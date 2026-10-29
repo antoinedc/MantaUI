@@ -452,13 +452,30 @@ export function isMissingSessionError(err, sessionName) {
 // `cwd` is required to be an absolute directory — callers (newSession /
 // newWindow / newWindowGetIndex) flow through `resolveCwdOrThrow` first, which
 // expands `~` and rejects a missing dir. The BET-307 tmux-side chokepoint.
-async function maybeCreateChatSession(oc, chatMode, cwd, title, permission) {
+// How long creating the opencode session may take. A session create runs inside the box-wide name allocator
+// (WS11 D5), so a hung opencode must not hold it — and with it every other create on the box.
+export const CHAT_SESSION_CREATE_TIMEOUT_MS = 20_000;
+
+export async function maybeCreateChatSession(oc, chatMode, cwd, title, permission, { timeoutMs = CHAT_SESSION_CREATE_TIMEOUT_MS } = {}) {
   if (!chatMode) return null;
   if (!oc || typeof oc.createSession !== "function") {
     throw new Error("chat mode requires an opencode client (oc.createSession)");
   }
-  const sess = await oc.createSession({ directory: cwd, title, permission });
-  return sess.id;
+  const pending = Promise.resolve(oc.createSession({ directory: cwd, title, permission }));
+  let timer;
+  const timedOut = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("The box couldn't start a chat session in time — try again.")), timeoutMs);
+  });
+  try {
+    const sess = await Promise.race([pending, timedOut]);
+    return sess.id;
+  } catch (e) {
+    // A create that finishes AFTER we gave up would be an orphan nobody owns: delete it.
+    void pending.then((sess) => sess?.id && oc.deleteSessionRaw?.(sess.id)).catch(() => {});
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // THE single place a caller-supplied cwd becomes a real directory handed to

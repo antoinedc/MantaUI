@@ -2615,6 +2615,8 @@ export type SeatStatusResult = {
   seat?: SeatView;
   /** The org the new login belongs to (different-org). */
   orgName?: string;
+  /** The box's sentence for a failure (WS11 D4); absent on an older box. */
+  message?: string;
 };
 
 /** accounts:resign-seat — a sign-in flow for an EXISTING seat. `flowId` keys
@@ -2632,6 +2634,8 @@ export type ResignStatusResult = {
   gotEmail?: string | null;
   /** The refreshed seat on ok. */
   seat?: SeatView;
+  /** The box's sentence for a failure (WS11 D4); absent on an older box. */
+  message?: string;
 };
 
 /** The conversation's current seat (null from the server = no assignment). */

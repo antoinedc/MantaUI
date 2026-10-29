@@ -5,7 +5,7 @@
 // error, and a cancel (which must say the seat was not changed).
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { accountsErrorMessage } from "../server/accountsCopy.mjs";
+import { accountsErrorMessage, resignFailureMessage } from "../server/accountsCopy.mjs";
 import { act } from "react";
 import { installCanvasStub, installMockApi, mount, resetStore, type Harness } from "./testHarness";
 import { useStore } from "./store";
@@ -127,7 +127,10 @@ describe("ResignSeatFlow", () => {
     const { onDone } = await start({
       accountsResignSeat: resign,
       accountsResignStatus: () =>
-        Promise.resolve({ state: "failed", error: "different-account", expectedEmail: "me@example.com", gotEmail: "other@example.com" }),
+        Promise.resolve({
+          state: "failed", error: "different-account", expectedEmail: "me@example.com", gotEmail: "other@example.com",
+          message: resignFailureMessage({ error: "different-account", expectedEmail: "me@example.com", gotEmail: "other@example.com", seatLabel: "Seat 3", email: "me@example.com" }),
+        }),
     });
     await advance(POLL);
     expect(text()).toContain("You signed in as other@example.com, but this seat is me@example.com. Sign in with me@example.com.");
@@ -138,14 +141,13 @@ describe("ResignSeatFlow", () => {
 
   it.each(["login-failed", "unknown-flow"])("%s: says the sign-in didn't complete and Try again restarts", async (error) => {
     const resign = vi.fn(() => Promise.resolve({ flowId: "f1", connect: DEVICE }));
-    await start({ accountsResignSeat: resign, accountsResignStatus: () => Promise.resolve({ state: "failed", error }) });
+    await start({ accountsResignSeat: resign, accountsResignStatus: () => Promise.resolve({ state: "failed", error, message: resignFailureMessage({ error, seatLabel: "Seat 3", email: null }) }) });
     await advance(POLL);
-    expect(text()).toContain("Sign-in didn't complete");
-    expect(text()).toContain("Seat 3 was not changed");
+    expect(text()).toContain(error === "login-failed" ? "Sign-in didn't complete" : "That sign-in is no longer running");
     await press(dialogButton("Try again"));
     expect(resign).toHaveBeenCalledTimes(2);
     await advance(POLL);
-    expect(text()).toContain("Sign-in didn't complete"); // still reported on the retry
+    expect(text()).toContain(error === "login-failed" ? "Sign-in didn't complete" : "That sign-in is no longer running"); // still reported on the retry
   });
 
   it("a start error from the box is shown with the shared accounts message", async () => {

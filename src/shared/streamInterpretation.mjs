@@ -906,7 +906,9 @@ const TITLE_INPUT_MAX_CHARS = 2000;
 // Max length of the final window name. tmux truncates long names in the
 // status line and our sidebar; a 3-6 word title should never approach this,
 // but we clamp defensively so a misbehaving model can't write an essay.
-const TITLE_MAX_CHARS = 48;
+// The box refuses a window name over 40 characters or containing ":" (sessionNaming.validateSessionName), so a
+// generated title is shaped to be accepted rather than refused.
+const TITLE_MAX_CHARS = 40;
 
 /**
  * Should an auto-rename fire at this user-turn count? True on every Nth
@@ -990,6 +992,8 @@ export function sanitizeGeneratedTitle(raw) {
   s = s.split(/\r?\n/)[0] ?? "";
   // Drop trailing sentence punctuation.
   s = s.replace(/[.!?,;:]+$/g, "");
+  // A window name can't carry control characters or ":" — replace a colon ("Fix: login redirect") with a dash.
+  s = s.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "").replace(/\s*:\s*/g, " – ");
   // Collapse internal whitespace, take at most six words. Preserve case.
   const words = s.trim().split(/\s+/).filter(Boolean).slice(0, 6);
   let out = words.join(" ").trim();
@@ -998,7 +1002,7 @@ export function sanitizeGeneratedTitle(raw) {
     const lastSpace = window.lastIndexOf(" ");
     out = (lastSpace > 0 ? window.slice(0, lastSpace) : window).trim();
   }
-  return out;
+  return out.replace(/[\s–]+$/, "");
 }
 
 // The instruction sent to the throwaway opencode session. Kept here so the

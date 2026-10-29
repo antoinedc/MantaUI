@@ -1076,7 +1076,9 @@ export interface Api {
   sessionsWindowStatus(): Promise<Record<string, WindowStatusPayload>>;
   sessionsClosePreview(input: { project: string; windowIndex?: number }): Promise<SessionClosePreview>;
   sessionsClose(input: { project: string; windowIndex?: number; dirtyWorktree?: "remove" | "keep"; deleteConversation?: boolean }): Promise<SessionCloseResult>;
-  tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
+  // `returnName`: ask for `{projects, name}` where `name` is the FINAL (tmux-safe) name the box gave the project.
+  // A box that predates it answers a bare `Project[]`.
+  tmuxRenameSession(input: { oldName: string; newName: string; returnName?: boolean }): Promise<Project[] | { projects: Project[]; name: string }>;
   tmuxRenameWindow(input: {
     sessionName: string;
     windowIndex: number;

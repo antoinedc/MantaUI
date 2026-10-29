@@ -27,7 +27,7 @@
 // helpers here (describeMissing, helpText)
 // are unit-tested.
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import type { AccountsRowStates, DiscoverResult, ProviderEndpoint, ProviderView, SubscriptionStatus } from "../shared/types";
 import { autoEligibility, describeMissing } from "../shared/autoEligibility.mjs";
@@ -208,6 +208,15 @@ export function endpointEligibility(
   return { missing: [...missing], declaredPrice };
 }
 
+// The control an older box (or a not-yet-read one) leaves a row with, from fields the card already reads. The one
+// deliberate exception to "the box decides": a degraded fallback, replaced by `accounts:row-states` whenever it answers.
+function fallbackControl(row: AccountRowModel, rawHealth?: string): "retry" | "disconnect" | "connect" | "none" {
+  if (rawHealth === "out-of-credit") return "retry";
+  if (row.className === "Custom") return "none";
+  if (row.connected && row.managedExternally) return "none";
+  return row.connected ? "disconnect" : "connect";
+}
+
 // ===== The one row component =====
 
 function AccountRow({
@@ -251,9 +260,13 @@ function AccountRow({
   onDiscover: (id: string) => void;
   onRemove: (id: string) => void;
 }) {
-  // An older box sends no row states: show its raw health label (no controls — their
-  // precedence is the box's) and the page shows the update note.
-  const state = boxState ?? { text: providerStateLabel(rawHealth ?? "") ?? "", tone: "quiet" as const, control: "none" as const };
+  // No row state from the box (an older box, or one not read yet): its raw health label and the plain data-driven
+  // controls, so Connect / Disconnect / Try again never disappear. The box's own precedence applies whenever it answers.
+  const state = boxState ?? {
+    text: providerStateLabel(rawHealth ?? "") ?? "",
+    tone: "quiet" as const,
+    control: fallbackControl(row, rawHealth),
+  };
   const isBusy = busy === row.id;
   const {
     connectingId,
@@ -455,13 +468,12 @@ type AccountsData = {
   statuses: SubscriptionStatus[];
   providers: ProviderEndpoint[];
   health: AccountsHealth;
-  /** `accounts:row-states` — null on an older box / a failed read. */
-  rowStates: AccountsRowStates["rows"] | null;
   declared: Record<string, DeclaredModel> | undefined;
 };
 
 export function AccountsCard() {
-  const snapshots = useStore((s) => s.usage) ?? [];
+  const usageSlice = useStore((s) => s.usage);
+  const snapshots = usageSlice ?? [];
   const seatViews = useStore((s) => s.accounts);
   const accountsCopyCap = useBoxCapability("accounts-copy-1");
   const routingCatalog = useRoutingCatalog();
@@ -497,9 +509,32 @@ export function AccountsCard() {
     const cfg = await window.api.configGet().catch(() => null);
     const declared = (cfg as { modelRouting?: { declaredModels?: Record<string, DeclaredModel> } } | null)
       ?.modelRouting?.declaredModels;
-    const rowStates = await window.api.accountsRowStates().then((r) => r.rows).catch(() => null);
-    return { statuses: res.providers, providers, health, rowStates, declared };
+    return { statuses: res.providers, providers, health, declared };
   });
+
+  // The row words/tones/controls are the box's (`accounts:row-states`), read on their own so a FAILED read keeps the
+  // last good rows and says so (never an older-box fallback on a current box). Re-read whenever the card's data or
+  // the usage slice changes, so the words follow live usage.
+  const [rowStatesRead, setRowStatesRead] = useState<{ rows: AccountsRowStates["rows"] | null; failed: boolean }>({
+    rows: null,
+    failed: false,
+  });
+  const rowStatesSeq = useRef(0);
+  const loadRowStates = useCallback(async () => {
+    if (accountsCopyCap === false || !window.api.accountsRowStates) return;
+    const seq = ++rowStatesSeq.current;
+    try {
+      const r = await window.api.accountsRowStates();
+      if (seq === rowStatesSeq.current) setRowStatesRead({ rows: r.rows, failed: false });
+    } catch (e) {
+      console.warn("[accounts] row states read failed:", e instanceof Error ? e.message : e);
+      if (seq === rowStatesSeq.current) setRowStatesRead((prev) => ({ rows: prev.rows, failed: true }));
+    }
+  }, [accountsCopyCap]);
+  useEffect(() => {
+    void loadRowStates();
+  }, [loadRowStates, data, usageSlice]);
+  const rowStates = rowStatesRead.rows;
 
   // BET-1537 (§W9): this provider's endpoint-register entries, keyed by model
   // id for the ModelChecklist badges. The key format is the router's own
@@ -633,7 +668,7 @@ export function AccountsCard() {
       let changed = false;
       const next: typeof prev = {};
       for (const [id, v] of Object.entries(prev)) {
-        if (data?.rowStates?.[id]?.control === "retry") {
+        if (rowStates?.[id]?.control === "retry" || (rowStates == null && data?.health?.providers?.[id]?.state === "out-of-credit")) {
           next[id] = v;
         } else {
           changed = true;
@@ -641,7 +676,7 @@ export function AccountsCard() {
       }
       return changed ? next : prev;
     });
-  }, [data]);
+  }, [data, rowStates]);
 
   const toggleModel = useCallback(
     async (ep: ProviderEndpoint, modelId: string) => {
@@ -761,6 +796,17 @@ export function AccountsCard() {
 
       {error && <div className="text-meta text-danger break-words">{error}</div>}
       {accountsCopyCap === false && <UpdateBoxNote />}
+      {accountsCopyCap !== false && rowStatesRead.failed && (
+        <div className="text-meta text-danger flex items-center gap-2">
+          <span>Couldn't load account states.</span>
+          <button
+            onClick={() => void loadRowStates()}
+            className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className="py-2">
@@ -780,7 +826,7 @@ export function AccountsCard() {
               <div key={row.id}>
                 <AccountRow
                   row={row}
-                  state={data?.rowStates?.[row.id] ?? null}
+                  state={rowStates?.[row.id] ?? null}
                   rawHealth={data?.health?.providers?.[row.id]?.state}
                   seatView={seatView}
                   onConnect={(id) => void startConnect(id)}
@@ -819,7 +865,7 @@ export function AccountsCard() {
                     <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
                     <EndpointRegisterLine
                       providerID={ep.id}
-                      line={data?.rowStates?.[ep.id]?.registerLine ?? null}
+                      line={rowStates?.[ep.id]?.registerLine ?? null}
                       onProbe={() => void probe(ep)}
                       probeDisabled={busy === row.id}
                     />

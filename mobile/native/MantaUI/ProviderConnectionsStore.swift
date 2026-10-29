@@ -32,6 +32,9 @@ final class ProviderConnectionsStore: ObservableObject {
     /// false once the box answers "unknown rpc channel" — rows then carry no state or
     /// control and the screen says to update the box.
     @Published private(set) var rowStatesSupported = true
+    /// The last `accounts:row-states` read FAILED on a box that has the channel (a timeout, a 500). The rows keep the
+    /// last good states and the screen says so with a retry — a failure is never evidence of an older box.
+    @Published private(set) var rowStatesReadFailed = false
     /// Model ids from the last "Refresh model list", per endpoint id.
     @Published private(set) var discovered: [String: [String]] = [:]
     /// Models the user switched off on this screen visit, per endpoint id, so a
@@ -114,18 +117,22 @@ final class ProviderConnectionsStore: ObservableObject {
     }
 
     /// The box's words and controls for every row (`accounts:row-states`). An older box
-    /// predates the channel: rows then show no state and no control, and the screen says
-    /// to update the box (`rowStatesSupported`).
-    private func readRowStates() async {
+    /// predates the channel: rows then carry the plain data-driven controls and the screen
+    /// says to update the box (`rowStatesSupported`). Any OTHER failure keeps the last good
+    /// states and raises `rowStatesReadFailed`.
+    func readRowStates() async {
         do {
             rowStates = try await api.accountsRowStates().rows
             rowStatesSupported = true
+            rowStatesReadFailed = false
         } catch {
             if BoxCapabilities.isUnknownChannel(error) {
                 rowStates = [:]
                 rowStatesSupported = false
+                rowStatesReadFailed = false
             } else {
                 NSLog("[accounts] row states read failed: %@", String(describing: error))
+                rowStatesReadFailed = true
             }
         }
     }

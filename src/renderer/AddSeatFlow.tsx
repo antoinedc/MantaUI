@@ -62,15 +62,6 @@ export function readTosAck(): boolean {
   }
 }
 
-/** Why a seat sign-in failed, in words that say what to do next. */
-export function seatFailureMessage(error: string | undefined, timedOut: boolean): string {
-  if (error === "duplicate-login") return "That login is already added as a seat. Sign in with a different account.";
-  if (timedOut) {
-    return "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser.";
-  }
-  return "The sign-in failed — the code may have been wrong or expired. Try again.";
-}
-
 type Phase =
   | { kind: "starting" }
   | { kind: "claude"; seatId: string; sessionKey: string; cwd: string; url: string; inputError?: string }
@@ -202,7 +193,7 @@ export function AddSeatFlow({
             kind: "failed",
             message: unreachable
               ? "Couldn't reach the server to check the sign-in. If you finished it, the seat will appear in the list once the box is reachable."
-              : seatFailureMessage(undefined, true),
+              : accountsFailureMessage(null),
           });
           return;
         }
@@ -220,7 +211,7 @@ export function AddSeatFlow({
         openSeatRef.current = null; // the box already dropped it
         set({
           kind: "failed",
-          message: seatFailureMessage(st.error, Date.now() - startedWall >= SERVER_LOGIN_LIMIT_MS),
+          message: accountsFailureMessage(st),
         });
       } finally {
         inFlight = false;

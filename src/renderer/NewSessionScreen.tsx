@@ -173,7 +173,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // WS11 D5: naming is the box's. An older box can't name a new project (an unsafe name would be
   // silently rewritten by tmux), so creating one is disabled with the note.
   const namingCapability = useBoxCapability("sessions-naming-1");
-  const namingBlocked = isNewProject && namingCapability === false;
+  // A new project needs the box to name it: blocked until the box is KNOWN to (an older box answers false; while the
+  // list is still unknown a create could strand a half-made session on an older box).
+  const namingBlocked = isNewProject && namingCapability !== true;
+  const namingChecking = isNewProject && namingCapability === null;
   // WS11 D5 (S8): clone errors, kinds and the destination are the box's; an older box can't clone from here.
   const cloneBlocked = useBoxCapability("forge-clone-view-1") === false;
 
@@ -1073,7 +1076,9 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             title={
               sending
                 ? "Starting…"
-                : draft.input.trim()
+                : namingChecking
+                  ? "Checking your box…"
+                  : draft.input.trim()
                   ? "Start a session"
                   : createLabel
             }
@@ -1333,7 +1338,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         </>
         )}
 
-        {(namingBlocked || (cloneBlocked && isNewProject && !showComposer)) && <UpdateBoxNote />}
+        {((namingBlocked && !namingChecking) || (cloneBlocked && isNewProject && !showComposer)) && <UpdateBoxNote />}
         {error && (
           <Card danger>
             <span className="text-meta text-danger break-words">{error}</span>

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  accountsErrorMessage, withErrorMessage, formatRetryMinutes, formatAgeAt, formatEndpointStateLine,
+  accountsErrorMessage, withErrorMessage, seatSignInFailureMessage, resignFailureMessage, formatRetryMinutes, formatAgeAt, formatEndpointStateLine,
   worstEndpoint, providerLinesFor, formatNoHealthyEndpointCopy, moveNoticeText, moveLine, resentText, moveCopy, moveReasonText,
 } from "./accountsCopy.mjs";
 
@@ -86,4 +86,21 @@ test("K5: dial line, reason words and the re-sent figure", () => {
   assert.equal(resentText({ crossOrg: true }), null);
   assert.equal(resentText({ crossOrg: false, resentTokens: 5 }), null);
   assert.deepEqual(Object.keys(moveCopy({ fromLabel: "a", toLabel: "b" })).sort(), ["line", "resentText", "text"]);
+});
+
+test("sign-in failure sentences (the status replies' message): every code, timed out or not", () => {
+  assert.equal(seatSignInFailureMessage({ error: "duplicate-login" }), "That login is already added as a seat. Sign in with a different account.");
+  assert.equal(seatSignInFailureMessage({ error: "login-failed", timedOut: false }), "The sign-in failed — the code may have been wrong or expired. Try again.");
+  assert.equal(
+    seatSignInFailureMessage({ error: "login-failed", timedOut: true }),
+    "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser.",
+  );
+  assert.equal(seatSignInFailureMessage({ error: "different-org" }), accountsErrorMessage("different-org"));
+  const r = { seatLabel: "Seat 2", email: "me@x.com" };
+  assert.equal(resignFailureMessage({ error: "different-account", expectedEmail: "me@x.com", gotEmail: "o@x.com", ...r }), "You signed in as o@x.com, but this seat is me@x.com. Sign in with me@x.com.");
+  assert.equal(resignFailureMessage({ error: "different-account", expectedEmail: null, gotEmail: null, ...r }), "You signed in as a different account, but this seat is me@x.com. Sign in with me@x.com.");
+  assert.equal(resignFailureMessage({ error: "different-account", seatLabel: "Seat 2", email: null }), "You signed in as a different account, but that isn't the account Seat 2 belongs to. Sign in with the same account.");
+  assert.equal(resignFailureMessage({ error: "login-failed", ...r }), "Sign-in didn't complete. Seat 2 was not changed — try again.");
+  assert.equal(resignFailureMessage({ error: "login-failed", timedOut: true, ...r }), "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Seat 2 was not changed — try again.");
+  assert.equal(resignFailureMessage({ error: "unknown-flow", ...r }), accountsErrorMessage("unknown-flow"));
 });

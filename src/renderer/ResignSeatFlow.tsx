@@ -43,22 +43,6 @@ type Phase =
   | { kind: "done"; message: string }
   | { kind: "failed"; message: string };
 
-/** Why a re-sign failed, in words that say what to do next. The seat was not
- *  changed in any of these cases. */
-export function resignFailureMessage(
-  error: string | undefined,
-  info: { expectedEmail?: string | null; gotEmail?: string | null; seatLabel: string; email: string | null },
-): string {
-  if (error === "different-account") {
-    const expected = info.expectedEmail ?? info.email;
-    const got = info.gotEmail ?? "a different account";
-    return expected
-      ? `You signed in as ${got}, but this seat is ${expected}. Sign in with ${expected}.`
-      : `You signed in as ${got}, but that isn't the account ${info.seatLabel} belongs to. Sign in with the same account.`;
-  }
-  return `Sign-in didn't complete. ${info.seatLabel} was not changed — try again.`;
-}
-
 export function ResignSeatFlow({
   provider,
   seatId,
@@ -174,7 +158,7 @@ export function ResignSeatFlow({
             kind: "failed",
             message: unreachable
               ? `Couldn't reach the server to check the sign-in. ${seatLabel} was not changed — try again once the box is reachable.`
-              : `The sign-in wasn't finished within 15 minutes, so the box stopped waiting. ${seatLabel} was not changed — try again.`,
+              : accountsFailureMessage(null),
           });
           return;
         }
@@ -195,12 +179,7 @@ export function ResignSeatFlow({
         }
         set({
           kind: "failed",
-          message: resignFailureMessage(st.error, {
-            expectedEmail: st.expectedEmail,
-            gotEmail: st.gotEmail,
-            seatLabel,
-            email,
-          }),
+          message: accountsFailureMessage(st),
         });
       } finally {
         inFlight = false;

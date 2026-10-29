@@ -259,6 +259,11 @@ struct AccountsScreen: View {
                 failureRow("Couldn't load subscriptions — \(reason)") { await connections.loadStatuses() }
             }
         }
+        if connections.rowStatesReadFailed && connections.rowStatesSupported {
+            Section {
+                failureRow("Couldn't load account states.") { await connections.readRowStates() }
+            }
+        }
         if case .failed(let reason) = store.phase, store.providers.isEmpty {
             Section {
                 failureRow(reason == AccountsCopy.staleBox ? reason : AccountsCopy.failure("load accounts", reason: reason)) {
@@ -321,10 +326,13 @@ struct AccountsScreen: View {
     // MARK: - Connection row
 
     private func connectionRow(_ status: SubscriptionStatus) -> some View {
-        // The words and the control are the box's; an older box sends none, so the row
-        // shows its name and no control (the screen carries the update note).
+        // The words and the control are the box's. With none (an older box, or no read yet) the row keeps the plain
+        // data-driven controls, so Connect / Disconnect / Try again never disappear.
         let state = connections.rowState(for: status.id)
-        let control = state?.control ?? .none
+        let control = state?.control ?? AccountRowState.fallbackControl(
+            connected: status.connected, managedExternally: status.managedExternally,
+            health: connections.health?.providers[status.id]?.state
+        )
         let working = connections.busyProvider == status.id || deciding == status.id
         let help = ["Supported", "subscription", status.plan].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return HStack(alignment: .center, spacing: Metrics.spacing.sp2) {

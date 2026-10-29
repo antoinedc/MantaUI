@@ -561,6 +561,12 @@ final class AccountsTests: XCTestCase {
 
     // MARK: - Labels + copy
 
+    func testABoxWordedRefusalIsShownAsItsOwnSentence() {
+        let refusal = AccountsRefusal(code: "invalid-label", message: "Names must be 1–40 characters, with no control characters.")
+        XCTAssertEqual(AccountsCopy.failure("rename the seat", refusal), "Names must be 1–40 characters, with no control characters.")
+        XCTAssertEqual(AccountsCopy.failure("rename the seat", MantaError.transport("offline")), "Couldn't rename the seat — check the connection and try again")
+    }
+
     func testFailureCopyNamesTheActionAndTheReason() {
         // The box words every refusal (WS11 D4 / K7): the phone shows its sentence as sent.
         let live = "This is the login the box is using right now, so it can't be removed."

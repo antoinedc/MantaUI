@@ -834,4 +834,20 @@ describe("NewSessionScreen on a box without sessions-naming-1 (WS11 D5)", () => 
     expect(create.disabled).toBe(true);
     h.unmount();
   });
+
+  it("while the capability list is still unknown, creating a project is disabled with a 'Checking your box…' title (no half-made session on an older box)", async () => {
+    const d = draft({ mode: "new-project", cwd: "/x", wantWorktree: false, scratch: true, projectName: "fresh-app", scratchRoot: "/home" });
+    installMockApi({ apiVersion: () => new Promise(() => {}), fsListDirs: () => Promise.resolve({ dir: "/home", entries: [] }) });
+    refreshModelCatalog();
+    refreshAgentCatalog();
+    resetStore({ projects: [], activeDraftId: d.id, drafts: [d], autoSubmitPrompt: null });
+    const h = mount(<NewSessionScreen draftId={d.id} />);
+    await h.flush();
+    await h.flush();
+    const create = h.container.querySelector('button[aria-label="Create workspace"]') as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    expect(create.title).toBe("Checking your box…");
+    expect(h.text()).not.toContain("Update your box to use this");
+    h.unmount();
+  });
 });

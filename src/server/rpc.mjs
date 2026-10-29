@@ -21,7 +21,7 @@ import {
 import { buildContextPayload } from "./sessionContext.mjs";
 import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
 import { previewClose, closeSession } from "./sessionClose.mjs";
-import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName } from "./sessionNaming.mjs";
+import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName, tmuxSafeName, nameTaken } from "./sessionNaming.mjs";
 import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
 import { buildAccountRowStates } from "./accountsRowState.mjs";
 import { createLauncherFlagWriter, launchersView, resolveLauncherForSpawn } from "./launchersConfig.mjs";
@@ -1431,10 +1431,20 @@ export function buildHandlers({
       // WS11 D5 (S2): validated on the box with a sentence a person can read; unchanged → no tmux call.
       const valid = validateSessionName(i?.newName);
       if (!valid.ok) throw new Error(valid.error);
-      if (valid.name === i?.oldName) return tmux.listProjects();
-      const result = await tmux.renameSession({ ...i, newName: valid.name });
+      // tmux silently rewrites "." and ":" in a session name: apply the same rule here so the name we report
+      // (`returnName`) is the one that exists, and map tmux's "duplicate session" to the sentence a person can read.
+      const finalName = tmuxSafeName(valid.name);
+      const reply = (projects) => (i?.returnName === true ? { projects, name: finalName } : projects);
+      if (finalName === i?.oldName) return reply(await tmux.listProjects());
+      let result;
+      try {
+        result = await tmux.renameSession({ ...i, newName: finalName });
+      } catch (e) {
+        if (/duplicate session/i.test(String(e?.message ?? e))) throw new Error(nameTaken(finalName));
+        throw e;
+      }
       await syncState.refreshNow();
-      return result;
+      return reply(result);
     },
     "tmux:rename-window": async (i) => {
       const valid = validateSessionName(i?.newName);

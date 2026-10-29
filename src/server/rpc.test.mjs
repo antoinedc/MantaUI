@@ -430,6 +430,13 @@ test("sessions:propose-name previews project and scratch names; rename validates
   assert.deepEqual(calls.renameWindow, [{ sessionName: "alpha", windowIndex: 0, newName: "fresh" }]);
   await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "alpha" });
   assert.equal(calls.renameSession.length, 0);
+  // tmux-safe: "." / ":" are rewritten the way tmux would, and the final name is reported on request.
+  const renamed = await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "a.b", returnName: true });
+  assert.deepEqual(calls.renameSession.at(-1), { oldName: "alpha", newName: "a_b", returnName: true });
+  assert.equal(renamed.name, "a_b");
+  assert.ok(Array.isArray(await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "a.c" })), "without the flag the reply is the project list, as before");
+  deps.tmux.renameSession = async () => { throw new Error("duplicate session: beta"); };
+  await assert.rejects(handlers["tmux:rename-session"]({ oldName: "alpha", newName: "beta" }), /A project named “beta” already exists\./);
 });
 
 // The create return contract: the renderer needs the newly-created window's

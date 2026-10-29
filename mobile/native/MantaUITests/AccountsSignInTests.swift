@@ -85,24 +85,9 @@ final class AccountsSignInTests: XCTestCase {
 
     // MARK: - Copy
 
-    func testSeatFailureMessage() {
-        XCTAssertEqual(
-            AccountsSignInCopy.seatFailureMessage(error: "duplicate-login", timedOut: false),
-            "That login is already added as a seat. Sign in with a different account."
-        )
-        XCTAssertEqual(
-            AccountsSignInCopy.seatFailureMessage(error: "duplicate-login", timedOut: true),
-            "That login is already added as a seat. Sign in with a different account.",
-            "a duplicate is a duplicate even past the deadline"
-        )
-        XCTAssertEqual(
-            AccountsSignInCopy.seatFailureMessage(error: nil, timedOut: true),
-            "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser."
-        )
-        XCTAssertEqual(
-            AccountsSignInCopy.seatFailureMessage(error: "login-failed", timedOut: false),
-            "The sign-in failed — the code may have been wrong or expired. Try again."
-        )
+    // The sign-in failure sentences are the box's (`message` on the status replies; pinned in accountsCopy.test.mjs).
+    // The only client-side line left is the one for a box that cannot be reached to ask.
+    func testUnreachableLineIsTheOnlyClientSentence() {
         XCTAssertTrue(AccountsSignInCopy.unreachableAtDeadline.hasPrefix("Couldn't reach the server to check the sign-in."))
     }
 
@@ -297,8 +282,8 @@ final class AccountsSignInTests: XCTestCase {
     // MARK: - Poll decisions
 
     func testSeatPollDecisions() {
-        func decide(_ reply: SeatStatusReply?, expired: Bool = false, past: Bool = false) -> SeatPollOutcome {
-            SignInPollRules.decideSeat(reply: reply, expired: expired, pastServerLimit: past)
+        func decide(_ reply: SeatStatusReply?, expired: Bool = false) -> SeatPollOutcome {
+            SignInPollRules.decideSeat(reply: reply, expired: expired)
         }
         XCTAssertEqual(decide(nil), .keepPolling, "box transiently unreachable")
         XCTAssertEqual(decide(SeatStatusReply(state: .pending)), .keepPolling)
@@ -307,8 +292,9 @@ final class AccountsSignInTests: XCTestCase {
         let seat = AccountsSeat(id: "s1", label: "Seat 1")
         XCTAssertEqual(decide(SeatStatusReply(state: .ok, seat: seat)), .added(seat))
         XCTAssertEqual(decide(SeatStatusReply(state: .failed, error: "different-org", orgName: "Acme")), .differentOrg(orgName: "Acme"))
-        XCTAssertEqual(decide(SeatStatusReply(state: .failed, error: "duplicate-login")), .failed(error: "duplicate-login", timedOut: false))
-        XCTAssertEqual(decide(SeatStatusReply(state: .failed), past: true), .failed(error: nil, timedOut: true))
+        XCTAssertEqual(decide(SeatStatusReply(state: .failed, error: "duplicate-login", message: "That login is already added as a seat. Sign in with a different account.")),
+                       .failed(message: "That login is already added as a seat. Sign in with a different account."))
+        XCTAssertEqual(decide(SeatStatusReply(state: .failed)), .failed(message: nil), "an older box words nothing: the static line")
         // The last reading at the limit still wins over giving up.
         XCTAssertEqual(decide(SeatStatusReply(state: .ok, seat: seat), expired: true), .added(seat))
     }
@@ -321,7 +307,7 @@ final class AccountsSignInTests: XCTestCase {
         XCTAssertEqual(SignInPollRules.decideResign(reply: ResignStatusReply(state: .ok, seat: seat), expired: false), .signedBack(seat))
         XCTAssertEqual(
             SignInPollRules.decideResign(reply: ResignStatusReply(state: .failed, error: "different-account", expectedEmail: "a@x", gotEmail: "b@x"), expired: false),
-            .failed(error: "different-account", expectedEmail: "a@x", gotEmail: "b@x")
+            .failed(message: nil)
         )
     }
 
@@ -347,16 +333,13 @@ final class AccountsSignInTests: XCTestCase {
         XCTAssertNil(try decode(#"{"state":"failed","expectedEmail":null}"#).expectedEmail)
     }
 
-    func testResignFailureMessages() {
-        func msg(_ error: String?, expected: String? = nil, got: String? = nil, email: String? = nil) -> String {
-            AccountsSignInCopy.resignFailureMessage(error: error, expectedEmail: expected, gotEmail: got, seatLabel: "Seat 1", seatEmail: email)
-        }
-        XCTAssertEqual(msg("different-account", expected: "a@x", got: "b@x"), "You signed in as b@x, but this seat is a@x. Sign in with a@x.")
-        XCTAssertEqual(msg("different-account", got: "b@x", email: "seat@x"), "You signed in as b@x, but this seat is seat@x. Sign in with seat@x.")
-        XCTAssertEqual(msg("different-account"), "You signed in as a different account, but that isn't the account Seat 1 belongs to. Sign in with the same account.")
-        XCTAssertEqual(msg("login-failed"), "Sign-in didn't complete. Seat 1 was not changed — try again.")
-        XCTAssertEqual(msg("unknown-flow"), "Sign-in didn't complete. Seat 1 was not changed — try again.")
-        XCTAssertEqual(AccountsSignInCopy.resignTimedOut(seatLabel: "Seat 1"), "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Seat 1 was not changed — try again.")
+    func testResignStatusReplyCarriesTheBoxsSentence() throws {
+        let r = try JSONDecoder().decode(ResignStatusReply.self, from: Data(#"{"state":"failed","error":"different-account","message":"You signed in as b@x, but this seat is a@x. Sign in with a@x."}"#.utf8))
+        XCTAssertEqual(r.message, "You signed in as b@x, but this seat is a@x. Sign in with a@x.")
+        XCTAssertEqual(SignInPollRules.decideResign(reply: r, expired: false), .failed(message: r.message))
+    }
+
+    func testResignClientSentences() {
         XCTAssertEqual(AccountsSignInCopy.resignUnreachable(seatLabel: "Seat 1"), "Couldn't reach the server to check the sign-in. Seat 1 was not changed — try again once the box is reachable.")
         XCTAssertEqual(AccountsSignInCopy.resignBadCode(seatLabel: "Seat 1"), "That code didn't work (it may have expired). Seat 1 was not changed — start the sign-in again.")
         XCTAssertEqual(AccountsSignInCopy.resignDone(email: "a@x", seatLabel: "Seat 1"), "Signed back in as a@x")
@@ -375,13 +358,13 @@ final class AccountsSignInTests: XCTestCase {
         XCTAssertEqual(AccountsSignInCopy.startFailure(live, resign: true), AccountsSignInCopy.liveSeatRace)
         XCTAssertEqual(
             AccountsSignInCopy.startFailure(live, resign: false),
-            "Couldn't start the sign-in — \(live.message)",
+            live.message,
             "the general live-seat text is the box's sentence"
         )
         XCTAssertEqual(AccountsSignInCopy.startFailure(MantaError.transport("x"), resign: true), AccountsSignInCopy.startUnreachable)
         XCTAssertEqual(
             AccountsSignInCopy.startFailure(AccountsRefusal(code: "unknown-provider", message: "That provider doesn't support several accounts."), resign: false),
-            "Couldn't start the sign-in — That provider doesn't support several accounts."
+            "That provider doesn't support several accounts."
         )
     }
 

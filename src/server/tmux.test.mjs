@@ -1210,3 +1210,21 @@ test("findWindowBySessionId / findWindowByName locate a window across projects",
   assert.deepEqual(await findWindowByName("handoff-hof_9", projects), { sessionName: "b", windowIndex: 4 });
   assert.equal(await findWindowByName("nope", projects), null);
 });
+
+
+test("maybeCreateChatSession: a hung opencode times out (so it cannot hold the allocator) and a late session is deleted", async () => {
+  const { maybeCreateChatSession } = await import("./tmux.mjs");
+  const deleted = [];
+  let release;
+  const oc = {
+    createSession: () => new Promise((resolve) => { release = () => resolve({ id: "ses_late" }); }),
+    deleteSessionRaw: async (id) => { deleted.push(id); },
+  };
+  await assert.rejects(maybeCreateChatSession(oc, true, "/x", "", undefined, { timeoutMs: 10 }), /couldn't start a chat session in time/);
+  release();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(deleted, ["ses_late"]);
+  // The fast path is untouched, and a non-chat create makes nothing.
+  assert.equal(await maybeCreateChatSession({ createSession: async () => ({ id: "ses_ok" }) }, true, "/x", ""), "ses_ok");
+  assert.equal(await maybeCreateChatSession(oc, false, "/x", ""), null);
+});

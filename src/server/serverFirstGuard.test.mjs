@@ -51,6 +51,9 @@ export const DELETED = [
   // D7 — job nesting and the per-window rollup (running beneath, subagents) are the box's.
   { scopes: ["renderer"], regex: /\b(computeJobNesting|sessionsWithActiveWork|shouldResyncWindowsForJobs|setSessionParent|sessionParents|setChatSubagents|countRunningSubagents)\b/, why: "D7: windows[].job + the windowStatus frame carry nesting and the busy/subagent rollup; no client walks the parent graph" },
   { scopes: ["swift", "swiftTests"], regex: /\b(SessionJobNesting|SessionSubagentCount|DelegateNesting)\b|\bdelegateJobs\b|func applyJobs/, why: "D7: iOS reads windows[].job and the windowStatus frame; it never nests jobs or counts subagents itself" },
+  // D4–D5 review — sign-in failure sentences are the box's (status replies carry `message`).
+  { scopes: ["renderer"], regex: /\bfunction (seatFailureMessage|resignFailureMessage)\b/, why: "D4 review: accounts:seat-status / resign-status carry the sentence (message); no client words a sign-in failure" },
+  { scopes: ["swift", "swiftTests"], regex: /\bfunc (seatFailureMessage|resignFailureMessage|resignTimedOut)\b/, why: "D4 review: the sign-in failure sentences are the box's; iOS shows `message`" },
   // D1–D3 review additions.
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },

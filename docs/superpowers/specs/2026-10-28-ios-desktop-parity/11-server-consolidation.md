@@ -2363,3 +2363,31 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
 - `stopped` rides the payload but neither client switches to it yet (desktop's header pill needs the full records and
   iOS still reads its stopped list); `attention` likewise stays on the existing frames.
 - Old box: no `job` / `windowStatus` → rail is flat, rows show their own turn only (owner-tagged job windows still hide).
+
+## Review fixes (D4–D5 Opus review)
+
+1. **Failed `accounts:row-states` read ≠ older box.** Desktop reads the states on their own (re-read when the card's
+   data or the usage slice changes — NIT 7); a failure keeps the last good rows and shows "Couldn't load account
+   states" with Retry. iOS: `rowStatesReadFailed` + the same row in the source-failure section, Retry re-reads.
+   Only `accounts-copy-1 === false` / an unknown-channel answer is the older-box fallback.
+2. **Auto-rename.** `sanitizeGeneratedTitle` now yields what `validateSessionName` accepts: 40 characters max, an
+   internal ":" becomes " – ", control characters dropped (one fix covers the first-name and re-title paths).
+3. **Older box keeps Connect / Disconnect / Try again** (decision recorded here for the D4 fallback cell): with no
+   row state the control comes from fields the clients already read — out-of-credit health → Try again, external
+   credential → none, else connected ? Disconnect : Connect. It is the one deliberate exception to "the box decides"
+   (`fallbackControl` on desktop, `AccountRowState.fallbackControl` on iOS) and is replaced the moment the box answers.
+4. **Sign-in failure sentences are the box's.** The failed `accounts:seat-status` / `accounts:resign-status` replies
+   carry `message` (timed out after 15 min, duplicate login, different account with both emails, generic). The
+   `duplicate-login` code sentence is now the actionable one. Deleted: both clients' `seatFailureMessage` /
+   `resignFailureMessage` / `resignTimedOut`. Still client-side by necessity: "couldn't reach the server to check"
+   (the box cannot answer) and the claude-login-exited-with-an-error line; a box that never gives a verdict past the
+   limit shows the static "That didn't work. Try again."
+5. **Capability unknown ≠ supported.** New-project creates (NewSessionScreen, InboxPalette, iOS create sheet) require
+   `sessions-naming-1 === true`; while the list is unknown the action is disabled with "Checking your box…".
+6. NIT 6: an `AccountsRefusal` is rendered as the box's sentence alone. NIT 8: the CTO `projects.create` goes through
+   the allocator (explicit name; a lost race is `target_exists`). NIT 9: `tmux:rename-session` applies `tmuxSafeName`,
+   maps tmux's duplicate error to the class-1 sentence, and reports the final name with the additive `returnName`
+   flag (desktop uses it for the active project). NIT 10: creating the opencode session is bounded (20 s) and a late
+   session is deleted, so a hung opencode cannot hold the allocator. NIT 11: iOS clears the previewed name when the
+   folder changes. R2-2 (misplaced K7 comment) and R2-3 (the upgrade test now asserts Retry offered / Roll back
+   hidden on an older box) applied.

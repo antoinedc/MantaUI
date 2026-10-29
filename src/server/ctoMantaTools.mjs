@@ -68,6 +68,7 @@ import { lockForStore, mantaControlStore } from "./ctoStores.mjs";
 import { canonicalArgsHash } from "./ctoWork.mjs";
 import { resolveProjectCwd as defaultResolveProjectCwd } from "./projectCwd.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
+import { createSessionUnderAllocator } from "./sessionNaming.mjs";
 import { resolveNamedModel } from "./delegate.mjs";
 import {
   createSession as ocCreateSessionDefault,
@@ -1083,13 +1084,29 @@ export function createCtoMantaControl({
         } catch (error) {
           throw mapCwdError(error);
         }
-        const created = await writes.tmuxNewSession({
-          name: input.name,
-          cwd: resolvedCwd,
-          windowName: input.windowName,
-          createDir: input.createDir === true,
-          chatMode: false,
-        });
+        // Through the box-wide name allocator (WS11 D5): a concurrent hinted create can never take this name between
+        // the existence check above and tmux accepting it, and a lost race is the same sentence a person gets.
+        let created;
+        try {
+          ({ result: created } = await createSessionUnderAllocator({
+            explicitName: input.name,
+            create: ({ name }) =>
+              writes.tmuxNewSession({
+                name,
+                cwd: resolvedCwd,
+                windowName: input.windowName,
+                createDir: input.createDir === true,
+                chatMode: false,
+              }),
+            listNames: async () => [],
+            deleteSession: async () => {},
+          }));
+        } catch (error) {
+          if (/already exists\./.test(String(error?.message ?? ""))) {
+            throw controlError("target_exists", `project "${input.name}" already exists`, { retrySafe: false });
+          }
+          throw error;
+        }
         // §4.1 — the mint-at-creation trigger: the created project's durable
         // key persists NOW, on the refreshed live row, through the ONE
         // identity surface (an orphan anchored at this checkout rebinds

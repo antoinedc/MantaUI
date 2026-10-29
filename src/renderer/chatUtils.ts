@@ -3199,10 +3199,6 @@ export function seatResetHint(seat: SeatView, nowMs: number): string | null {
 }
 
 /**
- * The sentence for a failed `accounts:*` call: the BOX words every error code
- * (`message`, WS11 D4 / K7). An older box sends none — the static fallback.
- */
-/**
  * The model line of the context popover: the model the BOX measured against (`context.model`), named from
  * the catalog, with "(last reply's model)" when the box fell back to the last reply's model (`basis`
  * "last-used"). An older box sends no `context.model`: the client's own active-model name stands in.
@@ -3218,6 +3214,10 @@ export function contextModelLabel(
   return basis === "last-used" ? `${name} (last reply's model)` : name;
 }
 
+/**
+ * The sentence for a failed `accounts:*` call: the BOX words every error code
+ * (`message`, WS11 D4 / K7). An older box sends none — the static fallback.
+ */
 export const ACCOUNTS_ERROR_FALLBACK = "That didn't work. Try again.";
 export function accountsFailureMessage(res: { message?: string } | null | undefined): string {
   return typeof res?.message === "string" && res.message ? res.message : ACCOUNTS_ERROR_FALLBACK;

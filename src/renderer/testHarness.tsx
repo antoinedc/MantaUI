@@ -164,7 +164,7 @@ function defaultApiImpl(): Record<string, unknown> {
     progressGet: () => Promise.resolve(null),
     // A current box: it advertises the server-first capabilities (WS02) and no session is a background job.
     getServerVersion: () =>
-      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1", "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1"] }),
+      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1", "accounts-copy-1", "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1"] }),
     // WS11 D4 (K2): the box builds every Accounts row's words from the same reads the card
     // makes; the harness runs the REAL box builder over the test's mocked reads.
     accountsRowStates: async () =>

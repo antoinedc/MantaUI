@@ -133,8 +133,8 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
       setError(`No local checkout of ${repoNameOf(item)} on this server to start a session in.`);
       return;
     }
-    if (namingCapability === false) {
-      setError(UPDATE_BOX_NOTE_TEXT);
+    if (namingCapability !== true) {
+      setError(namingCapability === false ? UPDATE_BOX_NOTE_TEXT : "Checking your box… try again in a moment.");
       return;
     }
     setError(null);

@@ -319,11 +319,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
     try {
       if (renameTarget.kind === "project") {
-        await window.api.tmuxRenameSession({
+        const renamed = await window.api.tmuxRenameSession({
           oldName: renameTarget.old,
           newName,
+          returnName: true,
         });
-        if (activeProjectName === renameTarget.old) setActive(newName);
+        // The box reports the name it actually gave the project (tmux-safe); an older box answers a bare list.
+        const finalName = Array.isArray(renamed) ? newName : renamed.name;
+        if (activeProjectName === renameTarget.old) setActive(finalName);
       } else {
         await window.api.tmuxRenameWindow({
           sessionName: renameTarget.project,

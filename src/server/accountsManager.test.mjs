@@ -615,7 +615,7 @@ test("a sign-in that never produces credentials fails after the timeout, deletin
     const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
     const dir = join(r.paths.seatsRoot, "claude", seatId);
     await new Promise((res) => setTimeout(res, 5));
-    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed", message: `The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser.` });
     assert.equal(await r.exists(dir), false);
   } finally {
     await r.cleanup();
@@ -762,7 +762,7 @@ test("add-seat (codex): starting a second add supersedes the first (opencode has
     const a = await ch(r, "accounts:add-seat", { provider: "codex" });
     const b = await ch(r, "accounts:add-seat", { provider: "codex" });
     assert.notEqual(a.seatId, b.seatId);
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: a.seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: a.seatId }), { state: "failed", error: "login-failed", message: "The sign-in failed — the code may have been wrong or expired. Try again." });
     assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: b.seatId }), { state: "pending" });
   } finally {
     await r.cleanup();
@@ -882,7 +882,7 @@ test("(c) no credentials at the timeout: the flow is dropped, its directory dele
     await mgr.tick();
     assert.equal(await r.exists(dir), false);
     assert.deepEqual(calls.cancel, [connect.sessionKey]);
-    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed", message: `The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser.` });
   } finally {
     await r.cleanup();
   }
@@ -1061,7 +1061,7 @@ test("resign-seat (claude): a DIFFERENT account → failed/different-account wit
 
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), {
       state: "failed",
-      error: "different-account", message: accountsErrorMessage("different-account"),
+      error: "different-account", message: "You signed in as x@example.com, but this seat is a@example.com. Sign in with a@example.com.",
       expectedEmail: "a@example.com",
       gotEmail: "x@example.com",
     });
@@ -1112,7 +1112,7 @@ test("resign-seat (claude): a seat with no account uuid is matched by email; wit
     const keep = await readFile(seatCredsFile(r), "utf-8");
     const c = await startResign(r);
     await writeFile(join(c.tempDir, ".credentials.json"), credsJson("tok-Q"));
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: c.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: c.flowId }), { state: "failed", error: "login-failed", message: `Sign-in didn't complete. Seat 1 was not changed — try again.` });
     assert.equal(await readFile(seatCredsFile(r), "utf-8"), keep);
     assert.notEqual(before, keep);
   } finally {
@@ -1158,7 +1158,7 @@ test("resign-seat: a second flow for the same seat ends the first one; another s
     const other = await startResign(r, "seat-3");
     const second = await startResign(r, "seat-1");
     assert.notEqual(first.flowId, second.flowId);
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed", message: `Sign-in didn't complete. Seat 1 was not changed — try again.` });
     assert.equal(await r.exists(first.tempDir), false, "the old temp directory is gone");
     assert.equal(r.calls.claudeCancel.filter((k) => k === "claude-login-seat-1").length, 1, "the old login is stopped");
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "pending" });
@@ -1216,7 +1216,7 @@ test("resign-seat: a login that never produces credentials times out — flow fa
     assert.equal(mgr._resigns().get(flowId).state, "pending");
     clock.t += 16 * 60_000;
     await mgr.tick();
-    assert.deepEqual(await mgr.channels["accounts:resign-status"]({ flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await mgr.channels["accounts:resign-status"]({ flowId }), { state: "failed", error: "login-failed", message: `The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Seat 1 was not changed — try again.` });
     assert.equal(await r.exists(tempDir), false);
     assert.deepEqual(calls.cancel, ["k-seat-1"]);
     assert.equal(await readFile(seatCredsFile(r), "utf-8"), before);
@@ -1320,7 +1320,7 @@ test("resign-seat (codex): a DIFFERENT account → failed/different-account, the
 
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), {
       state: "failed",
-      error: "different-account", message: accountsErrorMessage("different-account"),
+      error: "different-account", message: "You signed in as a different account, but that isn't the account Seat 2 belongs to. Sign in with the same account.",
       expectedEmail: null,
       gotEmail: null,
     });
@@ -1369,11 +1369,11 @@ test("resign-seat (codex): one OAuth wait per provider — a second flow (or an 
     });
     const first = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
     const second = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed", message: `Sign-in didn't complete. Seat 2 was not changed — try again.` });
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "pending" });
     const add = await ch(r, "accounts:add-seat", { provider: "codex" });
     assert.ok(add.seatId);
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "failed", error: "login-failed", message: `Sign-in didn't complete. Seat 2 was not changed — try again.` });
     // the live (borrowed) codex seat is refused
     assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-1" }), { error: "live-seat", message: accountsErrorMessage("live-seat") });
   } finally {

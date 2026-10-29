@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { validateSessionName } from "../server/sessionNaming.mjs";
 // Moved from src/renderer/chatUtils.test.ts alongside the logic (BET-551).
 // Tests are unchanged; only the module path differs.
 import {
@@ -1758,6 +1759,33 @@ describe("buildTitlePromptInput", () => {
     expect(
       buildTitlePromptInput([{ info: { role: "user" }, parts: [] }]),
     ).toBe("");
+  });
+});
+
+describe("sanitizeGeneratedTitle — a title the box accepts as a window name", () => {
+  it("replaces an internal colon and keeps within 40 characters", () => {
+    expect(sanitizeGeneratedTitle("Fix: login redirect")).toBe("Fix – login redirect");
+    const long = sanitizeGeneratedTitle("Investigate intermittent websocket reconnect failures");
+    expect(long.length).toBeLessThanOrEqual(40);
+    expect(long.length).toBeGreaterThan(0);
+    // 45 characters in 3 words: cut at a word boundary, never mid-word, never empty
+    const forty5 = sanitizeGeneratedTitle("Reconfiguration of authentication middleware");
+    expect(forty5.length).toBeLessThanOrEqual(40);
+    expect(forty5).toBe("Reconfiguration of authentication");
+  });
+
+  it("every shape the sanitizer returns passes validateSessionName", () => {
+    for (const raw of [
+      "Fix: login redirect",
+      "Title: Refactor: the store\x07 now",
+      "a:b:c",
+      "Reconfiguration of authentication middleware",
+      "Investigate intermittent websocket reconnect failures after sleep",
+      "Pick a color: red, green or blue and then more words",
+    ]) {
+      const out = sanitizeGeneratedTitle(raw);
+      expect(validateSessionName(out)).toEqual({ ok: true, name: out });
+    }
   });
 });
 

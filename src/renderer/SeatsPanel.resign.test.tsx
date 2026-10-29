@@ -6,6 +6,7 @@
 // box cannot verify, and — for the box's own login — an instruction, not a button.
 
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { resignFailureMessage } from "../server/accountsCopy.mjs";
 import { act } from "react";
 import { installCanvasStub, mount, installMockApi, resetStore, type Harness } from "./testHarness";
 import { clearAccountsFocus } from "./accountsData";
@@ -97,7 +98,10 @@ describe("SeatsPanel — Sign back in", () => {
   it("a different account is refused visibly and the modal can be closed", async () => {
     const m = await openPanel(loneNonLiveView("codex"), {
       accountsResignStatus: () =>
-        Promise.resolve({ state: "failed", error: "different-account", expectedEmail: "s1@example.com", gotEmail: "x@example.com" }),
+        Promise.resolve({
+          state: "failed", error: "different-account", expectedEmail: "s1@example.com", gotEmail: "x@example.com",
+          message: resignFailureMessage({ error: "different-account", expectedEmail: "s1@example.com", gotEmail: "x@example.com", seatLabel: "Seat 1", email: null }),
+        }),
     });
     await press(bodyButton("Sign back in"));
     await advance(POLL);
@@ -108,7 +112,7 @@ describe("SeatsPanel — Sign back in", () => {
   });
 
   it("an identity the box cannot verify (login-failed) stays visible and Close works", async () => {
-    await openPanel(loneNonLiveView(), { accountsResignStatus: () => Promise.resolve({ state: "failed", error: "login-failed" }) });
+    await openPanel(loneNonLiveView(), { accountsResignStatus: () => Promise.resolve({ state: "failed", error: "login-failed", message: resignFailureMessage({ error: "login-failed", seatLabel: "Seat 1", email: null }) }) });
     await press(bodyButton("Sign back in"));
     await advance(POLL);
     expect(document.body.textContent).toContain("Sign-in didn't complete");

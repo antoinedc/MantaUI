@@ -112,6 +112,11 @@ final class UpgradeStoreTests: XCTestCase {
             let store = makeStore(box)
             await store.read()
             XCTAssertEqual(store.screen?.kind, statusToShow.state == .running ? .running : .failed)
+            if statusToShow.state == .failed {
+                // An older box (no upgrade view): Retry is still offered, Roll back is not — the behaviour that matters mid-migration.
+                XCTAssertEqual(store.screen?.canRetry, true)
+                XCTAssertEqual(store.screen?.canRollback, false)
+            }
         }
         XCTAssertEqual(loading.state, .loading, "the upgrade screen never waited on the capability reader")
         XCTAssertEqual(failedStore.state, .failed(lastLoaded: nil))

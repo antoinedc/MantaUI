@@ -474,6 +474,15 @@ struct AccountRowState: Equatable, Sendable, Decodable {
         self.registerLine = registerLine
     }
 
+    /// The control a subscription row falls back to when the box gave it no row state (an older box, or no read
+    /// yet), from fields the screen already reads — so Connect / Disconnect / Try again never disappear. The one
+    /// deliberate exception to "the box decides"; `accounts:row-states` replaces it whenever it answers.
+    static func fallbackControl(connected: Bool, managedExternally: Bool, health: String?) -> Control {
+        if health == "out-of-credit" { return .tryAgain }
+        if connected && managedExternally { return .none }
+        return connected ? .disconnect : .connect
+    }
+
     private enum CodingKeys: String, CodingKey { case text, tone, control, registerLine }
 
     init(from decoder: Decoder) throws {

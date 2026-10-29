@@ -17,6 +17,8 @@ import {
   type MockApi,
 } from "./testHarness";
 import { invalidateCachedResource } from "./useCachedResource";
+import { act } from "react";
+import { useStore } from "./store";
 import { AccountsCard } from "./AccountsCard";
 import { formatEndpointStateLine } from "../server/accountsCopy.mjs";
 
@@ -448,5 +450,68 @@ describe("AccountsCard endpoint register (custom rows)", () => {
     const result = h.container.querySelector('[data-testid="probe-result-voska"]');
     expect(result?.textContent).toContain("responded");
     expect((result as HTMLElement).className).toContain("text-ok");
+  });
+});
+
+describe("AccountsCard row states: failure vs older box (WS11 D4 review)", () => {
+  const base = {
+    opencodeProviderAuth: () => Promise.resolve(statusProvider()),
+    opencodeGetProviders: () => Promise.resolve([]),
+    accountHealth: () => Promise.resolve({ providers: { anthropic: { state: "ok" } }, endpoints: {} }),
+    ...ENDPOINT_TEST_API_DEFAULTS,
+  };
+
+  it("a failed read on a current box keeps the last good rows, says so, and Retry re-reads", async () => {
+    invalidateCachedResource("accounts");
+    let fail = false;
+    installMockApi({
+      ...base,
+      accountsRowStates: () =>
+        fail
+          ? Promise.reject(new Error("timeout"))
+          : Promise.resolve({ rows: { anthropic: { text: "Box words", tone: "ok" as const, control: "disconnect" as const, registerLine: null } } }),
+    });
+    const h = mount(<AccountsCard />);
+    await h.flush();
+    expect(h.container.textContent).toContain("Box words");
+    fail = true;
+    // Live usage moves → the card re-reads the states; the read fails.
+    await act(async () => {
+      useStore.setState({ usage: [] as never });
+    });
+    await h.flush();
+    expect(h.container.textContent).toContain("Couldn't load account states");
+    expect(h.container.textContent).toContain("Box words");
+    expect(buttonByText(h, "Disconnect")).toBeTruthy();
+    fail = false;
+    buttonByText(h, "Retry")!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    expect(h.container.textContent).not.toContain("Couldn't load account states");
+    expect(h.container.textContent).toContain("Box words");
+    h.unmount();
+  });
+
+  it("an older box (no accounts-copy-1) still offers Connect / Disconnect and the update note", async () => {
+    invalidateCachedResource("accounts");
+    installMockApi({
+      ...base,
+      apiVersion: () => Promise.resolve({ capabilities: [] } as never),
+      accountsRowStates: () => Promise.reject(new Error("unknown rpc channel")),
+      opencodeProviderAuth: () =>
+        Promise.resolve({
+          action: "status" as const,
+          providers: [
+            { id: "anthropic", label: "Claude", plan: "", console: null, docs: "", connected: true },
+            { id: "kimi", label: "Kimi", plan: "", console: null, docs: "", connected: false },
+          ],
+        }),
+    });
+    const h = mount(<AccountsCard />);
+    await h.flush();
+    expect(buttonByText(h, "Disconnect")).toBeTruthy();
+    expect(buttonByText(h, "Connect")).toBeTruthy();
+    expect(h.container.textContent).toContain("Update your box to use this");
+    expect(h.container.textContent).not.toContain("Couldn't load account states");
+    h.unmount();
   });
 });

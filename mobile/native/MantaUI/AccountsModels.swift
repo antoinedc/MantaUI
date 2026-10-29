@@ -342,16 +342,19 @@ struct ResignStatusReply: Decodable, Equatable, Sendable {
     var expectedEmail: String? = nil
     var gotEmail: String? = nil
     var seat: AccountsSeat? = nil
+    /// The box's sentence for a failure (WS11 D4); nil on an older box.
+    var message: String? = nil
 
-    private enum CodingKeys: String, CodingKey { case state, error, expectedEmail, gotEmail, seat }
+    private enum CodingKeys: String, CodingKey { case state, error, expectedEmail, gotEmail, seat, message }
 
     init(state: State = .pending, error: String? = nil, expectedEmail: String? = nil,
-         gotEmail: String? = nil, seat: AccountsSeat? = nil) {
+         gotEmail: String? = nil, seat: AccountsSeat? = nil, message: String? = nil) {
         self.state = state
         self.error = error
         self.expectedEmail = expectedEmail
         self.gotEmail = gotEmail
         self.seat = seat
+        self.message = message
     }
 
     init(from decoder: Decoder) throws {
@@ -362,6 +365,7 @@ struct ResignStatusReply: Decodable, Equatable, Sendable {
         expectedEmail = try? c.decodeIfPresent(String.self, forKey: .expectedEmail)
         gotEmail = try? c.decodeIfPresent(String.self, forKey: .gotEmail)
         seat = try? c.decodeIfPresent(AccountsSeat.self, forKey: .seat)
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
     }
 }
 
@@ -404,14 +408,17 @@ struct SeatStatusReply: Decodable, Equatable, Sendable {
     var error: String? = nil
     var seat: AccountsSeat? = nil
     var orgName: String? = nil
+    /// The box's sentence for a failure (WS11 D4); nil on an older box.
+    var message: String? = nil
 
-    private enum CodingKeys: String, CodingKey { case state, error, seat, orgName }
+    private enum CodingKeys: String, CodingKey { case state, error, seat, orgName, message }
 
-    init(state: State = .pending, error: String? = nil, seat: AccountsSeat? = nil, orgName: String? = nil) {
+    init(state: State = .pending, error: String? = nil, seat: AccountsSeat? = nil, orgName: String? = nil, message: String? = nil) {
         self.state = state
         self.error = error
         self.seat = seat
         self.orgName = orgName
+        self.message = message
     }
 
     init(from decoder: Decoder) throws {
@@ -421,6 +428,7 @@ struct SeatStatusReply: Decodable, Equatable, Sendable {
         error = try? c.decodeIfPresent(String.self, forKey: .error)
         seat = try? c.decodeIfPresent(AccountsSeat.self, forKey: .seat)
         orgName = try? c.decodeIfPresent(String.self, forKey: .orgName)
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
     }
 }
 
@@ -726,9 +734,11 @@ enum AccountsCopy {
         return text.isEmpty ? "something went wrong — try again" : text
     }
 
-    /// "Couldn't rename the seat — names must be 1–40 characters".
+    /// "Couldn't rename the seat — no connection". A refusal the box already worded is shown as that sentence alone
+    /// (it is a full, capitalised sentence — never joined onto a clause).
     static func failure(_ action: String, _ error: Error) -> String {
-        failure(action, reason: reason(for: error))
+        if let refusal = error as? AccountsRefusal { return refusal.message }
+        return failure(action, reason: reason(for: error))
     }
 
     static func failure(_ action: String, reason: String) -> String {

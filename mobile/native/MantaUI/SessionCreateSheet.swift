@@ -158,7 +158,10 @@ struct SessionCreateSheet: View {
 
     /// An older box can't name a new project (an unsafe name would be silently rewritten by tmux), so
     /// creating one is disabled with the note.
-    private var namingBlocked: Bool { target == .newProject && capabilities.has(.sessionsNaming) == false }
+    /// Blocked until the box is KNOWN to name projects: an older box answers false, and while the list is still
+    /// unknown a create could strand a half-made session on an older box.
+    private var namingBlocked: Bool { target == .newProject && capabilities.has(.sessionsNaming) != true }
+    private var namingChecking: Bool { target == .newProject && capabilities.has(.sessionsNaming) == nil }
 
     // MARK: - Body
 
@@ -179,7 +182,9 @@ struct SessionCreateSheet: View {
 
                 carriedOverSection
 
-                if namingBlocked {
+                if namingChecking {
+                    Section { Text("Checking your box…").font(.footnote).foregroundStyle(.secondary) }
+                } else if namingBlocked {
                     Section { UpdateBoxNote(showsLink: false) }
                 }
 
@@ -613,6 +618,9 @@ struct SessionCreateSheet: View {
     private func proposeProjectName() async {
         let path = folder.trimmingCharacters(in: .whitespacesAndNewlines)
         guard target == .newProject, source == .folder, !nameEdited, !path.isEmpty else { return }
+        // The folder changed: the previous folder's preview is stale until this one answers (a failed read leaves it
+        // blank — the create re-checks and the box names it anyway).
+        newProjectName = ""
         guard let proposal = try? await api.sessionsProposeName(project: path), !Task.isCancelled, !nameEdited else { return }
         newProjectName = proposal.name
     }

@@ -117,6 +117,16 @@ final class ProviderConnectTests: XCTestCase {
         XCTAssertEqual(reply.rows["acme"]?.registerLine, "Dead")
     }
 
+    // With no row state from the box (an older box, or none read yet) the controls fall back to plain data, so
+    // Connect / Disconnect / Try again never disappear.
+    func testFallbackControlsComeFromPlainData() {
+        typealias S = AccountRowState
+        XCTAssertEqual(S.fallbackControl(connected: false, managedExternally: false, health: nil), .connect)
+        XCTAssertEqual(S.fallbackControl(connected: true, managedExternally: false, health: "ok"), .disconnect)
+        XCTAssertEqual(S.fallbackControl(connected: true, managedExternally: true, health: nil), .none)
+        XCTAssertEqual(S.fallbackControl(connected: true, managedExternally: false, health: "out-of-credit"), .tryAgain)
+    }
+
     func testAnUnreadableToneOrControlIsTheSafeOne() throws {
         let reply = try decode(AccountRowStatesReply.self, #"{"rows":{"x":{"text":"t","tone":"purple","control":"explode"}}}"#)
         XCTAssertEqual(reply.rows["x"], AccountRowState(text: "t", tone: .quiet, control: .none))

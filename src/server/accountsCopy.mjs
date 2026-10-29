@@ -29,7 +29,7 @@ export function accountsErrorMessage(code) {
     case "login-failed":
       return "Sign-in failed. Try again.";
     case "duplicate-login":
-      return "That login is already added.";
+      return "That login is already added as a seat. Sign in with a different account.";
     case "different-org":
       return "That login belongs to a different organisation.";
     case "different-account":
@@ -47,6 +47,30 @@ export function withErrorMessage(result) {
     return { ...result, message: accountsErrorMessage(result.error) };
   }
   return result;
+}
+
+const TIMED_OUT = "The sign-in wasn't finished within 15 minutes, so the box stopped waiting.";
+
+/** Why an add-seat sign-in failed, in words that say what to do next (the status reply's `message`). */
+export function seatSignInFailureMessage({ error, timedOut }) {
+  if (error === "login-failed" && timedOut) return `${TIMED_OUT} Try again and finish it in the browser.`;
+  if (error === "login-failed") return "The sign-in failed — the code may have been wrong or expired. Try again.";
+  return accountsErrorMessage(error);
+}
+
+/** Why a re-sign failed; the seat was not changed in any of these cases. `seatLabel` / `email` are the seat being re-signed. */
+export function resignFailureMessage({ error, timedOut, expectedEmail, gotEmail, seatLabel, email }) {
+  const label = seatLabel || "The seat";
+  if (error === "different-account") {
+    const expected = expectedEmail || email || null;
+    const got = gotEmail || "a different account";
+    return expected
+      ? `You signed in as ${got}, but this seat is ${expected}. Sign in with ${expected}.`
+      : `You signed in as ${got}, but that isn't the account ${label} belongs to. Sign in with the same account.`;
+  }
+  if (error === "login-failed" && timedOut) return `${TIMED_OUT} ${label} was not changed — try again.`;
+  if (error === "login-failed") return `Sign-in didn't complete. ${label} was not changed — try again.`;
+  return accountsErrorMessage(error);
 }
 
 /** The retry-cooldown minutes for a rate-limited entry; always ≥1, null when none. */
