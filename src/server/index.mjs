@@ -105,6 +105,7 @@ import { enrichProviderError, describeBackgroundCompaction } from "../shared/str
 import { createDelegateView } from "./delegateView.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
 import { createQuestionsDecorator } from "./questionsDecorator.mjs";
+import { runBoundaryOf } from "./transcriptRuns.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
@@ -357,6 +358,14 @@ const streamInterp = createStreamInterpreter({
   publish: (evt) => questionsDecorator.publish(evt),
   contextLimitFor,
   resolveContextModel: (a) => contextModels.resolve(a),
+  // WS11 D11: the run ledger resolves an inbox delivery it could not classify at enqueue time from the delivered message
+  // itself (the SAME predicate the canonical walk uses), and repairs a guessed boundary from canonical history.
+  classifyDelivered: async ({ sessionId, messageID }) => {
+    const m = await oc.getMessage(sessionId, messageID);
+    if (!m) throw new Error("message not found");
+    return { cls: runBoundaryOf(m), user: m.info?.role === "user" };
+  },
+  rebuildFromCanonical: (sid) => oc.listMessages(sid, { limit: 100 }),
   // The device stream predicts cache staleness against the SAME TTL opencode
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.

@@ -63,6 +63,7 @@ import type {
   StreamPlanModePayload,
   StreamRetryPayload,
   StreamRunningPayload,
+  StreamToolRunsPayload,
   StreamSessionErrorPayload,
   StreamStepEndedPayload,
   StreamContextPayload,
@@ -84,6 +85,7 @@ import { openAccountsSettings } from "../accountsData";
 import { createInboxTracker, type InboxTracker } from "../inboxState";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
+import { ingestRunFrame, opencodeMessagesTracked } from "../runEpoch";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
 
 /** The compaction card's state; `firstLine` is the box's summary line once it ended. */
@@ -470,7 +472,7 @@ export function useSseBus(params: {
       setTranscriptLoadError(null);
       setRefreshing(true);
       fetchTranscriptWithRetry(
-        () => window.api.opencodeMessages(sessionId, fetchOpts()),
+        () => opencodeMessagesTracked(sessionId, fetchOpts(), scheduleRefetch),
         { timeoutMs: INITIAL_FETCH_TIMEOUT_MS, retryDelayMs: INITIAL_FETCH_RETRY_DELAY_MS },
       )
         .then((m) => {
@@ -527,6 +529,11 @@ export function useSseBus(params: {
             return m;
           });
           if (next === "idle") scheduleRefetch();
+          return;
+        }
+        case "toolRuns": {
+          // The child's run values feed its own map (the TaskCard's layout reads it).
+          ingestRunFrame(childId, ev.payload as StreamToolRunsPayload);
           return;
         }
         default:
@@ -603,6 +610,12 @@ export function useSseBus(params: {
             setRunning(false);
             scheduleRefetch();
           }, TURN_SETTLE_MS);
+          return;
+        }
+        case "toolRuns": {
+          // The box's live run values (summaries, tone, the latest unfinished call). They are merged by revision under the
+          // current connection's epoch (runEpoch.ts); a canonical rebuild retired some run ids, so membership is re-read once.
+          if (ingestRunFrame(sessionId, ev.payload as StreamToolRunsPayload)) scheduleRefetch();
           return;
         }
         case "retry": {

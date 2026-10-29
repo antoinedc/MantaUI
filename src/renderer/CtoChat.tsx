@@ -46,6 +46,7 @@ import { MantaLoader } from "./MantaLoader";
 import { Composer } from "./Composer";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { useTranscriptState } from "./hooks/useTranscriptState";
+import { opencodeMessagesTracked } from "./runEpoch";
 import { useSseBus } from "./hooks/useSseBus";
 import { useSessionResources } from "./hooks/useSessionResources";
 // The ONE shared composer container — the CTO conversation renders the SAME
@@ -818,8 +819,7 @@ function CtoConversation(props: {
       if (existing) clearTimeout(existing);
       const t = setTimeout(() => {
         childRefetchTimers.current.delete(childId);
-        window.api
-          .opencodeMessages(childId, { view: true })
+        opencodeMessagesTracked(childId, { view: true })
           .then((m) => ts.setChildMessages((prev) => new Map(prev).set(childId, m)))
           .catch(() => {
             /* non-fatal */

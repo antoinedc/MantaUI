@@ -83,6 +83,7 @@ export async function replay(events) {
   };
   const interp = createStreamInterpreter({
     publish: (e) => frames.push(e),
+    epoch: "epoch-golden",
     now: () => clock,
     setTimer: (fn, ms) => {
       const t = { at: clock + ms, fn, dead: false };
@@ -273,7 +274,8 @@ test("08-permission: permissions frame + attention around the reply", async () =
 test("re-delivered events (a reconnect) never double a frame", async () => {
   const events = readEvents("02-slow-bash");
   const doubled = events.flatMap((e) => [e, e]);
-  const noChurn = (fr) => subs(fr).filter((x) => x !== "messageChanged");
+  // Both are timing-coalesced (100 ms windows on a clock that advances per raw event), so their COUNT is not an invariant.
+  const noChurn = (fr) => subs(fr).filter((x) => x !== "messageChanged" && x !== "toolRuns");
   assert.deepEqual(noChurn(await replay(doubled)), noChurn(await replay(events)));
 });
 

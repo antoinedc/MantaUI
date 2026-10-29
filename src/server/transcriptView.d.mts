@@ -4,8 +4,11 @@ export function computeTurns(
   opts?: { running?: boolean },
 ): Map<string, { durationMs: number | null; tokens: number | null; verbSeedId: string }>;
 export function truncationOf(message: unknown): { kind: "output-cap" | "context-wall" | "tool-cutoff"; label: string; hint: string } | null;
-export function annotateView<T>(messages: T[], opts?: { running?: boolean }): T[];
-export function annotateSingle<T>(message: T): T;
+export function annotateView<T>(
+  messages: T[],
+  opts?: { running?: boolean; ledger?: unknown; single?: boolean; runContext?: unknown[] | null; runContextOpen?: boolean },
+): T[];
+export function annotateSingle<T>(message: T, opts?: { ledger?: unknown }): T;
 export function beginHandle(output: string): string | null;
 export function parseShowOutput(output: string): { path: string; mime: string; width: number | null; height: number | null; size: number } | null;
 export function mediaId(a: { handle: string | null | undefined; showMessageId: string; path: string }): string;

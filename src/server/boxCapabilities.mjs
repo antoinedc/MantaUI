@@ -50,6 +50,8 @@ export const BOX_CAPABILITIES = Object.freeze([
   "transcript-view-1",
   // WS11 D10 (plan question data)
   "questions-plan-1",
+  // WS11 D11 (tool activity wording + runs: part.view, message.view.runs, the toolRuns frame, runningSet.epoch)
+  "transcript-runs-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

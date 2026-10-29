@@ -38,6 +38,8 @@ import { ToolCard } from "./ToolCard";
 import { LoadEarlierHeader } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import { layoutTranscript, stabilizeLayout, type TranscriptLayout } from "./toolActivity";
+import { useRunMap } from "./runEpoch";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
 
 const NO_BLOCKS: never[] = [];
 
@@ -65,16 +67,21 @@ export function TaskCard({ state }: { state: ToolState }) {
   // streams, so the layout is stabilized through a ref to keep each memo'd
   // MessageRow from re-rendering on every refetch. (Hook: before the early
   // return below, like the memos above.)
+  const childRuns = useRunMap(info?.childSessionId ?? "");
+  const runsCapability = useBoxCapability("transcript-runs-1");
   const childLayoutRef = useRef<TranscriptLayout | null>(null);
   const childLayout = useMemo(() => {
     if (!childMsgsForSummary) return null;
     const next = layoutTranscript(childMsgsForSummary, {
       running: false,
       showThinking: ctx?.showThinking ?? false,
+      runs: childRuns.runs,
+      minGen: childRuns.minGen,
+      runsAvailable: runsCapability === false ? false : null,
     });
     childLayoutRef.current = stabilizeLayout(childLayoutRef.current, next);
     return childLayoutRef.current;
-  }, [childMsgsForSummary, ctx?.showThinking]);
+  }, [childMsgsForSummary, ctx?.showThinking, childRuns, runsCapability]);
   if (!info) {
     // No child id yet (very brief window between tool-input.started and the
     // first metadata write). Fall back to whatever output is present.

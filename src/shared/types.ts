@@ -3086,12 +3086,45 @@ export type MediaViewEntry = {
   handle: string | null;
 };
 
+/** A run's revision: the interpreter's process `epoch`, the ledger membership `gen`, and a per-session `seq` (WS11 D11). */
+export type RunRev = { epoch: string; gen: number; seq: number };
+
+/** What the box says a run of tool calls IS: its summary wording, tone, and the latest unfinished call (present tense). */
+export type RunSummaryView = {
+  label: string;
+  calls: number;
+  failed: number;
+  tone: "ok" | "warn" | "running";
+  live: { kind: string; label: string } | null;
+};
+export type RunSegmentView = RunSummaryView & { id: string };
+export type RunView = RunSummaryView & {
+  id: string;
+  ownerMessageId: string;
+  rev: RunRev;
+  /** Only when reasoning split the run (a client with reasoning shown draws one row per segment). */
+  segments?: RunSegmentView[];
+};
+/** A reference to a run whose full view rides on its placement message; never overwrites a stored value. */
+export type RunRef = { id: string; rev: RunRev; ref: true };
+
+/** `part.view` for a tool/patch part (and, D9, a media file part). */
+export type PartView = {
+  activity?: { kind: string; status: string; label: string; target: string; counted: boolean };
+  runId?: string;
+  segmentId?: string;
+  gen?: number;
+  media?: { kind: "image" | "video"; path: string };
+};
+
 export type MessageView = {
   /** The finished turn this message ends: duration / tokens / the verb seed. Never on a lone `getMessage`. */
   turn?: { durationMs: number | null; tokens: number | null; verbSeedId: string };
   truncation?: TruncationView;
   /** Ready inline media this message OWNS (a begin's message, else the show's), in first-sight order. */
   media?: MediaViewEntry[];
+  /** The runs this message touches (the full view on the run's placement message, a RunRef elsewhere). */
+  runs?: Array<RunView | RunRef>;
 };
 
 export type OpencodeMessage = {
@@ -3342,6 +3375,21 @@ export type StreamAttentionPayload = { kind: "question" | "permission" | null };
 // running.
 export type RunningSetPayload = {
   sessions: Array<{ sessionId: string; since?: number | null; type?: string | null }>;
+  /** The box's interpreter process id (WS11 D11): run values of any other epoch are retired. */
+  epoch?: string;
+};
+
+/** The live `toolRuns` frame (WS11 D11). Desktop uses `runs`/`closed`/`rebuilt`/`retired`; the phone also draws `layout`/`parts`. */
+export type StreamToolRunsPayload = {
+  epoch: string;
+  full: boolean;
+  gen: number;
+  rebuilt?: true;
+  retired?: string[];
+  layout: unknown[];
+  runs: RunView[];
+  closed: string[];
+  parts: unknown[];
 };
 
 export type StreamEnvelope = {
@@ -3375,6 +3423,7 @@ export type StreamEnvelope = {
     | "childSession"
     | "attention"
     | "windowStatus"
+    | "toolRuns"
     | "aborted"
     // Client-synthesised (never sent by the box): the events socket reconnected,
     // so every open panel must resync (see httpApi `fireResync`). `sessionId` is "".

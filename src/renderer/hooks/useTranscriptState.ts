@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
+import { opencodeMessageTracked, opencodeMessagesTracked } from "../runEpoch";
 import {
   mergeBufferedDeltas,
   collectChildSessionIds,
@@ -174,8 +175,9 @@ export function useTranscriptState(params: {
     refetchTimerRef.current = setTimeout(() => {
       refetchTimerRef.current = null;
       setRefreshing(true);
-      window.api
-        .opencodeMessages(sessionId, fetchOpts())
+      // Tracked: the run views it carries are merged under the connection generation it was ISSUED under (runEpoch.ts); an
+      // answer carrying a membership a rebuild has retired schedules one more fetch.
+      opencodeMessagesTracked(sessionId, fetchOpts(), scheduleRefetch)
         .then((m) => {
           setMessages(m);
           for (const cid of collectChildSessionIds(m)) {
@@ -217,8 +219,7 @@ export function useTranscriptState(params: {
       setTimeout(() => {
         spliceTimers.current.delete(messageId);
         spliceFirstScheduledAt.current.delete(messageId);
-        window.api
-          .opencodeMessage(sessionId, messageId, { view: true })
+        opencodeMessageTracked(sessionId, messageId, { view: true }, scheduleRefetch)
           .then((msg) => {
             if (!msg) {
               scheduleRefetch();
@@ -267,13 +268,10 @@ export function useTranscriptState(params: {
   const fetchChildTranscript = useCallback((childId: string) => {
     // Tail-first, matching the main session: the first fetch pulls only the
     // tail unless "Load earlier" has already pulled the full history.
-    window.api
-      .opencodeMessages(
-        childId,
-        childLoadedAllRef.current.get(childId)
-          ? { view: true }
-          : { limit: TRANSCRIPT_TAIL_LIMIT, view: true },
-      )
+    opencodeMessagesTracked(
+      childId,
+      childLoadedAllRef.current.get(childId) ? { view: true } : { limit: TRANSCRIPT_TAIL_LIMIT, view: true },
+    )
       .then((m) => {
         setChildMessages((prev) => {
           const next = new Map(prev);
@@ -286,8 +284,7 @@ export function useTranscriptState(params: {
 
   const loadEarlierChildTranscript = useCallback((childId: string) => {
     setLoadingChildEarlier((prev) => new Set(prev).add(childId));
-    window.api
-      .opencodeMessages(childId, { view: true })
+    opencodeMessagesTracked(childId, { view: true })
       .then((m) => {
         childLoadedAllRef.current.set(childId, true);
         setChildMessages((prev) => new Map(prev).set(childId, m));

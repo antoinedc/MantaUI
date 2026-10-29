@@ -534,7 +534,9 @@ test("snapshotState always emits exactly one runningSet frame (index 0), even wi
   const { interp } = make();
   const snap = interp.snapshotState();
   assert.equal(snap.length, 1);
-  assert.deepEqual(snap[0], { kind: "runningSet", payload: { sessions: [] } });
+  // `epoch` identifies this interpreter process (WS11 D11): clients keep run values of the latest connection's epoch only.
+  assert.deepEqual(snap[0], { kind: "runningSet", payload: { sessions: [], epoch: interp.epoch } });
+  assert.equal(typeof interp.epoch, "string");
 });
 
 test("snapshotState lists a running session with its original since, replays pending asks, drops finished ones", () => {

@@ -74,6 +74,7 @@ import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
 import { normalizeUpgradeStatus } from "../upgradeGateLogic";
 import { ship } from "../log";
+import { onRunConnection, onRunEpoch } from "../runEpoch";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -589,6 +590,9 @@ export function dispatchFrame(data: unknown) {
       sessionId?: string;
     };
     if (kind === "heartbeat") return; // liveness ping only — no listener, no demux
+    // The connection's first frame names the box's interpreter epoch (WS11 D11): recorded HERE, before any listener, so a chat
+    // opened after the snapshot still reads it and no subscriber ordering can miss it.
+    if (kind === "runningSet") onRunEpoch((payload as { epoch?: string } | undefined)?.epoch);
     const set = listeners[kind as Kind];
     if (!set) return;
     // The `stream` kind wraps a derived sub-event: the box publishes
@@ -648,6 +652,8 @@ function getController(): WsReconnectController {
     onReconnect: fireResync,
     onState: (s) => {
       useStore.getState().setConnectionState(s);
+      // A new connection retires every answer issued before it and awaits its own `runningSet` epoch (WS11 D11).
+      if (s.state === "connected") onRunConnection();
       ship("info", "ws state", { state: s.state });
       // Fresh connect (initial or reconnect, including a forced one): reset
       // the liveness clock so the watchdog doesn't immediately re-fire while

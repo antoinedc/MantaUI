@@ -825,6 +825,11 @@ type State = {
   setPairLinkError: (message: string | null) => void;
   setConnectionState: (s: ConnectionState) => void;
   setBoxCapabilities: (c: { state: "loading" | "loaded" | "failed"; ids: string[]; loadedOnce: boolean }) => void;
+  // The run-revision connection state (WS11 D11, runEpoch.ts): the interpreter epoch announced by the LATEST events
+  // connection's `runningSet` (null until it arrives) and a counter bumped on every (re)connect.
+  runEpoch: { epoch: string | null; connGen: number };
+  setRunEpoch: (epoch: string | null) => void;
+  beginRunConnection: () => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -900,6 +905,7 @@ export const useStore = create<State>((set, get) => ({
   serverUpdateProgress: null,
   connectionState: { state: "idle" },
   boxCapabilities: { state: "loading", ids: [], loadedOnce: false },
+  runEpoch: { epoch: null, connGen: 0 },
   backgroundSyncing: false,
   videoRenderNow: null,
   opencodeRestartNeeded: false,
@@ -1258,6 +1264,8 @@ export const useStore = create<State>((set, get) => ({
   setServerUpdateProgress: (p) => set({ serverUpdateProgress: p }),
   setConnectionState: (s) => set({ connectionState: s }),
   setBoxCapabilities: (c) => set({ boxCapabilities: c }),
+  setRunEpoch: (epoch) => set((s) => (s.runEpoch.epoch === epoch ? s : { runEpoch: { ...s.runEpoch, epoch } })),
+  beginRunConnection: () => set((s) => ({ runEpoch: { epoch: null, connGen: s.runEpoch.connGen + 1 } })),
   setOpencodeRestartNeeded: (v) => set({ opencodeRestartNeeded: v }),
 
   applyStatusBatch: (batch) =>

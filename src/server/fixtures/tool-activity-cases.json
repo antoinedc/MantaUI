@@ -1,5 +1,5 @@
 {
-  "_comment": "Parity fixture for tool-activity wording and run grouping. ASSERTED by src/renderer/toolActivity.fixture.test.ts (against toolActivity.ts) and by mobile/native/MantaUITests/ToolActivityTests.swift (against the Swift port). Both suites read this file and generate nothing. To change wording, change toolActivity.ts, regenerate the expectations from it, and update the Swift port in the same commit.",
+  "_comment": "Wording + grouping cases for the BOX's tool-activity rules (src/server/transcriptRuns.mjs), asserted by src/server/transcriptRuns.test.mjs. These were the desktop/iOS parity fixture; the rules now live only on the box, so this is its regression suite. Add a case here when a rule changes.",
   "describe": [
     {
       "name": "read: basename of filePath",
@@ -376,10 +376,10 @@
       "expect": {
         "kind": "bash",
         "status": "completed",
-        "running": "Run the complete integration suite against the staging clus…",
-        "done": "Run the complete integration suite against the staging clus…",
-        "failed": "Failed: Run the complete integration suite against the staging clus…",
-        "label": "Run the complete integration suite against the staging clus…",
+        "running": "Run the complete integration suite against the staging clus\u2026",
+        "done": "Run the complete integration suite against the staging clus\u2026",
+        "failed": "Failed: Run the complete integration suite against the staging clus\u2026",
+        "label": "Run the complete integration suite against the staging clus\u2026",
         "counted": true
       }
     },
@@ -979,6 +979,55 @@
         "failed": "Saved changes",
         "label": "Saved changes",
         "counted": false
+      }
+    },
+    {
+      "name": "delegate: running background job, name from the input",
+      "part": {
+        "type": "tool",
+        "id": "d1",
+        "messageID": "m",
+        "tool": "mcp_delegate_delegate",
+        "state": {
+          "status": "running",
+          "input": {
+            "prompt": "Run the sync nightly\nmore"
+          }
+        }
+      },
+      "expect": {
+        "kind": "delegate",
+        "status": "running",
+        "running": "Running background job Run the sync nightly",
+        "done": "Started background job Run the sync nightly",
+        "failed": "Failed to start background job Run the sync nightly",
+        "label": "Running background job Run the sync nightly",
+        "counted": true
+      }
+    },
+    {
+      "name": "delegate: the quoted name in the output wins over the input",
+      "part": {
+        "type": "tool",
+        "id": "d2",
+        "messageID": "m",
+        "tool": "delegate",
+        "state": {
+          "status": "completed",
+          "input": {
+            "prompt": "Run the sync"
+          },
+          "output": "Started job \"nightly-sync\" (id 198262c2). The result arrives later."
+        }
+      },
+      "expect": {
+        "kind": "delegate",
+        "status": "completed",
+        "running": "Running background job nightly-sync",
+        "done": "Started background job nightly-sync",
+        "failed": "Failed to start background job nightly-sync",
+        "label": "Started background job nightly-sync",
+        "counted": true
       }
     }
   ],

@@ -72,6 +72,8 @@ export const DELETED = [
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },
   { scopes: ["renderer"], regex: /\b(NO_ROLLBACK_STEPS|CHECK_AGAIN_STEPS)\b|export function (currentStep|stepFraction|diskSentence)\b/, why: "D3: the upgrade gate's current step, fraction, disk sentence and Retry/Roll back rules are the box's" },
+  // D11 — tool activity wording + runs.
+  { scopes: ["renderer"], regex: /\b(describeActivity|describeToolPart|describePatchPart|summarizeToolGroup|groupTone|normalizeToolStatus|humanizeToolName)\b|export type (Activity|ActivityKind|GroupSummary)\b|\bfunction (hostOf|clip)\b/, why: "D11: part.view.activity / message.view.runs / the toolRuns frame carry every tool call's wording and every run's summary, tone and membership; the renderer lays out the box's runs and derives none of it" },
 ];
 
 function* walk(dir, recursive) {

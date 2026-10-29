@@ -15,6 +15,7 @@ import {
 import { TaskCard } from "./TaskCard";
 import { TaskContext, type TaskContextValue, type ToolState } from "./chatShared";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
+import { viewed } from "./testRunViews";
 import type { OpencodePart, OpencodeMessage } from "../shared/types";
 
 // Tool-call cards start COLLAPSED. Mounting a <ToolCall> hides its body until
@@ -514,11 +515,12 @@ describe("TaskCard child transcript groups tool runs", () => {
   });
 
   it("collapses a run spanning child messages into ONE line, drawn once", () => {
-    const msgs = [
+    // The child transcript as the box sends it (run ids + wording stamped by the box's own module).
+    const msgs = viewed([
       child("c1", [{ type: "text", text: "Searching." }, readTool("/a.ts")]),
       child("c2", [readTool("/b.ts")]),
       child("c3", [{ type: "text", text: "Found." }]),
-    ];
+    ]);
     const ctx = childTaskContext(msgs);
     installMockApi();
     h = mount(

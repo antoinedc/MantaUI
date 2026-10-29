@@ -95,6 +95,7 @@ import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useComposerController } from "./hooks/useComposerController";
 import { useTranscriptState } from "./hooks/useTranscriptState";
+import { opencodeMessagesTracked } from "./runEpoch";
 import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
@@ -739,8 +740,7 @@ export function ChatPanel({
       if (existing) clearTimeout(existing);
       const t = setTimeout(() => {
         childRefetchTimers.current.delete(childId);
-        window.api
-          .opencodeMessages(childId, { view: true })
+        opencodeMessagesTracked(childId, { view: true })
           .then((m) => {
             setChildMessages((prev) => {
               const next = new Map(prev);

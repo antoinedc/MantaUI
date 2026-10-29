@@ -8,7 +8,8 @@ import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { ToolGroupRow } from "./ToolGroup";
 import { MessageRow } from "./MessageRow";
-import type { ToolGroup } from "./toolActivity";
+import { layoutTranscript, type ToolGroup } from "./toolActivity";
+import { viewed } from "./testRunViews";
 import type { OpencodeMessage, OpencodePart } from "../shared/types";
 
 let n = 0;
@@ -20,7 +21,16 @@ const tool = (name: string, input: Record<string, unknown>, status = "completed"
     tool: name,
     state: { status, input, output: "OUT" },
   }) as OpencodePart;
-const group = (...items: OpencodePart[]): ToolGroup => ({ id: items[0].id, items });
+// The run exactly as the box says it: stamped by the box's own module, laid out by run id.
+const group = (...items: OpencodePart[]): ToolGroup => {
+  const messages = viewed([
+    { info: { id: "u", sessionID: "s", role: "user", time: { created: 1 } }, parts: [{ id: "ux", messageID: "u", type: "text", text: "go" }] },
+    { info: { id: "a", sessionID: "s", role: "assistant", time: { created: 2 } }, parts: items },
+  ] as unknown as OpencodeMessage[]);
+  const g = layoutTranscript(messages, { running: false, showThinking: false }).blocksByMessage.get("a")!.find((b) => b.kind === "tools");
+  if (!g || g.kind !== "tools") throw new Error("fixture has no run");
+  return g.group;
+};
 
 describe("ToolGroupRow", () => {
   let h: Harness | null = null;
@@ -72,6 +82,20 @@ describe("ToolGroupRow", () => {
     expect(h.container.querySelectorAll("button[aria-expanded]")).toHaveLength(3);
   });
 
+  it("a box without runs: ONE neutral line, expandable to the raw calls, with the update note", () => {
+    const g: ToolGroup = {
+      id: "tools:a",
+      items: [tool("read", { filePath: "a" }), tool("bash", { command: "ls" })],
+      view: { label: "Tool activity", calls: 2, failed: 0, tone: "ok", live: null },
+      fallback: true,
+    };
+    h = mount(<ToolGroupRow group={g} showThinking={false} />);
+    expect(line().textContent).toContain("Tool activity");
+    act(() => line().click());
+    expect(h.text()).toContain("Update your box to see tool details");
+    expect(h.container.querySelectorAll("button[aria-expanded]").length).toBeGreaterThan(1);
+  });
+
   it("only pops in (data-motion) when the owning message is entering", () => {
     const g = group(tool("read", { filePath: "a" }));
     h = mount(<ToolGroupRow group={g} showThinking={false} />);
@@ -89,10 +113,12 @@ describe("MessageRow without a layout (subagent transcripts)", () => {
     h = null;
   });
   const row = (parts: OpencodePart[], extra: Record<string, unknown> = {}) => {
-    const msg = {
-      info: { id: "a1", sessionID: "s", role: "assistant", time: { created: 1 } },
-      parts,
-    } as unknown as OpencodeMessage;
+    const msg = viewed([
+      {
+        info: { id: "a1", sessionID: "s", role: "assistant", time: { created: 1 } },
+        parts,
+      } as unknown as OpencodeMessage,
+    ])[0];
     return (
       <MessageRow
         msg={msg}

@@ -2476,7 +2476,7 @@ test("opencode:messages passes the interpreter's running flag (never the client'
   const handlers = buildHandlers({ ...deps, streamInterp: { getState: (sid) => (sid === "ses_run" ? { running: true } : undefined) } });
   await handlers["opencode:messages"]("ses_run", { view: true, running: false });
   await handlers["opencode:messages"]("ses_idle", { view: true });
-  assert.deepEqual(seen, [{ view: true, running: true }, { view: true, running: false }]);
+  assert.deepEqual(seen, [{ view: true, running: true, ledger: null }, { view: true, running: false, ledger: null }]);
   await handlers["opencode:message"]("ses_run", "m1", { view: true });
-  assert.deepEqual(gotOpts, { view: true });
+  assert.deepEqual(gotOpts, { view: true, ledger: null });
 });

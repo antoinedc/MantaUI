@@ -1519,7 +1519,11 @@ export function buildHandlers({
     // duplicated tool stdout is stripped server-side for every client.
     // `view:true` adds `message.view` (WS11 D8+). `running` is the interpreter's, never the client's.
     "opencode:messages": (sessionId, opts) =>
-      oc.listMessages(sessionId, { ...(opts ?? {}), running: streamInterp?.getState(sessionId)?.running === true }),
+      oc.listMessages(sessionId, {
+        ...(opts ?? {}),
+        running: streamInterp?.getState(sessionId)?.running === true,
+        ledger: streamInterp?.ledgerFor?.(sessionId) ?? null,
+      }),
 
     // Context usage for a session that may be idle. The live `stream/context`
     // frame is emitted only when an assistant message arrives, so a client
@@ -1555,7 +1559,7 @@ export function buildHandlers({
 
     // Single-message fetch for live-turn splice (returns null on miss).
     "opencode:message": (sessionId, messageId, opts) =>
-      oc.getMessage(sessionId, messageId, opts ?? {}),
+      oc.getMessage(sessionId, messageId, { ...(opts ?? {}), ledger: streamInterp?.ledgerFor?.(sessionId) ?? null }),
 
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape

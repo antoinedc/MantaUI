@@ -791,3 +791,21 @@ describe("httpApi approval decisions fail fast on a stalled connection", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ args: ["a1"] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// WS11 D11: the connection's first frame (`runningSet`) names the box's interpreter epoch. It is recorded in dispatchFrame
+// itself — before any listener — so a chat opened after the snapshot still reads it.
+describe("dispatchFrame records the run epoch (WS11 D11)", () => {
+  it("a runningSet envelope sets the runEpoch slice, with no listener registered", async () => {
+    const { useStore } = await import("../store");
+    const { onRunConnection } = await import("../runEpoch");
+    onRunConnection();
+    expect(useStore.getState().runEpoch.epoch).toBeNull();
+    dispatchFrame(JSON.stringify({ kind: "runningSet", payload: { sessions: [], epoch: "E7" } }));
+    expect(useStore.getState().runEpoch.epoch).toBe("E7");
+    // An older box sends none: the epoch stays unknown rather than being invented.
+    onRunConnection();
+    dispatchFrame(JSON.stringify({ kind: "runningSet", payload: { sessions: [] } }));
+    expect(useStore.getState().runEpoch.epoch).toBeNull();
+  });
+});

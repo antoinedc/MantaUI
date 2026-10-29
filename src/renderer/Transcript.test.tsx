@@ -29,6 +29,7 @@ import { Transcript, TranscriptList, type TranscriptProps } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage } from "../shared/types";
 import type { EntryMotionState } from "./chatUtils";
+import { viewed } from "./testRunViews";
 
 // Mirrors ChatPanel's SINGLE `motionStateRef`: one ref per mounted transcript.
 // `open()` resets it so each opened session starts a fresh gate; `render()`
@@ -65,7 +66,8 @@ function toolMsg(id: string, tool: string): OpencodeMessage {
 
 function props(messages: OpencodeMessage[], running = false): TranscriptProps {
   return {
-    messages,
+    // What the box sends for these messages: run ids + wording stamped by the box's own module.
+    messages: viewed(messages, { running }),
     virtuosoRef: createRef<VirtuosoHandle>(),
     sessionId: "s1",
     setMessages: () => {},

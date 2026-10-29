@@ -17,6 +17,7 @@ import {
   getSessionDirectory,
   readSession,
   listMessages,
+  RUN_LOOKBACK,
   getMessage,
   slimTranscript,
   stripDuplicateToolOutput,
@@ -930,6 +931,99 @@ test("listMessages {slim:true} drops the part types the iOS client never renders
     // step-finish survives slim: it carries the raw finish reason the iOS turn footer classifies.
     assert.deepEqual((await listMessages("ses_a", { slim: true }))[0].parts.map((p) => p.type), ["text", "step-finish"]);
     assert.deepEqual((await listMessages("ses_a"))[0].parts.map((p) => p.type), ["reasoning", "text", "step-finish"]);
+  });
+});
+
+// ---- WS11 D11: runs on a `view` fetch (window edges, byte-identity without `view`, slim keeps segment ids) ----
+
+const T = (id, file) => ({ type: "tool", id, name: "read", state: { status: "completed", input: { path: `/w/${file}` }, content: [{ type: "text", text: "x" }] } });
+/** A session of `n` tool-only assistant steps after one user message; records are served newest-first. */
+const stepsTimeline = (n, { firstText = false } = {}) => {
+  const asc = [U("u1", "go")];
+  for (let i = 1; i <= n; i++) asc.push(A(`a${i}`, [...(firstText && i === 1 ? [{ type: "text", text: "start" }] : []), T(`T${i}`, `f${i}.ts`)]));
+  return [...asc].reverse();
+};
+const runsOf = (msgs) => msgs.flatMap((m) => (m.view?.runs ?? []).map((r) => ({ msg: m.info.id, ...r })));
+
+test("listMessages {view} vs without: stripping `view` gives the same bytes (an old desktop is unaffected)", async () => {
+  await withV2({ "GET /api/session/ses_a/message": { data: stepsTimeline(3), cursor: { next: null } } }, async () => {
+    const plain = await listMessages("ses_a");
+    const viewed = await listMessages("ses_a", { view: true });
+    const strip = (ms) => JSON.parse(JSON.stringify(ms, (k, v) => (k === "view" ? undefined : v)));
+    assert.deepEqual(strip(viewed), strip(plain));
+    assert.equal(plain.some((m) => m.view || m.parts.some((p) => p.view)), false);
+    assert.ok(viewed.some((m) => m.view?.runs?.length));
+  });
+});
+
+test("window edges: a run that began 5 records before a tail window keeps its TRUE id and owner; the widened window agrees", async () => {
+  await withV2({ "GET /api/session/ses_a/message": { data: stepsTimeline(8), cursor: { next: null } } }, async () => {
+    const tail = await listMessages("ses_a", { limit: 3, view: true }); // a6..a8
+    assert.deepEqual(tail.map((m) => m.info.id), ["a6", "a7", "a8"]);
+    const full = runsOf(tail).find((r) => !r.ref);
+    assert.equal(full.msg, "a6", "drawn at the first in-window message that has a part of it");
+    assert.equal(full.ownerMessageId, "a1", "…but the owner is the message the run began in, outside the window");
+    const [wide] = runsOf(await listMessages("ses_a", { limit: 9, view: true })).filter((r) => !r.ref);
+    assert.equal(wide.id, full.id, "widening the window keeps the id");
+    assert.equal(wide.ownerMessageId, "a1");
+    // Every other in-window message carries only a reference.
+    assert.deepEqual(runsOf(tail).filter((r) => r.ref).map((r) => r.msg), ["a7", "a8"]);
+  });
+});
+
+test("window edges: a run that began MORE than RUN_LOOKBACK records before the window is anchored at the window", async () => {
+  const n = RUN_LOOKBACK + 10;
+  const origWarn = console.warn;
+  const warned = [];
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    // Serve the history in two pages so the read stops before the oldest records: an OPEN edge.
+    let page = 0;
+    await withV2(
+      {
+        "GET /api/session/ses_a/message": ({ query }) => {
+          page++;
+          const desc = stepsTimeline(n); // newest first: a(n) … a1, u1
+          if (!query.cursor) return { data: desc.slice(0, RUN_LOOKBACK + 2), cursor: { next: "C1" } };
+          return { data: desc.slice(RUN_LOOKBACK + 2), cursor: { next: null } };
+        },
+      },
+      async () => {
+        const out = await listMessages("ses_a", { limit: 2, view: true });
+        assert.deepEqual(out.map((m) => m.info.id), [`a${n - 1}`, `a${n}`]);
+        const run = runsOf(out).find((r) => !r.ref);
+        assert.equal(run.id, `T${n - 1}`, "id = the first IN-WINDOW part (the run's true start is past the lookback)");
+        assert.equal(run.ownerMessageId, `a${n - 1}`);
+        assert.equal(page, 1, "no more than the lookback was read");
+      },
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.ok(warned.some((w) => /lookback/.test(w)), "logged");
+});
+
+test("a run that began inside the read context keeps its true id even when older records exist", async () => {
+  // a1 starts with TEXT, so the run begins at a1's tool; a window of 2 over 6 steps reads limit+40 records (all of them).
+  await withV2({ "GET /api/session/ses_a/message": { data: stepsTimeline(6, { firstText: true }), cursor: { next: null } } }, async () => {
+    const out = await listMessages("ses_a", { limit: 2, view: true });
+    const run = runsOf(out).find((r) => !r.ref);
+    assert.equal(run.ownerMessageId, "a1");
+  });
+});
+
+test("slim keeps part.view (run ids, segment ids) while dropping reasoning parts", async () => {
+  const content = [T("T1", "a.ts"), { type: "reasoning", text: "hmm" }, T("T2", "b.ts")];
+  await withV2({ "GET /api/session/ses_a/message": { data: [A("a1", content), U("u1", "go")], cursor: { next: null } } }, async () => {
+    const out = await listMessages("ses_a", { view: true, slim: true });
+    const a = out.find((m) => m.info.id === "a1");
+    assert.equal(a.parts.some((p) => p.type === "reasoning"), false);
+    const tools = a.parts.filter((p) => p.type === "tool");
+    assert.equal(tools.length, 2);
+    assert.ok(tools[0].view.runId);
+    assert.equal(tools[0].view.runId, tools[1].view.runId, "one run");
+    assert.notEqual(tools[0].view.segmentId, tools[1].view.segmentId, "reasoning split it into two segments");
+    assert.equal(a.view.runs[0].segments.length, 2);
   });
 });
 

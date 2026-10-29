@@ -7,9 +7,12 @@
 // D8: `view.turn` and `view.truncation`.
 // D9: `view.media` (the canonical inline media of a message the BOX owns) and `part.view.media` (a file part that is
 //     an image/video).
+// D11: `part.view.{activity,runId,segmentId,gen}` and `message.view.runs` (the runs a message touches, each with its
+//     wording, summary and revision) — rules in transcriptRuns.mjs, shared with the live ledger.
 
 import { classifyFinish, describeTruncation } from "../shared/streamInterpretation.mjs";
 import { MIME_BY_EXT } from "./media.mjs";
+import { activityView, computeRuns, runView } from "./transcriptRuns.mjs";
 
 /** A finished background run (v2-next N4) carries a `background-result` part. */
 export function isBackgroundResultMessage(message) {
@@ -239,11 +242,67 @@ const withFileViews = (message) => {
 };
 
 /**
+ * `runContext` (optional): the window PLUS up to RUN_LOOKBACK earlier records — runs are walked over it so a run that
+ * began before the window keeps its true id and owner (rev/windows: see the spec's "Window edges"). `runContextOpen`: older
+ * records exist that were not read, so a run that reaches the context's start is anchored at the window instead.
+ * `ledger` (optional) is the live run ledger of the session: `{epoch, gen, runView(id), runOfPart(id)}`. A run it knows
+ * is emitted with ITS view and revision (a full fetch can never regress live state); history it does not know gets
+ * `rev {epoch, gen, seq: 0}` and the canonical summary.
+ */
+function withRunViews(messages, ledger, { single = false, runContext = null, runContextOpen = false } = {}) {
+  let walked = computeRuns(runContext ?? messages);
+  if (runContext && runContextOpen && !walked.anchored) {
+    // The run reaches back past what was read (more than RUN_LOOKBACK records before the window): annotate as if it began at
+    // the window — an id that is stable for THIS window only (the spec's accepted edge).
+    console.warn(`[transcript] a run reaches back more than the lookback before the window (${messages[0]?.info?.id ?? "?"}); anchoring it at the window`);
+    walked = computeRuns(messages);
+  }
+  const { walker, partRun, messageRuns } = walked;
+  const epoch = ledger?.epoch ?? "";
+  const gen = ledger?.gen ?? 1;
+  const viewOf = (run) => ledger?.runView?.(run.id) ?? runView(walker, run, { epoch, gen, seq: 0 });
+  // PAYLOAD (measured, transcriptView.payload.test.mjs): the full RunView on EVERY message of a long run is quadratic, so a
+  // list response carries it ONLY on the run's placement message (the first in-window message touching it — its owner when
+  // that is in the window); every other message carries a RunRef `{id, rev, ref:true}` a client never lets overwrite a
+  // stored value. A lone `getMessage` is self-contained: always full.
+  const placed = new Set();
+  return messages.map((m) => {
+    const runIds = messageRuns.get(m?.info?.id);
+    let parts = m?.parts;
+    if (Array.isArray(parts) && runIds) {
+      parts = parts.map((p) => {
+        let at = partRun.get(p.id);
+        if (single && p.type !== "text") at = ledger?.runOfPart?.(p.id) ?? at;
+        if (!at) return p;
+        const run = walker.runs.get(at.runId);
+        const split = (ledger?.runView?.(at.runId)?.segments ?? (run?.segments.length > 1 ? run.segments : null)) != null;
+        return { ...p, view: { ...(p.view ?? {}), activity: activityView(p), runId: at.runId, ...(split ? { segmentId: at.segmentId } : {}), gen } };
+      });
+    }
+    if (!runIds) return m;
+    const runs = runIds
+      .map((id) => walker.runs.get(id))
+      .filter(Boolean)
+      .map((run) => {
+        const view = viewOf(run);
+        if (single || !placed.has(run.id)) {
+          placed.add(run.id);
+          return view;
+        }
+        return { id: view.id, rev: view.rev, ref: true };
+      });
+    return { ...m, parts, view: { ...(m.view ?? {}), runs } };
+  });
+}
+
+/**
  * Add `view` to each message. Pure: returns new message objects; a message with nothing to say gets no `view`.
  * `running`: the session has a turn in flight (the box reads it from the interpreter), which withholds the footer of
- * the in-flight turn.
+ * the in-flight turn. `ledger` / `single` / `runContext`: see `withRunViews`.
+ * @param {any[]} messages
+ * @param {{running?: boolean, ledger?: any, single?: boolean, runContext?: any[]|null, runContextOpen?: boolean}} [opts]
  */
-export function annotateView(messages, { running = false } = {}) {
+export function annotateView(messages, { running = false, ledger = null, single = false, runContext = null, runContextOpen = false } = {}) {
   const turns = computeTurns(messages, { running });
   const mediaByOwner = new Map();
   for (const entry of canonicalMediaEntries(messages)) {
@@ -251,9 +310,10 @@ export function annotateView(messages, { running = false } = {}) {
     if (!mediaByOwner.has(ownerMessageId)) mediaByOwner.set(ownerMessageId, []);
     mediaByOwner.get(ownerMessageId).push(rest);
   }
-  return messages.map((raw) => {
+  const withRuns = withRunViews(messages, ledger, { single, runContext, runContextOpen });
+  return withRuns.map((raw) => {
     const m = withFileViews(raw);
-    const view = {};
+    const view = { ...(m.view ?? {}) };
     const turn = turns.get(m?.info?.id);
     if (turn) view.turn = turn;
     const truncation = truncationOf(m);
@@ -264,13 +324,16 @@ export function annotateView(messages, { running = false } = {}) {
   });
 }
 
-/** A single message annotated alone (`getMessage`): its truncation and media, never a turn (a turn needs neighbours). */
-export function annotateSingle(message) {
+/**
+ * A single message annotated alone (`getMessage`): truncation, media and its runs, never a turn (a turn needs neighbours).
+ * @param {any} message
+ * @param {{ledger?: any}} [opts]
+ */
+export function annotateSingle(message, { ledger = null } = {}) {
   if (!message) return message;
-  const [annotated] = annotateView([message], { running: true });
-  if (!annotated?.view) return annotated;
+  const [annotated] = annotateView([message], { running: true, ledger, single: true });
+  if (!annotated?.view?.turn) return annotated;
   const { turn: _turn, ...rest } = annotated.view;
-  if (Object.keys(rest).length > 0) return { ...annotated, view: rest };
-  const { view: _view, ...bare } = annotated;
-  return bare;
+  const { view: _v, ...bare } = annotated;
+  return Object.keys(rest).length > 0 ? { ...bare, view: rest } : bare;
 }
