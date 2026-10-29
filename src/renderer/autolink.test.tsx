@@ -51,6 +51,11 @@ describe("MarkdownBody autolinking", () => {
     expect(anchors(h)[0].textContent).toBe("docs");
   });
 
+  it("keeps mailto markdown links as anchors", () => {
+    h = mount(<MarkdownBody text="[x](mailto:a@b.co)" />);
+    expect(hrefs(h)).toEqual(["mailto:a@b.co"]);
+  });
+
   it("does not put react-markdown's node prop on the DOM", () => {
     h = mount(<MarkdownBody text="[a](https://a.com) and `x`" />);
     expect(h.html()).not.toContain("node=");
@@ -102,6 +107,12 @@ describe("Linkified surfaces", () => {
   it("makes the WebFetch header URL a link", () => {
     h = mount(<WebFetchBody state={{ input: { url: "https://a.com/page" }, output: "" }} />);
     expect(hrefs(h)).toEqual(["https://a.com/page"]);
+  });
+
+  it.each([["javascript:alert(1)"], ["file:///etc/passwd"]])("renders no anchor for the WebFetch URL %s", (url) => {
+    h = mount(<WebFetchBody state={{ input: { url }, output: "" }} />);
+    expect(anchors(h)).toHaveLength(0);
+    expect(h.text()).toContain(url);
   });
 
   it("opens an auto link externally and stops the click from propagating", () => {

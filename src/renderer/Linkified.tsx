@@ -8,7 +8,12 @@ import { useMemo, type AnchorHTMLAttributes } from "react";
 import { getMantaPreload } from "./preloadAccess";
 import { findLinks, type FindLinksOptions } from "./linkify";
 
+// Only these schemes become anchors: the href can come from model output, and
+// openExternal hands it to the OS. Anything else renders as plain text.
+const SAFE_HREF = /^(https?:|mailto:)/i;
+
 export function ExternalLink({ href, children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  if (!href || !SAFE_HREF.test(href)) return <>{children}</>;
   return (
     <a
       href={href}
