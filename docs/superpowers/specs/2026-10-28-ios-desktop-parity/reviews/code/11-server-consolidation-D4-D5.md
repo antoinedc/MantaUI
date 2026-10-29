@@ -137,3 +137,69 @@ On a pre-D5 box, `tmux:new-session` then runs with `name: undefined`. A chat-mod
 | `forge-clone-view-1` | Clone action disabled with the note on both clients ✓. The `{root}` form is never sent to a box without it, except while the capability is unknown; then an old box answers `bad_request`, shown as "Couldn't start the clone." (a reported failure, not a dead control). |
 
 VERDICT: CHANGES REQUIRED
+
+---
+
+## Round 2 — re-check against fix commit `e9b374d1`
+
+I read the full diff of `e9b374d1` only; other uncommitted work in the worktree was ignored. I ran the checks on a `git archive e9b374d1` snapshot:
+
+- **`npm run typecheck`:** clean.
+- **`npm run test:server`:** 6252 pass, 1 fail. The failure is `upgradeV2Reclaim.test.mjs` › "a manifest entry replaced by a DIFFERENT file (different inode) is refused". It is a timing flake under box load: other agents' suites were running at the same time, the file passed 76/76 three times in isolation, and the commit doesn't touch it.
+- **Full `npx vitest run`:** 251/251 files, 4835 pass, 0 fail. This covers the run the implementer skipped after the final `py-1` class change. The class change broke nothing, including the visual/structure suites.
+- **Swift:** read only. The poll-outcome enums changed shape (`.failed(message:)`), and I checked every call site: `AccountsSignInFlow.swift:459,489` and the tests. `ProviderConnectionsStore.readRowStates` is now internal, so the screen's Retry can call it. I found no isolation or exhaustiveness risk.
+
+### Findings 1–11
+
+| # | Status | Notes |
+|---|---|---|
+| 1 BLOCKING (row-states failure) | **Resolved** | **Desktop:** the read is separate and sequence-guarded. A failure keeps the last good rows and shows "Couldn't load account states." with Retry. The older-box path is only `accounts-copy-1 === false`. **iOS:** `rowStatesReadFailed` drives the same row; only an unknown-channel answer means an older box. Tests on both clients. |
+| 2 BLOCKING (auto-rename) | **Resolved** | `TITLE_MAX_CHARS = 40`. An internal ":" becomes " – " and control characters are dropped. A test runs every sanitizer shape through `validateSessionName`. One fix covers both the first-name and re-title paths. |
+| 3 SHOULD (older-box controls) | **Resolved** (choice (a) accepted, see below) | |
+| 4 SHOULD (sign-in wording) | **Resolved** (choice (b) accepted, see below) | `accounts:seat-status` / `accounts:resign-status` failures carry `message`: timed out, duplicate login, different account with both emails, generic. The box's `duplicate-login` sentence is now the actionable one. Both clients' `seatFailureMessage` / `resignFailureMessage` / `resignTimedOut` are deleted, with guard rows. Node tests cover every branch. |
+| 5 SHOULD (capability unknown) | **Resolved** | NewSessionScreen, InboxPalette and the iOS create sheet now require `sessions-naming-1 === true`; while it is unknown they show "Checking your box…". The harness test covers it. |
+| 6 NIT (refusal copy) | Resolved | An `AccountsRefusal` is shown as the box's sentence alone. |
+| 7 NIT (row freshness) | Resolved | Row states are re-read when the card's data or the `usage` slice changes. |
+| 8 NIT (CTO allocator) | Resolved | `projects.create` goes through `createSessionUnderAllocator` with an explicit name. A lost race maps to `target_exists`. Tested. |
+| 9 NIT (rename-session tmux-safe) | Resolved | `tmuxSafeName` is applied, and duplicate errors map to the class-1 sentence. The additive `returnName` flag gives the final name; the Sidebar uses it, and an older box's bare list falls back to the typed name. Tested. |
+| 10 NIT (opencode create inside the mutex) | Resolved | `maybeCreateChatSession` is bounded at 20 s, and a late session is deleted. Tested. |
+| 11 NIT (iOS stale preview) | Resolved | The field is cleared when the folder key changes. It only clears while `!nameEdited`, and since `nameEdited` is set only by the field's own setter (`SessionCreateSheet.swift:341`), the programmatic clear does not mark the field as edited. |
+
+### Judgement on the two deliberate choices
+
+**(a) Older box: Connect / Disconnect / Try again derived from plain fields. Accepted.**
+- The rule is four lines: out-of-credit → Try again; external credential → none; connected → Disconnect; else Connect. It reads fields both clients already hold, and it applies only while the box has given no row state.
+- It is named (`fallbackControl` / `AccountRowState.fallbackControl`), documented in the spec's D4 cell as the single exception, and replaced as soon as `accounts:row-states` answers.
+- The failure mode is benign. The box still refuses anything it can't do, and the flows already show refusals.
+- It also covers a current box whose first read failed. That is strictly better than the controls disappearing.
+- Small gap, accepted: the box also treats a usage reader's `exhausted` as out-of-credit, and the fallback only checks health. So such a row shows Disconnect instead of Try again until the box answers.
+
+**(b) Strings the client keeps, plus a static line when the box stays silent past the limit. Accepted.**
+- "Couldn't reach the server to check" is knowledge only the client has (the box can't report its own unreachability).
+- The claude-login-exited line comes from the PTY the client drives.
+- Past the client's deadline with no verdict, the box has not done what it promised, so the old "the box stopped waiting after 15 minutes" was a claim the client couldn't verify. A static "That didn't work. Try again." is the honest choice.
+- **Minor cost (NIT R2-3 below):** for a re-sign, that static line drops the reassurance "<seat> was not changed", which the client does know.
+- **Older-box cost, accepted under D24:** a box without `message` on its status replies now shows the static line for every sign-in failure. Before, it showed the specific sentence, including the emails for `different-account`.
+
+### New problems (NIT only)
+
+**R2-1 NIT — a failed seat lookup now hides a real sign-in failure.**
+- **Where:** `src/server/accountsManager.mjs` (resign-status failure path).
+- **Problem:** to word the sentence, the failure reply now calls `findSeatView(await providerView(…))`. If that read throws, the channel turns a definite "failed" verdict into the generic thrown error. The client then reads it as unreachable and keeps polling until its own limit.
+- **Fix:** wrap the lookup in `try` and fall back to `seatLabel: undefined` (the sentence already handles "The seat").
+
+**R2-2 NIT — desktop shows a failure instead of the update note on an older box while the capability is unknown.**
+- **Where:** `src/renderer/AccountsCard.tsx` `loadRowStates`.
+- **Problem:** while `accounts-copy-1` is still `null`, an older box answers "unknown rpc channel". That is recorded as `failed`, so the card shows "Couldn't load account states. Retry" instead of the update note until the capability resolves. iOS already separates the two cases.
+- **Fix:** treat `isUnknownChannelError` like `accountsCopyCap === false`.
+
+**R2-3 NIT — the re-sign abandon line drops a reassurance the client knows.**
+- **Where:** `ResignSeatFlow.tsx` / `AccountsSignInFlow.swift` (`.abandon(unreachable:false)`).
+- **Problem:** the static "That didn't work. Try again." no longer says the seat was not changed, though the client knows it.
+- **Fix:** append the client-known clause: "That didn't work. <seat> was not changed — try again."
+
+**R2-4 NIT — "Checking your box…" can stay up indefinitely.**
+- **Problem:** this happens when the capability read is `failed` with no earlier success, including after a 401, which deliberately stops the retries.
+- **Fix:** distinguish `failed` ("Couldn't check your box — retrying" with a Retry) from `loading`.
+
+VERDICT: APPROVE
