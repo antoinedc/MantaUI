@@ -19,8 +19,6 @@ import { memo, useCallback, useState } from "react";
 import { useStore } from "./store";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import {
-  OBSERVED_JOB_LABEL,
-  OBSERVED_JOB_TITLE,
   backgroundApi,
   openJobSession,
   resultStateLabel,
@@ -145,11 +143,6 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
         )}
         {card.kind === "settling" && (
           <span className="text-text-faint truncate min-w-0">— the result arrives when this turn ends</span>
-        )}
-        {"observed" in card && card.observed && (
-          <span className="text-text-faint truncate min-w-0" title={OBSERVED_JOB_TITLE} data-testid="background-observed-label">
-            · {OBSERVED_JOB_LABEL}
-          </span>
         )}
         <span className="text-text-faint shrink-0">·</span>
         <OpenSessionButton onOpen={() => void open()} busy={busy} />

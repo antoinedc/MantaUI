@@ -480,18 +480,10 @@ describe("ChatPanel background slash commands (Stage B)", () => {
       expect(q('[data-testid="background-card"]')).not.toBeNull();
     });
 
-    it("an observed job's card says it was started outside Manta; others do not", async () => {
+    it("an observed job's card carries no started-outside-Manta label", async () => {
       await open(undefined, { store: { jobs: { ses_c1: job({ origin: "observed", completionOwner: "opencode" }) } } });
-      const label = q('[data-testid="background-observed-label"]')!;
-      expect(label.textContent).toContain("started outside Manta");
-      expect(label.getAttribute("title")).toContain("doesn't report its result to a chat");
       expect(q('[data-testid="background-card"]')).not.toBeNull();
-    });
-
-    it("a plain job's card has no outside-Manta label", async () => {
-      await open(undefined, { store: { jobs: { ses_c1: job() } } });
-      expect(q('[data-testid="background-card"]')).not.toBeNull();
-      expect(q('[data-testid="background-observed-label"]')).toBeNull();
+      expect(q('[data-testid="background-card"]')!.textContent).not.toContain("outside Manta");
     });
 
     it("a superseded record never gets a card (the store drops it on setJobs)", async () => {

@@ -643,7 +643,7 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
   });
 });
 
-describe("Sidebar — nested background job rows (observed label, superseded)", () => {
+describe("Sidebar — nested background job rows (observed, superseded)", () => {
   let h: Harness | null = null;
   const job = (over: Record<string, unknown> = {}) => ({
     id: "j1",
@@ -683,29 +683,18 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     h = null;
   });
 
-  it("an observed job's nested row carries the small observed mark", () => {
+  it("an observed job's nested row renders like any other job row — no extra mark", () => {
     mountWith([job({ origin: "observed", completionOwner: "opencode" })]);
-    const label = h!.container.querySelector('[data-testid="job-observed-label"]');
-    expect(label?.textContent).toBe("");
-    expect(label?.querySelector("svg")).not.toBeNull();
-    expect(label?.getAttribute("aria-label")).toBe("started outside Manta");
-    expect(label?.getAttribute("title")).toContain("started by a script or another tool");
+    expect(h!.container.querySelectorAll('[role="treeitem"]').length).toBeGreaterThan(1);
+    expect(h!.container.querySelector('[aria-label="started outside Manta"]')).toBeNull();
   });
 
-  it("an observed job whose parent has no window renders top-level and still carries the label", () => {
+  it("an observed job whose parent has no window renders top-level, with no extra mark", () => {
     mountWith([job({ origin: "observed", completionOwner: "opencode" })], [
       { index: 1, name: "child", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_child" },
     ]);
-    const labels = h!.container.querySelectorAll('[data-testid="job-observed-label"]');
-    expect(labels.length).toBe(1);
-    expect(labels[0].getAttribute("aria-label")).toBe("started outside Manta");
-    expect(labels[0].closest('[role="treeitem"]')?.getAttribute("aria-level")).toBeNull();
-  });
-
-  it("an ordinary job's nested row has no such label", () => {
-    mountWith([job({ origin: "delegate" })]);
-    expect(h!.container.querySelector('[data-testid="job-observed-label"]')).toBeNull();
-    expect(h!.container.querySelectorAll('[role="treeitem"]').length).toBeGreaterThan(1);
+    expect(h!.container.querySelector('[aria-label="started outside Manta"]')).toBeNull();
+    expect(h!.container.textContent).toContain("child");
   });
 
   it("a superseded record is not rendered as a nested job; its successor is", () => {
@@ -714,7 +703,6 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
       job({ id: "new", attempt: 2, origin: "delegate" }),
     ]);
     expect(useStore.getState().jobs["ses_child"]?.id).toBe("new");
-    expect(h!.container.querySelector('[data-testid="job-observed-label"]')).toBeNull();
   });
 });
 

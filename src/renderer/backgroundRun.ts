@@ -132,8 +132,8 @@ export function splitSlashText(text: string): { name: string; args: string } | n
 // `createdAt` is the job's start time: it anchors the card in the transcript
 // after the message that was current when the job started (anchorBackgroundCards).
 export type BackgroundCard =
-  | { kind: "running"; key: string; jobId: string; name: string; createdAt: number; paused: boolean; observed?: true }
-  | { kind: "uncertain"; key: string; jobId: string; name: string; createdAt: number; observed?: true }
+  | { kind: "running"; key: string; jobId: string; name: string; createdAt: number; paused: boolean }
+  | { kind: "uncertain"; key: string; jobId: string; name: string; createdAt: number }
   | { kind: "failed"; key: string; jobId: string; name: string; createdAt: number; error: string }
   | { kind: "settling"; key: string; jobId: string; name: string; createdAt: number };
 
@@ -165,16 +165,6 @@ export function collectFinishedKeys(messages: ReadonlyArray<OpencodeMessage> | n
 }
 
 const LIVE = new Set(["running", "paused"]);
-
-// A session Manta only watches (started by a script or another tool): shown,
-// never reported to a chat. Both surfaces that show one carry this label.
-export const OBSERVED_JOB_LABEL = "started outside Manta";
-export const OBSERVED_JOB_TITLE =
-  "Picked up automatically — this session was started by a script or another tool. Manta shows it but doesn't report its result to a chat.";
-
-export function isObservedJob(job: { origin?: string } | null | undefined): boolean {
-  return job?.origin === "observed";
-}
 
 /** One run = one record: an older run of a continued job is never shown. */
 export function isSupersededJob(job: { supersededBy?: string | null } | null | undefined): boolean {
@@ -221,11 +211,10 @@ export function deriveBackgroundCards(
     if (job.childSessionID && finished.childIds.has(job.childSessionID)) continue;
     const base = { key: job.id, jobId: job.id, name: job.name, createdAt: job.createdAt };
     if (LIVE.has(job.status)) {
-      const observed = job.origin === "observed" ? ({ observed: true } as const) : {};
       cards.push(
         job.launchState === "uncertain"
-          ? { kind: "uncertain", ...base, ...observed }
-          : { kind: "running", ...base, paused: job.status === "paused", ...observed },
+          ? { kind: "uncertain", ...base }
+          : { kind: "running", ...base, paused: job.status === "paused" },
       );
     } else if (failedBeforeStart(job)) {
       cards.push({ kind: "failed", ...base, error: job.error || "It failed before it started" });
