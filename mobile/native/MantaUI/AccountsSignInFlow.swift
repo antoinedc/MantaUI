@@ -449,7 +449,6 @@ final class AccountsSeatSignIn: ObservableObject {
         guard SignInAttemptGate.accepts(resultFor: id, current: current?.id), let attempt = current else { return true }
         let now = Date()
         let expired = SignInClock.isExpired(startedAt: began, now: now, limit: SignInClock.clientLimit)
-        let pastServer = SignInClock.isExpired(startedAt: began, now: now, limit: SignInClock.serverLoginLimit)
 
         switch request.mode {
         case .add:
@@ -457,12 +456,11 @@ final class AccountsSeatSignIn: ObservableObject {
             var reply: SeatStatusReply?
             do { reply = try await api.accountsSeatStatus(seatId: seatId) } catch { reply = nil }
             guard SignInAttemptGate.accepts(resultFor: id, current: current?.id) else { return true }
-            switch SignInPollRules.decideSeat(reply: reply, expired: expired, pastServerLimit: pastServer) {
+            switch SignInPollRules.decideSeat(reply: reply, expired: expired) {
             case .keepPolling:
                 return false
             case .abandon(let unreachable):
-                failAndTeardown(id, unreachable ? AccountsSignInCopy.unreachableAtDeadline
-                                                : AccountsSignInCopy.seatFailureMessage(error: nil, timedOut: true))
+                failAndTeardown(id, unreachable ? AccountsSignInCopy.unreachableAtDeadline : AccountsCopy.fallback)
                 return true
             case .added(let seat):
                 // The box placed it: nothing left to release.
@@ -475,11 +473,11 @@ final class AccountsSeatSignIn: ObservableObject {
                 current?.parked = true
                 phase = .differentOrg(orgName: org, busy: false)
                 return true
-            case .failed(let error, let timedOut):
+            case .failed(let message):
                 // The box already dropped it.
                 stopLocalWork()
                 current = nil
-                phase = .failed(AccountsSignInCopy.seatFailureMessage(error: error, timedOut: timedOut))
+                phase = .failed(message ?? AccountsCopy.fallback)
                 return true
             }
 
@@ -492,19 +490,16 @@ final class AccountsSeatSignIn: ObservableObject {
             case .keepPolling:
                 return false
             case .abandon(let unreachable):
-                failAndTeardown(id, unreachable ? AccountsSignInCopy.resignUnreachable(seatLabel: seatLabel)
-                                                : AccountsSignInCopy.resignTimedOut(seatLabel: seatLabel))
+                failAndTeardown(id, unreachable ? AccountsSignInCopy.resignUnreachable(seatLabel: seatLabel) : AccountsCopy.fallback)
                 return true
             case .signedBack(let seat):
                 current?.flowId = nil
                 await finishResigned(id, message: AccountsSignInCopy.resignDone(email: seat?.email ?? email, seatLabel: seat?.label ?? seatLabel))
                 return true
-            case .failed(let error, let expected, let got):
+            case .failed(let message):
                 stopLocalWork()
                 current = nil
-                phase = .failed(AccountsSignInCopy.resignFailureMessage(
-                    error: error, expectedEmail: expected, gotEmail: got, seatLabel: seatLabel, seatEmail: email
-                ))
+                phase = .failed(message ?? AccountsCopy.fallback)
                 return true
             }
         }

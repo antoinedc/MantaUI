@@ -21,8 +21,8 @@ import type {
   UpgradeStep,
   UpgradeStepId,
   UpgradeStepStatus,
+  UpgradeView,
 } from "../shared/api";
-import { formatBytes } from "./chatUtils";
 
 /** Poll cadence while the /events stream is down (the box is restarting). */
 export const UPGRADE_POLL_MS = 1000;
@@ -104,6 +104,7 @@ export function normalizeUpgradeStatus(raw: unknown): UpgradeStatus | null {
     overall: finite(raw.overall) ? Math.min(1, Math.max(0, raw.overall)) : 0,
     etaSeconds: finite(raw.etaSeconds) && raw.etaSeconds >= 0 ? raw.etaSeconds : null,
     error,
+    ...(isObj(raw.view) && typeof raw.view.kind === "string" ? { view: raw.view as unknown as UpgradeView } : {}),
   };
 }
 
@@ -245,110 +246,77 @@ export type GateView =
       kind: "running";
       steps: UpgradeStep[];
       overall: number;
-      etaSeconds: number | null;
+      /** "about 4 min left", worded by the box; null → none / an older box. */
+      etaText: string | null;
       current: UpgradeStep | null;
       /** 0..1 for the current step, null → indeterminate. */
       currentFraction: number | null;
+      /** The box's "Copy details" text; "" on an older box. */
+      details: string;
     }
   | {
       kind: "failed";
       steps: UpgradeStep[];
       overall: number;
       message: string;
-      /** "needs 31 GB free, has 3 GB" when the failure carries disk numbers. */
-      disk: string | null;
+      /** "Needs 31 GB free, has 3 GB." — worded by the box. */
+      diskSentence: string | null;
       failedStep: UpgradeStepId;
       retryLabel: "Retry" | "Check again";
       /** false → render Retry disabled with `retryDisabledReason`. */
       canRetry: boolean;
       retryDisabledReason: string | null;
       canRollback: boolean;
+      /** True when the box sent `view` (an older box has no Retry/Roll back). */
+      hasView: boolean;
+      details: string;
       retry: ActionOutcome;
       rollback: ActionOutcome;
     }
-  | { kind: "rolled_back"; steps: UpgradeStep[] };
-
-/**
- * Failures where rolling back is meaningless or wrong, per the plan's failure
- * table: pre-flight stops before anything is touched ("Nothing was stopped"),
- * and a verification failure (e.g. a Claude login) is fixed in place — "no
- * rollback; shows the specific fix and Check again".
- */
-const NO_ROLLBACK_STEPS: ReadonlySet<UpgradeStepId> = new Set(["preflight", "verify"]);
-const CHECK_AGAIN_STEPS: ReadonlySet<UpgradeStepId> = new Set(["preflight", "verify"]);
-
-export function currentStep(status: UpgradeStatus): UpgradeStep | null {
-  return (
-    status.steps.find((s) => s.status === "running") ??
-    status.steps.find((s) => s.status === "failed") ??
-    null
-  );
-}
-
-/** numerator/denominator → 0..1, or null (indeterminate) when not measurable. */
-export function stepFraction(step: UpgradeStep | null): number | null {
-  const p = step?.progress;
-  if (!p || !finite(p.numerator) || !finite(p.denominator) || p.denominator <= 0) return null;
-  return Math.min(1, Math.max(0, p.numerator / p.denominator));
-}
-
-/** "needs 31 GB free, has 3 GB" — null unless the failure carries disk numbers. */
-export function describeDiskShortfall(error: UpgradeStatus["error"]): string | null {
-  if (!error || !finite(error.needBytes) || error.needBytes <= 0) return null;
-  const need = `needs ${formatBytes(error.needBytes)} free`;
-  if (!finite(error.haveBytes) || error.haveBytes < 0) return need;
-  return `${need}, has ${error.haveBytes === 0 ? "0 B" : formatBytes(error.haveBytes)}`;
-}
-
-/** "needs 31 GB free, has 3 GB" → "Needs 31 GB free, has 3 GB." (a sentence on its own line). */
-export function diskSentence(disk: string): string {
-  return disk === "" ? "" : `${disk[0].toUpperCase()}${disk.slice(1)}.`;
-}
-
-/** "about 4 min left"; null when the box gave no estimate. */
-export function formatEtaSeconds(seconds: number | null): string | null {
-  if (seconds === null || !finite(seconds) || seconds < 0) return null;
-  if (seconds < 45) return "less than a minute left";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `about ${minutes} min left`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m === 0 ? `about ${h} h left` : `about ${h} h ${m} min left`;
-}
+  | { kind: "rolled_back"; steps: UpgradeStep[]; details: string };
 
 export function selectGateView(state: GateState, inputs: GateInputs): GateView {
   const s = state.status;
   if (s) {
+    // The wording (current step, fraction, ETA, disk sentence, Retry/Roll back
+    // rules, "Copy details") is the BOX's: `status.view` (WS11 D3). An older box
+    // sends none — the gate then shows the steps and the raw message only, with
+    // no Retry / Roll back (their rules are the box's).
     if (s.state === "running") {
-      const current = currentStep(s);
+      const v = s.view?.kind === "running" ? s.view : null;
       return {
         kind: "running",
         steps: s.steps,
         overall: s.overall,
-        etaSeconds: s.etaSeconds,
-        current,
-        currentFraction: stepFraction(current),
+        etaText: v?.etaText ?? null,
+        current: v?.currentStepId ? (s.steps.find((x) => x.id === v.currentStepId) ?? null) : null,
+        currentFraction: v?.currentFraction ?? null,
+        details: v?.details ?? "",
       };
     }
     if (s.state === "failed") {
-      const failedStep = s.error?.step ?? currentStep(s)?.id ?? "preflight";
-      const retryable = s.error?.retryable !== false;
+      const v = s.view?.kind === "failed" ? s.view : null;
       return {
         kind: "failed",
         steps: s.steps,
         overall: s.overall,
-        message: s.error?.message ?? s.steps.find((x) => x.status === "failed")?.error ?? "The upgrade failed.",
-        disk: describeDiskShortfall(s.error),
-        failedStep,
-        retryLabel: CHECK_AGAIN_STEPS.has(failedStep) ? "Check again" : "Retry",
-        canRetry: retryable,
-        retryDisabledReason: retryable ? null : "This failure can't be retried — roll back instead.",
-        canRollback: !NO_ROLLBACK_STEPS.has(failedStep),
+        message: v?.message ?? s.error?.message ?? s.steps.find((x) => x.status === "failed")?.error ?? "The upgrade failed.",
+        diskSentence: v?.diskSentence ?? null,
+        failedStep: v?.failedStep ?? s.error?.step ?? "preflight",
+        retryLabel: v?.retryLabel ?? "Retry",
+        // No view = an older box: Retry is still offered (the box refuses a retry it cannot do with its own sentence).
+        canRetry: v?.canRetry ?? true,
+        retryDisabledReason: v?.retryDisabledReason ?? null,
+        canRollback: v?.canRollback ?? false,
+        hasView: v !== null,
+        details: v?.details ?? "",
         retry: state.retry,
         rollback: state.rollback,
       };
     }
-    if (s.state === "rolled_back") return { kind: "rolled_back", steps: s.steps };
+    if (s.state === "rolled_back") {
+      return { kind: "rolled_back", steps: s.steps, details: s.view?.kind === "rolled_back" ? s.view.details : "" };
+    }
     // The box itself says the migration finished. That outranks the K4 version
     // read, which may still hold the pre-upgrade number for a moment — without
     // this the gate would flash "Upgrade box" between "completed" and the
@@ -372,28 +340,3 @@ export function selectGateView(state: GateState, inputs: GateInputs): GateView {
 
 /** Whether the gate is covering the app. */
 export const isGateVisible = (view: GateView): boolean => view.kind !== "hidden";
-
-/**
- * Plain-text snapshot of what the gate is showing, for "Copy details" — the one
- * thing a stuck user can hand to whoever is helping them. Steps with their
- * status and measured progress, then the failure (with the disk numbers).
- */
-export function describeGateDetails(view: GateView): string {
-  if (view.kind !== "running" && view.kind !== "failed" && view.kind !== "rolled_back") {
-    return "";
-  }
-  const lines: string[] = [`Manta box upgrade — ${view.kind.replace("_", " ")}`];
-  for (const s of view.steps) {
-    const p = s.progress;
-    const measured =
-      p && finite(p.numerator) && finite(p.denominator) ? ` (${p.numerator}/${p.denominator})` : "";
-    const caption = p?.label ? ` — ${p.label}` : "";
-    const err = s.error ? ` — ${s.error}` : "";
-    lines.push(`${s.id}: ${s.status}${measured}${caption}${err}`);
-  }
-  if (view.kind === "failed") {
-    lines.push(`error (${view.failedStep}): ${view.message}`);
-    if (view.disk) lines.push(`disk: ${view.disk}`);
-  }
-  return lines.join("\n");
-}

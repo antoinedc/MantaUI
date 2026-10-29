@@ -242,10 +242,10 @@ describe("ArtifactsPanel — renders the box's artifacts:list", () => {
 });
 
 describe("ArtifactsPanel — states", () => {
-  it("a box without the channel → 'Update your box to use this.' and no list", async () => {
+  it("a box without the channel → 'Update your box to use this' and no list", async () => {
     const list = vi.fn().mockRejectedValue(new Error("unknown rpc channel: artifacts:list"));
     const { h } = await openPanel(list);
-    expect(h.text()).toContain("Update your box to use this.");
+    expect(h.text()).toContain("Update your box to use this");
     expect(h.text()).toContain("Artifacts need a newer box version.");
     expect(h.text()).not.toContain("No links yet");
     // Review mode (same panel) is unaffected

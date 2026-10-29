@@ -23,7 +23,7 @@ final class CloneFromGitHubStore: ObservableObject {
         case connect
         case pick
         case cloning(name: String, index: Int, total: Int)
-        case failed(name: String, kind: CloneErrorKind, message: String, raw: String)
+        case failed(name: String, message: String, raw: String)
     }
 
     enum ReposState: Equatable {
@@ -50,6 +50,8 @@ final class CloneFromGitHubStore: ObservableObject {
     private var currentJobID: String?
     private var queue: [GitHubRepo] = []
     private var clonedPaths: [String] = []
+    /// Repository full name → where the box cloned it (the status's `dest`), so a retry skips finished ones.
+    private var clonedDest: [String: String] = [:]
     private var finished = false
     var onCloned: ([String]) -> Void = { _ in }
 
@@ -84,19 +86,19 @@ final class CloneFromGitHubStore: ObservableObject {
         reposState = .loading
         do {
             let reply = try await api.forgeRepos()
-            if RepoListError.needsSignIn(code: reply.error) {
+            if reply.needsSignIn == true {
                 // The box cleared the dead credential: back to sign-in.
                 signInAttempt += 1
                 phase = .connect
                 return
             }
             if let code = reply.error, !code.isEmpty {
-                reposState = .error(RepoListError.message(code: code))
+                reposState = .error(reply.message ?? CloneFailureCopy.listFallback)
             } else {
                 reposState = .ready(reply.repos)
             }
         } catch {
-            reposState = .error(RepoListError.message(code: nil))
+            reposState = .error(CloneFailureCopy.listFallback)
         }
     }
 
@@ -112,10 +114,8 @@ final class CloneFromGitHubStore: ObservableObject {
 
     /// "Try again": the failed repository goes last; ones already cloned stay done.
     func retry() {
-        guard case .failed(let name, _, _, _) = phase else { return }
-        let remaining = queue.filter { repo in
-            !clonedPaths.contains(ClonePicker.dest(root: root, name: repo.name))
-        }
+        guard case .failed(let name, _, _) = phase else { return }
+        let remaining = queue.filter { clonedDest[$0.fullName] == nil }
         let failed = remaining.filter { $0.name == name }
         let others = remaining.filter { $0.name != name }
         run(others + failed)
@@ -127,7 +127,7 @@ final class CloneFromGitHubStore: ObservableObject {
     }
 
     func copyDiagnostics() {
-        guard case .failed(_, _, _, let raw) = phase else { return }
+        guard case .failed(_, _, let raw) = phase else { return }
         UIPasteboard.general.string = raw
         showNote("Copied")
     }
@@ -171,17 +171,17 @@ final class CloneFromGitHubStore: ObservableObject {
             guard !Task.isCancelled else { return }
             phase = .cloning(name: repo.name, index: offset, total: repos.count)
             status = nil
-            let dest = ClonePicker.dest(root: root.trimmingCharacters(in: .whitespacesAndNewlines), name: repo.name)
             // Already cloned in an earlier pass: nothing to do (cloning again
             // would fail on a non-empty destination).
-            if clonedPaths.contains(dest) { continue }
+            if clonedDest[repo.fullName] != nil { continue }
 
             let start: CloneStartResult
             do {
-                start = try await api.forgeCloneStart(url: repo.cloneUrl, dest: dest, name: repo.name)
+                // The box joins `<root>/<name>` and reports it on the status.
+                start = try await api.forgeCloneStart(url: repo.cloneUrl, root: root.trimmingCharacters(in: .whitespacesAndNewlines), name: repo.name)
             } catch {
                 guard !Task.isCancelled else { return }
-                fail(repo, kind: .unknown, raw: "Couldn't reach the server.")
+                fail(repo, message: "Couldn't reach the server.", raw: "Couldn't reach the server.")
                 return
             }
             guard !Task.isCancelled else { return }
@@ -189,9 +189,9 @@ final class CloneFromGitHubStore: ObservableObject {
                 // The box preflights the destination and says what is wrong —
                 // shown verbatim (it names the folder, never the token).
                 if let message = start.message, !message.isEmpty {
-                    fail(repo, kind: .destination, raw: message)
+                    fail(repo, message: message, raw: message)
                 } else {
-                    fail(repo, kind: .unknown, raw: "Couldn't start the clone.")
+                    fail(repo, message: "Couldn't start the clone.", raw: "Couldn't start the clone.")
                 }
                 return
             }
@@ -200,12 +200,13 @@ final class CloneFromGitHubStore: ObservableObject {
             switch await poll(id: id) {
             case .cancelled:
                 return
-            case .failed(let kind, let raw):
+            case .failed(let message, let raw):
                 currentJobID = nil
-                fail(repo, kind: kind, raw: raw)
+                fail(repo, message: message, raw: raw)
                 return
-            case .done:
+            case .done(let dest):
                 currentJobID = nil
+                clonedDest[repo.fullName] = dest
                 clonedPaths.append(dest)
             }
         }
@@ -216,8 +217,8 @@ final class CloneFromGitHubStore: ObservableObject {
     }
 
     private enum PollResult {
-        case done
-        case failed(CloneErrorKind, String)
+        case done(dest: String)
+        case failed(message: String, raw: String)
         case cancelled
     }
 
@@ -225,7 +226,7 @@ final class CloneFromGitHubStore: ObservableObject {
         let deadline = Date().addingTimeInterval(CloneTiming.timeout)
         var consecutiveThrows = 0
         while !Task.isCancelled {
-            if Date() > deadline { return .failed(.network, "The clone timed out.") }
+            if Date() > deadline { return .failed(message: "The clone timed out.", raw: "The clone timed out.") }
             let reply: CloneJobStatus?
             do {
                 reply = try await api.forgeCloneStatus(id: id)
@@ -236,27 +237,28 @@ final class CloneFromGitHubStore: ObservableObject {
                 // cloning: only a run of failures does.
                 consecutiveThrows += 1
                 if consecutiveThrows >= CloneTiming.maxConsecutiveThrows {
-                    return .failed(.network, "Lost contact with the server while cloning.")
+                    return .failed(message: "Lost contact with the server while cloning.", raw: "Lost contact with the server while cloning.")
                 }
                 try? await Task.sleep(nanoseconds: UInt64(CloneTiming.pollInterval * 1_000_000_000))
                 continue
             }
             guard !Task.isCancelled else { return .cancelled }
             // `null` means the box forgot the job.
-            guard let snapshot = reply else { return .failed(.unknown, "The clone job went away.") }
+            guard let snapshot = reply else { return .failed(message: "The clone job went away.", raw: "The clone job went away.") }
             status = snapshot
             if snapshot.done {
-                if snapshot.ok { return .done }
+                if snapshot.ok { return .done(dest: snapshot.dest) }
+                // The box classifies the failure and words it; the raw git output is only for diagnostics.
                 let raw = snapshot.error ?? ""
-                return .failed(CloneErrorKind.classify(raw), raw.isEmpty ? "Clone failed" : raw)
+                return .failed(message: snapshot.message ?? CloneFailureCopy.cloneFallback, raw: raw.isEmpty ? "Clone failed" : raw)
             }
             try? await Task.sleep(nanoseconds: UInt64(CloneTiming.pollInterval * 1_000_000_000))
         }
         return .cancelled
     }
 
-    private func fail(_ repo: GitHubRepo, kind: CloneErrorKind, raw: String) {
-        phase = .failed(name: repo.name, kind: kind, message: CloneFailureCopy.message(kind: kind, raw: raw), raw: raw)
+    private func fail(_ repo: GitHubRepo, message: String, raw: String) {
+        phase = .failed(name: repo.name, message: message, raw: raw)
         cloneTask = nil
     }
 
@@ -308,7 +310,7 @@ struct CloneFromGitHubView: View {
             picker
         case .cloning(let name, let index, let total):
             cloning(name: name, index: index, total: total)
-        case .failed(let name, _, let message, _):
+        case .failed(let name, let message, _):
             failed(name: name, message: message)
         }
     }

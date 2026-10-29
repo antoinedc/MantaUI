@@ -111,13 +111,13 @@ describe("setChatRunning / setChatAttention", () => {
       ],
       status: {},
       liveRunning: {},
-      sessionParents: {},
+      windowStatusBySession: {},
       activeProjectName: null,
       activeWindowByProject: {},
     });
   });
 
-  describe("liveRunning / reconcileRunningSet / setSessionParent", () => {
+  describe("liveRunning / reconcileRunningSet / windowStatus", () => {
     it("tracks a windowless (subagent) session as running", () => {
       useStore.getState().setChatRunning("ses_child", true);
       expect(useStore.getState().liveRunning).toEqual({ ses_child: true });
@@ -142,13 +142,17 @@ describe("setChatRunning / setChatAttention", () => {
       expect(useStore.getState().status.manta[0].running).toBe(false);
     });
 
-    it("setSessionParent records a link and ignores self/duplicate links", () => {
-      useStore.getState().setSessionParent("c", "p");
-      const first = useStore.getState().sessionParents;
-      useStore.getState().setSessionParent("c", "p");
-      useStore.getState().setSessionParent("x", "x");
-      expect(useStore.getState().sessionParents).toBe(first);
-      expect(first).toEqual({ c: "p" });
+    it("setWindowStatus stores the box's rollup and ignores an identical frame; fillWindowStatus never overwrites a frame", () => {
+      const p = { running: false, busy: true, startedAt: null, attention: null, subagents: 1, stopped: false };
+      useStore.getState().setWindowStatus("ses_chat", p);
+      const first = useStore.getState().windowStatusBySession;
+      useStore.getState().setWindowStatus("ses_chat", { ...p });
+      expect(useStore.getState().windowStatusBySession).toBe(first);
+      // A read fills only what no frame has covered: it never overwrites a (newer) frame's entry.
+      const newer = { ...p, busy: false, subagents: 0 };
+      useStore.getState().setWindowStatus("ses_chat", newer);
+      useStore.getState().fillWindowStatus({ ses_chat: p, other: p });
+      expect(useStore.getState().windowStatusBySession).toEqual({ ses_chat: newer, other: p });
     });
   });
 
@@ -374,50 +378,6 @@ describe("setChatRunning / setChatAttention", () => {
     });
   });
 
-  describe("setChatSubagents", () => {
-    // Sole update path for the `·N` indicator on chat-mode windows. The
-    // TUI poller's regex can't see chat-mode panes (they run `sleep
-    // infinity`, not claude). ChatPanel pushes here whenever its derived
-    // count from countRunningSubagents changes.
-
-    it("no-ops when no window owns the sessionId", () => {
-      useStore.getState().setChatSubagents("ses_unknown", 3);
-      expect(useStore.getState().status).toEqual({});
-    });
-
-    it("sets the subagent count on the matching window", () => {
-      useStore.getState().setChatSubagents("ses_chat", 2);
-      expect(useStore.getState().status.manta[0]).toEqual({
-        running: false,
-        subagents: 2,
-        attention: false,
-        attentionKind: undefined,
-      });
-    });
-
-    it("returns the previous state object when the count is unchanged (no churn)", () => {
-      // Critical for keystroke perf: ChatPanel pushes on every transcript
-      // change, which is many per second during streaming. A no-op must
-      // not allocate a new state, or every zustand subscriber re-renders.
-      useStore.getState().setChatSubagents("ses_chat", 0);
-      const firstStatus = useStore.getState().status;
-      useStore.getState().setChatSubagents("ses_chat", 0);
-      expect(useStore.getState().status).toBe(firstStatus);
-    });
-
-    it("preserves running and attention fields when changing the count", () => {
-      // Subagent count is orthogonal to running/attention; updating it
-      // must not clear unrelated flags set by setChatRunning/Attention.
-      useStore.getState().setChatRunning("ses_chat", true);
-      useStore.getState().setChatAttention("ses_chat", "question");
-      useStore.getState().setChatSubagents("ses_chat", 4);
-      const win = useStore.getState().status.manta[0];
-      expect(win.running).toBe(true);
-      expect(win.attention).toBe(true);
-      expect(win.attentionKind).toBe("question");
-      expect(win.subagents).toBe(4);
-    });
-  });
 });
 
 // ===== Startup attention replay =====

@@ -29,7 +29,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ProviderView, SeatConnect, SeatProviderId } from "../shared/types";
 import {
-  accountsErrorMessage,
+  accountsFailureMessage,
   isPollExpired,
   needsSecondAccountNote,
   providerViewOrError,
@@ -60,15 +60,6 @@ export function readTosAck(): boolean {
   } catch {
     return false;
   }
-}
-
-/** Why a seat sign-in failed, in words that say what to do next. */
-export function seatFailureMessage(error: string | undefined, timedOut: boolean): string {
-  if (error === "duplicate-login") return "That login is already added as a seat. Sign in with a different account.";
-  if (timedOut) {
-    return "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser.";
-  }
-  return "The sign-in failed — the code may have been wrong or expired. Try again.";
 }
 
 type Phase =
@@ -137,7 +128,7 @@ export function AddSeatFlow({
       }
       if (cancelled) return;
       if (!res || "error" in res) {
-        set({ kind: "failed", message: accountsErrorMessage(res && "error" in res ? res.error : undefined) });
+        set({ kind: "failed", message: accountsFailureMessage(res && "error" in res ? res : undefined) });
         return;
       }
       openSeatRef.current = res.seatId;
@@ -202,7 +193,7 @@ export function AddSeatFlow({
             kind: "failed",
             message: unreachable
               ? "Couldn't reach the server to check the sign-in. If you finished it, the seat will appear in the list once the box is reachable."
-              : seatFailureMessage(undefined, true),
+              : accountsFailureMessage(null),
           });
           return;
         }
@@ -220,7 +211,7 @@ export function AddSeatFlow({
         openSeatRef.current = null; // the box already dropped it
         set({
           kind: "failed",
-          message: seatFailureMessage(st.error, Date.now() - startedWall >= SERVER_LOGIN_LIMIT_MS),
+          message: accountsFailureMessage(st),
         });
       } finally {
         inFlight = false;

@@ -156,6 +156,8 @@ struct ChatScreen: View {
     /// composer ONCE, when the screen first opens. A clear or handoff swap (which
     /// rebuilds the content below) never re-applies it.
     var draft: NewSessionDraft? = nil
+    /// The app's one capability reader (owned by `MantaAppRoot`).
+    @EnvironmentObject private var capabilities: BoxCapabilitiesStore
 
     var body: some View {
         let sid = currentSessionId ?? sessionId
@@ -164,6 +166,7 @@ struct ChatScreen: View {
             title: title,
             projectName: projectName,
             eventStore: eventStore,
+            capabilities: capabilities,
             path: $path,
             onCleared: { newId in
                 carryOver = nil
@@ -185,6 +188,8 @@ private struct ChatScreenContent: View {
     let title: String
     let projectName: String
     @ObservedObject var eventStore: MantaEventStore
+    /// The app's one capability reader, handed to the screens this one pushes.
+    let capabilities: BoxCapabilitiesStore
     @Binding var path: NavigationPath
     @StateObject private var store: ChatSessionStore
     @StateObject private var modelStore: ChatModelStore
@@ -249,7 +254,9 @@ private struct ChatScreenContent: View {
     /// When the branch was last fetched, so a 5s tick only refetches once the
     /// interval has elapsed (see `BranchFreshnessPolicy`).
     @State private var lastBranchFetch: Date?
-    @State private var sessionWindow: (name: String, index: Int, cwd: String)?
+    @State private var sessionWindow: (name: String, index: Int, cwd: String, worktree: String?)?
+    /// A dirty worktree the box asked about while deleting this session (the answer is sent back to `sessions:close`).
+    @State private var deletePrompt: SessionWorktreePrompt?
     /// Which overflow-sheet item's card is presented (BET-627).
     @State private var overflowDestination: OverflowDestination?
     /// The run the Activity sheet is showing (spec §1.5). One sheet at a time:
@@ -329,10 +336,11 @@ private struct ChatScreenContent: View {
     /// stores and used by the plan card to build the deterministic plan-page URL.
     private let api: MantaAPIClient
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, capabilities: BoxCapabilitiesStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
+        self.capabilities = capabilities
         self._path = path
         self.onCleared = onCleared
         self.onHandedOff = onHandedOff
@@ -349,14 +357,13 @@ private struct ChatScreenContent: View {
         self.skippedUploads = carryOver?.skippedUploads ?? 0
         let api = MantaAPIClient.live()
         self.api = api
-        // One capability reader shared by the chat store and the job check.
-        let capabilities = ChatCardCapabilities(api: api)
+        // The app's one capability reader, shared by the chat store and the job check.
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
             api: api,
             widgetLiveStore: WidgetLiveStore.shared,
-            chatCardCapabilities: capabilities
+            capabilities: capabilities
         ))
         _approvalStore = StateObject(wrappedValue: ChatCardApprovalStore(
             sessionId: sessionId,
@@ -529,6 +536,7 @@ private struct ChatScreenContent: View {
             // 5s branch poll (desktop cadence) so a terminal-side checkout
             // reflects within one tick (BET-747 gap #13). Cancelled on disappear.
             .task { await pollBranch() }
+            .task(id: store.cache?.staleAt) { await flipAtStaleAt() }
             // A submit starts a turn optimistically (`send()` sets running), so
             // refreshing the branch on the running edge covers "refresh on
             // submit" — the new message is written in `cwd`'s current branch
@@ -726,6 +734,7 @@ private struct ChatScreenContent: View {
             PreviousSessionScreen(
                 route: route,
                 eventStore: eventStore,
+                capabilities: capabilities,
                 api: MantaAPIClient.live(),
                 tokens: tokens,
                 path: $path
@@ -738,6 +747,7 @@ private struct ChatScreenContent: View {
                 title: agent.taskName,
                 subtitle: agent.subtitle,
                 eventStore: eventStore,
+                capabilities: capabilities,
                 api: MantaAPIClient.live(),
                 tokens: tokens,
                 path: $path
@@ -770,6 +780,16 @@ private struct ChatScreenContent: View {
         }
         // The Activity sheet for a tool run — tapped from a run row, or from the
         // working line while the run is still the tail of a running turn.
+        .sheet(item: $deletePrompt) { prompt in
+            SessionWorktreePromptSheet(prompt: prompt) { answer in
+                deletePrompt = nil
+                switch answer {
+                case .cancel: return
+                case .keep: Task { await runDelete(dirtyWorktree: "keep", shownPath: prompt.ask.path) }
+                case .remove: Task { await runDelete(dirtyWorktree: "remove", shownPath: prompt.ask.path) }
+                }
+            }
+        }
         .sheet(item: $activityTarget, onDismiss: flushPendingPush) { target in
             ActivitySheet(
                 store: store,
@@ -1068,7 +1088,7 @@ private struct ChatScreenContent: View {
         else { return }
         let cwd = window.paneCurrentPath.isEmpty ? project.defaultCwd : window.paneCurrentPath
         await MainActor.run {
-            sessionWindow = (project.tmuxSession, window.index, cwd)
+            sessionWindow = (project.tmuxSession, window.index, cwd, window.worktreePath)
             branchRelPath = Self.relativeWorkingPath(cwd: cwd, root: project.defaultCwd)
         }
         await refreshBranch()
@@ -1208,17 +1228,48 @@ private struct ChatScreenContent: View {
         }
     }
 
+    /// Delete this session: the SAME close flow as the list (worktree clean-on-close, the dirty-tree question, the kill),
+    /// plus deleting the conversation — on the box, bound to THIS window's identity.
     private func deleteSession() async {
+        await runDelete(dirtyWorktree: nil, shownPath: nil)
+    }
+
+    private func runDelete(dirtyWorktree: String?, shownPath: String?) async {
+        guard capabilities.has(.sessionsClose) != false else {
+            store.actionHint = UpdateBoxNote.text
+            return
+        }
         guard let w = sessionWindow else {
             store.actionHint = "Can't delete — session's window not found."
             return
         }
+        let expect = SessionCloseExpect(opencodeSessionId: store.sessionId, worktreePath: shownPath ?? w.worktree)
         do {
-            try await MantaAPIClient.live().deleteSession(
-                sessionId: store.sessionId, sessionName: w.name, windowIndex: w.index)
-            await MainActor.run { dismiss() }
+            let result = try await MantaAPIClient.live().sessionsClose(
+                project: projectName, windowIndex: w.index, dirtyWorktree: dirtyWorktree, deleteConversation: true, expect: expect
+            )
+            if let ask = result.needsConfirm {
+                await MainActor.run {
+                    deletePrompt = SessionWorktreePrompt(
+                        key: "chat-delete", project: projectName, index: w.index, windowName: title,
+                        worktreePath: ask.path, ask: ask, expect: expect
+                    )
+                }
+                return
+            }
+            guard result.ok else {
+                await MainActor.run { store.actionHint = result.error ?? "Delete failed — the session is still there" }
+                return
+            }
+            await MainActor.run {
+                if !result.warnings.isEmpty { store.actionHint = result.warnings.joined(separator: " ") }
+                dismiss()
+            }
         } catch {
-            await MainActor.run { store.actionHint = "Delete failed — the session is still there" }
+            await MainActor.run {
+                store.actionHint = BoxCapabilities.isUnknownChannel(error)
+                    ? UpdateBoxNote.text : "Delete failed — the session is still there"
+            }
         }
     }
 
@@ -1262,35 +1313,39 @@ private struct ChatScreenContent: View {
 
     // MARK: - Context meter (BET-824)
 
-    /// The context breakdown re-derived against the SELECTED model. One read,
-    /// so the pill's percentage and the sheet's "of N" cannot describe two
-    /// different models (which is exactly what "87% — 174k of 1M" was).
-    private var contextBreakdown: StreamContextPayload? {
-        store.context.map { UsageMeters.recompute($0, limit: activeModelContextLimit) }
-    }
+    /// The context breakdown exactly as the box sent it — measured on the box
+    /// against the SELECTED model (WS11 D2), so the pill's percentage and the
+    /// sheet's "of N" describe one model. No client recompute.
+    private var contextBreakdown: StreamContextPayload? { store.context }
 
     /// The context percentage from the SELECTED model's breakdown: a real
     /// percentage when the box reports one, nil when it has none (nil early in
     /// a session, and again after a compaction). A missing value renders
     /// nothing — never a confident 0%.
     private var contextPct: Double? {
-        guard let ctx = contextBreakdown, ctx.pct.isFinite else { return nil }
-        return ctx.pct
+        guard let pct = contextBreakdown?.pct, pct.isFinite else { return nil }
+        return pct
     }
 
     /// Whether the prompt cache has gone cold. One read, so the tint, the label
     /// and the accessibility string cannot disagree.
-    private var cacheIsStale: Bool { store.cache?.isStale == true }
+    private var cacheIsStale: Bool {
+        _ = staleTick   // re-read when the one-shot timer at `staleAt` fires
+        return UsageMeters.isCold(store.cache, now: Date())
+    }
 
-    /// The active model's own context window — the meter's denominator. Opus
-    /// 4.7 reports 1M against Sonnet's 200k, so it is read per-model, never
-    /// hardcoded.
-    private var activeModelContextLimit: Double? {
-        guard let model = ChatModel.activeModel(modelStore.models,
-                                                override: modelStore.override,
-                                                configuration: modelStore.configDefault,
-                                                provider: modelStore.defaultModel) else { return nil }
-        return model.limit?.context
+    /// Bumped by the timer at the box's `staleAt` so the cold state flips with no
+    /// new frame (WS11 D2). The decision itself stays on the box.
+    @State private var staleTick = 0
+
+    private func flipAtStaleAt() async {
+        guard let staleAt = store.cache?.staleAt else { return }
+        let waitMs = staleAt - Date().timeIntervalSince1970 * 1000
+        if waitMs > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(waitMs * 1_000_000) + 50_000_000)
+        }
+        guard !Task.isCancelled else { return }
+        staleTick += 1
     }
 
     private var activeModelName: String {
@@ -1386,7 +1441,7 @@ private struct ChatScreenContent: View {
                 Text("\(Int(pct.rounded()))%")
                     .font(.manta(size: Metrics.type.twoXS, weight: .bold))
                     .foregroundColor(contextBandColor)
-                if let coldLabel = UsageMeters.staleChipLabel(store.cache) {
+                if let coldLabel = UsageMeters.staleChipLabel(store.cache, now: Date()) {
                     Text(coldLabel)
                         .font(.manta(size: Metrics.type.twoXS, weight: .bold))
                         .foregroundColor(tokens.warn)
@@ -1442,8 +1497,10 @@ private struct ChatScreenContent: View {
             ContextSheet(
                 context: ctx,
                 cache: store.cache,
-                limit: activeModelContextLimit,
-                modelName: activeModelName,
+                isCold: cacheIsStale,
+                limit: ctx.limit,
+                // The model the BOX measured against (decision 4), not the client's own selection.
+                modelName: ChatModel.contextModelLabel(modelStore.models, measured: ctx.model, basis: ctx.basis, fallback: activeModelName),
                 bandColor: contextBandColor,
                 tokens: tokens,
                 onCompact: { store.compact() },
@@ -1805,9 +1862,7 @@ private struct ChatScreenContent: View {
     /// changed (BET-1214).
     private var cardActions: TranscriptCardActions {
         TranscriptCardActions(
-            messages: store.messages,
             buildModelName: buildModelName,
-            planURL: planURL,
             onPermissionReply: { permission, reply in
                 store.replyPermission(permission, reply: reply)
             },
@@ -1823,7 +1878,7 @@ private struct ChatScreenContent: View {
             onKeepPlanning: { question, feedback in
                 store.keepPlanning(question: question, feedback: feedback)
             },
-            onOpenPage: { openPlanPage() },
+            onOpenPage: { question in openPlanPage(question.plan?.pageUrl) },
             onQuote: { selection, destination in
                 Task { await quote(selection, into: destination) }
             },
@@ -1836,16 +1891,6 @@ private struct ChatScreenContent: View {
     /// its arrival (BET-1214).
     private var isBlockingCardPresent: Bool {
         store.hasBlockingCard
-    }
-
-    /// The deterministic plan-page URL for this session (`<base>/pages/plan-…`,
-    /// auto-published by the plan agent's plan_render tool), or nil when no
-    /// usable subdomain slug can be formed. There is no on-device publish call
-    /// — the URL is derived, mirroring the current desktop
-    /// (`ChatPanel.tsx:2544-2552`) which standardized on the single-HTML plan
-    /// page auto-published under the per-session subdomain.
-    private var planURL: String? {
-        PlanDerivation.planPageURL(sessionID: store.sessionId, baseURL: api.serverURL)
     }
 
     /// The session's BUILD-model name for the card's "Ready to build · …"
@@ -1868,7 +1913,7 @@ private struct ChatScreenContent: View {
         // then re-send the plan text ourselves (feedback appended) with that
         // build model — opencode's own "yes" would otherwise stamp the injected
         // build turn with the planning model.
-        var prompt = PlanDerivation.extractPlanData(question, in: store.messages).text
+        var prompt = question.plan?.text ?? ""
         let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             prompt = prompt.isEmpty ? trimmed : "\(prompt)\n\n\(trimmed)"
@@ -1878,8 +1923,8 @@ private struct ChatScreenContent: View {
         store.buildHere(question: question, planText: prompt, buildModel: buildModel)
     }
 
-    private func openPlanPage() {
-        if let planURL, let url = URL(string: planURL) {
+    private func openPlanPage(_ pageUrl: String?) {
+        if let pageUrl, let url = URL(string: pageUrl) {
             UIApplication.shared.open(url)
         }
     }
@@ -1934,7 +1979,7 @@ struct ChatSubagentScreen: View {
     /// dismissing (flushed from the sheet's `onDismiss:`).
     @State private var pendingPush: PendingPush?
 
-    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
+    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, capabilities: BoxCapabilitiesStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
         self.childSessionId = childSessionId
         self.title = title
         self.subtitle = subtitle
@@ -1944,7 +1989,8 @@ struct ChatSubagentScreen: View {
             sessionId: childSessionId ?? "",
             eventStore: eventStore,
             api: api,
-            isReadOnly: true
+            isReadOnly: true,
+            capabilities: capabilities
         ))
     }
 
@@ -2323,9 +2369,8 @@ struct QuestionCard: View {
 
 // MARK: - Plan card (BET-1026)
 
-/// The plan_exit question upgraded into a dedicated card. Detection is EXACT
-/// (`PlanDerivation.isPlanExitQuestion`, a matching `plan_exit` tool callID —
-/// never the question text), so this card REPLACES the generic QuestionCard for
+/// The plan_exit question upgraded into a dedicated card. Detection is the BOX's and EXACT (`question.plan`, set
+/// when a `plan_exit` tool call matched the question's callID — never the question text), so this card REPLACES the generic QuestionCard for
 /// that question and never coexists with it.
 ///
 /// Recipes are reused, not invented: the container matches `PermissionCard`
@@ -2338,11 +2383,8 @@ struct QuestionCard: View {
 /// generated tokens — no new token.
 struct PlanCard: View {
     let question: QuestionRequest
-    let messages: [OpencodeMessage]
     /// The session's BUILD-model name for "Ready to build · <model>".
     let buildModelName: String
-    /// The deterministic plan-page URL (nil when no usable slug can be formed).
-    let planURL: String?
     let tokens: Tokens
     let onBuildHere: (String) -> Void
     let onKeepPlanning: (String) -> Void
@@ -2350,8 +2392,10 @@ struct PlanCard: View {
 
     @State private var feedback = ""
 
-    private var data: PlanData { PlanDerivation.extractPlanData(question, in: messages) }
-    private var metrics: (steps: Int, files: Int) { PlanDerivation.planMetrics(data.text) }
+    /// The box's plan data. A question without one is never given this card (the split is `plan != nil`).
+    private var data: PlanQuestionView { question.plan ?? PlanQuestionView(title: "Plan complete", text: "") }
+    /// The box's shareable page (nil when the box has no public base URL).
+    private var planURL: String? { data.pageUrl }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
@@ -2370,7 +2414,7 @@ struct PlanCard: View {
             // (a plan authored via `write`/`plan` without a discoverable path) —
             // never an empty bullet, never a crash (BET-1026 decision 6).
             if let path = data.path {
-                Text("\(metrics.steps) steps · \(metrics.files) files · \(path)")
+                Text("\(data.steps) steps · \(data.files) files · \(path)")
                     .font(.manta(size: Metrics.type.twoXS, design: .monospaced))
                     .foregroundColor(tokens.tx3)
                     .lineLimit(1)
@@ -2399,7 +2443,7 @@ struct PlanCard: View {
                 .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             HStack(spacing: Metrics.spacing.sp2) {
                 buildButton
-                openPageButton
+                if planURL != nil { openPageButton }
                 Spacer(minLength: 0)
                 keepPlanningButton
             }

@@ -37,6 +37,7 @@ import type { Api } from "../../shared/api.js";
 import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo, DirListing } from "../../shared/types.js";
 import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { demoArtifactsList } from "./demoArtifacts.js";
+import { annotateView } from "../../server/transcriptView.mjs";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
@@ -394,14 +395,21 @@ const previewArtifactsImageMessage = {
   ],
 } as OpencodeMessage;
 
-const opencodeMessages = (sessionId: string, _opts?: { limit?: number }) =>
+// The demo's "box" answers `view:true` with the real box's own annotation (run ids, wording, footers) — the renderer
+// computes none of it, so a demo transcript without it would draw every tool call as a card.
+const viewed = (messages: OpencodeMessage[]): OpencodeMessage[] =>
+  annotateView(messages as never) as unknown as OpencodeMessage[];
+
+const opencodeMessages = (sessionId: string, opts?: { limit?: number; view?: boolean }) =>
   forActiveSession(
     sessionId,
-    DEMO_STATE === "artifacts"
-      ? [...demoState.messages, previewArtifactsImageMessage]
-      : isStream
-        ? revealedTranscript(streamStep)
-        : demoState.messages,
+    ((list) => (opts?.view ? viewed(list) : list))(
+      DEMO_STATE === "artifacts"
+        ? [...demoState.messages, previewArtifactsImageMessage]
+        : isStream
+          ? revealedTranscript(streamStep)
+          : demoState.messages,
+    ),
   );
 
 // The targeted single-message read the transcript assembler's splice uses.
@@ -409,13 +417,14 @@ const opencodeMessages = (sessionId: string, _opts?: { limit?: number }) =>
 // stream position, so a message.updated event causes the rendered copy to
 // grow one phase at a time. Served marks the phase as applied so the harness
 // knows not to screenshot while the splice debounce is still pending.
-const opencodeMessage = (_sessionId: string, messageId: string) => {
+const opencodeMessage = (_sessionId: string, messageId: string, opts?: { view?: boolean }) => {
   const list = isStream ? revealedTranscript(streamStep) : demoState.messages;
   const hit = list.find((m) => m.info.id === messageId) ?? null;
   if (isStream && hit && !hit.info.time?.completed) {
     streamServed = true;
   }
-  return Promise.resolve(hit);
+  // A lone message is annotated within itself (the same as the box's splice).
+  return Promise.resolve(hit && opts?.view ? viewed([hit])[0] : hit);
 };
 
 // The renderer fetches transcripts through `opencodeMessages` (with an
@@ -522,6 +531,8 @@ const getServerVersion = (): Promise<{ version: string; minClient: string; openc
     version: DEMO_STATE === "incompatible" ? "1.0.0" : DEMO_STATE === "server-update" ? "0.0.10" : "0.0.13",
     minClient: DEMO_STATE === "version-skew" ? "0.1.0" : "0.0.0",
     opencodeVersion: "0.0.0",
+    // The demo box groups tool calls into runs (viewed() above).
+    capabilities: ["transcript-runs-1"],
   });
 
 // Box upgrade gate (OpenCode V2 cutover C4, contract K3). Every state but
@@ -615,6 +626,8 @@ export const explicitMethods = {
   onStatusEvent,
   opencodeMessages,
   opencodeMessage,
+  opencodeContext: () => Promise.resolve(null),
+  opencodeCache: () => Promise.resolve(null),
   opencodePermissions,
   opencodeQuestions,
   opencodeVcsBranch,
@@ -626,6 +639,7 @@ export const explicitMethods = {
   onOpencodeEvent,
   onStreamEvent,
   launchersList,
+  launchersSetFlag: () => Promise.reject(new Error("Not available in the demo.")),
   servePageList,
   outboxList,
   artifactsList,
@@ -634,6 +648,7 @@ export const explicitMethods = {
   projectCreateScratch,
   getClientVersion,
   getServerVersion,
+  apiVersion: getServerVersion,
   onAutoUpdateError,
   opencodeProviderAuth,
   claudeLoginCancel,

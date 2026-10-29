@@ -35,14 +35,7 @@ import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
   selectActiveTodos,
-  selectCacheTtlMs,
-  selectLastAssistantCompletion,
-  computeStaleCache,
-  computeContextBreakdown,
-  resolveContextLimit,
-  STALE_CACHE_MIN_TOKENS,
-  countRunningSubagents,
-  computeTurnInfo,
+  turnInfoFromView,
   computeLiveTurn,
   shouldAutoRename,
   countUserTurns,
@@ -52,19 +45,17 @@ import {
   findSessionTitle,
   type EntryMotionState,
   type StaleCacheResult,
+  type ContextBreakdown,
   type PendingScrollWin,
   scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
   progressAttentionKind,
-  isPlanExitQuestion,
-  extractPlanData,
   titleCase,
-  formatNoHealthyEndpointCopy,
   providersFromExcludedKeys,
+  contextModelLabel,
+  isUnknownChannelError,
 } from "./chatUtils";
-import { planPageUrl } from "../shared/planMode.mjs";
-import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
   makePermissionReplyHandler,
@@ -104,6 +95,7 @@ import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useComposerController } from "./hooks/useComposerController";
 import { useTranscriptState } from "./hooks/useTranscriptState";
+import { opencodeMessagesTracked } from "./runEpoch";
 import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
@@ -114,7 +106,8 @@ import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap, concatUserMessageText } from "./chatUtils";
-import { UPDATE_BOX_NOTE, useBoxCapability } from "./hooks/useBoxCapabilities";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
+import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
 import { planBusySend, shouldClearDraft } from "./inboxState";
@@ -224,6 +217,10 @@ const SENT_ROW_LINGER_MS = 1500;
 const IDLE_SEND_SETTLE_MS = 3000;
 const mintMessageId = () => `msg_${crypto.randomUUID().replaceAll("-", "")}`;
 
+const EMPTY_CONTEXT_BREAKDOWN: ContextBreakdown = {
+  freshInput: 0, cacheRead: 0, cacheWrite: 0, totalInput: 0, pct: null, hasLimit: false, segments: [],
+};
+
 export function ChatPanel({
   sessionId,
   tmuxSession,
@@ -247,6 +244,7 @@ export function ChatPanel({
   // INSIDE useComposerController now (they feed the composer's trust toggle +
   // model picker). ChatPanel keeps only what its OWN (non-composer) paths read.
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
+  const pushAppToast = useStore((s) => s.pushAppToast);
   const configDefaultModel = useStore((s) => s.defaultModel);
   // BET-1274 10d: the routing preset drives the Auto row's display label; the
   // value lives on the same store block Settings writes (modelRouting.preset).
@@ -290,7 +288,6 @@ export function ChatPanel({
   // save Nk tokens" pill when the session has been idle past this TTL.
   // manta doesn't set the real cache_control.ttl on requests; this is the
   // user's claim about what opencode is sending. See AppConfig comment.
-  const cacheTtl = useStore((s) => s.cacheTtl);
   // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
   // state, refresh callbacks, poll effects, session resets, and the mobile
   // `manta-open-*` window-event bridges. Extracted to a self-contained hook
@@ -316,7 +313,6 @@ export function ChatPanel({
     setWebhookError,
     refreshWebhooks,
   } = resources;
-  const setChatSubagents = useStore((s) => s.setChatSubagents);
   const setChatMessages = useStore((s) => s.setChatMessages);
 
   // BET-418 §A: pre-flight background-job approvals. When trust mode is OFF
@@ -711,6 +707,8 @@ export function ChatPanel({
     questions,
     setQuestions,
     stepTokens,
+    contextPayload,
+    cachePayload,
     todosDismissed,
     setTodosDismissed,
     liveTodos,
@@ -742,8 +740,7 @@ export function ChatPanel({
       if (existing) clearTimeout(existing);
       const t = setTimeout(() => {
         childRefetchTimers.current.delete(childId);
-        window.api
-          .opencodeMessages(childId)
+        opencodeMessagesTracked(childId, { view: true })
           .then((m) => {
             setChildMessages((prev) => {
               const next = new Map(prev);
@@ -890,7 +887,7 @@ export function ChatPanel({
   // the box has answered, and nothing at all while it has not (null).
   const inboxCapability = useBoxCapability("chat-cards-1");
   const inboxActionsEnabled = inboxCapability === true;
-  const inboxGateNote = inboxCapability === false ? UPDATE_BOX_NOTE : null;
+  const inboxGateNote = inboxCapability === false ? UPDATE_BOX_NOTE_TEXT : null;
   const inboxActionsEnabledRef = useRef(inboxActionsEnabled);
   inboxActionsEnabledRef.current = inboxActionsEnabled;
 
@@ -1933,7 +1930,7 @@ export function ChatPanel({
             // and WHY (the router's structured per-key states, worded by the
             // shared labels), and the banner carries the W8 reset affordance
             // inline — the providers behind the excluded keys.
-            const copy = formatNoHealthyEndpointCopy(decision);
+            const copy = decision.copy ?? "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.";
             setSendError(copy);
             setVerdictReset({ message: copy, providers: providersFromExcludedKeys(decision.excluded) });
             setRunning(false);
@@ -2292,26 +2289,49 @@ export function ChatPanel({
   const clearSessionRef = useRef(clearSession);
   clearSessionRef.current = clearSession;
 
-  // Delete session — kills the tmux window + opencode session. Reaches the
-  // same IPC the mobile ⋯ sheet uses.
-  const deleteSession = useCallback(async () => {
-    if (!tmuxSession || windowIndex == null) return;
-    setSendError(null);
-    try {
-      await window.api.opencodeDeleteSession({
-        sessionId,
-        sessionName: tmuxSession,
-        windowIndex,
-      });
-      await refresh();
-    } catch (e) {
-      setSendError(String((e as Error)?.message ?? e));
-    }
-  }, [sessionId, tmuxSession, windowIndex, refresh]);
+  // Delete session — the SAME close flow as the sidebar (worktree clean-on-close, the dirty-tree question, the kill),
+  // plus deleting this conversation. It runs on the box (`sessions:close`) bound to THIS window's identity.
+  const closeCapability = useBoxCapability("sessions-close-1");
+  const [deleteAsk, setDeleteAsk] = useState<{ title: string; body: string; removeLabel: string; keepLabel: string; path: string } | null>(null);
+  const runDelete = useCallback(
+    async (dirtyWorktree?: "remove" | "keep", shownPath?: string) => {
+      if (!tmuxSession || windowIndex == null) return;
+      if (closeCapability === false) {
+        setSendError(UPDATE_BOX_NOTE_TEXT);
+        return;
+      }
+      setSendError(null);
+      setDeleteAsk(null);
+      const w = useStore.getState().projects.find((p) => p.tmuxSession === tmuxSession)?.windows.find((x) => x.index === windowIndex);
+      try {
+        const res = await window.api.sessionsClose({
+          project: tmuxSession,
+          windowIndex,
+          deleteConversation: true,
+          ...(dirtyWorktree ? { dirtyWorktree } : {}),
+          expect: { opencodeSessionId: sessionId, worktreePath: shownPath ?? w?.worktreePath ?? null },
+        });
+        if (res.ok === false && "needsConfirm" in res) {
+          setDeleteAsk({ ...res.needsConfirm });
+          return;
+        }
+        if (res.ok === false) {
+          setSendError(res.error);
+          return;
+        }
+        await refresh();
+        if (res.notice) pushAppToast({ tone: "info", message: res.notice });
+        for (const warning of res.warnings) pushAppToast({ tone: "error", message: warning });
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        setSendError(isUnknownChannelError(msg) ? UPDATE_BOX_NOTE_TEXT : msg);
+      }
+    },
+    [sessionId, tmuxSession, windowIndex, refresh, closeCapability, pushAppToast],
+  );
+  const deleteSession = useCallback(() => runDelete(), [runDelete]);
 
-  // Session deletion lives in the sidebar (desktop) and the mobile ⋯ sheet —
-  // it was removed from the composer status bar to declutter. The IPC
-  // (window.api.opencodeDeleteSession) is still wired for those paths.
+  // Session deletion lives in the session header menu and the sidebar (both through `sessions:close`).
 
   // ===== Auto-rename =====
   // Derives a short tmux window name from the conversation every Nth completed
@@ -2596,79 +2616,38 @@ export function ChatPanel({
     latestTokensRef.current = latestTokens;
   }, [latestTokens]);
 
-  // ===== Stale prompt-cache detection =====
+  // ===== Stale prompt-cache + context window (WS11 D2) =====
   //
-  // Drives the "/clear to save Nk tokens" pill in the footer. When the
-  // session has been idle long enough that Anthropic's prompt cache has
-  // expired (TTL = 5m default OR 1h opt-in, set in Settings to match
-  // opencode's cache_control.ttl), the next user turn will re-bill the
-  // entire cached prefix as cache_creation_input_tokens. For deep
-  // sessions that's often 100k+ tokens of avoidable spend; suggest /clear
-  // when the cached prefix is non-trivial AND the cache has expired.
-  //
-  // Three inputs to the predicate:
-  //   - lastCompleted: timestamp of the last fully-finished assistant
-  //     turn (cache TTL clock starts at the request that wrote it, but
-  //     time.completed is the closest proxy in the data we have)
-  //   - cachedTokens: cache.read + cache.write from the most recent step
-  //     (= every token currently in this session's cache entry)
-  //   - now: stale cache is time-driven, so we need to re-evaluate over
-  //     time without remounting. Tick at 10s — staleness is a 5-min /
-  //     1-hr scale so sub-10s precision is irrelevant.
-  //
-  // The tick ONLY runs while a turn isn't actively in flight; running
-  // turns can't go stale by definition.
-  const lastAssistantCompletion = useMemo(
-    () => selectLastAssistantCompletion(messages),
-    [messages],
-  );
-  // Cached prefix size = read + write from the last step. On a warm
-  // session most of the prefix is `cache.read`; on the first turn after
-  // /compact (or the first turn ever) it'll be mostly `cache.write`.
-  // Either way, this is what flips from "free" to "paid" when the TTL
-  // expires.
-  const cachedTokens = latestTokens
-    ? (latestTokens.cache?.read ?? 0) + (latestTokens.cache?.write ?? 0)
-    : 0;
-  const ttlMs = selectCacheTtlMs(cacheTtl);
-  // Tick state — re-render every 10s when we have a completed turn and
-  // we're not running. The interval is deliberately scope-gated to avoid
-  // burning a wakeup every 10s on idle apps with no completed turns.
-  const [staleTick, setStaleTick] = useState(0);
+  // Both come from the box ready to render: the `cache` payload carries the
+  // epoch-ms instant the prompt cache goes cold (`staleAt`); the `context` payload
+  // is measured against the session's SELECTED model. The client only compares the
+  // instant with its own clock — one timer at `staleAt`, no polling, no recompute.
+  const staleAt = cachePayload?.staleAt ?? null;
+  const [staleNow, setStaleNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!isActive) return; // BET-730: hidden panels don't need staleness ticks
-    if (running) return;
-    if (lastAssistantCompletion == null) return;
-    if (cachedTokens < STALE_CACHE_MIN_TOKENS) return;
-    const id = setInterval(() => setStaleTick((t) => t + 1), 10_000);
-    return () => clearInterval(id);
-  }, [running, lastAssistantCompletion, cachedTokens, isActive]);
-  const staleCache = useMemo<StaleCacheResult>(
-    () =>
-      computeStaleCache({
-        lastCompleted: lastAssistantCompletion,
-        now: Date.now(),
-        ttlMs,
-        cachedTokens,
-        running,
-      }),
-    // staleTick is intentionally in the deps so the memo recomputes on
-    // each tick even when other inputs haven't changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [lastAssistantCompletion, ttlMs, cachedTokens, running, staleTick],
-  );
-
-  // Context breakdown for the SessionHeader pill + popover (BET-415). The
-  // denominator is the active model's real context window so the pill
-  // reflects what the provider will actually accept on the next request.
-  const ctxLimit = useMemo(
-    () => resolveContextLimit(activeModel),
-    [activeModel],
-  );
-  const ctxBreakdown = useMemo(
-    () => computeContextBreakdown(latestTokens, ctxLimit),
-    [latestTokens, ctxLimit],
-  );
+    if (staleAt == null) return;
+    const wait = staleAt - Date.now();
+    if (wait <= 0) {
+      setStaleNow(Date.now());
+      return;
+    }
+    // setTimeout caps at ~24.8 days; a TTL is minutes/hours.
+    const id = setTimeout(() => setStaleNow(Date.now()), wait + 50);
+    return () => clearTimeout(id);
+  }, [staleAt]);
+  const staleCache = useMemo<StaleCacheResult>(() => {
+    const lastCompleted = cachePayload?.lastCompleted ?? null;
+    return {
+      isStale: staleAt != null && staleNow >= staleAt,
+      idleMs: lastCompleted != null ? Math.max(0, staleNow - lastCompleted) : 0,
+      staleTokens: cachePayload?.staleTokens ?? 0,
+      ttlMs: cachePayload?.ttlMs ?? 0,
+      lastCompleted,
+      staleAt,
+    };
+  }, [cachePayload, staleAt, staleNow]);
+  const ctxBreakdown: ContextBreakdown = contextPayload ?? EMPTY_CONTEXT_BREAKDOWN;
+  const ctxLimit = contextPayload?.limit ?? null;
 
   // Most recent TodoWrite call from anywhere in the session — pinned under
   // either the running indicator (while a turn is live) or the final turn's
@@ -2726,10 +2705,7 @@ export function ChatPanel({
   // only the final one does. While the turn is running, the footer is gated off
   // its still-streaming final assistant message (it would render behind the
   // working indicator); it appears once running flips false.
-  const turnInfo = useMemo(
-    () => computeTurnInfo(messages, running),
-    [messages, running],
-  );
+  const turnInfo = useMemo(() => turnInfoFromView(messages), [messages]);
 
   // Live metrics of the in-flight turn (startedAt, tokens, verb seed) for the
   // working row at the transcript tail. Recomputes on every messages change;
@@ -2932,25 +2908,6 @@ export function ChatPanel({
     ],
   );
 
-  // Push the running-subagent count into the global store so the sidebar's
-  // `·N` indicator (Sidebar.tsx's StatusIndicator) lights up for chat-mode
-  // windows. The TUI poller can't see chat-mode subagents (holder pane runs
-  // `sleep infinity`), so this is the sole update path for chat-mode `·N`.
-  // Pure derivation from the same data TaskBody consumes; the store no-ops
-  // when the count is unchanged so this doesn't churn other subscribers.
-  const runningSubagents = useMemo(
-    () => countRunningSubagents(messages, liveChildStatus),
-    [messages, liveChildStatus],
-  );
-  useEffect(() => {
-    setChatSubagents(sessionId, runningSubagents);
-  }, [sessionId, runningSubagents, setChatSubagents]);
-  // Reset to zero on unmount / session change so a stale count from the
-  // previous session doesn't linger on the sidebar dot.
-  useEffect(() => {
-    return () => setChatSubagents(sessionId, 0);
-  }, [sessionId, setChatSubagents]);
-
   // BET-659: lift this session's live transcript into the store so the
   // Artifacts panel can derive artifacts without a second opencodeMessages
   // fetch. `messages` only changes on an actual transcript commit (never on a
@@ -2996,18 +2953,14 @@ export function ChatPanel({
 
   // ===== Plan card (BET-951) =====
   // The plan_exit question is upgraded into a blocking plan card in the pinned
-  // card stack. Detection is EXACT — `isPlanExitQuestion` matches the question's
-  // `tool.callID` against a `plan_exit` tool part in the transcript, never the
-  // question text. These are also EXCLUDED from the inline transcript question
+  // card stack. Detection is the BOX's and EXACT (`question.plan`: its `tool.callID` matched a `plan_exit` tool
+  // part, never the question text); an older box sends none and the question stays an ordinary card. These are also EXCLUDED from the inline transcript question
   // rendering below so they never appear twice (once inline as a generic
   // QuestionCard, once in the stack).
-  const planQuestions = useMemo(
-    () => questions.filter((q) => isPlanExitQuestion(q, messages)),
-    [questions, messages],
-  );
+  const planQuestions = useMemo(() => questions.filter((q) => q.plan != null), [questions]);
   const planDataByQuestion = useMemo(
-    () => new Map(planQuestions.map((q) => [q.id, extractPlanData(q, messages)])),
-    [planQuestions, messages],
+    () => new Map(planQuestions.map((q) => [q.id, q.plan as NonNullable<QuestionRequest["plan"]>])),
+    [planQuestions],
   );
 
   // Delegate split control (BET-951).
@@ -3046,11 +2999,11 @@ export function ChatPanel({
 
   const buildPlanPrompt = useCallback(
     (q: QuestionRequest, feedback: string) => {
-      const text = extractPlanData(q, messages).text;
+      const text = q.plan?.text ?? "";
       const trimmed = feedback.trim();
       return trimmed ? `${text}\n\n${trimmed}` : text;
     },
-    [messages],
+    [],
   );
 
   const buildHere = useCallback(
@@ -3113,19 +3066,6 @@ export function ChatPanel({
     [buildPlanPrompt, sessionId, cwd],
   );
 
-  // The PlanCard's "Open page" URL. Single-HTML plans are published by the
-  // model's plan_render tool under the DETERMINISTIC per-session subdomain
-  // (`<base>/pages/plan-<shortSessionId>`); there is no eager-publish state and
-  // no `.md` publish path. serverBase may be unavailable (no server
-  // configured); then there is simply no URL.
-  const planCardUrl = useMemo(() => {
-    try {
-      return planPageUrl(sessionId, serverBase());
-    } catch {
-      return "";
-    }
-  }, [sessionId]);
-
   // The plan_exit card, built here and mounted in the transcript tail the SAME
   // way the questions are (it used to be pinned in the CardStack). Building the
   // element here keeps the closures over the plan data + the deterministic
@@ -3140,6 +3080,8 @@ export function ChatPanel({
     for (const q of planQuestions) {
       const data = planDataByQuestion.get(q.id);
       if (!data) continue;
+      // The "Open page" link is the box's (`plan.pageUrl`, null when the box has no public base URL).
+      const planCardUrl = data.pageUrl ?? "";
       return (
         <PlanCard
           key={q.id}
@@ -3171,7 +3113,7 @@ export function ChatPanel({
       );
     }
     return null;
-  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planCardUrl]);
+  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel]);
 
   // Background-run cards in the transcript (v2-next N5), from the job store.
   // The transcript is only scanned for finished results when some job of this
@@ -3455,17 +3397,30 @@ export function ChatPanel({
       {/* Session header (BET-415): owns SESSION STATE — git branch, context
           usage pill + popover, and the session menu (fork / compact / clear /
           delete). The composer below owns only composing. */}
+      <Modal size="sm" open={deleteAsk != null} onDismiss={() => setDeleteAsk(null)} label="Uncommitted changes in this worktree">
+        <div className="space-y-4">
+          <h3 className="text-title font-semibold">{deleteAsk?.title}</h3>
+          <div className="text-body text-text-faint break-all">{deleteAsk?.body}</div>
+          <div className="flex justify-end gap-2">
+            <Button tone="ghost" onClick={() => setDeleteAsk(null)}>
+              Cancel
+            </Button>
+            <Button tone="default" onClick={() => void runDelete("keep", deleteAsk?.path)}>
+              {deleteAsk?.keepLabel}
+            </Button>
+            <Button tone="danger" onClick={() => void runDelete("remove", deleteAsk?.path)}>
+              {deleteAsk?.removeLabel}
+            </Button>
+          </div>
+        </div>
+      </Modal>
       <SessionHeader
         sessionId={sessionId}
         branch={branch}
         ctxBreakdown={ctxBreakdown}
         ctxLimit={ctxLimit}
         staleCache={staleCache}
-        modelName={
-          activeModel
-            ? activeModel.name
-            : null
-        }
+        modelName={contextModelLabel(models ?? [], contextPayload?.model, contextPayload?.basis, activeModel ? activeModel.name : null)}
         hasSession={!!tmuxSession && windowIndex != null}
         readOnly={viewOnly}
         handoff={{
@@ -3541,7 +3496,7 @@ export function ChatPanel({
             // BET-418 §D: a job session is read-only — never show its (anyway
             // impossible) question cards. Defensive: a job's pre-flight ruleset
             // means it never generates asks.
-            questions={viewOnly ? [] : questions.filter((q) => !isPlanExitQuestion(q, messages))}
+            questions={viewOnly ? [] : questions.filter((q) => q.plan == null)}
             turnInfo={turnInfo}
             finishByMessageId={finishByMessageId}
             userCommandInfo={userCommandInfo}

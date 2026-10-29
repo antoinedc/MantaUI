@@ -33,13 +33,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ScrollFrame } from "./ScrollFrame";
 import { MantaLoader } from "./MantaLoader";
 import { ConnectGithubPanel, PanelHeader, PANEL_CLASS } from "./ConnectGithub";
-import {
-  formatAge,
-  formatBytes,
-  cloneErrorKind,
-  repoListErrorMessage,
-  type CloneErrorKind,
-} from "./chatUtils";
+import { formatAge, formatBytes } from "./chatUtils";
 import type {
   ForgeCloneStatus,
   ForgeRepo,
@@ -48,7 +42,12 @@ import type {
 type Phase =
   | { kind: "pick" }
   | { kind: "clone"; queue: ForgeRepo[]; index: number }
-  | { kind: "failed"; repo: ForgeRepo; message: string; errorKind: CloneErrorKind };
+  // `message` is what the person reads (the box's wording); `diagnostics` is what "Copy diagnostics" copies
+  // (the raw git output, never rendered).
+  | { kind: "failed"; repo: ForgeRepo; message: string; diagnostics: string };
+
+// The wording a failed repo listing falls back to when the box (older) sent none.
+const REPO_LIST_FALLBACK = "Couldn't list your repositories from GitHub.";
 
 // One state for the repo fetch, so "in flight", "failed" and "loaded" can
 // never disagree. The previous three-flag version (repos + reposError, with
@@ -114,7 +113,7 @@ export function CloneFromGitHub({
       try {
         const res = await window.api.forgeRepos();
         if (cancelled) return;
-        if (res.error === "rejected" || res.error === "not_connected") {
+        if (res.needsSignIn) {
           // The box cleared the dead credential; its own sign-in panel is the
           // next screen. `forgeDeviceStart` no longer short-circuits, so the
           // real device flow runs.
@@ -123,11 +122,11 @@ export function CloneFromGitHub({
         }
         // `res.repos` is always an array; `res.error` is the only failure
         // signal. Testing the array's truthiness was the original bug.
-        if (res.error) setReposState({ kind: "error", message: repoListErrorMessage(res.error) });
+        if (res.error) setReposState({ kind: "error", message: res.message ?? REPO_LIST_FALLBACK });
         else setReposState({ kind: "ready", repos: res.repos });
       } catch {
         if (cancelled) return;
-        setReposState({ kind: "error", message: repoListErrorMessage(null) });
+        setReposState({ kind: "error", message: REPO_LIST_FALLBACK });
       }
     })();
     return () => {
@@ -146,10 +145,6 @@ export function CloneFromGitHub({
 
   const selected = repos.filter((r) => checked.has(r.fullName));
 
-  // Derive the on-disk destination for a repo: <root>/<name>.
-  const destFor = (repo: ForgeRepo) =>
-    `${root.replace(/\/+$/, "")}/${repo.name}`;
-
   // ---- [S7]: run the clones for the selected repos (sequentially) ----
   const runClones = (queue: ForgeRepo[], startIndex: number) => {
     setPhase({ kind: "clone", queue, index: startIndex });
@@ -166,17 +161,17 @@ export function CloneFromGitHub({
     }
     const repo = queue[phase.index];
     let cancelled = false;
-    const dest = destFor(repo);
     const controller: { id?: string } = {};
     let stop = false;
 
     (async () => {
       let res;
       try {
-        res = await window.api.forgeCloneStart({ url: repo.cloneUrl, dest, name: repo.name });
+        // The box joins <root>/<name> itself (WS11 D5 / S8) and reports it as the status's `dest`.
+        res = await window.api.forgeCloneStart({ url: repo.cloneUrl, root, name: repo.name });
       } catch {
         if (!cancelled) {
-          setPhase({ kind: "failed", repo, message: "Couldn't reach the server.", errorKind: "unknown" });
+          setPhase({ kind: "failed", repo, message: "Couldn't reach the server.", diagnostics: "Couldn't reach the server." });
         }
         return;
       }
@@ -188,9 +183,9 @@ export function CloneFromGitHub({
         // instead of a generic "couldn't start". Only a bare request error
         // without a message falls back to the generic text.
         if (res?.message) {
-          setPhase({ kind: "failed", repo, message: res.message, errorKind: "destination" });
+          setPhase({ kind: "failed", repo, message: res.message, diagnostics: res.message });
         } else {
-          setPhase({ kind: "failed", repo, message: "Couldn't start the clone.", errorKind: "unknown" });
+          setPhase({ kind: "failed", repo, message: "Couldn't start the clone.", diagnostics: "Couldn't start the clone." });
         }
         return;
       }
@@ -201,20 +196,20 @@ export function CloneFromGitHub({
       const deadline = Date.now() + 130_000;
       while (!cancelled && !stop) {
         if (Date.now() > deadline) {
-          setPhase({ kind: "failed", repo, message: "The clone timed out.", errorKind: "network" });
+          setPhase({ kind: "failed", repo, message: "The clone timed out.", diagnostics: "The clone timed out." });
           return;
         }
         const st = await window.api.forgeCloneStatus({ id: res.id }).catch(() => null);
         if (cancelled) return;
         if (!st) {
           // Job unknown/expired — bail.
-          if (!cancelled) setPhase({ kind: "failed", repo, message: "The clone job went away.", errorKind: "unknown" });
+          if (!cancelled) setPhase({ kind: "failed", repo, message: "The clone job went away.", diagnostics: "The clone job went away." });
           return;
         }
         setClone(st);
         if (st.done) {
           if (st.ok) {
-            clonedPathsRef.current.push(dest);
+            clonedPathsRef.current.push(st.dest);
             const nextIndex = phase.index + 1;
             if (nextIndex >= queue.length) {
               // Last repo in the queue finished — hand off to the batch
@@ -227,7 +222,8 @@ export function CloneFromGitHub({
               setPhase({ kind: "clone", queue, index: nextIndex });
             }
           } else {
-            setPhase({ kind: "failed", repo, message: st.error || "Clone failed", errorKind: cloneErrorKind(st.error || "") });
+            // The box classifies the failure and words it; the raw git output is only for diagnostics.
+            setPhase({ kind: "failed", repo, message: st.message ?? "the clone failed.", diagnostics: st.error || "Clone failed" });
           }
           return;
         }
@@ -263,7 +259,7 @@ export function CloneFromGitHub({
 
   const copyDiagnostics = () => {
     if (phase.kind === "failed") {
-      void window.api.clipboardWriteText(phase.message).then(() => {}, () => {});
+      void window.api.clipboardWriteText(phase.diagnostics).then(() => {}, () => {});
     }
   };
 
@@ -421,9 +417,9 @@ export function CloneFromGitHub({
           <div className="mt-3">
             <ProgressBar percent={clone?.percent ?? 0} />
           </div>
-          <div className="mt-3 text-[12.5px] text-text-faint">
-            into {destFor(phase.queue[phase.index])}
-          </div>
+          {clone?.dest && (
+            <div className="mt-3 text-[12.5px] text-text-faint">into {clone.dest}</div>
+          )}
           <div className="flex gap-2 mt-3">
             <Button tone="ghost" onClick={cancelClone}>
               Cancel
@@ -438,7 +434,7 @@ export function CloneFromGitHub({
           <div className="p-4">
             <Callout tone="danger">
               <b className="text-text">{phase.repo.name}</b> —{" "}
-              {failedMessage(phase.errorKind, phase.message)}
+              {phase.message}
             </Callout>
             <div className="flex gap-2 mt-3 items-center">
               <Button tone="primary" onClick={retryClone}>
@@ -458,23 +454,4 @@ export function CloneFromGitHub({
       )}
     </div>
   );
-}
-
-// [E3] names the cause — only permission is actionable by the user, so it must
-// be called out specifically.
-function failedMessage(kind: CloneErrorKind, raw: string): string {
-  switch (kind) {
-    case "permission":
-      return "permission denied. The token may not have access to this repository.";
-    case "disk":
-      return "not enough disk space in the clone location.";
-    case "network":
-      return "a network error prevented the clone.";
-    case "destination":
-      // The server's preflight message is already specific and user-facing —
-      // pass it through verbatim (it names the folder, not the token).
-      return raw || "the clone destination is not usable.";
-    default:
-      return raw || "the clone failed.";
-  }
 }

@@ -133,6 +133,9 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
   });
 });
 
+// The close flow is the box's (WS11 D6): advertise it so the Sidebar runs it.
+const CLOSE_CAPS = { apiVersion: () => Promise.resolve({ capabilities: ["sessions-close-1"] } as never) };
+
 describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () => {
   let h: Harness | null = null;
 
@@ -142,6 +145,7 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
     // change the nav-order this block asserts on.
     localStorage.clear();
     installMockApi({
+      ...CLOSE_CAPS,
       configUpdate: (patch: Record<string, unknown>) =>
         Promise.resolve({ pinnedWindows: (patch as { pinnedWindows?: string[] }).pinnedWindows ?? [] }),
     });
@@ -205,17 +209,19 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
     expect(h!.docText()).not.toContain("Close session");
   });
 
-  it("⌘⌫ opens the confirm for the focused row", () => {
+  it("⌘⌫ opens the confirm for the focused row", async () => {
     mountSidebar();
     focusWindowRow();
     keyOnTree("Backspace", { metaKey: true });
+    await h!.flush();
     expect(h!.docText()).toContain("Close session");
   });
 
-  it("Ctrl+Delete opens the confirm for the focused row", () => {
+  it("Ctrl+Delete opens the confirm for the focused row", async () => {
     mountSidebar();
     focusWindowRow();
     keyOnTree("Delete", { ctrlKey: true });
+    await h!.flush();
     expect(h!.docText()).toContain("Close session");
   });
 
@@ -278,9 +284,11 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
 
   // Home focuses navKeys[0] (the "proj" group header), then ⌘⌫ opens the
   // project-close confirm for that focused group — the same path a user clicks.
-  function openProjectCloseConfirm() {
+  async function openProjectCloseConfirm() {
     keyOnTree("Home");
     keyOnTree("Delete", { metaKey: true });
+    // The confirm's words arrive from the box (sessions:close-preview).
+    await h!.flush();
   }
 
   function confirmCloseProjectButton(): HTMLButtonElement {
@@ -301,6 +309,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
 
   it("closes a project with two clean worktrees → both removed, no keep-toast", async () => {
     installMockApi({
+      ...CLOSE_CAPS,
       gitRemoveWorktree: () => Promise.resolve({ removed: true }),
     });
     resetStore({
@@ -317,7 +326,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
       ],
     });
     mountSidebar();
-    openProjectCloseConfirm();
+    await openProjectCloseConfirm();
     // Confirm body advertises both worktrees being removed.
     expect(h!.docText()).toContain("2 worktrees will be removed.");
 
@@ -335,6 +344,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
 
   it("one dirty worktree survives, tmux session dies, exactly one keep-toast names it", async () => {
     installMockApi({
+      ...CLOSE_CAPS,
       gitRemoveWorktree: (args: { path: string }) =>
         Promise.resolve(
           args.path === "/wt/dirty" ? { removed: false, reason: "dirty" } : { removed: true },
@@ -354,7 +364,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
       ],
     });
     mountSidebar();
-    openProjectCloseConfirm();
+    await openProjectCloseConfirm();
 
     const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
     act(() => confirmCloseProjectButton().click());
@@ -374,7 +384,8 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
   });
 
   it("worktreeCleanOnClose off → no gitRemoveWorktree, no worktree sentence in confirm", async () => {
-    installMockApi({});
+    installMockApi({
+      ...CLOSE_CAPS, ...CLOSE_CAPS });
     resetStore({
       worktreeCleanOnClose: false,
       appToasts: [],
@@ -389,9 +400,9 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
       ],
     });
     mountSidebar();
-    openProjectCloseConfirm();
+    await openProjectCloseConfirm();
 
-    // Body from describeProjectClose with worktreeCount 0 — no worktree copy.
+    // The box's body with no worktrees to remove — no worktree copy.
     expect(h!.docText()).not.toContain("worktree");
     expect(h!.docText()).toContain('Close “proj”');
 
@@ -407,6 +418,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
 
   it("projectMetaDelete runs and a throw there does not block refresh()", async () => {
     installMockApi({
+      ...CLOSE_CAPS,
       projectMetaDelete: () => Promise.reject(new Error("meta gone")),
     });
     resetStore({
@@ -423,7 +435,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
       ],
     });
     mountSidebar();
-    openProjectCloseConfirm();
+    await openProjectCloseConfirm();
 
     const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
     act(() => confirmCloseProjectButton().click());
@@ -435,8 +447,119 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     expect(
       useStore
         .getState()
-        .appToasts.some((t) => t.tone === "error" && String(t.message).includes("meta gone")),
+        .appToasts.some((t) => t.tone === "error" && String(t.message).includes("saved folder setting")),
     ).toBe(true);
+  });
+
+  function firstWindowCloseConfirm() {
+    keyOnTree("ArrowDown");
+    keyOnTree("ArrowDown");
+    keyOnTree("Backspace", { metaKey: true });
+  }
+  const buttonNamed = (label: string) =>
+    [...document.querySelectorAll('div[role="dialog"] button')].find((b) => b.textContent === label) as HTMLButtonElement;
+
+  it("a dirty worktree comes back from the box as needsConfirm: the dialog renders the box's words and the choice is sent back", async () => {
+    const asked = {
+      kind: "worktree-dirty" as const, path: "/wt/a", title: "Dirty (box)", body: "/wt/a has changes (box words).",
+      removeLabel: "Remove it", keepLabel: "Keep it",
+    };
+    const sent: unknown[] = [];
+    installMockApi({
+      ...CLOSE_CAPS,
+      sessionsClose: (input: { dirtyWorktree?: string }) => {
+        sent.push(input);
+        return Promise.resolve(input.dirtyWorktree ? { ok: true, removed: [], kept: ["/wt/a"], failed: [], warnings: [], notice: "Kept worktree at /wt/a" } : { ok: false, needsConfirm: asked });
+      },
+    });
+    resetStore({ worktreeCleanOnClose: true, appToasts: [], refresh: async () => { refreshCalls++; }, projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, "/wt/a")] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    act(() => buttonNamed("Close session").click());
+    await h!.flush();
+    expect(h!.docText()).toContain("Dirty (box)");
+    expect(h!.docText()).toContain("/wt/a has changes (box words).");
+    act(() => buttonNamed("Keep it").click());
+    await h!.flush();
+    const expect0 = { opencodeSessionId: null, worktreePath: "/wt/a" };
+    // Both calls carry the identity of the window that was confirmed; the second names the path that was shown.
+    expect(sent).toEqual([
+      { project: "proj", windowIndex: 0, expect: expect0 },
+      { project: "proj", windowIndex: 0, dirtyWorktree: "keep", expect: expect0 },
+    ]);
+    expect(useStore.getState().appToasts.some((t) => String(t.message) === "Kept worktree at /wt/a")).toBe(true);
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("a successful close with warnings shows the notice and every warning, and still refreshes", async () => {
+    installMockApi({
+      ...CLOSE_CAPS,
+      sessionsClose: () =>
+        Promise.resolve({ ok: true, removed: [], kept: [], failed: [{ path: "/wt/a", message: "Couldn't remove the worktree at /wt/a — it was left in place." }], warnings: ["Couldn't remove the worktree at /wt/a — it was left in place.", "The project was closed, but its saved folder setting couldn't be cleared."], notice: null }),
+    });
+    resetStore({ worktreeCleanOnClose: true, appToasts: [], refresh: async () => { refreshCalls++; }, projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, "/wt/a")] })] });
+    mountSidebar();
+    await openProjectCloseConfirm();
+    act(() => confirmCloseProjectButton().click());
+    await h!.flush();
+    const msgs = useStore.getState().appToasts.map((t) => String(t.message));
+    expect(msgs).toContain("Couldn't remove the worktree at /wt/a — it was left in place.");
+    expect(msgs).toContain("The project was closed, but its saved folder setting couldn't be cleared.");
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("the window list changes between opening the confirm and confirming: the close is refused and NOTHING is killed", async () => {
+    const kills: unknown[] = [];
+    installMockApi({ ...CLOSE_CAPS, tmuxKillWindow: (a: unknown) => (kills.push(a), Promise.resolve([])) });
+    const original = { index: 0, name: "mine", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_mine", worktreePath: null };
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [original] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    // Another device closed it and a different window now sits at index 0.
+    act(() => {
+      useStore.setState({ projects: [proj({ tmuxSession: "proj", windows: [{ ...original, name: "other", opencodeSessionId: "ses_other" }] })] });
+    });
+    await h!.flush();
+    act(() => buttonNamed("Close session").click());
+    await h!.flush();
+    expect(kills).toEqual([]);
+    expect(useStore.getState().appToasts.some((t) => String(t.message).includes("That session changed"))).toBe(true);
+  });
+
+  it("the confirm opens at once with a pending state (not a dead click) while the box words it", async () => {
+    installMockApi({ ...CLOSE_CAPS, sessionsClosePreview: () => new Promise(() => {}) });
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, null)] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    expect(h!.docText()).toContain("Checking…");
+    expect((buttonNamed("Close") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a box that answers 'unknown rpc channel' for the close flow gets the update note, never the raw text", async () => {
+    installMockApi({ ...CLOSE_CAPS, sessionsClosePreview: () => Promise.reject(new Error("unknown rpc channel: sessions:close-preview")) });
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, null)] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    const msgs = useStore.getState().appToasts.map((t) => String(t.message));
+    expect(msgs).toContain("Update your box to use this");
+    expect(msgs.join(" ")).not.toContain("unknown rpc channel");
+  });
+
+  it("an older box (no sessions-close-1): Close says to update the box instead of running anything", async () => {
+    installMockApi({ apiVersion: () => Promise.resolve({ capabilities: [] } as never) });
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, null)] })] });
+    mountSidebar();
+    await h!.flush();
+    keyOnTree("Home");
+    keyOnTree("Delete", { metaKey: true });
+    await h!.flush();
+    expect(useStore.getState().appToasts.some((t) => String(t.message) === "Update your box to use this")).toBe(true);
+    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
+    expect(api.calls.sessionsClose).toBeUndefined();
   });
 });
 
@@ -592,5 +715,62 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     ]);
     expect(useStore.getState().jobs["ses_child"]?.id).toBe("new");
     expect(h!.container.querySelector('[data-testid="job-observed-label"]')).toBeNull();
+  });
+});
+
+describe("Sidebar — the box's job nesting and status rollup (WS11 D7)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  const mountIt = async () => {
+    h = mount(
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} />,
+    );
+    await h.flush();
+  };
+  const win = (index: number, name: string, sid: string | null, extra: object = {}) => ({
+    index, name, active: index === 0, paneCurrentPath: "/x", opencodeSessionId: sid, ...extra,
+  });
+
+  it("a window the box nests under its parent renders once, as the parent's child — not also as a top-level row", async () => {
+    localStorage.clear();
+    installMockApi({});
+    resetStore({
+      pinnedWindows: [],
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [
+            win(0, "parent", "ses_p"),
+            win(1, "jobwin", "ses_j", { job: { id: "j1", status: "running", parentWindowIndex: 0 } }),
+          ],
+        }),
+      ],
+      jobs: { ses_j: { id: "j1", name: "j", status: "running", childSessionID: "ses_j", parentSessionID: "ses_p" } as never },
+    });
+    await mountIt();
+    expect((h!.docText().match(/jobwin/g) ?? []).length).toBe(1);
+  });
+
+  it("an older box sends no nesting: the same window is a plain top-level row", async () => {
+    localStorage.clear();
+    installMockApi({});
+    resetStore({ pinnedWindows: [], projects: [proj({ tmuxSession: "proj", windows: [win(0, "parent", "ses_p"), win(1, "jobwin", "ses_j")] })] });
+    await mountIt();
+    expect(h!.docText()).toContain("jobwin");
+  });
+
+  it("a parent whose own turn ended but whose rollup says busy reads as running with the box's subagent count", async () => {
+    localStorage.clear();
+    installMockApi({});
+    resetStore({
+      pinnedWindows: [],
+      projects: [proj({ tmuxSession: "proj", windows: [win(0, "parent", "ses_p")] })],
+      windowStatusBySession: { ses_p: { running: false, busy: true, startedAt: null, attention: null, subagents: 2, stopped: false } },
+    });
+    await mountIt();
+    expect(h!.container.querySelector('[title*="Running"][title*="2 subagents"]')).not.toBeNull();
   });
 });

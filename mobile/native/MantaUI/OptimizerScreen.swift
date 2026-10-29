@@ -65,7 +65,7 @@ final class OptimizerStore: ObservableObject {
                 summary = .updateYourBox
             }
         } catch {
-            summary = ModelsCapability.isUnsupported(error) ? .updateYourBox : .failed(ModelsCapability.reason(error))
+            summary = BoxCapabilities.isUnknownChannel(error) ? .updateYourBox : .failed(ModelsCapability.reason(error))
         }
     }
 
@@ -86,7 +86,7 @@ final class OptimizerStore: ObservableObject {
                 next = .updateYourBox
             }
         } catch {
-            next = ModelsCapability.isUnsupported(error) ? .updateYourBox : .failed(ModelsCapability.reason(error))
+            next = BoxCapabilities.isUnknownChannel(error) ? .updateYourBox : .failed(ModelsCapability.reason(error))
         }
         // Only the newest request lands: a slow 30d answer never overwrites a later 24h one.
         guard seq == seriesSeq else { return }

@@ -103,19 +103,38 @@ enum SessionPtyKey {
     }
 }
 
-/// The `launcher` query value `/pty` reads: `{id, flags}`.
+/// The `launcher` query value `/pty` reads: `{id}` (the box applies the saved launch
+/// options) or `{id, flags}` when explicit flags are given.
 struct SessionPtyLauncher: Equatable, Sendable {
     var id: String
-    var flags: [String: Bool]
+    var flags: [String: Bool]?
+
+    init(id: String, flags: [String: Bool]? = nil) {
+        self.id = id
+        self.flags = flags
+    }
+
+    /// The launcher a spawn carries. A current box resolves the saved launch options itself, so `{id}` is
+    /// enough. An older box (a flag row without `value`) runs only the flags it is GIVEN — a bare `{id}` would
+    /// drop every option, including skip-permissions whose default is on — so for it the row's own defaults are
+    /// sent (the old box's data; no rule is copied here).
+    static func make(id: String, launchers: [AvailableLauncher]) -> SessionPtyLauncher {
+        guard let row = launchers.first(where: { $0.id == id }),
+              !row.flags.isEmpty, row.flags.contains(where: { $0.value == nil }) else {
+            return SessionPtyLauncher(id: id)
+        }
+        return SessionPtyLauncher(id: id, flags: Dictionary(uniqueKeysWithValues: row.flags.map { ($0.key, $0.default) }))
+    }
 
     /// Compact JSON with sorted keys, so the same launcher always produces the
-    /// same URL: `{"flags":{…},"id":"…"}`.
+    /// same URL: `{"id":"…"}` or `{"flags":{…},"id":"…"}`.
     var queryJSON: String {
-        let object: [String: Any] = ["id": id, "flags": flags]
+        var object: [String: Any] = ["id": id]
+        if let flags { object["flags"] = flags }
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
-            return "{\"flags\":{},\"id\":\"\(id)\"}"
+            return "{\"id\":\"\(id)\"}"
         }
         return text
     }

@@ -14,9 +14,8 @@
 
 import { memo, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
-import type { OpencodeMessage, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeMessage, TruncationView, VoiceNoteRecord } from "../shared/types";
 import {
-  describeTruncation,
   concatUserMessageText,
   formatClockTime,
   formatDuration,
@@ -25,8 +24,9 @@ import {
   selectVisibleTodos,
   summarizeTodoProgress,
   todoStatusOf,
+  viewMediaToEntry,
+  canonicalMediaToDraw,
   type TodoStatus,
-  type TruncationKind,
 } from "./chatUtils";
 import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
@@ -257,6 +257,7 @@ export const MessageRow = memo(function MessageRow({
   commandInfo,
   voiceNote = null,
   media = null,
+  liveMediaHandles,
   widget = null,
   entering = false,
   blocks,
@@ -280,7 +281,7 @@ export const MessageRow = memo(function MessageRow({
   // standalone footer when there's no duration, e.g. mid-turn assistant
   // messages within a multi-step turn that hit max_tokens). null = no
   // truncation, no badge.
-  truncation: TruncationKind | null;
+  truncation: TruncationView | null;
   // Slash-command provenance from commandByMessageId. When set on a user
   // message, the row shows a collapsed `/name args` pill with an expand
   // chevron instead of the full expanded template body.
@@ -300,6 +301,8 @@ export const MessageRow = memo(function MessageRow({
   // a `fail` ends it as a labelled placeholder. Stable reference from a panel
   // memo, so the MessageRow memo chain is untouched.
   media?: MediaEntry | null;
+  /** Handles of every live media entry in the session — a canonical entry with the same handle is not drawn again. */
+  liveMediaHandles?: ReadonlySet<string>;
   // BET-1325: the inline-widget entry (from the `widget` bus events) this
   // assistant message owns, keyed by messageId. When set, the row renders the
   // WidgetBody card — a sandboxed <iframe> in a ToolCard shell, reserved to
@@ -352,7 +355,7 @@ export const MessageRow = memo(function MessageRow({
   if (
     !isRenderableRow(msg, {
       blocks: rowBlocks,
-      hasMedia: media != null,
+      hasMedia: media != null || canonicalMediaToDraw(msg.view?.media, liveMediaHandles).length > 0,
       hasWidget: widget != null,
       hasFooter: turnDurationMs != null || truncation != null,
     })
@@ -482,7 +485,14 @@ export const MessageRow = memo(function MessageRow({
   // list for every turn that touches todos.
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
+      {/* The live entry (this session's `media` frames) wins; otherwise the box's canonical entries for this message —
+          what makes generated media survive a reload. */}
       {media != null && !isUser && <MediaBody entry={media} />}
+      {media == null &&
+        !isUser &&
+        canonicalMediaToDraw(msg.view?.media, liveMediaHandles).map((entry) => (
+          <MediaBody key={entry.id} entry={viewMediaToEntry(entry)} />
+        ))}
       {widget != null && !isUser && <WidgetBody entry={widget} />}
       {rowBlocks.map((b) =>
         b.kind === "tools" ? (
@@ -547,10 +557,10 @@ export const MessageRow = memo(function MessageRow({
                   backgroundColor: "var(--warn-bg)",
                   color: "var(--warn)",
                 }}
-                title={describeTruncation(truncation).hint}
+                title={truncation.hint}
               >
                 <span aria-hidden>⚠</span>
-                {describeTruncation(truncation).label}
+                {truncation.label}
               </span>
             </>
           )}

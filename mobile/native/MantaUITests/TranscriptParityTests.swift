@@ -33,6 +33,10 @@ final class TranscriptParityTests: XCTestCase {
         )
     }
 
+    private func usage(output: Double, reasoning: Double = 0) -> OpencodeTokenUsage {
+        OpencodeTokenUsage(input: 100, output: output, reasoning: reasoning, cache: nil)
+    }
+
     private func toolPart(_ id: String, _ messageID: String, tool: String, status: String = "completed",
                           input: [String: JSONValue] = [:], output: String? = nil) -> OpencodePart {
         var state: [String: JSONValue] = ["status": .string(status), "input": .object(input)]
@@ -216,95 +220,47 @@ final class TranscriptParityTests: XCTestCase {
         XCTAssertEqual(allCurrent.byID.count, TranscriptMediaSessionState.maxEntries + 1, "current-turn entries are never evicted")
     }
 
-    // MARK: - Tool-output parsing
+    // MARK: - Canonical media (the box's `view.media`; the parsing is pinned in transcriptView.test.mjs)
 
-    func testShowOutputWithDimensions() {
-        let r = TranscriptMediaParse.showOutput("Displayed /home/u/cat.png (image/png 600x400, 1234 bytes) in the transcript.")
-        XCTAssertEqual(r?.path, "/home/u/cat.png")
-        XCTAssertEqual(r?.mime, "image/png")
-        XCTAssertEqual(r?.w, 600)
-        XCTAssertEqual(r?.h, 400)
-        XCTAssertEqual(r?.size, 1234)
+    private func mediaMessage(_ id: String, _ media: [TranscriptMediaView]) -> OpencodeMessage {
+        var m = message(id, role: "assistant", completed: 2)
+        m.view = TranscriptMessageView(media: media)
+        return m
     }
 
-    func testShowOutputWithoutDimensions() {
-        let r = TranscriptMediaParse.showOutput("Displayed /home/u/c.mp4 (video/mp4, 99 bytes) in the transcript.")
-        XCTAssertEqual(r?.mime, "video/mp4")
-        XCTAssertNil(r?.w)
-        XCTAssertNil(r?.h)
-        XCTAssertEqual(r?.size, 99)
-    }
-
-    func testShowOutputAnchorsOnTheLastOpenParenthesis() {
-        let r = TranscriptMediaParse.showOutput("Displayed /home/u/my pics (copy) (1).png (image/png 10x20, 5 bytes) in the transcript.")
-        XCTAssertEqual(r?.path, "/home/u/my pics (copy) (1).png")
-        XCTAssertEqual(r?.mime, "image/png")
-        XCTAssertEqual(r?.w, 10)
-        XCTAssertEqual(r?.size, 5)
-    }
-
-    func testShowOutputJunkIsNil() {
-        XCTAssertNil(TranscriptMediaParse.showOutput("nope"))
-        XCTAssertNil(TranscriptMediaParse.showOutput("Displayed /x.png in the transcript."))
-        XCTAssertNil(TranscriptMediaParse.showOutput("Displayed  (image/png, 5 bytes) in the transcript."))
-    }
-
-    func testBeginHandle() {
-        XCTAssertEqual(TranscriptMediaParse.beginHandle("Placeholder reserved. Handle: 1a2b3c4d. Keep it."), "1a2b3c4d")
-        XCTAssertNil(TranscriptMediaParse.beginHandle("Placeholder reserved."))
-        XCTAssertNil(TranscriptMediaParse.beginHandle("Handle: zzz"))
-    }
-
-    func testMimeForPath() {
-        XCTAssertEqual(TranscriptMediaMime.forPath("/a/B.PNG"), "image/png")
-        XCTAssertEqual(TranscriptMediaMime.forPath("/a/b.mov"), "video/quicktime")
-        XCTAssertNil(TranscriptMediaMime.forPath("/a/b.txt"))
-        XCTAssertNil(TranscriptMediaMime.forPath("/a/noext"))
-    }
-
-    func testToolNameMatchingIsExact() {
-        XCTAssertTrue(TranscriptMediaParse.isTool("media_show", "media_show"))
-        XCTAssertFalse(TranscriptMediaParse.isTool("manta_media_show", "media_show"))
-        XCTAssertFalse(TranscriptMediaParse.isTool("media_showcase", "media_show"))
-    }
-
-    // MARK: - Canonical entries
-
-    func testCanonicalBeginInAndShowInBGivesOneReadyEntryOwnedByAWithBeginGeometry() {
-        let a = message("A", role: "assistant", completed: 2, parts: [beginPart("pa", "A", handle: "a1b2")])
-        let b = message("B", role: "assistant", completed: 3, parts: [showPart("pb", "B", handle: "a1b2", path: "/home/u/cat.png")])
-        let entries = TranscriptMediaParse.canonicalEntries([a, b])
-        XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries[0].id, "media:h:a1b2")
-        XCTAssertEqual(entries[0].ownerMessageID, "A")
-        XCTAssertEqual(entries[0].state, .ready)
-        XCTAssertEqual(entries[0].path, "/home/u/cat.png")
-        XCTAssertEqual(entries[0].reserved, TranscriptMediaGeometryInput(aspectRatio: 16.0 / 9.0))
+    func testViewMediaGivesReadyEntriesOwnedByTheMessageItRidesOnInTranscriptOrder() {
+        let a = mediaMessage("A", [
+            TranscriptMediaView(id: "media:h:a1b2", path: "/home/u/cat.png", mime: "image/png", aspectRatio: 16.0 / 9.0, size: 1234, title: "Cat", handle: "a1b2"),
+        ])
+        let b = mediaMessage("B", [
+            TranscriptMediaView(id: "media:s:B:/home/u/x.png", path: "/home/u/x.png", mime: "image/png", width: 30, height: 20, size: 5),
+            TranscriptMediaView(id: "media:s:B:/home/u/v.mp4", kind: "video", path: "/home/u/v.mp4", mime: "video/mp4", size: 9),
+        ])
+        let entries = TranscriptViewMedia.entries([a, message("u", role: "user"), b])
+        XCTAssertEqual(entries.map(\.id), ["media:h:a1b2", "media:s:B:/home/u/x.png", "media:s:B:/home/u/v.mp4"])
+        XCTAssertEqual(entries.map(\.ownerMessageID), ["A", "B", "B"])
+        XCTAssertEqual(entries.map(\.seq), [0, 1, 2])
+        XCTAssertTrue(entries.allSatisfy { $0.state == .ready })
+        XCTAssertEqual(entries[0].reserved, TranscriptMediaGeometryInput(aspectRatio: 16.0 / 9.0), "the begin's reserved box")
         XCTAssertEqual(entries[0].title, "Cat")
+        XCTAssertEqual(entries[1].reserved, TranscriptMediaGeometryInput(width: 30, height: 20))
+        XCTAssertEqual(entries[2].kind, .video)
     }
 
-    func testCanonicalShowWithoutAHandleUsesTheMessageAndPathIdentity() {
-        let b = message("B", role: "assistant", completed: 3, parts: [showPart("pb", "B", handle: nil, path: "/home/u/x.png", dims: " 30x20")])
-        let entries = TranscriptMediaParse.canonicalEntries([b])
-        XCTAssertEqual(entries.map(\.id), ["media:s:B:/home/u/x.png"])
-        XCTAssertEqual(entries[0].reserved, TranscriptMediaGeometryInput(width: 30, height: 20))
+    func testAMessageWithNoViewHasNoCanonicalMedia() {
+        XCTAssertTrue(TranscriptViewMedia.entries([message("A", role: "assistant", completed: 2)]).isEmpty, "an older box: nothing reconstructed on the phone")
     }
 
-    func testCanonicalErrorShowAndUnshownBeginYieldNothing() {
-        let a = message("A", role: "assistant", completed: 2, parts: [
-            beginPart("pa", "A", handle: "a1b2"),
-            toolPart("pe", "A", tool: "media_show", status: "error", input: ["path": .string("/x.png")], output: "boom"),
-        ])
-        XCTAssertTrue(TranscriptMediaParse.canonicalEntries([a]).isEmpty)
+    func testViewMediaEntriesAreDeterministic() {
+        let a = mediaMessage("A", [TranscriptMediaView(id: "media:h:z", path: "/a.png")])
+        XCTAssertEqual(TranscriptViewMedia.entries([a]), TranscriptViewMedia.entries([a]))
     }
 
-    func testCanonicalEntriesAreDeterministic() {
-        let a = message("A", role: "assistant", completed: 2, parts: [beginPart("pa", "A", handle: "a1b2")])
-        let b = message("B", role: "assistant", completed: 3, parts: [
-            showPart("pb", "B", handle: "a1b2", path: "/a.png"),
-            showPart("pc", "B", handle: nil, path: "/b.png"),
-        ])
-        XCTAssertEqual(TranscriptMediaParse.canonicalEntries([a, b]), TranscriptMediaParse.canonicalEntries([a, b]))
+    func testMimeKindMapsImageAndVideoOnly() {
+        XCTAssertEqual(TranscriptMediaMime.kind(of: "Image/PNG"), .image)
+        XCTAssertEqual(TranscriptMediaMime.kind(of: "video/mp4"), .video)
+        XCTAssertNil(TranscriptMediaMime.kind(of: "text/csv"))
+        XCTAssertNil(TranscriptMediaMime.kind(of: nil))
     }
 
     func testLiveOnlyDropsEntriesTheCanonicalListCoversAndOrdersBySeqThenId() {
@@ -496,127 +452,48 @@ final class TranscriptParityTests: XCTestCase {
         XCTAssertEqual(TranscriptTurnVerb.past.count, TranscriptTurnVerb.present.count)
     }
 
-    // MARK: - Truncation
+    // MARK: - Truncation (the box's — pinned in transcriptView.test.mjs; the phone decodes and adapts the live frame)
 
-    func testClassify() {
-        XCTAssertEqual(TranscriptTruncation.classify("max_tokens", lastPartIsToolUse: false), .outputCap)
-        XCTAssertEqual(TranscriptTruncation.classify("length", lastPartIsToolUse: false), .outputCap)
-        XCTAssertEqual(TranscriptTruncation.classify("MAX_TOKENS", lastPartIsToolUse: true), .toolCutoff)
-        XCTAssertEqual(TranscriptTruncation.classify("MODEL_CONTEXT_WINDOW_EXCEEDED", lastPartIsToolUse: false), .contextWall)
-        XCTAssertNil(TranscriptTruncation.classify("end_turn", lastPartIsToolUse: false))
-        XCTAssertNil(TranscriptTruncation.classify("stop", lastPartIsToolUse: false))
-        XCTAssertNil(TranscriptTruncation.classify("tool-calls", lastPartIsToolUse: true))
-        XCTAssertNil(TranscriptTruncation.classify(nil, lastPartIsToolUse: true))
-        XCTAssertNil(TranscriptTruncation.classify("", lastPartIsToolUse: false))
+    func testLiveTruncationFromPayloadRejectsAnEmptyMessageAndAnUnknownKind() {
+        func payload(_ kind: String, _ id: String?, hint: String? = nil) -> StreamTruncationPayload {
+            StreamTruncationPayload(kind: kind, label: "L", hint: hint, messageID: id)
+        }
+        XCTAssertNil(TranscriptLiveTruncation.from(payload: payload("output-cap", nil)))
+        XCTAssertNil(TranscriptLiveTruncation.from(payload: payload("output-cap", "")))
+        XCTAssertNil(TranscriptLiveTruncation.from(payload: payload("mystery", "m")))
+        XCTAssertEqual(
+            TranscriptLiveTruncation.from(payload: payload("context-wall", "m", hint: "H")),
+            TranscriptLiveTruncation(messageID: "m", view: TranscriptTruncationView(kind: "context-wall", label: "L", hint: "H"))
+        )
     }
 
-    func testDescribeStringsAreVerbatim() {
-        XCTAssertEqual(TranscriptTruncation.describe(.outputCap).label, "truncated (output limit)")
-        XCTAssertEqual(TranscriptTruncation.describe(.contextWall).label, "truncated (context full)")
-        XCTAssertEqual(TranscriptTruncation.describe(.toolCutoff).label, "tool call cut off — retry needed")
-        XCTAssertEqual(TranscriptTruncation.describe(.contextWall).hint,
-                       "Response hit the model's context window mid-generation. Run /compact to free space, or start a new session.")
-        XCTAssertTrue(TranscriptTruncation.describe(.outputCap).hint.hasPrefix("Response hit the per-turn output cap."))
-        XCTAssertTrue(TranscriptTruncation.describe(.toolCutoff).hint.hasSuffix("(optionally with a higher max output)."))
-    }
-
-    func testKindOfMessagePrefersTheStepFinishReasonAndFallsBackToFinish() {
-        let step = OpencodePart(type: "step-finish", id: "m:step-finish", messageID: "m", extra: ["reason": .string("max_tokens")])
-        XCTAssertEqual(TranscriptTruncation.kind(of: message("m", role: "assistant", completed: 1, finish: "tool-calls", parts: [step])), .toolCutoff)
-        XCTAssertEqual(TranscriptTruncation.kind(of: message("m", role: "assistant", completed: 1, finish: "length")), .outputCap)
-        XCTAssertNil(TranscriptTruncation.kind(of: message("m", role: "assistant", completed: 1, finish: "stop")))
-        let benign = OpencodePart(type: "step-finish", id: "m:step-finish", messageID: "m", extra: ["reason": .string("stop")])
-        XCTAssertNil(TranscriptTruncation.kind(of: message("m", role: "assistant", completed: 1, finish: "length", parts: [benign])),
-                     "the raw step-finish reason is the box's own signal and wins over info.finish")
-    }
-
-    func testLiveTruncationFromRejectsAnEmptyMessageAndAnUnknownKind() {
-        XCTAssertNil(TranscriptLiveTruncation.from(kind: "output-cap", messageID: nil))
-        XCTAssertNil(TranscriptLiveTruncation.from(kind: "output-cap", messageID: ""))
-        XCTAssertNil(TranscriptLiveTruncation.from(kind: "mystery", messageID: "m"))
-        XCTAssertEqual(TranscriptLiveTruncation.from(kind: "context-wall", messageID: "m"),
-                       TranscriptLiveTruncation(messageID: "m", kind: .contextWall))
+    func testAnOlderBoxsLiveFrameHasNoHint() {
+        let live = TranscriptLiveTruncation.from(payload: StreamTruncationPayload(kind: "output-cap", label: "truncated (output limit)", messageID: "m"))
+        XCTAssertEqual(live?.view.label, "truncated (output limit)")
+        XCTAssertNil(live?.view.hint, "no explain action, no client copy of the words")
     }
 
     func testFooterRuleCoversTheFourCombinations() {
+        let t = TranscriptTruncationView(kind: "output-cap", label: "x")
         XCTAssertTrue(TranscriptFooterRule.shouldEmit(finishedTurn: true, effectiveTruncation: nil))
-        XCTAssertTrue(TranscriptFooterRule.shouldEmit(finishedTurn: true, effectiveTruncation: .outputCap))
-        XCTAssertTrue(TranscriptFooterRule.shouldEmit(finishedTurn: false, effectiveTruncation: .outputCap))
+        XCTAssertTrue(TranscriptFooterRule.shouldEmit(finishedTurn: true, effectiveTruncation: t))
+        XCTAssertTrue(TranscriptFooterRule.shouldEmit(finishedTurn: false, effectiveTruncation: t))
         XCTAssertFalse(TranscriptFooterRule.shouldEmit(finishedTurn: false, effectiveTruncation: nil))
     }
 
-    // MARK: - Turn info
+    // MARK: - Turn wording (which turn ends where is the box's)
 
-    private func usage(output: Double, reasoning: Double = 0) -> OpencodeTokenUsage {
-        OpencodeTokenUsage(input: 100, output: output, reasoning: reasoning, cache: nil)
-    }
-
-    func testTurnInfoSpansTheAssistantRunAfterEachUserMessage() {
-        let msgs = [
-            message("u1", role: "user", created: 100),
-            message("a1", role: "assistant", created: 1_000, completed: 2_000, tokens: usage(output: 10, reasoning: 5)),
-            message("a2", role: "assistant", created: 2_000, completed: 61_000, tokens: usage(output: 20)),
-            message("u2", role: "user", created: 70_000),
-            message("a3", role: "assistant", created: 71_000, completed: 72_500, tokens: usage(output: 7)),
-        ]
-        let info = TranscriptTurns.info(msgs, running: false)
-        XCTAssertEqual(Set(info.keys), ["a2", "a3"])
-        XCTAssertEqual(info["a2"]?.durationMs, 60_000, "first assistant created → last assistant completed")
-        XCTAssertEqual(info["a2"]?.tokens, 35, "output + reasoning summed across the turn")
-        XCTAssertEqual(info["a2"]?.verbSeedID, "a1", "the verb is seeded by the turn's FIRST assistant message")
-        XCTAssertEqual(info["a3"]?.durationMs, 1_500)
-        XCTAssertEqual(info["a3"]?.verbSeedID, "a3")
-    }
-
-    func testABackgroundResultStartsANewTurn() {
+    func testIsBackgroundResultReadsTheBackgroundResultPart() {
         let bg = OpencodePart(type: "background-result", id: "bg", messageID: "bgm", text: nil, extra: [:])
-        let msgs = [
-            message("u1", role: "user", created: 0),
-            message("a1", role: "assistant", created: 10, completed: 20),
-            message("bgm", role: "assistant", created: 100, completed: 100, parts: [bg]),
-            message("a2", role: "assistant", created: 200, completed: 900),
-        ]
-        XCTAssertTrue(TranscriptTurns.isBackgroundResult(msgs[2]))
-        XCTAssertFalse(TranscriptTurns.isBackgroundResult(msgs[1]))
-        let info = TranscriptTurns.info(msgs, running: false)
-        XCTAssertEqual(Set(info.keys), ["a1", "a2"], "the background result is the start of a turn, not a footer carrier")
-        XCTAssertEqual(info["a1"]?.durationMs, 10)
-        XCTAssertEqual(info["a2"]?.durationMs, 700)
-    }
-
-    func testRunningSuppressesTheFooterOnTheTranscriptsLastMessageOnly() {
-        let msgs = [
-            message("u1", role: "user"),
-            message("a1", role: "assistant", created: 10, completed: 20),
-            message("u2", role: "user"),
-            message("a2", role: "assistant", created: 30, completed: 40),
-        ]
-        XCTAssertEqual(Set(TranscriptTurns.info(msgs, running: true).keys), ["a1"])
-        XCTAssertEqual(Set(TranscriptTurns.info(msgs, running: false).keys), ["a1", "a2"])
-    }
-
-    func testAnInFlightLastAssistantGivesNoFooterForItsTurn() {
-        let msgs = [
-            message("u1", role: "user"),
-            message("a1", role: "assistant", created: 10, completed: 20),
-            message("a2", role: "assistant", created: 30, completed: nil),
-        ]
-        XCTAssertTrue(TranscriptTurns.info(msgs, running: false).isEmpty)
-    }
-
-    func testATurnWithoutADurationStillGetsAnEntry() {
-        let msgs = [message("u1", role: "user"), message("a1", role: "assistant", created: nil, completed: 20)]
-        let info = TranscriptTurns.info(msgs, running: false)
-        XCTAssertNotNil(info["a1"])
-        XCTAssertNil(info["a1"]?.durationMs)
-        XCTAssertNil(TranscriptTurns.summary(info["a1"]!))
+        XCTAssertTrue(TranscriptTurns.isBackgroundResult(message("bgm", role: "assistant", parts: [bg])))
+        XCTAssertFalse(TranscriptTurns.isBackgroundResult(message("a1", role: "assistant")))
     }
 
     func testSummaryReadsVerbDurationAndTokens() {
-        let info = TranscriptTurnInfo(durationMs: 104_000, tokens: 12_400, verbSeedID: "msg_01")
-        XCTAssertEqual(TranscriptTurns.summary(info), "Ruminated for 1m44s · 12.4k tokens")
-        XCTAssertEqual(TranscriptTurns.summary(TranscriptTurnInfo(durationMs: 2_000, tokens: nil, verbSeedID: "msg_01")),
-                       "Ruminated for 2s")
+        let turn = TranscriptTurnView(durationMs: 104_000, tokens: 12_400, verbSeedId: "msg_01")
+        XCTAssertEqual(TranscriptTurns.summary(turn), "Ruminated for 1m44s · 12.4k tokens")
+        XCTAssertEqual(TranscriptTurns.summary(TranscriptTurnView(durationMs: 2_000, tokens: nil, verbSeedId: "msg_01")), "Ruminated for 2s")
+        XCTAssertNil(TranscriptTurns.summary(TranscriptTurnView(durationMs: nil, tokens: 5, verbSeedId: "msg_01")), "no duration, no summary")
     }
 
     // MARK: - Message info decoding

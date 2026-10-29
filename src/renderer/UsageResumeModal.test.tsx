@@ -186,11 +186,11 @@ describe("UsageResumeModal — box view + dry-run + apply", () => {
     expect(h.docText()).not.toContain("stale");
   });
 
-  it("an older box (unknown channel) shows 'Update your box to use this.'", async () => {
+  it("an older box (unknown channel) shows 'Update your box to use this'", async () => {
     install({ usageStoppedView: () => Promise.reject(new Error("unknown rpc channel: usage-stopped:view")) });
     h = mount(<UsageResumeModal open onClose={() => {}} />);
     await settle(h);
-    expect(h.docText()).toContain("Update your box to use this.");
+    expect(h.docText()).toContain("Update your box to use this");
   });
 
   it("closing stamps last-looked even without applying", async () => {

@@ -179,102 +179,28 @@ enum UsageMeters {
         }
     }
 
-    /// "344k cold" when the box has flagged the prompt cache stale, nil
-    /// otherwise. Pure, so the label is unit-testable and the view renders
-    /// whatever comes back — the staleness DECISION belongs to the box
-    /// (`computeStaleCache`), never to the client.
-    static func staleChipLabel(_ cache: StreamCachePayload?) -> String? {
-        guard let cache, cache.isStale else { return nil }
+    /// Whether the prompt cache is cold at `now`: the box sends the INSTANT it goes
+    /// cold (`staleAt`, epoch ms) and the client only compares it with its own
+    /// clock — no staleness rule lives here (WS11 D2).
+    static func isCold(_ cache: StreamCachePayload?, now: Date) -> Bool {
+        guard let staleAt = cache?.staleAt else { return false }
+        return now.timeIntervalSince1970 * 1000 >= staleAt
+    }
+
+    /// Time since the last completed turn: the frame's `idleMs` is as of emission, so
+    /// read the instant (`lastCompleted`) against the clock when the box sent it.
+    static func idleMs(_ cache: StreamCachePayload, now: Date) -> Double {
+        guard let last = cache.lastCompleted else { return cache.idleMs }
+        return max(0, now.timeIntervalSince1970 * 1000 - last)
+    }
+
+    /// "344k cold" once the box's `staleAt` has passed, nil otherwise.
+    static func staleChipLabel(_ cache: StreamCachePayload?, now: Date) -> String? {
+        guard let cache, isCold(cache, now: now) else { return nil }
         return "\(formatTokens(cache.staleTokens)) cold"
     }
 
-    /// Re-derive a context breakdown against the model the user has SELECTED.
-    ///
-    /// The box computes `pct` and `segments` against the model that produced
-    /// the last reply — it cannot know the client's per-session override, which
-    /// is local state sent only at submit time. So the derived fields go stale
-    /// the moment the user switches model. The raw token counts do not, and the
-    /// selected model's window is in the catalogue, so the honest number is
-    /// always derivable here. Mirrors the desktop's `computeContextBreakdown`
-    /// (src/shared/streamInterpretation.mjs) so both clients agree.
-    static func recompute(_ ctx: StreamContextPayload, limit: Double?) -> StreamContextPayload {
-        // The "is there a real max context?" signal comes from the BOX
-        // (hasLimit), never re-derived here (BET-1138: "use hasLimit from the
-        // payload" — no second unknown representation). When the box has no
-        // limit, the strip/sheet render the unknown state; the derived fields
-        // are irrelevant and left empty.
-        guard ctx.hasLimit else {
-            return StreamContextPayload(
-                freshInput: ctx.freshInput,
-                cacheRead: ctx.cacheRead,
-                cacheWrite: ctx.cacheWrite,
-                totalInput: ctx.totalInput,
-                pct: 0,
-                hasLimit: false,
-                segments: []
-            )
-        }
-
-        // Box confirmed a max exists; re-derive pct/segments against the
-        // SELECTED model's window. When that window is unknown, fall back to
-        // the desktop's assumed 200k exactly as pre-BET-1138 recompute did —
-        // this only sizes the visible bar; the unknown-state signal is the
-        // box's hasLimit:false, never this pct.
-        let safeLimit: Double
-        if let limit, limit.isFinite, limit > 0 {
-            safeLimit = limit
-        } else {
-            safeLimit = assumedContextTokens
-        }
-
-        // Guard the raw counts: the payload arrives from the box already
-        // rounded and non-negative, but a bad value must never produce NaN or
-        // a negative width. Clamp to [0, ∞) per bucket for the arithmetic only;
-        // the raw fields are copied through unchanged.
-        let fresh  = ctx.freshInput.isFinite  ? max(0, ctx.freshInput)  : 0
-        let read   = ctx.cacheRead.isFinite   ? max(0, ctx.cacheRead)   : 0
-        let write  = ctx.cacheWrite.isFinite  ? max(0, ctx.cacheWrite)  : 0
-        let total  = ctx.totalInput.isFinite  ? max(0, ctx.totalInput)  : 0
-
-        let rawPct = (total / safeLimit) * 100
-        // Rounded, clamped to 0...100 (mirrors `Math.min(100, Math.round(...))`).
-        let pct = min(100, max(0, rawPct.rounded()))
-
-        // Each segment is its bucket over the SELECTED limit, in cost-decreasing
-        // order fresh → cacheWrite → cacheRead, matching the desktop's order.
-        var segments = [
-            StreamContextSegment(kind: "fresh", pct: (fresh / safeLimit) * 100),
-            StreamContextSegment(kind: "cacheWrite", pct: (write / safeLimit) * 100),
-            StreamContextSegment(kind: "cacheRead", pct: (read / safeLimit) * 100),
-        ]
-        // Rescale segments that would sum past 100 the same way the desktop
-        // does (streamInterpretation.mjs), so an over-context payload never
-        // renders widths whose sum exceeds 100.
-        let sum = segments.reduce(0) { $0 + $1.pct }
-        if sum > 100 && sum > 0 {
-            let scale = 100 / sum
-            for i in segments.indices { segments[i].pct *= scale }
-        }
-
-        return StreamContextPayload(
-            freshInput: ctx.freshInput,
-            cacheRead: ctx.cacheRead,
-            cacheWrite: ctx.cacheWrite,
-            totalInput: ctx.totalInput,
-            pct: pct,
-            hasLimit: true,
-            segments: segments
-        )
-    }
-
     // MARK: - Reset-time absolute formatters (BET-967)
-
-    /// Client-side bar-sizing fallback (the desktop's `ASSUMED_CONTEXT_TOKENS`).
-    /// Used ONLY to size the visible bar when the box has confirmed a max exists
-    /// (`hasLimit:true`) but the SELECTED model's window is unknown. The
-    /// unknown-state signal is the box's `hasLimit:false` — never fabricated by
-    /// this constant.
-    private static let assumedContextTokens: Double = 200_000
 
     // OS locale on purpose (autoupdatingCurrent), and the TEMPLATE chooses
     // 12- vs 24-hour from the device — never a literal "HH:mm" pattern and

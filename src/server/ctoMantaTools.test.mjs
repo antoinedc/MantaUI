@@ -317,6 +317,16 @@ test("replay: same key + same args returns the ORIGINAL result without re-execut
   assert.equal(calls.filter((c) => c.name === "tmuxNewSession").length, before, "execute ran exactly once");
 });
 
+test("projects.create goes through the box-wide name allocator: a name tmux says is taken is target_exists, not a raw error (WS11 D5 review)", async () => {
+  const dup = Object.assign(new Error("duplicate session: raced"), { name: "DuplicateSessionNameError" });
+  const spies = makeSpies({ overrides: { tmuxNewSession: () => { throw dup; } } });
+  const { control } = makeControl({ spies });
+  await assert.rejects(
+    control.projectsCreate({ key: "k-race", name: "raced", cwd: fix("cto-fixture") }),
+    (error) => error.code === "target_exists",
+  );
+});
+
 test("counterfactual: a DIFFERENT key on the same op re-executes (replay is key-scoped, not op-scoped)", async () => {
   const { control, calls } = makeControl();
   await control.sessionsCompact({ key: "s1", session: "ses_a" });

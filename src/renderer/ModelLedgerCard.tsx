@@ -21,7 +21,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "./Card";
 import type { LedgerSummary } from "../shared/types";
-import { UPDATE_YOUR_BOX } from "./modelsPicker";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
 
@@ -92,7 +92,7 @@ export function ModelLedgerCard() {
   if (!view) {
     return (
       <Card header={header}>
-        <div className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</div>
+        <UpdateBoxNote />
       </Card>
     );
   }

@@ -4,7 +4,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  validateSessionName,
   compactSession,
   switchModel,
   renameSession,
@@ -53,34 +52,6 @@ function harness(extra = {}) {
   };
   return { published, calls, deps };
 }
-
-// ---------------------------------------------------------------------------
-// validateSessionName
-// ---------------------------------------------------------------------------
-
-test("validateSessionName accepts a normal 1–40 char name", () => {
-  const r = validateSessionName("My Session");
-  assert.equal(r.ok, true);
-  assert.equal(r.name, "My Session");
-});
-
-test("validateSessionName trims surrounding whitespace", () => {
-  assert.equal(validateSessionName("  clear  ").name, "clear");
-});
-
-test("validateSessionName rejects empty, too-short, and over-40-char names", () => {
-  assert.equal(validateSessionName("").ok, false);
-  assert.equal(validateSessionName("   ").ok, false);
-  assert.equal(validateSessionName("a".repeat(41)).ok, false);
-  assert.equal(validateSessionName(null).ok, false);
-  assert.equal(validateSessionName(undefined).ok, false);
-});
-
-test("validateSessionName rejects ':' and control characters", () => {
-  assert.equal(validateSessionName("a:b").ok, false);
-  assert.equal(validateSessionName("line\nbreak").ok, false);
-  assert.equal(validateSessionName("bad\u0000").ok, false);
-});
 
 // ---------------------------------------------------------------------------
 // compactSession — session resolution by id and by directory fallback
@@ -168,7 +139,7 @@ test("renameSession rejects an invalid name without calling tmux", async () => {
   const { calls, deps } = harness();
   const r = await renameSession({ sessionID: "ses_a0", name: "has:colon" }, deps);
   assert.equal(r.ok, false);
-  assert.match(r.error, /cannot contain ':'/);
+  assert.match(r.error, /can't contain “:”/);
   assert.equal(calls.rename.length, 0);
 });
 

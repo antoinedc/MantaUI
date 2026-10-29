@@ -367,6 +367,27 @@ async function tmuxListOutput(args) {
   }
 }
 
+/** Every live tmux session name (including ones Manta does not own) — the "taken" set for name allocation. */
+export async function listSessionNames() {
+  const { stdout } = await tmuxListOutput(["list-sessions", "-F", "#{session_name}"]);
+  return stdout.split("\n").map((n) => n.trim()).filter(Boolean);
+}
+
+/**
+ * `new-session` hit a name that is already taken. `createdHere` is true only when THIS call made the
+ * opencode chat session (so a caller that gives up may delete it); a caller-supplied `existingSessionId`
+ * is never ours to delete.
+ */
+export class DuplicateSessionNameError extends Error {
+  constructor(name, { sessionId, createdHere }) {
+    super(`duplicate session: ${name}`);
+    this.name = "DuplicateSessionNameError";
+    this.sessionName = name;
+    this.sessionId = sessionId ?? null;
+    this.createdHere = !!createdHere;
+  }
+}
+
 export async function listProjects(installHome = INSTALL_HOME) {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
   const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}${FS}#{@manta-owner}`;
@@ -431,13 +452,30 @@ export function isMissingSessionError(err, sessionName) {
 // `cwd` is required to be an absolute directory — callers (newSession /
 // newWindow / newWindowGetIndex) flow through `resolveCwdOrThrow` first, which
 // expands `~` and rejects a missing dir. The BET-307 tmux-side chokepoint.
-async function maybeCreateChatSession(oc, chatMode, cwd, title, permission) {
+// How long creating the opencode session may take. A session create runs inside the box-wide name allocator
+// (WS11 D5), so a hung opencode must not hold it — and with it every other create on the box.
+export const CHAT_SESSION_CREATE_TIMEOUT_MS = 20_000;
+
+export async function maybeCreateChatSession(oc, chatMode, cwd, title, permission, { timeoutMs = CHAT_SESSION_CREATE_TIMEOUT_MS } = {}) {
   if (!chatMode) return null;
   if (!oc || typeof oc.createSession !== "function") {
     throw new Error("chat mode requires an opencode client (oc.createSession)");
   }
-  const sess = await oc.createSession({ directory: cwd, title, permission });
-  return sess.id;
+  const pending = Promise.resolve(oc.createSession({ directory: cwd, title, permission }));
+  let timer;
+  const timedOut = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("The box couldn't start a chat session in time — try again.")), timeoutMs);
+  });
+  try {
+    const sess = await Promise.race([pending, timedOut]);
+    return sess.id;
+  } catch (e) {
+    // A create that finishes AFTER we gave up would be an orphan nobody owns: delete it.
+    void pending.then((sess) => sess?.id && oc.deleteSessionRaw?.(sess.id)).catch(() => {});
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // THE single place a caller-supplied cwd becomes a real directory handed to
@@ -523,6 +561,7 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, e
   // this was the BET-113 regression. `existingSessionId` (from the draft's
   // optimistic create) reuses an already-created opencode session instead of
   // making a second one.
+  let createdHere = false;
   const sid =
     existingSessionId ??
     // Pass an EMPTY title so opencode auto-generates the session's real title
@@ -531,8 +570,19 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, e
     // first-name path then reads that workspace-prefixed string back and
     // renames the window to "workspace / fragment" (BET-1100). The tmux window
     // name itself comes from `windowName` below, not from this title.
-    (await maybeCreateChatSession(oc, chatMode, dir, "", permission));
-  const idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
+    (await maybeCreateChatSession(oc, chatMode, dir, "", permission).then((id) => {
+      createdHere = !!id;
+      return id;
+    }));
+  let idx;
+  try {
+    idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
+  } catch (err) {
+    if (/duplicate session/i.test(String(err?.message ?? err))) {
+      throw new DuplicateSessionNameError(name, { sessionId: sid ?? null, createdHere });
+    }
+    throw err;
+  }
   await applySessionSurvivability(name);
   if (sid) await restampSessionId(name, idx, sid);
   // BET-871: stamp the originating inbox issue on `@manta-forge-issue` right

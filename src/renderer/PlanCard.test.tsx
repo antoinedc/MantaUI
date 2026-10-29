@@ -92,7 +92,7 @@ describe("PlanCard (BET-951)", () => {
     );
 
   it("renders badge, title and the action row (no metrics, no path, no Keep planning)", () => {
-    h = render();
+    h = render({ planUrl: "https://box/pages/plan-sesa" });
     expect(h.text()).toContain("Add login");
     expect(h.text()).toContain("Build here");
     expect(h.text()).toContain("Delegate");
@@ -177,9 +177,14 @@ describe("PlanCard (BET-951)", () => {
     expect(h.text()).toContain("Claude");
   });
 
-  it("Open page is always enabled and labelled 'Open page', firing onOpenInBrowser", () => {
+  it("with no page URL from the box there is no Open page control at all (never a dead button)", () => {
+    h = render();
+    expect(h.text()).not.toContain("Open page");
+  });
+
+  it("Open page is enabled and labelled 'Open page', firing onOpenInBrowser", () => {
     let fired = false;
-    h = render({ onOpenInBrowser: () => { fired = true; } });
+    h = render({ planUrl: "https://box/pages/plan-sesa", onOpenInBrowser: () => { fired = true; } });
     expect(h.text()).toContain("Open page");
     expect(openBtn(h).disabled).toBe(false);
     act(() => openBtn(h).click());

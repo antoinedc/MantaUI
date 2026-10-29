@@ -47,6 +47,7 @@
 //   out like add-seat flows. Cancel deletes only the temp directory / gives the
 //   borrowed live login back — it never removes or rewrites the seat.
 
+import { withErrorMessage, seatSignInFailureMessage, resignFailureMessage } from "./accountsCopy.mjs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -931,7 +932,12 @@ export function createAccountsManager({
       const seat = findSeatView(await providerView(rec.provider), seatId);
       return seat ? { state: "ok", seat } : { state: "failed", error: "login-failed" };
     }
-    const out = { state: "failed", error: rec.error ?? "login-failed" };
+    const error = rec.error ?? "login-failed";
+    const out = {
+      state: "failed",
+      error,
+      message: seatSignInFailureMessage({ error, timedOut: now() - rec.startedAt >= t.loginTimeoutMs }),
+    };
     if (rec.error === "different-org" && rec.orgName) out.orgName = rec.orgName;
     return out;
   }
@@ -1059,7 +1065,20 @@ export function createAccountsManager({
       const seat = findSeatView(await providerView(rec.provider), rec.seatId);
       return seat ? { state: "ok", seat } : { state: "failed", error: "login-failed" };
     }
-    const out = { state: "failed", error: rec.error ?? "login-failed" };
+    const error = rec.error ?? "login-failed";
+    const seat = findSeatView(await providerView(rec.provider), rec.seatId);
+    const out = {
+      state: "failed",
+      error,
+      message: resignFailureMessage({
+        error,
+        timedOut: now() - rec.startedAt >= t.loginTimeoutMs,
+        expectedEmail: rec.expectedEmail ?? null,
+        gotEmail: rec.gotEmail ?? null,
+        seatLabel: seat?.label,
+        email: seat?.email ?? null,
+      }),
+    };
     if (rec.error === "different-account") {
       out.expectedEmail = rec.expectedEmail ?? null;
       out.gotEmail = rec.gotEmail ?? null;
@@ -1106,9 +1125,10 @@ export function createAccountsManager({
   function channel(name, fn) {
     return async (input) => {
       try {
-        return await fn(isObj(input) ? input : {});
+        // WS11 D4 (K7): a `{error: code}` result gains the sentence for that code.
+        return withErrorMessage(await fn(isObj(input) ? input : {}));
       } catch (e) {
-        if (e instanceof AccountsError) return { error: e.code };
+        if (e instanceof AccountsError) return withErrorMessage({ error: e.code });
         log.warn?.(`[accounts] ${name} failed:`, e?.message ?? e);
         throw new Error(ACCOUNTS_SAFE_ERROR_MESSAGE);
       }

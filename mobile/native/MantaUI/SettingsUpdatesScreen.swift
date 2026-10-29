@@ -60,6 +60,14 @@ struct SettingsUpdatesScreen: View {
                 }
             }
 
+            if store.checkFailed {
+                Text("Couldn't check for updates. Try again.")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.danger)
+                    .accessibilityIdentifier("updates-check-failed")
+            } else if store.needsBoxUpdate {
+                UpdateBoxNote()
+            }
             ForEach(store.targets) { target in
                 row(target)
             }
@@ -108,7 +116,7 @@ struct SettingsUpdatesScreen: View {
     }
 
     @ViewBuilder
-    private func row(_ target: UpdateTarget) -> some View {
+    private func row(_ target: UpdateTargetView) -> some View {
         let isServer = target.id == "server"
         SettingsPanel {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
@@ -120,7 +128,7 @@ struct SettingsUpdatesScreen: View {
                         .font(.manta(size: Metrics.type.body, weight: .medium))
                         .foregroundColor(tokens.tx1)
                     Spacer()
-                    if let versions = UpdateTargets.versionText(target) {
+                    if let versions = target.versionText {
                         Text(versions)
                             .font(.manta(size: Metrics.type.xs, design: .monospaced))
                             .foregroundColor(tokens.tx3)
@@ -134,8 +142,8 @@ struct SettingsUpdatesScreen: View {
         .accessibilityIdentifier("updates-row-\(target.id)")
     }
 
-    private func dotColor(_ target: UpdateTarget) -> Color {
-        switch UpdateTargets.describe(target).tone {
+    private func dotColor(_ target: UpdateTargetView) -> Color {
+        switch UpdateTone(wire: target.tone) {
         case .ok: return tokens.ok
         case .action: return tokens.accent
         case .muted: return tokens.tx4
@@ -145,7 +153,7 @@ struct SettingsUpdatesScreen: View {
 
     /// The row's status wording; the server row narrates its own update.
     @ViewBuilder
-    private func statusLine(_ target: UpdateTarget, isServer: Bool) -> some View {
+    private func statusLine(_ target: UpdateTargetView, isServer: Bool) -> some View {
         if isServer, let narration = serverNarration {
             HStack(spacing: Metrics.spacing.sp2) {
                 if narration.busy { ProgressView().tint(tokens.accent) }
@@ -168,10 +176,9 @@ struct SettingsUpdatesScreen: View {
                     .foregroundColor(tokens.tx2)
             }
         } else {
-            let described = UpdateTargets.describe(target)
-            Text(described.text)
+            Text(target.text)
                 .font(.manta(size: Metrics.type.small))
-                .foregroundColor(described.tone == .error ? tokens.danger : tokens.tx3)
+                .foregroundColor(UpdateTone(wire: target.tone) == .error ? tokens.danger : tokens.tx3)
         }
     }
 
@@ -195,8 +202,8 @@ struct SettingsUpdatesScreen: View {
     }
 
     @ViewBuilder
-    private func action(_ target: UpdateTarget, isServer: Bool) -> some View {
-        if UpdateTargets.hasUpdate(target) {
+    private func action(_ target: UpdateTargetView, isServer: Bool) -> some View {
+        if target.hasUpdate {
             let disabled = store.isUpdating || store.checking
             Button {
                 if isServer {
@@ -216,8 +223,8 @@ struct SettingsUpdatesScreen: View {
             .disabled(disabled)
             .opacity(disabled ? 0.4 : 1)
             .accessibilityIdentifier("updates-update-\(target.id)")
-        } else if target.ok, target.manual {
-            if let urlText = target.manualUrl, let url = URL(string: urlText) {
+        } else if UpdateTone(wire: target.tone) == .muted {
+            if let urlText = store.manualUrls[target.id], let url = URL(string: urlText) {
                 Button {
                     openURL(url)
                 } label: {

@@ -36,7 +36,6 @@
 import {
   classifyFinish,
   describeTruncation,
-  computeContextBreakdown,
   selectCacheTtlMs,
   computeStaleCache,
   isTerminalTodo,
@@ -63,6 +62,9 @@ import {
   toolTitle,
 } from "../shared/opencodeV2.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { createRunLedger } from "./runLedger.mjs";
+import { isDelegateTool, isHandoffToolPart } from "./transcriptRuns.mjs";
+import { buildContextPayload } from "./sessionContext.mjs";
 import { randomUUID } from "node:crypto";
 
 // opencode stamps its cache breakpoints with no `ttl`, so Anthropic applies
@@ -164,7 +166,9 @@ function newSessionState() {
     runningType: null,         // "busy" | "retry" | null; preserved for the connect-time snapshot replay
     todos: null,               // last todo_write list ; null = not seen
     model: null,               // { providerID, modelID } of the latest step
-    contextEmitted: null,      // { totalInput, limit } of the last context emit
+    contextEmitted: null,      // { totalInput, limit, model } of the last context emit
+    lastStepTokens: null,      // normalized tokens of the last step (re-emit on a model change)
+    cacheEmitted: null,        // key of the last `cache` emit (dedup)
     retryActive: false,        // a non-null `retry` frame is outstanding
     attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
     compacted: false,          // a compaction ended; the transcript goes stale when its execution settles
@@ -211,6 +215,17 @@ export function createStreamInterpreter({
   listInbox = null,
   // Minted once per manta-server process: a restarted server is "newer" to a client.
   epoch = randomUUID(),
+  // Which model a session's context is measured against (WS11 D2): selected →
+  // default → the last reply's model (sessionContext.mjs). The default answers
+  // with the last-used model so a bare interpreter still emits a labelled context.
+  resolveContextModel = ({ lastUsed }) =>
+    lastUsed?.providerID && lastUsed?.modelID ? { ...lastUsed, basis: "last-used" } : null,
+  // WS11 D11 — the run ledger's two reads (both optional; without them a delivery that cannot be classified at
+  // enqueue time is treated as a boundary, provisionally):
+  //   classifyDelivered({sessionId, messageID}) → "draws" | "transparent" | {cls, user}
+  //   rebuildFromCanonical(sessionId)           → the canonical window to repair a provisional boundary from
+  classifyDelivered = null,
+  rebuildFromCanonical = null,
 }) {
   const sessions = new Map();
   const childParent = new Map(); // child session id -> parent session id
@@ -238,6 +253,34 @@ export function createStreamInterpreter({
   }
   function emit(sid, sub, payload) {
     publish({ kind: "stream", sub, sessionId: sid, payload });
+  }
+  // The live run ledger (WS11 D11): the same rules as the canonical walk (transcriptRuns.mjs), in event order.
+  const runLedger = createRunLedger({
+    epoch,
+    emit: (sid, frame) => emit(sid, "toolRuns", frame),
+    now,
+    setTimer,
+    clearTimer,
+    classifyDelivered,
+    rebuildFromCanonical,
+  });
+  const LEDGER_OUTPUT_MAX = 4096;
+  function ledgerTool(sid, tool) {
+    if (!tool?.name || tool.name === "todo_write" || tool.name === "todowrite") return;
+    const part = {
+      type: "tool",
+      id: tool.idx,
+      callID: tool.callID,
+      messageID: tool.messageID ?? "",
+      tool: tool.name,
+      state: {
+        status: tool.status,
+        input: normalizeToolInput(tool.v2Name, tool.input),
+        ...(tool.hint ? { title: tool.hint } : {}),
+        ...(tool.output && isDelegateTool(tool.name) ? { output: tool.output } : {}),
+      },
+    };
+    runLedger.onTool(sid, part, { childSessionId: tool.childSessionId, handoff: isHandoffToolPart(part) });
   }
 
   // messageChanged: "the canonical copy of this message changed — refetch it".
@@ -320,13 +363,40 @@ export function createStreamInterpreter({
   function emitCacheStaleness(sid, st, tokens, nowMs) {
     st.cachedTokens =
       (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) || st.cachedTokens;
-    emit(sid, "cache", computeStaleCache({
+    emitCache(sid, st, nowMs);
+  }
+
+  // The `cache` frame for a session. Emitted at step end (running, so `staleAt` is
+  // null) AND at the running->false edge, which is the emit that carries the
+  // instant the cache goes cold. Deduped on what a client would see change.
+  function emitCache(sid, st, nowMs = now()) {
+    if (st.lastCompleted == null) return;
+    const payload = computeStaleCache({
       lastCompleted: st.lastCompleted,
       now: nowMs,
       ttlMs: selectCacheTtlMs(cacheTtlLabel ?? TTL_DEFAULT),
       cachedTokens: st.cachedTokens,
       running: st.running,
-    }));
+    });
+    const key = `${payload.staleAt}|${payload.isStale}|${payload.ttlMs}|${payload.staleTokens}|${payload.lastCompleted}`;
+    if (st.cacheEmitted === key) return;
+    st.cacheEmitted = key;
+    emit(sid, "cache", payload);
+  }
+
+  // The `context` frame, measured against the session's SELECTED model (WS11 D2).
+  function emitContext(sid, st) {
+    const tokens = st.lastStepTokens;
+    if (!tokens) return;
+    const totalInput = (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
+    if (totalInput <= 0) return;
+    const resolved = resolveContextModel({ sessionId: sid, lastUsed: st.model });
+    const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+    const modelKey = resolved ? `${resolved.providerID}/${resolved.modelID}/${resolved.basis}` : "";
+    const prev = st.contextEmitted;
+    if (prev && prev.totalInput === totalInput && prev.limit === limit && prev.model === modelKey) return;
+    st.contextEmitted = { totalInput, limit, model: modelKey };
+    emit(sid, "context", buildContextPayload(tokens, resolved, limit));
   }
 
   // The single place `running` changes. Stamps the idle->busy EDGE only, so a
@@ -341,11 +411,14 @@ export function createStreamInterpreter({
     setRunning(st, running);
     st.runningType = running ? "busy" : null;
     emit(sid, "running", { running, type: running ? "busy" : "idle", since: st.runningSince });
+    if (!running) emitCache(sid, st);
   }
 
   function emitTurnComplete(sid, st, complete) {
     setRunning(st, st.running && !complete);
     emit(sid, "turnComplete", { complete, running: st.running, since: st.runningSince });
+    runLedger.onTurnComplete(sid, complete);
+    if (complete) emitCache(sid, st);
   }
 
   // ---- tool frames ---------------------------------------------------------
@@ -508,6 +581,11 @@ export function createStreamInterpreter({
     }
     tool.status = ok ? "completed" : "error";
     tool.ended = true;
+    if (ok && isDelegateTool(tool.name)) {
+      const out = toolOutputText(tool.v2Name, d.content);
+      if (out) tool.output = out.length > LEDGER_OUTPUT_MAX ? out.slice(0, LEDGER_OUTPUT_MAX) : out;
+    }
+    ledgerTool(sid, tool);
     emit(sid, "toolEnded", { sessionId: sid, idx: tool.idx, ok, ...(tool.truncated ? { truncated: true } : {}) });
     emit(sid, "toolBoundary", {
       messageID: String(d.assistantMessageID ?? tool.messageID ?? ""),
@@ -803,12 +881,14 @@ export function createStreamInterpreter({
       case "session.inbox.delivered": {
         // The user's message id IS the inbox id; it joins the timeline now.
         onInboxEvent(sid, st, evt);
+        runLedger.onDelivered(sid, d.inboxID, d.inboxID);
         noteMessageChanged(sid, d.inboxID);
         return;
       }
       case "session.inbox.enqueued":
       case "session.inbox.cancelled":
       case "session.inbox.delivery.changed": {
+        if (evt.type === "session.inbox.enqueued") runLedger.onEnqueued(d.inboxID, d.item);
         onInboxEvent(sid, st, evt);
         return;
       }
@@ -828,11 +908,14 @@ export function createStreamInterpreter({
         const field = reasoning ? "reasoning" : "text";
         // V2 deltas are phrase-level already, so they are forwarded as they
         // arrive; the part id is the one the transcript mapper gives the block.
-        emit(sid, "flush", { messageID, partID: `${messageID}:${field}:${d.ordinal ?? 0}`, field, text: chunk });
+        const partID = `${messageID}:${field}:${d.ordinal ?? 0}`;
+        emit(sid, "flush", { messageID, partID, field, text: chunk });
+        (reasoning ? runLedger.onReasoning : runLedger.onText)(sid, { partID, messageID, text: chunk });
         return;
       }
       case "session.tool.input.started": {
-        ensureTool(sid, st, d);
+        const tool = ensureTool(sid, st, d);
+        ledgerTool(sid, tool);
         noteMessageChanged(sid, d.assistantMessageID);
         return;
       }
@@ -851,6 +934,7 @@ export function createStreamInterpreter({
           announceTool(sid, tool, "running");
         }
         if (tool.name === "todo_write" || tool.name === "todowrite") emitTodos(sid, st, tool.input.todos);
+        ledgerTool(sid, tool);
         noteMessageChanged(sid, d.assistantMessageID);
         return;
       }
@@ -869,6 +953,7 @@ export function createStreamInterpreter({
           if (!st.liveChildStatus.has(md.sessionID)) st.liveChildStatus.set(md.sessionID, "running");
           subagentFrame(sid, st, tool, "running", null);
         }
+        ledgerTool(sid, tool);
         noteMessageChanged(sid, d.assistantMessageID);
         return;
       }
@@ -902,16 +987,15 @@ export function createStreamInterpreter({
           emit(sid, "truncation", {
             kind,
             label: describeTruncation(kind).label,
+            // The same {kind, label, hint} the canonical `view.truncation` carries (WS11 D8): no client keeps `describe`.
+            hint: describeTruncation(kind).hint,
             messageID: mid || undefined,
           });
         }
         const totalInput = (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
         if (totalInput > 0) {
-          const limit = st.model ? contextLimitFor(st.model.providerID, st.model.modelID) : null;
-          if (!st.contextEmitted || st.contextEmitted.totalInput !== totalInput || st.contextEmitted.limit !== limit) {
-            st.contextEmitted = { totalInput, limit };
-            emit(sid, "context", computeContextBreakdown(tokens, limit));
-          }
+          st.lastStepTokens = tokens;
+          emitContext(sid, st);
           emitCacheStaleness(sid, st, tokens, now());
         }
         noteMessageChanged(sid, mid);
@@ -933,6 +1017,7 @@ export function createStreamInterpreter({
         const own = sessions.get(sid);
         if (own) for (const t of own.tools.values()) stopShellPoll(t);
         sessions.delete(sid);
+        runLedger.onDeleted(sid);
         childParent.delete(sid);
         return;
       }
@@ -999,6 +1084,7 @@ export function createStreamInterpreter({
         emit(sid, "compaction", { phase: "ended", firstLine: compactionFirstLine(st.compactionText ?? "") });
         st.compactionText = "";
         st.compacted = true;
+        runLedger.onCompacted(sid);
         return;
       }
       case "session.compacted": {
@@ -1017,6 +1103,8 @@ export function createStreamInterpreter({
   function resync(sid, { running, permissions, questions } = {}) {
     const st = sessions.get(sid);
     if (!st) return;
+    // A delivery still being classified resolves NOW, before any resync frame is emitted.
+    runLedger.onReconnect(sid);
     if (running === false && st.running) {
       clearRetry(sid, st);
       emitRunning(sid, st, false);
@@ -1084,7 +1172,8 @@ export function createStreamInterpreter({
           running.push({ sessionId: sid, since: st.runningSince, type: st.runningType ?? null });
         }
       }
-      const out = [{ kind: "runningSet", payload: { sessions: running } }];
+      // `epoch` identifies this interpreter process: clients keep the run values of the LATEST connection's epoch only.
+      const out = [{ kind: "runningSet", payload: { sessions: running, epoch } }];
       for (const [sid, st] of sessions) {
         // Same precedence as the live `attention` frame (question over
         // permission) so a reconnecting sidebar shows the badge.
@@ -1098,9 +1187,49 @@ export function createStreamInterpreter({
         if (st.permissions.length > 0) {
           out.push({ kind: "stream", sub: "permissions", sessionId: sid, payload: { permissions: st.permissions } });
         }
+        // The idle-edge `cache` (carries `staleAt`) and the current `context`, so a
+        // client that connects mid-idle does not wait for the next turn.
+        if (st.lastCompleted != null) {
+          out.push({
+            kind: "stream", sub: "cache", sessionId: sid,
+            payload: computeStaleCache({
+              lastCompleted: st.lastCompleted,
+              now: now(),
+              ttlMs: selectCacheTtlMs(cacheTtlLabel ?? TTL_DEFAULT),
+              cachedTokens: st.cachedTokens,
+              running: st.running,
+            }),
+          });
+        }
+        if (st.lastStepTokens) {
+          const resolved = resolveContextModel({ sessionId: sid, lastUsed: st.model });
+          const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+          out.push({ kind: "stream", sub: "context", sessionId: sid, payload: buildContextPayload(st.lastStepTokens, resolved, limit) });
+        }
       }
+      out.push(...runLedger.snapshotFrames());
       return out;
     },
+    /** The configured cache TTL changed (`config:update`): re-emit every cache frame. */
+    setCacheTtlLabel(label) {
+      cacheTtlLabel = typeof label === "string" && label.length > 0 ? label : null;
+      for (const [sid, st] of sessions) emitCache(sid, st);
+    },
+    /** A session's selected model changed (`model-prefs:set`): re-measure its context. */
+    reemitContext(sid) {
+      const st = sessions.get(sid);
+      if (st) emitContext(sid, st);
+      // false = the interpreter has nothing to measure for this session (not seen since boot, or no step yet):
+      // the caller measures it from the transcript instead.
+      return Boolean(st?.lastStepTokens);
+    },
+    /** The default model changed (`config:update`): re-measure every known session. */
+    reemitAllContext() {
+      for (const [sid, st] of sessions) emitContext(sid, st);
+    },
+    // The live run ledger: `ledgerFor(sid)` is what `opencode:messages` / `opencode:message` stamp revisions from.
+    ledgerFor: (sid) => runLedger.ledgerFor(sid),
+    runLedger,
     sessions,
   };
 }

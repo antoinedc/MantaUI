@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { validateSessionName } from "../server/sessionNaming.mjs";
 // Moved from src/renderer/chatUtils.test.ts alongside the logic (BET-551).
 // Tests are unchanged; only the module path differs.
 import {
@@ -15,7 +16,6 @@ import {
   collectChildSessionIds,
   computeContextBreakdown,
   computeStaleCache,
-  countRunningSubagents,
   countUserTurns,
   describeTruncation,
   extractSubagentInfo,
@@ -1399,53 +1399,6 @@ describe("collectChildSessionIds", () => {
   });
 });
 
-describe("countRunningSubagents", () => {
-  const taskPart = (childId: string, status: string) => ({
-    parts: [{ type: "tool", tool: "task", state: { status, metadata: { sessionId: childId } } }],
-  });
-
-  it("returns 0 for null/empty transcript", () => {
-    expect(countRunningSubagents(null)).toBe(0);
-    expect(countRunningSubagents([])).toBe(0);
-  });
-
-  it("counts transcript-status running / pending; skips completed / error", () => {
-    const messages = [
-      taskPart("a", "running"),
-      taskPart("b", "completed"),
-      taskPart("c", "pending"),
-      taskPart("d", "error"),
-    ];
-    // a (running) + c (pending) = 2
-    expect(countRunningSubagents(messages)).toBe(2);
-  });
-
-  it("liveStatus 'idle' WINS over transcript 'running' (the staleness case)", () => {
-    // Child just sent session.idle but the parent's task-part status snapshot
-    // is still "running" because the parent's transcript hasn't been refetched
-    // yet. Without this override, the sidebar would over-count.
-    const messages = [taskPart("a", "running"), taskPart("b", "running")];
-    const live = new Map<string, "running" | "idle">([
-      ["a", "idle"],
-      ["b", "running"],
-    ]);
-    expect(countRunningSubagents(messages, live)).toBe(1);
-  });
-
-  it("liveStatus 'running' counts even when transcript says completed", () => {
-    // Rare but possible during a refetch race: live SSE says running, the
-    // refetched task part still shows the previous completed run. Trust live.
-    const messages = [taskPart("a", "completed")];
-    const live = new Map<string, "running" | "idle">([["a", "running"]]);
-    expect(countRunningSubagents(messages, live)).toBe(1);
-  });
-
-  it("missing live entry falls back to transcript status", () => {
-    const messages = [taskPart("a", "running")];
-    expect(countRunningSubagents(messages, new Map())).toBe(1);
-  });
-});
-
 describe("summarizeChildSession", () => {
   it("returns zeros for null / empty input", () => {
     expect(summarizeChildSession(null)).toEqual({ toolCount: 0, lastToolName: null, tokens: 0 });
@@ -1806,6 +1759,33 @@ describe("buildTitlePromptInput", () => {
     expect(
       buildTitlePromptInput([{ info: { role: "user" }, parts: [] }]),
     ).toBe("");
+  });
+});
+
+describe("sanitizeGeneratedTitle — a title the box accepts as a window name", () => {
+  it("replaces an internal colon and keeps within 40 characters", () => {
+    expect(sanitizeGeneratedTitle("Fix: login redirect")).toBe("Fix – login redirect");
+    const long = sanitizeGeneratedTitle("Investigate intermittent websocket reconnect failures");
+    expect(long.length).toBeLessThanOrEqual(40);
+    expect(long.length).toBeGreaterThan(0);
+    // 45 characters in 3 words: cut at a word boundary, never mid-word, never empty
+    const forty5 = sanitizeGeneratedTitle("Reconfiguration of authentication middleware");
+    expect(forty5.length).toBeLessThanOrEqual(40);
+    expect(forty5).toBe("Reconfiguration of authentication");
+  });
+
+  it("every shape the sanitizer returns passes validateSessionName", () => {
+    for (const raw of [
+      "Fix: login redirect",
+      "Title: Refactor: the store\x07 now",
+      "a:b:c",
+      "Reconfiguration of authentication middleware",
+      "Investigate intermittent websocket reconnect failures after sleep",
+      "Pick a color: red, green or blue and then more words",
+    ]) {
+      const out = sanitizeGeneratedTitle(raw);
+      expect(validateSessionName(out)).toEqual({ ok: true, name: out });
+    }
   });
 });
 

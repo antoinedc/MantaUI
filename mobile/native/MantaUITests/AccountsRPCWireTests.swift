@@ -74,16 +74,31 @@ final class AccountsRPCWireTests: XCTestCase {
         XCTAssertEqual(lastObject?["flowId"] as? String, "f1")
     }
 
-    func testResignRefusalThrowsFromEitherEnvelopeShape() async {
+    func testResignRefusalCarriesTheCodeAndTheBoxsSentence() async {
         let client = makeClient()
-        for reply in [#"{"error": "live-seat"}"#, #"{"result": {"error": "live-seat"}}"#] {
-            AccountsCapturingURLProtocol.result = reply
-            do {
-                _ = try await client.accountsResignSeat(provider: "claude", seatId: "s1")
-                XCTFail("expected a throw for \(reply)")
-            } catch {
-                XCTAssertEqual(error as? MantaError, .server("live-seat"), reply)
-            }
+        AccountsCapturingURLProtocol.result = #"{"result": {"error": "live-seat", "message": "This is the login the box is using right now, so it can't be removed."}}"#
+        do {
+            _ = try await client.accountsResignSeat(provider: "claude", seatId: "s1")
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertEqual(error as? AccountsRefusal,
+                           AccountsRefusal(code: "live-seat", message: "This is the login the box is using right now, so it can't be removed."))
+        }
+        // An older box words no error: the static fallback, never the raw code.
+        AccountsCapturingURLProtocol.result = #"{"result": {"error": "live-seat"}}"#
+        do {
+            _ = try await client.accountsResignSeat(provider: "claude", seatId: "s1")
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertEqual(error as? AccountsRefusal, AccountsRefusal(code: "live-seat", message: AccountsCopy.fallback))
+        }
+        // The rpc envelope's own error (a sentence) is still a plain server error.
+        AccountsCapturingURLProtocol.result = #"{"error": "This sign-in has expired. Close it and start again."}"#
+        do {
+            _ = try await client.accountsResignSeat(provider: "claude", seatId: "s1")
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertEqual(error as? MantaError, .server("This sign-in has expired. Close it and start again."))
         }
     }
 

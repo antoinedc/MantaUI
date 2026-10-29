@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { launcherSpawnPayload } from "./launcherSpawn";
 import { MotionConfig } from "framer-motion";
 import { Bell, PhoneCall, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
@@ -21,13 +22,13 @@ import {
   type ModelSelection,
   readSavedMode,
   writeSavedMode,
-  resolveLauncherFlags,
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload, CtoState } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
+import { refreshBoxCapabilities, resetBoxCapabilities, useBoxCapability } from "./hooks/useBoxCapabilities";
 import { UpgradeGate } from "./UpgradeGate";
 import { boxNeedsMajorUpgrade } from "./upgradeGateLogic";
 import { UpdateBar } from "./UpdateBar";
@@ -242,7 +243,6 @@ function Shell() {
   // the App-local `desktopRestarting` below (the desktop analogue of boxRestarting).
   const desktopDownloadPercent = useStore((s) => s.desktopDownloadPercent);
   const connectionState = useStore((s) => s.connectionState);
-  const launcherFlags = useStore((s) => s.launcherFlags);
   const createDraft = useStore((s) => s.createDraft);
   const boxStale = useStore((s) => s.boxStale);
   // BET-708: first-time pairing swaps window.api in place with no reload
@@ -645,22 +645,7 @@ function Shell() {
       window.api
         .delegateList()
         .then((list) => {
-          const store = useStore.getState();
-          store.setJobs(Array.isArray(list) ? list : []);
-          // A job's tmux window is created ON THE BOX, so nothing here has
-          // re-listed windows since bootstrap and the tree is missing it.
-          // computeJobNesting drops a job whose window it can't find, so
-          // without this the job is invisible in the sidebar even though the
-          // slice above holds it. Re-list only when the tree actually
-          // disagrees (window created for a running job, or still present for
-          // a finished one) — not on every event, which would mean a tmux call
-          // per job per activity tick.
-          const after = useStore.getState();
-          if (shouldResyncWindowsForJobs(after.projects, after.jobs)) {
-            void after.refresh().catch(() => {
-              /* transport blip — the next tick re-evaluates the invariant */
-            });
-          }
+          useStore.getState().setJobs(Array.isArray(list) ? list : []);
         })
         .catch((e) => {
           // BET-640: a transport blip keeps today's silent behaviour (leave
@@ -1091,6 +1076,19 @@ function Shell() {
     void refreshUpdateTargets().catch(() => {});
   }, [connectionState.state, apiGeneration]);
 
+  // A transport swap is a (possibly different) box: forget what the last one said BEFORE the read below, so a
+  // failed first read can never leave the old box's capabilities gating the new one (WS11 D1 review #5).
+  useEffect(() => {
+    resetBoxCapabilities();
+  }, [apiGeneration]);
+
+  // The box's capability list (WS11 D1): read on connect and on every reconnect
+  // so gated surfaces know what the box can do before they mount.
+  useEffect(() => {
+    if (connectionState.state !== "connected") return;
+    void refreshBoxCapabilities();
+  }, [connectionState.state, apiGeneration]);
+
   // Server-update progress (this ticket): while the box runs
   // scripts/self-update.sh, manta-server tails its log and republishes each
   // MANTA_PROGRESS marker as a `serverUpdateProgress` bus event. The renderer
@@ -1158,7 +1156,7 @@ function Shell() {
   //                                       → running:false (latches "idle"
   //                                         attention if user isn't on the
   //                                         window — same logic as the poller)
-  //   - childSession                      → remember child → parent
+  //   - windowStatus                      → the box's per-session rollup
   //   - attention {kind}                  → "question" | "permission" | clear
   //
   // `turnComplete` is NOT used for the dot: the box derives it from the
@@ -1174,11 +1172,26 @@ function Shell() {
       createSidebarFrameHandler({
         setChatRunning: (sid, running) => useStore.getState().setChatRunning(sid, running),
         setChatAttention: (sid, kind) => useStore.getState().setChatAttention(sid, kind),
-        setSessionParent: (child, parent) => useStore.getState().setSessionParent(child, parent),
+        setWindowStatus: (sid, payload) => useStore.getState().setWindowStatus(sid, payload),
       }),
     );
     return off;
   }, [apiGeneration]);
+
+  // WS11 D7: the box's per-window rollup (busy beneath, direct subagents, stopped). Streamed as `windowStatus`
+  // frames — the connect snapshot replays every windowed session, so a session that stopped while we were away is
+  // corrected by the stream. This read only FILLS sessions no frame has covered yet and never overwrites one (a frame
+  // is always newer than a read; replacing wholesale could resurrect a finished child's `busy`). An older box (no
+  // capability) has no rollup — rows show their own turn only.
+  const windowStatusCap = useBoxCapability("sessions-window-status-1");
+  const pullWindowStatus = () => {
+    if (windowStatusCap !== true || !window.api.sessionsWindowStatus) return;
+    window.api
+      .sessionsWindowStatus()
+      .then((map) => useStore.getState().fillWindowStatus(map ?? {}))
+      .catch((e) => console.warn("[window-status] read failed:", e instanceof Error ? e.message : e));
+  };
+  useEffect(pullWindowStatus, [apiGeneration, windowStatusCap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The box replays its authoritative running set on every events
   // (re)connect. Without it, a turn already underway when the app connected
@@ -1191,9 +1204,10 @@ function Shell() {
         .map((s) => s?.sessionId)
         .filter((s): s is string => typeof s === "string" && s.length > 0);
       useStore.getState().reconcileRunningSet(ids);
+      pullWindowStatus();
     });
     return off;
-  }, [apiGeneration]);
+  }, [apiGeneration, windowStatusCap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // App-control bus (BET-840/841). The box publishes ONE `appControl` kind
   // with an `action` discriminator whenever an app-control tool lands a
@@ -2166,9 +2180,9 @@ function Shell() {
                 const launcherDef = m.modeId === "terminal"
                   ? undefined
                   : availableLaunchers.find((l) => l.id === m.modeId);
-                const launcher = launcherDef
-                  ? { id: launcherDef.id, flags: resolveLauncherFlags(launcherDef.flags, launcherFlags[launcherDef.id]) }
-                  : undefined;
+                // The box resolves the saved launch options at spawn (WS11 D3); an older box is sent its own
+                // flag defaults so no option is silently dropped.
+                const launcher = launcherDef ? launcherSpawnPayload(launcherDef) : undefined;
                 return (
                   <PanelShell key={`term:${key}`} active={isActiveThisMode}>
                     <Terminal

@@ -98,6 +98,32 @@ final class UpgradeStoreTests: XCTestCase {
         XCTAssertNil(store.screen)
     }
 
+    // WS11 D1 review #13: mid-migration `/api/version` can be unreadable (or the list not loaded yet); the upgrade
+    // screen renders from `/api/upgrade` alone, whatever the capability reader says.
+    func testTheScreenRendersFromTheUpgradeReadWhileCapabilitiesAreLoadingOrFailed() async {
+        let loading = BoxCapabilitiesStore(load: { try await Task.sleep(for: .seconds(30)); throw MantaError.transport("never") })
+        XCTAssertEqual(loading.state, .loading)
+        let failedStore = BoxCapabilitiesStore(load: { throw MantaError.transport("migrating") })
+        await failedStore.refresh()
+        XCTAssertEqual(failedStore.state, .failed(lastLoaded: nil))
+        for statusToShow in [running(), failed(step: "migrate")] {
+            let box = FakeBox()
+            box.answer(.success(statusToShow))
+            let store = makeStore(box)
+            await store.read()
+            XCTAssertEqual(store.screen?.kind, statusToShow.state == .running ? .running : .failed)
+            if statusToShow.state == .failed {
+                // An older box (no upgrade view): Retry is still offered, Roll back is not — the behaviour that matters mid-migration.
+                XCTAssertEqual(store.screen?.canRetry, true)
+                XCTAssertEqual(store.screen?.canRollback, false)
+            }
+        }
+        XCTAssertEqual(loading.state, .loading, "the upgrade screen never waited on the capability reader")
+        XCTAssertEqual(failedStore.state, .failed(lastLoaded: nil))
+        failedStore.resetForBoxChange()
+        loading.resetForBoxChange()
+    }
+
     func testAReadFeedsTheScreen() async {
         let box = FakeBox()
         box.answer(.success(running()))

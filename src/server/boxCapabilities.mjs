@@ -28,6 +28,30 @@ export const BOX_CAPABILITIES = Object.freeze([
   "forge-diff-view-1",
   "forge-inbox-view-1",
   "forge-messages-1",
+  // WS11 D2 (stale-cache instant, context against the selected model)
+  "cache-stale-at-1",
+  "context-selected-model-1",
+  // WS11 D3 (box-derived Settings fields)
+  "devices-view-1",
+  "forge-status-secondary-1",
+  "update-targets-view-1",
+  "upgrade-view-1",
+  "launchers-flags-1",
+  // WS11 D4 (accounts copy, row states)
+  "accounts-copy-1",
+  // WS11 D5 (naming, rename, proposed root)
+  "sessions-naming-1",
+  "forge-clone-view-1",
+  // WS11 D6 (close flow)
+  "sessions-close-1",
+  // WS11 D7 (window status + job nesting)
+  "sessions-window-status-1",
+  // WS11 D8–D9 (message.view: turn footer, truncation, canonical media)
+  "transcript-view-1",
+  // WS11 D10 (plan question data)
+  "questions-plan-1",
+  // WS11 D11 (tool activity wording + runs: part.view, message.view.runs, the toolRuns frame, runningSet.epoch)
+  "transcript-runs-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

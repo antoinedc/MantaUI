@@ -97,11 +97,11 @@ describe("ModelsWeCouldntIdentify (renders the box's rows)", () => {
     expect(h.text()).not.toContain("Matched automatically");
   });
 
-  it("an older box (unknown channel) shows 'Update your box to use this.'", async () => {
+  it("an older box (unknown channel) shows 'Update your box to use this'", async () => {
     h = mountBlock("unsupported").h;
     await h.flush();
     await h.flush();
-    expect(h.text()).toContain("Update your box to use this.");
+    expect(h.text()).toContain("Update your box to use this");
   });
 
   it("probable → Confirm declares {key, catalogId} and shows the box's message; the refreshed list replaces the rows", async () => {
@@ -415,10 +415,10 @@ describe("ModelsCard (renders models:table)", () => {
     expect(h.docQuery('div[role="dialog"]')).toBeTruthy();
   });
 
-  it("an older box (unknown channel) shows 'Update your box to use this.'", async () => {
+  it("an older box (unknown channel) shows 'Update your box to use this'", async () => {
     const m = await mountCard("unsupported");
     h = m.h;
-    expect(h.text()).toContain("Update your box to use this.");
+    expect(h.text()).toContain("Update your box to use this");
     expect(h.container.querySelector("table")).toBeNull();
   });
 });

@@ -39,6 +39,7 @@ import * as tmux from "./tmux.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { loadJobs } from "./delegate.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { isPlanExitQuestion } from "./questionsDecorator.mjs";
 
 const DIR = statePath();
 const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
@@ -286,18 +287,6 @@ export function routeNotification(payload, presence, now = Date.now()) {
 // ---------------------------------------------------------------------------
 // Event classification (pure) + dispatch (stateful)
 // ---------------------------------------------------------------------------
-
-/**
- * Whether a question is opencode's plan_exit approval — the "Plan ready"
- * handoff at the end of plan mode (BET-993). opencode's plan_exit question
- * literal starts with "Plan at " and carries header "Build Agent". We match
- * either so the detection survives opencode phrasing drift.
- */
-function isPlanExitQuestion(q) {
-  if (!q || typeof q !== "object") return false;
-  const question = typeof q.question === "string" ? q.question : "";
-  return question.startsWith("Plan at ") || q.header === "Build Agent";
-}
 
 // MantaUI's notification body for the plan_exit approval, replacing opencode's
 // raw "Plan at <derived .md path>…" text so no opencode path ever leaks to the

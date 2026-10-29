@@ -46,7 +46,7 @@ function Probe() {
     setMessages: stubs.setMessages as never,
     setRefreshing: stubs.setRefreshing as never,
     scheduleRefetch: stubs.scheduleRefetch as never,
-    fetchOpts: () => ({}),
+    fetchOpts: () => ({ view: true as const }),
     spliceMessage: stubs.spliceMessage as never,
     scheduleChildRefetch: stubs.scheduleChildRefetch as never,
     childSessionIds: stubs.childSessionIds as never,

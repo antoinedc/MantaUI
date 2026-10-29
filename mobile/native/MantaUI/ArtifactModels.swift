@@ -235,16 +235,6 @@ struct ArtifactsListResult: Decodable, Equatable, Sendable {
     }
 }
 
-/// Detects a box that predates `artifacts:list`: it answers an unknown channel
-/// with `{error: "unknown rpc channel: artifacts:list"}`, which `MantaAPIClient`
-/// surfaces as `MantaError.server`. No fallback derivation exists.
-enum ArtifactsCapability {
-    static func isUnsupported(_ error: Error) -> Bool {
-        guard case MantaError.server(let message) = error else { return false }
-        return message.hasPrefix("unknown rpc channel: artifacts:list")
-    }
-}
-
 /// Footnote copy for `degraded` entries.
 enum ArtifactDegradedCopy {
     static let publicAddress = "Published pages are hidden — this box has no public address."

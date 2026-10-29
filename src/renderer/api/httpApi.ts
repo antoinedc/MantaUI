@@ -74,6 +74,7 @@ import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
 import { normalizeUpgradeStatus } from "../upgradeGateLogic";
 import { ship } from "../log";
+import { onRunConnection, onRunEpoch } from "../runEpoch";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -589,6 +590,9 @@ export function dispatchFrame(data: unknown) {
       sessionId?: string;
     };
     if (kind === "heartbeat") return; // liveness ping only — no listener, no demux
+    // The connection's first frame names the box's interpreter epoch (WS11 D11): recorded HERE, before any listener, so a chat
+    // opened after the snapshot still reads it and no subscriber ordering can miss it.
+    if (kind === "runningSet") onRunEpoch((payload as { epoch?: string } | undefined)?.epoch);
     const set = listeners[kind as Kind];
     if (!set) return;
     // The `stream` kind wraps a derived sub-event: the box publishes
@@ -648,6 +652,8 @@ function getController(): WsReconnectController {
     onReconnect: fireResync,
     onState: (s) => {
       useStore.getState().setConnectionState(s);
+      // A new connection retires every answer issued before it and awaits its own `runningSet` epoch (WS11 D11).
+      if (s.state === "connected") onRunConnection();
       ship("info", "ws state", { state: s.state });
       // Fresh connect (initial or reconnect, including a forced one): reset
       // the liveness clock so the watchdog doesn't immediately re-fire while
@@ -832,6 +838,10 @@ export const httpApi: Api = {
     rpcWithTimeout(IPC.syncSnapshot, RPC_METADATA_TIMEOUT_MS, args),
   tmuxNewSession: (input) => rpc(IPC.tmuxNewSession, input),
   tmuxNewWindow: (input) => rpc(IPC.tmuxNewWindow, input),
+  sessionsProposeName: (input) => rpc(IPC.sessionsProposeName, input),
+  sessionsClosePreview: (input) => rpc(IPC.sessionsClosePreview, input),
+  sessionsClose: (input) => rpc(IPC.sessionsClose, input),
+  sessionsWindowStatus: () => rpc(IPC.sessionsWindowStatus),
   tmuxRenameSession: (input) => rpc(IPC.tmuxRenameSession, input),
   tmuxRenameWindow: (input) => rpc(IPC.tmuxRenameWindow, input),
   tmuxKillSession: (sessionName) => rpc(IPC.tmuxKillSession, sessionName),
@@ -1132,6 +1142,7 @@ export const httpApi: Api = {
 
   // -- AI CLI TUI launchers --
   launchersList: () => rpc(IPC.launchersList),
+  launchersSetFlag: (input) => rpc(IPC.launchersSetFlag, input),
 
   // -- window status --
   onStatusEvent: (cb) => on<WindowStatus[]>("status", cb),
@@ -1151,8 +1162,10 @@ export const httpApi: Api = {
   // rpc registry doesn't define them, so calling them would 500 "unknown rpc
   // channel"; rpcOptional() swallows exactly that and yields the graceful
   // no-op instead of a red console 500 on every ChatPanel mount/unmount.
-  opencodeMessage: (sessionId, messageId) =>
-    rpc(IPC.opencodeMessage, sessionId, messageId),
+  opencodeMessage: (sessionId, messageId, opts) =>
+    opts ? rpc(IPC.opencodeMessage, sessionId, messageId, opts) : rpc(IPC.opencodeMessage, sessionId, messageId),
+  opencodeContext: (sessionId) => rpc(IPC.opencodeContext, sessionId),
+  opencodeCache: (sessionId) => rpc(IPC.opencodeCache, sessionId),
   opencodeOpenStream: (sessionId) =>
     rpcOptional(IPC.opencodeOpenStream, undefined, sessionId),
   opencodeCloseStream: (sessionId) =>
@@ -1213,6 +1226,7 @@ export const httpApi: Api = {
   routingChoose: (input) => rpc(IPC.routingChoose, input),
   accountsRetry: (providerID) => rpc(IPC.accountsRetry, { providerID }),
   accountHealth: () => rpc(IPC.accountsHealth),
+  accountsRowStates: () => rpc(IPC.accountsRowStates),
   accountsEndpointProbe: (endpointKey) => rpc(IPC.accountsEndpointProbe, { endpointKey }),
   accountsList: () => rpc(IPC.accountsList, {}),
   accountsSetMode: (input) => rpc(IPC.accountsSetMode, input),
@@ -1244,7 +1258,6 @@ export const httpApi: Api = {
   opencodeForkSession: (input) => rpc(IPC.opencodeForkSession, input),
   opencodeCompactSession: (sessionId) =>
     rpc(IPC.opencodeCompactSession, sessionId),
-  opencodeDeleteSession: (input) => rpc(IPC.opencodeDeleteSession, input),
   // BET-421: ephemeral session lifecycle for the onboarding verifier.
   opencodeCreateEphemeralSession: (input) =>
     rpc(IPC.opencodeCreateEphemeralSession, input),
@@ -1526,6 +1539,28 @@ export const httpApi: Api = {
   // version the box's release ships. Settings → About may render it in this
   // same round-trip — no new IPC channel.
   getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>(IPC.getServerVersion),
+  apiVersion: async () => {
+    const res = await fetchWithTimeout(
+      `${serverBase()}/api/version`,
+      { method: "GET", headers: authHeaders(clientToken()) },
+      5000,
+    );
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const b = (await res.json()) as {
+      version?: unknown; minClient?: unknown; opencode?: { version?: unknown }; opencodeVersion?: unknown; capabilities?: unknown;
+    } | null;
+    return {
+      version: typeof b?.version === "string" ? b.version : "",
+      minClient: typeof b?.minClient === "string" ? b.minClient : "",
+      opencodeVersion:
+        typeof b?.opencodeVersion === "string" ? b.opencodeVersion
+          : typeof b?.opencode?.version === "string" ? b.opencode.version : "",
+      ...(Array.isArray(b?.capabilities)
+        ? { capabilities: b.capabilities.filter((c): c is string => typeof c === "string") }
+        : {}),
+    };
+  },
 
   // -- client version (BET-225 stage 3) --
   // Returns the running client's own version. On desktop the preload bridge

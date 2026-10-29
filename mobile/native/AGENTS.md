@@ -235,6 +235,12 @@ three are now merged into `main`** (verified 2026-08-19):
   hand-rolled `ListDataSource` and its append-only change log are gone, which
   removed the mechanism behind the "invalid batch updates" crash.
 
+**WS11 D11 changed three ids on purpose (deterministic, one-time):** a prose row from a text PART is `"p" + partID`
+(`<msg>:text:<n>`) instead of a content hash, so a live text segment and its canonical twin are ONE row and the old
+`liveTailRowID` swap is gone; a run row is `"run-" + <id of the run's first part>` (a segment's first part with reasoning
+shown) as decided by the BOX; the live tail is built from the box's ordered ledger (`ChatTranscriptMapper.liveTail`), never
+from tool frames. Prose with no part (previews, fixtures) keeps its content id.
+
 Row identity still matters, but the sharpest edge is gone. **Verify against the
 code on your base rather than trusting this paragraph** — an earlier version of
 it said BET-1104 was unmerged for a day after it landed, and that stale line

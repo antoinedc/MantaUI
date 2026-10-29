@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act } from "react";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
 import { useStore } from "./store";
+import { buildUpgradeView } from "../server/upgradeView.mjs";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
 import { UpgradeGate } from "./UpgradeGate";
 import { DESKTOP_DOWNLOAD_URL } from "./upgradeGateLogic";
@@ -54,6 +55,10 @@ function at(
 
 const COMPLETED: UpgradeStatus = { state: "completed", steps: ALL.map((s) => step(s, "done")), overall: 1, etaSeconds: null, error: null };
 
+// The box words the gate (WS11 D3 / X5): the fake box attaches the REAL box view, as
+// GET /api/upgrade and the upgrade frame do.
+const withBoxView = (s: UpgradeStatus): UpgradeStatus => ({ ...s, view: buildUpgradeView(s) });
+
 /** The fake box: what GET /api/upgrade answers, the frames it pushes, the POSTs. */
 function fakeBox() {
   const box = {
@@ -69,7 +74,8 @@ function fakeBox() {
     openExternal: vi.fn(async (_url: string) => {}),
     api: {} as Record<string, unknown>,
     /** The box changes state and pushes a frame. */
-    emit(s: UpgradeStatus) {
+    emit(raw: UpgradeStatus) {
+      const s = withBoxView(raw);
       box.current = s;
       act(() => {
         for (const cb of Array.from(box.frameCbs)) cb(s);
@@ -86,7 +92,7 @@ function fakeBox() {
     upgradeStatus: async () => {
       box.pollCount++;
       if (box.down) throw new Error("fetch failed");
-      return box.current;
+      return box.current ? withBoxView(box.current) : null;
     },
     upgradeRetry: async () => {
       box.retry();
@@ -225,6 +231,17 @@ describe("UpgradeGate — driven by a fake K3 box", () => {
     await h!.flush();
     expect(document.body.textContent).toContain("Upgrading your box");
     expect(document.body.textContent).not.toContain("Checking again…");
+  });
+
+  it("D1: a client connecting mid-failure with the capability list failed still gets Retry/Rollback from /api/upgrade alone", async () => {
+    installMockApi({ ...box.api, apiVersion: () => Promise.reject(new Error("HTTP 503")) });
+    setConnected(true);
+    await start();
+    box.emit(at("migrate", "failed", { error: { step: "migrate", message: "Migration failed.", retryable: true } }));
+    await h!.flush();
+    expect(button("Retry")).not.toBeNull();
+    expect(button("Roll back")).not.toBeNull();
+    expect(useStore.getState().boxCapabilities.loadedOnce).toBe(false);
   });
 
   it("a refused Retry shows the box's reason next to the button (not a silent no-op)", async () => {

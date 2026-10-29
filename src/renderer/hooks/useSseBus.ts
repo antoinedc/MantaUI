@@ -44,7 +44,7 @@
 //   - compactSession, forkSession (for voice dispatch, but we'll skip that)
 //   - selectModel (for voice dispatch, but we'll skip that)
 //   - refreshPermissions, refreshQuestions (for server.connected)
-//   - setChatAttention, setChatSubagents (for sidebar updates)
+//   - setChatAttention (for sidebar updates)
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
@@ -63,10 +63,14 @@ import type {
   StreamPlanModePayload,
   StreamRetryPayload,
   StreamRunningPayload,
+  StreamToolRunsPayload,
   StreamSessionErrorPayload,
   StreamStepEndedPayload,
+  StreamContextPayload,
+  StreamCachePayload,
   StreamTodosPayload,
   StreamTruncationPayload,
+  TruncationView,
   StreamQuestionsPayload,
   StreamSubagentChildPayload,
 } from "../../shared/types";
@@ -81,6 +85,7 @@ import { openAccountsSettings } from "../accountsData";
 import { createInboxTracker, type InboxTracker } from "../inboxState";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
+import { ingestRunFrame, opencodeMessagesTracked } from "../runEpoch";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
 
 /** The compaction card's state; `firstLine` is the box's summary line once it ended. */
@@ -104,13 +109,11 @@ export type RetryInfo = {
 const INITIAL_FETCH_TIMEOUT_MS = 15_000;
 const INITIAL_FETCH_RETRY_DELAY_MS = 2_000;
 
-// A `turnComplete` with running:false is NOT proof the turn ended: the box
-// derives it from the transcript, and at every tool-step boundary the just-
-// finished step's message is momentarily the transcript tail, so it fires
-// mid-turn and is re-armed by the next `session.status busy` 0-134ms later
-// (measured on the live stream, 2026-08-07). Waiting this long before
-// believing it collapses that flicker, while still self-healing if the hard
-// `session.status {"type":"idle"}` signal is ever dropped.
+// `turnComplete{running:false}` is the box's "an execution ended" frame, sent right AFTER the hard `running:false` frame
+// (it never fires per tool step any more). It is still not proof the TURN is over: a follow-up execution (a queued send, a
+// background result) can start immediately. So the running→false flip it asks for waits this long — a `running:true` in
+// the meantime cancels it — while the hard `running` frame stays authoritative. It is also the fallback for a dropped
+// `running:false`: the canonical refetch of a turn end happens ONCE (see `endRefetchedRef`).
 const TURN_SETTLE_MS = 400;
 export { TURN_SETTLE_MS };
 
@@ -143,6 +146,10 @@ export type SseBus = {
   setPermissions: React.Dispatch<React.SetStateAction<PermissionRequest[]>>;
   questions: QuestionRequest[];
   setQuestions: React.Dispatch<React.SetStateAction<QuestionRequest[]>>;
+  // The box's `context` / `cache` payloads (WS11 D2): seeded from
+  // `opencode:context` / `opencode:cache` on open and replaced by every frame.
+  contextPayload: StreamContextPayload | null;
+  cachePayload: StreamCachePayload | null;
   stepTokens: (TokenUsage & { cost: number }) | null;
   setStepTokens: React.Dispatch<React.SetStateAction<(TokenUsage & { cost: number }) | null>>;
   compactionState: CompactionState | null;
@@ -156,8 +163,8 @@ export type SseBus = {
   setTodosDismissed: React.Dispatch<React.SetStateAction<boolean>>;
   retryInfo: RetryInfo | null;
   setRetryInfo: React.Dispatch<React.SetStateAction<RetryInfo | null>>;
-  finishByMessageId: Map<string, import("../chatUtils").TruncationKind>;
-  setFinishByMessageId: React.Dispatch<React.SetStateAction<Map<string, import("../chatUtils").TruncationKind>>>;
+  finishByMessageId: Map<string, TruncationView>;
+  setFinishByMessageId: React.Dispatch<React.SetStateAction<Map<string, TruncationView>>>;
   commandByMessageId: Map<string, { name: string; arguments: string }>;
   setCommandByMessageId: React.Dispatch<React.SetStateAction<Map<string, { name: string; arguments: string }>>>;
   liveChildStatus: Map<string, "running" | "idle">;
@@ -188,7 +195,7 @@ export function useSseBus(params: {
   setRefreshing: React.Dispatch<React.SetStateAction<boolean>>;
   scheduleRefetch: () => void;
   // Options for every transcript fetch (tail limit until "Load earlier").
-  fetchOpts: () => { limit: number } | {};
+  fetchOpts: () => { limit?: number; view: true };
   spliceMessage: (messageId: string) => void;
   scheduleChildRefetch: (childId: string) => void;
   childSessionIds: React.MutableRefObject<Set<string>>;
@@ -266,6 +273,22 @@ export function useSseBus(params: {
   const setPlanOnRef = useRef(setPlanOn);
   setPlanOnRef.current = setPlanOn;
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
+  const [contextPayload, setContextPayload] = useState<StreamContextPayload | null>(null);
+  const [cachePayload, setCachePayload] = useState<StreamCachePayload | null>(null);
+  // Seed both from the box on open (an idle session has no frame coming); a frame
+  // that lands first wins over a slower seed.
+  useEffect(() => {
+    let live = true;
+    void window.api.opencodeContext(sessionId).then((c) => {
+      if (live && c) setContextPayload((cur) => cur ?? c);
+    }).catch(() => {});
+    void window.api.opencodeCache(sessionId).then((c) => {
+      if (live && c) setCachePayload((cur) => cur ?? c);
+    }).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [sessionId]);
   const [compactionState, setCompactionState] = useState<CompactionState | null>(null);
   const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // BET-1347: a background compaction the BOX did while this conversation was
@@ -291,13 +314,18 @@ export function useSseBus(params: {
       turnSettleRef.current = null;
     }
   };
+  // The box ends a turn with `running:false` and THEN `turnComplete{running:false}` (and a failed turn adds a
+  // `sessionError` first): the canonical refetch (turn footer, truncation) is wanted once per end, not once per frame. Set
+  // where an end signal already scheduled it; cleared when a turn (re)starts. The settle timer is only the fallback for
+  // a `running:false` that never arrived.
+  const endRefetchedRef = useRef(false);
   const [liveTodos, setLiveTodos] = useState<
     Array<{ content: string; status: string; priority: string }> | null
   >(null);
   const [todosDismissed, setTodosDismissed] = useState(false);
   const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
   const [finishByMessageId, setFinishByMessageId] = useState<
-    Map<string, import("../chatUtils").TruncationKind>
+    Map<string, TruncationView>
   >(() => new Map());
   const [commandByMessageId, setCommandByMessageId] = useState<
     Map<string, { name: string; arguments: string }>
@@ -447,7 +475,7 @@ export function useSseBus(params: {
       setTranscriptLoadError(null);
       setRefreshing(true);
       fetchTranscriptWithRetry(
-        () => window.api.opencodeMessages(sessionId, fetchOpts()),
+        () => opencodeMessagesTracked(sessionId, fetchOpts(), scheduleRefetch),
         { timeoutMs: INITIAL_FETCH_TIMEOUT_MS, retryDelayMs: INITIAL_FETCH_RETRY_DELAY_MS },
       )
         .then((m) => {
@@ -484,9 +512,9 @@ export function useSseBus(params: {
     //     matters because streamed text deltas never produce `messageChanged`.
     //   - `running` → the card's live running/idle badge; going idle also
     //     refetches the PARENT so the task part's own state flips.
-    // `turnComplete` is deliberately NOT used for the child badge: the box derives
-    // it from the transcript, so it fires mid-turn at every tool-step boundary
-    // (see TURN_SETTLE_MS) and would flicker the badge. `running` is the hard
+    // `turnComplete` is deliberately NOT used for the child badge: it only marks an
+    // execution end (a follow-up execution can start right after — see
+    // TURN_SETTLE_MS), so it would flicker the badge. `running` is the hard
     // signal — the same one the raw child handler used (session.status).
     const handleChildFrame = (ev: StreamEnvelope) => {
       const childId = ev.sessionId;
@@ -504,6 +532,11 @@ export function useSseBus(params: {
             return m;
           });
           if (next === "idle") scheduleRefetch();
+          return;
+        }
+        case "toolRuns": {
+          // The child's run values feed its own map (the TaskCard's layout reads it).
+          ingestRunFrame(childId, ev.payload as StreamToolRunsPayload);
           return;
         }
         default:
@@ -558,24 +591,44 @@ export function useSseBus(params: {
           // stale timer can't clobber this value, then apply it immediately.
           cancelTurnSettle();
           setRunning(nowRunning);
+          // The turn footer / truncation come only from a full view fetch (a
+          // splice never carries a turn), so a turn ending needs one.
+          if (nowRunning) endRefetchedRef.current = false;
+          else {
+            endRefetchedRef.current = true;
+            scheduleRefetch();
+          }
           return;
         }
         case "turnComplete": {
           const { running: turnRunning } = ev.payload as StreamRunningPayload;
           if (turnRunning === true) {
             cancelTurnSettle();
+            endRefetchedRef.current = false;
             setRunning(true);
             return;
           }
-          // running:false is not proof the turn ended — the box derives it from
-          // the transcript, so it fires at every tool-step boundary and is
-          // re-armed by the next `session.status busy`. Start (or restart) a
-          // settle timer; only the hard `running` signal or a genuine end clears
-          // it early.
+          // The box emits this when an execution ends, but a follow-up busy can
+          // still re-arm the turn right away (queued sends, background results),
+          // so settle after a short quiet period; the hard `running` signal or a
+          // genuine end clears the timer early. The canonical refetch (turn
+          // footer, truncation) belongs to the end: it already ran for the
+          // `running:false` that precedes this frame, and runs here only when
+          // that frame never came.
           cancelTurnSettle();
           turnSettleRef.current = setTimeout(() => {
             setRunning(false);
+            if (!endRefetchedRef.current) {
+              endRefetchedRef.current = true;
+              scheduleRefetch();
+            }
           }, TURN_SETTLE_MS);
+          return;
+        }
+        case "toolRuns": {
+          // The box's live run values (summaries, tone, the latest unfinished call). They are merged by revision under the
+          // current connection's epoch (runEpoch.ts); a canonical rebuild retired some run ids, so membership is re-read once.
+          if (ingestRunFrame(sessionId, ev.payload as StreamToolRunsPayload)) scheduleRefetch();
           return;
         }
         case "retry": {
@@ -627,6 +680,16 @@ export function useSseBus(params: {
           setAuthReconnectState(rc ? { providerID: rc.providerID, label: rc.label } : null);
           cancelTurnSettle();
           setRunning(false);
+          endRefetchedRef.current = true;
+          scheduleRefetch();
+          return;
+        }
+        case "context": {
+          setContextPayload(ev.payload as StreamContextPayload);
+          return;
+        }
+        case "cache": {
+          setCachePayload(ev.payload as StreamCachePayload);
           return;
         }
         case "stepEnded": {
@@ -716,7 +779,7 @@ export function useSseBus(params: {
           if (p.messageID && p.kind) {
             setFinishByMessageId((prev) => {
               const next = new Map(prev);
-              next.set(p.messageID as string, p.kind as import("../chatUtils").TruncationKind);
+              next.set(p.messageID as string, { kind: p.kind as TruncationView["kind"], label: p.label, hint: p.hint });
               return next;
             });
           }
@@ -789,6 +852,8 @@ export function useSseBus(params: {
     setPermissions,
     questions,
     setQuestions,
+    contextPayload,
+    cachePayload,
     stepTokens,
     setStepTokens,
     compactionState,

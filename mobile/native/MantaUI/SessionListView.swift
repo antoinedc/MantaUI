@@ -24,6 +24,7 @@ struct SessionListView: View {
     @EnvironmentObject private var eventStore: MantaEventStore
     @EnvironmentObject private var pushRouter: MantaPushRouter
     @EnvironmentObject private var navigator: MantaNavigator
+    @EnvironmentObject private var capabilities: BoxCapabilitiesStore
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
@@ -512,6 +513,9 @@ struct SessionListView: View {
         case .closedWithNotice(let text):
             SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
             showFeedback(text)
+        case .closedWithWarnings(let lines):
+            SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
+            showFeedback(lines.joined(separator: "\n"))
         case .failed(let text):
             SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
             showFeedback(text)
@@ -775,19 +779,18 @@ struct SessionListView: View {
     /// killed (and their worktrees removed) too, so they are counted. The box
     /// setting is read fresh — a failed read counts as off.
     private func beginCloseProject(_ name: String) {
+        // An older box has no close flow: say so instead of a dead action.
+        guard capabilities.has(.sessionsClose) != false else {
+            showFeedback(UpdateBoxNote.text)
+            return
+        }
         Task {
-            let clean = await store.readCleanOnClose()
-            guard let counts = store.closeCounts(for: name, cleanOnClose: clean) else {
-                showFeedback("Couldn't close — that project is no longer on your server")
-                return
+            do {
+                let preview = try await store.closePreview(project: name)
+                closeProjectPrompt = CloseProjectPrompt(name: name, confirm: preview.confirm)
+            } catch {
+                showFeedback(BoxCapabilities.isUnknownChannel(error) ? UpdateBoxNote.text : SessionActionError.message("close", error: error))
             }
-            closeProjectPrompt = CloseProjectPrompt(
-                name: name,
-                confirm: SessionCloseCopy.project(
-                    name: name, sessionCount: counts.sessionCount,
-                    runningCount: counts.runningCount, worktreeCount: counts.worktreeCount
-                )
-            )
         }
     }
 
@@ -796,8 +799,7 @@ struct SessionListView: View {
             let report = await store.closeProject(name)
             if report.killed { SessionHaptics.fire(.success, enabled: store.hapticsEnabled) }
             else { SessionHaptics.fire(.warning, enabled: store.hapticsEnabled) }
-            let lines = [SessionCloseCopy.kept(report.keptWorktrees), report.errors.first].compactMap { $0 }
-            if !lines.isEmpty { showFeedback(lines.joined(separator: "\n")) }
+            if !report.lines.isEmpty { showFeedback(report.lines.joined(separator: "\n")) }
         }
     }
 
@@ -874,6 +876,11 @@ struct SessionListView: View {
     // MARK: - Delete (§7.3)
 
     private func requestDelete(window: MantaWindow, projectName: String) {
+        // An older box has no close flow (WS11 D6): say so instead of a dead action.
+        guard capabilities.has(.sessionsClose) != false else {
+            showFeedback(UpdateBoxNote.text)
+            return
+        }
         let status = store.rowStatus(for: window)
         if status.running {
             let durationText = runningDuration(of: window)
@@ -886,8 +893,9 @@ struct SessionListView: View {
             // removal the box no longer does (or hide one it will do).
             if let path = window.worktreePath, !path.isEmpty {
                 Task {
-                    if await store.readCleanOnClose() {
-                        deleteWorktreeNote = SessionCloseCopy.worktreeRemovalSentence(path: path)
+                    // Only the worktree sentence: the running-turn confirm already says the rest.
+                    if let preview = try? await store.closePreview(project: projectName, index: window.index) {
+                        deleteWorktreeNote = preview.worktreeLine
                     }
                 }
             }
@@ -921,7 +929,10 @@ struct SessionListView: View {
                 sheetRoute = nil
                 // Through the close queue: one close at a time, a dirty worktree
                 // asks, and the haptic/toast follow the real outcome.
-                store.enqueueClose(project: project, index: index)
+                // Bound to the window this sheet SHOWED: if the index is reused
+                // while the sheet is open, the box refuses instead of deleting
+                // the newcomer.
+                store.enqueueClose(project: project, index: index, expect: SessionCloseExpect(window: target))
             } label: {
                 Text("Delete Session")
                     .font(.manta(size: Metrics.type.small, weight: .semibold))

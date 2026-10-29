@@ -235,6 +235,9 @@ struct AccountsScreen: View {
             }
         }
         sourceFailures
+        if !connections.rowStatesSupported {
+            Section { UpdateBoxNote() }
+        }
         let sections = plan.subscriptions
         if sections.isEmpty {
             placeholder
@@ -254,6 +257,11 @@ struct AccountsScreen: View {
         if case .failed(let reason) = connections.statusPhase {
             Section {
                 failureRow("Couldn't load subscriptions — \(reason)") { await connections.loadStatuses() }
+            }
+        }
+        if connections.rowStatesReadFailed && connections.rowStatesSupported {
+            Section {
+                failureRow("Couldn't load account states.") { await connections.readRowStates() }
             }
         }
         if case .failed(let reason) = store.phase, store.providers.isEmpty {
@@ -318,9 +326,13 @@ struct AccountsScreen: View {
     // MARK: - Connection row
 
     private func connectionRow(_ status: SubscriptionStatus) -> some View {
-        let health = connections.health(for: status.id)
-        let state = AccountRowState.describe(status: status, health: health)
-        let control = AccountRowState.control(status: status, health: health)
+        // The words and the control are the box's. With none (an older box, or no read yet) the row keeps the plain
+        // data-driven controls, so Connect / Disconnect / Try again never disappear.
+        let state = connections.rowState(for: status.id)
+        let control = state?.control ?? AccountRowState.fallbackControl(
+            connected: status.connected, managedExternally: status.managedExternally,
+            health: connections.health?.providers[status.id]?.state
+        )
         let working = connections.busyProvider == status.id || deciding == status.id
         let help = ["Supported", "subscription", status.plan].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
@@ -330,9 +342,11 @@ struct AccountsScreen: View {
                 Text(help)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Text(state.text)
-                    .font(.footnote)
-                    .foregroundColor(color(for: state.tone))
+                if let state {
+                    Text(state.text)
+                        .font(.footnote)
+                        .foregroundColor(color(for: state.tone))
+                }
             }
             Spacer(minLength: 0)
             if working {

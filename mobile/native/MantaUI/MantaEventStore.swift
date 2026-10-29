@@ -83,6 +83,12 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// so the Plan chip turns itself off the moment the model exits planning.
     var planOn: Bool?
     var subagents: [StreamSubagentPayload] = []
+    /// The box's per-window rollup (busy beneath, direct subagent count, stopped) — WS11 D7. Replayed in the connect
+    /// snapshot for every windowed session and streamed on change; nil until the first frame (or on an older box).
+    var windowStatus: StreamWindowStatusPayload?
+    /// The live turn's tool-run ledger as the box reports it (`toolRuns` frames, WS11 D11): the ordered layout, the calls,
+    /// which runs closed, and the run values merged by revision.
+    var liveRuns = TranscriptLiveRunsState()
     // --- WS02 chat cards. All of it lives for the app's lifetime, so nothing here
     // is "cleared by a timer": transient cards are hidden by a latch in the chat
     // store, keyed by the generation / sequence numbers below.
@@ -110,12 +116,6 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// as step rows (BET-753).
     var tools: [String: LiveTool] = [:]
     var toolStartOrder: [String] = []
-    /// Child session ids whose `subagent` frames arrived this turn, in arrival
-    /// order. Lets the transcript keep a subagent that FINISHED this turn until
-    /// the canonical refetch owns it, without resurrecting frames from earlier
-    /// turns (the loaded transcript window is short, so an old child's task
-    /// part may not be in it). Cleared on `turnComplete`, like the tools.
-    var turnSubagentIDs: [String] = []
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -188,7 +188,14 @@ enum MantaStreamRouter {
     }
 
     /// Apply one frame to a session's state. Pure so the mapping is testable.
-    static func applying(_ frame: MantaStreamFrame, to state: MantaSessionStreamState?) -> MantaSessionStreamState {
+    /// `epoch` / `connGen`: the connection state a `toolRuns` frame is judged against (the epoch of the LATEST events
+    /// connection's `runningSet`, and the connection counter). A frame of another epoch is rejected.
+    static func applying(
+        _ frame: MantaStreamFrame,
+        to state: MantaSessionStreamState?,
+        epoch: String? = nil,
+        connGen: Int = 0
+    ) -> MantaSessionStreamState {
         guard frame.kind == "stream", let sub = frame.sub else {
             return state ?? MantaSessionStreamState(sessionId: frame.sessionId ?? "")
         }
@@ -225,7 +232,6 @@ enum MantaStreamRouter {
             // (BET-753).
             s.tools.removeAll()
             s.toolStartOrder.removeAll()
-            s.turnSubagentIDs.removeAll()
         case "toolStarted":
             if let p = try? frame.decodedPayload(StreamToolStartedPayload.self) {
                 let callID = p.callID.flatMap { $0.isEmpty ? nil : $0 } ?? p.idx
@@ -293,6 +299,12 @@ enum MantaStreamRouter {
             s.questions = try? frame.decodedPayload(StreamQuestionsPayload.self)
         case "permissions":
             s.permissions = try? frame.decodedPayload(StreamPermissionsPayload.self)
+        case "windowStatus":
+            s.windowStatus = try? frame.decodedPayload(StreamWindowStatusPayload.self)
+        case "toolRuns":
+            if let p = try? frame.decodedPayload(StreamToolRunsPayload.self) {
+                s.liveRuns = s.liveRuns.applying(p, context: TranscriptRunContext(currentEpoch: epoch, connGen: connGen))
+            }
         case "planMode":
             s.planOn = try? frame.decodedPayload(StreamPlanModePayload.self)?.on
         case "subagent":
@@ -307,7 +319,6 @@ enum MantaStreamRouter {
                 } else {
                     s.subagents.append(p)
                 }
-                if !s.turnSubagentIDs.contains(p.childSessionId) { s.turnSubagentIDs.append(p.childSessionId) }
             }
         case "subagent.child", "autoRename":
             break // registration / rename triggers consumed by later stages
@@ -455,6 +466,12 @@ final class MantaEventStore: ObservableObject {
     /// has since spoken definitively. Not `@Published` — `sessionStates` is,
     /// and it is reassigned in the same call, so observers already re-run.
     private(set) var runningSetSeq: Int = 0
+
+    /// The box's interpreter epoch, announced by the LATEST connection's `runningSet` (nil until it arrives, and on an
+    /// older box that sends none). Run values of any other epoch are rejected (WS11 D11).
+    @Published private(set) var connectionEpoch: String?
+    /// Bumped on every transition to connected. An RPC answer issued under an older value is discarded for the run map.
+    private(set) var connGen: Int = 0
 
     /// Which session the most recent stream frame targeted and the `sub` it
     /// carried. `sub == nil` for a non-routed frame (nothing turn-state-related
@@ -614,6 +631,11 @@ final class MantaEventStore: ObservableObject {
     // MARK: - Controller callbacks
 
     private func handleState(_ state: MantaConnectionState) {
+        // A new connection retires every answer issued before it, and its epoch is unknown until its `runningSet`.
+        if state.name == "connected", connectionState.name != "connected" {
+            connGen += 1
+            connectionEpoch = nil
+        }
         connectionState = state
         degraded = controller.hasConnectedOnce && state.isUnreachable
     }
@@ -650,6 +672,17 @@ final class MantaEventStore: ObservableObject {
         guard let p = try? frame.decodedPayload(StreamRunningSetPayload.self) else { return }
         sessionStates = MantaStreamRouter.applyingRunningSet(p, to: sessionStates)
         runningSetSeq += 1
+        // The connection's epoch: every session's run values of another epoch are dropped, queued writes apply.
+        if connectionEpoch != p.epoch {
+            connectionEpoch = p.epoch
+            for (sid, var s) in sessionStates {
+                let next = s.liveRuns.settingEpoch(p.epoch, connGen: connGen)
+                if next != s.liveRuns {
+                    s.liveRuns = next
+                    sessionStates[sid] = s
+                }
+            }
+        }
     }
 
     private func routeStream(_ frame: MantaStreamFrame) {
@@ -663,7 +696,7 @@ final class MantaEventStore: ObservableObject {
         // already-published state while unreachable.
         guard !degraded else { return }
         let sid = frame.sessionId ?? ""
-        var next = MantaStreamRouter.applying(frame, to: sessionStates[sid])
+        var next = MantaStreamRouter.applying(frame, to: sessionStates[sid], epoch: connectionEpoch, connGen: connGen)
         // A turn that COMPLETED with no observer attached has no one who will
         // retire its accumulated chunks (retirement lives in the observing
         // ChatSessionStore's refetch path). Clear them here so an unopened
@@ -675,6 +708,42 @@ final class MantaEventStore: ObservableObject {
         }
         sessionStates[sid] = next
         lastStreamFrame = StreamFrameStamp(sessionId: sid, sub: frame.sub)
+    }
+
+    /// Fold the run views a canonical transcript answer carries into the session's run values, under the connection
+    /// generation the request was ISSUED under (an answer from an older connection is discarded for the run map), then
+    /// forget the runs nothing references any more: the answer is the whole loaded window, so a run no loaded message names
+    /// and the live turn does not hold is dropped. Returns true when the answer carries a RETIRED run's old membership — a
+    /// rebuild happened meanwhile, so the caller refetches once.
+    @discardableResult
+    func ingestRunViews(sessionId: String, messages: [OpencodeMessage], issuedConnGen: Int) -> Bool {
+        let entries = TranscriptRunStore.entries(of: messages)
+        var state = sessionStates[sessionId] ?? MantaSessionStreamState(sessionId: sessionId)
+        var store = state.liveRuns.store
+        if !entries.isEmpty {
+            let context = TranscriptRunContext(currentEpoch: connectionEpoch, connGen: connGen, issuedConnGen: issuedConnGen)
+            store = store.merging(entries, context: context)
+        }
+        // An answer issued before the latest reconnect says nothing about what is referenced now.
+        let current = issuedConnGen >= connGen
+        if current, !messages.isEmpty {
+            store = store.pruning(keeping: TranscriptRunStore.referencedRunIDs(in: messages).union(state.liveRuns.heldRunIDs))
+        }
+        if store != state.liveRuns.store {
+            state.liveRuns.store = store
+            sessionStates[sessionId] = state
+            lastStreamFrame = nil
+        }
+        return current && TranscriptRunStore.hasStaleMembership(messages, minGen: store.minGen, retired: store.retired)
+    }
+
+    /// The live turn is over and the canonical transcript covers its blocks: forget the ledger's layout and calls (the run
+    /// VALUES stay, so a later canonical answer can never regress them).
+    func clearLiveRunLayout(sessionId: String) {
+        guard var state = sessionStates[sessionId], !state.liveRuns.isEmpty else { return }
+        state.liveRuns = state.liveRuns.clearingLayout()
+        sessionStates[sessionId] = state
+        lastStreamFrame = nil
     }
 
     /// Mark a session as having a live observer. Only an observed session keeps

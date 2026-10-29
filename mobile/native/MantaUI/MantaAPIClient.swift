@@ -40,10 +40,12 @@ final class MantaAPIClient: Sendable {
     /// tool's stdout that opencode writes into `state.metadata.output` — on a
     /// real 63-message session that is most of the payload. Both are opt-in on
     /// the wire; the desktop passes neither and still gets the full history.
-    func messages(sessionId: String, limit: Int? = nil, slim: Bool = false) async throws -> [OpencodeMessage] {
+    func messages(sessionId: String, limit: Int? = nil, slim: Bool = false, view: Bool = false) async throws -> [OpencodeMessage] {
         var opts: [String: Any] = [:]
         if let limit, limit > 0 { opts["limit"] = limit }
         if slim { opts["slim"] = true }
+        // `view: true` asks the box to decide what the transcript means (turn footers, truncation — WS11 D8+).
+        if view { opts["view"] = true }
         let args: [Any] = opts.isEmpty ? [sessionId] : [sessionId, opts]
         return try await call("opencode:messages", args: args, as: [OpencodeMessage].self) ?? []
     }
@@ -249,26 +251,6 @@ final class MantaAPIClient: Sendable {
         ]
         if let cwd = input.cwd { dict["cwd"] = cwd }
         return try await callRequired("tmux:new-window", args: [dict], as: TmuxCreateResult.self).projects
-    }
-
-    /// `tmux:kill-window` — delete a session (a row in the list).
-    func killWindow(_ input: KillWindowInput) async throws {
-        let dict: [String: Any] = [
-            "sessionName": input.sessionName,
-            "windowIndex": input.windowIndex,
-        ]
-        _ = try await callVoid("tmux:kill-window", args: [dict])
-    }
-
-    /// `opencode:delete-session` — delete a chat session AND its tmux window
-    /// (the desktop path). Used when the row has an opencode session id.
-    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
-        let dict: [String: Any] = [
-            "sessionId": sessionId,
-            "sessionName": sessionName,
-            "windowIndex": windowIndex,
-        ]
-        _ = try await callVoid("opencode:delete-session", args: [dict])
     }
 
     /// `opencode:fork-session` — fork a chat session into a new window (§7.2
@@ -516,7 +498,7 @@ final class MantaAPIClient: Sendable {
         if let accountId { payload["accountId"] = accountId }
         if let label { payload["label"] = label }
         let object = try await callRequired("accounts:add-seat", args: [payload], as: [String: JSONValue].self)
-        if case .string(let code)? = object["error"], !code.isEmpty { throw MantaError.server(code) }
+        if case .string(let code)? = object["error"], !code.isEmpty { throw AccountsRefusal(code: code, message: Self.accountsMessage(object)) }
         guard case .string(let seatId)? = object["seatId"], !seatId.isEmpty else {
             throw MantaError.transport("accounts:add-seat returned no seat")
         }
@@ -542,7 +524,7 @@ final class MantaAPIClient: Sendable {
     /// One mutating channel that answers the changed `ProviderView`.
     private func accountsAction(_ channel: String, _ payload: [String: Any]) async throws -> AccountsProvider {
         let reply = try await callRequired(channel, args: [payload], as: AccountsActionReply.self)
-        if let code = reply.error { throw MantaError.server(code) }
+        if let code = reply.error { throw AccountsRefusal(code: code, message: reply.message ?? AccountsCopy.fallback) }
         guard let provider = reply.provider else {
             throw MantaError.transport("\(channel) returned no provider")
         }
@@ -903,6 +885,29 @@ final class MantaAPIClient: Sendable {
             throw MantaError.transport("unrecognised upgrade status")
         }
         return status
+    }
+
+    /// `GET /api/version` — the capability read (WS11 D1). Unlike `serverVersion()`
+    /// (an RPC that answers 503 while the box migrates) this route is upgrade-exempt,
+    /// so it still answers mid-upgrade. 401 → `authRequired`; any other failure is
+    /// an error (never "an old box": a body without `capabilities` is that). Lives
+    /// here, not in `+Settings`, because it needs the private transport members.
+    func apiVersion() async throws -> ServerVersionInfo {
+        var request = URLRequest(url: serverURL.appendingPathComponent("api").appendingPathComponent("version"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 5
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 { throw MantaError.authRequired }
+            if http.statusCode >= 400 { throw MantaError.server("version check failed (\(http.statusCode))") }
+        }
+        guard let info = try? JSONDecoder().decode(ServerVersionInfo.self, from: data) else {
+            throw MantaError.transport("unrecognised version response")
+        }
+        return info
     }
 
     // MARK: - Transport + envelope

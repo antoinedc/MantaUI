@@ -28,12 +28,13 @@ import { MOTION_FAST } from "./chatMotion";
 import { CardMount } from "./components/CardMount";
 import { DisclosureChevron, ToolActivityList } from "./ToolGroup";
 import { useGroupExpanded } from "./toolGroupExpansion";
+import { getRunMap, opencodeMessagesTracked, useRunMap } from "./runEpoch";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import {
   isRenderableRow,
   layoutTranscript,
   locateVisibleRow,
   stabilizeLayout,
-  summarizeToolGroup,
   type Block,
   type RowLocation,
   type ToolGroup,
@@ -47,9 +48,9 @@ import { PendingVoiceRow, type PendingVoiceNote } from "./VoiceNote";
 import { BackgroundRunCards } from "./BackgroundCards";
 import { anchorBackgroundCards, type BackgroundCard } from "./backgroundRun";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
-import type { OpencodeMessage, ProgressRecord, QuestionRequest, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeMessage, ProgressRecord, QuestionRequest, TruncationView, VoiceNoteRecord } from "../shared/types";
 import {
-  computeTurnInfo,
+  turnInfoFromView,
   createEntryMotionState,
   updateEntryMotion,
   formatDuration,
@@ -63,6 +64,7 @@ import {
   type EntryMotionState,
   type LiveTurn,
   workingIndicatorLabel,
+  canonicalMediaToDraw,
 } from "./chatUtils";
 
 // ===== Virtuoso context =====
@@ -133,12 +135,14 @@ function rowContext(
   finishes: TranscriptProps["finishByMessageId"],
   media: TranscriptProps["mediaByMessageId"],
   widgets: TranscriptProps["widgetsByMessageId"],
+  liveMediaHandles: ReadonlySet<string>,
 ) {
   return {
     blocks: blocksByMessage.get(m.info.id),
-    hasMedia: media.has(m.info.id),
+    hasMedia: media.has(m.info.id) || canonicalMediaToDraw(m.view?.media, liveMediaHandles).length > 0,
     hasWidget: widgets.has(m.info.id),
-    hasFooter: turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null,
+    hasFooter:
+      turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null || m.view?.truncation != null,
   };
 }
 
@@ -296,12 +300,14 @@ export function WorkingIndicator({
   let meta: string;
   let failed = 0;
   const clock = [elapsed, tokens > 0 ? formatTokens(tokens) : ""].filter(Boolean);
-  const summary = toolGroup ? summarizeToolGroup(toolGroup.items) : null;
+  // The run's summary is the box's (`toolGroup.view`); a box without runs sends only the stand-in group, which says no more
+  // than the turn verb (no live label, no counts).
+  const summary = toolGroup && !toolGroup.fallback ? toolGroup.view : null;
   if (summary) failed = summary.failed;
   if (summary?.live) {
     // A tool is executing: it IS the headline ("Editing Transcript.tsx…"). A
     // model progress label yields the headline to it and moves into the meta.
-    headline = `${summary.live.running}…`;
+    headline = `${summary.live.label}…`;
     const parts = [
       useModelLabel ? progress.label : "",
       summary.calls > 1 ? `${summary.calls} tools` : "",
@@ -478,7 +484,7 @@ export type TranscriptProps = {
       verbSeedId: string | null;
     }
   >;
-  finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
+  finishByMessageId: Map<string, TruncationView>;
   userCommandInfo: Map<string, { name: string; arguments: string; inline?: true }>;
   voiceNoteByMessageId: Map<string, VoiceNoteRecord>;
   // BET-1148: messageID → inline media entry (from the `media` bus events),
@@ -582,14 +588,31 @@ export function Transcript({
   // widget, or a turn footer / truncation badge. A message a run spilled into
   // owns nothing and must not occupy a slot.
   const layoutRef = useRef<TranscriptLayout | null>(null);
+  // The box's run values (rev-merged by runEpoch.ts) and whether this box has them at all.
+  const runMap = useRunMap(sessionId);
+  const runsCapability = useBoxCapability("transcript-runs-1");
+  const runsAvailable = runsCapability === false ? false : null;
   const layout = useMemo(() => {
-    const next = layoutTranscript(messages, { running, showThinking });
+    const next = layoutTranscript(messages, {
+      running,
+      showThinking,
+      runs: runMap.runs,
+      minGen: runMap.minGen,
+      runsAvailable,
+    });
     // Stabilized so unchanged messages keep the SAME block arrays: MessageRow
     // is React.memo'd and fresh arrays per streaming delta would re-render
     // every row (AGENTS.md "Transcript row memoization").
     layoutRef.current = stabilizeLayout(layoutRef.current, next);
     return layoutRef.current;
-  }, [messages, running, showThinking]);
+  }, [messages, running, showThinking, runMap, runsAvailable]);
+
+  // Every live media handle in the session: a canonical card for the same handle is not drawn a second time.
+  const liveMediaHandles = useMemo(() => {
+    const set = new Set<string>();
+    for (const entry of mediaByMessageId.values()) if (entry.handle) set.add(entry.handle);
+    return set;
+  }, [mediaByMessageId]);
 
   const visibleMessages = useMemo(
     () =>
@@ -603,10 +626,11 @@ export function Transcript({
             finishByMessageId,
             mediaByMessageId,
             widgetsByMessageId,
+            liveMediaHandles,
           ),
         ),
       ),
-    [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId],
+    [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId, liveMediaHandles],
   );
 
   const backgroundByRowRef = useRef<Map<string, BackgroundCard[]>>(new Map());
@@ -648,8 +672,7 @@ export function Transcript({
   const onLoadEarlier = () => {
     if (loadingEarlier) return;
     setLoadingEarlier(true);
-    window.api
-      .opencodeMessages(sessionId, {})
+    opencodeMessagesTracked(sessionId, { view: true })
       .then((newMessages: OpencodeMessage[]) => {
         loadedAllRef.current = true;
         // Anchor the scroll shift on VISIBLE rows: prepended rows that render
@@ -658,8 +681,15 @@ export function Transcript({
         // "Visible" means the same row predicate as above, applied to a fresh
         // layout of the full history (a tool run can now start in a prepended
         // message and absorb rows that were visible before).
-        const nextLayout = layoutTranscript(newMessages, { running, showThinking });
-        const nextTurns = computeTurnInfo(newMessages, running);
+        const fresh = getRunMap(sessionId);
+        const nextLayout = layoutTranscript(newMessages, {
+          running,
+          showThinking,
+          runs: fresh.runs,
+          minGen: fresh.minGen,
+          runsAvailable,
+        });
+        const nextTurns = turnInfoFromView(newMessages);
         // NOTE: the media / widget / finish maps used below only cover the
         // messages loaded SO FAR, so a prepended message's media or widget row
         // can't be predicted here. That is why the shift is anchored on the id
@@ -678,6 +708,7 @@ export function Transcript({
               finishByMessageId,
               mediaByMessageId,
               widgetsByMessageId,
+              liveMediaHandles,
             ),
           ),
         );
@@ -926,7 +957,7 @@ export function Transcript({
                     turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
                     turnTokens={turnInfo.get(m.info.id)?.turnTokens ?? null}
                     verbSeedId={turnInfo.get(m.info.id)?.verbSeedId ?? null}
-                    truncation={finishByMessageId.get(m.info.id) ?? null}
+                    truncation={finishByMessageId.get(m.info.id) ?? m.view?.truncation ?? null}
                     commandInfo={cmdInfo}
                     voiceNote={voiceNote}
                     media={
@@ -934,6 +965,7 @@ export function Transcript({
                         ? null
                         : mediaByMessageId.get(m.info.id) ?? null
                     }
+                    liveMediaHandles={liveMediaHandles}
                     widget={
                       m.info.role === "user"
                         ? null

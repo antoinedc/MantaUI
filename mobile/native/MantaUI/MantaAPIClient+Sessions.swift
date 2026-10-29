@@ -18,14 +18,25 @@ extension MantaAPIClient {
     /// `tmux:new-session` — a new project with its first window. The reply names
     /// the created window (B2): use `windowIndex` before falling back to a name.
     func createSession(_ input: SessionNewProjectInput) async throws -> TmuxCreateResult {
-        let dict: [String: Any] = [
-            "name": input.name,
+        var dict: [String: Any] = [
             "cwd": input.cwd,
             "windowName": input.windowName,
             "createDir": input.createDir,
             "chatMode": input.chatMode,
         ]
+        if let name = input.name, !name.isEmpty { dict["name"] = name }
+        if let hint = input.nameHint, !hint.isEmpty { dict["nameHint"] = hint }
         return try await callRequired("tmux:new-session", args: [dict], as: TmuxCreateResult.self)
+    }
+
+    /// `sessions:propose-name` — preview the name a create would pick (the create re-checks).
+    /// `project`: from a folder/hint against the live sessions; `scratch`: the folder slug under `root`.
+    func sessionsProposeName(project cwd: String) async throws -> SessionNameProposal {
+        try await callRequired("sessions:propose-name", args: [["kind": "project", "cwd": cwd]], as: SessionNameProposal.self)
+    }
+
+    func sessionsProposeName(scratch hint: String, root: String) async throws -> SessionNameProposal {
+        try await callRequired("sessions:propose-name", args: [["kind": "scratch", "hint": hint, "root": root]], as: SessionNameProposal.self)
     }
 
     /// `tmux:new-window` — a new session in an existing project. `worktreePath`
@@ -41,19 +52,27 @@ extension MantaAPIClient {
         return try await callRequired("tmux:new-window", args: [dict], as: TmuxCreateResult.self)
     }
 
+    /// `sessions:close-preview` (WS11 D6) — the confirm's words and facts for closing one window or a project.
+    func sessionsClosePreview(project: String, windowIndex: Int?) async throws -> SessionClosePreview {
+        var dict: [String: Any] = ["project": project]
+        if let windowIndex { dict["windowIndex"] = windowIndex }
+        return try await callRequired("sessions:close-preview", args: [dict], as: SessionClosePreview.self)
+    }
+
+    /// `sessions:close` — runs the whole close on the box (worktree removal → kill → project settings → refresh) and
+    /// reports what happened. `deleteConversation` also deletes the window's opencode conversation (this app's "delete").
+    func sessionsClose(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool, expect: SessionCloseExpect? = nil) async throws -> SessionCloseResult {
+        var dict: [String: Any] = ["project": project]
+        if let windowIndex { dict["windowIndex"] = windowIndex }
+        if let dirtyWorktree { dict["dirtyWorktree"] = dirtyWorktree }
+        if deleteConversation { dict["deleteConversation"] = true }
+        if windowIndex != nil, let expect { dict["expect"] = expect.wire }
+        return try await callRequired("sessions:close", args: [dict], as: SessionCloseResult.self)
+    }
+
     /// `tmux:rename-session` — rename a project (the whole group).
     func tmuxRenameSession(oldName: String, newName: String) async throws {
         _ = try await callVoid("tmux:rename-session", args: [["oldName": oldName, "newName": newName]])
-    }
-
-    /// `tmux:kill-session` — close a whole project.
-    func tmuxKillSession(_ name: String) async throws {
-        _ = try await callVoid("tmux:kill-session", args: [name])
-    }
-
-    /// `project:meta:delete` — forget the project's stored defaults.
-    func projectMetaDelete(_ tmuxSession: String) async throws {
-        _ = try await callVoid("project:meta:delete", args: [tmuxSession])
     }
 
     // MARK: - git / fs
@@ -62,12 +81,6 @@ extension MantaAPIClient {
     /// Throws with git's own message when it can't.
     func gitAddWorktree(cwd: String, name: String) async throws -> SessionWorktreeAdded {
         try await callRequired("git:add-worktree", args: [["cwd": cwd, "name": name]], as: SessionWorktreeAdded.self)
-    }
-
-    /// `git:remove-worktree` — safe-first removal. A dirty checkout answers
-    /// `{removed:false, reason:"dirty"}`; any other failure throws.
-    func gitRemoveWorktree(path: String, force: Bool) async throws -> SessionWorktreeRemoval {
-        try await callRequired("git:remove-worktree", args: [["path": path, "force": force]], as: SessionWorktreeRemoval.self)
     }
 
     /// `fs:list-dirs` — the sub-folders of `dir`: `{dir, entries:[{name,path,hidden}]}`.
@@ -112,8 +125,9 @@ extension MantaAPIClient {
 
     /// `forge:clone-start` — start a clone on the box. The destination is
     /// preflighted server-side; a refusal comes back as `{error, message}`.
-    func forgeCloneStart(url: String, dest: String, name: String) async throws -> CloneStartResult {
-        try await callRequired("forge:clone-start", args: [["url": url, "dest": dest, "name": name]], as: CloneStartResult.self)
+    func forgeCloneStart(url: String, root: String, name: String) async throws -> CloneStartResult {
+        // The box joins `<root>/<name>` itself and reports it as the status's `dest` (WS11 D5 / S8).
+        try await callRequired("forge:clone-start", args: [["url": url, "root": root, "name": name]], as: CloneStartResult.self)
     }
 
     /// `forge:clone-status` — the job snapshot, or nil once the box forgot it.

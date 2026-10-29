@@ -73,13 +73,14 @@ extension MantaAPIClient {
             as: InboxCancelResult.self
         )
     }
+}
 
-    /// `server:version` → `capabilities`. A box that predates the field answers
-    /// without it: an empty set ("has none"), distinct from a failed request.
-    func boxCapabilities() async throws -> Set<String> {
-        struct Reply: Decodable { let capabilities: [String]? }
-        let reply = try await callRequired("server:version", args: [], as: Reply.self)
-        return Set(reply.capabilities ?? [])
+extension MantaAPIClient {
+    /// `opencode:cache` — the box's cache-staleness payload for an idle session
+    /// (WS11 D2); nil before any completed turn, and on a box that predates it
+    /// (`cache-stale-at-1` missing → the warning never shows).
+    func opencodeCache(sessionId: String) async throws -> StreamCachePayload? {
+        try await call("opencode:cache", args: [sessionId], as: StreamCachePayload.self)
     }
 }
 

@@ -50,6 +50,7 @@ struct GitSessionHeaderRow: View {
     let composer: ComposerTextController?
 
     @StateObject private var store = GitForgeStore()
+    @EnvironmentObject private var capabilities: BoxCapabilitiesStore
     @Environment(\.composerController) private var environmentComposer
     @Environment(\.scenePhase) private var scenePhase
     @State private var sheet: GitHeaderSheet?
@@ -75,7 +76,9 @@ struct GitSessionHeaderRow: View {
             // Hosts the poll even when nothing else is visible (no branch yet, or
             // no offer): the offer itself depends on what the poll learns.
             Color.clear.frame(height: 0)
+                .onAppear { store.useCapabilities(capabilities) }
                 .task(id: cwd ?? "") {
+                    store.useCapabilities(capabilities)
                     guard let cwd, !cwd.isEmpty else { return }
                     await store.run(cwd: cwd)
                 }

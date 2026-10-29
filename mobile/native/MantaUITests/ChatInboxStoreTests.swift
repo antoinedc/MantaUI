@@ -56,7 +56,7 @@ final class ChatInboxStoreTests: XCTestCase {
         )
         let store = ChatSessionStore(sessionId: sessionId, eventStore: eventStore, api: api, isReadOnly: readOnly, mutationPolicy: readOnly ? .resolving : .allowed)
         // A current box: it advertises the chat-cards capability.
-        store.chatCardCapabilities.apply([ChatCardCapabilities.chatCards])
+        store.capabilities.apply(["chat-cards-1"])
         return Harness(store: store, stream: stream, eventStore: eventStore)
     }
 
@@ -434,7 +434,7 @@ final class ChatInboxStoreTests: XCTestCase {
     /// would be lost silently — so every inbox action is gated and sends NO request.
     func testInboxActionsAreGatedOnTheCapabilityAndSendNothing() async {
         let h = makeHarness()
-        h.store.chatCardCapabilities.apply([])   // an older box: answered, lists nothing
+        h.store.capabilities.apply([])   // an older box: answered, lists nothing
         h.store.setInboxDelivery(id: "m", to: .steer)
         h.store.cancelInboxItem(id: "m")
         let edited = await h.store.editLastInboxItem()

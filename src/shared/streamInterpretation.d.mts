@@ -74,7 +74,18 @@ export type StaleCacheResult = {
   idleMs: number;
   staleTokens: number;
   ttlMs: number;
+  lastCompleted?: number | null;
+  /** Epoch ms the cache goes cold; null = nothing to warn about. */
+  staleAt?: number | null;
 };
+
+export function computeStaleAt(input: {
+  lastCompleted: number | null;
+  ttlMs: number;
+  cachedTokens: number;
+  running?: boolean;
+  minCacheTokens?: number;
+}): number | null;
 
 export function computeStaleCache(input: {
   lastCompleted: number | null;
@@ -193,11 +204,6 @@ export type SubagentInfo = {
 export function extractSubagentInfo(part: SubagentPart): SubagentInfo | null;
 
 export function collectChildSessionIds(messages: SubagentMessage[] | null | undefined): Set<string>;
-
-export function countRunningSubagents(
-  messages: SubagentMessage[] | null | undefined,
-  liveStatus?: Map<string, "running" | "idle"> | null,
-): number;
 
 export function summarizeChildSession(
   messages: SubagentMessage[] | null | undefined,

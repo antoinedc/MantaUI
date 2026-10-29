@@ -46,14 +46,14 @@ final class BoxDevicesStore: ObservableObject {
     func refresh() async {
         do {
             let response = try await deps.devices()
-            load = .loaded(BoxDevices.sorted(response.devices))
+            load = .loaded(response.devices)
         } catch {
             load = .failed("Couldn't load linked devices. \(SettingsError.message(error))")
         }
     }
 
     func revoke(_ device: BoxDevice) async {
-        guard BoxDevices.canRevoke(device), !revoking.contains(device.deviceID) else { return }
+        guard device.revocable == true, !revoking.contains(device.deviceID) else { return }
         revoking.insert(device.deviceID)
         notice = nil
         let answer = await deps.revoke(device.deviceID)
@@ -121,6 +121,10 @@ struct BoxDevicesScreen: View {
         ForEach(devices) { device in
             row(device)
         }
+        // An older box does not say who may be revoked: ONE note under the list, not one per row.
+        if devices.contains(where: { $0.revocable == nil }) {
+            UpdateBoxNote()
+        }
     }
 
     private func row(_ device: BoxDevice) -> some View {
@@ -142,7 +146,10 @@ struct BoxDevicesScreen: View {
                     hint("To sign this phone out, use Remove server.")
                 } else if device.primary {
                     hint("The main pairing is shared with your desktop — manage it from the desktop.")
-                } else if !BoxDevices.canRevoke(device) {
+                } else if device.revocable == nil {
+                    // An older box does not say who may be revoked: no Revoke (the note under the list says why).
+                    EmptyView()
+                } else if device.revocable == false {
                     hint("This device has no ID the box can revoke it by. Remove it from the device itself.")
                 } else {
                     Button(role: .destructive) {
@@ -159,7 +166,7 @@ struct BoxDevicesScreen: View {
             }
         }
         .contextMenu {
-            if BoxDevices.canRevoke(device) {
+            if device.revocable == true {
                 Button("Revoke", role: .destructive) { pendingRevoke = device }
             }
         }

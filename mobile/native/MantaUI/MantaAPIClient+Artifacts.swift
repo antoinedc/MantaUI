@@ -6,7 +6,7 @@ extension MantaAPIClient {
     /// (links, files, images, hosted pages, agent-sent files, plans, expiry state,
     /// counts). `callRequired`: a missing result is an error, never an empty list.
     /// A box that predates the channel answers `unknown rpc channel: artifacts:list`;
-    /// callers classify that with `ArtifactsCapability.isUnsupported`.
+    /// callers classify that with `BoxCapabilities.isUnknownChannel`.
     func artifactsList(sessionId: String) async throws -> ArtifactsListResult {
         try await callRequired(
             "artifacts:list",

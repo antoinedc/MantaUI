@@ -30,6 +30,16 @@ import Foundation
 
 // MARK: - Server shapes (tmux:list / git:list-worktrees)
 
+/// The box's job fact for a window (`windows[].job`).
+struct MantaWindowJob: Codable, Equatable, Sendable {
+    var id: String
+    var status: String
+    var parentWindowIndex: Int?
+
+    /// Still live: `done`/`failed`/`stopped` are terminal, anything else (incl. a status a newer box adds) counts.
+    var isActive: Bool { status != "done" && status != "failed" && status != "stopped" }
+}
+
 struct MantaWindow: Codable, Equatable, Sendable, Identifiable {
     var index: Int
     var name: String
@@ -41,6 +51,10 @@ struct MantaWindow: Codable, Equatable, Sendable, Identifiable {
     /// `"cto"` or `"job"` (src/server/tmux.mjs). Absent on a box that predates
     /// the stamp, which reads as a plain user window.
     var owner: String? = nil
+    /// Set by the box (`sessions-window-status-1`) on a window that IS a background job's child: which job, its
+    /// status, and the top-level window it nests under (nil = it stays top-level). Absent on every other window
+    /// and on an older box, which sends no nesting.
+    var job: MantaWindowJob? = nil
 
     var id: Int { index }
 
@@ -205,30 +219,24 @@ struct LenientDelegateJobs: Decodable, Sendable {
     }
 }
 
-/// Which windows are background-job windows, and what the session list should
-/// therefore render (spec §2).
-///
-/// A window is a job window when the box tagged it `owner == "job"` OR the
-/// job-record nesting rule hides it (covers windows created before the tag
-/// existed). Job windows are never top-level rows. A job window whose parent is
-/// visible is represented by its parent's count; one with NO visible parent
-/// (parent closed, in another project, headless, or the job record pruned) is
-/// hidden entirely — it is reachable only from the parent's Background jobs
-/// sheet, never from the list.
+/// A window is a job window when the box tagged it `owner == "job"` OR the box nested it under a parent
+/// (`job.parentWindowIndex`). Job windows are never top-level rows; a nested job window is represented by its
+/// parent's count. One the box tagged but could not nest (parent closed, in another project, headless, or the job
+/// record pruned) is hidden entirely — reachable only from the parent's Background jobs sheet.
 enum SessionJobWindows {
     /// Indices of a project's windows to REMOVE from the list.
-    static func hiddenIndices(project: MantaProject, jobs: [DelegateJob]) -> Set<Int> {
-        hiddenIndices(project: project, nesting: SessionJobNesting.compute(project: project, jobs: jobs))
+    static func hiddenIndices(project: MantaProject) -> Set<Int> {
+        Set(project.windows.filter { $0.isJobWindow || $0.job?.parentWindowIndex != nil }.map(\.index))
     }
 
-    /// Same, for a caller that already computed the nesting (it also needs the
-    /// per-parent counts) and should not compute it twice.
-    static func hiddenIndices(project: MantaProject, nesting: DelegateNesting) -> Set<Int> {
-        var hidden = nesting.hidden
-        for w in project.windows where w.isJobWindow {
-            hidden.insert(w.index)
+    /// Parent window index → how many of its nested job windows are still live (the "N background jobs" count).
+    static func activeChildCounts(project: MantaProject) -> [Int: Int] {
+        var counts: [Int: Int] = [:]
+        for w in project.windows {
+            guard let job = w.job, job.isActive, let parent = job.parentWindowIndex else { continue }
+            counts[parent, default: 0] += 1
         }
-        return hidden
+        return counts
     }
 
     /// `projects` with each project's hidden windows removed. A project left
@@ -243,45 +251,6 @@ enum SessionJobWindows {
             if copy.windows.isEmpty && !project.windows.isEmpty { return nil }
             return copy
         }
-    }
-}
-
-/// Result of nesting a project's windows against its jobs (BET-1213).
-struct DelegateNesting: Equatable, Sendable {
-    /// Child window indices to REMOVE from the project's top-level rows.
-    var hidden: Set<Int>
-    /// Parent window index -> count of non-terminal jobs nested under it.
-    var activeChildCounts: [Int: Int]
-}
-
-/// Pure port of the desktop `computeJobNesting` (src/renderer/chatUtils.ts).
-/// For each job whose child window AND parent window both exist in the project,
-/// the child window is hidden — on mobile it renders as NO row of its own; the
-/// parent row carries the background-job count instead (no nested row, no
-/// disclosure). A job whose parent window is gone leaves the child VISIBLE at
-/// top level (never orphan a reachable session). A job whose child window is
-/// absent is ignored.
-enum SessionJobNesting {
-    static func compute(project: MantaProject, jobs: [DelegateJob]) -> DelegateNesting {
-        var hidden = Set<Int>()
-        var counts: [Int: Int] = [:]
-        var byOpencodeId: [String: MantaWindow] = [:]
-        for w in project.windows {
-            if let sid = w.opencodeSessionId, !sid.isEmpty {
-                byOpencodeId[sid] = w
-            }
-        }
-        for job in jobs {
-            guard let child = job.childSessionID, !child.isEmpty,
-                  let childWin = byOpencodeId[child] else { continue }
-            guard let parent = job.parentSessionID, !parent.isEmpty,
-                  let parentWin = byOpencodeId[parent] else { continue }
-            hidden.insert(childWin.index)
-            if job.isActive {
-                counts[parentWin.index, default: 0] += 1
-            }
-        }
-        return DelegateNesting(hidden: hidden, activeChildCounts: counts)
     }
 }
 
@@ -337,13 +306,16 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
     let projects: [MantaProject]
     let sessionId: String?
     let windowIndex: Int?
+    /// The final session (project) name — the box picks it (WS11 D5 / S1). nil on an older box.
+    let name: String?
 
-    private enum CodingKeys: String, CodingKey { case projects, sessionId, windowIndex }
+    private enum CodingKeys: String, CodingKey { case projects, sessionId, windowIndex, name }
 
-    init(projects: [MantaProject], sessionId: String? = nil, windowIndex: Int? = nil) {
+    init(projects: [MantaProject], sessionId: String? = nil, windowIndex: Int? = nil, name: String? = nil) {
         self.projects = projects
         self.sessionId = sessionId
         self.windowIndex = windowIndex
+        self.name = name
     }
 
     init(from decoder: Decoder) throws {
@@ -351,6 +323,7 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
             projects = list
             sessionId = nil
             windowIndex = nil
+            name = nil
             return
         }
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -358,13 +331,9 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
         let sid = (try? container.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil
         sessionId = (sid?.isEmpty == false) ? sid : nil
         windowIndex = (try? container.decodeIfPresent(Int.self, forKey: .windowIndex)) ?? nil
+        let reported = (try? container.decodeIfPresent(String.self, forKey: .name)) ?? nil
+        name = (reported?.isEmpty == false) ? reported : nil
     }
-}
-
-/// Delete-input payload for `tmux:kill-window`.
-struct KillWindowInput: Sendable {
-    var sessionName: String
-    var windowIndex: Int
 }
 
 // MARK: - Row presentation (§7.1 / §7.1a)
@@ -389,27 +358,12 @@ struct SessionRowStatus: Equatable, Sendable {
     var lastActivity: Date? = nil
     /// A tmux window with no opencode session — i.e. a terminal window.
     var isTerminal: Bool = false
-    /// How many of this session's subagents are working right now (spec 04 §9).
-    /// Already stale-guarded by `SessionSubagentCount` — zero whenever the
-    /// parent turn is not running.
+    /// How many of this session's subagents are working right now (spec 04 §9) —
+    /// the box's `windowStatus.subagents` (direct children whose own turn runs).
     var runningSubagents: Int = 0
     /// The box's durable record says a provider usage limit stopped this
     /// conversation (spec 04 §9).
     var halted: Bool = false
-}
-
-/// How many subagents a row reports (spec 04 §9). Counts the live subagent
-/// records the interpreted stream publishes under the PARENT session.
-enum SessionSubagentCount {
-    /// `running` and `pending` records count; `completed`, `error` and an
-    /// unknown status do not. A record can stay `running` forever if its finish
-    /// frame was missed across a reconnect, so the count is ZERO whenever the
-    /// parent turn is not running: foreground subagents block the parent's turn,
-    /// and background ones are counted by the job list.
-    static func running(_ subagents: [StreamSubagentPayload], parentRunning: Bool) -> Int {
-        guard parentRunning else { return 0 }
-        return subagents.filter { $0.status == "running" || $0.status == "pending" }.count
-    }
 }
 
 /// Per-window live status for a TERMINAL window, as reported by the box's
@@ -847,6 +801,8 @@ struct PendingDelete: Equatable, Sendable {
     var pinID: String
     /// When the 5s undo window started; `expired(now:)` decides the commit.
     var startedAt: Date
+    /// The window as it was when the user tapped delete: the close is bound to it, not to whatever the index names later.
+    var expect: SessionCloseExpect? = nil
 
     /// The §7.3 undo window length.
     static let undoWindow: TimeInterval = 5

@@ -12,7 +12,7 @@ struct SessionWorktreePromptSheet: View {
     let onDecision: (SessionWorktreeAnswer) -> Void
 
     var body: some View {
-        let copy = SessionCloseCopy.dirtyWorktree(path: prompt.worktreePath)
+        let copy = prompt.ask
         VStack(spacing: 0) {
             VStack(spacing: 6) {
                 Text(copy.title)
@@ -31,7 +31,7 @@ struct SessionWorktreePromptSheet: View {
             Button(role: .destructive) {
                 onDecision(.remove)
             } label: {
-                Text("Remove worktree")
+                Text(copy.removeLabel)
                     .font(.body)
                     .frame(maxWidth: .infinity, minHeight: 50)
                     .contentShape(Rectangle())
@@ -41,7 +41,7 @@ struct SessionWorktreePromptSheet: View {
             Button {
                 onDecision(.keep)
             } label: {
-                Text("Keep worktree")
+                Text(copy.keepLabel)
                     .font(.body)
                     .frame(maxWidth: .infinity, minHeight: 50)
                     .contentShape(Rectangle())

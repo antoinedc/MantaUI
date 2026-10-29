@@ -208,6 +208,42 @@ struct StreamRunningSetPayload: Codable, Equatable, Sendable {
         var type: String?
     }
     var sessions: [Entry]
+    /// The box's interpreter process id (WS11 D11): run values of any other epoch are retired. nil on an older box.
+    var epoch: String? = nil
+}
+
+/// `sub: "windowStatus"` — one windowed session's rolled-up status, decided on the box (WS11 D7): `busy` is work
+/// anywhere beneath it (own turn, subagents at any depth, a running background job), `subagents` the direct children
+/// whose own turn runs.
+struct StreamWindowStatusPayload: Codable, Equatable, Sendable {
+    var running: Bool = false
+    var busy: Bool = false
+    var startedAt: Double? = nil
+    var attention: String? = nil
+    var subagents: Int = 0
+    var stopped: Bool = false
+
+    private enum CodingKeys: String, CodingKey { case running, busy, startedAt, attention, subagents, stopped }
+
+    init(running: Bool = false, busy: Bool = false, startedAt: Double? = nil, attention: String? = nil,
+         subagents: Int = 0, stopped: Bool = false) {
+        self.running = running
+        self.busy = busy
+        self.startedAt = startedAt
+        self.attention = attention
+        self.subagents = subagents
+        self.stopped = stopped
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        running = ((try? c.decodeIfPresent(Bool.self, forKey: .running)) ?? nil) ?? false
+        busy = ((try? c.decodeIfPresent(Bool.self, forKey: .busy)) ?? nil) ?? false
+        startedAt = (try? c.decodeIfPresent(Double.self, forKey: .startedAt)) ?? nil
+        attention = (try? c.decodeIfPresent(String.self, forKey: .attention)) ?? nil
+        subagents = ((try? c.decodeIfPresent(Int.self, forKey: .subagents)) ?? nil) ?? 0
+        stopped = ((try? c.decodeIfPresent(Bool.self, forKey: .stopped)) ?? nil) ?? false
+    }
 }
 
 /// `sub: "turnComplete"` — emitted by `message.updated`/`session.idle`.
@@ -221,6 +257,8 @@ struct StreamTurnCompletePayload: Codable, Equatable, Sendable {
 struct StreamTruncationPayload: Codable, Equatable, Sendable {
     var kind: String
     var label: String
+    /// The explanation, worded by the box (WS11 D8); nil on an older box.
+    var hint: String? = nil
     var messageID: String?
 }
 
@@ -306,9 +344,21 @@ struct StreamContextPayload: Codable, Equatable, Sendable {
     var cacheRead: Double
     var cacheWrite: Double
     var totalInput: Double
-    var pct: Double
+    /// nil when the selected model's limit is unknown (`hasLimit` false) — the box sends `pct: null` then.
+    var pct: Double?
     var hasLimit: Bool
     var segments: [StreamContextSegment]
+    // WS11 D2: the box measures against the session's SELECTED model. Absent on an
+    // older box (decode-if-present).
+    var limit: Double? = nil
+    var model: StreamContextModel? = nil
+    var basis: String? = nil
+}
+
+/// `context.model` — the model the percentage is measured against.
+struct StreamContextModel: Codable, Equatable, Sendable {
+    var providerID: String
+    var modelID: String
 }
 
 /// `sub: "cache"` — computeStaleCache output.
@@ -317,6 +367,10 @@ struct StreamCachePayload: Codable, Equatable, Sendable {
     var idleMs: Double
     var staleTokens: Double
     var ttlMs: Double
+    // WS11 D2: `staleAt` is the epoch-ms instant the cache goes cold (nil = nothing
+    // to warn about, or an older box); the client compares it with its own clock.
+    var lastCompleted: Double? = nil
+    var staleAt: Double? = nil
 }
 
 /// `sub: "todos"` — selectActiveTodos + selectVisibleTodos output.

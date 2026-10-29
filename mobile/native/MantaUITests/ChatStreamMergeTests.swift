@@ -534,13 +534,26 @@ final class ChatStreamMergeTests: XCTestCase {
         }
     }
 
-    /// A `toolStarted` frame surfaces the live tool as a call inside a run in the
+    /// A `toolRuns` frame the way the box sends it: the ordered layout, the run values and the calls (WS11 D11). One run `run`
+    /// holding the given (id, tool, status, label) calls.
+    private static func toolRunsFrame(
+        run: String, calls: [(id: String, tool: String, status: String, label: String)], closed: Bool = false, label: String = "x"
+    ) -> String {
+        let live = calls.contains { $0.status != "completed" && $0.status != "error" }
+        let parts = calls.map {
+            #"{"id":"\#($0.id)","callID":"\#($0.id)","messageID":"m","runId":"\#(run)","tool":"\#($0.tool)","status":"\#($0.status)","activity":{"kind":"other","status":"\#($0.status)","label":"\#($0.label)","target":"","counted":true}}"#
+        }.joined(separator: ",")
+        let tone = live ? "running" : (calls.contains { $0.status == "error" } ? "warn" : "ok")
+        return #"{"kind":"stream","sub":"toolRuns","sessionId":"ses","payload":{"epoch":"E1","full":true,"gen":1,"layout":[{"kind":"run","id":"\#(run)","segmentId":"\#(run)"}],"runs":[{"id":"\#(run)","ownerMessageId":"m","rev":{"epoch":"E1","gen":1,"seq":1},"label":"\#(label)","calls":\#(calls.count),"failed":0,"tone":"\#(tone)"}],"closed":[\#(closed ? "\"\(run)\"" : "")],"parts":[\#(parts)]}}"#
+    }
+
+    /// A `toolRuns` frame surfaces the live tool as a call inside a run in the
     /// transcript, not as a pinned overlay above the composer. (Changed from the
     /// step-row expectation: tool calls are now runs — spec §1.)
-    func testToolStartedMergesLiveToolIntoTranscript() async {
+    func testToolRunsFrameMergesLiveToolIntoTranscript() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
-        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","callID":"toolu_1","toolName":"bash","toolPresentationHint":"Run: npm test","status":"running"}}"#)
+        stream.inject(Self.toolRunsFrame(run: "toolu_1", calls: [("toolu_1", "bash", "running", "Run: npm test")], label: "Run: npm test"))
 
         let store = ChatSessionStore(
             sessionId: "ses",
@@ -552,9 +565,8 @@ final class ChatStreamMergeTests: XCTestCase {
         let parts = Self.activityParts(in: store.blocks)
         XCTAssertEqual(parts.count, 1, "the live tool renders as a call in a run in the transcript")
         XCTAssertEqual(parts[0].id, "toolu_1", "the live call keeps the tool part id so the canonical call replaces it in place")
-        let activity = ToolActivity.describe(parts[0])
-        XCTAssertEqual(activity.label, "Run: npm test")
-        XCTAssertEqual(activity.status, .running)
+        XCTAssertEqual(TranscriptPartView.of(parts[0])?.activity?.label, "Run: npm test", "the wording is the box's")
+        XCTAssertEqual(ToolActivity.status(of: parts[0]), .running)
     }
 
     /// While a turn RUNS, the run at the tail is not a row: the working line
@@ -570,7 +582,7 @@ final class ChatStreamMergeTests: XCTestCase {
         await Task.yield()
 
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
-        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","callID":"toolu_1","toolName":"read","toolPresentationHint":"a.ts","status":"running"}}"#)
+        stream.inject(Self.toolRunsFrame(run: "toolu_1", calls: [("toolu_1", "read", "running", "Reading a.ts")]))
         await Task.yield()
 
         XCTAssertEqual(store.trailingRun?.id, "toolu_1", "the live run is the trailing run of the working line")
@@ -578,6 +590,27 @@ final class ChatStreamMergeTests: XCTestCase {
                       "a trailing run must not also be a transcript row")
         XCTAssertEqual(store.activityRun(id: "toolu_1")?.parts.count, 1,
                        "the Activity sheet can still find the trailing run by id")
+    }
+
+    /// A chat store created AFTER the connection's snapshot reads the epoch the event store holds: the run values the
+    /// frames carried (judged against that epoch) are the ones its working line draws — not the neutral fallback.
+    func testAChatStoreCreatedAfterTheSnapshotReadsTheStoredEpoch() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        stream.onState?(.connected)
+        stream.inject(#"{"kind":"runningSet","payload":{"sessions":[{"sessionId":"ses","since":1700000000000,"type":"busy"}],"epoch":"E1"}}"#)
+        stream.inject(Self.toolRunsFrame(run: "toolu_1", calls: [("toolu_1", "read", "running", "Reading a.ts")], label: "Reading a.ts"))
+        XCTAssertEqual(eventStore.connectionEpoch, "E1")
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
+        )
+        await Task.yield()
+
+        XCTAssertEqual(store.trailingRun?.view.label, "Reading a.ts", "the box's value, merged under the stored epoch")
+        XCTAssertFalse(store.trailingRun?.isFallback ?? true)
     }
 
     /// Appended `toolOutput` deltas for the same `idx` concatenate onto the live
@@ -592,6 +625,7 @@ final class ChatStreamMergeTests: XCTestCase {
         )
         await Task.yield()
 
+        stream.inject(Self.toolRunsFrame(run: "toolu_1", calls: [("toolu_1", "bash", "running", "Run"), ("toolu_2", "read", "running", "Read")]))
         stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","toolName":"bash","status":"running"}}"#)
         stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","text":"one\n"}}"#)
         stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","text":"two\n"}}"#)
@@ -605,9 +639,9 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(ToolActivity.detail(of: parts[1]).output, "file.txt", "a new idx starts a fresh tail")
     }
 
-    /// `toolEnded` removes the live call from the transcript; the event store
+    /// An ended call stays in the run (the box's ledger says it failed); the event store
     /// retains the outcome (`ok:false`/`truncated`) for the canonical refetch.
-    func testToolEndedRemovesLiveCallAndRetainsOutcome() async {
+    func testToolEndedKeepsTheCallInTheRunAndRetainsOutcome() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
         let store = ChatSessionStore(
@@ -619,6 +653,7 @@ final class ChatStreamMergeTests: XCTestCase {
 
         stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","toolName":"bash","status":"running"}}"#)
         stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","text":"boom\n"}}"#)
+        stream.inject(Self.toolRunsFrame(run: "toolu_1", calls: [("toolu_1", "bash", "error", "Failed: x")]))
         stream.inject(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","ok":false,"truncated":true}}"#)
         await Task.yield()
 
@@ -626,7 +661,7 @@ final class ChatStreamMergeTests: XCTestCase {
         // refetched mid-turn), now reading failed.
         let parts = Self.activityParts(in: store.blocks)
         XCTAssertEqual(parts.map(\.id), ["toolu_1"], "an ended tool stays in the run until the canonical refetch")
-        XCTAssertEqual(parts.first.map { ToolActivity.describe($0).status }, .error)
+        XCTAssertEqual(parts.first.map { ToolActivity.status(of: $0) }, .error)
         let reflected = eventStore.sessionStates["ses"]?.tools["toolu_1"]
         XCTAssertEqual(reflected?.ended, true, "the outcome is reflected on the retained record")
         XCTAssertEqual(reflected?.ok, false)
@@ -1077,22 +1112,14 @@ final class TrailingCardsTests: XCTestCase {
 
     private func planExitQuestion(_ id: String, callID: String) -> QuestionRequest {
         QuestionRequest(id: id, sessionID: "ses", questions: [],
-                        tool: PermissionTool(messageID: "m1", callID: callID), requestId: nil)
-    }
-
-    private func planMessage(callID: String) -> OpencodeMessage {
-        OpencodeMessage(
-            info: OpencodeMessageInfo(id: "m1", sessionID: "ses", role: .assistant,
-                                      time: OpencodeTime(created: 0)),
-            parts: [OpencodePart(type: "tool", id: "p1", messageID: "m1",
-                                 extra: ["tool": .string("plan_exit"), "callID": .string(callID)])]
-        )
+                        tool: PermissionTool(messageID: "m1", callID: callID), requestId: nil,
+                        plan: PlanQuestionView(title: "Plan", text: "# Plan"))
     }
 
     func testSplitQuestionsPutsPlanExitApartFromGeneric() {
         let pe = planExitQuestion("pe", callID: "call-exit")
         let plain = cardQuestion("plain")
-        let split = ChatSessionStore.splitQuestions([pe, plain], messages: [planMessage(callID: "call-exit")])
+        let split = ChatSessionStore.splitQuestions([pe, plain])
         XCTAssertEqual(split.planExit?.id, "pe")
         XCTAssertEqual(split.generic?.id, "plain",
                        "the plan-exit and the generic question card must render different questions")
@@ -1100,15 +1127,23 @@ final class TrailingCardsTests: XCTestCase {
 
     func testSplitQuestionsNeverReturnsTheSameQuestionAsBoth() {
         let pe = planExitQuestion("pe", callID: "call-exit")
-        let split = ChatSessionStore.splitQuestions([pe], messages: [planMessage(callID: "call-exit")])
+        let split = ChatSessionStore.splitQuestions([pe])
         XCTAssertEqual(split.planExit?.id, "pe")
         XCTAssertNil(split.generic,
                      "a plan-exit question must never also surface as a generic question card")
     }
 
+    func testAnOlderBoxSendsNoPlanSoAPlanExitQuestionIsAnOrdinaryQuestion() {
+        // Same shape and callID, but the box (no `questions-plan-1`) never decorated it.
+        let undecorated = QuestionRequest(id: "pe", sessionID: "ses", questions: [], tool: PermissionTool(messageID: "m1", callID: "call-exit"))
+        let split = ChatSessionStore.splitQuestions([undecorated])
+        XCTAssertNil(split.planExit)
+        XCTAssertEqual(split.generic?.id, "pe", "its options still answer it")
+    }
+
     func testSplitQuestionsOfAPlainQuestionHasNoPlanExit() {
         let plain = cardQuestion("plain")
-        let split = ChatSessionStore.splitQuestions([plain], messages: [planMessage(callID: "call-exit")])
+        let split = ChatSessionStore.splitQuestions([plain])
         XCTAssertNil(split.planExit)
         XCTAssertEqual(split.generic?.id, "plain")
     }

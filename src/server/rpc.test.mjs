@@ -43,12 +43,18 @@ function makeDeps(projects, liveProjects = []) {
     createSession: [],
     forkSession: [],
     projectMetaUpsert: [],
+    renameWindow: [],
+    renameSession: [],
   };
   return {
     calls,
     deps: {
       tmux: {
         listProjects: async () => liveProjects,
+        listSessionNames: async () => liveProjects.map((p) => p.tmuxSession),
+        renamed: [],
+        renameWindow: async (i) => { calls.renameWindow.push(i); return liveProjects; },
+        renameSession: async (i) => { calls.renameSession.push(i); return liveProjects; },
         newWindow: async (i) => {
           calls.newWindow.push(i);
           return { sessionId: null, windowIndex: 1, projects: liveProjects };
@@ -390,7 +396,47 @@ test("tmux:new-session swallows projectMetaUpsert failures (best-effort)", async
     chatMode: true,
   });
   // tmux.newSession result returned (no throw), NOT unboxed to projects.
-  assert.deepEqual(result, { sessionId: "ses_new", windowIndex: 1, projects: [] });
+  assert.deepEqual(result, { sessionId: "ses_new", windowIndex: 1, projects: [], name: "newproj" });
+});
+
+test("tmux:new-session with no name: the box picks a tmux-safe, unique name from nameHint (WS11 D5 / S1)", async () => {
+  const live = [{ tmuxSession: "next_js", windows: [] }];
+  const { deps, calls } = makeDeps([], live);
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:new-session"]({ nameHint: "/home/dev/next.js", cwd: "/home/dev/next.js", windowName: "default" });
+  assert.equal(out.name, "next_js-2");
+  assert.equal(calls.newSession.at(-1).name, "next_js-2");
+  assert.equal(calls.projectMetaUpsert.at(-1).tmuxSession, "next_js-2", "metadata is written under the FINAL name");
+  // The folder is the hint when none is sent.
+  const bare = await handlers["tmux:new-session"]({ cwd: "/home/dev/alpha", windowName: "default" });
+  assert.equal(bare.name, "alpha");
+  // An explicit name is made tmux-safe, never renamed.
+  const explicit = await handlers["tmux:new-session"]({ name: "a.b", cwd: "/home/dev/alpha" });
+  assert.equal(explicit.name, "a_b");
+});
+
+test("sessions:propose-name previews project and scratch names; rename validates and skips an unchanged name (WS11 D5)", async () => {
+  const live = [{ tmuxSession: "alpha", windows: [{ index: 0, name: "default" }] }];
+  const { deps, calls } = makeDeps([], live);
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["sessions:propose-name"]({ kind: "project", cwd: "/x/alpha" }), { name: "alpha-2", hint: null });
+  const scratch = await handlers["sessions:propose-name"]({ kind: "scratch", hint: "  ", root: "/nonexistent-root-d5" });
+  assert.match(scratch.hint, /Add at least one letter or number/);
+  await assert.rejects(handlers["tmux:rename-window"]({ sessionName: "alpha", windowIndex: 0, newName: "a:b" }), /can't contain/);
+  await assert.rejects(handlers["tmux:rename-session"]({ oldName: "alpha", newName: "" }), /can't be empty/);
+  await handlers["tmux:rename-window"]({ sessionName: "alpha", windowIndex: 0, newName: " default " });
+  assert.equal(calls.renameWindow.length, 0, "unchanged → no tmux call");
+  await handlers["tmux:rename-window"]({ sessionName: "alpha", windowIndex: 0, newName: " fresh " });
+  assert.deepEqual(calls.renameWindow, [{ sessionName: "alpha", windowIndex: 0, newName: "fresh" }]);
+  await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "alpha" });
+  assert.equal(calls.renameSession.length, 0);
+  // tmux-safe: "." / ":" are rewritten the way tmux would, and the final name is reported on request.
+  const renamed = await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "a.b", returnName: true });
+  assert.deepEqual(calls.renameSession.at(-1), { oldName: "alpha", newName: "a_b", returnName: true });
+  assert.equal(renamed.name, "a_b");
+  assert.ok(Array.isArray(await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "a.c" })), "without the flag the reply is the project list, as before");
+  deps.tmux.renameSession = async () => { throw new Error("duplicate session: beta"); };
+  await assert.rejects(handlers["tmux:rename-session"]({ oldName: "alpha", newName: "beta" }), /A project named “beta” already exists\./);
 });
 
 // The create return contract: the renderer needs the newly-created window's
@@ -741,6 +787,9 @@ test("server:update-apply routes to runServerSelfUpdate with SELF_UPDATE_SCRIPT 
   assert.deepEqual(result, { ok: true, pid: 9999 });
 });
 
+// WS11 D3 (X3): the check also carries `view` (row wording); these tests pin the verdict itself.
+const withoutView = ({ view: _view, ...rest }) => rest;
+
 test("server:update-check routes to the injected checkServerUpdate and returns its verdict", async () => {
   // The channel behind Settings → About's "Check for updates" button. It must
   // hand back the poller's verdict verbatim — including `available:false`,
@@ -756,11 +805,12 @@ test("server:update-check routes to the injected checkServerUpdate and returns i
   const handlers = buildHandlers(deps);
   const result = await handlers["server:update-check"]();
   assert.equal(calls, 1, "checkServerUpdate invoked exactly once");
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutView(result), {
     available: true,
     version: "9.9.9",
     notesUrl: "https://mantaui.com/releases",
   });
+  assert.ok(result.view.targets.some((t) => t.id === "server" && t.hasUpdate), "WS11 D3: the rows are worded on the box");
 });
 
 test("server:update-check defaults to 'no update' when the dep is not wired", async () => {
@@ -771,7 +821,7 @@ test("server:update-check defaults to 'no update' when the dep is not wired", as
   const { deps } = makeDeps([]);
   delete deps.checkServerUpdate;
   const handlers = buildHandlers(deps);
-  assert.deepEqual(await handlers["server:update-check"](), { available: false });
+  assert.deepEqual(withoutView(await handlers["server:update-check"]()), { available: false });
 });
 
 test("server:update-check attaches CLI `targets` from the cliDetector", async () => {
@@ -799,7 +849,7 @@ test("server:update-check swallows a throwing cliDetector and keeps the box verd
   deps.cliDetector = { detect: async () => { throw new Error("probe exploded"); } };
   const handlers = buildHandlers(deps);
   const result = await handlers["server:update-check"]();
-  assert.deepEqual(result, { available: true, version: "9.9.9" });
+  assert.deepEqual(withoutView(result), { available: true, version: "9.9.9" });
 });
 
 test("server:update-check swallows a timing-out cliDetector and keeps the box verdict", async () => {
@@ -811,7 +861,7 @@ test("server:update-check swallows a timing-out cliDetector and keeps the box ve
   deps.cliProbeTimeoutMs = 20; // tiny bound for the test
   const handlers = buildHandlers(deps);
   const result = await handlers["server:update-check"]();
-  assert.deepEqual(result, { available: false });
+  assert.deepEqual(withoutView(result), { available: false });
 });
 
 test("server:update-check works with no cliDetector wired (older box)", async () => {
@@ -820,7 +870,7 @@ test("server:update-check works with no cliDetector wired (older box)", async ()
   const { deps } = makeDeps([]);
   deps.checkServerUpdate = async () => ({ available: false });
   const handlers = buildHandlers(deps);
-  assert.deepEqual(await handlers["server:update-check"](), { available: false });
+  assert.deepEqual(withoutView(await handlers["server:update-check"]()), { available: false });
 });
 
 test("server:update-apply propagates runServerSelfUpdate's failure result through the RPC", async () => {
@@ -1145,7 +1195,7 @@ test("opencode:context derives a breakdown from a billed assistant message", asy
   const handlers = buildHandlers({ ...deps, contextLimitFor: () => 400_000 });
   const res = await handlers["opencode:context"]("ses_idle");
   assert.deepEqual(listCalls, [{ slim: true }]);
-  assert.deepEqual(res, computeContextBreakdown(tokens, 400_000));
+  assert.deepEqual(res, { ...computeContextBreakdown(tokens, 400_000), limit: 400_000, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "last-used" });
   assert.equal(res.hasLimit, true);
 });
 
@@ -1161,7 +1211,7 @@ test("opencode:context uses contextLimitFor; unknown limit yields hasLimit:false
     contextLimitFor: () => 400_000,
   });
   const limited = await withLimit["opencode:context"]("s");
-  assert.deepEqual(limited, computeContextBreakdown(tokens, 400_000));
+  assert.deepEqual(limited, { ...computeContextBreakdown(tokens, 400_000), limit: 400_000, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "last-used" });
   assert.equal(limited.hasLimit, true);
 
   const unknown = buildHandlers({
@@ -1169,7 +1219,7 @@ test("opencode:context uses contextLimitFor; unknown limit yields hasLimit:false
     contextLimitFor: () => null,
   });
   const noLimit = await unknown["opencode:context"]("s");
-  assert.deepEqual(noLimit, computeContextBreakdown(tokens, null));
+  assert.deepEqual(noLimit, { ...computeContextBreakdown(tokens, null), limit: null, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "last-used" });
   assert.equal(noLimit.hasLimit, false);
   assert.equal(noLimit.pct, null);
 });
@@ -2044,9 +2094,14 @@ test("accounts:health returns the provider facade AND the per-endpoint detail fr
       }),
     },
   };
+  deps.getProviderEndpoints = async () => [{ id: "acme", enabledModels: ["m1"] }];
   const handlers = buildHandlers(deps);
   const out = await handlers["accounts:health"]();
   assert.deepEqual(out.providers, { anthropic: { state: "rate-limited", retryInMs: 4 * 60_000 } });
+  // WS11 D4 (K3): each endpoint carries its worded line; the worst per provider is named.
+  assert.match(out.endpoints["anthropic/claude-x"].stateLine, /^Rate limited · retry in 3m · HTTP 429 · APIError|^Rate limited · retry in 3m · HTTP 429/);
+  assert.deepEqual(out.providerLines.anthropic.key, "anthropic/claude-x");
+  assert.deepEqual(out.providerLines.acme, { key: null, stateLine: "Unproven" });
   assert.equal(out.endpoints["anthropic/claude-x"].state, "rate-limited");
   assert.equal(out.endpoints["anthropic/claude-x"].reason.httpStatus, 429);
   // Not wired → BOTH maps degrade, never throw.
@@ -2055,6 +2110,25 @@ test("accounts:health returns the provider facade AND the per-endpoint detail fr
   const handlers2 = buildHandlers(deps2.deps);
   const empty = await handlers2["accounts:health"]();
   assert.deepEqual(empty, { providers: {}, endpoints: {} });
+});
+
+test("accounts:row-states builds every row on the box and never throws when a source fails (WS11 D4 / K2)", async () => {
+  const { deps } = makeDeps([]);
+  deps.oc.readAuthedProviderIds = async () => ["anthropic"];
+  deps.getProviderEndpoints = async () => [{ id: "acme", name: "Acme", hasApiKey: true, enabledModels: ["m1"] }];
+  deps.providerHealth = { all: () => ({}), engine: { endpointDetail: () => ({ "acme/m1": { state: "dead" } }) } };
+  const handlers = buildHandlers(deps);
+  const out = await handlers["accounts:row-states"]();
+  assert.equal(out.rows.acme.registerLine, "Dead");
+  assert.ok(out.rows.anthropic, "the subscription statuses come from the box's own auth store");
+  // "none" when this box's own Claude CLI owns the credential (the detect path exists), else a Disconnect.
+  assert.ok(["disconnect", "none"].includes(out.rows.anthropic.control));
+  assert.equal(out.rows.openai.control, "connect");
+  const broken = makeDeps([]);
+  broken.deps.oc.readAuthedProviderIds = async () => { throw new Error("auth store gone"); };
+  broken.deps.getProviderEndpoints = async () => { throw new Error("config gone"); };
+  const rows = await buildHandlers(broken.deps)["accounts:row-states"]();
+  assert.deepEqual(rows, { rows: {} });
 });
 
 test("accounts:endpoint-probe reports BOTH branches and validates its input", async () => {
@@ -2274,4 +2348,135 @@ test("delegate:open-session hands the job id to the engine and returns its answe
   const { deps } = bgDeps();
   deps.delegate = undefined;
   assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "x" }), { ok: false, error: "no engine" });
+});
+
+test("opencode:context measures against the SELECTED model when the resolver knows one (WS11 D2)", async () => {
+  const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async () => [{ info: { role: "assistant", tokens, providerID: "anthropic", modelID: "small" } }];
+  const contextModels = { resolve: () => ({ providerID: "anthropic", modelID: "big", basis: "selected" }) };
+  const handlers = buildHandlers({ ...deps, contextModels, contextLimitFor: (_p, m) => (m === "big" ? 1_000_000 : 200_000) });
+  const res = await handlers["opencode:context"]("s");
+  assert.equal(res.limit, 1_000_000);
+  assert.equal(res.basis, "selected");
+  assert.equal(res.model.modelID, "big");
+});
+
+test("opencode:cache derives the stream's cache payload from the transcript; null before any completed turn (WS11 D2)", async () => {
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async () => [
+    { info: { role: "assistant", time: { completed: 1_000 }, tokens: { input: 1, cache: { read: 6_000, write: 0 } }, providerID: "a", modelID: "m" } },
+  ];
+  const handlers = buildHandlers({ ...deps, streamInterp: { getState: () => ({ running: false }) } });
+  const res = await handlers["opencode:cache"]("s");
+  assert.equal(res.lastCompleted, 1_000);
+  assert.equal(res.staleAt, 1_000 + 5 * 60_000);
+  assert.equal(res.staleTokens, 6_000);
+  const running = buildHandlers({ ...deps, streamInterp: { getState: () => ({ running: true }) } });
+  assert.equal((await running["opencode:cache"]("s")).staleAt, null);
+  deps.oc.listMessages = async () => [{ info: { role: "user" } }];
+  assert.equal(await buildHandlers(deps)["opencode:cache"]("s"), null);
+});
+
+test("launchers:set-flag writes the option through config and returns the updated row (WS11 D3)", async () => {
+  const { deps } = makeDeps([]);
+  let config = { launcherFlags: {} };
+  deps.local.configGet = async () => config;
+  deps.local.configUpdate = async (patch) => ((config = { ...config, ...patch }), config);
+  deps.syncState = { applyConfig: () => {} };
+  const handlers = buildHandlers(deps);
+  const row = await handlers["launchers:set-flag"]({ id: "claude", key: "skipPermissions", value: false });
+  assert.equal(row.id, "claude");
+  assert.equal(row.flags[0].value, false);
+  assert.deepEqual(config.launcherFlags, { claude: { skipPermissions: false } });
+  await assert.rejects(handlers["launchers:set-flag"]({ id: "ghost", key: "x", value: true }), /Unknown launcher\./);
+  const list = await handlers["launchers:list"]();
+  for (const l of list) for (const f of l.flags) assert.equal(typeof f.value, "boolean");
+});
+
+// WS11 D2 review #9 / #13: a model switch changes the context frame even for a session the interpreter has not
+// seen since boot (an idle session after a manta-server restart).
+test("model-prefs:set re-measures a known session via the interpreter, and an unknown one from the transcript", async () => {
+  const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
+  const makeBus = () => {
+    const events = [];
+    return { events, publish: (e) => events.push(e) };
+  };
+  const base = () => {
+    const deps = makeDeps([]).deps;
+    deps.oc.listMessages = async () => [{ info: { role: "assistant", tokens, providerID: "anthropic", modelID: "small" } }];
+    return deps;
+  };
+  const contextModels = { resolve: () => ({ providerID: "anthropic", modelID: "big", basis: "selected" }), invalidatePrefs: () => {} };
+  const contextLimitFor = (_p, m) => (m === "big" ? 1_000_000 : 200_000);
+  const selection = { providerID: "anthropic", modelID: "big" };
+
+  // Known to the interpreter: it re-emits; the handler adds nothing.
+  const knownBus = makeBus();
+  const reemitted = [];
+  const known = buildHandlers({ ...base(), bus: knownBus, contextModels, contextLimitFor, streamInterp: { reemitContext: (sid) => (reemitted.push(sid), true) } });
+  await known["model-prefs:set"]({ sessionId: "ses_known", selection });
+  assert.deepEqual(reemitted, ["ses_known"]);
+  assert.equal(knownBus.events.filter((e) => e.kind === "stream" && e.sub === "context").length, 0);
+
+  // Unknown to the interpreter: the handler measures from the transcript and publishes the frame itself.
+  const unknownBus = makeBus();
+  const unknown = buildHandlers({ ...base(), bus: unknownBus, contextModels, contextLimitFor, streamInterp: { reemitContext: () => false } });
+  await unknown["model-prefs:set"]({ sessionId: "ses_idle", selection });
+  const frames = unknownBus.events.filter((e) => e.kind === "stream" && e.sub === "context");
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].sessionId, "ses_idle");
+  assert.equal(frames[0].payload.limit, 1_000_000);
+  assert.equal(frames[0].payload.model.modelID, "big");
+
+  // No transcript tokens yet: nothing to publish, and no throw.
+  const emptyBus = makeBus();
+  const emptyDeps = base();
+  emptyDeps.oc.listMessages = async () => [{ info: { role: "user" } }];
+  const empty = buildHandlers({ ...emptyDeps, bus: emptyBus, contextModels, contextLimitFor, streamInterp: { reemitContext: () => false } });
+  await empty["model-prefs:set"]({ sessionId: "ses_new", selection });
+  assert.equal(emptyBus.events.filter((e) => e.sub === "context").length, 0);
+});
+
+test("launchers:list still lists every launcher, at the registry defaults, when the config cannot be read (WS11 D3 review #18)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => { throw new Error("config unreadable"); };
+  const list = await buildHandlers(deps)["launchers:list"]();
+  for (const l of list) for (const f of l.flags) assert.equal(f.value, f.default);
+});
+
+test("sessions:close-preview / sessions:close are wired to the box's close flow (WS11 D6)", async () => {
+  const live = [{ tmuxSession: "p", windows: [{ index: 0, name: "a", opencodeSessionId: "ses_a", worktreePath: "/wt/a" }, { index: 1, name: "t", worktreePath: null }] }];
+  const { deps } = makeDeps([], live);
+  const killed = [];
+  deps.tmux.killWindow = async (a) => (killed.push(a), live);
+  deps.tmux.killSession = async (n) => (killed.push(n), live);
+  deps.local.configGet = async () => ({ worktreeCleanOnClose: true });
+  deps.local.gitRemoveWorktree = async () => ({ removed: true });
+  deps.local.projectMetaDelete = async () => ({});
+  const handlers = buildHandlers({
+    ...deps,
+    streamInterp: { getState: (sid) => (sid === "ses_a" ? { running: true } : undefined) },
+    terminalRunning: (s, i) => s === "p" && i === 1,
+  });
+  const preview = await handlers["sessions:close-preview"]({ project: "p" });
+  assert.equal(preview.runningCount, 2, "a chat window from the interpreter, a terminal window from the status batch");
+  assert.equal(preview.confirmLabel, "Close project");
+  const res = await handlers["sessions:close"]({ project: "p", windowIndex: 0 });
+  assert.deepEqual(res, { ok: true, removed: ["/wt/a"], kept: [], failed: [], warnings: [], notice: null });
+  assert.deepEqual(killed, [{ sessionName: "p", windowIndex: 0 }]);
+});
+
+test("opencode:messages passes the interpreter's running flag (never the client's) and the view option; opencode:message forwards opts (WS11 D8)", async () => {
+  const seen = [];
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async (sid, opts) => (seen.push(opts), []);
+  let gotOpts;
+  deps.oc.getMessage = async (sid, mid, opts) => ((gotOpts = opts), null);
+  const handlers = buildHandlers({ ...deps, streamInterp: { getState: (sid) => (sid === "ses_run" ? { running: true } : undefined) } });
+  await handlers["opencode:messages"]("ses_run", { view: true, running: false });
+  await handlers["opencode:messages"]("ses_idle", { view: true });
+  assert.deepEqual(seen, [{ view: true, running: true, ledger: null }, { view: true, running: false, ledger: null }]);
+  await handlers["opencode:message"]("ses_run", "m1", { view: true });
+  assert.deepEqual(gotOpts, { view: true, ledger: null });
 });

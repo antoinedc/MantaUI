@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { SeatProviderId } from "../shared/types";
-import { accountsErrorMessage, isPollExpired, liveSeatNoteParts } from "./chatUtils";
+import { accountsFailureMessage, isPollExpired, liveSeatNoteParts } from "./chatUtils";
 import { Callout } from "./Callout";
 import { Modal } from "./Modal";
 import { useStore } from "./store";
@@ -42,22 +42,6 @@ type Phase =
   | (Extract<SignInPhase, { kind: "device" }> & { flowId: string })
   | { kind: "done"; message: string }
   | { kind: "failed"; message: string };
-
-/** Why a re-sign failed, in words that say what to do next. The seat was not
- *  changed in any of these cases. */
-export function resignFailureMessage(
-  error: string | undefined,
-  info: { expectedEmail?: string | null; gotEmail?: string | null; seatLabel: string; email: string | null },
-): string {
-  if (error === "different-account") {
-    const expected = info.expectedEmail ?? info.email;
-    const got = info.gotEmail ?? "a different account";
-    return expected
-      ? `You signed in as ${got}, but this seat is ${expected}. Sign in with ${expected}.`
-      : `You signed in as ${got}, but that isn't the account ${info.seatLabel} belongs to. Sign in with the same account.`;
-  }
-  return `Sign-in didn't complete. ${info.seatLabel} was not changed — try again.`;
-}
 
 export function ResignSeatFlow({
   provider,
@@ -125,7 +109,7 @@ export function ResignSeatFlow({
         return;
       }
       if (!res || "error" in res) {
-        set({ kind: "failed", message: accountsErrorMessage(res && "error" in res ? res.error : undefined) });
+        set({ kind: "failed", message: accountsFailureMessage(res && "error" in res ? res : undefined) });
         return;
       }
       const signIn = signInFromConnect(res.connect);
@@ -174,7 +158,7 @@ export function ResignSeatFlow({
             kind: "failed",
             message: unreachable
               ? `Couldn't reach the server to check the sign-in. ${seatLabel} was not changed — try again once the box is reachable.`
-              : `The sign-in wasn't finished within 15 minutes, so the box stopped waiting. ${seatLabel} was not changed — try again.`,
+              : accountsFailureMessage(null),
           });
           return;
         }
@@ -195,12 +179,7 @@ export function ResignSeatFlow({
         }
         set({
           kind: "failed",
-          message: resignFailureMessage(st.error, {
-            expectedEmail: st.expectedEmail,
-            gotEmail: st.gotEmail,
-            seatLabel,
-            email,
-          }),
+          message: accountsFailureMessage(st),
         });
       } finally {
         inFlight = false;

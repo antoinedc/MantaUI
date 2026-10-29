@@ -4,8 +4,9 @@ import {
   updateEntryMotion,
   markReconciledFromOptimistic,
   isOptimisticUserId,
-  computeTurnInfo,
+  turnInfoFromView,
   computeLiveTurn,
+  contextModelLabel,
   formatTokens,
   buildCumulativePath,
   chartAxisTicks,
@@ -48,7 +49,6 @@ import {
   chooseUpdateSkewVariant,
   isTransientUpdateNetworkError,
   boxUpgradeLanded,
-  describeUpdateTarget,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
@@ -71,9 +71,6 @@ import {
   resolvePin,
   projectForNavKey,
   fuzzySessionScore,
-  computeJobNesting,
-  sessionsWithActiveWork,
-  shouldResyncWindowsForJobs,
   shortModelName,
   isFastModelId,
   baseModelId,
@@ -89,9 +86,9 @@ import {
   countPreviewLines,
   resolveMediaAspect,
   mediaKindFromMime,
-  isMediaMime,
   mediaGrid,
-  filePartToMediaEntry,
+  filePartViewToEntry,
+  viewMediaToEntry,
   applyMediaEvent,
   dispatchMedia,
   applyWidgetEvent,
@@ -101,10 +98,6 @@ import {
   decodeDataUri,
   fetchTranscriptWithRetry,
   selectUsageSnapshot,
-  formatRetryMinutes,
-  formatAgeAt,
-  formatEndpointStateLine,
-  formatNoHealthyEndpointCopy,
   providersFromExcludedKeys,
   usageDialState,
   formatWindowReset,
@@ -120,9 +113,6 @@ import {
   describeRepoRow,
   homeRelativePath,
   planHighlightRanges,
-  cloneErrorKind,
-  repoListErrorMessage,
-  forgeCredentialSecondary,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -138,15 +128,11 @@ import {
   releaseUserScrollIntent,
   USER_SCROLL_INTENT_WINDOW_MS,
   FOLLOW_THRESHOLD_PX,
-  describeSessionClose,
-  describeProjectClose,
-  isPlanExitQuestion,
-  extractPlanData,
   resolveDelegateModel,
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, QuestionRequest, UpdateTarget } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
 
 
 
@@ -1496,56 +1482,6 @@ describe("chooseUpdateSkewVariant", () => {
 });
 
 // ===== "Check for updates" verdict rows =====
-describe("describeUpdateTarget", () => {
-  const target = (over: Partial<UpdateTarget>): UpdateTarget => ({
-    id: "desktop",
-    label: "Desktop app",
-    current: null,
-    latest: null,
-    available: false,
-    ok: true,
-    manual: false,
-    disruption: "app-restart",
-    ...over,
-  });
-
-  it("reports a current target as 'ok', up to date", () => {
-    expect(describeUpdateTarget(target({ id: "desktop" }))).toEqual({
-      tone: "ok",
-      text: "Up to date",
-    });
-  });
-
-  it("reports an available target as 'action', update available", () => {
-    const row = describeUpdateTarget(target({ available: true }));
-    expect(row.tone).toBe("action");
-    expect(row.text).toBe("Update available");
-  });
-
-  it("reports a manual target as 'muted' — never 'up to date'", () => {
-    // A dev build (supported:false → manual) and a CLI with no safe upgrade
-    // command have to read as "not applicable", not as a clean bill of health.
-    const row = describeUpdateTarget(target({ manual: true }));
-    expect(row.tone).toBe("muted");
-    expect(row.tone).not.toBe("ok");
-  });
-
-  it("a failed check is an ERROR and outranks every other reading", () => {
-    // Even a manual, available target must render as a failure, not as an
-    // action or a reassuring "up to date". The invariant: an unanswerable
-    // check is NEVER rendered as "ok".
-    const row = describeUpdateTarget(target({ ok: false, manual: true, available: true }));
-    expect(row).toEqual({ tone: "error", text: "Couldn't check" });
-  });
-
-  it("manual outranks available", () => {
-    // A target that is both manual and available (e.g. a broken updater) must
-    // be muted "Update manually", not an actionable "Update available".
-    const row = describeUpdateTarget(target({ manual: true, available: true }));
-    expect(row.tone).toBe("muted");
-    expect(row.text).toBe("Update manually");
-  });
-});
 
 // ===== isTransientUpdateNetworkError =====
 describe("isTransientUpdateNetworkError", () => {
@@ -2289,269 +2225,6 @@ describe("fuzzySessionScore", () => {
   });
 });
 
-describe("a job row nests by displayParentID ?? parentSessionID", () => {
-  // The real parent ("old") has no window; the orchestrator that drives the job ("driver") does.
-  const projects = [
-    mkProject("p", [
-      { index: 1, name: "driver", opencodeSessionId: "driver" },
-      { index: 2, name: "job", opencodeSessionId: "child1" },
-      { index: 3, name: "other", opencodeSessionId: "other" },
-    ]),
-  ];
-  const base = { status: "running", parentSessionID: "old", childSessionID: "child1" };
-
-  it("computeJobNesting nests under the display parent when the real parent has no window", () => {
-    const r = computeJobNesting(projects[0], { j: { ...base, displayParentID: "driver" } });
-    expect(r.children.get(1)).toEqual([2]);
-    expect([...r.hidden]).toEqual([2]);
-  });
-
-  it("computeJobNesting prefers the display parent even when the real parent also has a window", () => {
-    const r = computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other", displayParentID: "driver" } });
-    expect(r.children.get(1)).toEqual([2]);
-    expect(r.children.has(3)).toBe(false);
-  });
-
-  it("computeJobNesting lifts a row whose parent is itself a nested row to the top-level ancestor", () => {
-    const proj = mkProject("p", [
-      { index: 1, name: "orch", opencodeSessionId: "orch" },
-      { index: 2, name: "a", opencodeSessionId: "a" },
-      { index: 3, name: "b", opencodeSessionId: "b" },
-    ]);
-    const r = computeJobNesting(proj, {
-      a: { status: "running", parentSessionID: "orch", childSessionID: "a" },
-      b: { status: "running", parentSessionID: "x", displayParentID: "a", childSessionID: "b" },
-    });
-    expect(r.children.get(1)).toEqual([2, 3]);
-    expect(r.children.has(2)).toBe(false);
-    expect([...r.hidden].sort()).toEqual([2, 3]);
-  });
-
-  it("computeJobNesting leaves a parent cycle top-level instead of hiding it", () => {
-    const proj = mkProject("p", [
-      { index: 1, name: "a", opencodeSessionId: "a" },
-      { index: 2, name: "b", opencodeSessionId: "b" },
-    ]);
-    const r = computeJobNesting(proj, {
-      a: { status: "running", parentSessionID: "b", childSessionID: "a" },
-      b: { status: "running", parentSessionID: "a", childSessionID: "b" },
-    });
-    expect(r.hidden.size).toBe(0);
-  });
-
-  it("falls back to parentSessionID without a display parent (absent or null)", () => {
-    expect(computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other" } }).children.get(3)).toEqual([2]);
-    expect(computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other", displayParentID: null } }).children.get(3)).toEqual([2]);
-    expect(computeJobNesting(projects[0], { j: base }).children.size).toBe(0); // windowless real parent → top-level
-  });
-
-  it("sessionsWithActiveWork rolls a running job up to its display parent, not the windowless real parent", () => {
-    const withDisplay = sessionsWithActiveWork([], { child1: "old" }, { j: { ...base, displayParentID: "driver" } });
-    expect([...withDisplay].sort()).toEqual(["child1", "driver"]);
-    const without = sessionsWithActiveWork([], { child1: "old" }, { j: base });
-    expect([...without].sort()).toEqual(["child1", "old"]);
-  });
-});
-
-describe("superseded jobs are invisible to the sidebar inputs", () => {
-  const projects = [
-    mkProject("p", [
-      { index: 1, name: "parent", opencodeSessionId: "parent" },
-      { index: 2, name: "job", opencodeSessionId: "child1" },
-    ]),
-  ];
-  const old = { status: "done", parentSessionID: "parent", childSessionID: "child1", supersededBy: "next" };
-  const live = { status: "running", parentSessionID: "parent", childSessionID: "child1" };
-
-  it("computeJobNesting ignores a superseded record but nests the live one", () => {
-    expect(computeJobNesting(projects[0], { old }).children.size).toBe(0);
-    expect(computeJobNesting(projects[0], { old, live }).children.get(1)).toEqual([2]);
-  });
-
-  it("sessionsWithActiveWork ignores a superseded running record", () => {
-    expect(sessionsWithActiveWork([], {}, { old: { ...old, status: "running" } }).size).toBe(0);
-    expect([...sessionsWithActiveWork([], {}, { live })].sort()).toEqual(["child1", "parent"]);
-  });
-
-  it("shouldResyncWindowsForJobs does not chase a superseded record's window", () => {
-    expect(shouldResyncWindowsForJobs(projects, { old })).toBe(false);
-  });
-});
-
-describe("shouldResyncWindowsForJobs", () => {
-  // THE REGRESSION THIS LOCKS IN: a delegated job creates its tmux window on
-  // the box, so the renderer's window tree — only re-listed at bootstrap and
-  // after the app's own actions — never contains it. computeJobNesting then
-  // drops the job (`if (!childWin) continue`) and it renders NOWHERE, while
-  // the jobs slice happily holds it. The sidebar looked like it ignored
-  // background jobs entirely.
-  it("running job whose window is NOT in the tree → resync (the invisible-job bug)", () => {
-    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
-    const jobs = { child1: { status: "running", childSessionID: "child1" } };
-    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(true);
-  });
-
-  it("documents WHY it matters: nesting renders a window-less job NOWHERE", () => {
-    // Not nested, not orphaned, not top-level — computeJobNesting's
-    // `if (!childWin) continue` drops it silently. This is the state the
-    // sidebar was permanently in for every delegated job.
-    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
-    const nesting = computeJobNesting(
-      projects[0],
-      { child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" } },
-    );
-    expect(nesting.hidden.size).toBe(0);
-    expect(nesting.children.size).toBe(0);
-    // …which is exactly the condition the predicate flags for a re-list.
-    expect(
-      shouldResyncWindowsForJobs(projects, {
-        child1: { status: "running", childSessionID: "child1" },
-      }),
-    ).toBe(true);
-  });
-
-  it("running job whose window IS in the tree → no resync", () => {
-    const projects = [
-      mkProject("p", [
-        { index: 1, name: "parent", opencodeSessionId: "parent" },
-        { index: 2, name: "job", opencodeSessionId: "child1" },
-      ]),
-    ];
-    const jobs = { child1: { status: "running", childSessionID: "child1" } };
-    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
-  });
-
-  it("finished job whose window is STILL in the tree → resync (stale window would linger)", () => {
-    const projects = [
-      mkProject("p", [
-        { index: 1, name: "parent", opencodeSessionId: "parent" },
-        { index: 2, name: "job", opencodeSessionId: "child1" },
-      ]),
-    ];
-    const jobs = { child1: { status: "done", childSessionID: "child1" } };
-    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(true);
-  });
-
-  it("finished job already cleaned up → no resync (steady state, no tmux call)", () => {
-    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
-    const jobs = { child1: { status: "done", childSessionID: "child1" } };
-    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
-  });
-
-  it("no jobs → no resync", () => {
-    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
-    expect(shouldResyncWindowsForJobs(projects, {})).toBe(false);
-  });
-
-  it("job with no childSessionID is ignored (mid-start record)", () => {
-    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
-    const jobs = { x: { status: "running", childSessionID: null } };
-    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
-  });
-
-  it("finds a job window in ANY project, not just the parent's", () => {
-    const projects = [
-      mkProject("a", [{ index: 1, name: "parent", opencodeSessionId: "parent" }]),
-      mkProject("b", [{ index: 1, name: "job", opencodeSessionId: "child1" }]),
-    ];
-    const jobs = { child1: { status: "running", childSessionID: "child1" } };
-    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
-  });
-});
-
-describe("sessionsWithActiveWork", () => {
-  it("includes running sessions and every ancestor", () => {
-    const out = sessionsWithActiveWork(["grandchild"], { grandchild: "child", child: "root" }, {});
-    expect([...out].sort()).toEqual(["child", "grandchild", "root"]);
-  });
-
-  it("is empty when nothing runs", () => {
-    expect(sessionsWithActiveWork([], { c: "p" }, {}).size).toBe(0);
-  });
-
-  it("a running background job marks its child and its parent", () => {
-    const out = sessionsWithActiveWork([], {}, {
-      j: { status: "running", parentSessionID: "parent", childSessionID: "jobChild" },
-    });
-    expect(out.has("jobChild")).toBe(true);
-    expect(out.has("parent")).toBe(true);
-  });
-
-  it("finished jobs do not count", () => {
-    const out = sessionsWithActiveWork([], {}, {
-      j: { status: "done", parentSessionID: "parent", childSessionID: "jobChild" },
-    });
-    expect(out.size).toBe(0);
-  });
-
-  it("a mid-start job (no child yet) keeps the parent busy", () => {
-    const out = sessionsWithActiveWork([], {}, {
-      j: { status: "running", parentSessionID: "parent", childSessionID: null },
-    });
-    expect([...out]).toEqual(["parent"]);
-  });
-
-  it("terminates on a parent cycle", () => {
-    const out = sessionsWithActiveWork(["a"], { a: "b", b: "a" }, {});
-    expect([...out].sort()).toEqual(["a", "b"]);
-  });
-});
-
-describe("computeJobNesting", () => {
-  const jobs = {
-    child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" },
-    child2: { status: "running", parentSessionID: "parent", childSessionID: "child2" },
-    doneJob: { status: "done", parentSessionID: "parent", childSessionID: "doneChild" },
-    orphanJob: { status: "running", parentSessionID: "goneParent", childSessionID: "orphanChild" },
-  };
-
-  it("nests running job children under their parent window and hides them from top level", () => {
-    const project = mkProject("p", [
-      { index: 0, name: "parent", opencodeSessionId: "parent" },
-      { index: 1, name: "job1", opencodeSessionId: "child1" },
-      { index: 2, name: "job2", opencodeSessionId: "child2" },
-    ]);
-    const res = computeJobNesting(project, jobs);
-    expect([...res.hidden]).toEqual([1, 2]);
-    expect(res.children.get(0)).toEqual([1, 2]);
-  });
-
-  it("a terminal job stays nested — selection is not an input", () => {
-    const project = mkProject("p", [
-      { index: 0, name: "parent", opencodeSessionId: "parent" },
-      { index: 3, name: "done", opencodeSessionId: "doneChild" },
-    ]);
-    // Terminal job whose parent window exists is nested regardless of which
-    // window is selected — selection is no longer a parameter, so calling the
-    // function twice yields byte-identical results.
-    const a = computeJobNesting(project, jobs);
-    const b = computeJobNesting(project, jobs);
-    expect(a.hidden.has(3)).toBe(true);
-    expect(a.children.get(0)).toEqual([3]);
-    expect(b.hidden.has(3)).toBe(true);
-    expect(b.children.get(0)).toEqual([3]);
-    expect([...a.hidden]).toEqual([...b.hidden]);
-    expect([...a.children]).toEqual([...b.children]);
-  });
-
-  it("renders a job at top level when its parent window is gone", () => {
-    const project = mkProject("p", [
-      { index: 5, name: "orphan", opencodeSessionId: "orphanChild" },
-    ]);
-    const res = computeJobNesting(project, jobs);
-    expect(res.hidden.has(5)).toBe(false);
-  });
-
-  it("ignores jobs whose child window is not in this project", () => {
-    const project = mkProject("p", [{ index: 0, name: "parent", opencodeSessionId: "parent" }]);
-    const res = computeJobNesting(project, jobs);
-    expect(res.hidden.size).toBe(0);
-    expect(res.children.size).toBe(0);
-  });
-});
-
-// ===== shortModelName (BET-460) =====
-
 describe("shortModelName", () => {
   it("strips a known leading vendor brand from the display name", () => {
     expect(shortModelName("Claude Opus 4.7")).toBe("Opus 4.7");
@@ -3067,9 +2740,24 @@ describe("transcript initial-fetch timeout + retry", () => {
   });
 });
 
-// ===== computeTurnInfo (BET-688) =====
+// ===== turnInfoFromView (WS11 D8) =====
+// The turn rules (running gate, background-result boundaries, token sums) are the box's — pinned in
+// src/server/transcriptView.test.mjs. The renderer only re-keys the view it was sent.
+describe("turnInfoFromView", () => {
+  it("re-keys message.view.turn by message id; messages with no turn get no entry; null → empty", () => {
+    const messages = [
+      { info: { id: "u1", role: "user" }, parts: [] },
+      { info: { id: "a1", role: "assistant" }, parts: [], view: { turn: { durationMs: 4000, tokens: 42, verbSeedId: "a0" } } },
+      { info: { id: "a2", role: "assistant" }, parts: [], view: { truncation: { kind: "output-cap", label: "x" } } },
+    ];
+    const info = turnInfoFromView(messages as never);
+    expect([...info.keys()]).toEqual(["a1"]);
+    expect(info.get("a1")).toEqual({ turnDurationMs: 4000, turnTokens: 42, verbSeedId: "a0" });
+    expect(turnInfoFromView(null).size).toBe(0);
+  });
+});
 
-describe("computeTurnInfo", () => {
+describe("computeLiveTurn", () => {
   const userMsg = (id: string) => ({
     info: { role: "user", id },
     parts: [],
@@ -3102,117 +2790,6 @@ describe("computeTurnInfo", () => {
           : undefined,
     } as never,
     parts: [],
-  });
-
-  it("running: true, transcript ending in an assistant message → no footer entry for it", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 5000, output: 42 }),
-    ];
-    const info = computeTurnInfo(messages as never, true);
-    expect(info.size).toBe(0);
-    expect(info.has("a1")).toBe(false);
-  });
-
-  it("running: false, same transcript → footer entry with same duration/tokens", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 5000, output: 42 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.has("a1")).toBe(true);
-    expect(info.get("a1")).toEqual({
-      turnDurationMs: 4000,
-      turnTokens: 42,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("running: true, transcript ending with a USER message → completed turn footer PRESENT", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 5000, output: 9 }),
-      userMsg("u2"),
-    ];
-    const info = computeTurnInfo(messages as never, true);
-    expect(info.has("a1")).toBe(true);
-    expect(info.get("a1")).toEqual({
-      turnDurationMs: 4000,
-      turnTokens: 9,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("multi-step turn, running: false → entry only on the final assistant message", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 3 }),
-      assistantMsg("a2", { created: 2000, completed: 6000, output: 20 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.has("a1")).toBe(false);
-    expect(info.has("a2")).toBe(true);
-    expect(info.get("a2")).toEqual({
-      turnDurationMs: 5000,
-      turnTokens: 23,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("multi-step turn, running: true → the still-streaming final assistant gets NO footer", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 3 }),
-      assistantMsg("a2", { created: 2000, completed: 6000, output: 20 }),
-    ];
-    const info = computeTurnInfo(messages as never, true);
-    expect(info.has("a1")).toBe(false);
-    expect(info.has("a2")).toBe(false);
-  });
-
-  it("returns empty map for a null transcript", () => {
-    expect(computeTurnInfo(null, false).size).toBe(0);
-    expect(computeTurnInfo(null, true).size).toBe(0);
-  });
-
-  it("sums output + reasoning across ALL assistant steps of the turn (not the last step's output)", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 10, reasoning: 1 }),
-      assistantMsg("a2", { created: 2000, completed: 3000, output: 20, reasoning: 2 }),
-      assistantMsg("a3", { created: 3000, completed: 7000, output: 30, reasoning: 3 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.get("a3")).toEqual({
-      turnDurationMs: 6000,
-      turnTokens: 66,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("a turn with reasoning: 0 behaves as before (output-only arithmetic)", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 10, reasoning: 0 }),
-      assistantMsg("a2", { created: 2000, completed: 5000, output: 20, reasoning: 0 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.get("a2")).toEqual({
-      turnDurationMs: 4000,
-      turnTokens: 30,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("verbSeedId is the FIRST assistant message's id, not the last", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 5 }),
-      assistantMsg("a2", { created: 2000, completed: 3000, output: 7 }),
-      assistantMsg("a3", { created: 3000, completed: 6000, output: 9 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.get("a3")?.verbSeedId).toBe("a1");
   });
 
   it("computeLiveTurn: happy path — start time, summed tokens, first-assistant seed id", () => {
@@ -4192,115 +3769,6 @@ describe("buildVoiceNoteMap (BET-837)", () => {
     expect(map.get("m1")?.id).toBe("n1");  });
 });
 
-describe("cloneErrorKind", () => {
-  it("classifies destination failures (never blame the token)", () => {
-    expect(cloneErrorKind("fatal: could not create leading directories of '/root/projects/x': Permission denied")).toBe("destination");
-    expect(cloneErrorKind("fatal: destination path 'x' already exists and is not an empty directory.")).toBe("destination");
-    expect(cloneErrorKind("fatal: destination path 'x' already exists")).toBe("destination");
-    expect(cloneErrorKind("fatal: reference repository is not an empty directory")).toBe("destination");
-  });
-
-  it("classifies permission failures (the actionable one)", () => {
-    expect(cloneErrorKind("remote: Permission to acme/widget denied to octocat\nfatal: unable to access ...")).toBe("permission");
-    expect(cloneErrorKind("fatal: could not read Username for 'https://github.com': terminal prompts disabled")).toBe("permission");
-    expect(cloneErrorKind("remote: Repository not found.")).toBe("permission");
-  });
-
-  it("classifies disk failures", () => {
-    expect(cloneErrorKind("fatal: write error: No space left on device")).toBe("disk");
-    expect(cloneErrorKind("error: insufficient disk space")).toBe("disk");
-  });
-
-  it("classifies network failures", () => {
-    expect(cloneErrorKind("fatal: unable to access 'https://github.com/...': Could not resolve host: github.com")).toBe("network");
-    expect(cloneErrorKind("fatal: unable to access '...': Failed to connect to github.com port 443: Connection refused")).toBe("network");
-  });
-
-  it("returns unknown for anything else", () => {
-    expect(cloneErrorKind("fatal: some other git error")).toBe("unknown");
-    expect(cloneErrorKind("")).toBe("unknown");
-    expect(cloneErrorKind(undefined as unknown as string)).toBe("unknown");
-  });
-});
-
-describe("repoListErrorMessage (BET-1011)", () => {
-  it("maps the server's not_connected and rejected codes to sign-in guidance", () => {
-    expect(repoListErrorMessage("not_connected")).toBe(
-      "GitHub isn't connected. Go back and sign in again.",
-    );
-    expect(repoListErrorMessage("rejected")).toBe(
-      "GitHub isn't connected. Go back and sign in again.",
-    );
-  });
-
-  it("explains a rate-limited listing", () => {
-    expect(repoListErrorMessage("rate_limited")).toBe(
-      "GitHub's rate limit is used up. Try again in a few minutes.",
-    );
-  });
-
-  it("explains a forbidden listing with an SSO hint", () => {
-    expect(repoListErrorMessage("forbidden")).toBe(
-      "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.",
-    );
-  });
-
-  it("explains a network failure", () => {
-    expect(repoListErrorMessage("network")).toBe(
-      "Couldn't reach GitHub from your server. Check its connection and try again.",
-    );
-  });
-
-  it("falls back to a generic message for any other code or absence", () => {
-    const generic = "Couldn't list your repositories from GitHub.";
-    expect(repoListErrorMessage("bogus")).toBe(generic);
-    expect(repoListErrorMessage("")).toBe(generic);
-    expect(repoListErrorMessage(null)).toBe(generic);
-    expect(repoListErrorMessage(undefined)).toBe(generic);
-  });
-});
-
-describe("forgeCredentialSecondary (BET-1059)", () => {
-  it("explains a rejected gh CLI credential", () => {
-    expect(forgeCredentialSecondary({ login: "a", source: "cli", valid: false })).toBe(
-      "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.",
-    );
-  });
-
-  it("explains a rejected env-var credential", () => {
-    expect(forgeCredentialSecondary({ login: "a", source: "env", valid: false })).toBe(
-      "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.",
-    );
-  });
-
-  it("explains a rejected stored credential without a provenance hint", () => {
-    expect(forgeCredentialSecondary({ login: "a", source: "stored", valid: false })).toBe(
-      "GitHub rejected this sign-in. Disconnect, then connect again.",
-    );
-    expect(forgeCredentialSecondary({ login: null, source: null, valid: false })).toBe(
-      "GitHub rejected this sign-in. Disconnect, then connect again.",
-    );
-  });
-
-  it("valid with a login → @login · <where>", () => {
-    expect(forgeCredentialSecondary({ login: "antoinedc", source: "cli", valid: true })).toBe(
-      "@antoinedc · from the gh CLI on your server",
-    );
-  });
-
-  it("valid with no login → the bare <where>", () => {
-    expect(forgeCredentialSecondary({ login: null, source: "stored", valid: true })).toBe(
-      "signed in on this server",
-    );
-  });
-
-  it("valid null is treated like valid true — not-yet-probed never renders as rejected", () => {
-    expect(forgeCredentialSecondary({ login: "antoinedc", source: "env", valid: null })).toBe(
-      "@antoinedc · from the MANTA_GITHUB_TOKEN env var",
-    );
-  });
-});
-
 describe("dispatchAppControl (BET-841)", () => {
   it("routes switch-model to the handler with the resolved model", () => {
     const switchModel = vi.fn();
@@ -4509,201 +3977,6 @@ describe("user scroll intent", () => {
   });
 });
 
-// ===== describeSessionClose / describeProjectClose (BET-935) =====
-
-describe("describeSessionClose", () => {
-  it("idle + no worktree → exact single sentence", () => {
-    expect(describeSessionClose({ name: "Deploy", running: false, worktreePath: null })).toEqual({
-      title: 'Close “Deploy”?',
-      body: "Its tmux window will be killed on the server.",
-      confirmLabel: "Close session",
-    });
-  });
-
-  it("running → body ends with the running-turn sentence", () => {
-    const r = describeSessionClose({ name: "Deploy", running: true, worktreePath: null });
-    expect(r.body).toMatch(/A turn is currently running and will be stopped\.$/);
-  });
-
-  it("worktree → body contains the literal path", () => {
-    const r = describeSessionClose({
-      name: "Deploy",
-      running: false,
-      worktreePath: "/srv/manta/ethernal",
-    });
-    expect(r.body).toContain("/srv/manta/ethernal");
-  });
-
-  it("running + worktree → all three sentences, in order", () => {
-    const r = describeSessionClose({
-      name: "Deploy",
-      running: true,
-      worktreePath: "/srv/manta/ethernal",
-    });
-    expect(r.body).toBe(
-      "Its tmux window will be killed on the server. " +
-        "A turn is currently running and will be stopped. " +
-        "Its worktree at /srv/manta/ethernal will be removed.",
-    );
-  });
-
-  it("title quotes the name with curly quotes", () => {
-    const r = describeSessionClose({ name: "api", running: false, worktreePath: null });
-    expect(r.title).toBe("Close “api”?");
-  });
-});
-
-describe("describeProjectClose", () => {
-  it("0 sessions → no count clause in title, tmux-session body variant", () => {
-    const r = describeProjectClose({
-      name: "orphan",
-      sessionCount: 0,
-      runningCount: 0,
-      worktreeCount: 0,
-    });
-    expect(r.title).toBe("Close “orphan”?");
-    expect(r.body).toBe("Its tmux session will be killed on the server.");
-    expect(r.confirmLabel).toBe("Close project");
-  });
-
-  it("1 session → singular count clauses", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 1,
-      runningCount: 0,
-      worktreeCount: 0,
-    });
-    expect(r.title).toBe("Close “manta” and its 1 session?");
-    expect(r.body).toBe("All 1 tmux window will be killed on the server.");
-  });
-
-  it("4 sessions, 2 running → plural mid-turn sentence", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 2,
-      worktreeCount: 0,
-    });
-    expect(r.body).toContain("2 sessions are mid-turn and will be stopped.");
-  });
-
-  it("4 sessions, 1 running → singular mid-turn sentence", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 1,
-      worktreeCount: 0,
-    });
-    expect(r.body).toContain("1 session is mid-turn and will be stopped.");
-  });
-
-  it("runningCount 0 → mid-turn sentence absent (never '0 sessions are…')", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 0,
-      worktreeCount: 0,
-    });
-    expect(r.body).not.toContain("mid-turn");
-    expect(r.body).not.toContain("0 sessions");
-  });
-
-  it("worktreeCount 0 → worktree sentence absent", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 1,
-      worktreeCount: 0,
-    });
-    expect(r.body).not.toContain("worktree");
-  });
-});
-
-describe("isPlanExitQuestion", () => {
-  const planq = (callID?: string): QuestionRequest =>
-    ({
-      id: "q1",
-      sessionID: "s1",
-      questions: [],
-      tool: callID ? { messageID: "m1", callID } : undefined,
-    }) as QuestionRequest;
-
-  const part = (tool: string, callID: string) =>
-    ({ type: "tool", id: "p", messageID: "m1", tool, callID });
-
-  it("true when a transcript tool part named plan_exit carries the question's callID", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        part("read", "call-read"),
-        part("plan_exit", "call-exit"),
-      ],
-    };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(true);
-  });
-
-  it("false when the matching callID belongs to a DIFFERENT tool", () => {
-    const msg: OpencodeMessage = { info: {} as never, parts: [part("edit", "call-exit")] };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(false);
-  });
-
-  it("false for an ordinary question with no tool call", () => {
-    expect(isPlanExitQuestion(planq(undefined), null)).toBe(false);
-  });
-
-  it("false when no part matches the callID even if a plan_exit part exists", () => {
-    const msg: OpencodeMessage = { info: {} as never, parts: [part("plan_exit", "other")] };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(false);
-  });
-
-  it("matches a nested state.input.tool shape (reconciled transcript part)", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        {
-          type: "tool",
-          id: "p",
-          messageID: "m1",
-          callID: "call-exit",
-          state: { status: "completed", input: { tool: "plan_exit", planPath: "/x/plan.md" } },
-        },
-      ],
-    };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(true);
-  });
-});
-
-describe("extractPlanData", () => {
-  const planq = (callID: string): QuestionRequest =>
-    ({ id: "q1", sessionID: "s1", questions: [], tool: { messageID: "m1", callID } }) as QuestionRequest;
-
-  it("title from first heading + the plan text from the tool input", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        {
-          type: "tool",
-          id: "p",
-          messageID: "m1",
-          callID: "call-exit",
-          state: { status: "completed", input: { tool: "plan_exit", plan: "# Add login\n## Step 1\n- `src/a.ts`" } },
-        },
-      ],
-    };
-    const d = extractPlanData(planq("call-exit"), [msg]);
-    expect(d.title).toBe("Add login");
-    expect(d.text).toContain("## Step 1");
-  });
-
-  it("falls back to the question header when no plan text is present", () => {
-    const q = planq("call-exit");
-    q.questions = [{ question: "Plan at /p is complete. Would you like to switch?", header: "Build Agent", options: [] }];
-    const d = extractPlanData(q, []);
-    expect(d.title).toBe("Build Agent");
-    expect(d.text).toBe("");
-  });
-});
-
 describe("resolveDelegateModel", () => {
   const sel = (providerID: string, modelID: string): import("./chatShared").ModelSelection =>
     ({ providerID, modelID });
@@ -4794,7 +4067,7 @@ describe("resolvePreviewType video", () => {
   });
 });
 
-describe("mediaKindFromMime / isMediaMime", () => {
+describe("mediaKindFromMime", () => {
   it("maps image/* and video/* mimes", () => {
     expect(mediaKindFromMime("image/png")).toBe("image");
     expect(mediaKindFromMime("Image/PNG")).toBe("image");
@@ -4802,13 +4075,6 @@ describe("mediaKindFromMime / isMediaMime", () => {
     expect(mediaKindFromMime("application/pdf")).toBeNull();
     expect(mediaKindFromMime(null)).toBeNull();
     expect(mediaKindFromMime(undefined)).toBeNull();
-  });
-
-  it("isMediaMime is true only for media mimes", () => {
-    expect(isMediaMime("image/png")).toBe(true);
-    expect(isMediaMime("video/webm")).toBe(true);
-    expect(isMediaMime("application/pdf")).toBe(false);
-    expect(isMediaMime(null)).toBe(false);
   });
 });
 
@@ -4956,24 +4222,30 @@ describe("applyWidgetEvent", () => {
   });
 });
 
-describe("filePartToMediaEntry", () => {
-  it("derives a ready image entry from a file part", () => {
-    const e = filePartToMediaEntry({ type: "file", mime: "image/png", url: "file:///home/dev/diagram.png", filename: "diagram.png" } as never);
-    expect(e.state).toBe("ready");
-    expect(e.meta.kind).toBe("image");
-    expect(e.meta.path).toBe("/home/dev/diagram.png");
-    expect(e.meta.mime).toBe("image/png");
+describe("media from the box's view (WS11 D9)", () => {
+  it("a file part the box marked (part.view.media) is a ready entry with the box's kind and path", () => {
+    const e = filePartViewToEntry({ type: "file", mime: "image/png", url: "file:///home/dev/diagram.png", view: { media: { kind: "image", path: "/home/dev/diagram.png" } } } as never);
+    expect(e?.state).toBe("ready");
+    expect(e?.meta.kind).toBe("image");
+    expect(e?.meta.path).toBe("/home/dev/diagram.png");
+    expect(e?.meta.mime).toBe("image/png");
+    const v = filePartViewToEntry({ type: "file", mime: "video/mp4", view: { media: { kind: "video", path: "/c.mp4" } } } as never);
+    expect(v?.meta.kind).toBe("video");
   });
 
-  it("derives a ready video entry from a file part", () => {
-    const e = filePartToMediaEntry({ type: "file", mime: "video/mp4", url: "file:///home/dev/clip.mp4" } as never);
-    expect(e.meta.kind).toBe("video");
-    expect(e.meta.path).toBe("/home/dev/clip.mp4");
+  it("an unmarked file part (an older box, a non-media file) yields no entry — it stays a file card", () => {
+    expect(filePartViewToEntry({ type: "file", mime: "image/png", url: "file:///x.png" } as never)).toBeNull();
   });
 
-  it("falls back to image for a non-media file part (never used, defensive)", () => {
-    const e = filePartToMediaEntry({ type: "file", mime: "application/pdf", url: "file:///x.pdf" } as never);
-    expect(e.meta.kind).toBe("image");
+  it("a canonical message entry becomes a ready card entry carrying the begin's reserved box", () => {
+    const e = viewMediaToEntry({
+      id: "media:h:a1", kind: "image", path: "/a.png", mime: "image/png", width: null, height: null,
+      aspectRatio: 16 / 9, count: 4, size: 10, title: "Cat", handle: "a1",
+    });
+    expect(e).toEqual({
+      handle: "a1", state: "ready", beganAt: null,
+      meta: { kind: "image", path: "/a.png", mime: "image/png", width: null, height: null, aspectRatio: 16 / 9, count: 4, title: "Cat" },
+    });
   });
 });
 
@@ -5065,88 +4337,6 @@ describe("chartAxisTicks", () => {
 
 // ===== Endpoint health formatting (BET-1537 S5 review Blocks 1+3) =====
 
-describe("formatRetryMinutes / formatAgeAt", () => {
-  it("floors the cooldown to whole minutes, minimum 1, null without a deadline", () => {
-    expect(formatRetryMinutes(4 * 60_000)).toBe(4);
-    expect(formatRetryMinutes(1)).toBe(1);
-    expect(formatRetryMinutes(0)).toBeNull();
-    expect(formatRetryMinutes(null)).toBeNull();
-    expect(formatRetryMinutes(undefined)).toBeNull();
-  });
-
-  it("formats ages compactly", () => {
-    const now = 1_000_000_000;
-    expect(formatAgeAt(now, now)).toBe("just now");
-    expect(formatAgeAt(now - 5 * 60_000, now)).toBe("5m ago");
-    expect(formatAgeAt(now - 3 * 3_600_000, now)).toBe("3h ago");
-    expect(formatAgeAt(now - 6 * 86_400_000, now)).toBe("6d ago");
-    expect(formatAgeAt(null, now)).toBeNull();
-    expect(formatAgeAt(0, now)).toBeNull();
-  });
-});
-
-describe("formatEndpointStateLine", () => {
-  const NOW = 1_000_000_000;
-
-  it("carries state, deadline, reason and the §W9 window activity", () => {
-    expect(
-      formatEndpointStateLine(
-        {
-          state: "rate-limited",
-          retryInMs: 4 * 60_000,
-          reason: { httpStatus: 429, errorName: "APIError" },
-          lastSuccessAt: NOW - 2 * 3_600_000,
-          attempts: 12,
-          successes: 2,
-        },
-        NOW,
-      ),
-    ).toBe("Rate limited · retry in 4m · HTTP 429 · last success 2h ago · 12 attempts · 17% success in window");
-  });
-
-  it("omits absent fields; falls back to the raw state when the label is unknown", () => {
-    expect(formatEndpointStateLine({ state: "dead" }, NOW)).toBe("Dead");
-    expect(formatEndpointStateLine({ state: "mystery" }, NOW)).toBe("mystery");
-    expect(formatEndpointStateLine(null, NOW)).toBe("");
-    expect(
-      formatEndpointStateLine({ state: "unproven", attempts: 1, successes: 0 }, NOW),
-    ).toBe("Unproven · 1 attempt · 0% success in window");
-  });
-});
-
-describe("formatNoHealthyEndpointCopy", () => {
-  it("names each excluded endpoint and WHY (shared labels), with the way out", () => {
-    expect(
-      formatNoHealthyEndpointCopy({
-        excluded: ["anthropic/claude-x", "voska/alpha"],
-        excludedWhy: {
-          "anthropic/claude-x": { endpoint: "not-found", provider: null },
-          "voska/alpha": { endpoint: "dead", provider: "out-of-credit" },
-        },
-      }),
-    ).toBe(
-      "Auto couldn't pick a healthy model — anthropic/claude-x (Not found), voska/alpha (Dead, Out of credit) excluded. " +
-        "The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
-    );
-  });
-
-  it("falls back to the plain key list for a box without excludedWhy", () => {
-    expect(
-      formatNoHealthyEndpointCopy({ excluded: ["anthropic/claude-x"] }),
-    ).toBe(
-      "Auto couldn't pick a healthy model — anthropic/claude-x excluded. The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
-    );
-  });
-
-  it("handles an empty/absent decision", () => {
-    expect(formatNoHealthyEndpointCopy({})).toBe(
-      "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
-    );
-    expect(formatNoHealthyEndpointCopy(null)).toBe(
-      "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
-    );
-  });
-});
 
 describe("providersFromExcludedKeys / ENDPOINT_STATE_LABEL coverage", () => {
   it("derives the distinct providers behind the excluded keys", () => {
@@ -5239,5 +4429,20 @@ describe("authProviderSeatId", () => {
   });
   it("has no seat panel for Kimi or anything else", () => {
     for (const v of ["kimi-for-coding", "", "foo", null, undefined]) expect(authProviderSeatId(v)).toBeUndefined();
+  });
+});
+
+describe("contextModelLabel (WS11 D2 decision 4)", () => {
+  const models = [{ id: "opus", providerID: "anthropic", name: "Claude Opus" }];
+  it("names the model the box measured against, from the catalog", () => {
+    expect(contextModelLabel(models, { providerID: "anthropic", modelID: "opus" }, "selected", "Other")).toBe("Claude Opus");
+  });
+  it("marks a last-reply fallback so the label cannot name a model that was not measured", () => {
+    expect(contextModelLabel(models, { providerID: "anthropic", modelID: "opus" }, "last-used", "Other")).toBe("Claude Opus (last reply's model)");
+  });
+  it("falls back to the raw model id when the catalog lacks it, and to the client's name on an older box", () => {
+    expect(contextModelLabel(models, { providerID: "x", modelID: "mystery" }, "selected", "Other")).toBe("mystery");
+    expect(contextModelLabel(models, null, undefined, "Other")).toBe("Other");
+    expect(contextModelLabel(models, undefined, null, null)).toBeNull();
   });
 });

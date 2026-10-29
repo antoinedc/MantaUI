@@ -13,8 +13,9 @@ import { presentVerbFor } from "./chatShared";
 import type { LiveTurn } from "./chatUtils";
 import { pinDemoClock } from "./clock";
 import { useStore } from "./store";
-import type { ToolGroup } from "./toolActivity";
-import type { OpencodePart } from "../shared/types";
+import { layoutTranscript, type ToolGroup } from "./toolActivity";
+import { viewed } from "./testRunViews";
+import type { OpencodeMessage, OpencodePart } from "../shared/types";
 
 // A fixed clock anchor; the elapsed label is a function of this, not the wall
 // clock. startedAt is 103s before the anchor so formatDuration renders "1m43s".
@@ -117,7 +118,16 @@ describe("WorkingIndicator", () => {
   let n = 0;
   const tool = (name: string, input: Record<string, unknown>, status = "completed") =>
     ({ id: `t${++n}`, messageID: "m", type: "tool", tool: name, state: { status, input } }) as OpencodePart;
-  const group = (...items: OpencodePart[]): ToolGroup => ({ id: items[0].id, items });
+  // The tail run exactly as the box says it: stamped by the box's own module, laid out by run id.
+  const group = (...items: OpencodePart[]): ToolGroup => {
+    const messages = viewed([
+      { info: { id: "u", sessionID: "s", role: "user", time: { created: 1 } }, parts: [{ id: "ux", messageID: "u", type: "text", text: "go" }] },
+      { info: { id: "a", sessionID: "s", role: "assistant", time: { created: 2 } }, parts: items },
+    ] as unknown as OpencodeMessage[]);
+    const trailing = layoutTranscript(messages, { running: true, showThinking: false }).trailing;
+    if (!trailing) throw new Error("fixture has no trailing run");
+    return trailing;
+  };
   const headline = () => h!.container.querySelector(".text-text.font-medium")?.textContent;
   const meta = () => h!.container.querySelector(".text-text-faint.text-meta")?.textContent;
   const workingProgress = {

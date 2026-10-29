@@ -234,6 +234,15 @@ enum ChatModel {
         return "Default"
     }
 
+    /// The model line of the context sheet: the model the BOX measured against (`context.model`), named from the
+    /// catalog, with "(last reply's model)" when the box fell back to the last reply's model (`basis`
+    /// "last-used"). An older box sends no `context.model`: `fallback` (the client's own name) stands in.
+    static func contextModelLabel(_ models: [OpencodeModel], measured: StreamContextModel?, basis: String?, fallback: String) -> String {
+        guard let measured else { return fallback }
+        let name = models.first { $0.providerID == measured.providerID && $0.id == measured.modelID }?.name ?? measured.modelID
+        return basis == "last-used" ? "\(name) (last reply's model)" : name
+    }
+
     /// Fuzzy-match a named model against the pickable list (desktop's
     /// `fuzzyMatchModel`-style resolution).
     static func findByQuery(_ models: [OpencodeModel], query: String) -> OpencodeModel? {

@@ -4,19 +4,14 @@
 // and the formatting.
 
 import { describe, it, expect } from "vitest";
+import { buildUpgradeView } from "../server/upgradeView.mjs";
 import type { UpgradeStatus, UpgradeStep } from "../shared/api";
 import {
   boxNeedsMajorUpgrade,
-  currentStep,
-  describeDiskShortfall,
-  describeGateDetails,
-  diskSentence,
-  formatEtaSeconds,
   gateReducer,
   initialGateState,
   normalizeUpgradeStatus,
   selectGateView,
-  stepFraction,
   type GateInputs,
   type GateState,
 } from "./upgradeGateLogic";
@@ -29,14 +24,23 @@ const step = (id: UpgradeStep["id"], status: UpgradeStep["status"], extra: Parti
   ...extra,
 });
 
-const status = (over: Partial<UpgradeStatus> = {}): UpgradeStatus => ({
-  state: "running",
-  steps: [step("preflight", "done"), step("stop", "done"), step("copy", "running")],
-  overall: 0.4,
-  etaSeconds: 240,
-  error: null,
-  ...over,
-});
+// The box words the gate (WS11 D3 / X5): attach the REAL box view to every status,
+// exactly as GET /api/upgrade does, so these tests exercise the wire the app gets.
+const status = (over: Partial<UpgradeStatus> = {}): UpgradeStatus => {
+  const base: UpgradeStatus = {
+    state: "running",
+    steps: [step("preflight", "done"), step("stop", "done"), step("copy", "running")],
+    overall: 0.4,
+    etaSeconds: 240,
+    error: null,
+    ...over,
+  };
+  return { ...base, view: buildUpgradeView(base) as UpgradeStatus["view"] };
+};
+const oldBoxStatus = (over: Partial<UpgradeStatus> = {}): UpgradeStatus => {
+  const { view: _v, ...rest } = status(over);
+  return rest;
+};
 
 const inputs = (over: Partial<GateInputs> = {}): GateInputs => ({
   boxNeedsUpgrade: false,
@@ -223,7 +227,7 @@ describe("selectGateView", () => {
       ],
     });
     const v = selectGateView(withStatus(s), inputs());
-    expect(v).toMatchObject({ kind: "running", overall: 0.4, etaSeconds: 240, currentFraction: 0.25 });
+    expect(v).toMatchObject({ kind: "running", overall: 0.4, etaText: "about 4 min left", currentFraction: 0.25 });
     expect((v as { current: UpgradeStep }).current.id).toBe("copy");
   });
 
@@ -242,7 +246,7 @@ describe("selectGateView", () => {
       ]);
       expect(v).toMatchObject({
         kind: "failed",
-        disk: "needs 31 GB free, has 3 GB",
+        diskSentence: "Needs 31 GB free, has 3 GB.",
         retryLabel: "Check again",
         canRetry: true,
         canRollback: false,
@@ -251,7 +255,7 @@ describe("selectGateView", () => {
 
     it("migration failure: Retry and Roll back both offered", () => {
       const v = failed({ step: "migrate", message: "boom", retryable: true });
-      expect(v).toMatchObject({ retryLabel: "Retry", canRetry: true, canRollback: true, disk: null });
+      expect(v).toMatchObject({ retryLabel: "Retry", canRetry: true, canRollback: true, diskSentence: null });
     });
 
     it("verification failure: 'Check again', no Roll back (the fix is in place)", () => {
@@ -278,66 +282,23 @@ describe("selectGateView", () => {
     });
   });
 
-  it("rolled_back → its own view", () => {
-    expect(selectGateView(withStatus(status({ state: "rolled_back" })), inputs()).kind).toBe("rolled_back");
-  });
-});
-
-describe("formatting", () => {
-  it("describeDiskShortfall", () => {
-    const g = 2 ** 30;
-    expect(describeDiskShortfall({ step: "preflight", message: "", retryable: true, needBytes: 31 * g, haveBytes: 3 * g })).toBe(
-      "needs 31 GB free, has 3 GB",
-    );
-    expect(describeDiskShortfall({ step: "preflight", message: "", retryable: true, needBytes: 31 * g })).toBe("needs 31 GB free");
-    expect(describeDiskShortfall({ step: "preflight", message: "", retryable: true, needBytes: 5 * g, haveBytes: 0 })).toBe(
-      "needs 5 GB free, has 0 B",
-    );
-    expect(describeDiskShortfall({ step: "migrate", message: "", retryable: true })).toBeNull();
-    expect(describeDiskShortfall(null)).toBeNull();
-  });
-
-  it("diskSentence capitalises and terminates", () => {
-    expect(diskSentence("needs 31 GB free, has 3 GB")).toBe("Needs 31 GB free, has 3 GB.");
-    expect(diskSentence("")).toBe("");
-  });
-
-  it("formatEtaSeconds", () => {
-    expect(formatEtaSeconds(null)).toBeNull();
-    expect(formatEtaSeconds(10)).toBe("less than a minute left");
-    expect(formatEtaSeconds(240)).toBe("about 4 min left");
-    expect(formatEtaSeconds(3600)).toBe("about 1 h left");
-    expect(formatEtaSeconds(5400)).toBe("about 1 h 30 min left");
-  });
-
-  it("stepFraction clamps and refuses a zero denominator", () => {
-    expect(stepFraction(step("copy", "running", { progress: { numerator: 5, denominator: 0 } }))).toBeNull();
-    expect(stepFraction(step("copy", "running", { progress: { numerator: 500, denominator: 100 } }))).toBe(1);
-    expect(stepFraction(step("copy", "running", { progress: { label: "x" } }))).toBeNull();
-    expect(stepFraction(null)).toBeNull();
-  });
-
-  it("currentStep prefers running, then failed", () => {
-    expect(currentStep(status({ steps: [step("stop", "failed"), step("copy", "running")] }))?.id).toBe("copy");
-    expect(currentStep(status({ steps: [step("stop", "done"), step("copy", "failed")] }))?.id).toBe("copy");
-    expect(currentStep(status({ steps: [step("stop", "done")] }))).toBeNull();
-  });
-
-  it("describeGateDetails snapshots steps and the failure for support", () => {
+  it("an older box (no view): steps and the raw message; Retry is still offered (never a dead end), Roll back is not", () => {
     const v = selectGateView(
-      withStatus(
-        status({
-          state: "failed",
-          steps: [step("preflight", "failed", { error: "no space" })],
-          error: { step: "preflight", message: "Not enough disk space", retryable: true, needBytes: 2 ** 31, haveBytes: 2 ** 30 },
-        }),
-      ),
+      withStatus(oldBoxStatus({ state: "failed", steps: [step("migrate", "failed")], error: { step: "migrate", message: "raw box message", retryable: true } })),
       inputs(),
     );
-    const text = describeGateDetails(v);
-    expect(text).toContain("preflight: failed — no space");
-    expect(text).toContain("error (preflight): Not enough disk space");
-    expect(text).toContain("disk: needs 2 GB free, has 1 GB");
-    expect(describeGateDetails({ kind: "hidden" })).toBe("");
+    expect(v).toMatchObject({ kind: "failed", message: "raw box message", canRetry: true, canRollback: false, hasView: false, details: "" });
+    const run = selectGateView(withStatus(oldBoxStatus()), inputs());
+    expect(run).toMatchObject({ kind: "running", etaText: null, currentFraction: null, current: null });
+  });
+
+  it("carries the box's Copy-details text", () => {
+    const v = selectGateView(withStatus(status({ state: "failed", steps: [step("preflight", "failed", { error: "no space" })], error: { step: "preflight", message: "Not enough disk space", retryable: true, needBytes: 2 ** 31, haveBytes: 2 ** 30 } })), inputs());
+    expect((v as { details: string }).details).toContain("error (preflight): Not enough disk space");
+    expect((v as { details: string }).details).toContain("disk: needs 2 GB free, has 1 GB");
+  });
+
+  it("rolled_back → its own view", () => {
+    expect(selectGateView(withStatus(status({ state: "rolled_back" })), inputs()).kind).toBe("rolled_back");
   });
 });

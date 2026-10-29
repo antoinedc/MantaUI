@@ -4,7 +4,7 @@ import SwiftUI
 // WS10 F9 — GitHub connection + forge rules (Settings → Extensions).
 //
 // The GitHub row says who is connected and where the credential came from (the
-// pure `ExtensionsForge.secondary`), and offers Disconnect behind a confirm.
+// box's `forge:status.secondary`), and offers Disconnect behind a confirm.
 // CONNECTING is WS05's device-flow sign-in in the chat's git sheet — Settings
 // does not duplicate it, so "Not connected." is a statement, not a dead button.
 // Forge rules are written on the box by the AI; this screen lists them (invalid
@@ -188,7 +188,7 @@ struct ExtensionsForgeScreen: View {
                             .font(.manta(size: Metrics.type.body, weight: .medium))
                             .foregroundColor(tokens.tx1)
                         Text(status.connected
-                             ? ExtensionsForge.secondary(login: status.login, source: status.source, valid: status.valid)
+                             ? (status.secondary ?? status.login.map { "@\($0)" } ?? "connected")
                              : "Not connected.")
                             .font(.manta(size: Metrics.type.small))
                             .foregroundColor(status.valid == false ? tokens.warn : tokens.tx3)

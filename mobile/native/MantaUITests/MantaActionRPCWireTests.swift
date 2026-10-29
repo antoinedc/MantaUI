@@ -88,18 +88,13 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertTrue(projects.isEmpty)
     }
 
-    func testKillWindowSingleWraps() async throws {
+    // WS11 D6: the close flow is the box's — one object per call, and only the options that apply are sent.
+    func testSessionsCloseSingleWraps() async throws {
         let client = makeClient()
-        try await client.killWindow(KillWindowInput(sessionName: "p", windowIndex: 2))
+        CapturingURLProtocol.result = #"{"result": {"ok": true}}"#
+        _ = try await client.sessionsClose(project: "p", windowIndex: 2, dirtyWorktree: "keep", deleteConversation: true)
         assertSingleWrapped()
-        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/tmux:kill-window")
-    }
-
-    func testDeleteSessionSingleWraps() async throws {
-        let client = makeClient()
-        try await client.deleteSession(sessionId: "s", sessionName: "p", windowIndex: 2)
-        assertSingleWrapped()
-        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:delete-session")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/sessions:close")
     }
 
     func testRenameWindowSingleWraps() async throws {
@@ -582,7 +577,7 @@ final class MantaActionRPCWireTests: XCTestCase {
                 _ = try await client.accountsRemoveSeat(provider: "claude", seatId: "s1")
                 XCTFail("expected a throw for \(reply)")
             } catch {
-                XCTAssertEqual(error as? MantaError, .server("last-seat"), reply)
+                XCTAssertEqual(Self.refusalCode(error), "last-seat", reply)
             }
         }
     }
@@ -624,8 +619,17 @@ final class MantaActionRPCWireTests: XCTestCase {
             _ = try await client.accountsAddSeat(provider: "nope")
             XCTFail("expected a throw")
         } catch {
-            XCTAssertEqual(error as? MantaError, .server("unknown-provider"))
+            XCTAssertEqual(Self.refusalCode(error), "unknown-provider")
         }
+    }
+
+    /// An accounts refusal reaches the caller as `AccountsRefusal` (code + the
+    /// box's sentence, WS11 D4) when it rides in the result body, or as the
+    /// transport's `MantaError.server` when it rides in the rpc envelope.
+    private static func refusalCode(_ error: Error) -> String? {
+        if let refusal = error as? AccountsRefusal { return refusal.code }
+        if case .server(let code)? = error as? MantaError { return code }
+        return nil
     }
 }
 

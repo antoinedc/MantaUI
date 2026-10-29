@@ -13,9 +13,18 @@ import { existsSync } from "node:fs";
 import { transcribeAudio } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import {
-  computeContextBreakdown,
   selectLatestTokenUsage,
+  selectLastAssistantCompletion,
+  selectCacheTtlMs,
+  computeStaleCache,
 } from "../shared/streamInterpretation.mjs";
+import { buildContextPayload } from "./sessionContext.mjs";
+import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
+import { previewClose, closeSession } from "./sessionClose.mjs";
+import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName, tmuxSafeName, nameTaken } from "./sessionNaming.mjs";
+import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
+import { buildAccountRowStates } from "./accountsRowState.mjs";
+import { createLauncherFlagWriter, launchersView, resolveLauncherForSpawn } from "./launchersConfig.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots, getUsageAlerts as getUsageAlertsImpl } from "./usage.mjs";
 import {
@@ -601,6 +610,10 @@ export function buildHandlers({
   // alert engine are injectable so tests never touch a live opencode.jsonc.
   setModelCostDetailed = providers.setModelCostDetailed,
   syncSubagentsDetailed = providers.syncSubagentsDetailed,
+  // WS11 D4: the custom endpoints behind `opencode:get-providers` (injectable for tests).
+  getProviderEndpoints = providers.getProviderEndpoints,
+  // WS11 D5: the one session-name allocator (injectable so a test gets a fresh one).
+  nameAllocator = sharedNameAllocator,
   getUsageAlerts = getUsageAlertsImpl,
   // BET-P3a3: the composed CTO conversation service (createCtoConversationService
   // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
@@ -623,6 +636,15 @@ export function buildHandlers({
   // K3/K4: the stream interpreter that owns the pending-user-message list.
   // Null when not wired (tests) → opencode:inbox* answer a clear error.
   streamInterp = null,
+  // WS11 D10: adds `plan` to a plan_exit question (null in a bare test harness).
+  questionsDecorator = null,
+  // WS11 D7: the per-window status aggregator (null in a bare test harness).
+  sessionStatus = null,
+  // WS11 D6: (session, windowIndex) → is a terminal window mid-turn (the status poller's latest batch).
+  terminalRunning = () => false,
+  // WS11 D2: the shared "which model is this session measured against" resolver
+  // (sessionContext.mjs). Null (tests) → the last reply's model, labelled so.
+  contextModels = null,
   // N3: `backgroundCommandNames(directory) → Promise<Set<string>>` — the names
   // whose definitions provably run in the background (commandBackground.mjs).
   // Injectable for tests; the default reads the real definitions.
@@ -809,6 +831,10 @@ export function buildHandlers({
     syncState.applyConfig(next);
     return next;
   };
+  const setLauncherFlag = createLauncherFlagWriter({
+    configGet: () => local.configGet(),
+    configUpdate: configUpdateSynced,
+  });
   const modelsTable = createModelsTable({
     listModels: (overrides) => oc.listModels(overrides, { strict: true }),
     configGet: () => local.configGet(),
@@ -840,7 +866,36 @@ export function buildHandlers({
     now: Date.now,
   });
 
-  return {
+  // WS11 D4 (K2): the subscription connection statuses — read here once so
+  // `opencode:provider-auth {action:"status"}` and `accounts:row-states` share it.
+  async function readSubscriptionStatuses() {
+    // BET-1319: read connected-state from opencode's OWN auth store, not from
+    // GET /provider (opencode keeps `connected[]` for the process lifetime).
+    const connected = await oc.readAuthedProviderIds();
+    // BET-1320: a provider whose detect path exists on disk has its credential
+    // owned outside Manta (e.g. the Claude CLI).
+    const externallyManaged = new Set(
+      subscriptionProviders.SUBSCRIPTION_PROVIDERS.filter((p) =>
+        (p.detect ?? []).some((d) => existsSync(expandTilde(d))),
+      ).map((p) => p.id),
+    );
+    return subscriptionProviders.subscriptionStatuses(connected, externallyManaged);
+  }
+
+  // The context payload measured from the persisted transcript against the session's selected model (WS11 D2).
+  async function measureContext(sessionId) {
+    const messages = await oc.listMessages(sessionId, { slim: true });
+    const found = selectLatestTokenUsage(messages);
+    if (!found) return null;
+    const lastUsed = found.providerID && found.modelID ? { providerID: found.providerID, modelID: found.modelID } : null;
+    const resolved = contextModels
+      ? contextModels.resolve({ sessionId, lastUsed })
+      : lastUsed && { ...lastUsed, basis: "last-used" };
+    const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+    return buildContextPayload(found.tokens, resolved ?? null, limit);
+  }
+
+  const handlers = {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
 
     // preload: ipcRenderer.invoke(IPC.configGet)  → no args
@@ -925,6 +980,12 @@ export function buildHandlers({
       }
       const prev = await local.configGet();
       const next = await local.configUpdate(patch);
+      // WS11 D2: a changed cache TTL / default model re-measures live sessions
+      // without a restart.
+      if (patch?.cacheTtl === "5m" || patch?.cacheTtl === "1h") streamInterp?.setCacheTtlLabel(patch.cacheTtl);
+      if (patch && "defaultModel" in patch && contextModels?.setDefaultModel(next?.defaultModel)) {
+        streamInterp?.reemitAllContext();
+      }
       // BET-1386 §10.5 card 1: the effort dial is a real, persisted selection
       // AND ledgered on change — only an ACTUAL Low/Med/High switch appends an
       // Activity-ledger row (pure decision in ctoTier.mjs, tested) so the A12
@@ -1015,7 +1076,11 @@ export function buildHandlers({
     // server resolves cwd → origin → repo.
     // preload: ipcRenderer.invoke(IPC.forgeStatus)             → no args
     // preload: ipcRenderer.invoke(IPC.forgePullRequest, {cwd}) → args[0] = { cwd }
-    "forge:status": (input) => forgeStatus({ validate: input?.validate === true }),
+    // WS11 D3 (X9): `secondary` is the Settings row's second line, worded here.
+    "forge:status": async (input) => {
+      const status = await forgeStatus({ validate: input?.validate === true });
+      return status?.connected === true ? { ...status, secondary: forgeCredentialSecondary(status) } : status;
+    },
     "forge:pull-request": (input) =>
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
     // A forge ref is either the session cwd ({ cwd }) — resolved box-side to
@@ -1207,6 +1272,7 @@ export function buildHandlers({
     // succeeded, do a synchronous refresh so the first call doesn't return a
     // hardcoded empty list to a box that just booted.
     "tmux:list": async () => {
+      await sessionStatus?.settled?.();
       if (!syncState.everSucceeded()) {
         await syncState.refreshNow();
       }
@@ -1316,10 +1382,22 @@ export function buildHandlers({
       // the renderer. formatIssueRef returns null for invalid input, which
       // simply skips the stamp.
       const forgeIssueRef = i?.forgeIssue ? formatIssueRef(i.forgeIssue) : null;
-      const result = await tmux.newSession({ ...i, cwd, oc, forgeIssueRef });
+      // WS11 D5 (S1): the box names the session. No `name` → a tmux-safe, unique name from `nameHint`
+      // (else the folder), allocated under one mutex so two clients can never take the same name; an
+      // explicit `name` is made tmux-safe and never renamed. The final name comes back as `name`.
+      const { result, name } = await createSessionUnderAllocator({
+        explicitName: i?.name,
+        hint: typeof i?.nameHint === "string" && i.nameHint.trim() ? i.nameHint : cwd,
+        existingSessionId: i?.existingSessionId,
+        create: ({ name: finalName, existingSessionId }) =>
+          tmux.newSession({ ...i, name: finalName, cwd, oc, forgeIssueRef, existingSessionId }),
+        listNames: () => tmux.listSessionNames(),
+        deleteSession: (id) => oc.deleteSessionRaw(id),
+        allocator: nameAllocator,
+      });
       await local
         .projectMetaUpsert({
-          tmuxSession: i.name,
+          tmuxSession: name,
           defaultCwd: expandTilde(cwd),
         })
         .catch(() => {});
@@ -1329,7 +1407,16 @@ export function buildHandlers({
       // sessions up with existing ones on name collisions).
       // BET-675: refresh materialized state so the sync delta publishes now.
       await syncState.refreshNow();
-      return result;
+      return { ...result, name };
+    },
+    // WS11 D5 (S1): a preview of the name a create would pick; the create re-checks.
+    "sessions:propose-name": async (i) => {
+      if (i?.kind === "scratch") {
+        const taken = await listChildDirNames(i.root);
+        return proposeScratchName(i.hint ?? "", taken);
+      }
+      const taken = new Set(await tmux.listSessionNames());
+      return { name: proposeProjectName({ hint: i?.hint, cwd: i?.cwd }, taken), hint: null };
     },
     // Resolve cwd: prefer explicit cwd in input, then fall back to the
     // project's stored defaultCwd (set when the workspace was created).
@@ -1343,15 +1430,68 @@ export function buildHandlers({
       return result;
     },
     "tmux:rename-session": async (i) => {
-      const result = await tmux.renameSession(i);
+      // WS11 D5 (S2): validated on the box with a sentence a person can read; unchanged → no tmux call.
+      const valid = validateSessionName(i?.newName);
+      if (!valid.ok) throw new Error(valid.error);
+      // tmux silently rewrites "." and ":" in a session name: apply the same rule here so the name we report
+      // (`returnName`) is the one that exists, and map tmux's "duplicate session" to the sentence a person can read.
+      const finalName = tmuxSafeName(valid.name);
+      const reply = (projects) => (i?.returnName === true ? { projects, name: finalName } : projects);
+      if (finalName === i?.oldName) return reply(await tmux.listProjects());
+      let result;
+      try {
+        result = await tmux.renameSession({ ...i, newName: finalName });
+      } catch (e) {
+        if (/duplicate session/i.test(String(e?.message ?? e))) throw new Error(nameTaken(finalName));
+        throw e;
+      }
       await syncState.refreshNow();
-      return result;
+      return reply(result);
     },
     "tmux:rename-window": async (i) => {
-      const result = await tmux.renameWindow(i);
+      const valid = validateSessionName(i?.newName);
+      if (!valid.ok) throw new Error(valid.error);
+      const projects = await tmux.listProjects();
+      const current = projects.find((p) => p.tmuxSession === i?.sessionName)?.windows?.find((w) => w.index === i?.windowIndex);
+      if (current && current.name === valid.name) return projects;
+      const result = await tmux.renameWindow({ ...i, newName: valid.name });
       await syncState.refreshNow();
       return result;
     },
+    // WS11 D7 (S14): every windowed session's `windowStatus` payload — a FULL replacement for the client.
+    "sessions:window-status": async () => sessionStatus?.windowStatusMap() ?? {},
+    // WS11 D6 (S10): the close flow — confirm copy, then worktree removal → kill → metadata → refresh — on the box.
+    "sessions:close-preview": async (i) =>
+      previewClose({
+        project: i?.project,
+        windowIndex: i?.windowIndex ?? undefined,
+        projects: await tmux.listProjects(),
+        cleanOnClose: (await local.configGet().catch(() => ({})))?.worktreeCleanOnClose === true,
+        isRunning: (w, project) =>
+          w.opencodeSessionId
+            ? Boolean(streamInterp?.getState(w.opencodeSessionId)?.running)
+            : terminalRunning(project, w.index) === true,
+      }),
+    "sessions:close": (i) =>
+      closeSession(
+        {
+          project: i?.project,
+          windowIndex: i?.windowIndex ?? undefined,
+          dirtyWorktree: i?.dirtyWorktree,
+          deleteConversation: i?.deleteConversation === true,
+          expect: i?.expect && typeof i.expect === "object" ? i.expect : undefined,
+        },
+        {
+          listProjects: () => tmux.listProjects(),
+          cleanOnClose: async () => (await local.configGet())?.worktreeCleanOnClose === true,
+          removeWorktree: (a) => local.gitRemoveWorktree(a),
+          deleteConversation: (sid) => oc.deleteSessionRaw(sid),
+          killWindow: (a) => tmux.killWindow(a),
+          killSession: (n) => tmux.killSession(n),
+          projectMetaDelete: (n) => local.projectMetaDelete(n),
+          refresh: () => syncState.refreshNow(),
+        },
+      ),
     "tmux:kill-session": async (n) => {
       const result = await tmux.killSession(n);
       await syncState.refreshNow();
@@ -1377,7 +1517,13 @@ export function buildHandlers({
     // fetch and `{}` (whole history) for "Load earlier"; no limit at all keeps
     // the full transcript. The native iOS client passes {limit, slim}. The
     // duplicated tool stdout is stripped server-side for every client.
-    "opencode:messages": (sessionId, opts) => oc.listMessages(sessionId, opts ?? {}),
+    // `view:true` adds `message.view` (WS11 D8+). `running` is the interpreter's, never the client's.
+    "opencode:messages": (sessionId, opts) =>
+      oc.listMessages(sessionId, {
+        ...(opts ?? {}),
+        running: streamInterp?.getState(sessionId)?.running === true,
+        ledger: streamInterp?.ledgerFor?.(sessionId) ?? null,
+      }),
 
     // Context usage for a session that may be idle. The live `stream/context`
     // frame is emitted only when an assistant message arrives, so a client
@@ -1385,17 +1531,35 @@ export function buildHandlers({
     // turn. This derives the same payload from the persisted transcript, using
     // the same shared breakdown function, so an idle session is correct on
     // open. Returns null when the transcript has no billed assistant turn yet.
-    "opencode:context": async (sessionId) => {
+    "opencode:context": (sessionId) => measureContext(sessionId),
+
+    // WS11 D2 (T21): the same `cache` payload the stream emits, computed from the
+    // persisted transcript so an idle session is right on open. null when no
+    // assistant turn has completed. Mirrors opencode:context.
+    "opencode:cache": async (sessionId) => {
+      if (typeof sessionId !== "string" || !sessionId) return null;
       const messages = await oc.listMessages(sessionId, { slim: true });
+      const lastCompleted = selectLastAssistantCompletion(messages);
+      if (lastCompleted == null) return null;
       const found = selectLatestTokenUsage(messages);
-      if (!found) return null;
-      const limit = contextLimitFor(found.providerID, found.modelID);
-      return computeContextBreakdown(found.tokens, limit);
+      let label = null;
+      try {
+        label = await providers.readCacheTtl();
+      } catch {
+        /* non-fatal: the 5m default */
+      }
+      return computeStaleCache({
+        lastCompleted,
+        now: Date.now(),
+        ttlMs: selectCacheTtlMs(label ?? "5m"),
+        cachedTokens: (found?.tokens?.cache?.read ?? 0) + (found?.tokens?.cache?.write ?? 0),
+        running: streamInterp?.getState(sessionId)?.running === true,
+      });
     },
 
     // Single-message fetch for live-turn splice (returns null on miss).
-    "opencode:message": (sessionId, messageId) =>
-      oc.getMessage(sessionId, messageId),
+    "opencode:message": (sessionId, messageId, opts) =>
+      oc.getMessage(sessionId, messageId, { ...(opts ?? {}), ledger: streamInterp?.ledgerFor?.(sessionId) ?? null }),
 
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape
@@ -1503,7 +1667,10 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
     // Background-job children no longer surface here (BET-418 §A) — see
     // opencode:permissions above.
-    "opencode:questions": async (sessionId) => oc.listQuestions(sessionId),
+    "opencode:questions": async (sessionId) => {
+      const questions = await oc.listQuestions(sessionId);
+      return questionsDecorator && sessionId ? questionsDecorator.decorate(sessionId, questions) : questions;
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }
@@ -1718,6 +1885,9 @@ export function buildHandlers({
             model: null,
             reason: decision?.reason ?? "",
             excluded: Array.isArray(decision?.excluded) ? decision.excluded : [],
+            // WS11 D4 (K3): the banner copy, worded by the box from the router's
+            // structured per-key states.
+            copy: formatNoHealthyEndpointCopy(decision),
             alternatives: [],
             changed: false,
             incumbentHealthy,
@@ -1855,7 +2025,43 @@ export function buildHandlers({
       } catch {
         endpoints = {};
       }
-      return { providers: out, endpoints };
+      // WS11 D4 (K3): each endpoint's one-line state and the worst per provider,
+      // worded now (they are polled, so the age text is as fresh as the poll).
+      const nowMs = Date.now();
+      const withLines = {};
+      for (const [key, entry] of Object.entries(endpoints)) {
+        withLines[key] = { ...entry, stateLine: formatEndpointStateLine(entry, nowMs) };
+      }
+      let enabledCounts = {};
+      try {
+        for (const ep of (await getProviderEndpoints()) ?? []) {
+          enabledCounts[ep.id] = Array.isArray(ep.enabledModels) ? ep.enabledModels.length : 0;
+        }
+      } catch {
+        enabledCounts = {};
+      }
+      return { providers: out, endpoints: withLines, providerLines: providerLinesFor(endpoints, enabledCounts, nowMs) };
+    },
+
+    // WS11 D4 (K2): every Accounts row's text / tone / control / register line,
+    // built on the box from the reads the desktop used to make itself. Never
+    // throws: a failed source degrades that part (a row with no usage reads "No
+    // usage data", never a made-up number).
+    "accounts:row-states": async () => {
+      const safe = async (fn, fallback) => {
+        try {
+          return (await fn()) ?? fallback;
+        } catch {
+          return fallback;
+        }
+      };
+      const [statuses, endpoints, snapshots, health] = await Promise.all([
+        safe(() => readSubscriptionStatuses(), []),
+        safe(() => getProviderEndpoints(), []),
+        safe(() => usageListSnapshots(), []),
+        safe(() => handlers["accounts:health"](), null),
+      ]);
+      return buildAccountRowStates({ statuses, providers: endpoints, snapshots, health, nowMs: Date.now() });
     },
 
     // BET-1537 (S5, §W9): "Send probe" on a custom endpoint row — runs the
@@ -1913,7 +2119,7 @@ export function buildHandlers({
     // NOT return the raw /provider HTTP shape { all, connected, default } — that
     // object has no rows for the card to map over, so custom providers (e.g.
     // "Voska AI") would never be prefilled (BET-114).
-    "opencode:get-providers": () => providers.getProviderEndpoints(),
+    "opencode:get-providers": () => getProviderEndpoints(),
 
     // discover-models: query an OpenAI-compatible endpoint's /models.
     // POSITIONAL args (baseURL, apiKey) — httpApi/preload both send
@@ -2009,6 +2215,8 @@ export function buildHandlers({
           // Detection threw or timed out — return the box verdict untouched.
         }
       }
+      // WS11 D3 (X3): the rows' wording (box + CLI targets), ready to render.
+      result.view = updateTargetsView({ check: result, serverVersion });
       return result;
     },
 
@@ -2290,27 +2498,7 @@ export function buildHandlers({
     "opencode:provider-auth": async (req) => {
       const action = req?.action;
       if (action === "status") {
-        // BET-1319: read connected-state from opencode's OWN auth store, not
-        // from GET /provider. opencode keeps `connected[]` for the process
-        // lifetime, so a completed DELETE /auth/{id} did not show up until a
-        // restart — the disconnect reported success yet the row stayed
-        // "Connected" forever. The auth store is what both connect and
-        // disconnect write, so it reflects the truth immediately.
-        const connected = await oc.readAuthedProviderIds();
-        // BET-1320: a provider whose detect path exists on disk has its
-        // credential owned outside Manta (e.g. the Claude CLI) — flag it so
-        // the renderer shows the owner instead of a Disconnect it can't
-        // deliver. Expand a leading `~` via the shared expandTilde (the one
-        // place that knows how).
-        const externallyManaged = new Set(
-          subscriptionProviders.SUBSCRIPTION_PROVIDERS.filter((p) =>
-            (p.detect ?? []).some((d) => existsSync(expandTilde(d))),
-          ).map((p) => p.id),
-        );
-        return {
-          action: "status",
-          providers: subscriptionProviders.subscriptionStatuses(connected, externallyManaged),
-        };
+        return { action: "status", providers: await readSubscriptionStatuses() };
       }
       if (action === "start") {
         return providerAuthStart(oc, String(req?.id ?? ""));
@@ -2528,11 +2716,33 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.modelPrefsGet)  → no args
     "model-prefs:get": () => modelPrefsGetStore(),
     // preload: ipcRenderer.invoke(IPC.modelPrefsSet, { sessionId?, selection?, recents? })
-    "model-prefs:set": (input) =>
-      modelPrefsSetStore(input ?? {}, { publish: (evt) => bus.publish(evt) }),
+    "model-prefs:set": async (input) => {
+      const out = await modelPrefsSetStore(input ?? {}, { publish: (evt) => bus.publish(evt) });
+      // The session's selected model decides its context percentage (WS11 D2).
+      contextModels?.invalidatePrefs();
+      if (typeof input?.sessionId === "string") {
+        const sid = input.sessionId;
+        // A session the interpreter has not seen since boot has nothing to re-emit; measure it from the
+        // persisted transcript (as `opencode:context` does) and publish the same frame, so a switch changes
+        // both clients without waiting for the next turn.
+        if (!streamInterp?.reemitContext(sid)) {
+          try {
+            const payload = await measureContext(sid);
+            if (payload) bus.publish({ kind: "stream", sub: "context", sessionId: sid, payload });
+          } catch {
+            /* non-fatal: the next turn's frame carries it */
+          }
+        }
+      }
+      return out;
+    },
     // preload: ipcRenderer.invoke(IPC.modelPrefsSeed, { sessions?, recents? })
-    "model-prefs:seed": (input) =>
-      modelPrefsSeedStore(input ?? {}, { publish: (evt) => bus.publish(evt) }),
+    "model-prefs:seed": async (input) => {
+      const out = await modelPrefsSeedStore(input ?? {}, { publish: (evt) => bus.publish(evt) });
+      contextModels?.invalidatePrefs();
+      streamInterp?.reemitAllContext();
+      return out;
+    },
 
     // ---- background jobs (manta-server owned; in-process on mobile) ----
     // Mirror of the /api/delegate REST surface for the renderer. Jobs are
@@ -2737,7 +2947,7 @@ export function buildHandlers({
     //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
     //   where PtyEvent = { kind:"data"|"exit", sessionKey, data? / code? }
     //   (matches src/shared/types.ts PtyEvent)
-    "pty:spawn": (opts) => {
+    "pty:spawn": async (opts) => {
       // `extraEnv` is SERVER-owned: whatever the caller sent is dropped, and the
       // only value ever set comes from a registered multi-account seat sign-in
       // (CLAUDE_CONFIG_DIR → that seat's own directory), for its own launcher.
@@ -2750,7 +2960,13 @@ export function buildHandlers({
       if (safe.launcher?.id === "claude-auth-login" && !login) {
         throw new Error("This sign-in has expired. Close it and start again.");
       }
-      const spawnOpts = login?.configDir ? { ...safe, extraEnv: { CLAUDE_CONFIG_DIR: login.configDir } } : safe;
+      // WS11 D3 (X1): a launcher sent without `flags` runs with the box's saved options.
+      const launcher = await resolveLauncherForSpawn(safe.launcher, { configGet: () => local.configGet() });
+      const spawnOpts = {
+        ...safe,
+        ...(launcher ? { launcher } : {}),
+        ...(login?.configDir ? { extraEnv: { CLAUDE_CONFIG_DIR: login.configDir } } : {}),
+      };
       return pty.spawn(spawnOpts, (e) => bus.publish({ kind: "pty", payload: e }));
     },
 
@@ -2771,8 +2987,25 @@ export function buildHandlers({
     // src/server/launcherRegistry.mjs) are available on this box right now:
     // binary on PATH. Cheap; the renderer fetches on active-session change,
     // no polling.
-    "launchers:list": () => launchers.listAvailableLaunchers(),
+    "launchers:list": async () => {
+      // An unreadable config must not hide every launcher: fall back to the registry defaults.
+      let config = null;
+      try {
+        config = await local.configGet();
+      } catch {
+        config = null;
+      }
+      return launchersView(await launchers.listAvailableLaunchers(), config);
+    },
+    // WS11 D3 (X1): flip ONE launch option; returns the updated launcher row.
+    "launchers:set-flag": (input) =>
+      setLauncherFlag({
+        id: input?.id,
+        key: input?.key,
+        value: input?.value,
+      }),
   };
+  return handlers;
 }
 
 // POST /rpc/<channel>  body: {"args":[...]}  ->  {"result":...} | {"error":"..."}

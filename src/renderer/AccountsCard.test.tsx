@@ -17,7 +17,12 @@ import {
   type MockApi,
 } from "./testHarness";
 import { invalidateCachedResource } from "./useCachedResource";
+import { act } from "react";
+import { useStore } from "./store";
 import { AccountsCard } from "./AccountsCard";
+import { formatEndpointStateLine } from "../server/accountsCopy.mjs";
+
+const withStateLine = <T extends { state: string }>(entry: T) => ({ ...entry, stateLine: formatEndpointStateLine(entry, Date.now()) });
 
 // BET-1537 (review cycle 2, duplication gate): the mock-api boilerplate the
 // endpoint/register tests share — one object, spread at each site.
@@ -336,25 +341,25 @@ describe("AccountsCard Try-again verdict clears on recovery (9c)", () => {
   it("drops the verdict once a refetch shows the row recovered", async () => {
     // Cold-start the "accounts" cache so the mount fetch actually reads health.
     invalidateCachedResource("accounts");
-    let calls = 0;
+    let recovered = false;
     installMockApi({
       opencodeProviderAuth: () => Promise.resolve(statusProvider()),
       opencodeGetProviders: () => Promise.resolve([]),
-      accountHealth: () => {
-        calls++;
-        // First read (mount) is out-of-credit; every later read (retry's own
-        // refetch) shows the flag cleared — so the verdict must not linger.
-        return Promise.resolve(calls <= 1 ? { providers: { anthropic: { state: "out-of-credit" } }, endpoints: {} } : { providers: { anthropic: { state: "ok" } }, endpoints: {} });
-      },
+      accountHealth: () =>
+        // Out-of-credit until the retry runs; every read after it shows the flag
+        // cleared — so the verdict must not linger.
+        Promise.resolve(recovered ? { providers: { anthropic: { state: "ok" } }, endpoints: {} } : { providers: { anthropic: { state: "out-of-credit" } }, endpoints: {} }),
       configGet: () => Promise.resolve({}),
       opencodeSetProviders: () => Promise.resolve({ ok: true }),
       opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
-      accountsRetry: () =>
-        Promise.resolve({
+      accountsRetry: () => {
+        recovered = true;
+        return Promise.resolve({
           ok: false,
           state: "out-of-credit",
           message: "still reports out of credit — check the account.",
-        }),
+        });
+      },
     });
     const h = mount(<AccountsCard />);
     await h.flush();
@@ -387,11 +392,12 @@ describe("AccountsCard endpoint register (custom rows)", () => {
         Promise.resolve({
           providers: {},
           endpoints: {
-            "voska/alpha": {
+            // The box words each endpoint's line (K3); the harness runs the real wording.
+            "voska/alpha": withStateLine({
               state: "rate-limited",
               retryInMs: 4 * 60_000,
               reason: { httpStatus: 429, errorName: "APIError" },
-            },
+            }),
           },
         }),
     });
@@ -444,5 +450,68 @@ describe("AccountsCard endpoint register (custom rows)", () => {
     const result = h.container.querySelector('[data-testid="probe-result-voska"]');
     expect(result?.textContent).toContain("responded");
     expect((result as HTMLElement).className).toContain("text-ok");
+  });
+});
+
+describe("AccountsCard row states: failure vs older box (WS11 D4 review)", () => {
+  const base = {
+    opencodeProviderAuth: () => Promise.resolve(statusProvider()),
+    opencodeGetProviders: () => Promise.resolve([]),
+    accountHealth: () => Promise.resolve({ providers: { anthropic: { state: "ok" } }, endpoints: {} }),
+    ...ENDPOINT_TEST_API_DEFAULTS,
+  };
+
+  it("a failed read on a current box keeps the last good rows, says so, and Retry re-reads", async () => {
+    invalidateCachedResource("accounts");
+    let fail = false;
+    installMockApi({
+      ...base,
+      accountsRowStates: () =>
+        fail
+          ? Promise.reject(new Error("timeout"))
+          : Promise.resolve({ rows: { anthropic: { text: "Box words", tone: "ok" as const, control: "disconnect" as const, registerLine: null } } }),
+    });
+    const h = mount(<AccountsCard />);
+    await h.flush();
+    expect(h.container.textContent).toContain("Box words");
+    fail = true;
+    // Live usage moves → the card re-reads the states; the read fails.
+    await act(async () => {
+      useStore.setState({ usage: [] as never });
+    });
+    await h.flush();
+    expect(h.container.textContent).toContain("Couldn't load account states");
+    expect(h.container.textContent).toContain("Box words");
+    expect(buttonByText(h, "Disconnect")).toBeTruthy();
+    fail = false;
+    buttonByText(h, "Retry")!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    expect(h.container.textContent).not.toContain("Couldn't load account states");
+    expect(h.container.textContent).toContain("Box words");
+    h.unmount();
+  });
+
+  it("an older box (no accounts-copy-1) still offers Connect / Disconnect and the update note", async () => {
+    invalidateCachedResource("accounts");
+    installMockApi({
+      ...base,
+      apiVersion: () => Promise.resolve({ capabilities: [] } as never),
+      accountsRowStates: () => Promise.reject(new Error("unknown rpc channel")),
+      opencodeProviderAuth: () =>
+        Promise.resolve({
+          action: "status" as const,
+          providers: [
+            { id: "anthropic", label: "Claude", plan: "", console: null, docs: "", connected: true },
+            { id: "kimi", label: "Kimi", plan: "", console: null, docs: "", connected: false },
+          ],
+        }),
+    });
+    const h = mount(<AccountsCard />);
+    await h.flush();
+    expect(buttonByText(h, "Disconnect")).toBeTruthy();
+    expect(buttonByText(h, "Connect")).toBeTruthy();
+    expect(h.container.textContent).toContain("Update your box to use this");
+    expect(h.container.textContent).not.toContain("Couldn't load account states");
+    h.unmount();
   });
 });

@@ -80,6 +80,8 @@ import { blendedPrice } from "../shared/blendedPrice.mjs";
 }
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
+import { resolveLauncherForSpawn } from "./launchersConfig.mjs";
+import { devicesView } from "./settingsViews.mjs";
 import { attachCallWs, createCallRegistry } from "./callWs.mjs";
 import {
   buildHandlers,
@@ -94,11 +96,16 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { createContextModelResolver } from "./sessionContext.mjs";
+import { loadModelPrefs } from "./modelPrefs.mjs";
 import { createCommandCorrelator, createOriginStore } from "./commandOrigins.mjs";
 import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
+import { createSessionStatus } from "./sessionStatus.mjs";
+import { createQuestionsDecorator } from "./questionsDecorator.mjs";
+import { runBoundaryOf } from "./transcriptRuns.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
@@ -280,6 +287,7 @@ import {
 import * as push from "./push.mjs";
 import { registerWithGateway, publicBaseUrl, loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 import { readServerVersion, opencodeInfo, writeVersionResponse } from "./version.mjs";
+import { handleAuthRevoke } from "./authRevokeRoute.mjs";
 import { createUpgradeV2, createDefaultDeps as createUpgradeDeps, createUpgradeRoutes } from "./upgradeV2.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -327,9 +335,37 @@ function contextLimitFor(providerID, modelID) {
 
 // Box-side stream interpretation (BET-551): interprets the opencode stream on
 // the box and republishes derived events on THIS bus (single stream/endpoint).
-const streamInterp = createStreamInterpreter({
+// WS11 D2: the model a session's context is measured against (selected → default →
+// last reply). Prefs are cached and invalidated by model-prefs:set/seed; the default
+// is primed from the saved config here and refreshed by config:update.
+const contextModels = createContextModelResolver({ loadPrefs: () => loadModelPrefs() });
+void (async () => {
+  try {
+    contextModels.setDefaultModel((await local.configGet())?.defaultModel);
+  } catch {
+    /* non-fatal: no default until the next config:update */
+  }
+})();
+// WS11 D10: a question that belongs to a plan_exit tool call carries the plan (title, text, counts, path, page URL),
+// decided here from the session's transcript — on the `questions` frame, in the connect snapshot and from
+// `opencode:questions`.
+const questionsDecorator = createQuestionsDecorator({
   publish: (evt) => bus.publish(evt),
+  listMessages: (sid) => oc.listMessages(sid, { slim: true }),
+  baseUrl: () => publicBaseUrl(),
+});
+const streamInterp = createStreamInterpreter({
+  publish: (evt) => questionsDecorator.publish(evt),
   contextLimitFor,
+  resolveContextModel: (a) => contextModels.resolve(a),
+  // WS11 D11: the run ledger resolves an inbox delivery it could not classify at enqueue time from the delivered message
+  // itself (the SAME predicate the canonical walk uses), and repairs a guessed boundary from canonical history.
+  classifyDelivered: async ({ sessionId, messageID }) => {
+    const m = await oc.getMessage(sessionId, messageID);
+    if (!m) throw new Error("message not found");
+    return { cls: runBoundaryOf(m), user: m.info?.role === "user" };
+  },
+  rebuildFromCanonical: (sid) => oc.listMessagesForRebuild(sid),
   // The device stream predicts cache staleness against the SAME TTL opencode
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.
@@ -368,7 +404,7 @@ oc.setCommandCorrelator(commandCorrelator);
 // interactive card reappear and stay answerable on a thin client).
 // `snapshotState()` returns these events; the bus replays them to each new
 // subscriber.
-bus.setSnapshot(() => streamInterp.snapshotState());
+bus.setSnapshot(() => [...questionsDecorator.decorateSnapshot(streamInterp.snapshotState()), ...(sessionStatusRef.current?.snapshotFrames() ?? [])]);
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a
@@ -388,8 +424,14 @@ const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
 // re-materialize — snapshots the exact tree it just applied. Persist
 // failures are warned + swallowed inside syncState and can never flip a good
 // refresh to stale; a failed listing never reaches the persister at all.
+// WS11 D7: every window of the session list carries its background-job `job` ({id, status, parentWindowIndex}),
+// annotated from the status aggregator's delegate records (assigned below, once the delegate engine exists).
+const sessionStatusRef = { current: null };
 const syncState = createSyncState({
-  listProjects: () => tmux.listProjects(),
+  listProjects: async () => {
+    const projects = await tmux.listProjects();
+    return sessionStatusRef.current ? sessionStatusRef.current.annotateProjects(projects) : projects;
+  },
   publish: (env) => bus.publish(env),
   persistTopology: createTopologyPersister(),
 });
@@ -444,6 +486,14 @@ push.setDesktopSink((payload) =>
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
+// The latest terminal-window activity batch (chat windows are answered by the stream interpreter), so the box can
+// say whether a window is mid-turn without a client (WS11 D6).
+const terminalRunning = new Map();
+bus.subscribe((evt) => {
+  if (evt?.kind !== "status" || !Array.isArray(evt.payload)) return;
+  terminalRunning.clear();
+  for (const w of evt.payload) terminalRunning.set(`${w.session}:${w.windowIndex}`, w.running === true);
+});
 
 // BET-675: sync-state poller — materialize tmux session/config state in memory
 // every 2s. Follows the exact shape of the other pollers (in-flight guard +
@@ -1207,6 +1257,26 @@ const delegateView = createDelegateView({
   listProjects: () => tmux.listProjects(),
   listModels: () => oc.listModels(),
 });
+// WS11 D7 (S13, S14): per-window status (running / busy beneath / subagents / attention / stopped) and job nesting,
+// aggregated from authoritative sources only (the interpreter's own-session frames, parent edges, delegate records) and
+// published as one `windowStatus` frame per session whose payload changed.
+const sessionStatus = createSessionStatus({
+  publish: (evt) => bus.publish(evt),
+  windowedSessionIds: () => {
+    const ids = [];
+    for (const p of syncState.snapshot().projects ?? []) for (const w of p.windows ?? []) if (w.opencodeSessionId) ids.push(w.opencodeSessionId);
+    return ids;
+  },
+  loadJobs: () => delegateEngine.loadRecords(),
+  loadStopped: async () => new Set(((await listStopped()).records ?? []).map((r) => r.conversation)),
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  getSessionParent: (id) => oc.getSessionParent(id),
+  runningSince: (id) => streamInterp.getState(id)?.runningSince ?? null,
+  // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
+  onJobsChanged: () => syncState.refreshNow(),
+});
+sessionStatusRef.current = sessionStatus;
+bus.subscribe((evt) => sessionStatus.observe(evt));
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one
 // result; a `paused` one is upgraded in place so it can still be resumed. A healthy
@@ -2051,6 +2121,9 @@ rpcHandlers = buildHandlers({
   pty,
   bus,
   streamInterp,
+  questionsDecorator,
+  terminalRunning: (session, index) => terminalRunning.get(`${session}:${index}`) === true,
+  contextModels,
   accountsManager,
   local,
   syncState,
@@ -2061,6 +2134,7 @@ rpcHandlers = buildHandlers({
   delegate: delegateEngine,
   handoff: handoffEngine,
   delegateView,
+  sessionStatus,
   // BET-1252: routing-services readers shared with delegate (the routing:choose
   // channel). Same degradation contract:
   // absent readers ⇒ absent services ⇒ the router returns the incumbent.
@@ -3536,6 +3610,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     // opencode may have restarted outside Manta: its provider catalogue is no longer trustworthy.
     if (reconnect) oc.invalidateProvidersCache({ restarted: true });
     if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+    // The running set and the parent edges are rebuilt from opencode's own reads (no replay on V2).
+    void sessionStatus.hydrate().catch((e) => console.warn("[session-status] hydration failed:", e?.message ?? e));
     // Events may have been missed while disconnected (or before the first
     // connect): re-check every unfinished V2 job from authoritative reads.
     delegateEngine.reconcileV2().catch((e) => console.warn("[delegate] reconnect reconciliation failed:", e?.message ?? e));
@@ -3965,28 +4041,7 @@ const handleRequest = async (req, res) => {
         return;
       }
       if (req.method === "DELETE" && path === "/auth/revoke") {
-        // Manual auth check (this route is exempt from the standard gate so
-        // we can distinguish malformed-token → 400 from missing-token → 401;
-        // the gate collapses both into 401). The shape of the response is
-        // whatever authEngine.revoke returns: { ok, status?, error? }.
-        // BET-490: `device_id` targets ONE device for per-device revoke;
-        // absent → legacy whole-box reset.
-        const token = parseBearer(req.headers["authorization"]);
-        const q = Object.fromEntries(url.searchParams);
-        const result = await authEngine.revoke({
-          token,
-          device_id: q.device_id ?? q.deviceId ?? null,
-        });
-        if (!result.ok) {
-          respondJson(res, result.status ?? 401, { error: result.error });
-          return;
-        }
-        respondJson(res, 200, {
-          ok: true,
-          box_id: result.box_id,
-          device_id: result.device_id ?? null,
-          reset: !!result.reset,
-        });
+        await handleAuthRevoke({ req, url, res, authEngine, respondJson, parseBearer });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
@@ -4143,7 +4198,8 @@ const handleRequest = async (req, res) => {
   if (req.method === "GET" && path === "/auth/devices") {
     respondJson(res, 200, {
       box_id: authEngine.box_id,
-      devices: authEngine.listDevices({ currentToken: parseBearer(req.headers["authorization"]) }),
+      // WS11 D3 (X6): sorted (this device first, then most recently active) with `revocable`.
+      devices: devicesView(authEngine.listDevices({ currentToken: parseBearer(req.headers["authorization"]) })),
     });
     return;
   }
@@ -6395,7 +6451,7 @@ const handleUpgrade = (req, socket, head) => {
     // Binary-safe terminal bridge (BET-158). Direct clients (header bearer
     // or ?token=<box_token>) connect here for a low-latency raw-byte
     // terminal stream.
-    wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url));
+    wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url, { resolveLauncher: (l) => resolveLauncherForSpawn(l, { configGet: local.configGet }) }));
     return;
   }
   if (url.pathname === "/call") {

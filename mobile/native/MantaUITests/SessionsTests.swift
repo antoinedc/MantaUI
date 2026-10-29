@@ -27,18 +27,17 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
 // MARK: - Rename
 
 final class SessionRenameLogicTests: XCTestCase {
-    func testRenameRejectsEmptyAndWhitespace() {
-        XCTAssertNil(SessionRenameLogic.validated("", current: "a"))
-        XCTAssertNil(SessionRenameLogic.validated("   \n", current: "a"))
+    // Whether a name is valid is the box's call (sentences pinned in sessionNaming.test.mjs); the phone only
+    // skips the call for an unchanged name.
+    func testRenameSkipsAnUnchangedName() {
+        XCTAssertNil(SessionRenameLogic.changed("a", current: "a"))
+        XCTAssertNil(SessionRenameLogic.changed("  a  ", current: "a"))
     }
 
-    func testRenameRejectsUnchanged() {
-        XCTAssertNil(SessionRenameLogic.validated("a", current: "a"))
-        XCTAssertNil(SessionRenameLogic.validated("  a  ", current: "a"))
-    }
-
-    func testRenameTrims() {
-        XCTAssertEqual(SessionRenameLogic.validated("  b  ", current: "a"), "b")
+    func testRenameSendsTheTrimmedName() {
+        XCTAssertEqual(SessionRenameLogic.changed("  b  ", current: "a"), "b")
+        // An empty name is sent too: the box refuses it with its sentence, which the sheet then shows.
+        XCTAssertEqual(SessionRenameLogic.changed("   ", current: "a"), "")
     }
 
     func testActionErrorNeverShowsTransportText() {
@@ -145,64 +144,30 @@ final class SessionModeLogicTests: XCTestCase {
         let b = SessionPtyLauncher(id: "claude", flags: ["a": false, "b": true])
         XCTAssertEqual(a.queryJSON, b.queryJSON)
         XCTAssertEqual(a.queryJSON, "{\"flags\":{\"a\":false,\"b\":true},\"id\":\"claude\"}")
+        // WS11 D3: with no flags the box applies the saved launch options.
+        XCTAssertEqual(SessionPtyLauncher(id: "claude").queryJSON, "{\"id\":\"claude\"}")
+    }
+
+    // WS11 D3 review #2: an older box runs only the flags it is given, so it gets the row's own defaults.
+    func testLauncherSendsJustTheIdToACurrentBoxAndTheDefaultsToAnOlderOne() {
+        let current = AvailableLauncher(id: "claude", label: "Claude", flags: [AvailableLauncherFlag(key: "skipPermissions", label: "Skip", default: true, value: false)])
+        XCTAssertEqual(SessionPtyLauncher.make(id: "claude", launchers: [current]).queryJSON, "{\"id\":\"claude\"}")
+        let old = AvailableLauncher(id: "claude", label: "Claude", flags: [AvailableLauncherFlag(key: "skipPermissions", label: "Skip", default: true)])
+        XCTAssertEqual(SessionPtyLauncher.make(id: "claude", launchers: [old]).queryJSON, "{\"flags\":{\"skipPermissions\":true},\"id\":\"claude\"}")
+        XCTAssertEqual(SessionPtyLauncher.make(id: "claude", launchers: []).queryJSON, "{\"id\":\"claude\"}")
+        XCTAssertEqual(SessionPtyLauncher.make(id: "codex", launchers: [AvailableLauncher(id: "codex", label: "Codex")]).queryJSON, "{\"id\":\"codex\"}")
     }
 }
 
 // MARK: - Create: naming, hints, roots
 
 final class SessionNamingTests: XCTestCase {
-    func testSlugify() {
-        XCTAssertEqual(SessionNaming.slugify("My App!"), "my-app")
-        XCTAssertEqual(SessionNaming.slugify("Café"), "cafe")
-        XCTAssertEqual(SessionNaming.slugify("!!!"), "")
-        XCTAssertEqual(SessionNaming.slugify("项目"), "")
-        let long = SessionNaming.slugify(String(repeating: "ab ", count: 20))
-        XCTAssertLessThanOrEqual(long.count, 32)
-        XCTAssertFalse(long.hasSuffix("-"))
-        XCTAssertEqual(SessionNaming.slugify("  --Hello   World--  "), "hello-world")
-    }
-
     func testDeriveProjectName() {
         XCTAssertEqual(SessionNaming.deriveProjectName("/a/b/"), "b")
         XCTAssertEqual(SessionNaming.deriveProjectName("~"), "project")
         XCTAssertEqual(SessionNaming.deriveProjectName(""), "project")
         XCTAssertEqual(SessionNaming.deriveProjectName("/"), "project")
         XCTAssertEqual(SessionNaming.deriveProjectName("~/code/api"), "api")
-    }
-
-    func testUnique() {
-        XCTAssertEqual(SessionNaming.unique("x", taken: ["x", "x-2"]), "x-3")
-        XCTAssertEqual(SessionNaming.unique("y", taken: ["x"]), "y")
-    }
-
-    func testTmuxSafeReplacesDotAndColon() {
-        XCTAssertEqual(SessionNaming.tmuxSafe("next.js"), "next_js")
-        XCTAssertEqual(SessionNaming.tmuxSafe("a.b:c.d"), "a_b_c_d")
-        XCTAssertEqual(SessionNaming.tmuxSafe("plain-name"), "plain-name")
-        XCTAssertEqual(SessionNaming.tmuxSafe(""), "")
-    }
-
-    func testUniqueProjectNameSanitisesBeforeDeduplicating() {
-        XCTAssertEqual(SessionNaming.uniqueProjectName(forFolder: "/r/next.js", taken: []), "next_js")
-        // Uniqueness is judged on the name tmux will KEEP.
-        XCTAssertEqual(SessionNaming.uniqueProjectName(forFolder: "/r/next.js", taken: ["next_js"]), "next_js-2")
-    }
-
-    func testScratchHint() {
-        XCTAssertEqual(SessionScratchHint.text(slug: "", taken: []), SessionScratchHint.emptySlug)
-        XCTAssertEqual(SessionScratchHint.text(slug: "app", taken: ["app"]), "app already exists — will create app-2")
-        XCTAssertEqual(SessionScratchHint.text(slug: "app", taken: ["app", "app-2"]), "app already exists — will create app-3")
-        XCTAssertNil(SessionScratchHint.text(slug: "app", taken: ["other"]))
-    }
-
-    func testWorkspaceRoot() {
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: [], homeDir: "/home/u"), "/home/u/projects")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/home/u/code/a", "/home/u/code/b"], homeDir: "/home/u"), "/home/u/code")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/a/x", "/b/y"], homeDir: "/home/u"), "/home/u/projects")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: [], homeDir: nil), "")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/home/u/code/a"], homeDir: nil), "/home/u/code")
-        // A shared prefix that is not a folder boundary is not a common parent.
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/home/u/code/a", "/home/u/codex/b"], homeDir: "/home/u"), "/home/u")
     }
 }
 
@@ -223,19 +188,23 @@ final class SessionCreatePlanTests: XCTestCase {
     }
 
     func testNewProjectWithEmptyNameIsDisabled() {
-        let p = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = " " }
+        // A typed-then-emptied name is refused; an untouched field lets the box name the session.
+        let p = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = " "; $0.nameEdited = true }
         XCTAssertFalse(p.enabled)
-        let ok = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = "b" }
+        let ok = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = "b"; $0.nameEdited = true }
         XCTAssertTrue(ok.enabled)
+        let hinted = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b" }
+        XCTAssertTrue(hinted.enabled)
     }
 
     func testScratchEmptySlugIsDisabledWithItsLabel() {
-        let p = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "!!!" }
+        // `scratchUsable` is the box's verdict on the name (an empty slug → not usable).
+        let p = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "!!!"; $0.scratchUsable = false }
         XCTAssertFalse(p.enabled)
         XCTAssertEqual(p.label, "Create workspace")
-        let ok = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "My App" }
+        let ok = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "My App"; $0.scratchUsable = true }
         XCTAssertTrue(ok.enabled)
-        let noRoot = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = ""; $0.scratchName = "x" }
+        let noRoot = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = ""; $0.scratchName = "x"; $0.scratchUsable = true }
         XCTAssertFalse(noRoot.enabled)
     }
 
@@ -318,7 +287,6 @@ final class SessionCreatePlanTests: XCTestCase {
     }
 
     func testCreatedWindowFoundBySessionIdWhenNameDiffers() {
-        // We asked for "next.js"; tmux kept "next_js".
         let projects = [project("other", "", [window(0, "x", sid: "ses_o")]), project("next_js", "", [window(0, "default", sid: "ses_new")])]
         let located = SessionCreatedWindow.locate(in: projects, project: "next.js", windowIndex: nil, sessionId: "ses_new", name: "default")
         XCTAssertEqual(located?.project, "next_js")
@@ -330,11 +298,27 @@ final class SessionCreatePlanTests: XCTestCase {
         XCTAssertNil(SessionCreatedWindow.locate(in: projects, project: "nope", windowIndex: 0, sessionId: "ses_none", name: nil))
     }
 
-    func testCreatedWindowFoundByTmuxSafeNameWithoutASessionId() {
+    func testCreatedWindowFoundByTheNameTheBoxReported() {
         let projects = [project("api_v2", "", [window(1, "default")])]
-        let located = SessionCreatedWindow.locate(in: projects, project: "api:v2", windowIndex: 1, sessionId: nil, name: "default")
+        let located = SessionCreatedWindow.locate(in: projects, project: "api_v2", windowIndex: 1, sessionId: nil, name: "default")
         XCTAssertEqual(located?.project, "api_v2")
         XCTAssertEqual(located?.window.index, 1)
+    }
+
+    func testCreateResultDecodesTheBoxsName() throws {
+        let with = try JSONDecoder().decode(TmuxCreateResult.self, from: Data(#"{"name":"next_js","projects":[],"sessionId":"s","windowIndex":0}"#.utf8))
+        XCTAssertEqual(with.name, "next_js")
+        let old = try JSONDecoder().decode(TmuxCreateResult.self, from: Data(#"{"projects":[],"sessionId":"s","windowIndex":0}"#.utf8))
+        XCTAssertNil(old.name)
+        XCTAssertNil(try JSONDecoder().decode(TmuxCreateResult.self, from: Data("[]".utf8)).name)
+    }
+
+    func testProposalAndProbeDecode() throws {
+        let p = try JSONDecoder().decode(SessionNameProposal.self, from: Data(#"{"name":"app-2","hint":"app already exists — will create app-2"}"#.utf8))
+        XCTAssertEqual(p, SessionNameProposal(name: "app-2", hint: "app already exists — will create app-2"))
+        XCTAssertNil(try JSONDecoder().decode(SessionNameProposal.self, from: Data(#"{"name":"app","hint":null}"#.utf8)).hint)
+        let probe = try JSONDecoder().decode(ForgeProbeResult.self, from: Data(#"{"repos":[],"cli":{},"partial":false,"homeDir":"/home/u","proposedRoot":"/home/u/code"}"#.utf8))
+        XCTAssertEqual(probe.proposedRoot, "/home/u/code")
     }
 
     func testChatLandingWritesNothing() {
@@ -483,20 +467,14 @@ final class SessionRepoScanTests: XCTestCase {
         XCTAssertEqual(RepoRowFormat.age(ms: -5), "now")
     }
 
-    func testBatchNamesAreUniqueAcrossTheBatch() {
-        let two = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: [])
-        XCTAssertEqual(two.rows.map(\.name), ["api", "api-2"])
-        let withExisting = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: ["api"])
-        XCTAssertEqual(withExisting.rows.map(\.name), ["api-2", "api-3"])
-    }
-
-    func testBatchNameForDottedRepoIsTmuxSafe() {
-        let batch = SessionSetupBatch(paths: ["/r/next.js", "/s/next_js", "/t/api:v2"], taken: [])
-        XCTAssertEqual(batch.rows.map(\.name), ["next_js", "next_js-2", "api_v2"])
+    func testBatchRowsAreLabelledByTheirFolder() {
+        let two = SessionSetupBatch(paths: ["/a/api", "/b/api"])
+        XCTAssertEqual(two.rows.map(\.name), ["api", "api"], "a label only — the box names each session uniquely")
+        XCTAssertEqual(SessionSetupBatch(paths: ["/r/next.js"]).rows.map(\.name), ["next.js"])
     }
 
     func testFailCreatingLeavesNoRowStuckCreating() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b", "/c"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b", "/c"])
         batch.markCreating(at: 0)
         batch.markReady(path: "/a")
         batch.markCreating(at: 1)
@@ -507,7 +485,7 @@ final class SessionRepoScanTests: XCTestCase {
     }
 
     func testBatchRunsInOrderAndTracksPhases() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b"])
         XCTAssertEqual(batch.nextQueuedIndex, 0)
         batch.markCreating(at: 0)
         XCTAssertTrue(batch.isRunning)
@@ -520,31 +498,30 @@ final class SessionRepoScanTests: XCTestCase {
     }
 
     func testBatchLandsOnFirstSuccess() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b"])
         batch.markReady(path: "/a")
         batch.markReady(path: "/b")
         XCTAssertEqual(batch.autoLandingPath, "/a")
     }
 
     func testBatchPartialFailureDoesNotLand() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b"])
         batch.markFailed(path: "/a", message: "boom")
         batch.markReady(path: "/b")
         XCTAssertNil(batch.autoLandingPath)
         XCTAssertTrue(batch.hasFailures)
         // "Done" lands on the first success.
         XCTAssertEqual(batch.doneLandingPath, "/b")
-        var none = SessionSetupBatch(paths: ["/a"], taken: [])
+        var none = SessionSetupBatch(paths: ["/a"])
         none.markFailed(path: "/a", message: "boom")
         XCTAssertNil(none.doneLandingPath)
     }
 
-    func testRetryRequeuesOnlyAFailedRowAndKeepsItsName() {
-        var batch = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: [])
+    func testRetryRequeuesOnlyAFailedRow() {
+        var batch = SessionSetupBatch(paths: ["/a/api", "/b/api"])
         batch.markFailed(path: "/b/api", message: "boom")
         batch.requeue(path: "/b/api")
         XCTAssertEqual(batch.rows[1].phase, .queued)
-        XCTAssertEqual(batch.rows[1].name, "api-2")
         XCTAssertNil(batch.rows[1].error)
         batch.markReady(path: "/a/api")
         batch.requeue(path: "/a/api")
@@ -567,106 +544,49 @@ final class SessionRepoScanTests: XCTestCase {
 // MARK: - Close
 
 final class SessionCloseLogicTests: XCTestCase {
-    func testProjectCloseZeroSessions() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 0, runningCount: 0, worktreeCount: 0)
-        XCTAssertEqual(c.title, "Close “a”?")
-        XCTAssertEqual(c.body, "Its tmux session will be killed on the server.")
-        XCTAssertEqual(c.destructiveTitle, "Close project")
+    // The confirm copy, the worktree orchestration, the notices and the sentences are the BOX's (WS11 D6; pinned in
+    // sessionClose.test.mjs). The phone decodes and shows them.
+
+    func testPreviewDecodesTheBoxsWords() throws {
+        let json = #"{"title":"Close “p” and its 2 sessions?","body":"All 2 tmux windows will be killed on the server.","confirmLabel":"Close project","runningCount":1,"worktrees":[{"path":"/wt/a","willRemove":true}]}"#
+        let p = try JSONDecoder().decode(SessionClosePreview.self, from: Data(json.utf8))
+        XCTAssertEqual(p.confirm, SessionCloseConfirm(title: "Close “p” and its 2 sessions?", body: "All 2 tmux windows will be killed on the server.", destructiveTitle: "Close project"))
+        XCTAssertEqual(p.runningCount, 1)
+        XCTAssertEqual(p.worktrees, [SessionClosePreview.Worktree(path: "/wt/a", willRemove: true)])
     }
 
-    func testProjectCloseSingular() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 1, runningCount: 0, worktreeCount: 0)
-        XCTAssertEqual(c.title, "Close “a” and its 1 session?")
-        XCTAssertEqual(c.body, "All 1 tmux window will be killed on the server.")
+    func testResultDecodesSuccessWithFailuresAndWarnings() throws {
+        let json = #"{"ok":true,"removed":["/a"],"kept":["/b"],"failed":[{"path":"/c","message":"Couldn't remove the worktree at /c — it was left in place."}],"warnings":["Couldn't remove the worktree at /c — it was left in place.","The project was closed, but its saved folder setting couldn't be cleared."],"notice":"Kept worktree at /b — it has uncommitted changes."}"#
+        let r = try JSONDecoder().decode(SessionCloseResult.self, from: Data(json.utf8))
+        XCTAssertTrue(r.ok)
+        XCTAssertEqual(r.kept, ["/b"])
+        XCTAssertEqual(r.failed.map(\.path), ["/c"])
+        XCTAssertEqual(r.warnings.count, 2)
+        XCTAssertEqual(r.notice, "Kept worktree at /b — it has uncommitted changes.")
     }
 
-    func testProjectClosePluralWithRunningAndWorktrees() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 4, runningCount: 2, worktreeCount: 3)
-        XCTAssertEqual(c.title, "Close “a” and its 4 sessions?")
-        XCTAssertEqual(c.body, "All 4 tmux windows will be killed on the server. 2 sessions are mid-turn and will be stopped. 3 worktrees will be removed.")
+    func testResultDecodesTheDirtyQuestionAndASentenceFailure() throws {
+        let ask = #"{"ok":false,"needsConfirm":{"kind":"worktree-dirty","path":"/wt","title":"Uncommitted changes in this worktree","body":"/wt has uncommitted changes. Removing the worktree will permanently delete that work.","removeLabel":"Remove worktree","keepLabel":"Keep worktree"}}"#
+        let r = try JSONDecoder().decode(SessionCloseResult.self, from: Data(ask.utf8))
+        XCTAssertFalse(r.ok)
+        XCTAssertEqual(r.needsConfirm?.path, "/wt")
+        XCTAssertEqual(r.needsConfirm?.keepLabel, "Keep worktree")
+        let bad = try JSONDecoder().decode(SessionCloseResult.self, from: Data(#"{"ok":false,"error":"Couldn't close it — the server couldn't stop it."}"#.utf8))
+        XCTAssertEqual(bad.error, "Couldn't close it — the server couldn't stop it.")
+        XCTAssertNil(bad.needsConfirm)
     }
 
-    func testProjectCloseOneRunningUsesIs() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 2, runningCount: 1, worktreeCount: 1)
-        XCTAssertTrue(c.body.contains("1 session is mid-turn and will be stopped."))
-        XCTAssertTrue(c.body.contains("1 worktree will be removed."))
-    }
-
-    func testSessionCloseCopy() {
-        let c = SessionCloseCopy.session(name: "x", running: true, worktreePath: "/wt")
-        XCTAssertEqual(c.title, "Close “x”?")
-        XCTAssertEqual(c.body, "Its tmux window will be killed on the server. A turn is currently running and will be stopped. Its worktree at /wt will be removed.")
-        XCTAssertEqual(SessionCloseCopy.session(name: "x", running: false, worktreePath: nil).body,
-                       "Its tmux window will be killed on the server.")
-    }
-
-    func testCountsIncludeHiddenJobWindow() {
-        let proj = project("p", "", [
-            window(0, "parent", sid: "ses_p"),
-            window(1, "job", sid: "ses_j", worktree: "/wt/job", owner: "job"),
-        ])
-        let running = { (w: MantaWindow) in w.opencodeSessionId == "ses_j" }
-        let on = SessionCloseCounts.project(proj, isRunning: running, cleanOnClose: true)
-        XCTAssertEqual(on, SessionCloseCounts.Counts(sessionCount: 2, runningCount: 1, worktreeCount: 1))
-        let off = SessionCloseCounts.project(proj, isRunning: running, cleanOnClose: false)
-        XCTAssertEqual(off.worktreeCount, 0)
-        XCTAssertEqual(off.sessionCount, 2)
-    }
-
-    func testKeptNoticeSingleNamesPath() {
-        XCTAssertEqual(SessionCloseCopy.kept(["/wt/a"]), "Kept worktree at /wt/a — it has uncommitted changes.")
-    }
-
-    func testKeptNoticePluralCounts() {
-        XCTAssertEqual(SessionCloseCopy.kept(["/a", "/b"]), "Kept 2 worktrees with uncommitted changes.")
-    }
-
-    func testKeptNoticeEmptyIsNil() {
-        XCTAssertNil(SessionCloseCopy.kept([]))
-    }
-
-    // MARK: decision
-
-    func testNoWorktreeGoesStraightToKill() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: nil, removal: nil, decision: .none), .kill(.plain))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "", removal: nil, decision: .none), .kill(.plain))
-    }
-
-    func testSettingOffIgnoresWorktree() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: false, worktreePath: "/wt", removal: nil, decision: .none), .kill(.plain))
-    }
-
-    func testCleanRemovalKills() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: nil, decision: .none), .removeWorktree(force: false))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: SessionWorktreeRemoval(removed: true), decision: .none), .kill(.plain))
-    }
-
-    func testDirtyWithoutDecisionAsks() {
-        let dirty = SessionWorktreeRemoval(removed: false, reason: "dirty")
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: dirty, decision: .none), .ask)
-    }
-
-    func testKeepKillsWithNotice() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: nil, decision: .keep),
-                       .kill(.keptWorktree(path: "/wt")))
-    }
-
-    func testRemoveForcesThenKills() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: nil, decision: .remove), .removeWorktree(force: true))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: SessionWorktreeRemoval(removed: true), decision: .remove), .kill(.plain))
-    }
-
-    func testOtherRemovalErrorStillKillsAndReports() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: .otherFailure, decision: .none),
-                       .kill(.removalFailed(path: "/wt")))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: .otherFailure, decision: .remove),
-                       .kill(.removalFailed(path: "/wt")))
+    func testChoiceMapsToTheWireValue() {
+        XCTAssertNil(SessionCloseChoice.none.wire)
+        XCTAssertEqual(SessionCloseChoice.keep.wire, "keep")
+        XCTAssertEqual(SessionCloseChoice.remove.wire, "remove")
     }
 
     // MARK: prompt queue
 
     private func prompt(_ key: String) -> SessionWorktreePrompt {
-        SessionWorktreePrompt(key: key, project: "p", index: 0, windowName: "w", worktreePath: "/wt/\(key)")
+        SessionWorktreePrompt(key: key, project: "p", index: 0, windowName: "w", worktreePath: "/wt/\(key)",
+                              ask: SessionCloseAsk(path: "/wt/\(key)", title: "t", body: "b", removeLabel: "Remove worktree", keepLabel: "Keep worktree"))
     }
 
     func testTwoPromptsQueuedInOrder() {
@@ -703,10 +623,6 @@ final class SessionRowStatusTests: XCTestCase {
                          isTerminal: terminal, runningSubagents: subagents, halted: halted)
     }
 
-    private func sub(_ status: String?) -> StreamSubagentPayload {
-        StreamSubagentPayload(childSessionId: UUID().uuidString, status: status)
-    }
-
     func testSubtitleSubagentsReplaceEverythingButJobs() {
         XCTAssertEqual(SessionRowSubtitle.text(for: status(running: true, subagents: 3, model: "opus 4.8")), "3 subagents")
     }
@@ -719,18 +635,11 @@ final class SessionRowStatusTests: XCTestCase {
         XCTAssertEqual(SessionRowSubtitle.text(for: status(running: true, jobs: 2, subagents: 3)), "2 background jobs")
     }
 
-    func testSubagentCountIgnoresCompletedAndError() {
-        let list = [sub("running"), sub("completed"), sub("error"), sub(nil)]
-        XCTAssertEqual(SessionSubagentCount.running(list, parentRunning: true), 1)
-    }
-
-    func testSubagentCountZeroWhenParentNotRunning() {
-        // A missed finish frame must not leave "2 subagents" on an idle row.
-        XCTAssertEqual(SessionSubagentCount.running([sub("running"), sub("running")], parentRunning: false), 0)
-    }
-
-    func testSubagentCountCountsPending() {
-        XCTAssertEqual(SessionSubagentCount.running([sub("pending"), sub("running")], parentRunning: true), 2)
+    func testWindowStatusPayloadDecodesLeniently() throws {
+        let full = try JSONDecoder().decode(StreamWindowStatusPayload.self, from: Data(#"{"running":false,"busy":true,"startedAt":5,"attention":"question","subagents":2,"stopped":true}"#.utf8))
+        XCTAssertEqual(full, StreamWindowStatusPayload(running: false, busy: true, startedAt: 5, attention: "question", subagents: 2, stopped: true))
+        let sparse = try JSONDecoder().decode(StreamWindowStatusPayload.self, from: Data(#"{"busy":"junk","subagents":"x"}"#.utf8))
+        XCTAssertEqual(sparse, StreamWindowStatusPayload())
     }
 
     func testHaltedSubtitleWhenIdle() {
@@ -947,9 +856,7 @@ final class SessionWireTests: XCTestCase {
         XCTAssertEqual(result.projects.count, 1)
     }
 
-    func testWorktreeRemovalShapes() throws {
-        XCTAssertTrue(try decode(SessionWorktreeRemoval.self, #"{"removed":false,"reason":"dirty"}"#).isDirty)
-        XCTAssertFalse(try decode(SessionWorktreeRemoval.self, #"{"removed":true}"#).isDirty)
+    func testWorktreeAddedShape() throws {
         XCTAssertEqual(try decode(SessionWorktreeAdded.self, #"{"path":"/r-wt","branch":"worktree-2"}"#).branch, "worktree-2")
     }
 

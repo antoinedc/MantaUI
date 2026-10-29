@@ -15,6 +15,7 @@ import {
 import { TaskCard } from "./TaskCard";
 import { TaskContext, type TaskContextValue, type ToolState } from "./chatShared";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
+import { viewed } from "./testRunViews";
 import type { OpencodePart, OpencodeMessage } from "../shared/types";
 
 // Tool-call cards start COLLAPSED. Mounting a <ToolCall> hides its body until
@@ -277,7 +278,7 @@ describe("non-tool assistant parts", () => {
     installMockApi();
     h = mount(
       <AssistantPart
-        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png" } as unknown as OpencodePart}
+        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png", view: { media: { kind: "image", path: "/home/dev/diagram.png" } } } as unknown as OpencodePart}
         showThinking={false}
       />,
     );
@@ -290,12 +291,23 @@ describe("non-tool assistant parts", () => {
     installMockApi();
     h = mount(
       <AssistantPart
-        part={{ type: "file", filename: "clip.mp4", mime: "video/mp4", url: "file:///home/dev/clip.mp4" } as unknown as OpencodePart}
+        part={{ type: "file", filename: "clip.mp4", mime: "video/mp4", url: "file:///home/dev/clip.mp4", view: { media: { kind: "video", path: "/home/dev/clip.mp4" } } } as unknown as OpencodePart}
         showThinking={false}
       />,
     );
     expect(h.text()).toContain("Video");
     expect(h.container.querySelector("button[aria-expanded]")).toBeTruthy();
+  });
+
+  it("an image file part the box did NOT mark (an older box) stays a header-only file card", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png" } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.container.querySelector("button[aria-expanded]")).toBeNull();
   });
 
   it("keeps a non-media file part header-only (no disclosure chevron)", () => {
@@ -503,11 +515,12 @@ describe("TaskCard child transcript groups tool runs", () => {
   });
 
   it("collapses a run spanning child messages into ONE line, drawn once", () => {
-    const msgs = [
+    // The child transcript as the box sends it (run ids + wording stamped by the box's own module).
+    const msgs = viewed([
       child("c1", [{ type: "text", text: "Searching." }, readTool("/a.ts")]),
       child("c2", [readTool("/b.ts")]),
       child("c3", [{ type: "text", text: "Found." }]),
-    ];
+    ]);
     const ctx = childTaskContext(msgs);
     installMockApi();
     h = mount(

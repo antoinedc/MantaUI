@@ -293,14 +293,15 @@ enum SeatPollOutcome: Equatable, Sendable {
     case abandon(unreachable: Bool)
     case added(AccountsSeat?)
     case differentOrg(orgName: String?)
-    case failed(error: String?, timedOut: Bool)
+    /// The box's sentence (nil on an older box).
+    case failed(message: String?)
 }
 
 enum ResignPollOutcome: Equatable, Sendable {
     case keepPolling
     case abandon(unreachable: Bool)
     case signedBack(AccountsSeat?)
-    case failed(error: String?, expectedEmail: String?, gotEmail: String?)
+    case failed(message: String?)
 }
 
 enum SignInPollRules {
@@ -308,7 +309,7 @@ enum SignInPollRules {
     /// client limit has not been reached a failed or pending reading just
     /// keeps polling; at the limit the box is asked one last time (this is
     /// that reading) before the flow gives up.
-    static func decideSeat(reply: SeatStatusReply?, expired: Bool, pastServerLimit: Bool) -> SeatPollOutcome {
+    static func decideSeat(reply: SeatStatusReply?, expired: Bool) -> SeatPollOutcome {
         guard let reply, reply.state != .pending else {
             return expired ? .abandon(unreachable: reply == nil) : .keepPolling
         }
@@ -317,7 +318,7 @@ enum SignInPollRules {
             return .added(reply.seat)
         case .failed:
             if reply.error == "different-org" { return .differentOrg(orgName: reply.orgName) }
-            return .failed(error: reply.error, timedOut: pastServerLimit)
+            return .failed(message: reply.message)
         case .pending:
             return .keepPolling
         }
@@ -331,7 +332,7 @@ enum SignInPollRules {
         case .ok:
             return .signedBack(reply.seat)
         case .failed:
-            return .failed(error: reply.error, expectedEmail: reply.expectedEmail, gotEmail: reply.gotEmail)
+            return .failed(message: reply.message)
         case .pending:
             return .keepPolling
         }
@@ -399,15 +400,6 @@ enum AccountsSignInCopy {
     static let liveSeatRace = "This is the box's own login, so it can't be signed in again from here."
     static let createAccountFailed = "Couldn't create the account — the server didn't answer. Try again."
 
-    /// Why a seat sign-in failed, in words that say what to do next.
-    static func seatFailureMessage(error: String?, timedOut: Bool) -> String {
-        if error == "duplicate-login" { return "That login is already added as a seat. Sign in with a different account." }
-        if timedOut {
-            return "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser."
-        }
-        return "The sign-in failed — the code may have been wrong or expired. Try again."
-    }
-
     static func differentOrgPrompt(orgName: String?, accountLabel: String?) -> String {
         let org = (orgName?.isEmpty == false) ? " (\(orgName ?? ""))" : ""
         let target = (accountLabel?.isEmpty == false) ? "“\(accountLabel ?? "")”" : "this account"
@@ -441,22 +433,6 @@ enum AccountsSignInCopy {
         "Sign in with \((email?.isEmpty == false) ? (email ?? "") : "this seat's account"). \(seatLabel) stays as it is until the sign-in is confirmed to be the same account."
     }
 
-    static func resignFailureMessage(error: String?, expectedEmail: String?, gotEmail: String?, seatLabel: String, seatEmail: String?) -> String {
-        if error == "different-account" {
-            let expected = nonEmpty(expectedEmail) ?? nonEmpty(seatEmail)
-            let got = nonEmpty(gotEmail) ?? "a different account"
-            if let expected {
-                return "You signed in as \(got), but this seat is \(expected). Sign in with \(expected)."
-            }
-            return "You signed in as \(got), but that isn't the account \(seatLabel) belongs to. Sign in with the same account."
-        }
-        return "Sign-in didn't complete. \(seatLabel) was not changed — try again."
-    }
-
-    static func resignTimedOut(seatLabel: String) -> String {
-        "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. \(seatLabel) was not changed — try again."
-    }
-
     static func resignUnreachable(seatLabel: String) -> String {
         "Couldn't reach the server to check the sign-in. \(seatLabel) was not changed — try again once the box is reachable."
     }
@@ -477,10 +453,9 @@ enum AccountsSignInCopy {
     /// Why starting a sign-in failed. `resign` adds the live-seat race mapping
     /// (whose general text is about removal, so it is not in `AccountsCopy`).
     static func startFailure(_ error: Error, resign: Bool) -> String {
+        if resign, let refusal = error as? AccountsRefusal, refusal.code == "live-seat" { return liveSeatRace }
         if let manta = error as? MantaError {
             switch manta {
-            case .server(let code) where resign && code.trimmingCharacters(in: .whitespacesAndNewlines) == "live-seat":
-                return liveSeatRace
             case .transport:
                 return startUnreachable
             default:

@@ -121,100 +121,27 @@ final class SettingsExtensionsTests: XCTestCase {
         XCTAssertEqual(l.flags.map(\.key), ["k"])
     }
 
-    // MARK: - Launchers: resolve / update / saved
+    // MARK: - Launchers + forge: the box's values (WS11 D3)
 
-    private let flags = [
-        AvailableLauncherFlag(key: "a", label: "A", default: false),
-        AvailableLauncherFlag(key: "b", label: "B", default: true),
-    ]
-
-    func testResolveSavedWinsAndDefaultsFillTheRest() {
-        XCTAssertEqual(ExtensionsLaunchers.resolve(schema: flags, saved: ["a": true]), ["a": true, "b": true])
-        XCTAssertEqual(ExtensionsLaunchers.resolve(schema: flags, saved: ["b": false]), ["a": false, "b": false])
+    func testLauncherFlagValueIsTheBoxsAnswerAndNilOnAnOlderBox() throws {
+        let withValue = try JSONDecoder().decode(
+            AvailableLauncher.self,
+            from: Data(#"{"id":"claude","label":"Claude","flags":[{"key":"skipPermissions","label":"Skip","type":"boolean","default":true,"value":false}]}"#.utf8))
+        XCTAssertEqual(withValue.flags[0].value, false)
+        XCTAssertEqual(withValue.flags[0].default, true)
+        let old = try JSONDecoder().decode(
+            AvailableLauncher.self,
+            from: Data(#"{"id":"claude","label":"Claude","flags":[{"key":"skipPermissions","label":"Skip","type":"boolean","default":true}]}"#.utf8))
+        XCTAssertNil(old.flags[0].value)
     }
 
-    func testResolveWithNothingSavedIsAllDefaults() {
-        XCTAssertEqual(ExtensionsLaunchers.resolve(schema: flags, saved: nil), ["a": false, "b": true])
-    }
-
-    func testResolveDropsKeysTheSchemaNoLongerHas() {
-        XCTAssertEqual(ExtensionsLaunchers.resolve(schema: flags, saved: ["gone": true, "a": true]), ["a": true, "b": true])
-    }
-
-    func testResolveOfAnEmptySchemaIsEmpty() {
-        XCTAssertEqual(ExtensionsLaunchers.resolve(schema: [], saved: ["a": true]), [:])
-    }
-
-    func testUpdateWritesTheFullResolvedMapPlusTheToggledKey() {
-        let launchers = [AvailableLauncher(id: "claude", label: "Claude", flags: flags),
-                         AvailableLauncher(id: "codex", label: "Codex", flags: [])]
-        let prev: [String: [String: Bool]] = ["codex": ["x": true]]
-        let next = ExtensionsLaunchers.update(launchers: launchers, launcherID: "claude", flagKey: "a", checked: true, prev: prev)
-        // `b` was never touched but is written with its default, so the box never holds a partial map.
-        XCTAssertEqual(next["claude"], ["a": true, "b": true])
-        XCTAssertEqual(next["codex"], ["x": true], "other launchers are untouched")
-    }
-
-    func testUpdateKeepsPriorSavedValuesOfTheSameLauncher() {
-        let launchers = [AvailableLauncher(id: "claude", label: "Claude", flags: flags)]
-        let next = ExtensionsLaunchers.update(
-            launchers: launchers, launcherID: "claude", flagKey: "a", checked: true, prev: ["claude": ["b": false]])
-        XCTAssertEqual(next["claude"], ["a": true, "b": false])
-    }
-
-    func testUpdateOfAnUnknownLauncherChangesNothing() {
-        let launchers = [AvailableLauncher(id: "claude", label: "Claude", flags: flags)]
-        let prev: [String: [String: Bool]] = ["claude": ["a": true]]
-        XCTAssertEqual(ExtensionsLaunchers.update(launchers: launchers, launcherID: "nope", flagKey: "a", checked: false, prev: prev), prev)
-    }
-
-    func testSavedFlagsReadsAnObjectOfBools() {
-        let config: [String: JSONValue] = [
-            "launcherFlags": .object([
-                "claude": .object(["a": .bool(true), "b": .bool(false)]),
-            ])
-        ]
-        XCTAssertEqual(ExtensionsLaunchers.savedFlags(from: config), ["claude": ["a": true, "b": false]])
-    }
-
-    func testSavedFlagsSkipsWhatIsNotBoolOrObject() {
-        let config: [String: JSONValue] = [
-            "launcherFlags": .object([
-                "claude": .object(["a": .bool(true), "junk": .string("yes"), "n": .number(1)]),
-                "weird": .string("not an object"),
-                "list": .array([]),
-            ])
-        ]
-        XCTAssertEqual(ExtensionsLaunchers.savedFlags(from: config), ["claude": ["a": true]])
-    }
-
-    func testSavedFlagsFromNothingIsEmpty() {
-        XCTAssertEqual(ExtensionsLaunchers.savedFlags(from: nil), [:])
-        XCTAssertEqual(ExtensionsLaunchers.savedFlags(from: [:]), [:])
-        XCTAssertEqual(ExtensionsLaunchers.savedFlags(from: ["launcherFlags": .string("x")]), [:])
-    }
-
-    // MARK: - Forge (forgeCredentialSecondary)
-
-    func testForgeSecondaryForEverySourceWithAndWithoutALogin() {
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: "cli", valid: nil), "@octo · from the gh CLI on your server")
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: "env", valid: true), "@octo · from the MANTA_GITHUB_TOKEN env var")
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: "stored", valid: true), "@octo · signed in on this server")
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: nil, valid: nil), "@octo · connected")
-        XCTAssertEqual(ExtensionsForge.secondary(login: nil, source: "cli", valid: nil), "from the gh CLI on your server")
-        XCTAssertEqual(ExtensionsForge.secondary(login: nil, source: nil, valid: nil), "connected")
-        XCTAssertEqual(ExtensionsForge.secondary(login: "", source: "stored", valid: nil), "signed in on this server")
-    }
-
-    func testForgeSecondaryWhenGitHubRejectedTheCredential() {
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: "cli", valid: false),
-                       "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.")
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: "env", valid: false),
-                       "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.")
-        XCTAssertEqual(ExtensionsForge.secondary(login: "octo", source: "stored", valid: false),
-                       "GitHub rejected this sign-in. Disconnect, then connect again.")
-        XCTAssertEqual(ExtensionsForge.secondary(login: nil, source: nil, valid: false),
-                       "GitHub rejected this sign-in. Disconnect, then connect again.")
+    func testForgeSecondaryIsTheBoxsLine() throws {
+        let s = try JSONDecoder().decode(
+            ForgeConnectionStatus.self,
+            from: Data(#"{"connected":true,"login":"octo","kind":"github","source":"cli","valid":true,"secondary":"@octo · from the gh CLI on your server"}"#.utf8))
+        XCTAssertEqual(s.secondary, "@octo · from the gh CLI on your server")
+        let old = try JSONDecoder().decode(ForgeConnectionStatus.self, from: Data(#"{"connected":true,"login":"octo"}"#.utf8))
+        XCTAssertNil(old.secondary)
     }
 
     func testForgeStatusDecodes() throws {

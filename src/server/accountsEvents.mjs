@@ -15,6 +15,8 @@
 // `accounts.moved` is rare and each one matters to the conversation it names, so
 // it is never throttled or merged.
 
+import { moveCopy } from "./accountsCopy.mjs";
+
 export const UPDATE_MIN_INTERVAL_MS = 1000;
 
 /**
@@ -79,6 +81,17 @@ export function createAccountsEvents({
           toLabel: evt.toLabel ?? evt.to,
           trigger: evt.trigger ?? null,
           crossOrg: evt.crossOrg === true,
+          // WS11 D4 (K5): the notice sentence, the dial line (no age) and the
+          // re-sent figure, worded by the box.
+          ...moveCopy({
+            from: evt.from,
+            fromLabel: evt.fromLabel ?? evt.from,
+            toLabel: evt.toLabel ?? evt.to,
+            reason: evt.reason,
+            trigger: evt.trigger ?? null,
+            crossOrg: evt.crossOrg === true,
+            resentTokens: evt.resentTokens,
+          }),
         },
       });
     } catch {

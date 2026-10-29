@@ -104,7 +104,7 @@ struct UpgradeScreen: View {
     private var failureBlock: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             if let disk = model.disk {
-                Text(UpgradePresentation.sentence(disk))
+                Text(disk)
                     .font(.manta(size: Metrics.type.body, weight: .semibold))
                     .foregroundColor(tokens.danger)
                     .accessibilityIdentifier("upgrade-disk")
@@ -125,6 +125,12 @@ struct UpgradeScreen: View {
 
     private var failureActions: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+            // An older box sends no `view`: Retry is still offered (the box refuses a retry it cannot do with
+            // its own sentence, shown below); Roll back needs the box's rules, so it stays hidden — the
+            // update note says why. A failed upgrade must never be a dead end.
+            if model.needsBoxUpdate {
+                UpdateBoxNote(showsLink: false)
+            }
             HStack(spacing: Metrics.spacing.sp3) {
                 Button {
                     Task { await upgradeStore.retry() }
@@ -198,7 +204,12 @@ struct UpgradeScreen: View {
         }
     }
 
+    @ViewBuilder
     private var copyDetailsRow: some View {
+        if !model.details.isEmpty { copyDetailsContent }
+    }
+
+    private var copyDetailsContent: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             Button {
                 UIPasteboard.general.string = model.details
@@ -240,7 +251,7 @@ struct UpgradeScreen: View {
                 if step.status == .running {
                     // The CURRENT step's own bar: determinate when the box reports
                     // numerator/denominator, an indeterminate spinner otherwise.
-                    if let fraction = UpgradePresentation.fraction(step) {
+                    if step.id == model.currentStep?.id, let fraction = model.currentFraction {
                         ProgressView(value: fraction)
                             .tint(tokens.accent)
                             .accessibilityLabel("\(step.label) progress")

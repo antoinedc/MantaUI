@@ -17,7 +17,6 @@ import {
   readSavedMode,
   writeSavedMode,
   modelFromChoice,
-  resolveLauncherFlags,
   resolveAgentMentions,
   readPromptHistory,
   appendPromptHistory,
@@ -393,32 +392,6 @@ describe("modelFromChoice (BET-1248 seed derivation)", () => {
   });
 });
 
-describe("resolveLauncherFlags", () => {
-  const schema = [
-    { key: "skipPermissions", default: true },
-    { key: "verbose", default: false },
-  ];
-
-  it("uses each flag's registry default when nothing is saved", () => {
-    expect(resolveLauncherFlags(schema, undefined)).toEqual({
-      skipPermissions: true,
-      verbose: false,
-    });
-  });
-
-  it("overrides defaults with saved values, per-key", () => {
-    expect(resolveLauncherFlags(schema, { skipPermissions: false })).toEqual({
-      skipPermissions: false,
-      verbose: false, // untouched key still falls back to its default
-    });
-  });
-
-  it("ignores saved keys that aren't in the schema", () => {
-    expect(
-      resolveLauncherFlags(schema, { skipPermissions: false, ghostFlag: true } as never),
-    ).toEqual({ skipPermissions: false, verbose: false });
-  });
-});
 
 describe("prompt history persistence (survives /clear)", () => {
   beforeEach(() => {

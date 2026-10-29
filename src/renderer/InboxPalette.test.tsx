@@ -47,6 +47,7 @@ describe("InboxPalette", () => {
 
   async function open(items: ForgeInboxItem[], extra: Record<string, unknown> = {}) {
     const mock = installMockApi({
+      apiVersion: () => Promise.resolve({ capabilities: ["forge-inbox-view-1", "sessions-naming-1"] } as never),
       forgeInbox: () => Promise.resolve({ items, stale: false, error: null }),
       forgeProbe: vi.fn(() => Promise.resolve({ repos: [] })),
       ...extra,
@@ -78,12 +79,15 @@ describe("InboxPalette", () => {
 
   it("Start a session uses the box's localPath and branchName", async () => {
     const gitAddWorktree = vi.fn(() => Promise.resolve({ path: "/wt" }));
-    const tmuxNewSession = vi.fn(() => Promise.resolve({ projects: [], sessionId: "s1" }));
+    const tmuxNewSession = vi.fn((_input: Record<string, unknown>) => Promise.resolve({ name: "manta", projects: [], sessionId: "s1" }));
     await open(ITEMS, { gitAddWorktree, tmuxNewSession });
     const start = [...document.body.querySelectorAll("button")].find((b) => b.textContent?.includes("Start a session"))!;
     await act(async () => { start.click(); });
     await h!.flush();
     expect(gitAddWorktree).toHaveBeenCalledWith({ cwd: "/home/dev/projects/manta", name: "manta/pr-412-fix-the-thing" });
+    // The box names the session from the repo folder (WS11 D5 / S1) — no client-side name.
+    expect(tmuxNewSession).toHaveBeenCalledWith(expect.objectContaining({ nameHint: "/home/dev/projects/manta", cwd: "/wt" }));
+    expect(tmuxNewSession.mock.calls[0][0]).not.toHaveProperty("name");
   });
 
   it("an item without a checkout says so and creates nothing", async () => {

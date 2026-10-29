@@ -34,114 +34,28 @@ enum SessionActionError {
 // MARK: - Rename
 
 enum SessionRenameLogic {
-    /// The trimmed name to save, or nil when it is empty or unchanged (nothing to
-    /// send — the desktop cancels with no RPC in both cases).
-    static func validated(_ input: String, current: String) -> String? {
+    /// The trimmed name to send, or nil when it is unchanged (nothing to send — the desktop cancels with no
+    /// RPC). Whether a name is VALID (empty, too long, a `:`) is the box's call: it refuses with a sentence
+    /// (WS11 D5 / S2).
+    static func changed(_ input: String, current: String) -> String? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != current else { return nil }
-        return trimmed
+        return trimmed == current ? nil : trimmed
     }
 }
 
-// MARK: - Naming (port of projectName.mjs)
+// MARK: - Naming
 
+/// Naming is the box's (WS11 D5 / S1): it makes a name tmux-safe, unique and allocates it under a lock, and
+/// previews it with `sessions:propose-name`. Only the display basename of a folder is derived here.
 enum SessionNaming {
-    /// A filesystem-, tmux- and git-branch-safe slug. NFKD, drop diacritics,
-    /// lowercase, every run of `[^a-z0-9]` becomes one `-`, trim `-`, cap at 32,
-    /// trim again. Anything with no ASCII form (CJK, `ß`) slugs away to `""`.
-    static func slugify(_ input: String) -> String {
-        let folded = input.decomposedStringWithCompatibilityMapping.unicodeScalars
-            .filter { !$0.properties.isDiacritic }
-        var out = ""
-        var pendingDash = false
-        for scalar in String(String.UnicodeScalarView(folded)).lowercased().unicodeScalars {
-            let v = scalar.value
-            let isAlnum = (v >= 0x61 && v <= 0x7A) || (v >= 0x30 && v <= 0x39)
-            if isAlnum {
-                if pendingDash && !out.isEmpty { out.append("-") }
-                pendingDash = false
-                out.unicodeScalars.append(scalar)
-            } else {
-                pendingDash = true
-            }
-        }
-        var slug = String(out.prefix(32))
-        while slug.hasSuffix("-") { slug.removeLast() }
-        return slug
-    }
-
-    /// The basename of a folder path; `"~"`, empty and `"/"` are `"project"`.
+    /// The basename of a folder path; `"~"`, empty and `"/"` are `"project"`. A display label (the batch rows),
+    /// never the name a session is created under.
     static func deriveProjectName(_ cwd: String) -> String {
         var clean = cwd
         while clean.hasSuffix("/") { clean.removeLast() }
         if clean.isEmpty || clean == "~" { return "project" }
         let last = clean.split(separator: "/", omittingEmptySubsequences: true).last
         return last.map(String.init) ?? "project"
-    }
-
-    /// The session name tmux KEEPS: it silently rewrites every `.` and `:` to `_`
-    /// (`session_check_name`). A name sent to `tmux:new-session` must go through
-    /// this first, or the project is created under a different name than the one
-    /// we then look for (a folder like `next.js` became `next_js`, and the
-    /// create "failed" after it had succeeded).
-    static func tmuxSafe(_ name: String) -> String {
-        name.replacingOccurrences(of: ".", with: "_").replacingOccurrences(of: ":", with: "_")
-    }
-
-    /// A project (tmux session) name for a folder: its basename, made tmux-safe
-    /// FIRST and de-duplicated after, so uniqueness is judged on the name tmux
-    /// will actually keep.
-    static func uniqueProjectName(forFolder path: String, taken: Set<String>) -> String {
-        unique(tmuxSafe(deriveProjectName(path)), taken: taken)
-    }
-
-    /// `base` when free, else the first free `base-2`, `base-3`, …
-    static func unique(_ base: String, taken: Set<String>) -> String {
-        if !taken.contains(base) { return base }
-        var i = 2
-        while taken.contains("\(base)-\(i)") { i += 1 }
-        return "\(base)-\(i)"
-    }
-}
-
-enum SessionScratchHint {
-    static let emptySlug = "Add at least one letter or number — that becomes the folder name."
-
-    /// The one hint slot under the scratch name: it can't make a folder at all,
-    /// or it collides with something already under the root. Never both.
-    static func text(slug: String, taken: Set<String>) -> String? {
-        if slug.isEmpty { return emptySlug }
-        if taken.contains(slug) {
-            return "\(slug) already exists — will create \(SessionNaming.unique(slug, taken: taken))"
-        }
-        return nil
-    }
-}
-
-enum SessionWorkspaceRoot {
-    /// Where new workspaces go: the common parent of the repositories the scan
-    /// found when they share one, else `<home>/projects`. Empty when nothing is
-    /// known — callers stay disabled rather than invent a path.
-    static func proposed(repoPaths: [String], homeDir: String?) -> String {
-        let fallback = (homeDir ?? "").isEmpty ? "" : "\(homeDir ?? "")/projects"
-        let parents = repoPaths.compactMap { path -> String? in
-            guard let slash = path.lastIndex(of: "/") else { return nil }
-            let parent = String(path[..<slash])
-            return parent.isEmpty ? nil : parent
-        }
-        guard var common = parents.first else { return fallback }
-        for parent in parents.dropFirst() {
-            // Boundary-aware (the desktop's `startsWith` walk would call
-            // `/home/u/code` the parent of `/home/u/codex`).
-            while !common.isEmpty && parent != common && !parent.hasPrefix(common + "/") {
-                if let slash = common.lastIndex(of: "/") {
-                    common = String(common[..<slash])
-                } else {
-                    common = ""
-                }
-            }
-        }
-        return (common.isEmpty || common == "/") ? fallback : common
     }
 }
 
@@ -164,6 +78,11 @@ struct SessionCreateForm: Equatable, Sendable {
     var folder = ""
     var scratchName = ""
     var scratchRoot = ""
+    /// The box's preview said the scratch name makes a usable folder (or no preview has arrived and the
+    /// field is not blank — the create re-checks).
+    var scratchUsable = false
+    /// The name field was typed in: it is sent as the explicit name; otherwise the box names the session.
+    var nameEdited = false
     /// The git probe said the folder is a repository.
     var worktreeAvailable = false
     var worktreeOn = false
@@ -239,14 +158,14 @@ struct SessionCreatePlan: Equatable, Sendable {
             case .scratch:
                 kind = .scratch
                 label = "Create workspace"
-                enabled = !SessionNaming.slugify(form.scratchName).isEmpty
+                enabled = form.scratchUsable
                     && !form.scratchRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 single = true
                 wantsWorktree = false
             case .folder:
                 kind = form.fanOutCount > 1 ? .fanOut : .newProjectFolder
                 label = "Create"
-                enabled = !form.newProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                enabled = (!form.nameEdited || !form.newProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     && !form.folder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 single = kind == .newProjectFolder
                 if kind == .fanOut { wantsWorktree = false }
@@ -313,12 +232,10 @@ enum SessionCreatedWindow {
     /// the name to put in the navigation value, not the one we sent.
     static func locate(in projects: [MantaProject], project: String, windowIndex: Int?, sessionId: String?,
                        name: String?) -> (project: String, window: MantaWindow)? {
-        let candidates = [project, SessionNaming.tmuxSafe(project)]
-        for candidate in candidates {
-            if let proj = projects.first(where: { $0.tmuxSession == candidate }),
-               let window = pick(in: proj, windowIndex: windowIndex, name: name) {
-                return (proj.tmuxSession, window)
-            }
+        // The project name is the one the box reported (tmux-safe and unique already).
+        if let proj = projects.first(where: { $0.tmuxSession == project }),
+           let window = pick(in: proj, windowIndex: windowIndex, name: name) {
+            return (proj.tmuxSession, window)
         }
         if let sessionId, !sessionId.isEmpty {
             for proj in projects {
@@ -476,7 +393,7 @@ enum SessionSetupRowPhase: Equatable, Sendable {
 struct SessionSetupBatch: Equatable, Sendable {
     struct Row: Equatable, Sendable {
         var path: String
-        /// The unique project name reserved for this repository.
+        /// The repository folder's basename, as a label.
         var name: String
         var phase: SessionSetupRowPhase = .queued
         var error: String?
@@ -484,18 +401,10 @@ struct SessionSetupBatch: Equatable, Sendable {
 
     private(set) var rows: [Row]
 
-    /// Names are unique across the batch AND against `taken` (the existing
-    /// projects): two repos both called `api` become `api`, `api-2`, and with an
-    /// existing `api` they become `api-2`, `api-3`.
-    init(paths: [String], taken: Set<String>) {
-        var used = taken
-        var rows: [Row] = []
-        for path in paths {
-            let name = SessionNaming.uniqueProjectName(forFolder: path, taken: used)
-            used.insert(name)
-            rows.append(Row(path: path, name: name))
-        }
-        self.rows = rows
+    /// One row per repository. The row's `name` is its folder's basename (a label); the box names each
+    /// session — tmux-safe and unique across the batch and the existing projects (WS11 D5 / S1).
+    init(paths: [String]) {
+        self.rows = paths.map { Row(path: $0, name: SessionNaming.deriveProjectName($0)) }
     }
 
     /// Index of the next row to run, in order.
@@ -537,7 +446,7 @@ struct SessionSetupBatch: Equatable, Sendable {
         }
     }
 
-    /// Puts a failed row back in the queue (keeps its reserved name).
+    /// Puts a failed row back in the queue.
     mutating func requeue(path: String) {
         guard let i = rows.firstIndex(where: { $0.path == path }), rows[i].phase == .failed else { return }
         rows[i].phase = .queued

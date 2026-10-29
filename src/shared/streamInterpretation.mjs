@@ -347,23 +347,44 @@ export function computeStaleCache(input) {
       ? Math.max(0, input.now - input.lastCompleted)
       : 0;
   const tokens = Math.max(0, Math.round(input.cachedTokens));
+  const lastCompleted = input.lastCompleted ?? null;
+  const staleAt = computeStaleAt({
+    lastCompleted,
+    ttlMs: input.ttlMs,
+    cachedTokens: tokens,
+    running: input.running,
+    minCacheTokens: min,
+  });
   // Never report stale while a turn is running — the cache is being actively
   // touched (writes count as touches) and a "/clear to save" suggestion is
   // meaningless until the turn ends.
   if (input.running) {
-    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
+    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs, lastCompleted, staleAt };
   }
   // Need a completed turn to know when staleness started; need real cached
   // tokens to make the warning actionable.
   if (input.lastCompleted == null || tokens < min) {
-    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
+    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs, lastCompleted, staleAt };
   }
   return {
     isStale: idleMs >= input.ttlMs,
     idleMs,
     staleTokens: tokens,
     ttlMs: input.ttlMs,
+    lastCompleted,
+    staleAt,
   };
+}
+
+// The epoch-ms instant the prompt cache goes cold, or null when there is nothing
+// to warn about (a turn is running, no turn has finished, or too few cached
+// tokens). The box computes the INSTANT; a client compares it to its own clock so
+// the warning flips at the right time without a new frame (WS11 D2 / audit T21).
+export function computeStaleAt({ lastCompleted, ttlMs, cachedTokens, running, minCacheTokens }) {
+  const min = minCacheTokens ?? STALE_CACHE_MIN_TOKENS;
+  const tokens = Math.max(0, Math.round(cachedTokens ?? 0));
+  if (running || lastCompleted == null || tokens < min) return null;
+  return lastCompleted + ttlMs;
 }
 
 // ===== Context window breakdown =====
@@ -816,35 +837,6 @@ export function collectChildSessionIds(messages) {
 }
 
 /**
- * Count task tool parts whose status is "running" (or "pending"). Live status
- * can be more accurate than the parent's transcript snapshot — when a child's
- * `session.idle` arrives, the caller maps its sessionId → "idle" and passes
- * it here so we don't keep counting subagents that just finished.
- *
- * `liveStatus` keys are child session ids; values are "running" | "idle".
- */
-export function countRunningSubagents(messages, liveStatus) {
-  if (!messages) return 0;
-  let n = 0;
-  for (const m of messages) {
-    const parts = m?.parts;
-    if (!parts) continue;
-    for (const p of parts) {
-      const info = extractSubagentInfo(p);
-      if (!info) continue;
-      const live = liveStatus?.get(info.childSessionId);
-      if (live === "idle") continue;
-      if (live === "running") {
-        n++;
-        continue;
-      }
-      if (info.status === "running" || info.status === "pending") n++;
-    }
-  }
-  return n;
-}
-
-/**
  * Lightweight summary of a child session's transcript, for the collapsed
  * TaskBody header (tool count, last tool name, cumulative tokens scraped from
  * the child's step-finish parts). Returns zeros for an empty/null transcript.
@@ -914,7 +906,9 @@ const TITLE_INPUT_MAX_CHARS = 2000;
 // Max length of the final window name. tmux truncates long names in the
 // status line and our sidebar; a 3-6 word title should never approach this,
 // but we clamp defensively so a misbehaving model can't write an essay.
-const TITLE_MAX_CHARS = 48;
+// The box refuses a window name over 40 characters or containing ":" (sessionNaming.validateSessionName), so a
+// generated title is shaped to be accepted rather than refused.
+const TITLE_MAX_CHARS = 40;
 
 /**
  * Should an auto-rename fire at this user-turn count? True on every Nth
@@ -998,6 +992,8 @@ export function sanitizeGeneratedTitle(raw) {
   s = s.split(/\r?\n/)[0] ?? "";
   // Drop trailing sentence punctuation.
   s = s.replace(/[.!?,;:]+$/g, "");
+  // A window name can't carry control characters or ":" — replace a colon ("Fix: login redirect") with a dash.
+  s = s.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "").replace(/\s*:\s*/g, " – ");
   // Collapse internal whitespace, take at most six words. Preserve case.
   const words = s.trim().split(/\s+/).filter(Boolean).slice(0, 6);
   let out = words.join(" ").trim();
@@ -1006,7 +1002,7 @@ export function sanitizeGeneratedTitle(raw) {
     const lastSpace = window.lastIndexOf(" ");
     out = (lastSpace > 0 ? window.slice(0, lastSpace) : window).trim();
   }
-  return out;
+  return out.replace(/[\s–]+$/, "");
 }
 
 // The instruction sent to the throwaway opencode session. Kept here so the

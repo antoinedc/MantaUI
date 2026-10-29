@@ -23,14 +23,15 @@ final class HandoffTranscriptTests: XCTestCase {
         )
     }
 
-    func testHandoffToolPartBecomesACardBlockThatSplitsTheRun() {
+    /// An older box (no run ids): a message's calls are ONE neutral line, placed at the first call, and the handoff stays a
+    /// card of its own. (The box's own split around a handoff is `testAHandoffCallStandsApartFromTheRunAroundIt`.)
+    func testOnAnOlderBoxTheCallsOfAMessageAreOneNeutralLineAndTheHandoffStaysACard() {
         let blocks = ChatTranscriptMapper.blocks(from: [assistant("m1", [bash("t1"), handoffPart("h1"), bash("t2")])])
-        XCTAssertEqual(blocks.count, 3)
-        guard case .activity(let first) = blocks[0], case .handoff(let ref) = blocks[1], case .activity(let last) = blocks[2] else {
-            return XCTFail("expected activity, handoff, activity — got \(blocks)")
+        guard blocks.count == 2, case .activity(let line) = blocks[0], case .handoff(let ref) = blocks[1] else {
+            return XCTFail("expected [neutral line, handoff], got \(blocks)")
         }
-        XCTAssertEqual(first.parts.map(\.id), ["t1"])
-        XCTAssertEqual(last.parts.map(\.id), ["t2"])
+        XCTAssertTrue(line.isFallback)
+        XCTAssertEqual(line.parts.map(\.id), ["t1", "t2"])
         XCTAssertEqual(ref.partId, "h1")
         XCTAssertEqual(ref.handoffId, "hof_a")
         XCTAssertEqual(ref.statusLine, "Handoff prompt ready below.")
@@ -49,24 +50,26 @@ final class HandoffTranscriptTests: XCTestCase {
         let rows = uniqueTranscriptRows(blocks)
         XCTAssertEqual(rows.map(\.id), ["hof-h1", "hof-h2"])
         XCTAssertEqual(uniqueTranscriptRows(blocks).map(\.id), rows.map(\.id))
-        XCTAssertNil(blocks[0].timestamp)
+        guard let first = blocks.first else { return XCTFail("expected two handoff blocks") }
+        XCTAssertNil(first.timestamp)
     }
 
-    /// A live `handoff` call must not appear as a run line only to vanish when the
-    /// canonical card takes over (and would duplicate it if both were kept).
-    func testLiveHandoffToolIsNotMergedIntoARun() {
-        let live = LiveTool(idx: "h1", callID: "c1", name: "handoff", presentationHint: nil, status: "running")
-        let merge = ChatTranscriptMapper.mergingLive(
-            tools: [live], subagents: [], context: .empty, running: true, hasTailContent: false, to: []
-        )
-        XCTAssertTrue(merge.blocks.isEmpty)
-        XCTAssertNil(merge.trailing)
+    /// A `handoff` call is a card of its own: the box leaves it out of every run (canonical and live), so it never
+    /// appears as a run line only to vanish when the card takes over.
+    func testAHandoffCallStandsApartFromTheRunAroundIt() {
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([
+            assistant("m1", [bash("t1"), handoffPart("h1"), bash("t2")]),
+        ]))
+        guard blocks.count == 3, case .activity(let first) = blocks[0], case .handoff = blocks[1], case .activity(let second) = blocks[2] else {
+            return XCTFail("expected [.activity, .handoff, .activity], got \(blocks)")
+        }
+        XCTAssertEqual(first.parts.map(\.id), ["t1"])
+        XCTAssertEqual(second.parts.map(\.id), ["t2"])
     }
 
     func testToolWithoutAHandoffIsUnchanged() {
         let blocks = ChatTranscriptMapper.blocks(from: [assistant("m1", [bash("t1"), bash("t2")])])
-        XCTAssertEqual(blocks.count, 1)
-        guard case .activity(let run) = blocks[0] else { return XCTFail("expected one run") }
+        guard blocks.count == 1, case .activity(let run) = blocks[0] else { return XCTFail("expected one run, got \(blocks)") }
         XCTAssertEqual(run.parts.map(\.id), ["t1", "t2"])
     }
 }

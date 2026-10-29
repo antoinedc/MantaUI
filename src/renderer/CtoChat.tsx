@@ -46,6 +46,7 @@ import { MantaLoader } from "./MantaLoader";
 import { Composer } from "./Composer";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { useTranscriptState } from "./hooks/useTranscriptState";
+import { opencodeMessagesTracked } from "./runEpoch";
 import { useSseBus } from "./hooks/useSseBus";
 import { useSessionResources } from "./hooks/useSessionResources";
 // The ONE shared composer container — the CTO conversation renders the SAME
@@ -60,7 +61,7 @@ import { useModelCatalog } from "./modelCatalog";
 import { useSessionModelChoice } from "./modelPrefs";
 import {
   computeLiveTurn,
-  computeTurnInfo,
+  turnInfoFromView,
   type EntryMotionState,
 } from "./chatUtils";
 import {
@@ -818,8 +819,7 @@ function CtoConversation(props: {
       if (existing) clearTimeout(existing);
       const t = setTimeout(() => {
         childRefetchTimers.current.delete(childId);
-        window.api
-          .opencodeMessages(childId)
+        opencodeMessagesTracked(childId, { view: true })
           .then((m) => ts.setChildMessages((prev) => new Map(prev).set(childId, m)))
           .catch(() => {
             /* non-fatal */
@@ -871,8 +871,7 @@ function CtoConversation(props: {
   }, [messages, queue, ts.scheduleRefetch]);
 
   // Derived maps (memoized so Transcript's MessageRow memos aren't defeated).
-  const running = bus.running;
-  const turnInfo = useMemo(() => computeTurnInfo(messages, running), [messages, running]);
+  const turnInfo = useMemo(() => turnInfoFromView(messages), [messages]);
   const liveTurn = useMemo(() => computeLiveTurn(messages), [messages]);
   const taskContextValue = useMemo<TaskContextValue>(
     () => ({

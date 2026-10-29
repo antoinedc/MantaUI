@@ -572,6 +572,32 @@ final class AccountsFlowTests: XCTestCase {
         ProviderConnectionsStore(api: h.api, announce: said)
     }
 
+    @MainActor
+    func testAFailedRowStatesReadKeepsTheLastGoodRowsAndSaysSo() async {
+        let h = Harness()
+        let rows = #"{"rows":{"openai":{"text":"Box words","tone":"ok","control":"disconnect","registerLine":null}}}"#
+        var failing = false
+        FlowStub.handler = { channel, _ in
+            guard channel == "accounts:row-states" else { return .result("null") }
+            return failing ? .failure(.timedOut) : .result(rows)
+        }
+        let conns = connections(h)
+        await conns.readRowStates()
+        XCTAssertEqual(conns.rowState(for: "openai")?.text, "Box words")
+        XCTAssertFalse(conns.rowStatesReadFailed)
+
+        failing = true
+        await conns.readRowStates()
+
+        XCTAssertTrue(conns.rowStatesReadFailed, "the screen says it could not load them")
+        XCTAssertTrue(conns.rowStatesSupported, "a failed read is not an older box")
+        XCTAssertEqual(conns.rowState(for: "openai")?.control, .disconnect, "the last good controls stay")
+
+        failing = false
+        await conns.readRowStates()
+        XCTAssertFalse(conns.rowStatesReadFailed)
+    }
+
     private let openai = SubscriptionStatus(id: "openai", label: "Codex", plan: "ChatGPT Plus / Pro", connected: false)
     private let kimi = SubscriptionStatus(id: "kimi-for-coding", label: "Kimi", console: "https://www.kimi.com/code/console", connected: false)
 

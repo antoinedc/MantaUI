@@ -396,6 +396,24 @@ export type TmuxWindow = {
   // a pre-existing worktree is never identified by this stamp, so the
   // renderer can safely remove ONLY what manta created.
   worktreePath?: string | null;
+  // WS11 D7 (S13): set by the box (sessions-window-status-1) on a window that IS a background job's child —
+  // `parentWindowIndex` is the top-level window it nests under, or null when it stays top-level. Null / absent
+  // on every other window and on an older box (which sends no nesting, so the rail renders flat).
+  job?: { id: string; status: string; parentWindowIndex: number | null } | null;
+};
+
+/** `windowStatus` frame / `sessions:window-status` (WS11 D7): one windowed session's rolled-up status. */
+export type WindowStatusPayload = {
+  /** The session's OWN turn is running. */
+  running: boolean;
+  /** Work in flight anywhere beneath it (own turn, subagent children at any depth, a running background job). */
+  busy: boolean;
+  startedAt: number | null;
+  attention: "question" | "permission" | null;
+  /** Direct children whose own turn is running. */
+  subagents: number;
+  /** Stopped by a provider usage limit. */
+  stopped: boolean;
 };
 
 export type TmuxSession = {
@@ -437,6 +455,8 @@ export type Project = {
 // re-locating it by name, which mixed new sessions up with existing ones on
 // name collisions. `projects` is the refreshed listing.
 export type TmuxCreateResult = {
+  /** The final session (project) name — the box picks it (WS11 D5 / S1). Absent on an older box. */
+  name?: string;
   sessionId: string | null;
   windowIndex: number;
   projects: Project[];
@@ -507,7 +527,32 @@ export type ForgeProbeResult = {
   // instead of the absolute path. null when not provided (renderer degrades
   // to the absolute path).
   homeDir: string | null;
+  /** Where new workspaces go, decided by the box (WS11 D5 / S3). Absent on an older box. */
+  proposedRoot?: string;
 };
+
+/** `sessions:propose-name` (WS11 D5 / S1): a preview of the name a create would pick. */
+export type SessionNameProposal = { name: string; hint: string | null };
+
+/** `sessions:close-preview` (WS11 D6 / S10): the confirm dialog's words and facts, from the box. */
+export type SessionClosePreview = {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  runningCount: number;
+  /** The worktree sentence alone ("Its worktree at X will be removed."), null when nothing will be removed. */
+  worktreeLine?: string | null;
+  worktrees: { path: string; willRemove: boolean }[];
+};
+
+/** `sessions:close` (WS11 D6): what the close did, as data. */
+export type SessionCloseResult =
+  | { ok: true; removed: string[]; kept: string[]; failed: { path: string; message: string }[]; warnings: string[]; notice: string | null }
+  | {
+      ok: false;
+      needsConfirm: { kind: "worktree-dirty"; path: string; title: string; body: string; removeLabel: string; keepLabel: string };
+    }
+  | { ok: false; error: string; removed?: string[]; kept?: string[]; failed?: { path: string; message: string }[]; warnings?: string[] };
 
 // ----- Forge clone flow (BET-796) -----
 
@@ -556,6 +601,9 @@ export type ForgeRepoListResult = {
   repos: ForgeRepo[];
   stale: boolean;
   error: string | null;
+  /** WS11 D5 (S8): the box's sentence for `error` and whether the credential is missing/dead. Absent on an older box. */
+  message?: string;
+  needsSignIn?: boolean;
 };
 
 export type ForgeCloneStatus = {
@@ -569,6 +617,9 @@ export type ForgeCloneStatus = {
   ok: boolean;
   error: string | null;
   cancelled: boolean;
+  /** A failed clone's cause and sentence, worded by the box (WS11 D5 / S8); `error` stays the raw git output. */
+  errorKind?: "permission" | "disk" | "network" | "destination" | "unknown";
+  message?: string;
 };
 
 // ----- Forge read path (BET-788) -----
@@ -656,6 +707,8 @@ export type ForgeStatusResult =
        *  rejected (only reachable for a `gh` CLI / env credential — a rejected
        *  stored credential is cleared, so it reports `connected: false`). */
       valid: boolean | null;
+      /** The row's second line, worded by the box (WS11 D3 / X9); absent on an older box. */
+      secondary?: string;
     }
   | { connected: false };
 
@@ -992,7 +1045,7 @@ export type SpawnOptions = {
   cols: number;
   rows: number;
   // Present only for a TUI launch mode (absent = plain login shell).
-  launcher?: { id: string; flags: Record<string, boolean> };
+  launcher?: { id: string; flags?: Record<string, boolean> };
   // Present only when attaching to an existing tmux window (a window Manta
   // did not create). WINS over `launcher`. Server-only behavior today; the
   // renderer half to wire this through is the follow-up issue.
@@ -1012,6 +1065,8 @@ export type LauncherFlagSchema = {
   label: string;
   type: "boolean";
   default: boolean;
+  /** The box-resolved current value (saved choice, else the default). Absent on an older box. */
+  value?: boolean;
 };
 
 export type AvailableLauncher = {
@@ -1104,6 +1159,12 @@ export type UpdateTarget = {
   manual: boolean; // no safe upgrade command → link, not a button
   manualUrl?: string;
   disruption: "none" | "reconnect" | "ends-turns" | "app-restart";
+  /**
+   * The row wording the BOX computed for a box-side target (WS11 D3 / X3):
+   * `server:update-check`'s `view.targets`. Absent on the desktop row (the shared
+   * `describeUpdateTarget` words that Electron leg) and on an older box.
+   */
+  view?: { tone: "ok" | "action" | "muted" | "error"; text: string; hasUpdate: boolean; versionText: string | null };
 };
 
 // Result of an ON-DEMAND desktop update check (`autoUpdate:check`).
@@ -1338,6 +1399,10 @@ export const IPC = {
   tmuxList: "tmux:list",
   tmuxNewSession: "tmux:new-session",         // creates tmux session + first window
   tmuxNewWindow: "tmux:new-window",
+  sessionsProposeName: "sessions:propose-name",
+  sessionsClosePreview: "sessions:close-preview",
+  sessionsClose: "sessions:close",
+  sessionsWindowStatus: "sessions:window-status",
   tmuxRenameSession: "tmux:rename-session",
   tmuxRenameWindow: "tmux:rename-window",
   tmuxKillSession: "tmux:kill-session",
@@ -1480,6 +1545,8 @@ export const IPC = {
   // right now — binary on PATH AND its opencode provider connected. Drives
   // the session-mode dropdown's launcher options (BET-138 refinement).
   launchersList: "launchers:list",
+  // Flip ONE launch option on the box ({id, key, value}) → the updated launcher row.
+  launchersSetFlag: "launchers:set-flag",
 
   // Per-window activity status, pushed every ~2s from a remote pane-capture poll
   statusEvent: "status:event",
@@ -1523,6 +1590,11 @@ export const IPC = {
   // during a live turn instead of re-pulling the whole (up to 3 MB) transcript.
   // Returns null on miss/error so the caller can fall back to a full refetch.
   opencodeMessage: "opencode:message",
+  // The box-computed `context` / `cache` payloads for an idle session (WS11 D2):
+  // the same objects the live stream frames carry; null before any billed /
+  // completed turn.
+  opencodeContext: "opencode:context",
+  opencodeCache: "opencode:cache",
   // Live SSE stream from opencode, forwarded raw to the renderer. Renderer
   // filters by sessionID in the event payload.
   opencodeEvent: "opencode:event",
@@ -1563,6 +1635,7 @@ export const IPC = {
   accountsRetry: "accounts:retry",
   // BET-1250: per-provider health snapshot for the merged Accounts list.
   accountsHealth: "accounts:health",
+  accountsRowStates: "accounts:row-states",
   // BET-1537 (S5): "Send probe" on a custom endpoint row — force a health
   // probe against one endpoint key now, report both branches.
   accountsEndpointProbe: "accounts:endpoint-probe",
@@ -1614,7 +1687,6 @@ export const IPC = {
   opencodeListSessions: "opencode:list-sessions",
   opencodeForkSession: "opencode:fork-session",     // returns new sessionId
   opencodeCompactSession: "opencode:compact-session",
-  opencodeDeleteSession: "opencode:delete-session",
   // BET-949: read a single session's `agent` field (GET /session/{id}) so the
   // plan-mode toggle can seed from a session already set to plan outside
   // MantaUI, before the honesty sync's first event. Returns the agent name or
@@ -2514,10 +2586,14 @@ export type AccountsError =
   | "unknown-provider"
   | "login-failed"
   | "last-seat"
-  | "no-replacement";
+  | "no-replacement"
+  | "duplicate-login"
+  | "different-org"
+  | "different-account"
+  | "unknown-flow";
 
 /** A mutation answers the refreshed provider, or a class-1 safe error code. */
-export type ProviderViewResult = ProviderView | { error: AccountsError };
+export type ProviderViewResult = ProviderView | { error: AccountsError; message?: string };
 
 /** `connect` of accounts:add-seat — the SAME shape the existing connect flow
  *  (`opencode:provider-auth` start) answers: `claude-login` carries a
@@ -2532,7 +2608,7 @@ export type SeatConnect = {
   cwd?: string;
 };
 
-export type AddSeatResult = { seatId: string; connect: SeatConnect } | { error: AccountsError };
+export type AddSeatResult = { seatId: string; connect: SeatConnect } | { error: AccountsError; message?: string };
 
 export type SeatStatusResult = {
   state: "pending" | "ok" | "failed";
@@ -2540,11 +2616,13 @@ export type SeatStatusResult = {
   seat?: SeatView;
   /** The org the new login belongs to (different-org). */
   orgName?: string;
+  /** The box's sentence for a failure (WS11 D4); absent on an older box. */
+  message?: string;
 };
 
 /** accounts:resign-seat — a sign-in flow for an EXISTING seat. `flowId` keys
  *  resign-status / resign-cancel; the seat keeps its id, label and assignments. */
-export type ResignSeatResult = { flowId: string; connect: SeatConnect } | { error: AccountsError };
+export type ResignSeatResult = { flowId: string; connect: SeatConnect } | { error: AccountsError; message?: string };
 
 export type ResignStatusResult = {
   state: "pending" | "ok" | "failed";
@@ -2557,6 +2635,8 @@ export type ResignStatusResult = {
   gotEmail?: string | null;
   /** The refreshed seat on ok. */
   seat?: SeatView;
+  /** The box's sentence for a failure (WS11 D4); absent on an older box. */
+  message?: string;
 };
 
 /** The conversation's current seat (null from the server = no assignment). */
@@ -2575,6 +2655,10 @@ export type SessionSeat = {
     resentTokens?: number;
     /** Phase 4: the reading that drove an automatic move ("5h at 91%"). */
     trigger?: SeatMoveTrigger | null;
+    /** WS11 D4 (K5), worded by the box: the notice sentence, the dial line (no age), the re-sent figure. */
+    text?: string;
+    line?: string;
+    resentText?: string | null;
   };
 };
 
@@ -2597,6 +2681,23 @@ export type AccountsMovedPayload = {
   trigger?: SeatMoveTrigger | null;
   /** The move crossed orgs, so the history was re-sent. */
   crossOrg?: boolean;
+  /** WS11 D4 (K5), worded by the box. Absent on an older box. */
+  text?: string;
+  line?: string;
+  resentText?: string | null;
+};
+
+/** `accounts:row-states` (WS11 D4 / K2): every Accounts row's words and control, built on the box. */
+export type AccountsRowStates = {
+  rows: Record<
+    string,
+    {
+      text: string;
+      tone: "ok" | "warn" | "danger" | "quiet";
+      control: "retry" | "disconnect" | "connect" | "none";
+      registerLine: string | null;
+    }
+  >;
 };
 
 // The list-level read of the stopped record: the records plus the modal's
@@ -2965,11 +3066,74 @@ export type OpencodeBackgroundResultPart = {
   text: string;
 };
 
+/** A truncation as the BOX words it (canonical `view.truncation` and the live `truncation` frame carry the same). */
+export type TruncationView = { kind: "output-cap" | "context-wall" | "tool-cutoff"; label: string; hint?: string };
+
+/** What the box decided a message MEANS (`{view:true}` on `opencode:messages` / `opencode:message`, WS11 D8+). */
+/** One canonical inline media entry the box reconstructed from the transcript (`view.media`, WS11 D9). `id` is the
+ *  identity rule: `media:h:<handle>` or `media:s:<messageId>:<path>`. `aspectRatio`/`count` are the begin's reserved box. */
+export type MediaViewEntry = {
+  id: string;
+  kind: "image" | "video";
+  path: string | null;
+  mime: string | null;
+  width: number | null;
+  height: number | null;
+  aspectRatio: number | null;
+  count: number | null;
+  size: number | null;
+  title: string | null;
+  handle: string | null;
+};
+
+/** A run's revision: the interpreter's process `epoch`, the ledger membership `gen`, and a per-session `seq` (WS11 D11). */
+export type RunRev = { epoch: string; gen: number; seq: number };
+
+/** What the box says a run of tool calls IS: its summary wording, tone, and the latest unfinished call (present tense). */
+export type RunSummaryView = {
+  label: string;
+  calls: number;
+  failed: number;
+  tone: "ok" | "warn" | "running";
+  live: { kind: string; label: string } | null;
+};
+export type RunSegmentView = RunSummaryView & { id: string };
+export type RunView = RunSummaryView & {
+  id: string;
+  ownerMessageId: string;
+  rev: RunRev;
+  /** Only when reasoning split the run (a client with reasoning shown draws one row per segment). */
+  segments?: RunSegmentView[];
+};
+/** A reference to a run whose full view rides on its placement message; never overwrites a stored value. */
+export type RunRef = { id: string; rev: RunRev; ref: true };
+
+/** `part.view` for a tool/patch part (and, D9, a media file part). */
+export type PartView = {
+  activity?: { kind: string; status: string; label: string; target: string; counted: boolean };
+  runId?: string;
+  segmentId?: string;
+  gen?: number;
+  media?: { kind: "image" | "video"; path: string };
+};
+
+export type MessageView = {
+  /** The finished turn this message ends: duration / tokens / the verb seed. Never on a lone `getMessage`. */
+  turn?: { durationMs: number | null; tokens: number | null; verbSeedId: string };
+  truncation?: TruncationView;
+  /** Ready inline media this message OWNS (a begin's message, else the show's), in first-sight order. */
+  media?: MediaViewEntry[];
+  /** The runs this message touches (the full view on the run's placement message, a RunRef elsewhere). */
+  runs?: Array<RunView | RunRef>;
+};
+
 export type OpencodeMessage = {
   info: OpencodeMessageInfo;
   // OpencodePart is open (index signature), so an OpencodeBackgroundResultPart
   // is already a member; renderers narrow on `type === "background-result"`.
   parts: OpencodePart[];
+  /** Present only when the request asked for `{view:true}` and the box has something to say. */
+  view?: MessageView;
 };
 
 // Generic SSE event envelope, mirroring opencode's `Event` union. The
@@ -3020,6 +3184,8 @@ export type StreamTodosPayload = {
 export type StreamTruncationPayload = {
   kind: string;
   label: string;
+  /** The explanation (WS11 D8); absent on an older box. */
+  hint?: string;
   messageID?: string;
 };
 
@@ -3091,6 +3257,38 @@ export type StreamStepEndedPayload = {
   tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
   cost?: number;
   finish?: string;
+};
+
+/**
+ * `context`: the context window breakdown, measured by the box against the
+ * session's SELECTED model (WS11 D2). `limit`/`model`/`basis` are absent on an
+ * older box (whose breakdown is against the last reply's model).
+ */
+export type StreamContextPayload = {
+  freshInput: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalInput: number;
+  pct: number | null;
+  hasLimit: boolean;
+  segments: { kind: "fresh" | "cacheRead" | "cacheWrite"; pct: number }[];
+  limit?: number | null;
+  model?: { providerID: string; modelID: string } | null;
+  basis?: "selected" | "default" | "last-used" | null;
+};
+
+/**
+ * `cache`: prompt-cache staleness. `staleAt` is the epoch-ms instant the cache
+ * goes cold (null = nothing to warn about; absent on an older box) — the client
+ * compares it with its own clock (WS11 D2).
+ */
+export type StreamCachePayload = {
+  isStale: boolean;
+  idleMs: number;
+  staleTokens: number;
+  ttlMs: number;
+  lastCompleted?: number | null;
+  staleAt?: number | null;
 };
 
 /** `toolBoundary`: a tool part reached a terminal status (once per part) — the queued-prompt drain trigger. */
@@ -3177,6 +3375,21 @@ export type StreamAttentionPayload = { kind: "question" | "permission" | null };
 // running.
 export type RunningSetPayload = {
   sessions: Array<{ sessionId: string; since?: number | null; type?: string | null }>;
+  /** The box's interpreter process id (WS11 D11): run values of any other epoch are retired. */
+  epoch?: string;
+};
+
+/** The live `toolRuns` frame (WS11 D11). Desktop uses `runs`/`closed`/`rebuilt`/`retired`; the phone also draws `layout`/`parts`. */
+export type StreamToolRunsPayload = {
+  epoch: string;
+  full: boolean;
+  gen: number;
+  rebuilt?: true;
+  retired?: string[];
+  layout: unknown[];
+  runs: RunView[];
+  closed: string[];
+  parts: unknown[];
 };
 
 export type StreamEnvelope = {
@@ -3209,6 +3422,8 @@ export type StreamEnvelope = {
     | "inbox"
     | "childSession"
     | "attention"
+    | "windowStatus"
+    | "toolRuns"
     | "aborted"
     // Client-synthesised (never sent by the box): the events socket reconnected,
     // so every open panel must resync (see httpApi `fireResync`). `sessionId` is "".
@@ -3434,6 +3649,19 @@ export type QuestionRequest = {
   // the id opencode's form reply/reject routes accept. Absent
   // for transcript-only recovered questions (which are thus unanswerable).
   requestId?: string;
+  /** Set by the box (`questions-plan-1`) on a plan_exit question: the plan card's data. Absent on an ordinary
+   *  question and on an older box (the question then renders as an ordinary card). */
+  plan?: PlanQuestionView;
+};
+
+/** The plan card's data for a plan_exit question, decided on the box (WS11 D10). */
+export type PlanQuestionView = {
+  title: string;
+  text: string;
+  steps: number;
+  files: number;
+  path: string | null;
+  pageUrl: string | null;
 };
 
 // ----- Voice / speech-to-text (Groq) -----

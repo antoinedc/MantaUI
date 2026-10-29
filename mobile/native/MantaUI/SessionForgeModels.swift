@@ -67,24 +67,6 @@ struct SessionWorktreeAdded: Decodable, Equatable, Sendable {
     var branch: String
 }
 
-/// `git:remove-worktree` → `{removed, reason?}`. A dirty checkout is
-/// `{removed:false, reason:"dirty"}`; every other failure THROWS (the store maps
-/// that to `.otherFailure`).
-struct SessionWorktreeRemoval: Decodable, Equatable, Sendable {
-    var removed: Bool
-    var reason: String?
-
-    init(removed: Bool, reason: String? = nil) {
-        self.removed = removed
-        self.reason = reason
-    }
-
-    var isDirty: Bool { !removed && reason == "dirty" }
-
-    /// Stand-in for a removal that threw something other than "dirty".
-    static let otherFailure = SessionWorktreeRemoval(removed: false, reason: "other")
-}
-
 /// `project:create-scratch` → `{path, name}`.
 struct SessionScratchProject: Decodable, Equatable, Sendable {
     var path: String
@@ -161,15 +143,18 @@ struct ForgeProbeResult: Decodable, Equatable, Sendable {
     var cli: ForgeCliStatus
     var partial: Bool
     var homeDir: String?
+    /// Where new workspaces go, decided by the box (WS11 D5 / S3). nil on an older box.
+    var proposedRoot: String?
 
-    init(repos: [RepoHit], cli: ForgeCliStatus = ForgeCliStatus(), partial: Bool = false, homeDir: String? = nil) {
+    init(repos: [RepoHit], cli: ForgeCliStatus = ForgeCliStatus(), partial: Bool = false, homeDir: String? = nil, proposedRoot: String? = nil) {
         self.repos = repos
         self.cli = cli
         self.partial = partial
         self.homeDir = homeDir
+        self.proposedRoot = proposedRoot
     }
 
-    private enum CodingKeys: String, CodingKey { case repos, cli, partial, homeDir }
+    private enum CodingKeys: String, CodingKey { case repos, cli, partial, homeDir, proposedRoot }
 
     /// Decodes anything and consumes exactly one element, so a malformed repo is
     /// stepped over instead of failing the whole scan.
@@ -184,7 +169,15 @@ struct ForgeProbeResult: Decodable, Equatable, Sendable {
         cli = ((try? c.decodeIfPresent(ForgeCliStatus.self, forKey: .cli)) ?? nil) ?? ForgeCliStatus()
         partial = ((try? c.decodeIfPresent(Bool.self, forKey: .partial)) ?? nil) ?? false
         homeDir = (try? c.decodeIfPresent(String.self, forKey: .homeDir)) ?? nil
+        proposedRoot = (try? c.decodeIfPresent(String.self, forKey: .proposedRoot)) ?? nil
     }
+}
+
+/// `sessions:propose-name` — a preview of the name a create would pick (WS11 D5 / S1). `hint` is the one
+/// line under a scratch name ("Add at least one letter or number…" / "x already exists — will create x-2").
+struct SessionNameProposal: Decodable, Equatable, Sendable {
+    var name: String
+    var hint: String?
 }
 
 // MARK: - GitHub device sign-in
@@ -342,14 +335,19 @@ struct GitHubRepoList: Decodable, Equatable, Sendable {
     var repos: [GitHubRepo]
     var stale: Bool
     var error: String?
+    /// The box's sentence for `error`, and whether the credential is missing or dead (WS11 D5 / S8).
+    var message: String?
+    var needsSignIn: Bool?
 
-    init(repos: [GitHubRepo], stale: Bool = false, error: String? = nil) {
+    init(repos: [GitHubRepo], stale: Bool = false, error: String? = nil, message: String? = nil, needsSignIn: Bool? = nil) {
         self.repos = repos
         self.stale = stale
         self.error = error
+        self.message = message
+        self.needsSignIn = needsSignIn
     }
 
-    private enum CodingKeys: String, CodingKey { case repos, stale, error }
+    private enum CodingKeys: String, CodingKey { case repos, stale, error, message, needsSignIn }
 
     private struct LossyRepo: Decodable {
         let repo: GitHubRepo?
@@ -361,6 +359,8 @@ struct GitHubRepoList: Decodable, Equatable, Sendable {
         repos = (((try? c.decodeIfPresent([LossyRepo].self, forKey: .repos)) ?? nil) ?? []).compactMap(\.repo)
         stale = ((try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? nil) ?? false
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
+        needsSignIn = (try? c.decodeIfPresent(Bool.self, forKey: .needsSignIn)) ?? nil
     }
 }
 
@@ -400,9 +400,13 @@ struct CloneJobStatus: Decodable, Equatable, Sendable {
     var ok: Bool
     var error: String?
     var cancelled: Bool
+    /// A failed clone's sentence, worded by the box (WS11 D5 / S8). `error` stays the raw git output, which is
+    /// only ever copied as diagnostics, never shown.
+    var message: String? = nil
 
     init(id: String, name: String = "", url: String = "", dest: String = "", percent: Double = 0, bytes: Double = 0,
-         done: Bool = false, ok: Bool = false, error: String? = nil, cancelled: Bool = false) {
+         done: Bool = false, ok: Bool = false, error: String? = nil, cancelled: Bool = false, message: String? = nil) {
+        self.message = message
         self.id = id
         self.name = name
         self.url = url
@@ -416,7 +420,7 @@ struct CloneJobStatus: Decodable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, url, dest, percent, bytes, done, ok, error, cancelled
+        case id, name, url, dest, percent, bytes, done, ok, error, cancelled, message
     }
 
     init(from decoder: Decoder) throws {
@@ -431,6 +435,7 @@ struct CloneJobStatus: Decodable, Equatable, Sendable {
         ok = ((try? c.decodeIfPresent(Bool.self, forKey: .ok)) ?? nil) ?? false
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
         cancelled = ((try? c.decodeIfPresent(Bool.self, forKey: .cancelled)) ?? nil) ?? false
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
     }
 }
 
@@ -512,7 +517,10 @@ struct SessionStoppedList: Decodable, Equatable, Sendable {
 
 /// `tmux:new-session` — a new project (a tmux session) with its first window.
 struct SessionNewProjectInput: Equatable, Sendable {
-    var name: String
+    /// An explicit name (the box makes it tmux-safe but never renames it). nil = the box names the
+    /// session from `nameHint` (tmux-safe, unique, allocated under a lock) — WS11 D5 / S1.
+    var name: String? = nil
+    var nameHint: String? = nil
     var cwd: String
     var windowName: String
     var chatMode: Bool

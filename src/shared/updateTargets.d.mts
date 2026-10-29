@@ -36,6 +36,16 @@ export function buildUpdateTargets(args: {
  */
 export function isCliTarget(t: UpdateTarget | null | undefined): boolean;
 
+/**
+ * The status wording for ONE update row (the single shared describe function):
+ * `!ok` → error, `manual` → muted, `available` → action, else ok. An
+ * unanswerable check is never "ok".
+ */
+export function describeUpdateTarget(t: UpdateTarget): {
+  tone: "ok" | "action" | "muted" | "error";
+  text: string;
+};
+
 export function summarizeUpdates(targets: UpdateTarget[]): UpdateTargetSummary;
 
 export interface UpdateBanner {

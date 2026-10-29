@@ -64,7 +64,7 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testUserTextMapsToUserBand() {
         let msgs = [message(id: "m1", role: "user", parts: [textPart("p1", "m1", "check bet-520")])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         guard case .user(let text, _) = blocks[0] else {
             return XCTFail("expected .user, got \(blocks[0])")
         }
@@ -73,8 +73,8 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testAssistantTextMapsToProse() {
         let msgs = [message(id: "m1", role: "assistant", parts: [textPart("p1", "m1", "Checking metadata.")])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
-        guard case .prose(let text, _) = blocks[0] else {
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
+        guard case .prose(let text, _, _) = blocks[0] else {
             return XCTFail("expected .prose")
         }
         XCTAssertEqual(text, "Checking metadata.")
@@ -98,7 +98,7 @@ final class ChatTranscriptTests: XCTestCase {
             ),
             parts: [textPart("p1", "m1", "check bet-520")]
         )
-        let blocks = ChatTranscriptMapper.blocks(from: [msg])
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([msg]))
         guard case .user(_, let at) = blocks[0] else {
             return XCTFail("expected .user, got \(blocks[0])")
         }
@@ -120,8 +120,8 @@ final class ChatTranscriptTests: XCTestCase {
             ),
             parts: [textPart("p1", "m1", "Checking metadata.")]
         )
-        let blocks = ChatTranscriptMapper.blocks(from: [msg])
-        guard case .prose(_, let at) = blocks[0] else {
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([msg]))
+        guard case .prose(_, let at, _) = blocks[0] else {
             return XCTFail("expected .prose, got \(blocks[0])")
         }
         XCTAssertEqual(at?.timeIntervalSince1970 ?? 0, completedMs / 1000, accuracy: 0.001)
@@ -133,7 +133,7 @@ final class ChatTranscriptTests: XCTestCase {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
         ])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertNil(blocks[0].timestamp)
     }
 
@@ -159,16 +159,16 @@ final class ChatTranscriptTests: XCTestCase {
         return run
     }
 
-    func testBashCallMapsToAnActivityRunWithItsCommandAsLabel() {
+    func testBashCallMapsToAnActivityRunWithItsCommandAsDetail() {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("multica issue get BET-520")], output: "Blocked", start: 12000, end: 12400),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
         XCTAssertEqual(run.id, "t1", "a run's id is its first part's id")
         XCTAssertEqual(run.parts.count, 1)
-        let activity = ToolActivity.describe(run.parts[0])
-        XCTAssertEqual(activity.label, "multica issue get BET-520")
-        XCTAssertEqual(activity.status, .completed)
+        // The call's wording is the box's (`part.view.activity`); the phone keeps the status and the detail.
+        XCTAssertEqual(ToolActivity.status(of: run.parts[0]), .completed)
+        XCTAssertEqual(ToolActivity.detail(of: run.parts[0]).command, "multica issue get BET-520")
         XCTAssertEqual(ToolActivity.durationSeconds(of: run.parts[0]) ?? -1, 0.4, accuracy: 0.0001)
         XCTAssertEqual(ToolActivity.detail(of: run.parts[0]).output, "Blocked")
     }
@@ -177,10 +177,8 @@ final class ChatTranscriptTests: XCTestCase {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             toolPart("t1", "m1", tool: "read", status: "running", input: ["filePath": str("pr-body.md")], output: nil, start: nil, end: nil),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
-        let activity = ToolActivity.describe(run.parts[0])
-        XCTAssertEqual(activity.label, "Reading pr-body.md")
-        XCTAssertEqual(activity.status, .running)
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
+        XCTAssertEqual(ToolActivity.status(of: run.parts[0]), .running)
         XCTAssertNil(ToolActivity.durationSeconds(of: run.parts[0]), "a timeless running call has no duration")
     }
 
@@ -190,11 +188,11 @@ final class ChatTranscriptTests: XCTestCase {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             taskPart("t1", "m1", childID: "ses_child", title: "unblock sweep", status: "running"),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)),
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))),
               let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
             return XCTFail("expected a task call that maps to a subagent")
         }
-        XCTAssertEqual(ToolActivity.describe(run.parts[0]).kind, .task)
+        XCTAssertTrue(ToolActivity.isTask(run.parts[0]))
         XCTAssertEqual(agent.taskName, "unblock sweep")
         XCTAssertEqual(agent.childSessionId, "ses_child")
         XCTAssertEqual(agent.status, .running)
@@ -277,91 +275,9 @@ final class ChatTranscriptTests: XCTestCase {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             taskPart("t1", "m1", childID: "ses_child", title: "sweep", status: "running"),
         ], completed: false)]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertTrue(blocks.isEmpty,
                       "an in-flight assistant message must not emit a canonical subagent row")
-    }
-
-    private func merge(
-        tools: [LiveTool] = [],
-        subagents: [StreamSubagentPayload] = [],
-        context: TaskStatusContext = .empty,
-        running: Bool = false,
-        hasTailContent: Bool = false,
-        to blocks: [TranscriptBlock] = []
-    ) -> LiveActivityMerge {
-        ChatTranscriptMapper.mergingLive(
-            tools: tools, subagents: subagents, context: context,
-            running: running, hasTailContent: hasTailContent, to: blocks)
-    }
-
-    func testLiveSubagentAppendsARunningTaskCall() {
-        let result = merge(subagents: [runningPayload()])
-        guard case .activity(let run)? = result.blocks.last, run.parts.count == 1,
-              let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
-            return XCTFail("expected exactly one live task call")
-        }
-        XCTAssertEqual(agent.taskName, "unblock sweep")
-        XCTAssertEqual(agent.childSessionId, "ses_child")
-        XCTAssertEqual(agent.status, .running)
-    }
-
-    /// A finished live subagent is no longer dropped for resolving done: it stays in
-    /// its run, as a done call, until the canonical transcript names its child.
-    func testLiveSubagentCompletedStaysInTheRunAsDone() {
-        let done = StreamSubagentPayload(
-            childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
-            status: "completed", title: "sweep", output: "all good", truncated: nil,
-            durationMs: nil, runningCount: nil, model: nil
-        )
-        guard case .activity(let run)? = merge(subagents: [done]).blocks.last,
-              let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
-            return XCTFail("a finished live subagent must stay until the canonical transcript owns it")
-        }
-        XCTAssertEqual(agent.status, .done)
-    }
-
-    /// Spec §5: a task whose tool call reads COMPLETED because the work was started
-    /// in the background is kept while it runs — and, once the child says idle,
-    /// stays as a DONE call (it used to be dropped, so the card vanished mid-turn).
-    func testLiveBackgroundTaskThatReadsCompletedIsKeptRunningThenDone() {
-        let started = StreamSubagentPayload(
-            childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
-            status: "completed", title: "sweep", output: "<task id=\"1\" state=\"running\">started</task>",
-            truncated: nil, durationMs: nil, runningCount: nil, model: nil
-        )
-        func status(_ context: TaskStatusContext) -> SubagentStatus? {
-            guard case .activity(let run)? = merge(subagents: [started], context: context).blocks.last else { return nil }
-            return ChatSubagentMapper.session(from: run.parts[0])?.status
-        }
-        XCTAssertEqual(status(TaskStatusContext(childRunning: ["ses_child": true])), .running)
-        XCTAssertEqual(status(TaskStatusContext(childRunning: [:])), .running, "no state yet: unknown, still running")
-        XCTAssertEqual(status(TaskStatusContext(childRunning: ["ses_child": false])), .done)
-    }
-
-    func testLiveSubagentDedupedAgainstCanonicalTaskCall() {
-        let canonical = [message(id: "m1", role: "assistant", parts: [
-            taskPart("t1", "m1", childID: "ses_child", title: "sweep", status: "running"),
-        ])]
-        let blocks = ChatTranscriptMapper.blocks(from: canonical)
-        let result = merge(subagents: [runningPayload()], to: blocks)
-        guard case .activity(let run)? = result.blocks.last else {
-            return XCTFail("expected the canonical run")
-        }
-        XCTAssertEqual(run.parts.count, 1,
-                       "a live card whose child the canonical transcript already names must not be appended")
-    }
-
-    func testLiveTaskToolRowIsSuppressed() {
-        let task = LiveTool(idx: "t1", callID: "toolu_1", name: "task", presentationHint: "Find the skill", status: "running")
-        XCTAssertTrue(merge(tools: [task]).blocks.isEmpty,
-                      "the redundant task tool call must not render — the subagent frame owns the card")
-
-        let bash = LiveTool(idx: "t2", callID: "toolu_2", name: "bash", presentationHint: "run tests", status: "running")
-        guard case .activity(let run)? = merge(tools: [bash]).blocks.first else {
-            return XCTFail("a non-task live tool must still append a call")
-        }
-        XCTAssertEqual(run.parts.count, 1)
     }
 
     func testSubagentIdIsUniquePerCallWithoutChildSession() {
@@ -418,128 +334,6 @@ final class ChatTranscriptTests: XCTestCase {
 
     // MARK: - This turn's finished live calls (activity-parity live fix)
 
-    private func liveTool(
-        _ idx: String, _ name: String = "bash", hint: String? = nil, status: String = "running",
-        ended: Bool = false, ok: Bool = true, tail: String = ""
-    ) -> LiveTool {
-        var t = LiveTool(idx: idx, callID: idx, name: name, presentationHint: hint, status: status)
-        t.ended = ended
-        t.ok = ok
-        t.tail = tail
-        return t
-    }
-
-    func testAnEndedLiveToolStaysInTheRunAsCompletedOrFailed() {
-        let result = merge(tools: [
-            liveTool("t1", hint: "ls", ended: true),
-            liveTool("t2", hint: "make", ended: true, ok: false),
-            liveTool("t3", "read", hint: "a.ts"),
-        ])
-        guard case .activity(let run)? = result.blocks.last else { return XCTFail("expected a run") }
-        XCTAssertEqual(run.parts.map(\.id), ["t1", "t2", "t3"], "start order, ended calls included")
-        XCTAssertEqual(run.parts.map { ToolActivity.describe($0).status }, [.completed, .error, .running])
-    }
-
-    /// The trailing run's id is its first part's id; it must not change as tools end,
-    /// or an open Activity sheet loses its run.
-    func testTheTrailingRunKeepsItsIdAsToolsEnd() {
-        func trailingID(_ tools: [LiveTool]) -> String? {
-            merge(tools: tools, running: true).trailing?.id
-        }
-        XCTAssertEqual(trailingID([liveTool("t1")]), "t1")
-        XCTAssertEqual(trailingID([liveTool("t1", ended: true), liveTool("t2")]), "t1")
-        let allEnded = merge(tools: [liveTool("t1", ended: true), liveTool("t2", ended: true)], running: true)
-        XCTAssertEqual(allEnded.trailing?.id, "t1")
-        XCTAssertEqual(allEnded.trailing?.parts.count, 2, "between tools the run still holds both finished calls")
-        XCTAssertEqual(allEnded.trailing?.summary.running, false)
-    }
-
-    func testACanonicalCallReplacesItsEndedLiveSibling() {
-        // A real canonical tool part always carries its callID.
-        var canonicalPart = toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")])
-        canonicalPart.extra["callID"] = str("t1")
-        let canonical = [message(id: "m1", role: "assistant", parts: [canonicalPart])]
-        let blocks = ChatTranscriptMapper.blocks(from: canonical)
-        var byCallID = liveTool("t2", ended: true)
-        byCallID.callID = "t1"
-        let live = [
-            liveTool("t1", ended: true),   // owned by part id
-            byCallID,                      // owned by call id
-            liveTool("t3"),
-        ]
-        let merged = merge(tools: live, to: blocks)
-        guard case .activity(let run)? = merged.blocks.last else { return XCTFail("expected a run") }
-        XCTAssertEqual(run.parts.map(\.id), ["t1", "t3"], "the canonical call stays, its ended live twins are dropped")
-        XCTAssertEqual(run.id, "t1")
-    }
-
-    func testALiveTodoWriteIsNotACall() {
-        let merged = merge(tools: [liveTool("t1", "todowrite", ended: true), liveTool("t2", "todo_write")])
-        XCTAssertTrue(merged.blocks.isEmpty, "the transcript never draws a todo write, so neither does the live merge")
-    }
-
-    func testALiveDelegateCallReadsRunningWhileItsJobRuns() {
-        let started = "Started background job \"ship-gate\" (id 198262c2). It runs in its own session."
-        let call = liveTool("d1", "delegate_delegate", ended: true, tail: started)
-        func status(_ ctx: TaskStatusContext) -> ActivityStatus? {
-            guard case .activity(let run)? = merge(tools: [call], context: ctx).blocks.last else { return nil }
-            return ToolActivity.describe(run.parts[0]).status
-        }
-        XCTAssertEqual(status(TaskStatusContext(jobStatusByID: ["198262c2": "running"])), .running)
-        XCTAssertEqual(status(TaskStatusContext(jobStatusByID: ["198262c2": "done"])), .completed)
-        XCTAssertEqual(status(.empty), .completed, "an unknown job leaves the call as it is")
-    }
-
-    /// A background task's call completes instantly. With the child not yet in the
-    /// running set it still resolves running (see the store's child snapshot);
-    /// once finished it stays as a DONE call in the run instead of vanishing.
-    func testALiveSubagentThatResolvesDoneIsStillInTheRun() {
-        let finished = StreamSubagentPayload(
-            childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
-            status: "completed", title: "sweep", output: "all good", truncated: nil,
-            durationMs: nil, runningCount: nil, model: nil
-        )
-        guard case .activity(let run)? = merge(subagents: [finished]).blocks.last,
-              let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
-            return XCTFail("a finished live subagent must still show")
-        }
-        XCTAssertEqual(agent.status, .done)
-
-        let failed = StreamSubagentPayload(
-            childSessionId: "ses_bad", agent: nil, description: nil, prompt: nil,
-            status: "error", title: "sweep", output: nil, truncated: nil,
-            durationMs: nil, runningCount: nil, model: nil
-        )
-        guard case .activity(let failedRun)? = merge(subagents: [failed]).blocks.last,
-              let failedAgent = ChatSubagentMapper.session(from: failedRun.parts[0]) else {
-            return XCTFail("a failed live subagent must still show")
-        }
-        XCTAssertEqual(failedAgent.status, .failed)
-    }
-
-    /// The store narrows that to this turn's children: a finished frame from an
-    /// earlier turn whose task part has scrolled out of the loaded window must not
-    /// resurface; a running one always shows.
-    func testAFinishedSubagentFromAnEarlierTurnIsDroppedWhenTheTurnSetExcludesIt() {
-        let finished = StreamSubagentPayload(
-            childSessionId: "ses_old", agent: nil, description: nil, prompt: nil,
-            status: "completed", title: "old", output: "x", truncated: nil,
-            durationMs: nil, runningCount: nil, model: nil
-        )
-        let outsideTurn = ChatTranscriptMapper.mergingLive(
-            tools: [], subagents: [finished], context: .empty, running: false, hasTailContent: false,
-            thisTurnChildren: [], to: [])
-        XCTAssertTrue(outsideTurn.blocks.isEmpty)
-        let insideTurn = ChatTranscriptMapper.mergingLive(
-            tools: [], subagents: [finished], context: .empty, running: false, hasTailContent: false,
-            thisTurnChildren: ["ses_old"], to: [])
-        XCTAssertEqual(insideTurn.blocks.count, 1)
-        let stillRunning = ChatTranscriptMapper.mergingLive(
-            tools: [], subagents: [runningPayload("ses_old")], context: .empty, running: true, hasTailContent: false,
-            thisTurnChildren: [], to: [])
-        XCTAssertEqual(stillRunning.trailing?.parts.count, 1, "a running subagent is kept whatever turn it started in")
-    }
-
     // MARK: - Run grouping (spec §1.1; the rules are the desktop's layoutTranscript)
 
     func testConsecutiveCallsAreOneRunNotARollupOfThreeOrMore() {
@@ -547,9 +341,9 @@ final class ChatTranscriptTests: XCTestCase {
             toolPart("t1", "m1", tool: "read", status: "completed", input: ["filePath": str("a.ts")]),
             toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
         XCTAssertEqual(run.parts.count, 2, "two calls are ONE run — the 3+ roll-up rule is gone")
-        XCTAssertEqual(run.summary.label, "Read 2 files")
+        XCTAssertEqual(run.view.calls, 2, "the run's summary is the box's; here it carries the call count")
     }
 
     func testAMixedRunSummarisesByCategoryInFirstSeenOrder() {
@@ -558,8 +352,8 @@ final class ChatTranscriptTests: XCTestCase {
             toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
             toolPart("t3", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
-        XCTAssertEqual(run.summary.label, "Read 2 files, ran a command")
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
+        XCTAssertEqual(run.view.calls, 3)
     }
 
     /// A run SPANS assistant messages (opencode writes one message per model
@@ -578,7 +372,7 @@ final class ChatTranscriptTests: XCTestCase {
                 textPart("p1", "m3", "Done."),
             ]),
         ]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertEqual(blocks.count, 2, "one run + one prose, got \(blocks)")
         guard case .activity(let run) = blocks[0], case .prose = blocks[1] else {
             return XCTFail("expected [.activity, .prose], got \(blocks)")
@@ -593,7 +387,7 @@ final class ChatTranscriptTests: XCTestCase {
             textPart("p1", "m1", "Now the second."),
             toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
         ])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertEqual(blocks.count, 3)
         guard case .activity(let a) = blocks[0], case .prose = blocks[1], case .activity(let b) = blocks[2] else {
             return XCTFail("expected [.activity, .prose, .activity], got \(blocks)")
@@ -611,7 +405,7 @@ final class ChatTranscriptTests: XCTestCase {
                 toolPart("t2", "m2", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
             ]),
         ]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(BoxViewFixture.stamp(msgs)))
         XCTAssertEqual(blocks.count, 4, "the second run's turn (after the user message) ends with its footer")
         guard case .activity(let a) = blocks[0], case .user = blocks[1], case .activity(let b) = blocks[2],
               case .turnFooter = blocks[3] else {
@@ -626,7 +420,7 @@ final class ChatTranscriptTests: XCTestCase {
             toolPart("t1", "m1", tool: "todowrite", status: "completed", input: [:]),
             toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("a.ts")]),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
         XCTAssertEqual(run.parts.map(\.id), ["t2"])
     }
 
@@ -638,7 +432,7 @@ final class ChatTranscriptTests: XCTestCase {
             textPart("p1", "m1", "\n"),
             toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
         XCTAssertEqual(run.parts.count, 2)
     }
 
@@ -655,8 +449,8 @@ final class ChatTranscriptTests: XCTestCase {
                 toolPart("t3", "m2", tool: "read", status: "completed", input: ["filePath": str("c.ts")]),
             ]),
         ]
-        let first = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: msgs))
-        let second = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: msgs))
+        let first = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs)))
+        let second = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs)))
         XCTAssertEqual(first.map(\.id), second.map(\.id), "a refetch of the same window reproduces the same ids")
         XCTAssertEqual(first.count, 3)
         XCTAssertEqual(first[0].id, "run-t1")
@@ -671,8 +465,8 @@ final class ChatTranscriptTests: XCTestCase {
         let two = one + [message(id: "m2", role: "assistant", parts: [
             toolPart("t2", "m2", tool: "bash", status: "completed", input: ["command": str("ls")]),
         ])]
-        let before = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: one)).map(\.id)
-        let after = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: two)).map(\.id)
+        let before = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(one))).map(\.id)
+        let after = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(two))).map(\.id)
         XCTAssertEqual(before, ["run-t1"])
         XCTAssertEqual(after, ["run-t1"], "a run that grows (even across messages) is an in-place update of the same row")
     }
@@ -689,7 +483,7 @@ final class ChatTranscriptTests: XCTestCase {
             textPart("p2", "m1", "\n"),
             toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("multica issue get BET-520")]),
         ])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertEqual(blocks.count, 2, "expected prose + a run only, got \(blocks)")
         guard case .prose = blocks[0], case .activity = blocks[1] else {
             return XCTFail("expected [.prose, .activity], got \(blocks)")
@@ -698,7 +492,7 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testWhitespaceOnlyTextPartIsBlank() {
         let msgs = [message(id: "m1", role: "assistant", parts: [textPart("p1", "m1", "   \n  ")])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertTrue(blocks.isEmpty, "whitespace-only text must be skipped, got \(blocks)")
     }
 
@@ -709,7 +503,7 @@ final class ChatTranscriptTests: XCTestCase {
             toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
             textPart("p1", "m1", "\n\n"),
         ])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertEqual(blocks.count, 1, "expected only the run, got \(blocks)")
         guard case .activity = blocks[0] else {
             return XCTFail("expected .activity, got \(blocks)")
@@ -721,7 +515,7 @@ final class ChatTranscriptTests: XCTestCase {
             textPart("p1", "m1", "check bet-520"),
             textPart("p2", "m1", "\n"),
         ])]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         guard case .user(let text, _) = blocks[0] else {
             return XCTFail("expected .user, got \(blocks[0])")
         }
@@ -735,7 +529,7 @@ final class ChatTranscriptTests: XCTestCase {
             taskPart("t2", "m1", childID: "c", title: "sweep", status: "running"),
             toolPart("t3", "m1", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
         ])]
-        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: msgs)) else { return }
+        guard let run = onlyRun(ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))) else { return }
         XCTAssertEqual(run.parts.count, 3)
     }
 
@@ -747,7 +541,7 @@ final class ChatTranscriptTests: XCTestCase {
         // appends it as the in-progress tail. Including it here would double
         // it while streaming.
         let msgs = [message(id: "m1", role: "assistant", parts: [textPart("p1", "m1", "streaming…")], completed: false)]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs))
         XCTAssertTrue(blocks.isEmpty)
     }
 
@@ -814,8 +608,8 @@ final class ChatTranscriptTests: XCTestCase {
             toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
             toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("a.ts")]),
         ])]
-        let first = stepIDs(from: ChatTranscriptMapper.blocks(from: msgs))
-        let second = stepIDs(from: ChatTranscriptMapper.blocks(from: msgs))
+        let first = stepIDs(from: ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs)))
+        let second = stepIDs(from: ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs)))
         XCTAssertFalse(first.isEmpty, "expected at least one step id")
         XCTAssertEqual(first, second, "mapping the same transcript twice must yield identical step ids")
     }
@@ -824,11 +618,11 @@ final class ChatTranscriptTests: XCTestCase {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
         ])]
-        let before = stepIDs(from: ChatTranscriptMapper.blocks(from: msgs))
+        let before = stepIDs(from: ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(msgs)))
         let extended = msgs + [message(id: "m2", role: "assistant", parts: [
             toolPart("t3", "m2", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
         ])]
-        let after = stepIDs(from: ChatTranscriptMapper.blocks(from: extended))
+        let after = stepIDs(from: ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(extended)))
         let preserved = after.prefix(before.count)
         XCTAssertEqual(Array(preserved), before,
                        "pre-existing step ids must be preserved when a new message is appended")
@@ -1010,80 +804,235 @@ final class ChatTranscriptTests: XCTestCase {
 
     // MARK: - Live tools merged into the transcript (BET-823, spec §1)
 
-    func testLiveToolExtendsTheLastRun() {
-        let canonical = [message(id: "m1", role: "assistant", parts: [
-            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
-        ])]
-        let blocks = ChatTranscriptMapper.blocks(from: canonical)
-        let live = [LiveTool(idx: "t2", callID: "toolu_2", name: "read", presentationHint: "a.ts", status: "running")]
-        let merged = merge(tools: live, to: blocks)
-        guard merged.blocks.count == 1, case .activity(let run) = merged.blocks[0], run.parts.count == 2 else {
-            return XCTFail("expected both calls in one run")
-        }
-        XCTAssertEqual(run.id, "t1", "extending a run keeps its id")
-        XCTAssertEqual(ToolActivity.describe(run.parts[0]).status, .completed)
-        let liveActivity = ToolActivity.describe(run.parts[1])
-        XCTAssertEqual(liveActivity.status, .running)
-        XCTAssertEqual(liveActivity.label, "Reading a.ts")
+    // MARK: - The live tail (the box's ordered ledger laid over the canonical blocks, WS11 D11)
+
+    private func liveEntry(
+        _ id: String, _ tool: String = "bash", run: String = "t1", segment: String? = nil,
+        status: String = "running", child: String? = nil, label: String = "x"
+    ) -> LiveRunPart {
+        LiveRunPart(
+            id: id, callID: id, messageID: "m", runId: run, segmentId: segment, tool: tool, status: status, childSessionId: child,
+            activity: TranscriptActivityView(kind: tool == "task" ? .task : .other, status: ActivityStatus.normalize(status),
+                                             label: label, target: "", counted: true))
     }
 
-    func testLiveToolSkipsWhenCanonicalCounterpartExists() {
-        // A live tool whose part id / callID the transcript already owns must not
-        // be appended a second time — the canonical call takes over in place.
-        let canonical = [message(id: "m1", role: "assistant", parts: [
-            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
-        ])]
-        let blocks = ChatTranscriptMapper.blocks(from: canonical)
-        let live = [LiveTool(idx: "t1", callID: "t1", name: "bash", presentationHint: nil, status: "running")]
-        let merged = merge(tools: live, to: blocks)
-        guard case .activity(let run)? = merged.blocks.first else {
-            return XCTFail("expected a run")
-        }
-        XCTAssertEqual(run.parts.count, 1, "the canonical call owns the row; no duplicate live call")
+    private func runValue(_ id: String, _ label: String, segments: [TranscriptRunSegment] = []) -> TranscriptRunView {
+        TranscriptRunView(id: id, ownerMessageId: "m", rev: TranscriptRunRev(epoch: "E1", gen: 1, seq: 1),
+                          summary: TranscriptRunSummary(label: label, calls: 1, failed: 0, tone: .running), segments: segments)
     }
 
-    func testLiveToolCreatesARunWhenNoneExists() {
-        let live = [LiveTool(idx: "t1", callID: "toolu_1", name: "bash", presentationHint: nil, status: "running")]
-        let merged = merge(tools: live)
-        guard case .activity(let run)? = merged.blocks.last else {
-            return XCTFail("expected a run to be created at the tail")
-        }
+    private func chunk(_ partID: String, _ text: String, field: String = "text") -> StreamTextChunk {
+        StreamTextChunk(partID: partID, messageID: "m", field: field, text: text)
+    }
+
+    private func tail(
+        _ layout: [LiveBlock], parts: [LiveRunPart] = [], runs: [String: TranscriptRunView] = [:], closed: Set<String> = [],
+        chunks: [StreamTextChunk] = [], tails: [String: String] = [:], subagents: [StreamSubagentPayload] = [],
+        context: TaskStatusContext = .empty, showReasoning: Bool = false, canonical: [TranscriptBlock] = [], running: Bool = false
+    ) -> LiveTailResult {
+        ChatTranscriptMapper.liveTail(
+            layout: layout, runs: runs, parts: parts, closed: closed, chunks: chunks, tails: tails, subagents: subagents,
+            taskContext: context, showReasoning: showReasoning, canonical: canonical, running: running)
+    }
+
+    private func rowIDs(_ blocks: [TranscriptBlock]) -> [String] { uniqueTranscriptRows(blocks).map(\.id) }
+
+    func testTheLiveTurnDrawsInItsRealOrderToolProseTool() {
+        let result = tail(
+            [.run(id: "t1", segmentId: "t1"), .text(partID: "a1:text:0", messageID: "a1"), .run(id: "t2", segmentId: "t2")],
+            parts: [liveEntry("t1", run: "t1"), liveEntry("t2", run: "t2")],
+            runs: ["t1": runValue("t1", "Read a file"), "t2": runValue("t2", "Ran a command")],
+            chunks: [chunk("a1:text:0", "Found it.")]
+        )
+        XCTAssertEqual(rowIDs(result.blocks), ["run-t1", "pa1:text:0", "run-t2"])
+        guard case .activity(let first) = result.blocks[0] else { return XCTFail("expected a run") }
+        XCTAssertEqual(first.view.label, "Read a file", "the summary is the box's")
+    }
+
+    /// The handover: every live row id equals the id of its canonical twin, in the same order, so the turn-end refetch
+    /// replaces rows in place and the live tail then has nothing left to draw.
+    func testLiveRowIDsEqualTheirCanonicalTwinsSoTheHandoverIsAnInPlaceUpdate() {
+        let layout: [LiveBlock] = [.run(id: "t1", segmentId: "t1"), .text(partID: "a1:text:0", messageID: "a1"), .run(id: "t2", segmentId: "t2")]
+        let live = tail(layout, parts: [liveEntry("t1", run: "t1"), liveEntry("t2", run: "t2")],
+                        chunks: [chunk("a1:text:0", "Found it.")])
+        let canonicalMessages = [
+            message(id: "u1", role: "user", parts: [textPart("u1:text:0", "u1", "go")]),
+            message(id: "a1", role: "assistant", parts: [
+                toolPart("t1", "a1", tool: "read", status: "completed", input: ["filePath": str("a.ts")]),
+                textPart("a1:text:0", "a1", "Found it."),
+                toolPart("t2", "a1", tool: "bash", status: "completed", input: ["command": str("ls")]),
+            ]),
+        ]
+        let canonical = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(canonicalMessages))
+        let canonicalIDs = rowIDs(canonical)
+        XCTAssertEqual(rowIDs(live.blocks), Array(canonicalIDs.dropFirst()), "same ids, same order (after the user band)")
+
+        let after = tail(layout, parts: [liveEntry("t1", run: "t1"), liveEntry("t2", run: "t2")],
+                         chunks: [chunk("a1:text:0", "Found it.")], canonical: canonical)
+        XCTAssertTrue(after.blocks.isEmpty, "everything the live tail drew is now canonical — nothing is drawn twice")
+        XCTAssertTrue(ChatTranscriptMapper.coversLayout(canonical: canonical, layout: layout, showReasoning: false))
+    }
+
+    func testAPartlyCanonicalRunIsUpsertedInPlaceNotDuplicated() {
+        let canonical = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([
+            message(id: "a1", role: "assistant", parts: [toolPart("t1", "a1", tool: "read", status: "completed", input: ["filePath": str("a.ts")])]),
+        ]))
+        let result = tail([.run(id: "t1", segmentId: "t1")],
+                          parts: [liveEntry("t1", run: "t1", status: "completed"), liveEntry("t2", run: "t1")],
+                          runs: ["t1": runValue("t1", "Read 2 files")], canonical: canonical)
+        XCTAssertTrue(result.blocks.isEmpty, "no second row for the same run")
+        guard result.canonical.count == 1, case .activity(let run) = result.canonical[0] else { return XCTFail("expected the canonical run") }
         XCTAssertEqual(run.id, "t1")
-        XCTAssertEqual(run.parts.count, 1)
+        XCTAssertEqual(run.parts.map(\.id), ["t1", "t2"], "the canonical call stays; the ledger adds only what is missing")
+        XCTAssertEqual(run.view.label, "Read 2 files", "the rev-merged summary, never the older one")
     }
 
-    func testMergingLiveIsANoOpWhenNothingToAppend() {
-        XCTAssertTrue(merge().blocks.isEmpty)
-        XCTAssertNil(merge().trailing)
+    func testTheCanonicalCallWinsOverItsLiveSiblingByPartIDAndByCallID() {
+        var canonicalPart = toolPart("t1", "a1", tool: "bash", status: "completed", input: ["command": str("ls")])
+        canonicalPart.extra["callID"] = str("c1")
+        let canonical = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([message(id: "a1", role: "assistant", parts: [canonicalPart])]))
+        var sameCall = liveEntry("t2", run: "t1", status: "completed")
+        sameCall.callID = "c1"
+        let result = tail([.run(id: "t1", segmentId: "t1")],
+                          parts: [liveEntry("t1", run: "t1", status: "completed"), sameCall, liveEntry("t3", run: "t1")],
+                          canonical: canonical)
+        guard case .activity(let run) = result.canonical[0] else { return XCTFail("expected a run") }
+        XCTAssertEqual(run.parts.map(\.id), ["t1", "t3"])
     }
 
-    /// While a turn runs, the run at the very tail goes to the working line.
-    func testWhileRunningTheTailRunIsWithheldAsTrailing() {
-        let canonical = [message(id: "m1", role: "assistant", parts: [
-            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
-        ])]
-        let blocks = ChatTranscriptMapper.blocks(from: canonical)
-        let running = merge(running: true, to: blocks)
+    func testTheRunAtTheVeryTailIsWithheldForTheWorkingLineWhileTheTurnRuns() {
+        let layout: [LiveBlock] = [.run(id: "t1", segmentId: "t1")]
+        let parts = [liveEntry("t1", run: "t1")]
+        let running = tail(layout, parts: parts, running: true)
         XCTAssertTrue(running.blocks.isEmpty, "the tail run is not a row while the turn runs")
         XCTAssertEqual(running.trailing?.id, "t1")
 
-        let idle = merge(running: false, to: blocks)
-        XCTAssertEqual(idle.blocks.count, 1, "once the turn ends the same run is an ordinary row")
+        let closed = tail(layout, parts: parts, closed: ["t1"], running: true)
+        XCTAssertEqual(rowIDs(closed.blocks), ["run-t1"], "a closed run is an ordinary row")
+        XCTAssertNil(closed.trailing)
+
+        let idle = tail(layout, parts: parts, running: false)
+        XCTAssertEqual(rowIDs(idle.blocks), ["run-t1"])
         XCTAssertNil(idle.trailing)
     }
 
-    /// Prose after the run means it is no longer at the tail: it stays inline, and
-    /// live calls open a NEW run after the prose.
-    func testRunFollowedByLiveProseStaysInlineAndLiveCallsOpenANewRun() {
-        let canonical = [message(id: "m1", role: "assistant", parts: [
-            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
-        ])]
-        let blocks = ChatTranscriptMapper.blocks(from: canonical)
-        let live = [LiveTool(idx: "t9", callID: "toolu_9", name: "read", presentationHint: "z.ts", status: "running")]
-        let merged = merge(tools: live, running: true, hasTailContent: true, to: blocks)
-        XCTAssertEqual(merged.blocks.count, 1, "the earlier run stays an inline row")
-        XCTAssertEqual(merged.trailing?.id, "t9", "the live call opens its own trailing run")
-        XCTAssertEqual(merged.trailing?.parts.count, 1)
+    func testARunFollowedByLiveProseIsNotTheTailAndANewRunAfterItIs() {
+        let layout: [LiveBlock] = [.run(id: "t1", segmentId: "t1"), .text(partID: "a1:text:0", messageID: "a1"), .run(id: "t2", segmentId: "t2")]
+        let result = tail(layout, parts: [liveEntry("t1", run: "t1"), liveEntry("t2", run: "t2")],
+                          chunks: [chunk("a1:text:0", "hmm")], running: true)
+        XCTAssertEqual(rowIDs(result.blocks), ["run-t1", "pa1:text:0"])
+        XCTAssertEqual(result.trailing?.id, "t2")
+    }
+
+    func testAnUpsertedCanonicalRowAtTheVeryEndBecomesTheTrailingRun() {
+        let canonical = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([
+            message(id: "a1", role: "assistant", parts: [toolPart("t1", "a1", tool: "read", status: "completed", input: ["filePath": str("a.ts")])]),
+        ]))
+        let result = tail([.run(id: "t1", segmentId: "t1")],
+                          parts: [liveEntry("t1", run: "t1", status: "completed"), liveEntry("t2", run: "t1")], canonical: canonical, running: true)
+        XCTAssertTrue(result.canonical.isEmpty, "withheld from the rows for the working line")
+        XCTAssertEqual(result.trailing?.id, "t1")
+        XCTAssertEqual(result.trailing?.parts.count, 2)
+    }
+
+    func testReasoningSegmentsAreRowsWhenShownAndOneRowWhenHiddenWithTheSameFirstId() {
+        let layout: [LiveBlock] = [.run(id: "A", segmentId: "A"), .reasoning(partID: "m:reasoning:0", messageID: "m"), .run(id: "A", segmentId: "B")]
+        let parts = [liveEntry("A", run: "A", segment: "A"), liveEntry("B", run: "A", segment: "B")]
+        let split = [TranscriptRunSegment(id: "A", summary: TranscriptRunSummary(label: "Read a file")),
+                     TranscriptRunSegment(id: "B", summary: TranscriptRunSummary(label: "Ran a command"))]
+        let runs = ["A": runValue("A", "Read a file, ran a command", segments: split)]
+        let chunks = [chunk("m:reasoning:0", "thinking", field: "reasoning")]
+        let shown = tail(layout, parts: parts, runs: runs, chunks: chunks, showReasoning: true)
+        XCTAssertEqual(rowIDs(shown.blocks), ["run-A", "rm:reasoning:0", "run-B"])
+        let hidden = tail(layout, parts: parts, runs: runs, chunks: chunks, showReasoning: false)
+        XCTAssertEqual(rowIDs(hidden.blocks), ["run-A"], "toggling keeps the first row's id")
+        guard case .activity(let whole) = hidden.blocks[0] else { return XCTFail("expected a run") }
+        XCTAssertEqual(whole.view.label, "Read a file, ran a command")
+        XCTAssertEqual(whole.parts.map(\.id), ["A", "B"])
+    }
+
+    func testTextTheLedgerDoesNotNameStillShowsKeyedByItsPartAndCanonicalTextIsNotDrawnTwice() {
+        // An older box has no ledger at all: streamed text must not disappear.
+        let older = tail([], chunks: [chunk("a1:text:0", "streaming")])
+        XCTAssertEqual(rowIDs(older.blocks), ["pa1:text:0"])
+        // The canonical block for that part replaces it.
+        let canonical: [TranscriptBlock] = [.prose("streaming", at: Date(timeIntervalSince1970: 1), partID: "a1:text:0")]
+        XCTAssertTrue(tail([], chunks: [chunk("a1:text:0", "streaming")], canonical: canonical).blocks.isEmpty)
+        XCTAssertEqual(rowIDs(canonical), ["pa1:text:0"], "a text part's row id is the part id, live or canonical")
+    }
+
+    func testALiveTaskCallCarriesItsSubagentAndReadsRunningUntilItFinishes() {
+        let call = liveEntry("task1", "task", run: "task1", child: "ses_child")
+        let running = tail([.run(id: "task1", segmentId: "task1")], parts: [call], subagents: [runningPayload()])
+        guard case .activity(let run)? = running.blocks.last, let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
+            return XCTFail("expected a live task call")
+        }
+        XCTAssertEqual(agent.taskName, "unblock sweep")
+        XCTAssertEqual(agent.childSessionId, "ses_child")
+        XCTAssertEqual(agent.status, .running)
+
+        var done = call
+        done.status = "completed"
+        let finished = StreamSubagentPayload(childSessionId: "ses_child", agent: nil, description: nil, prompt: nil, status: "completed",
+                                             title: "sweep", output: "all good", truncated: nil, durationMs: nil, runningCount: nil, model: nil)
+        guard case .activity(let doneRun)? = tail([.run(id: "task1", segmentId: "task1")], parts: [done], subagents: [finished]).blocks.last,
+              let doneAgent = ChatSubagentMapper.session(from: doneRun.parts[0]) else { return XCTFail("expected the task call") }
+        XCTAssertEqual(doneAgent.status, .done)
+    }
+
+    /// Spec §5: a task whose tool call reads COMPLETED because the work was started in the background stays running until
+    /// the child (or its job record) says otherwise.
+    func testABackgroundTaskThatReadsCompletedIsRunningThenDone() {
+        let started = StreamSubagentPayload(
+            childSessionId: "ses_child", agent: nil, description: nil, prompt: nil, status: "completed", title: "sweep",
+            output: "<task id=\"1\" state=\"running\">started</task>", truncated: nil, durationMs: nil, runningCount: nil, model: nil)
+        func status(_ context: TaskStatusContext) -> SubagentStatus? {
+            let result = tail([.run(id: "task1", segmentId: "task1")],
+                              parts: [liveEntry("task1", "task", run: "task1", status: "completed", child: "ses_child")],
+                              subagents: [started], context: context)
+            guard case .activity(let run)? = result.blocks.last else { return nil }
+            return ChatSubagentMapper.session(from: run.parts[0])?.status
+        }
+        XCTAssertEqual(status(TaskStatusContext(childRunning: ["ses_child": true])), .running)
+        XCTAssertEqual(status(TaskStatusContext(childRunning: [:])), .running, "no state yet: unknown, still running")
+        XCTAssertEqual(status(TaskStatusContext(childRunning: ["ses_child": false])), .done)
+    }
+
+    func testALiveDelegateCallReadsRunningWhileItsJobRuns() {
+        let started = "Started background job \"ship-gate\" (id 198262c2). It runs in its own session."
+        func status(_ ctx: TaskStatusContext) -> ActivityStatus? {
+            let result = tail([.run(id: "d1", segmentId: "d1")],
+                              parts: [liveEntry("d1", "delegate_delegate", run: "d1", status: "completed")],
+                              tails: ["d1": started], context: ctx)
+            guard case .activity(let run)? = result.blocks.last else { return nil }
+            return ToolActivity.status(of: run.parts[0])
+        }
+        XCTAssertEqual(status(TaskStatusContext(jobStatusByID: ["198262c2": "running"])), .running)
+        XCTAssertEqual(status(TaskStatusContext(jobStatusByID: ["198262c2": "done"])), .completed)
+        XCTAssertEqual(status(.empty), .completed, "an unknown job leaves the call as it is")
+    }
+
+    func testARunningCallsStdoutTailRidesOnItsPartForTheActivitySheet() {
+        let result = tail([.run(id: "t1", segmentId: "t1")], parts: [liveEntry("t1", run: "t1")], tails: ["t1": "one\ntwo\n"])
+        guard case .activity(let run)? = result.blocks.last else { return XCTFail("expected a run") }
+        XCTAssertEqual(ToolActivity.detail(of: run.parts[0]).output, "one\ntwo\n")
+        XCTAssertEqual(TranscriptPartView.of(run.parts[0])?.activity?.label, "x", "the wording on a live part is the box's")
+    }
+
+    func testARunWithNoValueYetIsDrawnWithTheNeutralSummary() {
+        let result = tail([.run(id: "t1", segmentId: "t1")], parts: [liveEntry("t1", run: "t1")])
+        guard case .activity(let run)? = result.blocks.last else { return XCTFail("expected a run") }
+        XCTAssertEqual(run.view.label, "Tool activity", "no value yet (epoch unknown): the static label, never wording of the phone's own")
+    }
+
+    func testRunViewsAreRefreshedOnTheCanonicalRowsWithoutRemapping() {
+        let canonical = ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns([
+            message(id: "a1", role: "assistant", parts: [toolPart("t1", "a1", tool: "read", status: "completed", input: ["filePath": str("a.ts")])]),
+        ]))
+        let refreshed = ChatTranscriptMapper.applyingRunViews(canonical, runs: ["t1": runValue("t1", "Read 3 files")], showReasoning: false)
+        guard case .activity(let run) = refreshed[0] else { return XCTFail("expected a run") }
+        XCTAssertEqual(run.view.label, "Read 3 files")
+        XCTAssertEqual(run.id, "t1", "the row id never changes with its summary")
     }
 
     // MARK: - Task status resolution applied to runs (spec §5)
@@ -1097,18 +1046,18 @@ final class ChatTranscriptTests: XCTestCase {
             "metadata": jsonObject(["sessionId": str("ses_child")]),
         ]
         let part = OpencodePart(type: "tool", id: "t1", messageID: "m1", extra: ["tool": str("task"), "state": jsonObject(state)])
-        let blocks: [TranscriptBlock] = [.activity(ToolRun(id: "t1", parts: [part]))]
+        let blocks: [TranscriptBlock] = [.activity(ToolRun(id: "t1", parts: [part], view: TranscriptRunSummary(label: "Ran agent")))]
 
         let busy = ChatTranscriptMapper.resolvingTaskStatuses(
             blocks, context: TaskStatusContext(childRunning: ["ses_child": true]))
         guard case .activity(let runningRun) = busy[0] else { return XCTFail("expected a run") }
-        XCTAssertEqual(ToolActivity.describe(runningRun.parts[0]).status, .running)
-        XCTAssertEqual(runningRun.summary.tone, .running)
+        XCTAssertEqual(ToolActivity.status(of: runningRun.parts[0]), .running)
+        XCTAssertEqual(runningRun.view.label, "Ran agent", "resolving a task's status never rewrites the box's run summary")
 
         let idle = ChatTranscriptMapper.resolvingTaskStatuses(
             blocks, context: TaskStatusContext(childRunning: ["ses_child": false]))
         guard case .activity(let doneRun) = idle[0] else { return XCTFail("expected a run") }
-        XCTAssertEqual(ToolActivity.describe(doneRun.parts[0]).status, .completed,
+        XCTAssertEqual(ToolActivity.status(of: doneRun.parts[0]), .completed,
                        "the row is upgraded to done once the child reports idle")
     }
 }

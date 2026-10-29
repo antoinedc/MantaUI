@@ -494,7 +494,7 @@ struct PreviousSessionScreen: View {
         scrollsToBottomOnReplace: true
     )
 
-    init(route: PreviousSessionRoute, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
+    init(route: PreviousSessionRoute, eventStore: MantaEventStore, capabilities: BoxCapabilitiesStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
         self.route = route
         self.tokens = tokens
         self._path = path
@@ -502,7 +502,8 @@ struct PreviousSessionScreen: View {
             sessionId: route.sessionId,
             eventStore: eventStore,
             api: api,
-            isReadOnly: true
+            isReadOnly: true,
+            capabilities: capabilities
         ))
     }
 

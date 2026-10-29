@@ -27,6 +27,8 @@
 // cwd → origin → repo server-side, keeping the renderer ignorant of forge
 // identity).
 
+import { decorateCloneStatus, decorateRepoList } from "./cloneView.mjs";
+import { projectDirFor } from "../../shared/projectName.mjs";
 import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey, repoKeyParts } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
 import { withInternalMarker } from "../internalSessionMarker.mjs";
@@ -504,7 +506,8 @@ export async function forgeListRepos({
   now = Date.now,
 } = {}) {
   const tok = await resolveToken(GH_HOST);
-  if (!tok) return { repos: [], stale: false, error: "not_connected" };
+  // WS11 D5 (S8): an error carries the sentence and `needsSignIn`, so no client words or classifies it.
+  if (!tok) return decorateRepoList({ repos: [], stale: false, error: "not_connected" });
   try {
     const { data, stale } = await getAdapterFn("github", tok.token).listMyRepos();
     return { repos: Array.isArray(data) ? data : [], stale: Boolean(stale), error: null };
@@ -514,7 +517,7 @@ export async function forgeListRepos({
       writeVerdict(GH_HOST, tok.token, "rejected", { now });
       if (tok.source === "stored") await clearStored();
     }
-    return { repos: [], stale: false, error: kind };
+    return decorateRepoList({ repos: [], stale: false, error: kind });
   }
 }
 
@@ -538,8 +541,14 @@ export async function forgeCloneStart(
   } = {},
 ) {
   const url = input?.url;
-  const dest = input?.dest;
   const name = input?.name;
+  // WS11 D5 (S8): `{url, root, name}` — the box joins the destination; `{url, dest, name}` still works.
+  const dest =
+    typeof input?.dest === "string" && input.dest
+      ? input.dest
+      : typeof input?.root === "string" && input.root.trim() && typeof name === "string" && name
+        ? projectDirFor(input.root.trim(), name)
+        : undefined;
   if (typeof url !== "string" || !url || typeof dest !== "string" || !dest) {
     return { error: "bad_request" };
   }
@@ -590,7 +599,7 @@ export async function forgeCloneStart(
  * @param {{ store?: ReturnType<typeof getCloneStore> }} [deps]
  */
 export function forgeCloneStatus(id, { store = getCloneStore() } = {}) {
-  return store.status(id);
+  return decorateCloneStatus(store.status(id));
 }
 
 /**

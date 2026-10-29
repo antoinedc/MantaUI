@@ -245,13 +245,6 @@ final class ModelsTests: XCTestCase {
 
     // MARK: capability + one-time copy
 
-    func testCapabilityDetection() {
-        XCTAssertTrue(ModelsCapability.isUnsupported(MantaError.server("unknown rpc channel: models:table")))
-        XCTAssertFalse(ModelsCapability.isUnsupported(MantaError.server("boom")))
-        XCTAssertFalse(ModelsCapability.isUnsupported(MantaError.transport("unknown rpc channel: x")))
-        XCTAssertFalse(ModelsCapability.isUnsupported(MantaError.authRequired))
-    }
-
     func testReasonPrefersTheBoxsSentence() {
         XCTAssertEqual(ModelsCapability.reason(MantaError.server("disk full")), "disk full")
         XCTAssertEqual(ModelsCapability.reason(MantaError.transport("offline")), "offline")

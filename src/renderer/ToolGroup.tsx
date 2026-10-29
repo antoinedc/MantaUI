@@ -7,7 +7,8 @@
 //
 // `ToolActivityList` is shared with the working line (Transcript.tsx), which
 // shows the run at the tail of a running turn and expands the very same list.
-// The grouping itself is decided by toolActivity.ts; this file only draws it.
+// What the run says (label, tone, failures) and which calls belong to it are the BOX's (`group.view`, WS11 D11);
+// toolActivity.ts decides only where the block sits. This file only draws it.
 
 import { memo } from "react";
 import { motion } from "framer-motion";
@@ -17,7 +18,11 @@ import { AssistantPart } from "./ToolCall";
 import { StatusDot } from "./StatusDot";
 import { CardMount } from "./components/CardMount";
 import { useGroupExpanded } from "./toolGroupExpansion";
-import { groupTone, summarizeToolGroup, type ToolGroup } from "./toolActivity";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
+import type { ToolGroup } from "./toolActivity";
+
+/** Shown under a box-less run (an older box): the calls are real, the wording is not available. */
+export const TOOL_DETAILS_UPDATE_NOTE = "Update your box to see tool details";
 
 /** The expanded list: the run's cards behind a thin left rule. */
 export const ToolActivityList = memo(function ToolActivityList({
@@ -29,9 +34,10 @@ export const ToolActivityList = memo(function ToolActivityList({
 }) {
   // A run with exactly ONE tool call opens its card straight away, so the diff
   // or output is one click from the line rather than two.
-  const { calls } = summarizeToolGroup(group.items);
+  const { calls } = group.view;
   return (
     <div className="mt-2 ml-1 pl-3 border-l border-border-subtle flex flex-col gap-2">
+      {group.fallback && <UpdateBoxNote text={TOOL_DETAILS_UPDATE_NOTE} />}
       {group.items.map((p) => (
         <AssistantPart
           key={p.id}
@@ -72,8 +78,8 @@ export const ToolGroupRow = memo(function ToolGroupRow({
 }) {
   // Shared with the working line, so a run opened there stays open here.
   const [expanded, toggle] = useGroupExpanded(group.id);
-  const summary = summarizeToolGroup(group.items);
-  const tone = groupTone(summary);
+  const summary = group.view;
+  const tone = summary.tone;
   return (
     // Same always-present motion wrapper AssistantPart uses: the element type
     // never swaps, so the pop plays once at mount and never replays.

@@ -37,6 +37,9 @@ import { SessionHeader } from "./SessionHeader";
 // exactly the frames a live box would publish — no hand-written frame can drift
 // from the mapping.
 import { createStreamInterpreter } from "../server/streamInterp.mjs";
+import { buildAccountRowStates } from "../server/accountsRowState.mjs";
+import { proposeProjectName, proposeScratchName } from "../server/sessionNaming.mjs";
+import { previewClose, closeSession } from "../server/sessionClose.mjs";
 // The interpreter reads OpenCode V2 events; this harness's tests are written with
 // V1-shaped literals, so each one is re-expressed as V2 first (test support only).
 import { createV1ToV2 } from "../server/fixtures/v1EventsAsV2.mjs";
@@ -161,7 +164,45 @@ function defaultApiImpl(): Record<string, unknown> {
     progressGet: () => Promise.resolve(null),
     // A current box: it advertises the server-first capabilities (WS02) and no session is a background job.
     getServerVersion: () =>
-      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1", "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1"] }),
+      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1", "accounts-copy-1", "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1", "transcript-runs-1"] }),
+    // WS11 D4 (K2): the box builds every Accounts row's words from the same reads the card
+    // makes; the harness runs the REAL box builder over the test's mocked reads.
+    accountsRowStates: async () =>
+      buildAccountRowStates({
+        statuses: ((await window.api.opencodeProviderAuth({ action: "status" })) as { providers?: never[] }).providers ?? [],
+        providers: await window.api.opencodeGetProviders().catch(() => []),
+        snapshots: (useStore.getState().usage ?? []) as never[],
+        health: await window.api.accountHealth().catch(() => null),
+        nowMs: Date.now(),
+      }),
+    // WS11 D6 (S10): the close flow is the box's; the harness runs the REAL box functions over the test's mocked
+    // primitives (git, tmux, project metadata), so what a test asserts is what the box would do.
+    sessionsClosePreview: async (input: { project: string; windowIndex?: number }) =>
+      previewClose({
+        project: input.project,
+        windowIndex: input.windowIndex,
+        projects: useStore.getState().projects as never[],
+        cleanOnClose: useStore.getState().worktreeCleanOnClose === true,
+        isRunning: () => false,
+      }),
+    sessionsClose: async (input: { project: string; windowIndex?: number; dirtyWorktree?: "remove" | "keep" }) =>
+      closeSession(input, {
+        listProjects: async () => useStore.getState().projects as never[],
+        cleanOnClose: async () => useStore.getState().worktreeCleanOnClose === true,
+        removeWorktree: (a: { path: string; force: boolean }) => window.api.gitRemoveWorktree(a),
+        killWindow: (a: { sessionName: string; windowIndex: number }) => window.api.tmuxKillWindow(a),
+        killSession: (n: string) => window.api.tmuxKillSession(n),
+        projectMetaDelete: (n: string) => window.api.projectMetaDelete(n),
+        refresh: async () => {},
+        warn: () => {},
+      }),
+    // WS11 D5 (S1): the box previews names; the harness runs the REAL box rules over an empty "taken" set.
+    sessionsProposeName: async (input: { kind: "project" | "scratch"; hint?: string; cwd?: string }) =>
+      input.kind === "scratch"
+        ? proposeScratchName(input.hint ?? "", new Set<string>())
+        : { name: proposeProjectName({ hint: input.hint, cwd: input.cwd }, new Set<string>()), hint: null },
+    // The capability read mirrors whatever `getServerVersion` answers (a test overrides one).
+    apiVersion: () => window.api.getServerVersion(),
     delegateJobForSession: () => Promise.resolve({ readOnly: false }),
     // Per-session model prefs (BET-1281): ChatPanel reads the box mirror through
     // the shared modelPrefs module. Empty by default unless a test overrides it.

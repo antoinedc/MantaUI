@@ -30,7 +30,7 @@ import { Card } from "./Card";
 import { ChipGroup } from "./Chip";
 import { buildCumulativePath, chartAxisTicks, formatResetAt, formatClockTime } from "./chatUtils";
 import type { OptimizerSummary, OptimizerRange, OptimizerSeries } from "../shared/types";
-import { UPDATE_YOUR_BOX } from "./modelsPicker";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 
 type OptimizerData = OptimizerSummary | { supported: false };
 type OptimizerSeriesData = OptimizerSeries | { supported: false };
@@ -140,7 +140,7 @@ export function OptimizerCard() {
   if (!sv) {
     return (
       <Card header={header}>
-        <div className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</div>
+        <UpdateBoxNote />
       </Card>
     );
   }
@@ -236,7 +236,7 @@ export function OptimizerCard() {
       ) : !sd ? (
         <div className="text-meta text-text-faint">Reading your history…</div>
       ) : !rv ? (
-        <div className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</div>
+        <UpdateBoxNote />
       ) : (
         <div className={series.loading ? "opacity-60" : undefined}>
           {rv.noActivity ? (

@@ -80,7 +80,8 @@ struct SessionCreateSheet: View {
     @State private var openAs: SessionMode = .chat
     @State private var scratchName = ""
     @State private var scratchRoot = ""
-    @State private var scratchTaken: Set<String> = []
+    /// The box's preview of the scratch folder name and its one hint (`sessions:propose-name`).
+    @State private var scratchProposal: SessionNameProposal?
     @State private var gitProbe: GitProbe = .idle
     @State private var worktreeOn = false
     @State private var worktreeBranch = SessionWorktreeDefaults.branch
@@ -97,13 +98,12 @@ struct SessionCreateSheet: View {
     @State private var cloneOpen = false
 
     @StateObject private var setup = SessionSetupStore()
+    @EnvironmentObject private var capabilities: BoxCapabilitiesStore
     @Environment(\.openURL) private var openURL
 
     private let api = MantaAPIClient.live()
 
     // MARK: - Derived
-
-    private var projectNames: Set<String> { Set(store.projects.map(\.tmuxSession)) }
 
     private var existingProject: MantaProject? {
         if case .existing(let name) = target { return store.projects.first { $0.tmuxSession == name } }
@@ -121,6 +121,8 @@ struct SessionCreateSheet: View {
         f.folder = folder
         f.scratchName = scratchName
         f.scratchRoot = scratchRoot
+        f.scratchUsable = scratchProposal.map { !$0.name.isEmpty } ?? !scratchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        f.nameEdited = nameEdited
         f.worktreeAvailable = gitProbe == .repo
         f.worktreeOn = worktreeOn
         f.worktreeBranch = worktreeBranch
@@ -148,11 +150,18 @@ struct SessionCreateSheet: View {
 
     private var cliChoicesAuthoritative: Bool { store.launcherCatalog.authoritativeIDs != nil }
 
-    private var slug: String { SessionNaming.slugify(scratchName) }
+    /// The folder the box will create under the scratch root, and the one hint under the field — both the
+    /// box's preview (WS11 D5 / S1).
+    private var slug: String { scratchProposal?.name ?? "" }
 
-    private var scratchHint: String? {
-        SessionScratchHint.text(slug: slug, taken: scratchTaken.union(projectNames))
-    }
+    private var scratchHint: String? { scratchProposal?.hint }
+
+    /// An older box can't name a new project (an unsafe name would be silently rewritten by tmux), so
+    /// creating one is disabled with the note.
+    /// Blocked until the box is KNOWN to name projects: an older box answers false, and while the list is still
+    /// unknown a create could strand a half-made session on an older box.
+    private var namingBlocked: Bool { target == .newProject && capabilities.has(.sessionsNaming) != true }
+    private var namingChecking: Bool { target == .newProject && capabilities.has(.sessionsNaming) == nil }
 
     // MARK: - Body
 
@@ -172,6 +181,12 @@ struct SessionCreateSheet: View {
                 }
 
                 carriedOverSection
+
+                if namingChecking {
+                    Section { Text("Checking your box…").font(.footnote).foregroundStyle(.secondary) }
+                } else if namingBlocked {
+                    Section { UpdateBoxNote(showsLink: false) }
+                }
 
                 Section {
                     Picker("Project", selection: Binding(get: { target }, set: { selectTarget($0) })) {
@@ -211,7 +226,7 @@ struct SessionCreateSheet: View {
                         Button("Done", action: finishBatch)
                     } else if setup.batch == nil {
                         Button(plan.label, action: create)
-                            .disabled(!plan.enabled || creating)
+                            .disabled(!plan.enabled || creating || namingBlocked)
                     }
                 }
             }
@@ -228,7 +243,8 @@ struct SessionCreateSheet: View {
         }
         .task { await prepare() }
         .task(id: probeFolder ?? "") { await probeGit() }
-        .task(id: scratchTaskKey) { await listScratchRoot() }
+        .task(id: scratchProposalKey) { await proposeScratchName() }
+        .task(id: nameProposalKey) { await proposeProjectName() }
         .onChange(of: setup.probe) { _, _ in adoptProposedScratchRoot() }
         .onChange(of: setup.batch) { _, batch in batchChanged(batch) }
         .onDisappear { setup.cancel() }
@@ -315,7 +331,8 @@ struct SessionCreateSheet: View {
                 setup: setup,
                 onBrowse: { pickerTarget = .folder },
                 onClone: { cloneOpen = true },
-                onScratch: startScratch
+                onScratch: startScratch,
+                cloneEnabled: capabilities.has(.forgeCloneView) != false
             )
         case .folder:
             Section("New project") {
@@ -533,7 +550,6 @@ struct SessionCreateSheet: View {
                 source = .folder
                 folder = prefill.folder ?? ""
                 nameEdited = false
-                newProjectName = SessionNaming.uniqueProjectName(forFolder: folder, taken: projectNames)
                 placed = true
             case .unspecified:
                 break
@@ -562,9 +578,6 @@ struct SessionCreateSheet: View {
         fanOut = worktrees
         if target == .newProject {
             source = .folder
-            if !nameEdited {
-                newProjectName = SessionNaming.uniqueProjectName(forFolder: path, taken: projectNames)
-            }
         }
     }
 
@@ -586,16 +599,30 @@ struct SessionCreateSheet: View {
         scratchRoot = setup.proposedRoot
     }
 
-    private var scratchTaskKey: String { source == .scratch ? scratchRoot : "" }
+    /// The scratch preview is keyed on what it depends on, and debounced 250 ms (it is a preview — the
+    /// create re-checks; a failed read just clears it).
+    private var scratchProposalKey: String { source == .scratch ? "\(scratchName)\u{1F}\(scratchRoot)" : "" }
 
-    /// What already lives under the scratch root, so the hint can name the
-    /// de-duplicated folder the box will create. A failed read is "nothing
-    /// taken" — the box de-duplicates on its own either way.
-    private func listScratchRoot() async {
-        guard source == .scratch, !scratchRoot.isEmpty else { scratchTaken = []; return }
-        let listing = try? await api.fsListDirectory(scratchRoot)
+    private func proposeScratchName() async {
+        guard source == .scratch else { scratchProposal = nil; return }
+        try? await Task.sleep(nanoseconds: 250_000_000)
         guard !Task.isCancelled else { return }
-        scratchTaken = Set((listing?.entries ?? []).map(\.name))
+        let proposal = try? await api.sessionsProposeName(scratch: scratchName, root: scratchRoot)
+        guard !Task.isCancelled else { return }
+        scratchProposal = proposal
+    }
+
+    /// The name a new project would get, previewed in the field until the user types their own.
+    private var nameProposalKey: String { (target == .newProject && source == .folder && !nameEdited) ? folder : "" }
+
+    private func proposeProjectName() async {
+        let path = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard target == .newProject, source == .folder, !nameEdited, !path.isEmpty else { return }
+        // The folder changed: the previous folder's preview is stale until this one answers (a failed read leaves it
+        // blank — the create re-checks and the box names it anyway).
+        newProjectName = ""
+        guard let proposal = try? await api.sessionsProposeName(project: path), !Task.isCancelled, !nameEdited else { return }
+        newProjectName = proposal.name
     }
 
     private func probeGit() async {
@@ -617,9 +644,9 @@ struct SessionCreateSheet: View {
     // MARK: - Batch
 
     private func startBatch(paths: [String]) {
-        guard !paths.isEmpty else { return }
+        guard !paths.isEmpty, !namingBlocked else { return }
         source = .none
-        setup.setUp(paths: paths, taken: projectNames)
+        setup.setUp(paths: paths)
     }
 
     private func batchChanged(_ batch: SessionSetupBatch?) {
@@ -653,10 +680,10 @@ struct SessionCreateSheet: View {
     // session itself rather than in this sheet.
 
     private func create() {
-        guard !creating, plan.enabled else { return }
+        guard !creating, plan.enabled, !namingBlocked else { return }
         let plan = self.plan
         if plan.kind == .repoBatch {
-            setup.setUp(paths: setup.checkedPathsInOrder, taken: projectNames)
+            setup.setUp(paths: setup.checkedPathsInOrder)
             return
         }
         creating = true
@@ -719,10 +746,9 @@ struct SessionCreateSheet: View {
     }
 
     private func createNewProject(_ plan: SessionCreatePlan) async throws -> SessionCreated {
-        // The name tmux will KEEP (it rewrites `.` and `:` to `_`).
-        let projectName = SessionNaming.tmuxSafe(newProjectName.trimmingCharacters(in: .whitespacesAndNewlines))
         let windowName = resolvedSessionName
-        var cwd = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folderPath = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cwd = folderPath
         var createDir = true
         if let wt = plan.worktree {
             let added = try await api.gitAddWorktree(cwd: wt.cwd, name: wt.branch)
@@ -731,8 +757,11 @@ struct SessionCreateSheet: View {
         }
         let reply: TmuxCreateResult
         do {
+            // A typed name is sent as is; otherwise the box names the session from the folder.
+            let typed = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
             reply = try await api.createSession(SessionNewProjectInput(
-                name: projectName, cwd: cwd, windowName: windowName, chatMode: true, createDir: createDir
+                name: nameEdited ? typed : nil, nameHint: nameEdited ? nil : folderPath,
+                cwd: cwd, windowName: windowName, chatMode: true, createDir: createDir
             ))
         } catch {
             if plan.worktree != nil {
@@ -741,18 +770,26 @@ struct SessionCreateSheet: View {
             }
             throw error
         }
-        return try finish(reply: reply, project: projectName, windowName: windowName, plan: plan)
+        return try finish(reply: reply, project: try createdName(reply), windowName: windowName, plan: plan)
+    }
+
+    /// The name the box gave the session it just created (it picks it — WS11 D5 / S1).
+    private func createdName(_ reply: TmuxCreateResult) throws -> String {
+        guard let name = reply.name, !name.isEmpty else { throw MantaError.transport("the box didn't report the new session's name") }
+        return name
     }
 
     /// The folder holds several worktrees and the user chose one session each:
     /// the first becomes the project's initial window, the rest are added.
     private func createFanOut(_ plan: SessionCreatePlan) async throws -> SessionCreated {
         guard let worktrees = fanOut, let first = worktrees.first else { throw MantaError.transport("no worktrees to open") }
-        let projectName = SessionNaming.tmuxSafe(newProjectName.trimmingCharacters(in: .whitespacesAndNewlines))
         let firstName = WorktreeInfoLogic.name(first)
+        let typed = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
         var reply = try await api.createSession(SessionNewProjectInput(
-            name: projectName, cwd: first.path, windowName: firstName, chatMode: true, createDir: false
+            name: nameEdited ? typed : nil, nameHint: nameEdited ? nil : folder.trimmingCharacters(in: .whitespacesAndNewlines),
+            cwd: first.path, windowName: firstName, chatMode: true, createDir: false
         ))
+        let projectName = try createdName(reply)
         let landingIndex = reply.windowIndex
         for worktree in worktrees.dropFirst() {
             reply = try await api.createWindow(SessionNewWindowInput(
@@ -767,11 +804,10 @@ struct SessionCreateSheet: View {
 
     private func createScratch(_ plan: SessionCreatePlan) async throws -> SessionCreated {
         let scratch = try await api.projectCreateScratch(root: scratchRoot, name: scratchName)
-        let name = SessionNaming.uniqueProjectName(forFolder: scratch.path, taken: projectNames)
         let reply = try await api.createSession(SessionNewProjectInput(
-            name: name, cwd: scratch.path, windowName: "default", chatMode: true, createDir: false
+            nameHint: scratch.path, cwd: scratch.path, windowName: "default", chatMode: true, createDir: false
         ))
-        return try finish(reply: reply, project: name, windowName: "default", plan: plan)
+        return try finish(reply: reply, project: try createdName(reply), windowName: "default", plan: plan)
     }
 
     /// Resolve the created window (by the index the box reported first), save the

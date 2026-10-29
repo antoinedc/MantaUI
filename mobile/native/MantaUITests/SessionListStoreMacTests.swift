@@ -312,6 +312,31 @@ final class TerminalStatusTests: XCTestCase {
         #"{"kind":"status","payload":[{"session":"\#(session)","windowIndex":\#(windowIndex),"running":\#(running),"subagents":0}]}"#
     }
 
+    // Background-job nesting refreshes on the box's `sessions.nesting` signal ONLY. `delegate.updated` fires about every
+    // 10 s per running job for activity text and must cost nothing.
+    func testActivityOnlyDelegateFramesReadNoProjectListAndANestingSignalReadsExactlyOne() async {
+        let (store, stream) = makeStore()
+        var reads = 0
+        let nested = MantaWindow(index: 1, name: "job", active: false, paneCurrentPath: "/x", opencodeSessionId: "ses_job",
+                                 worktreePath: nil, job: MantaWindowJob(id: "j", status: "running", parentWindowIndex: 0))
+        let parent = MantaWindow(index: 0, name: "parent", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_p", worktreePath: nil)
+        store.projectsReader = {
+            reads += 1
+            return [MantaProject(tmuxSession: "proj", defaultCwd: "/tmp", windows: [parent, nested], attached: false, mantaOwned: nil)]
+        }
+
+        for n in 0..<5 {
+            stream.inject(#"{"kind":"delegate.updated","payload":{"id":"j","status":"running","activity":"step \#(n)"}}"#)
+        }
+        await store.waitForNestingRefresh()
+        XCTAssertEqual(reads, 0, "activity-only frames trigger no tmux:list")
+
+        stream.inject(#"{"kind":"sessions.nesting","payload":{}}"#)
+        await store.waitForNestingRefresh()
+        XCTAssertEqual(reads, 1, "a nesting signal triggers exactly one")
+        XCTAssertEqual(store.visibleWindows(in: store.projects[0]).map(\.index), [0], "the nested job window is hidden under its parent")
+    }
+
     func testStatusFrameDecodesToSingleEntryKeyedProjectHashWindow() {
         let (store, stream) = makeStore()
 

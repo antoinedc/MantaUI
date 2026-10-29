@@ -3,10 +3,10 @@ import SwiftUI
 // ===========================================================================
 // WS10 F12 — CLI launch options. Flags used when a session starts an AI CLI
 // (e.g. Claude Code) directly in its terminal; only CLIs installed on the box are
-// listed, and only ones that have flags. Each toggle writes the launcher's FULL
-// resolved flag map (`ExtensionsLaunchers.update`), awaited and serialized — all
-// toggles are disabled while one saves, a failure puts the value back and says
-// so, and a success adopts the map the box returns.
+// listed, and only ones that have flags. Each toggle flips ONE option on the box
+// (`launchers:set-flag`), awaited and serialized — all toggles are disabled while
+// one saves, a failure puts the value back and says so, and a success adopts the
+// launcher row the box returns.
 // ===========================================================================
 
 @MainActor
@@ -20,7 +20,6 @@ final class ExtensionsLaunchersModel: ObservableObject {
 
     @Published private(set) var load: Load = .loading
     @Published private(set) var launchers: [AvailableLauncher] = []
-    @Published private(set) var saved: [String: [String: Bool]] = [:]
     @Published private(set) var saving = false
     @Published private(set) var notice: String?
 
@@ -32,19 +31,8 @@ final class ExtensionsLaunchersModel: ObservableObject {
 
     func reload() async {
         load = .loading
-        async let list = api.launchersList()
-        async let config = api.configGet()
         do {
-            let (found, current) = try await (list, config)
-            // A missing config is a failed read, NOT "nothing saved": `config:update`
-            // replaces the whole `launcherFlags` key, so writing from an empty guess
-            // would wipe every other launcher's saved flags.
-            guard let current else {
-                load = .failed("The box sent no settings.")
-                return
-            }
-            launchers = found
-            saved = ExtensionsLaunchers.savedFlags(from: current)
+            launchers = try await api.launchersList()
             load = .loaded
         } catch {
             load = .failed(SettingsError.message(error))
@@ -56,24 +44,32 @@ final class ExtensionsLaunchersModel: ObservableObject {
         launchers.filter { $0.flags.contains { $0.type == "boolean" } }
     }
 
-    func value(launcher: AvailableLauncher, flag: AvailableLauncherFlag) -> Bool {
-        ExtensionsLaunchers.resolve(schema: launcher.flags, saved: saved[launcher.id])[flag.key] ?? flag.default
-    }
+    /// The box's current value; nil on an older box (the toggle is then disabled).
+    func value(flag: AvailableLauncherFlag) -> Bool? { flag.value }
 
+    /// Flip the option on the box and show the row it returns; a refusal reverts and says why.
     func set(launcher: AvailableLauncher, flag: AvailableLauncherFlag, checked: Bool) async {
         guard !saving else { return }
-        let previous = saved
-        let next = ExtensionsLaunchers.update(
-            launchers: launchers, launcherID: launcher.id, flagKey: flag.key, checked: checked, prev: saved)
-        saved = next
+        let previous = launchers
+        launchers = launchers.map { l in
+            guard l.id == launcher.id else { return l }
+            var copy = l
+            copy.flags = l.flags.map { f in
+                guard f.key == flag.key else { return f }
+                var g = f
+                g.value = checked
+                return g
+            }
+            return copy
+        }
         saving = true
         notice = nil
         do {
-            let merged = try await api.configUpdate(["launcherFlags": ExtensionsLaunchers.payload(next)])
-            if merged != nil { saved = ExtensionsLaunchers.savedFlags(from: merged) }
+            let row = try await api.launchersSetFlag(id: launcher.id, key: flag.key, value: checked)
+            launchers = launchers.map { $0.id == row.id ? row : $0 }
         } catch {
-            saved = previous
-            notice = "Couldn't save launcher flag."
+            launchers = previous
+            notice = "Couldn't save launcher flag. \(SettingsError.message(error))"
         }
         saving = false
     }
@@ -81,7 +77,6 @@ final class ExtensionsLaunchersModel: ObservableObject {
 
 struct ExtensionsLaunchersScreen: View {
     @Environment(\.colorScheme) private var colorScheme
-    @EnvironmentObject private var sessionStore: SessionListStore
     @StateObject private var model = ExtensionsLaunchersModel()
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -116,8 +111,6 @@ struct ExtensionsLaunchersScreen: View {
             }
         }
         .task { await model.reload() }
-        // The session list caches these flags for new sessions; refresh it.
-        .onDisappear { sessionStore.loadConfig() }
     }
 
     private func launcherSection(_ launcher: AvailableLauncher) -> some View {
@@ -135,14 +128,18 @@ struct ExtensionsLaunchersScreen: View {
                                 .foregroundColor(tokens.tx1)
                             Spacer()
                             if model.saving { ProgressView().tint(tokens.accent) }
-                            Toggle("", isOn: Binding(
-                                get: { model.value(launcher: launcher, flag: flag) },
-                                set: { checked in Task { await model.set(launcher: launcher, flag: flag, checked: checked) } }
-                            ))
-                            .labelsHidden()
-                            .tint(tokens.accent)
-                            .disabled(model.saving)
-                            .accessibilityIdentifier("launcher-\(launcher.id)-\(flag.key)")
+                            if let current = model.value(flag: flag) {
+                                Toggle("", isOn: Binding(
+                                    get: { current },
+                                    set: { checked in Task { await model.set(launcher: launcher, flag: flag, checked: checked) } }
+                                ))
+                                .labelsHidden()
+                                .tint(tokens.accent)
+                                .disabled(model.saving)
+                                .accessibilityIdentifier("launcher-\(launcher.id)-\(flag.key)")
+                            } else {
+                                UpdateBoxNote()
+                            }
                         }
                     }
                 }

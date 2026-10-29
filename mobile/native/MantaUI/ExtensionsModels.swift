@@ -6,13 +6,11 @@ import Foundation
 // ([pkg], D19). Each is a port of a desktop rule so the two clients can never
 // disagree:
 //   ExtensionsFormat      Settings.tsx `formatTimeout` + the plugin row text
-//   ExtensionsForge       chatUtils.ts `forgeCredentialSecondary`
 //   ExtensionsRegistries  Settings.tsx onAddRegistry / onRemoveRegistry
 //   ExtensionsReferences  settingsSchema.ts `validateReferenceAlias` /
 //                         `classifyReferenceTarget` + the add payload
-//   ExtensionsLaunchers   chatShared.tsx `resolveLauncherFlags` +
-//                         settingsShared.ts `updateLauncherFlag` (D21: WS10 owns
-//                         launcher discovery; WS04 consumes `resolve`)
+// (The GitHub row's secondary line and the launcher option values are the BOX's
+// now — `forge:status.secondary`, `launchers:list` `value` — WS11 D3.)
 // ===========================================================================
 
 enum ExtensionsFormat {
@@ -72,34 +70,6 @@ enum ExtensionsFormat {
     static func ruleCountText(_ count: Int?) -> String {
         let n = count ?? 0
         return "\(n) rule\(count == 1 ? "" : "s")"
-    }
-}
-
-enum ExtensionsForge {
-
-    /// The secondary line on the GitHub row: who is connected, where the
-    /// credential came from, and — when GitHub rejected it — what to do. Exact
-    /// port of `forgeCredentialSecondary` (the box wording "server" is kept).
-    static func secondary(login: String?, source: String?, valid: Bool?) -> String {
-        if valid == false {
-            switch source {
-            case "cli":
-                return "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect."
-            case "env":
-                return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect."
-            default:
-                return "GitHub rejected this sign-in. Disconnect, then connect again."
-            }
-        }
-        let origin: String
-        switch source {
-        case "cli": origin = "from the gh CLI on your server"
-        case "env": origin = "from the MANTA_GITHUB_TOKEN env var"
-        case "stored": origin = "signed in on this server"
-        default: origin = "connected"
-        }
-        if let login, !login.isEmpty { return "@\(login) · \(origin)" }
-        return origin
     }
 }
 
@@ -181,52 +151,5 @@ enum ExtensionsReferences {
             target = ""
         }
         return "@\(name) → \(target)"
-    }
-}
-
-enum ExtensionsLaunchers {
-
-    /// For every flag in `schema`, `saved[key] ?? flag.default`. Keys in `saved`
-    /// that the schema no longer has are dropped.
-    static func resolve(schema: [AvailableLauncherFlag], saved: [String: Bool]?) -> [String: Bool] {
-        var out: [String: Bool] = [:]
-        for flag in schema { out[flag.key] = saved?[flag.key] ?? flag.default }
-        return out
-    }
-
-    /// `prev` with the launcher's entry replaced by its FULL resolved map plus the
-    /// toggled key — so a write never leaves the box holding a partial map. An
-    /// unknown launcher id leaves `prev` unchanged.
-    static func update(launchers: [AvailableLauncher], launcherID: String, flagKey: String,
-                       checked: Bool, prev: [String: [String: Bool]]) -> [String: [String: Bool]] {
-        guard let launcher = launchers.first(where: { $0.id == launcherID }) else { return prev }
-        var next = prev
-        var map = resolve(schema: launcher.flags, saved: prev[launcherID])
-        map[flagKey] = checked
-        next[launcherID] = map
-        return next
-    }
-
-    /// Reads `config["launcherFlags"]` into the typed map: non-object launchers and
-    /// non-bool flags are skipped; a missing config is empty.
-    static func savedFlags(from config: [String: JSONValue]?) -> [String: [String: Bool]] {
-        guard case .object(let launchers)? = config?["launcherFlags"] else { return [:] }
-        var out: [String: [String: Bool]] = [:]
-        for (launcherID, value) in launchers {
-            guard case .object(let flags) = value else { continue }
-            var map: [String: Bool] = [:]
-            for (key, flag) in flags {
-                if case .bool(let b) = flag { map[key] = b }
-            }
-            out[launcherID] = map
-        }
-        return out
-    }
-
-    /// The map as the `Any` graph `configUpdate` serialises.
-    static func payload(_ flags: [String: [String: Bool]]) -> [String: Any] {
-        var out: [String: Any] = [:]
-        for (launcherID, map) in flags { out[launcherID] = map }
-        return out
     }
 }

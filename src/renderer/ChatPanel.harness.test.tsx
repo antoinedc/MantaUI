@@ -643,8 +643,124 @@ describe("ChatPanel transcript rendering", () => {
     // loadedAllRef.
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0][0]).toBe("ses_test");
-    expect(fetchCalls[0][1]).toEqual({ limit: TRANSCRIPT_TAIL_LIMIT });
+    expect(fetchCalls[0][1]).toEqual({ limit: TRANSCRIPT_TAIL_LIMIT, view: true });
     expect(h.text()).toContain("hello there");
+  });
+});
+
+// ===== Turn footer after a live turn (WS11 D8 review, BLOCKING 1) =====
+//
+// A footer comes only from a FULL view fetch (a splice never carries a turn),
+// so a live turn that ends must schedule one. The turn here is delivered by
+// splices alone; the footer must appear once the turn ends — whether it ends
+// with `turnComplete` (settled) or a bare `running:false`.
+describe("ChatPanel turn footer after a live turn", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const user = {
+    info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const, time: { created: 1 } },
+    parts: [{ type: "text", id: "prt_u1", messageID: "msg_u1", text: "go" }],
+  };
+  const assistant = {
+    info: {
+      id: "msg_a1",
+      sessionID: "ses_test",
+      role: "assistant" as const,
+      time: { created: 2, completed: 7 },
+    },
+    parts: [{ type: "text", id: "prt_a1", messageID: "msg_a1", text: "done" }],
+  };
+  const withTurn = {
+    ...assistant,
+    view: { turn: { durationMs: 5000, tokens: 1200, verbSeedId: "msg_a1" } },
+  };
+  const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+  const FOOTER_5S = /\bfor 5s\b/;
+
+  async function runTurn(end: (bus: MockEventBus) => void) {
+    const fetchCalls: Array<[string, unknown]> = [];
+    let fetched = 0;
+    const { bus } = installMockApi({
+      // First (mount) fetch: the user message only. Later fetches: the canonical view.
+      opencodeMessages: (sid: string, opts?: unknown) => {
+        fetchCalls.push([sid, opts]);
+        return Promise.resolve(fetched++ === 0 ? [user] : [user, withTurn]);
+      },
+      // A splice never carries a turn.
+      opencodeMessage: () => Promise.resolve(assistant),
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(fetchCalls.length).toBe(1);
+
+    await emitStreamAndFlush(bus, h, { sub: "running", sessionId: "ses_test", payload: { running: true } });
+    await emitStreamAndFlush(bus, h, { sub: "messageChanged", sessionId: "ses_test", payload: { messageID: "msg_a1" } });
+    await wait(450);
+    expect(h.text()).toContain("done");
+    // No footer yet: the splice carried no turn and no refetch has run. (The footer reads "<verb> for 5s"; the live
+    // working line shows a wall-clock elapsed that can end in "5s" too, so only the footer's own phrase counts.)
+    expect(h.text()).not.toMatch(FOOTER_5S);
+    expect(fetchCalls.length).toBe(1);
+
+    end(bus);
+    await wait(1100);
+    await h.flush();
+    return fetchCalls;
+  }
+
+  it("a splice-only turn that ends with turnComplete refetches once (view:true) and shows the footer", async () => {
+    const calls = await runTurn((bus) =>
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: true, running: false } })),
+    );
+    expect(calls.length).toBe(2);
+    expect(calls[1][0]).toBe("ses_test");
+    expect(calls[1][1]).toMatchObject({ view: true });
+    expect(h!.text()).toMatch(FOOTER_5S);
+  });
+
+  // The box's REAL end-of-turn order: `running:false` first, then `turnComplete{running:false}` (a failed turn adds a
+  // `sessionError` before both). One turn end is ONE full refetch — the debounce cannot merge two calls 400 ms apart.
+  it("the box's real pair (running:false, then turnComplete) refetches EXACTLY once", async () => {
+    const calls = await runTurn((bus) => {
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } }));
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: true, running: false } }));
+    });
+    expect(calls.length).toBe(2); // the mount fetch + ONE refetch
+    expect(calls[1][1]).toMatchObject({ view: true });
+    expect(h!.text()).toMatch(FOOTER_5S);
+  });
+
+  it("a failed turn's real order (sessionError, running:false, turnComplete) refetches EXACTLY once", async () => {
+    const calls = await runTurn((bus) => {
+      act(() => bus.emitStream({ sub: "sessionError", sessionId: "ses_test", payload: { message: "boom", name: "UnknownError" } }));
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } }));
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: true, running: false } }));
+    });
+    expect(calls.length).toBe(2);
+  });
+
+  it("a new turn starting between the two end frames re-arms: the stale settle neither refetches nor ends the new turn", async () => {
+    const calls = await runTurn((bus) => {
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } }));
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: true } }));
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: false, running: true } }));
+    });
+    expect(calls.length).toBe(2); // only the first end refetched
+  });
+
+  it("a bare running:false refetches once (view:true) and shows the footer", async () => {
+    const calls = await runTurn((bus) =>
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } })),
+    );
+    expect(calls.length).toBe(2);
+    expect(calls[1][1]).toMatchObject({ view: true });
+    expect(h!.text()).toMatch(FOOTER_5S);
   });
 });
 
@@ -1698,5 +1814,50 @@ describe("ChatPanel attachment auto-submit (BET-1124)", () => {
         }),
       ]),
     );
+  });
+});
+
+// WS11 D10: the plan card is the BOX's call (`question.plan`). A plan_exit question carries it; the same shape without it
+// (an older box, or an ordinary question) is an ordinary question card whose options still answer it.
+describe("ChatPanel plan question (box-decided)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const transcript = [
+    {
+      info: { id: "msg_a1", sessionID: "ses_test", role: "assistant" as const, time: { created: 1, completed: 2 } },
+      parts: [{ type: "text", id: "prt_a1", messageID: "msg_a1", text: "plan done" }],
+    },
+  ];
+  const question = (plan?: Record<string, unknown>) => ({
+    id: "que_p", sessionID: "ses_test", requestId: "que_p", tool: { messageID: "msg_a1", callID: "call_exit" },
+    questions: [{ header: "Build Agent", question: "Plan at x ready. Switch?", options: [{ label: "Yes" }, { label: "No" }] }],
+    ...(plan ? { plan } : {}),
+  });
+
+  async function open(q: ReturnType<typeof question>) {
+    const { bus } = installMockApi({ opencodeMessages: () => Promise.resolve(transcript) });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitStreamAndFlush(bus, h, { sub: "questions", sessionId: "ses_test", payload: { questions: [q] } });
+  }
+
+  it("a question with `plan` renders the plan card (title, counts, page link) and not the ordinary card", async () => {
+    await open(question({ title: "Ship login", text: "# Ship login", steps: 3, files: 2, path: null, pageUrl: "https://b.example/pages/plan-x" }));
+    expect(h!.text()).toContain("Ship login");
+    expect(h!.text()).toContain("3 steps");
+    expect(h!.text()).toContain("2 files");
+    expect(h!.text()).toContain("Build here");
+    expect(h!.text()).not.toContain("Switch?");
+  });
+
+  it("the same question WITHOUT `plan` is an ordinary question card (its options still answer it)", async () => {
+    await open(question());
+    expect(h!.text()).toContain("Plan at x ready. Switch?");
+    expect(h!.text()).not.toContain("Build here");
   });
 });

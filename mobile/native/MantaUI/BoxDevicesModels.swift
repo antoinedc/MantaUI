@@ -6,7 +6,8 @@ import Foundation
 //
 //   - `BoxDevice` / `BoxDevicesResponse`  the `GET /auth/devices` payload
 //     (tolerant: an older box has no `current`);
-//   - `BoxDevices`        sorting, who may be revoked, "last active" wording;
+//   - `BoxDevices`        "last active" wording and the revoke outcome (the order and
+//     who may be revoked come from the box: `revocable`, WS11 D3);
 //   - `BoxRemoval`        which request signs THIS phone out, what its answer
 //     means, and the warning the user must see;
 //   - `BoxRemovalFlow`    the Remove-server state machine. The root transition
@@ -37,21 +38,25 @@ struct BoxDevice: Decodable, Equatable, Sendable, Identifiable {
     var primary: Bool
     /// The device making this request. False everywhere on an older box.
     var current: Bool
+    /// Whether the BOX allows revoking this row (WS11 D3 / X6). `nil` = an older box
+    /// that does not say: the list then offers no Revoke and shows the update note.
+    var revocable: Bool?
 
     var id: String { deviceID }
 
     init(deviceID: String, name: String = "device", lastSeen: Double? = nil, createdAt: Double? = nil,
-         primary: Bool = false, current: Bool = false) {
+         primary: Bool = false, current: Bool = false, revocable: Bool? = nil) {
         self.deviceID = deviceID
         self.name = name
         self.lastSeen = lastSeen
         self.createdAt = createdAt
         self.primary = primary
         self.current = current
+        self.revocable = revocable
     }
 
     private enum CodingKeys: String, CodingKey {
-        case deviceID = "device_id", name, lastSeen = "last_seen", createdAt = "created_at", primary, current
+        case deviceID = "device_id", name, lastSeen = "last_seen", createdAt = "created_at", primary, current, revocable
     }
 
     init(from decoder: Decoder) throws {
@@ -63,6 +68,7 @@ struct BoxDevice: Decodable, Equatable, Sendable, Identifiable {
         createdAt = (try? c.decodeIfPresent(Double.self, forKey: .createdAt)) ?? nil
         primary = ((try? c.decodeIfPresent(Bool.self, forKey: .primary)) ?? nil) ?? false
         current = ((try? c.decodeIfPresent(Bool.self, forKey: .current)) ?? nil) ?? false
+        revocable = (try? c.decodeIfPresent(Bool.self, forKey: .revocable)) ?? nil
     }
 }
 
@@ -92,32 +98,6 @@ struct BoxDevicesResponse: Decodable, Equatable, Sendable {
 // MARK: - Linked-devices list
 
 enum BoxDevices {
-
-    /// This phone first, then the most recently active.
-    static func sorted(_ devices: [BoxDevice]) -> [BoxDevice] {
-        devices.enumerated().sorted { a, b in
-            if a.element.current != b.element.current { return a.element.current }
-            let l = a.element.lastSeen ?? -1
-            let r = b.element.lastSeen ?? -1
-            if l != r { return l > r }
-            return a.offset < b.offset
-        }.map(\.element)
-    }
-
-    /// The current phone signs out through "Remove server"; the primary row is the
-    /// desktop's shared pairing, managed from the desktop. Everything else may be
-    /// revoked. (An older box has no `current`: revoke stays offered on every
-    /// non-primary row and the user tells by name.)
-    static func canRevoke(_ device: BoxDevice) -> Bool {
-        !device.current && !device.primary && isRevocableID(device.deviceID)
-    }
-
-    /// An id the box can be asked to revoke. An empty or blank id must never
-    /// reach `DELETE /auth/revoke`: with no `device_id` the box resets the WHOLE
-    /// identity and signs every device out.
-    static func isRevocableID(_ id: String) -> Bool {
-        !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
 
     enum RevokeOutcome: Equatable, Sendable {
         case revoked
@@ -179,8 +159,9 @@ enum BoxRemoval {
     static func plan(devices: [BoxDevice]) -> RemovalPlan {
         guard let me = devices.first(where: \.current) else { return .unknownDevice }
         if me.primary { return .sharedPairing }
-        // A blank own id has no safe target (see `isRevocableID`).
-        return BoxDevices.isRevocableID(me.deviceID) ? .revoke(deviceID: me.deviceID) : .unknownDevice
+        // A blank own id has no safe target: with no `device_id` an older box runs the
+        // whole-identity reset and drops EVERY device.
+        return me.deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .unknownDevice : .revoke(deviceID: me.deviceID)
     }
 
     /// What the `DELETE /auth/revoke?device_id=` answer means.

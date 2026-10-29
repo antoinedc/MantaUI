@@ -37,18 +37,18 @@ final class ChatCardJobOwnershipStore: ObservableObject {
 
     private let sessionId: String
     private let api: any ChatCardJobAPI
-    private let capabilities: ChatCardCapabilities
+    private let capabilities: BoxCapabilitiesStore
     private var capabilityWatch: AnyCancellable?
 
-    init(sessionId: String, api: any ChatCardJobAPI, capabilities: ChatCardCapabilities) {
+    init(sessionId: String, api: any ChatCardJobAPI, capabilities: BoxCapabilitiesStore) {
         self.sessionId = sessionId
         self.api = api
         self.capabilities = capabilities
         // Belt and braces: when the capability list lands while this session is still
         // unconfirmed, ask again at once rather than waiting for the 30 s tick.
-        capabilityWatch = capabilities.$ids
+        capabilityWatch = capabilities.$state
             .dropFirst()
-            .compactMap { $0 }
+            .compactMap { $0.known }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { @MainActor in
@@ -71,11 +71,11 @@ final class ChatCardJobOwnershipStore: ObservableObject {
         resolveInFlight = true
         defer { resolveInFlight = false }
 
-        if capabilities.has(ChatCardCapabilities.chatCards) == nil {
+        if capabilities.has(.chatCards) == nil {
             await capabilities.refresh()
         }
         let input: ChatCardOwnershipInput
-        switch capabilities.has(ChatCardCapabilities.chatCards) {
+        switch capabilities.has(.chatCards) {
         case .none:
             lastFailure = "Can't confirm this session yet — messages you send will wait"
             input = .failure

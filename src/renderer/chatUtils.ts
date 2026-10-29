@@ -3,9 +3,10 @@
 // Type-only import — erased at compile time, keeps this module dependency-
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
+import { formatBytes } from "../shared/formatBytes.mjs";
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, WindowStatusPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -15,15 +16,12 @@ import { isBackgroundResultMessage } from "./backgroundRun";
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
-import { formatTokens, formatTokenCount } from "../shared/formatTokens.mjs";
+import { formatTokens } from "../shared/formatTokens.mjs";
 // BET-1139: the deprecated-model predicate lives in the shared node-safe
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
 import { isDeprecated } from "../shared/modelGuide.mjs";
 import { leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
-// BET-1537 (S5, §W9): the shared endpoint/provider state labels — the same
-// words the router's verdict copy and the Accounts/Models surfaces use.
-import { endpointStateLabel, providerStateLabel } from "../shared/providerHealthLabel.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
 // tmux window is identified by its session name + index, which EVERY window
@@ -93,13 +91,8 @@ export {
   buildTitleInstruction,
   buildTitlePromptInput,
   classifyCacheAge,
-  classifyFinish,
   collectChildSessionIds,
-  computeContextBreakdown,
-  computeStaleCache,
-  countRunningSubagents,
   countUserTurns,
-  describeTruncation,
   extractSubagentInfo,
   humanizeProviderError,
   hydrateQuestion,
@@ -109,11 +102,9 @@ export {
   isTerminalTodo,
   mergeBufferedDeltas,
   registerChildSessionFromCreated,
-  resolveContextLimit,
   sanitizeGeneratedTitle,
   selectActiveTodos,
   selectCacheTtlMs,
-  selectLastAssistantCompletion,
   selectVisibleTodos,
   shouldAutoRename,
   shouldDropEventForSessionFilter,
@@ -126,7 +117,6 @@ export type {
   QuestionLike,
   StaleCacheResult,
   SubagentInfo,
-  TruncationKind,
 } from "../shared/streamInterpretation.mjs";
 
 
@@ -289,18 +279,7 @@ function tickLabel(t: number, bucket: "hour" | "day"): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-export function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "";
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let val = n / 1024;
-  let i = 0;
-  while (val >= 1024 && i < units.length - 1) {
-    val /= 1024;
-    i++;
-  }
-  return `${val < 10 ? val.toFixed(1).replace(/\.0$/, "") : Math.round(val)} ${units[i]}`;
-}
+export { formatBytes };
 
 // ===== Download confirmation (BET-1198) =====
 //
@@ -748,8 +727,8 @@ export function stepTokensFromFrame(p: {
  *
  *   running {running}   → setChatRunning(sid, running)   (the hard signal)
  *   sessionError/aborted→ setChatRunning(sid, false)
- *   childSession        → setSessionParent(child, parent) (frame is published
- *                         under the PARENT's session id)
+ *   windowStatus        → setWindowStatus(sid, payload) (the box's rollup: busy
+ *                         beneath, direct subagents, stopped — WS11 D7)
  *   attention {kind}    → setChatAttention(sid, kind) (the box never frames a
  *                         trust-mode ask it auto-answers, so there is nothing
  *                         to debounce client-side)
@@ -761,12 +740,11 @@ export function stepTokensFromFrame(p: {
 export function createSidebarFrameHandler(store: {
   setChatRunning: (sid: string, running: boolean) => void;
   setChatAttention: (sid: string, kind: "question" | "permission" | null) => void;
-  setSessionParent: (child: string, parent: string) => void;
+  setWindowStatus: (sid: string, payload: WindowStatusPayload) => void;
 }): (ev: StreamEnvelope) => void {
   return (ev) => {
-    if (ev.sub === "childSession") {
-      const p = ev.payload as StreamChildSessionPayload;
-      if (p?.childSessionId && p.parentSessionId) store.setSessionParent(p.childSessionId, p.parentSessionId);
+    if (ev.sub === "windowStatus") {
+      if (ev.sessionId && ev.payload && typeof ev.payload === "object") store.setWindowStatus(ev.sessionId, ev.payload as WindowStatusPayload);
       return;
     }
     const sid = ev.sessionId;
@@ -1245,37 +1223,6 @@ export function chooseUpdateSkewVariant(
 // this app shipped a macOS updater that could never install anything for its
 // whole life without anyone noticing. So an unanswerable check is NEVER
 // rendered as "ok".
-
-export type UpdateRowTone = "ok" | "action" | "muted" | "error";
-export type UpdateRow = { tone: UpdateRowTone; text: string };
-
-/**
- * Describe ONE update target for its row.
- *
- * One function for every target. The old code had two bespoke functions
- * (`describeDesktopUpdate` / `describeServerUpdate`) doing the same job for
- * two targets; there are about to be six, so both are replaced by this single
- * one keyed off the shared `UpdateTarget` shape.
- *
- * Rules, in this exact order — the ordering IS the semantics:
- *  - `!t.ok`       → error, "Couldn't check"
- *  - `t.manual`    → muted, "Update manually"
- *  - `t.available` → action, "Update available"
- *  - else          → ok, "Up to date"
- *
- * The invariant that must survive: an unanswerable check is NEVER rendered as
- * "ok". "Up to date" and "couldn't check" otherwise look identical — both are
- * a sentence with no button — and a reassuring silence over a failed check is
- * exactly how a permanently broken macOS updater passed for a healthy one. So
- * `!ok` wins over everything, and `manual` (a dev build with no updater, or a
- * CLI with no safe upgrade command) is "muted", never "ok".
- */
-export function describeUpdateTarget(t: UpdateTarget): UpdateRow {
-  if (!t.ok) return { tone: "error", text: "Couldn't check" };
-  if (t.manual) return { tone: "muted", text: "Update manually" };
-  if (t.available) return { tone: "action", text: "Update available" };
-  return { tone: "ok", text: "Up to date" };
-}
 
 // ===== Box self-update: transient network failure vs real failure =====
 //
@@ -1856,179 +1803,6 @@ export function fuzzySessionScore(
   return 100 + gapBonus;
 }
 
-// Background-job nesting for one project. A job's child window (the window
-// whose opencodeSessionId === job.childSessionID) renders as an indented
-// CHILD row under its parent window (the window whose opencodeSessionId ===
-// job.displayParentID ?? job.parentSessionID) whenever both windows exist.
-//
-// Returns:
-//   hidden      — child window indices that must be REMOVED from the
-//                 project's top-level window list (they render nested).
-//   children    — parent window index → ordered child window indices to
-//                 render indented under that parent row.
-export type JobNestingResult = {
-  hidden: Set<number>;
-  children: Map<number, number[]>;
-};
-
-export function computeJobNesting(
-  project: Project,
-  jobs: Record<
-    string,
-    {
-      status: string;
-      parentSessionID: string | null;
-      displayParentID?: string | null;
-      childSessionID: string | null;
-      supersededBy?: string | null;
-    }
-  >,
-): JobNestingResult {
-  const hidden = new Set<number>();
-  const children = new Map<number, number[]>();
-
-  // Index windows by opencodeSessionId for parent/child resolution.
-  const byOpencodeId = new Map<string, TmuxWindow>();
-  for (const w of project.windows) {
-    if (w.opencodeSessionId) byOpencodeId.set(w.opencodeSessionId, w);
-  }
-
-  // child window index → parent window index. Nest by the DISPLAY parent when the server resolved one (the
-  // real parent has no window); the real parent still routes results and is the fallback.
-  const parentOf = new Map<number, number>();
-  for (const job of Object.values(jobs)) {
-    if (!job.childSessionID || job.supersededBy) continue;
-    const childWin = byOpencodeId.get(job.childSessionID);
-    if (!childWin) continue; // job's window isn't in this project
-    const nestUnder = job.displayParentID ?? job.parentSessionID;
-    const parentWin = nestUnder ? byOpencodeId.get(nestUnder) : undefined;
-    if (!parentWin || parentWin.index === childWin.index) continue; // child stays top-level; parent window is gone
-    parentOf.set(childWin.index, parentWin.index);
-  }
-  // Only top-level rows render children, so a row whose parent is itself nested is lifted to the nearest
-  // top-level ancestor (cycle-safe: a cycle leaves its members top-level).
-  for (const [child] of parentOf) {
-    const seen = new Set([child]);
-    let top = parentOf.get(child)!;
-    while (parentOf.has(top) && !seen.has(top)) {
-      seen.add(top);
-      top = parentOf.get(top)!;
-    }
-    if (seen.has(top)) continue;
-    hidden.add(child);
-    const arr = children.get(top) ?? [];
-    arr.push(child);
-    children.set(top, arr);
-  }
-
-  // Sort children by window index for stable render order.
-  for (const arr of children.values()) arr.sort((a, b) => a - b);
-  return { hidden, children };
-}
-
-// Which sessions have work in flight ANYWHERE beneath them — their own turn,
-// a subagent child (inline or backgrounded, any depth), or a background job
-// they started. A session's sidebar row should read "running" for as long as
-// any of that is going, not just while its own turn is: a parent whose turn
-// ended while its background child keeps working is still busy from the
-// user's point of view.
-//
-// `running`  — session ids currently running a turn (incl. windowless ones)
-// `parents`  — child session id → parent session id
-// `jobs`     — background-job records; a `running` job counts as work in its
-//              child session AND (via displayParentID ?? parentSessionID) its parent
-//
-// Returns every running session plus all of its ancestors. Cycle-safe.
-export function sessionsWithActiveWork(
-  running: Iterable<string>,
-  parents: Record<string, string>,
-  jobs: Record<
-    string,
-    {
-      status: string;
-      parentSessionID: string | null;
-      displayParentID?: string | null;
-      childSessionID: string | null;
-      supersededBy?: string | null;
-    }
-  >,
-): Set<string> {
-  const links = new Map<string, string>(Object.entries(parents));
-  const seeds: string[] = [...running];
-  for (const job of Object.values(jobs)) {
-    if (job.status !== "running" || job.supersededBy) continue;
-    if (job.childSessionID) {
-      seeds.push(job.childSessionID);
-      // The row nests under its display parent, so that is where its running state rolls up to — even when
-      // the session's own (windowless) parent is known.
-      if (job.displayParentID) {
-        links.set(job.childSessionID, job.displayParentID);
-      } else if (job.parentSessionID && !links.has(job.childSessionID)) {
-        links.set(job.childSessionID, job.parentSessionID);
-      }
-    } else if (job.parentSessionID) {
-      // Mid-start record (no child session yet) — the parent is still busy.
-      seeds.push(job.parentSessionID);
-    }
-  }
-  const out = new Set<string>();
-  for (const seed of seeds) {
-    let cur: string | undefined = seed;
-    while (cur && !out.has(cur)) {
-      out.add(cur);
-      cur = links.get(cur);
-    }
-  }
-  return out;
-}
-
-// Does the window tree disagree with the jobs slice, so the tree needs a
-// re-list?
-//
-// `computeJobNesting` can only render a job it can find a WINDOW for
-// (`byOpencodeId.get(job.childSessionID)`), and drops the job outright when it
-// can't. The two inputs refresh on completely different schedules: the jobs
-// slice re-fetches on every `delegate.updated` bus event, while the window tree
-// is only re-listed by `refresh()` — which the app runs at bootstrap and then
-// only after an action it performed itself. A background job creates its tmux
-// window on the BOX, after boot and without the app doing anything, so its
-// window is absent from the tree and the job renders NOWHERE: not nested, not
-// orphaned, not top-level. That is the "delegated jobs never appear in the
-// sidebar" bug, and it self-heals only if the user happens to do something
-// that re-lists windows.
-//
-// Rather than re-listing tmux on a timer (polling the box for a change that is
-// already announced) or on every `delegate.updated` (activity updates fire
-// every ~10s per job, so that is a tmux call per job per tick), this states the
-// invariant the renderer actually depends on and lets the caller re-list only
-// when it is violated:
-//
-//   - a RUNNING job whose child window is missing  → the tree is behind a
-//     window that was created (job would be invisible)
-//   - a window whose session belongs to a TERMINAL job → the tree is behind a
-//     window that was removed (a finished job's window would otherwise linger
-//     and, once its record is swept, reappear as an ordinary session)
-//
-// Pure so it can be tested without a tree, a socket, or a live job.
-export function shouldResyncWindowsForJobs(
-  projects: Project[],
-  jobs: Record<string, { status: string; childSessionID: string | null; supersededBy?: string | null }>,
-): boolean {
-  const known = new Set<string>();
-  for (const p of projects) {
-    for (const w of p.windows) {
-      if (w.opencodeSessionId) known.add(w.opencodeSessionId);
-    }
-  }
-  for (const job of Object.values(jobs)) {
-    if (!job.childSessionID || job.supersededBy) continue;
-    const present = known.has(job.childSessionID);
-    if (job.status === "running" && !present) return true;
-    if (job.status !== "running" && present) return true;
-  }
-  return false;
-}
-
 // Compact model display name for the composer model pill (BET-460). The
 // friendly name opencode returns is often "<brand> <family> <version>"
 // (e.g. "Claude Opus 4.7"); the design shows the family + version only
@@ -2215,86 +1989,10 @@ export function resolvePlanToggle(
   };
 }
 
-// ===== Plan card data (BET-951) =====
+// ===== Plan card data (BET-951 → WS11 D10) =====
 //
-// The plan_exit question is upgraded into a plan card in the pinned card
-// stack. Its title ("the plan's title/first heading") and the FULL plan text
-// are derived from the `plan_exit` tool call's carried plan. Detection is
-// EXACT, never heuristic: the question's `tool.callID` links back to the
-// `plan_exit` tool part in the transcript — match on that, never on the
-// question text.
-
-// A tool part may surface its name/callID directly (the live `message.part.*`
-// event shape used by useSseBus) or nested under `state.input` (the reconciled
-// transcript shape Toolkit parts carry). Read both tolerantly.
-function toolPartName(part: OpencodePart): string {
-  const direct = part.tool;
-  if (typeof direct === "string" && direct) return direct;
-  const state = part.state as { input?: { tool?: unknown } } | undefined;
-  const nested = state?.input?.tool;
-  return typeof nested === "string" ? nested : "";
-}
-
-/**
- * Is `question` the plan_exit ask? True iff a transcript tool part named
- * `plan_exit` carries the SAME `callID` as `question.tool.callID`. A callID is
- * required (an orphaned/recovered question without one can never be matched)
- * and the match must be exact — the question text is never consulted.
- */
-export function isPlanExitQuestion(
-  question: QuestionRequest,
-  messages: OpencodeMessage[] | null,
-): boolean {
-  const qCallID = question.tool?.callID;
-  if (!qCallID) return false;
-  for (const msg of messages ?? []) {
-    for (const part of msg.parts) {
-      if (part.type !== "tool") continue;
-      if (part.callID !== qCallID) continue;
-      if (toolPartName(part) === "plan_exit") return true;
-    }
-  }
-  return false;
-}
-
-/**
- * The plan card's display data: the title (first markdown heading of the plan
- * text, falling back to the question header) and the FULL plan text (what
- * "Build here" resubmits as the next prompt with the build model). Everything
- * is tolerant — when the `plan_exit` part's input carries no plan text the
- * card still renders, just with the question's header as the title.
- */
-export function extractPlanData(
-  question: QuestionRequest,
-  messages: OpencodeMessage[] | null,
-): {
-  title: string;
-  text: string;
-} {
-  let text = "";
-  for (const msg of messages ?? []) {
-    for (const part of msg.parts) {
-      if (part.type !== "tool") continue;
-      if (part.callID !== question.tool?.callID) continue;
-      if (toolPartName(part) !== "plan_exit") continue;
-      const state = part.state as { input?: Record<string, unknown> } | undefined;
-      const input = (state?.input ?? part.input) as
-        | Record<string, unknown>
-        | undefined;
-      const t = input?.plan ?? input?.content ?? input?.text;
-      if (typeof t === "string") text = t;
-      break;
-    }
-  }
-  const firstHeading = text.match(/^#{1,6}[ \t]+(.+)$/m)?.[1]?.trim();
-  const firstLine = text.split("\n").find((l) => l.trim())?.trim();
-  const title =
-    firstHeading ??
-    firstLine ??
-    question.questions[0]?.header ??
-    "Plan complete";
-  return { title, text };
-}
+// The plan_exit question carries its plan card data from the BOX (`question.plan`: title, text, step/file counts,
+// the plan file, the page URL — decided from the matching `plan_exit` tool part). Nothing here derives it.
 
 // ===== resolveDelegateModel (BET-951) =====
 //
@@ -2655,89 +2353,16 @@ export async function fetchTranscriptWithRetry<T>(
   }
 }
 
-// Turn boundary metadata: which assistant messages are the FINAL one of their
-// turn (i.e., immediately followed by a user message or end-of-list), the
-// cumulative duration of that turn (first assistant `created` → last assistant
-// `completed`), the whole turn's token figure (sum of `output + reasoning`
-// across every assistant step — one ASSISTANT MESSAGE PER STEP, and each
-// message's `tokens` describes only that step, so reading the last one
-// under-reports by an order of magnitude), and the seed id (the turn's FIRST
-// assistant message) that both the live verb and the footer verb are derived
-// from. Intermediate assistant messages within a multi-step turn get no footer
-// — only the final one does.
-//
-// The `running` gate: while a turn is still in progress we do NOT stamp the
-// footer on its in-progress last assistant message — it would render behind the
-// working indicator at the transcript tail. When `running` flips false the turn
-// is complete and its footer computes normally. When the transcript's last
-// message is a USER message (just submitted), `lastAssistantId` belongs to the
-// previous, already-complete turn, so the gate's comparison is false and that
-// turn keeps its footer.
-export function computeTurnInfo(
+// Turn footers are the BOX's (`message.view.turn`, WS11 D8): which assistant message ends a finished turn, the turn's
+// duration, its output+reasoning tokens and the verb seed. The box also owns the running gate (it reads the
+// interpreter's running flag when it builds the view). This only re-keys what the box sent.
+export function turnInfoFromView(
   messages: OpencodeMessage[] | null,
-  running: boolean,
-): Map<
-  string,
-  { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }
-> {
-  const out = new Map<
-    string,
-    { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }
-  >();
-  if (!messages) return out;
-  let i = 0;
-  while (i < messages.length) {
-    // A finished background run (v2-next N4) is not part of the turn before it
-    // and starts the agent's reply to it, exactly like a user message does —
-    // otherwise the earlier turn's footer would move onto the reply and its
-    // duration would span the idle gap between them.
-    if (messages[i].info.role === "user" || isBackgroundResultMessage(messages[i])) {
-      // Walk forward over the run of assistant messages that follow.
-      let j = i + 1;
-      let firstStart: number | null = null;
-      let lastEnd: number | null = null;
-      let turnTokens = 0;
-      let lastAssistantId: string | null = null;
-      let verbSeedId: string | null = null;
-      while (
-        j < messages.length &&
-        messages[j].info.role === "assistant" &&
-        !isBackgroundResultMessage(messages[j])
-      ) {
-        const t = messages[j].info.time;
-        if (firstStart == null && t?.created != null) firstStart = t.created;
-        if (t?.completed != null) lastEnd = t.completed;
-        // `tokens` is declared on OpencodeMessageInfo (BET-733/L10) — no cast.
-        const tok = messages[j].info.tokens;
-        if (tok) turnTokens += (tok.output ?? 0) + (tok.reasoning ?? 0);
-        if (verbSeedId == null) verbSeedId = messages[j].info.id;
-        lastAssistantId = messages[j].info.id;
-        j++;
-      }
-      // Mid-turn: don't stamp the footer on the in-progress turn's last
-      // assistant message — it renders behind the working indicator. It
-      // appears once running flips false (BET per owner decision).
-      if (
-        running &&
-        lastAssistantId === messages[messages.length - 1]?.info.id
-      ) {
-        i = j;
-        continue;
-      }
-      if (lastAssistantId) {
-        out.set(lastAssistantId, {
-          turnDurationMs:
-            firstStart != null && lastEnd != null && lastEnd > firstStart
-              ? lastEnd - firstStart
-              : null,
-          turnTokens: turnTokens > 0 ? turnTokens : null,
-          verbSeedId,
-        });
-      }
-      i = j;
-    } else {
-      i++;
-    }
+): Map<string, { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }> {
+  const out = new Map<string, { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }>();
+  for (const m of messages ?? []) {
+    const turn = m.view?.turn;
+    if (turn) out.set(m.info.id, { turnDurationMs: turn.durationMs, turnTokens: turn.tokens, verbSeedId: turn.verbSeedId });
   }
   return out;
 }
@@ -3364,23 +2989,19 @@ export function isSameOrgMove(
   return from.account.id === to.account.id;
 }
 
-/** "Moved from Seat 1 · <reason> · 2h ago" (+ the re-sent history for a
- *  cross-org move), or null once the move is older than 5h. */
+/** The box's move line ("Moved from Seat 1 · seat was at its limit") plus the age — the
+ *  one thing the client adds, from its own clock — or null once the move is older than 5h
+ *  or the box (older) sent no wording. */
 export function formatLastMove(
   move: SessionSeat["lastMove"] | null | undefined,
   nowMs: number,
 ): { line: string; resent: string | null } | null {
-  if (!move || !Number.isFinite(move.at)) return null;
+  if (!move || !Number.isFinite(move.at) || !move.line) return null;
   const age = nowMs - move.at;
   if (age > SEAT_LAST_MOVE_WINDOW_MS) return null;
   const ago = formatAge(Math.max(0, age));
   const when = ago === "now" ? "just now" : `${ago} ago`;
-  const reason = move.reason ? ` · ${move.reason}` : "";
-  const resent =
-    move.crossOrg && typeof move.resentTokens === "number"
-      ? `history re-sent: ${formatTokenCount(move.resentTokens)}`
-      : null;
-  return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
+  return { line: `${move.line} · ${when}`, resent: move.resentText ?? null };
 }
 
 /** "Seat: Work · Seat 2" — the session header's context-popover line. Names come
@@ -3425,26 +3046,29 @@ export function seatResetHint(seat: SeatView, nowMs: number): string | null {
   return formatWindowReset(driver?.resetsAt, nowMs);
 }
 
-/** The sentence for a class-1 `accounts:*` error code — never the raw code. */
-export function accountsErrorMessage(code: AccountsError | string | undefined): string {
-  switch (code) {
-    case "unknown-seat":
-      return "That seat no longer exists. The list has been refreshed.";
-    case "invalid-label":
-      return "Names must be 1–40 characters, with no control characters.";
-    case "live-seat":
-      return "This is the login the box is using right now, so it can't be removed.";
-    case "last-seat":
-      return "This is the only login on this box — use Disconnect instead.";
-    case "no-replacement":
-      return "No other login is signed in and ready to take over, so this one can't be removed yet.";
-    case "unknown-provider":
-      return "That provider doesn't support several accounts.";
-    case "login-failed":
-      return "Sign-in failed. Try again.";
-    default:
-      return "That didn't work. Try again.";
-  }
+/**
+ * The model line of the context popover: the model the BOX measured against (`context.model`), named from
+ * the catalog, with "(last reply's model)" when the box fell back to the last reply's model (`basis`
+ * "last-used"). An older box sends no `context.model`: the client's own active-model name stands in.
+ */
+export function contextModelLabel(
+  models: ReadonlyArray<{ id: string; providerID: string; name: string }>,
+  measured: { providerID: string; modelID: string } | null | undefined,
+  basis: string | null | undefined,
+  fallbackName: string | null,
+): string | null {
+  if (!measured) return fallbackName;
+  const name = models.find((m) => m.providerID === measured.providerID && m.id === measured.modelID)?.name ?? measured.modelID;
+  return basis === "last-used" ? `${name} (last reply's model)` : name;
+}
+
+/**
+ * The sentence for a failed `accounts:*` call: the BOX words every error code
+ * (`message`, WS11 D4 / K7). An older box sends none — the static fallback.
+ */
+export const ACCOUNTS_ERROR_FALLBACK = "That didn't work. Try again.";
+export function accountsFailureMessage(res: { message?: string } | null | undefined): string {
+  return typeof res?.message === "string" && res.message ? res.message : ACCOUNTS_ERROR_FALLBACK;
 }
 
 /**
@@ -3480,11 +3104,11 @@ export function seatStateText(status: SeatView["status"]): string | null {
 
 /** Narrow an `accounts:*` mutation answer: the refreshed view, or an error. */
 export function providerViewOrError(
-  res: ProviderView | { error: AccountsError } | null | undefined,
+  res: ProviderView | { error: AccountsError; message?: string } | null | undefined,
 ): { view: ProviderView } | { error: string } {
-  if (res && typeof res === "object" && "error" in res) return { error: accountsErrorMessage(res.error) };
+  if (res && typeof res === "object" && "error" in res) return { error: accountsFailureMessage(res) };
   if (res && typeof res === "object" && "provider" in res) return { view: res };
-  return { error: accountsErrorMessage(undefined) };
+  return { error: ACCOUNTS_ERROR_FALLBACK };
 }
 
 // The ToS note (§0) is shown ONCE, when a second ACCOUNT (not a second seat of
@@ -3741,89 +3365,6 @@ export function describeRepoRow(repo: RepoHit, homeDir?: string | null): string 
   return branch;
 }
 
-// ===== Forge clone flow (BET-796) =====
-
-// The distinguished cause of a failed clone ([E3]). Only `permission` is
-// actionable by the user (token scope, or an org that hasn't approved the
-// token), so it must be named specifically; `disk` and `network` are
-// distinguished so the failure text can say which one occurred rather than a
-// generic "clone failed".
-export type CloneErrorKind = "permission" | "disk" | "network" | "destination" | "unknown";
-
-/**
- * Classify a `git clone` failure's stderr into an actionable kind. Order
- * matters: the destination regex runs first (a destination path problem must
- * never be attributed to the GitHub token), then permission (GitHub's "could
- * not read Username" / "Repository not found" for a private repo reads like a
- * generic error but is really an auth (scope) problem). Pure.
- */
-export function cloneErrorKind(stderr: string): CloneErrorKind {
-  const s = String(stderr ?? "").toLowerCase();
-  if (
-    /could not create leading directories|destination path .* already exists|not an empty directory/.test(s)
-  ) {
-    return "destination";
-  }
-  if (
-    /permission to .* denied|permission denied|could not read (username|password)|authentication failed|not authorized|repository not found|\b403\b|check that you have the correct access rights/.test(s)
-  ) {
-    return "permission";
-  }
-  if (/no space left on device|disk (is )?full|insufficient|write error: no space|enosPC/.test(s)) {
-    return "disk";
-  }
-  if (
-    /could not resolve host|connection (timed out|refused|reset)|network is unreachable|failed to connect|unable to access|temporary failure in name resolution|ssl|tls/.test(s)
-  ) {
-    return "network";
-  }
-  return "unknown";
-}
-
-// The box returns machine codes (`not_connected`, `rejected`, `rate_limited`,
-// `forbidden`, `network`) or a raw exception string for a failed repo listing;
-// neither is something to show a person. One mapping, so the picker never
-// renders a server code verbatim.
-export function repoListErrorMessage(code: string | null | undefined): string {
-  if (code === "not_connected" || code === "rejected") {
-    return "GitHub isn't connected. Go back and sign in again.";
-  }
-  if (code === "rate_limited") {
-    return "GitHub's rate limit is used up. Try again in a few minutes.";
-  }
-  if (code === "forbidden") {
-    return "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.";
-  }
-  if (code === "network") {
-    return "Couldn't reach GitHub from your server. Check its connection and try again.";
-  }
-  return "Couldn't list your repositories from GitHub.";
-}
-
-/** The secondary line on the Settings GitHub row: who is connected, where the
- *  credential came from, and — when GitHub has rejected it — what to do. Pure. */
-export function forgeCredentialSecondary(status: {
-  login: string | null;
-  source: "cli" | "env" | "stored" | null;
-  valid: boolean | null;
-}): string {
-  if (status.valid === false) {
-    if (status.source === "cli") {
-      return "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.";
-    }
-    if (status.source === "env") {
-      return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.";
-    }
-    return "GitHub rejected this sign-in. Disconnect, then connect again.";
-  }
-  const where =
-    status.source === "cli" ? "from the gh CLI on your server"
-    : status.source === "env" ? "from the MANTA_GITHUB_TOKEN env var"
-    : status.source === "stored" ? "signed in on this server"
-    : "connected";
-  return status.login ? `@${status.login} · ${where}` : where;
-}
-
 // The plain text of a USER message — its non-synthetic text parts concatenated
 // with newlines, trailing whitespace stripped. This is the single source for
 // "what text did the user send" and is shared by MessageRow (rendering) and
@@ -3990,12 +3531,6 @@ export function mediaKindFromMime(mime: string | null | undefined): MediaKind | 
   return null;
 }
 
-/** True when the mime is image/* or video/* — i.e. the file-part branch should
- *  render MediaBody instead of the header-only file card. */
-export function isMediaMime(mime: string | null | undefined): boolean {
-  return mediaKindFromMime(mime) != null;
-}
-
 function numOrNull(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
@@ -4044,19 +3579,48 @@ export function mediaGrid(count: number | null): { tiles: number; more: number }
 /** Parse a transcript `file` part into a ready media entry. A file part's wire
  *  shape (src/server/opencode.mjs) is { type:"file", mime, url:"file://<abs>",
  *  filename? } — the absolute path is the `file://` URL stripped. */
-export function filePartToMediaEntry(part: OpencodePart): MediaEntry {
-  const url = String((part as Record<string, unknown>).url ?? "");
-  const mime = strOrNull((part as Record<string, unknown>).mime);
-  const kind = mediaKindFromMime(mime) ?? "image";
+/** A box-canonical media entry (`message.view.media`) as the card's entry. */
+export function viewMediaToEntry(v: import("../shared/types").MediaViewEntry): MediaEntry {
+  return {
+    handle: v.handle,
+    state: "ready",
+    beganAt: null,
+    meta: {
+      kind: v.kind,
+      path: v.path,
+      mime: v.mime,
+      width: v.width,
+      height: v.height,
+      aspectRatio: v.aspectRatio,
+      count: v.count,
+      title: v.title,
+    },
+  };
+}
+
+/**
+ * The canonical media entries a message should draw: the box's `view.media`, minus any entry whose handle a LIVE entry
+ * of this session already draws (a live card for the same generation may sit on a different message than the owner —
+ * e.g. the app restarted between `begin` and `show` — and would otherwise draw twice).
+ */
+export function canonicalMediaToDraw(
+  entries: readonly import("../shared/types").MediaViewEntry[] | undefined,
+  liveHandles: ReadonlySet<string> | undefined,
+): readonly import("../shared/types").MediaViewEntry[] {
+  if (!entries?.length) return [];
+  if (!liveHandles || liveHandles.size === 0) return entries;
+  return entries.filter((e) => !(e.handle && liveHandles.has(e.handle)));
+}
+
+/** An image/video FILE part, from the box's `part.view.media` (`{kind, path}`) — null when the box did not mark one. */
+export function filePartViewToEntry(part: OpencodePart): MediaEntry | null {
+  const media = (part as { view?: { media?: { kind: MediaKind; path: string } } }).view?.media;
+  if (!media) return null;
   return {
     handle: null,
     state: "ready",
     beganAt: null,
-    meta: {
-      ...baseMeta(kind),
-      path: url.replace(/^file:\/\//, "") || null,
-      mime,
-    },
+    meta: { ...baseMeta(media.kind), path: media.path, mime: strOrNull((part as Record<string, unknown>).mime) },
   };
 }
 
@@ -4395,64 +3959,6 @@ export function releaseUserScrollIntent(intent: UserScrollIntent, now: number): 
   intent.pointerScrolled = false;
 }
 
-/**
- * Confirm copy for destructive "Close" actions in the sidebar rail (BET-935).
- * Pure string assembly so the confirm wording is testable without a DOM.
- */
-
-export type CloseConfirmCopy = {
-  title: string;
-  body: string;
-  confirmLabel: string;
-};
-
-/** Confirm copy for closing ONE session (a tmux window). */
-export function describeSessionClose(args: {
-  name: string;
-  /** true when a turn is in flight for this window. */
-  running: boolean;
-  /** The worktree that WILL be removed, or null when none will be. */
-  worktreePath: string | null;
-}): CloseConfirmCopy {
-  const parts = ["Its tmux window will be killed on the server."];
-  if (args.running) parts.push("A turn is currently running and will be stopped.");
-  if (args.worktreePath) parts.push(`Its worktree at ${args.worktreePath} will be removed.`);
-  return {
-    title: `Close “${args.name}”?`,
-    body: parts.join(" "),
-    confirmLabel: "Close session",
-  };
-}
-
-/** Confirm copy for closing a WHOLE project (a tmux session). */
-export function describeProjectClose(args: {
-  name: string;
-  sessionCount: number;
-  runningCount: number;
-  /** Worktrees that WILL be removed. Pass 0 when project close does not remove them. */
-  worktreeCount: number;
-}): CloseConfirmCopy {
-  const { name, sessionCount, runningCount, worktreeCount } = args;
-  const title =
-    sessionCount === 0
-      ? `Close “${name}”?`
-      : `Close “${name}” and its ${sessionCount} session${sessionCount === 1 ? "" : "s"}?`;
-  const parts = [
-    sessionCount === 0
-      ? "Its tmux session will be killed on the server."
-      : `All ${sessionCount} tmux window${sessionCount === 1 ? "" : "s"} will be killed on the server.`,
-  ];
-  if (runningCount > 0) {
-    parts.push(
-      `${runningCount} session${runningCount === 1 ? " is" : "s are"} mid-turn and will be stopped.`,
-    );
-  }
-  if (worktreeCount > 0) {
-    parts.push(`${worktreeCount} worktree${worktreeCount === 1 ? "" : "s"} will be removed.`);
-  }
-  return { title, body: parts.join(" "), confirmLabel: "Close project" };
-}
-
 // ===== On-call CTO voice UI build flag (BET-1191) =====
 //
 // The voice-call feature is being rebuilt on a different stack; until then its
@@ -4471,102 +3977,6 @@ export function voiceUiEnabled(voiceFlag: string | undefined): boolean {
 /** The one read of the build-time flag. Off by default; a developer turns the
  *  voice UI on with `VITE_MANTA_VOICE=1 npm run dev`. */
 export const voiceUi: boolean = voiceUiEnabled(import.meta.env.VITE_MANTA_VOICE);
-
-// ===== Endpoint health formatting (BET-1537 S5, §W9) =====
-//
-// ONE pure home for every word and number the endpoint-health surfaces show —
-// the issue's test list: "chatUtils-style pure helpers for any formatting, do
-// not inline logic in the component". The labels come from the shared
-// providerHealthLabel module (also read server-side), so the UI's words are
-// the same words the router's verdict copy uses.
-
-/** The retry-cooldown minutes for a rate-limited endpoint entry, or null when
- *  there is no active deadline. Always ≥1 so the UI never shows "retry in 0m". */
-export function formatRetryMinutes(retryInMs: number | null | undefined): number | null {
-  return typeof retryInMs === "number" && retryInMs > 0 ? Math.max(1, Math.ceil(retryInMs / 60_000)) : null;
-}
-
-/** A compact human age for a timestamp ("just now", "5m ago", "3h ago",
- *  "6d ago"). Pure: the caller supplies now. Named formatAgeAt to stay clear
- *  of the pre-existing elapsed-ms formatAge above. */
-export function formatAgeAt(ts: number | null | undefined, nowMs: number): string | null {
-  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return null;
-  const delta = Math.max(0, nowMs - ts);
-  if (delta < 60_000) return "just now";
-  const minutes = Math.floor(delta / 60_000);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-/** The one-line summary for an endpoint's register detail — the Accounts
- *  custom-row line and the per-model badges both render through this, so
- *  neither can drift from the other. Carries, when present: the state label,
- *  the rate-limit deadline, the exclusion reason (HTTP status / error name),
- *  and the §W9 window activity (last success, attempts + success rate). */
-export function formatEndpointStateLine(
-  detail: {
-    state: string;
-    retryInMs?: number | null;
-    reason?: { httpStatus?: number | null; errorName?: string | null } | null;
-    lastSuccessAt?: number | null;
-    attempts?: number | null;
-    successes?: number | null;
-  } | null | undefined,
-  nowMs: number,
-): string {
-  if (!detail || typeof detail.state !== "string") return "";
-  const parts: string[] = [];
-  const label = endpointStateLabel(detail.state) ?? detail.state;
-  parts.push(label);
-  const retryMin = formatRetryMinutes(detail.retryInMs);
-  if (retryMin != null) parts.push(`retry in ${retryMin}m`);
-  const status = detail.reason?.httpStatus;
-  const errorName = detail.reason?.errorName;
-  if (typeof status === "number" && Number.isFinite(status)) parts.push(`HTTP ${status}`);
-  else if (typeof errorName === "string" && errorName) parts.push(errorName);
-  const lastSuccess = formatAgeAt(detail.lastSuccessAt, nowMs);
-  if (lastSuccess) parts.push(`last success ${lastSuccess}`);
-  const attempts = typeof detail.attempts === "number" ? detail.attempts : null;
-  const successes = typeof detail.successes === "number" ? detail.successes : null;
-  if (attempts != null && attempts > 0) {
-    const pct = Math.round(((successes ?? 0) / attempts) * 100);
-    parts.push(`${attempts} attempt${attempts === 1 ? "" : "s"} · ${pct}% success in window`);
-  }
-  return parts.join(" · ");
-}
-
-/** The no-healthy-endpoint verdict's user-visible copy (§W9): names WHAT was
- *  excluded and WHY (the router's structured per-key states, worded through
- *  the shared labels), plus the way out. Falls back to the plain key list for
- *  an older box whose decision carries no `excludedWhy`. Pure — the banner
- *  renders it verbatim. */
-export function formatNoHealthyEndpointCopy(
-  decision: {
-    excluded?: string[];
-    excludedWhy?: Record<string, { endpoint: string | null; provider: string | null }>;
-  } | null | undefined,
-): string {
-  const excluded = Array.isArray(decision?.excluded) ? decision!.excluded! : [];
-  if (excluded.length === 0) {
-    return "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.";
-  }
-  const why = decision?.excludedWhy ?? {};
-  const named = excluded
-    .map((key) => {
-      const entry = why[key];
-      if (!entry) return key;
-      const bits: string[] = [];
-      const ep = typeof entry.endpoint === "string" ? endpointStateLabel(entry.endpoint) : null;
-      if (ep) bits.push(ep);
-      const pv = typeof entry.provider === "string" ? providerStateLabel(entry.provider) : null;
-      if (pv) bits.push(pv);
-      return bits.length > 0 ? `${key} (${bits.join(", ")})` : key;
-    })
-    .join(", ");
-  return `Auto couldn't pick a healthy model — ${named} excluded. The turn was not sent; switch off Auto, reset health below, or pick a model to send.`;
-}
 
 /** The distinct provider ids behind the verdict's excluded endpoint keys —
  *  the providers the banner's inline reset covers. */

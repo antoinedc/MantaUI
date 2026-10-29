@@ -710,6 +710,25 @@ async function mountFailingSubmit(
     await h.flush();
   });
 
+  it("a turn end in the box's real order (running:false, then turnComplete) refetches the transcript exactly once", async () => {
+    h = mountCto();
+    await h.flush();
+    // A receipt-driven refetch timer left by the PREVIOUS test (250 ms + the 300 ms debounce) lands on this mock: let it
+    // pass so only this turn's end is counted.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 700));
+    });
+    const base = (api.calls.opencodeMessages ?? []).length;
+    await emitStreamAndFlush(bus, h, { sub: "running", sessionId: SESSION, payload: { running: true } });
+    await emitStreamAndFlush(bus, h, { sub: "running", sessionId: SESSION, payload: { running: false } });
+    await emitStreamAndFlush(bus, h, { sub: "turnComplete", sessionId: SESSION, payload: { complete: true, running: false } });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 1100));
+    });
+    await h.flush();
+    expect((api.calls.opencodeMessages ?? []).length - base).toBe(1);
+  });
+
   it("a pending question renders exactly once — pinned stack, not duplicated inline", async () => {
     h = mountCto();
     await h.flush();

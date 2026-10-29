@@ -18,7 +18,8 @@ import { Callout } from "./Callout";
 import { Checkbox } from "./Checkbox";
 import { formatResetAt, formatResetDistance, formatTokens } from "./chatUtils";
 import { reconcileResumeSelection } from "./usageResume";
-import { UPDATE_YOUR_BOX, isUnknownChannel } from "./modelsPicker";
+import { isUnknownChannel } from "./modelsPicker";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 import type { UsageResumeApplyReply, UsageResumeRowView, UsageResumeView } from "../shared/types";
 
 const PLAN_DEBOUNCE_MS = 150;
@@ -158,7 +159,7 @@ export function UsageResumeModal({ open, onClose }: { open: boolean; onClose: ()
         </div>
 
         {loaded.state === "unsupported" ? (
-          <p className="px-5 py-4 text-body text-text-faint">{UPDATE_YOUR_BOX}</p>
+          <p className="px-5 py-4"><UpdateBoxNote className="text-body text-text-faint" /></p>
         ) : loaded.state === "error" ? (
           <p role="alert" className="px-5 py-4 text-body text-danger">
             Couldn't load the list — {loaded.message}

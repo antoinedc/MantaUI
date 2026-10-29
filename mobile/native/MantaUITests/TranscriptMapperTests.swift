@@ -71,6 +71,17 @@ final class TranscriptMapperTests: XCTestCase {
         )
     }
 
+    /// The box's canonical media entry for a shown handle (what `view.media` carries).
+    private func mediaView(_ handle: String, path: String) -> TranscriptMediaView {
+        TranscriptMediaView(id: "media:h:\(handle)", path: path, mime: "image/png", aspectRatio: 16.0 / 9.0, size: 1234, handle: handle)
+    }
+
+    private func withMedia(_ message: OpencodeMessage, _ media: [TranscriptMediaView]) -> OpencodeMessage {
+        var copy = message
+        copy.view = TranscriptMessageView(media: media)
+        return copy
+    }
+
     private func showPart(_ messageID: String, handle: String?, path: String) -> OpencodePart {
         var input: [String: JSONValue] = ["path": .string(path)]
         if let handle { input["handle"] = .string(handle) }
@@ -81,7 +92,8 @@ final class TranscriptMapperTests: XCTestCase {
     }
 
     private func map(_ messages: [OpencodeMessage], _ options: TranscriptMapOptions = TranscriptMapOptions()) -> [TranscriptBlock] {
-        ChatTranscriptMapper.blocks(from: messages, voiceNotes: [], widgets: [], options: options)
+        // The box stamps each message's turn/truncation view (WS11 D8); the fixture does it the box's way.
+        ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(BoxViewFixture.stamp(messages, running: options.running)), voiceNotes: [], widgets: [], options: options)
     }
 
     private func mediaEntries(_ blocks: [TranscriptBlock]) -> [TranscriptMediaEntry] {
@@ -134,7 +146,7 @@ final class TranscriptMapperTests: XCTestCase {
         state.observeRunning(true)
         state.apply(TranscriptMediaFrame(action: "show", messageID: "A", width: 10, height: 10, path: "/home/u/x.png", mime: "image/png"), now: t0)
         let blocks = map([user("u1"), a], TranscriptMapOptions(liveMedia: state.vended()))
-        guard case .file = blocks[1], case .prose(let prose, _) = blocks[2] else {
+        guard case .file = blocks[1], case .prose(let prose, _, _) = blocks[2] else {
             return XCTFail("expected media then prose, got \(blocks)")
         }
         XCTAssertEqual(prose, "here it is")
@@ -152,8 +164,9 @@ final class TranscriptMapperTests: XCTestCase {
         let liveOnly = map([user("u1"), a], TranscriptMapOptions(liveMedia: state.vended()))
         XCTAssertEqual(mediaEntries(liveOnly).map(\.id), ["media:h:ab12"])
 
-        // Canonical: both parts are in the transcript.
-        let canonical = map([user("u1"), a, b], TranscriptMapOptions(liveMedia: state.vended()))
+        // Canonical: the box reconstructed the entry on the begin's message (`view.media`).
+        let aOwned = withMedia(a, [mediaView("ab12", path: "/home/u/cat.png")])
+        let canonical = map([user("u1"), aOwned, b], TranscriptMapOptions(liveMedia: state.vended()))
         XCTAssertEqual(mediaEntries(canonical).map(\.id), ["media:h:ab12"])
         XCTAssertEqual(mediaEntries(canonical).first?.ownerMessageID, "A")
         for blocks in [liveOnly, canonical] {
@@ -164,7 +177,8 @@ final class TranscriptMapperTests: XCTestCase {
     }
 
     func testMediaRowIdsAreIdenticalAcrossTwoMappings() {
-        let a = assistant("A", parts: [beginPart("A", handle: "ab12"), showPart("A", handle: "ab12", path: "/home/u/cat.png")])
+        let a = withMedia(assistant("A", parts: [beginPart("A", handle: "ab12"), showPart("A", handle: "ab12", path: "/home/u/cat.png")]),
+                          [mediaView("ab12", path: "/home/u/cat.png")])
         let first = uniqueTranscriptRows(map([user("u1"), a])).map(\.id)
         let second = uniqueTranscriptRows(map([user("u1"), a])).map(\.id)
         XCTAssertEqual(first, second)
@@ -226,7 +240,7 @@ final class TranscriptMapperTests: XCTestCase {
         state.apply(TranscriptMediaFrame(action: "show", handle: "ab12", messageID: "B", path: "/home/u/cat.png", mime: "image/png"), now: t0)
         let messages = [
             user("u1"),
-            assistant("A", parts: [beginPart("A", handle: "ab12")]),
+            withMedia(assistant("A", parts: [beginPart("A", handle: "ab12")]), [mediaView("ab12", path: "/home/u/cat.png")]),
             assistant("B", parts: [showPart("B", handle: "ab12", path: "/home/u/cat.png")]),
         ]
         let entries = mediaEntries(map(messages, TranscriptMapOptions(liveMedia: state.vended())))
@@ -370,7 +384,7 @@ final class TranscriptMapperTests: XCTestCase {
             stepFinish("m", reason: "model_context_window_exceeded"),
         ], tokens: output(5))
         let blocks = map(slim([user("u1"), m]))
-        XCTAssertEqual(footers(blocks).first?.truncation, .contextWall)
+        XCTAssertEqual(footers(blocks).first?.truncation?.kind, "context-wall")
     }
 
     func testASlimTranscriptHasNoReasoningRowsEvenWithTheSwitchOn() {
@@ -443,14 +457,14 @@ final class TranscriptMapperTests: XCTestCase {
         XCTAssertNil(all[0].summary)
         XCTAssertFalse(all[0].isTurnEnd)
         XCTAssertEqual(all[0].turnText, "", "no reply menu on a warning-only footer")
-        XCTAssertEqual(all[0].truncation, .outputCap)
+        XCTAssertEqual(all[0].truncation?.kind, "output-cap")
         XCTAssertTrue(all[1].isTurnEnd)
         XCTAssertEqual(all[1].turnText, "cut off\n\ndone")
     }
 
     func testALiveTruncationThenAnIncompleteSnapshotGivesNoFooterAndTheNoticeStays() {
         let incomplete = assistant("m", completed: nil, parts: [text("m", "partial")])
-        let live = TranscriptLiveTruncation(messageID: "m", kind: .outputCap)
+        let live = TranscriptLiveTruncation(messageID: "m", view: TranscriptTruncationView(kind: "output-cap", label: "truncated (output limit)", hint: "H"))
         let blocks = map([user("u1"), incomplete], TranscriptMapOptions(liveTruncation: live))
         XCTAssertTrue(footers(blocks).isEmpty)
         XCTAssertTrue(ChatTranscriptMapper.footerTruncationMessageIDs(blocks).isEmpty, "WS02 keeps its notice")
@@ -458,16 +472,16 @@ final class TranscriptMapperTests: XCTestCase {
 
     func testACompletedMessageWithNoStepFinishTakesTheLiveKindAndIsInTheSet() {
         let m = assistant("m", parts: [text("m", "x")])
-        let live = TranscriptLiveTruncation(messageID: "m", kind: .outputCap)
+        let live = TranscriptLiveTruncation(messageID: "m", view: TranscriptTruncationView(kind: "output-cap", label: "truncated (output limit)", hint: "H"))
         let blocks = map([user("u1"), m], TranscriptMapOptions(liveTruncation: live))
-        XCTAssertEqual(footers(blocks).first?.truncation, .outputCap)
+        XCTAssertEqual(footers(blocks).first?.truncation?.kind, "output-cap")
         XCTAssertEqual(ChatTranscriptMapper.footerTruncationMessageIDs(blocks), ["m"])
     }
 
     func testALiveOnlyTruncationOnANonFinalMessageIsAWarningOnlyFooter() {
         let m = assistant("m", parts: [text("m", "step")])
         let n = assistant("n", created: 3_000, completed: 4_000, parts: [text("n", "next")])
-        let live = TranscriptLiveTruncation(messageID: "m", kind: .contextWall)
+        let live = TranscriptLiveTruncation(messageID: "m", view: TranscriptTruncationView(kind: "context-wall", label: "truncated (context full)", hint: "H"))
         let blocks = map([user("u1"), m, n], TranscriptMapOptions(liveTruncation: live))
         let all = footers(blocks)
         XCTAssertEqual(all.first?.messageID, "m")
@@ -483,7 +497,7 @@ final class TranscriptMapperTests: XCTestCase {
     }
 
     func testALiveTruncationForAnotherMessageDoesNotAffectThisOne() {
-        let live = TranscriptLiveTruncation(messageID: "other", kind: .outputCap)
+        let live = TranscriptLiveTruncation(messageID: "other", view: TranscriptTruncationView(kind: "output-cap", label: "truncated (output limit)", hint: "H"))
         let blocks = map([user("u1"), assistant("m", parts: [text("m", "x")])], TranscriptMapOptions(liveTruncation: live))
         XCTAssertNil(footers(blocks).first?.truncation)
     }
@@ -496,8 +510,8 @@ final class TranscriptMapperTests: XCTestCase {
 
     func testTheCanonicalKindBeatsTheLiveOne() {
         let m = assistant("m", parts: [text("m", "x"), stepFinish("m", reason: "length")], tokens: output(3))
-        let live = TranscriptLiveTruncation(messageID: "m", kind: .contextWall)
-        XCTAssertEqual(footers(map([user("u1"), m], TranscriptMapOptions(liveTruncation: live))).first?.truncation, .outputCap)
+        let live = TranscriptLiveTruncation(messageID: "m", view: TranscriptTruncationView(kind: "context-wall", label: "truncated (context full)", hint: "H"))
+        XCTAssertEqual(footers(map([user("u1"), m], TranscriptMapOptions(liveTruncation: live))).first?.truncation?.kind, "output-cap")
     }
 
     func testFooterIdsAreStableAcrossMappings() {
@@ -537,9 +551,42 @@ final class TranscriptMapperTests: XCTestCase {
         XCTAssertEqual(footers(map(messages)).last?.turnText, "review passed")
     }
 
+    // MARK: - D8: the footer comes from the box's view only
+
+    func testAnUnstampedTranscriptHasNoFooterAndNoReloadTimeTruncation() {
+        // An older box (no `view`): the phone derives nothing, not even from a max_tokens finish.
+        let m = assistant("a1", created: 1_000, completed: 61_000, parts: [text("a1", "hi"), stepFinish("a1", reason: "max_tokens")], tokens: output(5))
+        let raw = ChatTranscriptMapper.blocks(from: [user("u1"), m], voiceNotes: [], widgets: [], options: TranscriptMapOptions())
+        XCTAssertTrue(footers(raw).isEmpty)
+    }
+
+    func testLiveBeforeRefetchTheFooterShowsTheLiveLabelAndHintThenTheCanonicalViewTakesOverWithTheSameRowID() {
+        let m = assistant("m", parts: [text("m", "x")])
+        let live = TranscriptLiveTruncation(messageID: "m", view: TranscriptTruncationView(kind: "output-cap", label: "truncated (output limit)", hint: "live hint"))
+        let before = footers(ChatTranscriptMapper.blocks(from: [user("u1"), m], voiceNotes: [], widgets: [], options: TranscriptMapOptions(liveTruncation: live)))
+        XCTAssertEqual(before.first?.truncation?.label, "truncated (output limit)")
+        XCTAssertEqual(before.first?.truncation?.hint, "live hint")
+        var canonical = m
+        canonical.view = TranscriptMessageView(truncation: TranscriptTruncationView(kind: "output-cap", label: "truncated (output limit)", hint: "box hint"))
+        let afterBlocks = ChatTranscriptMapper.blocks(from: [user("u1"), canonical], voiceNotes: [], widgets: [], options: TranscriptMapOptions(liveTruncation: live))
+        XCTAssertEqual(footers(afterBlocks).first?.truncation?.hint, "box hint", "the canonical view wins")
+        let beforeID = uniqueTranscriptRows(ChatTranscriptMapper.blocks(from: [user("u1"), m], voiceNotes: [], widgets: [], options: TranscriptMapOptions(liveTruncation: live))).last?.id
+        XCTAssertEqual(uniqueTranscriptRows(afterBlocks).last?.id, beforeID)
+        XCTAssertEqual(beforeID, "tf-m")
+    }
+
+    func testAnOldBoxsLiveFrameHasNoHintSoThePillIsPlainText() {
+        let m = assistant("m", parts: [text("m", "x")])
+        let live = TranscriptLiveTruncation.from(payload: StreamTruncationPayload(kind: "output-cap", label: "truncated (output limit)", messageID: "m"))
+        let blocks = ChatTranscriptMapper.blocks(from: [user("u1"), m], voiceNotes: [], widgets: [], options: TranscriptMapOptions(liveTruncation: live))
+        let f = footers(blocks).first
+        XCTAssertEqual(f?.truncation?.label, "truncated (output limit)")
+        XCTAssertNil(f?.truncation?.hint, "no explain action")
+    }
+
     func testTheFooterMessageIDsHelperReadsOnlyTruncatedFooters() {
         let blocks: [TranscriptBlock] = [
-            .turnFooter(TranscriptTurnFooter(messageID: "a", summary: nil, truncation: .outputCap, isTurnEnd: false, turnText: "")),
+            .turnFooter(TranscriptTurnFooter(messageID: "a", summary: nil, truncation: TranscriptTruncationView(kind: "output-cap", label: "x"), isTurnEnd: false, turnText: "")),
             .turnFooter(TranscriptTurnFooter(messageID: "b", summary: "x", truncation: nil, isTurnEnd: true, turnText: "t")),
         ]
         XCTAssertEqual(ChatTranscriptMapper.footerTruncationMessageIDs(blocks), ["a"])
@@ -549,9 +596,9 @@ final class TranscriptMapperTests: XCTestCase {
 
     private func actions(onQuote: ((String, QuoteDestination) -> Void)?) -> TranscriptCardActions {
         TranscriptCardActions(
-            messages: [], buildModelName: "", planURL: nil,
+            buildModelName: "",
             onPermissionReply: { _, _ in }, onQuestionSubmit: { _, _ in }, onQuestionReject: { _ in },
-            onBuildHere: { _, _ in }, onKeepPlanning: { _, _ in }, onOpenPage: {},
+            onBuildHere: { _, _ in }, onKeepPlanning: { _, _ in }, onOpenPage: { _ in },
             onQuote: onQuote
         )
     }

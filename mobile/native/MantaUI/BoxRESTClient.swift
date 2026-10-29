@@ -66,7 +66,7 @@ struct BoxRESTClient: Sendable {
     /// device. Refusing here protects every caller; it reports as a transport
     /// failure (nothing was revoked).
     func revokeDevice(id: String) async -> (status: Int?, transportError: Bool) {
-        guard BoxDevices.isRevocableID(id) else { return (nil, true) }
+        guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return (nil, true) }
         guard var parts = URLComponents(url: serverURL.appendingPathComponent("auth").appendingPathComponent("revoke"),
                                         resolvingAgainstBaseURL: false) else {
             return (nil, true)

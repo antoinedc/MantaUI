@@ -188,138 +188,73 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(UsageMeters.providerLabel(""), "")
     }
 
-    // MARK: - staleChipLabel (BET-969)
+    // MARK: - staleChipLabel / isCold (WS11 D2 — the box sends the instant)
 
-    private func cache(_ isStale: Bool, staleTokens: Double) -> StreamCachePayload {
-        StreamCachePayload(isStale: isStale, idleMs: 0, staleTokens: staleTokens, ttlMs: 0)
+    private func cache(staleAt: Double?, staleTokens: Double) -> StreamCachePayload {
+        StreamCachePayload(isStale: false, idleMs: 0, staleTokens: staleTokens, ttlMs: 300_000, lastCompleted: 1_000, staleAt: staleAt)
     }
+
+    private func at(_ ms: Double) -> Date { Date(timeIntervalSince1970: ms / 1000) }
 
     func testStaleChipNilWhenNoCache() {
-        XCTAssertNil(UsageMeters.staleChipLabel(nil))
+        XCTAssertNil(UsageMeters.staleChipLabel(nil, now: at(5_000)))
     }
 
-    /// A warm cache never labels, regardless of size.
-    func testStaleChipNilWhenWarm() {
-        XCTAssertNil(UsageMeters.staleChipLabel(cache(false, staleTokens: 900_000)))
+    func testColdFlipsAtTheBoxInstantWithoutANewFrame() {
+        let c = cache(staleAt: 301_000, staleTokens: 344_000)
+        XCTAssertNil(UsageMeters.staleChipLabel(c, now: at(300_999)))
+        XCTAssertEqual(UsageMeters.staleChipLabel(c, now: at(301_000)), "344k cold")
+        XCTAssertEqual(UsageMeters.staleChipLabel(c, now: at(900_000)), "344k cold")
     }
 
-    func testStaleChipFormatsColdTokens() {
-        XCTAssertEqual(UsageMeters.staleChipLabel(cache(true, staleTokens: 344_000)), "344k cold")
+    func testNoStaleAtIsNeverCold() {
+        XCTAssertFalse(UsageMeters.isCold(cache(staleAt: nil, staleTokens: 900_000), now: at(9_999_999)))
     }
 
-    /// Proves the chip delegates to `formatTokens` rather than rounding on its
-    /// own: whatever the formatter emits is what the label carries.
-    func testStaleChipDelegatesToFormatTokens() {
-        let value: Double = 148_000
-        let label = UsageMeters.staleChipLabel(cache(true, staleTokens: value))
-        XCTAssertEqual(label, "\(UsageMeters.formatTokens(value)) cold")
+    /// An old box's frame (no `staleAt`) decodes and is never cold; a new frame decodes both.
+    func testCachePayloadDecodesOldAndNewShapes() throws {
+        let old = try JSONDecoder().decode(StreamCachePayload.self, from: Data(#"{"isStale":false,"idleMs":0,"staleTokens":10,"ttlMs":300000}"#.utf8))
+        XCTAssertNil(old.staleAt)
+        XCTAssertFalse(UsageMeters.isCold(old, now: at(9_999_999_999)))
+        let new = try JSONDecoder().decode(StreamCachePayload.self, from: Data(#"{"isStale":false,"idleMs":0,"staleTokens":10,"ttlMs":300000,"lastCompleted":5,"staleAt":300005}"#.utf8))
+        XCTAssertEqual(new.staleAt, 300_005)
+        XCTAssertEqual(new.lastCompleted, 5)
     }
 
-    // MARK: - recompute (BET-1086 — selected-model context breakdown)
-
-    /// A payload shaped like the box's `opencode:context` — raw counts plus the
-    /// derived `pct`/`segments` the box computed against the LAST-REPLY model's
-    /// window. `totalInput` mirrors the box summing the three disjoint buckets.
-    private func payload(fresh: Double = 0, read: Double = 0, write: Double = 0,
-                         pct: Double = 0, hasLimit: Bool = true,
-                         segments: [StreamContextSegment]) -> StreamContextPayload {
-        StreamContextPayload(
-            freshInput: fresh,
-            cacheRead: read,
-            cacheWrite: write,
-            totalInput: fresh + read + write,
-            pct: pct,
-            hasLimit: hasLimit,
-            segments: segments
-        )
+    func testContextPayloadDecodesTheSelectedModelFields() throws {
+        let json = #"{"freshInput":1,"cacheRead":2,"cacheWrite":3,"totalInput":6,"pct":1,"hasLimit":true,"segments":[],"limit":1000000,"model":{"providerID":"anthropic","modelID":"opus"},"basis":"selected"}"#
+        let ctx = try JSONDecoder().decode(StreamContextPayload.self, from: Data(json.utf8))
+        XCTAssertEqual(ctx.limit, 1_000_000)
+        XCTAssertEqual(ctx.model, StreamContextModel(providerID: "anthropic", modelID: "opus"))
+        XCTAssertEqual(ctx.basis, "selected")
+        let old = try JSONDecoder().decode(StreamContextPayload.self, from: Data(#"{"freshInput":1,"cacheRead":2,"cacheWrite":3,"totalInput":6,"pct":1,"hasLimit":true,"segments":[]}"#.utf8))
+        XCTAssertNil(old.limit)
+        XCTAssertNil(old.basis)
     }
 
-    /// The reported bug, stated as a test: a 200k-window payload (the box read
-    /// 40k tokens, 20% of 200k) recomputed against the user's SELECTED 1M
-    /// window is one fifth as full — the percentage changes with the model,
-    /// with no new reply and no refetch.
-    func testRecomputeChangesPctWithSelectedModel() {
-        let s = payload(fresh: 40_000, pct: 20,
-                        segments: [StreamContextSegment(kind: "fresh", pct: 20)])
-        let r = UsageMeters.recompute(s, limit: 1_000_000)
-        XCTAssertEqual(r.pct, 4)
-        XCTAssertEqual(r.segments.first { $0.kind == "fresh" }?.pct, 4)
-        XCTAssertEqual(r.hasLimit, true)
+    // WS11 D2 review #7: the box sends `pct: null` when the selected model's limit is unknown; it must decode (a
+    // failed decode blanked the meter and made the unknown-limit UI unreachable).
+    func testContextPayloadDecodesAnUnknownLimit() throws {
+        let json = #"{"freshInput":1,"cacheRead":2,"cacheWrite":3,"totalInput":6,"pct":null,"hasLimit":false,"segments":[],"model":{"providerID":"x","modelID":"y"},"basis":"selected"}"#
+        let ctx = try JSONDecoder().decode(StreamContextPayload.self, from: Data(json.utf8))
+        XCTAssertNil(ctx.pct)
+        XCTAssertFalse(ctx.hasLimit)
+        XCTAssertFalse(UsageMeters.shouldShowContext(pct: ctx.pct))
     }
 
-    /// The box drives the unknown signal (`hasLimit:false`), and recompute must
-    /// preserve it — it never re-derives "no max context" from the SELECTED
-    /// model's window (BET-1138: use hasLimit from the payload, no second
-    /// unknown representation). Raw token totals ride through, derived fields
-    /// stay empty.
-    func testRecomputePreservesUnknownWhenPayloadHasNoLimit() {
-        let s = payload(fresh: 10_000, read: 30_000, write: 5_000, pct: 0,
-                        hasLimit: false, segments: [])
-        let r = UsageMeters.recompute(s, limit: 1_000_000)
-        XCTAssertEqual(r.hasLimit, false)
-        XCTAssertEqual(r.pct, 0)
-        XCTAssertEqual(r.segments, [])
-        XCTAssertEqual(r.totalInput, 45_000)
+    // Decision 4: the sheet names the model the BOX measured, and says so when it was the last reply's.
+    func testContextSheetNamesTheMeasuredModel() {
+        let models = [OpencodeModel(id: "opus", providerID: "anthropic", name: "Claude Opus")]
+        let opus = StreamContextModel(providerID: "anthropic", modelID: "opus")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: opus, basis: "selected", fallback: "Other"), "Claude Opus")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: opus, basis: "last-used", fallback: "Other"), "Claude Opus (last reply's model)")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: StreamContextModel(providerID: "x", modelID: "mystery"), basis: nil, fallback: "Other"), "mystery")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: nil, basis: nil, fallback: "Other"), "Other", "an older box sends no model")
     }
 
-    /// `limit: nil` (an unknown SELECTED-model window) does NOT turn a known
-    /// box reading into "no max context": the box already flagged hasLimit:true,
-    /// so recompute keeps it and sizes the bar against the assumed 200k — the
-    /// unknown-type signal is the box's hasLimit:false, not this pct.
-    func testRecomputeNilLimitKeepsKnownPct() {
-        let s = payload(fresh: 10_000, read: 30_000, write: 5_000, pct: 23,
-                        segments: [
-                            StreamContextSegment(kind: "fresh", pct: 5),
-                            StreamContextSegment(kind: "cacheWrite", pct: 2.5),
-                            StreamContextSegment(kind: "cacheRead", pct: 15),
-                        ])
-        let r = UsageMeters.recompute(s, limit: nil)
-        XCTAssertEqual(r.hasLimit, true)
-        XCTAssertEqual(r.pct, 23) // 45_000 / 200_000 → 22.5 → 23
-        XCTAssertEqual(r.segments.map(\.pct), [5, 2.5, 15])
-        XCTAssertEqual(r.totalInput, 45_000)
-    }
-
-    /// A zero or negative SELECTED-model limit likewise keeps a box-confirmed
-    /// hasLimit:true, bar-sized against the assumed 200k — never NaN, and
-    /// never an invented "no max context" (that stays the box's call).
-    func testRecomputeNonPositiveLimitKeepsKnownPct() {
-        let s = payload(fresh: 100_000, pct: 50,
-                        segments: [StreamContextSegment(kind: "fresh", pct: 50)])
-        for limit in [0.0, -200_000.0] {
-            let r = UsageMeters.recompute(s, limit: limit)
-            XCTAssertEqual(r.hasLimit, true)
-            XCTAssertEqual(r.pct, 50) // 100_000 / 200_000 → 50
-        }
-    }
-
-    /// The raw counts ride through untouched — only the derived fields change.
-    func testRecomputeCopiesRawCountsThrough() {
-        let s = payload(fresh: 20_000, read: 60_000, write: 20_000, pct: 50,
-                        segments: [StreamContextSegment(kind: "fresh", pct: 20)])
-        let r = UsageMeters.recompute(s, limit: 1_000_000)
-        XCTAssertEqual(r.freshInput, 20_000)
-        XCTAssertEqual(r.cacheRead, 60_000)
-        XCTAssertEqual(r.cacheWrite, 20_000)
-        XCTAssertEqual(r.totalInput, 100_000)
-    }
-
-    /// Over-context: `totalInput` clamps `pct` to 100 and the segment widths
-    /// rescale so they never sum past 100. Oracle: clamps-pct-to-100 case.
-    func testRecomputeClampsPctAndSegmentsWhenOverContext() {
-        let s = payload(fresh: 250_000, pct: 100,
-                        segments: [StreamContextSegment(kind: "fresh", pct: 125)])
-        let r = UsageMeters.recompute(s, limit: 200_000)
-        XCTAssertEqual(r.pct, 100)
-        XCTAssertLessThanOrEqual(r.segments.reduce(0) { $0 + $1.pct }, 100 + 0.001)
-    }
-
-    /// Zero tokens yields 0% and zero-width segments — never NaN.
-    func testRecomputeZeroTokensIsZeroNotNaN() {
-        let r = UsageMeters.recompute(payload(segments: []), limit: 200_000)
-        XCTAssertEqual(r.pct, 0)
-        XCTAssertFalse(r.pct.isNaN)
-        XCTAssertTrue(r.segments.allSatisfy { $0.pct == 0 })
+    func testIdleMsReadsTheInstantAgainstTheClock() {
+        let c = cache(staleAt: 301_000, staleTokens: 1)
+        XCTAssertEqual(UsageMeters.idleMs(c, now: at(61_000)), 60_000)
     }
 
     // MARK: - MeterRing clamp / isFull (BET-877)

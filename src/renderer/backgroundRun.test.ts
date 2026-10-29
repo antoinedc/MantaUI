@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpencodeMessage } from "../shared/types";
-import { MANTA_BUILTIN_NAMES, computeLiveTurn, computeTurnInfo } from "./chatUtils";
+import { MANTA_BUILTIN_NAMES, computeLiveTurn } from "./chatUtils";
 import {
   anchorBackgroundCards,
   backgroundBoxVisible,
@@ -344,14 +344,6 @@ describe("a finished background run is a turn boundary", () => {
   it("recognises the N4 message", () => {
     expect(isBackgroundResultMessage(resultMsg("m", {}))).toBe(true);
     expect(isBackgroundResultMessage(asst("a", 1, 2))).toBe(false);
-  });
-  it("the earlier turn keeps its footer; the reply to the result gets its own", () => {
-    const msgs = [user("u1", 0), asst("a1", 1, 5000), resultMsg("r1", {}), asst("a2", 600_000, 604_000)];
-    const info = computeTurnInfo(msgs, false);
-    expect(info.get("a1")?.turnDurationMs).toBe(4999);
-    expect(info.has("r1")).toBe(false);
-    // The reply's duration is its own, not a span back across the idle gap.
-    expect(info.get("a2")?.turnDurationMs).toBe(4000);
   });
   it("the live turn after a result starts at the reply, not at the old user message", () => {
     const msgs = [user("u1", 0), asst("a1", 1, 5000), resultMsg("r1", {}), asst("a2", 600_000, 604_000)];

@@ -129,7 +129,7 @@ final class TerminalSocket {
     /// the launcher is never dropped. The bearer stays in a header, never in the
     /// URL.
     nonisolated static func makeRequest(serverURL: URL, sessionKey: String, cols: Int, rows: Int, cwd: String?,
-                            launcher: SessionPtyLauncher?, token: String?) -> URLRequest? {
+                                        launcher: SessionPtyLauncher?, token: String?) -> URLRequest? {
         guard let url = TerminalURLBuilder.ptyURL(
             serverURL: serverURL, sessionKey: sessionKey, cols: cols, rows: rows, cwd: cwd, launcher: launcher
         ) else { return nil }

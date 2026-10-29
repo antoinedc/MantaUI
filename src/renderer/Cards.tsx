@@ -512,8 +512,8 @@ export function QuestionCard({
 
 // ===== Plan card (BET-951) =====
 //
-// Upgrades the plan_exit question (detected EXACTLY via isPlanExitQuestion —
-// the matching `plan_exit` tool callID, never the question text) into a
+// Upgrades the plan_exit question (detected by the BOX — `question.plan`, from the
+// matching `plan_exit` tool callID, never the question text) into a
 // dedicated card. Rendered in the transcript TAIL, the same way the question
 // cards are (it used to be pinned in the card stack). It is an unanswered ask
 // like the questions beside it, never below an ambient card.
@@ -537,7 +537,7 @@ export function PlanCard({
   onOpenInBrowser,
   planUrl = null,
 }: {
-  data: { title: string };
+  data: { title: string; steps?: number; files?: number };
   models: Array<[string, OpencodeModel[]]> | null;
   remembered: import("./chatShared").ModelSelection | null;
   sessionModel: import("./chatShared").ModelSelection | null;
@@ -656,15 +656,18 @@ export function PlanCard({
         disabled={busy !== null || atDelegateCap}
         loading={busy === "delegate" || models === null}
       />
-      <Button
-        tone="ghost"
-        onClick={onOpenInBrowser}
-        title="Open the published plan page"
-        hook="manta-plan-open-page"
-      >
-        Open page
-        <ArrowUpRight size={14} aria-hidden="true" />
-      </Button>
+      {/* Only when the box gave a page URL (it has none without a public base URL): no control without an action. */}
+      {planUrl && (
+        <Button
+          tone="ghost"
+          onClick={onOpenInBrowser}
+          title="Open the published plan page"
+          hook="manta-plan-open-page"
+        >
+          Open page
+          <ArrowUpRight size={14} aria-hidden="true" />
+        </Button>
+      )}
     </>
   );
 
@@ -675,7 +678,13 @@ export function PlanCard({
         badgeBg="var(--accent-bg)"
         badgeColor="var(--accent-tx)"
         title={data.title}
-        subtitle={buildModelName ? `Ready to build · ${buildModelName}` : "Ready to build"}
+        subtitle={[
+          buildModelName ? `Ready to build · ${buildModelName}` : "Ready to build",
+          data.steps ? `${data.steps} step${data.steps === 1 ? "" : "s"}` : null,
+          data.files ? `${data.files} file${data.files === 1 ? "" : "s"}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
         body={body}
         actions={actions}
       />

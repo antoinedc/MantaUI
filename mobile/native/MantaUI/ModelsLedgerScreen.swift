@@ -36,7 +36,7 @@ final class ModelsLedgerStore: ObservableObject {
                 phase = .updateYourBox
             }
         } catch {
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 phase = .updateYourBox
             } else {
                 phase = .failed(ModelsCapability.reason(error))

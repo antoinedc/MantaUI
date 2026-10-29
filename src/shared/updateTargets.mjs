@@ -27,7 +27,7 @@ const SERVER_FIXED = { label: "Manta Server", disruption: "reconnect" };
  *    `manual` = `desktopCheck.supported === false`. A dev build (no updater) is
  *    `ok:true, available:false, manual:true` — rendered as "not applicable",
  *    never "up to date".
- *  - server: `available` = `serverCheck.available`; `ok` = `serverCheck.ok !== false`.
+ *  - server: `available` = `serverCheck.available`; `ok` = `serverCheck != null && serverCheck.ok !== false`.
  *  - CLIs: passed straight through from `serverCheck.targets`.
  *
  * @param {object} args
@@ -76,12 +76,25 @@ export function buildUpdateTargets({
     current: serverVersion ?? null,
     latest: serverCheck?.version ?? null,
     available: serverCheck?.available === true,
-    ok: serverCheck?.ok !== false,
+    // No answer (a rejected or timed-out check) is "couldn't check", never "fine".
+    ok: serverCheck != null && serverCheck.ok !== false,
     manual: false,
     disruption: SERVER_FIXED.disruption,
   };
 
   const clis = Array.isArray(serverCheck?.targets) ? serverCheck.targets : [];
+
+  // WS11 D3 (X3): the box words the box/CLI rows (`serverCheck.view.targets`);
+  // carry that wording on each target so a client renders it as given.
+  const viewById = new Map(
+    (Array.isArray(serverCheck?.view?.targets) ? serverCheck.view.targets : []).map((v) => [v.id, v]),
+  );
+  const withView = (t) => {
+    const v = viewById.get(t.id);
+    return v ? { ...t, view: { tone: v.tone, text: v.text, hasUpdate: v.hasUpdate, versionText: v.versionText } } : t;
+  };
+  server.view = withView(server).view;
+  if (server.view === undefined) delete server.view;
 
   const opencode = clis.find((t) => t && t.id === "opencode");
   const rest = clis
@@ -89,7 +102,7 @@ export function buildUpdateTargets({
     .slice()
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 
-  return [desktop, server, ...(opencode ? [opencode] : []), ...rest];
+  return [desktop, server, ...(opencode ? [withView(opencode)] : []), ...rest.map(withView)];
 }
 
 /**
@@ -328,4 +341,27 @@ export function desktopUpdateBusy({
     };
   }
   return { busyLabel: "Downloading…", progress: null };
+}
+
+/**
+ * The status wording for ONE update row (the one shared describe function — the
+ * box uses it for the box/CLI rows, the desktop for its Electron-updater leg).
+ *
+ * Rules, in this exact order — the ordering IS the semantics:
+ *  - `!t.ok`       → error, "Couldn't check"
+ *  - `t.manual`    → muted, "Update manually"
+ *  - `t.available` → action, "Update available"
+ *  - else          → ok, "Up to date"
+ *
+ * An unanswerable check is NEVER rendered as "ok": "Up to date" and "couldn't
+ * check" would otherwise look identical (a sentence with no button).
+ *
+ * @param {object} t an UpdateTarget
+ * @returns {{ tone: "error"|"muted"|"action"|"ok", text: string }}
+ */
+export function describeUpdateTarget(t) {
+  if (!t.ok) return { tone: "error", text: "Couldn't check" };
+  if (t.manual) return { tone: "muted", text: "Update manually" };
+  if (t.available) return { tone: "action", text: "Update available" };
+  return { tone: "ok", text: "Up to date" };
 }

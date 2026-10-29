@@ -9,79 +9,24 @@ import XCTest
 
 final class SettingsUpdatesTests: XCTestCase {
 
-    // MARK: - Targets
+    // MARK: - Rows are the box's (WS11 D3 / X3)
 
-    private func cli(_ id: String, _ label: String, available: Bool = false) -> UpdateTarget {
-        UpdateTarget(id: id, label: label, current: "1.0", latest: available ? "2.0" : "1.0",
-                     available: available, disruption: id == "opencode" ? "ends-turns" : "none")
+    func testTheCheckDecodesTheBoxsRowWording() throws {
+        let json = #"{"available":true,"version":"0.0.40","view":{"targets":[{"id":"server","label":"Manta Server","tone":"action","text":"Update available","hasUpdate":true,"versionText":"0.0.39 → 0.0.40"},{"id":"claude","label":"Claude Code","tone":"error","text":"Couldn't check","hasUpdate":false,"versionText":null}]}}"#
+        let check = try JSONDecoder().decode(ServerUpdateCheck.self, from: Data(json.utf8))
+        XCTAssertEqual(check.view?.targets.map(\.id), ["server", "claude"])
+        XCTAssertEqual(check.view?.targets[0].versionText, "0.0.39 → 0.0.40")
+        XCTAssertEqual(check.view?.targets[0].hasUpdate, true)
+        XCTAssertNil(check.view?.targets[1].versionText)
+        XCTAssertEqual(UpdateTone(wire: check.view?.targets[1].tone ?? ""), .error)
     }
 
-    func testBuildOrdersServerThenOpencodeThenCLIsAlphabetically() {
-        let check = ServerUpdateCheck(
-            available: true, version: "0.0.40",
-            targets: [cli("kimi", "Kimi Code"), cli("claude", "Claude Code"), cli("opencode", "opencode"), cli("codex", "Codex")])
-        let rows = UpdateTargets.build(check: check, serverVersion: "0.0.39")
-        XCTAssertEqual(rows.map(\.id), ["server", "opencode", "claude", "codex", "kimi"])
-        XCTAssertEqual(rows[0].label, "Manta Server")
-        XCTAssertEqual(rows[0].current, "0.0.39")
-        XCTAssertEqual(rows[0].latest, "0.0.40")
-        XCTAssertTrue(rows[0].available)
-        XCTAssertEqual(rows[0].disruption, "reconnect")
-    }
-
-    func testTheDesktopRowIsNeverPresent() {
-        let check = ServerUpdateCheck(available: false, targets: [cli("desktop", "Manta Desktop"), cli("claude", "Claude Code")])
-        let rows = UpdateTargets.build(check: check, serverVersion: "1")
-        XCTAssertFalse(rows.contains { $0.id == "desktop" })
-        XCTAssertEqual(rows.map(\.id), ["server", "claude"])
-    }
-
-    func testAnOldBoxWithNoTargetsHasJustTheServerRow() {
-        let rows = UpdateTargets.build(check: ServerUpdateCheck(available: false), serverVersion: "1")
-        XCTAssertEqual(rows.map(\.id), ["server"])
-        XCTAssertTrue(rows[0].ok, "an old box's check has no `ok` — treated as true")
-    }
-
-    func testAFailedCheckIsNeverUpToDate() {
-        let rows = UpdateTargets.build(check: nil, serverVersion: "1")
-        XCTAssertFalse(rows[0].ok)
-        XCTAssertEqual(UpdateTargets.describe(rows[0]).tone, .error)
-        XCTAssertEqual(UpdateTargets.describe(rows[0]).text, "Couldn't check")
-        // …and so is a verdict that says it could not determine.
-        let notOk = UpdateTargets.build(check: ServerUpdateCheck(available: false, ok: false), serverVersion: "1")
-        XCTAssertFalse(notOk[0].ok)
-    }
-
-    // MARK: - Row wording (order is the semantics)
-
-    func testDescribeTonesAndText() {
-        XCTAssertEqual(UpdateTargets.describe(UpdateTarget(id: "a", label: "A", ok: false)).tone, .error)
-        // `!ok` wins even over `available` and `manual`.
-        XCTAssertEqual(UpdateTargets.describe(UpdateTarget(id: "a", label: "A", available: true, ok: false, manual: true)).text,
-                       "Couldn't check")
-        let manual = UpdateTargets.describe(UpdateTarget(id: "a", label: "A", available: true, manual: true))
-        XCTAssertEqual(manual.tone, .muted)
-        XCTAssertEqual(manual.text, "Update manually")
-        let available = UpdateTargets.describe(UpdateTarget(id: "a", label: "A", available: true))
-        XCTAssertEqual(available.tone, .action)
-        XCTAssertEqual(available.text, "Update available")
-        let upToDate = UpdateTargets.describe(UpdateTarget(id: "a", label: "A"))
-        XCTAssertEqual(upToDate.tone, .ok)
-        XCTAssertEqual(upToDate.text, "Up to date")
-    }
-
-    func testHasUpdateNeedsOkAvailableAndNotManual() {
-        XCTAssertTrue(UpdateTargets.hasUpdate(UpdateTarget(id: "a", label: "A", available: true)))
-        XCTAssertFalse(UpdateTargets.hasUpdate(UpdateTarget(id: "a", label: "A", available: true, manual: true)))
-        XCTAssertFalse(UpdateTargets.hasUpdate(UpdateTarget(id: "a", label: "A", available: true, ok: false)))
-        XCTAssertFalse(UpdateTargets.hasUpdate(UpdateTarget(id: "a", label: "A")))
-    }
-
-    func testVersionText() {
-        XCTAssertEqual(UpdateTargets.versionText(UpdateTarget(id: "a", label: "A", current: "1", latest: "2")), "1 → 2")
-        XCTAssertEqual(UpdateTargets.versionText(UpdateTarget(id: "a", label: "A", current: "1", latest: "1")), "1")
-        XCTAssertEqual(UpdateTargets.versionText(UpdateTarget(id: "a", label: "A", latest: "2")), "2")
-        XCTAssertNil(UpdateTargets.versionText(UpdateTarget(id: "a", label: "A")))
+    func testAnOlderBoxSendsNoViewAndAnUnknownToneIsNeverOk() throws {
+        let check = try JSONDecoder().decode(ServerUpdateCheck.self, from: Data(#"{"available":true,"version":"0.0.40"}"#.utf8))
+        XCTAssertNil(check.view)
+        XCTAssertEqual(UpdateTone(wire: "something-new"), .muted)
+        XCTAssertEqual(UpdateTone(wire: "ok"), .ok)
+        XCTAssertEqual(UpdateTone(wire: "action"), .action)
     }
 
     func testLandedIsAnEdgeAndUnknownNeverCounts() {

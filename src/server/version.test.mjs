@@ -124,6 +124,14 @@ test("writeVersionResponse carries the capabilities list (master D25)", () => {
   assert.ok(body.capabilities.includes("chat-cards-1"));
 });
 
+test("GET /api/version and the server:version RPC carry the SAME capability list (spec D1)", async () => {
+  let captured = null;
+  writeVersionResponse({ writeHead() {}, end(body) { captured = body; } }, { version: "1.2.3" });
+  const { buildHandlers } = await import("./rpc.mjs");
+  const handlers = buildHandlers({ tmux: {}, oc: {}, pty: {}, bus: {}, local: {}, syncState: {} });
+  assert.deepEqual(JSON.parse(captured).capabilities, handlers["server:version"]().capabilities);
+});
+
 test("writeVersionResponse defaults opencodeVersion to the pinned OpenCode version (never the 0.0.0 fallback)", () => {
   // The field used to come from an `opencode --version` shell-out that fails
   // under the service's PATH, so a healthy V2 box reported "0.0.0" next to

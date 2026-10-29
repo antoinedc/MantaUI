@@ -4,6 +4,7 @@
 // control must end in a reported success or a specific error.
 
 import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
+import { accountsErrorMessage, seatSignInFailureMessage } from "../server/accountsCopy.mjs";
 import { act } from "react";
 import { installCanvasStub, mount, installMockApi, resetStore, buttonByText, type Harness } from "./testHarness";
 import { useStore } from "./store";
@@ -87,7 +88,7 @@ describe("SeatsPanel", () => {
   });
 
   it("mode toggle failure shows the reason and changes nothing", async () => {
-    await openPanel(threeSeatView(), { accountsSetMode: () => Promise.resolve({ error: "unknown-provider" }) });
+    await openPanel(threeSeatView(), { accountsSetMode: () => Promise.resolve({ error: "unknown-provider", message: accountsErrorMessage("unknown-provider") }) });
     await click(buttonByText(h!, "Manual"));
     expect(h!.container.querySelector('[role="alert"]')?.textContent).toContain("doesn't support");
     expect(useStore.getState().accounts[0].mode).toBe("auto");
@@ -121,7 +122,7 @@ describe("SeatsPanel", () => {
     renamed.accounts[0].seats[1] = { ...renamed.accounts[0].seats[1], label: "Desk" };
     let n = 0;
     const m = await openPanel(threeSeatView(), {
-      accountsRename: () => Promise.resolve(n++ === 0 ? { error: "invalid-label" } : renamed),
+      accountsRename: () => Promise.resolve(n++ === 0 ? { error: "invalid-label", message: accountsErrorMessage("invalid-label") } : renamed),
     });
     await click(h!.container.querySelector('button[aria-label="Rename Seat 2"]'));
     const input = h!.container.querySelector('input[aria-label="Rename Seat 2"]') as HTMLInputElement;
@@ -174,7 +175,7 @@ describe("SeatsPanel", () => {
   });
 
   it("a refused removal reports the server's reason", async () => {
-    await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve({ error: "last-seat" }) });
+    await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve({ error: "last-seat", message: accountsErrorMessage("last-seat") }) });
     await click(rowButton("s2", "Remove"));
     await click(Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Remove" && !b.disabled && b.className.includes("danger")));
     expect(h!.container.querySelector('[role="alert"]')?.textContent).toContain("only login on this box");
@@ -292,7 +293,7 @@ describe("AddSeatFlow", () => {
 
   it("duplicate-login: a clear message and Try again restarts", async () => {
     const add = vi.fn(() => Promise.resolve({ seatId: "n1", connect: { shape: "oauth-auto", url: "https://l", instructions: "" } }));
-    await flow({ accountsAddSeat: add, accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "duplicate-login" }) });
+    await flow({ accountsAddSeat: add, accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "duplicate-login", message: seatSignInFailureMessage({ error: "duplicate-login" }) }) });
     await tick();
     expect(h!.text()).toContain("already added");
     await click(buttonByText(h!, "Try again"));
@@ -300,7 +301,7 @@ describe("AddSeatFlow", () => {
   });
 
   it("login-failed: says the sign-in didn't complete", async () => {
-    await flow({ accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "login-failed" }) });
+    await flow({ accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "login-failed", message: seatSignInFailureMessage({ error: "login-failed" }) }) });
     await tick();
     expect(h!.text()).toContain("sign-in failed");
     expect(h!.text()).not.toContain("15 minutes");
@@ -343,7 +344,7 @@ describe("AddSeatFlow", () => {
   });
 
   it("add-seat error → message; an unsupported connect shape → failure, seat handed back", async () => {
-    await flow({ accountsAddSeat: () => Promise.resolve({ error: "login-failed" }) });
+    await flow({ accountsAddSeat: () => Promise.resolve({ error: "login-failed", message: accountsErrorMessage("login-failed") }) });
     expect(h!.text()).toContain("Sign-in failed");
     h!.unmount();
     const cancelSeat = vi.fn(() => Promise.resolve({ ok: true }));
@@ -409,7 +410,7 @@ describe("AddSeatFlow wait limit and failure reasons", () => {
     expect(cancelSeat).not.toHaveBeenCalled(); // inside the grace
     await advance(20_000);
     expect(cancelSeat).toHaveBeenCalledWith({ seatId: "n1" });
-    expect(h!.text()).toContain("wasn't finished within 15 minutes");
+    expect(h!.text()).toContain("That didn't work. Try again."); // the box never gave a verdict: the static line
     expect(buttonByText(h!, "Try again")).toBeTruthy();
   });
 
@@ -418,7 +419,7 @@ describe("AddSeatFlow wait limit and failure reasons", () => {
     const t0 = Date.now();
     await timed({
       accountsSeatStatus: () =>
-        Promise.resolve(Date.now() - t0 >= 15 * 60_000 ? { state: "failed", error: "login-failed" } : { state: "pending" }),
+        Promise.resolve(Date.now() - t0 >= 15 * 60_000 ? { state: "failed", error: "login-failed", message: seatSignInFailureMessage({ error: "login-failed", timedOut: true }) } : { state: "pending" }),
     });
     await advance(15 * 60_000 + 4_000);
     expect(h!.text()).toContain("wasn't finished within 15 minutes");
@@ -431,7 +432,7 @@ describe("AddSeatFlow wait limit and failure reasons", () => {
   });
 
   it("duplicate-login names the reason; different-org keeps its create-account prompt", async () => {
-    await timed({ accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "duplicate-login" }) });
+    await timed({ accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "duplicate-login", message: seatSignInFailureMessage({ error: "duplicate-login" }) }) });
     await advance(2100);
     expect(h!.text()).toContain("already added as a seat");
   });

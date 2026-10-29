@@ -199,7 +199,7 @@ describe("K3 payload", () => {
     const box = makeBox();
     const m = createUpgradeV2(box.deps);
     const s = m.status();
-    assert.deepEqual(Object.keys(s).sort(), ["error", "etaSeconds", "overall", "state", "steps"]);
+    assert.deepEqual(Object.keys(s).sort(), ["error", "etaSeconds", "overall", "state", "steps", "view"]);
     assert.equal(s.state, "idle");
     assert.equal(s.overall, 0);
     assert.equal(s.etaSeconds, null);

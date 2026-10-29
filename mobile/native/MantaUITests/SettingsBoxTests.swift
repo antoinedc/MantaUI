@@ -144,16 +144,6 @@ final class SettingsBoxTests: XCTestCase {
         BoxDevice(deviceID: id, name: name, lastSeen: lastSeen, createdAt: createdAt, primary: primary, current: current)
     }
 
-    func testABlankDeviceIdIsNeverRevocable() {
-        // `DELETE /auth/revoke?device_id=` (empty) is the box's WHOLE-BOX RESET.
-        for id in ["", " ", "\t\n  "] {
-            XCTAssertFalse(BoxDevices.isRevocableID(id), "[\(id)]")
-            XCTAssertFalse(BoxDevices.canRevoke(BoxDevice(deviceID: id)), "[\(id)]")
-        }
-        XCTAssertTrue(BoxDevices.isRevocableID("d1"))
-        XCTAssertTrue(BoxDevices.canRevoke(BoxDevice(deviceID: "d1")))
-    }
-
     func testPlanWithABlankOwnIdHasNoSafeTarget() {
         for id in ["", "   "] {
             let list = [device("desktop", primary: true), device(id, current: true)]
@@ -161,25 +151,13 @@ final class SettingsBoxTests: XCTestCase {
         }
     }
 
-    func testSortPutsThisPhoneFirstThenMostRecentlyActive() {
-        let list = [
-            device("old", lastSeen: 1_000),
-            device("never"),
-            device("me", lastSeen: 500, current: true),
-            device("new", lastSeen: 9_000),
-        ]
-        XCTAssertEqual(BoxDevices.sorted(list).map(\.deviceID), ["me", "new", "old", "never"])
-    }
-
-    func testSortIsStableForTies() {
-        let list = [device("a", lastSeen: 5), device("b", lastSeen: 5), device("c", lastSeen: 5)]
-        XCTAssertEqual(BoxDevices.sorted(list).map(\.deviceID), ["a", "b", "c"])
-    }
-
-    func testCanRevokeExcludesThisPhoneAndThePrimaryPairing() {
-        XCTAssertFalse(BoxDevices.canRevoke(device("me", current: true)))
-        XCTAssertFalse(BoxDevices.canRevoke(device("desktop", primary: true)))
-        XCTAssertTrue(BoxDevices.canRevoke(device("other")))
+    /// WS11 D3 / X6: the order and who may be revoked are the box's (`revocable`); an older
+    /// box sends no `revocable`, which decodes to nil (no Revoke, update note).
+    func testRevocableIsTheBoxsAnswerAndNilOnAnOlderBox() throws {
+        let json = #"{"box_id":"b","devices":[{"device_id":"me","name":"phone","current":true,"revocable":false},{"device_id":"o","name":"other","revocable":true},{"device_id":"old","name":"older box row"}]}"#
+        let r = try JSONDecoder().decode(BoxDevicesResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(r.devices.map(\.deviceID), ["me", "o", "old"], "the box's order is kept")
+        XCTAssertEqual(r.devices.map(\.revocable), [false, true, nil])
     }
 
     func testLastActiveText() {

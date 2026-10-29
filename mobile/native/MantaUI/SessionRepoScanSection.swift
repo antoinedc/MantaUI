@@ -16,6 +16,9 @@ struct SessionRepoScanSection: View {
     let onBrowse: () -> Void
     let onClone: () -> Void
     let onScratch: () -> Void
+    /// false on a box that doesn't word clone results (no `forge-clone-view-1`): the action is disabled with the
+    /// note, never a dead button (WS11 D5 / S8).
+    var cloneEnabled = true
 
     @Environment(\.colorScheme) private var colorScheme
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -113,6 +116,12 @@ struct SessionRepoScanSection: View {
             if showsClone {
                 Button(action: onClone) {
                     Label("Clone from GitHub…", systemImage: "arrow.down.circle")
+                }
+                .disabled(!cloneEnabled)
+                if !cloneEnabled {
+                    Text(UpdateBoxNote.text)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             Button(action: onBrowse) {

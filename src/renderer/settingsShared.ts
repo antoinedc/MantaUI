@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import type { AvailableLauncher } from "../shared/types";
-import { resolveLauncherFlags } from "./chatShared";
 
 /**
  * Shared settings logic used by both desktop Settings.tsx and mobile
@@ -32,28 +31,6 @@ export function useLaunchers(): [
       .catch(() => {});
   }, []);
   return [available, setAvailable];
-}
-
-/**
- * Pure updater for a single launcher flag. Used inside a setState callback:
- * `setLauncherFlagValues((prev) => updateLauncherFlag(available, id, key, val, prev))`.
- */
-export function updateLauncherFlag(
-  launchers: AvailableLauncher[],
-  launcherId: string,
-  flagKey: string,
-  checked: boolean,
-  prev: Record<string, Record<string, boolean>>,
-): Record<string, Record<string, boolean>> {
-  const l = launchers.find((x) => x.id === launcherId);
-  if (!l) return prev;
-  return {
-    ...prev,
-    [launcherId]: {
-      ...resolveLauncherFlags(l.flags, prev[launcherId]),
-      [flagKey]: checked,
-    },
-  };
 }
 
 /**

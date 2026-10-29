@@ -610,6 +610,24 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertNil(next["ses_1"]?.permissions)
     }
 
+    // MARK: - Window status (WS11 D7)
+
+    /// The box's per-window rollup lands on the session state as sent, and a later frame replaces it.
+    func testWindowStatusFrameIsStoredAndReplaced() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"windowStatus","sessionId":"ses_1","payload":{"running":false,"busy":true,"startedAt":null,"attention":null,"subagents":1,"stopped":false}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.windowStatus, StreamWindowStatusPayload(running: false, busy: true, subagents: 1))
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"windowStatus","sessionId":"ses_1","payload":{"running":false,"busy":false,"subagents":0,"stopped":true}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.windowStatus?.busy, false)
+        XCTAssertEqual(state.windowStatus?.stopped, true)
+    }
+
     // MARK: - Subagent upsert (BET-672)
 
     /// A subagent that goes running→done for the SAME child must leave exactly
@@ -746,10 +764,9 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(state.turnTools.map(\.idx), ["a", "b", "c"])
     }
 
-    /// turnComplete clears the tools (running and ended alike) and the turn's
-    /// subagent ids; the subagent frames themselves persist (background tasks
-    /// outlive the turn).
-    func testTurnCompleteClearsTurnToolsAndTurnSubagentIDs() throws {
+    /// turnComplete clears the tools (running and ended alike); the subagent
+    /// frames themselves persist (background tasks outlive the turn).
+    func testTurnCompleteClearsTurnToolsButNotSubagents() throws {
         var state = MantaSessionStreamState(sessionId: "ses_1")
         for json in [
             #"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"a","toolName":"bash","status":"running"}}"#,
@@ -761,7 +778,6 @@ final class MantaEventStreamRouterTests: XCTestCase {
         }
         XCTAssertEqual(state.turnTools.count, 1)
         XCTAssertEqual(state.runningTools.count, 0)
-        XCTAssertEqual(state.turnSubagentIDs, ["ses_child"], "recorded once per child")
 
         state = MantaStreamRouter.applying(
             try MantaStreamFrame.parse(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#),
@@ -771,7 +787,6 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertTrue(state.toolStartOrder.isEmpty)
         XCTAssertTrue(state.turnTools.isEmpty)
         XCTAssertTrue(state.runningTools.isEmpty)
-        XCTAssertTrue(state.turnSubagentIDs.isEmpty)
         XCTAssertEqual(state.subagents.count, 1, "a background task outlives the turn")
     }
 
@@ -1188,6 +1203,113 @@ final class MantaEventStoreTests: XCTestCase {
         XCTAssertNil(MantaEventStore.bearer(token: ""))
         XCTAssertNil(MantaEventStore.bearer(token: nil))
     }
+
+    // MARK: - D11 run epoch + connection counter (the wiring: handleState / applyRunningSet / ingestRunViews)
+
+    private func runningSetFrame(epoch: String?) -> String {
+        let e = epoch.map { ",\"epoch\":\"\($0)\"" } ?? ""
+        return "{\"kind\":\"runningSet\",\"payload\":{\"sessions\":[]\(e)}}"
+    }
+
+    private func toolRunsFrame(epoch: String, run: String = "A") -> String {
+        #"{"kind":"stream","sub":"toolRuns","sessionId":"ses_1","payload":{"epoch":"\#(epoch)","full":true,"gen":1,"layout":[{"kind":"run","id":"\#(run)","segmentId":"\#(run)"}],"runs":[{"id":"\#(run)","ownerMessageId":"m","rev":{"epoch":"\#(epoch)","gen":1,"seq":1},"label":"Read a file","calls":1,"failed":0,"tone":"ok"}],"closed":[],"parts":[]}}"#
+    }
+
+    /// A canonical answer whose one message carries the full view of `run` at `epoch`.
+    private func answer(run: String, epoch: String) throws -> [OpencodeMessage] {
+        let json = #"[{"info":{"id":"a1","sessionID":"ses_1","role":"assistant"},"parts":[],"view":{"runs":[{"id":"\#(run)","ownerMessageId":"a1","rev":{"epoch":"\#(epoch)","gen":1,"seq":1},"label":"Read a file","calls":1,"failed":0,"tone":"ok"}]}}]"#
+        return try JSONDecoder().decode([OpencodeMessage].self, from: Data(json.utf8))
+    }
+
+    private func runs(_ store: MantaEventStore) -> Set<String> {
+        Set(store.sessionStates["ses_1"]?.liveRuns.store.runs.keys.map { $0 } ?? [])
+    }
+
+    func testARunningSetFrameSetsTheConnectionEpoch() {
+        let fake = FakeStreamControl()
+        let store = makeStore(fake)
+        fake.drive(.connected)
+        XCTAssertNil(store.connectionEpoch, "unknown until the connection's runningSet")
+        fake.inject(runningSetFrame(epoch: "E1"))
+        XCTAssertEqual(store.connectionEpoch, "E1")
+    }
+
+    func testAReconnectBumpsTheConnectionCounterAndForgetsTheEpochUntilItsRunningSet() {
+        let fake = FakeStreamControl()
+        let store = makeStore(fake)
+        fake.drive(.connected)
+        fake.inject(runningSetFrame(epoch: "E1"))
+        XCTAssertEqual(store.connGen, 1)
+        fake.drive(.reconnecting(attempt: 1, backoffMs: 1000))
+        XCTAssertEqual(store.connGen, 1, "a drop is not a new connection")
+        fake.drive(.connected)
+        XCTAssertEqual(store.connGen, 2)
+        XCTAssertNil(store.connectionEpoch)
+        fake.inject(runningSetFrame(epoch: "E2"))
+        XCTAssertEqual(store.connectionEpoch, "E2")
+    }
+
+    func testRunValuesBeforeTheEpochIsKnownAreQueuedAndApplyWhenItsRunningSetArrives() {
+        let fake = FakeStreamControl()
+        let store = makeStore(fake)
+        fake.drive(.connected)
+        fake.inject(toolRunsFrame(epoch: "E1"))
+        XCTAssertTrue(runs(store).isEmpty, "queued while the epoch is unknown")
+        fake.inject(runningSetFrame(epoch: "E1"))
+        XCTAssertEqual(runs(store), ["A"])
+    }
+
+    /// A reconnect to the SAME box process: the epoch repeats, so what was asked of the run store meanwhile (a canonical
+    /// answer issued under the new connection) must apply, and what was there stays.
+    func testAnAnswerIngestedDuringASameProcessReconnectAppliesWhenTheEpochRepeats() throws {
+        let fake = FakeStreamControl()
+        let store = makeStore(fake)
+        fake.drive(.connected)
+        fake.inject(runningSetFrame(epoch: "E1"))
+        fake.inject(toolRunsFrame(epoch: "E1", run: "A"))
+        XCTAssertEqual(runs(store), ["A"])
+
+        fake.drive(.reconnecting(attempt: 1, backoffMs: 1000))
+        fake.drive(.connected)
+        store.ingestRunViews(sessionId: "ses_1", messages: try answer(run: "B", epoch: "E1"), issuedConnGen: store.connGen)
+        XCTAssertEqual(runs(store), ["A"], "B waits for the new connection's epoch")
+        fake.inject(runningSetFrame(epoch: "E1"))
+        XCTAssertEqual(runs(store), ["A", "B"])
+    }
+
+    /// A refetch issued under connection 1 that completes after a reconnect (connection 2, a new epoch) must not become
+    /// run state — the box it asked is gone.
+    func testAnAnswerIssuedBeforeAReconnectLeavesTheRunStoreUnchanged() throws {
+        let fake = FakeStreamControl()
+        let store = makeStore(fake)
+        fake.drive(.connected)
+        fake.inject(runningSetFrame(epoch: "E1"))
+        let issued = store.connGen
+        fake.drive(.reconnecting(attempt: 1, backoffMs: 1000))
+        fake.drive(.connected)
+        fake.inject(runningSetFrame(epoch: "E2"))
+
+        let stale = store.ingestRunViews(sessionId: "ses_1", messages: try answer(run: "A", epoch: "E1"), issuedConnGen: issued)
+        XCTAssertFalse(stale)
+        XCTAssertTrue(runs(store).isEmpty)
+
+        store.ingestRunViews(sessionId: "ses_1", messages: try answer(run: "A", epoch: "E2"), issuedConnGen: store.connGen)
+        XCTAssertEqual(runs(store), ["A"], "an answer issued under the current connection applies")
+    }
+
+    /// The refetch's housekeeping: a run no loaded message references and the live turn does not hold is forgotten.
+    func testARefetchForgetsRunsNothingReferencesButKeepsTheLiveTurnsRuns() throws {
+        let fake = FakeStreamControl()
+        let store = makeStore(fake)
+        fake.drive(.connected)
+        fake.inject(runningSetFrame(epoch: "E1"))
+        fake.inject(toolRunsFrame(epoch: "E1", run: "LIVE"))
+        store.ingestRunViews(sessionId: "ses_1", messages: try answer(run: "OLD", epoch: "E1"), issuedConnGen: store.connGen)
+        XCTAssertEqual(runs(store), ["LIVE", "OLD"])
+
+        store.ingestRunViews(sessionId: "ses_1", messages: try answer(run: "NEW", epoch: "E1"), issuedConnGen: store.connGen)
+        XCTAssertEqual(runs(store), ["LIVE", "NEW"], "OLD is referenced by no loaded message; LIVE is the current turn's")
+    }
 }
 
 // MARK: - Stream text ↔ canonical transcript seam (BET-655)
@@ -1255,7 +1377,7 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
 
     private func proseCount(_ blocks: [TranscriptBlock], containing needle: String) -> Int {
         blocks.reduce(into: 0) { total, block in
-            if case .prose(let body, _) = block, body.contains(needle) { total += 1 }
+            if case .prose(let body, _, _) = block, body.contains(needle) { total += 1 }
         }
     }
 

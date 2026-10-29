@@ -46,6 +46,7 @@ import {
   defaultCredentialsValidator,
   restoreFromBackup,
 } from "./claudeAuth.mjs";
+import { annotateView, annotateSingle } from "./transcriptView.mjs";
 // BET-418 §A removed the BET-380 background-job permission/question routing;
 // delegate.mjs ownership helpers (relatedSessionIds/jobNameForSession) are no
 // longer imported here.
@@ -445,10 +446,12 @@ const isConversation = (m) => m?.type === "user" || m?.type === "assistant" || (
  * idle / agent-switch records that are not messages, so pages are read until
  * enough conversation records have been seen.
  * @param {string} sessionId
- * @param {{ limit?: number|null }} [opts]
+ * `meta.exhausted` is set true when the whole history was read (no older page left).
+ * @param {{ limit?: number|null, meta?: {exhausted?: boolean} }} [opts]
  */
-async function readTimeline(sessionId, { limit } = {}) {
+async function readTimeline(sessionId, { limit, meta } = {}) {
   const desc = [];
+  if (meta) meta.exhausted = false;
   let convo = 0;
   let cursor = null;
   for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
@@ -463,7 +466,10 @@ async function readTimeline(sessionId, { limit } = {}) {
       if (isConversation(m)) convo++;
     }
     cursor = body?.cursor?.next ?? null;
-    if (!cursor || rows.length === 0) break;
+    if (!cursor || rows.length === 0) {
+      if (meta) meta.exhausted = true;
+      break;
+    }
     if (limit != null && convo >= limit) break;
   }
   return desc.reverse();
@@ -498,38 +504,64 @@ async function directoryForTitles(sessionId) {
   return cachedSessionDirectory(sessionId) ?? (await getSessionInfo(sessionId))?.directory ?? undefined;
 }
 
+/** How many extra conversation records a `view` fetch reads before its window (WS11 D11 "Window edges"). */
+export const RUN_LOOKBACK = 40;
+
+/** The canonical window a run-ledger rebuild reads: the 100-message tail PLUS the lookback, so a turn's first run keeps its true id. */
+export const REBUILD_WINDOW = 100 + RUN_LOOKBACK;
+export const listMessagesForRebuild = (sessionId) => listMessages(sessionId, { limit: REBUILD_WINDOW });
+
 /** Fetch a session's message transcript, in the `{info, parts}[]` shape every client reads.
  *
  *  @param {string} sessionId
- *  @param {{limit?: number, slim?: boolean}} [opts]
+ *  @param {{limit?: number, slim?: boolean, view?: boolean, running?: boolean, ledger?: object|null}} [opts]
  *    limit — return only the most recent N messages (the TAIL, chronological).
  *      Omit for the whole history (the desktop's "Load earlier" / refetches).
+ *    view  — add `message.view` (turn footer, truncation — WS11 D8; more per step): what the transcript MEANS,
+ *      decided here so no client carries its own copy of the rules. `running` (the interpreter's, set by the caller)
+ *      withholds the footer of the in-flight turn.
  *    slim  — additionally drop parts the iOS client never renders (opt-in;
  *      mobile only). Duplicate tool stdout is ALWAYS stripped for every
  *      client regardless of `slim` (see stripDuplicateToolOutput).
  */
 export async function listMessages(sessionId, opts = {}) {
   const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : null;
-  const timeline = await readTimeline(sessionId, { limit });
-  let mapped = mapTimeline(timeline, { sessionID: sessionId, directory: await directoryForTitles(sessionId) });
-  if (limit != null && mapped.length > limit) mapped = mapped.slice(mapped.length - limit);
+  // A run can begin before the window: with `view`, read RUN_LOOKBACK extra records so it keeps its true id and owner.
+  const wantView = opts.view === true;
+  const meta = {};
+  const timeline = await readTimeline(sessionId, { limit: limit != null && wantView ? limit + RUN_LOOKBACK : limit, meta });
+  const all = mapTimeline(timeline, { sessionID: sessionId, directory: await directoryForTitles(sessionId) });
+  let mapped = limit != null && all.length > limit ? all.slice(all.length - limit) : all;
+  const context = wantView && mapped.length < all.length ? all : null;
   await hydrateRunningShells(mapped, sessionId);
   mapped = stampCommandOrigins(mapped, commandCorrelator.originOf);
   const stripped = mapped.map(stripDuplicateToolOutput);
-  return opts.slim ? slimTranscript(stripped) : stripped;
+  // The view is computed over the FULL parts (a truncation reads the step-finish part), then slim may drop parts.
+  const viewed = wantView
+    ? annotateView(stripped, {
+        running: opts.running === true,
+        ledger: opts.ledger ?? null,
+        runContext: context ? context.map(stripDuplicateToolOutput) : null,
+        runContextOpen: meta.exhausted !== true,
+      })
+    : stripped;
+  return opts.slim ? slimTranscript(viewed) : viewed;
 }
 
 /** Fetch a single message by id (GET /api/session/{id}/message/{messageID}).
  *  Returns null on miss/error so the caller can fall back to a full refetch.
  *  @param {string} sessionId
  *  @param {string} messageId
+ *  @param {{view?: boolean, ledger?: object|null}} [opts]
  */
-export async function getMessage(sessionId, messageId) {
+export async function getMessage(sessionId, messageId, opts = {}) {
   try {
     const record = await ocCall("getMessage", (c, o) => c.session.message.get({ sessionID: sessionId, messageID: messageId }, o), { onHttpError: () => null });
     if (record === null) return null;
     const [mapped] = stampCommandOrigins(await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId, directory: await directoryForTitles(sessionId) }), sessionId), commandCorrelator.originOf);
-    return mapped ? stripDuplicateToolOutput(mapped) : null;
+    if (!mapped) return null;
+    const stripped = stripDuplicateToolOutput(mapped);
+    return opts?.view === true ? annotateSingle(stripped, { ledger: opts.ledger ?? null }) : stripped;
   } catch {
     return null;
   }
@@ -870,6 +902,30 @@ export async function listSessions(directory, { signal } = {}) {
 }
 
 /** One session record, mapped; null on miss/error. */
+/**
+ * A session's parent, with the three outcomes kept apart (getSessionInfo collapses the last two into null):
+ * `ok` (parentID null = a root), `not-found` (the session was deleted), `error` (could not be determined).
+ * @returns {Promise<{status:"ok", parentID: string|null}|{status:"not-found"}|{status:"error"}>}
+ */
+export async function getSessionParent(sessionId) {
+  const NOT_FOUND = Symbol("not-found");
+  try {
+    const record = await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), {
+      signal: AbortSignal.timeout(8000),
+      onHttpError: (f) => {
+        if (f.status === 404) return NOT_FOUND;
+        throw plainError("getSession", f);
+      },
+    });
+    if (record === NOT_FOUND) return { status: "not-found" };
+    if (!record || typeof record !== "object") return { status: "error" };
+    const parent = record.parentID ?? record.parentId;
+    return { status: "ok", parentID: typeof parent === "string" && parent.length > 0 ? parent : null };
+  } catch {
+    return { status: "error" };
+  }
+}
+
 async function getSessionInfo(sessionId) {
   try {
     const record = await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), { onHttpError: () => null });

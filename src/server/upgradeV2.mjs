@@ -22,6 +22,7 @@
 // `createDefaultDeps` is the real thing. NOTHING here talks to the opencode API of a
 // V1 service except the single running-turns probe.
 
+import { buildUpgradeView } from "./upgradeView.mjs";
 import { copyFile, lstat, realpath, rename, rm, stat, statfs, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -259,13 +260,15 @@ export function createUpgradeV2(deps) {
       if (state.error.needBytes !== undefined) error.needBytes = state.error.needBytes;
       if (state.error.haveBytes !== undefined) error.haveBytes = state.error.haveBytes;
     }
-    return {
+    const base = {
       state: state.state,
       steps,
       overall: state.state === "completed" ? 1 : computeOverall(state.steps, state.mode),
       etaSeconds: state.state === "running" && state.steps.migrate.status === "running" ? eta.seconds : null,
       error,
     };
+    // WS11 D3 (X5): the gate's wording, computed from the in-memory state alone.
+    return { ...base, view: buildUpgradeView(base) };
   }
 
   async function commit() {

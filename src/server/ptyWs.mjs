@@ -91,8 +91,12 @@ export function attachPtyWs(ws, url, opts = {}) {
     ptyReady = getDefaultPty();
   }
 
+  // Set by the close handler. A spawn that was still waiting (on the pty module or on the saved-options
+  // read) when the socket closed must NOT go ahead: nothing would own, or ever kill, the process.
+  let closed = false;
+
   function withPty(fn) {
-    ptyReady.then(fn).catch((err) => {
+    return ptyReady.then(fn).catch((err) => {
       // The pty module failed to load (e.g. node-pty not installed). Surface
       // once on the first attempt — subsequent attempts (after close) are
       // no-ops on a closed socket.
@@ -105,22 +109,29 @@ export function attachPtyWs(ws, url, opts = {}) {
     });
   }
 
-  withPty((ptyModule) => {
-    ptyModule.spawn({ sessionKey, cwd, cols, rows, launcher }, (e) => {
-      if (e.kind === "data") {
-        try {
-          ws.send(typeof e.data === "string" ? e.data : Buffer.from(e.data));
-        } catch {
-          /* socket closing */
+  const spawned = withPty(async (ptyModule) => {
+    const spawnWith = (resolvedLauncher) => {
+      if (closed) return;
+      return ptyModule.spawn({ sessionKey, cwd, cols, rows, launcher: resolvedLauncher }, (e) => {
+        if (e.kind === "data") {
+          try {
+            ws.send(typeof e.data === "string" ? e.data : Buffer.from(e.data));
+          } catch {
+            /* socket closing */
+          }
+        } else if (e.kind === "exit") {
+          try {
+            ws.close(1000, JSON.stringify({ kind: "exit", code: e.code ?? null }));
+          } catch {
+            /* already closed */
+          }
         }
-      } else if (e.kind === "exit") {
-        try {
-          ws.close(1000, JSON.stringify({ kind: "exit", code: e.code ?? null }));
-        } catch {
-          /* already closed */
-        }
-      }
-    });
+      });
+    };
+    // WS11 D3 (X1): a launcher sent without `flags` gets the box's saved options
+    // (only that case waits; every other spawn stays synchronous).
+    if (opts.resolveLauncher && launcher) return spawnWith(await opts.resolveLauncher(launcher));
+    return spawnWith(launcher);
   });
 
   ws.on("message", (raw) => {
@@ -128,7 +139,9 @@ export function attachPtyWs(ws, url, opts = {}) {
     // Anything that fails to parse is dropped silently — the device is
     // authoritative for input shaping; a stray garbage frame should not
     // kill the pty.
-    withPty((ptyModule) => {
+    // Chained on the spawn: a frame that arrives while the launcher is still being resolved waits for the
+    // process to exist instead of being written to nothing.
+    spawned.then(() => withPty((ptyModule) => {
       let msg;
       try {
         msg = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
@@ -145,7 +158,7 @@ export function attachPtyWs(ws, url, opts = {}) {
       ) {
         ptyModule.resize(sessionKey, msg.cols, msg.rows);
       }
-    });
+    }));
   });
 
   ws.on("close", () => {
@@ -153,9 +166,10 @@ export function attachPtyWs(ws, url, opts = {}) {
     // reconnecting device creates a fresh sessionKey on the next WS — the
     // pty module's `if (ptys.has(sessionKey)) return` re-spawn guard is
     // bypassed intentionally, since the WS is the connection owner here.
-    withPty((ptyModule) => {
+    closed = true;
+    spawned.then(() => withPty((ptyModule) => {
       try { ptyModule.kill(sessionKey); } catch { /* already gone */ }
-    });
+    }));
   });
   ws.on("error", () => {
     // ws fires 'error' then 'close'; cleanup runs in the close handler.

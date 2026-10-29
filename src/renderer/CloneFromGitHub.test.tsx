@@ -215,7 +215,9 @@ describe("CloneFromGitHub picker", () => {
     const startCalls = api.calls.forgeCloneStart ?? [];
     expect(startCalls.length).toBe(1);
     // The clone runs for the still-selected (but filtered-out) repo.
-    expect(startCalls[0][0]).toMatchObject({ url: REPOS[0].cloneUrl });
+    // The box joins <root>/<name> itself; the client sends the root and the name.
+    expect(startCalls[0][0]).toMatchObject({ url: REPOS[0].cloneUrl, name: REPOS[0].name });
+    expect(startCalls[0][0]).not.toHaveProperty("dest");
   });
 
   it("stops polling and cancels the job when unmounted mid-clone (no async past teardown, BET-1479)", async () => {
@@ -309,6 +311,28 @@ describe("CloneFromGitHub picker", () => {
     await flushMicro();
 
     expect(clonedPaths).toEqual(["/root/alpha"]);
+  });
+
+  it("a failed clone shows the box's sentence — never the raw git output (WS11 D5 / S8)", async () => {
+    mountPicker({
+      forgeCloneStatus: () =>
+        Promise.resolve({
+          ...CLONE_IN_PROGRESS, done: true, ok: false,
+          error: "fatal: could not read Username for 'https://github.com'",
+          errorKind: "permission" as const,
+          message: "permission denied. The token may not have access to this repository.",
+        }),
+    });
+    await flushMicro();
+    clickCheckbox(h!, "Clone alpha");
+    act(() => {
+      cloneButtonFor("1 selected").click();
+    });
+    await flushMicro();
+    await flushMicro();
+    const text = container!.textContent ?? "";
+    expect(text).toContain("permission denied. The token may not have access to this repository.");
+    expect(text).not.toContain("could not read Username");
   });
 
   it("shows the server's preflight destination message (names the folder), not a generic start failure (BET-1073)", async () => {
@@ -435,7 +459,9 @@ describe("CloneFromGitHub picker", () => {
             : NOT_CONNECTED_START,
         );
       },
-      forgeRepos: () => Promise.resolve({ repos: [], stale: false, error: "rejected" }),
+      // The box words the error and says the credential is dead (WS11 D5 / S8).
+      forgeRepos: () =>
+        Promise.resolve({ repos: [], stale: false, error: "rejected", message: "GitHub isn't connected. Go back and sign in again.", needsSignIn: true }),
     });
     await flushMicro();
     await flushMicro();
@@ -451,7 +477,11 @@ describe("CloneFromGitHub picker", () => {
 
   it("renders an error message for a network failure and does NOT drop to the connect panel (BET-1059)", async () => {
     mountPicker({
-      forgeRepos: () => Promise.resolve({ repos: [], stale: false, error: "network" }),
+      forgeRepos: () =>
+        Promise.resolve({
+          repos: [], stale: false, error: "network",
+          message: "Couldn't reach GitHub from your server. Check its connection and try again.", needsSignIn: false,
+        }),
     });
     await flushMicro();
     await flushMicro();

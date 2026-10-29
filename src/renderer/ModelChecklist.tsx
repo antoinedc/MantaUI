@@ -24,7 +24,6 @@ import { Field } from "./Field";
 import { Button } from "./Button";
 import { Checkbox } from "./Checkbox";
 import { ListRow } from "./ListRow";
-import { formatEndpointStateLine } from "./chatUtils";
 
 /**
  * BET-1537 (S5, §W9): optional per-model ENDPOINT health, keyed by model id
@@ -33,7 +32,7 @@ import { formatEndpointStateLine } from "./chatUtils";
  * state (and the rate-limit deadline) next to its name, from the SAME
  * register that gates Auto — the badge can never disagree with routing.
  */
-export type ModelHealthStates = Record<string, { state: string; retryInMs?: number | null }>;
+export type ModelHealthStates = Record<string, { state: string; stateLine?: string }>;
 
 export function ModelChecklist({
   models,
@@ -115,7 +114,7 @@ export function ModelChecklist({
             const h = states?.[m.id];
             // BET-1537 review Block 3: the badge renders through the ONE pure
             // helper (chatUtils), never inline formatting.
-            const line = h ? formatEndpointStateLine(h, Date.now()) : "";
+            const line = h?.stateLine ?? "";
             return (
               <ListRow
                 key={m.id}

@@ -1,114 +1,9 @@
 import XCTest
 @testable import MantaUI
 
-// Tool activity (spec 2026-10-04-ios-activity-parity §1, §5, §6) — the PURE
-// logic in ToolActivity.swift. Foundation-only on purpose, so this file also
-// compiles in the Linux `swift test` view of the app.
-
-// MARK: - Parity fixture (the desktop contract)
-
-/// Asserts the Swift port against `src/shared/fixtures/tool-activity-cases.json`,
-/// the same file `src/renderer/toolActivity.fixture.test.ts` asserts against
-/// `toolActivity.ts`. If one client's wording changes without the fixture, a
-/// suite goes red.
-final class ToolActivityParityTests: XCTestCase {
-
-    private struct DescribeExpect: Decodable, Equatable {
-        var kind: String, status: String, running: String, done: String, failed: String, label: String
-        var counted: Bool
-    }
-    private struct DescribeCase: Decodable {
-        var name: String
-        var part: OpencodePart
-        var expect: DescribeExpect
-    }
-    private struct SummarizeExpect: Decodable, Equatable {
-        var label: String
-        var calls: Int
-        var failed: Int
-        var running: Bool
-        var live: String?
-    }
-    private struct SummarizeCase: Decodable {
-        var name: String
-        var parts: [OpencodePart]
-        var expect: SummarizeExpect
-    }
-    private struct LayoutExpect: Decodable, Equatable {
-        var blocks: [String: [String]]
-        var trailing: String?
-    }
-    private struct LayoutCase: Decodable {
-        var name: String
-        var running: Bool
-        var showThinking: Bool
-        var messages: [OpencodeMessage]
-        var expect: LayoutExpect
-    }
-    private struct Fixture: Decodable {
-        var describe: [DescribeCase]
-        var summarize: [SummarizeCase]
-        var layout: [LayoutCase]
-    }
-
-    /// The fixture is a test resource of the app's test bundle (project.yml); a
-    /// bare `swift test` has no resource bundle, so fall back to the checkout the
-    /// test was compiled from.
-    private func loadFixture() throws -> Fixture {
-        let data: Data
-        if let url = Bundle(for: ToolActivityParityTests.self).url(forResource: "tool-activity-cases", withExtension: "json") {
-            data = try Data(contentsOf: url)
-        } else {
-            var url = URL(fileURLWithPath: #filePath)
-            for _ in 0..<4 { url.deleteLastPathComponent() }
-            url.appendPathComponent("src/shared/fixtures/tool-activity-cases.json")
-            data = try Data(contentsOf: url)
-        }
-        return try JSONDecoder().decode(Fixture.self, from: data)
-    }
-
-    func testFixtureIsBigEnoughToBeAContract() throws {
-        let f = try loadFixture()
-        XCTAssertGreaterThanOrEqual(f.describe.count + f.summarize.count, 25)
-        XCTAssertGreaterThanOrEqual(f.layout.count, 6)
-    }
-
-    func testDescribeMatchesTheFixture() throws {
-        for c in try loadFixture().describe {
-            let a = ToolActivity.describe(c.part)
-            let actual = DescribeExpect(
-                kind: a.kind.rawValue, status: a.status.rawValue,
-                running: a.running, done: a.done, failed: a.failed, label: a.label, counted: a.counted)
-            XCTAssertEqual(actual, c.expect, c.name)
-        }
-    }
-
-    func testSummaryMatchesTheFixture() throws {
-        for c in try loadFixture().summarize {
-            let s = ToolActivity.summarize(c.parts)
-            let actual = SummarizeExpect(
-                label: s.label, calls: s.calls, failed: s.failed, running: s.running, live: s.live?.running)
-            XCTAssertEqual(actual, c.expect, c.name)
-        }
-    }
-
-    func testRunLayoutMatchesTheFixture() throws {
-        for c in try loadFixture().layout {
-            let layout = ToolActivity.layout(messages: c.messages, running: c.running, showThinking: c.showThinking)
-            var blocks: [String: [String]] = [:]
-            for (id, bs) in layout.blocksByMessage {
-                blocks[id] = bs.map { block in
-                    switch block {
-                    case .tools(let run): return "tools:" + run.parts.map(\.id).joined(separator: ",")
-                    case .part(let part): return "part:" + part.id
-                    }
-                }
-            }
-            let actual = LayoutExpect(blocks: blocks, trailing: layout.trailing.map { $0.parts.map(\.id).joined(separator: ",") })
-            XCTAssertEqual(actual, c.expect, c.name)
-        }
-    }
-}
+// Tool activity (WS11 D11): what the phone still owns of a tool call — detail disclosure, duration, task / delegate STATUS,
+// run placement (by the box's run ids), the working-line assembly, and the todo card. The wording and the run rules are the
+// BOX's (src/server/transcriptRuns.test.mjs); there is no parity fixture any more.
 
 // MARK: - Shared builders
 
@@ -138,6 +33,25 @@ private func text(_ id: String, _ t: String) -> OpencodePart {
     OpencodePart(type: "text", id: id, messageID: "m", text: t)
 }
 
+private func runSummary(_ label: String = "Read a file", calls: Int = 1, failed: Int = 0, tone: GroupTone = .ok,
+                        live: TranscriptLiveActivity? = nil) -> TranscriptRunSummary {
+    TranscriptRunSummary(label: label, calls: calls, failed: failed, tone: tone, live: live)
+}
+
+/// A tool part stamped the way the box stamps it: its run (and segment) and its wording.
+private func viewed(_ part: OpencodePart, run: String, segment: String? = nil, gen: Int? = nil, label: String = "Read x") -> OpencodePart {
+    var copy = part
+    copy.extra["view"] = TranscriptPartView.extra(
+        activity: TranscriptActivityView(kind: .read, status: ToolActivity.status(of: part), label: label, target: "x", counted: true),
+        runId: run, segmentId: segment, gen: gen)
+    return copy
+}
+
+private func runView(_ id: String, _ label: String, owner: String = "a1", seq: Int = 1, segments: [TranscriptRunSegment] = []) -> TranscriptRunView {
+    TranscriptRunView(id: id, ownerMessageId: owner, rev: TranscriptRunRev(epoch: "E1", gen: 1, seq: seq),
+                      summary: runSummary(label), segments: segments)
+}
+
 private func message(_ id: String, _ role: String, _ parts: [OpencodePart]) -> OpencodeMessage {
     OpencodeMessage(
         info: OpencodeMessageInfo(id: id, sessionID: "s", role: OpencodeRole(rawValue: role),
@@ -145,26 +59,9 @@ private func message(_ id: String, _ role: String, _ parts: [OpencodePart]) -> O
         parts: parts)
 }
 
-// MARK: - Wording details beyond the fixture
+// MARK: - Status, durations, detail, disclosure, working line
 
-final class ToolActivityWordingTests: XCTestCase {
-
-    func testHostOfKeepsNonDefaultPortsAndLowercases() {
-        XCTAssertEqual(ToolActivity.hostOf("https://Example.COM:8443/x"), "example.com:8443")
-        XCTAssertEqual(ToolActivity.hostOf("http://example.com:80/x"), "example.com")
-        XCTAssertEqual(ToolActivity.hostOf("not a url"), "not a url")
-        XCTAssertEqual(ToolActivity.hostOf(""), "")
-    }
-
-    func testClipCountsUTF16LikeJS() {
-        let sixtyOne = String(repeating: "a", count: 61)
-        let clipped = ToolActivity.clip(sixtyOne, 60)
-        XCTAssertEqual(clipped.utf16.count, 60)
-        XCTAssertTrue(clipped.hasSuffix("…"))
-        XCTAssertEqual(ToolActivity.clip(String(repeating: "a", count: 60), 60).utf16.count, 60)
-        // Trailing whitespace before the ellipsis is trimmed (JS trimEnd).
-        XCTAssertEqual(ToolActivity.clip("abcdefgh  ijkl", 11), "abcdefgh…")
-    }
+final class ToolActivityTests: XCTestCase {
 
     func testStatusNormalisationMatchesDesktop() {
         XCTAssertEqual(ActivityStatus.normalize("completed"), .completed)
@@ -175,30 +72,13 @@ final class ToolActivityWordingTests: XCTestCase {
         XCTAssertEqual(ActivityStatus.normalize(nil), .pending)
     }
 
-    func testGroupToneFollowsRunningThenFailedThenOk() {
-        func tone(_ parts: [OpencodePart]) -> GroupTone { ToolActivity.summarize(parts).tone }
-        XCTAssertEqual(tone([tool("a", "read", input: ["filePath": jstr("x")], title: nil)]), .ok)
-        XCTAssertEqual(tone([tool("a", "read", status: "error")]), .warn)
-        XCTAssertEqual(tone([tool("a", "read", status: "running"), tool("b", "read", status: "error")]), .running,
-                       "a run that is still going is running even when an earlier call failed")
-    }
-
-    func testTargetIsTheFullPathCommandPatternOrUrl() {
-        XCTAssertEqual(ToolActivity.target(of: tool("a", "read", input: ["filePath": jstr("/r/src/A.swift")])), "/r/src/A.swift")
-        XCTAssertEqual(ToolActivity.target(of: tool("a", "bash", input: ["command": jstr("git status\ngit diff")])), "git status")
-        XCTAssertEqual(ToolActivity.target(of: tool("a", "grep", input: ["pattern": jstr("TODO")])), "TODO")
-        XCTAssertEqual(ToolActivity.target(of: tool("a", "webfetch", input: ["url": jstr("https://a.com/x")])), "https://a.com/x")
-        XCTAssertEqual(ToolActivity.target(of: tool("a", "mystery", title: "A title")), "A title")
-        XCTAssertEqual(ToolActivity.target(of: tool("a", "read")), "")
-    }
-
     func testDurationAndTotalDuration() {
         let a = tool("a", "read", start: 1000, end: 1400)
         let b = tool("b", "read", start: 1500, end: 3000)
         XCTAssertEqual(ToolActivity.durationSeconds(of: a) ?? -1, 0.4, accuracy: 0.0001)
         XCTAssertNil(ToolActivity.durationSeconds(of: tool("c", "read", start: 1000)), "no end yet")
-        XCTAssertEqual(ToolRun(id: "a", parts: [a, b]).totalDurationSeconds ?? -1, 2.0, accuracy: 0.0001)
-        XCTAssertNil(ToolRun(id: "c", parts: [tool("c", "read")]).totalDurationSeconds)
+        XCTAssertEqual(ToolRun(id: "a", parts: [a, b], view: runSummary()).totalDurationSeconds ?? -1, 2.0, accuracy: 0.0001)
+        XCTAssertNil(ToolRun(id: "c", parts: [tool("c", "read")], view: runSummary()).totalDurationSeconds)
     }
 
     // MARK: Detail (what a tapped call row reveals)
@@ -270,82 +150,185 @@ final class ToolActivityWordingTests: XCTestCase {
         XCTAssertFalse(ActivityDisclosure.expanded(callCount: 1, status: .completed, isTool: true, userToggled: false))
     }
 
-    // MARK: Working line (spec §1.4)
+    // MARK: Working line (spec §1.4) — the summary is the box's; only the assembly is the phone's
 
     func testWorkingLineWhileAToolRuns() {
-        let summary = ToolActivity.summarize([
-            tool("a", "read", input: ["filePath": jstr("a.ts")]),
-            tool("b", "read", status: "running", input: ["filePath": jstr("ChatScreen.swift")]),
-        ])
+        let summary = TranscriptRunSummary(label: "Read 2 files", calls: 2, failed: 0, tone: .running,
+                                           live: TranscriptLiveActivity(kind: .read, label: "Reading ChatScreen.swift"))
         XCTAssertEqual(summary.workingLineHeadline(verb: "Pondering"), "Reading ChatScreen.swift…")
         XCTAssertEqual(summary.workingLineMeta(elapsed: "12s"), "· 2 tools · 12s")
     }
 
     func testWorkingLineWithOneRunningToolDoesNotCountToolsOfOne() {
-        let summary = ToolActivity.summarize([tool("b", "read", status: "running", input: ["filePath": jstr("a.ts")])])
+        let summary = TranscriptRunSummary(label: "Read a file", calls: 1, failed: 0, tone: .running,
+                                           live: TranscriptLiveActivity(kind: .read, label: "Reading a.ts"))
         XCTAssertEqual(summary.workingLineMeta(elapsed: "3s"), "· 3s")
     }
 
     func testWorkingLineBetweenTools() {
-        let summary = ToolActivity.summarize([
-            tool("a", "read", input: ["filePath": jstr("a.ts")]),
-            tool("b", "bash", input: ["command": jstr("ls")]),
-        ])
+        let summary = TranscriptRunSummary(label: "Read a file, ran a command", calls: 2, failed: 0, tone: .ok, live: nil)
         XCTAssertEqual(summary.workingLineHeadline(verb: "Pondering"), "Pondering…")
         XCTAssertEqual(summary.workingLineMeta(elapsed: "12s"), "· Read a file, ran a command · 12s")
         XCTAssertEqual(summary.workingLineMeta(elapsed: nil), "· Read a file, ran a command",
                        "an unknown turn start shows no timer rather than one restarting from zero")
     }
+
+    func testARunSummaryIsRunningWhenTheBoxSaysSo() {
+        XCTAssertTrue(runSummary(tone: .running).running)
+        XCTAssertFalse(runSummary(tone: .warn).running)
+    }
 }
 
-// MARK: - Layout details beyond the fixture
+// MARK: - Layout by the box's run ids
 
 final class ToolActivityLayoutTests: XCTestCase {
 
-    /// DELIBERATE deviation from the desktop (documented in ToolActivity.swift):
-    /// iOS draws nothing for a whitespace-only text part (BET-632), so it must not
-    /// end a run the way desktop's would.
-    func testWhitespaceOnlyTextIsTransparentToARun() {
-        let layout = ToolActivity.layout(messages: [
-            message("a1", "assistant", [tool("t1", "read"), text("x1", "\n"), tool("t2", "read")]),
-        ], running: false, showThinking: false)
-        guard case .tools(let run)? = layout.blocksByMessage["a1"]?.first else { return XCTFail("expected a run") }
+    private func asst(_ id: String, _ parts: [OpencodePart], view: TranscriptMessageView? = nil) -> OpencodeMessage {
+        var m = message(id, "assistant", parts)
+        m.view = view
+        return m
+    }
+
+    private func runs(_ blocks: [ToolLayoutBlock]?) -> [ToolRun] {
+        (blocks ?? []).compactMap { if case .tools(let r) = $0 { return r } else { return nil } }
+    }
+
+    func testARunSpansMessagesAndIsDrawnOnceAtItsFirstMessageWithTheBoxsSummary() {
+        let layout = ToolActivity.layout(
+            messages: [
+                asst("a1", [viewed(tool("t1", "read"), run: "t1")]),
+                asst("a2", [viewed(tool("t2", "read"), run: "t1")]),
+            ],
+            showThinking: false,
+            runs: ["t1": runView("t1", "Read 2 files")]
+        )
+        let first = runs(layout.blocksByMessage["a1"])
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(first[0].id, "t1", "the run's id is its first part's id")
+        XCTAssertEqual(first[0].parts.map(\.id), ["t1", "t2"])
+        XCTAssertEqual(first[0].view.label, "Read 2 files", "the summary is the box's, never recomputed")
+        XCTAssertEqual(layout.blocksByMessage["a2"]?.count, 0, "an absorbed message draws nothing")
+    }
+
+    func testAPartWithNoRunIdJoinsOneNeutralLinePerMessageAndIsNeverDropped() {
+        let layout = ToolActivity.layout(
+            messages: [asst("a1", [tool("t1", "read"), tool("t2", "bash")])], showThinking: false)
+        let line = runs(layout.blocksByMessage["a1"])
+        XCTAssertEqual(line.count, 1)
+        XCTAssertTrue(line[0].isFallback)
+        XCTAssertEqual(line[0].id, "tools:a1")
+        XCTAssertEqual(line[0].view.label, "Tool activity")
+        XCTAssertEqual(line[0].parts.map(\.id), ["t1", "t2"])
+    }
+
+    func testTextBetweenCallsDoesNotChangeRunMembershipTheBoxDecidesIt() {
+        let layout = ToolActivity.layout(
+            messages: [asst("a1", [
+                viewed(tool("t1", "read"), run: "t1"), text("x1", "Found it."), viewed(tool("t2", "read"), run: "t2"),
+            ])],
+            showThinking: false,
+            runs: ["t1": runView("t1", "Read a file"), "t2": runView("t2", "Read a file")]
+        )
+        let kinds = (layout.blocksByMessage["a1"] ?? []).map { block -> String in
+            switch block { case .tools(let r): return "run:" + r.id; case .part(let p): return "part:" + p.id }
+        }
+        XCTAssertEqual(kinds, ["run:t1", "part:x1", "run:t2"])
+    }
+
+    func testWhitespaceOnlyTextDrawsNothing() {
+        let layout = ToolActivity.layout(
+            messages: [asst("a1", [viewed(tool("t1", "read"), run: "t1"), text("x1", "\n")])], showThinking: false)
         XCTAssertEqual(layout.blocksByMessage["a1"]?.count, 1)
-        XCTAssertEqual(run.parts.map(\.id), ["t1", "t2"])
     }
 
-    func testAUserMessageWithOnlyBlankTextDoesNotEndARun() {
-        let layout = ToolActivity.layout(messages: [
-            message("a1", "assistant", [tool("t1", "read")]),
-            message("u1", "user", [text("x1", "  \n")]),
-            message("a2", "assistant", [tool("t2", "read")]),
-        ], running: false, showThinking: false)
-        XCTAssertEqual(layout.blocksByMessage["a2"]?.count, 0, "a blank user message draws no band, so the run continues")
+    func testReasoningShownDrawsOneBlockPerSegmentHiddenCollapsesThem() {
+        let split = [
+            TranscriptRunSegment(id: "t1", summary: runSummary("Read a file")),
+            TranscriptRunSegment(id: "t2", summary: runSummary("Read a file")),
+        ]
+        let messages = [
+            asst("a1", [viewed(tool("t1", "read"), run: "t1", segment: "t1")]),
+            asst("a2", [
+                OpencodePart(type: "reasoning", id: "r1", messageID: "a2", text: "thinking"),
+                viewed(tool("t2", "read"), run: "t1", segment: "t2"),
+            ]),
+        ]
+        let store = ["t1": runView("t1", "Read 2 files", segments: split)]
+        let hidden = ToolActivity.layout(messages: messages, showThinking: false, runs: store)
+        XCTAssertEqual(runs(hidden.blocksByMessage["a1"]).map(\.id), ["t1"])
+        XCTAssertEqual(runs(hidden.blocksByMessage["a1"])[0].parts.count, 2)
+        XCTAssertEqual(runs(hidden.blocksByMessage["a1"])[0].view.label, "Read 2 files")
+
+        let shown = ToolActivity.layout(messages: messages, showThinking: true, runs: store)
+        XCTAssertEqual(runs(shown.blocksByMessage["a1"]).map(\.id), ["t1"], "the first segment keeps the run's id")
+        XCTAssertEqual(runs(shown.blocksByMessage["a2"]).map(\.id), ["t2"])
+        XCTAssertEqual(runs(shown.blocksByMessage["a2"])[0].runID, "t1")
+        XCTAssertEqual(runs(shown.blocksByMessage["a2"])[0].view.label, "Read a file", "the segment's own summary")
     }
 
-    func testTrailingRunKeepsTheOwningMessageIdAndDropsItsPlaceholder() {
-        let layout = ToolActivity.layout(messages: [
-            message("a1", "assistant", [text("x1", "Looking."), tool("t1", "read")]),
-        ], running: true, showThinking: false)
-        XCTAssertEqual(layout.trailing?.id, "t1")
-        XCTAssertEqual(layout.blocksByMessage["a1"]?.count, 1, "only the text remains; the run moved to the working line")
+    func testARunWhoseOwnerIsOutsideTheWindowIsDrawnAtTheFirstMessageThatHasAPartOfIt() {
+        let layout = ToolActivity.layout(
+            messages: [asst("a6", [viewed(tool("t6", "read"), run: "t1")]), asst("a7", [viewed(tool("t7", "read"), run: "t1")])],
+            showThinking: false,
+            runs: ["t1": runView("t1", "Read 8 files", owner: "a1")]
+        )
+        let block = runs(layout.blocksByMessage["a6"])
+        XCTAssertEqual(block.count, 1)
+        XCTAssertEqual(block[0].id, "t1", "the TRUE id, not the window's first part")
+        XCTAssertEqual(layout.blocksByMessage["a7"]?.count, 0)
     }
 
-    func testRunAppendingSkipsWhatItAlreadyOwns() {
-        let run = ToolRun(id: "t1", parts: [tool("t1", "read")])
-        let merged = run.appending([tool("t1", "read"), tool("t2", "bash")])  // t1 is a duplicate part id
+    func testAMembershipOlderThanMinGenIsIgnoredForLayoutOnlyForARetiredRun() {
+        let layout = ToolActivity.layout(
+            messages: [asst("a1", [viewed(tool("t1", "read"), run: "t1", gen: 1)])], showThinking: false, minGen: 2, retired: ["t1"])
+        let lines = runs(layout.blocksByMessage["a1"])
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines.allSatisfy(\.isFallback), "a retired run id can never be resurrected")
+    }
+
+    /// A rebuild repairs ONE run: history the rebuild never touched keeps its rows (and ids) while the repair is read back.
+    func testARebuildOnlyRegroupsTheRetiredRunNotTheHistoryAroundIt() {
+        let messages = [
+            asst("a1", [viewed(tool("h1", "read"), run: "H", gen: 1)]),
+            asst("a2", [viewed(tool("b1", "read"), run: "B", gen: 1), text("x", "between"), viewed(tool("b2", "read"), run: "B2", gen: 1)]),
+        ]
+        let store = ["H": runView("H", "Read a file"), "B2": runView("B2", "Read a file")]
+        let layout = ToolActivity.layout(messages: messages, showThinking: false, runs: store, minGen: 2, retired: ["B"])
+        XCTAssertEqual(runs(layout.blocksByMessage["a1"]).map(\.id), ["H"], "history keeps run-H")
+        XCTAssertEqual(runs(layout.blocksByMessage["a1"]).map(\.isFallback), [false])
+        let a2 = runs(layout.blocksByMessage["a2"])
+        XCTAssertEqual(a2.map(\.id), ["tools:a2", "B2"], "only the retired run's call regroups; the other run keeps its id")
+        XCTAssertEqual(a2.map(\.isFallback), [true, false])
+    }
+
+    func testTheSummaryFallsBackToTheRunViewAMessageCarries() {
+        let carried = TranscriptMessageView(runs: [.view(runView("t1", "Read a file"))])
+        let layout = ToolActivity.layout(
+            messages: [asst("a1", [viewed(tool("t1", "read"), run: "t1")], view: carried)], showThinking: false)
+        XCTAssertEqual(runs(layout.blocksByMessage["a1"])[0].view.label, "Read a file")
+    }
+
+    func testAHandoffCallStandsAloneAsAPart() {
+        let handoff = tool("h1", "handoff")
+        let layout = ToolActivity.layout(messages: [asst("a1", [handoff])], showThinking: false)
+        XCTAssertEqual(layout.blocksByMessage["a1"], [.part(handoff)])
+    }
+
+    func testRunUpsertingSkipsWhatItAlreadyOwns() {
+        let run = ToolRun(id: "t1", parts: [tool("t1", "read")], view: runSummary())
+        let merged = run.upserting([tool("t1", "read"), tool("t2", "bash")])  // t1 is a duplicate part id
         XCTAssertEqual(merged.parts.map(\.id), ["t1", "t2"])
         XCTAssertEqual(merged.id, "t1", "extending a run never changes its id")
     }
 
-    func testRunAppendingDedupesByCallIDAndByChildSession() {
+    func testRunUpsertingDedupesByCallIDAndByChildSession() {
         let canonical = OpencodePart(type: "tool", id: "t1", messageID: "m", extra: [
             "tool": jstr("task"), "callID": jstr("c1"),
             "state": jobj(["status": jstr("running"), "metadata": jobj(["sessionId": jstr("child")])]),
         ])
         let liveSameCall = OpencodePart(type: "tool", id: "live1", messageID: "m", extra: ["tool": jstr("task"), "callID": jstr("c1"), "state": jobj([:])])
         let liveSameChild = ToolActivity.makeToolPart(id: "live-task-child", tool: "task", status: "running", metadata: ["sessionId": jstr("child")])
-        let merged = ToolRun(id: "t1", parts: [canonical]).appending([liveSameCall, liveSameChild])
+        let merged = ToolRun(id: "t1", parts: [canonical], view: runSummary()).upserting([liveSameCall, liveSameChild])
         XCTAssertEqual(merged.parts.count, 1)
     }
 }
@@ -431,7 +414,7 @@ final class TaskStatusResolverTests: XCTestCase {
     func testApplyingRewritesOnlyWhenTheResolvedStatusDiffers() {
         let ctx = TaskStatusContext(childRunning: ["c": true])
         let started = taskPart(status: "completed", output: marker)
-        XCTAssertEqual(ToolActivity.describe(TaskStatusResolver.applying(ctx, to: started)).status, .running)
+        XCTAssertEqual(ToolActivity.status(of: TaskStatusResolver.applying(ctx, to: started)), .running)
 
         let pending = taskPart(status: "pending")
         XCTAssertEqual(TaskStatusResolver.applying(ctx, to: pending), pending,
@@ -445,9 +428,11 @@ final class TaskStatusResolverTests: XCTestCase {
     }
 
     func testResolvingARunUpgradesItsBackgroundTaskOnceTheChildIsIdle() {
-        let run = ToolRun(id: "t1", parts: [taskPart(status: "completed", output: marker)])
-        XCTAssertEqual(run.resolvingTasks(TaskStatusContext(childRunning: [:])).summary.tone, .running)
-        XCTAssertEqual(run.resolvingTasks(TaskStatusContext(childRunning: ["c": false])).summary.tone, .ok)
+        let run = ToolRun(id: "t1", parts: [taskPart(status: "completed", output: marker)], view: runSummary())
+        XCTAssertEqual(ToolActivity.status(of: run.resolvingTasks(TaskStatusContext(childRunning: [:])).parts[0]), .running)
+        XCTAssertEqual(ToolActivity.status(of: run.resolvingTasks(TaskStatusContext(childRunning: ["c": false])).parts[0]), .completed)
+        XCTAssertEqual(run.resolvingTasks(TaskStatusContext(childRunning: [:])).view, run.view,
+                       "the run's summary is the box's; resolving a task's status never rewrites it")
     }
 
     func testChildSessionIDsAreCollectedFromTaskParts() {
@@ -458,7 +443,7 @@ final class TaskStatusResolverTests: XCTestCase {
     }
 }
 
-// MARK: - Delegate calls (iOS-only wording + job linking)
+// MARK: - Delegate calls (job linking; the wording is the box's)
 
 final class DelegateCallTests: XCTestCase {
 
@@ -499,42 +484,15 @@ final class DelegateCallTests: XCTestCase {
         XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job (ID 198262c2)"))
     }
 
-    func testWordingReadsAsABackgroundJobNotAsDelegateDelegate() {
-        let done = ToolActivity.describe(delegate(output: started))
-        XCTAssertEqual(done.kind, .delegate)
-        XCTAssertEqual(done.label, "Started background job you-are-the-ship-gate")
-        XCTAssertEqual(done.running, "Running background job you-are-the-ship-gate")
-        XCTAssertEqual(done.failed, "Failed to start background job you-are-the-ship-gate")
-
-        let failed = ToolActivity.describe(delegate(status: "error", input: ["prompt": jstr("Fix the build")]))
-        XCTAssertEqual(failed.label, "Failed to start background job Fix the build")
-
-        XCTAssertEqual(ToolActivity.describe(delegate(status: "running", name: "delegate")).label,
-                       "Running background job")
-    }
-
-    func testNameFallsBackToTheInputAndIsClipped() {
-        let long = String(repeating: "a", count: 90)
-        let byDescription = delegate(input: ["description": jstr("  sweep the board \nsecond line"), "prompt": jstr("ignored")])
-        XCTAssertEqual(TaskStatusResolver.delegateJobName(of: byDescription), "sweep the board")
-        let byPrompt = delegate(input: ["prompt": jstr("\n\nFirst real line\nmore")])
-        XCTAssertEqual(TaskStatusResolver.delegateJobName(of: byPrompt), "First real line")
-        let clipped = TaskStatusResolver.delegateJobName(of: delegate(input: ["prompt": jstr(long)]))
-        XCTAssertEqual(clipped.utf16.count, TaskStatusResolver.delegateNameMax)
-        XCTAssertTrue(clipped.hasSuffix("…"))
-        XCTAssertEqual(TaskStatusResolver.delegateJobName(of: delegate()), "")
-    }
-
     func testARunningJobMakesTheFinishedCallReadRunning() {
         let part = delegate(output: started)
         for status in ["running", "paused", "Running"] {
             let ctx = TaskStatusContext(jobStatusByID: ["198262c2": status])
             let resolved = TaskStatusResolver.applying(ctx, to: part)
-            XCTAssertEqual(ToolActivity.describe(resolved).status, .running, status)
-            XCTAssertEqual(ToolActivity.describe(resolved).label, "Running background job you-are-the-ship-gate")
+            XCTAssertEqual(ToolActivity.status(of: resolved), .running, status)
         }
-        let run = ToolRun(id: "d1", parts: [part])
-        XCTAssertEqual(run.resolvingTasks(TaskStatusContext(jobStatusByID: ["198262c2": "running"])).summary.tone, .running)
+        let run = ToolRun(id: "d1", parts: [part], view: runSummary())
+        XCTAssertEqual(ToolActivity.status(of: run.resolvingTasks(TaskStatusContext(jobStatusByID: ["198262c2": "running"])).parts[0]), .running)
     }
 
     func testAJobThatIsDoneFailedOrUnknownLeavesTheCallAlone() {
@@ -566,15 +524,7 @@ final class DelegateCallTests: XCTestCase {
     func testTheJobIDIsReadFromTheLiveTailToo() {
         let part = delegate(metadataOutput: started)
         let ctx = TaskStatusContext(jobStatusByID: ["198262c2": "running"])
-        XCTAssertEqual(ToolActivity.describe(TaskStatusResolver.applying(ctx, to: part)).status, .running)
-        XCTAssertEqual(ToolActivity.describe(part).label, "Started background job you-are-the-ship-gate")
-    }
-
-    func testRunSummaryCountsBackgroundJobs() {
-        XCTAssertEqual(ToolActivity.summarize([delegate(output: started)]).label,
-                       "Started background job you-are-the-ship-gate")
-        let two = ToolActivity.summarize([delegate(output: started), tool("d2", "delegate_delegate")])
-        XCTAssertEqual(two.label, "Started 2 background jobs")
+        XCTAssertEqual(ToolActivity.status(of: TaskStatusResolver.applying(ctx, to: part)), .running)
     }
 }
 

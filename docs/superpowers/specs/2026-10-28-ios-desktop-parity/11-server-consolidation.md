@@ -133,7 +133,7 @@ signal; their ids are registered but not all read.
   blip does not hide features).
 - **Missing capability → the dependent surface is hidden, or rendered disabled
   with the static note "Update your box to use this"** (and, on iOS, a "Box
-  updates" link to `MantaRoute.settings(section: "updates")`). The table per
+  updates" link to `MantaRoute.settings(section: "general")`). The table per
   sub-step lists which. A surface is never left as a control that does nothing.
 - **The upgrade gate never waits on the list.** It is self-describing: it uses
   `GET /api/upgrade`'s `view` when present (D3 X5) and the old rendering when
@@ -200,7 +200,7 @@ signal; their ids are registered but not all read.
   in `BoxCapabilities.swift`; their callers migrate and both are added to the
   guard table.
 - NEW `MantaUI/UpdateBoxNote.swift`: `struct UpdateBoxNote: View` — the note +
-  "Box updates" button (`MantaNavigator.open(.settings(section: "updates"))`).
+  "Box updates" button (`MantaNavigator.open(.settings(section: "general"))`).
 
 ### Guardrail
 
@@ -475,8 +475,8 @@ desktop, K2).
 | `devices-view-1` | — | list shown, Revoke hidden, note shown |
 | `forge-status-secondary-1` | row shows login only | same |
 | `update-targets-view-1` | box/CLI rows: disabled "Update your box to use this"; Electron leg works | box rows replaced by the note |
-| `upgrade-view-1` | detected by the ABSENCE of `view` in `/api/upgrade` (not by the list, D1): gate shows steps + raw `error.message`, Retry/Rollback hidden, note | same |
-| `launchers-flags-1` | Settings launcher options disabled with note; spawn sends `{id}` (old box uses defaults) | same |
+| `upgrade-view-1` | detected by the ABSENCE of `view` in `/api/upgrade` (not by the list, D1): gate shows steps + raw `error.message`, **Retry still offered** (the box refuses a retry it cannot do with its own sentence — a box stuck mid-failed-upgrade is by definition on a pre-D3 release, so hiding Retry would be a dead end), Rollback hidden, note | same |
+| `launchers-flags-1` | Settings launcher options disabled with note; spawn sends `{id}` to a current box, and `{id, flags}` built from the old box's own `launchers:list` row defaults (an old box runs only the flags it is given — a bare `{id}` would drop `--dangerously-skip-permissions`) | same |
 
 ### Tests
 
@@ -1231,7 +1231,9 @@ geometry stay (KC).
 ### Capability fallback
 
 Missing → canonical media not shown after reload (desktop today; iOS loses its
-reconstruction — acceptable, the box self-updates).
+reconstruction — acceptable, the box self-updates). Also on desktop: an image/video
+FILE part is drawn inline only when the box marked it (`part.view.media`), so on an
+older box it stays an ordinary file card (a working control, not a regression).
 
 ### Tests
 
@@ -1792,6 +1794,29 @@ Missing → each assistant message's tool parts collapse into ONE neutral line
 "Tool activity" (static), expandable to the raw calls, with the note "Update
 your box to see tool details"; the working line shows the turn verb only.
 
+### Review-round decisions (recorded, not in the original design)
+
+- **The parity fixture moved instead of being deleted.** `tool-activity-cases.json` now lives at
+  `src/server/fixtures/tool-activity-cases.json` and drives `transcriptRuns.test.mjs` (the box's own drift guard for the
+  wording). The acceptance line "the fixture files are gone" is read as "no CLIENT copy of the rules": the desktop
+  `toolActivity.fixture.test.ts` is deleted. The iOS test target must stop listing the old `src/shared/fixtures/` path
+  (`mobile/native/project.yml`) when the iOS half of D11 lands.
+- **A single-message fetch carries every run its parts reference, from the ledger** (a later step of a run belongs to a run
+  that began in an earlier message), and never a run id no part references.
+- **The ledger is bounded.** Tool output is kept only for `delegate` calls (the one wording rule that reads it); a
+  finished turn (`turnComplete complete:true`, nothing pending/provisional) is left out of the connect snapshot and evicted
+  after 10 min or beyond 200 sessions (oldest settled first); an evicted session's `gen` never goes back (a floor is kept),
+  so a client's `minGen` never rejects a fresh stamp.
+- **A rebuild never starts under a classification or another canonical read** (it waits, then runs); every canonical read is
+  time-bounded (10 s) and buffered events replay after it.
+- **A ledger created by a run event with no drawing user message before it** (manta-server restarted mid-turn, or the ledger
+  was evicted) is **seeded** from canonical history before the event is applied, so the run keeps its true id.
+- **The rebuild reads `100 + RUN_LOOKBACK` messages** (the same lookback a `view` fetch reads).
+- **Desktop run map:** writes queued while a reconnect's epoch is unknown are applied when the SAME epoch is announced
+  again; a full transcript answer prunes runs no loaded message references (the turn in progress is held by the latest
+  `toolRuns` frames); a session's map is dropped when its panel stops showing it. `useRunMap` re-renders only for its own
+  session.
+
 ### Tests
 
 - node `transcriptView.test.mjs`: every case of the retired fixture (wording
@@ -2266,3 +2291,269 @@ Review: `reviews/server-first-3/11-server-consolidation.md`, plus
 | 4 (SHOULD) | Master rows edited minimally. Shared member registry: `apiVersion()` added for iOS (WS10 `+Settings` wave-D note) and desktop (`window.api` WS11 sentence); labeled `sessionsClosePreview(project:windowIndex:)` / `sessionsClose(project:windowIndex:dirtyWorktree:)`; WS01 types row now notes that `from(kind:messageID:)` is replaced by `from(payload:)` in D8 (the B contract is unchanged). M-09-4 now lists D22's `TranscriptMediaStore.shared.resetForBoxChange()` (same applier, IB). WS11 D6 prose uses the labeled signatures. |
 | X-S1 (sf-2 cross-cutting) | Same edits as finding 4. |
 | X-S2 (sf-2 cross-cutting) | Already resolved in server-first-2 finding 7 (latch outside the lock, no barrier inside the critical section); confirmed by the server-first-3 review. No further change. |
+
+## Implementation notes (D4)
+
+- **K2 moved cleanly — no dependency on the client-only routing catalog.** `accounts:row-states` needs only the
+  reads the Accounts card already made (subscription statuses, usage snapshots, provider health, the custom
+  endpoint list, the endpoint register). The routing-catalog code (`endpointEligibility`, `describeMissing`,
+  help text) feeds the row's help line and "Auto needs" gaps, which are NOT part of K2's words and stay on the
+  desktop; they will move with the models/eligibility work, not here.
+- `accounts:*` error results carry `message` (K7) next to `error`; the code stays so flows can branch on it
+  (iOS: `AccountsRefusal{code,message}`). Codes beyond the spec's list that the box can emit
+  (`duplicate-login`, `different-org`, `different-account`, `unknown-flow`) have sentences too.
+- `routing:choose` no-healthy verdict gains `copy`; `accounts:health` gains `endpoints[*].stateLine` and
+  `providerLines`; move payloads (`accounts.moved`, `accounts:session-seat.lastMove`) gain `text`/`line`/`resentText`.
+  The client adds only its own clock: the "· 2h ago" suffix and the 5h visibility window.
+- Older box: desktop and iOS show the static "That didn't work. Try again." for errors, no row state/control and
+  the "Update your box to use this" note on the Accounts screen; no client copy of the moved logic remains.
+
+## Implementation notes (D5, naming half — `sessions-naming-1`)
+
+- Shipped as its own step. The clone half (S8, `forge-clone-view-1`) is a separate step, so the two capability
+  ids stay independently gateable.
+- An explicit `name` on `tmux:new-session` is also made tmux-safe (never renamed, never retried) and returned as
+  `name`; before, tmux rewrote `.`/`:` silently and the client had to guess. A collision with an explicit name is
+  the sentence "A project named “x” already exists.".
+- Hinted create retries at most 3 attempts in total (three collisions fail), reusing the opencode session.
+- The scratch preview unions nothing but the directories under `root` (what `project:create-scratch` actually
+  de-duplicates against); the old clients also unioned live session names, which could promise a name the
+  create then did not use.
+- iOS: `SessionNaming` keeps only `deriveProjectName` (a display basename for the batch rows); the batch rows are
+  labelled by folder and the box names each session. A typed name field is sent as the explicit name only once
+  edited; otherwise the box names the session from the folder.
+
+## Implementation notes (D5, clone half — `forge-clone-view-1`)
+
+- `forge:clone-start` accepts `{url, root, name}`; the box joins `<root>/<name>` and the finished status carries
+  `dest` (already did), so neither client builds a destination. The old `{url, dest, name}` form still works.
+- A failed status's `message` is the sentence per kind; the raw git output stays in `error` and is only ever copied
+  as diagnostics, never rendered (desktop used to render it for the `unknown` kind).
+- Old box: desktop "Clone from GitHub…" and iOS's clone action are disabled with "Update your box to use this".
+
+## Review fixes (D1–D3 review, `reviews/code/11-server-consolidation-D1-D3.md`)
+
+Findings 1–13 applied; NITs 14–21 applied except #22 (fake timers in `ChatPanel.cacheContext.test.tsx`: the panel's
+effect, the harness `flush` and the test's own clock all use real timers, so converting it risks a hang for a
+0.7 s test). Notes where the fix differs in shape from the suggestion:
+- #1: the server row's `ok` is `serverCheck != null && ok !== false` in the shared builder, so the BOX-side view
+  also reads "Couldn't check" when its own check is missing (before: "Up to date").
+- #3/#4: `BoxCapabilitiesStore.shared` is the app root's instance; a screen not handed the environment store
+  falls back to it, never to a private one. `GitForgeStore` reads it through `useCapabilities(_:)`.
+- #6: a 401 stops the retry loop on both clients. Pausing retries while the stream is down is done on desktop
+  (it has the connection state); iOS keeps its schedule (the store has no connection input).
+- #9: `reemitContext` now returns whether the interpreter had something to measure; `model-prefs:set` measures
+  from the transcript itself otherwise.
+- `DELETE /auth/revoke` moved to `authRevokeRoute.mjs` so the blank-vs-absent `device_id` rule is tested at route level.
+- Launcher defaults for an older box are sent from the box's own `launchers:list` row (the review's fix).
+
+## Implementation notes (D6, `sessions-close-1`)
+
+- `sessions:close` takes one additive option, `deleteConversation` (single window): iOS's "delete" also deletes the
+  window's opencode conversation (before the kill), which the desktop's close does not. Without it the box
+  behaves exactly like the desktop close.
+- The preview counts a worktree shared by several windows once (the close removes it once); the old copy counted
+  windows. Running = the stream interpreter for chat windows, the status poller's latest batch for terminal windows;
+  D7's aggregator will replace both sources.
+- iOS: `gitRemoveWorktree`, `tmux:kill-window`/`tmux:kill-session`/`project-meta:delete` client members and
+  `KillWindowInput` are deleted (the close flow was their only caller). The old `project:meta:delete` channel name
+  the phone used never matched the box's `project-meta:delete`; that call is gone with the rest.
+- Old box (no `sessions-close-1`): desktop shows "Update your box to use this" when Close is pressed; iOS shows the
+  same line from the delete / close-project entry points.
+
+## Implementation notes (D7, `sessions-window-status-1`)
+
+- Box: `sessionStatus.mjs` (`createSessionStatus`) observes the bus (the interpreter's `running`/`turnComplete`/
+  `attention`/`childSession` frames for ANY session id, `runningSet`, `delegate.updated`, `usage-stopped.updated`) and
+  publishes one `windowStatus` frame per WINDOWED session whose payload changed (coalesced per tick, ancestors
+  included): `{running, busy, startedAt, attention, subagents, stopped}`. The connect snapshot replays every
+  windowed session; `sessions:window-status` returns the same map as a full replacement.
+- Parent edges come from `childSession` frames, delegate records and, after a start / opencode reconnect, an
+  ancestry walk from opencode's own records (`getSessionParent`, three-way ok / not-found / error) seeded from
+  `GET /api/session/active` and every running job's child. A failed read keeps what is held and retries on 1/2/5/10 s;
+  edges are evicted LRU beyond 5000 (running / windowed chains kept). `busy`/job nesting are moved verbatim from the
+  desktop (`sessionsWithActiveWork` counts `running` jobs only, as before; `computeJobNesting` incl. lifting and cycles).
+- `tmux:list` / sync deltas now carry `windows[].job = {id, status, parentWindowIndex}`; a job change re-reads the list
+  (only when ids / statuses / windows changed, not on the ~10 s activity ticks) and `tmux:list` waits for that to
+  settle, so an iOS refresh right after `delegate.updated` already has the new nesting.
+- Desktop: rail nesting is read from `job.parentWindowIndex`; the row's running / `·N` come from the rollup
+  (`windowStatusBySession`, replaced on connect, patched by frames). Own running and the attention latch stay on the
+  existing `running` / `attention` frames. Deleted: `computeJobNesting`, `sessionsWithActiveWork`,
+  `shouldResyncWindowsForJobs`, `sessionParents` / `setSessionParent`, `setChatSubagents` + ChatPanel's push,
+  `countRunningSubagents`. The jobs poll stays (activity strings / observed marks).
+- iOS: `MantaWindow.job`, `StreamWindowStatusPayload` → `MantaSessionStreamState.windowStatus`; `rowStatus` takes
+  `busy`/`subagents` from it; hidden job windows and per-parent counts come from the list. Deleted: `SessionJobNesting`,
+  `DelegateNesting`, `SessionSubagentCount`, the `delegate:list` poll and `delegateJobs`. `delegate.updated` now triggers a
+  plain refresh.
+- `stopped` rides the payload but neither client switches to it yet (desktop's header pill needs the full records and
+  iOS still reads its stopped list); `attention` likewise stays on the existing frames.
+- Old box: no `job` / `windowStatus` → rail is flat, rows show their own turn only (owner-tagged job windows still hide).
+
+## Review fixes (D4–D5 Opus review)
+
+1. **Failed `accounts:row-states` read ≠ older box.** Desktop reads the states on their own (re-read when the card's
+   data or the usage slice changes — NIT 7); a failure keeps the last good rows and shows "Couldn't load account
+   states" with Retry. iOS: `rowStatesReadFailed` + the same row in the source-failure section, Retry re-reads.
+   Only `accounts-copy-1 === false` / an unknown-channel answer is the older-box fallback.
+2. **Auto-rename.** `sanitizeGeneratedTitle` now yields what `validateSessionName` accepts: 40 characters max, an
+   internal ":" becomes " – ", control characters dropped (one fix covers the first-name and re-title paths).
+3. **Older box keeps Connect / Disconnect / Try again** (decision recorded here for the D4 fallback cell): with no
+   row state the control comes from fields the clients already read — out-of-credit health → Try again, external
+   credential → none, else connected ? Disconnect : Connect. It is the one deliberate exception to "the box decides"
+   (`fallbackControl` on desktop, `AccountRowState.fallbackControl` on iOS) and is replaced the moment the box answers.
+4. **Sign-in failure sentences are the box's.** The failed `accounts:seat-status` / `accounts:resign-status` replies
+   carry `message` (timed out after 15 min, duplicate login, different account with both emails, generic). The
+   `duplicate-login` code sentence is now the actionable one. Deleted: both clients' `seatFailureMessage` /
+   `resignFailureMessage` / `resignTimedOut`. Still client-side by necessity: "couldn't reach the server to check"
+   (the box cannot answer) and the claude-login-exited-with-an-error line; a box that never gives a verdict past the
+   limit shows the static "That didn't work. Try again."
+5. **Capability unknown ≠ supported.** New-project creates (NewSessionScreen, InboxPalette, iOS create sheet) require
+   `sessions-naming-1 === true`; while the list is unknown the action is disabled with "Checking your box…".
+6. NIT 6: an `AccountsRefusal` is rendered as the box's sentence alone. NIT 8: the CTO `projects.create` goes through
+   the allocator (explicit name; a lost race is `target_exists`). NIT 9: `tmux:rename-session` applies `tmuxSafeName`,
+   maps tmux's duplicate error to the class-1 sentence, and reports the final name with the additive `returnName`
+   flag (desktop uses it for the active project). NIT 10: creating the opencode session is bounded (20 s) and a late
+   session is deleted, so a hung opencode cannot hold the allocator. NIT 11: iOS clears the previewed name when the
+   folder changes. R2-2 (misplaced K7 comment) and R2-3 (the upgrade test now asserts Retry offered / Roll back
+   hidden on an older box) applied.
+
+## Review fixes (D6–D7 Opus review)
+
+1. **The close is bound to the confirmed window.** `sessions:close` takes `expect {opencodeSessionId, worktreePath}`,
+   captured from the row when the user opens the confirm (desktop: when the confirm opens; iOS: when delete is tapped /
+   a close is enqueued; in-chat delete: the open session). Every key sent must still match what is at the index, else
+   `ok:false, error:"That session changed — refresh and try again."` and nothing is touched. A forced worktree removal
+   additionally needs `expect.worktreePath` to equal the path (the answer to `needsConfirm` sends back the path that was
+   shown); without it the box never forces and asks again. `deleteConversation` deletes `expect.opencodeSessionId` (verified).
+2. **iOS refreshes on `sessions.nesting`, not on `delegate.updated`.** The box publishes `{kind:"sessions.nesting"}` once,
+   AFTER the `sync` delta that carries a changed job nesting (a job window appears / nests / finishes / is superseded —
+   computed from the annotated list's per-window `job` fields), so the refresh sees it. iOS re-reads only the project list
+   on it (coalesced); activity-only `delegate.updated` frames cost nothing (XCTest). Desktop is unaffected.
+3. **A close that fails part-way reports what it did.** Order is worktree → kill → conversation. A failed kill returns
+   `error` ("…couldn't stop it. Its worktree at X was already removed.") plus `removed/kept/failed/warnings`; a failed
+   conversation delete after a successful kill is a warning, a 404 counts as done.
+4. **Other close entry points.** Desktop in-chat Delete and iOS in-chat Delete now run `sessions:close` (with
+   `deleteConversation` and `expect`, a dirty-worktree question, the same notices); `opencodeDeleteSession` /
+   `MantaAPIClient.deleteSession` are deleted from both clients (the box handler stays for older clients). The review's
+   "iOS passes the window name" was a misread: `sessionWindow.name` holds the project's tmux session — no bug there.
+5. **Desktop never overwrites a newer frame with a read.** `fillWindowStatus` fills only sessions no frame has covered;
+   the connect snapshot already replays every windowed session.
+6. **Hydration keeps live edges.** A `running`/`turnComplete` frame seen while the active-list read is in flight is
+   re-applied after it replaces the set; hydrated sessions take `since` from the interpreter.
+7. NITs: unknown-channel on the close flow → the update note on both clients (7); the desktop confirm opens at once with
+   "Checking…" and a held-back button (8); the preview carries `worktreeLine` and iOS shows only that sentence (9);
+   direct-child counts computed once per flush (10); `rootIds` cleared per hydration (12).
+8. **No footer note for `sessions-window-status-1` (NIT 11) — amended:** without it the rail is flat and rows show their own
+   turn, which is a missing decoration, not a broken or dead control; a note on every list would nag older boxes for nothing.
+   The Accounts/close surfaces that DO lose a control keep their note.
+9. **Follow-up (NIT 13, master D29):** `windowStatus.stopped` / `attention` ride the payload with no consumer yet; retire
+   WS04's stopped list or rewire M-09-2 and the desktop stopped marker to `windowStatus.stopped`.
+
+## Implementation notes (D8)
+
+- Box: `transcriptView.mjs` (`computeTurns`, `truncationOf`, `annotateView`, `annotateSingle`); `listMessages({view:true})`
+  adds `message.view {turn?, truncation?}` computed over the FULL parts (before slim drops any), the running gate comes
+  from the interpreter (`opencode:messages` sets `running` itself — a client value is ignored); `getMessage({view:true})`
+  carries a truncation only (a turn needs its neighbours). The live `truncation` frame gains `hint`.
+- `transcript-view-1` is advertised at the end of D9 (as specced); clients ask for `view` only when the box says it has
+  it (iOS) / always (desktop — an older box ignores the option and no footer shows).
+- Desktop: every transcript fetch/splice/child fetch passes `{view:true}`; a splice keeps the previous `view.turn` of the
+  message it replaces (a lone message has none); `turnInfoFromView` re-keys the view, `computeTurnInfo` /
+  `describeTruncation` / `classifyFinish` are no longer imported by the renderer; `finishByMessageId` stores `{kind,label,hint}`
+  and the badge hides its tooltip when `hint` is absent.
+- iOS: `OpencodeMessage.view`, lenient `TranscriptMessageView` / `TranscriptTurnView` / `TranscriptTruncationView` (a malformed view
+  never fails its message); `TranscriptLiveTruncation.from(payload:)`; the footer pill is a button only when a `hint`
+  exists; `TranscriptTurns.info` / `TranscriptTruncation.classify|describe|kind(of:)` deleted. A capability list that turns
+  out to include `transcript-view-1` after the first fetch triggers one refetch.
+- Deviation: the mapper no longer applies the client-side "running && last message" gate; the box's gate applies at
+  fetch time, so a finished turn's footer can linger for the ~300 ms until the refetch after a new send.
+- Test fixture `BoxViewFixture` (Mac test target only) stamps `view` onto raw mapper fixtures with the box's rules.
+
+## Implementation notes (D9, `transcript-view-1`)
+
+- Box: `canonicalMediaEntries` (the phone's `canonicalEntries`/`showOutput`/`beginHandle` moved verbatim, incl. the last-" (" path
+  anchor and the media half of `MIME_BY_EXT`); `view.media` rides the OWNER message (the begin's, else the show's), ready entries
+  only, first-sight order, over the returned window; `getMessage({view:true})` computes over that one message. A file part with an
+  image/video mime and a `file://` url gains `part.view.media {kind, path}` (an inline `data:` URL is not a box path, so it stays
+  a file chip — the old desktop code would have asked the box to peek the data URL).
+- Deviation from the spec's `MediaView`: it also carries `aspectRatio` and `count` (the begin's reserved box). The phone's entry
+  geometry depends on them (`reserved`), and "moved verbatim" needs them on the wire.
+- `transcript-view-1` is now advertised (D8's turn/truncation + D9's media share it).
+- Desktop: `MessageRow` draws `view.media` cards when the session's live map has no entry for the message; `ToolCall` draws a file
+  part as media only when the box marked it. Deleted: `filePartToMediaEntry`, `isMediaMime`.
+- iOS: `TranscriptViewMedia.entries(messages)` (seq = transcript-order index, `.ready`) replaces `TranscriptMediaParse` (deleted with
+  `TranscriptMediaMime.forPath`); `TranscriptMediaReconcile.liveOnly`, the live reducer and geometry are untouched. Lossy decode: a
+  malformed media entry is skipped, never the list or the message.
+
+## Implementation notes (D10, `questions-plan-1`)
+
+- Box: `questionsDecorator.mjs` — `planForQuestion` (exact callID match against a `plan_exit` part; title = first heading →
+  first non-blank line → the question header → "Plan complete"; `path` = the part's own plan ref else the first authoring-tool/text
+  ref in the transcript via WS07's `planRefsFromPart`; `pageUrl` = `planPageUrl(sessionId, publicBaseUrl())`; steps/files =
+  the phone's `planMetrics` rules) and `createQuestionsDecorator`: wraps the interpreter's publish for `questions` frames (a
+  transcript read per (session, callID), cached; negatives cached for 10 s), drops an overtaken async publish with a per-session
+  sequence, decorates the connect snapshot and `opencode:questions`. A failed transcript read publishes the question undecorated
+  (still answerable). `push.mjs` imports the ONE `isPlanExitQuestion` (decorated `plan`, else opencode's own literal) — its
+  private copy is deleted and the guard forbids another under `src/server/`.
+- Behaviour notes: a heading must start its line (the desktop rule; the phone also accepted an indented one); an empty question
+  header falls through to "Plan complete" (the phone's rule).
+- Desktop: `q.plan` replaces `isPlanExitQuestion`/`extractPlanData` (and the client-built page URL); the card subtitle shows the
+  box's step/file counts; "Open page" uses `plan.pageUrl` (null → the existing no-op guard in the handler stays).
+- iOS: `QuestionRequest.plan: PlanQuestionView?` (lossy: a malformed plan keeps the question, as an ordinary card);
+  `PlanDerivation.swift` and its tests deleted; `splitQuestions` is `plan != nil`; `TranscriptCardActions` lost `messages`/`planURL`
+  (the open-page action takes the question); the "Open page" button is only drawn when the box gave a URL (no dead control).
+
+## Review fixes (D8–D10 Opus review)
+
+1. **The desktop footer refetch (BLOCKING).** A footer comes only from a full `view` fetch, so a turn ending schedules one:
+   `scheduleRefetch()` in the `turnComplete` settle timer (after `running` goes false), in the `running` case when it
+   settles to false (the authoritative signal cancels the timer), and in `sessionError`. The shared `useSseBus` means
+   `CtoChat` gets it too. Harness test: a splice-only turn that ends with `turnComplete` / a bare `running:false` issues
+   exactly one `opencodeMessages(sid, {view:true, …})` and renders the footer.
+2. **Late `plan_exit` part (SHOULD).** A `questions` frame published while its `plan_exit` part is not readable yet is looked
+   up once more after 1 s (cache bypassed, one-shot, cancelled by any newer frame for the session) and republished
+   decorated if the part has appeared. The decorated list is stored and `decorateSnapshot` replays it (NIT 4).
+3. **Canonical vs live media (NIT 3).** `MessageRow` skips a canonical `view.media` entry whose `handle` a live card
+   elsewhere in the session already draws (`canonicalMediaToDraw`); the row-visibility predicate uses the same filter.
+4. **One golden for the box's view rules (NIT 5).** `mobile/native/MantaUITests/Fixtures/transcript-view.golden.json`
+   (raw messages + the box's `annotateView` output per scenario): `transcriptView.test.mjs` pins the box to it
+   (`UPDATE_GOLDEN=1` regenerates), `TranscriptViewTests` decodes it (Linux), and `BoxViewFixtureParityTests` (Mac) pins the
+   mapper tests' `BoxViewFixture` stamper to the same file. Deviation: the many incidental mapper tests that need a plausible
+   footer on inline-built messages still stamp them; the stamper is now tied to the box by the golden instead of replaced.
+5. NIT 6 (older-box desktop file part) is recorded in D9's "Capability fallback"; NIT 7 (stale `turnComplete` comment) fixed.
+
+## Implementation notes (D11, `transcript-runs-1`)
+
+- Box: `transcriptRuns.mjs` (wording moved verbatim from `toolActivity.ts` + the phone's `delegate` kind; `createRunWalker` = the ONE
+  run-building walk for the canonical transcript and the live ledger; `runBoundaryOf`/`deliveryClassOf`), `runLedger.mjs` (per-session
+  live ledger: ordered layout, revisions `{epoch, gen, seq}`, boundary classification with buffer-and-replay, provisional boundaries
+  and the canonical rebuild), `transcriptView.mjs` (`part.view.{activity,runId,segmentId,gen}`, `message.view.runs`), `opencode.mjs`
+  (`RUN_LOOKBACK = 40` extra records on a `view` fetch; a run reaching back past what was read is anchored at the window and logged),
+  `streamInterp.mjs` (`toolRuns` frame; `runningSet.epoch`; `ledgerFor`), `index.mjs` (`classifyDelivered`, `rebuildFromCanonical`).
+- **Payload guard decided the fallback.** The spec's default (the FULL `RunView` on every message a run touches) measured +14.9 % on
+  the recorded session but +145 % on one 60-step run, so the implementation ships the `RunRef` fallback: the full view only on the
+  run's placement message, `{id, rev, ref:true}` on every other, always full on a lone `getMessage`. `transcriptView.payload.test.mjs`
+  pins the fallback's bytes (+15 % on all three fixtures) and that it IS the fallback.
+- The parity fixture is gone (`toolActivity.fixture.test.ts`, `src/shared/fixtures/tool-activity-cases.json`); its cases now run against
+  the box (`transcriptRuns.test.mjs`, reading `src/server/fixtures/tool-activity-cases.json` as the box's own regression suite), and
+  `streamInterp.runs.test.mjs` is the event/canonical parity guard (scripts 1–12).
+- Desktop: `toolActivity.ts` keeps only layout by run id, `stabilizeLayout`, `isRenderableRow`, `locateVisibleRow` and the pure
+  `mergeRunViews` family; `runEpoch.ts` owns the per-connection epoch/`connGen` and the per-session run maps (fed by `dispatchFrame`
+  for `runningSet`, by `httpApi`'s connection transitions, by the tracked transcript fetches in `useTranscriptState`/`useSseBus`/
+  `ChatPanel`/`CtoChat`, and by `toolRuns` frames). A box without `transcript-runs-1` shows ONE neutral "Tool activity" line per
+  message with "Update your box to see tool details". Deleted: `describeActivity`, `describeToolPart`, `describePatchPart`,
+  `summarizeToolGroup`, `groupTone`, `normalizeToolStatus`, `humanizeToolName`, `basename`, `hostOf`, `clip`, `Activity`, `ActivityKind`,
+  `GroupSummary`.
+- iOS: `TranscriptViewModels.swift` gained the view types, `TranscriptRunStore` (revision rules), `StreamToolRunsPayload`/`LiveBlock`/
+  `TranscriptLiveRunsState` and `TranscriptLiveTailPlan` (the placement rule). `ToolRun` is `{id, parts, view, runID, segmentID,
+  isFallback}`; `ToolActivity.layout` places runs by `runId`; `ChatTranscriptMapper.liveTail(...)` replaces `mergingLive` + the single
+  live prose block + the `liveTailRowID` swap; `TranscriptBlock.prose` gained `partID` (row id `"p"+partID`). Deleted: `ActivityKind.plural`,
+  `Activity`, `GroupSummary`, `describe*`, `summarize`, `target`, `basename`, `hostOf`, `clip`, `humanizeToolName`, `userMessageDraws`,
+  `TaskStatusResolver.delegateJobName`/`delegateNameMax`, `mergingLive`, both `livePart(from:)`, `LiveActivityMerge`, `liveTailRowID`.
+- Deviations: `liveTail` takes `chunks`, `closed`, `tails`, `subagents` and `taskContext` in addition to the spec's parameters (it needs
+  the ordered text chunks, the closed set, the stdout tails and the task statuses to build the synthetic parts and keep the old
+  task/delegate rules); text the ledger does not name (an older box has no ledger) is still drawn after the planned blocks, keyed by its
+  part id, so prose never disappears; a call with no run id joins one neutral line per message (never dropped). The run store lives in the
+  event store (`liveRuns.store`), so canonical answers and live frames merge into the SAME map. `BoxViewFixture.stampRuns` is a test-only
+  stand-in for the box's run membership, tied to the box by the shared golden (`BoxViewFixtureParityTests`) and compiled by the Linux
+  package too.

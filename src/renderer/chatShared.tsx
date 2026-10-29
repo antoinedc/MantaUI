@@ -498,18 +498,6 @@ export function writeSavedActiveSession(pin: ActiveSessionPin | null): void {
   } catch { /* quota / disabled storage */ }
 }
 
-// Merge a launcher's flag schema with the user's saved overrides (from
-// AppConfig.launcherFlags), falling back to each flag's registry default for
-// keys the user never touched.
-export function resolveLauncherFlags(
-  schema: { key: string; default: boolean }[],
-  saved: Record<string, boolean> | undefined,
-): Record<string, boolean> {
-  const out: Record<string, boolean> = {};
-  for (const f of schema) out[f.key] = saved?.[f.key] ?? f.default;
-  return out;
-}
-
 // ===== Persisted prompt history (survives /clear) =====
 //
 // Keyed by the tmux WINDOW (project session + window index), NOT the opencode

@@ -20,13 +20,10 @@ import { Button } from "./Button";
 import { Callout } from "./Callout";
 import { ConfirmModal } from "./ConfirmModal";
 import { getMantaPreload } from "./preloadAccess";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 import mantaMark from "./assets/manta-mark-128.png";
 import {
   DESKTOP_DOWNLOAD_URL,
-  describeGateDetails,
-  diskSentence,
-  formatEtaSeconds,
-  stepFraction,
   type ActionOutcome,
   type GateView,
 } from "./upgradeGateLogic";
@@ -84,11 +81,11 @@ function StepIcon({ status }: { status: UpgradeStep["status"] }) {
   }
 }
 
-function StepList({ steps }: { steps: UpgradeStep[] }) {
+function StepList({ steps, currentStepId = null, currentFraction = null }: { steps: UpgradeStep[]; currentStepId?: string | null; currentFraction?: number | null }) {
   return (
     <ol className="space-y-3" aria-label="Upgrade steps">
       {steps.map((s) => {
-        const fraction = s.status === "running" ? stepFraction(s) : null;
+        const fraction = s.status === "running" && s.id === currentStepId ? currentFraction : null;
         const p = s.progress;
         const measured =
           s.status === "running" && p && p.numerator !== undefined && p.denominator !== undefined
@@ -148,7 +145,7 @@ function Spin() {
 /** "Copy details" with a visible result on BOTH branches. */
 function CopyDetails({ view }: { view: GateView }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
-  const text = describeGateDetails(view);
+  const text = view.kind === "running" || view.kind === "failed" || view.kind === "rolled_back" ? view.details : "";
   if (!text) return null;
   const copy = async () => {
     try {
@@ -273,7 +270,7 @@ export function UpgradeGate({ view, onUpgradeBox, onRetry, onRollback }: Upgrade
   }
 
   if (view.kind === "running") {
-    const eta = formatEtaSeconds(view.etaSeconds);
+    const eta = view.etaText;
     const overallPct = Math.round(view.overall * 100);
     return (
       <GateFrame title="Upgrading your box" titleId={TITLE_ID}>
@@ -288,7 +285,7 @@ export function UpgradeGate({ view, onUpgradeBox, onRetry, onRollback }: Upgrade
             {eta && <span>{eta}</span>}
           </div>
         </div>
-        <StepList steps={view.steps} />
+        <StepList steps={view.steps} currentStepId={view.current?.id ?? null} currentFraction={view.currentFraction} />
       </GateFrame>
     );
   }
@@ -300,7 +297,7 @@ export function UpgradeGate({ view, onUpgradeBox, onRetry, onRollback }: Upgrade
         <Callout tone="danger">
           <div role="alert" className="space-y-1">
             <div className="break-words">{view.message}</div>
-            {view.disk && <div className="font-medium">{diskSentence(view.disk)}</div>}
+            {view.diskSentence && <div className="font-medium">{view.diskSentence}</div>}
             {view.failedStep === "preflight" && (
               <div className="text-text-faint">Nothing was changed — your box is exactly as it was.</div>
             )}
@@ -348,6 +345,7 @@ export function UpgradeGate({ view, onUpgradeBox, onRetry, onRollback }: Upgrade
           {!view.canRetry && view.retryDisabledReason && (
             <div className="text-meta text-text-faint">{view.retryDisabledReason}</div>
           )}
+          {!view.hasView && <UpdateBoxNote />}
           <CopyDetails view={view} />
         </div>
         <ConfirmModal

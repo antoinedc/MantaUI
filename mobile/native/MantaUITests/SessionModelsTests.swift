@@ -55,70 +55,8 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertNil(SessionRowSubtitle.text(for: s))
     }
 
-    // MARK: - BET-1213 background-job nesting
-
-    private func win(_ index: Int, _ sid: String?) -> MantaWindow {
-        MantaWindow(index: index, name: "w\(index)", active: false, paneCurrentPath: "", opencodeSessionId: sid, worktreePath: nil)
-    }
-
-    private func job(_ id: String, parent: String?, child: String?, status: String = "running") -> DelegateJob {
-        DelegateJob(id: id, parentSessionID: parent, childSessionID: child, status: status)
-    }
-
-    private func proj(_ windows: [MantaWindow]) -> MantaProject {
-        MantaProject(tmuxSession: "proj", defaultCwd: "/tmp", windows: windows, attached: false, mantaOwned: nil)
-    }
-
-    func testNestingHidesChildUnderPresentParent() {
-        let p = proj([win(0, "ses_parent"), win(1, "ses_child")])
-        let nesting = SessionJobNesting.compute(project: p, jobs: [job("j1", parent: "ses_parent", child: "ses_child")])
-        XCTAssertEqual(nesting.hidden, [1])
-        XCTAssertEqual(nesting.activeChildCounts, [0: 1])
-    }
-
-    func testNestingChildStaysVisibleWhenParentWindowAbsent() {
-        // The child window exists but its parent session has no window in the
-        // project — the child must NOT be orphaned or hidden.
-        let p = proj([win(0, "ses_child")])
-        let nesting = SessionJobNesting.compute(project: p, jobs: [job("j1", parent: "ses_gone", child: "ses_child")])
-        XCTAssertTrue(nesting.hidden.isEmpty)
-        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
-    }
-
-    func testNestingIgnoresJobWhoseChildWindowIsAbsent() {
-        let p = proj([win(0, "ses_parent")])
-        let nesting = SessionJobNesting.compute(project: p, jobs: [job("j1", parent: "ses_parent", child: "ses_no_window")])
-        XCTAssertTrue(nesting.hidden.isEmpty)
-        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
-    }
-
-    func testNestingNoJobsIsANoop() {
-        let p = proj([win(0, "ses_a"), win(1, "ses_b")])
-        let nesting = SessionJobNesting.compute(project: p, jobs: [])
-        XCTAssertTrue(nesting.hidden.isEmpty)
-        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
-    }
-
-    func testNestingCountsOnlyNonTerminalJobs() {
-        // Both children are hidden (any job whose child+parent windows exist),
-        // but only the RUNNING one counts toward the parent's background-job
-        // subtitle.
-        let p = proj([win(0, "ses_parent"), win(1, "ses_run"), win(2, "ses_done")])
-        let nesting = SessionJobNesting.compute(project: p, jobs: [
-            job("a", parent: "ses_parent", child: "ses_run", status: "running"),
-            job("b", parent: "ses_parent", child: "ses_done", status: "done"),
-        ])
-        XCTAssertEqual(nesting.hidden, [1, 2])
-        XCTAssertEqual(nesting.activeChildCounts, [0: 1])
-    }
-
-    func testNestingChildOfTerminalJobIsStillHidden() {
-        // Desktop hides a nested child window regardless of job status.
-        let p = proj([win(0, "ses_parent"), win(1, "ses_done")])
-        let nesting = SessionJobNesting.compute(project: p, jobs: [job("a", parent: "ses_parent", child: "ses_done", status: "done")])
-        XCTAssertEqual(nesting.hidden, [1])
-        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
-    }
+    // Background-job nesting is the box's (WS11 D7); the pure reads of its `windows[].job` are pinned in
+    // SessionActivityOrderTests.
 
     // MARK: - §7.1 status dot
     func testDotNeedsYouTakesPrecedenceOverRunning() {

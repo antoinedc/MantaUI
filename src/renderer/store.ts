@@ -11,6 +11,7 @@ import type {
   SessionSeat,
   StoppedRecord,
   WindowStatus,
+  WindowStatusPayload,
   UpdateTarget,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
@@ -403,11 +404,6 @@ type State = {
   // cache_control.ttl on requests — opencode does); must match opencode's
   // setting. Defaults to "1h".
   cacheTtl: "5m" | "1h";
-  // Per-launcher CLI flag overrides for AI CLI TUI launch modes (BET-138
-  // refinement). Keyed by launcher id, then flag key; missing keys fall back
-  // to the launcher's registry default (see resolveLauncherFlags). Empty
-  // object = no user overrides for any launcher.
-  launcherFlags: Record<string, Record<string, boolean>>;
   // Voice / Groq STT. `groqApiKey` is the gating signal — empty string
   // means voice features are unavailable and the mic button stays hidden.
   // The transcription model defaults to "" so the main/server picks the
@@ -479,10 +475,13 @@ type State = {
   // background child kept working showed as idle in the rail. Fed by the same
   // App-level opencode-event subscription as `setChatRunning`.
   liveRunning: Record<string, true>;
-  // child session id → parent session id, learned from `session.created`
-  // (properties.info.parentID) and from the session list backfill. Lets the
-  // sidebar roll a running descendant up onto its ancestor's row.
-  sessionParents: Record<string, string>;
+  // WS11 D7: the box's per-session rollup (busy beneath, direct-subagent count, stopped), streamed as `windowStatus`
+  // frames (the connect snapshot replays every windowed session) and only FILLED by `sessions:window-status`. Own running + the attention
+  // latch stay on `status` / `liveRunning`; this adds only what the box derives from the parent/child graph.
+  windowStatusBySession: Record<string, WindowStatusPayload>;
+  setWindowStatus: (sessionId: string, payload: WindowStatusPayload) => void;
+  // Fill sessions the stream has said nothing about yet. NEVER overwrites an entry: a frame is always newer than a read.
+  fillWindowStatus: (map: Record<string, WindowStatusPayload>) => void;
   // BET-738: subscription plan usage snapshots (one per connected provider),
   // fed by the composer's UsageDial. Primed once with window.api.usageList()
   // on mount and kept live by the `usage.updated` bus event — App.tsx does
@@ -599,6 +598,11 @@ type State = {
   // show "reconnecting…" when the link is down. Updated by the httpApi
   // reconnect controller via setConnectionState; read by App.tsx.
   connectionState: ConnectionState;
+  // The box's server-first capability ids (master D25 / WS11 D1): `loading` until
+  // the first GET /api/version lands, `loaded` with the ids, `failed` when the
+  // box could not be asked (never read as "old box"; the last loaded ids are kept
+  // across a later failure). Read through `useBoxCapability`.
+  boxCapabilities: { state: "loading" | "loaded" | "failed"; ids: string[]; loadedOnce: boolean };
   // True while the startup opencode fan-out (`runBackgroundSync`) is running
   // — surfaced as a subtle "Syncing…" indicator in the sidebar so a momentary
   // slowdown from bounded-concurrency fetches reads as "syncing", not
@@ -714,9 +718,6 @@ type State = {
   // same UI; just a different update path. Owning window is resolved
   // from `sessionId` via the active projects tree.
   setChatRunning: (sessionId: string, running: boolean) => void;
-  // Record a child → parent session link (see `sessionParents`). No-op when
-  // already known.
-  setSessionParent: (childId: string, parentId: string) => void;
   // Apply the box's authoritative `runningSet` (replayed on every events
   // (re)connect): every listed session is running, every other session we
   // believed was running is not. Corrects a rail latched on a turn whose
@@ -735,20 +736,13 @@ type State = {
     sessionId: string,
     kind: AttentionKind | null,
   ) => void;
-  // Chat-mode subagent count driven by ChatPanel's task-tool inspection
-  // (`countRunningSubagents` over the live transcript + child status). The
-  // PTY poller's regex (`● Task(...)` + `⎿ Running…`) can't see chat-mode
-  // windows because their pane runs `sleep infinity` — without this update
-  // path the sidebar `·N` indicator would always be 0 for chat windows.
-  // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
-  setChatSubagents: (sessionId: string, count: number) => void;
   // BET-791: reflect a chat-mode window's model-authored progress label into
   // the store so the rail row's title tooltip (the subagent count's home) can
   // carry it. Owning window resolved from `sessionId`; label null clears.
   setChatProgressLabel: (sessionId: string, label: string | null) => void;
   // BET-659: reflect a chat-mode window's live transcript into the store so
   // the Artifacts panel can derive artifacts from it. No-op when unchanged
-  // (same guard as setChatSubagents) so keystroke re-renders of ChatPanel —
+  // so keystroke re-renders of ChatPanel —
   // which leave the `messages` reference stable — don't re-emit the whole
   // array to every store subscriber.
   setChatMessages: (sessionId: string, messages: OpencodeMessage[]) => void;
@@ -830,6 +824,12 @@ type State = {
   setPendingPairLink: (url: string | null) => void;
   setPairLinkError: (message: string | null) => void;
   setConnectionState: (s: ConnectionState) => void;
+  setBoxCapabilities: (c: { state: "loading" | "loaded" | "failed"; ids: string[]; loadedOnce: boolean }) => void;
+  // The run-revision connection state (WS11 D11, runEpoch.ts): the interpreter epoch announced by the LATEST events
+  // connection's `runningSet` (null until it arrives) and a counter bumped on every (re)connect.
+  runEpoch: { epoch: string | null; connGen: number };
+  setRunEpoch: (epoch: string | null) => void;
+  beginRunConnection: () => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -861,7 +861,6 @@ export const useStore = create<State>((set, get) => ({
   optInModels: [],
   skillRegistryUrls: [],
   cacheTtl: "5m",
-  launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
   openaiApiKey: "",
@@ -882,7 +881,7 @@ export const useStore = create<State>((set, get) => ({
   sessionCost: {},
   jobs: {},
   liveRunning: {},
-  sessionParents: {},
+  windowStatusBySession: {},
   usage: [],
   accounts: [],
   sessionSeats: {},
@@ -905,6 +904,8 @@ export const useStore = create<State>((set, get) => ({
   serverUpdatePrompt: null,
   serverUpdateProgress: null,
   connectionState: { state: "idle" },
+  boxCapabilities: { state: "loading", ids: [], loadedOnce: false },
+  runEpoch: { epoch: null, connGen: 0 },
   backgroundSyncing: false,
   videoRenderNow: null,
   opencodeRestartNeeded: false,
@@ -1150,7 +1151,6 @@ export const useStore = create<State>((set, get) => ({
       // Absent/unknown → "5m": opencode always requests Anthropic's default
       // 5-minute TTL (see AppConfig.cacheTtl), so 5m is the honest fallback.
       cacheTtl: c.cacheTtl === "1h" ? "1h" : "5m",
-      launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       openaiApiKey: c.openaiApiKey ?? "",
@@ -1263,6 +1263,9 @@ export const useStore = create<State>((set, get) => ({
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setServerUpdateProgress: (p) => set({ serverUpdateProgress: p }),
   setConnectionState: (s) => set({ connectionState: s }),
+  setBoxCapabilities: (c) => set({ boxCapabilities: c }),
+  setRunEpoch: (epoch) => set((s) => (s.runEpoch.epoch === epoch ? s : { runEpoch: { ...s.runEpoch, epoch } })),
+  beginRunConnection: () => set((s) => ({ runEpoch: { epoch: null, connGen: s.runEpoch.connGen + 1 } })),
   setOpencodeRestartNeeded: (v) => set({ opencodeRestartNeeded: v }),
 
   applyStatusBatch: (batch) =>
@@ -1407,11 +1410,24 @@ export const useStore = create<State>((set, get) => ({
       };
     }),
 
-  setSessionParent: (childId, parentId) =>
+  setWindowStatus: (sessionId, payload) =>
     set((prev) => {
-      if (!childId || !parentId || childId === parentId) return prev;
-      if (prev.sessionParents[childId] === parentId) return prev;
-      return { sessionParents: { ...prev.sessionParents, [childId]: parentId } };
+      const old = prev.windowStatusBySession[sessionId];
+      if (old && JSON.stringify(old) === JSON.stringify(payload)) return prev;
+      return { windowStatusBySession: { ...prev.windowStatusBySession, [sessionId]: payload } };
+    }),
+
+  fillWindowStatus: (map) =>
+    set((prev) => {
+      const next = { ...prev.windowStatusBySession };
+      let changed = false;
+      for (const [sid, payload] of Object.entries(map)) {
+        if (next[sid] === undefined) {
+          next[sid] = payload;
+          changed = true;
+        }
+      }
+      return changed ? { windowStatusBySession: next } : prev;
     }),
 
   reconcileRunningSet: (sessionIds) => {
@@ -1461,34 +1477,6 @@ export const useStore = create<State>((set, get) => ({
         subagents: old?.subagents ?? 0,
         attention: wantAttention,
         attentionKind: wantAttention ? kind ?? "idle" : undefined,
-        lastMessageAt: old?.lastMessageAt,
-        progressLabel: old?.progressLabel,
-      };
-      return {
-        status: {
-          ...prev.status,
-          [owner.tmuxSession]: {
-            ...prev.status[owner.tmuxSession],
-            [owner.windowIndex]: nextWin,
-          },
-        },
-      };
-    }),
-
-  setChatSubagents: (sessionId, count) =>
-    set((prev) => {
-      const owner = resolveSessionOwner(prev.projects, sessionId);
-      if (!owner) return prev;
-      const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
-      const prevCount = old?.subagents ?? 0;
-      // No-op when unchanged to avoid pointless re-renders of the entire
-      // sidebar tree (zustand re-emits to all subscribers on every set).
-      if (prevCount === count) return prev;
-      const nextWin: WindowStatusUI = {
-        running: old?.running ?? false,
-        subagents: count,
-        attention: old?.attention ?? false,
-        attentionKind: old?.attentionKind,
         lastMessageAt: old?.lastMessageAt,
         progressLabel: old?.progressLabel,
       };
@@ -1662,9 +1650,6 @@ export const useStore = create<State>((set, get) => ({
         try {
           const sessions = await window.api.opencodeListSessions!(dir);
           for (const s of sessions) {
-            // Same listing carries the subagent → parent link; seed it so a
-            // child already running at connect rolls up onto its parent row.
-            if (s.parentID) get().setSessionParent(s.id, s.parentID);
             const updated = s.time?.updated;
             if (typeof updated === "number" && updated > 0) {
               updatedBySessionId.set(s.id, updated);

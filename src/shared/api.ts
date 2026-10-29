@@ -1,5 +1,12 @@
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
+  AccountsRowStates,
+  SessionClosePreview,
+  SessionCloseResult,
+  WindowStatusPayload,
+  SessionNameProposal,
+  StreamCachePayload,
+  StreamContextPayload,
   AgentFileReady,
   ModelsTableResult,
   ModelsWriteReply,
@@ -160,7 +167,26 @@ export type UpgradeStatus = {
     needBytes?: number;
     haveBytes?: number;
   } | null;
+  /** The gate's wording, computed by the box (WS11 D3 / X5). Absent on an older box. */
+  view?: UpgradeView;
 };
+export type UpgradeView =
+  | { kind: "idle" | "completed" }
+  | { kind: "running"; currentStepId: UpgradeStepId | null; currentFraction: number | null; etaText: string | null; details: string }
+  | {
+      kind: "failed";
+      currentStepId: UpgradeStepId | null;
+      failedStep: UpgradeStepId;
+      message: string;
+      disk: string | null;
+      diskSentence: string | null;
+      retryLabel: "Retry" | "Check again";
+      canRetry: boolean;
+      retryDisabledReason: string | null;
+      canRollback: boolean;
+      details: string;
+    }
+  | { kind: "rolled_back"; details: string };
 /** `POST /api/upgrade/retry` and `/rollback` outcome. */
 export type UpgradeActionResult = { ok: true } | { ok: false; error: string };
 
@@ -197,6 +223,9 @@ type RoutingChooseDecision = {
   // no-healthy-endpoint only: the endpoint keys ("providerID/modelID") the
   // router knows are excluded.
   excluded?: string[];
+  // WS11 D4 (K3): the banner copy for a no-healthy-endpoint verdict, worded by
+  // the box from the router's structured per-key states. Absent on an older box.
+  copy?: string;
   // BET-1537 (W9): WHY each excluded key is excluded — the raw endpoint
   // register state and provider facade state per key (structured; the
   // renderer's shared endpoint/provider labels do the words). A key missing
@@ -1000,7 +1029,10 @@ export interface Api {
   // re-locating it by name (which mixed new sessions up with existing ones
   // on name collisions).
   tmuxNewSession(input: {
-    name: string;
+    // Omit `name` to let the box pick one (tmux-safe, unique, allocated under a lock) from `nameHint`
+    // (else the folder); the final name comes back as `name` on the result (WS11 D5 / S1).
+    name?: string;
+    nameHint?: string;
     cwd: string;
     windowName?: string;
     chatMode?: boolean;
@@ -1028,7 +1060,32 @@ export interface Api {
     // it on the new window.
     existingSessionId?: string;
   }): Promise<TmuxCreateResult>;
-  tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
+  // WS11 D5 (S1): preview the name a create would pick. `project`: from a hint/folder against live
+  // sessions; `scratch`: the folder slug under `root`, with the collision hint.
+  sessionsProposeName(input: {
+    kind: "project" | "scratch";
+    hint?: string;
+    cwd?: string;
+    root?: string;
+  }): Promise<SessionNameProposal>;
+  // WS11 D6 (S10): the close flow on the box. Preview words the confirm; close runs worktree removal → kill →
+  // metadata → refresh and reports what happened. A single-window close whose worktree is dirty answers
+  // `needsConfirm` (nothing killed) until called again with `dirtyWorktree`.
+  // WS11 D7 (S14): every windowed session's status — a FULL replacement for the client's map (also streamed as
+  // `windowStatus` frames).
+  sessionsWindowStatus(): Promise<Record<string, WindowStatusPayload>>;
+  sessionsClosePreview(input: { project: string; windowIndex?: number }): Promise<SessionClosePreview>;
+  sessionsClose(input: {
+    project: string;
+    windowIndex?: number;
+    dirtyWorktree?: "remove" | "keep";
+    deleteConversation?: boolean;
+    /** The window the user confirmed (from its row): the box refuses if the index now names another window. */
+    expect?: { opencodeSessionId?: string | null; worktreePath?: string | null };
+  }): Promise<SessionCloseResult>;
+  // `returnName`: ask for `{projects, name}` where `name` is the FINAL (tmux-safe) name the box gave the project.
+  // A box that predates it answers a bare `Project[]`.
+  tmuxRenameSession(input: { oldName: string; newName: string; returnName?: boolean }): Promise<Project[] | { projects: Project[]; name: string }>;
   tmuxRenameWindow(input: {
     sessionName: string;
     windowIndex: number;
@@ -1114,7 +1171,7 @@ export interface Api {
   forgeDevicePoll(input: { grantId: string }): Promise<ForgeDevicePollResult>;
   forgeDeviceCancel(input: { grantId: string }): Promise<{ ok: boolean }>;
   forgeRepos(): Promise<ForgeRepoListResult>;
-  forgeCloneStart(input: { url: string; dest: string; name: string }): Promise<{ id?: string; error?: string; message?: string }>;
+  forgeCloneStart(input: { url: string; name: string; root?: string; dest?: string }): Promise<{ id?: string; error?: string; message?: string }>;
   forgeCloneStatus(input: { id: string }): Promise<ForgeCloneStatus | null>;
   forgeCloneCancel(input: { id: string }): Promise<{ cancelled: boolean }>;
 
@@ -1201,6 +1258,7 @@ export interface Api {
   // Which AI CLI TUI launchers are available on this box right now (BET-138
   // refinement). Cheap; call on active-session change, no polling needed.
   launchersList(): Promise<AvailableLauncher[]>;
+  launchersSetFlag(input: { id: string; key: string; value: boolean }): Promise<AvailableLauncher>;
 
   onStatusEvent(cb: (batch: WindowStatus[]) => void): () => void;
 
@@ -1209,9 +1267,13 @@ export interface Api {
   //   chronological TAIL). Omit (or pass {}) for the whole history. The
   //   desktop passes {limit: 100} for the tail-first mount and {} for
   //   "Load earlier". Duplicate tool stdout is stripped server-side always.
-  opencodeMessages(sessionId: string, opts?: { limit?: number }): Promise<OpencodeMessage[]>;
+  opencodeMessages(sessionId: string, opts?: { limit?: number; view?: boolean }): Promise<OpencodeMessage[]>;
   // Single-message fetch — returns null on miss so callers can fall back.
-  opencodeMessage(sessionId: string, messageId: string): Promise<OpencodeMessage | null>;
+  opencodeMessage(sessionId: string, messageId: string, opts?: { view?: boolean }): Promise<OpencodeMessage | null>;
+  /** The box's context breakdown for an idle session (null before a billed turn). */
+  opencodeContext(sessionId: string): Promise<StreamContextPayload | null>;
+  /** The box's cache-staleness payload for an idle session (null before a completed turn). */
+  opencodeCache(sessionId: string): Promise<StreamCachePayload | null>;
   // Open/close the scoped SSE stream for a session. ChatPanel calls open on
   // mount and close on unmount so the main process only streams open
   // sessions.
@@ -1319,9 +1381,19 @@ export interface Api {
         streak?: number;
         since?: number;
         reason?: { httpStatus?: number | null; errorName?: string | null } | null;
+        lastSuccessAt?: number;
+        attempts?: number;
+        successes?: number;
+        /** WS11 D4 (K3): the one-line state, worded by the box. Absent on an older box. */
+        stateLine?: string;
       }
     >;
+    /** WS11 D4 (K3): the worst endpoint per provider (`key` null = "Unproven"). */
+    providerLines?: Record<string, { key: string | null; stateLine: string }>;
   }>;
+  // WS11 D4 (K2): every Accounts row's state text / tone / control / register
+  // line, computed on the box.
+  accountsRowStates(): Promise<AccountsRowStates>;
   // BET-1537 (S5): "Send probe" on a custom endpoint row — force a health
   // probe against one endpoint key now. `message` is a factual row string and
   // is NEVER empty — the control reports both outcomes.
@@ -1406,11 +1478,6 @@ export interface Api {
     messageID?: string;
   }): Promise<{ newSessionId: string; projects: Project[] }>;
   opencodeCompactSession(sessionId: string): Promise<void>;
-  opencodeDeleteSession(input: {
-    sessionId: string;
-    sessionName: string;
-    windowIndex: number;
-  }): Promise<Project[]>;
   // BET-421: bare session lifecycle for the ephemeral onboarding verifier.
   // create makes a fresh opencode session in `directory` (no tmux window,
   // no project); deleteRaw drops it by id alone. Together they let the
@@ -1790,6 +1857,11 @@ export interface Api {
   // `opencode.version`). Rendered alongside the desktop + server versions in
   // this single round-trip — no new IPC channel.
   getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
+  // GET /api/version — the capability read (master D25/D1). Unlike the
+  // `server:version` RPC it is upgrade-exempt, so it still answers while the box
+  // migrates. A body without `capabilities` is an older box (an empty set); a
+  // rejection means "could not ask", never "old box".
+  apiVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version
   // via Electron's `app.getVersion()`. Combined with the server's

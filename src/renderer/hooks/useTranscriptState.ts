@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
+import { forgetRunSession, opencodeMessageTracked, opencodeMessagesTracked } from "../runEpoch";
 import {
   mergeBufferedDeltas,
   collectChildSessionIds,
@@ -48,7 +49,7 @@ export type TranscriptState = {
   loadedAllRef: React.MutableRefObject<boolean>;
   // The options for the next transcript fetch: { limit: TRANSCRIPT_TAIL_LIMIT }
   // until loadedAllRef flips, then {} (full history).
-  fetchOpts: () => { limit: number } | {};
+  fetchOpts: () => { limit?: number; view: true };
   // Tail-first loading for CHILD transcripts (BET-683). `childLoadedAllRef`
   // maps each childSessionId to whether its FULL history has been pulled (via
   // "Load earlier"); until true, child fetches pass { limit:
@@ -98,8 +99,8 @@ export function useTranscriptState(params: {
   // { limit: TRANSCRIPT_TAIL_LIMIT }. Reset on session change below.
   const loadedAllRef = useRef(false);
   const fetchOpts = useCallback(
-    (): { limit: number } | {} =>
-      loadedAllRef.current ? {} : { limit: TRANSCRIPT_TAIL_LIMIT },
+    (): { limit?: number; view: true } =>
+      loadedAllRef.current ? { view: true } : { limit: TRANSCRIPT_TAIL_LIMIT, view: true },
     [],
   );
   const isActiveRef = useRef(isActive);
@@ -174,8 +175,9 @@ export function useTranscriptState(params: {
     refetchTimerRef.current = setTimeout(() => {
       refetchTimerRef.current = null;
       setRefreshing(true);
-      window.api
-        .opencodeMessages(sessionId, fetchOpts())
+      // Tracked: the run views it carries are merged under the connection generation it was ISSUED under (runEpoch.ts); an
+      // answer carrying a membership a rebuild has retired schedules one more fetch.
+      opencodeMessagesTracked(sessionId, fetchOpts(), scheduleRefetch)
         .then((m) => {
           setMessages(m);
           for (const cid of collectChildSessionIds(m)) {
@@ -217,8 +219,7 @@ export function useTranscriptState(params: {
       setTimeout(() => {
         spliceTimers.current.delete(messageId);
         spliceFirstScheduledAt.current.delete(messageId);
-        window.api
-          .opencodeMessage(sessionId, messageId)
+        opencodeMessageTracked(sessionId, messageId, { view: true }, scheduleRefetch)
           .then((msg) => {
             if (!msg) {
               scheduleRefetch();
@@ -229,7 +230,10 @@ export function useTranscriptState(params: {
               const idx = prev.findIndex((m) => m.info.id === msg.info.id);
               if (idx >= 0) {
                 const next = prev.slice();
-                next[idx] = msg;
+                // A lone message never carries `view.turn` (a turn needs its neighbours): keep the one the last full
+                // fetch gave it, so a splice cannot drop a finished turn's footer.
+                const kept = prev[idx].view?.turn;
+                next[idx] = kept && !msg.view?.turn ? { ...msg, view: { ...msg.view, turn: kept } } : msg;
                 return next;
               }
               // Reconcile: if the incoming message is the real user message
@@ -264,13 +268,10 @@ export function useTranscriptState(params: {
   const fetchChildTranscript = useCallback((childId: string) => {
     // Tail-first, matching the main session: the first fetch pulls only the
     // tail unless "Load earlier" has already pulled the full history.
-    window.api
-      .opencodeMessages(
-        childId,
-        childLoadedAllRef.current.get(childId)
-          ? {}
-          : { limit: TRANSCRIPT_TAIL_LIMIT },
-      )
+    opencodeMessagesTracked(
+      childId,
+      childLoadedAllRef.current.get(childId) ? { view: true } : { limit: TRANSCRIPT_TAIL_LIMIT, view: true },
+    )
       .then((m) => {
         setChildMessages((prev) => {
           const next = new Map(prev);
@@ -283,8 +284,7 @@ export function useTranscriptState(params: {
 
   const loadEarlierChildTranscript = useCallback((childId: string) => {
     setLoadingChildEarlier((prev) => new Set(prev).add(childId));
-    window.api
-      .opencodeMessages(childId, {})
+    opencodeMessagesTracked(childId, { view: true })
       .then((m) => {
         childLoadedAllRef.current.set(childId, true);
         setChildMessages((prev) => new Map(prev).set(childId, m));
@@ -323,6 +323,16 @@ export function useTranscriptState(params: {
     for (const t of spliceTimers.current.values()) clearTimeout(t);
     spliceTimers.current.clear();
     spliceFirstScheduledAt.current.clear();
+  }, [sessionId]);
+
+  // The run values of a session (and its subagent children) this hook stops showing are dropped with it — the map is
+  // per-session app-lifetime state and would otherwise hold every run ever seen.
+  useEffect(() => {
+    const children = childSessionIds.current;
+    return () => {
+      forgetRunSession(sessionId);
+      for (const cid of children) forgetRunSession(cid);
+    };
   }, [sessionId]);
 
   // Unmount cleanup — clear EVERY pending debounce timer. A timer surviving

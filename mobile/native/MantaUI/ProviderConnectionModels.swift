@@ -231,12 +231,15 @@ struct ProviderHealthEntry: Equatable, Sendable {
 
 struct EndpointHealthEntry: Equatable, Sendable {
     var state: String
-    var retryInMs: Double? = nil
-    var httpStatus: Int? = nil
-    var errorName: String? = nil
-    var lastSuccessAt: Double? = nil
-    var attempts: Int? = nil
-    var successes: Int? = nil
+    /// The one-line state, worded by the box (WS11 D4 / K3). nil on an older box.
+    var stateLine: String? = nil
+}
+
+/// The worst endpoint of a provider, worded by the box: `key` is the register key
+/// ("providerID/modelID"; nil = "Unproven" with nothing in the register yet).
+struct ProviderHealthLine: Equatable, Sendable {
+    var key: String?
+    var stateLine: String
 }
 
 /// `accounts:health` — the health engine's per-provider and per-endpoint
@@ -246,10 +249,17 @@ struct AccountsHealth: Decodable, Equatable, Sendable {
     var providers: [String: ProviderHealthEntry] = [:]
     /// Keyed `"<providerID>/<modelID>"`.
     var endpoints: [String: EndpointHealthEntry] = [:]
+    /// The worst endpoint per provider, worded by the box.
+    var providerLines: [String: ProviderHealthLine] = [:]
 
-    init(providers: [String: ProviderHealthEntry] = [:], endpoints: [String: EndpointHealthEntry] = [:]) {
+    init(
+        providers: [String: ProviderHealthEntry] = [:],
+        endpoints: [String: EndpointHealthEntry] = [:],
+        providerLines: [String: ProviderHealthLine] = [:]
+    ) {
         self.providers = providers
         self.endpoints = endpoints
+        self.providerLines = providerLines
     }
 
     init(from decoder: Decoder) throws {
@@ -258,10 +268,6 @@ struct AccountsHealth: Decodable, Equatable, Sendable {
         func number(_ object: [String: JSONValue], _ key: String) -> Double? {
             if case .number(let n)? = object[key], n.isFinite { return n }
             return nil
-        }
-        func count(_ object: [String: JSONValue], _ key: String) -> Int? {
-            guard let n = number(object, key) else { return nil }
-            return Int(exactly: n)
         }
         if case .object(let map)? = root["providers"] {
             for (id, raw) in map {
@@ -272,21 +278,17 @@ struct AccountsHealth: Decodable, Equatable, Sendable {
         if case .object(let map)? = root["endpoints"] {
             for (key, raw) in map {
                 guard case .object(let entry) = raw, case .string(let state)? = entry["state"], !state.isEmpty else { continue }
-                var httpStatus: Int?
-                var errorName: String?
-                if case .object(let reason)? = entry["reason"] {
-                    httpStatus = count(reason, "httpStatus")
-                    if case .string(let name)? = reason["errorName"], !name.isEmpty { errorName = name }
-                }
-                endpoints[key] = EndpointHealthEntry(
-                    state: state,
-                    retryInMs: number(entry, "retryInMs"),
-                    httpStatus: httpStatus,
-                    errorName: errorName,
-                    lastSuccessAt: number(entry, "lastSuccessAt"),
-                    attempts: count(entry, "attempts"),
-                    successes: count(entry, "successes")
-                )
+                var line: String?
+                if case .string(let l)? = entry["stateLine"], !l.isEmpty { line = l }
+                endpoints[key] = EndpointHealthEntry(state: state, stateLine: line)
+            }
+        }
+        if case .object(let map)? = root["providerLines"] {
+            for (id, raw) in map {
+                guard case .object(let entry) = raw, case .string(let line)? = entry["stateLine"], !line.isEmpty else { continue }
+                var key: String?
+                if case .string(let k)? = entry["key"], !k.isEmpty { key = k }
+                providerLines[id] = ProviderHealthLine(key: key, stateLine: line)
             }
         }
     }
@@ -443,14 +445,16 @@ struct AccountsSectionPlan: Equatable, Sendable {
 
 // MARK: - Connection row
 
-/// What a subscription's connection row says and offers (`describeAccountState`
-/// on the Mac app, minus the usage-reading branches — the seat meters below carry
-/// those numbers).
-struct AccountRowState: Equatable, Sendable {
-    enum Tone: Equatable, Sendable { case ok, warn, danger, quiet }
-    enum Control: Equatable, Sendable {
+/// What a connection row says and offers — computed on the box (`accounts:row-states`,
+/// WS11 D4 / K2) and shown as given. The box names the control by precedence (out of
+/// credit → retry; a credential owned elsewhere → none; connected → disconnect; else
+/// connect); the phone never re-derives it. An unreadable tone is quiet and an
+/// unreadable control is none (no control is the safe answer).
+struct AccountRowState: Equatable, Sendable, Decodable {
+    enum Tone: String, Equatable, Sendable { case ok, warn, danger, quiet }
+    enum Control: String, Equatable, Sendable {
         /// Out of credit: re-read the meter and clear the flag if funds are back.
-        case tryAgain
+        case tryAgain = "retry"
         case disconnect
         case connect
         /// Connected, but the credential is owned elsewhere: nothing to offer.
@@ -459,64 +463,40 @@ struct AccountRowState: Equatable, Sendable {
 
     var text: String
     var tone: Tone
+    var control: Control
+    /// A custom endpoint's register line (its worst state); nil on subscription rows.
+    var registerLine: String?
 
-    private enum Health { case outOfCredit, rateLimited(retryMinutes: Int?), failing }
-
-    /// Only these three states mean anything to the row; any other (or no) entry
-    /// is "no health data", never "healthy".
-    private static func health(_ entry: ProviderHealthEntry?) -> Health? {
-        guard let entry else { return nil }
-        switch entry.state {
-        case "out-of-credit": return .outOfCredit
-        case "rate-limited": return .rateLimited(retryMinutes: ProviderHealthFormat.retryMinutes(entry.retryInMs))
-        case "failing": return .failing
-        default: return nil
-        }
+    init(text: String, tone: Tone, control: Control = .none, registerLine: String? = nil) {
+        self.text = text
+        self.tone = tone
+        self.control = control
+        self.registerLine = registerLine
     }
 
-    static func describe(status: SubscriptionStatus, health entry: ProviderHealthEntry?) -> AccountRowState {
-        switch health(entry) {
-        case .outOfCredit?:
-            return AccountRowState(text: "Out of credit", tone: .danger)
-        case .rateLimited(let minutes)?:
-            return AccountRowState(text: minutes.map { "Rate limited · retry in \($0)m" } ?? "Rate limited", tone: .warn)
-        case .failing?:
-            return AccountRowState(text: "Not responding", tone: .warn)
-        case nil:
-            break
-        }
-        if status.connected, status.managedExternally, let by = status.managedBy, !by.isEmpty {
-            return AccountRowState(text: "connected · signed in with \(by)", tone: .ok)
-        }
-        if status.connected { return AccountRowState(text: "Connected", tone: .ok) }
-        return AccountRowState(text: "Not connected", tone: .quiet)
+    /// The control a subscription row falls back to when the box gave it no row state (an older box, or no read
+    /// yet), from fields the screen already reads — so Connect / Disconnect / Try again never disappear. The one
+    /// deliberate exception to "the box decides"; `accounts:row-states` replaces it whenever it answers.
+    static func fallbackControl(connected: Bool, managedExternally: Bool, health: String?) -> Control {
+        if health == "out-of-credit" { return .tryAgain }
+        if connected && managedExternally { return .none }
+        return connected ? .disconnect : .connect
     }
 
-    static func control(status: SubscriptionStatus, health entry: ProviderHealthEntry?) -> Control {
-        if case .outOfCredit? = health(entry) { return .tryAgain }
-        if status.connected, status.managedExternally { return .none }
-        return status.connected ? .disconnect : .connect
+    private enum CodingKeys: String, CodingKey { case text, tone, control, registerLine }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = (try? c.decode(String.self, forKey: .text)) ?? ""
+        tone = ((try? c.decode(String.self, forKey: .tone)).flatMap(Tone.init(rawValue:))) ?? .quiet
+        control = ((try? c.decode(String.self, forKey: .control)).flatMap(Control.init(rawValue:))) ?? .none
+        registerLine = (try? c.decodeIfPresent(String.self, forKey: .registerLine)) ?? nil
     }
 }
 
-enum ProviderHealthFormat {
-    /// Minutes to show for a rate-limit deadline: at least 1, nil when none.
-    static func retryMinutes(_ retryInMs: Double?) -> Int? {
-        guard let retryInMs, retryInMs.isFinite, retryInMs > 0 else { return nil }
-        return max(1, Int((retryInMs / 60_000).rounded(.up)))
-    }
-
-    /// "just now" / "5m ago" / "3h ago" / "6d ago"; nil for a missing time.
-    static func ageText(_ timestampMs: Double?, nowMs: Double) -> String? {
-        guard let timestampMs, timestampMs.isFinite, timestampMs > 0, nowMs.isFinite else { return nil }
-        let delta = max(0, nowMs - timestampMs)
-        if delta < 60_000 { return "just now" }
-        let minutes = Int(delta / 60_000)
-        if minutes < 60 { return "\(minutes)m ago" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h ago" }
-        return "\(hours / 24)d ago"
-    }
+/// `accounts:row-states` — `{rows: {<providerID>: AccountRowState}}`.
+struct AccountRowStatesReply: Decodable, Equatable, Sendable {
+    var rows: [String: AccountRowState] = [:]
 }
 
 // MARK: - Connect: which flow does the Connect button open?
