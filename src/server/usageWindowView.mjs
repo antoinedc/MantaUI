@@ -5,13 +5,9 @@
 // rings can never disagree about what colour 85% is. `kind` stays the window's
 // role (session / weekly …): comparing it to a literal is not a rule.
 
-/** "under" (<70) | "warn" (70–89) | "danger" (90–99) | "over" (≥100). */
-export function windowTone(pct) {
-  if (pct >= 100) return "over";
-  if (pct >= 90) return "danger";
-  if (pct >= 70) return "warn";
-  return "under";
-}
+import { windowTone } from "../shared/usageWindowTone.mjs";
+
+export { windowTone };
 
 /**
  * A snapshot with `tone` on every window (the input is not mutated). A snapshot

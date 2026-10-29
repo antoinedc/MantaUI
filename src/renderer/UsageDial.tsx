@@ -34,6 +34,7 @@ import {
   selectUsageSnapshot,
   usageDialState,
   usageStale,
+  usageWindowBlocker,
   type UsageDialTone,
 } from "./chatUtils";
 import { useStore } from "./store";
@@ -126,7 +127,10 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
   // switch to the all-seats figure, and only in automatic mode.
   const combined = multi && view?.mode === "auto" ? combinedSeatWindows(view) : null;
   const popoverState = usageDialState(snapshot, alwaysShow);
-  const state = snapshot && combined ? usageDialState({ ...snapshot, windows: combined.windows }, alwaysShow) : popoverState;
+  const state =
+    snapshot && combined
+      ? usageDialState({ ...snapshot, windows: combined.windows }, alwaysShow, { applyBlocking: false })
+      : popoverState;
   const moveComing = isMoveComing(view, current);
 
   // Learn which seat this conversation is on (cached in the store; kept
@@ -166,6 +170,7 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
       : current.account.label
     : null;
   const lead = seatName ? `${label} · ${seatName}` : label;
+  const blockedReset = state.blockedBy ? formatWindowReset(state.blockedBy.resetsAt, nowMs) : null;
   const nextReset = resetLine?.startsWith("resets ") ? `next reset ${resetLine.slice(7)}` : resetLine;
   const title =
     (combined
@@ -173,9 +178,12 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         ? `${label} · the ${windowLabel} quota is resetting on every seat`
         : `${label} · ${pctClamped}% of the ${windowLabel} across ${combined.seatCount} seats` +
           (nextReset ? ` — ${nextReset}` : "")
-      : state.awaitingReset
-        ? `${lead} · the ${windowLabel} quota is resetting`
-        : `${lead} · ${pctClamped}% of the ${windowLabel}` + (resetLine ? ` — ${resetLine}` : "")) +
+      : state.blockedBy
+        ? `${lead} · the ${state.blockedBy.label} limit is used up` +
+          (blockedReset ? ` — ${blockedReset}` : "")
+        : state.awaitingReset
+          ? `${lead} · the ${windowLabel} quota is resetting`
+          : `${lead} · ${pctClamped}% of the ${windowLabel}` + (resetLine ? ` — ${resetLine}` : "")) +
     (moveComing ? " · this conversation will move to another seat soon" : "") +
     " · click for details";
 
@@ -401,7 +409,12 @@ function UsagePopoverBody({
 
       <div className="flex flex-col gap-3">
         {snapshot.windows.map((w) => (
-          <UsageWindowRow key={w.kind} usageWindow={w} nowMs={nowMs} />
+          <UsageWindowRow
+            key={w.kind}
+            usageWindow={w}
+            nowMs={nowMs}
+            blockedBy={usageWindowBlocker(snapshot.windows, w)}
+          />
         ))}
       </div>
       {snapshot.windows.some((w) => w.tone == null) && (
@@ -598,8 +611,15 @@ export function SeatMiniBars({ seat, nowMs: _nowMs }: { seat: SeatView; nowMs: n
       {windows.map((w) => {
         const awaiting = w.stale === true;
         const pct = awaiting ? 0 : Math.max(0, Math.min(100, w.pct));
+        const blockedBy = usageWindowBlocker(seat.windows, w);
         return (
-          <div key={w.kind} className="flex items-center gap-1" data-window-kind={w.kind}>
+          <div
+            key={w.kind}
+            className={"flex items-center gap-1" + (blockedBy ? " opacity-40" : "")}
+            data-window-kind={w.kind}
+            data-blocked={blockedBy ? "true" : undefined}
+            title={blockedBy ? `Not usable until the ${blockedBy.label} limit resets` : undefined}
+          >
             <span className="w-5 truncate text-label text-text-faint">{w.label}</span>
             <span className="flex-1 h-[3px] rounded-xs bg-fill-active overflow-hidden">
               <span
@@ -621,7 +641,17 @@ export function SeatMiniBars({ seat, nowMs: _nowMs }: { seat: SeatView; nowMs: n
 // + fill, and a reset line. The component iterates `snapshot.windows` — it
 // never hardcodes "session"/"weekly" so a provider with a third window (or a
 // daily one) renders with zero changes here.
-export function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWindow; nowMs: number }) {
+export function UsageWindowRow({
+  usageWindow: w,
+  nowMs,
+  blockedBy = null,
+}: {
+  usageWindow: UsageWindow;
+  nowMs: number;
+  // A longer, used-up window that makes this one unusable despite its own
+  // headroom: the row keeps its figure but is greyed and says why.
+  blockedBy?: UsageWindow | null;
+}) {
   // Awaiting its replacement numbers: show no value and no fill rather than a
   // figure we know is the previous window's. The notice above the list says
   // why, and formatWindowReset already renders "resetting…" below.
@@ -639,9 +669,15 @@ export function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWi
         ? `${w.used.toLocaleString()} / ${w.limit.toLocaleString()} · ${pctClamped}%`
         : `${pctClamped}%`;
   const resetLine = formatWindowReset(w.resetsAt, nowMs);
+  const blocked = !inactive && blockedBy != null;
+  const blockedLine = blocked ? `not usable until the ${blockedBy.label} limit resets` : null;
 
   return (
-    <div className={inactive ? "opacity-50" : undefined} data-inactive={inactive ? "true" : undefined}>
+    <div
+      className={inactive || blocked ? "opacity-50" : undefined}
+      data-inactive={inactive ? "true" : undefined}
+      data-blocked={blocked ? "true" : undefined}
+    >
       <div className="flex items-center justify-between text-meta mb-1">
         <span className="text-text-muted">{w.label}</span>
         <span className="font-mono font-medium text-text tabular-nums">{value}</span>
@@ -652,10 +688,10 @@ export function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWi
           style={{ width: `${pctClamped}%`, backgroundColor: fill }}
         />
       </div>
-      {resetLine && (
+      {(resetLine || blockedLine) && (
         <div className="mt-1 text-label text-text-faint">
-          {resetLine}
-          {w.binding ? " · binding limit" : ""}
+          {blockedLine ?? resetLine}
+          {!blockedLine && w.binding ? " · binding limit" : ""}
         </div>
       )}
     </div>

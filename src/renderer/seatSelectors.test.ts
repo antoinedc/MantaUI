@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   combinedSeatWindows,
+  usageDialState,
   describeSeatLine,
   formatLastMove,
   hasSeatChoice,
@@ -308,6 +309,37 @@ describe("combinedSeatWindows (automatic-mode ring)", () => {
     expect(byKind(all, "session").stale).toBe(true);
     expect(byKind(all, "session").pct).toBe(0);
     expect(byKind(all, "session").resetsAt).toBeUndefined();
+  });
+
+  it("a seat whose weekly is used up counts as full in the 5h, however empty its 5h is", () => {
+    // The live case: a Max 20x seat at 0% 5h / 100% 7d next to Team Max 5x seats.
+    const blocked = seat("a", "A", 0, 100);
+    blocked.windows[0] = win("session", 0, { resetsAt: NOW + 600_000 });
+    const team = seat("b", "B", 50, 0, { windows: [win("session", 50)] });
+    const r = combinedSeatWindows(view(["Max 20x", "Team · Max 5x"], [blocked, team]));
+    expect(byKind(r, "session").pct).toBe(90); // (100·20 + 50·5) / 25, not (0·20 + 50·5) / 25 = 10
+    // Its 5h reset frees nothing, so it is not the "next reset".
+    expect(byKind(r, "session").resetsAt).toBe(NOW + 3 * 3_600_000);
+  });
+
+  it("an used-up model-scoped or inactive weekly does not block a seat's 5h", () => {
+    const a = seat("a", "A", 20, 0, {
+      windows: [
+        win("session", 20),
+        win("weekly", 100, { kind: "weekly_scoped:x", label: "7d · X", scope: "X" }),
+        win("weekly", 100, { active: false }),
+      ],
+    });
+    expect(byKind(combinedSeatWindows(view([null], [a])), "session").pct).toBe(20);
+  });
+
+  it("every combined window carries the colour band of its combined figure", () => {
+    // Without a band the ring falls back to the neutral grey track.
+    const r = combinedSeatWindows(view([null, null], [seat("a", "A", 10, 80), seat("b", "B", 30, 100)]));
+    expect(byKind(r, "session").tone).toBe("under"); // 20%
+    expect(byKind(r, "weekly").tone).toBe("danger"); // 90%
+    const st = usageDialState({ ...claudeSnapshot, windows: r!.windows }, true, { applyBlocking: false });
+    expect(st.tone).toBe("under");
   });
 
   it("a kind reported by only some seats averages over just those seats", () => {

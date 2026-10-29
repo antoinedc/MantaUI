@@ -24,4 +24,17 @@ describe("UsageWindowRow", () => {
     expect(html).not.toContain("not active");
     expect(html).not.toContain("data-inactive");
   });
+
+  it("a window blocked by a used-up longer one is greyed and says why", () => {
+    const html = renderToStaticMarkup(
+      createElement(UsageWindowRow, {
+        usageWindow: { kind: "session", label: "5h", pct: 0 },
+        nowMs: 1_800_000_000_000,
+        blockedBy: { kind: "weekly", label: "7d", pct: 100 },
+      }),
+    );
+    expect(html).toContain('data-blocked="true"');
+    expect(html).toContain("opacity-50");
+    expect(html).toContain("not usable until the 7d limit resets");
+  });
 });

@@ -113,6 +113,37 @@ describe("UsageDial — three seats, automatic", () => {
     expect(h!.container.querySelector(".animate-pulse")).toBeTruthy();
   });
 
+  it("a seat whose 7d is used up adds no 5h headroom to the ring, and its 5h is greyed in the popover", async () => {
+    // s2: 20% of its 5h but 100% of its 7d, so none of that 5h is usable.
+    const v = threeSeatView();
+    v.accounts[0].seats[1] = seat("s2", "Seat 2", 20, 100);
+    const { popover } = await open([v], { seatId: "s1" });
+    const trigger = h!.container.querySelector("button") as HTMLButtonElement;
+    // (96·20 + 100·20 + 55·1) / 41 = 97 — not 58, which would count s2's 80% free 5h.
+    expect(trigger.getAttribute("title")).toContain("Claude · 97% of the 5h across 3 seats");
+    const s2bars = popover.querySelector('[data-seat-id="s2"]') as HTMLElement;
+    expect(s2bars.querySelector('[data-window-kind="session"]')?.getAttribute("data-blocked")).toBe("true");
+    expect(s2bars.querySelector('[data-window-kind="weekly"]')?.getAttribute("data-blocked")).toBeNull();
+  });
+
+  it("on the blocked seat itself, the popover's 5h row is greyed and says why", async () => {
+    const v = threeSeatView();
+    v.accounts[0].seats[1] = seat("s2", "Seat 2", 20, 100);
+    const { popover } = await open([v], { seatId: "s2" });
+    expect(popover.querySelector('[data-blocked="true"]')?.textContent).toContain(
+      "not usable until the 7d limit resets",
+    );
+  });
+
+  it("manual mode on a seat whose 7d is used up: the ring reads full, not 20%", async () => {
+    const v = threeSeatView({ mode: "manual", activeSeatId: "s2" });
+    v.accounts[0].seats[1] = seat("s2", "Seat 2", 20, 100);
+    await open([v], { seatId: "s2" });
+    const trigger = h!.container.querySelector("button") as HTMLButtonElement;
+    expect(trigger.getAttribute("title")).toContain("the 7d limit is used up");
+    expect(trigger.getAttribute("title")).not.toContain("20% of the 5h");
+  });
+
   it("a signed-out seat is left out of the ring's count", async () => {
     const v = threeSeatView();
     v.accounts[1].seats[0] = { ...seat("s3", "Seat 1", 55), status: "signed-out" };
