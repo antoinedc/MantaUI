@@ -86,9 +86,9 @@ import {
   countPreviewLines,
   resolveMediaAspect,
   mediaKindFromMime,
-  isMediaMime,
   mediaGrid,
-  filePartToMediaEntry,
+  filePartViewToEntry,
+  viewMediaToEntry,
   applyMediaEvent,
   dispatchMedia,
   applyWidgetEvent,
@@ -4154,7 +4154,7 @@ describe("resolvePreviewType video", () => {
   });
 });
 
-describe("mediaKindFromMime / isMediaMime", () => {
+describe("mediaKindFromMime", () => {
   it("maps image/* and video/* mimes", () => {
     expect(mediaKindFromMime("image/png")).toBe("image");
     expect(mediaKindFromMime("Image/PNG")).toBe("image");
@@ -4162,13 +4162,6 @@ describe("mediaKindFromMime / isMediaMime", () => {
     expect(mediaKindFromMime("application/pdf")).toBeNull();
     expect(mediaKindFromMime(null)).toBeNull();
     expect(mediaKindFromMime(undefined)).toBeNull();
-  });
-
-  it("isMediaMime is true only for media mimes", () => {
-    expect(isMediaMime("image/png")).toBe(true);
-    expect(isMediaMime("video/webm")).toBe(true);
-    expect(isMediaMime("application/pdf")).toBe(false);
-    expect(isMediaMime(null)).toBe(false);
   });
 });
 
@@ -4316,24 +4309,30 @@ describe("applyWidgetEvent", () => {
   });
 });
 
-describe("filePartToMediaEntry", () => {
-  it("derives a ready image entry from a file part", () => {
-    const e = filePartToMediaEntry({ type: "file", mime: "image/png", url: "file:///home/dev/diagram.png", filename: "diagram.png" } as never);
-    expect(e.state).toBe("ready");
-    expect(e.meta.kind).toBe("image");
-    expect(e.meta.path).toBe("/home/dev/diagram.png");
-    expect(e.meta.mime).toBe("image/png");
+describe("media from the box's view (WS11 D9)", () => {
+  it("a file part the box marked (part.view.media) is a ready entry with the box's kind and path", () => {
+    const e = filePartViewToEntry({ type: "file", mime: "image/png", url: "file:///home/dev/diagram.png", view: { media: { kind: "image", path: "/home/dev/diagram.png" } } } as never);
+    expect(e?.state).toBe("ready");
+    expect(e?.meta.kind).toBe("image");
+    expect(e?.meta.path).toBe("/home/dev/diagram.png");
+    expect(e?.meta.mime).toBe("image/png");
+    const v = filePartViewToEntry({ type: "file", mime: "video/mp4", view: { media: { kind: "video", path: "/c.mp4" } } } as never);
+    expect(v?.meta.kind).toBe("video");
   });
 
-  it("derives a ready video entry from a file part", () => {
-    const e = filePartToMediaEntry({ type: "file", mime: "video/mp4", url: "file:///home/dev/clip.mp4" } as never);
-    expect(e.meta.kind).toBe("video");
-    expect(e.meta.path).toBe("/home/dev/clip.mp4");
+  it("an unmarked file part (an older box, a non-media file) yields no entry — it stays a file card", () => {
+    expect(filePartViewToEntry({ type: "file", mime: "image/png", url: "file:///x.png" } as never)).toBeNull();
   });
 
-  it("falls back to image for a non-media file part (never used, defensive)", () => {
-    const e = filePartToMediaEntry({ type: "file", mime: "application/pdf", url: "file:///x.pdf" } as never);
-    expect(e.meta.kind).toBe("image");
+  it("a canonical message entry becomes a ready card entry carrying the begin's reserved box", () => {
+    const e = viewMediaToEntry({
+      id: "media:h:a1", kind: "image", path: "/a.png", mime: "image/png", width: null, height: null,
+      aspectRatio: 16 / 9, count: 4, size: 10, title: "Cat", handle: "a1",
+    });
+    expect(e).toEqual({
+      handle: "a1", state: "ready", beganAt: null,
+      meta: { kind: "image", path: "/a.png", mime: "image/png", width: null, height: null, aspectRatio: 16 / 9, count: 4, title: "Cat" },
+    });
   });
 });
 

@@ -30,6 +30,7 @@ const EXPECTED_AFTER_STEP = [
   "forge-clone-view-1", // D5 (clone)
   "sessions-close-1", // D6
   "sessions-window-status-1", // D7
+  "transcript-view-1", // D8–D9
 ];
 
 test("the capability list is frozen and carries chat-cards-1", () => {

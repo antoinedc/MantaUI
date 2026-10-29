@@ -60,4 +60,18 @@ final class TranscriptViewTests: XCTestCase {
         // (Pinned end-to-end by MantaActionRPCWireTests on the Mac.)
         XCTAssertEqual(TranscriptTruncationKind(rawValue: "tool-cutoff"), .toolCutoff)
     }
+
+    // MARK: - D9 media decode
+
+    func testMediaEntriesDecodeAndAMalformedOneIsSkippedNotTheWholeList() throws {
+        let json = #"[{\#(info),"parts":[],"view":{"media":[{"id":"media:h:a","kind":"image","path":"/a.png","mime":"image/png","width":null,"height":null,"aspectRatio":1.78,"count":null,"size":10,"title":null,"handle":"a"},"junk",{"kind":"image"},{"id":"media:s:m:/b.mp4","kind":"video","path":"/b.mp4"}]}}]"#
+        let media = try XCTUnwrap(try decode(json)[0].view?.media)
+        XCTAssertEqual(media.map(\.id), ["media:h:a", "media:s:m:/b.mp4"])
+        XCTAssertEqual(media[0].aspectRatio, 1.78)
+        XCTAssertEqual(media[1].kind, "video")
+    }
+
+    func testAMessageViewWithoutMediaHasAnEmptyList() throws {
+        XCTAssertEqual(try decode(#"[{\#(info),"parts":[],"view":{}}]"#)[0].view?.media, [])
+    }
 }

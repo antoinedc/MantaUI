@@ -8,7 +8,7 @@ import Combine
 // folded into one `TranscriptMediaSessionState` per session by the pure reducer
 // (TranscriptMediaModel.swift). The store is in memory only, like the desktop's:
 // after a relaunch the persisted `media_begin` / `media_show` tool parts bring
-// the media back (`TranscriptMediaParse.canonicalEntries`).
+// the media back (`TranscriptViewMedia.entries`, from the box's `message.view.media`).
 //
 // Bound once at the app root, next to `WidgetLiveStore`. A fresh instance exists
 // only in tests.

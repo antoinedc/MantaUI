@@ -238,7 +238,7 @@ enum ChatTranscriptMapper {
         // Media: canonical (session-wide) plus live-only entries, grouped under
         // the settled assistant message that owns them. Entries whose owner is
         // not settled belong to `liveMediaTail`.
-        let canonicalMedia = TranscriptMediaParse.canonicalEntries(messages)
+        let canonicalMedia = TranscriptViewMedia.entries(messages)
         let liveMedia = TranscriptMediaReconcile.liveOnly(live: options.liveMedia, canonical: canonicalMedia)
         let owners = mediaOwnerIDs(of: messages)
         var mediaByOwner: [String: [TranscriptMediaEntry]] = [:]
@@ -371,7 +371,7 @@ enum ChatTranscriptMapper {
         live: [TranscriptMediaEntry],
         isLiveWindow: Bool
     ) -> [TranscriptBlock] {
-        let canonical = TranscriptMediaParse.canonicalEntries(messages)
+        let canonical = TranscriptViewMedia.entries(messages)
         let liveOnly = TranscriptMediaReconcile.liveOnly(live: live, canonical: canonical)
         let drawnByMapper = mediaOwnerIDs(of: messages)
         let present = Set(messages.map(\.info.id))

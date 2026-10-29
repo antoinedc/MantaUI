@@ -17,7 +17,7 @@ import { motion } from "framer-motion";
 import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import type { OpencodePart } from "../shared/types";
 import { toolTitle } from "../shared/opencodeV2.mjs";
-import { filePartToMediaEntry, isMediaMime, resolveToolOutput } from "./chatUtils";
+import { filePartViewToEntry, resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
 import {
@@ -170,8 +170,10 @@ function renderAssistantPart(
   if (part.type === "file") {
     const filename = String((part as Record<string, unknown>).filename ?? "");
     const mime = String((part as Record<string, unknown>).mime ?? "");
-    if (isMediaMime(mime)) {
-      return <MediaBody entry={filePartToMediaEntry(part)} />;
+    // The box marks an image/video file part (`part.view.media`); an older box sends no mark, so it stays a file card.
+    const media = filePartViewToEntry(part);
+    if (media) {
+      return <MediaBody entry={media} />;
     }
     return <ToolCard tone="ok" name="File" arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`} />;
   }

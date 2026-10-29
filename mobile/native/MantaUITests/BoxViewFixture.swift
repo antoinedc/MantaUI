@@ -11,8 +11,11 @@ enum BoxViewFixture {
         let turns = turnViews(messages, running: running)
         return messages.map { m in
             var copy = m
-            copy.view = TranscriptMessageView(turn: turns[m.info.id], truncation: truncation(of: m))
-            if copy.view?.turn == nil, copy.view?.truncation == nil { copy.view = nil }
+            // Keep what a fixture already carries (e.g. hand-made `media`); add the box's turn + truncation.
+            var view = m.view ?? TranscriptMessageView()
+            view.turn = turns[m.info.id] ?? view.turn
+            view.truncation = truncation(of: m) ?? view.truncation
+            copy.view = (view.turn == nil && view.truncation == nil && view.media.isEmpty) ? nil : view
             return copy
         }
     }

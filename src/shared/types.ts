@@ -3070,10 +3070,28 @@ export type OpencodeBackgroundResultPart = {
 export type TruncationView = { kind: "output-cap" | "context-wall" | "tool-cutoff"; label: string; hint?: string };
 
 /** What the box decided a message MEANS (`{view:true}` on `opencode:messages` / `opencode:message`, WS11 D8+). */
+/** One canonical inline media entry the box reconstructed from the transcript (`view.media`, WS11 D9). `id` is the
+ *  identity rule: `media:h:<handle>` or `media:s:<messageId>:<path>`. `aspectRatio`/`count` are the begin's reserved box. */
+export type MediaViewEntry = {
+  id: string;
+  kind: "image" | "video";
+  path: string | null;
+  mime: string | null;
+  width: number | null;
+  height: number | null;
+  aspectRatio: number | null;
+  count: number | null;
+  size: number | null;
+  title: string | null;
+  handle: string | null;
+};
+
 export type MessageView = {
   /** The finished turn this message ends: duration / tokens / the verb seed. Never on a lone `getMessage`. */
   turn?: { durationMs: number | null; tokens: number | null; verbSeedId: string };
   truncation?: TruncationView;
+  /** Ready inline media this message OWNS (a begin's message, else the show's), in first-sight order. */
+  media?: MediaViewEntry[];
 };
 
 export type OpencodeMessage = {

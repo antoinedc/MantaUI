@@ -24,6 +24,7 @@ import {
   selectVisibleTodos,
   summarizeTodoProgress,
   todoStatusOf,
+  viewMediaToEntry,
   type TodoStatus,
 } from "./chatUtils";
 import { pastVerbFor } from "./chatShared";
@@ -350,7 +351,7 @@ export const MessageRow = memo(function MessageRow({
   if (
     !isRenderableRow(msg, {
       blocks: rowBlocks,
-      hasMedia: media != null,
+      hasMedia: media != null || (msg.view?.media?.length ?? 0) > 0,
       hasWidget: widget != null,
       hasFooter: turnDurationMs != null || truncation != null,
     })
@@ -480,7 +481,12 @@ export const MessageRow = memo(function MessageRow({
   // list for every turn that touches todos.
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
+      {/* The live entry (this session's `media` frames) wins; otherwise the box's canonical entries for this message —
+          what makes generated media survive a reload. */}
       {media != null && !isUser && <MediaBody entry={media} />}
+      {media == null &&
+        !isUser &&
+        msg.view?.media?.map((entry) => <MediaBody key={entry.id} entry={viewMediaToEntry(entry)} />)}
       {widget != null && !isUser && <WidgetBody entry={widget} />}
       {rowBlocks.map((b) =>
         b.kind === "tools" ? (

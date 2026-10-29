@@ -70,25 +70,137 @@ struct TranscriptTruncationView: Codable, Equatable, Sendable {
     }
 }
 
+/// One canonical inline-media entry the box reconstructed (`view.media`, D9). `id` is the identity rule
+/// (`media:h:<handle>` / `media:s:<messageId>:<path>`); `aspectRatio` / `count` are the begin's reserved box.
+struct TranscriptMediaView: Codable, Equatable, Sendable {
+    var id: String
+    var kind: String
+    var path: String?
+    var mime: String?
+    var width: Double?
+    var height: Double?
+    var aspectRatio: Double?
+    var count: Int?
+    var size: Int64?
+    var title: String?
+    var handle: String?
+
+    private enum CodingKeys: String, CodingKey { case id, kind, path, mime, width, height, aspectRatio, count, size, title, handle }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = (try? c.decodeIfPresent(String.self, forKey: .kind)) ?? "image"
+        path = (try? c.decodeIfPresent(String.self, forKey: .path)) ?? nil
+        mime = (try? c.decodeIfPresent(String.self, forKey: .mime)) ?? nil
+        width = (try? c.decodeIfPresent(Double.self, forKey: .width)) ?? nil
+        height = (try? c.decodeIfPresent(Double.self, forKey: .height)) ?? nil
+        aspectRatio = (try? c.decodeIfPresent(Double.self, forKey: .aspectRatio)) ?? nil
+        count = (try? c.decodeIfPresent(Int.self, forKey: .count)) ?? nil
+        size = (try? c.decodeIfPresent(Int64.self, forKey: .size)) ?? nil
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil
+        handle = (try? c.decodeIfPresent(String.self, forKey: .handle)) ?? nil
+    }
+
+    init(id: String, kind: String = "image", path: String? = nil, mime: String? = nil, width: Double? = nil,
+         height: Double? = nil, aspectRatio: Double? = nil, count: Int? = nil, size: Int64? = nil,
+         title: String? = nil, handle: String? = nil) {
+        self.id = id
+        self.kind = kind
+        self.path = path
+        self.mime = mime
+        self.width = width
+        self.height = height
+        self.aspectRatio = aspectRatio
+        self.count = count
+        self.size = size
+        self.title = title
+        self.handle = handle
+    }
+}
+
 /// `message.view`.
 struct TranscriptMessageView: Codable, Equatable, Sendable {
     var turn: TranscriptTurnView?
     var truncation: TranscriptTruncationView?
+    /// Ready media this message OWNS, in first-sight order. A malformed entry is skipped, never the whole list.
+    var media: [TranscriptMediaView]
 
-    init(turn: TranscriptTurnView? = nil, truncation: TranscriptTruncationView? = nil) {
+    init(turn: TranscriptTurnView? = nil, truncation: TranscriptTruncationView? = nil, media: [TranscriptMediaView] = []) {
         self.turn = turn
         self.truncation = truncation
+        self.media = media
     }
 
-    private enum CodingKeys: String, CodingKey { case turn, truncation }
+    private enum CodingKeys: String, CodingKey { case turn, truncation, media }
 
     init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
             turn = nil
             truncation = nil
+            media = []
             return
         }
         turn = (try? c.decodeIfPresent(TranscriptTurnView.self, forKey: .turn)) ?? nil
         truncation = (try? c.decodeIfPresent(TranscriptTruncationView.self, forKey: .truncation)) ?? nil
+        media = ((try? c.decodeIfPresent(LossyList<TranscriptMediaView>.self, forKey: .media)) ?? nil)?.items ?? []
+    }
+}
+
+/// A list that drops the elements it cannot decode instead of failing as a whole.
+struct LossyList<Element: Decodable>: Decodable {
+    var items: [Element]
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var out: [Element] = []
+        while !container.isAtEnd {
+            if let element = try? container.decode(Element.self) {
+                out.append(element)
+            } else {
+                _ = try? container.decode(DiscardedValue.self)
+            }
+        }
+        items = out
+    }
+
+    private struct DiscardedValue: Decodable {}
+}
+
+// MARK: - Canonical media → entries (D9)
+
+enum TranscriptViewMedia {
+    /// Every message's `view.media`, as the entries the media card draws: ready, owned by that message, `seq` = the
+    /// index in transcript order (the box already ordered them by first sight). Replaces the phone's own parsing of
+    /// `media_begin` / `media_show` tool output.
+    static func entries(_ messages: [OpencodeMessage]) -> [TranscriptMediaEntry] {
+        var out: [TranscriptMediaEntry] = []
+        for message in messages {
+            for view in message.view?.media ?? [] {
+                out.append(TranscriptMediaEntry(
+                    id: view.id,
+                    ownerMessageID: message.info.id,
+                    seq: out.count,
+                    state: .ready,
+                    kind: view.kind == "video" ? .video : .image,
+                    reserved: TranscriptMediaGeometryInput(
+                        width: positive(view.width), height: positive(view.height), aspectRatio: positive(view.aspectRatio)
+                    ),
+                    count: view.count,
+                    title: (view.title?.isEmpty == false) ? view.title : nil,
+                    path: view.path,
+                    mime: view.mime,
+                    size: view.size,
+                    beganAt: nil,
+                    handle: (view.handle?.isEmpty == false) ? view.handle : nil
+                ))
+            }
+        }
+        return out
+    }
+
+    private static func positive(_ n: Double?) -> Double? {
+        guard let n, n.isFinite, n > 0 else { return nil }
+        return n
     }
 }

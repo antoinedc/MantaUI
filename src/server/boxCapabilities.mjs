@@ -46,6 +46,8 @@ export const BOX_CAPABILITIES = Object.freeze([
   "sessions-close-1",
   // WS11 D7 (window status + job nesting)
   "sessions-window-status-1",
+  // WS11 D8–D9 (message.view: turn footer, truncation, canonical media)
+  "transcript-view-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

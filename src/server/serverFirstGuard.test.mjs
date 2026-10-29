@@ -61,6 +61,9 @@ export const DELETED = [
   // D8 — turn footers and truncation are the box's (`message.view`).
   { scopes: ["renderer"], regex: /\b(computeTurnInfo|describeTruncation|classifyFinish)\b/, why: "D8: message.view.turn / view.truncation carry the footer and the truncation words; the renderer derives none of it" },
   { scopes: ["swift", "swiftTests"], regex: /\benum TranscriptTruncation\b|TranscriptTruncation\.(classify|describe|kind)\b|\bTranscriptTurns\.info\b|\bstruct TranscriptTurnInfo\b/, why: "D8: iOS reads message.view and the live frame's hint; it never classifies a finish or words a truncation" },
+  // D9 — canonical inline media are the box's (`message.view.media`, `part.view.media`).
+  { scopes: ["renderer"], regex: /\b(filePartToMediaEntry|isMediaMime)\b/, why: "D9: part.view.media marks an image/video file part; the renderer does not sniff mimes" },
+  { scopes: ["swift", "swiftTests"], regex: /\bTranscriptMediaParse\b|TranscriptMediaMime\.forPath|\bcanonicalEntries\b/, why: "D9: iOS maps message.view.media; it never parses media_begin / media_show tool output" },
   // D1–D3 review additions.
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },

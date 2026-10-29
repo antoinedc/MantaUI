@@ -71,6 +71,17 @@ final class TranscriptMapperTests: XCTestCase {
         )
     }
 
+    /// The box's canonical media entry for a shown handle (what `view.media` carries).
+    private func mediaView(_ handle: String, path: String) -> TranscriptMediaView {
+        TranscriptMediaView(id: "media:h:\(handle)", path: path, mime: "image/png", aspectRatio: 16.0 / 9.0, size: 1234, handle: handle)
+    }
+
+    private func withMedia(_ message: OpencodeMessage, _ media: [TranscriptMediaView]) -> OpencodeMessage {
+        var copy = message
+        copy.view = TranscriptMessageView(media: media)
+        return copy
+    }
+
     private func showPart(_ messageID: String, handle: String?, path: String) -> OpencodePart {
         var input: [String: JSONValue] = ["path": .string(path)]
         if let handle { input["handle"] = .string(handle) }
@@ -153,8 +164,9 @@ final class TranscriptMapperTests: XCTestCase {
         let liveOnly = map([user("u1"), a], TranscriptMapOptions(liveMedia: state.vended()))
         XCTAssertEqual(mediaEntries(liveOnly).map(\.id), ["media:h:ab12"])
 
-        // Canonical: both parts are in the transcript.
-        let canonical = map([user("u1"), a, b], TranscriptMapOptions(liveMedia: state.vended()))
+        // Canonical: the box reconstructed the entry on the begin's message (`view.media`).
+        let aOwned = withMedia(a, [mediaView("ab12", path: "/home/u/cat.png")])
+        let canonical = map([user("u1"), aOwned, b], TranscriptMapOptions(liveMedia: state.vended()))
         XCTAssertEqual(mediaEntries(canonical).map(\.id), ["media:h:ab12"])
         XCTAssertEqual(mediaEntries(canonical).first?.ownerMessageID, "A")
         for blocks in [liveOnly, canonical] {
@@ -165,7 +177,8 @@ final class TranscriptMapperTests: XCTestCase {
     }
 
     func testMediaRowIdsAreIdenticalAcrossTwoMappings() {
-        let a = assistant("A", parts: [beginPart("A", handle: "ab12"), showPart("A", handle: "ab12", path: "/home/u/cat.png")])
+        let a = withMedia(assistant("A", parts: [beginPart("A", handle: "ab12"), showPart("A", handle: "ab12", path: "/home/u/cat.png")]),
+                          [mediaView("ab12", path: "/home/u/cat.png")])
         let first = uniqueTranscriptRows(map([user("u1"), a])).map(\.id)
         let second = uniqueTranscriptRows(map([user("u1"), a])).map(\.id)
         XCTAssertEqual(first, second)
@@ -227,7 +240,7 @@ final class TranscriptMapperTests: XCTestCase {
         state.apply(TranscriptMediaFrame(action: "show", handle: "ab12", messageID: "B", path: "/home/u/cat.png", mime: "image/png"), now: t0)
         let messages = [
             user("u1"),
-            assistant("A", parts: [beginPart("A", handle: "ab12")]),
+            withMedia(assistant("A", parts: [beginPart("A", handle: "ab12")]), [mediaView("ab12", path: "/home/u/cat.png")]),
             assistant("B", parts: [showPart("B", handle: "ab12", path: "/home/u/cat.png")]),
         ]
         let entries = mediaEntries(map(messages, TranscriptMapOptions(liveMedia: state.vended())))

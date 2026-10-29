@@ -136,7 +136,7 @@ function rowContext(
 ) {
   return {
     blocks: blocksByMessage.get(m.info.id),
-    hasMedia: media.has(m.info.id),
+    hasMedia: media.has(m.info.id) || (m.view?.media?.length ?? 0) > 0,
     hasWidget: widgets.has(m.info.id),
     hasFooter:
       turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null || m.view?.truncation != null,

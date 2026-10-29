@@ -3607,12 +3607,6 @@ export function mediaKindFromMime(mime: string | null | undefined): MediaKind | 
   return null;
 }
 
-/** True when the mime is image/* or video/* — i.e. the file-part branch should
- *  render MediaBody instead of the header-only file card. */
-export function isMediaMime(mime: string | null | undefined): boolean {
-  return mediaKindFromMime(mime) != null;
-}
-
 function numOrNull(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
@@ -3661,19 +3655,34 @@ export function mediaGrid(count: number | null): { tiles: number; more: number }
 /** Parse a transcript `file` part into a ready media entry. A file part's wire
  *  shape (src/server/opencode.mjs) is { type:"file", mime, url:"file://<abs>",
  *  filename? } — the absolute path is the `file://` URL stripped. */
-export function filePartToMediaEntry(part: OpencodePart): MediaEntry {
-  const url = String((part as Record<string, unknown>).url ?? "");
-  const mime = strOrNull((part as Record<string, unknown>).mime);
-  const kind = mediaKindFromMime(mime) ?? "image";
+/** A box-canonical media entry (`message.view.media`) as the card's entry. */
+export function viewMediaToEntry(v: import("../shared/types").MediaViewEntry): MediaEntry {
+  return {
+    handle: v.handle,
+    state: "ready",
+    beganAt: null,
+    meta: {
+      kind: v.kind,
+      path: v.path,
+      mime: v.mime,
+      width: v.width,
+      height: v.height,
+      aspectRatio: v.aspectRatio,
+      count: v.count,
+      title: v.title,
+    },
+  };
+}
+
+/** An image/video FILE part, from the box's `part.view.media` (`{kind, path}`) — null when the box did not mark one. */
+export function filePartViewToEntry(part: OpencodePart): MediaEntry | null {
+  const media = (part as { view?: { media?: { kind: MediaKind; path: string } } }).view?.media;
+  if (!media) return null;
   return {
     handle: null,
     state: "ready",
     beganAt: null,
-    meta: {
-      ...baseMeta(kind),
-      path: url.replace(/^file:\/\//, "") || null,
-      mime,
-    },
+    meta: { ...baseMeta(media.kind), path: media.path, mime: strOrNull((part as Record<string, unknown>).mime) },
   };
 }
 

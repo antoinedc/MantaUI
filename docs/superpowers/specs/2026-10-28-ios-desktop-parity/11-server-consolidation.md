@@ -2443,3 +2443,19 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
 - Deviation: the mapper no longer applies the client-side "running && last message" gate; the box's gate applies at
   fetch time, so a finished turn's footer can linger for the ~300 ms until the refetch after a new send.
 - Test fixture `BoxViewFixture` (Mac test target only) stamps `view` onto raw mapper fixtures with the box's rules.
+
+## Implementation notes (D9, `transcript-view-1`)
+
+- Box: `canonicalMediaEntries` (the phone's `canonicalEntries`/`showOutput`/`beginHandle` moved verbatim, incl. the last-" (" path
+  anchor and the media half of `MIME_BY_EXT`); `view.media` rides the OWNER message (the begin's, else the show's), ready entries
+  only, first-sight order, over the returned window; `getMessage({view:true})` computes over that one message. A file part with an
+  image/video mime and a `file://` url gains `part.view.media {kind, path}` (an inline `data:` URL is not a box path, so it stays
+  a file chip — the old desktop code would have asked the box to peek the data URL).
+- Deviation from the spec's `MediaView`: it also carries `aspectRatio` and `count` (the begin's reserved box). The phone's entry
+  geometry depends on them (`reserved`), and "moved verbatim" needs them on the wire.
+- `transcript-view-1` is now advertised (D8's turn/truncation + D9's media share it).
+- Desktop: `MessageRow` draws `view.media` cards when the session's live map has no entry for the message; `ToolCall` draws a file
+  part as media only when the box marked it. Deleted: `filePartToMediaEntry`, `isMediaMime`.
+- iOS: `TranscriptViewMedia.entries(messages)` (seq = transcript-order index, `.ready`) replaces `TranscriptMediaParse` (deleted with
+  `TranscriptMediaMime.forPath`); `TranscriptMediaReconcile.liveOnly`, the live reducer and geometry are untouched. Lossy decode: a
+  malformed media entry is skipped, never the list or the message.

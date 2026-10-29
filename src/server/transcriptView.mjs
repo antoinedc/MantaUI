@@ -5,8 +5,11 @@
 // `opencode:message` called with `{view:true}` now carry them: `message.view` (+ `part.view`). Pure; no I/O.
 //
 // D8: `view.turn` and `view.truncation`.
+// D9: `view.media` (the canonical inline media of a message the BOX owns) and `part.view.media` (a file part that is
+//     an image/video).
 
 import { classifyFinish, describeTruncation } from "../shared/streamInterpretation.mjs";
+import { MIME_BY_EXT } from "./media.mjs";
 
 /** A finished background run (v2-next N4) carries a `background-result` part. */
 export function isBackgroundResultMessage(message) {
@@ -79,6 +82,162 @@ export function truncationOf(message) {
   return { kind, label, hint };
 }
 
+// ---- D9: canonical media ---------------------------------------------------------------------------------------
+
+/** Media extension → mime (the image/video part of the box's one allowlist, `MIME_BY_EXT`). */
+function mediaMimeForPath(path) {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return null;
+  const mime = MIME_BY_EXT[path.slice(dot).toLowerCase()];
+  return mime && (mime.startsWith("image/") || mime.startsWith("video/")) ? mime : null;
+}
+
+function mediaKindOf(mime) {
+  const m = (mime ?? "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  return null;
+}
+
+/** `"Handle: <hex>"` out of a `media_begin` result, or null. */
+export function beginHandle(output) {
+  const i = output.indexOf("Handle: ");
+  if (i < 0) return null;
+  const m = /^[0-9a-fA-F]+/.exec(output.slice(i + "Handle: ".length));
+  return m ? m[0] : null;
+}
+
+/**
+ * `"Displayed <path> (<mime>[ <W>x<H>], <size> bytes) in the transcript."`. The path is anchored on the LAST " (" so a
+ * path containing spaces or parentheses still parses. Returns null for anything else.
+ */
+export function parseShowOutput(output) {
+  const prefix = "Displayed ";
+  const suffix = " bytes) in the transcript.";
+  const text = output.trim();
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) return null;
+  const body = text.slice(prefix.length, text.length - suffix.length);
+  const open = body.lastIndexOf(" (");
+  if (open < 0) return null;
+  const path = body.slice(0, open);
+  const inner = body.slice(open + 2);
+  const comma = inner.lastIndexOf(", ");
+  if (path === "" || comma < 0) return null;
+  const sizeText = inner.slice(comma + 2).trim();
+  if (!/^-?\d+$/.test(sizeText)) return null;
+  const meta = inner.slice(0, comma).split(" ").filter(Boolean);
+  if (meta.length === 0) return null;
+  let width = null;
+  let height = null;
+  if (meta.length >= 2) {
+    const dims = meta[1].split("x");
+    if (dims.length === 2) {
+      const w = Number(dims[0]);
+      const h = Number(dims[1]);
+      if (dims[0] !== "" && dims[1] !== "" && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+        width = w;
+        height = h;
+      }
+    }
+  }
+  return { path, mime: meta[0], width, height, size: Number(sizeText) };
+}
+
+const positive = (n) => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : null);
+const nonEmpty = (s) => (typeof s === "string" && s !== "" ? s : null);
+
+/** The identity rule, verbatim from the phone: a handle gives `media:h:<handle>`, else the show call's message + path. */
+export function mediaId({ handle, showMessageId, path }) {
+  return handle ? `media:h:${handle}` : `media:s:${showMessageId}:${path}`;
+}
+
+/**
+ * Canonical inline media over a list of messages (session-wide over what was loaded): every completed `media_begin`
+ * seeds a pending entry owned by the begin's message; every completed `media_show` resolves it (by handle, else by
+ * message + path) to ready. A begin that was never shown draws nothing. Returns READY entries only, in first-sight
+ * order, each carrying `ownerMessageId`.
+ * @returns {Array<{ id: string, ownerMessageId: string, kind: "image"|"video", path: string, mime: string|null,
+ *   width: number|null, height: number|null, aspectRatio: number|null, count: number|null, size: number|null,
+ *   title: string|null, handle: string|null }>}
+ */
+export function canonicalMediaEntries(messages) {
+  const byId = new Map();
+  let seq = 0;
+  for (const message of messages ?? []) {
+    if (message?.info?.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (part?.type !== "tool") continue;
+      const state = part.state && typeof part.state === "object" ? part.state : {};
+      if (state.status !== "completed") continue;
+      const input = state.input && typeof state.input === "object" ? state.input : {};
+      const output = typeof state.output === "string" ? state.output : "";
+      if (part.tool === "media_begin") {
+        const handle = beginHandle(output);
+        if (!handle) continue;
+        const id = mediaId({ handle, showMessageId: "", path: "" });
+        if (byId.has(id)) continue;
+        const count = typeof input.count === "number" && Number.isFinite(input.count) ? Math.round(input.count) : null;
+        byId.set(id, {
+          id, ownerMessageId: message.info.id, seq: seq++, ready: false,
+          kind: input.kind === "video" ? "video" : "image",
+          path: null, mime: null,
+          width: positive(input.width), height: positive(input.height), aspectRatio: positive(input.aspectRatio),
+          count, size: null, title: nonEmpty(input.title), handle,
+        });
+      } else if (part.tool === "media_show") {
+        const out = parseShowOutput(output);
+        if (!out) continue;
+        const handle = nonEmpty(input.handle);
+        const id = mediaId({ handle, showMessageId: message.info.id, path: out.path });
+        const mime = out.mime ?? mediaMimeForPath(out.path);
+        const kind = mediaKindOf(mime);
+        const existing = byId.get(id);
+        if (existing) {
+          existing.ready = true;
+          existing.path = out.path;
+          existing.mime = mime;
+          existing.size = out.size;
+          existing.kind = kind ?? existing.kind;
+          existing.title = nonEmpty(input.title) ?? existing.title;
+        } else {
+          byId.set(id, {
+            id, ownerMessageId: message.info.id, seq: seq++, ready: true,
+            kind: kind ?? "image", path: out.path, mime,
+            width: out.width, height: out.height, aspectRatio: null, count: null,
+            size: out.size, title: nonEmpty(input.title), handle,
+          });
+        }
+      }
+    }
+  }
+  return [...byId.values()]
+    .filter((e) => e.ready)
+    .sort((a, b) => a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(({ seq: _seq, ready: _ready, ...entry }) => entry);
+}
+
+/** A file part that is an image/video on the box's disk: `{kind, path}`, else null. */
+export function filePartMedia(part) {
+  if (part?.type !== "file") return null;
+  const kind = mediaKindOf(typeof part.mime === "string" ? part.mime : null);
+  const url = typeof part.url === "string" ? part.url : "";
+  if (!kind || !url.startsWith("file://")) return null;
+  const path = url.slice("file://".length);
+  return path ? { kind, path } : null;
+}
+
+const withFileViews = (message) => {
+  if (!Array.isArray(message?.parts)) return message;
+  let changed = false;
+  const parts = message.parts.map((p) => {
+    const media = filePartMedia(p);
+    if (!media) return p;
+    changed = true;
+    return { ...p, view: { ...(p.view ?? {}), media } };
+  });
+  return changed ? { ...message, parts } : message;
+};
+
 /**
  * Add `view` to each message. Pure: returns new message objects; a message with nothing to say gets no `view`.
  * `running`: the session has a turn in flight (the box reads it from the interpreter), which withholds the footer of
@@ -86,19 +245,32 @@ export function truncationOf(message) {
  */
 export function annotateView(messages, { running = false } = {}) {
   const turns = computeTurns(messages, { running });
-  return messages.map((m) => {
+  const mediaByOwner = new Map();
+  for (const entry of canonicalMediaEntries(messages)) {
+    const { ownerMessageId, ...rest } = entry;
+    if (!mediaByOwner.has(ownerMessageId)) mediaByOwner.set(ownerMessageId, []);
+    mediaByOwner.get(ownerMessageId).push(rest);
+  }
+  return messages.map((raw) => {
+    const m = withFileViews(raw);
     const view = {};
     const turn = turns.get(m?.info?.id);
     if (turn) view.turn = turn;
     const truncation = truncationOf(m);
     if (truncation) view.truncation = truncation;
+    const media = mediaByOwner.get(m?.info?.id);
+    if (media) view.media = media;
     return Object.keys(view).length > 0 ? { ...m, view } : m;
   });
 }
 
-/** A single message annotated alone (`getMessage`): a truncation, never a turn (a turn needs its neighbours). */
+/** A single message annotated alone (`getMessage`): its truncation and media, never a turn (a turn needs neighbours). */
 export function annotateSingle(message) {
   if (!message) return message;
-  const truncation = truncationOf(message);
-  return truncation ? { ...message, view: { truncation } } : message;
+  const [annotated] = annotateView([message], { running: true });
+  if (!annotated?.view) return annotated;
+  const { turn: _turn, ...rest } = annotated.view;
+  if (Object.keys(rest).length > 0) return { ...annotated, view: rest };
+  const { view: _view, ...bare } = annotated;
+  return bare;
 }

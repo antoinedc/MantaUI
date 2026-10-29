@@ -220,95 +220,47 @@ final class TranscriptParityTests: XCTestCase {
         XCTAssertEqual(allCurrent.byID.count, TranscriptMediaSessionState.maxEntries + 1, "current-turn entries are never evicted")
     }
 
-    // MARK: - Tool-output parsing
+    // MARK: - Canonical media (the box's `view.media`; the parsing is pinned in transcriptView.test.mjs)
 
-    func testShowOutputWithDimensions() {
-        let r = TranscriptMediaParse.showOutput("Displayed /home/u/cat.png (image/png 600x400, 1234 bytes) in the transcript.")
-        XCTAssertEqual(r?.path, "/home/u/cat.png")
-        XCTAssertEqual(r?.mime, "image/png")
-        XCTAssertEqual(r?.w, 600)
-        XCTAssertEqual(r?.h, 400)
-        XCTAssertEqual(r?.size, 1234)
+    private func mediaMessage(_ id: String, _ media: [TranscriptMediaView]) -> OpencodeMessage {
+        var m = message(id, role: "assistant", completed: 2)
+        m.view = TranscriptMessageView(media: media)
+        return m
     }
 
-    func testShowOutputWithoutDimensions() {
-        let r = TranscriptMediaParse.showOutput("Displayed /home/u/c.mp4 (video/mp4, 99 bytes) in the transcript.")
-        XCTAssertEqual(r?.mime, "video/mp4")
-        XCTAssertNil(r?.w)
-        XCTAssertNil(r?.h)
-        XCTAssertEqual(r?.size, 99)
-    }
-
-    func testShowOutputAnchorsOnTheLastOpenParenthesis() {
-        let r = TranscriptMediaParse.showOutput("Displayed /home/u/my pics (copy) (1).png (image/png 10x20, 5 bytes) in the transcript.")
-        XCTAssertEqual(r?.path, "/home/u/my pics (copy) (1).png")
-        XCTAssertEqual(r?.mime, "image/png")
-        XCTAssertEqual(r?.w, 10)
-        XCTAssertEqual(r?.size, 5)
-    }
-
-    func testShowOutputJunkIsNil() {
-        XCTAssertNil(TranscriptMediaParse.showOutput("nope"))
-        XCTAssertNil(TranscriptMediaParse.showOutput("Displayed /x.png in the transcript."))
-        XCTAssertNil(TranscriptMediaParse.showOutput("Displayed  (image/png, 5 bytes) in the transcript."))
-    }
-
-    func testBeginHandle() {
-        XCTAssertEqual(TranscriptMediaParse.beginHandle("Placeholder reserved. Handle: 1a2b3c4d. Keep it."), "1a2b3c4d")
-        XCTAssertNil(TranscriptMediaParse.beginHandle("Placeholder reserved."))
-        XCTAssertNil(TranscriptMediaParse.beginHandle("Handle: zzz"))
-    }
-
-    func testMimeForPath() {
-        XCTAssertEqual(TranscriptMediaMime.forPath("/a/B.PNG"), "image/png")
-        XCTAssertEqual(TranscriptMediaMime.forPath("/a/b.mov"), "video/quicktime")
-        XCTAssertNil(TranscriptMediaMime.forPath("/a/b.txt"))
-        XCTAssertNil(TranscriptMediaMime.forPath("/a/noext"))
-    }
-
-    func testToolNameMatchingIsExact() {
-        XCTAssertTrue(TranscriptMediaParse.isTool("media_show", "media_show"))
-        XCTAssertFalse(TranscriptMediaParse.isTool("manta_media_show", "media_show"))
-        XCTAssertFalse(TranscriptMediaParse.isTool("media_showcase", "media_show"))
-    }
-
-    // MARK: - Canonical entries
-
-    func testCanonicalBeginInAndShowInBGivesOneReadyEntryOwnedByAWithBeginGeometry() {
-        let a = message("A", role: "assistant", completed: 2, parts: [beginPart("pa", "A", handle: "a1b2")])
-        let b = message("B", role: "assistant", completed: 3, parts: [showPart("pb", "B", handle: "a1b2", path: "/home/u/cat.png")])
-        let entries = TranscriptMediaParse.canonicalEntries([a, b])
-        XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries[0].id, "media:h:a1b2")
-        XCTAssertEqual(entries[0].ownerMessageID, "A")
-        XCTAssertEqual(entries[0].state, .ready)
-        XCTAssertEqual(entries[0].path, "/home/u/cat.png")
-        XCTAssertEqual(entries[0].reserved, TranscriptMediaGeometryInput(aspectRatio: 16.0 / 9.0))
+    func testViewMediaGivesReadyEntriesOwnedByTheMessageItRidesOnInTranscriptOrder() {
+        let a = mediaMessage("A", [
+            TranscriptMediaView(id: "media:h:a1b2", path: "/home/u/cat.png", mime: "image/png", aspectRatio: 16.0 / 9.0, size: 1234, title: "Cat", handle: "a1b2"),
+        ])
+        let b = mediaMessage("B", [
+            TranscriptMediaView(id: "media:s:B:/home/u/x.png", path: "/home/u/x.png", mime: "image/png", width: 30, height: 20, size: 5),
+            TranscriptMediaView(id: "media:s:B:/home/u/v.mp4", kind: "video", path: "/home/u/v.mp4", mime: "video/mp4", size: 9),
+        ])
+        let entries = TranscriptViewMedia.entries([a, message("u", role: "user"), b])
+        XCTAssertEqual(entries.map(\.id), ["media:h:a1b2", "media:s:B:/home/u/x.png", "media:s:B:/home/u/v.mp4"])
+        XCTAssertEqual(entries.map(\.ownerMessageID), ["A", "B", "B"])
+        XCTAssertEqual(entries.map(\.seq), [0, 1, 2])
+        XCTAssertTrue(entries.allSatisfy { $0.state == .ready })
+        XCTAssertEqual(entries[0].reserved, TranscriptMediaGeometryInput(aspectRatio: 16.0 / 9.0), "the begin's reserved box")
         XCTAssertEqual(entries[0].title, "Cat")
+        XCTAssertEqual(entries[1].reserved, TranscriptMediaGeometryInput(width: 30, height: 20))
+        XCTAssertEqual(entries[2].kind, .video)
     }
 
-    func testCanonicalShowWithoutAHandleUsesTheMessageAndPathIdentity() {
-        let b = message("B", role: "assistant", completed: 3, parts: [showPart("pb", "B", handle: nil, path: "/home/u/x.png", dims: " 30x20")])
-        let entries = TranscriptMediaParse.canonicalEntries([b])
-        XCTAssertEqual(entries.map(\.id), ["media:s:B:/home/u/x.png"])
-        XCTAssertEqual(entries[0].reserved, TranscriptMediaGeometryInput(width: 30, height: 20))
+    func testAMessageWithNoViewHasNoCanonicalMedia() {
+        XCTAssertTrue(TranscriptViewMedia.entries([message("A", role: "assistant", completed: 2)]).isEmpty, "an older box: nothing reconstructed on the phone")
     }
 
-    func testCanonicalErrorShowAndUnshownBeginYieldNothing() {
-        let a = message("A", role: "assistant", completed: 2, parts: [
-            beginPart("pa", "A", handle: "a1b2"),
-            toolPart("pe", "A", tool: "media_show", status: "error", input: ["path": .string("/x.png")], output: "boom"),
-        ])
-        XCTAssertTrue(TranscriptMediaParse.canonicalEntries([a]).isEmpty)
+    func testViewMediaEntriesAreDeterministic() {
+        let a = mediaMessage("A", [TranscriptMediaView(id: "media:h:z", path: "/a.png")])
+        XCTAssertEqual(TranscriptViewMedia.entries([a]), TranscriptViewMedia.entries([a]))
     }
 
-    func testCanonicalEntriesAreDeterministic() {
-        let a = message("A", role: "assistant", completed: 2, parts: [beginPart("pa", "A", handle: "a1b2")])
-        let b = message("B", role: "assistant", completed: 3, parts: [
-            showPart("pb", "B", handle: "a1b2", path: "/a.png"),
-            showPart("pc", "B", handle: nil, path: "/b.png"),
-        ])
-        XCTAssertEqual(TranscriptMediaParse.canonicalEntries([a, b]), TranscriptMediaParse.canonicalEntries([a, b]))
+    func testMimeKindMapsImageAndVideoOnly() {
+        XCTAssertEqual(TranscriptMediaMime.kind(of: "Image/PNG"), .image)
+        XCTAssertEqual(TranscriptMediaMime.kind(of: "video/mp4"), .video)
+        XCTAssertNil(TranscriptMediaMime.kind(of: "text/csv"))
+        XCTAssertNil(TranscriptMediaMime.kind(of: nil))
     }
 
     func testLiveOnlyDropsEntriesTheCanonicalListCoversAndOrdersBySeqThenId() {

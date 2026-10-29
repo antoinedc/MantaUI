@@ -118,3 +118,84 @@ test("annotateView: `view` only where there is something; getMessage-style singl
   // The input is not mutated.
   assert.equal(m[1].view, undefined);
 });
+
+// ---- D9: canonical media (every iOS `canonicalEntries` / `showOutput` case, ported) ----
+import { canonicalMediaEntries, parseShowOutput, beginHandle, filePartMedia } from "./transcriptView.mjs";
+
+const toolPart = (id, messageID, tool, { status = "completed", input = {}, output } = {}) => ({ type: "tool", id, messageID, tool, state: { status, input, ...(output != null ? { output } : {}) } });
+const begin = (id, mid, handle, input = { kind: "image", aspectRatio: 16 / 9, title: "Cat" }) =>
+  toolPart(id, mid, "media_begin", { input, output: `Placeholder reserved. Handle: ${handle}. Keep it and pass it to media_show once the media file exists.` });
+const show = (id, mid, handle, path, { dims = " 600x600", mime = "image/png", size = 1234, title } = {}) =>
+  toolPart(id, mid, "media_show", { input: { path, ...(handle ? { handle } : {}), ...(title ? { title } : {}) }, output: `Displayed ${path} (${mime}${dims}, ${size} bytes) in the transcript.` });
+const am = (id, parts) => ({ info: { role: "assistant", id, time: { created: 1, completed: 2 } }, parts });
+
+test("showOutput: with dimensions, without, the last '(' anchor for paths with spaces and parentheses, junk", () => {
+  assert.deepEqual(parseShowOutput("Displayed /home/u/cat.png (image/png 600x400, 1234 bytes) in the transcript."), { path: "/home/u/cat.png", mime: "image/png", width: 600, height: 400, size: 1234 });
+  const noDims = parseShowOutput("Displayed /home/u/c.mp4 (video/mp4, 99 bytes) in the transcript.");
+  assert.deepEqual([noDims.mime, noDims.width, noDims.height, noDims.size], ["video/mp4", null, null, 99]);
+  const tricky = parseShowOutput("Displayed /home/u/my pics (copy) (1).png (image/png 10x20, 5 bytes) in the transcript.");
+  assert.deepEqual([tricky.path, tricky.mime, tricky.width, tricky.size], ["/home/u/my pics (copy) (1).png", "image/png", 10, 5]);
+  for (const junk of ["nope", "Displayed /x.png in the transcript.", "Displayed  (image/png, 5 bytes) in the transcript."]) assert.equal(parseShowOutput(junk), null, junk);
+});
+
+test("beginHandle", () => {
+  assert.equal(beginHandle("Placeholder reserved. Handle: 1a2b3c4d. Keep it."), "1a2b3c4d");
+  assert.equal(beginHandle("Placeholder reserved."), null);
+  assert.equal(beginHandle("Handle: zzz"), null);
+});
+
+test("begin in A, show in B (same handle): ONE ready entry owned by A with the begin's geometry, the show's file", () => {
+  const e = canonicalMediaEntries([am("A", [begin("pa", "A", "a1b2")]), am("B", [show("pb", "B", "a1b2", "/home/u/cat.png")])]);
+  assert.equal(e.length, 1);
+  assert.equal(e[0].id, "media:h:a1b2");
+  assert.equal(e[0].ownerMessageId, "A");
+  assert.equal(e[0].path, "/home/u/cat.png");
+  assert.equal(e[0].aspectRatio, 16 / 9);
+  assert.equal(e[0].width, null);
+  assert.equal(e[0].title, "Cat");
+});
+
+test("a show with no handle uses the message + path identity and the show's dimensions", () => {
+  const e = canonicalMediaEntries([am("B", [show("pb", "B", null, "/home/u/x.png", { dims: " 30x20" })])]);
+  assert.deepEqual(e.map((x) => x.id), ["media:s:B:/home/u/x.png"]);
+  assert.deepEqual([e[0].width, e[0].height, e[0].aspectRatio], [30, 20, null]);
+});
+
+test("a show whose begin is outside the loaded window is owned by the show's message; a begin never shown draws nothing; an error show yields nothing", () => {
+  const e = canonicalMediaEntries([am("B", [show("pb", "B", "late", "/a.png")])]);
+  assert.deepEqual([e[0].id, e[0].ownerMessageId], ["media:h:late", "B"]);
+  assert.deepEqual(canonicalMediaEntries([am("A", [begin("pa", "A", "a1b2"), toolPart("pe", "A", "media_show", { status: "error", input: { path: "/x.png" }, output: "boom" })])]), []);
+});
+
+test("missing mime falls back to the extension; paths with spaces/parentheses survive; entries are deterministic and ordered by first sight", () => {
+  const out = "Displayed /a/b.MOV (video/quicktime, 9 bytes) in the transcript.";
+  const msgs = [am("A", [begin("pa", "A", "h1")]), am("B", [show("pb", "B", "h1", "/a.png"), show("pc", "B", null, "/b.png")])];
+  assert.deepEqual(canonicalMediaEntries(msgs), canonicalMediaEntries(msgs));
+  assert.deepEqual(canonicalMediaEntries(msgs).map((x) => x.id), ["media:h:h1", "media:s:B:/b.png"]);
+  void out;
+});
+
+test("annotateView: media goes on the OWNER message only; a file part that is an image/video gains part.view.media", () => {
+  const filePart = { type: "file", id: "f1", messageID: "B", mime: "image/png", url: "file:///home/u/f.png" };
+  const dataPart = { type: "file", id: "f2", messageID: "B", mime: "image/png", url: "data:image/png;base64,AAAA" };
+  const textFile = { type: "file", id: "f3", messageID: "B", mime: "text/csv", url: "file:///x.csv" };
+  const msgs = [
+    { info: { role: "user", id: "u" }, parts: [] },
+    am("A", [begin("pa", "A", "a1b2")]),
+    am("B", [show("pb", "B", "a1b2", "/home/u/cat.png"), filePart, dataPart, textFile]),
+  ];
+  const out = annotateView(msgs);
+  assert.equal(out[2].view?.media, undefined);
+  assert.equal(out[1].view.media.length, 1);
+  assert.equal(out[1].view.media[0].ownerMessageId, undefined, "the owner is the message it rides on");
+  assert.deepEqual(out[2].parts[1].view, { media: { kind: "image", path: "/home/u/f.png" } });
+  assert.equal(out[2].parts[2].view, undefined, "an inline data: URL is not a box path");
+  assert.equal(out[2].parts[3].view, undefined);
+  assert.equal(filePartMedia({ type: "tool" }), null);
+});
+
+test("getMessage-style single: the media of that ONE message (a show whose begin is elsewhere is owned by it), never a turn", () => {
+  const single = annotateSingle(am("B", [show("pb", "B", "a1b2", "/home/u/cat.png")]));
+  assert.equal(single.view.media[0].id, "media:h:a1b2");
+  assert.equal(single.view.turn, undefined);
+});
