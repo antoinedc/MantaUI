@@ -5,9 +5,10 @@ import SwiftUI
 
 extension TranscriptLinkify {
     /// `text` with every link made tappable (link attribute + accent colour +
-    /// underline). Link-free text returns the plain string untouched.
-    static func attributed(_ text: String, linkColor: Color) -> AttributedString {
-        let links = findLinks(in: text)
+    /// underline). Link-free text returns the plain string untouched. `schemeless`
+    /// is the desktop's per-surface mode; every plain-text surface uses the default.
+    static func attributed(_ text: String, linkColor: Color, schemeless: LinkifySchemeless = .yes) -> AttributedString {
+        let links = findLinks(in: text, schemeless: schemeless)
         guard !links.isEmpty else { return AttributedString(text) }
         var out = AttributedString()
         var cursor = text.startIndex

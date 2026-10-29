@@ -38,24 +38,31 @@ Files: `HandoffModels`, `HandoffStore`, `HandoffViews`, `ChatScreen`,
 
 ## 4. Links in the transcript
 
-`http://`, `https://` and `mailto:` URLs are tappable wherever the transcript shows
-text. Only those schemes — no schemeless hosts (`install.sh`), no `www.`, no bare
-e-mail addresses. Foundation's `NSDataDetector` was not used: it links schemeless
-names (every file extension that is also a TLD), and its handling of placeholders and
-trailing punctuation cannot be pinned down without running it. A small scanner
-(`TranscriptLinkify`) carries the desktop's rules (`src/renderer/linkify.ts`):
-trailing `. , ; : ! ? ' * ^ |` and an unbalanced `)` are dropped, balanced parentheses
-stay, `http://localhost:<port>` / `{host}` / `$PORT` are placeholders, not links, a
-URL glued to a word or path is not one.
-- Prose: the markdown renderer has no GFM autolink, so `TranscriptMarkdownLinks`
-  rewrites the source first — a bare URL becomes `<url>`; inside an inline-code span
-  only the URL becomes a link (a code chip), the rest of the span stays code. Fenced
-  code, existing links, `<autolinks>`/HTML and reference definitions are left alone.
-- Plain text: user prompt, live streaming tail, reasoning, tool output (activity
-  sheet, step output), expanded `/command` text — `AttributedString` link runs.
-Files: `TranscriptLinkify` (Foundation-only, Linux-testable), `TranscriptLinkifyView`,
-`TranscriptComponents`, `TranscriptReasoning`, `TranscriptCommand`, `ActivitySheet`,
-`TranscriptLinkifyTests`.
+Link detection **matches the desktop** (`src/renderer/linkify.ts`, spec
+`2026-10-29-transcript-autolink.md`): the same matcher and the same rules, so a URL is
+tappable on iOS exactly when it is a link on the desktop. `TranscriptLinkifyEngine`
+ports linkify-it's matcher to `NSRegularExpression` (same regular expressions, same
+candidate-picking loop, TLD list = the desktop allowlist); `TranscriptLinkify` layers
+linkify.ts's rules on top: `http(s)://` URLs and `www.` hosts (href `https://` + text);
+schemeless hosts only for the allowlist TLDs (`app`/`ai` only with a `/` path), never
+after `/ \ . @ ~ - _ $ :` or a word character; `<`/`{`/`$` right after (or `:` then one
+of them) makes it a placeholder, not a link; backticks and `= * ^ + | ~` before a
+scheme/`www.` do not hide a URL; trailing `` ` * | ^ `` trimmed; no e-mail, no IPs, no
+`mailto:`/`ftp:`. Only `http(s)` hrefs are opened. The desktop's `schemeless` modes
+(`true` / `false` / `"whole"`) are `LinkifySchemeless` (`.yes` / `.no` / `.whole`).
+- Prose (mode `.yes`): the markdown renderer has no GFM autolink, so
+  `TranscriptMarkdownLinks` rewrites the source first — a link becomes `<url>` (or
+  `[text](<href>)` for `www.`/schemeless). Inline code uses `.whole` like the desktop:
+  a URL inside the span becomes a link (a code chip) and the rest stays code; a span
+  that is one schemeless host (`` `mantaui.com` ``) links as a whole. Fenced code,
+  existing links, `<autolinks>`/HTML and reference definitions are left alone.
+- Plain text, mode `.yes` as on the desktop's matching surfaces: user prompt, live
+  streaming tail, reasoning, tool output (activity sheet, step output), expanded
+  `/command` text — `AttributedString` link runs.
+Files: `TranscriptLinkify` + `TranscriptLinkifyEngine` (Foundation-only,
+Linux-testable), `TranscriptLinkifyView`, `TranscriptComponents`,
+`TranscriptReasoning`, `TranscriptCommand`, `ActivitySheet`, `TranscriptLinkifyTests`
+(mirrors `linkify.test.ts` case for case).
 
 ## 5. Show more / Show less on user prompts
 

@@ -89,6 +89,7 @@ let package = Package(
                 "SettingsWireModels.swift",
                 "TranscriptDisplayOptions.swift",
                 "TranscriptLinkify.swift",
+                "TranscriptLinkifyEngine.swift",
                 "TranscriptMediaModel.swift",
                 "TranscriptTurns.swift",
                 "TranscriptViewModels.swift",
