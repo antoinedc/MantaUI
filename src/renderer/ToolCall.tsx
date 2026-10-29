@@ -20,6 +20,7 @@ import { toolTitle } from "../shared/opencodeV2.mjs";
 import { filePartViewToEntry, resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
+import { Linkified } from "./Linkified";
 import {
   BashBody,
   GlobBody,
@@ -128,7 +129,9 @@ function renderAssistantPart(
           </span>
           <div className="flex-1 min-w-0 flex flex-col" style={{ gap: "var(--sp-1)" }}>
             <div className="text-text-faint not-italic">Thinking…</div>
-            <div>{text}</div>
+            <div>
+              <Linkified text={text} />
+            </div>
           </div>
         </div>
       </div>

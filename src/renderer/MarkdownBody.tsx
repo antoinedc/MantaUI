@@ -2,8 +2,8 @@
 //
 // react-markdown + remark-gfm (tables, strikethrough, autolinks, task lists).
 // Component overrides route fenced code blocks through CodeBlock (Prism), and
-// links through window.api.openExternal so external URLs open in the user's
-// default browser rather than navigating the Electron renderer.
+// links through ExternalLink so external URLs open in the user's default
+// browser rather than navigating the Electron renderer.
 //
 // Extracted from ChatPanel.tsx (M0.5). Pure leaf module — no dependency on the
 // message/tool rendering stack, so it imports cleanly from anywhere.
@@ -13,7 +13,8 @@ import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components as MarkdownComponents } from "react-markdown";
-import { getMantaPreload } from "./preloadAccess";
+import { ExternalLink, Linkified } from "./Linkified";
+import { findLinks } from "./linkify";
 import { CopyButton } from "./CopyButton";
 import { useResolvedTheme } from "./theme";
 
@@ -37,29 +38,54 @@ export function renderMarkdown(text: string): React.ReactNode {
   return <MarkdownBody text={text} />;
 }
 
+// remark-gfm already links http(s):// and www.; this adds schemeless hosts
+// (`mantaui.com/downloads`) in prose. Text inside links, inline code and code
+// blocks is left alone.
+type MdNode = { type: string; value?: string; url?: string; children?: MdNode[] };
+const NO_LINKIFY = new Set(["link", "linkReference", "inlineCode", "code", "html", "definition"]);
+
+function linkifyTextNodes(node: MdNode): void {
+  const kids = node.children;
+  if (!kids || NO_LINKIFY.has(node.type)) return;
+  for (let i = 0; i < kids.length; i++) {
+    const kid = kids[i];
+    if (kid.type !== "text" || !kid.value) {
+      linkifyTextNodes(kid);
+      continue;
+    }
+    const links = findLinks(kid.value);
+    if (links.length === 0) continue;
+    const parts: MdNode[] = [];
+    let at = 0;
+    for (const l of links) {
+      if (l.start > at) parts.push({ type: "text", value: kid.value.slice(at, l.start) });
+      parts.push({ type: "link", url: l.href, children: [{ type: "text", value: l.text }] });
+      at = l.end;
+    }
+    if (at < kid.value.length) parts.push({ type: "text", value: kid.value.slice(at) });
+    kids.splice(i, 1, ...parts);
+    i += parts.length - 1;
+  }
+}
+
+function remarkLinkifySchemeless() {
+  return (tree: MdNode) => linkifyTextNodes(tree);
+}
+
 // Hoisted out so component identity is stable — re-rendering on every keystroke
 // otherwise causes react-markdown to throw away CodeBlock state (the Highlight
 // component would re-tokenize).
 const MD_COMPONENTS: MarkdownComponents = {
-  code({ inline, className, children, ...rest }: {
-    inline?: boolean;
-    className?: string;
+  // Only ever displayed for INLINE code: fenced blocks are rendered by the
+  // `pre` override below from this element's props, never from its output.
+  code({ node: _node, children }: {
+    node?: unknown;
     children?: React.ReactNode;
   } & React.HTMLAttributes<HTMLElement>) {
-    // Inline `code` — manta's accent color, no box. Block code handled below
-    // by wrapping pre.
-    if (inline) {
-      return (
-        <code className="font-mono text-accent" {...rest}>
-          {children}
-        </code>
-      );
-    }
-    // Block code: defer to the <pre> override which will pull lang from
-    // className "language-xxx".
+    // Inline `code` — manta's accent color, no box.
     return (
-      <code className={className} {...rest}>
-        {children}
+      <code className="font-mono text-accent">
+        <Linkified text={childrenToString(children)} schemeless="whole" />
       </code>
     );
   },
@@ -76,26 +102,8 @@ const MD_COMPONENTS: MarkdownComponents = {
     }
     return <pre>{children}</pre>;
   },
-  a({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) {
-    return (
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        className="underline"
-        style={{ color: "var(--accent-tx)" }}
-        onClick={(e) => {
-          const preload = getMantaPreload();
-          if (preload && href) {
-            e.preventDefault();
-            preload.openExternal(href);
-          }
-        }}
-        {...rest}
-      >
-        {children}
-      </a>
-    );
+  a({ node: _node, href, children }: { node?: unknown } & React.AnchorHTMLAttributes<HTMLAnchorElement>) {
+    return <ExternalLink href={href}>{children}</ExternalLink>;
   },
   // BET-413: real headings restored. MD_COMPONENTS previously downgraded every
   // heading to a <div> at near-body size. The sizes/weights below are the
@@ -224,12 +232,12 @@ export const MarkdownBody = memo(function MarkdownBody({ text }: { text: string 
     // Oversized: bypass markdown + Prism to keep the main thread responsive.
     return (
       <pre className="whitespace-pre-wrap break-words text-code font-mono text-text">
-        {text}
+        <Linkified text={text} />
       </pre>
     );
   }
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+    <ReactMarkdown remarkPlugins={[remarkGfm, remarkLinkifySchemeless]} components={MD_COMPONENTS}>
       {preprocessForStream(text)}
     </ReactMarkdown>
   );
