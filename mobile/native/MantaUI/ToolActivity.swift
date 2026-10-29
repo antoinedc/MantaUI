@@ -387,12 +387,14 @@ extension ToolActivity {
     /// - A call with no run id (an older box, or a membership a rebuild retired) joins ONE neutral line per message — it is
     ///   never dropped.
     /// - `runs` is the newest value of each run (revision-merged); a run it lacks falls back to the full view a message
-    ///   carries. `minGen`: parts with `view.gen` below it are a retired membership.
+    ///   carries. `minGen` + `retired`: a part of a RETIRED run whose `view.gen` is below `minGen` is a stale membership
+    ///   (a rebuild repaired that run); every other run keeps its row while the repair is read back.
     static func layout(
         messages: [OpencodeMessage],
         showThinking: Bool,
         runs: [String: TranscriptRunView] = [:],
-        minGen: Int = 0
+        minGen: Int = 0,
+        retired: Set<String> = []
     ) -> ToolLayout {
         var carried: [String: TranscriptRunView] = [:]
         for message in messages {
@@ -419,7 +421,7 @@ extension ToolActivity {
                 }
                 if part.type == "tool" || part.type == "patch" {
                     let view = TranscriptPartView.of(part)
-                    guard let runID = view?.runId, (view?.gen ?? minGen) >= minGen else {
+                    guard let runID = view?.runId, !TranscriptRunStore.isStale(view, minGen: minGen, retired: retired) else {
                         let key = "tools:\(id)"
                         if groupParts[key] != nil {
                             groupParts[key]?.append(part)

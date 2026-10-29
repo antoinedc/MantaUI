@@ -229,8 +229,10 @@ struct ActivitySheet: View {
         let calls = run.view.calls
         return List {
             // A box that predates the run view groups nothing and words nothing: the calls are listed raw, with this note.
-            if run.isFallback {
-                Text("Update your box to see tool details")
+            // On a current box a neutral line is transient (a rebuild's repair, a read made before the capabilities
+            // resolved), so the note only says "update" when the capability is verifiably absent.
+            if let note = ActivityFallbackNote.text(isFallback: run.isFallback, hasRuns: store.transcriptRunsAvailable) {
+                Text(note)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("activity-update-note")

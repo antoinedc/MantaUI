@@ -592,6 +592,27 @@ final class ChatStreamMergeTests: XCTestCase {
                        "the Activity sheet can still find the trailing run by id")
     }
 
+    /// A chat store created AFTER the connection's snapshot reads the epoch the event store holds: the run values the
+    /// frames carried (judged against that epoch) are the ones its working line draws — not the neutral fallback.
+    func testAChatStoreCreatedAfterTheSnapshotReadsTheStoredEpoch() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        stream.onState?(.connected)
+        stream.inject(#"{"kind":"runningSet","payload":{"sessions":[{"sessionId":"ses","since":1700000000000,"type":"busy"}],"epoch":"E1"}}"#)
+        stream.inject(Self.toolRunsFrame(run: "toolu_1", calls: [("toolu_1", "read", "running", "Reading a.ts")], label: "Reading a.ts"))
+        XCTAssertEqual(eventStore.connectionEpoch, "E1")
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
+        )
+        await Task.yield()
+
+        XCTAssertEqual(store.trailingRun?.view.label, "Reading a.ts", "the box's value, merged under the stored epoch")
+        XCTAssertFalse(store.trailingRun?.isFallback ?? true)
+    }
+
     /// Appended `toolOutput` deltas for the same `idx` concatenate onto the live
     /// call's tail in order; a new `idx` starts a fresh tail.
     func testToolOutputTailConcatenatesOnLiveCall() async {

@@ -116,12 +116,6 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// as step rows (BET-753).
     var tools: [String: LiveTool] = [:]
     var toolStartOrder: [String] = []
-    /// Child session ids whose `subagent` frames arrived this turn, in arrival
-    /// order. Lets the transcript keep a subagent that FINISHED this turn until
-    /// the canonical refetch owns it, without resurrecting frames from earlier
-    /// turns (the loaded transcript window is short, so an old child's task
-    /// part may not be in it). Cleared on `turnComplete`, like the tools.
-    var turnSubagentIDs: [String] = []
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -238,7 +232,6 @@ enum MantaStreamRouter {
             // (BET-753).
             s.tools.removeAll()
             s.toolStartOrder.removeAll()
-            s.turnSubagentIDs.removeAll()
         case "toolStarted":
             if let p = try? frame.decodedPayload(StreamToolStartedPayload.self) {
                 let callID = p.callID.flatMap { $0.isEmpty ? nil : $0 } ?? p.idx
@@ -326,7 +319,6 @@ enum MantaStreamRouter {
                 } else {
                     s.subagents.append(p)
                 }
-                if !s.turnSubagentIDs.contains(p.childSessionId) { s.turnSubagentIDs.append(p.childSessionId) }
             }
         case "subagent.child", "autoRename":
             break // registration / rename triggers consumed by later stages
@@ -719,24 +711,30 @@ final class MantaEventStore: ObservableObject {
     }
 
     /// Fold the run views a canonical transcript answer carries into the session's run values, under the connection
-    /// generation the request was ISSUED under (an answer from an older connection is discarded for the run map). Returns
-    /// true when the answer carries a membership older than the session's `minGen` — a rebuild happened meanwhile, so the
-    /// caller refetches once.
+    /// generation the request was ISSUED under (an answer from an older connection is discarded for the run map), then
+    /// forget the runs nothing references any more: the answer is the whole loaded window, so a run no loaded message names
+    /// and the live turn does not hold is dropped. Returns true when the answer carries a RETIRED run's old membership — a
+    /// rebuild happened meanwhile, so the caller refetches once.
     @discardableResult
     func ingestRunViews(sessionId: String, messages: [OpencodeMessage], issuedConnGen: Int) -> Bool {
         let entries = TranscriptRunStore.entries(of: messages)
         var state = sessionStates[sessionId] ?? MantaSessionStreamState(sessionId: sessionId)
+        var store = state.liveRuns.store
         if !entries.isEmpty {
             let context = TranscriptRunContext(currentEpoch: connectionEpoch, connGen: connGen, issuedConnGen: issuedConnGen)
-            let next = state.liveRuns.store.merging(entries, context: context)
-            if next != state.liveRuns.store {
-                state.liveRuns.store = next
-                sessionStates[sessionId] = state
-                lastStreamFrame = nil
-            }
+            store = store.merging(entries, context: context)
         }
-        return issuedConnGen >= connGen
-            && TranscriptRunStore.hasStaleMembership(messages, minGen: (sessionStates[sessionId] ?? state).liveRuns.store.minGen)
+        // An answer issued before the latest reconnect says nothing about what is referenced now.
+        let current = issuedConnGen >= connGen
+        if current, !messages.isEmpty {
+            store = store.pruning(keeping: TranscriptRunStore.referencedRunIDs(in: messages).union(state.liveRuns.heldRunIDs))
+        }
+        if store != state.liveRuns.store {
+            state.liveRuns.store = store
+            sessionStates[sessionId] = state
+            lastStreamFrame = nil
+        }
+        return current && TranscriptRunStore.hasStaleMembership(messages, minGen: store.minGen, retired: store.retired)
     }
 
     /// The live turn is over and the canonical transcript covers its blocks: forget the ledger's layout and calls (the run

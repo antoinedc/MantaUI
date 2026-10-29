@@ -278,10 +278,27 @@ final class ToolActivityLayoutTests: XCTestCase {
         XCTAssertEqual(layout.blocksByMessage["a7"]?.count, 0)
     }
 
-    func testAMembershipOlderThanMinGenIsIgnoredForLayout() {
+    func testAMembershipOlderThanMinGenIsIgnoredForLayoutOnlyForARetiredRun() {
         let layout = ToolActivity.layout(
-            messages: [asst("a1", [viewed(tool("t1", "read"), run: "t1", gen: 1)])], showThinking: false, minGen: 2)
-        XCTAssertTrue(runs(layout.blocksByMessage["a1"]).allSatisfy(\.isFallback), "a retired run id can never be resurrected")
+            messages: [asst("a1", [viewed(tool("t1", "read"), run: "t1", gen: 1)])], showThinking: false, minGen: 2, retired: ["t1"])
+        let lines = runs(layout.blocksByMessage["a1"])
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines.allSatisfy(\.isFallback), "a retired run id can never be resurrected")
+    }
+
+    /// A rebuild repairs ONE run: history the rebuild never touched keeps its rows (and ids) while the repair is read back.
+    func testARebuildOnlyRegroupsTheRetiredRunNotTheHistoryAroundIt() {
+        let messages = [
+            asst("a1", [viewed(tool("h1", "read"), run: "H", gen: 1)]),
+            asst("a2", [viewed(tool("b1", "read"), run: "B", gen: 1), text("x", "between"), viewed(tool("b2", "read"), run: "B2", gen: 1)]),
+        ]
+        let store = ["H": runView("H", "Read a file"), "B2": runView("B2", "Read a file")]
+        let layout = ToolActivity.layout(messages: messages, showThinking: false, runs: store, minGen: 2, retired: ["B"])
+        XCTAssertEqual(runs(layout.blocksByMessage["a1"]).map(\.id), ["H"], "history keeps run-H")
+        XCTAssertEqual(runs(layout.blocksByMessage["a1"]).map(\.isFallback), [false])
+        let a2 = runs(layout.blocksByMessage["a2"])
+        XCTAssertEqual(a2.map(\.id), ["tools:a2", "B2"], "only the retired run's call regroups; the other run keeps its id")
+        XCTAssertEqual(a2.map(\.isFallback), [true, false])
     }
 
     func testTheSummaryFallsBackToTheRunViewAMessageCarries() {

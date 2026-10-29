@@ -515,7 +515,7 @@ struct TranscriptPartView: Equatable, Sendable {
         }
         let runId = ChatJSON.string(view["runId"])
         let segmentId = ChatJSON.string(view["segmentId"])
-        let gen = ChatJSON.number(view["gen"]).map { Int($0) }
+        let gen = ChatJSON.number(view["gen"]).flatMap { Int(exactly: $0) }
         if activity == nil, runId == nil, segmentId == nil, gen == nil { return nil }
         return TranscriptPartView(activity: activity, runId: (runId?.isEmpty == false) ? runId : nil,
                                   segmentId: (segmentId?.isEmpty == false) ? segmentId : nil, gen: gen)
@@ -569,19 +569,24 @@ struct TranscriptRunStore: Equatable, Sendable {
     private(set) var runs: [String: TranscriptRunView]
     /// The highest `gen` seen in the current epoch.
     private(set) var minGen: Int
+    /// The run ids a rebuild retired in the current epoch. Only a part of one of THESE runs is a stale membership when its
+    /// `gen` is below `minGen`: history a rebuild never touched keeps its rows.
+    private(set) var retired: Set<String>
     private var queue: [Queued]
 
     init() {
         epoch = nil
         runs = [:]
         minGen = 0
+        retired = []
         queue = []
     }
 
-    private init(epoch: String?, runs: [String: TranscriptRunView], minGen: Int, queue: [Queued]) {
+    private init(epoch: String?, runs: [String: TranscriptRunView], minGen: Int, retired: Set<String> = [], queue: [Queued]) {
         self.epoch = epoch
         self.runs = runs
         self.minGen = minGen
+        self.retired = retired
         self.queue = queue
     }
 
@@ -589,7 +594,16 @@ struct TranscriptRunStore: Equatable, Sendable {
 
     /// The connection's epoch became known / changed: runs of another epoch are dropped, queued writes apply.
     func settingEpoch(_ newEpoch: String?, connGen: Int) -> TranscriptRunStore {
-        if newEpoch == epoch { return self }
+        if newEpoch == epoch {
+            // A reconnect to the SAME box process: nothing is dropped, but whatever was queued while the new connection's
+            // epoch was unknown applies now (the connection counter still discards answers issued before the reconnect).
+            guard newEpoch != nil, !queue.isEmpty else { return self }
+            var next = TranscriptRunStore(epoch: epoch, runs: runs, minGen: minGen, retired: retired, queue: [])
+            for q in queue {
+                next = next.merging(q.values, context: TranscriptRunContext(currentEpoch: newEpoch, connGen: connGen, issuedConnGen: q.issuedConnGen))
+            }
+            return next
+        }
         var next = TranscriptRunStore(epoch: newEpoch, runs: [:], minGen: 0, queue: [])
         if newEpoch != nil {
             for q in queue {
@@ -621,23 +635,25 @@ struct TranscriptRunStore: Equatable, Sendable {
             if v.rev.gen > minGen { minGen = v.rev.gen }
         }
         if !changed { return self }
-        return TranscriptRunStore(epoch: base.epoch, runs: runs, minGen: minGen, queue: base.queue)
+        return TranscriptRunStore(epoch: base.epoch, runs: runs, minGen: minGen, retired: base.retired, queue: base.queue)
     }
 
-    /// Fold another store's values in (both under the same epoch), by the same rules.
-    func merging(store other: TranscriptRunStore) -> TranscriptRunStore {
-        guard let current = epoch ?? other.epoch else { return self }
-        var base = self
-        if base.epoch != current { base = base.settingEpoch(current, connGen: 0) }
-        return base.merging(Array(other.runs.values).map { .view($0) },
-                            context: TranscriptRunContext(currentEpoch: current, connGen: 0))
-    }
-
-    /// A canonical rebuild (`rebuilt:true`): delete the retired ids and raise `minGen`.
+    /// A canonical rebuild (`rebuilt:true`): delete the retired ids, remember them (so only THEIR old membership reads as
+    /// stale) and raise `minGen`.
     func retiring(_ ids: [String], gen: Int) -> TranscriptRunStore {
         var runs = self.runs
         for id in ids { runs[id] = nil }
-        return TranscriptRunStore(epoch: epoch, runs: runs, minGen: max(minGen, gen), queue: queue)
+        return TranscriptRunStore(epoch: epoch, runs: runs, minGen: max(minGen, gen), retired: retired.union(ids), queue: queue)
+    }
+
+    /// The runs no loaded message references and the current turn does not hold are forgotten (a refetch's housekeeping:
+    /// the map must not grow with every run a session ever saw). A retired id is remembered only while something still
+    /// references it.
+    func pruning(keeping ids: Set<String>) -> TranscriptRunStore {
+        let kept = runs.filter { ids.contains($0.key) }
+        let stillRetired = retired.intersection(ids)
+        if kept.count == runs.count && stillRetired.count == retired.count { return self }
+        return TranscriptRunStore(epoch: epoch, runs: kept, minGen: minGen, retired: stillRetired, queue: queue)
     }
 
     /// The full (non-reference) run views a transcript carries, in message order.
@@ -645,12 +661,36 @@ struct TranscriptRunStore: Equatable, Sendable {
         messages.flatMap { $0.view?.runs ?? [] }
     }
 
-    /// True when a message's parts carry a membership older than `minGen` (a splice issued before a rebuild).
-    static func hasStaleMembership(_ messages: [OpencodeMessage], minGen: Int) -> Bool {
-        guard minGen > 0 else { return false }
+    /// True when a message's parts carry a RETIRED run's old membership (a splice or read issued before a rebuild): a part
+    /// whose `gen` is below `minGen` AND whose run a rebuild retired. Everything else is still right.
+    static func hasStaleMembership(_ messages: [OpencodeMessage], minGen: Int, retired: Set<String>) -> Bool {
+        guard minGen > 0, !retired.isEmpty else { return false }
         return messages.contains { m in
-            m.parts.contains { (TranscriptPartView.of($0)?.gen ?? minGen) < minGen }
+            m.parts.contains { isStale(TranscriptPartView.of($0), minGen: minGen, retired: retired) }
         }
+    }
+
+    /// One part's membership is stale when it names a retired run under a generation below `minGen`.
+    static func isStale(_ view: TranscriptPartView?, minGen: Int, retired: Set<String>) -> Bool {
+        guard let view, let runID = view.runId, let gen = view.gen else { return false }
+        return gen < minGen && retired.contains(runID)
+    }
+
+    /// The run ids a set of messages references (parts and `message.view.runs`, full views and references alike).
+    static func referencedRunIDs(in messages: [OpencodeMessage]) -> Set<String> {
+        var out = Set<String>()
+        for message in messages {
+            for part in message.parts {
+                if let id = TranscriptPartView.of(part)?.runId { out.insert(id) }
+            }
+            for entry in message.view?.runs ?? [] {
+                switch entry {
+                case .view(let v): out.insert(v.id)
+                case .ref(let r): out.insert(r.id)
+                }
+            }
+        }
+        return out
     }
 }
 
@@ -800,6 +840,13 @@ struct TranscriptLiveRunsState: Equatable, Sendable {
 
     var isEmpty: Bool { layout.isEmpty && parts.isEmpty }
 
+    /// The run ids the live turn holds (its layout and its calls): never pruned from the run store.
+    var heldRunIDs: Set<String> {
+        var out = Set(parts.map(\.runId))
+        for case .run(let id, _) in layout { out.insert(id) }
+        return out
+    }
+
     /// The connection's epoch became known: another epoch's layout/parts/closed and runs are dropped.
     func settingEpoch(_ epoch: String?, connGen: Int) -> TranscriptLiveRunsState {
         var next = self
@@ -886,5 +933,18 @@ enum TranscriptLiveTailPlan {
             }
         }
         return out
+    }
+}
+
+// MARK: Older-box note (the Activity sheet)
+
+enum ActivityFallbackNote {
+    /// What the Activity sheet says above a neutral (fallback) line. The "update your box" advice is for a box that
+    /// verifiably lacks `transcript-runs-1` (`hasRuns == false`); on a current box a fallback line is transient (a rebuild's
+    /// repair, or a first read made before the capabilities resolved), so it says the details are loading; with the
+    /// capabilities not known yet it says nothing. nil for a line that is not a fallback.
+    static func text(isFallback: Bool, hasRuns: Bool?) -> String? {
+        guard isFallback, let hasRuns else { return nil }
+        return hasRuns ? "Loading tool details\u{2026}" : "Update your box to see tool details"
     }
 }

@@ -274,6 +274,9 @@ final class ChatSessionStore: ObservableObject {
     /// nil (not known yet). Republished here so views observe one object; the store's
     /// own guards read `capabilities` directly (synchronous).
     @Published private(set) var chatCardsAvailable: Bool?
+    /// Whether the box has `transcript-runs-1`: true / false (an older box) / nil (not known yet). The Activity sheet's
+    /// "update your box" note reads it: a neutral line on a current box is transient, not a reason to update.
+    @Published private(set) var transcriptRunsAvailable: Bool?
     private var inboxActionsAvailable: Bool {
         capabilities.has(.chatCards) == true
     }
@@ -444,11 +447,19 @@ final class ChatSessionStore: ObservableObject {
         self.isReadOnly = isReadOnly
         self.mutationPolicy = mutationPolicy
         self.capabilities = capabilities ?? BoxCapabilitiesStore.shared
+        // A rebuild that happened before this store opened is not news to it.
+        self.lastRunRebuildSeq = eventStore.sessionStates[sessionId]?.liveRuns.rebuildSeq ?? 0
         self.capabilities.$state
             .map { $0.known.map { $0.has(.chatCards) } }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] available in self?.chatCardsAvailable = available }
+            .store(in: &cancellables)
+        self.capabilities.$state
+            .map { $0.known.map { $0.has(.transcriptRuns) } }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] available in self?.transcriptRunsAvailable = available }
             .store(in: &cancellables)
         // The box's transcript view (turn footers, truncation) arrives only on a `view: true` fetch: when the capability
         // list turns out to include it AFTER the first fetch went out without, fetch again so footers appear.
@@ -995,6 +1006,9 @@ final class ChatSessionStore: ObservableObject {
         let withRuns = ChatTranscriptMapper.applyingRunViews(resolved, runs: liveRuns.store.runs, showReasoning: showReasoning)
         var tails: [String: String] = [:]
         for (idx, tool) in streamState?.tools ?? [:] where !tool.tail.isEmpty { tails[idx] = tool.tail }
+        // A prompt still being SENT is a new turn that has not been acknowledged: the previous turn's ledger is not the live
+        // turn's, so its last run must not be taken for the working line's.
+        let sendingNewTurn = pendingPrompts.contains { $0.state == .sending && !$0.isBusySend }
         let tail = ChatTranscriptMapper.liveTail(
             layout: liveRuns.layout,
             runs: liveRuns.store.runs,
@@ -1006,7 +1020,7 @@ final class ChatSessionStore: ObservableObject {
             taskContext: taskContext,
             showReasoning: showReasoning,
             canonical: withRuns,
-            running: running
+            running: running && !sendingNewTurn
         )
         // Live media (images the model showed) draws after the settled transcript and before the live blocks (WS01 M-01-2).
         // Same `presentedMessages` as the mapper call, so a media owner is never drawn twice.

@@ -207,12 +207,79 @@ final class TranscriptViewTests: XCTestCase {
         XCTAssertEqual(s.runs["A"]?.summary.label, "merged")
     }
 
-    func testStaleMembershipIsDetectedFromAMessagesPartGens() throws {
+    func testStaleMembershipIsDetectedFromARetiredRunsOldPartGens() throws {
         let json = #"[{\#(info),"parts":[{"type":"tool","id":"t1","messageID":"a1","tool":"read","state":{},"view":{"runId":"A","gen":1}}]}]"#
         let messages = try decode(json)
-        XCTAssertFalse(TranscriptRunStore.hasStaleMembership(messages, minGen: 0))
-        XCTAssertFalse(TranscriptRunStore.hasStaleMembership(messages, minGen: 1))
-        XCTAssertTrue(TranscriptRunStore.hasStaleMembership(messages, minGen: 2))
+        XCTAssertFalse(TranscriptRunStore.hasStaleMembership(messages, minGen: 0, retired: ["A"]))
+        XCTAssertFalse(TranscriptRunStore.hasStaleMembership(messages, minGen: 1, retired: ["A"]))
+        XCTAssertTrue(TranscriptRunStore.hasStaleMembership(messages, minGen: 2, retired: ["A"]))
+        XCTAssertFalse(TranscriptRunStore.hasStaleMembership(messages, minGen: 2, retired: ["B"]), "a run no rebuild retired is not stale")
+        XCTAssertFalse(TranscriptRunStore.hasStaleMembership(messages, minGen: 2, retired: []))
+    }
+
+    func testAMalformedGenIsNoGenAndNeverTraps() throws {
+        let json = #"[{\#(info),"parts":[{"type":"tool","id":"t1","messageID":"a1","tool":"read","state":{},"view":{"runId":"A","gen":1e30}},{"type":"tool","id":"t2","messageID":"a1","tool":"read","state":{},"view":{"runId":"A","gen":2.5}}]}]"#
+        let parts = try decode(json)[0].parts
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertNil(TranscriptPartView.of(parts[0])?.gen)
+        XCTAssertNil(TranscriptPartView.of(parts[1])?.gen)
+        XCTAssertEqual(TranscriptPartView.of(parts[0])?.runId, "A")
+    }
+
+    // MARK: - D11 run store: reconnect to the same process, retired ids, pruning
+
+    /// The iOS twin of desktop S3-1: a reconnect to the SAME box process keeps the epoch, so values queued while the new
+    /// connection's epoch was unknown must still apply when its `runningSet` repeats the epoch.
+    func testWritesQueuedDuringASameProcessReconnectApplyWhenTheEpochRepeats() {
+        var s = known()
+        let unknown = TranscriptRunContext(currentEpoch: nil, connGen: 2, issuedConnGen: 2)
+        s = s.merging([run("A", "queued")], context: unknown)
+        XCTAssertNil(s.runs["A"], "queued, not applied, while the epoch is unknown")
+        s = s.settingEpoch("E1", connGen: 2)
+        XCTAssertEqual(s.runs["A"]?.summary.label, "queued")
+        XCTAssertEqual(s.settingEpoch("E1", connGen: 2), s, "nothing is left queued: a second apply changes nothing")
+    }
+
+    func testAnAnswerQueuedBeforeAReconnectIsStillDiscardedWhenTheEpochRepeats() {
+        var s = known()
+        s = s.merging([run("A", "from the old connection")], context: TranscriptRunContext(currentEpoch: nil, connGen: 1, issuedConnGen: 1))
+        s = s.settingEpoch("E1", connGen: 2)
+        XCTAssertNil(s.runs["A"], "the connection counter still discards an answer issued before the reconnect")
+    }
+
+    func testPruningKeepsOnlyReferencedRunsAndRemembersRetiredIdsOnlyWhileReferenced() {
+        var s = known().merging([run("A", "a"), run("B", "b"), run("C", "c")], context: ctx)
+        s = s.retiring(["C"], gen: 2)
+        XCTAssertEqual(s.retired, ["C"])
+        XCTAssertEqual(Set(s.runs.keys), ["A", "B"])
+        let pruned = s.pruning(keeping: ["A", "C"])
+        XCTAssertEqual(Set(pruned.runs.keys), ["A"], "B is referenced by nothing")
+        XCTAssertEqual(pruned.retired, ["C"], "C is still named by a loaded part: its old membership is still stale")
+        XCTAssertEqual(pruned.minGen, 2)
+        XCTAssertTrue(pruned.pruning(keeping: ["A"]).retired.isEmpty)
+        XCTAssertEqual(s.pruning(keeping: ["A", "B", "C"]), s, "nothing to forget: the same store")
+    }
+
+    func testTheRunIDsAMessageReferencesAreItsPartsAndItsRunEntries() throws {
+        let json = #"[{\#(info),"parts":[{"type":"tool","id":"t1","messageID":"a1","tool":"read","state":{},"view":{"runId":"A","gen":1}},{"type":"text","id":"x","messageID":"a1","text":"hi"}],"view":{"runs":[{"id":"B","ownerMessageId":"a1","rev":{"epoch":"E1","gen":1,"seq":1},"label":"x"},{"id":"C","rev":{"epoch":"E1","gen":1,"seq":1},"ref":true}]}}]"#
+        XCTAssertEqual(TranscriptRunStore.referencedRunIDs(in: try decode(json)), ["A", "B", "C"])
+    }
+
+    func testTheLiveTurnHoldsItsLayoutAndCallRunsAgainstPruning() throws {
+        let state = TranscriptLiveRunsState().settingEpoch("E1", connGen: 1)
+            .applying(try frame(#"{"epoch":"E1","full":true,"gen":1,"layout":[{"kind":"run","id":"A","segmentId":"A"},{"kind":"text","partID":"p","messageID":"m"}],"runs":[],"closed":[],"parts":[{"id":"t9","messageID":"m","runId":"Z","tool":"read","status":"running","activity":{"kind":"read","status":"running","label":"x","target":"","counted":true}}]}"#),
+                      context: TranscriptRunContext(currentEpoch: "E1", connGen: 1))
+        XCTAssertEqual(state.heldRunIDs, ["A", "Z"])
+    }
+
+    // MARK: - The Activity sheet's older-box note
+
+    func testTheUpdateYourBoxNoteIsOnlyForABoxThatVerifiablyLacksTheCapability() {
+        XCTAssertEqual(ActivityFallbackNote.text(isFallback: true, hasRuns: false), "Update your box to see tool details")
+        XCTAssertEqual(ActivityFallbackNote.text(isFallback: true, hasRuns: true), "Loading tool details\u{2026}",
+                       "on a current box a neutral line is transient (a rebuild's repair), never a reason to update")
+        XCTAssertNil(ActivityFallbackNote.text(isFallback: true, hasRuns: nil), "capabilities not loaded yet: say nothing")
+        XCTAssertNil(ActivityFallbackNote.text(isFallback: false, hasRuns: false))
     }
 
     // MARK: - D11 live frames (TranscriptLiveRunsState)

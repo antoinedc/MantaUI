@@ -240,7 +240,8 @@ enum ChatTranscriptMapper {
             $0.info.role.rawValue != "assistant" || $0.info.time?.completed != nil
         }
         let layout = ToolActivity.layout(
-            messages: settled, showThinking: options.showReasoning, runs: options.runStore.runs, minGen: options.runStore.minGen)
+            messages: settled, showThinking: options.showReasoning, runs: options.runStore.runs,
+            minGen: options.runStore.minGen, retired: options.runStore.retired)
 
         // Media: canonical (session-wide) plus live-only entries, grouped under
         // the settled assistant message that owns them. Entries whose owner is
@@ -544,15 +545,17 @@ enum ChatTranscriptMapper {
                 }
                 guard !members.isEmpty else { continue }
                 let rowParts = members.map(makePart)
-                let summary = runs[runID]?.summary(forSegment: segmentID)
-                    ?? ToolActivity.fallbackSummary(calls: members.count)
+                let stored = runs[runID]?.summary(forSegment: segmentID)
                 let toolRunID = String(rowID.dropFirst(4))
                 if let at = canonicalRun[rowID], case .activity(let existing) = canonicalOut[at] {
+                    // A run the store lacks (its epoch not yet known, values queued) keeps the summary the canonical row
+                    // already has rather than a neutral one.
                     var merged = existing.upserting(rowParts)
-                    merged.view = summary
+                    merged.view = stored ?? existing.view
                     canonicalOut[at] = .activity(merged)
                     last = (true, at, merged)
                 } else {
+                    let summary = stored ?? ToolActivity.fallbackSummary(calls: members.count)
                     let run = ToolRun(id: toolRunID, parts: rowParts, view: summary, runID: runID, segmentID: segmentID)
                     blocks.append(.activity(run))
                     last = (false, blocks.count - 1, run)
