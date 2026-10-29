@@ -581,6 +581,9 @@ export function useSseBus(params: {
           // stale timer can't clobber this value, then apply it immediately.
           cancelTurnSettle();
           setRunning(nowRunning);
+          // The turn footer / truncation come only from a full view fetch (a
+          // splice never carries a turn), so a turn ending needs one.
+          if (!nowRunning) scheduleRefetch();
           return;
         }
         case "turnComplete": {
@@ -590,14 +593,15 @@ export function useSseBus(params: {
             setRunning(true);
             return;
           }
-          // running:false is not proof the turn ended — the box derives it from
-          // the transcript, so it fires at every tool-step boundary and is
-          // re-armed by the next `session.status busy`. Start (or restart) a
-          // settle timer; only the hard `running` signal or a genuine end clears
-          // it early.
+          // The box emits this when an execution ends, but a follow-up busy can
+          // still re-arm the turn right away (queued sends, background results),
+          // so settle after a short quiet period; the hard `running` signal or a
+          // genuine end clears the timer early. The canonical refetch (turn
+          // footer, truncation) belongs to the settled end, so it runs here.
           cancelTurnSettle();
           turnSettleRef.current = setTimeout(() => {
             setRunning(false);
+            scheduleRefetch();
           }, TURN_SETTLE_MS);
           return;
         }
@@ -650,6 +654,7 @@ export function useSseBus(params: {
           setAuthReconnectState(rc ? { providerID: rc.providerID, label: rc.label } : null);
           cancelTurnSettle();
           setRunning(false);
+          scheduleRefetch();
           return;
         }
         case "context": {

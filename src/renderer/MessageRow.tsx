@@ -25,6 +25,7 @@ import {
   summarizeTodoProgress,
   todoStatusOf,
   viewMediaToEntry,
+  canonicalMediaToDraw,
   type TodoStatus,
 } from "./chatUtils";
 import { pastVerbFor } from "./chatShared";
@@ -256,6 +257,7 @@ export const MessageRow = memo(function MessageRow({
   commandInfo,
   voiceNote = null,
   media = null,
+  liveMediaHandles,
   widget = null,
   entering = false,
   blocks,
@@ -299,6 +301,8 @@ export const MessageRow = memo(function MessageRow({
   // a `fail` ends it as a labelled placeholder. Stable reference from a panel
   // memo, so the MessageRow memo chain is untouched.
   media?: MediaEntry | null;
+  /** Handles of every live media entry in the session — a canonical entry with the same handle is not drawn again. */
+  liveMediaHandles?: ReadonlySet<string>;
   // BET-1325: the inline-widget entry (from the `widget` bus events) this
   // assistant message owns, keyed by messageId. When set, the row renders the
   // WidgetBody card — a sandboxed <iframe> in a ToolCard shell, reserved to
@@ -351,7 +355,7 @@ export const MessageRow = memo(function MessageRow({
   if (
     !isRenderableRow(msg, {
       blocks: rowBlocks,
-      hasMedia: media != null || (msg.view?.media?.length ?? 0) > 0,
+      hasMedia: media != null || canonicalMediaToDraw(msg.view?.media, liveMediaHandles).length > 0,
       hasWidget: widget != null,
       hasFooter: turnDurationMs != null || truncation != null,
     })
@@ -486,7 +490,9 @@ export const MessageRow = memo(function MessageRow({
       {media != null && !isUser && <MediaBody entry={media} />}
       {media == null &&
         !isUser &&
-        msg.view?.media?.map((entry) => <MediaBody key={entry.id} entry={viewMediaToEntry(entry)} />)}
+        canonicalMediaToDraw(msg.view?.media, liveMediaHandles).map((entry) => (
+          <MediaBody key={entry.id} entry={viewMediaToEntry(entry)} />
+        ))}
       {widget != null && !isUser && <WidgetBody entry={widget} />}
       {rowBlocks.map((b) =>
         b.kind === "tools" ? (

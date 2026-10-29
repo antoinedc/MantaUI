@@ -1,0 +1,1020 @@
+[
+  {
+    "name": "one finished turn: duration from first created to last completed, tokens = output + reasoning",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 5000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 40,
+            "reasoning": 2,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 5000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 40,
+            "reasoning": 2,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": 4000,
+            "tokens": 42,
+            "verbSeedId": "a1"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "a multi-step turn: only the last assistant message carries the turn; the seed is the first",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 10,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2000,
+            "completed": 7000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 20,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 10,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2000,
+            "completed": 7000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 20,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": 6000,
+            "tokens": 30,
+            "verbSeedId": "a1"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "a still-running turn has no footer",
+    "running": true,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 10,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 10,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ]
+  },
+  {
+    "name": "running with the transcript ending in a user message keeps the finished turn's footer",
+    "running": true,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 5000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 9,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 5000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 9,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": 4000,
+            "tokens": 9,
+            "verbSeedId": "a1"
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ]
+  },
+  {
+    "name": "a background result starts a new turn",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "b1",
+          "time": {
+            "created": 3000,
+            "completed": 3000
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "b1",
+            "type": "background-result",
+            "id": "b1-p"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 4000,
+            "completed": 6000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 7,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": 1000,
+            "tokens": 5,
+            "verbSeedId": "a1"
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "b1",
+          "time": {
+            "created": 3000,
+            "completed": 3000
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "b1",
+            "type": "background-result",
+            "id": "b1-p"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 4000,
+            "completed": 6000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 7,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": 2000,
+            "tokens": 7,
+            "verbSeedId": "a2"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "truncation: output cap, context wall and a cut-off tool call; the step-finish reason wins over info.finish",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "max_tokens",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "tool-calls",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "step-finish",
+            "id": "a2:step-finish",
+            "reason": "max_tokens"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u3",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a3",
+          "time": {
+            "created": 5,
+            "completed": 6
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "end_turn",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a3",
+            "type": "step-finish",
+            "id": "a3:step-finish",
+            "reason": "model_context_window_exceeded"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u4",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a4",
+          "time": {
+            "created": 7,
+            "completed": 8
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "max_tokens",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a4",
+            "type": "step-finish",
+            "id": "a4:step-finish",
+            "reason": ""
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "max_tokens",
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": 1,
+            "tokens": 1,
+            "verbSeedId": "a1"
+          },
+          "truncation": {
+            "kind": "output-cap",
+            "label": "truncated (output limit)",
+            "hint": "Response hit the per-turn output cap. Ask the model to continue, or raise the max output budget for this provider."
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "tool-calls",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "step-finish",
+            "id": "a2:step-finish",
+            "reason": "max_tokens"
+          }
+        ],
+        "view": {
+          "turn": {
+            "durationMs": 1,
+            "tokens": 1,
+            "verbSeedId": "a2"
+          },
+          "truncation": {
+            "kind": "tool-cutoff",
+            "label": "tool call cut off — retry needed",
+            "hint": "The model was emitting a tool call when it hit the output limit, so the call is incomplete and won't execute. Retry the turn (optionally with a higher max output)."
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u3",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a3",
+          "time": {
+            "created": 5,
+            "completed": 6
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "end_turn",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a3",
+            "type": "step-finish",
+            "id": "a3:step-finish",
+            "reason": "model_context_window_exceeded"
+          }
+        ],
+        "view": {
+          "turn": {
+            "durationMs": 1,
+            "tokens": 1,
+            "verbSeedId": "a3"
+          },
+          "truncation": {
+            "kind": "context-wall",
+            "label": "truncated (context full)",
+            "hint": "Response hit the model's context window mid-generation. Run /compact to free space, or start a new session."
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u4",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a4",
+          "time": {
+            "created": 7,
+            "completed": 8
+          },
+          "tokens": {
+            "input": 0,
+            "output": 1,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "finish": "max_tokens",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a4",
+            "type": "step-finish",
+            "id": "a4:step-finish",
+            "reason": ""
+          }
+        ],
+        "view": {
+          "turn": {
+            "durationMs": 1,
+            "tokens": 1,
+            "verbSeedId": "a4"
+          },
+          "truncation": {
+            "kind": "output-cap",
+            "label": "truncated (output limit)",
+            "hint": "Response hit the per-turn output cap. Ask the model to continue, or raise the max output budget for this provider."
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "no tokens and no duration: the turn still exists, both null",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 1000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 1000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [],
+        "view": {
+          "turn": {
+            "durationMs": null,
+            "tokens": null,
+            "verbSeedId": "a1"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "the last assistant message must have time.completed",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1000,
+            "completed": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2000
+          },
+          "tokens": {
+            "input": 0,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      }
+    ]
+  }
+]

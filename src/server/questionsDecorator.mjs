@@ -12,7 +12,9 @@
 // The interpreter stays synchronous: `createQuestionsDecorator().publish` wraps its publish. A `questions` frame whose
 // questions carry a `tool.callID` is decorated (one transcript read per (session, callID), cached) before it goes out;
 // a per-session sequence number drops a decorated publish a NEWER frame has overtaken. The decorated list is kept so the
-// connect snapshot replays it.
+// connect snapshot replays it. A question published before its `plan_exit` part is readable is looked up once more
+// shortly after (RECHECK_MS), and republished decorated if the part has appeared — a late part must not leave the whole
+// ask a plain card.
 
 import { planRefsFromPart } from "./artifacts.mjs";
 import { planPageUrl } from "../shared/planMode.mjs";
@@ -104,6 +106,7 @@ export function isPlanExitQuestion(q) {
 // ---- stateful ------------------------------------------------------------------------------------------------------
 
 const NEGATIVE_TTL_MS = 10_000;
+const RECHECK_MS = 1_000;
 const CACHE_MAX = 200;
 
 /**
@@ -112,12 +115,27 @@ const CACHE_MAX = 200;
  * @param {(sessionId: string) => Promise<object[]>} d.listMessages  `oc.listMessages(sid, {slim:true})`
  * @param {() => string|null} d.baseUrl  the box's public base URL (null when none)
  * @param {() => number} [d.now]
+ * @param {(fn: () => void, ms: number) => unknown} [d.setTimer]  injectable for tests
+ * @param {(handle: unknown) => void} [d.clearTimer]
  * @param {(msg: string, err?: unknown) => void} [d.warn]
  */
-export function createQuestionsDecorator({ publish, listMessages, baseUrl, now = Date.now, warn = (m, e) => console.warn(m, e?.message ?? e ?? "") }) {
+export function createQuestionsDecorator({
+  publish,
+  listMessages,
+  baseUrl,
+  now = Date.now,
+  setTimer = (fn, ms) => {
+    const t = setTimeout(fn, ms);
+    t.unref?.();
+    return t;
+  },
+  clearTimer = (t) => clearTimeout(t),
+  warn = (m, e) => console.warn(m, e?.message ?? e ?? ""),
+}) {
   const cache = new Map(); // `${sid}\0${callID}` → { plan: object|null, at: number }
   const seq = new Map(); // sid → latest questions-frame sequence
   const latest = new Map(); // sid → the last decorated list published
+  const rechecks = new Map(); // sid → the pending late-part re-check timer
 
   const key = (sid, callID) => `${sid}\u0000${callID}`;
   const callIDs = (questions) => questions.map((q) => q?.tool?.callID).filter(Boolean);
@@ -178,10 +196,34 @@ export function createQuestionsDecorator({ publish, listMessages, baseUrl, now =
     const questions = Array.isArray(evt.payload?.questions) ? evt.payload.questions : [];
     const mine = (seq.get(sid) ?? 0) + 1;
     seq.set(sid, mine);
+    const prior = rechecks.get(sid);
+    if (prior !== undefined) {
+      clearTimer(prior);
+      rechecks.delete(sid);
+    }
     const sync = decorateFromCache(sid, questions);
     const emit = (list) => {
       latest.set(sid, list);
       publish({ ...evt, payload: { ...evt.payload, questions: list } });
+      scheduleRecheck(list);
+    };
+    // The read can lose a race with V2 persisting the `plan_exit` part: look once more shortly after, then stop.
+    const scheduleRecheck = (list) => {
+      if (!list.some((q) => q?.tool?.callID && !q.plan)) return;
+      rechecks.set(
+        sid,
+        setTimer(() => {
+          rechecks.delete(sid);
+          if (seq.get(sid) !== mine) return;
+          for (const q of list) if (q?.tool?.callID && !q.plan) cache.delete(key(sid, q.tool.callID));
+          void decorate(sid, questions).then((next) => {
+            if (seq.get(sid) !== mine) return; // overtaken while reading
+            if (!next.some((q, i) => q.plan && !list[i]?.plan)) return; // still no part: stay as published
+            latest.set(sid, next);
+            publish({ ...evt, payload: { ...evt.payload, questions: next } });
+          });
+        }, RECHECK_MS),
+      );
     };
     if (callIDs(questions).length === 0 || sync.pending.length === 0) {
       emit(sync.questions);
@@ -201,14 +243,23 @@ export function createQuestionsDecorator({ publish, listMessages, baseUrl, now =
     },
     /** `opencode:questions` — the same decoration. */
     decorate,
-    /** The connect snapshot's `questions` frames, decorated from what is cached (a session never decorated stays plain). */
+    /**
+     * The connect snapshot's `questions` frames: the last decorated list published for the session when it names the
+     * same questions (so a lookup that came late is replayed too), else decorated from what is cached (a session never
+     * decorated stays plain).
+     */
     decorateSnapshot(frames) {
       return frames.map((f) => {
         if (f?.kind !== "stream" || f.sub !== "questions") return f;
-        const { questions } = decorateFromCache(f.sessionId, f.payload?.questions ?? []);
+        const incoming = f.payload?.questions ?? [];
+        const kept = latest.get(f.sessionId);
+        if (kept && kept.length === incoming.length && kept.every((q, i) => q?.id === incoming[i]?.id)) {
+          return { ...f, payload: { ...f.payload, questions: kept } };
+        }
+        const { questions } = decorateFromCache(f.sessionId, incoming);
         return { ...f, payload: { ...f.payload, questions } };
       });
     },
-    _state: { cache, seq, latest },
+    _state: { cache, seq, latest, rechecks },
   };
 }

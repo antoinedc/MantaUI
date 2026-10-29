@@ -63,6 +63,7 @@ import {
   type EntryMotionState,
   type LiveTurn,
   workingIndicatorLabel,
+  canonicalMediaToDraw,
 } from "./chatUtils";
 
 // ===== Virtuoso context =====
@@ -133,10 +134,11 @@ function rowContext(
   finishes: TranscriptProps["finishByMessageId"],
   media: TranscriptProps["mediaByMessageId"],
   widgets: TranscriptProps["widgetsByMessageId"],
+  liveMediaHandles: ReadonlySet<string>,
 ) {
   return {
     blocks: blocksByMessage.get(m.info.id),
-    hasMedia: media.has(m.info.id) || (m.view?.media?.length ?? 0) > 0,
+    hasMedia: media.has(m.info.id) || canonicalMediaToDraw(m.view?.media, liveMediaHandles).length > 0,
     hasWidget: widgets.has(m.info.id),
     hasFooter:
       turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null || m.view?.truncation != null,
@@ -592,6 +594,13 @@ export function Transcript({
     return layoutRef.current;
   }, [messages, running, showThinking]);
 
+  // Every live media handle in the session: a canonical card for the same handle is not drawn a second time.
+  const liveMediaHandles = useMemo(() => {
+    const set = new Set<string>();
+    for (const entry of mediaByMessageId.values()) if (entry.handle) set.add(entry.handle);
+    return set;
+  }, [mediaByMessageId]);
+
   const visibleMessages = useMemo(
     () =>
       messages.filter((m) =>
@@ -604,10 +613,11 @@ export function Transcript({
             finishByMessageId,
             mediaByMessageId,
             widgetsByMessageId,
+            liveMediaHandles,
           ),
         ),
       ),
-    [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId],
+    [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId, liveMediaHandles],
   );
 
   const backgroundByRowRef = useRef<Map<string, BackgroundCard[]>>(new Map());
@@ -679,6 +689,7 @@ export function Transcript({
               finishByMessageId,
               mediaByMessageId,
               widgetsByMessageId,
+              liveMediaHandles,
             ),
           ),
         );
@@ -935,6 +946,7 @@ export function Transcript({
                         ? null
                         : mediaByMessageId.get(m.info.id) ?? null
                     }
+                    liveMediaHandles={liveMediaHandles}
                     widget={
                       m.info.role === "user"
                         ? null

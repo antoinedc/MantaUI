@@ -101,4 +101,43 @@ final class TranscriptViewTests: XCTestCase {
         XCTAssertNil(plan.path)
         XCTAssertNil(plan.pageUrl)
     }
+
+    // MARK: - The box's golden (src/server/transcriptView.test.mjs pins the box to the same file)
+
+    func testTheBoxGoldenDecodesAndCarriesTheRulesTheBoxPins() throws {
+        let scenarios = try TranscriptViewGolden.load()
+        XCTAssertGreaterThanOrEqual(scenarios.count, 8)
+        let multi = try XCTUnwrap(scenarios.first { $0.name.hasPrefix("a multi-step turn") })
+        XCTAssertNil(multi.output.first { $0.info.id == "a1" }?.view)
+        XCTAssertEqual(multi.output.first { $0.info.id == "a2" }?.view?.turn,
+                       TranscriptTurnView(durationMs: 6000, tokens: 30, verbSeedId: "a1"))
+        let running = try XCTUnwrap(scenarios.first { $0.name.hasPrefix("a still-running turn") })
+        XCTAssertTrue(running.output.allSatisfy { $0.view == nil })
+        let trunc = try XCTUnwrap(scenarios.first { $0.name.hasPrefix("truncation:") })
+        XCTAssertEqual(trunc.output.compactMap { $0.view?.truncation?.kind }, ["output-cap", "tool-cutoff", "context-wall", "output-cap"])
+        XCTAssertTrue(trunc.output.compactMap { $0.view?.truncation }.allSatisfy { $0.hint != nil })
+    }
+}
+
+/// `Fixtures/transcript-view.golden.json`: raw messages + the box's `view` annotation for each scenario. A test resource
+/// of the app's test bundle; a bare `swift test` has no resource bundle, so it falls back to the checkout the test was
+/// compiled from.
+struct TranscriptViewGolden: Decodable {
+    var name: String
+    var running: Bool
+    var input: [OpencodeMessage]
+    var output: [OpencodeMessage]
+
+    static func load(file: StaticString = #filePath) throws -> [TranscriptViewGolden] {
+        let data: Data
+        if let url = Bundle(for: TranscriptViewTests.self).url(forResource: "transcript-view.golden", withExtension: "json") {
+            data = try Data(contentsOf: url)
+        } else {
+            var url = URL(fileURLWithPath: "\(file)")
+            url.deleteLastPathComponent()
+            url.appendPathComponent("Fixtures/transcript-view.golden.json")
+            data = try Data(contentsOf: url)
+        }
+        return try JSONDecoder().decode([TranscriptViewGolden].self, from: data)
+    }
 }

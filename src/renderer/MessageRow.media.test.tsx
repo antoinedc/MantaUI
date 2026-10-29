@@ -20,7 +20,7 @@ describe("MessageRow canonical media", () => {
     h = null;
   });
 
-  const render = (media: MediaEntry | null, view?: OpencodeMessage["view"], role = "assistant") => {
+  const render = (media: MediaEntry | null, view?: OpencodeMessage["view"], role = "assistant", liveMediaHandles?: ReadonlySet<string>) => {
     installMockApi();
     const msg = {
       info: { id: "a1", sessionID: "s", role, time: { created: 1, completed: 2 } },
@@ -28,7 +28,7 @@ describe("MessageRow canonical media", () => {
       ...(view ? { view } : {}),
     } as unknown as OpencodeMessage;
     h = mount(
-      <MessageRow msg={msg} showThinking={false} turnDurationMs={null} turnTokens={null} verbSeedId={null} truncation={null} commandInfo={null} media={media} />,
+      <MessageRow msg={msg} showThinking={false} turnDurationMs={null} turnTokens={null} verbSeedId={null} truncation={null} commandInfo={null} media={media} liveMediaHandles={liveMediaHandles} />,
     );
   };
 
@@ -42,6 +42,12 @@ describe("MessageRow canonical media", () => {
   it("the live entry wins: the canonical entries are not drawn on top of it", () => {
     const live: MediaEntry = { handle: "a", state: "ready", beganAt: null, meta: { kind: "image", path: "/a.png", mime: "image/png", width: 1, height: 1, aspectRatio: null, count: null, title: null } };
     render(live, { media: [entry("media:h:a", "/a.png")] });
+    expect(previews()).toBe(1);
+  });
+
+  it("a canonical entry whose handle a live card elsewhere in the session draws is not drawn again", () => {
+    const withHandle = (id: string, path: string, handle: string): MediaViewEntry => ({ ...entry(id, path), handle });
+    render(null, { media: [withHandle("media:h:a", "/a.png", "a"), withHandle("media:h:b", "/b.png", "b")] }, "assistant", new Set(["a"]));
     expect(previews()).toBe(1);
   });
 

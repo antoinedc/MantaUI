@@ -1231,7 +1231,9 @@ geometry stay (KC).
 ### Capability fallback
 
 Missing → canonical media not shown after reload (desktop today; iOS loses its
-reconstruction — acceptable, the box self-updates).
+reconstruction — acceptable, the box self-updates). Also on desktop: an image/video
+FILE part is drawn inline only when the box marked it (`part.view.media`), so on an
+older box it stays an ordinary file card (a working control, not a regression).
 
 ### Tests
 
@@ -2477,3 +2479,22 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
 - iOS: `QuestionRequest.plan: PlanQuestionView?` (lossy: a malformed plan keeps the question, as an ordinary card);
   `PlanDerivation.swift` and its tests deleted; `splitQuestions` is `plan != nil`; `TranscriptCardActions` lost `messages`/`planURL`
   (the open-page action takes the question); the "Open page" button is only drawn when the box gave a URL (no dead control).
+
+## Review fixes (D8–D10 Opus review)
+
+1. **The desktop footer refetch (BLOCKING).** A footer comes only from a full `view` fetch, so a turn ending schedules one:
+   `scheduleRefetch()` in the `turnComplete` settle timer (after `running` goes false), in the `running` case when it
+   settles to false (the authoritative signal cancels the timer), and in `sessionError`. The shared `useSseBus` means
+   `CtoChat` gets it too. Harness test: a splice-only turn that ends with `turnComplete` / a bare `running:false` issues
+   exactly one `opencodeMessages(sid, {view:true, …})` and renders the footer.
+2. **Late `plan_exit` part (SHOULD).** A `questions` frame published while its `plan_exit` part is not readable yet is looked
+   up once more after 1 s (cache bypassed, one-shot, cancelled by any newer frame for the session) and republished
+   decorated if the part has appeared. The decorated list is stored and `decorateSnapshot` replays it (NIT 4).
+3. **Canonical vs live media (NIT 3).** `MessageRow` skips a canonical `view.media` entry whose `handle` a live card
+   elsewhere in the session already draws (`canonicalMediaToDraw`); the row-visibility predicate uses the same filter.
+4. **One golden for the box's view rules (NIT 5).** `mobile/native/MantaUITests/Fixtures/transcript-view.golden.json`
+   (raw messages + the box's `annotateView` output per scenario): `transcriptView.test.mjs` pins the box to it
+   (`UPDATE_GOLDEN=1` regenerates), `TranscriptViewTests` decodes it (Linux), and `BoxViewFixtureParityTests` (Mac) pins the
+   mapper tests' `BoxViewFixture` stamper to the same file. Deviation: the many incidental mapper tests that need a plausible
+   footer on inline-built messages still stamp them; the stamper is now tied to the box by the golden instead of replaced.
+5. NIT 6 (older-box desktop file part) is recorded in D9's "Capability fallback"; NIT 7 (stale `turnComplete` comment) fixed.

@@ -77,13 +77,16 @@ function rig(messagesBySession = {}, { baseUrl = BASE } = {}) {
   const published = [];
   const reads = [];
   const release = [];
+  const timers = [];
   const d = createQuestionsDecorator({
+    setTimer: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
+    clearTimer: (t) => { t.cleared = true; },
     publish: (e) => published.push(e),
     listMessages: (sid) => { reads.push(sid); const m = messagesBySession[sid]; return typeof m === "function" ? m() : Promise.resolve(m ?? []); },
     baseUrl: () => baseUrl,
     warn: () => {},
   });
-  return { d, published, reads, release };
+  return { d, published, reads, release, timers };
 }
 const frame = (sid, questions) => ({ kind: "stream", sub: "questions", sessionId: sid, payload: { questions } });
 const tick = () => new Promise((r) => setImmediate(r));
@@ -147,4 +150,42 @@ test("a failed transcript read leaves the question undecorated (still answerable
   await tick();
   assert.equal(published.length, 1);
   assert.equal(published[0].payload.questions[0].plan, undefined);
+});
+
+test("a plan_exit part that is not readable yet is picked up by one re-check, and the decorated list is republished", async () => {
+  const state = { m: [] };
+  const { d, published, reads, timers } = rig({ ses_1: () => Promise.resolve(state.m) });
+  d.publish(frame("ses_1", [q("q1", "c1")]));
+  await tick();
+  assert.equal(published.length, 1);
+  assert.equal(published[0].payload.questions[0].plan, undefined, "first read: no part yet, published plain");
+  assert.equal(timers.length, 1, "one re-check armed");
+  state.m = [msg("m", [planPart("c1", { plan: PLAN })])];
+  timers[0].fn();
+  await tick();
+  assert.equal(published.length, 2);
+  assert.equal(published[1].payload.questions[0].plan.title, "Ship the thing");
+  assert.equal(reads.length, 2);
+  assert.equal(timers.length, 1, "the re-check is one-shot");
+  const snap = d.decorateSnapshot([frame("ses_1", [q("q1", "c1")])]);
+  assert.equal(snap[0].payload.questions[0].plan.title, "Ship the thing", "the snapshot replays the late decoration");
+});
+
+test("a re-check that still finds no part publishes nothing; one overtaken by a newer frame does nothing", async () => {
+  const { d, published, timers } = rig({ ses_1: [] });
+  d.publish(frame("ses_1", [q("q1", "c1")]));
+  await tick();
+  timers[0].fn();
+  await tick();
+  assert.equal(published.length, 1, "no part, no republish");
+
+  const rig2 = rig({ ses_1: [msg("m", [planPart("c1", { plan: PLAN })])] });
+  rig2.d.publish(frame("ses_1", [q("q1", "c-none")]));
+  await tick();
+  assert.equal(rig2.timers.length, 1);
+  rig2.d.publish(frame("ses_1", []));
+  assert.equal(rig2.timers[0].cleared, true, "a newer frame cancels the pending re-check");
+  rig2.timers[0].fn();
+  await tick();
+  assert.equal(rig2.published.length, 2, "only the two frames themselves");
 });

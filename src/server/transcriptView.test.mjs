@@ -199,3 +199,89 @@ test("getMessage-style single: the media of that ONE message (a show whose begin
   assert.equal(single.view.media[0].id, "media:h:a1b2");
   assert.equal(single.view.turn, undefined);
 });
+
+// ---- the golden: what the box says about a transcript, shared with the iOS tests (D8–D10 review, NIT 5) ----
+// `mobile/native/MantaUITests/Fixtures/transcript-view.golden.json` holds each scenario's raw messages and the
+// `annotateView` output for them. THIS test pins the box to the file (regenerate with UPDATE_GOLDEN=1 after a deliberate
+// rule change); the Swift tests decode the same file, so a changed rule fails here first and then on the phone's side.
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const GOLDEN_PATH = fileURLToPath(new URL("../../mobile/native/MantaUITests/Fixtures/transcript-view.golden.json", import.meta.url));
+const goldenStep = (id, reason) => ({ type: "step-finish", id: `${id}:step-finish`, messageID: id, reason });
+// The box's messages always carry the session id and each part its message id (the Swift decoder requires them).
+const goldenSession = (messages) =>
+  messages.map((m) => ({
+    ...m,
+    info: { ...m.info, sessionID: "ses_golden" },
+    parts: m.parts.map((p) => ({ messageID: m.info.id, ...p })),
+  }));
+const goldenScenarios = () => [
+  {
+    name: "one finished turn: duration from first created to last completed, tokens = output + reasoning",
+    running: false,
+    input: [user("u1"), asst("a1", { created: 1000, completed: 5000, output: 40, reasoning: 2 })],
+  },
+  {
+    name: "a multi-step turn: only the last assistant message carries the turn; the seed is the first",
+    running: false,
+    input: [
+      user("u1"),
+      asst("a1", { created: 1000, completed: 2000, output: 10 }),
+      asst("a2", { created: 2000, completed: 7000, output: 20 }),
+    ],
+  },
+  {
+    name: "a still-running turn has no footer",
+    running: true,
+    input: [user("u1"), asst("a1", { created: 1000, completed: 2000, output: 10 })],
+  },
+  {
+    name: "running with the transcript ending in a user message keeps the finished turn's footer",
+    running: true,
+    input: [user("u1"), asst("a1", { created: 1000, completed: 5000, output: 9 }), user("u2")],
+  },
+  {
+    name: "a background result starts a new turn",
+    running: false,
+    input: [
+      user("u1"),
+      asst("a1", { created: 1000, completed: 2000, output: 5 }),
+      bg("b1", { created: 3000, completed: 3000 }),
+      asst("a2", { created: 4000, completed: 6000, output: 7 }),
+    ],
+  },
+  {
+    name: "truncation: output cap, context wall and a cut-off tool call; the step-finish reason wins over info.finish",
+    running: false,
+    input: [
+      user("u1"),
+      asst("a1", { created: 1, completed: 2, output: 1, finish: "max_tokens" }),
+      user("u2"),
+      asst("a2", { created: 3, completed: 4, output: 1, finish: "tool-calls", parts: [goldenStep("a2", "max_tokens")] }),
+      user("u3"),
+      asst("a3", { created: 5, completed: 6, output: 1, finish: "end_turn", parts: [goldenStep("a3", "model_context_window_exceeded")] }),
+      user("u4"),
+      asst("a4", { created: 7, completed: 8, output: 1, finish: "max_tokens", parts: [goldenStep("a4", "")] }),
+    ],
+  },
+  {
+    name: "no tokens and no duration: the turn still exists, both null",
+    running: false,
+    input: [user("u1"), asst("a1", { created: 1000, completed: 1000, output: 0, reasoning: 0 })],
+  },
+  {
+    name: "the last assistant message must have time.completed",
+    running: false,
+    input: [user("u1"), asst("a1", { created: 1000, completed: 2000, output: 5 }), asst("a2", { created: 2000, output: 5 })],
+  },
+];
+
+test("transcript-view.golden.json equals what annotateView produces (UPDATE_GOLDEN=1 regenerates it)", () => {
+  const built = JSON.parse(JSON.stringify(goldenScenarios().map((s) => {
+    const input = goldenSession(s.input);
+    return { name: s.name, running: s.running, input, output: annotateView(structuredClone(input), { running: s.running }) };
+  })));
+  if (process.env.UPDATE_GOLDEN === "1") writeFileSync(GOLDEN_PATH, `${JSON.stringify(built, null, 2)}\n`);
+  assert.deepEqual(JSON.parse(readFileSync(GOLDEN_PATH, "utf8")), built);
+});

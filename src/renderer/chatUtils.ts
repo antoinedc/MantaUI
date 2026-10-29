@@ -3598,6 +3598,20 @@ export function viewMediaToEntry(v: import("../shared/types").MediaViewEntry): M
   };
 }
 
+/**
+ * The canonical media entries a message should draw: the box's `view.media`, minus any entry whose handle a LIVE entry
+ * of this session already draws (a live card for the same generation may sit on a different message than the owner —
+ * e.g. the app restarted between `begin` and `show` — and would otherwise draw twice).
+ */
+export function canonicalMediaToDraw(
+  entries: readonly import("../shared/types").MediaViewEntry[] | undefined,
+  liveHandles: ReadonlySet<string> | undefined,
+): readonly import("../shared/types").MediaViewEntry[] {
+  if (!entries?.length) return [];
+  if (!liveHandles || liveHandles.size === 0) return entries;
+  return entries.filter((e) => !(e.handle && liveHandles.has(e.handle)));
+}
+
 /** An image/video FILE part, from the box's `part.view.media` (`{kind, path}`) — null when the box did not mark one. */
 export function filePartViewToEntry(part: OpencodePart): MediaEntry | null {
   const media = (part as { view?: { media?: { kind: MediaKind; path: string } } }).view?.media;

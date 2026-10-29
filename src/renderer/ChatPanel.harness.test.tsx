@@ -648,6 +648,90 @@ describe("ChatPanel transcript rendering", () => {
   });
 });
 
+// ===== Turn footer after a live turn (WS11 D8 review, BLOCKING 1) =====
+//
+// A footer comes only from a FULL view fetch (a splice never carries a turn),
+// so a live turn that ends must schedule one. The turn here is delivered by
+// splices alone; the footer must appear once the turn ends — whether it ends
+// with `turnComplete` (settled) or a bare `running:false`.
+describe("ChatPanel turn footer after a live turn", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const user = {
+    info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const, time: { created: 1 } },
+    parts: [{ type: "text", id: "prt_u1", messageID: "msg_u1", text: "go" }],
+  };
+  const assistant = {
+    info: {
+      id: "msg_a1",
+      sessionID: "ses_test",
+      role: "assistant" as const,
+      time: { created: 2, completed: 7 },
+    },
+    parts: [{ type: "text", id: "prt_a1", messageID: "msg_a1", text: "done" }],
+  };
+  const withTurn = {
+    ...assistant,
+    view: { turn: { durationMs: 5000, tokens: 1200, verbSeedId: "msg_a1" } },
+  };
+  const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+
+  async function runTurn(end: (bus: MockEventBus) => void) {
+    const fetchCalls: Array<[string, unknown]> = [];
+    let fetched = 0;
+    const { bus } = installMockApi({
+      // First (mount) fetch: the user message only. Later fetches: the canonical view.
+      opencodeMessages: (sid: string, opts?: unknown) => {
+        fetchCalls.push([sid, opts]);
+        return Promise.resolve(fetched++ === 0 ? [user] : [user, withTurn]);
+      },
+      // A splice never carries a turn.
+      opencodeMessage: () => Promise.resolve(assistant),
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(fetchCalls.length).toBe(1);
+
+    await emitStreamAndFlush(bus, h, { sub: "running", sessionId: "ses_test", payload: { running: true } });
+    await emitStreamAndFlush(bus, h, { sub: "messageChanged", sessionId: "ses_test", payload: { messageID: "msg_a1" } });
+    await wait(450);
+    expect(h.text()).toContain("done");
+    // No footer yet: the splice carried no turn and no refetch has run.
+    expect(h.text()).not.toContain("5s");
+    expect(fetchCalls.length).toBe(1);
+
+    end(bus);
+    await wait(1100);
+    await h.flush();
+    return fetchCalls;
+  }
+
+  it("a splice-only turn that ends with turnComplete refetches once (view:true) and shows the footer", async () => {
+    const calls = await runTurn((bus) =>
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: true, running: false } })),
+    );
+    expect(calls.length).toBe(2);
+    expect(calls[1][0]).toBe("ses_test");
+    expect(calls[1][1]).toMatchObject({ view: true });
+    expect(h!.text()).toContain("5s");
+  });
+
+  it("a bare running:false refetches once (view:true) and shows the footer", async () => {
+    const calls = await runTurn((bus) =>
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } })),
+    );
+    expect(calls.length).toBe(2);
+    expect(calls[1][1]).toMatchObject({ view: true });
+    expect(h!.text()).toContain("5s");
+  });
+});
+
 // ===== Composer submit (via the mounted ChatPanel) =====
 //
 // Verifies the extracted <Composer> is wired to the submit path: typing into

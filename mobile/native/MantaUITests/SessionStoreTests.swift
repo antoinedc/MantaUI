@@ -250,7 +250,7 @@ final class SessionStoreTests: XCTestCase {
         let report = await store.closeProject("p")
 
         XCTAssertFalse(report.killed)
-        XCTAssertEqual(report.lines, ["Couldn't close the project — Couldn't close it — the server couldn't stop it."])
+        XCTAssertEqual(report.lines, ["Couldn't close it — the server couldn't stop it."])
         XCTAssertEqual(store.refreshRequestCount, 1)
     }
 
