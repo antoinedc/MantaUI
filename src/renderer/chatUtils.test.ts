@@ -131,8 +131,6 @@ import {
   releaseUserScrollIntent,
   USER_SCROLL_INTENT_WINDOW_MS,
   FOLLOW_THRESHOLD_PX,
-  describeSessionClose,
-  describeProjectClose,
   isPlanExitQuestion,
   extractPlanData,
   resolveDelegateModel,
@@ -4340,116 +4338,6 @@ describe("user scroll intent", () => {
     releaseUserScrollIntent(intent, 5_000);
     expect(intent.pointerDown).toBe(false);
     expect(hasUserScrollIntent(intent, 5_001)).toBe(false);
-  });
-});
-
-// ===== describeSessionClose / describeProjectClose (BET-935) =====
-
-describe("describeSessionClose", () => {
-  it("idle + no worktree → exact single sentence", () => {
-    expect(describeSessionClose({ name: "Deploy", running: false, worktreePath: null })).toEqual({
-      title: 'Close “Deploy”?',
-      body: "Its tmux window will be killed on the server.",
-      confirmLabel: "Close session",
-    });
-  });
-
-  it("running → body ends with the running-turn sentence", () => {
-    const r = describeSessionClose({ name: "Deploy", running: true, worktreePath: null });
-    expect(r.body).toMatch(/A turn is currently running and will be stopped\.$/);
-  });
-
-  it("worktree → body contains the literal path", () => {
-    const r = describeSessionClose({
-      name: "Deploy",
-      running: false,
-      worktreePath: "/srv/manta/ethernal",
-    });
-    expect(r.body).toContain("/srv/manta/ethernal");
-  });
-
-  it("running + worktree → all three sentences, in order", () => {
-    const r = describeSessionClose({
-      name: "Deploy",
-      running: true,
-      worktreePath: "/srv/manta/ethernal",
-    });
-    expect(r.body).toBe(
-      "Its tmux window will be killed on the server. " +
-        "A turn is currently running and will be stopped. " +
-        "Its worktree at /srv/manta/ethernal will be removed.",
-    );
-  });
-
-  it("title quotes the name with curly quotes", () => {
-    const r = describeSessionClose({ name: "api", running: false, worktreePath: null });
-    expect(r.title).toBe("Close “api”?");
-  });
-});
-
-describe("describeProjectClose", () => {
-  it("0 sessions → no count clause in title, tmux-session body variant", () => {
-    const r = describeProjectClose({
-      name: "orphan",
-      sessionCount: 0,
-      runningCount: 0,
-      worktreeCount: 0,
-    });
-    expect(r.title).toBe("Close “orphan”?");
-    expect(r.body).toBe("Its tmux session will be killed on the server.");
-    expect(r.confirmLabel).toBe("Close project");
-  });
-
-  it("1 session → singular count clauses", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 1,
-      runningCount: 0,
-      worktreeCount: 0,
-    });
-    expect(r.title).toBe("Close “manta” and its 1 session?");
-    expect(r.body).toBe("All 1 tmux window will be killed on the server.");
-  });
-
-  it("4 sessions, 2 running → plural mid-turn sentence", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 2,
-      worktreeCount: 0,
-    });
-    expect(r.body).toContain("2 sessions are mid-turn and will be stopped.");
-  });
-
-  it("4 sessions, 1 running → singular mid-turn sentence", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 1,
-      worktreeCount: 0,
-    });
-    expect(r.body).toContain("1 session is mid-turn and will be stopped.");
-  });
-
-  it("runningCount 0 → mid-turn sentence absent (never '0 sessions are…')", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 0,
-      worktreeCount: 0,
-    });
-    expect(r.body).not.toContain("mid-turn");
-    expect(r.body).not.toContain("0 sessions");
-  });
-
-  it("worktreeCount 0 → worktree sentence absent", () => {
-    const r = describeProjectClose({
-      name: "manta",
-      sessionCount: 4,
-      runningCount: 1,
-      worktreeCount: 0,
-    });
-    expect(r.body).not.toContain("worktree");
   });
 });
 

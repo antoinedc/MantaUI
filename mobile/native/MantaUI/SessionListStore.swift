@@ -30,11 +30,9 @@ protocol SessionListMutationAPI {
     func renameWindow(session: String, index: Int, newName: String) async throws
     func forkSession(sessionId: String, sessionName: String, windowName: String) async throws
     func renameProject(oldName: String, newName: String) async throws
-    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws
-    func killWindow(session: String, index: Int) async throws
-    func killProject(_ name: String) async throws
-    func deleteProjectMeta(_ name: String) async throws
-    func removeWorktree(path: String, force: Bool) async throws -> SessionWorktreeRemoval
+    /// WS11 D6: the close flow is the box's. `windowIndex` nil = the whole project.
+    func closePreview(project: String, windowIndex: Int?) async throws -> SessionClosePreview
+    func close(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool) async throws -> SessionCloseResult
     func configGet() async throws -> [String: JSONValue]?
     func launchersList() async throws -> [AvailableLauncher]
     func usageStoppedList() async throws -> SessionStoppedList
@@ -56,24 +54,12 @@ struct ServerSessionListMutations: SessionListMutationAPI {
         try await api.tmuxRenameSession(oldName: oldName, newName: newName)
     }
 
-    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
-        try await api.deleteSession(sessionId: sessionId, sessionName: sessionName, windowIndex: windowIndex)
+    func closePreview(project: String, windowIndex: Int?) async throws -> SessionClosePreview {
+        try await api.sessionsClosePreview(project: project, windowIndex: windowIndex)
     }
 
-    func killWindow(session: String, index: Int) async throws {
-        try await api.killWindow(KillWindowInput(sessionName: session, windowIndex: index))
-    }
-
-    func killProject(_ name: String) async throws {
-        try await api.tmuxKillSession(name)
-    }
-
-    func deleteProjectMeta(_ name: String) async throws {
-        try await api.projectMetaDelete(name)
-    }
-
-    func removeWorktree(path: String, force: Bool) async throws -> SessionWorktreeRemoval {
-        try await api.gitRemoveWorktree(path: path, force: force)
+    func close(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool) async throws -> SessionCloseResult {
+        try await api.sessionsClose(project: project, windowIndex: windowIndex, dirtyWorktree: dirtyWorktree, deleteConversation: deleteConversation)
     }
 
     func configGet() async throws -> [String: JSONValue]? {
@@ -737,51 +723,14 @@ final class SessionListStore: ObservableObject {
     private func processClose(_ request: SessionCloseRequest, generation: Int) async {
         let window = projects.first(where: { $0.tmuxSession == request.project })?
             .windows.first(where: { $0.index == request.index })
-        let cleanOnClose = await readCleanOnClose()
-        guard generation == closeGeneration else { return }
-        var removal: SessionWorktreeRemoval?
-        var removalError: String?
-        var step = SessionCloseDecision.next(
-            cleanOnClose: cleanOnClose, worktreePath: window?.worktreePath, removal: nil, decision: request.decision
-        )
-        // Bounded: each pass either removes (once) or ends in ask/kill.
-        for _ in 0..<3 {
-            switch step {
-            case .removeWorktree(let force):
-                guard let path = window?.worktreePath else { step = .kill(.plain); continue }
-                do {
-                    removal = try await mutations.removeWorktree(path: path, force: force)
-                } catch {
-                    removal = .otherFailure
-                    removalError = SessionActionError.message("remove the worktree", error: error)
-                }
-                guard generation == closeGeneration else { return }
-                step = SessionCloseDecision.next(
-                    cleanOnClose: cleanOnClose, worktreePath: window?.worktreePath, removal: removal, decision: request.decision
-                )
-            case .ask:
-                // Nothing is deleted. The row stays; the user decides.
-                let prompt = SessionWorktreePrompt(
-                    key: request.key, project: request.project, index: request.index,
-                    windowName: window?.name ?? "session", worktreePath: window?.worktreePath ?? ""
-                )
-                worktreePrompts = SessionWorktreePromptQueue.append(prompt, to: worktreePrompts)
-                return
-            case .kill(let outcome):
-                await kill(window: window, request: request, outcome: outcome, removalError: removalError, generation: generation)
-                return
-            }
-        }
-    }
-
-    private func kill(window: MantaWindow?, request: SessionCloseRequest, outcome: SessionCloseOutcome,
-                      removalError: String?, generation: Int) async {
+        let result: SessionCloseResult
         do {
-            if let sid = window?.opencodeSessionId, !sid.isEmpty {
-                try await mutations.deleteSession(sessionId: sid, sessionName: request.project, windowIndex: request.index)
-            } else {
-                try await mutations.killWindow(session: request.project, index: request.index)
-            }
+            // The box runs the whole close: worktree removal, the kill, the refresh of its own state. A chat window is
+            // DELETED (its conversation goes with it) — this app's "delete".
+            result = try await mutations.close(
+                project: request.project, windowIndex: request.index, dirtyWorktree: request.decision.wire,
+                deleteConversation: !(window?.opencodeSessionId ?? "").isEmpty
+            )
         } catch {
             guard generation == closeGeneration else { return }
             // The row's real state is shown instead of a phantom removal.
@@ -791,13 +740,26 @@ final class SessionListStore: ObservableObject {
         }
         // The close belonged to a box we have since left: say nothing about it.
         guard generation == closeGeneration else { return }
-        switch outcome {
-        case .plain:
+        if let ask = result.needsConfirm {
+            // Nothing was deleted. The row stays; the user decides.
+            let prompt = SessionWorktreePrompt(
+                key: request.key, project: request.project, index: request.index,
+                windowName: window?.name ?? "session", worktreePath: ask.path, ask: ask
+            )
+            worktreePrompts = SessionWorktreePromptQueue.append(prompt, to: worktreePrompts)
+            return
+        }
+        guard result.ok else {
+            publishFeedback(.failed(SessionActionError.message("delete", error: MantaError.server(result.error ?? ""))))
+            await refresh()
+            return
+        }
+        if !result.warnings.isEmpty {
+            publishFeedback(.closedWithWarnings(([result.notice].compactMap { $0 }) + result.warnings))
+        } else if let notice = result.notice {
+            publishFeedback(.closedWithNotice(notice))
+        } else {
             publishFeedback(.closed)
-        case .keptWorktree(let path):
-            publishFeedback(.closedWithNotice(SessionCloseCopy.kept([path]) ?? "Kept worktree at \(path)"))
-        case .removalFailed(let path):
-            publishFeedback(.closedWithNotice(removalError ?? "Couldn't remove the worktree at \(path)."))
         }
         await refresh()
     }
@@ -819,15 +781,6 @@ final class SessionListStore: ObservableObject {
         case .keep: enqueueClose(project: prompt.project, index: prompt.index, decision: .keep)
         case .remove: enqueueClose(project: prompt.project, index: prompt.index, decision: .remove)
         }
-    }
-
-    /// `worktreeCleanOnClose`, read from the box AT THE MOMENT it matters — a
-    /// cached copy would act on a setting the user has since changed. A failed
-    /// read is "off": nothing is removed when we can't confirm the setting.
-    func readCleanOnClose() async -> Bool {
-        guard let config = try? await mutations.configGet() else { return false }
-        if case .bool(let on)? = config["worktreeCleanOnClose"] { return on }
-        return false
     }
 
     /// `worktreePerSession`, read fresh when the create sheet opens. Off on failure.
@@ -893,52 +846,31 @@ final class SessionListStore: ObservableObject {
         return nil
     }
 
-    // MARK: - Close a whole project (spec 04 §7)
+    // MARK: - Close a whole project (spec 04 §7, WS11 D6)
 
-    /// Closes every window of a project the way the desktop does: remove each
-    /// worktree safely when the box setting asks for it (dirty ones are KEPT and
-    /// reported, other failures are reported and never abort), kill the tmux
-    /// session, forget the project's stored settings, refresh.
+    /// The confirm's words and facts for closing a window (`index`) or the whole project — from the box.
+    func closePreview(project: String, index: Int? = nil) async throws -> SessionClosePreview {
+        try await mutations.closePreview(project: project, windowIndex: index)
+    }
+
+    /// Closes every window of a project on the box: it removes each worktree safely when its setting asks (dirty
+    /// ones are KEPT and reported), kills the session, forgets the project's stored settings. The report carries
+    /// the box's notice and warnings, in order.
     func closeProject(_ name: String) async -> SessionCloseReport {
         var report = SessionCloseReport()
-        let windows = projects.first(where: { $0.tmuxSession == name })?.windows ?? []
-        if await readCleanOnClose() {
-            for window in windows {
-                guard let path = window.worktreePath, !path.isEmpty else { continue }
-                do {
-                    let removal = try await mutations.removeWorktree(path: path, force: false)
-                    if removal.isDirty {
-                        report.keptWorktrees.append(path)
-                    } else if !removal.removed {
-                        report.errors.append("Couldn't remove the worktree at \(path).")
-                    }
-                } catch {
-                    report.errors.append(SessionActionError.message("remove the worktree at \(path)", error: error))
-                }
+        do {
+            let result = try await mutations.close(project: name, windowIndex: nil, dirtyWorktree: nil, deleteConversation: false)
+            if result.ok {
+                report.killed = true
+                report.lines = ([result.notice].compactMap { $0 }) + result.warnings
+            } else {
+                report.lines = [SessionActionError.message("close the project", error: MantaError.server(result.error ?? ""))]
             }
-        }
-        do {
-            try await mutations.killProject(name)
-            report.killed = true
         } catch {
-            report.errors.append(SessionActionError.message("close the project", error: error))
-            await refresh()
-            return report
-        }
-        do {
-            try await mutations.deleteProjectMeta(name)
-        } catch {
-            report.errors.append(SessionActionError.message("clear the project's saved settings", error: error))
+            report.lines = [SessionActionError.message("close the project", error: error)]
         }
         await refresh()
         return report
-    }
-
-    /// The counts the project-close confirm shows, from the COMPLETE project
-    /// (hidden background-job windows are killed too, so they are counted).
-    func closeCounts(for name: String, cleanOnClose: Bool) -> SessionCloseCounts.Counts? {
-        guard let project = projects.first(where: { $0.tmuxSession == name }) else { return nil }
-        return SessionCloseCounts.project(project, isRunning: { rowStatus(for: $0).running }, cleanOnClose: cleanOnClose)
     }
 
     // MARK: - Recents + switcher (spec 04 §10)

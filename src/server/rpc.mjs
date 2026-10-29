@@ -20,6 +20,7 @@ import {
 } from "../shared/streamInterpretation.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
 import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
+import { previewClose, closeSession } from "./sessionClose.mjs";
 import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName } from "./sessionNaming.mjs";
 import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
 import { buildAccountRowStates } from "./accountsRowState.mjs";
@@ -635,6 +636,8 @@ export function buildHandlers({
   // K3/K4: the stream interpreter that owns the pending-user-message list.
   // Null when not wired (tests) → opencode:inbox* answer a clear error.
   streamInterp = null,
+  // WS11 D6: (session, windowIndex) → is a terminal window mid-turn (the status poller's latest batch).
+  terminalRunning = () => false,
   // WS11 D2: the shared "which model is this session measured against" resolver
   // (sessionContext.mjs). Null (tests) → the last reply's model, labelled so.
   contextModels = null,
@@ -1440,6 +1443,37 @@ export function buildHandlers({
       await syncState.refreshNow();
       return result;
     },
+    // WS11 D6 (S10): the close flow — confirm copy, then worktree removal → kill → metadata → refresh — on the box.
+    "sessions:close-preview": async (i) =>
+      previewClose({
+        project: i?.project,
+        windowIndex: i?.windowIndex ?? undefined,
+        projects: await tmux.listProjects(),
+        cleanOnClose: (await local.configGet().catch(() => ({})))?.worktreeCleanOnClose === true,
+        isRunning: (w, project) =>
+          w.opencodeSessionId
+            ? Boolean(streamInterp?.getState(w.opencodeSessionId)?.running)
+            : terminalRunning(project, w.index) === true,
+      }),
+    "sessions:close": (i) =>
+      closeSession(
+        {
+          project: i?.project,
+          windowIndex: i?.windowIndex ?? undefined,
+          dirtyWorktree: i?.dirtyWorktree,
+          deleteConversation: i?.deleteConversation === true,
+        },
+        {
+          listProjects: () => tmux.listProjects(),
+          cleanOnClose: async () => (await local.configGet())?.worktreeCleanOnClose === true,
+          removeWorktree: (a) => local.gitRemoveWorktree(a),
+          deleteConversation: (sid) => oc.deleteSessionRaw(sid),
+          killWindow: (a) => tmux.killWindow(a),
+          killSession: (n) => tmux.killSession(n),
+          projectMetaDelete: (n) => local.projectMetaDelete(n),
+          refresh: () => syncState.refreshNow(),
+        },
+      ),
     "tmux:kill-session": async (n) => {
       const result = await tmux.killSession(n);
       await syncState.refreshNow();

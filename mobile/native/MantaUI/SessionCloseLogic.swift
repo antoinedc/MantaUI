@@ -1,136 +1,122 @@
 import Foundation
 
 // ===========================================================================
-// WS04 §7/§8 — closing sessions and whole projects, as PURE logic.
-// Foundation-only (D19); uses `MantaProject` from `SessionModels.swift`.
-//
-// Ports of `describeSessionClose` / `describeProjectClose`
-// (`chatUtils.ts:5131-5175`) and the notice wording of `Sidebar.tsx:337-342`,
-// plus the decision the worktree-on-close flow takes (`Sidebar.tsx:240-294`).
+// WS04 §7/§8 + WS11 D6 — closing sessions and whole projects. The confirm
+// copy, the worktree orchestration, the notices and the warnings are the BOX's
+// (`sessions:close-preview` / `sessions:close`); this file holds the wire
+// shapes and the UI queue value types. Foundation-only (D19).
 // ===========================================================================
 
-// MARK: - Copy
+// MARK: - Wire (sessions:close-preview / sessions:close)
 
-/// A confirm sheet's wording.
+/// A confirm sheet's wording — the box's preview, ready to show.
 struct SessionCloseConfirm: Equatable, Sendable {
     var title: String
     var body: String
     var destructiveTitle: String
 }
 
-enum SessionCloseCopy {
-    /// "Its worktree at <path> will be removed." — shared by the one-session
-    /// and running-turn confirms.
-    static func worktreeRemovalSentence(path: String) -> String {
-        "Its worktree at \(path) will be removed."
+/// `sessions:close-preview` → the confirm dialog's words and facts.
+struct SessionClosePreview: Decodable, Equatable, Sendable {
+    struct Worktree: Decodable, Equatable, Sendable {
+        var path: String
+        var willRemove: Bool
     }
 
-    /// Confirm for closing ONE session.
-    static func session(name: String, running: Bool, worktreePath: String?) -> SessionCloseConfirm {
-        var parts = ["Its tmux window will be killed on the server."]
-        if running { parts.append("A turn is currently running and will be stopped.") }
-        if let worktreePath, !worktreePath.isEmpty { parts.append(worktreeRemovalSentence(path: worktreePath)) }
-        return SessionCloseConfirm(title: "Close “\(name)”?", body: parts.joined(separator: " "), destructiveTitle: "Close session")
+    var title: String
+    var body: String
+    var confirmLabel: String
+    var runningCount: Int = 0
+    var worktrees: [Worktree] = []
+
+    private enum CodingKeys: String, CodingKey { case title, body, confirmLabel, runningCount, worktrees }
+
+    init(title: String, body: String, confirmLabel: String, runningCount: Int = 0, worktrees: [Worktree] = []) {
+        self.title = title
+        self.body = body
+        self.confirmLabel = confirmLabel
+        self.runningCount = runningCount
+        self.worktrees = worktrees
     }
 
-    /// Confirm for closing a WHOLE project.
-    static func project(name: String, sessionCount: Int, runningCount: Int, worktreeCount: Int) -> SessionCloseConfirm {
-        let title = sessionCount == 0
-            ? "Close “\(name)”?"
-            : "Close “\(name)” and its \(sessionCount) session\(sessionCount == 1 ? "" : "s")?"
-        var parts = [
-            sessionCount == 0
-                ? "Its tmux session will be killed on the server."
-                : "All \(sessionCount) tmux window\(sessionCount == 1 ? "" : "s") will be killed on the server."
-        ]
-        if runningCount > 0 {
-            parts.append("\(runningCount) session\(runningCount == 1 ? " is" : "s are") mid-turn and will be stopped.")
-        }
-        if worktreeCount > 0 {
-            parts.append("\(worktreeCount) worktree\(worktreeCount == 1 ? "" : "s") will be removed.")
-        }
-        return SessionCloseConfirm(title: title, body: parts.joined(separator: " "), destructiveTitle: "Close project")
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        body = try c.decode(String.self, forKey: .body)
+        confirmLabel = try c.decode(String.self, forKey: .confirmLabel)
+        runningCount = ((try? c.decodeIfPresent(Int.self, forKey: .runningCount)) ?? nil) ?? 0
+        worktrees = ((try? c.decodeIfPresent([Worktree].self, forKey: .worktrees)) ?? nil) ?? []
     }
 
-    /// The notice after dirty worktrees were kept; nil when nothing was kept.
-    static func kept(_ paths: [String]) -> String? {
-        switch paths.count {
-        case 0: return nil
-        case 1: return "Kept worktree at \(paths[0]) — it has uncommitted changes."
-        default: return "Kept \(paths.count) worktrees with uncommitted changes."
-        }
-    }
-
-    /// The prompt for ONE session whose worktree has uncommitted work.
-    static func dirtyWorktree(path: String) -> (title: String, body: String) {
-        ("Uncommitted changes in this worktree",
-         "\(path) has uncommitted changes. Removing the worktree will permanently delete that work.")
+    var confirm: SessionCloseConfirm {
+        SessionCloseConfirm(title: title, body: body, destructiveTitle: confirmLabel)
     }
 }
 
-// MARK: - Counts
+/// The box asking about a dirty worktree before a single-window close (nothing was killed).
+struct SessionCloseAsk: Decodable, Equatable, Sendable {
+    var path: String
+    var title: String
+    var body: String
+    var removeLabel: String
+    var keepLabel: String
+}
 
-/// What a project close will touch. Counted over the COMPLETE project, not the
-/// visible windows: hidden background-job windows are killed and their
-/// worktrees removed too (desktop counts `proj.windows`).
-enum SessionCloseCounts {
-    struct Counts: Equatable, Sendable {
-        var sessionCount: Int
-        var runningCount: Int
-        var worktreeCount: Int
+/// `sessions:close` → what the close did (as data), or the question, or a sentence.
+struct SessionCloseResult: Decodable, Equatable, Sendable {
+    struct Failure: Decodable, Equatable, Sendable {
+        var path: String
+        var message: String
     }
 
-    static func project(_ project: MantaProject, isRunning: (MantaWindow) -> Bool, cleanOnClose: Bool) -> Counts {
-        let windows = project.windows
-        return Counts(
-            sessionCount: windows.count,
-            runningCount: windows.filter(isRunning).count,
-            worktreeCount: cleanOnClose ? windows.filter { !($0.worktreePath ?? "").isEmpty }.count : 0
-        )
+    var ok: Bool
+    var removed: [String] = []
+    var kept: [String] = []
+    var failed: [Failure] = []
+    var warnings: [String] = []
+    var notice: String?
+    var needsConfirm: SessionCloseAsk?
+    var error: String?
+
+    private enum CodingKeys: String, CodingKey { case ok, removed, kept, failed, warnings, notice, needsConfirm, error }
+
+    init(ok: Bool, removed: [String] = [], kept: [String] = [], failed: [Failure] = [], warnings: [String] = [],
+         notice: String? = nil, needsConfirm: SessionCloseAsk? = nil, error: String? = nil) {
+        self.ok = ok
+        self.removed = removed
+        self.kept = kept
+        self.failed = failed
+        self.warnings = warnings
+        self.notice = notice
+        self.needsConfirm = needsConfirm
+        self.error = error
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = ((try? c.decodeIfPresent(Bool.self, forKey: .ok)) ?? nil) ?? false
+        removed = ((try? c.decodeIfPresent([String].self, forKey: .removed)) ?? nil) ?? []
+        kept = ((try? c.decodeIfPresent([String].self, forKey: .kept)) ?? nil) ?? []
+        failed = ((try? c.decodeIfPresent([Failure].self, forKey: .failed)) ?? nil) ?? []
+        warnings = ((try? c.decodeIfPresent([String].self, forKey: .warnings)) ?? nil) ?? []
+        notice = (try? c.decodeIfPresent(String.self, forKey: .notice)) ?? nil
+        needsConfirm = (try? c.decodeIfPresent(SessionCloseAsk.self, forKey: .needsConfirm)) ?? nil
+        error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
     }
 }
 
-// MARK: - The decision the close flow takes for ONE window
+// MARK: - The user's choice for a dirty worktree
 
 /// What the user chose for a dirty worktree.
 enum SessionCloseChoice: Equatable, Sendable {
     case none, keep, remove
-}
 
-/// How a window was finally closed.
-enum SessionCloseOutcome: Equatable, Sendable {
-    case plain
-    /// The window was killed but its worktree was deliberately left in place.
-    case keptWorktree(path: String)
-    /// The window was killed but removing its worktree failed for another reason.
-    case removalFailed(path: String)
-}
-
-enum SessionCloseStep: Equatable, Sendable {
-    /// Run `git:remove-worktree` and call `next` again with the result.
-    case removeWorktree(force: Bool)
-    /// A dirty worktree and no decision yet: ask the user.
-    case ask
-    case kill(SessionCloseOutcome)
-}
-
-enum SessionCloseDecision {
-    /// `removal` is nil until a removal has been attempted. A removal that threw
-    /// something other than "dirty" is `SessionWorktreeRemoval.otherFailure`.
-    static func next(cleanOnClose: Bool, worktreePath: String?, removal: SessionWorktreeRemoval?,
-                     decision: SessionCloseChoice) -> SessionCloseStep {
-        guard cleanOnClose, let path = worktreePath, !path.isEmpty else { return .kill(.plain) }
-        switch decision {
-        case .keep:
-            return .kill(.keptWorktree(path: path))
-        case .remove:
-            guard let removal else { return .removeWorktree(force: true) }
-            return removal.removed ? .kill(.plain) : .kill(.removalFailed(path: path))
-        case .none:
-            guard let removal else { return .removeWorktree(force: false) }
-            if removal.removed { return .kill(.plain) }
-            if removal.isDirty { return .ask }
-            return .kill(.removalFailed(path: path))
+    /// The `dirtyWorktree` the box takes (absent = ask).
+    var wire: String? {
+        switch self {
+        case .none: return nil
+        case .keep: return "keep"
+        case .remove: return "remove"
         }
     }
 }
@@ -160,6 +146,8 @@ struct SessionWorktreePrompt: Equatable, Sendable, Identifiable {
     var index: Int
     var windowName: String
     var worktreePath: String
+    /// The box's question (title, body, button labels).
+    var ask: SessionCloseAsk
 
     var id: String { key }
 }
@@ -180,6 +168,8 @@ enum SessionWorktreePromptQueue {
 enum SessionCloseFeedbackKind: Equatable, Sendable {
     case closed
     case closedWithNotice(String)
+    /// Closed, but a non-fatal step failed (a worktree left in place, project settings not cleared).
+    case closedWithWarnings([String])
     case failed(String)
 }
 
@@ -195,12 +185,10 @@ struct SessionCloseFeedback: Equatable, Sendable, Identifiable {
     }
 }
 
-/// The result of closing a whole project.
+/// The result of closing a whole project, as the list shows it.
 struct SessionCloseReport: Equatable, Sendable {
-    /// Worktrees left in place because they had uncommitted changes.
-    var keptWorktrees: [String] = []
-    /// Failures, in order. Worktree and meta failures never stop the close.
-    var errors: [String] = []
     /// The project's tmux session was actually killed.
     var killed = false
+    /// The box's notice and warnings, in order — shown after the close.
+    var lines: [String] = []
 }

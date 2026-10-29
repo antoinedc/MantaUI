@@ -544,106 +544,49 @@ final class SessionRepoScanTests: XCTestCase {
 // MARK: - Close
 
 final class SessionCloseLogicTests: XCTestCase {
-    func testProjectCloseZeroSessions() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 0, runningCount: 0, worktreeCount: 0)
-        XCTAssertEqual(c.title, "Close “a”?")
-        XCTAssertEqual(c.body, "Its tmux session will be killed on the server.")
-        XCTAssertEqual(c.destructiveTitle, "Close project")
+    // The confirm copy, the worktree orchestration, the notices and the sentences are the BOX's (WS11 D6; pinned in
+    // sessionClose.test.mjs). The phone decodes and shows them.
+
+    func testPreviewDecodesTheBoxsWords() throws {
+        let json = #"{"title":"Close “p” and its 2 sessions?","body":"All 2 tmux windows will be killed on the server.","confirmLabel":"Close project","runningCount":1,"worktrees":[{"path":"/wt/a","willRemove":true}]}"#
+        let p = try JSONDecoder().decode(SessionClosePreview.self, from: Data(json.utf8))
+        XCTAssertEqual(p.confirm, SessionCloseConfirm(title: "Close “p” and its 2 sessions?", body: "All 2 tmux windows will be killed on the server.", destructiveTitle: "Close project"))
+        XCTAssertEqual(p.runningCount, 1)
+        XCTAssertEqual(p.worktrees, [SessionClosePreview.Worktree(path: "/wt/a", willRemove: true)])
     }
 
-    func testProjectCloseSingular() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 1, runningCount: 0, worktreeCount: 0)
-        XCTAssertEqual(c.title, "Close “a” and its 1 session?")
-        XCTAssertEqual(c.body, "All 1 tmux window will be killed on the server.")
+    func testResultDecodesSuccessWithFailuresAndWarnings() throws {
+        let json = #"{"ok":true,"removed":["/a"],"kept":["/b"],"failed":[{"path":"/c","message":"Couldn't remove the worktree at /c — it was left in place."}],"warnings":["Couldn't remove the worktree at /c — it was left in place.","The project was closed, but its saved folder setting couldn't be cleared."],"notice":"Kept worktree at /b — it has uncommitted changes."}"#
+        let r = try JSONDecoder().decode(SessionCloseResult.self, from: Data(json.utf8))
+        XCTAssertTrue(r.ok)
+        XCTAssertEqual(r.kept, ["/b"])
+        XCTAssertEqual(r.failed.map(\.path), ["/c"])
+        XCTAssertEqual(r.warnings.count, 2)
+        XCTAssertEqual(r.notice, "Kept worktree at /b — it has uncommitted changes.")
     }
 
-    func testProjectClosePluralWithRunningAndWorktrees() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 4, runningCount: 2, worktreeCount: 3)
-        XCTAssertEqual(c.title, "Close “a” and its 4 sessions?")
-        XCTAssertEqual(c.body, "All 4 tmux windows will be killed on the server. 2 sessions are mid-turn and will be stopped. 3 worktrees will be removed.")
+    func testResultDecodesTheDirtyQuestionAndASentenceFailure() throws {
+        let ask = #"{"ok":false,"needsConfirm":{"kind":"worktree-dirty","path":"/wt","title":"Uncommitted changes in this worktree","body":"/wt has uncommitted changes. Removing the worktree will permanently delete that work.","removeLabel":"Remove worktree","keepLabel":"Keep worktree"}}"#
+        let r = try JSONDecoder().decode(SessionCloseResult.self, from: Data(ask.utf8))
+        XCTAssertFalse(r.ok)
+        XCTAssertEqual(r.needsConfirm?.path, "/wt")
+        XCTAssertEqual(r.needsConfirm?.keepLabel, "Keep worktree")
+        let bad = try JSONDecoder().decode(SessionCloseResult.self, from: Data(#"{"ok":false,"error":"Couldn't close it — the server couldn't stop it."}"#.utf8))
+        XCTAssertEqual(bad.error, "Couldn't close it — the server couldn't stop it.")
+        XCTAssertNil(bad.needsConfirm)
     }
 
-    func testProjectCloseOneRunningUsesIs() {
-        let c = SessionCloseCopy.project(name: "a", sessionCount: 2, runningCount: 1, worktreeCount: 1)
-        XCTAssertTrue(c.body.contains("1 session is mid-turn and will be stopped."))
-        XCTAssertTrue(c.body.contains("1 worktree will be removed."))
-    }
-
-    func testSessionCloseCopy() {
-        let c = SessionCloseCopy.session(name: "x", running: true, worktreePath: "/wt")
-        XCTAssertEqual(c.title, "Close “x”?")
-        XCTAssertEqual(c.body, "Its tmux window will be killed on the server. A turn is currently running and will be stopped. Its worktree at /wt will be removed.")
-        XCTAssertEqual(SessionCloseCopy.session(name: "x", running: false, worktreePath: nil).body,
-                       "Its tmux window will be killed on the server.")
-    }
-
-    func testCountsIncludeHiddenJobWindow() {
-        let proj = project("p", "", [
-            window(0, "parent", sid: "ses_p"),
-            window(1, "job", sid: "ses_j", worktree: "/wt/job", owner: "job"),
-        ])
-        let running = { (w: MantaWindow) in w.opencodeSessionId == "ses_j" }
-        let on = SessionCloseCounts.project(proj, isRunning: running, cleanOnClose: true)
-        XCTAssertEqual(on, SessionCloseCounts.Counts(sessionCount: 2, runningCount: 1, worktreeCount: 1))
-        let off = SessionCloseCounts.project(proj, isRunning: running, cleanOnClose: false)
-        XCTAssertEqual(off.worktreeCount, 0)
-        XCTAssertEqual(off.sessionCount, 2)
-    }
-
-    func testKeptNoticeSingleNamesPath() {
-        XCTAssertEqual(SessionCloseCopy.kept(["/wt/a"]), "Kept worktree at /wt/a — it has uncommitted changes.")
-    }
-
-    func testKeptNoticePluralCounts() {
-        XCTAssertEqual(SessionCloseCopy.kept(["/a", "/b"]), "Kept 2 worktrees with uncommitted changes.")
-    }
-
-    func testKeptNoticeEmptyIsNil() {
-        XCTAssertNil(SessionCloseCopy.kept([]))
-    }
-
-    // MARK: decision
-
-    func testNoWorktreeGoesStraightToKill() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: nil, removal: nil, decision: .none), .kill(.plain))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "", removal: nil, decision: .none), .kill(.plain))
-    }
-
-    func testSettingOffIgnoresWorktree() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: false, worktreePath: "/wt", removal: nil, decision: .none), .kill(.plain))
-    }
-
-    func testCleanRemovalKills() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: nil, decision: .none), .removeWorktree(force: false))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: SessionWorktreeRemoval(removed: true), decision: .none), .kill(.plain))
-    }
-
-    func testDirtyWithoutDecisionAsks() {
-        let dirty = SessionWorktreeRemoval(removed: false, reason: "dirty")
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: dirty, decision: .none), .ask)
-    }
-
-    func testKeepKillsWithNotice() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: nil, decision: .keep),
-                       .kill(.keptWorktree(path: "/wt")))
-    }
-
-    func testRemoveForcesThenKills() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: nil, decision: .remove), .removeWorktree(force: true))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: SessionWorktreeRemoval(removed: true), decision: .remove), .kill(.plain))
-    }
-
-    func testOtherRemovalErrorStillKillsAndReports() {
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: .otherFailure, decision: .none),
-                       .kill(.removalFailed(path: "/wt")))
-        XCTAssertEqual(SessionCloseDecision.next(cleanOnClose: true, worktreePath: "/wt", removal: .otherFailure, decision: .remove),
-                       .kill(.removalFailed(path: "/wt")))
+    func testChoiceMapsToTheWireValue() {
+        XCTAssertNil(SessionCloseChoice.none.wire)
+        XCTAssertEqual(SessionCloseChoice.keep.wire, "keep")
+        XCTAssertEqual(SessionCloseChoice.remove.wire, "remove")
     }
 
     // MARK: prompt queue
 
     private func prompt(_ key: String) -> SessionWorktreePrompt {
-        SessionWorktreePrompt(key: key, project: "p", index: 0, windowName: "w", worktreePath: "/wt/\(key)")
+        SessionWorktreePrompt(key: key, project: "p", index: 0, windowName: "w", worktreePath: "/wt/\(key)",
+                              ask: SessionCloseAsk(path: "/wt/\(key)", title: "t", body: "b", removeLabel: "Remove worktree", keepLabel: "Keep worktree"))
     }
 
     func testTwoPromptsQueuedInOrder() {
@@ -924,9 +867,7 @@ final class SessionWireTests: XCTestCase {
         XCTAssertEqual(result.projects.count, 1)
     }
 
-    func testWorktreeRemovalShapes() throws {
-        XCTAssertTrue(try decode(SessionWorktreeRemoval.self, #"{"removed":false,"reason":"dirty"}"#).isDirty)
-        XCTAssertFalse(try decode(SessionWorktreeRemoval.self, #"{"removed":true}"#).isDirty)
+    func testWorktreeAddedShape() throws {
         XCTAssertEqual(try decode(SessionWorktreeAdded.self, #"{"path":"/r-wt","branch":"worktree-2"}"#).branch, "worktree-2")
     }
 

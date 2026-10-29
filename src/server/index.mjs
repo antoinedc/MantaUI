@@ -461,6 +461,14 @@ push.setDesktopSink((payload) =>
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
+// The latest terminal-window activity batch (chat windows are answered by the stream interpreter), so the box can
+// say whether a window is mid-turn without a client (WS11 D6).
+const terminalRunning = new Map();
+bus.subscribe((evt) => {
+  if (evt?.kind !== "status" || !Array.isArray(evt.payload)) return;
+  terminalRunning.clear();
+  for (const w of evt.payload) terminalRunning.set(`${w.session}:${w.windowIndex}`, w.running === true);
+});
 
 // BET-675: sync-state poller — materialize tmux session/config state in memory
 // every 2s. Follows the exact shape of the other pollers (in-flight guard +
@@ -2068,6 +2076,7 @@ rpcHandlers = buildHandlers({
   pty,
   bus,
   streamInterp,
+  terminalRunning: (session, index) => terminalRunning.get(`${session}:${index}`) === true,
   contextModels,
   accountsManager,
   local,

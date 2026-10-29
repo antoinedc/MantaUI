@@ -235,6 +235,8 @@ export const DEMO_UNIMPLEMENTED = [
   "serverCliUpdate",
   "serverUpdateApply",
   "serverUpdateCheck",
+  "sessionsClose",
+  "sessionsClosePreview",
   "sessionsProposeName",
   "tmuxConfigStatus",
   "tmuxKillSession",

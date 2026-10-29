@@ -12,7 +12,9 @@ import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } fro
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
 import { InboxPalette } from "./InboxPalette";
-import type { Project, TmuxWindow } from "../shared/types";
+import type { Project, SessionClosePreview, SessionCloseResult, TmuxWindow } from "../shared/types";
+import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import {
   classifyCacheAge,
   computeJobNesting,
@@ -24,8 +26,6 @@ import {
   projectForNavKey,
   selectCacheTtlMs,
   windowPinId,
-  describeProjectClose,
-  describeSessionClose,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { OBSERVED_JOB_LABEL, OBSERVED_JOB_TITLE, isObservedJob } from "./backgroundRun";
@@ -63,7 +63,8 @@ const COLLAPSE_KEY = "manta:collapsed-projects";
 type ConfirmDeleteFor =
   | { kind: "session"; project: string; index: number; name: string }
   | { kind: "project"; project: string }
-  | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
+  // The box asked: a single-window close found a dirty worktree (nothing was killed yet).
+  | { kind: "worktree-dirty"; project: string; index: number; name: string; ask: Extract<SessionCloseResult, { needsConfirm: unknown }>["needsConfirm"] }
   | null;
 
 function loadCollapsed(): Set<string> {
@@ -137,7 +138,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const pinnedWindows = useStore((s) => s.pinnedWindows);
   const recentWindows = useStore((s) => s.recentWindows);
   const togglePin = useStore((s) => s.togglePin);
-  const worktreeCleanOnClose = useStore((s) => s.worktreeCleanOnClose);
   const drafts = useStore((s) => s.drafts);
   const activeDraftId = useStore((s) => s.activeDraftId);
   // A draft is the active VIEW (App renders NewSessionScreen for it), so no
@@ -163,7 +163,45 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
 
-  const [confirmDeleteFor, setConfirmDeleteFor] = useState<ConfirmDeleteFor>(null);
+  const [confirmDeleteFor, setConfirmDeleteForRaw] = useState<ConfirmDeleteFor>(null);
+  // WS11 D6 (S10): the close flow lives on the box. An older box has none, so a close request says so
+  // instead of running a client-side orchestration that no longer exists.
+  const closeCapability = useBoxCapability("sessions-close-1");
+  const setConfirmDeleteFor = (c: ConfirmDeleteFor) => {
+    if (c && c.kind !== "worktree-dirty" && closeCapability === false) {
+      showNotice(UPDATE_BOX_NOTE_TEXT);
+      return;
+    }
+    setConfirmDeleteForRaw(c);
+  };
+  // The box's confirm copy for the session/project being closed (null until it arrives).
+  const [closeCopy, setCloseCopy] = useState<SessionClosePreview | null>(null);
+  const confirmKey =
+    confirmDeleteFor?.kind === "session"
+      ? `s:${confirmDeleteFor.project}:${confirmDeleteFor.index}`
+      : confirmDeleteFor?.kind === "project"
+        ? `p:${confirmDeleteFor.project}`
+        : null;
+  useEffect(() => {
+    setCloseCopy(null);
+    const c = confirmDeleteFor;
+    if (!c || (c.kind !== "session" && c.kind !== "project")) return;
+    let cancelled = false;
+    window.api
+      .sessionsClosePreview({ project: c.project, ...(c.kind === "session" ? { windowIndex: c.index } : {}) })
+      .then((p) => {
+        if (!cancelled) setCloseCopy(p);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setConfirmDeleteForRaw(null);
+        showError(e);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmKey]);
 
   const [renameTarget, setRenameTarget] = useState<
     { kind: "project"; old: string } | { kind: "window"; project: string; index: number; old: string } | null
@@ -241,104 +279,38 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
   };
 
-  const killWindow = async (project: string, index: number) => {
-    const proj = projects.find((p) => p.tmuxSession === project);
-    const w = proj?.windows.find((x) => x.index === index);
-    const wtPath = w?.worktreePath ?? null;
-    if (worktreeCleanOnClose && wtPath) {
-      try {
-        const res = await window.api.gitRemoveWorktree({ path: wtPath, force: false });
-        if (res && res.removed === false && res.reason === "dirty") {
-          setConfirmDeleteFor({
-            kind: "worktree-dirty",
-            project,
-            index,
-            name: w?.name ?? "",
-            worktreePath: wtPath,
-          });
-          return;
-        }
-      } catch (e) {
-        showError(e);
-      }
-    }
-    setConfirmDeleteFor(null);
-    try {
-      await window.api.tmuxKillWindow({ sessionName: project, windowIndex: index });
-      await refresh();
-    } catch (e) {
-      showError(e);
-    }
-  };
-
-  const killWorktreeDirtyAndClose = async (
-    project: string,
-    index: number,
-    wtPath: string,
-    force: boolean,
+  // Run the close on the box and show what it reports: the kept-worktree notice and a toast per warning. A
+  // single-window close with a dirty worktree comes back as `needsConfirm` (nothing was killed).
+  const runClose = async (
+    target: { project: string; index?: number; name?: string },
+    dirtyWorktree?: "remove" | "keep",
   ) => {
-    setConfirmDeleteFor(null);
-    if (force) {
-      try {
-        await window.api.gitRemoveWorktree({ path: wtPath, force: true });
-      } catch (e) {
-        showError(e);
-      }
-    } else {
-      showNotice(`Kept worktree at ${wtPath}`);
-    }
+    setConfirmDeleteForRaw(null);
     try {
-      await window.api.tmuxKillWindow({ sessionName: project, windowIndex: index });
-      await refresh();
-    } catch (e) {
-      showError(e);
-    }
-  };
-
-  const killProject = async (project: string) => {
-    setConfirmDeleteFor(null);
-    // BET-937 Task 2A: honour worktreeCleanOnClose when destroying a project.
-    // Remove every clean worktree the project's sessions owned; a dirty one
-    // is kept (never force-removed, no per-worktree confirm). Do this BEFORE
-    // the tmux kill so a worktree can't be half-destroyed mid-close, but a
-    // failure here must never abort the kill — killing the tmux session is
-    // the user's actual intent and always happens.
-    const proj = projects.find((p) => p.tmuxSession === project);
-    const skipped: string[] = [];
-    if (worktreeCleanOnClose && proj) {
-      const wtPaths = proj.windows
-        .map((w) => w.worktreePath)
-        .filter((p): p is string => p != null);
-      for (const path of wtPaths) {
-        try {
-          const res = await window.api.gitRemoveWorktree({ path, force: false });
-          if (res && res.removed === false && res.reason === "dirty") {
-            skipped.push(path);
-          }
-        } catch (e) {
-          showError(e);
-        }
+      const res = await window.api.sessionsClose({
+        project: target.project,
+        ...(target.index != null ? { windowIndex: target.index } : {}),
+        ...(dirtyWorktree ? { dirtyWorktree } : {}),
+      });
+      if (res.ok === false && "needsConfirm" in res) {
+        setConfirmDeleteForRaw({
+          kind: "worktree-dirty",
+          project: target.project,
+          index: target.index ?? 0,
+          name: target.name ?? "",
+          ask: res.needsConfirm,
+        });
+        return;
       }
-    }
-    try {
-      await window.api.tmuxKillSession(project);
-      try {
-        // BET-937 Task 2C: drop the project's stored metadata (defaultCwd)
-        // so a later project of the same name can't inherit a stale path.
-        // A failure must not block the refresh — the tmux session is already
-        // gone and a stale config entry is far less bad than a stale rail.
-        await window.api.projectMetaDelete(project);
-      } catch (e) {
-        showError(e);
+      if (res.ok === false) {
+        showError(new Error(res.error));
+        return;
       }
       await refresh();
+      if (res.notice) showNotice(res.notice);
+      for (const w of res.warnings) showError(new Error(w));
     } catch (e) {
       showError(e);
-    }
-    if (skipped.length === 1) {
-      showNotice(`Kept worktree at ${skipped[0]} — it has uncommitted changes.`);
-    } else if (skipped.length > 1) {
-      showNotice(`Kept ${skipped.length} worktrees with uncommitted changes.`);
     }
   };
 
@@ -1037,28 +1009,13 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             />
           );
         }
-        const proj = projects.find((p) => p.tmuxSession === c.project);
-        const copy =
-          c.kind === "session"
-            ? describeSessionClose({
-                name: c.name,
-                running: statusFor(c.project, c.index)?.running ?? false,
-                worktreePath: worktreeCleanOnClose
-                  ? (proj?.windows.find((w) => w.index === c.index)?.worktreePath ?? null)
-                  : null,
-              })
-            : describeProjectClose({
-                name: c.project,
-                sessionCount: proj?.windows.length ?? 0,
-                runningCount:
-                  proj?.windows.filter((w) => statusFor(c.project, w.index)?.running).length ?? 0,
-                // BET-937 Task 2B: the real number of worktrees project close
-                // will remove — every window with a worktree, or 0 when
-                // worktreeCleanOnClose is off.
-                worktreeCount: worktreeCleanOnClose
-                  ? (proj?.windows.filter((w) => w.worktreePath != null).length ?? 0)
-                  : 0,
-              });
+        // The words are the box's; until they arrive the dialog stays closed (never a half-worded confirm).
+        const copy = closeCopy;
+        if (!copy) {
+          return (
+            <ConfirmModal open={false} title="" body="" confirmLabel="" onConfirm={() => {}} onCancel={() => setConfirmDeleteFor(null)} />
+          );
+        }
         return (
           <ConfirmModal
             open
@@ -1066,8 +1023,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             body={copy.body}
             confirmLabel={copy.confirmLabel}
             onConfirm={() => {
-              if (c.kind === "session") void killWindow(c.project, c.index);
-              else void killProject(c.project);
+              if (c.kind === "session") void runClose({ project: c.project, index: c.index, name: c.name });
+              else void runClose({ project: c.project });
             }}
             onCancel={() => setConfirmDeleteFor(null)}
           />
@@ -1081,12 +1038,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         label="Uncommitted changes in this worktree"
       >
         <div className="space-y-4">
-          <h3 className="text-title font-semibold">Uncommitted changes in this worktree</h3>
-          <div className="text-body text-text-faint">
-            <code className="break-all">
-              {confirmDeleteFor?.kind === "worktree-dirty" ? confirmDeleteFor.worktreePath : ""}
-            </code>{" "}
-            has uncommitted changes. Removing the worktree will permanently delete that work.
+          <h3 className="text-title font-semibold">
+            {confirmDeleteFor?.kind === "worktree-dirty" ? confirmDeleteFor.ask.title : ""}
+          </h3>
+          <div className="text-body text-text-faint break-all">
+            {confirmDeleteFor?.kind === "worktree-dirty" ? confirmDeleteFor.ask.body : ""}
           </div>
           <div className="flex justify-end gap-2">
             <Button tone="ghost" onClick={() => setConfirmDeleteFor(null)}>
@@ -1096,31 +1052,21 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               tone="default"
               onClick={() => {
                 if (confirmDeleteFor?.kind === "worktree-dirty") {
-                  void killWorktreeDirtyAndClose(
-                    confirmDeleteFor.project,
-                    confirmDeleteFor.index,
-                    confirmDeleteFor.worktreePath,
-                    false,
-                  );
+                  void runClose(confirmDeleteFor, "keep");
                 }
               }}
             >
-              Keep worktree
+              {confirmDeleteFor?.kind === "worktree-dirty" ? confirmDeleteFor.ask.keepLabel : ""}
             </Button>
             <Button
               tone="danger"
               onClick={() => {
                 if (confirmDeleteFor?.kind === "worktree-dirty") {
-                  void killWorktreeDirtyAndClose(
-                    confirmDeleteFor.project,
-                    confirmDeleteFor.index,
-                    confirmDeleteFor.worktreePath,
-                    true,
-                  );
+                  void runClose(confirmDeleteFor, "remove");
                 }
               }}
             >
-              Remove worktree
+              {confirmDeleteFor?.kind === "worktree-dirty" ? confirmDeleteFor.ask.removeLabel : ""}
             </Button>
           </div>
         </div>

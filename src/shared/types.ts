@@ -516,6 +516,24 @@ export type ForgeProbeResult = {
 /** `sessions:propose-name` (WS11 D5 / S1): a preview of the name a create would pick. */
 export type SessionNameProposal = { name: string; hint: string | null };
 
+/** `sessions:close-preview` (WS11 D6 / S10): the confirm dialog's words and facts, from the box. */
+export type SessionClosePreview = {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  runningCount: number;
+  worktrees: { path: string; willRemove: boolean }[];
+};
+
+/** `sessions:close` (WS11 D6): what the close did, as data. */
+export type SessionCloseResult =
+  | { ok: true; removed: string[]; kept: string[]; failed: { path: string; message: string }[]; warnings: string[]; notice: string | null }
+  | {
+      ok: false;
+      needsConfirm: { kind: "worktree-dirty"; path: string; title: string; body: string; removeLabel: string; keepLabel: string };
+    }
+  | { ok: false; error: string };
+
 // ----- Forge clone flow (BET-796) -----
 
 // A normalised repo the clone picker ([S6]) can push to, from the adapter's
@@ -1362,6 +1380,8 @@ export const IPC = {
   tmuxNewSession: "tmux:new-session",         // creates tmux session + first window
   tmuxNewWindow: "tmux:new-window",
   sessionsProposeName: "sessions:propose-name",
+  sessionsClosePreview: "sessions:close-preview",
+  sessionsClose: "sessions:close",
   tmuxRenameSession: "tmux:rename-session",
   tmuxRenameWindow: "tmux:rename-window",
   tmuxKillSession: "tmux:kill-session",

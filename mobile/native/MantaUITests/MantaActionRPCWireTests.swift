@@ -88,11 +88,13 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertTrue(projects.isEmpty)
     }
 
-    func testKillWindowSingleWraps() async throws {
+    // WS11 D6: the close flow is the box's — one object per call, and only the options that apply are sent.
+    func testSessionsCloseSingleWraps() async throws {
         let client = makeClient()
-        try await client.killWindow(KillWindowInput(sessionName: "p", windowIndex: 2))
+        CapturingURLProtocol.result = #"{"result": {"ok": true}}"#
+        _ = try await client.sessionsClose(project: "p", windowIndex: 2, dirtyWorktree: "keep", deleteConversation: true)
         assertSingleWrapped()
-        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/tmux:kill-window")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/sessions:close")
     }
 
     func testDeleteSessionSingleWraps() async throws {

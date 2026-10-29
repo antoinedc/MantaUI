@@ -39,6 +39,7 @@ import { SessionHeader } from "./SessionHeader";
 import { createStreamInterpreter } from "../server/streamInterp.mjs";
 import { buildAccountRowStates } from "../server/accountsRowState.mjs";
 import { proposeProjectName, proposeScratchName } from "../server/sessionNaming.mjs";
+import { previewClose, closeSession } from "../server/sessionClose.mjs";
 // The interpreter reads OpenCode V2 events; this harness's tests are written with
 // V1-shaped literals, so each one is re-expressed as V2 first (test support only).
 import { createV1ToV2 } from "../server/fixtures/v1EventsAsV2.mjs";
@@ -173,6 +174,27 @@ function defaultApiImpl(): Record<string, unknown> {
         snapshots: (useStore.getState().usage ?? []) as never[],
         health: await window.api.accountHealth().catch(() => null),
         nowMs: Date.now(),
+      }),
+    // WS11 D6 (S10): the close flow is the box's; the harness runs the REAL box functions over the test's mocked
+    // primitives (git, tmux, project metadata), so what a test asserts is what the box would do.
+    sessionsClosePreview: async (input: { project: string; windowIndex?: number }) =>
+      previewClose({
+        project: input.project,
+        windowIndex: input.windowIndex,
+        projects: useStore.getState().projects as never[],
+        cleanOnClose: useStore.getState().worktreeCleanOnClose === true,
+        isRunning: () => false,
+      }),
+    sessionsClose: async (input: { project: string; windowIndex?: number; dirtyWorktree?: "remove" | "keep" }) =>
+      closeSession(input, {
+        listProjects: async () => useStore.getState().projects as never[],
+        cleanOnClose: async () => useStore.getState().worktreeCleanOnClose === true,
+        removeWorktree: (a: { path: string; force: boolean }) => window.api.gitRemoveWorktree(a),
+        killWindow: (a: { sessionName: string; windowIndex: number }) => window.api.tmuxKillWindow(a),
+        killSession: (n: string) => window.api.tmuxKillSession(n),
+        projectMetaDelete: (n: string) => window.api.projectMetaDelete(n),
+        refresh: async () => {},
+        warn: () => {},
       }),
     // WS11 D5 (S1): the box previews names; the harness runs the REAL box rules over an empty "taken" set.
     sessionsProposeName: async (input: { kind: "project" | "scratch"; hint?: string; cwd?: string }) =>

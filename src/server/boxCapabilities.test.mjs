@@ -28,6 +28,7 @@ const EXPECTED_AFTER_STEP = [
   "accounts-copy-1", // D4
   "sessions-naming-1", // D5 (naming)
   "forge-clone-view-1", // D5 (clone)
+  "sessions-close-1", // D6
 ];
 
 test("the capability list is frozen and carries chat-cards-1", () => {

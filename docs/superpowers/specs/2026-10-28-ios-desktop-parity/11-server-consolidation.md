@@ -2321,3 +2321,17 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
   from the transcript itself otherwise.
 - `DELETE /auth/revoke` moved to `authRevokeRoute.mjs` so the blank-vs-absent `device_id` rule is tested at route level.
 - Launcher defaults for an older box are sent from the box's own `launchers:list` row (the review's fix).
+
+## Implementation notes (D6, `sessions-close-1`)
+
+- `sessions:close` takes one additive option, `deleteConversation` (single window): iOS's "delete" also deletes the
+  window's opencode conversation (before the kill), which the desktop's close does not. Without it the box
+  behaves exactly like the desktop close.
+- The preview counts a worktree shared by several windows once (the close removes it once); the old copy counted
+  windows. Running = the stream interpreter for chat windows, the status poller's latest batch for terminal windows;
+  D7's aggregator will replace both sources.
+- iOS: `gitRemoveWorktree`, `tmux:kill-window`/`tmux:kill-session`/`project-meta:delete` client members and
+  `KillWindowInput` are deleted (the close flow was their only caller). The old `project:meta:delete` channel name
+  the phone used never matched the box's `project-meta:delete`; that call is gone with the rest.
+- Old box (no `sessions-close-1`): desktop shows "Update your box to use this" when Close is pressed; iOS shows the
+  same line from the delete / close-project entry points.

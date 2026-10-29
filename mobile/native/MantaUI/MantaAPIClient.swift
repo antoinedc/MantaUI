@@ -251,15 +251,6 @@ final class MantaAPIClient: Sendable {
         return try await callRequired("tmux:new-window", args: [dict], as: TmuxCreateResult.self).projects
     }
 
-    /// `tmux:kill-window` — delete a session (a row in the list).
-    func killWindow(_ input: KillWindowInput) async throws {
-        let dict: [String: Any] = [
-            "sessionName": input.sessionName,
-            "windowIndex": input.windowIndex,
-        ]
-        _ = try await callVoid("tmux:kill-window", args: [dict])
-    }
-
     /// `opencode:delete-session` — delete a chat session AND its tmux window
     /// (the desktop path). Used when the row has an opencode session id.
     func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {

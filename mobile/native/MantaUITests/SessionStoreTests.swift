@@ -25,21 +25,19 @@ final class SessionListFake: SessionListMutationAPI {
     var projectRenameError: Error?
     var projectRenameCalls: [String] = []
 
-    var deleteSessionCalls: [String] = []
-    var killWindowCalls: [String] = []
-    /// `"<project>#<index>"` keys whose kill throws.
-    var killFailures: Set<String> = []
-
-    var killProjectCalls: [String] = []
-    var killProjectError: Error?
-    var metaDeleteCalls: [String] = []
-    var metaDeleteError: Error?
-
-    var removalCalls: [(path: String, force: Bool)] = []
-    /// By worktree path; a path with no entry is removed cleanly.
-    var removalResults: [String: SessionWorktreeRemoval] = [:]
-    var forcedRemovalResults: [String: SessionWorktreeRemoval] = [:]
-    var removalErrors: Set<String> = []
+    struct CloseCall: Equatable {
+        var project: String
+        var windowIndex: Int?
+        var dirty: String?
+        var deleteConversation: Bool
+        var key: String { windowIndex.map { "\(project)#\($0)" } ?? project }
+    }
+    var closeCalls: [CloseCall] = []
+    /// By key (`"<project>#<index>"`, or the project name); a key with no entry succeeds. A queue: each call takes the
+    /// next result, the last one repeats.
+    var closeResults: [String: [Result<SessionCloseResult, Error>]] = [:]
+    var previews: [String: SessionClosePreview] = [:]
+    var previewError: Error?
 
     var config: [String: JSONValue]? = [:]
     var configError: Error?
@@ -47,10 +45,10 @@ final class SessionListFake: SessionListMutationAPI {
     var stopped: Result<SessionStoppedList, Error> = .success(SessionStoppedList())
     var stoppedCalls = 0
 
-    /// Keys (`"<project>#<index>"`) whose `killWindow` suspends until `release`.
-    var heldKills: Set<String> = []
-    /// Kills that have STARTED (before any hold), in order.
-    private(set) var killEntered: [String] = []
+    /// Keys whose `close` suspends until `release`.
+    var heldCloses: Set<String> = []
+    /// Closes that have STARTED (before any hold), in order.
+    private(set) var closeEntered: [String] = []
     private var gates: [String: CheckedContinuation<Void, Never>] = [:]
 
     private(set) var inFlight = 0
@@ -84,41 +82,24 @@ final class SessionListFake: SessionListMutationAPI {
         if let error = projectRenameError { throw error }
     }
 
-    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
-        await enter()
-        let key = "\(sessionName)#\(windowIndex)"
-        deleteSessionCalls.append(key)
-        if killFailures.contains(key) { throw MantaError.server("tmux said no") }
+    func closePreview(project: String, windowIndex: Int?) async throws -> SessionClosePreview {
+        if let previewError { throw previewError }
+        let key = windowIndex.map { "\(project)#\($0)" } ?? project
+        return previews[key] ?? SessionClosePreview(title: "Close “\(project)”?", body: "Its tmux session will be killed on the server.", confirmLabel: "Close project")
     }
 
-    func killWindow(session: String, index: Int) async throws {
+    func close(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool) async throws -> SessionCloseResult {
         await enter()
-        let key = "\(session)#\(index)"
-        killEntered.append(key)
-        if heldKills.contains(key) {
-            await withCheckedContinuation { gates[key] = $0 }
+        let call = CloseCall(project: project, windowIndex: windowIndex, dirty: dirtyWorktree, deleteConversation: deleteConversation)
+        closeEntered.append(call.key)
+        if heldCloses.contains(call.key) {
+            await withCheckedContinuation { gates[call.key] = $0 }
         }
-        killWindowCalls.append(key)
-        if killFailures.contains(key) { throw MantaError.server("tmux said no") }
-    }
-
-    func killProject(_ name: String) async throws {
-        await enter()
-        killProjectCalls.append(name)
-        if let error = killProjectError { throw error }
-    }
-
-    func deleteProjectMeta(_ name: String) async throws {
-        metaDeleteCalls.append(name)
-        if let error = metaDeleteError { throw error }
-    }
-
-    func removeWorktree(path: String, force: Bool) async throws -> SessionWorktreeRemoval {
-        await enter()
-        removalCalls.append((path, force))
-        if removalErrors.contains(path) { throw MantaError.server("git exploded") }
-        if force { return forcedRemovalResults[path] ?? SessionWorktreeRemoval(removed: true) }
-        return removalResults[path] ?? SessionWorktreeRemoval(removed: true)
+        closeCalls.append(call)
+        guard var queue = closeResults[call.key], !queue.isEmpty else { return SessionCloseResult(ok: true) }
+        let next = queue.count > 1 ? queue.removeFirst() : queue[0]
+        closeResults[call.key] = queue
+        return try next.get()
     }
 
     func configGet() async throws -> [String: JSONValue]? {
@@ -178,8 +159,6 @@ final class SessionStoreTests: XCTestCase {
         MantaProject(tmuxSession: name, defaultCwd: "/p", windows: windows, attached: false, mantaOwned: nil)
     }
 
-    private let cleanOnClose: [String: JSONValue] = ["worktreeCleanOnClose": .bool(true)]
-    private let dirty = SessionWorktreeRemoval(removed: false, reason: "dirty")
 
     // MARK: - Rename
 
@@ -230,107 +209,60 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(store.refreshRequestCount, 1)
     }
 
-    // MARK: - Close a whole project
+    // MARK: - Close a whole project (the box runs it — WS11 D6)
 
-    func testCloseProjectKeepsDirtyWorktreesAndStillKills() async {
+    private func ask(_ path: String) -> SessionCloseResult {
+        SessionCloseResult(ok: false, needsConfirm: SessionCloseAsk(path: path, title: "Uncommitted changes in this worktree",
+                                                                    body: "\(path) has uncommitted changes.", removeLabel: "Remove worktree", keepLabel: "Keep worktree"))
+    }
+
+    func testClosePreviewIsTheBoxsWords() async throws {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalResults["/wt/b"] = dirty
+        fake.previews["p"] = SessionClosePreview(title: "Close “p” and its 2 sessions?", body: "box body", confirmLabel: "Close project")
+        let store = makeStore(fake)
+        let preview = try await store.closePreview(project: "p")
+        XCTAssertEqual(preview.confirm.title, "Close “p” and its 2 sessions?")
+        XCTAssertEqual(preview.confirm.destructiveTitle, "Close project")
+    }
+
+    func testCloseProjectReportsTheBoxsNoticeAndWarningsInOrder() async {
+        let fake = SessionListFake()
+        fake.closeResults["p"] = [.success(SessionCloseResult(ok: true, kept: ["/wt/b"], warnings: ["The project was closed, but its saved folder setting couldn't be cleared."],
+                                                               notice: "Kept worktree at /wt/b — it has uncommitted changes."))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, "a", worktree: "/wt/a"), window(1, "b", worktree: "/wt/b")])])
 
         let report = await store.closeProject("p")
 
-        XCTAssertEqual(report.keptWorktrees, ["/wt/b"])
         XCTAssertTrue(report.killed)
-        XCTAssertEqual(fake.killProjectCalls, ["p"])
-        XCTAssertEqual(fake.metaDeleteCalls, ["p"])
-        // Safe-first only: a project close never forces a removal.
-        XCTAssertTrue(fake.removalCalls.allSatisfy { !$0.force })
+        XCTAssertEqual(report.lines, ["Kept worktree at /wt/b — it has uncommitted changes.", "The project was closed, but its saved folder setting couldn't be cleared."])
+        XCTAssertEqual(fake.closeCalls, [SessionListFake.CloseCall(project: "p", windowIndex: nil, dirty: nil, deleteConversation: false)])
         XCTAssertEqual(store.refreshRequestCount, 1)
     }
 
-    func testCloseProjectRemovesHiddenJobWorktree() async {
+    func testCloseProjectFailureSentenceIsReportedAndTheListStillRefreshes() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        let store = makeStore(fake)
-        store.applyProjects([project("p", [
-            window(0, "parent", sid: "ses_p"),
-            window(1, "job", sid: "ses_j", worktree: "/wt/job", owner: "job"),
-        ])])
-        // The job window is hidden from the list but belongs to the project.
-        XCTAssertEqual(store.visibleWindows(in: store.projects[0]).map(\.index), [0])
-
-        let report = await store.closeProject("p")
-
-        XCTAssertEqual(fake.removalCalls.map { $0.path }, ["/wt/job"])
-        XCTAssertTrue(report.killed)
-    }
-
-    func testCloseProjectMetaDeleteFailureStillRefreshes() async {
-        let fake = SessionListFake()
-        fake.metaDeleteError = MantaError.server("config locked")
-        let store = makeStore(fake)
-        store.applyProjects([project("p", [window(0)])])
-
-        let report = await store.closeProject("p")
-
-        XCTAssertTrue(report.killed)
-        XCTAssertEqual(report.errors.count, 1)
-        XCTAssertTrue(report.errors[0].contains("config locked"))
-        XCTAssertEqual(store.refreshRequestCount, 1)
-    }
-
-    func testCloseProjectSkipsWorktreesWhenSettingOff() async {
-        let fake = SessionListFake()
-        fake.config = ["worktreeCleanOnClose": .bool(false)]
-        let store = makeStore(fake)
-        store.applyProjects([project("p", [window(0, worktree: "/wt/a")])])
-
-        let report = await store.closeProject("p")
-
-        XCTAssertTrue(fake.removalCalls.isEmpty)
-        XCTAssertTrue(report.killed)
-    }
-
-    func testCloseProjectConfigReadFailureRemovesNothing() async {
-        let fake = SessionListFake()
-        fake.configError = MantaError.transport("offline")
-        let store = makeStore(fake)
-        store.applyProjects([project("p", [window(0, worktree: "/wt/a")])])
-
-        let report = await store.closeProject("p")
-
-        XCTAssertTrue(fake.removalCalls.isEmpty, "a setting we can't confirm is off")
-        XCTAssertTrue(report.killed)
-    }
-
-    func testCloseProjectKillFailureReportsAndStops() async {
-        let fake = SessionListFake()
-        fake.killProjectError = MantaError.server("no such session")
+        fake.closeResults["p"] = [.success(SessionCloseResult(ok: false, error: "Couldn't close it — the server couldn't stop it."))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0)])])
 
         let report = await store.closeProject("p")
 
         XCTAssertFalse(report.killed)
-        XCTAssertTrue(fake.metaDeleteCalls.isEmpty)
-        XCTAssertEqual(report.errors.count, 1)
+        XCTAssertEqual(report.lines, ["Couldn't close the project — Couldn't close it — the server couldn't stop it."])
+        XCTAssertEqual(store.refreshRequestCount, 1)
     }
 
-    func testCloseCountsAreFromTheCompleteProject() {
+    func testCloseProjectTransportErrorIsReported() async {
         let fake = SessionListFake()
+        fake.closeResults["p"] = [.failure(MantaError.transport("offline"))]
         let store = makeStore(fake)
-        store.applyProjects([project("p", [
-            window(0, "parent", sid: "ses_p"),
-            window(1, "job", sid: "ses_j", worktree: "/wt/job", owner: "job"),
-        ])])
 
-        let counts = store.closeCounts(for: "p", cleanOnClose: true)
+        let report = await store.closeProject("p")
 
-        XCTAssertEqual(counts?.sessionCount, 2)
-        XCTAssertEqual(counts?.worktreeCount, 1)
-        XCTAssertNil(store.closeCounts(for: "missing", cleanOnClose: true))
+        XCTAssertFalse(report.killed)
+        XCTAssertEqual(report.lines.count, 1)
+        XCTAssertEqual(store.refreshRequestCount, 1)
     }
 
     // MARK: - The close queue
@@ -341,9 +273,8 @@ final class SessionStoreTests: XCTestCase {
 
     func testTwoExpiredDirtyDeletesProduceTwoPromptsInOrder() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalResults["/wt/0"] = dirty
-        fake.removalResults["/wt/1"] = dirty
+        fake.closeResults["p#0"] = [.success(ask("/wt/0"))]
+        fake.closeResults["p#1"] = [.success(ask("/wt/1"))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, worktree: "/wt/0"), window(1, worktree: "/wt/1")])])
         store.beginIdleDelete(session: "p", index: 0)
@@ -353,15 +284,14 @@ final class SessionStoreTests: XCTestCase {
         await store.waitForCloseQueue()
 
         XCTAssertEqual(store.worktreePrompts.map(\.key), ["p#0", "p#1"])
-        XCTAssertTrue(fake.killWindowCalls.isEmpty)
+        XCTAssertEqual(store.worktreePrompts.first?.ask.keepLabel, "Keep worktree", "the question is the box's")
         XCTAssertTrue(store.closeFeedback.isEmpty, "a needs-decision outcome fires nothing")
     }
 
     func testMixedOutcomesDirtyFailedSuccess() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalResults["/wt/0"] = dirty
-        fake.killFailures = ["p#1"]
+        fake.closeResults["p#0"] = [.success(ask("/wt/0"))]
+        fake.closeResults["p#1"] = [.success(SessionCloseResult(ok: false, error: "Couldn't close it — the server couldn't stop it."))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, worktree: "/wt/0"), window(1), window(2)])])
         for index in 0...2 { store.beginIdleDelete(session: "p", index: index) }
@@ -373,7 +303,7 @@ final class SessionStoreTests: XCTestCase {
         let kinds = store.closeFeedback.map(\.kind)
         XCTAssertEqual(kinds.count, 2)
         XCTAssertEqual(kinds.filter { $0 == .closed }.count, 1, "exactly one success")
-        XCTAssertTrue(kinds.contains { if case .failed(let text) = $0 { return text.contains("tmux said no") }; return false })
+        XCTAssertTrue(kinds.contains { if case .failed(let text) = $0 { return text.contains("couldn't stop it") }; return false })
     }
 
     func testCloseRequestsRunOneAtATime() async {
@@ -385,45 +315,42 @@ final class SessionStoreTests: XCTestCase {
         expire(store)
         await store.waitForCloseQueue()
 
-        XCTAssertEqual(fake.killWindowCalls, ["p#0", "p#1", "p#2", "p#3"])
+        XCTAssertEqual(fake.closeCalls.map(\.key), ["p#0", "p#1", "p#2", "p#3"])
         XCTAssertEqual(fake.maxInFlight, 1)
     }
 
-    func testChatWindowsCloseThroughDeleteSession() async {
+    func testChatWindowsAreDeletedWithTheirConversation() async {
         let fake = SessionListFake()
         let store = makeStore(fake)
-        store.applyProjects([project("p", [window(0, sid: "ses_1")])])
+        store.applyProjects([project("p", [window(0, sid: "ses_1"), window(1)])])
         store.enqueueClose(project: "p", index: 0)
+        store.enqueueClose(project: "p", index: 1)
         await store.waitForCloseQueue()
 
-        XCTAssertEqual(fake.deleteSessionCalls, ["p#0"])
-        XCTAssertTrue(fake.killWindowCalls.isEmpty)
+        XCTAssertEqual(fake.closeCalls.map(\.deleteConversation), [true, false])
     }
 
     func testCancelPromptRestoresRowWithoutRPC() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalResults["/wt/0"] = dirty
+        fake.closeResults["p#0"] = [.success(ask("/wt/0"))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, worktree: "/wt/0")])])
         store.beginIdleDelete(session: "p", index: 0)
         expire(store)
         await store.waitForCloseQueue()
-        let callsBefore = fake.removalCalls.count
+        let callsBefore = fake.closeCalls.count
 
         store.resolveWorktreePrompt(key: "p#0", decision: .cancel)
         await store.waitForCloseQueue()
 
         XCTAssertTrue(store.worktreePrompts.isEmpty)
-        XCTAssertEqual(fake.removalCalls.count, callsBefore)
-        XCTAssertTrue(fake.killWindowCalls.isEmpty)
+        XCTAssertEqual(fake.closeCalls.count, callsBefore)
         XCTAssertEqual(store.projects.first?.windows.count, 1, "the row stays")
     }
 
-    func testKeepEnqueuesKillWithNotice() async {
+    func testKeepSendsTheChoiceAndShowsTheBoxsNotice() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalResults["/wt/0"] = dirty
+        fake.closeResults["p#0"] = [.success(ask("/wt/0")), .success(SessionCloseResult(ok: true, kept: ["/wt/0"], notice: "Kept worktree at /wt/0"))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, worktree: "/wt/0")])])
         store.beginIdleDelete(session: "p", index: 0)
@@ -433,18 +360,17 @@ final class SessionStoreTests: XCTestCase {
         store.resolveWorktreePrompt(key: "p#0", decision: .keep)
         await store.waitForCloseQueue()
 
-        XCTAssertEqual(fake.killWindowCalls, ["p#0"])
+        XCTAssertEqual(fake.closeCalls.map(\.dirty), [nil, "keep"])
         XCTAssertEqual(store.closeFeedback.count, 1)
         guard case .closedWithNotice(let text)? = store.closeFeedback.first?.kind else {
             return XCTFail("expected a notice")
         }
-        XCTAssertTrue(text.contains("/wt/0"))
+        XCTAssertEqual(text, "Kept worktree at /wt/0")
     }
 
-    func testRemoveForcesTheWorktreeThenKills() async {
+    func testRemoveSendsTheChoiceThenCloses() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalResults["/wt/0"] = dirty
+        fake.closeResults["p#0"] = [.success(ask("/wt/0")), .success(SessionCloseResult(ok: true, removed: ["/wt/0"]))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, worktree: "/wt/0")])])
         store.beginIdleDelete(session: "p", index: 0)
@@ -454,14 +380,13 @@ final class SessionStoreTests: XCTestCase {
         store.resolveWorktreePrompt(key: "p#0", decision: .remove)
         await store.waitForCloseQueue()
 
-        XCTAssertEqual(fake.removalCalls.map { $0.force }, [false, true])
-        XCTAssertEqual(fake.killWindowCalls, ["p#0"])
+        XCTAssertEqual(fake.closeCalls.map(\.dirty), [nil, "remove"])
         XCTAssertEqual(store.closeFeedback.map(\.kind), [.closed])
     }
 
-    func testNoSuccessFeedbackWhenKillFails() async {
+    func testNoSuccessFeedbackWhenTheCloseFails() async {
         let fake = SessionListFake()
-        fake.killFailures = ["p#0"]
+        fake.closeResults["p#0"] = [.failure(MantaError.server("tmux said no"))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0)])])
         store.enqueueClose(project: "p", index: 0)
@@ -473,18 +398,17 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(text.hasPrefix("Couldn't delete —"))
     }
 
-    func testRemovalErrorStillKillsAndReports() async {
+    func testAWorktreeThatCouldNotBeRemovedIsAWarningNotASuccess() async {
         let fake = SessionListFake()
-        fake.config = cleanOnClose
-        fake.removalErrors = ["/wt/0"]
+        fake.closeResults["p#0"] = [.success(SessionCloseResult(ok: true,
+            failed: [.init(path: "/wt/0", message: "Couldn't remove the worktree at /wt/0 — it was left in place.")],
+            warnings: ["Couldn't remove the worktree at /wt/0 — it was left in place."]))]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0, worktree: "/wt/0")])])
         store.enqueueClose(project: "p", index: 0)
         await store.waitForCloseQueue()
 
-        XCTAssertEqual(fake.killWindowCalls, ["p#0"])
-        guard case .closedWithNotice(let text)? = store.closeFeedback.first?.kind else { return XCTFail("expected a notice") }
-        XCTAssertTrue(text.contains("git exploded"))
+        XCTAssertEqual(store.closeFeedback.map(\.kind), [.closedWithWarnings(["Couldn't remove the worktree at /wt/0 — it was left in place."])])
     }
 
     func testConsumeFeedbackRemovesOnlyThatItem() async {
@@ -566,27 +490,27 @@ final class SessionStoreTests: XCTestCase {
 
     func testBoxResetDuringCloseDoesNotStartSecondWorker() async {
         let fake = SessionListFake()
-        fake.heldKills = ["p#0", "p#1"]
+        fake.heldCloses = ["p#0", "p#1"]
         let store = makeStore(fake)
         store.applyProjects([project("p", [window(0), window(1), window(2)])])
 
-        store.enqueueClose(project: "p", index: 0)           // old worker, held mid-kill
+        store.enqueueClose(project: "p", index: 0)           // old worker, held mid-close
         await waitUntil { fake.isHolding("p#0") }
         store.resetForBoxChange()
         store.applyProjects([project("p", [window(0), window(1), window(2)])])
-        store.enqueueClose(project: "p", index: 1)           // new worker, held mid-kill
+        store.enqueueClose(project: "p", index: 1)           // new worker, held mid-close
         await waitUntil { fake.isHolding("p#1") }
 
         fake.release("p#0")                                   // the OLD worker finishes
-        await waitUntil { fake.killWindowCalls.contains("p#0") }
+        await waitUntil { fake.closeCalls.contains { $0.key == "p#0" } }
         for _ in 0..<5 { await Task.yield() }
         store.enqueueClose(project: "p", index: 2)            // must queue behind p#1
 
         for _ in 0..<5 { await Task.yield() }
-        XCTAssertFalse(fake.killEntered.contains("p#2"), "a second concurrent worker started")
+        XCTAssertFalse(fake.closeEntered.contains("p#2"), "a second concurrent worker started")
         fake.release("p#1")
         await store.waitForCloseQueue()
-        XCTAssertEqual(fake.killWindowCalls, ["p#0", "p#1", "p#2"])
+        XCTAssertEqual(fake.closeCalls.map(\.key), ["p#0", "p#1", "p#2"])
         // The close that belonged to the old box says nothing in the new one.
         XCTAssertEqual(store.closeFeedback.count, 2)
     }

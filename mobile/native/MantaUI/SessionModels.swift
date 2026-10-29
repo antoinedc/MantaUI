@@ -367,12 +367,6 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
     }
 }
 
-/// Delete-input payload for `tmux:kill-window`.
-struct KillWindowInput: Sendable {
-    var sessionName: String
-    var windowIndex: Int
-}
-
 // MARK: - Row presentation (§7.1 / §7.1a)
 
 /// The live, store-derived status of a row. Values are inputs the store

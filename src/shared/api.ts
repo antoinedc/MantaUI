@@ -1,6 +1,8 @@
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
   AccountsRowStates,
+  SessionClosePreview,
+  SessionCloseResult,
   SessionNameProposal,
   StreamCachePayload,
   StreamContextPayload,
@@ -1065,6 +1067,11 @@ export interface Api {
     cwd?: string;
     root?: string;
   }): Promise<SessionNameProposal>;
+  // WS11 D6 (S10): the close flow on the box. Preview words the confirm; close runs worktree removal → kill →
+  // metadata → refresh and reports what happened. A single-window close whose worktree is dirty answers
+  // `needsConfirm` (nothing killed) until called again with `dirtyWorktree`.
+  sessionsClosePreview(input: { project: string; windowIndex?: number }): Promise<SessionClosePreview>;
+  sessionsClose(input: { project: string; windowIndex?: number; dirtyWorktree?: "remove" | "keep"; deleteConversation?: boolean }): Promise<SessionCloseResult>;
   tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
   tmuxRenameWindow(input: {
     sessionName: string;

@@ -46,3 +46,5 @@ Follow-ups to file:
 - (from bug-fix reviews) Approval card: clearing every tool then Start → box falls back to the tool's own requested list instead of granting nothing.
 - (from bug-fix reviews) iOS has no delegate approval card → a job raised from iOS just times out.
 - (WS05) A rate-limited PR list read with no last-PR cache returns draft:null (clients keep their snapshot).
+- (Mac executor) Very fast plugin jobs intermittently lose their entire job log (status "done", empty tail); padding the step with a few seconds of sleep before/after output works around it. Likely a race in the Mac app's capExecutor between job completion and log upload — fix in the app, not per-plugin.
+- (Mac build plugin, fixed 2026-10-28) a fetch within ~1 min of a push returned the previous tip; sync now verifies the target SHA (ls-remote or `sha` input) and retries. 

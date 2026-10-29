@@ -2437,3 +2437,25 @@ test("launchers:list still lists every launcher, at the registry defaults, when 
   const list = await buildHandlers(deps)["launchers:list"]();
   for (const l of list) for (const f of l.flags) assert.equal(f.value, f.default);
 });
+
+test("sessions:close-preview / sessions:close are wired to the box's close flow (WS11 D6)", async () => {
+  const live = [{ tmuxSession: "p", windows: [{ index: 0, name: "a", opencodeSessionId: "ses_a", worktreePath: "/wt/a" }, { index: 1, name: "t", worktreePath: null }] }];
+  const { deps } = makeDeps([], live);
+  const killed = [];
+  deps.tmux.killWindow = async (a) => (killed.push(a), live);
+  deps.tmux.killSession = async (n) => (killed.push(n), live);
+  deps.local.configGet = async () => ({ worktreeCleanOnClose: true });
+  deps.local.gitRemoveWorktree = async () => ({ removed: true });
+  deps.local.projectMetaDelete = async () => ({});
+  const handlers = buildHandlers({
+    ...deps,
+    streamInterp: { getState: (sid) => (sid === "ses_a" ? { running: true } : undefined) },
+    terminalRunning: (s, i) => s === "p" && i === 1,
+  });
+  const preview = await handlers["sessions:close-preview"]({ project: "p" });
+  assert.equal(preview.runningCount, 2, "a chat window from the interpreter, a terminal window from the status batch");
+  assert.equal(preview.confirmLabel, "Close project");
+  const res = await handlers["sessions:close"]({ project: "p", windowIndex: 0 });
+  assert.deepEqual(res, { ok: true, removed: ["/wt/a"], kept: [], failed: [], warnings: [], notice: null });
+  assert.deepEqual(killed, [{ sessionName: "p", windowIndex: 0 }]);
+});

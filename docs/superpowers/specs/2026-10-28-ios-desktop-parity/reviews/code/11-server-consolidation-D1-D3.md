@@ -235,3 +235,61 @@ required.
 | Old-box upgrade gate hides Retry/Rollback on both clients | Spec-conformant, see #12 |
 
 VERDICT: CHANGES REQUIRED
+
+---
+
+## Round 2 — re-check against fix commit `7f58a4bf`
+
+I read the full diff of `7f58a4bf`. Then I ran the checks on a `git archive 7f58a4bf` snapshot, which also contains D4–D5b:
+- `npm run typecheck`: clean.
+- `npm run test:server`: 6214 pass, 0 fail.
+- Full vitest: 4870 pass. The one failure is `tests/unit/e2e-smoke.test.ts` ("Playwright is installed"). It depends on the environment and is unrelated to this change.
+
+The Mac's compile at `a7c19027` predates this commit, so the Swift changes below have **not** been compiled yet.
+
+### Findings 1–22
+
+| # | Status | Notes |
+|---|---|---|
+| 1 | Resolved | Shared builder: `ok: serverCheck != null && …`. `UpdateTargetRow` shows "Couldn't check" when there is no view and the check failed, and the note only when there is no view and the check succeeded. Covered by `UpdateTargetRow.test.tsx` and `updateTargets.test.ts`. |
+| 2 | Resolved | `launcherSpawnPayload` (desktop) and `SessionPtyLauncher.make` (iOS) send the old box's own row defaults only when some flag lacks `value`. Tested on both clients. |
+| 3 | Resolved | `GitForgeStore` lost its `capabilities` client closure. It reads the app store through `useCapabilities(_:)`, and loading or failed counts as unknown, not as an older box. A guard row forbids `.apiVersion()` outside `BoxCapabilitiesStore` / `MantaAPIClient`. |
+| 4 | Resolved, but introduced R2-1 | The fallback is now `BoxCapabilitiesStore.shared`, which is the root's own instance. The child and previous-session screens are handed the store. |
+| 5 | Resolved | `resetBoxCapabilities()` runs on every `apiGeneration`, before the refresh effect. |
+| 6 | Resolved | A 401 schedules no retry on either client. The desktop also stops retrying while the link is down. iOS keeps retrying; the deviation is documented and accepted. |
+| 7 | Resolved | `pct: Double?`. Consumers were updated (`contextPct`, the sheet uses `?? 0` behind `hasLimit`). Decode test added. |
+| 8 | Resolved | `contextModelLabel` / `ChatModel.contextModelLabel` name the model the box measured and add "(last reply's model)". Tested. |
+| 9 | Resolved | `reemitContext` now returns a boolean. `model-prefs:set` measures from the transcript and publishes when the interpreter has nothing to re-emit. rpc test added. |
+| 10 | Resolved | Desktop box/CLI rows render `view.text`, `view.versionText` and `view.hasUpdate`. Only the Electron row derives locally. (The "→ latest" emphasis is gone; cosmetic.) |
+| 11 | Resolved | `closed` flag; spawn is skipped after close; data/resize/kill are chained on the spawn. Two ptyWs tests added. |
+| 12 | Resolved | Retry is offered when there is no `view` (the box refuses with its own sentence). Rollback stays hidden. The spec table was updated. |
+| 13 | Resolved | Added: iOS `UpgradeStoreTests` mid-migration test, rpc `model-prefs:set` test, route-level `authRevokeRoute.test.mjs` (handler extracted), and the `version.test.mjs` same-list test. |
+| 14–21 | Resolved | Section `"general"`; guard rows for `ExtensionsForge` / `UpgradePresentation.*` / the upgrade-gate symbols; `UPDATE_YOUR_BOX` deleted and every inline note goes through `UpdateBoxNote`; one devices note; `launchers:list` tolerates an unreadable config; `ContextSheet` takes `isCold`; stale comments fixed and `store.launcherFlags` removed; import moved to the top. |
+| 22 | Declined — **accepted** | The panel effect, the harness `flush` and the assertion all run on real timers. Converting one of them risks a hang, and a 0.7 s real-time test is a fair trade. |
+
+### The declared wire-visible change ("Couldn't check" instead of "Up to date" when the check is missing)
+
+Accepted. It is correct, and in practice it never appears on the wire:
+- On the box, `server:update-check` always passes its own non-null result object to `updateTargetsView`. So `check == null` never happens there, and the box's `view` is unchanged.
+- The rule only bites in the desktop's own `refreshUpdateTargets`, where a rejected or timed-out RPC really is "no answer". "Up to date" was the pre-existing bug D1 forbids.
+
+No client or older-box compatibility concern.
+
+### New problems
+
+**R2-1 BLOCKING — Swift compile error in `ChatScreenContent`.**
+- **Where:** `mobile/native/MantaUI/ChatScreen.swift:732` and `:745`.
+- **Problem:** the two new `navigationDestination` builders pass `capabilities: capabilities`. `ChatScreenContent` (lines 187–1927) has no member named `capabilities`. Its `init` receives one as a parameter (line 335) but only forwards it to the two stores (lines 361 and 371) and never stores it. This fails with "cannot find 'capabilities' in scope". This commit has not been compiled on the Mac.
+- **Fix:** pass `capabilities: store.capabilities`. `ChatSessionStore` exposes `let capabilities: BoxCapabilitiesStore`, which is the same instance. Alternatively, store the init parameter as `private let capabilities`. Run `ios-mantaui compile-only` before re-review.
+
+**R2-2 NIT — misplaced doc comment.**
+- **Where:** `src/renderer/chatUtils.ts:3380-3396`.
+- **Problem:** the new `contextModelLabel` was inserted between the K7 doc comment ("The sentence for a failed `accounts:*` call…") and the function it documents. The K7 comment now sits above `contextModelLabel`'s own comment, and `accountsFailureMessage` has none.
+- **Fix:** move the K7 comment back above `ACCOUNTS_ERROR_FALLBACK`.
+
+**R2-3 NIT — the new iOS upgrade test cannot fail.**
+- **Where:** `UpgradeStoreTests.testTheScreenRendersFromTheUpgradeReadWhileCapabilitiesAreLoadingOrFailed`.
+- **Problem:** it builds two capability stores but never connects either one to the `UpgradeStore` under test. `UpgradeStore` doesn't read capabilities at all, so the test passes by construction.
+- **Fix:** none required; it is acceptable as a pin. Optionally, assert on `model.canRetry` for a failed status with no `view`, which is the behaviour that actually matters mid-migration on an older box.
+
+VERDICT: CHANGES REQUIRED

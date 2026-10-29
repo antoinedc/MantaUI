@@ -67,24 +67,6 @@ struct SessionWorktreeAdded: Decodable, Equatable, Sendable {
     var branch: String
 }
 
-/// `git:remove-worktree` → `{removed, reason?}`. A dirty checkout is
-/// `{removed:false, reason:"dirty"}`; every other failure THROWS (the store maps
-/// that to `.otherFailure`).
-struct SessionWorktreeRemoval: Decodable, Equatable, Sendable {
-    var removed: Bool
-    var reason: String?
-
-    init(removed: Bool, reason: String? = nil) {
-        self.removed = removed
-        self.reason = reason
-    }
-
-    var isDirty: Bool { !removed && reason == "dirty" }
-
-    /// Stand-in for a removal that threw something other than "dirty".
-    static let otherFailure = SessionWorktreeRemoval(removed: false, reason: "other")
-}
-
 /// `project:create-scratch` → `{path, name}`.
 struct SessionScratchProject: Decodable, Equatable, Sendable {
     var path: String
