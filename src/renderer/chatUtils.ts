@@ -2599,8 +2599,10 @@ export function usageWindowBlocker(
   const idx = list.indexOf(w);
   for (let j = 0; j < list.length; j++) {
     const b = list[j];
-    if (b === w || b.active === false || b.stale === true || b.scope || b.pct < 100) continue;
-    if (w.scope || idx < 0 || j > idx) return b;
+    if (b === w || b.active === false || b.stale === true || b.scope || !(b.pct >= 100)) continue;
+    // An unscoped window not found in the list can't be placed, so nothing is
+    // known to be longer than it: never blocked.
+    if (w.scope || (idx >= 0 && j > idx)) return b;
   }
   return null;
 }
