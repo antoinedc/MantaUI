@@ -1189,56 +1189,78 @@ export async function deleteSessionRaw(sessionId) {
 }
 
 // ---------------------------------------------------------------------------
-// One-shot text generation (auto-rename, constraint extraction)
+// One-shot text generation (auto-rename, constraint extraction, condensed handoff)
 // ---------------------------------------------------------------------------
 //
 // V1 had no one-shot completion endpoint, so a hidden session was created,
 // prompted, polled and deleted. V2 has `POST /api/experimental/generate`
 // ({prompt, model?} → {data:{text}}): no session, nothing to clean up. Without
 // a model V2 falls back to its own default (the free tier, which refuses calls
-// from outside opencode), so a cheap CONNECTED model is picked here — the V1
-// `title` agent's own small-model config no longer exists.
+// from outside opencode), so the CALLER always names the model: the Summary
+// model, or the conversation's own. There is deliberately no "cheapest model on
+// the box" picker any more — the user can see and change which model reads their
+// conversation (src/server/summaryModel.mjs).
 
-const CHEAP_MODEL_RE = /haiku|mini|flash|nano|lite|small/i;
-
-/** The cheapest usable connected model for a one-shot text call, or null. */
-export async function pickCheapModel(listFn = listModels) {
-  /** @type {any[]} */
-  let models = [];
-  try {
-    models = await listFn();
-  } catch {
-    return null;
-  }
-  const usable = (Array.isArray(models) ? models : []).filter(
-    (m) => m && m.providerID !== "opencode" && m.status !== "deprecated" && m.enabled !== false,
-  );
-  const named = usable.filter((m) => CHEAP_MODEL_RE.test(m.id) || CHEAP_MODEL_RE.test(m.family ?? ""));
-  const pool = named.length > 0 ? named : usable;
-  const priced = pool.filter((m) => typeof m.cost?.input === "number");
-  const by = (priced.length > 0 ? priced : pool).slice().sort((a, b) => (a.cost?.input ?? Infinity) - (b.cost?.input ?? Infinity));
-  return by[0] ?? null;
+/** @param {any} model @returns {{ providerID: string, id: string }|null} */
+function generateModelRef(model) {
+  const id = model?.id ?? model?.modelID;
+  return model?.providerID && id ? { providerID: model.providerID, id } : null;
 }
 
 /**
- * Generate text from a prompt with no session. Returns the RAW text; "" on any
- * failure/timeout so a caller can skip rather than error.
+ * Generate text from a prompt with no session, on an EXPLICIT model. THROWS (with
+ * `err.status` on a refusal) so the caller can tell "the model returned nothing"
+ * from "couldn't ask" and say why. 60 s unless the caller's signal is sooner.
+ *
+ * @param {{ instruction?: string, model?: { providerID: string, id?: string, modelID?: string }|null, signal?: AbortSignal }} [a]
+ * @returns {Promise<string>}
+ */
+export async function generateTextStrict({ instruction, model, signal } = {}) {
+  const ref = generateModelRef(model);
+  if (!ref) throw Object.assign(new Error("no model given"), { status: 400 });
+  const timeout = AbortSignal.timeout(60_000);
+  const data = await ocCall(
+    "generate",
+    (c, o) => c.generate.text({ prompt: /** @type {string} */ (instruction), model: ref }, o),
+    { signal: signal ? AbortSignal.any([signal, timeout]) : timeout },
+  );
+  return typeof data?.text === "string" ? data.text : "";
+}
+
+/**
+ * Generate text from a prompt with no session, on an explicit model. Returns the
+ * RAW text; "" on any failure/timeout (or when no model is given — the call is
+ * never left to opencode's own default) so a caller can skip rather than error.
  *
  * @param {{ instruction?: string, model?: { providerID: string, id?: string, modelID?: string }|null, signal?: AbortSignal }} [a]
  */
 export async function generateText({ instruction, model, signal } = {}) {
+  if (!generateModelRef(model)) return "";
   try {
-    /** @type {any} */
-    const m = model ?? (await pickCheapModel());
-    const data = await ocCall(
-      "generate",
-      (c, o) => c.generate.text({ prompt: /** @type {string} */ (instruction), ...(m?.providerID && (m.id || m.modelID) ? { model: { providerID: m.providerID, id: m.id ?? m.modelID } } : {}) }, o),
-      { signal: signal ?? AbortSignal.timeout(30_000) },
-    );
-    return typeof data?.text === "string" ? data.text : "";
+    return await generateTextStrict({ instruction, model, signal: signal ?? AbortSignal.timeout(30_000) });
   } catch {
     return "";
   }
+}
+
+/**
+ * The model a session last answered with (its newest assistant message that names
+ * one), or null. The fallback writer for titles / instruction extraction when no
+ * Summary model is set — the model the user already chose for this conversation.
+ * @param {string} sessionId
+ * @returns {Promise<{ providerID: string, modelID: string }|null>}
+ */
+export async function lastUsedModel(sessionId) {
+  try {
+    const messages = await listMessages(sessionId, { slim: true });
+    for (let i = (Array.isArray(messages) ? messages.length : 0) - 1; i >= 0; i--) {
+      const info = messages[i]?.info;
+      if (info?.role === "assistant" && info.providerID && info.modelID) return { providerID: info.providerID, modelID: info.modelID };
+    }
+  } catch {
+    /* unreadable → no fallback */
+  }
+  return null;
 }
 
 /**
@@ -1259,8 +1281,8 @@ export async function generateInSession(sessionId, prompt, { signal } = {}) {
 
 // Auto-rename: generate a 1-2 word title. Returns the RAW model reply; the
 // renderer sanitizes it. "" on failure so the caller skips the rename.
-export function generateSessionTitle({ instruction }) {
-  return generateText({ instruction });
+export function generateSessionTitle({ instruction, model }) {
+  return generateText({ instruction, model });
 }
 
 /**
@@ -1268,11 +1290,11 @@ export function generateSessionTitle({ instruction }) {
  * short instruction, return the RAW text ("" on any failure). Kept under its
  * old name for its callers; there is no throwaway session any more.
  *
- * @param {{ instruction: string }} a
+ * @param {{ instruction: string, model?: { providerID: string, id?: string, modelID?: string }|null }} a
  * @returns {Promise<string>}
  */
-export async function runThrowawayAgent({ instruction }) {
-  return generateText({ instruction });
+export async function runThrowawayAgent({ instruction, model }) {
+  return generateText({ instruction, model });
 }
 
 /**

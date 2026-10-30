@@ -389,6 +389,16 @@ test("a successful refresh serves the catalogue and writes a cache copy", async 
   assert.equal(onDisk.length, FIXTURE.length);
 });
 
+test("onRefreshed fires after a successful refresh only, and a throwing listener never fails the refresh", async () => {
+  let fired = 0;
+  const ok = createModelCatalogController({ fetchImpl: stubFetch(), cachePath: statePath("model-catalog.test-onrefreshed.json"), onRefreshed: () => { fired++; throw new Error("listener"); } });
+  assert.equal((await ok.refresh()).ok, true);
+  assert.equal(fired, 1);
+  const bad = createModelCatalogController({ fetchImpl: failingFetch(), cachePath: statePath("model-catalog.test-onrefreshed-bad.json"), onRefreshed: () => { fired++; } });
+  assert.equal((await bad.refresh()).ok, false);
+  assert.equal(fired, 1);
+});
+
 test("a failed fetch degrades to the last good cached copy", async () => {
   const cachePath = statePath("model-catalog.test-cache.json");
   // Seed the cache the way a prior successful boot would have.

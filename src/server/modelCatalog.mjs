@@ -173,6 +173,7 @@ export function buildPriceMap(payload, knownIds) {
  * @param {string} [opts.pricesPath] optimizer price cache; defaults to `PRICES_PATH`
  * @param {number|(() => number)} [opts.now] clock for the price cache's fetchedAt
  * @param {number} [opts.intervalMs]
+ * @param {() => void} [opts.onRefreshed] called after each SUCCESSFUL refresh (never throws into it)
  */
 export function createModelCatalogController({
   fetchImpl,
@@ -180,6 +181,7 @@ export function createModelCatalogController({
   pricesPath = PRICES_PATH,
   now,
   intervalMs = DEFAULT_POLL_MS,
+  onRefreshed,
 } = {}) {
   const nowMs = () => (typeof now === "function" ? now() : (now ?? Date.now()));
   const cached = readJsonSync(cachePath, null);
@@ -240,6 +242,11 @@ export function createModelCatalogController({
       }
       catalog = createModelIndex(priced);
       await writeJsonAtomic(cachePath, JSON.stringify(priced), { mode: 0o600 });
+      try {
+        onRefreshed?.();
+      } catch (e) {
+        console.warn("[model-catalog] refresh listener failed:", e?.message ?? e);
+      }
       return { ok: true, size: priced.length };
     } catch (e) {
       return { ok: false, error: e?.message ?? String(e) };
@@ -267,7 +274,24 @@ export function createModelCatalogController({
 // entries.) Before the poller starts the matcher reflects whatever is cached
 // on disk at import; a never-populated box reports `{supported:false}` — safe,
 // honest, non-blocking.
-const boxCatalog = createModelCatalogController({});
+const _refreshListeners = new Set();
+const boxCatalog = createModelCatalogController({
+  onRefreshed: () => {
+    for (const fn of [..._refreshListeners]) {
+      try {
+        fn();
+      } catch (e) {
+        console.warn("[model-catalog] refresh listener failed:", e?.message ?? e);
+      }
+    }
+  },
+});
+
+/** Subscribe to "the box catalogue was refreshed" (a new catalogue can change a model's rating / price); returns the unsubscribe. */
+export function onModelCatalogRefreshed(fn) {
+  _refreshListeners.add(fn);
+  return () => _refreshListeners.delete(fn);
+}
 
 /**
  * Load the box's model catalogue and keep it fresh. Starts the module-level
