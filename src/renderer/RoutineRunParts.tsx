@@ -22,7 +22,7 @@ import { MessageBubble } from "./MessageBubble";
 import { OutputWell } from "./OutputWell";
 import { Tag } from "./Tag";
 import { CrumbLink, CrumbSep, ShowMore } from "./RoutinesParts";
-import { routinesToast, runAction } from "./routinesData";
+import { hasReportView, routinesToast, runAction } from "./routinesData";
 import { RoutineRunContext, type RoutineRunBinding } from "./routineRunContext";
 import { routineIdOfToolPart, routineToolKind } from "./routineToolParts";
 import {
@@ -41,7 +41,7 @@ import {
 import { formatTokenCount } from "../shared/formatTokens.mjs";
 import { nowMs } from "./clock";
 import { nextCronRun } from "./chatUtils";
-import type { Routine } from "../shared/routines";
+import type { Routine, RoutineRun } from "../shared/routines";
 
 
 /** The SessionHeader slots of a routine run: crumb, tag, the Keep-in-sidebar button and Close (back to the list). */
@@ -214,46 +214,88 @@ function KindLabel({ outcome, failed }: { outcome: "findings" | "nothing"; faile
   );
 }
 
-/** The run's closing report (R3). `fromRun` = the run has no `routine_report` part in the transcript. */
-export function RoutineReportCard() {
-  const ctx = useContext(RoutineRunContext);
-  if (!ctx) return null;
-  const { run, routine, onFixIt } = ctx;
+/**
+ * A run's report, drawn whole: kind, title, summary, the full markdown body, and a
+ * footer (notified line + actions). Shared by the transcript's pinned tail card and
+ * the report-first modal (`RoutineReportModal`). `chrome={false}` drops the card's own
+ * border/shadow/footer for a host that supplies them (the modal).
+ */
+export function ReportCard({
+  run,
+  routine,
+  onFixIt,
+  chrome = true,
+}: {
+  run: RoutineRun;
+  routine: Routine;
+  onFixIt?: () => void;
+  chrome?: boolean;
+}) {
   const failed = run.status === "failed" || run.status === "timed_out";
   const report = run.report;
   if (!report && !failed) return null;
   const title = report?.title ?? run.error ?? "The run did not finish";
-  const body = report?.body ?? (report ? "" : run.error ? "" : "");
-  const notified = run.notifiedAt != null;
+  const summary = report?.summary?.trim() ?? "";
+  const body = report?.body ?? "";
+  const content = (
+    <div className="flex items-start gap-3 px-4 pb-3 pt-4">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-accent-bg text-accent-tx">
+        <RoutineBadgeIcon icon={routine.icon} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <KindLabel outcome={report?.outcome ?? "findings"} failed={failed} />
+        <div className="mt-1 text-prose font-semibold text-text">{title}</div>
+        {summary !== "" && summary !== body.trim() && <div className="mt-2 text-body text-text-muted">{summary}</div>}
+        {body.trim() !== "" && (
+          <div className="mt-2 text-body text-text-muted">
+            <MarkdownBody text={body} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+  if (!chrome) return content;
+  return (
+    <div className="manta-routines-report overflow-hidden rounded-lg border border-border bg-bg-soft shadow-md">
+      {content}
+      <div className="flex items-center gap-2 border-t border-border-subtle bg-bg-elev px-4 py-2 text-meta text-text-faint">
+        <NotifiedLine run={run} />
+        {onFixIt && report?.outcome !== "nothing" && (
+          <span className="ml-auto">
+            <Button tone="default" onClick={onFixIt}>
+              Fix it in a new session
+            </Button>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function NotifiedLine({ run }: { run: RoutineRun }) {
+  return (
+    <>
+      <Bell size={14} aria-hidden />
+      {run.notifiedAt != null ? `Notified you at ${clockHM(run.notifiedAt)}` : "Filed quietly"}
+    </>
+  );
+}
+
+/**
+ * The run's report pinned at the END of its transcript (R3) — the thing most people
+ * open a run for, so it is always the last block, fully shown, whatever point of the
+ * turn the agent filed it at (the inline `routine_report` call is only a pointer).
+ */
+export function RoutineReportCard() {
+  const ctx = useContext(RoutineRunContext);
+  if (!ctx) return null;
+  const { run, routine, onFixIt } = ctx;
+  if (!hasReportView(run)) return null;
   const added = run.memoryDiff?.added ?? [];
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       {added.length > 0 && <MemoryUpdatedLine added={added} />}
-    <div className="manta-routines-report overflow-hidden rounded-lg border border-border bg-bg-soft shadow-md">
-      <div className="flex items-start gap-3 px-4 pb-3 pt-4">
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-accent-bg text-accent-tx">
-          <RoutineBadgeIcon icon={routine.icon} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <KindLabel outcome={report?.outcome ?? "findings"} failed={failed} />
-          <div className="mt-1 text-prose font-semibold text-text">{title}</div>
-          {body.trim() !== "" && (
-            <div className="mt-2 text-body text-text-muted">
-              <MarkdownBody text={body} />
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="flex items-center gap-2 border-t border-border-subtle bg-bg-elev px-4 py-2 text-meta text-text-faint">
-        <Bell size={14} aria-hidden />
-        {notified ? `Notified you at ${clockHM(run.notifiedAt as number)}` : "Filed quietly"}
-        <span className="ml-auto">
-          <Button tone="default" onClick={onFixIt}>
-            Fix it in a new session
-          </Button>
-        </span>
-      </div>
-    </div>
+      <ReportCard run={run} routine={routine} onFixIt={onFixIt} />
     </div>
   );
 }
@@ -268,9 +310,14 @@ type ToolPart = { type?: string; tool?: unknown; state?: unknown };
 export function RoutineToolCard({ part }: { part: ToolPart }) {
   const kind = routineToolKind(part);
   const ctx = useContext(RoutineRunContext);
-  if (kind === "report") return ctx && ctx.run.reportCount <= 1 ? <RoutineReportCard /> : <ReportToolFallback part={part} />;
+  // In a run the report is pinned at the transcript's end; the call itself is just a pointer to it.
+  if (kind === "report") return ctx ? <ReportFiledLine /> : <ReportToolFallback part={part} />;
   if (kind === "create" || kind === "update") return <RoutineCreatedCard part={part} kind={kind} />;
   return null;
+}
+
+function ReportFiledLine() {
+  return <div className="text-meta text-text-faint">Filed its report — it's at the end of this run ↓</div>;
 }
 
 /** A `routine_report` outside a routine run (e.g. a previous-session view) still deserves a card. */

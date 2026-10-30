@@ -1,0 +1,17 @@
+- heading /Daily analytics digest · Thu \d+ Oct · 9:\d+/ [level=3]
+- button "Close"
+- text: /Findings Signups up \d+% week over week; checkout errors doubled since Tuesday \d+ signups \(vs \d+\)\. Checkout error rate 2\.1% → 4\.3%, all on Safari \d+ — started with Tuesday's deploy\./
+- list:
+  - listitem:
+    - strong: Signups
+    - text: /\d+ vs \d+ last week \+\d+% — mostly organic search/
+  - listitem:
+    - strong: Checkout errors
+    - text: /2\.1% → 4\.3% ×2 — Safari \d+ only, since deploy/
+    - code: a41c9e2
+  - listitem:
+    - strong: Activation
+    - text: /back to \d+% after Monday's dip — no action needed/
+- text: /Notified you at 9:\d+/
+- button "See full transcript"
+- button "Fix it in a new session"

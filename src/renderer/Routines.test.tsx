@@ -11,7 +11,10 @@ import { createRoutinesStore, ROUTINES_T0 } from "./api/demoRoutines";
 import { RoutinesPane } from "./RoutinesPane";
 import { RoutineEditor } from "./RoutineEditor";
 import { RoutineRunContext, type RoutineRunContextValue } from "./routineRunContext";
-import { RoutineToolCard, routineHeaderChrome } from "./RoutineRunParts";
+import { RoutineReportCard, RoutineToolCard, routineHeaderChrome } from "./RoutineRunParts";
+import { RoutineReportModal } from "./RoutineReportModal";
+import { Popover } from "./Popover";
+import { Modal } from "./Modal";
 import { ShowMore } from "./RoutinesParts";
 import { ScheduledTasksCard } from "./PanelCards";
 import type { ScheduledJob } from "../shared/types";
@@ -70,6 +73,7 @@ describe("Routines", () => {
     expect(text.toLowerCase()).not.toContain("follow-ups in a chat");
     expect(h!.container.querySelector(".manta-routines-followups")).toBeNull();
     expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(8);
+    expect(h!.container.querySelector(".manta-routines-table")!.textContent).not.toContain("Findings");
     expect(text).toContain("14 bug reports are older than 90 days");
     expect(text).toContain("Tomorrow 9:00");
     expect(text).toContain("Weekdays · 9:00");
@@ -93,7 +97,7 @@ describe("Routines", () => {
     await click(h!, h!.container.querySelector(".manta-routines-table [role=button]"));
     expect(p.onOpenRoutine).toHaveBeenCalledWith("a1b2c3d4");
     await click(h!, h!.container.querySelector(".manta-routines-findings [role=button]"));
-    expect(p.onOpenRun).toHaveBeenCalledWith("run_dg_23");
+    expect(p.onOpenRun).toHaveBeenCalledWith("run_dg_23", expect.objectContaining({ id: "run_dg_23" }));
   });
 
   it("Answer opens the run that is waiting", async () => {
@@ -220,7 +224,7 @@ describe("Routines", () => {
       expect(routinesRunNow).toHaveBeenCalledWith("0a1b2c3d");
     });
 
-    it("a routine_report inside a run is the run's report card", async () => {
+    it("a routine_report inside a run is only a pointer; the pinned tail card carries the report", async () => {
       installMockApi();
       const run = (await store.runGet("run_dg_23")).run;
       const routine = (await store.get("a1b2c3d4")).routine;
@@ -229,6 +233,14 @@ describe("Routines", () => {
       h = mount(
         <RoutineRunContext.Provider value={ctx}>
           <RoutineToolCard part={part("routine_report", { outcome: "findings" })} />
+        </RoutineRunContext.Provider>,
+      );
+      expect(h.text()).toContain("Filed its report");
+      expect(h.text()).not.toContain("Signups up 18% week over week");
+      h.unmount();
+      h = mount(
+        <RoutineRunContext.Provider value={ctx}>
+          <RoutineReportCard />
         </RoutineRunContext.Provider>,
       );
       expect(h.text()).toContain("Findings");
@@ -334,5 +346,75 @@ describe("a run's header", () => {
     await click(h, h.container.querySelector('[aria-label="Close run"]'));
     expect(onBack).toHaveBeenCalled();
     h.unmount();
+  });
+});
+
+describe("report-first run modal", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("shows the report whole, marks the run read, and offers the full transcript", async () => {
+    const store = createRoutinesStore();
+    const routinesMarkRead = vi.fn(() => Promise.resolve({ updated: 1 }));
+    installMockApi({ routinesRunGet: store.runGet, routinesMarkRead });
+    const onSeeTranscript = vi.fn();
+    const onChanged = vi.fn();
+    h = mount(<RoutineReportModal runId="run_dg_23" onClose={vi.fn()} onSeeTranscript={onSeeTranscript} onClosePane={vi.fn()} onChanged={onChanged} />);
+    await h.flush();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Signups up 18% week over week");
+    expect(text).toContain("Safari 17");
+    expect(routinesMarkRead).toHaveBeenCalledWith(["run_dg_23"]);
+    const see = [...document.body.querySelectorAll("button")].find((b) => b.textContent?.includes("See full transcript"));
+    await click(h, see ?? null);
+    expect(onSeeTranscript).toHaveBeenCalled();
+  });
+
+  it("a run with nothing to report goes straight to the transcript", async () => {
+    const store = createRoutinesStore();
+    installMockApi({ routinesRunGet: store.runGet });
+    const onSeeTranscript = vi.fn();
+    h = mount(<RoutineReportModal runId="run_cp_8" onClose={vi.fn()} onSeeTranscript={onSeeTranscript} onClosePane={vi.fn()} onChanged={vi.fn()} />);
+    await h.flush();
+    expect(onSeeTranscript).toHaveBeenCalled();
+    expect(document.body.textContent ?? "").not.toContain("See full transcript");
+  });
+});
+
+describe("a menu opened from inside a modal", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("sits above the modal, and Escape closes the menu without closing the modal", async () => {
+    installMockApi();
+    const onDismiss = vi.fn();
+    const onClose = vi.fn();
+    function Host() {
+      const ref = { current: null as HTMLButtonElement | null };
+      return (
+        <Modal open onDismiss={onDismiss} label="Host">
+          <button ref={(el) => void (ref.current = el)}>anchor</button>
+          <Popover open onClose={onClose} anchorRef={ref as React.RefObject<HTMLElement>} ariaLabel="menu">
+            <input aria-label="search" />
+          </Popover>
+        </Modal>
+      );
+    }
+    h = mount(<Host />);
+    await h.flush();
+    const surface = document.body.querySelector('[aria-label="menu"]') as HTMLElement;
+    expect(surface.style.zIndex).toBe("55");
+    const input = surface.querySelector("input") as HTMLInputElement;
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalled();
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 });

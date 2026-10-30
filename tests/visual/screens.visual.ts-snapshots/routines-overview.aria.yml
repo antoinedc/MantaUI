@@ -19,13 +19,13 @@
   - button "Mark read"
   - button "Open"
 - text: /Running now 2 at a time; the rest wait their turn Running Docs drift check [\d,.]+[bkmBKM]+ \d+[hmsp]+ Competitor pricing scan [\d,.]+[bkmBKM]+ \d+[hmsp]+ Waiting 1 Error budget check queued \d+:\d+ 2 Dependency audit you pressed Run now queued \d+:\d+ A run is never skipped because the box is busy; it waits here\. A routine that's already waiting isn't queued twice\. A run waiting on your answer gives up its slot\. Your routines 8 Routine When Last run Next/
-- button /Daily analytics digest ronda Weekdays · 9:\d+ Read-only Findings Today 9:\d+ · [\d,.]+[bkmBKM]+ \d+[hmsp]+ Tomorrow 9:\d+ Enable Daily analytics digest/:
+- button /Daily analytics digest ronda Weekdays · 9:\d+ Read-only Today 9:\d+ · [\d,.]+[bkmBKM]+ \d+[hmsp]+ Tomorrow 9:\d+ Enable Daily analytics digest/:
   - text: ""
   - switch "Enable Daily analytics digest" [checked]
 - button /Weekly bug triage better-ui Thursdays · 9:\d+ Read-only Needs you Waiting for your answer · [\d,.]+[bkmBKM]+ — Enable Weekly bug triage/:
   - text: ""
   - switch "Enable Weekly bug triage" [checked]
-- button /Crash report sweep better-ui Daily · 7:\d+ Read-only Findings Today 7:\d+ · caught up Tomorrow 7:\d+ Enable Crash report sweep/:
+- button /Crash report sweep better-ui Daily · 7:\d+ Read-only Today 7:\d+ · caught up Tomorrow 7:\d+ Enable Crash report sweep/:
   - text: ""
   - switch "Enable Crash report sweep" [checked]
 - button /Docs drift check better-ui Wednesdays · 8:\d+ Read-only Running You pressed Run now · [\d,.]+[bkmBKM]+ ago Wed 8:\d+ Enable Docs drift check/:

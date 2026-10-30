@@ -4,7 +4,7 @@ Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) a
 1440×900 against `docs/screens/routines/mockup.html`. Baselines recorded for the
 seven `routines-*` rows only. Differences left on purpose or open:
 
-Last reviewed: 2026-10-30 (1e307f9b)
+Last reviewed: 2026-10-30 (e0d62750)
 
 ## Deliberate
 
@@ -43,6 +43,12 @@ Last reviewed: 2026-10-30 (1e307f9b)
   on the routine page and in a run.
 - **Run rows have no title of their own** when the outcome pill already says it all
   (no "Running" / "Done" twice).
+- **A finished run opens report-first** (owner request): a modal with the report
+  whole and "See full transcript" (`routines-report` row, no mockup). In the
+  transcript the report is always the pinned last block; the `routine_report` call
+  itself is a one-line pointer to it. The report card also shows the summary line.
+- **No "Findings" pill in the routines table's Last run column** (owner request);
+  the other outcome pills stay.
 - **Create editor** is typed into with real gestures by the registry row (the mockup
   is pre-filled); Folder shows the first project's folder, Model "Default".
 

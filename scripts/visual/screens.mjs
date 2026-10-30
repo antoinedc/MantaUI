@@ -726,6 +726,9 @@ export const SCREENS = [
       await page.locator(".manta-routines-table").getByText("Daily analytics digest").click();
       await page.waitForSelector(".manta-routines-memory", { state: "visible" });
       await page.locator(".manta-routines-detail").getByText("Signups up 18% week over week; checkout errors doubled since Tuesday").click();
+      // A finished run opens report-first; the transcript is one click further.
+      await page.waitForSelector(".manta-routines-report-modal", { state: "visible" });
+      await page.getByRole("button", { name: "See full transcript" }).click();
       await page.waitForSelector(".manta-routines-report", { state: "visible" });
     },
     mockup: "docs/screens/routines/mockup.html",
@@ -735,6 +738,24 @@ export const SCREENS = [
     mockupRegion: ".mainpane",
     viewport: DESKTOP_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-report",
+    title: "One run, report first — the modal a finished run opens with",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-report-modal",
+    region: ".manta-routines-report-modal",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.locator(".manta-routines-table").getByText("Daily analytics digest").click();
+      await page.waitForSelector(".manta-routines-memory", { state: "visible" });
+      await page.locator(".manta-routines-detail").getByText("Signups up 18% week over week; checkout errors doubled since Tuesday").click();
+      await page.waitForSelector(".manta-routines-report-modal", { state: "visible" });
+    },
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
   },
   {
     id: "routines-create",
