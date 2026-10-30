@@ -303,7 +303,7 @@ export function RoutineEditor({ open, routine, tz, onClose, onSaved, onTestRun }
               <RadioCard
                 selected={draft.access === "read"}
                 title="Read and report"
-                sub="Can read files, run commands and use your connectors. File edits are blocked."
+                sub="Can read files, run commands and use your connectors. Its edit tools are off; commands still run in your folder."
                 onSelect={() => patch({ access: "read" })}
               />
               <RadioCard

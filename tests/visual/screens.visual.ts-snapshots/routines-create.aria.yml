@@ -30,7 +30,7 @@
   - text: /\d+:\d+/
 - text: box time · Europe/Paris · first run Mon 3 Nov What it's allowed to do
 - radiogroup "Access":
-  - radio "Read and report Can read files, run commands and use your connectors. File edits are blocked." [checked]
+  - radio "Read and report Can read files, run commands and use your connectors. Its edit tools are off; commands still run in your folder." [checked]
   - radio "Make changes Works on its own branch each run and can open a draft PR."
 - text: Tell me
 - group "Notify":

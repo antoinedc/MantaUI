@@ -13,6 +13,7 @@ import { RoutinesHeader, CrumbLink, CrumbSep, PageColumn } from "./RoutinesParts
 import { errMessage, routinesToast, runAction, useRoutinesRefetch } from "./routinesData";
 import { basename, fixItSeed, isTerminal, runCrumbLabel } from "./routinesView";
 import { useStore } from "./store";
+import { readSessionAuto, sessionBoxSelection, setSessionChoice } from "./modelPrefs";
 import type { RoutineRunBinding } from "./routineRunContext";
 
 interface Loaded {
@@ -79,6 +80,27 @@ export function RoutineRunView({
         marked.current = null;
       });
   }, [data, onChanged]);
+
+  // Replies from the composer default to the routine's own model: seed the run session's
+  // per-session model choice once, only when it has none (the user's own pick always wins).
+  const seededFor = useRef<string | null>(null);
+  const seedSession = data?.run.sessionID ?? null;
+  const seedModel = data?.routine.model ?? null;
+  useEffect(() => {
+    if (!seedSession || !seedModel || seededFor.current === seedSession) return;
+    seededFor.current = seedSession;
+    void window.api
+      .modelPrefsGet?.()
+      .then((prefs) => {
+        const has = prefs?.sessions?.[seedSession] || sessionBoxSelection(seedSession) || readSessionAuto(seedSession);
+        if (has) return;
+        const { providerID, modelID, variant } = seedModel;
+        setSessionChoice(seedSession, { kind: "model", model: { providerID, modelID, ...(variant ? { variant } : {}) } });
+      })
+      .catch(() => {
+        /* no saved choice could be read: the composer keeps the server default */
+      });
+  }, [seedSession, seedModel]);
 
   const keepInSidebar = useCallback(async () => {
     if (!data) return;

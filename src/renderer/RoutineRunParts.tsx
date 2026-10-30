@@ -166,6 +166,32 @@ export function RoutinePromptBlock() {
   );
 }
 
+/** "Memory updated · +N lines ▸": what this run added to the routine's memory, collapsed until opened. */
+function MemoryUpdatedLine({ added }: { added: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="manta-routines-memory-updated text-meta text-text-faint">
+      <button type="button" className="hover:text-text" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        Memory updated · +{added.length} {added.length === 1 ? "line" : "lines"} {open ? "▾" : "▸"}
+      </button>
+      {open && (
+        <div className="mt-2">
+          <OutputWell variant="standalone">
+            <div className="whitespace-pre-wrap font-mono text-meta">
+              {added.map((l, i) => (
+                <span key={i}>
+                  <span className="rounded-xs bg-[var(--diff-add)]">{l}</span>
+                  {i < added.length - 1 ? "\n" : ""}
+                </span>
+              ))}
+            </div>
+          </OutputWell>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RoutineBadgeIcon({ icon }: { icon: string }) {
   const Icon = routineIcon(icon);
   return <Icon size={16} aria-hidden />;
@@ -191,7 +217,10 @@ export function RoutineReportCard() {
   const title = report?.title ?? run.error ?? "The run did not finish";
   const body = report?.body ?? (report ? "" : run.error ? "" : "");
   const notified = run.notifiedAt != null;
+  const added = run.memoryDiff?.added ?? [];
   return (
+    <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
+      {added.length > 0 && <MemoryUpdatedLine added={added} />}
     <div className="manta-routines-report overflow-hidden rounded-lg border border-border bg-bg-soft shadow-md">
       <div className="flex items-start gap-3 px-4 pb-3 pt-4">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-accent-bg text-accent-tx">
@@ -216,6 +245,7 @@ export function RoutineReportCard() {
           </Button>
         </span>
       </div>
+    </div>
     </div>
   );
 }

@@ -9,7 +9,9 @@
 - text: /Weekdays at 9:\d+ Routine instructions Use \$posthog-digest for yesterday\. Compare against the baselines you remember\. Only report changes beyond ±\d+% or anything new in errors; otherwise say there's nothing new\./
 - button "Started with its memory · 8 lines ▸"
 - button "Loaded a skill, ran 3 commands"
-- text: "/Signups are well above baseline\\. The bigger issue is checkout errors: they started climbing Tuesday afternoon and every one of them is on Safari \\d+\\. Tuesday's deploy a41c9e2 changed the payment form's date input, which matches the error\\. Findings Signups up \\d+% week over week; checkout errors doubled since Tuesday/"
+- text: "/Signups are well above baseline\\. The bigger issue is checkout errors: they started climbing Tuesday afternoon and every one of them is on Safari \\d+\\. Tuesday's deploy a41c9e2 changed the payment form's date input, which matches the error\\./"
+- button "Memory updated · +2 lines ▸"
+- text: /Findings Signups up \d+% week over week; checkout errors doubled since Tuesday/
 - list:
   - listitem:
     - strong: Signups
