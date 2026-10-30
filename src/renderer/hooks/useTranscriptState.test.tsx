@@ -295,7 +295,8 @@ describe("useTranscriptState child tail-first", () => {
     h = null;
   });
 
-  it("fetches a child tail-first, then full after loadEarlier, then stays full", async () => {
+  // Mounts the probe against a mock that records every transcript fetch.
+  async function mountChildProbe() {
     const fetchCalls: Array<[string, unknown]> = [];
     installMockApi({
       opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
@@ -306,50 +307,46 @@ describe("useTranscriptState child tail-first", () => {
     resetStore();
     h = mount(<ChildProbe sessionId="ses_a" />);
     await h.flush();
+    return fetchCalls;
+  }
+
+  it("fetches a child tail-first, then full after loadEarlier, then stays full", async () => {
+    const fetchCalls = await mountChildProbe();
 
     // Fresh ref: first child fetch pulls the tail.
     act(() => probe!.fetch("child_1"));
-    await h.flush();
+    await h!.flush();
     expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT, view: true }]);
 
     // "Load earlier" pulls the whole history and marks the child loaded-all.
     act(() => probe!.loadAll("child_1"));
-    await h.flush();
+    await h!.flush();
     expect(fetchCalls.at(-1)).toEqual(["child_1", { view: true }]);
     expect(probe!.ref.current.get("child_1")).toBe(true);
 
     // A subsequent fetch for the loaded-all child stays full (no tail cut).
     act(() => probe!.fetch("child_1"));
-    await h.flush();
+    await h!.flush();
     expect(fetchCalls.at(-1)).toEqual(["child_1", { view: true }]);
   });
 
   it("clears childLoadedAllRef on session change so a fresh fetch is tail-limited again", async () => {
-    const fetchCalls: Array<[string, unknown]> = [];
-    installMockApi({
-      opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
-        fetchCalls.push([sessionId, opts]);
-        return Promise.resolve([]);
-      },
-    });
-    resetStore();
-    h = mount(<ChildProbe sessionId="ses_a" />);
-    await h.flush();
+    const fetchCalls = await mountChildProbe();
 
     act(() => probe!.loadAll("child_1"));
-    await h.flush();
+    await h!.flush();
     expect(probe!.ref.current.get("child_1")).toBe(true);
 
     // Switching sessions clears the per-child loaded-all flags.
     await act(async () => {
       h!.rerender(<ChildProbe sessionId="ses_b" />);
     });
-    await h.flush();
+    await h!.flush();
     expect(probe!.ref.current.get("child_1")).toBeFalsy();
 
     // A fresh child fetch after the switch is tail-limited again.
     act(() => probe!.fetch("child_1"));
-    await h.flush();
+    await h!.flush();
     expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT, view: true }]);
   });
 });
@@ -385,6 +382,17 @@ describe("useTranscriptState catch-up", () => {
     return { pending, calls };
   }
   const sleep = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+
+  // An active panel holding one old message, with a catch-up in flight.
+  async function startCatchUpOverOld() {
+    const { pending } = deferredFetches();
+    h = mount(<Probe sessionId="ses_a" isActive />);
+    await h.flush();
+    act(() => ts!.setMessages([msg("m1", "old")]));
+    let outcome: Awaited<ReturnType<TranscriptState["catchUp"]>> | undefined;
+    act(() => { void ts!.catchUp().then((r) => (outcome = r)); });
+    return { pending, result: () => outcome };
+  }
 
   afterEach(() => {
     h?.unmount();
@@ -436,14 +444,9 @@ describe("useTranscriptState catch-up", () => {
   });
 
   it("failure: keeps the transcript, status failed, refetch owed again, refreshing cleared", async () => {
-    const { pending } = deferredFetches();
-    h = mount(<Probe sessionId="ses_a" isActive />);
-    await h.flush();
-    act(() => ts!.setMessages([msg("m1", "old")]));
-    let result: Awaited<ReturnType<TranscriptState["catchUp"]>> | undefined;
-    act(() => { void ts!.catchUp().then((r) => (result = r)); });
+    const { pending, result } = await startCatchUpOverOld();
     await act(async () => pending[0].reject(new Error("offline")));
-    expect(result).toEqual({ ok: false });
+    expect(result()).toEqual({ ok: false });
     expect(ts!.messages).toEqual([msg("m1", "old")]);
     expect(ts!.catchUpStatus).toBe("failed");
     expect(ts!.refetchOwedWhileInactive.current).toBe(true);
@@ -451,16 +454,11 @@ describe("useTranscriptState catch-up", () => {
   });
 
   it("a result arriving after deactivation is discarded: nothing applied, refetch stays owed", async () => {
-    const { pending } = deferredFetches();
-    h = mount(<Probe sessionId="ses_a" isActive />);
-    await h.flush();
-    act(() => ts!.setMessages([msg("m1", "old")]));
-    let result: Awaited<ReturnType<TranscriptState["catchUp"]>> | undefined;
-    act(() => { void ts!.catchUp().then((r) => (result = r)); });
+    const { pending, result } = await startCatchUpOverOld();
     await act(async () => { h!.rerender(<Probe sessionId="ses_a" isActive={false} />); });
     act(() => ts!.resetCatchUp());
     await act(async () => pending[0].resolve([msg("m1", "old"), msg("m2", "new")]));
-    expect(result).toEqual({ ok: false, stale: true });
+    expect(result()).toEqual({ ok: false, stale: true });
     expect(ts!.messages).toEqual([msg("m1", "old")]);
     expect(ts!.catchUpStatus).toBe("idle");
     expect(ts!.refetchOwedWhileInactive.current).toBe(true);
