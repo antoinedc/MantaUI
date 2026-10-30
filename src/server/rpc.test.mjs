@@ -2480,3 +2480,49 @@ test("opencode:messages passes the interpreter's running flag (never the client'
   await handlers["opencode:message"]("ses_run", "m1", { view: true });
   assert.deepEqual(gotOpts, { view: true, ledger: null });
 });
+
+// ---- routines:* channels (spec §5.1) ----------------------------------------
+
+test("routines:* channels hand their args straight to the engine, with the pinned names", async () => {
+  const calls = [];
+  const engine = new Proxy({}, { get: (_t, name) => async (...args) => (calls.push([name, ...args]), { ok: name }) });
+  const handlers = buildHandlers({ ...makeDeps([]).deps, routines: engine });
+  const table = [
+    ["routines:summary", [], "summary", []],
+    ["routines:get", ["ab12cd34", { beforeSeq: 5 }], "get", ["ab12cd34", { beforeSeq: 5 }]],
+    ["routines:get", ["ab12cd34"], "get", ["ab12cd34", {}]],
+    ["routines:create", [{ name: "n" }], "create", [{ name: "n" }]],
+    ["routines:update", ["ab12cd34", { name: "m" }], "update", ["ab12cd34", { name: "m" }]],
+    ["routines:delete", ["ab12cd34"], "remove", ["ab12cd34"]],
+    ["routines:run-now", ["ab12cd34"], "runNow", ["ab12cd34"]],
+    ["routines:run-get", ["0123456789"], "runGet", ["0123456789"]],
+    ["routines:mark-read", ["all"], "markRead", ["all"]],
+    ["routines:memory-set", ["ab12cd34", "text"], "memorySet", ["ab12cd34", "text"]],
+    ["routines:keep-in-sidebar", ["0123456789"], "keepInSidebar", ["0123456789"]],
+    ["routines:convert-preview", ["job00001"], "convertPreview", ["job00001"]],
+    ["routines:convert-commit", ["job00001", { name: "n" }], "convertCommit", ["job00001", { name: "n" }]],
+    ["routines:move-to-chat", ["ab12cd34", { type: "origin" }], "moveToChat", ["ab12cd34", { type: "origin" }]],
+    ["routines:move-to-routines", ["ab12cd34"], "moveBack", ["ab12cd34"]],
+  ];
+  for (const [channel, args, method, expected] of table) {
+    calls.length = 0;
+    assert.deepEqual(await dispatch(handlers, channel, args), { ok: method }, channel);
+    assert.deepEqual(calls, [[method, ...expected]], channel);
+  }
+});
+
+test("routines:* without an engine answers a sentence with a 503, and an engine refusal keeps its own status and message", async () => {
+  const bare = buildHandlers(makeDeps([]).deps);
+  const err = await dispatch(bare, "routines:summary", []).catch((e) => e);
+  assert.equal(err.rpcStatus, 503);
+  assert.match(err.message, /Routines aren't available/);
+
+  const refusing = buildHandlers({ ...makeDeps([]).deps, routines: { runNow: async () => { throw Object.assign(new Error("Wait for the current run to finish."), { rpcStatus: 409 }); } } });
+  const { req, res } = fakeExchange();
+  handleRpcRequest(refusing, "routines:run-now", req, res);
+  req._fire("data", JSON.stringify({ args: ["ab12cd34"] }));
+  await req._fire("end");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(res.status, 409);
+  assert.deepEqual(JSON.parse(res.body), { error: "Wait for the current run to finish." });
+});
