@@ -5,7 +5,7 @@
 // catching up, a message the user sends meanwhile is HELD and released once the
 // fresh transcript is committed, and a failed catch-up says so with Retry.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import {
@@ -17,6 +17,25 @@ import {
   type MockEventBus,
   type Harness,
 } from "./testHarness";
+
+// Pass-through spy: lets the voice tests reach the exact params ChatPanel hands
+// useVoice (the ref its take → send flow submits through, the pending-note setter).
+const voiceParams = vi.hoisted(() => ({
+  latest: null as null | {
+    submitRef: { current: (() => void) | null };
+    setPendingVoiceNote: (p: unknown) => void;
+  },
+}));
+vi.mock("./hooks/useVoice", async (orig) => {
+  const actual = await orig<typeof import("./hooks/useVoice")>();
+  return {
+    ...actual,
+    useVoice: (p: Parameters<typeof actual.useVoice>[0]) => {
+      voiceParams.latest = p as never;
+      return actual.useVoice(p);
+    },
+  };
+});
 
 const SID = "ses_test";
 const PROPS = { sessionId: SID, tmuxSession: "proj", windowIndex: 1, cwd: "/x", isActive: true };
@@ -80,10 +99,11 @@ describe("ChatPanel session catch-up", () => {
   // Open the panel active (initial load = T0), then hide it, let the session
   // "work" (a frame arrives while hidden → a refetch is owed) and bring it back.
   // Every fetch after the initial load waits for the test to answer it.
-  async function reactivate(opts: { detach?: boolean } = {}) {
+  async function reactivate(opts: { detach?: boolean; api?: Record<string, unknown> } = {}) {
     pending = [];
     let loads = 0;
     ({ api, bus } = installMockApi({
+      ...opts.api,
       opencodeMessages: () => {
         if (loads++ === 0) return Promise.resolve(T0);
         return new Promise<unknown[]>((resolve, reject) => pending.push({ resolve, reject }));
@@ -345,6 +365,56 @@ describe("ChatPanel session catch-up", () => {
       expect((api.calls.opencodeClearSession ?? []).length).toBe(1);
       expect(heldSend()).toBeNull();
       await resolveCatchUp(T0);
+    });
+  });
+  describe("voice sends", () => {
+    it("a voice take → send during catch-up is held, then released after success", async () => {
+      await reactivate();
+      // What useVoice does once a take is transcribed: the text lands in the composer…
+      await type("spoken words");
+      // …and it submits through the ref ChatPanel gave it.
+      await act(async () => { voiceParams.latest!.submitRef.current?.(); });
+      await h!.flush();
+      expect(promptTexts()).toEqual([]);
+      expect(heldSend()).not.toBeNull();
+      expect(pill()?.textContent).toContain("will send when ready");
+      await resolveCatchUp(T1);
+      expect(promptTexts()).toEqual(["spoken words"]);
+      expect(pill()?.textContent).toBe("1 new step · your message was sent");
+    });
+
+    it("a voice take → send when not catching up sends at once", async () => {
+      await reactivate();
+      await resolveCatchUp(T0);
+      await type("spoken words");
+      await act(async () => { voiceParams.latest!.submitRef.current?.(); });
+      await h!.flush();
+      expect(promptTexts()).toEqual(["spoken words"]);
+    });
+
+    it("the voice-note Retry during catch-up is held, then released after success", async () => {
+      await reactivate({
+        api: { voiceRetryNote: () => Promise.resolve({ ok: true, transcript: "retried words" }) },
+      });
+      await act(async () => {
+        voiceParams.latest!.setPendingVoiceNote({
+          peaks: new Uint8Array(0),
+          durationMs: 1000,
+          noteId: "note_1",
+          error: "Transcription failed",
+        });
+      });
+      await h!.flush();
+      const retry = Array.from(h!.container.querySelectorAll("button")).find(
+        (b) => b.textContent === "Retry" && !pill()?.contains(b),
+      );
+      await click(retry ?? null);
+      await sleep(10);
+      expect(textarea().value).toBe("retried words");
+      expect(promptTexts()).toEqual([]);
+      expect(heldSend()).not.toBeNull();
+      await resolveCatchUp(T1);
+      expect(promptTexts()).toEqual(["retried words"]);
     });
   });
 });

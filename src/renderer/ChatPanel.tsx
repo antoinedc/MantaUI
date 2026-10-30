@@ -513,7 +513,12 @@ export function ChatPanel({
   // controller is constructed HERE, before useSseBus, because it produces the
   // `submitRef` / `input` / `providerID` useSseBus needs; its send-error setter
   // rides the forward-declared bridge above (assigned right after useSseBus).
+  // The hold-aware submit the voice flows (take → send, voice-note retry) go
+  // through; assigned from the catch-up controller below. `submitRef` stays RAW
+  // for the programmatic bridges (/clear, auto-submit, quotes), which are never held.
+  const voiceSubmitRef = useRef<() => void>(() => {});
   const composer = useComposerController({
+    voiceSubmitRef,
     sessionId,
     messages,
     // Session history is keyed by the owning tmux window (survives /clear).
@@ -1535,6 +1540,7 @@ export function ChatPanel({
     setSendError,
     scrollToMessage,
   });
+  voiceSubmitRef.current = catchUpCtl.submit;
   const runCatchUp = catchUpCtl.run;
   useEffect(() => {
     if (!isActive) return;
@@ -2906,7 +2912,7 @@ export function ChatPanel({
           const text = res.transcript.trim();
           if (!text) return;
           setInput((prev) => (prev ? `${prev}\n${text}` : text));
-          setTimeout(() => submitRef.current?.(), 0);
+          setTimeout(() => voiceSubmitRef.current?.(), 0);
           return;
         }
         setPendingVoiceNote({ ...prev, noteId, error: res.ok ? "Transcription failed" : res.error });
