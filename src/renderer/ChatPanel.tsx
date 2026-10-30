@@ -102,6 +102,9 @@ import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
 import { QuoteToolbar } from "./QuoteToolbar";
 import { Composer } from "./Composer";
+import { RoutineRunContext, type RoutineRunBinding, type RoutineRunContextValue } from "./routineRunContext";
+import { RoutineReportCard, RoutineRunBar, routineHeaderChrome } from "./RoutineRunParts";
+import { routineToolKind } from "./routineToolParts";
 import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
@@ -207,6 +210,9 @@ type Props = {
   // by the "Back to current" bar; no card, menu or send exists. Set only by the
   // parent panel's own previous-session view.
   readOnlyView?: { label: string; onBack: () => void };
+  // Mounted on a routine run's session (spec §6.5): header crumb + Keep in sidebar,
+  // the run bar, the instruction block and the report card. Replies stay with the run.
+  routineRun?: RoutineRunBinding;
 };
 
 /** How long an idle send's transient inbox item may stay out of the pending card. */
@@ -239,6 +245,7 @@ export function ChatPanel({
   unregisterModelControl,
   seedPrompt,
   readOnlyView,
+  routineRun,
 }: Props) {
   // chatAutoAllow / setChatAutoAllow / optInModels / optInModel are subscribed
   // INSIDE useComposerController now (they feed the composer's trust toggle +
@@ -3076,6 +3083,20 @@ export function ChatPanel({
   // (Build here / Delegate / Send feedback) while their async call is in
   // flight — SQL no loading state existed before.
   const [pendingAction, setPendingAction] = useState<"build" | "delegate" | "feedback" | null>(null);
+  // Routine run (spec §6.5): the context the transcript rows read, and the tail
+  // report card when the run has a report but the transcript has no routine_report call.
+  const routineFirstUserId = useMemo(
+    () => (routineRun ? messages?.find((m) => m.info.role === "user")?.info.id ?? null : null),
+    [routineRun, messages],
+  );
+  const routineCtx = useMemo<RoutineRunContextValue | null>(
+    () => (routineRun ? { ...routineRun, firstUserMessageId: routineFirstUserId } : null),
+    [routineRun, routineFirstUserId],
+  );
+  const routineHasReportPart = useMemo(
+    () => !!routineRun && !!messages?.some((m) => m.parts.some((p) => routineToolKind(p) === "report")),
+    [routineRun, messages],
+  );
   const planCard = useMemo(() => {
     for (const q of planQuestions) {
       const data = planDataByQuestion.get(q.id);
@@ -3367,6 +3388,7 @@ export function ChatPanel({
 
 
   return (
+    <RoutineRunContext.Provider value={routineCtx}>
     <div
       className="h-full w-full flex flex-col bg-bg font-sans text-prose relative"
       onDragEnter={onPanelDragEnter}
@@ -3422,7 +3444,8 @@ export function ChatPanel({
         staleCache={staleCache}
         modelName={contextModelLabel(models ?? [], contextPayload?.model, contextPayload?.basis, activeModel ? activeModel.name : null)}
         hasSession={!!tmuxSession && windowIndex != null}
-        readOnly={viewOnly}
+        readOnly={viewOnly || !!routineRun}
+        routineChrome={routineRun ? routineHeaderChrome(routineRun) : undefined}
         handoff={{
           previous: handoff.previous,
           onOpenPrevious: handoff.openPrevious,
@@ -3437,7 +3460,8 @@ export function ChatPanel({
         onModeChange={onModeChange}
         availableLaunchers={availableLaunchers}
         artifactsOpen={artifactsOpen}
-        onToggleArtifacts={onToggleArtifacts}
+        // A routine run has no artifacts panel (it is mounted by the chat pane only), so no dead toggle.
+        onToggleArtifacts={routineRun ? undefined : onToggleArtifacts}
         hiddenStatusItems={hiddenStatusItems}
         pr={forge.pr}
         checks={forge.checks}
@@ -3467,6 +3491,7 @@ export function ChatPanel({
         onCreatePr={() => void confirmShip()}
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
+      {routineRun && <RoutineRunBar binding={routineRun} />}
 
       {/* The transcript region owns its own positioning context so the
           jump-to-latest button floats at the BOTTOM OF THE TRANSCRIPT — above
@@ -3507,7 +3532,7 @@ export function ChatPanel({
             onRetryVoiceNote={retryVoiceNote}
             onReplyQuestion={replyQuestion}
             onRejectQuestion={rejectQuestion}
-            planCard={planCard}
+            planCard={routineRun && !routineHasReportPart && (routineRun.run.report || routineRun.run.status === "failed" || routineRun.run.status === "timed_out") ? <RoutineReportCard /> : planCard}
             backgroundCards={backgroundCards}
             handoffCards={handoffCardsNode}
             scrollerElRef={scrollerElRef}
@@ -3568,7 +3593,8 @@ export function ChatPanel({
       ) : (
       <Composer
         {...composer.composerProps}
-        showHandoffMode
+        showHandoffMode={!routineRun}
+        metaHint={routineRun ? "Replies stay with this run · “Keep in sidebar” makes it a normal session" : undefined}
         // The send transport is ChatPanel's own — its `submit` is entangled with
         // routing / optimistic transcript / compaction and is NOT composer state,
         // so it is spread on top of the controller's ready-to-render bundle. The
@@ -3603,5 +3629,6 @@ export function ChatPanel({
         />
       </Modal>
     </div>
+    </RoutineRunContext.Provider>
   );
 }

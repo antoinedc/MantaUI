@@ -12,7 +12,7 @@
 // there for subagent transcripts) forms an intentional, render-time-only
 // module cycle.
 
-import { memo, useMemo, useState } from "react";
+import { memo, useContext, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
 import type { OpencodeMessage, TruncationView, VoiceNoteRecord } from "../shared/types";
 import {
@@ -39,6 +39,8 @@ import { MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
 import { Linkified } from "./Linkified";
 import { VoicePlayer } from "./VoiceNote";
+import { RoutineRunContext } from "./routineRunContext";
+import { RoutinePromptBlock } from "./RoutineRunParts";
 
 // ===== Active todos =====
 //
@@ -331,6 +333,8 @@ export const MessageRow = memo(function MessageRow({
   blocks?: readonly Block[];
 }) {
   const isUser = msg.info.role === "user";
+  // A routine run draws its first user turn (the routine's own prompt) as the instruction block.
+  const routineRun = useContext(RoutineRunContext);
 
   // HOOK ORDER: this hook must run BEFORE the not-renderable early return
   // below. A subagent transcript streams in, so a child message can flip from
@@ -422,6 +426,9 @@ export const MessageRow = memo(function MessageRow({
   // through the MessageBubble primitive, which owns the chrome.
   // FileParts attached to the message render as chips ABOVE the bubble, in the
   // same flex justify-end flow so they right-align with it.
+  if (isUser && routineRun && routineRun.firstUserMessageId === msg.info.id) {
+    return stampedRow(<RoutinePromptBlock />);
+  }
   if (isUser) {
     const text = concatUserMessageText(msg);
     const fileParts = msg.parts.filter((p) => p.type === "file");

@@ -55,7 +55,7 @@ const ROW_BASE =
   "transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1";
 
 // Selected (`.on`): `--raised` surface + the C3 marker at left:-8px.
-const ROW_SELECTED =
+export const ROW_SELECTED =
   "bg-raised before:absolute before:content-[''] before:left-[-8px] " +
   "before:top-1/2 before:-translate-y-1/2 before:h-4 before:w-[3px] " +
   "before:rounded-r-[3px] before:bg-accent";

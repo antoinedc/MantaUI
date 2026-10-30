@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { formatTokenCount } from "../shared/formatTokens.mjs";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, Loader2, History, ArrowRightLeft } from "lucide-react";
@@ -120,6 +121,7 @@ export function SessionHeader({
   aheadCount,
   onCreatePr,
   onEnsureShipPreview,
+  routineChrome,
 }: {
   // The conversation this header belongs to — the context popover names its
   // seat (multi-account). Absent: no seat line.
@@ -223,6 +225,11 @@ export function SessionHeader({
   // tests stay byte-identical.
   onCreatePr?: () => void;
   onEnsureShipPreview?: () => void;
+  // A routine run (spec §6.5): the crumb, the read-only/branch tag and a lead
+  // button (Keep in sidebar) replace the workspace crumb and the branch chip;
+  // the session menu and the stale-cache "Clear session" are not offered
+  // (a run has no window to clear or delete).
+  routineChrome?: { crumb: ReactNode; tag: ReactNode; lead: ReactNode };
 }) {
   const { pct, hasLimit, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -267,7 +274,7 @@ export function SessionHeader({
   // BET-867: the one decision driving the branch chip — plain non-interactive
   // Tag (no branch / no forge) vs. the interactive branch popover in its
   // no-PR or PR state.
-  const branchState = view?.panel ?? "none";
+  const branchState = routineChrome ? "none" : view?.panel ?? "none";
 
   // ===== Status-item registry (BET-782) =====
   // The right group is a REGISTRY, not hand-ordered JSX. Each entry is a
@@ -345,7 +352,7 @@ export function SessionHeader({
           cacheWrite={cacheWrite}
           modelName={modelName}
           staleCache={staleCache}
-          onRequestClear={() => setConfirm("clear")}
+          onRequestClear={routineChrome ? undefined : () => setConfirm("clear")}
           onHandOff={readOnly || !handoff ? undefined : handoff.onHandOff}
         />
       ),
@@ -406,7 +413,12 @@ export function SessionHeader({
             the header's primary job: one window shows many sessions across
             many workspaces, and the branch alone does not identify one. It is
             not decoration, and nothing else in the desktop chrome carries it. */}
-      {crumb && (
+      {routineChrome ? (
+        <>
+          {routineChrome.crumb}
+          {routineChrome.tag}
+        </>
+      ) : crumb && (
         <MarqueeLabel
           className="text-label text-text-faint shrink-0 max-w-[200px]"
           title={crumb}
@@ -444,7 +456,7 @@ export function SessionHeader({
           onOpenExternal={onOpenExternal}
           onReviewChanges={onReviewChanges}
         />
-      ) : branch ? (
+      ) : branch && !routineChrome ? (
         <Tag
           size="sm"
           icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
@@ -471,6 +483,7 @@ export function SessionHeader({
         className="ml-auto flex items-center gap-2"
         style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
       >
+        {routineChrome?.lead}
         {visible.map((it) => (
           <Fragment key={it.id}>{it.render()}</Fragment>
         ))}
@@ -629,7 +642,7 @@ function ContextPill({
   cacheWrite: number;
   modelName: string | null;
   staleCache: StaleCacheResult;
-  onRequestClear: () => void;
+  onRequestClear?: () => void;
   onHandOff?: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -822,7 +835,7 @@ function ContextPill({
           {/* Stale-cache warning — only when actually stale. The amber tint on
               the pill is the peripheral cue; this is the detail plus the one
               action that resolves it. */}
-          {stale && (
+          {stale && onRequestClear && (
             <div className="mt-4 pt-3 border-t border-border-subtle">
               <div className="flex items-center gap-2">
                 <span

@@ -13,7 +13,7 @@
 // immediately when the event target is (or is inside) a `<button>`, since
 // rows are `<div role="treeitem">` and never buttons themselves.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act } from "react";
 import { Sidebar } from "./Sidebar";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
@@ -64,7 +64,7 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
       />,
     );
     return h;
@@ -177,7 +177,7 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
       />,
     );
     return h;
@@ -269,7 +269,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
       />,
     );
     return h;
@@ -616,7 +616,7 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
       />,
     );
     await h.flush();
@@ -672,7 +672,7 @@ describe("Sidebar — nested background job rows (observed, superseded)", () => 
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
       />,
     );
     return h;
@@ -714,7 +714,7 @@ describe("Sidebar — the box's job nesting and status rollup (WS11 D7)", () => 
   });
   const mountIt = async () => {
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} />,
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} />,
     );
     await h.flush();
   };
@@ -760,5 +760,53 @@ describe("Sidebar — the box's job nesting and status rollup (WS11 D7)", () => 
     });
     await mountIt();
     expect(h!.container.querySelector('[title*="Running"][title*="2 subagents"]')).not.toBeNull();
+  });
+});
+
+describe("Sidebar — Routines row", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  function mountRow(props: Partial<{ needsYou: number; unread: number; open: boolean }> = {}) {
+    installMockApi();
+    resetStore({ projects: [] } as never);
+    const onOpenRoutines = vi.fn();
+    h = mount(
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+        onOpenRoutines={onOpenRoutines}
+        routinesBadge={{ needsYou: props.needsYou ?? 0, unread: props.unread ?? 0 }}
+        routinesOpen={props.open}
+      />,
+    );
+    return onOpenRoutines;
+  }
+  const row = () => h!.container.querySelector('button[aria-label="Open Routines"]') as HTMLButtonElement;
+
+  it("one nav row opens the Routines pane", () => {
+    const open = mountRow();
+    act(() => row().click());
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a red count for runs that need you and a blue one for unread findings; both hidden at zero", () => {
+    mountRow({ needsYou: 1, unread: 3 });
+    expect(row().querySelector('[aria-label="1 need you"]')?.textContent).toBe("1");
+    expect(row().querySelector('[aria-label="3 new findings"]')?.textContent).toBe("3");
+    h!.unmount();
+    mountRow();
+    expect(row().querySelector("span[aria-label]")).toBeNull();
+  });
+
+  it("is highlighted while the pane is open", () => {
+    mountRow({ open: true });
+    expect(row().className).toContain("bg-raised");
   });
 });

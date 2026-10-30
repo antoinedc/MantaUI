@@ -8,6 +8,8 @@ import { ChatPanel } from "./ChatPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { GlobalToasts } from "./GlobalToasts";
 import { Settings } from "./Settings";
+import { RoutinesRoot, type RoutinesView } from "./RoutinesRoot";
+import { useRoutinesSummary } from "./routinesData";
 import { CtoPanel } from "./CtoPanel";
 import { SearchPalette } from "./SearchPalette";
 import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchema";
@@ -262,7 +264,23 @@ function Shell() {
   // BET-1384: the Adaptive CTO overview pane (replaces the active session
   // panel in the main content area, mirroring how Settings opens from the
   // sidebar). Selecting any session closes it again.
-  const [ctoOpen, setCtoOpen] = useState(false);
+  const [ctoOpen, setCtoOpenRaw] = useState(false);
+  // Routines pane (spec §7): null = closed, else which page. Mutually exclusive with the CTO pane.
+  const [routinesView, setRoutinesViewRaw] = useState<RoutinesView>(null);
+  const setCtoOpen = useCallback((open: boolean) => {
+    setCtoOpenRaw(open);
+    if (open) setRoutinesViewRaw(null);
+  }, []);
+  const setRoutinesView = useCallback((v: RoutinesView) => {
+    setRoutinesViewRaw(v);
+    if (v) setCtoOpenRaw(false);
+  }, []);
+  // One summary subscription for the sidebar badge and the pane (it also polls every 60 s).
+  const { summary: routinesSummary, error: routinesError, reload: reloadRoutines } = useRoutinesSummary(60_000, apiGeneration);
+  const routinesBadge = useMemo(
+    () => ({ needsYou: routinesSummary?.needsYou ?? 0, unread: routinesSummary?.unread ?? 0 }),
+    [routinesSummary],
+  );
   // Live CTO state, held here so the always-mounted Sidebar badge/dot and the
   // CtoPanel share ONE subscription + initial GET (no per-consumer polling).
   const [ctoState, setCtoState] = useState<CtoState | null>(null);
@@ -313,6 +331,20 @@ function Shell() {
       ? s.drafts.find((d) => d.id === s.activeDraftId) ?? null
       : null,
   );
+  // A new-session draft (+ / ⌘N / "Fix it in a new session") takes over the main pane, so the
+  // Routines pane steps aside; and a chat card's "Open routine" opens the routine's page.
+  const activeDraftId = activeDraft?.id ?? null;
+  useEffect(() => {
+    if (activeDraftId) setRoutinesViewRaw(null);
+  }, [activeDraftId]);
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (id) setRoutinesView({ page: "routine", id });
+    };
+    window.addEventListener("manta-open-routine", onOpen);
+    return () => window.removeEventListener("manta-open-routine", onOpen);
+  }, [setRoutinesView]);
   // One-shot first-prompt for a freshly-created session (draft → new session):
   // App passes it to the matching ChatPanel, which auto-submits then clears it.
   const autoSubmitPrompt = useStore((s) => s.autoSubmitPrompt);
@@ -747,9 +779,12 @@ function Shell() {
   useEffect(() => {
     if (activeProjectName !== prevActiveProject.current) {
       prevActiveProject.current = activeProjectName;
-      if (activeProjectName) setCtoOpen(false);
+      if (activeProjectName) {
+        setCtoOpen(false);
+        setRoutinesViewRaw(null);
+      }
     }
-  }, [activeProjectName]);
+  }, [activeProjectName, setCtoOpen]);
 
   // ---- Subscription usage alerts (BET-739, server-first WS09) ----
   // The BOX decides when a 90% / limit alert fires (src/server/usageAlerts.mjs)
@@ -1344,6 +1379,11 @@ function Shell() {
             } catch {
               /* no-op */
             }
+            // A routine notification opens its run (spec §5.4); its session is not in the sidebar.
+            if (payload.routineRunId) {
+              setRoutinesView({ page: "run", runId: payload.routineRunId });
+              return;
+            }
             if (!sid) return;
             for (const p of projectsRef.current) {
               const w = p.windows.find((win) => win.opencodeSessionId === sid);
@@ -1360,7 +1400,7 @@ function Shell() {
       show();
     });
     return off;
-  }, [setActive]);
+  }, [setActive, setRoutinesView]);
 
   // BET-211: request Notification permission ONCE at startup, not lazily on
   // first event. The lazy request raced with the first directive arriving —
@@ -1948,6 +1988,9 @@ function Shell() {
         onOpenResumeModal={() => setResumeModalOpen(true)}
         onOpenCto={() => setCtoOpen(true)}
         ctoState={ctoState}
+        onOpenRoutines={() => setRoutinesView({ page: "list" })}
+        routinesBadge={routinesBadge}
+        routinesOpen={routinesView != null}
       />
       <main className="flex-1 flex flex-col min-w-0">
         {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
@@ -2047,7 +2090,7 @@ function Shell() {
             busyLabel={boxRestarting ? "Restarting the server…" : "Updating the server…"}
           />
         )}
-        {!isChatPaneActive && (
+        {!isChatPaneActive && !routinesView && (
         <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
           <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
@@ -2174,6 +2217,7 @@ function Shell() {
               {[...visitedModes.current.entries()].map(([key, m]) => {
                 const isActiveThisMode =
                   !ctoOpen &&
+                  !routinesView &&
                   activeProjectName === m.tmuxSession &&
                   activeWin?.index === m.windowIndex &&
                   mode === (m.modeId === "terminal" ? "terminal" : `tui:${m.modeId}`);
@@ -2203,7 +2247,7 @@ function Shell() {
                 // still has the panel mounted — fork/delete buttons
                 // gracefully no-op then.
                 const owner = resolveSessionOwner(projects, sid);
-                const isActiveChat = !ctoOpen && sid === activeChatSessionId && mode === "chat";
+                const isActiveChat = !ctoOpen && !routinesView && sid === activeChatSessionId && mode === "chat";
                 const ownerWinName = owner
                   ? (projects
                       .find((p) => p.tmuxSession === owner.tmuxSession)
@@ -2247,7 +2291,18 @@ function Shell() {
                   switching back to a real session (setActive clears
                   activeDraftId) reveals it with state intact. The sidebar
                   stays visible so the user can click another session. */}
-              {activeDraft && !ctoOpen && (
+              <PanelShell key="routines" active={routinesView != null}>
+                {routinesView && (
+                  <RoutinesRoot
+                    view={routinesView}
+                    setView={setRoutinesView}
+                    summary={routinesSummary}
+                    error={routinesError}
+                    reload={reloadRoutines}
+                  />
+                )}
+              </PanelShell>
+              {activeDraft && !ctoOpen && !routinesView && (
                 <div className="absolute inset-0 z-30 bg-bg">
                   <NewSessionScreen draftId={activeDraft.id} />
                 </div>
@@ -2263,7 +2318,7 @@ function Shell() {
           chat pane is required for it to show (there's no panel to open in a
           terminal). The outer shell is already `flex` and <main> is
           `flex-1 min-w-0`, so this needs no layout change. */}
-      {isChatPaneActive && (
+      {isChatPaneActive && !routinesView && (
         <ArtifactsPanel
           sessionId={activeChatSessionId}
           cwd={activeChatCwd}
