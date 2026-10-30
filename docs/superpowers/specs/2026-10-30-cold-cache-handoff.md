@@ -1,6 +1,6 @@
 # Cold-cache handoff + the Summary model setting
 
-Status: draft v3 (review rounds: DeepSeek V4.1 Flash ×2, GPT-6 Astra ×1) ·
+Status: draft v4 (review rounds: DeepSeek V4.1 Flash ×3, GPT-6 Astra ×2) ·
 Branch: `feat/cold-cache-handoff`
 Builds on: `2026-10-26-auto-handoff.md` (handoff engine, record, card),
 `2026-10-20-optimizer-sticky-trims.md` (prices, measured cache TTL).
@@ -102,7 +102,8 @@ interface SummaryModelStatus {
   // unknown = the model list couldn't be read (nothing is changed)
   reason?: string;               // one human sentence for every state but "ok"
   betterAvailable: boolean;      // auto pick is no longer the top candidate
-  candidates: Array<{
+  candidates: Array<{          // at most 30: every quality-passing model in pick order,
+                               // then the rest by price; the current model always included
     providerID: string; modelID: string; name: string;
     priceLabel: string | null;   // e.g. "$0.80 / $4 per M" or "subscription"
     recommended: boolean;        // the auto-pick
@@ -116,8 +117,13 @@ catalogue, prices), never a fresh network read, so it is fast.
 
 ### A3. Picking (pure)
 
-`rankSummaryModels({ models, catalogIndex, field, prices, subscriptionIds })
-→ { candidates, pick, reason }` in `src/shared/summaryModel.mjs`.
+`rankSummaryModels({ entries, field, subscriptionIds }) → { candidates, pick, reason }`
+in `src/shared/summaryModel.mjs`. Pure; the server pre-joins its inputs:
+- `entries: Array<{ model: OpencodeModel; catalogEntry: object | null;
+  listPrice: ListPrice | null }>` — `catalogEntry` from the catalogue
+  controller's `matchModel` (exact match only), `listPrice` from A6;
+- `field` = `buildBenchmarkField(catalogIndex)` from `routingServices.mjs`;
+- `subscriptionIds: Set<string>` — connected `SUBSCRIPTION_PROVIDERS` ids.
 
 1. **Eligible (hard gates — the picker shows exactly these)** = every
    connected model (`listModels`), ignoring the chat/subagent activation
@@ -157,10 +163,13 @@ refresh. Never inside `config:get`.
 1. Read models with `listModels({}, { strict: true })`. If it throws →
    status `unknown`, change nothing (an outage is not a disconnect).
 2. Snapshot `{summaryModel, summaryModelOptOut}` as read; compute ranking.
-3. Decide: opted out → nothing. `source: "user"` → never changed (status
-   `unavailable` if gone). `null` or `source: "auto"` and gone → `pick`
-   (`source: "auto"`) or `null` (status `unset`). `source: "auto"` and present
-   → kept; `betterAvailable` when it isn't `pick`.
+3. Decide ("valid" = connected AND passes the A3 step-1 hard gates, which
+   can change: a model may become deprecated or its listed context shrink):
+   opted out → nothing. `source: "user"` → never changed (status
+   `unavailable` with the reason when not valid). `null` or `source: "auto"`
+   and not valid → `pick` (`source: "auto"`) or `null` (status `unset`).
+   `source: "auto"` and valid → kept; `betterAvailable` when it isn't `pick`.
+   B1 trusts only a model whose status is `ok`.
 4. Write only if the stored pair still equals the snapshot (compare-and-set);
    otherwise re-queue. `summary-model:set` goes through the same queue.
 
@@ -185,7 +194,8 @@ Consumers:
    `generateSessionTitle({ instruction, model })`). `null` → returns `""`
    (the existing "retry on the next turn" path).
 3. **Standing-instruction extraction** — input condensed with
-   `condenseTranscript(messages, { maxTokens: 24_000 })` instead of the raw
+   `condenseTranscript(messages, { maxTokens: min(24_000, B2 budget for that
+   model) })` instead of the raw
    text dump; uses `generateTextStrict`; on failure the PREVIOUS constraints
    are kept (today an empty result overwrites them as fresh). The handoff fact
    gatherer passes the messages it already fetched.
@@ -197,10 +207,15 @@ Consumers:
 New in `optimizer/prices.mjs`:
 
 ```ts
-resolveListPrice({ providerID, modelID, config, catalog, model, now })
+resolveListPrice({ providerID, modelID, config, catalog, model, now, oneHour })
   → { input, output, cacheWrite, cacheWrite1h?, tiers?: Array<{ minPromptTokens, input, output, cacheWrite, cacheWrite1h? }>, source } | null
 // $ per million tokens. No cache-read gate. Sources in order: opencode config cost,
-// models.dev catalogue, the listModels model's own `cost`. cacheWrite defaults to input.
+// models.dev catalogue, the listModels model's own `cost`. A source whose input
+// price is 0 (a subscription's live "$0") is skipped, so subscriptions get the
+// catalogue's list price or null. cacheWrite defaults to input. With
+// `oneHour: true` (the caller passes isOneHourModel(...)), cacheWrite1h = the
+// record's own 1h price, else 2 × input — for the base AND every tier, a tier
+// inheriting any field it lacks from the base (same overlay rule as today).
 isOneHourModel({ config, providers, providerID, modelID }) → boolean   // exports the existing private rule
 priceForPrompt(listPrice, promptTokens) → rates   // tier applies when promptTokens > minPromptTokens (strict)
 ```
@@ -231,7 +246,7 @@ disposition), `contextTokens`, `idleMs` (now − newest assistant
 `time.completed`), `cacheTtlMs`, `summaryModel` (resolved, or null), `forced`.
 First match wins:
 
-1. `forced === "session"` → session (`user-asked`)
+1. `forced` set → that writer (`forced`) — `"session"` from Rewrite, `"condensed"` from a retry of a condensed attempt
 2. `disposition === "send"` → session (`unseen-send`)
 3. `contextTokens` unknown → session (`no-measurement`)
 4. `contextTokens < CONDENSE_MIN_TOKENS` (32 000) → session (`small`)
@@ -239,8 +254,10 @@ First match wins:
 6. `summaryModel == null` → session (`no-summary-model`)
 7. otherwise → condensed (`cold`)
 
-The decision is final: the condensed path always fits (B2 budget is derived
-from the model), so there is no later override. One log line per
+The decision is final. B2 guarantees a fit by construction (bounded
+protected regions inside a model-derived budget); the final serialized
+prompt is still checked (B2) and an over-budget prompt fails visibly with
+Rewrite offered — never a silent switch of writer. One log line per
 server-written handoff, after it settles:
 `[handoff] writer=<w> reason=<r> ctx=<n> idle=<s>s ttl=<s>s model=<p/m> in=<tokens> outcome=<ready|failed>`.
 
@@ -272,16 +289,27 @@ message. Levels:
 
 - Start at L1; while over budget, lower the oldest exchange not at its floor
   by one level. Terminates: every step lowers one level and levels are finite.
-- **Protected, with reserved budgets:** the original request (first
-  exchange) floors at L3 and its user text is clipped to 2 000 tokens; an
-  earlier compaction summary (newest message with `summary: true`, emitted
-  first as `Earlier summary:`, older messages skipped) is clipped to 8 000
-  tokens. The **newest** exchange floors at L2 and is lowered only after
-  every other exchange reached its floor; its errored-tool clips are 2 000 +
-  2 000 chars.
+- All sizes are in tokens (`estimateTokens`, chars/4); char clips are
+  tokens × 4. Clips keep head and tail (half each) with `…` between, except
+  where noted.
+- **Protected regions, each with a hard cap** (sum ≤ 16 500 tokens, below
+  the ~38k minimum budget):
+  - earlier compaction summary (newest message with `summary: true`, emitted
+    first as `Earlier summary:`, older messages skipped): ≤ 8 000;
+  - first exchange (the original ask), floor L3, user text ≤ 2 000 (head
+    kept);
+  - newest exchange, floor L2: user text ≤ 4 000, assistant prose ≤ 250,
+    tool lines ≤ 40 newest (`… N more tool calls`), errored-tool clips ≤ 500
+    each and ≤ 2 000 total. When first = newest, the newest caps apply.
+  The newest exchange is lowered to its floor only after every other
+  exchange reached its floor.
 - Still over budget with everything at its floor → middle exchanges are
   removed (merged into the omitted marker) from the oldest side; protected
-  parts are never removed. `levels.truncated = true`.
+  regions are never removed. `levels.truncated = true`.
+- **Final check:** `estimateTokens(full prompt) ≤ inputBudget` where
+  `inputBudget = floor((limit.context − 8_000) × 0.75)`; otherwise the
+  attempt fails with reason "The conversation is too large for <model>."
+  (Rewrite offered).
 - Key input: `filePath`/`path`, `command` (≤ 200 chars), `pattern`, `url`,
   `description`. Edit tools render as `[edit] <path>`. Dropped: reasoning,
   `synthetic`/`ignored` parts; attachments render as `[attachment: name]`.
@@ -350,17 +378,33 @@ rewriteEstimate?: {            // present whenever the last attempt was condense
   `publicRecord` compute it with one pure function:
   `rewriteAvailable(rec, { replaced })` = state ∈ {`ready`, `failed`} ∧
   `rewriteEstimate` present ∧ not a send record ∧ the source session not
-  replaced. `canRewrite = rewriteAvailable ∧ no operation in flight on the
-  source session`. It can never go stale across start, supersede, prune,
-  delete or replacement.
+  replaced. `canRewrite = rewriteAvailable`. Transient locks are NOT part of
+  it (they publish nothing when released); they are enforced only when the
+  action runs (409 `busy`). The engine exposes records through one
+  `present(rec)` wrapper (replacing direct `publicRecord` calls in
+  engine.mjs) that supplies `replaced`; `publicEvent` carries the same
+  field. A replacement commit touches every `ready`/`failed` record of the
+  replaced session so their `canRewrite` is republished.
 - **Renderer rule: show Rewrite iff `canRewrite === true`.**
 
-**Operation lock with owners.** `acquireOperation(sid, op)` returns a unique
-token or null (null if ANY operation, including another `handoff-generate`,
-is held); `releaseOperation(sid, token)` releases only its own token. The
-token is held from the start of generation until the record's final state is
-persisted (facts included), released in an outer `finally`. Applies to
-create, retry and rewrite alike.
+**Operation lock with owners.** The registry stores `{ kind, token }`.
+`acquireOperation(sid, kind, { reentrant = false })` returns a fresh token or
+null — null when any operation is held, except that `reentrant: true`
+succeeds when the held kind equals `kind` (preserves today's start resume /
+fencing semantics) and returns the HELD token. `releaseOperation(sid,
+token)` releases only that token. `opKind(sid)` replaces direct `ops.get`
+reads. Every consumer migrates in this change:
+- `handoff-generate` (create, retry, rewrite): not re-entrant. The caller
+  that changes state to `generating` acquires and PASSES the token into
+  `produceText(rec, { token })`; `produceText` acquires only when no token is
+  passed. Held until the final state (facts included) is persisted; released
+  in an outer `finally`.
+- `handoff-start` (start, resume, recovery at engine.mjs:860–863, 909–910,
+  1300, 1310): re-entrant; the token is kept on the in-memory run entry and
+  released with it.
+- `compaction` (index.mjs wiring + `optimizer/compaction.mjs`): `acquire`
+  returns the token, the scheduler keeps it per session and passes it to
+  `release`.
 
 **Action `rewrite`** — REST `POST /api/handoff/:id/rewrite` (route regex
 gains `rewrite`), rpc `handoff:rewrite {id}`, `httpApi.handoffRewrite(id)` →
@@ -376,7 +420,9 @@ gains `rewrite`), rpc `handoff:rewrite {id}`, `httpApi.handoffRewrite(id)` →
    prev: { state, text, writer, reason, rewriteEstimate, textReady } }`; set
    `internal.forceWriter = "session"`, state `generating`; persist; detach.
 
-`forceWriter` is one-shot: `produceText` reads and deletes it.
+`forceWriter` (`"session"` | `"condensed"`) is one-shot: `produceText`
+reads and deletes it; `chooseWriter` rule 1 generalises to "`forced` set →
+that writer".
 Before writing any result, `produceText` verifies the record still exists,
 is still `generating`, and `internal.attempt.id` matches; otherwise it
 discards its result.
@@ -398,8 +444,12 @@ restored from `prev` with reason "The rewrite was interrupted by a restart.";
 every other `generating` record becomes `failed` as today. `forceWriter` and
 `attempt` are cleared in both cases.
 
-`retry` (failed records only) uses `chooseWriter` normally — a condensed
-failure retries condensed; `rewrite` is the only route to the expensive path.
+`retry` (failed records only) keeps the failed attempt's writer: the record
+persists `internal.lastWriter`; a condensed failure retries condensed
+(`forceWriter: "condensed"`, bypassing rules 2–5) even if the cache has since
+warmed, and fails visibly ("No summary model is available.") when the
+Summary model is no longer `ok`. `rewrite` is the only route from condensed
+to the expensive path.
 
 ### B6. Card (desktop renderer, `HandoffParts.tsx`)
 
@@ -449,27 +499,35 @@ auto-rename caller (passes `sessionId`).
   subscription first (two subscriptions → lowest tier, then price); blended
   price; unpriced last; deterministic ties; nothing → null + reason.
 - reconciler — user choice never changed (→ `unavailable`); auto re-pick when
-  gone; no churn + `betterAvailable` when a cheaper one appears; opt-out
+  gone or no longer passing hard gates (user choice → `unavailable`); no
+  churn + `betterAvailable` when a cheaper one appears; candidates capped at
+  30 with the current model included; opt-out
   respected; strict-list failure → `unknown`, nothing written;
   compare-and-set loses to a concurrent `summary-model:set` and re-queues;
   `config:update` cannot write the keys.
 - `prices.test.mjs` — `resolveListPrice` keeps `output`, no cache-read gate,
-  three-source order; `priceForPrompt` strict tier boundary (200 000 base,
+  three-source order, `$0` source skipped; 1h derivation on base and
+  inherited tiers; `priceForPrompt` strict tier boundary (200 000 base,
   200 001 tier); `isOneHourModel`.
 - `policy.test.mjs` — `chooseWriter` each rule in order, warm-margin
   boundary, `forced` first, `send` never condenses.
 - `condense.test.mjs` — level table; oldest-first; termination; newest floor
   L2 lowered last; first-request and checkpoint reserved and never removed;
-  middle removal; errored-tool clips; key input; dropped parts; escaped
-  `</transcript>`; budget formula incl. 64k model; 2 MB synthetic transcript.
+  middle removal; every protected cap incl. a 2 MB newest user message and
+  first = newest; errored-tool clips; key input; dropped parts; escaped
+  `</transcript>`; budget formula incl. 64k model; final over-budget check
+  fails visibly; 2 MB synthetic transcript.
 - `text.test.mjs` — `buildCondensedPrompt`; `extractUserRequests`;
   `composeHandoffText` never drops protected facts.
 - engine (fake world) — cold card uses `generateCheap` (never `oc.generate`);
   warm uses `oc.generate`; reminder retry then `failed` with cause +
   `rewriteEstimate`; `rewrite` → `oc.generate`, `forceWriter` consumed;
-  `retry` after a rewrite failure follows `chooseWriter`; second `rewrite`
-  while generating → 422; another record's retry during a rewrite → `busy`;
-  `canRewrite` false after replacement / for send records / while generating;
+  retry of a condensed failure stays condensed after the cache warms, and
+  fails visibly without a Summary model; second `rewrite` while generating →
+  422; another record's retry during a rewrite → `busy`; rewrite does not
+  self-block (token passed into `produceText`); `canRewrite` false after
+  replacement / for send records and republished on replacement; start
+  resume still re-enters; compaction releases only its own token;
   failed rewrite restores the ready card with all fields; stale result
   discarded when `attempt.id` changed; boot recovery restores an interrupted
   rewrite and fails other generating records; `publicRecord`/`publicEvent`
