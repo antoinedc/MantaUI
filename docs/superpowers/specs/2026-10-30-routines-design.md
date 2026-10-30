@@ -481,9 +481,10 @@ project of `routine.createdFrom.sessionID` if that window still exists, else (3)
 project (tmux session) named `basename(directory)` with that cwd; `tmux.newWindow({sessionName, windowName: routine.name, cwd, chatMode: true, existingSessionId: run.sessionID, oc})` (`existingSessionId` is already supported — delegate uses it; do not rebuild it),
 set `keptInSidebar`. The renderer then switches to that window (closes the pane).
 
-"Fix it in a new session" (report footer) → opens the existing new-session draft in the
-routine's folder with the composer seeded (the BET-795 seed-prompt path):
-`"Follow up on routine \"<name>\" run of <date>:\n\n<report title>\n<report body>"`.
+"Follow up" (report footer, revised 2026-10-30; was "Fix it in a new session" seeding a
+new draft) → exactly Keep in sidebar: the run's own session, with its whole transcript,
+becomes an ordinary sidebar session and opens, so the follow-up continues where the run
+left off.
 
 ### 6.6 Handoff engine
 `handoff/engine.mjs maybeAuto` must skip sessions whose metadata carries
@@ -511,8 +512,7 @@ preset that reproduces it exactly, else Custom.
 
 ### Report-first runs (revised 2026-10-30)
 Opening a finished run that has a report (or failed) shows a modal with the report
-whole — title, summary, full body — plus "See full transcript" and "Fix it in a new
-session". A run notification opens the same modal over the Routines list. Runs with
+whole — title, summary, full body — plus "See full transcript" and "Follow up". A run notification opens the same modal over the Routines list. Runs with
 nothing to report (running, needs an answer, stopped) open the transcript directly.
 Inside the transcript the report is pinned as the last block; the `routine_report`
 tool call renders as a one-line pointer.

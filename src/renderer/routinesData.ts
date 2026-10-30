@@ -6,8 +6,7 @@
 // delivery is best-effort. The sidebar badge shares App's single summary.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Routine, RoutineRun, RoutinesSummary } from "../shared/routines";
-import { fixItSeed } from "./routinesView";
+import type { RoutineRun, RoutinesSummary } from "../shared/routines";
 import { useStore } from "./store";
 
 export const ROUTINES_REFETCH_DEBOUNCE_MS = 250;
@@ -83,13 +82,19 @@ export async function runAction<T>(what: string, fn: () => Promise<T>): Promise<
   }
 }
 
-/** "Fix it in a new session": a new-session draft seeded with the run's report, in the routine's project. */
-export function startFixIt(routine: Routine, run: RoutineRun): void {
-  const st = useStore.getState();
-  const project = st.projects.find((p) => p.defaultCwd === routine.directory) ?? st.projects.find((p) => p.tmuxSession === routine.projectName);
-  const id = project ? st.createDraft({ projectName: project.tmuxSession }) : st.createDraft("new-project");
-  st.updateDraft(id, { input: fixItSeed(routine.name, run), ...(project ? {} : { cwd: routine.directory }) });
-  routinesToast("info", "Started a new session with the report — send it when you're ready");
+/**
+ * "Keep in sidebar" / "Follow up": the run's own session becomes an ordinary sidebar
+ * session (its transcript intact), the Routines pane steps aside and the session opens.
+ */
+export async function keepRunInSidebar(
+  runId: string,
+  { onClosePane, onChanged, what = "keep the run in the sidebar" }: { onClosePane: () => void; onChanged: () => void; what?: string },
+): Promise<void> {
+  const r = await runAction(what, () => window.api.routinesKeepInSidebar(runId));
+  if (!r) return;
+  onClosePane();
+  onChanged();
+  await useStore.getState().activateWindow(r.tmuxSession, r.windowIndex);
 }
 
 /** A run whose report is what the user came for: open it report-first (the modal), not as a transcript. */

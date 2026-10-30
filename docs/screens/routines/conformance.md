@@ -4,7 +4,7 @@ Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) a
 1440×900 against `docs/screens/routines/mockup.html`. Baselines recorded for the
 seven `routines-*` rows only. Differences left on purpose or open:
 
-Last reviewed: 2026-10-30 (1f15b999)
+Last reviewed: 2026-10-30 (1d74af46)
 
 ## Deliberate
 
@@ -47,6 +47,8 @@ Last reviewed: 2026-10-30 (1f15b999)
   whole and "See full transcript" (`routines-report` row, no mockup). In the
   transcript the report is always the pinned last block; the `routine_report` call
   itself is a one-line pointer to it. The report card also shows the summary line.
+- **"Follow up"** replaces "Fix it in a new session" and does exactly what Keep in
+  sidebar does (the run's own session becomes an ordinary session and opens).
 - **No "Findings" pill in the routines table's Last run column** (owner request);
   the other outcome pills stay.
 - **Create editor** is typed into with real gestures by the registry row (the mockup

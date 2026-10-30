@@ -12,9 +12,8 @@ import { X } from "lucide-react";
 import { ChatPanel } from "./ChatPanel";
 import { IconButton } from "./IconButton";
 import { RoutinesHeader, CrumbLink, CrumbSep, PageColumn } from "./RoutinesParts";
-import { errMessage, runAction, startFixIt, useRoutinesRefetch } from "./routinesData";
+import { errMessage, keepRunInSidebar, useRoutinesRefetch } from "./routinesData";
 import { basename, isTerminal, runCrumbLabel } from "./routinesView";
-import { useStore } from "./store";
 import { readSessionAuto, sessionBoxSelection, setSessionChoice } from "./modelPrefs";
 import type { RoutineRunBinding } from "./routineRunContext";
 
@@ -37,7 +36,7 @@ export function RoutineRunView({
   onBack: () => void;
   onOpenRoutine: (routineId: string) => void;
   onOpenRun: (runId: string) => void;
-  /** Leave the Routines pane (after Keep in sidebar / Fix it). */
+  /** Leave the Routines pane (after Keep in sidebar / Follow up). */
   onClosePane: () => void;
   /** Something the summary / badge should pick up (a run got marked read). */
   onChanged: () => void;
@@ -104,20 +103,14 @@ export function RoutineRunView({
       });
   }, [seedSession, seedModel]);
 
-  const keepInSidebar = useCallback(async () => {
-    if (!data) return;
-    const r = await runAction("keep the run in the sidebar", () => window.api.routinesKeepInSidebar(data.run.id));
-    if (!r) return;
-    onClosePane();
-    onChanged();
-    await useStore.getState().activateWindow(r.tmuxSession, r.windowIndex);
-  }, [data, onClosePane, onChanged]);
-
-  const fixIt = useCallback(() => {
-    if (!data) return;
-    startFixIt(data.routine, data.run);
-    onClosePane();
-  }, [data, onClosePane]);
+  const runId_ = data?.run.id ?? null;
+  const keepInSidebar = useCallback(
+    (what?: string) => {
+      if (!runId_) return;
+      void keepRunInSidebar(runId_, { onClosePane, onChanged, what });
+    },
+    [runId_, onClosePane, onChanged],
+  );
 
   if (!data) {
     return (
@@ -158,10 +151,10 @@ export function RoutineRunView({
     prevRunId,
     nextRunId,
     onNavigate: onOpenRun,
-    onKeep: () => void keepInSidebar(),
+    onKeep: () => keepInSidebar(),
     onBack,
     onOpenRoutine: () => onOpenRoutine(routine.id),
-    onFixIt: fixIt,
+    onFollowUp: () => keepInSidebar("open the run as a session"),
   };
 
   return (

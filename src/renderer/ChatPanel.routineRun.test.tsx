@@ -36,7 +36,7 @@ describe("ChatPanel — routine run", () => {
       onKeep: vi.fn(),
       onBack: vi.fn(),
       onOpenRoutine: vi.fn(),
-      onFixIt: vi.fn(),
+      onFollowUp: vi.fn(),
       ...over,
     };
     installMockApi({ opencodeMessages: () => Promise.resolve(messages) });
@@ -79,7 +79,7 @@ describe("ChatPanel — routine run", () => {
     expect(h!.container.querySelector('[aria-label="Hide artifacts"]')).toBeNull();
   });
 
-  it("Keep in sidebar, the crumbs and the report's Fix it call the binding", async () => {
+  it("Keep in sidebar, the crumbs and the report's Follow up call the binding", async () => {
     const b = await open();
     await click(byText("Keep in sidebar"));
     expect(b.onKeep).toHaveBeenCalled();
@@ -87,8 +87,8 @@ describe("ChatPanel — routine run", () => {
     expect(b.onBack).toHaveBeenCalled();
     await click(byText("Daily analytics digest"));
     expect(b.onOpenRoutine).toHaveBeenCalled();
-    await click(byText("Fix it in a new session"));
-    expect(b.onFixIt).toHaveBeenCalled();
+    await click(byText("Follow up"));
+    expect(b.onFollowUp).toHaveBeenCalled();
   });
 
   it("previous / next move between runs; next is disabled on the latest run", async () => {

@@ -228,8 +228,8 @@ describe("Routines", () => {
       installMockApi();
       const run = (await store.runGet("run_dg_23")).run;
       const routine = (await store.get("a1b2c3d4")).routine;
-      const onFixIt = vi.fn();
-      const ctx: RoutineRunContextValue = { run, routine, prevRunId: null, nextRunId: null, onNavigate: vi.fn(), onKeep: vi.fn(), onBack: vi.fn(), onOpenRoutine: vi.fn(), onFixIt, firstUserMessageId: null };
+      const onFollowUp = vi.fn();
+      const ctx: RoutineRunContextValue = { run, routine, prevRunId: null, nextRunId: null, onNavigate: vi.fn(), onKeep: vi.fn(), onBack: vi.fn(), onOpenRoutine: vi.fn(), onFollowUp, firstUserMessageId: null };
       h = mount(
         <RoutineRunContext.Provider value={ctx}>
           <RoutineToolCard part={part("routine_report", { outcome: "findings" })} />
@@ -246,8 +246,8 @@ describe("Routines", () => {
       expect(h.text()).toContain("Findings");
       expect(h.text()).toContain("Signups up 18% week over week");
       expect(h.text()).toContain("Notified you at 9:04");
-      await click(h, buttonByText(h, "Fix it in a new session"));
-      expect(onFixIt).toHaveBeenCalled();
+      await click(h, buttonByText(h, "Follow up"));
+      expect(onFollowUp).toHaveBeenCalled();
     });
 
     it("a routine tool that has not completed is left to the generic tool card", () => {
@@ -340,7 +340,7 @@ describe("a run's header", () => {
       onKeep: vi.fn(),
       onBack,
       onOpenRoutine: vi.fn(),
-      onFixIt: vi.fn(),
+      onFollowUp: vi.fn(),
     });
     const h = mount(<>{chrome.lead}</>);
     await click(h, h.container.querySelector('[aria-label="Close run"]'));
@@ -416,5 +416,29 @@ describe("a menu opened from inside a modal", () => {
     });
     expect(onClose).toHaveBeenCalled();
     expect(onDismiss).not.toHaveBeenCalled();
+  });
+});
+
+describe("Follow up", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("in the report modal, moves the run into the sidebar as an ordinary session and opens it", async () => {
+    const store = createRoutinesStore();
+    const routinesKeepInSidebar = vi.fn(() => Promise.resolve({ tmuxSession: "ronda", windowIndex: 3, sessionID: "ses_run" }));
+    const tmuxSelectWindow = vi.fn(() => Promise.resolve());
+    installMockApi({ routinesRunGet: store.runGet, routinesMarkRead: () => Promise.resolve({ updated: 1 }), routinesKeepInSidebar, tmuxSelectWindow });
+    const onClosePane = vi.fn();
+    h = mount(<RoutineReportModal runId="run_dg_23" onClose={vi.fn()} onSeeTranscript={vi.fn()} onClosePane={onClosePane} onChanged={vi.fn()} />);
+    await h.flush();
+    const btn = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Follow up");
+    await click(h, btn ?? null);
+    await h.flush();
+    expect(routinesKeepInSidebar).toHaveBeenCalledWith("run_dg_23");
+    expect(onClosePane).toHaveBeenCalled();
+    expect(tmuxSelectWindow).toHaveBeenCalledWith({ sessionName: "ronda", windowIndex: 3 });
   });
 });

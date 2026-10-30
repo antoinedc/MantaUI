@@ -223,12 +223,12 @@ function KindLabel({ outcome, failed }: { outcome: "findings" | "nothing"; faile
 export function ReportCard({
   run,
   routine,
-  onFixIt,
+  onFollowUp,
   chrome = true,
 }: {
   run: RoutineRun;
   routine: Routine;
-  onFixIt?: () => void;
+  onFollowUp?: () => void;
   chrome?: boolean;
 }) {
   const failed = run.status === "failed" || run.status === "timed_out";
@@ -260,10 +260,10 @@ export function ReportCard({
       {content}
       <div className="flex items-center gap-2 border-t border-border-subtle bg-bg-elev px-4 py-2 text-meta text-text-faint">
         <NotifiedLine run={run} />
-        {onFixIt && report?.outcome !== "nothing" && (
+        {onFollowUp && (
           <span className="ml-auto">
-            <Button tone="default" onClick={onFixIt}>
-              Fix it in a new session
+            <Button tone="default" onClick={onFollowUp}>
+              Follow up
             </Button>
           </span>
         )}
@@ -289,13 +289,13 @@ export function NotifiedLine({ run }: { run: RoutineRun }) {
 export function RoutineReportCard() {
   const ctx = useContext(RoutineRunContext);
   if (!ctx) return null;
-  const { run, routine, onFixIt } = ctx;
+  const { run, routine, onFollowUp } = ctx;
   if (!hasReportView(run)) return null;
   const added = run.memoryDiff?.added ?? [];
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       {added.length > 0 && <MemoryUpdatedLine added={added} />}
-      <ReportCard run={run} routine={routine} onFixIt={onFixIt} />
+      <ReportCard run={run} routine={routine} onFollowUp={onFollowUp} />
     </div>
   );
 }

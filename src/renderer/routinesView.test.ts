@@ -8,7 +8,6 @@ import {
   draftErrors,
   draftToInput,
   emptyDraft,
-  fixItSeed,
   inboxTimeLabel,
   lastRunDetail,
   memoryLines,
@@ -200,10 +199,6 @@ describe("memory + instructions", () => {
     expect(accessLine({ access: "read", notify: "findings" })).toBe("Read-only");
     expect(accessLine({ access: "read", notify: "failures" })).toBe("Read-only · tells you only on failure");
     expect(accessLine({ access: "edit", notify: "findings" })).toBe("Can make changes · own branch");
-  });
-  it("fix-it seed names the routine, date, title and body", () => {
-    const seed = fixItSeed("Daily digest", run({ report: { outcome: "findings", title: "T", summary: "", body: "- b" } }));
-    expect(seed).toBe('Follow up on routine "Daily digest" run of Thu 30 Oct:\n\nT\n- b');
   });
 });
 
