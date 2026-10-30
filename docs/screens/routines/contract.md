@@ -100,7 +100,7 @@ text column `flex-1 min-w-0`: line 1 `text-meta text-text-faint` "<routine> · <
 line 2 `mt-1 text-body font-semibold text-text` = the question text in curly quotes (permission: "Allow <tool>: <command>?").
 Right: `<Button tone="primary">Answer</Button>` (self-center) → opens the run (R3) scrolled to the ask card.
 
-### R1.2 New findings (`manta-routines-findings`)
+### R1.2 Unread (`manta-routines-findings`; was "New findings")
 Unread runs with outcome `findings`, newest first, max 20 (then "Show all" link). Row:
 `relative grid grid-cols-[8px_1fr_auto] items-start gap-3 px-4 py-3 border-t border-border-subtle first:border-t-0 cursor-pointer hover:bg-fill`.
 - unread dot `mt-2 w-2 h-2 rounded-full bg-accent` (invisible, not removed, when read)
@@ -109,7 +109,7 @@ Unread runs with outcome `findings`, newest first, max 20 (then "Show all" link)
 - line 3 `mt-1 truncate text-label text-text-faint` report summary
 - right `mt-1 text-right text-micro font-mono tabular-nums text-text-quiet` time (`9:04` today, `Fri` this week, `24 Oct` older)
 - hover reveals (absolute, `right-3 top-1/2 -translate-y-1/2 flex gap-1`, time hidden): `<Button tone="ghost">`(Check) "Mark read" + `<Button tone="default">` "Open".
-Click row → R3 for that run (marks it read).
+Click row → R2 with that run selected (marks it read).
 
 ### R1.3 Running now (`manta-routines-queue`)
 Hint: "N at a time; the rest wait their turn" (N = configured concurrency, default 2).
@@ -153,6 +153,17 @@ on each recurring prompt row of the chat's ⏰ scheduled-tasks card (`ScheduledT
 In place of all sections: `<Card>` with header glyph tile (CalendarClock, accent tile `bg-accent-bg text-accent-tx`), `text-body font-semibold` "No routines yet", `text-label text-text-faint` "Ask in any chat — “every weekday at 9, summarize yesterday's analytics” — or create one here.", actions `<Button tone="primary">New routine</Button>`.
 
 ## R2 — One routine (`RoutineDetail.tsx`, hook `manta-routines-detail`)
+
+> **Revised 2026-10-30 — R2 is now the split view ("run inbox").** The routine page is a
+> run list (`manta-routines-runlist`, with an "About this routine" item on top) beside a
+> reading pane (`manta-routines-reading`) showing the selected run's report; the hero,
+> memory, instructions and settings below are the *About* pane, and Edit / Pause / Run now
+> moved to the header. Layout, selection, keyboard, actions and the label rules (no
+> "Findings" wording, pills only for in-flight / attention states) are in the spec's
+> "Run inbox" and "Labels" sections (`docs/superpowers/specs/2026-10-30-routines-design.md`)
+> and win over the layout described here; the visual reference is frame B of
+> `run-inbox-options.html`. The report-first modal is gone (R1.2 rows and notifications open
+> the routine page with that run selected).
 
 Header crumb: `Routines` (`text-text-faint hover:text-text`, button → R1) `/` routine name.
 Column as R1.
@@ -236,7 +247,7 @@ Footer: `ml-auto` Cancel · `<Button tone="primary">Move into chat</Button>`.
 
 ## R8 — Notification toast
 Uses the EXISTING desktop notification path (OS notification) — no new in-app toast
-component. The mockup's toast illustrates the payload only: title "<routine> · findings", body = report title, click → R3.
+component. The mockup's toast illustrates the payload only: title "<routine>" (a report with news; "<routine> · failed|needs you|nothing new" otherwise), body = report title, click → R2 with that run selected.
 
 ---
 
@@ -267,12 +278,13 @@ All rows: `url: "/app/index.html?demo&state=routines&desktop"`, `mockup: "docs/s
 | id | actions (real gestures) | final / region |
 |---|---|---|
 | routines-overview | click `aria-label="Open Routines"` | `.manta-routines-pane` |
-| routines-detail | + click row "Daily analytics digest" | `.manta-routines-detail` |
-| routines-run | + click run "Signups up 18%…" | `.manta-routines-run` |
+| routines-detail | + click row "Daily analytics digest" (newest unread run selected) | `.manta-routines-detail` |
+| routines-about | + click the "About this routine" item | `.manta-routines-memory` (region `.manta-routines-detail`) |
+| routines-run | detail + click "See transcript" | `.manta-routines-run` |
 | routines-create | overview + click "New routine" | `.manta-routines-editor` (snapshot = editor) |
 | routines-created-card | `?demo&state=routines-chat&desktop` (opens "Analytics review") | `.manta-routines-created-card` |
 | routines-convert | overview + click 2nd follow-up's "Make it a routine" | `.manta-routines-convert` |
-| routines-tochat | detail + click destination chip + "Inside a chat…" | `.manta-routines-tochat` |
+| routines-tochat | about + click destination chip + "Inside a chat…" | `.manta-routines-tochat` |
 
 Record baselines with `npm run visual:update`, run `npm run visual:compare`, and
 record findings in `docs/screens/routines/conformance.md` per the definition of done.

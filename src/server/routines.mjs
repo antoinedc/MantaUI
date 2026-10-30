@@ -231,10 +231,15 @@ export function notifyDecision(policy, run) {
     return { send: policy !== "never", urgent: false, kind: "failed" };
   }
   if (run.status === "done") {
-    if (run.report?.outcome === "findings") return { send: policy === "findings" || policy === "always", urgent: false, kind: "findings" };
+    if (run.report?.outcome === "findings") return { send: policy === "findings" || policy === "always", urgent: false, kind: "news" };
     return { send: policy === "always", urgent: false, kind: "nothing new" };
   }
   return { send: false, urgent: false, kind: "" };
+}
+
+/** The push title: the routine's name alone for a report with news, `name · what happened` otherwise. */
+export function notifyTitle(name, kind) {
+  return kind === "news" ? name : `${name} · ${kind}`;
 }
 
 /** Is a terminal run one the user has to look at? (spec §6.4: the only runs that can be unread) */
@@ -1215,7 +1220,7 @@ export function createRoutinesEngine(deps) {
     if (!d.send) return;
     const body = run.status === "needs_input" ? (run.question ?? "") : run.status === "failed" || run.status === "timed_out" ? (run.error ?? "") : (run.report?.title ?? "");
     try {
-      await push.fireNotify({ title: `${routine.name} · ${d.kind}`, message: body, urgent: d.urgent, tag: `routine-${routine.id}`, routineRunId: run.id });
+      await push.fireNotify({ title: notifyTitle(routine.name, d.kind), message: body, urgent: d.urgent, tag: `routine-${routine.id}`, routineRunId: run.id });
       await patchRun(run.id, { notifiedAt: now() }, { onlyLive: false });
     } catch (e) {
       log("[routines] notify failed:", e?.message ?? e);

@@ -87,7 +87,7 @@ type Props = {
   ctoState: CtoState | null;
   // Routines entry (spec §7): one nav row under CTO, never one per run. Clicking
   // opens the Routines pane; `routinesBadge` is the summary's counts (red =
-  // runs that need you, blue = unread findings; both hidden at 0).
+  // runs that need you, blue = unread reports; both hidden at 0).
   onOpenRoutines: () => void;
   routinesBadge: { needsYou: number; unread: number };
   /** The Routines pane is the visible view (selected-row state). */
@@ -755,7 +755,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             {routinesBadge.unread > 0 && (
               <span
                 className="rounded-full bg-accent-solid px-1 text-[11px] font-semibold leading-5 text-on-accent"
-                aria-label={`${routinesBadge.unread} new findings`}
+                aria-label={`${routinesBadge.unread} unread ${routinesBadge.unread === 1 ? "report" : "reports"}`}
               >
                 {routinesBadge.unread}
               </span>

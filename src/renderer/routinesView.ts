@@ -191,15 +191,15 @@ export interface OutcomeView {
   label: string;
 }
 
-/** Contract R1.4 outcome map. `waitingPos` is the 1-based place in line of a queued run. */
-export function outcomeView(run: Pick<RoutineRun, "status" | "report">, waitingPos?: number | null): OutcomeView {
+/**
+ * Contract R1.4 outcome map. `waitingPos` is the 1-based place in line of a queued run.
+ * A run that reported (either outcome) gets no pill — null: only something in flight or
+ * needing attention is worth one, and a "nothing" report shows as a muted title instead.
+ */
+export function outcomeView(run: Pick<RoutineRun, "status" | "report">, waitingPos?: number | null): OutcomeView | null {
   switch (run.status) {
     case "done":
-      return run.report?.outcome === "nothing"
-        ? { tone: "neutral", border: true, dot: null, label: "Nothing new" }
-        : run.report
-          ? { tone: "accent", border: false, dot: "accent", label: "Findings" }
-          : { tone: "neutral", border: true, dot: null, label: "Done" };
+      return null;
     case "running":
       return { tone: "accent", border: false, dot: "running", label: "Running" };
     case "queued":
@@ -262,6 +262,48 @@ export function runTitle(run: RoutineRun): string {
   return "";
 }
 
+/** The title of a run in the routine page's run list: `runTitle`, else a phrase for what the run is doing. */
+export function runListTitle(run: RoutineRun): string {
+  const t = runTitle(run);
+  if (t) return t;
+  switch (run.status) {
+    case "running":
+      return "Running…";
+    case "queued":
+      return "Waiting in line";
+    case "cancelled":
+      return "Stopped before it finished";
+    default:
+      return "Finished without a report";
+  }
+}
+
+/** The one sentence the reading pane gives a run that has no report to show. */
+export function runSentence(run: RoutineRun): string {
+  switch (run.status) {
+    case "cancelled":
+      return "This run was stopped before it finished.";
+    case "skipped":
+      return run.notes[0] ?? "This run was skipped.";
+    default:
+      return "This run finished without filing a report.";
+  }
+}
+
+/** A terminal run the user hasn't read yet and has to look at (spec §6.4's only unread runs). */
+export function isUnreadRun(run: Pick<RoutineRun, "status" | "report" | "readAt">): boolean {
+  return run.readAt == null && isTerminal(run.status) && (run.report?.outcome === "findings" || run.status === "failed" || run.status === "timed_out");
+}
+
+/** The run list's selection id for the "About this routine" item. */
+export const ABOUT_ITEM = "about";
+
+/** The selection a routine page opens on: the requested one, else the newest unread run, else the newest run, else About. */
+export function defaultRunSelection(runs: readonly RoutineRun[], requested?: string | null): string {
+  if (requested) return requested;
+  return runs.find(isUnreadRun)?.id ?? runs[0]?.id ?? ABOUT_ITEM;
+}
+
 /** The note under a run title: the report summary line is for findings; notes carry waits / catch-ups. */
 export function runNote(run: RoutineRun): string {
   if (run.notes.length > 0) return run.notes.join(" · ");
@@ -291,7 +333,7 @@ export function notifyLabel(n: RoutineNotify): string {
     case "never":
       return "Never notify";
     default:
-      return "Notify on findings";
+      return "Notify when there's news";
   }
 }
 

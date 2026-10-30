@@ -18,7 +18,7 @@ export interface RoutineRunBinding {
   onKeep: () => void;
   /** Back to the Routines list. */
   onBack: () => void;
-  /** Back to the routine's page. */
+  /** Back to the routine's page, this run selected (the × and the routine-name crumb). */
   onOpenRoutine: () => void;
   /** "Follow up": same as Keep in sidebar — the run becomes an ordinary session to continue in. */
   onFollowUp: () => void;

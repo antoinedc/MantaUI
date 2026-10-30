@@ -1,0 +1,1109 @@
+<!doctype html><html lang="en" data-theme="light"><head><meta charset="utf-8"/><title>Routines — opening a run: alternatives</title><style>
+/* tokens.css — THE design-token substrate. Single source of truth.
+ *
+ * Extracted verbatim from index.css (BET-VIS): the values are unchanged, but
+ * they now live in a standalone stylesheet so that BOTH consumers load the
+ * SAME file:
+ *
+ *   1. the app        — index.css @imports it (Vite inlines it at build time)
+ *   2. design mockups — docs/<screen>/mockup.html <link>s it directly
+ *
+ * That is what makes a mockup and the implementation comparable: same
+ * palette, same spacing grid, same shadows, same theme switching. A mockup
+ * that hardcodes its own hexes is not a spec — it is a picture, and it drifts
+ * the moment a token is retuned.
+ *
+ * RULES
+ *   - No selectors here other than :root and [data-theme="..."].
+ *   - No component styles. Those stay in index.css / Tailwind utilities.
+ *   - Changing a value here changes the app AND every mockup at once. That
+ *     is the point; it is also why a retune needs the visual baselines
+ *     regenerated (npm run visual:update).
+ */
+
+:root {
+  /* Width of the OS caption buttons overlaying the top-right of the window.
+     Windows (titleBarOverlay) reports a titlebar area narrower than the
+     window; macOS and Linux define neither variable, so the fallbacks make
+     this evaluate to 0 and the rule costs nothing there. */
+  --titlebar-inset-right: calc(
+    100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)
+  );
+
+  /* Spacing scale (BET-411). The 4px-grid steps matching the trimmed
+     Tailwind spacing scale from BET-407 (0, px, 1..12). Exposed as CSS
+     custom properties so hand-written layout rules (the transcript gap
+     rhythm below, and the surface sub-issues 08/09 that follow) read
+     spacing from one source — a value off the grid becomes impossible to
+     write in either Tailwind utilities or raw CSS. */
+  --sp-0: 0;
+  --sp-px: 1px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Transcript vertical rhythm (BET-411). Two numbers govern the whole
+     transcript: --block-gap is the gap between ANY two sibling blocks
+     inside one turn (paragraph, tool card, diff, todo list — all equal);
+     --turn-gap is the gap between turns. Driven from the container's
+     `gap`, never from per-child margins, so a new block type inherits the
+     correct spacing and cannot opt out. */
+  --block-gap: var(--sp-3);
+  --turn-gap: var(--sp-6);
+  /* The collapsed tool-activity line is one quiet row of metadata, not a
+     content block: it sits closer to its neighbours than --block-gap so a
+     turn with many tool runs reads as prose with annotations, not a stack. */
+  --tool-line-gap: var(--sp-1);
+
+  /* Transcript gutter. The composer column keeps the spec's 28px inset; the
+     TRANSCRIPT column is wider because its left/right margin is not empty
+     space — it is where each turn's timestamp sits, out of the reading
+     column, level with the turn's first line (the stamp used to sit ABOVE
+     the row, which pushed every turn down by its own height for a label
+     nobody reads twice). 48px is the stamp's width at 10px plus the sp-2 it
+     stands off the content plus an edge margin; below that the stamp starts
+     colliding with the panel edge. */
+  --transcript-inset: 48px;
+
+  /* Elevation shadows (BET-415). --shadow-sm is the resting lift for
+     contained surfaces (composer input, popovers, menus); --shadow-md is
+     reserved for floating panels that overlap content. Theme-aware so the
+     lift reads on both canvases without re-tuning per surface. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 0.5);
+  /* --shadow-lg is the third step: a surface floating over the whole window
+     (a modal, the folder picker), not merely over content. */
+  --shadow-lg: 0 20px 56px rgb(0 0 0 / 0.6);
+
+  /* Corner radii (BET-451). A named scale, for the same reason spacing is one:
+     a design that says `border-radius: 14px` forces an implementer to choose
+     between the mockup and the "no off-grid value" rule, and they will guess.
+     This is the scale the MantaUI 2.0 spec locks; --r-full is the pill form.
+     Tailwind's rounded-* utilities stay valid in component code — these exist
+     so a MOCKUP can name a radius without hardcoding a pixel, and so
+     hand-written CSS has one source. */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-full: 999px;
+
+  /* Reading measure + leading (BET-451). The measure now caps the composer
+     stack and the user bubble — not the transcript. Bringhurst's 45-75
+     characters is the long-standing optimum for prose that should be read at
+     measure; by owner decision the transcript runs the panel's full width
+     instead (BET-646), keeping only the 28px inset. Leading is split because
+     prose and chrome want different values — WCAG 1.4.12 requires content to
+     survive 1.5, so 1.5 is a floor, not a target. Do NOT change the token's
+     value: it is multi-consumer (BET-516 generates a Swift theme from this
+     file) and it still governs the composer and the user bubble. */
+  --measure: 80ch;
+  --prose-lh: 1.55;
+  --ui-lh: 1.45;
+
+  /* Type stacks (BET-451). These MIRROR tailwind.config.js `fontFamily` — the
+     app's components get them through font-sans / font-mono utilities, and
+     these exist so hand-written CSS and mockups resolve the same stack instead
+     of retyping it. Both faces are bundled (@fontsource-variable) rather than
+     assumed present: the renderer's CSP declares no font origin, so an
+     unbundled face is silently substituted per-OS. Change one, change both —
+     it is one decision living in two files. */
+  --font-sans: "Inter Variable", Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Transcript type + layout scale (BET-557 §8). The chat-screen atoms resolve
+     their sizes and weights through these so a retune is one edit across
+     desktop and the generated Swift client. The sizes are the §8-specified
+     transcript values (15 body / 13 step / 12 mono / 11 meta), NOT an off-grid
+     guess; --step-row-y and --step-dot are the step-row / rollup vertical
+     padding (7px) and the status-dot size (6px) the mockup fixes off the
+     spacing grid, so they get names here instead of being hardcoded. */
+  --font-size-body: 15px;
+  --font-size-small: 13px;
+  --font-size-xs: 12px;
+  --font-size-2xs: 11px;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --step-row-y: 7px;
+  --step-dot: 6px;
+  --chat-header-btn: 38px;
+  --font-size-chat-title: 14.5px;
+  --tracking-chat-title: -0.01;
+
+  /* Session-list anatomy (BET-595 §7). The row min-height, row corner radius,
+     row gap, group-header margins and the row-name size/tracking are off the
+     spacing / type grid, so they get names here instead of being hardcoded in
+     the Swift client. The two tracking values are UNITLESS em multipliers
+     (SwiftUI tracking is measured in points; the list view resolves them
+     against its font size). Additive — unused by the web app, no visual
+     change there. */
+  --list-row-min-h: 62px;
+  --list-row-radius: 20px;
+  --list-row-margin: 2px;
+  --list-group-above: 6px;
+  --list-group-below: 6px;
+  --font-size-row-name: 15.5px;
+  --tracking-list-heading: -0.015;
+  --tracking-row-name: -0.01;
+
+  /* S2 onboarding display sizes (BET-594). The pairing flow's headings, the
+     two-sided four-char confirm code, and the six-digit OTP resolve their font
+     sizes through these so a retune is one edit in the token source and the
+     generated Swift client reads the same values (additive — unused by the web
+     renderer, so no visual change there; mirrors how --step-row-y/--step-dot
+     were added for the transcript atoms). */
+  --font-size-display: 28px;
+  --font-size-confirm: 40px;
+  --font-size-otp: 26px;
+
+  /* Motion scale (audit D1). Mirrors chatMotion.ts — three durations, ONE
+     easing. Every in-app transition picks a token; ad-hoc durations/curves
+     are a regression. The CSS custom properties exist so keyframe/CSS
+     consumers (dropdowns, palette, onboarding, panel swap) resolve the same
+     values the framer sites import from chatMotion.ts. */
+  --motion-fast: 120ms;   /* menus, palette, backdrops */
+  --motion-base: 200ms;   /* modals, cards, toasts */
+  --motion-slow: 300ms;   /* message entry, panel slides, onboarding */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Reading-width cap for any inline embed (media, widgets). Cross-consumer:
+     MediaBody, WidgetBody, and the generated Swift theme all read it, which is
+     why it is a token and not a per-file constant. */
+  --inline-max-w: 520px;
+
+  /* Dim applied to a dormant widget's captured snapshot. Desktop and iOS must
+     dim identically; a hardcoded 0.5 in each would drift. */
+  --widget-dormant-opacity: 0.5;
+
+  /* Adaptive CTO pane & sidebar (§10). Dimensional and theme-shared — no
+     per-theme values, so nothing is needed in the theme blocks. See §10.7. */
+  --cto-card-min-w: 230px;  /* Now / Just-finished rail card minimum */
+  --cto-col-max-w: 960px;   /* overview page column */
+  --need-edge-w: 3px;       /* needs-you card left edge */
+  --tier-col-w: 76px;       /* digest tier-chip column */
+}
+
+/* Density scope (BET-544). Session-row metrics live on [data-density], NOT
+   :root (spec C2, docs/components.md). The sidebar rail renders inside a
+   density ancestor (Sidebar.tsx), so a row primitive consuming a --row-* token
+   must state that it requires a density ancestor. A component rendered outside
+   this scope gets none of these — the row collapses to an unpadded baseline.
+
+   `comfortable` is the app default and matches the prior :root values exactly
+   (no visual change to the rail). `compact` is the reduced variant the spec
+   defines (row-h 26px); it is not yet selected anywhere — the scope exists so
+   a future density setting can flip it. */
+[data-density="comfortable"] {
+  --row-h: 32px;
+  --row-px: 10px;
+  --row-py: 6px;
+}
+
+[data-density="compact"] {
+  --row-h: 26px;
+  --row-px: 8px;
+  --row-py: 4px;
+}
+
+/* Token substrate (BET-407). Colour literals moved out of tailwind.config.js
+   into CSS custom properties so a theme is one attribute on <html>. Values are
+   a 1:1 rename of the previous hardcoded literals — no retune. Sub-issue 03
+   adds a light block; sub-issue 04 splits the intentionally-collapsed tokens
+   (border-subtle/border, tx3/tx4, the three accent tokens).
+
+   Each colour that is used with a Tailwind alpha modifier (e.g. bg-accent/20)
+   is paired with a `-rgb` channel variable so `rgb(var(--tok-rgb) / <alpha>)`
+   can apply opacity. The hex `--tok` variables hold the same values for direct
+   use in hand-written CSS (e.g. the scrollbar below) and are the substrate
+   sub-issue 04 will split. */
+[data-theme="dark"] {
+  /* Contrast pass (BET-410): values retuned to the verified WCAG-AA block.
+     The prior values collapsed tx3/tx4 to #5C6578 (3.23:1 on canvas — below
+     AA for text) and border-strong to #33406B (1.88:1 — below the 3:1
+     control-boundary minimum). tx3 is now #939FB8 (7.12:1) for load-bearing
+     quiet text; tx4 (#6B7690) is the single sub-AA tier, reserved for
+     decorative text only (text-text-quiet). border-strong is now #5E6C9B
+     (3.69:1). See src/shared/contrast.mjs for the gate that pins these. */
+  --canvas: #0B1020;
+  --panel: #0F1526;
+  --card: #151C33;
+  --raised: #1C2440;
+  --inset: #070B16;
+  --border-subtle: #222C49;
+  --border: #33406B;
+  --border-strong: #5E6C9B;
+  /* --tx1 is INK, not white. It was #F2F5FA (17.3:1 on canvas) — a hair off
+     pure white on a near-black canvas, which is the classic dark-theme
+     halation setup: the glyphs bloom and the copy reads as harsh rather than
+     crisp. Material, IBM Carbon and Apple all land body ink around 87-90% of
+     the pure value for exactly this reason. #E3E8F2 is ~15:1 — still far
+     above the 4.5:1 the gate enforces and above AAA — with the glare gone.
+     The lighter tiers are unchanged; only the top tier was overdriven. */
+  --tx1: #E3E8F2;
+  --tx2: #BDC7DB;
+  --tx3: #939FB8;
+  --tx4: #6B7690;
+  --accent: #5A88FF;
+  --accent-tx: #7BA0FF;
+  --accent-solid: #5A88FF;
+  --on-accent: #0B1020;
+  --accent-soft: #1740AE;
+
+  /* Semantic tokens (BET-408). The -bg variants are pre-alpha'd fills; the
+     base ok/warn/danger/info colours carry -rgb channel vars so Tailwind
+     alpha modifiers (border-danger/30) and inline rgb(var(--tok-rgb)/<a>)
+     work. ok/warn/danger/info retuned in BET-410 to clear 4.5:1 on canvas
+     and panel (verified by the contrast gate). */
+  --ok: #3DD9A4;
+  --warn: #FACC15;
+  --danger: #FF6B7A;
+  --info: #49D7F5;
+  --cache-read: #0ea5a4;
+  --cache-write: #f59e0b;
+  --ok-bg: #3DD9A41f;
+  --warn-bg: #FACC151f;
+  --danger-bg: #FF6B7A1f;
+  --accent-bg: #5A88FF1f;
+  --fill: rgba(255, 255, 255, .04);
+  --fill-hover: rgba(255, 255, 255, .07);
+  --fill-active: rgba(255, 255, 255, .10);
+  --diff-add: #12351f;
+  --diff-del: #3a1720;
+
+  --ok-rgb: 61 217 164;
+  --warn-rgb: 250 204 21;
+  --danger-rgb: 255 107 122;
+  --info-rgb: 73 215 245;
+
+  --canvas-rgb: 11 16 32;
+  --panel-rgb: 15 21 38;
+  --card-rgb: 21 28 51;
+  --border-rgb: 51 64 107;
+  --tx1-rgb: 227 232 242;
+  --accent-rgb: 90 136 255;
+  --accent-soft-rgb: 23 64 174;
+}
+
+/* Light theme (BET-409). The core palette below is the WCAG-verified block
+   from the issue — values are exact, do not retune (sub-issue 04 splits the
+   intentionally-collapsed tokens). --accent is the hue (borders/tints);
+   --accent-solid is the DARKER fill behind --on-accent text so white-on-blue
+   clears 4.5:1 on thin glyphs. Use --accent-solid for filled buttons /
+   checkboxes / radios, never --accent.
+
+   The -rgb channel vars and --accent-soft are NOT in the issue's palette
+   block but the dark theme defines them and tailwind.config.js + existing
+   var() consumers (bg-accent, border-border, text-text, bg-accent-soft,
+   rgb(var(--danger-rgb)/…)) read them in BOTH themes. Omitting them here
+   would make every Tailwind colour class and every -rgb expression resolve
+   to nothing in light mode, so they are derived 1:1 from the listed values. */
+[data-theme="light"] {
+  --canvas: #FAF9F7;
+  --panel: #F2F0EC;
+  --card: #FFFFFF;
+  --raised: #EAE7E1;
+  --inset: #F5F3EF;
+  --border-subtle: #E8E4DD;
+  --border: #DAD5CC;
+  --border-strong: #857C6E;
+  /* Same correction as dark's --tx1, and more of it, because the light theme
+     is where it showed: #1A1815 on this canvas is 16.8:1 — effectively black
+     ink, harder than anything a reading UI uses. The reference points all sit
+     well below it (Notion #37352F ≈ 11.7:1, GitHub #1F2328, Material's
+     87%-black ≈ #212121, Tailwind prose slate-700 ≈ 10:1): comfortable body
+     copy is ~10-13:1, not maximal. #33302B keeps the canvas's warm cast, lands
+     at 12.5:1 on canvas / 10.7:1 on the raised surface — AAA everywhere the
+     gate checks — and takes the glare out of long transcripts.
+
+     This one token is the whole fix: --tx1 is `text-text`, which is the
+     assistant's prose, the user bubble, markdown headings and body, tool-card
+     names and diff bodies. Retuning it moves every one of them at once, which
+     is the point of having a tier. */
+  --tx1: #33302B;
+  --tx2: #48433C;
+  --tx3: #665F55;
+  --tx4: #8A8275;
+  --accent: #2E6BFF;
+  --accent-tx: #1F55D6;
+  --accent-solid: #1F55D6;
+  --on-accent: #FFFFFF;
+  /* A SOFT tint, not the accent itself. It was #1F55D6 — byte-identical to
+     --accent-tx, the colour drawn ON it — so every light-mode pill that pairs
+     them (the composer's model picker, the attach button, transcript glyphs)
+     rendered as a solid blue blob with invisible content. */
+  --accent-soft: #DFE8FF;
+  --ok: #0A7A53;
+  --warn: #6E6200;
+  --danger: #BE2F3C;
+  --info: #0B6E85;
+  --cache-read: #0ea5a4;
+  --cache-write: #f59e0b;
+  --ok-bg: #0A7A5314;
+  --warn-bg: #6E620014;
+  --danger-bg: #BE2F3C14;
+  --accent-bg: #2E6BFF14;
+  --fill: rgba(26, 24, 21, .035);
+  --fill-hover: rgba(26, 24, 21, .06);
+  --fill-active: rgba(26, 24, 21, .09);
+  --diff-add: #E4F4E9;
+  --diff-del: #FCEAEC;
+
+  --ok-rgb: 10 122 83;
+  --warn-rgb: 110 98 0;
+  --danger-rgb: 190 47 60;
+  --info-rgb: 11 110 133;
+
+  --canvas-rgb: 250 249 247;
+  --panel-rgb: 242 240 236;
+  --card-rgb: 255 255 255;
+  --border-rgb: 218 213 204;
+  --tx1-rgb: 51 48 43;
+  --accent-rgb: 46 107 255;
+  --accent-soft-rgb: 223 232 255;
+
+  --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06);
+  --shadow-md: 0 8px 24px rgb(26 24 21 / 0.10);
+  --shadow-lg: 0 20px 56px rgb(26 24 21 / 0.14);
+}
+/* ==========================================================================
+   ROUTINES — design contract CSS.
+   Every value below is a token (tokens.css), a Tailwind type role
+   (tailwind.config.js fontSize: display 24 / title 17 / prose 15 / body 14 /
+   label 13 / meta 12 / micro 11), a spacing step (--sp-*), or the chrome of an
+   EXISTING primitive (docs/components.md). The trailing comment on each rule
+   names the primitive or the Tailwind classes the implementation must use.
+   No raw hex, no off-grid spacing. See docs/screens/routines/contract.md.
+   ========================================================================== */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--panel); color: var(--tx1); font: 400 15px/var(--ui-lh) var(--font-sans); -webkit-font-smoothing: antialiased; }
+.ic { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; display:block; }
+.ic.s { width:14px; height:14px; }
+.ic.xs { width:12px; height:12px; stroke-width:2.2; }
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ---------- presentation chrome (NOT part of the design) ---------- */
+.deck{max-width:1440px;margin:0 auto;padding:var(--sp-5) var(--sp-6) var(--sp-10)}
+.deck-h{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.deck-h h1{font:600 17px/1.3 var(--font-sans);margin:0}
+.deck-h .sub{font:400 13px/1.4 var(--font-sans);color:var(--tx3)}
+.tabs{display:flex;gap:var(--sp-1);background:var(--fill);padding:var(--sp-1);border-radius:var(--r-md);margin-left:auto;flex-wrap:wrap}
+.tabs button{border:0;background:transparent;font:500 12px/1 var(--font-sans);color:var(--tx3);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);cursor:pointer}
+.tabs button.on{background:var(--card);color:var(--tx1);box-shadow:var(--shadow-sm)}
+.themeb{border:1px solid var(--border);background:var(--card);color:var(--tx2);font:500 12px/1 var(--font-sans);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-md);cursor:pointer}
+.caption{font:400 13px/1.55 var(--font-sans);color:var(--tx3);margin:var(--sp-3) 0 0;max-width:110ch}
+.caption b{color:var(--tx1);font-weight:600}
+.notes-spec{max-width:96ch;margin:var(--sp-6) 0 0;font:400 14px/1.6 var(--font-sans);color:var(--tx2)}
+.notes-spec h3{font:600 14px/1.3 var(--font-sans);color:var(--tx1);margin:var(--sp-5) 0 var(--sp-2)}
+.notes-spec li{margin:var(--sp-1) 0}
+.notes-spec b{color:var(--tx1)}
+.screen{display:none}
+.screen.on{display:contents}
+
+/* ================= APP SHELL (exists today — unchanged) ================= */
+.app{position:relative;border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-lg);
+  background:var(--canvas);display:grid;grid-template-columns:256px 1fr;height:860px;margin:var(--sp-4) 0 var(--sp-2)}
+/* Sidebar.tsx: <aside class="w-64 border-r border-border bg-bg-elev"> */
+.rail{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;min-width:0}
+.drag{height:48px;flex-shrink:0;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4)}
+.drag i{width:12px;height:12px;border-radius:50%;display:block;background:var(--border)}
+.rail-h{display:flex;align-items:center;padding:0 var(--sp-3) var(--sp-2)}
+.rail-h h2{font:600 12px/1.4 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx2);margin:0} /* text-meta font-semibold uppercase tracking-wider text-text-muted */
+.rail-h .acts{margin-left:auto;display:flex;gap:var(--sp-1)}
+.iconbtn{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:transparent;color:var(--tx3);cursor:pointer;display:grid;place-items:center;position:relative} /* <IconButton size="md"> */
+.iconbtn:hover{background:var(--fill-hover);color:var(--tx1)}
+.rail-scroll{flex:1;overflow-y:auto;padding:0 var(--sp-2) var(--sp-2);min-height:0}
+.nav{padding:0 var(--sp-1) var(--sp-1)}
+/* NEW pinned rail row — SAME chrome as the existing CTO row in Sidebar.tsx:
+   "flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm font-medium text-text hover:bg-fill-hover"
+   (text-sm there == 14px == text-body). Selected = bg-raised + accent marker (SessionRow's ROW_SELECTED). */
+.navrow{display:flex;align-items:center;gap:var(--sp-2);width:100%;padding:var(--sp-2);border-radius:var(--r-md);border:0;background:transparent;
+  font:500 14px/1.5 var(--font-sans);color:var(--tx1);cursor:pointer;text-align:left;position:relative}
+.navrow:hover{background:var(--fill-hover)}
+.navrow.on{background:var(--raised)}
+.navrow.on::before{content:"";position:absolute;left:calc(-1 * var(--sp-2));top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:0 3px 3px 0;background:var(--accent)}
+.navrow .t{flex:1}
+.navrow .ic{color:var(--tx3)}
+.navrow.on .ic{color:var(--accent-tx)}
+/* Count badges — the CTO row's badge chrome: "rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white".
+   Accent variant swaps bg-danger→bg-accent-solid, text-white→text-on-accent. */
+.cnt-badge{border-radius:var(--r-full);padding:0 var(--sp-1);font:600 11px/20px var(--font-sans);min-width:20px;text-align:center}
+.cnt-badge.danger{background:var(--danger);color:#fff}
+.cnt-badge.acc{background:var(--accent-solid);color:var(--on-accent)}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--tx4);display:inline-block} /* SessionRow DOT_BASE */
+.dot.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);animation:pulse 1.6s ease-in-out infinite}
+.dot.att{background:var(--danger);box-shadow:0 0 0 3px var(--danger-bg);animation:pulse 1.2s ease-in-out infinite}
+.dot.ok{background:var(--ok)}
+.dot.warn{background:var(--warn)}
+.create{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);padding:var(--row-py) var(--row-px);border-radius:var(--r-md);font:500 13px/1 var(--font-sans);color:var(--tx4);margin-bottom:var(--sp-1)}
+.create .k{margin-left:auto;font:500 11px/1 var(--font-mono);color:var(--tx4)}
+.grp{margin-top:var(--sp-3)}
+.grp-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) var(--sp-2);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)}
+.grp-h .ic{width:12px;height:12px;color:var(--tx4);stroke-width:2.5}
+.srow{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);padding:var(--row-py) var(--row-px);border-radius:var(--r-md);cursor:pointer;position:relative;margin-bottom:var(--sp-1)} /* <SessionRow> */
+.srow:hover{background:var(--fill-hover)}
+.srow.on{background:var(--raised)}
+.srow.on::before{content:"";position:absolute;left:calc(-1 * var(--sp-2));top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:0 3px 3px 0;background:var(--accent)}
+.srow .t{font:500 13px/1.4 var(--font-sans);color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.srow.on .t{color:var(--tx1);font-weight:600}
+.srow .age{font:500 11px/1 var(--font-mono);color:var(--tx4);min-width:20px;text-align:right}
+.rail-foot{border-top:1px solid var(--border);padding:var(--sp-3) var(--sp-4);font:400 13px/1 var(--font-sans);color:var(--tx2)}
+
+.mainpane{display:flex;flex-direction:column;min-width:0;background:var(--canvas);position:relative}
+/* Main-pane header: same 46px bar as SessionHeader / the CTO pane. */
+.topb{height:46px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3) 0 var(--sp-4);flex-shrink:0;border-bottom:1px solid var(--border-subtle)}
+.crumb{display:flex;align-items:center;gap:var(--sp-2);font:500 13px/1 var(--font-sans);color:var(--tx1);min-width:0;white-space:nowrap} /* text-label */
+.crumb .mut{color:var(--tx3);cursor:pointer}
+.crumb .mut:hover{color:var(--tx1)}
+.crumb .slash{color:var(--tx4)}
+/* <Tag size="md" icon=…> — "gap-[5px] h-[23px] px-2 text-[11.5px] font-mono rounded-full border border-border bg-fill text-text-faint" */
+.tag{display:inline-flex;align-items:center;gap:5px;height:23px;padding:0 var(--sp-2);border-radius:var(--r-full);border:1px solid var(--border);background:var(--fill);font:500 11.5px/1 var(--font-mono);color:var(--tx3);white-space:nowrap}
+.tag .ic{width:12px;height:12px}
+.topb .sp{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2)}
+.scroll{flex:1;overflow-y:auto;min-height:0}
+
+/* <Button tone=…> — md: "h-8 px-[14px] text-[12.5px] gap-[6px] rounded-md border". ONE size. */
+.btn{height:32px;padding:0 14px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--canvas);color:var(--tx1);
+  font:500 12.5px/1 var(--font-sans);cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn:hover{background:var(--raised);border-color:var(--border-strong)}
+.btn.pri{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--on-accent)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--tx3)}
+.btn.ghost:hover{background:var(--fill-hover);color:var(--tx1)}
+.btn .ic{width:14px;height:14px}
+
+/* ================= NEW: Routines page ================= */
+/* Page column = the CTO pane's column: "mx-auto px-6 py-8" + maxWidth var(--cto-col-max-w). */
+.page{max-width:var(--cto-col-max-w);margin:0 auto;padding:var(--sp-8) var(--sp-6) var(--sp-12)}
+.ph{display:flex;align-items:flex-end;gap:var(--sp-4)}
+.ph h1{font:600 24px/1.25 var(--font-sans);margin:0} /* text-display font-semibold text-text */
+.ph p{margin:var(--sp-1) 0 0;font:400 14px/1.5 var(--font-sans);color:var(--tx3)} /* text-body text-text-faint */
+.ph .acts{margin-left:auto;display:flex;gap:var(--sp-2)}
+.sec{margin-top:var(--sp-8)}
+.sec-h{display:flex;align-items:center;gap:var(--sp-2);margin-bottom:var(--sp-3)}
+.sec-h h3{margin:0;font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)} /* <Eyebrow> */
+.sec-h .n{font:500 11px/1.3 var(--font-mono);color:var(--tx4)} /* text-micro font-mono tabular-nums text-text-quiet */
+.sec-h .r{margin-left:auto;display:flex;gap:var(--sp-1);align-items:center}
+.sec-h .hint{font:400 12px/1.4 var(--font-sans);color:var(--tx4)} /* text-meta text-text-quiet */
+.link{border:0;background:transparent;color:var(--accent-tx);font:500 12px/1.4 var(--font-sans);cursor:pointer;padding:var(--sp-1) var(--sp-2);border-radius:var(--r-sm)} /* text-meta font-medium text-accent-tx hover:bg-accent-bg rounded-sm px-2 py-1 */
+.link:hover{background:var(--accent-bg)}
+/* List container — <Card>'s surface WITHOUT padding (rows own it): "rounded-lg border border-border-subtle bg-bg-soft overflow-hidden" */
+.box{border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--card);overflow:hidden}
+
+/* Needs-you card — the CTO needs-you chrome: left edge var(--need-edge-w) danger. */
+.need{display:flex;gap:var(--sp-3);align-items:flex-start;border:1px solid var(--border);border-left:var(--need-edge-w) solid var(--danger);
+  border-radius:var(--r-lg);background:var(--card);padding:var(--sp-3) var(--sp-4);box-shadow:var(--shadow-sm)}
+.need .badge{width:32px;height:32px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--danger-bg);color:var(--danger);flex-shrink:0}
+.need .tx{flex:1;min-width:0}
+.need .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)} /* text-meta text-text-faint */
+.need .q{font:600 14px/1.5 var(--font-sans);color:var(--tx1);margin-top:var(--sp-1)} /* text-body font-semibold */
+.need .acts{display:flex;gap:var(--sp-2);align-self:center}
+
+/* Findings inbox row */
+.irow{display:grid;grid-template-columns:8px 1fr auto;gap:var(--sp-3);align-items:start;padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);cursor:pointer;position:relative}
+.irow:first-child{border-top:0}
+.irow:hover{background:var(--fill)}
+.irow .ud{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:var(--sp-2)}
+.irow.read .ud{visibility:hidden}
+.irow .who{font:500 12px/1.4 var(--font-sans);color:var(--tx3);display:flex;gap:var(--sp-1);align-items:center} /* text-meta */
+.irow .who .sep{color:var(--tx4)}
+.irow .ttl{font:600 14px/1.5 var(--font-sans);color:var(--tx1);margin-top:var(--sp-1)} /* text-body font-semibold */
+.irow.read .ttl{font-weight:500;color:var(--tx2)}
+.irow .sum{font:400 13px/1.4 var(--font-sans);color:var(--tx3);margin-top:var(--sp-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} /* text-label text-text-faint truncate */
+.irow .when{font:500 11px/1.3 var(--font-mono);color:var(--tx4);margin-top:var(--sp-1);text-align:right} /* text-micro font-mono tabular-nums */
+.irow .hov{position:absolute;right:var(--sp-3);top:50%;transform:translateY(-50%);display:flex;gap:var(--sp-1);opacity:0}
+.irow:hover .hov{opacity:1}
+.irow:hover .when{visibility:hidden}
+
+/* Queue panel */
+.queue{display:grid;grid-template-columns:320px 1fr}
+.slots{padding:var(--sp-3) var(--sp-4);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;gap:var(--sp-2)}
+.slot{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-md);background:var(--accent-bg);font:500 13px/1.4 var(--font-sans);color:var(--tx1)}
+.slot .el{margin-left:auto;font:500 11px/1.3 var(--font-mono);color:var(--accent-tx)}
+.slot.free{background:transparent;border:1px dashed var(--border);color:var(--tx4)}
+.waiting{padding:var(--sp-3) var(--sp-4)}
+.wl{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) 0;font:500 13px/1.4 var(--font-sans);color:var(--tx2)}
+.wl .pos{width:20px;height:20px;border-radius:50%;background:var(--fill-active);display:grid;place-items:center;font:600 11px/1 var(--font-mono);color:var(--tx2)}
+.wl .since{margin-left:auto;font:500 11px/1.3 var(--font-mono);color:var(--tx4)}
+.qnote{font:400 12px/1.4 var(--font-sans);color:var(--tx4);margin-top:var(--sp-2)}
+.qlabel{font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx4);margin-bottom:var(--sp-1)} /* <Eyebrow> */
+
+/* Routines table */
+.rt-head,.rt-row{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,1.2fr) 96px 40px;gap:var(--sp-3);align-items:center;padding:0 var(--sp-4)}
+.rt-head{padding-top:var(--sp-2);padding-bottom:var(--sp-2);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx4);border-bottom:1px solid var(--border-subtle)}
+.rt-row{padding-top:var(--sp-3);padding-bottom:var(--sp-3);border-top:1px solid var(--border-subtle);cursor:pointer}
+.rt-head+.rt-row{border-top:0}
+.rt-row:hover{background:var(--fill)}
+.rt-row .nm{display:flex;align-items:center;gap:var(--sp-3);min-width:0}
+.rt-row .nm b{font:600 14px/1.5 var(--font-sans);color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block} /* text-body font-semibold */
+.rt-row .nm small{font:400 12px/1.4 var(--font-mono);color:var(--tx4);display:block} /* text-meta font-mono text-text-quiet */
+.rt-row .cad{font:500 13px/1.4 var(--font-sans);color:var(--tx2)} /* text-label */
+.rt-row .cad small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.rt-row .nx{font:500 12px/1.4 var(--font-mono);color:var(--tx3)}
+.rt-row.paused .nm b,.rt-row.paused .cad{color:var(--tx4)}
+/* Routine glyph tile: "grid place-items-center w-8 h-8 rounded-md bg-fill text-text-faint" (lucide size=14) */
+.ricon{width:32px;height:32px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--fill);color:var(--tx3);flex-shrink:0}
+/* Outcome = <Pill tone=… size="meta">. Pill chrome: "inline-flex items-center gap-2 rounded-full px-2 py-px font-semibold text-meta".
+   Tones used: accent (Findings, Running), neutral+border (Nothing new), warn (Queued), danger (Failed, Needs you) — `danger` is a NEW tone
+   on the existing Pill (bg-danger-bg text-danger), not a new primitive. The leading dot is <StatusDot>. */
+.oc{display:inline-flex;align-items:center;gap:var(--sp-2);padding:1px var(--sp-2);border-radius:var(--r-full);font:600 12px/1.4 var(--font-sans);white-space:nowrap}
+.oc .dot{width:6px;height:6px}
+.oc.find,.oc.run{background:var(--accent-bg);color:var(--accent)}
+.oc.find .dot{background:var(--accent)}
+.oc.none{background:transparent;color:var(--tx2);border:1px solid var(--border)}
+.oc.fail,.oc.need{background:var(--danger-bg);color:var(--danger)}
+.oc.fail .dot,.oc.need .dot{background:var(--danger)}
+.oc.wait{background:var(--warn-bg);color:var(--warn)}
+.oc.wait .dot{background:var(--warn)}
+.lastrun{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0;align-items:flex-start}
+.lastrun small{font:400 12px/1.4 var(--font-sans);color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+/* <Toggle> — track 32×18-ish, knob 14px (existing primitive, do not restyle). */
+.sw{display:inline-block;vertical-align:middle;width:32px;height:18px;border-radius:var(--r-full);background:var(--accent-solid);border:1px solid var(--accent-solid);position:relative;cursor:pointer}
+.sw::after{content:"";position:absolute;top:1px;left:15px;width:14px;height:14px;border-radius:50%;background:var(--on-accent)}
+.sw.off{background:var(--fill-active);border-color:var(--border)}
+.sw.off::after{left:1px;background:var(--tx3)}
+
+.conv-row{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);font:500 13px/1.4 var(--font-sans);color:var(--tx2)}
+.conv-row:first-child{border-top:0}
+.conv-row .in{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.conv-row .in a{color:var(--accent-tx);text-decoration:none}
+.conv-row .r{margin-left:auto;font:500 12px/1.4 var(--font-mono);color:var(--tx3)}
+.conv-row .mk{margin-left:var(--sp-2)}
+.conv-row .once{width:160px;font:400 12px/1.4 var(--font-sans);color:var(--tx4);text-align:right;margin-left:var(--sp-2)}
+
+/* ================= NEW: Routine detail ================= */
+.hero{display:flex;gap:var(--sp-4);align-items:flex-start}
+.hero .ricon{width:40px;height:40px;border-radius:var(--r-lg);background:var(--accent-bg);color:var(--accent-tx)}
+.hero .ricon .ic{width:20px;height:20px}
+.hero h1{font:600 24px/1.25 var(--font-sans);margin:0} /* text-display */
+.facts{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-2)}
+/* Facts row = <Chip> (29px, rounded-md, border, bg-bg-soft, text-meta). Clickable "destination" chip = <Chip on> + Dropdown. */
+.fact{display:inline-flex;align-items:center;gap:var(--sp-2);height:29px;padding:0 var(--sp-3);border-radius:var(--r-md);border:1px solid var(--border);background:var(--card);font:500 12px/1 var(--font-sans);color:var(--tx2)}
+.fact .ic{width:13px;height:13px;color:var(--tx3)}
+.fact.m{font-family:var(--font-mono)}
+.fact.sw2{cursor:pointer;border-color:var(--accent);background:var(--accent-bg);color:var(--accent-tx)}
+.fact.sw2 .ic{color:var(--accent-tx)}
+.hero .acts{margin-left:auto;display:flex;gap:var(--sp-2);flex-shrink:0}
+.nextline{font:400 13px/1.4 var(--font-sans);color:var(--tx3);margin-top:var(--sp-3)} /* text-label text-text-faint */
+.nextline b{color:var(--tx1);font-weight:600}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:var(--sp-6);margin-top:var(--sp-8);align-items:start}
+.runrow{display:grid;grid-template-columns:80px 112px minmax(0,1fr) 64px;gap:var(--sp-3);align-items:center;padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);cursor:pointer}
+.runrow:first-child{border-top:0}
+.runrow:hover{background:var(--fill)}
+.runrow .d{font:500 12px/1.4 var(--font-mono);color:var(--tx3)}
+.runrow .d small{display:block;color:var(--tx4);font-size:11px}
+.runrow .tt{font:500 13px/1.4 var(--font-sans);color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} /* text-label */
+.runrow.quiet .tt{color:var(--tx3);font-weight:400}
+.runrow .tt small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.runrow .du{font:500 11px/1.3 var(--font-mono);color:var(--tx4);text-align:right}
+.runrow.unread .tt{font-weight:600}
+.side{display:flex;flex-direction:column;gap:var(--sp-4)}
+.panel-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-4) 0}
+.panel-h h4{margin:0;font:600 13px/1.4 var(--font-sans);color:var(--tx1)} /* text-label font-semibold */
+.panel-h .ic{color:var(--tx3)}
+.panel-h .r{margin-left:auto;display:flex;gap:var(--sp-1)}
+.panel-sub{padding:var(--sp-1) var(--sp-4) 0;font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+/* Memory body = <OutputWell variant="standalone"> look: bg-inset, border-subtle, rounded-md, font-mono text-meta */
+.notes{margin:var(--sp-3) var(--sp-4) var(--sp-4);padding:var(--sp-3);border-radius:var(--r-md);background:var(--inset);border:1px solid var(--border-subtle);
+  font:400 12px/1.6 var(--font-mono);color:var(--tx2);white-space:pre-wrap}
+.notes .h{color:var(--tx1);font-weight:600}
+.notes .new{background:var(--diff-add);border-radius:var(--r-xs)}
+.instr{margin:var(--sp-3) var(--sp-4) var(--sp-4);font:400 13px/1.55 var(--font-sans);color:var(--tx2)}
+.skillchip{display:inline-flex;align-items:center;padding:0 var(--sp-2);border-radius:var(--r-full);background:var(--accent-bg);color:var(--accent-tx);font:500 12px/1.6 var(--font-mono)}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:var(--sp-2) var(--sp-3);padding:var(--sp-3) var(--sp-4) var(--sp-4);font:400 12px/1.4 var(--font-sans)}
+.kv dt{color:var(--tx4)}
+.kv dd{margin:0;color:var(--tx2)}
+
+/* ================= NEW: a run (existing ChatPanel + two additions) ================= */
+.runbar{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-2) var(--sp-6);background:var(--panel);border-bottom:1px solid var(--border-subtle);font:400 12px/1.4 var(--font-sans);color:var(--tx3)} /* text-meta */
+.runbar .ic{color:var(--accent-tx)}
+.runbar b{color:var(--tx1);font-weight:600}
+.runbar .sep{color:var(--tx4)}
+.runbar .r{margin-left:auto;display:flex;gap:var(--sp-2)}
+.tscroll{flex:1;overflow-y:auto;padding:var(--sp-6) 0;min-height:0}
+.wrap{padding:0 var(--transcript-inset);display:flex;flex-direction:column;gap:var(--turn-gap)}
+.turn{display:flex;flex-direction:column;gap:var(--block-gap)}
+.trigger{display:flex;align-items:center;gap:var(--sp-2);font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.trigger .ic{color:var(--accent-tx)}
+.trigger .line{flex:1;height:1px;background:var(--border-subtle)}
+/* The routine's prompt renders through <MessageBubble> with an Eyebrow label above the text. */
+.promptcard{border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--fill);padding:var(--sp-3) var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);margin-left:auto;max-width:min(88%,var(--measure))}
+.promptcard .lbl{display:flex;align-items:center;gap:var(--sp-1);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx4);margin-bottom:var(--sp-1)}
+.amsg{font:400 15px/var(--prose-lh) var(--font-sans);color:var(--tx1);display:flex;flex-direction:column;gap:var(--block-gap)}
+.amsg p{margin:0}
+.ict{font-family:var(--font-mono);font-size:.86em;background:var(--fill);border:1px solid var(--border-subtle);padding:1px var(--sp-1);border-radius:var(--r-xs)}
+.tline{display:flex;flex-direction:column;gap:var(--tool-line-gap)}
+.tl{display:flex;align-items:center;gap:var(--sp-2);font:500 12px/1.6 var(--font-mono);color:var(--tx3)} /* the existing collapsed tool-activity line */
+.tl .g{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.tl b{color:var(--tx2);font-weight:600}
+.tl .r{margin-left:auto;color:var(--tx4);font-size:11px}
+/* Report card — the ask-card chrome (Cards.tsx PermissionCard): rounded-lg border bg-bg-soft shadow-md; 32px badge; footer on bg-bg-elev. */
+.report{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-md);overflow:hidden}
+.report-h{display:flex;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4) var(--sp-3);align-items:flex-start}
+.report-h .bdg{width:32px;height:32px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--accent-bg);color:var(--accent-tx);flex-shrink:0}
+.report-h .k{font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--accent-tx)}
+.report-h h5{margin:var(--sp-1) 0 0;font:600 15px/1.4 var(--font-sans);color:var(--tx1)} /* text-prose font-semibold */
+.report-h .body{min-width:0;flex:1}
+.report ul{margin:var(--sp-2) 0 0;padding:0 0 0 var(--sp-4);font:400 14px/1.6 var(--font-sans);color:var(--tx2)} /* text-body */
+.report ul li{margin:var(--sp-1) 0}
+.report ul b{color:var(--tx1)}
+.report .up{color:var(--ok);font-weight:600}
+.report .down{color:var(--danger);font-weight:600}
+.report-f{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-4);border-top:1px solid var(--border-subtle);background:var(--panel);font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.report-f .r{margin-left:auto;display:flex;gap:var(--sp-2)}
+/* Composer = the existing InputArea, untouched. */
+.composer{flex-shrink:0;padding:0 0 var(--sp-3)}
+.comp-in{max-width:var(--measure);margin:0 auto;padding:0 28px}
+.cbox{border:1px solid var(--border-strong);border-radius:var(--r-lg);background:var(--card);padding:var(--sp-3) var(--sp-4);display:flex;align-items:flex-start;gap:var(--sp-3);box-shadow:var(--shadow-sm)}
+.cbox .ta{flex:1;font:400 15px/1.55 var(--font-sans);color:var(--tx3);min-height:22px}
+.cbox .send{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:var(--fill);color:var(--tx3);display:grid;place-items:center}
+.metarow{display:flex;align-items:center;gap:var(--sp-2);margin-top:var(--sp-2)}
+.msplit{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;height:29px;background:var(--card)} /* <SplitChip> */
+.msplit span{white-space:nowrap;height:100%;padding:0 var(--sp-3);font:500 12px/1 var(--font-sans);color:var(--tx2);display:inline-flex;align-items:center;gap:var(--sp-1)}
+.msplit span+span{border-left:1px solid var(--border)}
+.msplit .lvl{color:var(--accent-tx);font-weight:600}
+.msplit .ic{width:13px;height:13px}
+.mbtn{display:inline-flex;align-items:center;gap:var(--sp-1);height:28px;padding:0 var(--sp-2);border-radius:var(--r-sm);color:var(--tx3);font:500 12px/1 var(--font-sans)}
+.spacer{margin-left:auto}
+.comp-hint{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.umsg{align-self:flex-end;background:var(--fill);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-3) var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);max-width:min(88%,var(--measure))} /* <MessageBubble> */
+
+/* In-chat "Routine created" card — <Card elevated={false}> with a dl body and an actions row. */
+.rcard{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-sm);overflow:hidden;max-width:var(--inline-max-w)}
+.rcard-h{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4)}
+.rcard-h .ricon{background:var(--accent-bg);color:var(--accent-tx)}
+.rcard-h .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.rcard-h b{display:block;font:600 14px/1.5 var(--font-sans);color:var(--tx1)}
+.rcard-b{display:grid;grid-template-columns:96px 1fr;gap:var(--sp-1) var(--sp-3);margin:0;padding:0 var(--sp-4) var(--sp-3);font:400 13px/1.4 var(--font-sans)}
+.rcard-b dt{color:var(--tx4)} .rcard-b dd{margin:0;color:var(--tx2)}
+.rcard-f{display:flex;gap:var(--sp-2);padding:var(--sp-2) var(--sp-4);border-top:1px solid var(--border-subtle);background:var(--panel)}
+
+/* ================= NEW: modals — <Modal size="lg" tall> (560px) ================= */
+.scrim{position:absolute;inset:0 0 0 -256px;background:rgb(0 0 0 / .4);display:flex;align-items:flex-start;justify-content:center;padding-top:var(--sp-8);z-index:5} /* Modal backdrop bg-black/40 */
+.modal{width:560px;max-height:800px;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:var(--r-xl);background:var(--card);box-shadow:var(--shadow-lg);overflow:hidden}
+.modal-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-4) var(--sp-5);border-bottom:1px solid var(--border-subtle)}
+.modal-h h2{margin:0;font:600 17px/1.3 var(--font-sans)} /* text-title font-semibold */
+.modal-h .r{margin-left:auto}
+.modal-b{padding:var(--sp-4) var(--sp-5);overflow-y:auto;display:flex;flex-direction:column;gap:var(--sp-4)}
+.modal-f{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-5);border-top:1px solid var(--border-subtle);background:var(--panel)}
+/* Field label = Field's LABEL_CLS: "block text-micro font-semibold uppercase text-text-muted"; help = "text-meta text-text-faint". */
+.fld label{display:block;font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx2);margin-bottom:var(--sp-2)}
+.fld .help{font:400 12px/1.4 var(--font-sans);color:var(--tx3);margin-top:var(--sp-1)}
+/* Inputs = <Field> chrome: "bg-bg-soft border border-border-strong rounded-md text-body px-4 py-3" (focus: border-accent) */
+.inp{border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--card);padding:var(--sp-2) var(--sp-3);display:flex;align-items:center;gap:var(--sp-2);font:400 14px/1.5 var(--font-sans);color:var(--tx1);white-space:nowrap;overflow:hidden}
+.inp .ic{color:var(--tx3)}
+.inp.mono{font-family:var(--font-mono)}
+.inp .chev{margin-left:auto;color:var(--tx4)}
+.tarea{min-height:96px;border:1px solid var(--accent);border-radius:var(--r-md);background:var(--card);padding:var(--sp-3);font:400 14px/1.55 var(--font-sans);color:var(--tx1)}
+.tarea .cur{display:inline-block;width:2px;height:16px;background:var(--accent);vertical-align:-3px;animation:pulse 1s steps(1) infinite}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)}
+/* Option groups = <ChipGroup> (Chip chrome: h-[29px] rounded-md border border-border bg-bg-soft text-meta text-text-muted px-[11px]; on = border-accent bg-accent-bg text-accent-tx). */
+.seg{display:inline-flex;flex-wrap:wrap;gap:var(--sp-2)}
+.seg span{display:inline-flex;align-items:center;height:29px;padding:0 11px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--card);font:400 12px/1 var(--font-sans);color:var(--tx2);cursor:pointer;white-space:nowrap}
+.seg span.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent-tx)}
+.when{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.when .inp{width:96px}
+.when .tz{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.rcs{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2)}
+/* Radio card = <MenuOption selected> look: border, selected → border-accent bg-accent-bg. */
+.rc{border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);display:flex;gap:var(--sp-2);cursor:pointer;background:var(--card)}
+.rc.on{border-color:var(--accent);background:var(--accent-bg)}
+.rc .rb{width:16px;height:16px;border-radius:50%;border:2px solid var(--border-strong);flex-shrink:0;display:grid;place-items:center}
+.rc.on .rb{border-color:var(--accent-solid)}
+.rc.on .rb::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent-solid)}
+.rc b{display:block;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.rc small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+/* Memory/advice notes = <Callout tone="info" size="note"> */
+.memnote{display:flex;gap:var(--sp-2);align-items:flex-start;padding:var(--sp-2) var(--sp-3);border-left:2px solid var(--accent);border-radius:0 var(--r-sm) var(--r-sm) 0;background:var(--accent-bg);font:400 12px/1.4 var(--font-sans);color:var(--tx2)}
+.memnote .ic{color:var(--accent-tx);margin-top:1px}
+.memnote b{color:var(--tx1);font-weight:600}
+.from{display:flex;gap:var(--sp-3);align-items:center;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-md);background:var(--panel);border:1px solid var(--border-subtle)}
+.from .ic{color:var(--tx3)}
+.from b{display:block;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.from small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.from .arrow{margin-left:auto;display:flex;align-items:center;gap:var(--sp-1);font:600 12px/1 var(--font-sans);color:var(--accent-tx);white-space:nowrap}
+.diffbox{border:1px solid var(--border-subtle);border-radius:var(--r-md);overflow:hidden}
+.diffbox .was{padding:var(--sp-2) var(--sp-3);background:var(--diff-del);font:400 13px/1.5 var(--font-sans);color:var(--tx2);text-decoration:line-through}
+.diffbox .now{padding:var(--sp-2) var(--sp-3);background:var(--card);font:400 14px/1.55 var(--font-sans);color:var(--tx1);border-top:1px solid var(--border-subtle)}
+.seed{padding:var(--sp-3);border-radius:var(--r-md);background:var(--inset);border:1px solid var(--border-subtle);font:400 12px/1.6 var(--font-mono);color:var(--tx2);white-space:pre-wrap}
+.kept{display:flex;flex-direction:column;gap:var(--sp-1);font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.kept div{display:flex;gap:var(--sp-2);align-items:flex-start}
+.kept .ic{color:var(--ok);margin-top:1px}
+.kept b{color:var(--tx1);font-weight:600}
+.pick{display:flex;flex-direction:column;gap:var(--sp-2)}
+.mini3{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:var(--sp-2)}
+.mini3 .inp{font-size:13px}
+.fade{opacity:.55;pointer-events:none}
+
+/* Notification toast = the existing toast stack chrome (agent-file / download toasts). */
+.toast{position:absolute;right:var(--sp-5);top:96px;width:320px;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-md);padding:var(--sp-3) var(--sp-4);display:flex;gap:var(--sp-3);z-index:4}
+.toast .bdg{width:28px;height:28px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--accent-bg);color:var(--accent-tx);flex-shrink:0}
+.toast .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.toast b{display:block;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.toast .acts{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
+/* ===== additions for the report alternatives (tokens only) ===== */
+.ic.inl{display:inline-block;vertical-align:-2px}
+.rsum{margin:var(--sp-2) 0 0;font:400 14px/1.6 var(--font-sans);color:var(--tx2)}
+.rp{margin:var(--sp-2) 0 0;font:400 14px/1.6 var(--font-sans);color:var(--tx2)}
+.report h6{margin:var(--sp-4) 0 0;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.rlist{margin:var(--sp-2) 0 0;padding-left:var(--sp-4);font:400 14px/1.6 var(--font-sans);color:var(--tx2)}
+.report.big .report-h{padding:var(--sp-5) var(--sp-6) var(--sp-5)}
+.report.big h5{font:600 17px/1.4 var(--font-sans)}
+.report.flat{box-shadow:none}
+/* A — header segmented switch (SegmentedControl look) */
+.seg2{display:inline-flex;gap:2px;padding:2px;background:var(--fill);border-radius:var(--r-md);margin-left:var(--sp-3)}
+.seg2 span{padding:var(--sp-1) var(--sp-3);border-radius:var(--r-sm);font:500 12.5px/1.4 var(--font-sans);color:var(--tx3);cursor:pointer;display:inline-flex;gap:var(--sp-1);align-items:center}
+.seg2 span.on{background:var(--card);color:var(--tx1);box-shadow:var(--shadow-sm)}
+.seg2 i{font-style:normal;font:500 11px/1 var(--font-mono);color:var(--tx4)}
+.rpage{max-width:var(--measure);margin:0 auto;padding:var(--sp-8) var(--sp-6) var(--sp-12);display:flex;flex-direction:column;gap:var(--sp-4)}
+.rmeta{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.rmeta .sep{color:var(--tx4)}
+.after{display:flex;flex-direction:column;gap:var(--sp-1)}
+.disc{display:flex;align-items:center;gap:var(--sp-2);border:0;background:transparent;padding:var(--sp-2) var(--sp-1);font:500 12px/1.4 var(--font-sans);color:var(--tx3);cursor:pointer;border-radius:var(--r-sm);text-align:left}
+.disc:hover{background:var(--fill-hover);color:var(--tx1)}
+.disc .go{margin-left:auto;color:var(--accent-tx)}
+.pointer{display:flex;align-items:center;gap:var(--sp-2);font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.pointer .ic{color:var(--ok)}
+.pointer a{color:var(--accent-tx);cursor:pointer}
+/* B — inbox split */
+.split{flex:1;min-height:0;display:grid;grid-template-columns:340px 1fr}
+.slist{border-right:1px solid var(--border-subtle);overflow-y:auto;background:var(--panel)}
+.slist-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-4);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);border-bottom:1px solid var(--border-subtle)}
+.slist-h .n{font:500 11px/1.3 var(--font-mono);color:var(--tx4);letter-spacing:0}
+.slist-h .r{margin-left:auto;text-transform:none;letter-spacing:0}
+.sitem{display:grid;grid-template-columns:8px 1fr auto;gap:var(--sp-3);align-items:start;padding:var(--sp-3) var(--sp-4);border-bottom:1px solid var(--border-subtle);cursor:pointer}
+.sitem:hover{background:var(--fill-hover)}
+.sitem.on{background:var(--raised);box-shadow:inset 3px 0 0 var(--accent)}
+.sitem .ud{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:var(--sp-1)}
+.sitem.read .ud{visibility:hidden}
+.sitem .d{font:500 11px/1.3 var(--font-mono);color:var(--tx4)}
+.sitem .t{font:500 13px/1.4 var(--font-sans);color:var(--tx1);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sitem .t.q{color:var(--tx3);font-weight:400}
+.sitem .oc{padding:3px}
+.sread{overflow-y:auto;padding:var(--sp-6) var(--sp-8);display:flex;flex-direction:column;gap:var(--sp-4)}
+.sread-h{display:flex;align-items:center;gap:var(--sp-3)}
+.sread-h .m{font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.sread-h .r{margin-left:auto;display:flex;gap:var(--sp-2)}
+/* C — side sheet */
+.sheet-scrim{position:absolute;inset:0;background:rgb(0 0 0 / .18)}
+.sheet{position:absolute;top:0;right:0;bottom:0;width:640px;background:var(--canvas);border-left:1px solid var(--border);box-shadow:var(--shadow-lg);display:flex;flex-direction:column}
+.sheet-h{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-4) var(--sp-5);border-bottom:1px solid var(--border-subtle)}
+.sheet-h .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.sheet-h b{font:600 17px/1.3 var(--font-sans);color:var(--tx1)}
+.sheet-h .r{margin-left:auto;display:flex;gap:var(--sp-1)}
+.sheet-b{flex:1;overflow-y:auto;padding:var(--sp-5);display:flex;flex-direction:column;gap:var(--sp-3)}
+.sheet-f{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-5);border-top:1px solid var(--border-subtle);background:var(--panel);font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></symbol>
+<symbol id="i-hook" viewBox="0 0 24 24"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+<symbol id="i-panel" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></symbol>
+<symbol id="i-cto" viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 0 6h-1v1a4 4 0 0 1-8 0v-1H7a3 3 0 0 1 0-6h1V6a4 4 0 0 1 4-4z"/></symbol>
+<symbol id="i-routine" viewBox="0 0 24 24"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/></symbol>
+<symbol id="i-memory" viewBox="0 0 24 24"><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><rect width="16" height="20" x="4" y="2" rx="2"/><path d="M9.5 8h5"/><path d="M9.5 12H16"/><path d="M9.5 16H14"/></symbol>
+<symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
+<symbol id="i-bug" viewBox="0 0 24 24"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></symbol>
+<symbol id="i-package" viewBox="0 0 24 24"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m3.3 7 7.703 4.734a2 2 0 0 0 1.994 0L20.7 7"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/></symbol>
+<symbol id="i-crash" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+<symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-sidebar-add" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M14 12h4"/><path d="M16 10v4"/></symbol>
+<symbol id="i-msg" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+<symbol id="i-rotate" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+<symbol id="i-queue" viewBox="0 0 24 24"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></symbol>
+</defs></svg>
+
+<div class="deck">
+  <div class="deck-h">
+    <h1>Opening a run — three alternatives to the report modal</h1>
+    <span class="sub">Same white report card in all three; what changes is the room around it</span>
+    <div class="tabs" id="tabs">
+      <button data-s="now">0 · Today</button>
+      <button data-s="a" class="on">A · Report page ★</button>
+      <button data-s="a2">A · Transcript tab</button>
+      <button data-s="b">B · Inbox split</button>
+      <button data-s="c">C · Side sheet</button>
+    </div>
+    <button class="themeb" id="theme">Dark theme</button>
+  </div>
+  <p class="caption" id="cap"></p>
+
+  <div class="app">
+    <aside class="rail">
+      <div class="drag"><i></i><i></i><i></i></div>
+      <div class="rail-h"><h2>Workspace</h2></div>
+      <div class="rail-scroll">
+        <div class="nav">
+          <button class="navrow"><span class="dot ok"></span><span class="t">CTO</span></button>
+          <button class="navrow on"><svg class="ic s"><use href="#i-routine"/></svg><span class="t">Routines</span><span class="cnt-badge acc">2</span></button>
+        </div>
+        <div class="grp">
+          <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>ronda</div>
+          <div class="srow"><span class="dot ok"></span><span class="t">Analytics review</span><span class="age">6m</span></div>
+          <div class="srow"><span class="dot"></span><span class="t">Onboarding emails</span><span class="age">2h</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>better-ui</div>
+          <div class="srow"><span class="dot run"></span><span class="t">Deploy new billing service</span><span class="age">2m</span></div>
+          <div class="srow"><span class="dot"></span><span class="t">Refactor auth middleware</span><span class="age">1d</span></div>
+        </div>
+      </div>
+      <div class="rail-foot">Settings…</div>
+    </aside>
+
+    <div class="mainpane">
+
+      <!-- ===================== 0. TODAY ===================== -->
+      <div class="screen" data-screen="now">
+        <div class="topb"><span class="crumb"><span class="mut">Routines</span><span class="slash">/</span>Daily analytics digest</span></div>
+        <div class="scroll"><div class="page fade">
+          <div class="hero"><span class="ricon"><svg class="ic"><use href="#i-chart"/></svg></span><div><h1>Daily analytics digest</h1></div></div>
+          <div class="cols"><div class="box" style="height:420px"></div><div class="box" style="height:300px"></div></div>
+        </div></div>
+        <div class="scrim" style="inset:0;padding-top:120px">
+          <div class="modal" style="width:560px">
+            <div class="modal-h"><svg class="ic s" style="color:var(--accent-tx)"><use href="#i-routine"/></svg><h2>Daily analytics digest · Thu 30 Oct · 9:02</h2><span class="r"><button class="iconbtn"><svg class="ic"><use href="#i-x"/></svg></button></span></div>
+            <div class="report-h"><span class="bdg"><svg class="ic"><use href="#i-chart"/></svg></span><div class="body"><div class="k">Findings</div><h5>Signups up 18% week over week; checkout errors doubled since Tuesday</h5>
+              <p class="rsum">412 signups (vs 349). Checkout error rate 2.1% → 4.3%, all on Safari 17 — started with Tuesday's deploy.</p>
+              <ul class="rlist"><li><b>Signups</b> 412 vs 349 last week +18% — mostly organic search</li><li><b>Checkout errors</b> 2.1% → 4.3% ×2 — Safari 17 only, since deploy a41c9e2</li></ul></div></div>
+            <div class="modal-f"><svg class="ic s" style="color:var(--tx3)"><use href="#i-bell"/></svg><span style="font:400 12px/1 var(--font-sans);color:var(--tx3)">Notified you at 9:04</span><span class="spacer"></span><button class="btn">See full transcript</button><button class="btn pri">Follow up</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== A. REPORT PAGE ===================== -->
+      <div class="screen on" data-screen="a">
+        <div class="topb">
+          <span class="crumb"><span class="mut">Routines</span><span class="slash">/</span><span class="mut">Daily analytics digest</span><span class="slash">/</span>Thu 30 Oct · 9:02</span>
+          <div class="seg2"><span class="on">Report</span><span>Transcript <i>12</i></span></div>
+          <span class="sp">
+            <button class="btn ghost">‹ Wed</button><button class="btn ghost" disabled>Fri ›</button>
+            <button class="iconbtn" title="Close"><svg class="ic"><use href="#i-x"/></svg></button>
+          </span>
+        </div>
+        <div class="scroll">
+          <div class="rpage">
+            <div class="rmeta">
+              <svg class="ic xs inl" style="color:var(--accent-tx)"><use href="#i-routine"/></svg>
+              <span><b style="color:var(--tx1);font-weight:600">Scheduled run</b> · started 9:02 · 2m 14s · 38.2k tokens</span>
+            </div>
+            <div class="report big">
+              <div class="report-h">
+                <span class="bdg"><svg class="ic"><use href="#i-chart"/></svg></span>
+                <div class="body"><div class="k">Findings</div>
+                  <h5>Signups up 18% week over week; checkout errors doubled since Tuesday</h5>
+                  <p class="rsum">412 signups (vs 349). Checkout error rate 2.1% → 4.3%, all on Safari 17 — started with Tuesday's deploy.</p>
+                  <ul>
+                    <li><b>Signups</b> 412 vs 349 last week <span class="up">+18%</span> — mostly organic search</li>
+                    <li><b>Checkout errors</b> 2.1% → 4.3% <span class="down">×2</span> — Safari 17 only, since deploy <span class="ict">a41c9e2</span></li>
+                    <li><b>Activation</b> back to 33% after Monday's dip — no action needed</li>
+                  </ul>
+                  <h6>Why it matters</h6>
+                  <p class="rp">Tuesday's deploy <span class="ict">a41c9e2</span> changed the payment form's date input. Safari 17 rejects the new format, so the error appears only there. Revert or patch the input before the weekend peak.</p>
+                </div>
+              </div>
+              <div class="report-f"><svg class="ic s"><use href="#i-bell"/></svg>Notified you at 9:04<span class="r"><button class="btn pri"><svg class="ic"><use href="#i-msg"/></svg>Follow up</button></span></div>
+            </div>
+            <div class="after">
+              <button class="disc"><svg class="ic xs"><use href="#i-chev-r"/></svg>How it got there · loaded a skill, ran 3 commands, 2m 14s<span class="go">See full transcript →</span></button>
+              <button class="disc"><svg class="ic xs"><use href="#i-chev-r"/></svg>Memory updated · +2 lines</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== A2. TRANSCRIPT TAB ===================== -->
+      <div class="screen" data-screen="a2">
+        <div class="topb">
+          <span class="crumb"><span class="mut">Routines</span><span class="slash">/</span><span class="mut">Daily analytics digest</span><span class="slash">/</span>Thu 30 Oct · 9:02</span>
+          <div class="seg2"><span>Report</span><span class="on">Transcript <i>12</i></span></div>
+          <span class="sp">
+            <button class="btn ghost">‹ Wed</button><button class="btn ghost" disabled>Fri ›</button>
+            <button class="iconbtn" title="Close"><svg class="ic"><use href="#i-x"/></svg></button>
+          </span>
+        </div>
+        <div class="tscroll">
+          <div class="wrap">
+            <div class="turn">
+              <div class="trigger"><svg class="ic xs"><use href="#i-clock"/></svg>Weekdays at 9:00<span class="line"></span></div>
+              <div class="promptcard"><div class="lbl"><svg class="ic xs"><use href="#i-routine"/></svg>Routine instructions</div>Use <span class="skillchip">$posthog-digest</span> for yesterday. Compare against the baselines you remember. Only report changes beyond ±10% or anything new in errors.</div>
+            </div>
+            <div class="turn">
+              <div class="tline"><div class="tl"><span class="g"></span><b>Loaded a skill, ran 3 commands</b></div></div>
+              <div class="amsg"><p>Signups are well above baseline. The bigger issue is checkout errors: they started climbing Tuesday afternoon and every one of them is on Safari 17. Tuesday's deploy <span class="ict">a41c9e2</span> changed the payment form's date input, which matches the error.</p></div>
+              <div class="pointer"><svg class="ic xs"><use href="#i-check"/></svg>Filed its report · <a>Back to the report</a></div>
+            </div>
+          </div>
+        </div>
+        <div class="composer"><div class="comp-in">
+          <div class="cbox"><span class="ta">Follow up on this run…</span><button class="send"><svg class="ic s"><use href="#i-send"/></svg></button></div>
+          <div class="metarow"><span class="spacer"></span><span class="comp-hint">Sending moves this run into the sidebar as a normal session</span></div>
+        </div></div>
+      </div>
+
+      <!-- ===================== B. INBOX SPLIT ===================== -->
+      <div class="screen" data-screen="b">
+        <div class="topb"><span class="crumb"><span class="mut">Routines</span><span class="slash">/</span>Daily analytics digest</span>
+          <span class="sp"><button class="btn"><svg class="ic"><use href="#i-pencil"/></svg>Edit</button><button class="btn pri"><svg class="ic"><use href="#i-play"/></svg>Run now</button></span></div>
+        <div class="split">
+          <div class="slist">
+            <div class="slist-h">Runs <span class="n">23</span><span class="r"><button class="link">Findings only</button></span></div>
+            <div class="sitem on"><span class="ud"></span><div><div class="d">Thu 30 · 9:02</div><div class="t">Signups up 18% week over week; checkout errors doubled…</div></div><span class="oc find"><span class="dot"></span></span></div>
+            <div class="sitem read"><span class="ud"></span><div><div class="d">Wed 29 · 9:01</div><div class="t q">All metrics within normal range</div></div></div>
+            <div class="sitem read"><span class="ud"></span><div><div class="d">Tue 28 · 9:07</div><div class="t">Activation dipped to 31% after the onboarding copy change</div></div><span class="oc find"><span class="dot"></span></span></div>
+            <div class="sitem read"><span class="ud"></span><div><div class="d">Mon 27 · 9:41</div><div class="t">Weekend traffic 2.3× normal — a Hacker News link</div></div><span class="oc find"><span class="dot"></span></span></div>
+            <div class="sitem read"><span class="ud"></span><div><div class="d">Fri 24 · 9:01</div><div class="t q">All metrics within normal range</div></div></div>
+            <div class="sitem read"><span class="ud"></span><div><div class="d">Thu 23 · 9:00</div><div class="t">PostHog returned 401 — the API key expired</div></div><span class="oc fail"><span class="dot"></span></span></div>
+          </div>
+          <div class="sread">
+            <div class="sread-h">
+              <span class="oc find"><span class="dot"></span>Findings</span><span class="m">Thu 30 Oct · 9:02 · 2m 14s · notified 9:04</span>
+              <span class="r"><button class="btn">See transcript</button><button class="btn pri">Follow up</button></span>
+            </div>
+            <div class="report big flat">
+              <div class="report-h">
+                <span class="bdg"><svg class="ic"><use href="#i-chart"/></svg></span>
+                <div class="body"><div class="k">Findings</div>
+                  <h5>Signups up 18% week over week; checkout errors doubled since Tuesday</h5>
+                  <p class="rsum">412 signups (vs 349). Checkout error rate 2.1% → 4.3%, all on Safari 17 — started with Tuesday's deploy.</p>
+                  <ul>
+                    <li><b>Signups</b> 412 vs 349 last week <span class="up">+18%</span> — mostly organic search</li>
+                    <li><b>Checkout errors</b> 2.1% → 4.3% <span class="down">×2</span> — Safari 17 only, since deploy <span class="ict">a41c9e2</span></li>
+                    <li><b>Activation</b> back to 33% after Monday's dip — no action needed</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== C. SIDE SHEET ===================== -->
+      <div class="screen" data-screen="c">
+        <div class="topb"><span class="crumb"><span class="mut">Routines</span><span class="slash">/</span>Daily analytics digest</span></div>
+        <div class="scroll"><div class="page">
+          <div class="hero"><span class="ricon"><svg class="ic"><use href="#i-chart"/></svg></span><div><h1>Daily analytics digest</h1><div class="facts"><span class="fact"><svg class="ic"><use href="#i-clock"/></svg>Weekdays at 9:00</span><span class="fact m"><svg class="ic"><use href="#i-folder"/></svg>~/projects/ronda</span></div></div></div>
+          <div class="cols"><div class="box">
+            <div class="runrow unread" style="background:var(--fill)"><div class="d">Thu 30<small>9:02</small></div><div><span class="oc find"><span class="dot"></span>Findings</span></div><div class="tt">Signups up 18% week over week; checkout…</div><div class="du">2m 14s</div></div>
+            <div class="runrow quiet"><div class="d">Wed 29<small>9:01</small></div><div><span class="oc none">Nothing new</span></div><div class="tt">All metrics within normal range</div><div class="du">1m 48s</div></div>
+            <div class="runrow"><div class="d">Tue 28<small>9:07</small></div><div><span class="oc find"><span class="dot"></span>Findings</span></div><div class="tt">Activation dipped to 31%…</div><div class="du">2m 30s</div></div>
+          </div><div></div></div>
+        </div></div>
+        <div class="sheet-scrim"></div>
+        <aside class="sheet">
+          <div class="sheet-h">
+            <div><div class="k">Daily analytics digest</div><b>Thu 30 Oct · 9:02</b></div>
+            <span class="r"><button class="iconbtn">‹</button><button class="iconbtn">›</button><button class="iconbtn"><svg class="ic"><use href="#i-x"/></svg></button></span>
+          </div>
+          <div class="sheet-b">
+            <div class="report big">
+              <div class="report-h">
+                <span class="bdg"><svg class="ic"><use href="#i-chart"/></svg></span>
+                <div class="body"><div class="k">Findings</div>
+                  <h5>Signups up 18% week over week; checkout errors doubled since Tuesday</h5>
+                  <p class="rsum">412 signups (vs 349). Checkout error rate 2.1% → 4.3%, all on Safari 17 — started with Tuesday's deploy.</p>
+                  <ul>
+                    <li><b>Signups</b> 412 vs 349 last week <span class="up">+18%</span> — mostly organic search</li>
+                    <li><b>Checkout errors</b> 2.1% → 4.3% <span class="down">×2</span> — Safari 17 only, since deploy <span class="ict">a41c9e2</span></li>
+                    <li><b>Activation</b> back to 33% after Monday's dip — no action needed</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <div class="after"><button class="disc"><svg class="ic xs"><use href="#i-chev-r"/></svg>Memory updated · +2 lines</button></div>
+          </div>
+          <div class="sheet-f"><svg class="ic s"><use href="#i-bell"/></svg>Notified you at 9:04<span class="spacer"></span><button class="btn">See full transcript</button><button class="btn pri">Follow up</button></div>
+        </aside>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="notes-spec">
+    <h3>What's wrong today</h3>
+    <ul>
+      <li>The modal is the narrowest surface in the app (560px) holding its widest content. Lists, numbers and code wrap early, and the header sentence competes with the card's own title.</li>
+      <li>It's a dead end: no previous/next run and no way to reply. "See full transcript" swaps to a different screen with a different header, so the two feel unrelated.</li>
+    </ul>
+
+    <h3>Patterns other tools use for "a run and its result"</h3>
+    <ul>
+      <li><b>GitHub Actions / Vercel deployments</b>: a run is a <i>page</i>. "Summary" (the outcome) is the default tab and "Logs" or "Jobs" sits beside it. The URL is the run, and prev/next or re-run sit in the header. → A</li>
+      <li><b>Linear Inbox, Mail, Sentry issues</b>: a list on the left and a reading pane on the right. You triage many items without opening or closing anything. → B</li>
+      <li><b>Notion / Linear peek, Figma comments</b>: a wide side sheet over the list keeps your place. → C</li>
+      <li><b>ChatGPT scheduled tasks</b> drop each result into its own conversation, which is what our transcript does today. It's the thing users found awkward: the answer is buried at the end of the steps that produced it.</li>
+    </ul>
+
+    <h3>A · Report page with a Transcript tab — recommended</h3>
+    <ul>
+      <li>Clicking a run opens a full page in the same place the transcript lives now. Its header has a <b>Report | Transcript</b> switch, ‹ › to move between runs, and × back to Routines.</li>
+      <li>The white card, footer included, is shown at reading width (the transcript's measure), with nothing else competing. <b>Follow up</b> stays in its footer. Under it are two collapsed lines: "How it got there" (jumps to the Transcript tab) and "Memory updated".</li>
+      <li>The Transcript tab is today's run view, with the same header. The report is no longer repeated at the end; there's a one-line "Back to the report". Its composer offers follow-up directly, and sending moves the run into the sidebar (same as Follow up).</li>
+      <li>A run with nothing to report (running, waiting on you) opens on the Transcript tab. Notifications open on Report.</li>
+      <li><b>Cost:</b> smallest change. It reuses the run route, run bar and ChatPanel; the modal is deleted and the switch is a SegmentedControl in the header.</li>
+    </ul>
+
+    <h3>B · Inbox split on the routine page</h3>
+    <ul>
+      <li>The routine's run list becomes the left column, and the selected run's report fills the right. You can read many runs without opening anything, and the arrow keys move through them.</li>
+      <li>Best for daily routines you skim. It needs a second design for the cross-routine "New findings" list (the same split on the Routines page), and the transcript still opens as its own screen.</li>
+      <li><b>Cost:</b> medium. It replaces the routine page's two-column layout, and the side column (memory, instructions) moves to a tab or drawer.</li>
+    </ul>
+
+    <h3>C · Wide side sheet</h3>
+    <ul>
+      <li>A 640px sheet slides over the right of the page with the full card, ‹ › and the footer actions. The list behind stays visible and dimmed.</li>
+      <li>The least disruptive change from today (it's the modal, made tall and wide and anchored to the edge). But it's still an overlay: the transcript remains a separate screen, and on a narrow window the sheet covers almost everything.</li>
+      <li><b>Cost:</b> small. It needs a new sheet surface (no existing primitive), and the transcript doesn't change.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const caps = {
+  now: "<b>Today.</b> A 560px modal over the routine page: the report wraps early, has no previous/next, and the transcript is a separate screen.",
+  a: "<b>A · Report page (recommended).</b> The run opens as a page. The report is the default tab at reading width, with Transcript one click away in the header. ‹ › and close stay in the same header on both tabs; Follow up is in the card on Report and is the composer on Transcript.",
+  a2: "<b>A · Transcript tab.</b> Today's run view under the same header. The report isn't repeated at the end, just a pointer back. The composer offers follow-up directly.",
+  b: "<b>B · Inbox split.</b> The routine's runs on the left and the selected report on the right. Built for skimming many runs; the transcript stays a separate screen.",
+  c: "<b>C · Side sheet.</b> A wide sheet anchored to the right edge over the run list. Roomier than the modal and keeps your place, but still an overlay.",
+};
+const tabs = document.querySelectorAll("#tabs button");
+function go(s){
+  document.querySelectorAll(".screen").forEach(e=>e.classList.toggle("on", e.dataset.screen===s));
+  tabs.forEach(b=>b.classList.toggle("on", b.dataset.s===s));
+  document.getElementById("cap").innerHTML = caps[s];
+  history.replaceState(null,"","#"+s);
+}
+tabs.forEach(b=>b.addEventListener("click",()=>go(b.dataset.s)));
+go(location.hash.slice(1) in caps ? location.hash.slice(1) : "a");
+document.getElementById("theme").addEventListener("click",e=>{
+  const h=document.documentElement; const d=h.dataset.theme==="dark";
+  h.dataset.theme=d?"light":"dark"; e.target.textContent=d?"Dark theme":"Light theme";
+});
+</script>
+</body></html>

@@ -1,7 +1,7 @@
 // ===== Routines page (R1) =====
 //
 // The page behind the single "Routines" sidebar row: what is blocked on the
-// user, unread findings, the run queue and every routine. Follow-ups that run
+// user, unread reports, the run queue and every routine. Follow-ups that run
 // inside a chat are managed from that chat's ⏰ card, not here. Sections with
 // nothing to show are omitted (except "Your routines", which shows its empty
 // state). The summary comes from App's single subscription; this component only
@@ -61,13 +61,17 @@ export function RoutinesPane({
   reload,
   onOpenRoutine,
   onOpenRun,
+  onOpenTranscript,
   onNewRoutine,
 }: {
   summary: RoutinesSummary | null;
   error: string | null;
   reload: () => Promise<void>;
   onOpenRoutine: (id: string) => void;
-  onOpenRun: (runId: string, run?: RoutineRun) => void;
+  /** An unread run: opens in its routine's page with the run selected. */
+  onOpenRun: (runId: string, run: RoutineRun) => void;
+  /** Straight to a run's transcript (Answer on a run that needs you). */
+  onOpenTranscript: (runId: string) => void;
   onNewRoutine: () => void;
 }) {
   const now = useNowMs();
@@ -109,6 +113,7 @@ export function RoutinesPane({
               reload={reload}
               onOpenRoutine={onOpenRoutine}
               onOpenRun={onOpenRun}
+              onOpenTranscript={onOpenTranscript}
               onNewRoutine={onNewRoutine}
             />
           )}
@@ -126,6 +131,7 @@ function PaneSections({
   reload,
   onOpenRoutine,
   onOpenRun,
+  onOpenTranscript,
   onNewRoutine,
 }: {
   summary: RoutinesSummary;
@@ -134,21 +140,22 @@ function PaneSections({
   setShowAllFindings: (v: boolean) => void;
   reload: () => Promise<void>;
   onOpenRoutine: (id: string) => void;
-  onOpenRun: (runId: string, run?: RoutineRun) => void;
+  onOpenRun: (runId: string, run: RoutineRun) => void;
+  onOpenTranscript: (runId: string) => void;
   onNewRoutine: () => void;
 }) {
   const needsCount = summary.needs.length + summary.orphaned.length;
   const findings = showAllFindings ? summary.findings : summary.findings.slice(0, FINDINGS_COLLAPSED);
 
   const markAllRead = async () => {
-    const r = await runAction("mark findings read", () => window.api.routinesMarkRead("all"));
+    const r = await runAction("mark the reports read", () => window.api.routinesMarkRead("all"));
     if (r) {
-      routinesToast("info", `Marked ${r.updated} ${r.updated === 1 ? "finding" : "findings"} read`);
+      routinesToast("info", `Marked ${r.updated} ${r.updated === 1 ? "report" : "reports"} read`);
       await reload();
     }
   };
   const markRead = async (id: string) => {
-    if (await runAction("mark the finding read", () => window.api.routinesMarkRead([id]))) await reload();
+    if (await runAction("mark the report read", () => window.api.routinesMarkRead([id]))) await reload();
   };
 
   return (
@@ -158,7 +165,7 @@ function PaneSections({
           <SectionHead title="Needs you" count={needsCount} />
           <div className="flex flex-col gap-2">
             {summary.needs.map((run) => (
-              <NeedsCard key={run.id} run={run} now={now} onAnswer={() => onOpenRun(run.id)} />
+              <NeedsCard key={run.id} run={run} now={now} onAnswer={() => onOpenTranscript(run.id)} />
             ))}
             {summary.orphaned.map((r) => (
               <OrphanCard key={r.id} routine={r} reload={reload} />
@@ -170,7 +177,7 @@ function PaneSections({
       {summary.findings.length > 0 && (
         <div className="manta-routines-findings mt-8">
           <SectionHead
-            title="New findings"
+            title="Unread"
             count={summary.unread}
             right={
               <>
@@ -384,7 +391,7 @@ function FindingRow({
   onMarkRead: () => void;
 }) {
   const failed = run.status !== "done";
-  const title = failed ? run.error ?? outcomeView(run).label : run.report?.title ?? "";
+  const title = failed ? run.error ?? outcomeView(run)?.label ?? "" : run.report?.title ?? "";
   const summary = failed ? "" : run.report?.summary ?? "";
   const Icon = routineIcon(routine?.icon);
   return (
@@ -408,7 +415,7 @@ function FindingRow({
           )}
           {failed && (
             <Pill tone="danger" size="meta">
-              {outcomeView(run).label}
+              {outcomeView(run)?.label}
             </Pill>
           )}
         </div>
@@ -454,9 +461,8 @@ function RoutineRow({
   const dim = paused || inChat ? "text-text-quiet" : "";
   const next =
     inChat || paused || lastRun?.status === "needs_input" ? "—" : nextLabel(routine.nextRunAt, now);
-  const outcome = inChat ? IN_A_CHAT : lastRun ? outcomeView(lastRun, waitingPos) : null;
-  // No "Findings" pill in the table: unread findings have their own section above.
-  const view = outcome && !(lastRun?.status === "done" && lastRun.report?.outcome === "findings" && !inChat) ? outcome : null;
+  const view = inChat ? IN_A_CHAT : lastRun ? outcomeView(lastRun, waitingPos) : null;
+  // A run that reported gets no pill (outcomeView is null for it): unread reports have their own section above.
   const detail = inChat ? "Runs inside a chat" : lastRun ? lastRunDetail(lastRun, now) : "Never run";
   return (
     <div

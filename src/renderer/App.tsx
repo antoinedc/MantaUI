@@ -340,7 +340,7 @@ function Shell() {
   useEffect(() => {
     const onOpen = (e: Event) => {
       const detail = (e as CustomEvent<{ id?: string; runId?: string }>).detail;
-      if (detail?.runId) setRoutinesView({ page: "run", runId: detail.runId });
+      if (detail?.runId) setRoutinesView({ page: "open-run", runId: detail.runId });
       else if (detail?.id) setRoutinesView({ page: "routine", id: detail.id });
     };
     window.addEventListener("manta-open-routine", onOpen);
@@ -1381,10 +1381,10 @@ function Shell() {
             } catch {
               /* no-op */
             }
-            // A routine notification opens its run report-first over the Routines list (spec §5.4);
-            // the modal goes on to the transcript when the run has no report.
+            // A routine notification carries only the run id: the pane resolves its routine and
+            // opens the routine page with that run selected (spec §5.4).
             if (payload.routineRunId) {
-              setRoutinesView({ page: "list", report: payload.routineRunId });
+              setRoutinesView({ page: "open-run", runId: payload.routineRunId });
               return;
             }
             if (!sid) return;

@@ -2,9 +2,9 @@
 
 Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) at
 1440×900 against `docs/screens/routines/mockup.html`. Baselines recorded for the
-seven `routines-*` rows only. Differences left on purpose or open:
+eight `routines-*` rows only. Differences left on purpose or open:
 
-Last reviewed: 2026-10-30 (b5a69351)
+Last reviewed: 2026-10-30 (16946a73)
 
 ## Deliberate
 
@@ -41,16 +41,18 @@ Last reviewed: 2026-10-30 (b5a69351)
   the mockup relies on the crumb only.
 - **Instructions and memory are clamped** (5 / 6 lines) with Show more / Show less
   on the routine page and in a run.
-- **Run rows have no title of their own** when the outcome pill already says it all
-  (no "Running" / "Done" twice).
-- **A finished run opens report-first** (owner request): a modal with the report
-  whole and "See full transcript" (`routines-report` row, no mockup). In the
-  transcript the report is always the pinned last block; the `routine_report` call
-  itself is a one-line pointer to it. The report card also shows the summary line.
+- **The routine page is a split view** (owner pick "B", 2026-10-30): run list left
+  (About item on top), the selected run's report right, Edit / Pause / Run now in the
+  header; the `routines-detail` row compares against frame B of `run-inbox-options.html`
+  and `routines-about` has no mockup. A run opens in this page (from an Unread row or a
+  notification) and the transcript's × returns to it; the report-first modal is gone.
+  The transcript still pins the report as its last block (`routines-run` row).
+- **No "Findings" wording and no pill for a run that reported** (either outcome): a
+  "nothing" report is only a muted title. Pills are for Running / Queued / Needs you /
+  Failed / Timed out / Stopped / Skipped / In a chat. The page's section is "Unread",
+  the filter "Hide quiet runs". The wire value `findings` is unchanged.
 - **"Follow up"** replaces "Fix it in a new session" and does exactly what Keep in
   sidebar does (the run's own session becomes an ordinary session and opens).
-- **No "Findings" pill in the routines table's Last run column** (owner request);
-  the other outcome pills stay.
 - **Create editor** is typed into with real gestures by the registry row (the mockup
   is pre-filled); Folder shows the first project's folder, Model "Default".
 

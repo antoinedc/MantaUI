@@ -161,7 +161,7 @@ export function MoveToChatModal({
             <div className="block text-micro font-semibold uppercase text-text-muted">What changes</div>
             <div className="flex flex-col gap-1 text-meta text-text-faint">
               <CheckLine>
-                Each run posts into <b className="font-semibold text-text">{chatName}</b> and can see everything said there, so you can reply to a finding directly.
+                Each run posts into <b className="font-semibold text-text">{chatName}</b> and can see everything said there, so you can reply to a report directly.
               </CheckLine>
               <CheckLine>
                 Its memory ({lines} {lines === 1 ? "line" : "lines"}) is posted into the chat once. From then on the chat itself is the memory. The note is kept as it was,

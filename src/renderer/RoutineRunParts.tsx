@@ -44,7 +44,7 @@ import { nextCronRun } from "./chatUtils";
 import type { Routine, RoutineRun } from "../shared/routines";
 
 
-/** The SessionHeader slots of a routine run: crumb, tag, the Keep-in-sidebar button and Close (back to the list). */
+/** The SessionHeader slots of a routine run: crumb, tag, the Keep-in-sidebar button and Close (back to the routine's page). */
 export function routineHeaderChrome(b: RoutineRunBinding) {
   const when = runCrumbLabel(b.run.startedAt ?? b.run.queuedAt);
   return {
@@ -73,7 +73,7 @@ export function routineHeaderChrome(b: RoutineRunBinding) {
           <PanelLeftOpen size={14} aria-hidden />
           Keep in sidebar
         </Button>
-        <IconButton label="Close run" title="Close and go back to Routines" size="xl" icon={<X />} onClick={b.onBack} />
+        <IconButton label="Close run" title="Close and go back to the routine" size="xl" icon={<X />} onClick={b.onOpenRoutine} />
       </span>
     ),
   };
@@ -175,7 +175,7 @@ export function RoutinePromptBlock() {
 }
 
 /** "Memory updated · +N lines ▸": what this run added to the routine's memory, collapsed until opened. */
-function MemoryUpdatedLine({ added }: { added: string[] }) {
+export function MemoryUpdatedLine({ added }: { added: string[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="manta-routines-memory-updated text-meta text-text-faint">
@@ -205,31 +205,32 @@ function RoutineBadgeIcon({ icon }: { icon: string }) {
   return <Icon size={16} aria-hidden />;
 }
 
-function KindLabel({ outcome, failed }: { outcome: "findings" | "nothing"; failed: boolean }) {
-  if (failed) return <div className="text-micro font-semibold uppercase tracking-wider text-danger">Failed</div>;
-  return outcome === "findings" ? (
-    <div className="text-micro font-semibold uppercase tracking-wider text-accent-tx">Findings</div>
-  ) : (
-    <div className="text-micro font-semibold uppercase tracking-wider text-text-faint">Nothing new</div>
-  );
+/** Only a run that didn't finish is labelled; a report needs no kind label. */
+function KindLabel({ status }: { status: RoutineRun["status"] }) {
+  if (status === "failed") return <div className="text-micro font-semibold uppercase tracking-wider text-danger">Failed</div>;
+  if (status === "timed_out") return <div className="text-micro font-semibold uppercase tracking-wider text-danger">Timed out</div>;
+  return null;
 }
 
 /**
  * A run's report, drawn whole: kind, title, summary, the full markdown body, and a
  * footer (notified line + actions). Shared by the transcript's pinned tail card and
- * the report-first modal (`RoutineReportModal`). `chrome={false}` drops the card's own
- * border/shadow/footer for a host that supplies them (the modal).
+ * the routine page's reading pane. `footer={false}` drops the footer for a host that
+ * supplies those actions itself (the reading pane); `chrome={false}` drops the card's own
+ * border/shadow/footer too.
  */
 export function ReportCard({
   run,
   routine,
   onFollowUp,
   chrome = true,
+  footer = true,
 }: {
   run: RoutineRun;
   routine: Routine;
   onFollowUp?: () => void;
   chrome?: boolean;
+  footer?: boolean;
 }) {
   const failed = run.status === "failed" || run.status === "timed_out";
   const report = run.report;
@@ -243,7 +244,7 @@ export function ReportCard({
         <RoutineBadgeIcon icon={routine.icon} />
       </span>
       <div className="min-w-0 flex-1">
-        <KindLabel outcome={report?.outcome ?? "findings"} failed={failed} />
+        <KindLabel status={run.status} />
         <div className="mt-1 text-prose font-semibold text-text">{title}</div>
         {summary !== "" && summary !== body.trim() && <div className="mt-2 text-body text-text-muted">{summary}</div>}
         {body.trim() !== "" && (
@@ -258,16 +259,18 @@ export function ReportCard({
   return (
     <div className="manta-routines-report overflow-hidden rounded-lg border border-border bg-bg-soft shadow-md">
       {content}
-      <div className="flex items-center gap-2 border-t border-border-subtle bg-bg-elev px-4 py-2 text-meta text-text-faint">
-        <NotifiedLine run={run} />
-        {onFollowUp && (
-          <span className="ml-auto">
-            <Button tone="default" onClick={onFollowUp}>
-              Follow up
-            </Button>
-          </span>
-        )}
-      </div>
+      {footer && (
+        <div className="flex items-center gap-2 border-t border-border-subtle bg-bg-elev px-4 py-2 text-meta text-text-faint">
+          <NotifiedLine run={run} />
+          {onFollowUp && (
+            <span className="ml-auto">
+              <Button tone="default" onClick={onFollowUp}>
+                Follow up
+              </Button>
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -325,11 +328,9 @@ function ReportToolFallback({ part }: { part: ToolPart }) {
   const input = ((part.state ?? {}) as { input?: Record<string, unknown> }).input ?? {};
   const title = typeof input.title === "string" ? input.title : "Report filed";
   const body = typeof input.body === "string" ? input.body : "";
-  const outcome = input.outcome === "nothing" ? "nothing" : "findings";
   return (
     <div className="manta-routines-report overflow-hidden rounded-lg border border-border bg-bg-soft shadow-md">
       <div className="px-4 pb-3 pt-4">
-        <KindLabel outcome={outcome} failed={false} />
         <div className="mt-1 text-prose font-semibold text-text">{title}</div>
         {body.trim() !== "" && (
           <div className="mt-2 text-body text-text-muted">

@@ -4,7 +4,7 @@
 - button "New routine"
 - text: /Needs you 1 Weekly bug triage · better-ui · asked [\d,.]+[bkmBKM]+ ago · paused until you answer “\d+ bug reports are older than \d+ days with no repro\. Close them as stale, or keep them at P3\?”/
 - button "Answer"
-- text: New findings 3
+- text: Unread 3
 - button "Mark all read"
 - button /Daily analytics digest · ronda Signups up \d+% week over week; checkout errors doubled since Tuesday \d+ signups \(vs \d+\)\. Checkout error rate 2\.1% → 4\.3%, all on Safari \d+ — started with Tuesday's deploy\. 9:\d+ Mark read Open/:
   - text: /Daily analytics digest · ronda Signups up \d+% week over week; checkout errors doubled since Tuesday \d+ signups \(vs \d+\)\. Checkout error rate 2\.1% → 4\.3%, all on Safari \d+ — started with Tuesday's deploy\. 9:\d+/
