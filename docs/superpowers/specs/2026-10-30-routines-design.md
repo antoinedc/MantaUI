@@ -510,12 +510,72 @@ Editor ⇄ cron mapping (pure, tested): Hourly `M * * * *`; Daily `M H * * *`; W
 Custom (raw cron). Opening an existing routine maps its cron back to the richest
 preset that reproduces it exactly, else Custom.
 
-### Report-first runs (revised 2026-10-30)
-Opening a finished run that has a report (or failed) shows a modal with the report
-whole — title, summary, full body — plus "See full transcript" and "Follow up". A run notification opens the same modal over the Routines list. Runs with
-nothing to report (running, needs an answer, stopped) open the transcript directly.
-Inside the transcript the report is pinned as the last block; the `routine_report`
-tool call renders as a one-line pointer.
+### Run inbox — the routine page is a split view (revised 2026-10-30, owner pick "B")
+Replaces the report-first modal (deleted). Reference: `docs/screens/routines/run-inbox-options.html#b`.
+
+**Routine page (R2) layout.** Header bar (RoutinesHeader): crumb `Routines / <name>`;
+right slot = the actions that used to sit in the hero: Edit, Pause/Resume (or Move back
+when in a chat), Run now. Body = `grid grid-cols-[340px_minmax(0,1fr)]`, full height,
+each column scrolls on its own.
+
+- **Left column (the run list)**, `bg-bg-elev border-r border-border-subtle`:
+  1. An "About this routine" item (glyph + name, `cadence · next run`), selectable.
+  2. Eyebrow "Runs" + count; right: TextLink "Hide quiet runs" / "Show all"
+     (the old `findingsOnly` filter, renamed).
+  3. One item per run, newest first: unread dot (accent, `visibility:hidden` when
+     read) · date+time (`text-micro font-mono text-text-quiet`) · title, 2-line clamp
+     (`text-label`; quiet runs = report outcome "nothing" → `text-text-faint font-normal`;
+     unread → `font-semibold`) · status Pill on the right ONLY for running / queued /
+     needs_input / failed / timed_out / cancelled / skipped (see Labels). Selected item
+     = `bg-raised` + 3px accent inset left edge. Title fallback when the run has no
+     report title: the error, the question, or "Running…" / "Waiting in line" /
+     "Finished without a report".
+  4. "Show older" at the bottom (existing paging).
+  ↑/↓ (and j/k) move the selection while focus is in the list.
+- **Right pane (the reading pane)**, `overflow-y-auto px-8 py-6`, content max-width
+  `var(--measure)`:
+  - *About selected:* the old R2 content in one column: hero (glyph, name, fact chips,
+    destination chip, next-run line), then "What it remembers", "Instructions" and the
+    triggers/missed/keeps box — unchanged components.
+  - *A run with a report or failed/timed out:* a meta row (`text-meta text-text-faint`:
+    trigger label · started H:MM · duration · tokens · Bell "Notified you at H:MM" /
+    "Filed quietly") with right-aligned actions **See transcript** (default) and
+    **Follow up** (primary; = Keep in sidebar). Below it the white report card
+    (`ReportCard`, with its own footer dropped since the actions are above) and the
+    "Memory updated · +N lines" line.
+  - *Running:* "Running for 2m 10s · started 9:02" + **Watch transcript**.
+    *Needs you:* the question + **Answer** (opens the transcript).
+    *Queued:* "Waiting in line — #N" (no action). *Done without a report / stopped /
+    skipped:* one sentence + **See transcript** when it has a session.
+- **Default selection:** the view's `runId` when given; else the newest unread run;
+  else the newest run; else About (no runs yet). Selecting a terminal unread run marks
+  it read (`routines:mark-read`), same rule as opening it before.
+- **Navigation.** `RoutinesView` routine page = `{page:"routine", id, runId?}`; changing
+  the selection updates it, so coming back from a transcript lands on the same run.
+  Transcript (RoutineRunView): × and the routine-name crumb go back to the routine page
+  with that run selected; "Routines" crumb → list. Routines page "Unread" rows open the
+  routine page with that run selected; "Needs you" → Answer opens the transcript
+  directly. A run notification resolves the run's routine (`routines:run-get`) and opens
+  the routine page with the run selected. Inside the transcript the report stays pinned
+  as the last block (unchanged).
+
+### Labels — no "Findings" wording in the UI (revised 2026-10-30)
+"Findings" read as jargon. The wire/AI enum (`outcome: "findings" | "nothing"`,
+`notify: "findings"`) is unchanged; only what the user reads changes:
+- **Pills only for something that needs attention or is in flight:** Running, Queued
+  (#N), Needs you, Failed, Timed out, Stopped, Skipped, In a chat. A run that reported
+  (either outcome) gets **no pill**; a "nothing" report is shown by its muted title.
+- Report card: no kind label for a report; a failed/timed-out run keeps its danger
+  label ("Failed" / "Timed out").
+- Routines page section "New findings" → **"Unread"**; toast "Marked N reports read";
+  sidebar badge tooltip "N unread reports".
+- Run-list filter "Findings only" → **"Hide quiet runs"** / "Show all"; empty state
+  "No runs to show."
+- Notify summary "Notify on findings" → **"Notify when there's news"** (the editor's
+  option label "When it finds something" stays).
+- Push title: `<routine name>` for a report with news; `<name> · failed`,
+  `<name> · needs you`, `<name> · nothing new` otherwise (server, `notifyDecision`
+  kind → title).
 
 ## 8. Moving between follow-up and routine (owner request)
 
