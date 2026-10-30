@@ -43,6 +43,7 @@
 ## manta peer-session awareness	a94ad55145e366d6ea2b7b1bd0f9ec9382816bc14eeeeb4fbc512078afa01b36
 ## manta progress	7713e74d240e9be40f831bff2754a25bdc711dba8288a439ec9a566770e183a8
 ## manta resource snapshot	8847eba880b725c714b4eca602c781565339babf451322a4582c18df4ed28c4c
+## manta routines	a91ff997c41d1761cb9c5cbaf55373b75d34a6765e134d4fc7f09464eb56b461
 ## manta scheduled tasks	ca95bc5138f91b25ceea198f9183528de8976f4ee77ff9d9855927a122867feb
 ## manta secrets	7331ce90fc9b09920ee17e79fb3babc757523549dee76f84fedb18055db3714d
 ## manta send-file	3bcd3bd4e97ae39386c5eabcdcc90d26523f258ce404323ae357259ebbba8eec
