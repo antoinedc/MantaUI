@@ -16,6 +16,8 @@
 //   - Per-message incremental splice (300ms debounce)
 //   - Inactive-panel gating (skip refetch + delta flush when hidden)
 //   - Session-change reset
+//   - Catch-up on reactivation (immediate fetch + generation guard; inert
+//     unless a host calls catchUp())
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
@@ -33,6 +35,11 @@ import {
  *  "Load earlier" afterwards replaces the tail with the full history. The
  *  Transcript's LoadEarlier control and every fetchOpts() decision read this. */
 export const TRANSCRIPT_TAIL_LIMIT = 100;
+
+export type CatchUpStatus = "idle" | "catching" | "failed";
+export type CatchUpResult =
+  | { ok: true; before: OpencodeMessage[] | null; after: OpencodeMessage[] }
+  | { ok: false; stale?: true };
 
 export type TranscriptState = {
   messages: OpencodeMessage[] | null;
@@ -71,6 +78,11 @@ export type TranscriptState = {
     text: string;
   }) => number;
   scheduleRefetch: () => void;
+  // Catch-up on reactivation (spec 2026-10-30-session-catch-up B5). Inert
+  // unless a host calls catchUp(): status stays "idle" and nothing else reads it.
+  catchUpStatus: CatchUpStatus;
+  catchUp: () => Promise<CatchUpResult>;
+  resetCatchUp: () => void;
   spliceMessage: (messageId: string) => void;
   fetchChildTranscript: (childId: string) => void;
   // Pull the FULL child transcript once the user clicks "Load earlier" on an
@@ -94,6 +106,19 @@ export function useTranscriptState(params: {
 
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // The transcript as committed, for a catch-up's "before" snapshot (read at the
+  // moment its fetch starts, never from a stale closure).
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  // Catch-up state. `catchUpGenRef` is the generation token (B1): deactivation,
+  // session change and a newer catch-up all bump it, and a result is applied
+  // only while its token is still current. `catchUpDoneRef` is false while a
+  // catch-up is in flight or did not succeed (nothing to remember otherwise).
+  const [catchUpStatus, setCatchUpStatus] = useState<CatchUpStatus>("idle");
+  const catchUpGenRef = useRef(0);
+  const catchUpDoneRef = useRef(true);
   // Tail-first loading: until the user clicks "Load earlier" (or the full
   // history has otherwise been pulled), every transcript fetch passes
   // { limit: TRANSCRIPT_TAIL_LIMIT }. Reset on session change below.
@@ -174,12 +199,19 @@ export function useTranscriptState(params: {
     if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
     refetchTimerRef.current = setTimeout(() => {
       refetchTimerRef.current = null;
+      // The panel was hidden during the debounce: a hidden panel does not fetch.
+      if (!isActiveRef.current) {
+        refetchOwedWhileInactive.current = true;
+        return;
+      }
       setRefreshing(true);
       // Tracked: the run views it carries are merged under the connection generation it was ISSUED under (runEpoch.ts); an
       // answer carrying a membership a rebuild has retired schedules one more fetch.
       opencodeMessagesTracked(sessionId, fetchOpts(), scheduleRefetch)
         .then((m) => {
           setMessages(m);
+          // A later full refetch succeeding clears a catch-up failure (B2).
+          setCatchUpStatus((s) => (s === "failed" ? "idle" : s));
           for (const cid of collectChildSessionIds(m)) {
             childSessionIds.current.add(cid);
           }
@@ -188,6 +220,59 @@ export function useTranscriptState(params: {
         .finally(() => setRefreshing(false));
     }, 300);
   }, [sessionId, setRefreshing, fetchOpts]);
+
+  // Pull the canonical transcript NOW because the panel just became active
+  // with a refetch owed (B1/B5). Supersedes any pending ordinary-refetch timer.
+  const catchUp = useCallback(async (): Promise<CatchUpResult> => {
+    if (refetchTimerRef.current) {
+      clearTimeout(refetchTimerRef.current);
+      refetchTimerRef.current = null;
+    }
+    refetchOwedWhileInactive.current = false;
+    const gen = ++catchUpGenRef.current;
+    const sid = sessionId;
+    const before = messagesRef.current;
+    catchUpDoneRef.current = false;
+    setCatchUpStatus("catching");
+    setRefreshing(true);
+    const isCurrent = () =>
+      gen === catchUpGenRef.current && isActiveRef.current && sessionIdRef.current === sid;
+    // A result discarded because a NEWER catch-up for this same live panel took
+    // over leaves the owing to that one; any other discard leaves it owed.
+    const discard = (): CatchUpResult => {
+      const sameSession = sessionIdRef.current === sid;
+      const superseded = isActiveRef.current && sameSession && !catchUpDoneRef.current;
+      if (sameSession && !superseded) refetchOwedWhileInactive.current = true;
+      setRefreshing(false);
+      return { ok: false, stale: true };
+    };
+    try {
+      const after = await opencodeMessagesTracked(sid, fetchOpts(), scheduleRefetch);
+      if (!isCurrent()) return discard();
+      setMessages(after);
+      for (const cid of collectChildSessionIds(after)) {
+        childSessionIds.current.add(cid);
+      }
+      catchUpDoneRef.current = true;
+      setCatchUpStatus("idle");
+      setRefreshing(false);
+      return { ok: true, before, after };
+    } catch {
+      if (!isCurrent()) return discard();
+      refetchOwedWhileInactive.current = true;
+      setRefreshing(false);
+      setCatchUpStatus("failed");
+      return { ok: false };
+    }
+  }, [sessionId, setRefreshing, fetchOpts, scheduleRefetch]);
+
+  // Deactivation / session change: any in-flight catch-up result is now stale.
+  // The refetch stays owed unless the last catch-up succeeded.
+  const resetCatchUp = useCallback(() => {
+    catchUpGenRef.current++;
+    setCatchUpStatus("idle");
+    if (!catchUpDoneRef.current) refetchOwedWhileInactive.current = true;
+  }, []);
 
   const spliceMessage = useCallback((messageId: string) => {
     if (!messageId) {
@@ -315,6 +400,11 @@ export function useTranscriptState(params: {
   // Session-change reset
   useEffect(() => {
     loadedAllRef.current = false;
+    // A new session starts clean: nothing from the old one is owed or in flight.
+    catchUpGenRef.current++;
+    catchUpDoneRef.current = true;
+    refetchOwedWhileInactive.current = false;
+    setCatchUpStatus("idle");
     childLoadedAllRef.current.clear();
     setLoadingChildEarlier(new Set());
     // Cancel any in-flight per-message splice from the PREVIOUS session so a
@@ -365,6 +455,9 @@ export function useTranscriptState(params: {
     wantQuestionScroll,
     applyStreamFlush,
     scheduleRefetch,
+    catchUpStatus,
+    catchUp,
+    resetCatchUp,
     spliceMessage,
     fetchChildTranscript,
     loadEarlierChildTranscript,

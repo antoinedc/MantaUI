@@ -131,6 +131,11 @@ export type ComposerControllerConfig = {
   // never renders it.
   sendError: string | null;
   setSendError: (v: string | null) => void;
+  // Optional: the entry point the voice take→send flow submits through, in place
+  // of the raw `submitRef`. A host that holds sends during a session catch-up
+  // (ChatPanel) passes a hold-aware one; absent (the CTO conversation) voice
+  // submits through `submitRef` exactly as before.
+  voiceSubmitRef?: React.RefObject<() => void>;
   // The resource toolbar (⏰ schedules / 🔑 secrets / 🪝 webhooks). Host-owned
   // because each surface opens its own panels.
   scheduleCount: number;
@@ -557,7 +562,7 @@ export function useComposerController(config: ComposerControllerConfig): Compose
     input,
     setInput,
     inputRef,
-    submitRef,
+    submitRef: config.voiceSubmitRef ?? submitRef,
     setSendError,
     setSystemNotice,
     groqApiKey,

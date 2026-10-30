@@ -4097,3 +4097,88 @@ export function shouldClearMissingModel(
   if (!models || models.length === 0 || !sel) return false;
   return !models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID);
 }
+
+// ===== Session catch-up (spec 2026-10-30-session-catch-up) =====
+
+/** A part that counts as a "step" for the catch-up pill: a tool call, a
+ *  background result, or text with something in it. */
+function isNewStepPart(part: OpencodePart): boolean {
+  if (part.type === "tool" || part.type === "background-result") return true;
+  return part.type === "text" && typeof part.text === "string" && part.text.trim() !== "";
+}
+
+/** Parts of `after`, in transcript order, that are steps not present anywhere
+ *  in `before` (any role; optimistic rows never count). */
+function newStepParts(
+  before: readonly OpencodeMessage[] | null,
+  after: readonly OpencodeMessage[],
+): Array<{ messageId: string }> {
+  const seen = new Set<string>();
+  for (const m of before ?? []) for (const p of m.parts) seen.add(p.id);
+  const out: Array<{ messageId: string }> = [];
+  for (const m of after) {
+    if (m.info.id.startsWith("optimistic-")) continue;
+    for (const p of m.parts) {
+      if (seen.has(p.id) || !isNewStepPart(p)) continue;
+      out.push({ messageId: m.info.id });
+    }
+  }
+  return out;
+}
+
+/** How many new steps a catch-up fetch brought in (B3). */
+export function countNewSteps(
+  before: readonly OpencodeMessage[] | null,
+  after: readonly OpencodeMessage[],
+): number {
+  return newStepParts(before, after).length;
+}
+
+/** The id of the message holding the first new step, or null when none. */
+export function firstNewStepMessageId(
+  before: readonly OpencodeMessage[] | null,
+  after: readonly OpencodeMessage[],
+): string | null {
+  return newStepParts(before, after)[0]?.messageId ?? null;
+}
+
+export type CatchUpPillState = "catching" | "held" | "new" | "error";
+export type CatchUpPillView = {
+  label: string;
+  tone: "neutral" | "new" | "error";
+  /** What the pill's action does: Cancel the hold, Retry the fetch, or (new) the whole pill scrolls to the first new step. */
+  action: "cancel" | "retry" | "show" | null;
+};
+
+/** The pill's copy + tone + action for one state (B2). `sentInto` is only read
+ *  by `new`: whether a released held message went into a running turn, or was
+ *  sent plain; null when nothing was released. */
+export function describeCatchUpPill(args: {
+  state: CatchUpPillState;
+  newSteps?: number;
+  sentInto?: "running" | "idle" | null;
+}): CatchUpPillView {
+  switch (args.state) {
+    case "catching":
+      return { label: "Catching up…", tone: "neutral", action: null };
+    case "held":
+      return { label: "Catching up… · will send when ready", tone: "neutral", action: "cancel" };
+    case "error":
+      return { label: "Couldn't load the latest steps", tone: "error", action: "retry" };
+    case "new": {
+      const n = args.newSteps ?? 0;
+      const base = `${n} new step${n === 1 ? "" : "s"}`;
+      const suffix =
+        args.sentInto === "running"
+          ? " · your message was sent into the running turn"
+          : args.sentInto === "idle"
+            ? " · your message was sent"
+            : "";
+      return { label: base + suffix, tone: "new", action: "show" };
+    }
+  }
+}
+
+/** Shown in the send-error strip when a catch-up fails while a send is held. */
+export const CATCH_UP_HELD_FAILED_COPY =
+  "Not sent: couldn't load the latest steps. Retry, or press Enter to send anyway.";

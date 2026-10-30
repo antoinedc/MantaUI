@@ -177,6 +177,88 @@ html, body, #root {
   .manta-jump-latest { transition: none; }
 }
 
+/* Catch-up pill. Same floating-surface trio as .manta-jump-latest (border,
+   card, shadow-md, full radius) at the same anchor, so the two read as one
+   family. It REPLACES the jump button while shown (never both). */
+.manta-catchup-pill {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-4);
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: calc(100% - var(--sp-8));
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  background: var(--card);
+  color: var(--tx2);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+  transform: translate(-50%, 0);
+  opacity: 1;
+  transition:
+    opacity var(--motion-slow) var(--ease-out),
+    transform var(--motion-base) var(--ease-out);
+  animation: manta-catchup-in var(--motion-base) var(--ease-out);
+}
+.manta-catchup-pill__label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* "N new steps" — the whole pill is a button. */
+.manta-catchup-pill[data-tone="new"] {
+  color: var(--accent-tx);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+.manta-catchup-pill[data-tone="new"]:hover { border-color: var(--accent); }
+.manta-catchup-pill[data-tone="error"] {
+  border-color: rgb(var(--danger-rgb) / 0.5);
+  color: var(--danger);
+}
+/* Fading out (the "new steps" pill after its dwell). */
+.manta-catchup-pill[data-leaving="true"] {
+  opacity: 0;
+  transform: translate(-50%, var(--sp-1));
+  pointer-events: none;
+}
+.manta-catchup-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Inline text action inside the pill: "Cancel", "Retry". */
+.manta-catchup-pill__action {
+  flex: none;
+  margin-left: var(--sp-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-tx);
+  font: inherit;
+  cursor: pointer;
+}
+.manta-catchup-pill__action:hover { text-decoration: underline; }
+.manta-catchup-pill[data-tone="error"] .manta-catchup-pill__action { color: var(--danger); }
+.manta-catchup-pill__action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--r-xs);
+}
+@keyframes manta-catchup-in {
+  from { opacity: 0; transform: translate(-50%, var(--sp-1)); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-catchup-pill { animation: none; transition: none; }
+}
+
 /* Quote toolbar (BET-1351). Floating action bar shown when the user finishes
    selecting text in the transcript — "Quote" seeds the composer, "Quote in
    new session" forks with the quote. `position: fixed`, clamped into the

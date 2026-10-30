@@ -95,6 +95,8 @@ import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useComposerController } from "./hooks/useComposerController";
 import { useTranscriptState } from "./hooks/useTranscriptState";
+import { useCatchUp } from "./hooks/useCatchUp";
+import { CatchUpPill } from "./CatchUpPill";
 import { opencodeMessagesTracked } from "./runEpoch";
 import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
@@ -487,6 +489,9 @@ export function ChatPanel({
     wantQuestionScroll,
     applyStreamFlush,
     scheduleRefetch,
+    catchUpStatus,
+    catchUp,
+    resetCatchUp,
     spliceMessage,
     loadEarlierChildTranscript,
     toggleTaskExpand,
@@ -508,7 +513,12 @@ export function ChatPanel({
   // controller is constructed HERE, before useSseBus, because it produces the
   // `submitRef` / `input` / `providerID` useSseBus needs; its send-error setter
   // rides the forward-declared bridge above (assigned right after useSseBus).
+  // The hold-aware submit the voice flows (take → send, voice-note retry) go
+  // through; assigned from the catch-up controller below. `submitRef` stays RAW
+  // for the programmatic bridges (/clear, auto-submit, quotes), which are never held.
+  const voiceSubmitRef = useRef<() => void>(() => {});
   const composer = useComposerController({
+    voiceSubmitRef,
     sessionId,
     messages,
     // Session history is keyed by the owning tmux window (survives /clear).
@@ -1507,21 +1517,42 @@ export function ChatPanel({
     requestAnimationFrame(() => requestAnimationFrame(() => scrollElementToTail(el)));
   }, [isActive, setFollowing]);
 
-  // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
-  // delta buffer are suppressed (see the gating refs near refetchTimer) so we
-  // don't re-render a transcript the user can't see. On reactivation, pull the
-  // canonical transcript (if any refetch/delta was dropped while hidden) plus
-  // the pending questions/permissions — their .asked events can be missed while
+  // Catch-up on reactivation. While inactive, scheduleRefetch and the delta
+  // buffer are suppressed (see the gating refs near refetchTimer) so we don't
+  // re-render a transcript the user can't see. On reactivation, pull the
+  // canonical transcript NOW (if any refetch/delta was dropped while hidden)
+  // through the catch-up path: the pill says so while it runs and a message the
+  // user sends meanwhile is held until it lands (spec 2026-10-30-session-catch-up).
+  // `catchUpSendRef` / `catchUpHasDraftRef` are filled below, once `submit` exists.
+  const catchUpSendRef = useRef<
+    ((textOverride?: string, attachmentsOverride?: Attachment[], delivery?: "steer" | "queue") => void) | null
+  >(null);
+  const catchUpHasDraftRef = useRef(false);
+  const catchUpCtl = useCatchUp({
+    sessionId,
+    isActive,
+    running,
+    status: catchUpStatus,
+    catchUp,
+    resetCatchUp,
+    sendRef: catchUpSendRef,
+    hasDraftRef: catchUpHasDraftRef,
+    setSendError,
+    scrollToMessage,
+  });
+  voiceSubmitRef.current = catchUpCtl.submit;
+  const runCatchUp = catchUpCtl.run;
+  useEffect(() => {
+    if (!isActive) return;
+    if (refetchOwedWhileInactive.current) void runCatchUp();
+  }, [isActive, sessionId, runCatchUp]);
+  // The pending questions/permissions: their .asked events can be missed while
   // the panel is hidden and there is no delta/owed mechanism to replay them.
   useEffect(() => {
     if (!isActive) return;
-    if (refetchOwedWhileInactive.current) {
-      refetchOwedWhileInactive.current = false;
-      scheduleRefetch();
-    }
     refreshQuestions();
     refreshPermissions();
-  }, [isActive, scheduleRefetch, refreshQuestions, refreshPermissions]);
+  }, [isActive, refreshQuestions, refreshPermissions]);
 
   // Why a set of attachments can't go to the active model, or null when they can.
   // Refuse only what the model positively declares it cannot take. A file
@@ -2037,12 +2068,15 @@ export function ChatPanel({
   // (which would re-arm the effect on every keystroke).
   submitRef.current = submit;
 
-  // ⌥Enter / Alt+Enter: "After this turn". While the agent runs it is the same
-  // busy send with delivery:"queue"; idle it is an ordinary send (submit
-  // ignores `delivery` outside the busy branch), identical to Enter.
-  const submitAfterTurn = useCallback(() => {
-    void submit(undefined, undefined, { delivery: "queue" });
-  }, [submit]);
+  // The raw send behind the composer's hold-aware wrappers (useCatchUp), and the
+  // draft check its release uses. ⌥Enter / Alt+Enter is "After this turn": while
+  // the agent runs it is the same busy send with delivery:"queue"; idle it is an
+  // ordinary send (submit ignores `delivery` outside the busy branch).
+  catchUpSendRef.current = (textOverride, attachmentsOverride, delivery) => {
+    void submit(textOverride, attachmentsOverride, delivery ? { delivery } : undefined);
+  };
+  catchUpHasDraftRef.current =
+    !!input.trim() || attachments.some((a) => a.status === "ready" && !!a.remotePath && a.asPathRef);
 
   // Post-commit half of submit()'s force-pin. Runs once per submit (the ref
   // gate), after React has committed the optimistic user row and after the
@@ -2878,7 +2912,7 @@ export function ChatPanel({
           const text = res.transcript.trim();
           if (!text) return;
           setInput((prev) => (prev ? `${prev}\n${text}` : text));
-          setTimeout(() => submitRef.current?.(), 0);
+          setTimeout(() => voiceSubmitRef.current?.(), 0);
           return;
         }
         setPendingVoiceNote({ ...prev, noteId, error: res.ok ? "Transcription failed" : res.error });
@@ -3544,12 +3578,14 @@ export function ChatPanel({
             rowLocatorRef={rowLocatorRef}
           />
         </VoicePlaybackProvider>
+        {/* The catch-up pill takes the jump button's place while it is shown. */}
+        {catchUpCtl.pill && <CatchUpPill {...catchUpCtl.pill} />}
         <button
           type="button"
           className="manta-jump-latest"
-          data-shown={!following}
-          aria-hidden={following}
-          tabIndex={following ? -1 : 0}
+          data-shown={!following && !catchUpCtl.pill}
+          aria-hidden={following || !!catchUpCtl.pill}
+          tabIndex={following || catchUpCtl.pill ? -1 : 0}
           aria-label="Jump to latest"
           title="Jump to latest"
           onClick={scrollToTail}
@@ -3602,8 +3638,10 @@ export function ChatPanel({
         // so it is spread on top of the controller's ready-to-render bundle. The
         // pop-last gesture (onQueuePop) is already wired in the controller
         // config to ChatPanel's pending-message inbox via queuePopRef.
-        submit={submit}
-        onSubmitAfterTurn={submitAfterTurn}
+        submit={catchUpCtl.submit}
+        onSubmitAfterTurn={catchUpCtl.submitAfterTurn}
+        sendHeld={catchUpCtl.sendHeld}
+        onCancelHeldSend={catchUpCtl.cancelHold}
         sendBusy={busySending}
         slash={{ token: slashToken, background: runInBackground, onBackgroundChange: setRunInBackground }}
         abort={abort}
