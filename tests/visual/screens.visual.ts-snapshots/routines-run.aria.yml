@@ -25,7 +25,7 @@
     - strong: Activation
     - text: /back to \d+% after Monday's dip — no action needed/
 - text: /Notified you at 9:\d+/
-- button "Fix it in a new session"
+- button "Follow up"
 - status
 - textbox "Reply, or describe the next task…"
 - button "Opus 4.7"

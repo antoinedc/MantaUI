@@ -331,7 +331,7 @@ function Shell() {
       ? s.drafts.find((d) => d.id === s.activeDraftId) ?? null
       : null,
   );
-  // A new-session draft (+ / ⌘N / "Fix it in a new session") takes over the main pane, so the
+  // A new-session draft (+ / ⌘N) takes over the main pane, so the
   // Routines pane steps aside; and a chat card's "Open routine" opens the routine's page.
   const activeDraftId = activeDraft?.id ?? null;
   useEffect(() => {

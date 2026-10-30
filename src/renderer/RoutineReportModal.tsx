@@ -12,7 +12,7 @@ import { Button } from "./Button";
 import { Modal } from "./Modal";
 import { NotifiedLine, ReportCard } from "./RoutineRunParts";
 import { RoutineModalFooter, RoutineModalHeader } from "./RoutinesParts";
-import { errMessage, hasReportView, startFixIt } from "./routinesData";
+import { errMessage, hasReportView, keepRunInSidebar } from "./routinesData";
 import { isTerminal, runCrumbLabel } from "./routinesView";
 
 export function RoutineReportModal({
@@ -26,7 +26,7 @@ export function RoutineReportModal({
   onClose: () => void;
   /** Open the run's full transcript (also taken when the run has no report to show). */
   onSeeTranscript: () => void;
-  /** Leave the Routines pane (after Fix it). */
+  /** Leave the Routines pane (after Follow up). */
   onClosePane: () => void;
   /** The summary / badge should refetch (the run got marked read). */
   onChanged: () => void;
@@ -93,15 +93,12 @@ export function RoutineReportModal({
             <MessageSquareText size={14} aria-hidden />
             See full transcript
           </Button>
-          {data && data.run.report?.outcome !== "nothing" && (
+          {data && (
             <Button
               tone="primary"
-              onClick={() => {
-                startFixIt(data.routine, data.run);
-                onClosePane();
-              }}
+              onClick={() => void keepRunInSidebar(data.run.id, { onClosePane, onChanged, what: "open the run as a session" })}
             >
-              Fix it in a new session
+              Follow up
             </Button>
           )}
         </RoutineModalFooter>

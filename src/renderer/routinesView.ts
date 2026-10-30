@@ -611,14 +611,6 @@ export function splitInstructions(text: string): InstructionPart[] {
   return out;
 }
 
-/** The seed for "Fix it in a new session" (spec §6.5). */
-export function fixItSeed(routineName: string, run: RoutineRun): string {
-  const when = run.startedAt ?? run.queuedAt;
-  const d = new Date(when);
-  const date = `${DOW_SHORT[d.getDay()]} ${d.getDate()} ${MON_SHORT[d.getMonth()]}`;
-  const r = run.report;
-  return `Follow up on routine "${routineName}" run of ${date}:\n\n${r?.title ?? ""}\n${r?.body ?? ""}`.trimEnd();
-}
 
 /** "today" / "tomorrow" / "Fri 7 Nov" — the day word of an instant (created-card "first run …"). */
 export function nextDayWord(ms: number | null | undefined, now: number): string {

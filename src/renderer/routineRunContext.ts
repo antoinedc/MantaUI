@@ -20,8 +20,8 @@ export interface RoutineRunBinding {
   onBack: () => void;
   /** Back to the routine's page. */
   onOpenRoutine: () => void;
-  /** "Fix it in a new session": a draft seeded with the report. */
-  onFixIt: () => void;
+  /** "Follow up": same as Keep in sidebar — the run becomes an ordinary session to continue in. */
+  onFollowUp: () => void;
 }
 
 export type RoutineRunContextValue = RoutineRunBinding & { firstUserMessageId: string | null };
