@@ -366,4 +366,16 @@ describe("M527 primitive rules", () => {
       });
     }
   });
+
+  describe("routines variants are documented (docs/components.md)", () => {
+    const doc = readFileSync(path.join(RENDERER, "../../docs/components.md"), "utf8");
+    it.each([
+      ["Pill tone danger", /`danger`[^|]*bg-danger-bg text-danger/],
+      ["StatusDot tone accent", /`accent` is a STATIC accent dot/],
+      ["Field multiline + rows", /`multiline`[^|]*`rows`/],
+      ["Callout size md|note", /`size: md\\\|note`/],
+    ])("%s", (_label, re) => {
+      expect(doc).toMatch(re);
+    });
+  });
 });

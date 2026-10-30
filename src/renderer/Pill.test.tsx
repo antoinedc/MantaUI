@@ -53,6 +53,13 @@ describe("Pill", () => {
     expect(el.className).toContain("text-accent");
   });
 
+  it("danger tone renders the --danger-bg surface with a matching --danger foreground (C1) — the routines failed / needs-you pill", () => {
+    h = mount(<Pill tone="danger">Failed</Pill>);
+    const el = pillEl(h);
+    expect(el.className).toContain("bg-danger-bg");
+    expect(el.className).toContain("text-danger");
+  });
+
   it("warn tone renders the --warn-bg surface with a matching --warn foreground (C1)", () => {
     h = mount(<Pill tone="warn">stale</Pill>);
     const el = pillEl(h);

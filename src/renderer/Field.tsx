@@ -17,6 +17,10 @@
 //   - label micro-caps `--tx2` (`text-text-muted`), help `--tx3`
 //     (`text-text-faint`).
 //
+// `multiline` swaps the `<input>` for a `<textarea>` with the SAME chrome (plus
+// `resize-y`), so a prose field (routine instructions, memory) is not a second,
+// drifting copy of the input surface; `rows` sizes it.
+//
 // A leading icon slot (`leading`) is a chrome slot, not an escape hatch: it
 // adds the leading inset the icon needs (`pl-8`) so search/URL fields keep
 // their icon without a caller injecting classes.
@@ -61,10 +65,14 @@ type FieldProps = {
   disabled?: boolean;
   /** A ref to the native input (e.g. to focus/select it on mount). */
   inputRef?: Ref<HTMLInputElement>;
+  /** Render a `<textarea>` (same chrome, vertically resizable) instead of an `<input>`. */
+  multiline?: boolean;
+  /** Visible rows of a `multiline` field (default 3). */
+  rows?: number;
 };
 
-const INPUT_BASE = "w-full bg-bg-soft border border-border-strong rounded-md text-body text-text focus:outline-none focus:border-accent";
-const LABEL_CLS = "block text-micro font-semibold uppercase text-text-muted";
+export const INPUT_BASE = "w-full bg-bg-soft border border-border-strong rounded-md text-body text-text focus:outline-none focus:border-accent";
+export const LABEL_CLS = "block text-micro font-semibold uppercase text-text-muted";
 const META_CLS = "text-meta text-text-faint";
 
 export function Field({
@@ -87,6 +95,8 @@ export function Field({
   leading,
   disabled = false,
   inputRef,
+  multiline = false,
+  rows = 3,
 }: FieldProps) {
   // sp-3 / sp-4 = 12px vertical / 16px horizontal. A leading icon replaces the
   // left inset with the 8-rem-leading gutter the icon needs (pl-8).
@@ -105,6 +115,22 @@ export function Field({
             {leading}
           </span>
         )}
+        {multiline ? (
+          <textarea
+            id={id}
+            rows={rows}
+            placeholder={placeholder}
+            value={value}
+            onChange={onChange as unknown as React.ChangeEventHandler<HTMLTextAreaElement>}
+            onKeyDown={onKeyDown as unknown as React.KeyboardEventHandler<HTMLTextAreaElement>}
+            onFocus={onFocus}
+            onBlur={onBlur}
+            aria-label={ariaLabel}
+            spellCheck={false}
+            disabled={disabled}
+            className={`${INPUT_BASE} ${inset} ${fontCls} resize-y`}
+          />
+        ) : (
         <input
           id={id}
           type={type}
@@ -123,6 +149,7 @@ export function Field({
           disabled={disabled}
           className={`${INPUT_BASE} ${inset} ${fontCls}`}
         />
+        )}
       </div>
       {help && <div className={META_CLS}>{help}</div>}
       {footer}

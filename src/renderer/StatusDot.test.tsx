@@ -42,6 +42,12 @@ describe("StatusDot", () => {
     expect(dot(h).className).toBe(`${DOT} bg-accent animate-pulse`);
   });
 
+  it("accent tone is a STATIC accent dot — no pulse (the routines Findings pill)", () => {
+    h = mount(<StatusDot tone="accent" />);
+    expect(dot(h).className).toBe(`${DOT} bg-accent`);
+    expect(dot(h).className).not.toContain("animate-pulse");
+  });
+
   it("switches to the error tone", () => {
     h = mount(<StatusDot tone="error" />);
     expect(dot(h).className).toBe(`${DOT} bg-danger`);

@@ -68,6 +68,7 @@ import {
   networkFailure,
   type ClaimOutcome,
 } from "../../shared/claim.mjs";
+import type { RoutinesUpdatedPayload } from "../../shared/routines.js";
 import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
@@ -441,7 +442,8 @@ type Kind =
   | "stream"
   | "runningSet"
   | "sync"
-  | "ctoState";
+  | "ctoState"
+  | "routines.updated";
 
 // Stream-kind listeners receive the DERIVED envelope `{sub, sessionId, payload}`
 // (see dispatchFrame), not just `payload` — the bus event carries the extra
@@ -474,6 +476,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   runningSet: new Set(),
   sync: new Set(),
   ctoState: new Set(),
+  "routines.updated": new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -1269,6 +1272,23 @@ export const httpApi: Api = {
   scheduleDelete: (id) => rpc(IPC.scheduleDelete, id),
   // BET-739: usage reset actions create one-shot jobs through the same channel
   scheduleCreate: (input) => rpc(IPC.scheduleCreate, input),
+
+  // -- routines (manta-server owned) --
+  routinesSummary: () => rpc(IPC.routinesSummary),
+  routinesGet: (id, opts) => rpc(IPC.routinesGet, id, opts ?? {}),
+  routinesCreate: (input) => rpc(IPC.routinesCreate, input),
+  routinesUpdate: (id, patch) => rpc(IPC.routinesUpdate, id, patch),
+  routinesDelete: (id) => rpc(IPC.routinesDelete, id),
+  routinesRunNow: (id) => rpc(IPC.routinesRunNow, id),
+  routinesRunGet: (runId) => rpc(IPC.routinesRunGet, runId),
+  routinesMarkRead: (runIds) => rpc(IPC.routinesMarkRead, runIds),
+  routinesMemorySet: (id, text) => rpc(IPC.routinesMemorySet, id, text),
+  routinesKeepInSidebar: (runId) => rpc(IPC.routinesKeepInSidebar, runId),
+  routinesConvertPreview: (followupId) => rpc(IPC.routinesConvertPreview, followupId),
+  routinesConvertCommit: (followupId, input) => rpc(IPC.routinesConvertCommit, followupId, input),
+  routinesMoveToChat: (id, target) => rpc(IPC.routinesMoveToChat, id, target),
+  routinesMoveBack: (id) => rpc(IPC.routinesMoveBack, id),
+  onRoutinesUpdated: (cb) => on<RoutinesUpdatedPayload>("routines.updated", cb),
 
   // -- subscription plan usage (manta-server owned; in-process on mobile) --
   usageList: () => rpc(IPC.usageList),

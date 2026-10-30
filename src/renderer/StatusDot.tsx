@@ -9,13 +9,14 @@
 //
 // Chrome contract: `w-[6px] h-[6px] rounded-full shrink-0` plus a per-tone
 // background — `bg-ok` (ok), `bg-accent animate-pulse` (running), `bg-danger`
-// (error), `bg-warn` (warn), `bg-text-quiet` (idle).
+// (error), `bg-warn` (warn), `bg-text-quiet` (idle), `bg-accent` (accent — a
+// STATIC accent dot with no pulse: the routines "Findings" outcome pill).
 
 export function StatusDot({
   tone,
 }: {
   /** The dot's semantic state — drives the background (and pulse when running). */
-  tone: "ok" | "running" | "error" | "warn" | "idle";
+  tone: "ok" | "running" | "error" | "warn" | "idle" | "accent";
 }) {
   const toneCls =
     tone === "running"
@@ -26,6 +27,8 @@ export function StatusDot({
           ? "bg-warn"
           : tone === "ok"
             ? "bg-ok"
-            : "bg-text-quiet";
+            : tone === "accent"
+              ? "bg-accent"
+              : "bg-text-quiet";
   return <span className={`w-[6px] h-[6px] rounded-full shrink-0 ${toneCls}`} />;
 }
