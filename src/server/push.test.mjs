@@ -1498,3 +1498,19 @@ test("firePush: an event with no id is not dropped", async () => {
     _resetPushState();
   }
 });
+
+test("fireNotify carries routineRunId into the desktop payload; a routine notification has no sessionId and keeps its tag", async () => {
+  _resetPushState();
+  const seen = [];
+  setDesktopSink((p) => seen.push(p));
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null });
+  await fireNotify({ message: "Signups up 18%", title: "Digest · findings", tag: "routine-ab12cd34", routineRunId: "0123456789" });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].routineRunId, "0123456789");
+  assert.equal(seen[0].sessionId, null);
+  assert.equal(seen[0].tag, "routine-ab12cd34");
+  assert.equal(seen[0].title, "Digest · findings");
+  await fireNotify({ message: "plain", sessionID: "ses_n" });
+  assert.equal("routineRunId" in seen[1], false, "absent for every other caller");
+  _resetPushState();
+});

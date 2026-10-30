@@ -246,6 +246,11 @@ function genId() {
 // text in BOTH cases; there is deliberately no second text field. Defaulting
 // to "prompt" keeps every existing job and caller (the AI `schedule` tool)
 // unaffected.
+//
+// `routineId` / `preamble` are optional and only set when a routine is moved
+// into a chat (routines.mjs, spec §8.2): the job then fires the routine's prompt
+// here, and `preamble` (the routine's memory) is prepended ONCE, on the first
+// firing that is actually handed to the session.
 export async function createJob(
   {
     cron,
@@ -256,6 +261,8 @@ export async function createJob(
     directory = "",
     kind = "prompt",
     fireAt,
+    routineId,
+    preamble,
     now = () => new Date(),
   },
   { load = loadJobs, save = saveJobs, publish } = {},
@@ -299,6 +306,8 @@ export async function createJob(
     createdAt,
     dueAt,
     lastFiredMinute: null,
+    ...(typeof routineId === "string" && routineId ? { routineId } : {}),
+    ...(typeof preamble === "string" && preamble.trim() ? { preamble } : {}),
   };
   jobs.push(job);
   await save(jobs);
@@ -422,6 +431,7 @@ export function createScheduler({
         // Fire. Failures are swallowed (logged) so one bad job can't wedge the
         // loop or block other due jobs; lastFiredMinute is stamped regardless
         // to avoid hammering a persistently-failing send every tick.
+        let preambleUsed = false;
         try {
           if (job.kind === "notify") {
             if (typeof fireNotify === "function") {
@@ -439,14 +449,17 @@ export function createScheduler({
             // genuine retry of the same fire dedups, and every NEW firing
             // minute is a NEW occurrence (content must never be the
             // identity: recurring identical prompts would fire once ever).
-            await sendPrompt({
+            const delivery = await sendPrompt({
               sessionId: job.sessionID,
-              text: job.prompt,
+              text: job.preamble ? `${job.preamble}\n\n${job.prompt}` : job.prompt,
               ctoKey: `sched:${job.id}:${key}`,
               // Recurring firings of one job coalesce while the session is busy
               // (promptDelivery) instead of stacking into a burst.
               coalesceKey: `sched:${job.id}`,
             });
+            // A rejected delivery never reached the session, so the preamble stays for the
+            // next firing; a queued/coalesced one counts as delivered (promptDelivery owns it).
+            preambleUsed = !!job.preamble && delivery?.rejected !== true;
           }
         } catch (e) {
           console.warn(`[schedule] fire job ${job.id} failed:`, e?.message ?? e);
@@ -454,7 +467,9 @@ export function createScheduler({
         firedSessions.add(job.sessionID);
         mutated = true;
         if (job.recurring) {
-          survivors.push({ ...job, lastFiredMinute: key });
+          const fired = { ...job, lastFiredMinute: key };
+          if (preambleUsed) delete fired.preamble;
+          survivors.push(fired);
         }
         // one-shot: dropped (not pushed to survivors)
       }

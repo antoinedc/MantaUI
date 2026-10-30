@@ -657,9 +657,13 @@ async function dispatchNotification(payload, now = Date.now()) {
  * default `notify-${sessionID ?? "global"}` formula below is unchanged for
  * every existing caller that doesn't pass one.
  *
- * @param {{message:string, title?:string, urgent?:boolean, sessionID?:string, tag?:string}} args
+ * `routineRunId` (routines, spec §5.4) rides along into the desktop payload so a
+ * click opens the Routines pane at that run. A routine notification passes NO
+ * sessionID — its run session has no window, so a session deep link would be dead.
+ *
+ * @param {{message:string, title?:string, urgent?:boolean, sessionID?:string, tag?:string, routineRunId?:string}} args
  */
-export async function fireNotify({ message, title, urgent, sessionID, tag } = {}) {
+export async function fireNotify({ message, title, urgent, sessionID, tag, routineRunId } = {}) {
   const sid = typeof sessionID === "string" ? sessionID : null;
   const label = await resolveSessionLabel(sid);
   const payload = {
@@ -669,6 +673,7 @@ export async function fireNotify({ message, title, urgent, sessionID, tag } = {}
     body: typeof message === "string" ? message : "",
     sessionId: sid,
     tag: typeof tag === "string" && tag ? tag : `notify-${sid ?? "global"}`,
+    ...(typeof routineRunId === "string" && routineRunId ? { routineRunId } : {}),
   };
   await dispatchNotification(payload);
   return { ok: true };

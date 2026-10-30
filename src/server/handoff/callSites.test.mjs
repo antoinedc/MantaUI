@@ -39,6 +39,7 @@ const EXEMPT = {
   "delegate.mjs": { count: 2, why: "the opening prompt / command of a child session created seconds earlier — nothing can replace or fence it yet" },
   "rpc.mjs": { count: 5, why: "forge ship-preview's own throwaway session; the user send + command paths each run behind handoff.admitPrompt / handoff.guardCommand (asserted below), the raw fallback is only for an engine-less test build" },
   "index.mjs": { count: 5, why: "CTO conversation admission (a role session, never handed off), a delegate child's opening prompt, and the CTO runner's own sessions" },
+  "routines.mjs": { count: 3, why: "a routine run's own headless session (opening prompt, the one missing-report re-prompt, a crash-recovery resend): created by the engine, marked manta.routineId, and never auto-handed-off (maybeAuto skips it)" },
   "peers.mjs": { count: 1, why: "default dep; production injects promptDelivery.deliver (asserted below)" },
   "capNotifier.mjs": { count: 1, why: "default dep; production injects promptDelivery.deliver (asserted below)" },
   "forge/index.mjs": { count: 2, why: "forge ship-preview's own freshly created session" },

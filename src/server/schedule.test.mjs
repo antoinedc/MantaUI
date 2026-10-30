@@ -787,3 +787,59 @@ test("cron is evaluated in the process TZ: the same instant matches 09:00 only i
   });
   assert.deepEqual(JSON.parse(out.trim().split("\n").pop()), { utc: false, paris: true });
 });
+
+// ----------------------------------------------------------------------------
+// Routines (spec §8.2): optional `routineId` + one-shot `preamble`
+// ----------------------------------------------------------------------------
+
+test("createJob stores routineId and preamble only when given; the rest of the shape is unchanged", async () => {
+  const plain = await createJob({ cron: "0 9 * * *", prompt: "p", sessionID: "ses_x" }, { load: async () => [], save: async () => {} });
+  assert.equal("routineId" in plain.job, false);
+  assert.equal("preamble" in plain.job, false);
+  const moved = await createJob(
+    { cron: "0 9 * * *", prompt: "p", sessionID: "ses_x", routineId: "ab12cd34", preamble: "Notes:\n\nbaseline" },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(moved.job.routineId, "ab12cd34");
+  assert.equal(moved.job.preamble, "Notes:\n\nbaseline");
+  assert.deepEqual(Object.keys(plain.job).sort(), Object.keys(moved.job).filter((k) => k !== "routineId" && k !== "preamble").sort());
+  const blank = await createJob({ cron: "0 9 * * *", prompt: "p", sessionID: "ses_x", preamble: "  " }, { load: async () => [], save: async () => {} });
+  assert.equal("preamble" in blank.job, false);
+});
+
+test("tick prepends the preamble on the first delivered firing only, then clears it", async () => {
+  const job = { ...baseJob, id: "job9", cron: "*/5 * * * *", routineId: "ab12cd34", preamble: "Notes from earlier runs of this routine:\n\nbaseline" };
+  const h = harness([job], localDate(2026, 6, 20, 15, 5));
+  await createScheduler(h.deps).tick();
+  assert.equal(h.sent[0].text, "Notes from earlier runs of this routine:\n\nbaseline\n\ncheck the deploy");
+  assert.equal("preamble" in h.jobs[0], false, "consumed");
+  assert.equal(h.jobs[0].routineId, "ab12cd34", "routineId stays");
+  h.deps.now = () => localDate(2026, 6, 20, 15, 10);
+  await createScheduler(h.deps).tick();
+  assert.equal(h.sent[1].text, "check the deploy");
+});
+
+test("a rejected delivery keeps the preamble for the next firing; a queued or coalesced one counts as delivered; a thrown one keeps it", async () => {
+  const job = { ...baseJob, id: "job9", preamble: "P" };
+  for (const [result, kept] of [
+    [{ rejected: true }, true],
+    [{ delivered: false, queued: true }, false],
+    [{ delivered: false, queued: true, coalesced: true }, false],
+    [{ delivered: true }, false],
+    [undefined, false],
+  ]) {
+    const h = harness([job], localDate(2026, 6, 20, 15, 5));
+    h.deps.sendPrompt = async (args) => {
+      h.sent.push(args);
+      return result;
+    };
+    await createScheduler(h.deps).tick();
+    assert.equal("preamble" in h.jobs[0], kept, JSON.stringify(result));
+  }
+  const h = harness([job], localDate(2026, 6, 20, 15, 5));
+  h.deps.sendPrompt = async () => {
+    throw new Error("down");
+  };
+  await createScheduler(h.deps).tick();
+  assert.equal(h.jobs[0].preamble, "P", "a failed send never delivered it");
+});
