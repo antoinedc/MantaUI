@@ -14,6 +14,7 @@ import {
   nextOccurrence,
   resolveProjectName,
   notifyDecision,
+  notifyTitle,
   runWire,
   routineWire,
   memoryAddedLines,
@@ -673,7 +674,7 @@ test("settle: succeeded + report → done with tokens, quiet outcomes are born r
   assert.equal(done.endedAt, w.t);
   assert.equal(done.readAt, null);
   assert.equal(w.notes.length, 1);
-  assert.equal(w.notes[0].title, "Digest · findings");
+  assert.equal(w.notes[0].title, "Digest", "a report with news is titled by the routine name alone");
   assert.equal(w.notes[0].message, "Signups up 18%");
   assert.equal(w.notes[0].urgent, false);
   assert.equal(done.notifiedAt, w.t);
@@ -1065,6 +1066,14 @@ test("notify policy matrix (spec §6.3)", () => {
   for (const p of ["findings", "always", "failures", "never"]) assert.deepEqual(notifyDecision(p, needs), { send: true, urgent: true, kind: "needs you" });
   assert.equal(notifyDecision("always", { status: "cancelled" }).send, false);
   assert.equal(notifyDecision("always", nothing).kind, "nothing new");
+  assert.equal(notifyDecision("findings", findings).kind, "news");
+});
+
+test("push title: the name alone for news, `name · what happened` otherwise (no 'findings' wording)", () => {
+  assert.equal(notifyTitle("Digest", notifyDecision("findings", { status: "done", report: { outcome: "findings" } }).kind), "Digest");
+  assert.equal(notifyTitle("Digest", notifyDecision("always", { status: "done", report: { outcome: "nothing" } }).kind), "Digest · nothing new");
+  assert.equal(notifyTitle("Digest", notifyDecision("failures", { status: "failed" }).kind), "Digest · failed");
+  assert.equal(notifyTitle("Digest", notifyDecision("never", { status: "needs_input" }).kind), "Digest · needs you");
 });
 
 // ---------------------------------------------------------------------------

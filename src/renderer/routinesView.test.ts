@@ -5,19 +5,24 @@ import {
   cadenceText,
   canSaveDraft,
   cronToSchedule,
+  defaultRunSelection,
   draftErrors,
   draftToInput,
   emptyDraft,
   inboxTimeLabel,
+  isUnreadRun,
   lastRunDetail,
   memoryLines,
   nextLabel,
   nextRunPhrase,
+  notifyLabel,
   outcomeView,
   parseTimeInput,
   routineIcon,
   runDateParts,
   runDuration,
+  runListTitle,
+  runSentence,
   runTitle,
   scheduleToCron,
   splitInstructions,
@@ -97,16 +102,25 @@ describe("time labels", () => {
 });
 
 describe("outcomeView", () => {
-  it("maps every state", () => {
-    expect(outcomeView(run({ report: { outcome: "findings", title: "", summary: "", body: "" } }))).toMatchObject({ tone: "accent", dot: "accent", label: "Findings" });
-    expect(outcomeView(run({ report: { outcome: "nothing", title: "", summary: "", body: "" } }))).toMatchObject({ tone: "neutral", border: true, dot: null, label: "Nothing new" });
+  it("a run that reported gets no pill, whatever the outcome", () => {
+    expect(outcomeView(run({ report: { outcome: "findings", title: "", summary: "", body: "" } }))).toBeNull();
+    expect(outcomeView(run({ report: { outcome: "nothing", title: "", summary: "", body: "" } }))).toBeNull();
+    expect(outcomeView(run({}))).toBeNull();
+  });
+  it("maps what is in flight or needs attention", () => {
     expect(outcomeView(run({ status: "running" }))).toMatchObject({ tone: "accent", dot: "running" });
     expect(outcomeView(run({ status: "queued" }), 2)).toMatchObject({ tone: "warn", label: "Queued · #2" });
     expect(outcomeView(run({ status: "needs_input" }))).toMatchObject({ tone: "danger", dot: "error", label: "Needs you" });
     expect(outcomeView(run({ status: "failed" }))).toMatchObject({ tone: "danger", label: "Failed" });
-    expect(outcomeView(run({ status: "cancelled" })).label).toBe("Stopped");
-    expect(outcomeView(run({ status: "timed_out" })).label).toBe("Timed out");
-    expect(outcomeView(run({ status: "skipped" })).label).toBe("Skipped");
+    expect(outcomeView(run({ status: "cancelled" }))?.label).toBe("Stopped");
+    expect(outcomeView(run({ status: "timed_out" }))?.label).toBe("Timed out");
+    expect(outcomeView(run({ status: "skipped" }))?.label).toBe("Skipped");
+  });
+  it("no label anywhere says Findings", () => {
+    for (const status of ["running", "queued", "needs_input", "failed", "timed_out", "cancelled", "skipped", "done"] as const) {
+      expect(outcomeView(run({ status, report: { outcome: "findings", title: "", summary: "", body: "" } }))?.label ?? "").not.toMatch(/finding/i);
+    }
+    expect(notifyLabel("findings")).toBe("Notify when there's news");
   });
 });
 
@@ -232,5 +246,41 @@ describe("runTitle", () => {
     expect(runTitle(run({ report: { outcome: "findings", title: "Signups up", summary: "", body: "" } as never }))).toBe("Signups up");
     expect(runTitle(run({ status: "failed", error: "Session crashed" }))).toBe("Session crashed");
     expect(runTitle(run({ status: "needs_input", question: "Which env?" }))).toBe("Which env?");
+  });
+});
+
+describe("the run list", () => {
+  const found = { outcome: "findings" as const, title: "T", summary: "", body: "" };
+  const quiet = { outcome: "nothing" as const, title: "Q", summary: "", body: "" };
+  it("titles: the report, the error, the question, else what the run is doing", () => {
+    expect(runListTitle(run({ report: found }))).toBe("T");
+    expect(runListTitle(run({ status: "failed", error: "Session crashed" }))).toBe("Session crashed");
+    expect(runListTitle(run({ status: "needs_input", question: "Which env?" }))).toBe("Which env?");
+    expect(runListTitle(run({ status: "running", endedAt: null }))).toBe("Running…");
+    expect(runListTitle(run({ status: "queued", startedAt: null, endedAt: null }))).toBe("Waiting in line");
+    expect(runListTitle(run({ status: "done" }))).toBe("Finished without a report");
+  });
+  it("one sentence for a run with no report", () => {
+    expect(runSentence(run({ status: "cancelled" }))).toMatch(/stopped/);
+    expect(runSentence(run({ status: "skipped", notes: ["Skipped: the box was busy"] }))).toBe("Skipped: the box was busy");
+    expect(runSentence(run({ status: "done" }))).toMatch(/without filing a report/);
+  });
+  it("unread = terminal, never read, and something to look at", () => {
+    expect(isUnreadRun(run({ report: found }))).toBe(true);
+    expect(isUnreadRun(run({ report: found, readAt: 5 }))).toBe(false);
+    expect(isUnreadRun(run({ report: quiet }))).toBe(false);
+    expect(isUnreadRun(run({ status: "failed" }))).toBe(true);
+    expect(isUnreadRun(run({ status: "timed_out" }))).toBe(true);
+    expect(isUnreadRun(run({ status: "running", report: found }))).toBe(false);
+  });
+  it("default selection: the requested run, else the newest unread, else the newest, else About", () => {
+    const newest = run({ id: "n", report: quiet, readAt: 1 });
+    const unread = run({ id: "u", report: found });
+    const older = run({ id: "o", report: found });
+    expect(defaultRunSelection([newest, unread, older], "x")).toBe("x");
+    expect(defaultRunSelection([newest, unread, older], "about")).toBe("about");
+    expect(defaultRunSelection([newest, unread, older])).toBe("u");
+    expect(defaultRunSelection([newest, run({ id: "r", report: found, readAt: 1 })])).toBe("n");
+    expect(defaultRunSelection([])).toBe("about");
   });
 });

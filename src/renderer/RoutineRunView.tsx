@@ -34,7 +34,9 @@ export function RoutineRunView({
 }: {
   runId: string;
   onBack: () => void;
-  onOpenRoutine: (routineId: string) => void;
+  /** Back to the routine's page with this run selected. */
+  onOpenRoutine: (routineId: string, runId: string) => void;
+  /** Previous / next run: stays in the transcript view. */
   onOpenRun: (runId: string) => void;
   /** Leave the Routines pane (after Keep in sidebar / Follow up). */
   onClosePane: () => void;
@@ -129,10 +131,10 @@ export function RoutineRunView({
   if (!run.sessionID || run.status === "queued") {
     return (
       <div className="manta-routines-run flex h-full w-full flex-col bg-bg" data-screen="routines">
-        <RoutinesHeader right={<IconButton label="Close run" title="Close and go back to Routines" size="xl" icon={<X />} onClick={onBack} />}>
+        <RoutinesHeader right={<IconButton label="Close run" title="Close and go back to the routine" size="xl" icon={<X />} onClick={() => onOpenRoutine(routine.id, run.id)} />}>
           <CrumbLink onClick={onBack}>Routines</CrumbLink>
           <CrumbSep />
-          <CrumbLink onClick={() => onOpenRoutine(routine.id)}>{routine.name}</CrumbLink>
+          <CrumbLink onClick={() => onOpenRoutine(routine.id, run.id)}>{routine.name}</CrumbLink>
           <CrumbSep />
           {runCrumbLabel(run.queuedAt)}
         </RoutinesHeader>
@@ -153,7 +155,7 @@ export function RoutineRunView({
     onNavigate: onOpenRun,
     onKeep: () => keepInSidebar(),
     onBack,
-    onOpenRoutine: () => onOpenRoutine(routine.id),
+    onOpenRoutine: () => onOpenRoutine(routine.id, run.id),
     onFollowUp: () => keepInSidebar("open the run as a session"),
   };
 

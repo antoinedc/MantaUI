@@ -5,6 +5,6 @@
   - radio /Analytics review ronda · the chat this routine was created from · active [\d,.]+[bkmBKM]+ ago/ [checked]
   - radio "A new chat just for this Shows up in the sidebar as “Daily analytics digest”. Every run adds to it."
   - radio "Another chat… Pick any session in the sidebar."
-- text: /What changes Each run posts into Analytics review and can see everything said there, so you can reply to a finding directly\. Its memory \(\d+ lines\) is posted into the chat once\. From then on the chat itself is the memory\. The note is kept as it was, in case you move it back\. If you're in the middle of something at 9:\d+, the run waits until the chat is idle\. It never interrupts you\. The \d+ past runs stay in this routine's history\. Good for check-ins you want to discuss\. For independent daily reports, a new session each run keeps the chat from growing every day\./
+- text: /What changes Each run posts into Analytics review and can see everything said there, so you can reply to a report directly\. Its memory \(\d+ lines\) is posted into the chat once\. From then on the chat itself is the memory\. The note is kept as it was, in case you move it back\. If you're in the middle of something at 9:\d+, the run waits until the chat is idle\. It never interrupts you\. The \d+ past runs stay in this routine's history\. Good for check-ins you want to discuss\. For independent daily reports, a new session each run keeps the chat from growing every day\./
 - button "Cancel"
 - button "Move into chat"

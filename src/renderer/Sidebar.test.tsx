@@ -796,10 +796,10 @@ describe("Sidebar — Routines row", () => {
     expect(open).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a red count for runs that need you and a blue one for unread findings; both hidden at zero", () => {
+  it("shows a red count for runs that need you and a blue one for unread reports; both hidden at zero", () => {
     mountRow({ needsYou: 1, unread: 3 });
     expect(row().querySelector('[aria-label="1 need you"]')?.textContent).toBe("1");
-    expect(row().querySelector('[aria-label="3 new findings"]')?.textContent).toBe("3");
+    expect(row().querySelector('[aria-label="3 unread reports"]')?.textContent).toBe("3");
     h!.unmount();
     mountRow();
     expect(row().querySelector("span[aria-label]")).toBeNull();

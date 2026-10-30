@@ -12,7 +12,8 @@ import { RoutinesPane } from "./RoutinesPane";
 import { RoutineEditor } from "./RoutineEditor";
 import { RoutineRunContext, type RoutineRunContextValue } from "./routineRunContext";
 import { RoutineReportCard, RoutineToolCard, routineHeaderChrome } from "./RoutineRunParts";
-import { RoutineReportModal } from "./RoutineReportModal";
+import { RoutineDetail } from "./RoutineDetail";
+import { RoutinesRoot, type RoutinesView } from "./RoutinesRoot";
 import { Popover } from "./Popover";
 import { Modal } from "./Modal";
 import { ShowMore } from "./RoutinesParts";
@@ -57,6 +58,7 @@ describe("Routines", () => {
       reload: vi.fn(() => Promise.resolve()),
       onOpenRoutine: vi.fn(),
       onOpenRun: vi.fn(),
+      onOpenTranscript: vi.fn(),
       onNewRoutine: vi.fn(),
       ...over,
     };
@@ -67,13 +69,13 @@ describe("Routines", () => {
   it("draws the four sections from the summary, eight routines in the table, no follow-ups section", () => {
     mountPane();
     const text = h!.text();
-    for (const t of ["Needs you", "New findings", "Running now", "Your routines"]) {
+    for (const t of ["Needs you", "Unread", "Running now", "Your routines"]) {
       expect(text.toLowerCase()).toContain(t.toLowerCase());
     }
     expect(text.toLowerCase()).not.toContain("follow-ups in a chat");
     expect(h!.container.querySelector(".manta-routines-followups")).toBeNull();
     expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(8);
-    expect(h!.container.querySelector(".manta-routines-table")!.textContent).not.toContain("Findings");
+    expect(text).not.toMatch(/findings/i);
     expect(text).toContain("14 bug reports are older than 90 days");
     expect(text).toContain("Tomorrow 9:00");
     expect(text).toContain("Weekdays · 9:00");
@@ -100,10 +102,18 @@ describe("Routines", () => {
     expect(p.onOpenRun).toHaveBeenCalledWith("run_dg_23", expect.objectContaining({ id: "run_dg_23" }));
   });
 
-  it("Answer opens the run that is waiting", async () => {
+  it("Answer opens the transcript of the run that is waiting, not the routine page", async () => {
     const p = mountPane();
     await click(h!, buttonByText(h!, "Answer"));
-    expect(p.onOpenRun).toHaveBeenCalledWith("run_tr_9");
+    expect(p.onOpenTranscript).toHaveBeenCalledWith("run_tr_9");
+    expect(p.onOpenRun).not.toHaveBeenCalled();
+  });
+
+  it("a run that reported has no pill in the routines table", () => {
+    mountPane();
+    const row = [...h!.container.querySelectorAll(".manta-routines-table [role=button]")].find((r) => r.textContent?.includes("Daily analytics digest"));
+    expect(row?.textContent).toContain("Today 9:04");
+    expect(row?.textContent).not.toMatch(/findings|nothing new|done/i);
   });
 
   it("Mark all read calls the box, reloads and says how many it marked", async () => {
@@ -112,7 +122,7 @@ describe("Routines", () => {
     await click(h!, buttonByText(h!, "Mark all read"));
     expect(routinesMarkRead).toHaveBeenCalledWith("all");
     expect(p.reload).toHaveBeenCalled();
-    expect(toasts().join(" ")).toContain("Marked 3 findings read");
+    expect(toasts().join(" ")).toContain("Marked 3 reports read");
   });
 
   it("a failing action surfaces an error toast instead of failing silently", async () => {
@@ -243,7 +253,7 @@ describe("Routines", () => {
           <RoutineReportCard />
         </RoutineRunContext.Provider>,
       );
-      expect(h.text()).toContain("Findings");
+      expect(h.text()).not.toMatch(/findings/i);
       expect(h.text()).toContain("Signups up 18% week over week");
       expect(h.text()).toContain("Notified you at 9:04");
       await click(h, buttonByText(h, "Follow up"));
@@ -325,12 +335,13 @@ describe("ShowMore", () => {
 });
 
 describe("a run's header", () => {
-  it("has a Close button that goes back to the Routines list", async () => {
+  it("has a Close button that goes back to the routine page with this run selected", async () => {
     installMockApi();
     const s = createRoutinesStore();
     const sum = await s.summary();
     const run = sum.lastRuns[sum.routines[0].id]!;
     const onBack = vi.fn();
+    const onOpenRoutine = vi.fn();
     const chrome = routineHeaderChrome({
       run,
       routine: sum.routines[0],
@@ -339,48 +350,20 @@ describe("a run's header", () => {
       onNavigate: vi.fn(),
       onKeep: vi.fn(),
       onBack,
-      onOpenRoutine: vi.fn(),
+      onOpenRoutine,
       onFollowUp: vi.fn(),
     });
     const h = mount(<>{chrome.lead}</>);
     await click(h, h.container.querySelector('[aria-label="Close run"]'));
-    expect(onBack).toHaveBeenCalled();
+    expect(onOpenRoutine).toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
     h.unmount();
-  });
-});
-
-describe("report-first run modal", () => {
-  let h: Harness | null = null;
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
-
-  it("shows the report whole, marks the run read, and offers the full transcript", async () => {
-    const store = createRoutinesStore();
-    const routinesMarkRead = vi.fn(() => Promise.resolve({ updated: 1 }));
-    installMockApi({ routinesRunGet: store.runGet, routinesMarkRead });
-    const onSeeTranscript = vi.fn();
-    const onChanged = vi.fn();
-    h = mount(<RoutineReportModal runId="run_dg_23" onClose={vi.fn()} onSeeTranscript={onSeeTranscript} onClosePane={vi.fn()} onChanged={onChanged} />);
-    await h.flush();
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("Signups up 18% week over week");
-    expect(text).toContain("Safari 17");
-    expect(routinesMarkRead).toHaveBeenCalledWith(["run_dg_23"]);
-    const see = [...document.body.querySelectorAll("button")].find((b) => b.textContent?.includes("See full transcript"));
-    await click(h, see ?? null);
-    expect(onSeeTranscript).toHaveBeenCalled();
-  });
-
-  it("a run with nothing to report goes straight to the transcript", async () => {
-    const store = createRoutinesStore();
-    installMockApi({ routinesRunGet: store.runGet });
-    const onSeeTranscript = vi.fn();
-    h = mount(<RoutineReportModal runId="run_cp_8" onClose={vi.fn()} onSeeTranscript={onSeeTranscript} onClosePane={vi.fn()} onChanged={vi.fn()} />);
-    await h.flush();
-    expect(onSeeTranscript).toHaveBeenCalled();
-    expect(document.body.textContent ?? "").not.toContain("See full transcript");
+    const crumb = mount(<>{chrome.crumb}</>);
+    await click(crumb, buttonByText(crumb, "Routines"));
+    expect(onBack).toHaveBeenCalled();
+    await click(crumb, buttonByText(crumb, sum.routines[0].name));
+    expect(onOpenRoutine).toHaveBeenCalledTimes(2);
+    crumb.unmount();
   });
 });
 
@@ -419,26 +402,237 @@ describe("a menu opened from inside a modal", () => {
   });
 });
 
-describe("Follow up", () => {
+describe("the routine page — the run inbox", () => {
   let h: Harness | null = null;
   afterEach(() => {
     h?.unmount();
     h = null;
   });
 
-  it("in the report modal, moves the run into the sidebar as an ordinary session and opens it", async () => {
-    const store = createRoutinesStore();
+  const DIGEST = "a1b2c3d4";
+  async function mountDetail(over: { routineId?: string; runId?: string; api?: Record<string, unknown>; store?: ReturnType<typeof createRoutinesStore> } = {}) {
+    pinDemoClock(ROUTINES_T0);
+    resetStore();
+    const store = over.store ?? createRoutinesStore();
+    const routinesGet = vi.fn((id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }) => store.get(id, opts));
+    const routinesMarkRead = vi.fn((ids: string[] | "all") => store.markRead(ids));
     const routinesKeepInSidebar = vi.fn(() => Promise.resolve({ tmuxSession: "ronda", windowIndex: 3, sessionID: "ses_run" }));
     const tmuxSelectWindow = vi.fn(() => Promise.resolve());
-    installMockApi({ routinesRunGet: store.runGet, routinesMarkRead: () => Promise.resolve({ updated: 1 }), routinesKeepInSidebar, tmuxSelectWindow });
-    const onClosePane = vi.fn();
-    h = mount(<RoutineReportModal runId="run_dg_23" onClose={vi.fn()} onSeeTranscript={vi.fn()} onClosePane={onClosePane} onChanged={vi.fn()} />);
+    const routinesRunNow = vi.fn((id: string) => store.runNow(id));
+    installMockApi({ routinesGet, routinesRunGet: store.runGet, routinesMarkRead, routinesKeepInSidebar, tmuxSelectWindow, routinesRunNow, ...over.api });
+    const props = {
+      routineId: over.routineId ?? DIGEST,
+      summary: await store.summary(),
+      runId: over.runId,
+      onBack: vi.fn(),
+      onSelectRun: vi.fn(),
+      onOpenTranscript: vi.fn(),
+      onClosePane: vi.fn(),
+      onEdit: vi.fn(),
+      onMoveToChat: vi.fn(),
+      onChanged: vi.fn(),
+    };
+    h = mount(<RoutineDetail {...props} />);
     await h.flush();
-    const btn = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Follow up");
-    await click(h, btn ?? null);
     await h.flush();
-    expect(routinesKeepInSidebar).toHaveBeenCalledWith("run_dg_23");
-    expect(onClosePane).toHaveBeenCalled();
-    expect(tmuxSelectWindow).toHaveBeenCalledWith({ sessionName: "ronda", windowIndex: 3 });
+    return { props, store, routinesGet, routinesMarkRead, routinesKeepInSidebar, tmuxSelectWindow, routinesRunNow };
+  }
+  const reading = () => h!.container.querySelector(".manta-routines-reading") as HTMLElement;
+  const list = () => h!.container.querySelector(".manta-routines-runlist") as HTMLElement;
+  const options = () => [...list().querySelectorAll('[role="option"]')] as HTMLElement[];
+  const selectedOption = () => options().find((o) => o.getAttribute("aria-selected") === "true");
+  const option = (text: string) => options().find((o) => o.textContent?.includes(text)) as HTMLElement | undefined;
+  const readingButton = (text: string) => [...reading().querySelectorAll("button")].find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
+  async function key(el: Element, k: string) {
+    await act(async () => {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+    });
+    await h!.flush();
+  }
+
+  it("opens on the newest unread run: its report in the reading pane, read on arrival, the choice kept in the view", async () => {
+    const m = await mountDetail();
+    expect(selectedOption()?.textContent).toContain("Signups up 18% week over week");
+    expect(reading().textContent).toContain("Safari 17");
+    expect(reading().textContent).toContain("Notified you at 9:04");
+    expect(reading().textContent).toContain("Memory updated · +");
+    expect(m.routinesMarkRead).toHaveBeenCalledWith(["run_dg_23"]);
+    expect(m.props.onSelectRun).toHaveBeenCalledWith("run_dg_23");
+    expect(m.props.onChanged).toHaveBeenCalled();
+    // The unread dot goes away once it is read; the selection does not move.
+    expect(selectedOption()?.textContent).toContain("Signups up 18% week over week");
+    expect(selectedOption()?.querySelector(".invisible")).toBeTruthy();
+    expect(h!.text()).not.toMatch(/findings/i);
+  });
+
+  it("header carries Edit / Pause / Run now; the page is a list and a reading pane", async () => {
+    const m = await mountDetail();
+    expect(h!.container.querySelector(".manta-routines-runlist")).toBeTruthy();
+    expect(h!.container.querySelector(".manta-routines-reading")).toBeTruthy();
+    expect(options()[0].textContent).toContain("About this routine");
+    await click(h!, buttonByText(h!, "Run now"));
+    expect(m.routinesRunNow).toHaveBeenCalledWith(DIGEST);
+    await click(h!, buttonByText(h!, "Edit"));
+    expect(m.props.onEdit).toHaveBeenCalled();
+  });
+
+  it("selecting another run shows it and reports the selection; a quiet run is muted and has no pill", async () => {
+    const m = await mountDetail();
+    const quiet = option("All metrics within normal range")!;
+    expect(quiet.textContent).not.toMatch(/nothing new/i);
+    expect(quiet.querySelector(".text-text-faint.font-normal")).toBeTruthy();
+    await click(h!, quiet);
+    expect(m.props.onSelectRun).toHaveBeenLastCalledWith("run_dg_22");
+    expect(selectedOption()).toBe(option("All metrics within normal range"));
+    expect(reading().textContent).toContain("All metrics within normal range");
+    expect(reading().textContent).toContain("Filed quietly");
+  });
+
+  it("See transcript opens the run's transcript; Follow up keeps it in the sidebar and opens it", async () => {
+    const m = await mountDetail();
+    await click(h!, readingButton("See transcript") ?? null);
+    expect(m.props.onOpenTranscript).toHaveBeenCalledWith("run_dg_23");
+    await click(h!, readingButton("Follow up") ?? null);
+    await h!.flush();
+    expect(m.routinesKeepInSidebar).toHaveBeenCalledWith("run_dg_23");
+    expect(m.props.onClosePane).toHaveBeenCalled();
+    expect(m.tmuxSelectWindow).toHaveBeenCalledWith({ sessionName: "ronda", windowIndex: 3 });
+  });
+
+  it("a failed run shows its error with the danger label and the same two actions", async () => {
+    await mountDetail({ runId: "run_dg_18" });
+    expect(reading().textContent).toContain("PostHog returned 401");
+    expect(reading().textContent).toContain("Failed");
+    expect(readingButton("See transcript")).toBeTruthy();
+    expect(readingButton("Follow up")).toBeTruthy();
+    expect(option("PostHog returned 401")?.textContent).toContain("Failed");
+  });
+
+  it("a running run says how long, and Watch transcript opens it", async () => {
+    const m = await mountDetail({ routineId: "d4e5f6a7", runId: "run_dd_12" });
+    expect(reading().textContent).toContain("Running for 3m 4");
+    expect(reading().textContent).toContain("started 9:57");
+    await click(h!, readingButton("Watch transcript") ?? null);
+    expect(m.props.onOpenTranscript).toHaveBeenCalledWith("run_dd_12");
+  });
+
+  it("a run that needs you shows the question; Answer opens the transcript", async () => {
+    const m = await mountDetail({ routineId: "b2c3d4e5", runId: "run_tr_9" });
+    expect(reading().textContent).toContain("14 bug reports are older than 90 days");
+    await click(h!, readingButton("Answer") ?? null);
+    expect(m.props.onOpenTranscript).toHaveBeenCalledWith("run_tr_9");
+  });
+
+  it("a queued run says its place in line and offers no action", async () => {
+    await mountDetail({ routineId: "e5f6a7b8", runId: "run_da_31" });
+    expect(reading().textContent).toContain("Waiting in line — #2");
+    expect(reading().querySelector("button")).toBeNull();
+  });
+
+  it("About shows the routine: memory, instructions, settings", async () => {
+    await mountDetail({ runId: "about" });
+    expect(selectedOption()?.textContent).toContain("About this routine");
+    expect(reading().querySelector(".manta-routines-memory")).toBeTruthy();
+    expect(reading().textContent).toContain("What it remembers");
+    expect(reading().textContent).toContain("Instructions");
+    expect(reading().textContent).toContain("Missed runs");
+    expect(reading().textContent).toContain("Notify when there's news");
+  });
+
+  it("with no runs yet it opens on About", async () => {
+    const store = createRoutinesStore();
+    const m = await mountDetail({ store, api: { routinesGet: () => store.get(DIGEST).then((d) => ({ ...d, runs: [], hasMore: false })) } });
+    expect(selectedOption()?.textContent).toContain("About this routine");
+    expect(m.props.onSelectRun).toHaveBeenCalledWith("about");
+    expect(list().textContent).toContain("No runs yet");
+  });
+
+  it("↑/↓ and j/k move the selection through About and the runs", async () => {
+    const m = await mountDetail();
+    expect(list().getAttribute("role")).toBe("listbox");
+    expect(list().tabIndex).toBe(0);
+    await key(list(), "ArrowDown");
+    expect(m.props.onSelectRun).toHaveBeenLastCalledWith("run_dg_22");
+    expect(selectedOption()).toBe(option("All metrics within normal range"));
+    await key(list(), "j");
+    expect(m.props.onSelectRun).toHaveBeenLastCalledWith("run_dg_21");
+    await key(list(), "ArrowUp");
+    await key(list(), "k");
+    expect(m.props.onSelectRun).toHaveBeenLastCalledWith("run_dg_23");
+    await key(list(), "k");
+    expect(m.props.onSelectRun).toHaveBeenLastCalledWith("about");
+    await key(list(), "k");
+    expect(selectedOption()?.textContent).toContain("About this routine");
+  });
+
+  it("'Hide quiet runs' asks the box for the runs that matter and flips to 'Show all'", async () => {
+    const m = await mountDetail();
+    expect(buttonByText(h!, "Show all")).toBeNull();
+    await click(h!, buttonByText(h!, "Hide quiet runs"));
+    expect(m.routinesGet).toHaveBeenLastCalledWith(DIGEST, expect.objectContaining({ findingsOnly: true }));
+    expect(buttonByText(h!, "Show all")).toBeTruthy();
+    expect(h!.text()).not.toMatch(/findings/i);
+  });
+
+  it("a requested run older than the loaded page is fetched and shown", async () => {
+    const store = createRoutinesStore();
+    const m = await mountDetail({
+      store,
+      runId: "run_dg_17",
+      api: { routinesGet: (id: string) => store.get(id).then((d) => ({ ...d, runs: d.runs.filter((r) => r.id !== "run_dg_17") })) },
+    });
+    expect(m.props.onSelectRun).not.toHaveBeenCalled();
+    expect(reading().textContent).toContain("All metrics within normal range");
+  });
+});
+
+describe("RoutinesRoot routing", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  async function mountRoot(view: Exclude<RoutinesView, null>, api: Record<string, unknown> = {}) {
+    pinDemoClock(ROUTINES_T0);
+    resetStore();
+    const store = createRoutinesStore();
+    installMockApi({ routinesRunGet: store.runGet, routinesGet: store.get, routinesMarkRead: store.markRead, ...api });
+    const setView = vi.fn();
+    h = mount(<RoutinesRoot view={view} setView={setView} summary={await store.summary()} error={null} reload={() => Promise.resolve()} />);
+    await h.flush();
+    return setView;
+  }
+
+  it("an Unread row opens its routine page with that run selected", async () => {
+    const setView = await mountRoot({ page: "list" });
+    await click(h!, h!.container.querySelector(".manta-routines-findings [role=button]"));
+    expect(setView).toHaveBeenCalledWith({ page: "routine", id: "a1b2c3d4", runId: "run_dg_23" });
+  });
+
+  it("Answer goes straight to the transcript", async () => {
+    const setView = await mountRoot({ page: "list" });
+    await click(h!, buttonByText(h!, "Answer"));
+    expect(setView).toHaveBeenCalledWith({ page: "run", runId: "run_tr_9" });
+  });
+
+  it("a run known only by its id (a notification) resolves to its routine page with the run selected", async () => {
+    const setView = await mountRoot({ page: "open-run", runId: "run_dg_23" });
+    expect(setView).toHaveBeenCalledWith({ page: "routine", id: "a1b2c3d4", runId: "run_dg_23" });
+  });
+
+  it("a run that can't be opened says so and falls back to the list", async () => {
+    const setView = await mountRoot({ page: "open-run", runId: "gone" }, { routinesRunGet: () => Promise.reject(new Error("No run with that id")) });
+    expect(setView).toHaveBeenCalledWith({ page: "list" });
+    expect(toasts().join(" ")).toContain("Couldn't open the run — No run with that id");
+  });
+
+  it("a run's × (and its routine-name crumb) return to the routine page with that run selected", async () => {
+    const setView = await mountRoot({ page: "run", runId: "run_da_31" });
+    // A run still waiting in line has no transcript yet: its header is the placeholder's.
+    await click(h!, h!.container.querySelector('[aria-label="Close run"]'));
+    expect(setView).toHaveBeenLastCalledWith({ page: "routine", id: "e5f6a7b8", runId: "run_da_31" });
+    await click(h!, buttonByText(h!, "Routines"));
+    expect(setView).toHaveBeenLastCalledWith({ page: "list" });
   });
 });

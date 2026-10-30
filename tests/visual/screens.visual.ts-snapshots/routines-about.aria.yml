@@ -1,0 +1,38 @@
+- button "Routines"
+- text: / Daily analytics digest
+- button "Edit"
+- button "Pause"
+- button "Run now"
+- listbox "Runs":
+  - option /About this routine Weekdays · 9:\d+ · next tomorrow at 9:\d+/ [selected]
+  - text: /Runs \d+/
+  - button "Hide quiet runs"
+  - option /Thu \d+ · 9:\d+ Signups up \d+% week over week; checkout errors doubled since Tuesday/
+  - option /Wed \d+ · 9:\d+ All metrics within normal range/
+  - option /Tue \d+ · 9:\d+ Activation dipped to \d+% after the onboarding copy change/
+  - option /Mon \d+ · 9:\d+ Weekend traffic 2\.3× normal — a Hacker News link/
+  - option /Fri \d+ · 9:\d+ All metrics within normal range/
+  - option /Thu \d+ · 9:\d+ PostHog returned \d+ — the API key was rotated Failed/
+  - option /Wed \d+ · 9:\d+ All metrics within normal range/
+  - button "Show older"
+- heading "Daily analytics digest" [level=1]
+- button /Weekdays at 9:\d+/
+- button "~/projects/ronda"
+- button "Read-only"
+- button "Sonnet 5.5 · Medium"
+- button "Notify when there's news"
+- button "New session each run"
+- text: /Next run tomorrow at 9:\d+ · \d+ runs since 1 Oct · about [\d,.]+[bkmBKM]+ tokens a run/
+- heading "What it remembers" [level=4]
+- button "Edit memory"
+- text: "/Every run reads this first and updates it at the end\\. Last changed by Thursday's run\\. ## Baselines \\(trailing 4 wks\\) signups\\/day ≈ \\d+ · activation \\d+% checkout error rate ≈ 2% ## Watching - onboarding copy change \\(Oct \\d+\\): activation \\d+% → recovering - checkout errors on Safari \\d+ since Tue deploy — 4\\.3% \\(Oct \\d+\\) ## Ignore - weekend dips; HN spikes/"
+- button "Show more"
+- heading "Instructions" [level=4]
+- button "Edit instructions"
+- text: /Use \$posthog-digest for yesterday\. Compare against the baselines you remember\. Only report changes beyond ±\d+% or anything new in errors; otherwise say there's nothing new\./
+- term: Triggers
+- definition: Schedule · Run now
+- term: Missed runs
+- definition: /Run once on catch-up, up to \d+[hmsp]+ late/
+- term: Keeps
+- definition: /\d+ days of runs; unread runs are never deleted/
