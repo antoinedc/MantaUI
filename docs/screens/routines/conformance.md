@@ -4,7 +4,7 @@ Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) a
 1440×900 against `docs/screens/routines/mockup.html`. Baselines recorded for the
 seven `routines-*` rows only. Differences left on purpose or open:
 
-Last reviewed: 2026-10-30 (aa171972)
+Last reviewed: 2026-10-30 (1e307f9b)
 
 ## Deliberate
 
