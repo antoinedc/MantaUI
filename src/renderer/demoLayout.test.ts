@@ -36,6 +36,8 @@ describe("pickDemoState — every member is a valid DemoState", () => {
       "upgrade-failed",
       "stream",
       "artifacts",
+      "routines",
+      "routines-chat",
     ]);
   });
 });

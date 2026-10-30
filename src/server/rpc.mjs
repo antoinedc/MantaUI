@@ -553,6 +553,9 @@ export function buildHandlers({
   // error:"no upgrade path"}` rather than throwing.
   upgradeCli = null,
   delegate,
+  // Routines engine (src/server/routines.mjs). Null when not wired (tests): every
+  // `routines:*` channel then answers a plain sentence instead of throwing a TypeError.
+  routines = null,
   // WS02 (SF-4): the box's reading of background-job records (read-only refusal,
   // job view, list labels, approve rule check). Null when not wired (tests).
   delegateView = null,
@@ -910,6 +913,11 @@ export function buildHandlers({
     const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
     return buildContextPayload(found.tokens, resolved ?? null, limit);
   }
+
+  const needRoutines = () => {
+    if (!routines) throw Object.assign(new Error("Routines aren't available on this box yet."), { rpcStatus: 503 });
+    return routines;
+  };
 
   const handlers = {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
@@ -2690,6 +2698,24 @@ export function buildHandlers({
     // same poller, same ⏰ card. Returns { ok, job?, error? }.
     "schedule:create": (input) =>
       scheduleCreateJob(input || {}, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- routines (manta-server owned; src/server/routines.mjs, spec §5.1) ----
+    // Args/returns are the pinned wire contract in src/shared/routines.ts. A refusal is a
+    // RoutineError: a human sentence carrying its HTTP status (rpcStatus), never a path/stack.
+    "routines:summary": () => needRoutines().summary(),
+    "routines:get": (id, opts) => needRoutines().get(id, opts ?? {}),
+    "routines:create": (input) => needRoutines().create(input),
+    "routines:update": (id, patch) => needRoutines().update(id, patch),
+    "routines:delete": (id) => needRoutines().remove(id),
+    "routines:run-now": (id) => needRoutines().runNow(id),
+    "routines:run-get": (runId) => needRoutines().runGet(runId),
+    "routines:mark-read": (runIds) => needRoutines().markRead(runIds),
+    "routines:memory-set": (id, text) => needRoutines().memorySet(id, text),
+    "routines:keep-in-sidebar": (runId) => needRoutines().keepInSidebar(runId),
+    "routines:convert-preview": (followupId) => needRoutines().convertPreview(followupId),
+    "routines:convert-commit": (followupId, input) => needRoutines().convertCommit(followupId, input),
+    "routines:move-to-chat": (id, target) => needRoutines().moveToChat(id, target),
+    "routines:move-to-routines": (id) => needRoutines().moveBack(id),
 
     // ---- subscription plan usage (manta-server owned; BET-737) ----
     // Read-only: returns the current UsageSnapshot[] cache maintained by the

@@ -1,0 +1,55 @@
+- text: Routines
+- heading "Routines" [level=1]
+- paragraph: Recurring work that starts a fresh session each time it runs. Results land here and stay out of the sidebar.
+- button "New routine"
+- text: /Needs you 1 Weekly bug triage · better-ui · asked [\d,.]+[bkmBKM]+ ago · paused until you answer “\d+ bug reports are older than \d+ days with no repro\. Close them as stale, or keep them at P3\?”/
+- button "Answer"
+- text: New findings 3
+- button "Mark all read"
+- button /Daily analytics digest · ronda Signups up \d+% week over week; checkout errors doubled since Tuesday \d+ signups \(vs \d+\)\. Checkout error rate 2\.1% → 4\.3%, all on Safari \d+ — started with Tuesday's deploy\. 9:\d+ Mark read Open/:
+  - text: /Daily analytics digest · ronda Signups up \d+% week over week; checkout errors doubled since Tuesday \d+ signups \(vs \d+\)\. Checkout error rate 2\.1% → 4\.3%, all on Safari \d+ — started with Tuesday's deploy\. 9:\d+/
+  - button "Mark read"
+  - button "Open"
+- button /Crash report sweep · better-ui New crash in transcript list on iOS \d+\.\d+ — \d+ users Index out of range while a compaction lands mid-scroll\. Matches an issue closed in September; likely a regression\. 7:\d+ Mark read Open/:
+  - text: /Crash report sweep · better-ui New crash in transcript list on iOS \d+\.\d+ — \d+ users Index out of range while a compaction lands mid-scroll\. Matches an issue closed in September; likely a regression\. 7:\d+/
+  - button "Mark read"
+  - button "Open"
+- button "Dependency audit · ethernal 2 high-severity advisories; draft PR opened with the upgrades axios and express-session. Tests pass on the branch; the session upgrade changes a cookie default — flagged in the PR. Fri Mark read Open":
+  - text: Dependency audit · ethernal 2 high-severity advisories; draft PR opened with the upgrades axios and express-session. Tests pass on the branch; the session upgrade changes a cookie default — flagged in the PR. Fri
+  - button "Mark read"
+  - button "Open"
+- text: /Running now 2 at a time; the rest wait their turn Running Docs drift check [\d,.]+[bkmBKM]+ \d+[hmsp]+ Competitor pricing scan [\d,.]+[bkmBKM]+ \d+[hmsp]+ Waiting 1 Error budget check queued \d+:\d+ 2 Dependency audit you pressed Run now queued \d+:\d+ A run is never skipped because the box is busy; it waits here\. A routine that's already waiting isn't queued twice\. A run waiting on your answer gives up its slot\. Your routines 8 Routine When Last run Next/
+- button /Daily analytics digest ronda Weekdays · 9:\d+ Read-only Findings Today 9:\d+ · [\d,.]+[bkmBKM]+ \d+[hmsp]+ Tomorrow 9:\d+ Enable Daily analytics digest/:
+  - text: ""
+  - switch "Enable Daily analytics digest" [checked]
+- button /Weekly bug triage better-ui Thursdays · 9:\d+ Read-only Needs you Waiting for your answer · [\d,.]+[bkmBKM]+ — Enable Weekly bug triage/:
+  - text: ""
+  - switch "Enable Weekly bug triage" [checked]
+- button /Crash report sweep better-ui Daily · 7:\d+ Read-only Findings Today 7:\d+ · caught up Tomorrow 7:\d+ Enable Crash report sweep/:
+  - text: ""
+  - switch "Enable Crash report sweep" [checked]
+- button /Docs drift check better-ui Wednesdays · 8:\d+ Read-only Running You pressed Run now · [\d,.]+[bkmBKM]+ ago Wed 8:\d+ Enable Docs drift check/:
+  - text: ""
+  - switch "Enable Docs drift check" [checked]
+- 'button /Dependency audit ethernal Fridays · \d+:\d+ Can make changes · own branch Queued · #2 You pressed Run now · queued \d+:\d+ Tomorrow \d+:\d+ Enable Dependency audit/':
+  - text: ""
+  - switch "Enable Dependency audit" [checked]
+- button /Competitor pricing scan marketing Thursdays · \d+:\d+ Read-only Running Started \d+[hmsp]+ ago Thu 6 Nov Enable Competitor pricing scan/:
+  - text: ""
+  - switch "Enable Competitor pricing scan" [checked]
+- 'button /Error budget check ronda Hourly Read-only · tells you only on failure Queued · #1 Waiting since \d+:\d+ \d+:\d+ Enable Error budget check/':
+  - text: ""
+  - switch "Enable Error budget check" [checked]
+- button /Release notes draft better-ui Paused was Fridays · \d+:\d+ Failed Fri \d+:\d+ · GitHub token expired — Enable Release notes draft/:
+  - text: ""
+  - switch "Enable Release notes draft"
+- text: Follow-ups in a chat 3 · these run inside an existing chat instead of starting a new one Check whether the deploy finished every 5 min · in
+- button "Deploy new billing service"
+- text: /in [\d,.]+[bkmBKM]+/
+- button "Make it a routine"
+- text: Remind me to push the release once · in
+- button "Add CSV export"
+- text: /today \d+:\d+ one-time Write up what changed in billing this week Fridays · \d+:\d+ · in/
+- button "Deploy new billing service"
+- text: /Tomorrow \d+:\d+/
+- button "Make it a routine"

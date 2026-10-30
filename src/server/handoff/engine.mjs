@@ -125,6 +125,18 @@ export function createHandoffEngine(deps = {}) {
   } = deps;
 
   const isJobSession = deps.isJobSession ?? (async (sid) => (await runningJobOwner(sid)) !== null);
+  // A routine run's session carries `manta.routineId`: it is headless and reported on, so it must
+  // never hand off into a successor session (routines spec §6.6). Unreadable = not a routine.
+  const isRoutineSession =
+    deps.isRoutineSession ??
+    (async (sid) => {
+      try {
+        const rs = await oc.readSession?.(sid);
+        return typeof rs?.session?.metadata?.manta?.routineId === "string";
+      } catch {
+        return false;
+      }
+    });
   const mintSessionId = deps.mintSessionId ?? (() => `ses_${randomUUID().replaceAll("-", "")}`);
   const mintMessageId = deps.mintMessageId ?? (() => `msg_${randomUUID().replaceAll("-", "")}`);
   const mintId = deps.mintRecordId ?? mintRecordId;
@@ -990,6 +1002,7 @@ export function createHandoffEngine(deps = {}) {
     });
     if (!decision.fire) return;
     if (await isExcluded(sid)) return;
+    if (await isRoutineSession(sid)) return;
     if (mode === "auto" && (await isJobSession(sid))) return; // a job's turn end is its completion signal (§6.3)
     if (mode === "auto" && !(await tmux.findWindow?.(sid))) return; // nothing to take over
     const plan = entryPlan({ mode, trigger: "auto" });

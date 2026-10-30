@@ -153,6 +153,7 @@ export function InputArea({
   chatAutoAllow,
   setChatAutoAllow,
   showHandoffMode = false,
+  metaHint,
   voice,
   models,
   modelOverride,
@@ -233,6 +234,8 @@ export function InputArea({
   // toggle. Chat sessions only — the CTO conversation shares this composer and
   // has nothing to hand off.
   showHandoffMode?: boolean;
+  // A routine run replaces the dial + ⏰/🔑/🪝 toolbar (they act on a chat window a run does not have) with one hint line.
+  metaHint?: string;
   // The whole voice hook result (BET-836): the recording session state
   // (phase/elapsedMs/nearLimit/liveWindowRef), the actions (start/pause/
   // resume/send/discard), the discard-arm state, and the a11y announcements.
@@ -739,6 +742,9 @@ export function InputArea({
         {/* gap-2 (8px), the SAME gap SessionToolbar uses between its own three
             icons — so the dial + clock + key + webhook read as one evenly
             spaced run instead of a detached dial 12px off the group. */}
+        {metaHint ? (
+          <span className="manta-routines-comp-hint min-w-0 truncate text-meta text-text-quiet">{metaHint}</span>
+        ) : (
         <span className="shrink-0 flex items-center gap-2 flex-wrap">
           <UsageDial providerID={activeProviderID} sessionId={activeSessionId ?? null} />
           {typeof optSavingPct === "number" && optSavingPct > 0 && (
@@ -753,6 +759,7 @@ export function InputArea({
             onWebhooks={onWebhooks}
           />
         </span>
+        )}
       </div>
       {/* Trust toggle — labelled control with a Shield icon (BET-415).
           Shared TrustRow (also used by the new-session composer). In plan

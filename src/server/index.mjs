@@ -130,6 +130,7 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 // completed — the failure looked like an unavailable config surface rather
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
+import { createRoutinesEngine, startRoutinesPoller, defaultStoreDeps as routinesStoreDeps, RoutineError } from "./routines.mjs";
 import { createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
 import { createClaudeSeatHealth } from "./claudeSeatHealth.mjs";
 import { readCodexEntry } from "./codexRefresh.mjs";
@@ -792,6 +793,33 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
   },
   { intervalMs: 30000 },
 );
+
+// Routines (src/server/routines.mjs, spec docs/superpowers/specs/2026-10-30-routines-design.md):
+// server-owned scheduled work whose every run starts a fresh HEADLESS opencode session. The
+// poller reconciles runs a previous process left in flight, then ticks (scheduling + the FIFO
+// queue); the opencode pump feeds the engine raw + lifecycle events (observeRaw /
+// observeLifecycle below); `routines:*` rpc channels and /api/routines* serve the UI and the AI.
+const routinesEngine = createRoutinesEngine({
+  ...routinesStoreDeps,
+  oc,
+  tmux,
+  local: {
+    gitAddWorktree: (a) => local.gitAddWorktree(a),
+    gitRemoveWorktree: (a) => local.gitRemoveWorktree(a),
+    git: (args) => tmux.run("git", args),
+  },
+  push,
+  publish: (evt) => bus.publish(evt),
+  config: () => local.configGet(),
+  generateText: (a) => oc.generateText(a),
+  schedule: {
+    listJobs: () => listJobs(undefined),
+    createJob: (input) => createJob(input, BUS_PUBLISH_DEPS),
+    deleteJob: (id) => deleteJob(id, BUS_PUBLISH_DEPS),
+  },
+});
+// eslint-disable-next-line no-unused-vars
+const { stop: stopRoutinesPoller } = startRoutinesPoller(routinesEngine);
 
 // Deferred mobile-push deliveries (BET-1044): every 30s, resolve notifications
 // parked by the router (deferMobile) against the live desktop state and deliver
@@ -2197,6 +2225,7 @@ const stopTuner = startPoller(async () => {
 void stopTuner;
 
 rpcHandlers = buildHandlers({
+  routines: routinesEngine,
   tmux,
   oc,
   pty,
@@ -3576,6 +3605,8 @@ function observeLifecycleEvent(evt, raw) {
   } catch (e) {
     console.warn("[delegate] observeEvent failed:", e?.message ?? e);
   }
+  // Routines: session.error / session.deleted of a routine run's session.
+  routinesEngine.observeLifecycle(evt).catch((e) => console.warn("[routines] observeLifecycle failed:", e?.message ?? e));
   // Adaptive CTO engine (BET-1376): event ingestion. The one CTO consumer that
   // keeps running while paused (§10.6-5). Never throws into the pump.
   try {
@@ -3670,6 +3701,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   // Delegate engine: raw child creation + execution outcomes (V2 jobs complete
   // from these, not from the adapted lifecycle below).
   delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));
+  // Routines: forms / permissions / execution outcomes of a routine run's session.
+  routinesEngine.observeRaw(raw).catch((e) => console.warn("[routines] observeRaw failed:", e?.message ?? e));
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
     if (evt.type === "session.idle" && evt.properties?.sessionID) {
@@ -3700,6 +3733,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     // Events may have been missed while disconnected (or before the first
     // connect): re-check every unfinished V2 job from authoritative reads.
     delegateEngine.reconcileV2().catch((e) => console.warn("[delegate] reconnect reconciliation failed:", e?.message ?? e));
+    // Same for routine runs (their execution outcome may have been missed).
+    routinesEngine.onReconnect().catch((e) => console.warn("[routines] reconnect reconciliation failed:", e?.message ?? e));
   },
 });
 
@@ -4440,6 +4475,57 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       // class-2 (BET-1460): schedule opencode tool — relays the message to the model (the card UI reads via /rpc).
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Routines (AI tools: docs/opencode-plugins-v2/manta/tools/routines.ts) ----------
+  // POST   /api/routines/report   body {sessionID, outcome, title, summary, body?, memory?} → {ok}
+  // POST   /api/routines          body RoutineInput + {sessionID, directory?}      → {routine}
+  // GET    /api/routines          → {routines:[{id,name,cron,enabled,nextRunAt,lastRun}]}
+  // PATCH  /api/routines/:id      body partial RoutineInput                       → {routine}
+  // DELETE /api/routines/:id      → {deleted}
+  // POST   /api/routines/:id/run  → {run, alreadyQueued}
+  // Consumer is the model (class-2 errors: raw 400/500 bodies); the desktop UI uses the
+  // `routines:*` rpc channels instead. Engine: src/server/routines.mjs.
+  if (path === "/api/routines" || path.startsWith("/api/routines/")) {
+    try {
+      const idMatch = path.match(/^\/api\/routines\/([0-9a-f]{8})(\/run)?$/);
+      if (path === "/api/routines/report" && req.method === "POST") {
+        const body = await readJsonBody(req);
+        respondJson(res, 200, await routinesEngine.report(body ?? {}));
+        return;
+      }
+      if (path === "/api/routines" && req.method === "POST") {
+        const body = (await readJsonBody(req)) ?? {};
+        const routine = await routinesEngine.create(body, { runtimeSessionID: typeof body.sessionID === "string" ? body.sessionID : undefined });
+        respondJson(res, 200, { routine });
+        return;
+      }
+      if (path === "/api/routines" && req.method === "GET") {
+        respondJson(res, 200, { routines: await routinesEngine.list() });
+        return;
+      }
+      if (idMatch && !idMatch[2] && req.method === "PATCH") {
+        respondJson(res, 200, { routine: await routinesEngine.update(idMatch[1], (await readJsonBody(req)) ?? {}) });
+        return;
+      }
+      if (idMatch && !idMatch[2] && req.method === "DELETE") {
+        respondJson(res, 200, await routinesEngine.remove(idMatch[1]));
+        return;
+      }
+      if (idMatch && idMatch[2] && req.method === "POST") {
+        respondJson(res, 200, await routinesEngine.runNow(idMatch[1], { trigger: "ai" }));
+        return;
+      }
+      respondJson(res, 404, { error: "not found" });
+    } catch (e) {
+      if (e instanceof RoutineError) {
+        respondJson(res, e.status, { error: e.message });
+        return;
+      }
+      // class-2 (BET-1460): routine_* opencode tools — relays the message to the model (the UI reads via /rpc).
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -6450,7 +6536,7 @@ const handleRequest = async (req, res) => {
 // Durable, resumable state machine (src/server/upgradeV2.mjs). While it runs the box is in UPGRADE
 // MODE (see the gate right after the auth gate in handleRequest). Pausing background work = stopping
 // the three pollers that start turns / jobs on their own; resuming re-creates them.
-const upgradePausable = { schedule: stopSchedulePoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.() };
+const upgradePausable = { schedule: stopSchedulePoller, routines: stopRoutinesPoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.() };
 const upgradeV2 = createUpgradeV2(
   createUpgradeDeps({
     mantaHome: PROJECT_ROOT,
@@ -6472,6 +6558,7 @@ const upgradeV2 = createUpgradeV2(
           },
           { intervalMs: 30000 },
         ).stop;
+        upgradePausable.routines = startRoutinesPoller(routinesEngine).stop;
         upgradePausable.sweeper = delegateEngine.startSweeper().stop;
         upgradePausable.activity = delegateEngine.startActivityPoller().stop;
         stopDelegateReconciler = delegateEngine.startActiveSessionReconciler().stop;

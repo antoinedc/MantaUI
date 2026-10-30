@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import type { ReactElement } from "react";
-import { ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause } from "lucide-react";
+import { CalendarClock, ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
@@ -27,7 +27,7 @@ import {
   isUnknownChannelError,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
-import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
+import { SessionRow as RailSessionRow, ROW_SELECTED, type SessionStatus } from "./SessionRow";
 import { StatusDot } from "./StatusDot";
 import { dotTone, badgeLabel } from "./ctoView";
 import type { CtoState } from "../shared/api.js";
@@ -85,10 +85,17 @@ type Props = {
   // the needs-you badge. Passed in so the sidebar shares ONE subscription +
   // GET with the pane instead of a second copy.
   ctoState: CtoState | null;
+  // Routines entry (spec §7): one nav row under CTO, never one per run. Clicking
+  // opens the Routines pane; `routinesBadge` is the summary's counts (red =
+  // runs that need you, blue = unread findings; both hidden at 0).
+  onOpenRoutines: () => void;
+  routinesBadge: { needsYou: number; unread: number };
+  /** The Routines pane is the visible view (selected-row state). */
+  routinesOpen?: boolean;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -725,6 +732,32 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             {badgeLabel(ctoState) != null && (
               <span className="rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white">
                 {badgeLabel(ctoState)}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={onOpenRoutines}
+            className={`manta-routines-nav relative flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm font-medium text-text hover:bg-fill-hover ${routinesOpen ? ROW_SELECTED : ""}`}
+            title="Routines — scheduled work"
+            aria-label="Open Routines"
+          >
+            <CalendarClock size={14} className={routinesOpen ? "text-accent-tx" : "text-text-faint"} aria-hidden />
+            <span className="flex-1 text-left">Routines</span>
+            {routinesBadge.needsYou > 0 && (
+              <span
+                className="rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white"
+                aria-label={`${routinesBadge.needsYou} need you`}
+              >
+                {routinesBadge.needsYou}
+              </span>
+            )}
+            {routinesBadge.unread > 0 && (
+              <span
+                className="rounded-full bg-accent-solid px-1 text-[11px] font-semibold leading-5 text-on-accent"
+                aria-label={`${routinesBadge.unread} new findings`}
+              >
+                {routinesBadge.unread}
               </span>
             )}
           </button>

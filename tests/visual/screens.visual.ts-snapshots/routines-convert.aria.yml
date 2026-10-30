@@ -1,0 +1,14 @@
+- heading "Make it a routine" [level=3]
+- button "Close"
+- text: /Write up what changed in billing this week Fridays · \d+:\d+ · runs inside “Deploy new billing service” New session each run Instructions, rewritten to make sense without the chat Write up what changed in billing this week/
+- textbox "Instructions": "Write up what changed in the billing service this week: merged PRs touching services/billing, migrations run, and any Stripe webhook failures in Sentry. Compare against last week's write-up and call out anything still unresolved."
+- text: A fresh session can't see the chat, so “this week” and “billing” are spelled out. Edit freely. It will start out knowing
+- textbox "Starting memory": "/- billing lives in services\\/billing; deploys via scripts\\/deploy-billing[\\d,.]+[hmsp]+ \\(from this chat, Oct \\d+\\) - Stripe webhook retries were flaky until the Oct \\d+ fix: confirm they stay quiet - last write-up \\(Oct \\d+\\): 3 PRs, 1 migration/"
+- text: Taken from the chat. This becomes the routine's memory, and every run reads and updates it. Folder
+- button "Folder": ~/projects/better-ui
+- text: /When Fridays · \d+:\d+ Allowed to/
+- button "Read and report"
+- text: /The chat keeps the write-ups it already received\. It just stops getting new ones\. Same schedule, so the next run is still Friday at \d+:\d+, now on the Routines page\. You can move it back into a chat later from the routine's page\./
+- button "Test run now"
+- button "Cancel"
+- button "Make it a routine"

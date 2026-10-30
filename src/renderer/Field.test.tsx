@@ -33,6 +33,23 @@ describe("Field", () => {
     h = null;
   });
 
+  it("multiline renders a textarea with the SAME chrome, resize-y and the requested rows", () => {
+    h = mount(<Field id="m" label="Memory" multiline rows={6} value={"a\nb"} onChange={() => {}} />);
+    expect(h.container.querySelector("input")).toBeNull();
+    const ta = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(ta).toBeTruthy();
+    expect(ta.rows).toBe(6);
+    expect(ta.className).toContain(INPUT_BASE);
+    expect(ta.className).toContain(INSET);
+    expect(ta.className).toContain("resize-y");
+    expect(ta.value).toBe("a\nb");
+  });
+
+  it("multiline defaults to 3 rows", () => {
+    h = mount(<Field id="m" multiline value="" onChange={() => {}} />);
+    expect((h.container.querySelector("textarea") as HTMLTextAreaElement).rows).toBe(3);
+  });
+
   it("renders the input surface/edge/radius/padding per the contract", () => {
     h = mount(<Field id="f" label="Path" value="~/proj" onChange={() => {}} />);
     const el = inputEl(h.container);

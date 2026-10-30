@@ -63,6 +63,9 @@ after(async () => {
   await v2Tree.cleanup();
 });
 
+// Tools that never had a V1 file: V2 introduced them (routines: spec 2026-10-30).
+const V2_ONLY = ["handoff", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "todo_write"];
+
 describe("tool inventory", () => {
   test("V1 inventory is the 45 tools the spec names", async () => {
     const inv = await parseV1Inventory();
@@ -83,23 +86,23 @@ describe("tool inventory", () => {
     assert.equal(v1ToolName("delegate", "delegate_list"), "delegate_list");
   });
 
-  test("V2 tool-name set equals the V1 tool-name set (plus the V2-only todo_write and handoff)", async () => {
+  test("V2 tool-name set equals the V1 tool-name set (plus the V2-only tools)", async () => {
     const inv = await parseV1Inventory();
     const v1Names = new Set(inv.map((i) => i.name));
     const v2Names = new Set(v2.allTools.map((t) => t.name));
     assert.deepEqual([...v1Names].filter((n) => !v2Names.has(n)).sort(), [], "V1 tools missing in V2");
     assert.deepEqual(
       [...v2Names].filter((n) => !v1Names.has(n)).sort(),
-      ["handoff", "todo_write"],
-      "V2 adds exactly todo_write and handoff",
+      V2_ONLY,
+      "V2 adds exactly todo_write, handoff and the routines tools",
     );
-    assert.equal(v2.allTools.length, 47);
+    assert.equal(v2.allTools.length, 45 + V2_ONLY.length);
     assert.ok(!v2Names.has("todowrite"), "todowrite is reserved by V2");
   });
 
   test("every V1 export has a V2 twin loaded from the real V1 module", () => {
     for (const t of v2.allTools) {
-      if (t.name === "todo_write" || t.name === "handoff") continue;
+      if (V2_ONLY.includes(t.name)) continue;
       assert.ok(v1.tools[t.name], `V1 module for ${t.name}`);
     }
   });
@@ -329,7 +332,7 @@ describe("behavioural parity (V1 vs V2 against the same fake manta-server)", () 
 // ---------------------------------------------------------------------------
 
 describe("plugin entry", () => {
-  test("setup registers all 47 tools once, wrapping results as { content }", async () => {
+  test("setup registers every tool once, wrapping results as { content }", async () => {
     const mod = await import(v2.indexUrl);
     const def = mod.default;
     assert.equal(def.id, "manta");
@@ -346,8 +349,8 @@ describe("plugin entry", () => {
     };
     await def.setup(pluginCtx);
     assert.equal(transformCalls, 1);
-    assert.equal(added.length, 47);
-    assert.equal(new Set(added.map((t) => t.name)).size, 47);
+    assert.equal(added.length, v2.allTools.length);
+    assert.equal(new Set(added.map((t) => t.name)).size, v2.allTools.length);
 
     const calls = installFakeFetch();
     const sched = added.find((t) => t.name === "schedule_list");

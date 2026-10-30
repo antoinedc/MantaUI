@@ -1,0 +1,44 @@
+- heading "New routine" [level=3]
+- button "Close"
+- text: Name
+- textbox "Name":
+  - /placeholder: Daily analytics digest
+  - text: Weekly bug triage — ethernal
+- text: What should it do each time?
+- textbox "What should it do each time?": Read the bug reports opened or updated in the last 7 days (GitHub issues labelled bug + Sentry new issues). De-duplicate, give each a priority P0–P3 with one line of reasoning, and list the top 5 to fix this week. Ask me before closing anything.
+- text: "Write it for someone starting fresh each time. Tip: try it once in a normal chat first. Folder"
+- button "Folder": ~/projects/ronda
+- text: Model
+- button "Model": Default
+- text: When
+- group "Schedule":
+  - button "Hourly"
+  - button "Daily"
+  - button "Weekdays"
+  - button "Weekly" [pressed]
+  - button "Monthly"
+  - button "Custom"
+- button "Mon" [pressed]
+- button "Tue"
+- button "Wed"
+- button "Thu"
+- button "Fri"
+- button "Sat"
+- button "Sun"
+- textbox "Time":
+  - /placeholder: HH:MM
+  - text: /\d+:\d+/
+- text: box time · Europe/Paris · first run Mon 3 Nov What it's allowed to do
+- radiogroup "Access":
+  - radio "Read and report Can read files, run commands and use your connectors. Its edit tools are off; commands still run in your folder." [checked]
+  - radio "Make changes Works on its own branch each run and can open a draft PR."
+- text: Tell me
+- group "Notify":
+  - button "When it finds something" [pressed]
+  - button "Every run"
+  - button "Only if it fails"
+  - button "Never"
+- text: Each run starts fresh but reads what the routine remembers from earlier runs, then updates it. You can read and edit that on the routine's page.
+- button "Test run now"
+- button "Cancel"
+- button "Create routine"

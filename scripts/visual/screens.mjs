@@ -669,6 +669,161 @@ export const SCREENS = [
     mockup: "docs/screens/widgets/mockup.html",
     surfacesClosed: [],
   },
+
+  // ---- Routines (docs/screens/routines) ----------------------------------
+  // Every row boots the `routines` demo state (Thu 30 Oct 2025 10:01) and
+  // reaches its screen with real gestures. `ready` is the app shell (the
+  // Routines pane does not exist until the sidebar row opens it); `final` is
+  // the pane under review. `mockupActions` clicks the mockup's own tab.
+  {
+    id: "routines-overview",
+    title: "Routines page — needs you, findings, queue, routines, follow-ups",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-pane",
+    region: ".manta-routines-pane",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.waitForSelector(".manta-routines-table", { state: "visible" });
+    },
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="overview"]');
+    },
+    mockupRegion: ".mainpane",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-detail",
+    title: "One routine — hero, runs, memory, instructions, settings",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-detail",
+    region: ".manta-routines-detail",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.locator(".manta-routines-table").getByText("Daily analytics digest").click();
+      await page.waitForSelector(".manta-routines-memory", { state: "visible" });
+    },
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="detail"]');
+    },
+    mockupRegion: ".mainpane",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-run",
+    title: "One run — header, run bar, instructions, report card",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-report",
+    region: ".manta-routines-run",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.locator(".manta-routines-table").getByText("Daily analytics digest").click();
+      await page.waitForSelector(".manta-routines-memory", { state: "visible" });
+      await page.locator(".manta-routines-detail").getByText("Signups up 18% week over week; checkout errors doubled since Tuesday").click();
+      await page.waitForSelector(".manta-routines-report", { state: "visible" });
+    },
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="run"]');
+    },
+    mockupRegion: ".mainpane",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-create",
+    title: "New routine modal",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-editor",
+    region: ".manta-routines-editor",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.getByRole("button", { name: "New routine" }).first().click();
+      await page.waitForSelector(".manta-routines-editor", { state: "visible" });
+      // The mockup draws the form filled in: type it the way a person would.
+      await page.getByLabel("Name", { exact: true }).fill("Weekly bug triage — ethernal");
+      await page
+        .getByLabel("What should it do each time?")
+        .fill(
+          "Read the bug reports opened or updated in the last 7 days (GitHub issues labelled bug + Sentry new issues). De-duplicate, give each a priority P0–P3 with one line of reasoning, and list the top 5 to fix this week. Ask me before closing anything.",
+        );
+      await page.locator(".manta-routines-editor").getByRole("button", { name: "Weekly", exact: true }).click();
+      await page.getByLabel("Time", { exact: true }).fill("10:00");
+    },
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="create"]');
+    },
+    mockupRegion: ".screen.on .modal",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-created-card",
+    title: "Created-from-chat card in the transcript",
+    url: "/app/index.html?demo&state=routines-chat&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-created-card",
+    region: ".manta-routines-created-card",
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="chat"]');
+    },
+    mockupRegion: ".screen.on .rcard",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-convert",
+    title: "Follow-up → routine modal",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-convert",
+    region: ".manta-routines-convert",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.getByRole("button", { name: "Make it a routine" }).nth(1).click();
+      await page.waitForSelector(".manta-routines-convert", { state: "visible" });
+      await page.getByText("Write up what changed in the billing service this week").first().waitFor();
+    },
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="toroutine"]');
+    },
+    mockupRegion: ".screen.on .modal",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "routines-tochat",
+    title: "Routine → chat modal",
+    url: "/app/index.html?demo&state=routines&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-routines-tochat",
+    region: ".manta-routines-tochat",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Open Routines" }).click();
+      await page.locator(".manta-routines-table").getByText("Daily analytics digest").click();
+      await page.waitForSelector(".manta-routines-memory", { state: "visible" });
+      await page.getByRole("button", { name: /New session each run/ }).click();
+      await page.getByRole("option", { name: /Inside a chat/ }).click();
+      await page.waitForSelector(".manta-routines-tochat", { state: "visible" });
+    },
+    mockup: "docs/screens/routines/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-s="tochat"]');
+    },
+    mockupRegion: ".screen.on .modal",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */

@@ -79,7 +79,10 @@ async function bootDemo(): Promise<void> {
   // Real transports leave it null and `nowMs()` falls back to `Date.now()`.
   // It also just makes the demo read correctly: "14m", not "990d".
   const { DEMO_T0 } = await import("./api/demoFixture");
-  pinDemoClock(DEMO_T0);
+  // The Routines fixture is drawn against Thu 30 Oct 2025 10:01 (the mockup's weekday labels).
+  const demoParams = new URLSearchParams(window.location.search);
+  const { ROUTINES_T0 } = await import("./api/demoRoutines");
+  pinDemoClock(demoParams.get("state")?.startsWith("routines") ? ROUTINES_T0 : DEMO_T0);
   // Initialize renderer logging AFTER window.api is wired so configGet
   // works. The demo branch makes logging a no-op (no real token), but we
   // still call it for parity with the real boot path so future log-target

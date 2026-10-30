@@ -1,0 +1,11 @@
+- text: Routine created Daily analytics digest
+- term: When
+- definition: /Weekdays at 9:\d+ · first run tomorrow/
+- term: Folder
+- definition: ~/projects/ronda · read-only
+- term: Tell you
+- definition: When it finds something
+- term: Starts knowing
+- definition: The baselines from this chat (4 lines)
+- button "Open routine"
+- button "Run now"

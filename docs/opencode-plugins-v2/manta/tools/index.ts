@@ -16,6 +16,7 @@ import { tools as planRender } from "./plan-render.ts";
 import { tools as plugins } from "./plugins.ts";
 import { tools as progress } from "./progress.ts";
 import { tools as resourceSnapshot } from "./resource-snapshot.ts";
+import { tools as routines } from "./routines.ts";
 import { tools as schedule } from "./schedule.ts";
 import { tools as secrets } from "./secrets.ts";
 import { tools as sendFile } from "./send-file.ts";
@@ -40,6 +41,7 @@ export const allTools: ToolDef[] = [
   ...plugins,
   ...progress,
   ...resourceSnapshot,
+  ...routines,
   ...schedule,
   ...secrets,
   ...sendFile,

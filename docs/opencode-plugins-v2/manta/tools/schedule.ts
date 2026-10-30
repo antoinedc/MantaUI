@@ -18,6 +18,8 @@ export const tools: ToolDef[] = [
       "yourself (minute hour day-of-month month day-of-week, local time). When",
       "the scheduled time arrives, your prompt runs as a fresh turn in this same",
       "session automatically. Set recurring=false for a one-time reminder.",
+      "For recurring work whose runs should be INDEPENDENT of this conversation",
+      "(daily reports, weekly triage), use `routine_create` instead.",
     ].join(" "),
     input: input(
       {

@@ -97,6 +97,21 @@ test("a running background job's own session: the armed trigger never applies to
   assert.equal(records(adopted)[0]?.state, "ready", "an adopted (opencode-owned) session: suggest still offers a card");
 });
 
+test("a routine run's session (metadata manta.routineId) never auto-hands off, even over budget in auto mode", async () => {
+  const w = createWorld();
+  w.addSession("ses_p", { metadata: { manta: { internal: true, routineId: "ab12cd34", runId: "0123456789" } } });
+  w.addWindow("proj", 3, "work", "ses_p");
+  w.engine = w.build();
+  await turn(w.engine, "ses_p");
+  assert.equal(records(w).length, 0);
+  assert.equal(w.generateCalls.length, 0, "no full-history generation was paid for");
+  // an ordinary session next to it still hands off
+  const x = standardWorld();
+  x.addSession("ses_q", { metadata: { manta: { internal: true } } });
+  await turn(x.engine, "ses_p");
+  assert.equal(records(x).length, 1);
+});
+
 test("cooldown: a session created by a handoff is not handed off again for 30 minutes", async () => {
   const w = standardWorld();
   await turn(w.engine, "ses_p");

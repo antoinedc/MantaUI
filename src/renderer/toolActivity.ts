@@ -12,6 +12,7 @@
 import type { OpencodeMessage, OpencodePart, PartView, RunRef, RunSegmentView, RunSummaryView, RunView } from "../shared/types";
 import { isRenderableMessage, visibleAssistantParts } from "./chatUtils";
 import { isHandoffToolPart } from "./handoff";
+import { routineToolKind } from "./routineToolParts";
 
 export type { RunRef, RunView, RunSummaryView } from "../shared/types";
 export type GroupTone = RunSummaryView["tone"];
@@ -155,7 +156,7 @@ export type TranscriptLayout = {
 };
 
 const partView = (p: OpencodePart): PartView | undefined => (p as { view?: PartView }).view;
-const isRunPart = (p: OpencodePart): boolean => (p.type === "tool" && !isHandoffToolPart(p)) || p.type === "patch";
+const isRunPart = (p: OpencodePart): boolean => (p.type === "tool" && !isHandoffToolPart(p) && routineToolKind(p) == null) || p.type === "patch";
 const FALLBACK_VIEW: RunSummaryView = { label: "Tool activity", calls: 0, failed: 0, tone: "ok", live: null };
 
 /**

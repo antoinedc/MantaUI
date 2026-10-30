@@ -1,5 +1,15 @@
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
+  FollowupRow,
+  Routine,
+  RoutineDetail,
+  RoutineInput,
+  RoutineMoveTarget,
+  RoutineRun,
+  RoutinesSummary,
+  RoutinesUpdatedPayload,
+} from "./routines.js";
+import type {
   AccountsRowStates,
   SessionClosePreview,
   SessionCloseResult,
@@ -1561,6 +1571,24 @@ export interface Api {
     directory?: string;
     kind?: "prompt" | "notify";
   }): Promise<{ ok: boolean; job?: ScheduledJob; error?: string }>;
+
+  // Routines (manta-server owned; spec 2026-10-30-routines-design.md §5.1).
+  routinesSummary(): Promise<RoutinesSummary>;
+  routinesGet(id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }): Promise<RoutineDetail>;
+  routinesCreate(input: RoutineInput): Promise<Routine>;
+  routinesUpdate(id: string, patch: Partial<RoutineInput>): Promise<Routine>;
+  routinesDelete(id: string): Promise<{ deleted: boolean }>;
+  routinesRunNow(id: string): Promise<{ run: RoutineRun; alreadyQueued: boolean }>;
+  routinesRunGet(runId: string): Promise<{ run: RoutineRun; routine: Routine; prevRunId: string | null; nextRunId: string | null }>;
+  routinesMarkRead(runIds: string[] | "all"): Promise<{ updated: number }>;
+  routinesMemorySet(id: string, text: string): Promise<{ ok: true }>;
+  routinesKeepInSidebar(runId: string): Promise<{ tmuxSession: string; windowIndex: number; sessionID: string }>;
+  routinesConvertPreview(followupId: string): Promise<{ instructions: string; memory: string; rewritten: boolean }>;
+  routinesConvertCommit(followupId: string, input: RoutineInput & { memory: string }): Promise<Routine>;
+  routinesMoveToChat(id: string, target: RoutineMoveTarget): Promise<{ routine: Routine; followup: FollowupRow }>;
+  routinesMoveBack(id: string): Promise<Routine>;
+  /** The box published a routines change hint (`{kind:"routines.updated"}`); refetch. */
+  onRoutinesUpdated(cb: (p: RoutinesUpdatedPayload) => void): () => void;
 
   // Subscription plan usage (manta-server owned; BET-737). Read-only —
   // snapshots are produced by the box's usage poller (src/server/usage.mjs),

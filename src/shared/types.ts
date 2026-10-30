@@ -1111,6 +1111,8 @@ export type DesktopNotifyPayload = {
   sessionId: string | null;
   tag: string;
   urgent?: boolean;
+  /** Set on a routine notification (spec §5.4): the click opens the Routines pane at this run. */
+  routineRunId?: string;
 };
 
 // Payload for the server-update-available push (BET-225 stage 3). Published by
@@ -1829,6 +1831,22 @@ export const IPC = {
   scheduleList: "schedule:list", // (sessionId?) → ScheduledJob[]
   scheduleDelete: "schedule:delete", // (id) → { deleted: boolean }
   scheduleCreate: "schedule:create", // (input) → { ok, job?, error? } (BET-739 usage reset actions)
+
+  // ---- routines (manta-server owned; docs/superpowers/specs/2026-10-30-routines-design.md §5.1) ----
+  routinesSummary: "routines:summary", // () → RoutinesSummary
+  routinesGet: "routines:get", // (id, {beforeSeq?, findingsOnly?}) → RoutineDetail
+  routinesCreate: "routines:create", // (RoutineInput) → Routine
+  routinesUpdate: "routines:update", // (id, Partial<RoutineInput>) → Routine
+  routinesDelete: "routines:delete", // (id) → { deleted }
+  routinesRunNow: "routines:run-now", // (id) → { run, alreadyQueued }
+  routinesRunGet: "routines:run-get", // (runId) → { run, routine, prevRunId, nextRunId }
+  routinesMarkRead: "routines:mark-read", // (runIds | "all") → { updated }
+  routinesMemorySet: "routines:memory-set", // (id, text) → { ok }
+  routinesKeepInSidebar: "routines:keep-in-sidebar", // (runId) → { tmuxSession, windowIndex, sessionID }
+  routinesConvertPreview: "routines:convert-preview", // (followupId) → { instructions, memory, rewritten }
+  routinesConvertCommit: "routines:convert-commit", // (followupId, RoutineInput & {memory}) → Routine
+  routinesMoveToChat: "routines:move-to-chat", // (id, target) → { routine, followup }
+  routinesMoveBack: "routines:move-to-routines", // (id) → Routine
 
   // ---- subscription plan usage (manta-server owned; BET-737) ----
   // Read-only: the current UsageSnapshot[] cache maintained by the usage
