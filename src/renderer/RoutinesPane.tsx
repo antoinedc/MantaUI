@@ -67,7 +67,7 @@ export function RoutinesPane({
   error: string | null;
   reload: () => Promise<void>;
   onOpenRoutine: (id: string) => void;
-  onOpenRun: (runId: string) => void;
+  onOpenRun: (runId: string, run?: RoutineRun) => void;
   onNewRoutine: () => void;
 }) {
   const now = useNowMs();
@@ -134,7 +134,7 @@ function PaneSections({
   setShowAllFindings: (v: boolean) => void;
   reload: () => Promise<void>;
   onOpenRoutine: (id: string) => void;
-  onOpenRun: (runId: string) => void;
+  onOpenRun: (runId: string, run?: RoutineRun) => void;
   onNewRoutine: () => void;
 }) {
   const needsCount = summary.needs.length + summary.orphaned.length;
@@ -190,7 +190,7 @@ function PaneSections({
                 run={run}
                 routine={summary.routines.find((r) => r.id === run.routineId)}
                 now={now}
-                onOpen={() => onOpenRun(run.id)}
+                onOpen={() => onOpenRun(run.id, run)}
                 onMarkRead={() => void markRead(run.id)}
               />
             ))}
@@ -454,7 +454,9 @@ function RoutineRow({
   const dim = paused || inChat ? "text-text-quiet" : "";
   const next =
     inChat || paused || lastRun?.status === "needs_input" ? "—" : nextLabel(routine.nextRunAt, now);
-  const view = inChat ? IN_A_CHAT : lastRun ? outcomeView(lastRun, waitingPos) : null;
+  const outcome = inChat ? IN_A_CHAT : lastRun ? outcomeView(lastRun, waitingPos) : null;
+  // No "Findings" pill in the table: unread findings have their own section above.
+  const view = outcome && !(lastRun?.status === "done" && lastRun.report?.outcome === "findings" && !inChat) ? outcome : null;
   const detail = inChat ? "Runs inside a chat" : lastRun ? lastRunDetail(lastRun, now) : "Never run";
   return (
     <div

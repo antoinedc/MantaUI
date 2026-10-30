@@ -12,8 +12,8 @@ import { X } from "lucide-react";
 import { ChatPanel } from "./ChatPanel";
 import { IconButton } from "./IconButton";
 import { RoutinesHeader, CrumbLink, CrumbSep, PageColumn } from "./RoutinesParts";
-import { errMessage, routinesToast, runAction, useRoutinesRefetch } from "./routinesData";
-import { basename, fixItSeed, isTerminal, runCrumbLabel } from "./routinesView";
+import { errMessage, runAction, startFixIt, useRoutinesRefetch } from "./routinesData";
+import { basename, isTerminal, runCrumbLabel } from "./routinesView";
 import { useStore } from "./store";
 import { readSessionAuto, sessionBoxSelection, setSessionChoice } from "./modelPrefs";
 import type { RoutineRunBinding } from "./routineRunContext";
@@ -115,13 +115,8 @@ export function RoutineRunView({
 
   const fixIt = useCallback(() => {
     if (!data) return;
-    const { routine, run } = data;
-    const st = useStore.getState();
-    const project = st.projects.find((p) => p.defaultCwd === routine.directory) ?? st.projects.find((p) => p.tmuxSession === routine.projectName);
-    const id = project ? st.createDraft({ projectName: project.tmuxSession }) : st.createDraft("new-project");
-    st.updateDraft(id, { input: fixItSeed(routine.name, run), ...(project ? {} : { cwd: routine.directory }) });
+    startFixIt(data.routine, data.run);
     onClosePane();
-    routinesToast("info", "Started a new session with the report — send it when you're ready");
   }, [data, onClosePane]);
 
   if (!data) {

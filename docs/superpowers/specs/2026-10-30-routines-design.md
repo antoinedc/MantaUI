@@ -509,6 +509,14 @@ Editor ⇄ cron mapping (pure, tested): Hourly `M * * * *`; Daily `M H * * *`; W
 Custom (raw cron). Opening an existing routine maps its cron back to the richest
 preset that reproduces it exactly, else Custom.
 
+### Report-first runs (revised 2026-10-30)
+Opening a finished run that has a report (or failed) shows a modal with the report
+whole — title, summary, full body — plus "See full transcript" and "Fix it in a new
+session". A run notification opens the same modal over the Routines list. Runs with
+nothing to report (running, needs an answer, stopped) open the transcript directly.
+Inside the transcript the report is pinned as the last block; the `routine_report`
+tool call renders as a one-line pointer.
+
 ## 8. Moving between follow-up and routine (owner request)
 
 ### 8.1 Follow-up → routine

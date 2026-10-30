@@ -84,7 +84,17 @@ export function Popover({
       const p = panel.getBoundingClientRect();
       const w = p.width || 0;
       const h = p.height || 0;
-      const top = placement === "below" ? r.bottom + 4 : r.top - h - 4;
+      // Flip to the side with room when the preferred side can't fit the surface
+      // (a tall menu opened "above" a control in the middle of a modal).
+      const roomAbove = r.top - 8;
+      const roomBelow = window.innerHeight - r.bottom - 8;
+      const side =
+        placement === "above" && h + 4 > roomAbove && roomBelow > roomAbove
+          ? "below"
+          : placement === "below" && h + 4 > roomBelow && roomAbove > roomBelow
+            ? "above"
+            : placement;
+      const top = side === "below" ? r.bottom + 4 : r.top - h - 4;
       const left = align === "end" ? r.right - w : r.left;
       setPos({
         top: Math.max(8, Math.min(top, window.innerHeight - h - 8)),
@@ -128,7 +138,9 @@ export function Popover({
   if (!open) return null;
 
   // z-40: above the pane's in-pane z-30 surfaces, below modals/palettes (z-50)
-  // and toasts (z-[60]) so a modal opened over a menu still covers it.
+  // and toasts (z-[60]) so a modal opened over a menu still covers it. A menu
+  // opened FROM a modal (its trigger is inside the dialog) goes above it, z-55.
+  const inModal = !!anchorRef.current?.closest('[aria-modal="true"]');
   return createPortal(
     <div
       ref={resolvedPanel}
@@ -139,8 +151,17 @@ export function Popover({
         `${hook ? `${hook} ` : ""}${POPOVER_SURFACE}` +
         (surfaceClassName ? ` ${surfaceClassName}` : "")
       }
-      style={{ position: "fixed", top: pos?.top, left: pos?.left, zIndex: 40 }}
-      onKeyDown={onKeyDown}
+      style={{ position: "fixed", top: pos?.top, left: pos?.left, zIndex: inModal ? 55 : 40 }}
+      onKeyDown={(e) => {
+        onKeyDown?.(e);
+        // Escape closes THIS surface only: React bubbles portalled events up the
+        // component tree, so without this an enclosing Modal would close too.
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          if (!e.defaultPrevented) onClose();
+          anchorRef.current?.focus();
+        }
+      }}
     >
       {children}
     </div>,

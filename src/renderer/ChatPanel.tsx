@@ -106,7 +106,7 @@ import { QuoteToolbar } from "./QuoteToolbar";
 import { Composer } from "./Composer";
 import { RoutineRunContext, type RoutineRunBinding, type RoutineRunContextValue } from "./routineRunContext";
 import { RoutineReportCard, RoutineRunBar, routineHeaderChrome } from "./RoutineRunParts";
-import { routineToolKind } from "./routineToolParts";
+import { hasReportView } from "./routinesData";
 import { SessionHeader } from "./SessionHeader";
 import { ConvertToRoutineModal, followupFromJob } from "./ConvertToRoutineModal";
 import { Modal } from "./Modal";
@@ -3123,8 +3123,8 @@ export function ChatPanel({
   const convertWindowName = useStore(
     (s) => s.projects.find((p) => p.tmuxSession === tmuxSession)?.windows.find((w) => w.index === windowIndex)?.name ?? null,
   );
-  // Routine run (spec §6.5): the context the transcript rows read, and the tail
-  // report card when the run has a report but the transcript has no routine_report call.
+  // Routine run (spec §6.5): the context the transcript rows read. Its report is
+  // always pinned as the transcript's tail card (see planCard below).
   const routineFirstUserId = useMemo(
     () => (routineRun ? messages?.find((m) => m.info.role === "user")?.info.id ?? null : null),
     [routineRun, messages],
@@ -3132,10 +3132,6 @@ export function ChatPanel({
   const routineCtx = useMemo<RoutineRunContextValue | null>(
     () => (routineRun ? { ...routineRun, firstUserMessageId: routineFirstUserId } : null),
     [routineRun, routineFirstUserId],
-  );
-  const routineHasReportPart = useMemo(
-    () => !!routineRun && !!messages?.some((m) => m.parts.some((p) => routineToolKind(p) === "report")),
-    [routineRun, messages],
   );
   const planCard = useMemo(() => {
     for (const q of planQuestions) {
@@ -3573,7 +3569,7 @@ export function ChatPanel({
             onRetryVoiceNote={retryVoiceNote}
             onReplyQuestion={replyQuestion}
             onRejectQuestion={rejectQuestion}
-            planCard={routineRun && !routineHasReportPart && (routineRun.run.report || routineRun.run.status === "failed" || routineRun.run.status === "timed_out") ? <RoutineReportCard /> : planCard}
+            planCard={routineRun && hasReportView(routineRun.run) ? <RoutineReportCard /> : planCard}
             backgroundCards={backgroundCards}
             handoffCards={handoffCardsNode}
             scrollerElRef={scrollerElRef}

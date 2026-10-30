@@ -7,15 +7,21 @@
 // one subscription, not one per page.
 
 import { useCallback, useState } from "react";
-import type { Routine, RoutinesSummary } from "../shared/routines";
+import type { Routine, RoutineRun, RoutinesSummary } from "../shared/routines";
+import { RoutineReportModal } from "./RoutineReportModal";
 import { MoveToChatModal } from "./MoveToChatModal";
 import { RoutineDetail } from "./RoutineDetail";
 import { RoutineEditor } from "./RoutineEditor";
 import { RoutineRunView } from "./RoutineRunView";
 import { RoutinesPane } from "./RoutinesPane";
-import { useRoutinesRefetch } from "./routinesData";
+import { hasReportView, useRoutinesRefetch } from "./routinesData";
 
-export type RoutinesView = null | { page: "list" } | { page: "routine"; id: string } | { page: "run"; runId: string };
+// `report` = a run's report shown as a modal over the list / routine page (report-first).
+export type RoutinesView =
+  | null
+  | { page: "list"; report?: string }
+  | { page: "routine"; id: string; report?: string }
+  | { page: "run"; runId: string };
 
 export function RoutinesRoot({
   view,
@@ -41,7 +47,15 @@ export function RoutinesRoot({
   // The page's own freshness while it is open: refetch on the hint and every 30 s.
   useRoutinesRefetch(() => void reload(), 30_000);
 
-  const openRun = (runId: string) => setView({ page: "run", runId });
+  const openTranscript = (runId: string) => setView({ page: "run", runId });
+  // A finished run opens report-first (the modal over this page); anything else opens its transcript.
+  const openRun = (runId: string, run?: RoutineRun) => {
+    if (run && hasReportView(run) && view.page !== "run") setView({ ...view, report: runId });
+    else openTranscript(runId);
+  };
+  const closeReport = () => {
+    if (view.page !== "run") setView({ ...view, report: undefined });
+  };
   const openRoutine = (id: string) => setView({ page: "routine", id });
   const list = () => setView({ page: "list" });
   const close = () => setView(null);
@@ -84,6 +98,16 @@ export function RoutinesRoot({
         />
       )}
 
+      {view.page !== "run" && view.report && (
+        <RoutineReportModal
+          key={view.report}
+          runId={view.report}
+          onClose={closeReport}
+          onSeeTranscript={() => openTranscript(view.report as string)}
+          onClosePane={close}
+          onChanged={() => void reload()}
+        />
+      )}
       <RoutineEditor
         key={editor ? `${editor.routine?.id ?? "new"}` : "closed"}
         open={editor != null}

@@ -1381,9 +1381,10 @@ function Shell() {
             } catch {
               /* no-op */
             }
-            // A routine notification opens its run (spec §5.4); its session is not in the sidebar.
+            // A routine notification opens its run report-first over the Routines list (spec §5.4);
+            // the modal goes on to the transcript when the run has no report.
             if (payload.routineRunId) {
-              setRoutinesView({ page: "run", runId: payload.routineRunId });
+              setRoutinesView({ page: "list", report: payload.routineRunId });
               return;
             }
             if (!sid) return;

@@ -82,7 +82,7 @@ export function RoutineDetail({
   routineId: string;
   summary: RoutinesSummary | null;
   onBack: () => void;
-  onOpenRun: (runId: string) => void;
+  onOpenRun: (runId: string, run?: RoutineRun) => void;
   onEdit: (routine: Routine, memory: string) => void;
   onMoveToChat: (routine: Routine, ctx: { runCount: number; memory: string }) => void;
   /** A change the pane's summary should pick up. */
@@ -328,7 +328,7 @@ export function RoutineDetail({
                   </div>
                 ) : (
                   runs.map((run) => (
-                    <RunRow key={run.id} run={run} waitingPos={summary ? summary.waiting.findIndex((w) => w.id === run.id) + 1 || null : null} now={now} onOpen={() => onOpenRun(run.id)} />
+                    <RunRow key={run.id} run={run} waitingPos={summary ? summary.waiting.findIndex((w) => w.id === run.id) + 1 || null : null} now={now} onOpen={() => onOpenRun(run.id, run)} />
                   ))
                 )}
               </Box>

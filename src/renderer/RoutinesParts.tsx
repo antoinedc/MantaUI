@@ -30,7 +30,7 @@ export function RoutinesHeader({ children, right }: { children: ReactNode; right
       className="manta-routines-header titlebar-drag flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle pl-4 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))]"
     >
       <div className="flex min-w-0 items-center gap-2 whitespace-nowrap text-label font-medium text-text">{children}</div>
-      {right && <div className="ml-auto flex items-center gap-2">{right}</div>}
+      {right && <div className="titlebar-no-drag ml-auto flex items-center gap-2">{right}</div>}
     </div>
   );
 }
@@ -38,7 +38,9 @@ export function RoutinesHeader({ children, right }: { children: ReactNode; right
 /** A crumb segment that goes back (`Routines` in `Routines / name`). */
 export function CrumbLink({ onClick, children }: { onClick: () => void; children: ReactNode }) {
   return (
-    <button type="button" onClick={onClick} className="text-text-faint hover:text-text">
+    // titlebar-no-drag: the header bar is a window drag region, and on macOS a
+    // button inside one never receives the click.
+    <button type="button" onClick={onClick} className="titlebar-no-drag text-text-faint hover:text-text">
       {children}
     </button>
   );
