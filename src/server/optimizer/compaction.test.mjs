@@ -270,16 +270,16 @@ test("scheduler: a session another maintenance operation owns is skipped (cooldo
   const { scheduler, compactCalls, getState } = makeScheduler({
     listCandidates: async () => [candidate("s1"), candidate("s2")],
     acquire: (sid) => {
-      if (held.has(sid)) return false;
+      if (held.has(sid)) return null;
       acquired.push(sid);
-      return true;
+      return `tok-${sid}`;
     },
-    release: (sid) => released.push(sid),
+    release: (sid, token) => released.push([sid, token]),
   });
   await scheduler.tick();
   assert.deepEqual(compactCalls, ["s2"], "s1 belongs to a handoff");
   assert.deepEqual(acquired, ["s2"]);
-  assert.deepEqual(released, ["s2"]);
+  assert.deepEqual(released, [["s2", "tok-s2"]], "released with the token acquire returned");
   assert.equal(getState().sessions.s1, undefined, "a skipped session gets no cooldown stamp");
 });
 
@@ -290,11 +290,11 @@ test("scheduler: the operation is released even when the compaction throws or th
     compact: async () => {
       throw new Error("boom");
     },
-    acquire: () => true,
-    release: (sid) => released.push(sid),
+    acquire: (sid) => `tok-${sid}`,
+    release: (sid, token) => released.push([sid, token]),
   });
   await scheduler.tick();
-  assert.deepEqual(released, ["s1"]);
+  assert.deepEqual(released, [["s1", "tok-s1"]]);
 });
 
 // ---- auto-handoff: per-session eligibility (per-session handoff mode) ----
@@ -308,7 +308,7 @@ test("scheduler: eligible() is consulted per candidate — an ineligible session
       asked.push(sid);
       return sid !== "s1" && sid !== "s2";
     },
-    acquire: (sid) => (acquired.push(sid), true),
+    acquire: (sid) => (acquired.push(sid), `tok-${sid}`),
   });
   await scheduler.tick();
   assert.deepEqual(compactCalls, ["s3", "s4"], "the two ineligible sessions did not consume COMPACT_MAX_PER_TICK");

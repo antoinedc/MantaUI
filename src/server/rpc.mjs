@@ -2378,6 +2378,7 @@ export function buildHandlers({
     },
     "handoff:start": async (input) => ({ handoff: await requireHandoff().start(input?.id, input ?? {}) }),
     "handoff:retry": async (input) => ({ handoff: await requireHandoff().retry(input?.id) }),
+    "handoff:rewrite": async (input) => ({ handoff: await requireHandoff().rewrite(input?.id) }),
     "handoff:dismiss": async (input) => ({ handoff: await requireHandoff().dismiss(input?.id) }),
     "handoff:set-mode": async (input) => ({ mode: await requireHandoff().setMode(input?.sessionId, input?.mode) }),
     "handoff:draft-consumed": async (input) => {

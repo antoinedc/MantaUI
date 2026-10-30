@@ -103,3 +103,51 @@ export function decideAutoTrigger({ mode, turnSucceeded, contextTokens, budget, 
   if (typeof successorCreatedAt === "number" && now - successorCreatedAt < cooldownMs) return { fire: false, reason: "cooldown" };
   return { fire: true, reason: "over-budget" };
 }
+
+// ---- cold-cache handoff: who writes the text (spec B1) -------------------------
+
+/** Tunables (spec: not research results — revisit once the decision log has data). */
+export const CONDENSE_MIN_TOKENS = 32_000;
+export const WARM_MARGIN_MS = 30_000;
+
+/**
+ * PURE. Choose the writer of a server-written handoff. First match wins; the
+ * decision is final (a prompt that doesn't fit fails visibly, it never switches).
+ *   forced        → that writer (Rewrite → "session"; a retry of a condensed attempt → "condensed")
+ *   a send        → session  (the new session starts on it at once; never a cheap guess)
+ *   no size       → session
+ *   small         → session
+ *   warm cache    → session  (cache reads are cheap)
+ *   no summary    → session
+ *   otherwise     → condensed (cold)
+ * An unknown idle time counts as warm: the conservative, pre-existing behaviour.
+ *
+ * @param {{ disposition?: string|null, contextTokens?: number|null, idleMs?: number|null, cacheTtlMs: number, summaryModel?: any, forced?: "session"|"condensed"|null }} a
+ * @returns {{ writer: "session"|"condensed", reason: string }}
+ */
+export function chooseWriter({ disposition, contextTokens, idleMs, cacheTtlMs, summaryModel, forced } = {}) {
+  if (forced === "session" || forced === "condensed") return { writer: forced, reason: "forced" };
+  if (disposition === "send") return { writer: "session", reason: "unseen-send" };
+  if (typeof contextTokens !== "number" || !Number.isFinite(contextTokens)) return { writer: "session", reason: "no-measurement" };
+  if (contextTokens < CONDENSE_MIN_TOKENS) return { writer: "session", reason: "small" };
+  if (!(typeof idleMs === "number" && Number.isFinite(idleMs) && idleMs >= cacheTtlMs - WARM_MARGIN_MS)) return { writer: "session", reason: "warm" };
+  if (!summaryModel) return { writer: "session", reason: "no-summary-model" };
+  return { writer: "condensed", reason: "cold" };
+}
+
+/** What a Rewrite (a full-history generation on the session's own model) is expected to produce, for the estimate. */
+export const REWRITE_OUTPUT_TOKENS = 2_000;
+
+/**
+ * PURE. The estimated list-price cost of a Rewrite: the whole context written to
+ * a cold cache plus a ~2 000-token reply. `rates` = priceForPrompt(...) of the
+ * session model's list price; null when unpriced or when the result isn't finite.
+ * @param {{ rates: { output: number, cacheWrite: number, cacheWrite1h?: number }|null, oneHour: boolean, estTokens: number }} a
+ * @returns {number|null}
+ */
+export function estimateRewriteCostUsd({ rates, oneHour, estTokens }) {
+  if (!rates) return null;
+  const writeRate = oneHour ? rates.cacheWrite1h : rates.cacheWrite;
+  const usd = (writeRate * estTokens + rates.output * REWRITE_OUTPUT_TOKENS) / 1e6;
+  return Number.isFinite(usd) ? usd : null;
+}

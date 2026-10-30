@@ -12,6 +12,9 @@ import {
   resolveModelPrice,
   computePrices,
   createOptimizerPrices,
+  resolveListPrice,
+  priceForPrompt,
+  isOneHourModel,
   CATALOG_STALE_MS,
   PRICES_MEMO_MS,
   PRICE_CACHE_VERSION,
@@ -430,4 +433,72 @@ test("createOptimizerPrices: a config edit is picked up after invalidate (set-mo
   cfg = { provider: { anthropic: { models: { m: { cost: { input: 1, output: 2, cache_read: 0.1 } } } } } };
   api.invalidate();
   assert.equal((await api.get()).models["anthropic/m"].source, "config");
+});
+
+// ---------------------------------------------------------------------------
+// list price (no cache-read gate) — summary ranking + rewrite estimate
+// ---------------------------------------------------------------------------
+
+test("resolveListPrice keeps `output`, needs no cache-read price, and defaults cacheWrite to input", () => {
+  const lp = resolveListPrice({ providerID: "p", modelID: "m", config: { provider: { p: { models: { m: { cost: { input: 0.8, output: 4 } } } } } } });
+  assert.deepEqual(lp, { input: 0.8, output: 4, cacheWrite: 0.8, source: "config" });
+  assert.equal(resolveModelPrice({ providerID: "p", modelID: "m", config: { provider: { p: { models: { m: { cost: { input: 0.8, output: 4 } } } } } }, now: NOW }), null, "the optimizer's own cache-gated price is unchanged");
+});
+
+test("resolveListPrice sources in order: opencode config, models.dev catalogue (any age), the model's own cost; a $0 source is skipped", () => {
+  const catalog = catalogOf({ p: { m: { input: 3, output: 15, cache_write: 3.75 } } }, NOW - 40 * DAY);
+  const model = { cost: { input: 9, output: 9, cacheWrite: 9 } };
+  assert.equal(resolveListPrice({ providerID: "p", modelID: "m", config: { provider: { p: { models: { m: { cost: { input: 1, output: 2 } } } } } }, catalog, model }).source, "config");
+  assert.deepEqual(resolveListPrice({ providerID: "p", modelID: "m", config: {}, catalog, model }), { input: 3, output: 15, cacheWrite: 3.75, source: "catalog" }, "a 40-day-old catalogue still gives a list price");
+  assert.deepEqual(resolveListPrice({ providerID: "p", modelID: "m", config: {}, catalog: null, model }), { input: 9, output: 9, cacheWrite: 9, source: "model" });
+  // a subscription's live $0 never wins: config and model say 0, the catalogue's list price is used
+  const sub = resolveListPrice({ providerID: "p", modelID: "m", config: { provider: { p: { models: { m: { cost: { input: 0, output: 0 } } } } } }, catalog, model: { cost: { input: 0, output: 0 } } });
+  assert.equal(sub.source, "catalog");
+  assert.equal(resolveListPrice({ providerID: "p", modelID: "m", config: {}, catalog: null, model: { cost: { input: 0, output: 0 } } }), null, "only $0 sources → unpriced");
+  assert.equal(resolveListPrice({ providerID: "p", modelID: "other", config: {}, catalog, model: undefined }), null);
+});
+
+test("resolveListPrice: a source with an input price but no output makes the whole result null (never NaN downstream)", () => {
+  assert.equal(resolveListPrice({ providerID: "p", modelID: "m", config: {}, catalog: catalogOf({ p: { m: { input: 3 } } }), model: { cost: { input: 1, output: 2 } } }), null);
+});
+
+test("resolveListPrice 1h: own 1h price else 2 × input, on the base and on every tier (a tier inherits what it lacks)", () => {
+  const catalog = catalogOf({
+    p: {
+      m: {
+        input: 3,
+        output: 15,
+        cache_write: 3.75,
+        tiers: [{ tier: { type: "context", size: 200_000 }, input: 6, output: 22.5 }],
+      },
+      own: { input: 3, output: 15, cache_write: 3.75, cache_write_1h: 5, context_over_200k: { input: 6, output: 22.5 } },
+    },
+  });
+  const m = resolveListPrice({ providerID: "p", modelID: "m", catalog, oneHour: true });
+  assert.equal(m.cacheWrite1h, 6);
+  assert.deepEqual(m.tiers, [{ minPromptTokens: 200_000, input: 6, output: 22.5, cacheWrite: 3.75, cacheWrite1h: 12 }], "the tier inherits cacheWrite but 2× applies to ITS input");
+  const own = resolveListPrice({ providerID: "p", modelID: "own", catalog, oneHour: true });
+  assert.equal(own.cacheWrite1h, 5);
+  assert.equal(own.tiers[0].cacheWrite1h, 5, "a tier lacking its own 1h price inherits the base's own");
+  assert.equal("cacheWrite1h" in resolveListPrice({ providerID: "p", modelID: "m", catalog, oneHour: false }), false);
+});
+
+test("priceForPrompt: a tier applies strictly above its boundary (200000 → base, 200001 → tier)", () => {
+  const lp = resolveListPrice({ providerID: "p", modelID: "own", catalog: catalogOf({ p: { own: { input: 3, output: 15, context_over_200k: { input: 6, output: 22.5 } } } }) });
+  assert.equal(priceForPrompt(lp, 200_000).input, 3);
+  assert.equal(priceForPrompt(lp, 200_001).input, 6);
+  assert.equal(priceForPrompt(lp, 200_001).output, 22.5);
+  assert.equal(priceForPrompt(lp, 10).output, 15);
+  assert.equal(priceForPrompt(null, 10), null);
+  assert.equal("source" in priceForPrompt(lp, 10), false);
+});
+
+test("isOneHourModel: an Anthropic-SDK model whose opencode config carries ttl 1h; anything else is false", () => {
+  const providers = { all: [{ id: "anthropic", models: { opus: { package: "@opencode/ai/providers/anthropic" } } }, { id: "openai", models: { gpt: { package: "@opencode/ai/providers/openai" } } }] };
+  const cfg = (pid, mid) => ({ provider: { [pid]: { models: { [mid]: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } } } } } });
+  assert.equal(isOneHourModel({ config: cfg("anthropic", "opus"), providers, providerID: "anthropic", modelID: "opus" }), true);
+  assert.equal(isOneHourModel({ config: {}, providers, providerID: "anthropic", modelID: "opus" }), false, "no ttl configured → 5m");
+  assert.equal(isOneHourModel({ config: cfg("openai", "gpt"), providers, providerID: "openai", modelID: "gpt" }), false, "not an Anthropic-SDK model");
+  assert.equal(isOneHourModel({ config: cfg("x", "y"), providers, providerID: "x", modelID: "y" }), false, "unknown model");
+  assert.equal(isOneHourModel({ config: {}, providers: null, providerID: "anthropic", modelID: "opus" }), false);
 });

@@ -241,6 +241,120 @@ function isOneHour(config, targets, providerID, modelID) {
 }
 
 /**
+ * PURE. The same rule for ONE model, from the raw provider list (`providers.all`
+ * carries each model's serving `package`). Exported for callers that price a
+ * single model (the handoff's rewrite estimate).
+ */
+export function isOneHourModel({ config, providers, providerID, modelID }) {
+  const all = Array.isArray(providers?.all) ? providers.all : [];
+  const p = all.find((x) => x && x.id === providerID);
+  const m = isObj(p?.models) ? p.models[modelID] : null;
+  if (!m) return false;
+  const targets = new Set(selectCacheTtlTargets([{ providerID, modelID, package: m.package }]).map((t) => `${t.providerID}/${t.modelID}`));
+  return isOneHour(config, targets, providerID, modelID);
+}
+
+// ---------------------------------------------------------------------------
+// List price (no cache-read gate) — for what a model COSTS to ask, not whether
+// trimming pays: the Summary-model ranking and the handoff's rewrite estimate.
+// ---------------------------------------------------------------------------
+
+// One raw cost record (models.dev / opencode.jsonc snake case) → base rates, or
+// `undefined` when this source does not price the model (input 0 / absent: a
+// subscription's live "$0" is not a list price). `null` = this source decided
+// the model is unpriced (it has an input price but no output price).
+function rawListRates(raw) {
+  const c = sanitizeCost(raw);
+  if (!c) return undefined;
+  if (!(typeof c.input === "number" && c.input > 0)) return undefined;
+  if (typeof c.output !== "number") return null;
+  return { cost: c, base: { input: c.input, output: c.output, cacheWrite: c.cache_write, oneHour: pickOneHour(c) } };
+}
+
+function finalizeList(r, oneHour) {
+  const out = {
+    input: r.input,
+    output: r.output,
+    cacheWrite: typeof r.cacheWrite === "number" && r.cacheWrite > 0 ? r.cacheWrite : r.input,
+  };
+  if (oneHour) out.cacheWrite1h = typeof r.oneHour === "number" && r.oneHour > 0 ? r.oneHour : 2 * r.input;
+  return out;
+}
+
+function buildListPrice(found, oneHour) {
+  const { cost, base } = found;
+  const rec = finalizeList(base, oneHour);
+  let tierSources = [];
+  if (Array.isArray(cost.tiers) && cost.tiers.length > 0) tierSources = cost.tiers.map((t) => ({ size: t.tier.size, c: t }));
+  else if (isObj(cost.context_over_200k)) tierSources = [{ size: OVER_200K_SIZE, c: cost.context_over_200k }];
+  if (tierSources.length > 0) {
+    const bySize = new Map();
+    for (const { size, c } of tierSources) {
+      const overlaid = {
+        input: rate(c?.input) ?? base.input,
+        output: rate(c?.output) ?? base.output,
+        cacheWrite: rate(c?.cache_write) ?? base.cacheWrite,
+        oneHour: pickOneHour(c) ?? base.oneHour,
+      };
+      if (!(overlaid.input > 0)) return null; // fail closed, like the optimizer's price
+      bySize.set(size, { minPromptTokens: size, ...finalizeList(overlaid, oneHour) });
+    }
+    rec.tiers = [...bySize.values()].sort((a, b) => a.minPromptTokens - b.minPromptTokens);
+  }
+  return rec;
+}
+
+/**
+ * PURE. A model's LIST price in $ per million tokens, or null when unpriced.
+ * Sources in order: opencode.jsonc `cost`, the models.dev catalogue
+ * (`catalog` = the validated price cache `{ fetchedAt, providers }`, used at any
+ * age — a ranking input and a label, not a gate), the listModels model's own
+ * `cost`. A source whose input price is 0 is skipped (a subscription's live
+ * "$0"). `cacheWrite` defaults to `input`; a source with no `output` makes the
+ * whole result null. With `oneHour` (the caller passes `isOneHourModel(...)`)
+ * `cacheWrite1h` is the record's own 1h price, else 2 × input — for the base and
+ * every tier, a tier inheriting any field it lacks from the base.
+ * @returns {{ input: number, output: number, cacheWrite: number, cacheWrite1h?: number, tiers?: Array<{minPromptTokens:number,input:number,output:number,cacheWrite:number,cacheWrite1h?:number}>, source: "config"|"catalog"|"model" }|null}
+ */
+export function resolveListPrice({ providerID, modelID, config, catalog, model, oneHour = false } = {}) {
+  const pcfg = has(config?.provider, providerID) ? config.provider[providerID] : null;
+  const mcfg = has(pcfg?.models, modelID) ? pcfg.models[modelID] : null;
+  const catalogRaw = catalog && has(catalog.providers, providerID) && has(catalog.providers[providerID], modelID) ? catalog.providers[providerID][modelID] : null;
+  const m = model?.cost;
+  const modelRaw = isObj(m) ? { input: m.input, output: m.output, cache_write: m.cacheWrite } : null;
+  for (const [raw, source] of [[mcfg?.cost, "config"], [catalogRaw, "catalog"], [modelRaw, "model"]]) {
+    if (!isObj(raw)) continue;
+    const found = rawListRates(raw);
+    if (found === undefined) continue;
+    if (found === null) return null;
+    const rec = buildListPrice(found, oneHour);
+    return rec ? { ...rec, source } : null;
+  }
+  return null;
+}
+
+/**
+ * PURE. The rates that apply to a prompt of `promptTokens`: a tier applies when
+ * the prompt is STRICTLY GREATER than its `minPromptTokens`; the highest
+ * applying tier wins.
+ * @returns {{ input: number, output: number, cacheWrite: number, cacheWrite1h?: number }|null}
+ */
+export function priceForPrompt(listPrice, promptTokens) {
+  if (!listPrice) return null;
+  const { tiers, source: _source, ...base } = listPrice;
+  let rates = base;
+  if (Array.isArray(tiers) && typeof promptTokens === "number") {
+    for (const t of tiers) {
+      if (promptTokens > t.minPromptTokens) {
+        const { minPromptTokens: _min, ...tr } = t;
+        rates = tr;
+      }
+    }
+  }
+  return rates;
+}
+
+/**
  * PURE. The C1 body plus `unpriced`:
  *   { fetchedAt, models: { "<p>/<m>": record }, unpriced: ["<p>/<m>", …] }
  * The universe is the models of CONNECTED providers (`providers.all` filtered

@@ -23,6 +23,7 @@ function engineStub(over = {}) {
     get: (id) => (calls.push(["get", id]), id === ID ? rec : null),
     start: async (id, i) => (calls.push(["start", id, i]), rec),
     retry: async (id) => (calls.push(["retry", id]), rec),
+    rewrite: async (id) => (calls.push(["rewrite", id]), rec),
     dismiss: async (id) => (calls.push(["dismiss", id]), { ...rec, state: "dismissed" }),
     setMode: async (sid, mode) => (calls.push(["setMode", sid, mode]), mode),
     draftConsumed: async (id, rev) => void calls.push(["draftConsumed", id, rev]),
@@ -71,6 +72,23 @@ test("POST start / retry / draft-consumed", async () => {
   const d = await call(mk(e, { draftRevision: 3 }), "POST", `/api/handoff/${ID}/draft-consumed`);
   assert.equal(d.rs.status, 204);
   assert.deepEqual(e.calls.at(-1), ["draftConsumed", ID, 3]);
+});
+
+test("POST rewrite → 200 {handoff}; a GET is a 405; a not_ready / busy refusal keeps its status and the specific sentence", async () => {
+  const e = engineStub();
+  const ok = await call(mk(e), "POST", `/api/handoff/${ID}/rewrite`);
+  assert.equal(ok.rs.status, 200);
+  assert.deepEqual(ok.rs.body, { handoff: { id: ID, state: "ready" } });
+  assert.deepEqual(e.calls.at(-1), ["rewrite", ID]);
+  assert.equal((await call(mk(e), "GET", `/api/handoff/${ID}/rewrite`)).rs.status, 405);
+  const nr = engineStub({ rewrite: async () => { throw new HandoffError("not_ready", "This handoff is being written right now."); } });
+  const r1 = await call(mk(nr), "POST", `/api/handoff/${ID}/rewrite`);
+  assert.equal(r1.rs.status, 422);
+  assert.equal(r1.rs.body.message, "This handoff is being written right now.");
+  const busy = engineStub({ rewrite: async () => { throw new HandoffError("busy", "Another operation is running on this conversation."); } });
+  assert.equal((await call(mk(busy), "POST", `/api/handoff/${ID}/rewrite`)).rs.status, 409);
+  const gone = engineStub({ rewrite: async () => { throw new HandoffError("expired", "This handoff has expired."); } });
+  assert.equal((await call(mk(gone), "POST", `/api/handoff/${ID}/rewrite`)).rs.status, 404);
 });
 
 test("POST dismiss → 200 {handoff}; POST /api/handoff/mode → 200 {mode} (GET is a 405, a bad mode a 400)", async () => {

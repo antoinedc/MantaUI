@@ -2052,7 +2052,7 @@ const compactionScheduler = createCompactionScheduler({
   eligible: async (sid) => (await handoffEngine.modeFor(sid)) === "off",
   // §6.2: one maintenance operation per session.
   acquire: (sid) => handoffEngine.acquireOperation(sid, "compaction"),
-  release: (sid) => handoffEngine.releaseOperation(sid, "compaction"),
+  release: (sid, token) => handoffEngine.releaseOperation(sid, token),
 });
 
 const stopCompactionScheduler = startPoller(() => compactionScheduler.tick(), {
