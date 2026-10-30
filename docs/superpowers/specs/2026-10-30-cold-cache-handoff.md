@@ -1,6 +1,6 @@
 # Cold-cache handoff + the Summary model setting
 
-Status: draft v5 (review rounds: DeepSeek V4.1 Flash ×4, GPT-6 Astra ×3) ·
+Status: reviewed v6 — DeepSeek V4.1 Flash ×5, GPT-6 Astra ×4; both final rounds: NO BLOCKERS ·
 Branch: `feat/cold-cache-handoff`
 Builds on: `2026-10-26-auto-handoff.md` (handoff engine, record, card),
 `2026-10-20-optimizer-sticky-trims.md` (prices, measured cache TTL).
@@ -218,7 +218,8 @@ resolveListPrice({ providerID, modelID, config, catalog, model, now, oneHour })
 // $ per million tokens. No cache-read gate. Sources in order: opencode config cost,
 // models.dev catalogue, the listModels model's own `cost`. A source whose input
 // price is 0 (a subscription's live "$0") is skipped, so subscriptions get the
-// catalogue's list price or null. cacheWrite defaults to input. With
+// catalogue's list price or null. cacheWrite defaults to input; `output` absent → the
+// whole result is null (unpriced). With
 // `oneHour: true` (the caller passes isOneHourModel(...)), cacheWrite1h = the
 // record's own 1h price, else 2 × input — for the base AND every tier, a tier
 // inheriting any field it lacks from the base (same overlay rule as today).
@@ -376,14 +377,16 @@ rewriteEstimate?: {            // present whenever the last attempt was condense
 };
 ```
 
-- `writer` is set when text is produced (both paths).
+- `writer` is set when text is produced (both paths), and
+  `internal.lastWriter` is written on EVERY settle of a generating run
+  (ready or failed, first attempt included) — retry stickiness depends on it.
 - `rewriteEstimate` is computed when a condensed attempt settles (ready or
   failed):
   `oneHour = isOneHourModel(session model)` (evaluated once);
   `rates = priceForPrompt(resolveListPrice({ …session model, oneHour }), estTokens)`;
   `writeRate = oneHour ? rates.cacheWrite1h : rates.cacheWrite`;
   `estCostUsd = (writeRate × estTokens + rates.output × 2 000) / 1e6`;
-  null when unpriced.
+  null when unpriced or when the result is not a finite number.
 - `canRewrite` is NOT stored. `touch(rec)` (called on every mutation) and
   `publicRecord` compute it with one pure function:
   `rewriteAvailable(rec, { replaced })` = state ∈ {`ready`, `failed`} ∧
@@ -435,7 +438,11 @@ gains `rewrite`), rpc `handoff:rewrite {id}`, `httpApi.handoffRewrite(id)` →
    successful dispatch hands the token to `produceText`.
 
 **Attempts.** Every run that GENERATES (create's server path, retry,
-rewrite) sets `internal.attempt = { id, kind }` together with state
+rewrite) is launched through ONE helper, `launchGeneration(rec, { kind,
+prev, forceWriter })`: acquire token → set attempt + state → persist →
+dispatch `produceText(rec, { token })`; on any pre-dispatch error it restores
+the record's prior state (from `prev`, or the state it had before launch),
+releases the token and rethrows. Each run sets `internal.attempt = { id, kind }` together with state
 `generating` (rewrite adds `prev`). Its result is written only if the record
 still exists, is still `generating`, and `attempt.id` matches; otherwise it
 is discarded. The supplied-complete-body path (an agent's full handoff,
@@ -551,8 +558,10 @@ auto-rename caller (passes `sessionId`).
   failed rewrite restores the ready card with all fields; stale result
   discarded when `attempt.id` changed; a complete agent body still becomes
   ready (and a planned send still starts) with no model call and no attempt;
-  a rejected persist during `rewrite` restores the card and releases the
-  lock; `summary-model:set` accepts an eligible model outside the shortlist
+  a rejected persist during create, retry or rewrite restores the record
+  and releases the lock; the first cold condensed failure records
+  `lastWriter` so its retry stays condensed; a price source with no `output`
+  yields `estCostUsd: null`, never NaN; `summary-model:set` accepts an eligible model outside the shortlist
   and `search` finds it; the B1 dep never returns the session model; boot recovery restores an interrupted
   rewrite and fails other generating records; `publicRecord`/`publicEvent`
   expose `writer`/`canRewrite`/`rewriteEstimate`.
