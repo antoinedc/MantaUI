@@ -19,7 +19,7 @@ import { parseGitStatus } from "../peers.mjs";
  * @param {(sid: string) => Promise<boolean>} p.isCtoConversationSession
  * @param {(providerID: string, modelID: string) => number|null} p.contextLimitFor
  * @param {{ snapshot: () => Promise<any> }} p.constraints  the optimizer constraint store
- * @param {(sid: string) => Promise<void>} p.extractConstraints
+ * @param {(sid: string, opts?: { messages?: any[] }) => Promise<void>} p.extractConstraints
  * @param {() => any} p.loadState  synchronous read of handoffs.json
  * @param {(snapshot: any) => Promise<void>} p.saveState
  *
@@ -133,7 +133,7 @@ export function createProductionHandoff(p) {
           // Standing instructions are INFERRED; re-extract first when they predate the last user message.
           let entry = (await p.constraints.snapshot())?.sessions?.[sid];
           if (!entry || (typeof entry.at === "number" && entry.at < lastUserMessageAt(messages))) {
-            await p.extractConstraints(sid);
+            await p.extractConstraints(sid, { messages });
             entry = (await p.constraints.snapshot())?.sessions?.[sid];
           }
           if (entry?.constraints?.length) facts.constraints = { items: entry.constraints, at: entry.at ?? null };

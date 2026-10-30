@@ -92,3 +92,20 @@ test("connecting or disconnecting a provider nudges the reconciler (detached); a
   await dispatch(handlersWithRestart, "opencode:provider-auth", [{ action: "disconnect", id: "good" }]);
   assert.equal(nudges, 2);
 });
+
+test("a successful opencode:set-providers nudges the reconciler; a failed one does not", async () => {
+  let nudges = 0;
+  const summaryModel = { reconcile: async () => { nudges++; } };
+  let ok = true;
+  const setProviders = async () => (ok ? { ok: true } : { ok: false, error: "boom" });
+  const handlers = buildHandlers({
+    tmux: { listProjects: async () => [] }, pty: {}, bus: {},
+    syncState: { applyConfig: () => {} }, local: { configGet: async () => ({}) }, push: {},
+    oc: {}, summaryModel, setProviders,
+  });
+  await dispatch(handlers, "opencode:set-providers", [{ upsert: [{ id: "openrouter" }] }]);
+  assert.equal(nudges, 1);
+  ok = false;
+  await dispatch(handlers, "opencode:set-providers", [{ remove: ["openrouter"] }]);
+  assert.equal(nudges, 1);
+});

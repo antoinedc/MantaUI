@@ -612,6 +612,8 @@ export function buildHandlers({
   syncSubagentsDetailed = providers.syncSubagentsDetailed,
   // WS11 D4: the custom endpoints behind `opencode:get-providers` (injectable for tests).
   getProviderEndpoints = providers.getProviderEndpoints,
+  // `opencode:set-providers` writer (injectable so a test never edits a live opencode.jsonc).
+  setProviders = providers.setProviders,
   // WS11 D5: the one session-name allocator (injectable so a test gets a fresh one).
   nameAllocator = sharedNameAllocator,
   getUsageAlerts = getUsageAlertsImpl,
@@ -2156,7 +2158,7 @@ export function buildHandlers({
     // set-providers: apply upsert/remove mutations to opencode.jsonc.
     // Args: { upsert?: ProviderInput[], remove?: string[] }
     "opencode:set-providers": (input) =>
-      providers.setProviders(input ?? {}).then((res) => {
+      setProviders(input ?? {}).then((res) => {
         // W8 #2 (BET-1536): a provider configuration change clears the
         // affected keys — config churn is not evidence either way (a new key
         // or baseURL invalidates the old failures) — and the endpoints
@@ -2172,6 +2174,8 @@ export function buildHandlers({
         } catch (e) {
           console.warn("[provider-health] config-change clear failed:", e?.message ?? e);
         }
+        // Custom endpoints changed: the Summary model may need a new pick.
+        if (res?.ok) nudgeSummaryModel();
         return res;
       }),
 

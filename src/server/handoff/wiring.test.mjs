@@ -56,7 +56,7 @@ function fakes(over = {}) {
     isCtoConversationSession: async (sid) => sid === "ses_cto",
     contextLimitFor: () => 1_000_000,
     constraints: { snapshot: async () => ({ sessions: { ses_p: { constraints: ["no emojis"], at: 5 } } }) },
-    extractConstraints: async (sid) => void calls.push(["extract", sid]),
+    extractConstraints: async (sid, opts) => void calls.push(["extract", sid, opts]),
     loadState: () => (disk.json ? JSON.parse(disk.json) : null),
     saveState: async (s) => void (disk.json = JSON.stringify(s)),
     ...over,
@@ -80,6 +80,8 @@ test("the production engine builds a ready card from the box's real-shaped reads
   assert.match(done.text, /  > Patched\. Should I also run the migration\?/);
   assert.match(done.text, /- \(inferred\) standing instructions/);
   assert.ok(f.calls.some((c) => c[0] === "extract" && c[1] === "ses_p"), "the constraints (at=5) predate the last user message (100): re-extracted first");
+  const extractCall = f.calls.find((c) => c[0] === "extract");
+  assert.ok(Array.isArray(extractCall[2]?.messages) && extractCall[2].messages.length === 2, "the extractor gets the transcript facts already read, not a second read");
   assert.ok(f.calls.find((c) => c[0] === "generate")[2].startsWith("<!-- manta-handoff-generate -->"));
   assert.ok(f.published.some((e) => e.kind === "handoff"));
   assert.ok(JSON.parse(f.disk.json).records[rec.id], "persisted");

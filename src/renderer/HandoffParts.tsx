@@ -258,7 +258,7 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
               {writerLine}
             </div>
           )}
-          {!failed && record.state === "ready" && record.reason && (
+          {!failed && record.state === "ready" && record.writer?.path === "condensed" && record.reason && (
             <div className="mt-2 text-warn break-words" role="status" data-testid="handoff-reason">
               {record.reason}
             </div>

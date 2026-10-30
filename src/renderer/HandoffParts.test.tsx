@@ -285,9 +285,16 @@ describe("HandoffCardView", () => {
       expect(noticeText(h!)).toBe("This handoff is being written right now.");
     });
 
-    it("a restored ready card shows its reason", async () => {
-      open(rec({ reason: "The rewrite was interrupted by a restart." }));
+    it("a restored condensed ready card shows its reason", async () => {
+      open(rec({ writer: { path: "condensed" }, reason: "The rewrite was interrupted by a restart." }));
       expect(h!.container.querySelector('[data-testid="handoff-reason"]')?.textContent).toBe("The rewrite was interrupted by a restart.");
+    });
+
+    it("a session-written or writer-less ready card never shows a reason (e.g. 'you kept working')", async () => {
+      open(rec({ writer: { path: "session" }, reason: "you kept working" }));
+      expect(h!.container.querySelector('[data-testid="handoff-reason"]')).toBeNull();
+      open(rec({ reason: "you kept working" }));
+      expect(h!.container.querySelector('[data-testid="handoff-reason"]')).toBeNull();
     });
   });
 
