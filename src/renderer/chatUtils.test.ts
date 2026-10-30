@@ -27,6 +27,9 @@ import {
   formatUsdEstimate,
   describeRewriteButton,
   shouldClearMissingModel,
+  countNewSteps,
+  firstNewStepMessageId,
+  describeCatchUpPill,
   findSessionTitle,
   formatHiddenTodosSummary,
   summarizeTodoProgress,
@@ -4541,5 +4544,110 @@ describe("cold-cache handoff labels (spec B6)", () => {
       "Rewrite with claude-opus-5-5 (≈ 300k tokens)",
     );
     expect(describeRewriteButton({ ...base, estCostUsd: null, estTokens: 0 })).toBe("Rewrite with claude-opus-5-5");
+  });
+});
+
+// ===== Session catch-up helpers =====
+
+describe("countNewSteps / firstNewStepMessageId", () => {
+  type P = { id: string; type: string; text?: string };
+  const msg = (id: string, role: "user" | "assistant", parts: P[]) =>
+    ({ info: { id, sessionID: "s", role }, parts: parts.map((p) => ({ messageID: id, ...p })) }) as never;
+  const before = [
+    msg("m1", "user", [{ id: "p1", type: "text", text: "hi" }]),
+    msg("m2", "assistant", [{ id: "p2", type: "tool" }]),
+  ];
+
+  it("counts new tool parts", () => {
+    const after = [...before, msg("m3", "assistant", [{ id: "p3", type: "tool" }, { id: "p4", type: "tool" }])];
+    expect(countNewSteps(before, after)).toBe(2);
+  });
+
+  it("counts new text parts with content, ignores empty / whitespace text and other part types", () => {
+    const after = [
+      ...before,
+      msg("m3", "assistant", [
+        { id: "p3", type: "text", text: "done" },
+        { id: "p4", type: "text", text: "   " },
+        { id: "p5", type: "text" },
+        { id: "p6", type: "reasoning", text: "thinking" },
+        { id: "p7", type: "step-finish" },
+      ]),
+    ];
+    expect(countNewSteps(before, after)).toBe(1);
+  });
+
+  it("counts background results", () => {
+    const after = [...before, msg("m3", "assistant", [{ id: "p3", type: "background-result" }])];
+    expect(countNewSteps(before, after)).toBe(1);
+  });
+
+  it("counts user-role text (any role)", () => {
+    const after = [...before, msg("m3", "user", [{ id: "p3", type: "text", text: "from another window" }])];
+    expect(countNewSteps(before, after)).toBe(1);
+  });
+
+  it("ignores optimistic messages", () => {
+    const after = [...before, msg("optimistic-user-1", "user", [{ id: "p3", type: "text", text: "sending" }])];
+    expect(countNewSteps(before, after)).toBe(0);
+    expect(firstNewStepMessageId(before, after)).toBeNull();
+  });
+
+  it("is 0 when every part was already there (even if a message grew text)", () => {
+    expect(countNewSteps(before, before)).toBe(0);
+    expect(firstNewStepMessageId(before, before)).toBeNull();
+  });
+
+  it("a part already known keeps not counting when its message moved", () => {
+    const after = [before[1], before[0]];
+    expect(countNewSteps(before, after)).toBe(0);
+  });
+
+  it("firstNewStepMessageId is the message holding the first new step in transcript order", () => {
+    const after = [
+      ...before,
+      msg("m3", "assistant", [{ id: "p3", type: "text", text: "" }]),
+      msg("m4", "assistant", [{ id: "p4", type: "tool" }]),
+      msg("m5", "assistant", [{ id: "p5", type: "tool" }]),
+    ];
+    expect(firstNewStepMessageId(before, after)).toBe("m4");
+    expect(countNewSteps(before, after)).toBe(2);
+  });
+
+  it("treats a null before as everything new", () => {
+    expect(countNewSteps(null, before)).toBe(2);
+    expect(firstNewStepMessageId(null, before)).toBe("m1");
+  });
+});
+
+describe("describeCatchUpPill", () => {
+  it("catching: plain copy, neutral tone, no action", () => {
+    expect(describeCatchUpPill({ state: "catching" })).toEqual({ label: "Catching up…", tone: "neutral", action: null });
+  });
+  it("held: will-send copy with a Cancel action", () => {
+    expect(describeCatchUpPill({ state: "held" })).toEqual({
+      label: "Catching up… · will send when ready",
+      tone: "neutral",
+      action: "cancel",
+    });
+  });
+  it("error: danger tone with a Retry action", () => {
+    expect(describeCatchUpPill({ state: "error" })).toEqual({
+      label: "Couldn't load the latest steps",
+      tone: "error",
+      action: "retry",
+    });
+  });
+  it("new: count, singular, plural, no suffix without a release", () => {
+    expect(describeCatchUpPill({ state: "new", newSteps: 1 })).toEqual({ label: "1 new step", tone: "new", action: "show" });
+    expect(describeCatchUpPill({ state: "new", newSteps: 3, sentInto: null }).label).toBe("3 new steps");
+  });
+  it("new: both suffixes", () => {
+    expect(describeCatchUpPill({ state: "new", newSteps: 3, sentInto: "running" }).label).toBe(
+      "3 new steps · your message was sent into the running turn",
+    );
+    expect(describeCatchUpPill({ state: "new", newSteps: 1, sentInto: "idle" }).label).toBe(
+      "1 new step · your message was sent",
+    );
   });
 });

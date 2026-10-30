@@ -50,6 +50,7 @@ import {
 import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
 import { BUSY_PLACEHOLDER } from "./inboxState";
+import { SPINNER_CLASS } from "./CatchUpPill";
 import { backgroundBoxVisible, backgroundRequested, type SlashToken } from "./backgroundRun";
 import { BackgroundRunBox, SlashHighlight } from "./SlashComposerParts";
 import { VOICE_MAX_DURATION_MS } from "../shared/waveform.mjs";
@@ -194,6 +195,8 @@ export function InputArea({
   textareaAriaLabel,
   placeholderOverride,
   sendBusy = false,
+  sendHeld = false,
+  onCancelHeldSend,
   slash,
 }: {
   input: string;
@@ -314,6 +317,11 @@ export function InputArea({
   // True while a send into a running turn is in flight (the session composer's
   // steer path): the send button is disabled so a second click can't double up.
   sendBusy?: boolean;
+  // A send is HELD until the session finishes catching up (session catch-up
+  // spec B4): the Send button renders as the held variant (spinner) and a click
+  // cancels the hold. Supplied only by the session composer.
+  sendHeld?: boolean;
+  onCancelHeldSend?: () => void;
   // Slash-command highlight + the "Run in background" box (v2-next Stage B).
   // Supplied only by a surface that runs slash commands itself (the session
   // composer): the host resolves the token against its command list and owns
@@ -553,11 +561,12 @@ export function InputArea({
               return;
             }
             // ⌥Enter: preventDefault so macOS Option+Enter can't insert a
-            // newline / special character. Idle it is the same as Enter.
+            // newline / special character. Always routed through
+            // onSubmitAfterTurn so a held send keeps its "after this turn"
+            // delivery; idle, the send itself ignores it (same as Enter).
             if (e.key === "Enter" && e.altKey && !e.shiftKey && !e.metaKey && !e.ctrlKey && onSubmitAfterTurn) {
               e.preventDefault();
-              if (running) onSubmitAfterTurn();
-              else submit();
+              onSubmitAfterTurn();
               return;
             }
             if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -617,27 +626,31 @@ export function InputArea({
             framer tokens so reduced-motion is inherited via App's
             MotionConfig. */}
         <AnimatePresence initial={false}>
-          {input.trim() && (
+          {(input.trim() || sendHeld) && (
             <motion.button
               key="send"
               type="button"
-              onClick={() => submit()}
-              disabled={sendBusy}
+              onClick={() => (sendHeld ? onCancelHeldSend?.() : submit())}
+              disabled={sendBusy && !sendHeld}
               aria-label={
-                bgActive
-                  ? "Run in background"
-                  : running && !onSubmitAfterTurn
-                    ? "Queue message while running"
-                    : "Send message"
+                sendHeld
+                  ? "Waiting to send — click to cancel"
+                  : bgActive
+                    ? "Run in background"
+                    : running && !onSubmitAfterTurn
+                      ? "Queue message while running"
+                      : "Send message"
               }
               title={
-                bgActive
-                  ? "Run in background (Enter)"
-                  : running
-                    ? onSubmitAfterTurn
-                      ? "Send now (Enter)"
-                      : "Queue (Enter)"
-                    : "Send (Enter)"
+                sendHeld
+                  ? "Waiting to send — click to cancel"
+                  : bgActive
+                    ? "Run in background (Enter)"
+                    : running
+                      ? onSubmitAfterTurn
+                        ? "Send now (Enter)"
+                        : "Queue (Enter)"
+                      : "Send (Enter)"
               }
               initial={{ opacity: 0, x: 8 }}
               animate={{ opacity: 1, x: 0 }}
@@ -646,12 +659,27 @@ export function InputArea({
               className={
                 (bgActive
                   ? "h-7 px-2 rounded-sm text-meta font-semibold whitespace-nowrap border border-accent/45 bg-accent-bg text-accent-tx hover:bg-fill-hover disabled:opacity-50 "
-                  : "w-7 h-7 rounded-sm grid place-items-center bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50 ") +
+                  : sendHeld
+                    ? "w-7 h-7 rounded-sm grid place-items-center bg-raised text-accent-tx hover:bg-fill-hover "
+                    : "w-7 h-7 rounded-sm grid place-items-center bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50 ") +
                 "shrink-0 transition-colors " +
                 "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
               }
             >
-              {bgActive ? "Run in background" : <SendFilled size={14} />}
+              {sendHeld ? (
+                bgActive ? (
+                  <span className="inline-flex items-center gap-1">
+                    <span className={SPINNER_CLASS} aria-hidden="true" />
+                    Waiting…
+                  </span>
+                ) : (
+                  <span className={SPINNER_CLASS} aria-hidden="true" />
+                )
+              ) : bgActive ? (
+                "Run in background"
+              ) : (
+                <SendFilled size={14} />
+              )}
             </motion.button>
           )}
           {running && (
