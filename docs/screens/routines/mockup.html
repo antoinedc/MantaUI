@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Routines</title>
+<!--
+  THE SPEC for the Routines screens (docs/superpowers/specs/2026-10-30-routines-design.md).
+  This file is the design contract, not a picture. Read docs/visual-verification.md
+  and docs/screens/routines/contract.md before implementing.
+
+  It loads the app's REAL token stylesheet; every value below is a token, a
+  Tailwind type role, a spacing step or an existing primitive's chrome. The
+  trailing comment on each CSS rule names the primitive / Tailwind classes the
+  implementation must use. Placeholder content MATCHES the demo fixture the
+  visual registry captures (contract.md §Fixture).
+
+  The tab strip, caption and spec notes are presentation chrome, not design.
+  Each screen is addressable as mockup.html#<id>:
+  overview | detail | run | create | chat | toroutine | tochat
+-->
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+<style>
+/* ==========================================================================
+   ROUTINES — design contract CSS.
+   Every value below is a token (tokens.css), a Tailwind type role
+   (tailwind.config.js fontSize: display 24 / title 17 / prose 15 / body 14 /
+   label 13 / meta 12 / micro 11), a spacing step (--sp-*), or the chrome of an
+   EXISTING primitive (docs/components.md). The trailing comment on each rule
+   names the primitive or the Tailwind classes the implementation must use.
+   No raw hex, no off-grid spacing. See docs/screens/routines/contract.md.
+   ========================================================================== */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--panel); color: var(--tx1); font: 400 15px/var(--ui-lh) var(--font-sans); -webkit-font-smoothing: antialiased; }
+.ic { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; display:block; }
+.ic.s { width:14px; height:14px; }
+.ic.xs { width:12px; height:12px; stroke-width:2.2; }
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ---------- presentation chrome (NOT part of the design) ---------- */
+.deck{max-width:1440px;margin:0 auto;padding:var(--sp-5) var(--sp-6) var(--sp-10)}
+.deck-h{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.deck-h h1{font:600 17px/1.3 var(--font-sans);margin:0}
+.deck-h .sub{font:400 13px/1.4 var(--font-sans);color:var(--tx3)}
+.tabs{display:flex;gap:var(--sp-1);background:var(--fill);padding:var(--sp-1);border-radius:var(--r-md);margin-left:auto;flex-wrap:wrap}
+.tabs button{border:0;background:transparent;font:500 12px/1 var(--font-sans);color:var(--tx3);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);cursor:pointer}
+.tabs button.on{background:var(--card);color:var(--tx1);box-shadow:var(--shadow-sm)}
+.themeb{border:1px solid var(--border);background:var(--card);color:var(--tx2);font:500 12px/1 var(--font-sans);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-md);cursor:pointer}
+.caption{font:400 13px/1.55 var(--font-sans);color:var(--tx3);margin:var(--sp-3) 0 0;max-width:110ch}
+.caption b{color:var(--tx1);font-weight:600}
+.notes-spec{max-width:96ch;margin:var(--sp-6) 0 0;font:400 14px/1.6 var(--font-sans);color:var(--tx2)}
+.notes-spec h3{font:600 14px/1.3 var(--font-sans);color:var(--tx1);margin:var(--sp-5) 0 var(--sp-2)}
+.notes-spec li{margin:var(--sp-1) 0}
+.notes-spec b{color:var(--tx1)}
+.screen{display:none}
+.screen.on{display:contents}
+
+/* ================= APP SHELL (exists today — unchanged) ================= */
+.app{position:relative;border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-lg);
+  background:var(--canvas);display:grid;grid-template-columns:256px 1fr;height:860px;margin:var(--sp-4) 0 var(--sp-2)}
+/* Sidebar.tsx: <aside class="w-64 border-r border-border bg-bg-elev"> */
+.rail{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;min-width:0}
+.drag{height:48px;flex-shrink:0;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4)}
+.drag i{width:12px;height:12px;border-radius:50%;display:block;background:var(--border)}
+.rail-h{display:flex;align-items:center;padding:0 var(--sp-3) var(--sp-2)}
+.rail-h h2{font:600 12px/1.4 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx2);margin:0} /* text-meta font-semibold uppercase tracking-wider text-text-muted */
+.rail-h .acts{margin-left:auto;display:flex;gap:var(--sp-1)}
+.iconbtn{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:transparent;color:var(--tx3);cursor:pointer;display:grid;place-items:center;position:relative} /* <IconButton size="md"> */
+.iconbtn:hover{background:var(--fill-hover);color:var(--tx1)}
+.rail-scroll{flex:1;overflow-y:auto;padding:0 var(--sp-2) var(--sp-2);min-height:0}
+.nav{padding:0 var(--sp-1) var(--sp-1)}
+/* NEW pinned rail row — SAME chrome as the existing CTO row in Sidebar.tsx:
+   "flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm font-medium text-text hover:bg-fill-hover"
+   (text-sm there == 14px == text-body). Selected = bg-raised + accent marker (SessionRow's ROW_SELECTED). */
+.navrow{display:flex;align-items:center;gap:var(--sp-2);width:100%;padding:var(--sp-2);border-radius:var(--r-md);border:0;background:transparent;
+  font:500 14px/1.5 var(--font-sans);color:var(--tx1);cursor:pointer;text-align:left;position:relative}
+.navrow:hover{background:var(--fill-hover)}
+.navrow.on{background:var(--raised)}
+.navrow.on::before{content:"";position:absolute;left:calc(-1 * var(--sp-2));top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:0 3px 3px 0;background:var(--accent)}
+.navrow .t{flex:1}
+.navrow .ic{color:var(--tx3)}
+.navrow.on .ic{color:var(--accent-tx)}
+/* Count badges — the CTO row's badge chrome: "rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white".
+   Accent variant swaps bg-danger→bg-accent-solid, text-white→text-on-accent. */
+.cnt-badge{border-radius:var(--r-full);padding:0 var(--sp-1);font:600 11px/20px var(--font-sans);min-width:20px;text-align:center}
+.cnt-badge.danger{background:var(--danger);color:#fff}
+.cnt-badge.acc{background:var(--accent-solid);color:var(--on-accent)}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--tx4);display:inline-block} /* SessionRow DOT_BASE */
+.dot.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);animation:pulse 1.6s ease-in-out infinite}
+.dot.att{background:var(--danger);box-shadow:0 0 0 3px var(--danger-bg);animation:pulse 1.2s ease-in-out infinite}
+.dot.ok{background:var(--ok)}
+.dot.warn{background:var(--warn)}
+.create{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);padding:var(--row-py) var(--row-px);border-radius:var(--r-md);font:500 13px/1 var(--font-sans);color:var(--tx4);margin-bottom:var(--sp-1)}
+.create .k{margin-left:auto;font:500 11px/1 var(--font-mono);color:var(--tx4)}
+.grp{margin-top:var(--sp-3)}
+.grp-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) var(--sp-2);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)}
+.grp-h .ic{width:12px;height:12px;color:var(--tx4);stroke-width:2.5}
+.srow{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);padding:var(--row-py) var(--row-px);border-radius:var(--r-md);cursor:pointer;position:relative;margin-bottom:var(--sp-1)} /* <SessionRow> */
+.srow:hover{background:var(--fill-hover)}
+.srow.on{background:var(--raised)}
+.srow.on::before{content:"";position:absolute;left:calc(-1 * var(--sp-2));top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:0 3px 3px 0;background:var(--accent)}
+.srow .t{font:500 13px/1.4 var(--font-sans);color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.srow.on .t{color:var(--tx1);font-weight:600}
+.srow .age{font:500 11px/1 var(--font-mono);color:var(--tx4);min-width:20px;text-align:right}
+.rail-foot{border-top:1px solid var(--border);padding:var(--sp-3) var(--sp-4);font:400 13px/1 var(--font-sans);color:var(--tx2)}
+
+.mainpane{display:flex;flex-direction:column;min-width:0;background:var(--canvas);position:relative}
+/* Main-pane header: same 46px bar as SessionHeader / the CTO pane. */
+.topb{height:46px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3) 0 var(--sp-4);flex-shrink:0;border-bottom:1px solid var(--border-subtle)}
+.crumb{display:flex;align-items:center;gap:var(--sp-2);font:500 13px/1 var(--font-sans);color:var(--tx1);min-width:0;white-space:nowrap} /* text-label */
+.crumb .mut{color:var(--tx3);cursor:pointer}
+.crumb .mut:hover{color:var(--tx1)}
+.crumb .slash{color:var(--tx4)}
+/* <Tag size="md" icon=…> — "gap-[5px] h-[23px] px-2 text-[11.5px] font-mono rounded-full border border-border bg-fill text-text-faint" */
+.tag{display:inline-flex;align-items:center;gap:5px;height:23px;padding:0 var(--sp-2);border-radius:var(--r-full);border:1px solid var(--border);background:var(--fill);font:500 11.5px/1 var(--font-mono);color:var(--tx3);white-space:nowrap}
+.tag .ic{width:12px;height:12px}
+.topb .sp{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2)}
+.scroll{flex:1;overflow-y:auto;min-height:0}
+
+/* <Button tone=…> — md: "h-8 px-[14px] text-[12.5px] gap-[6px] rounded-md border". ONE size. */
+.btn{height:32px;padding:0 14px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--canvas);color:var(--tx1);
+  font:500 12.5px/1 var(--font-sans);cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn:hover{background:var(--raised);border-color:var(--border-strong)}
+.btn.pri{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--on-accent)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--tx3)}
+.btn.ghost:hover{background:var(--fill-hover);color:var(--tx1)}
+.btn .ic{width:14px;height:14px}
+
+/* ================= NEW: Routines page ================= */
+/* Page column = the CTO pane's column: "mx-auto px-6 py-8" + maxWidth var(--cto-col-max-w). */
+.page{max-width:var(--cto-col-max-w);margin:0 auto;padding:var(--sp-8) var(--sp-6) var(--sp-12)}
+.ph{display:flex;align-items:flex-end;gap:var(--sp-4)}
+.ph h1{font:600 24px/1.25 var(--font-sans);margin:0} /* text-display font-semibold text-text */
+.ph p{margin:var(--sp-1) 0 0;font:400 14px/1.5 var(--font-sans);color:var(--tx3)} /* text-body text-text-faint */
+.ph .acts{margin-left:auto;display:flex;gap:var(--sp-2)}
+.sec{margin-top:var(--sp-8)}
+.sec-h{display:flex;align-items:center;gap:var(--sp-2);margin-bottom:var(--sp-3)}
+.sec-h h3{margin:0;font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)} /* <Eyebrow> */
+.sec-h .n{font:500 11px/1.3 var(--font-mono);color:var(--tx4)} /* text-micro font-mono tabular-nums text-text-quiet */
+.sec-h .r{margin-left:auto;display:flex;gap:var(--sp-1);align-items:center}
+.sec-h .hint{font:400 12px/1.4 var(--font-sans);color:var(--tx4)} /* text-meta text-text-quiet */
+.link{border:0;background:transparent;color:var(--accent-tx);font:500 12px/1.4 var(--font-sans);cursor:pointer;padding:var(--sp-1) var(--sp-2);border-radius:var(--r-sm)} /* text-meta font-medium text-accent-tx hover:bg-accent-bg rounded-sm px-2 py-1 */
+.link:hover{background:var(--accent-bg)}
+/* List container — <Card>'s surface WITHOUT padding (rows own it): "rounded-lg border border-border-subtle bg-bg-soft overflow-hidden" */
+.box{border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--card);overflow:hidden}
+
+/* Needs-you card — the CTO needs-you chrome: left edge var(--need-edge-w) danger. */
+.need{display:flex;gap:var(--sp-3);align-items:flex-start;border:1px solid var(--border);border-left:var(--need-edge-w) solid var(--danger);
+  border-radius:var(--r-lg);background:var(--card);padding:var(--sp-3) var(--sp-4);box-shadow:var(--shadow-sm)}
+.need .badge{width:32px;height:32px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--danger-bg);color:var(--danger);flex-shrink:0}
+.need .tx{flex:1;min-width:0}
+.need .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)} /* text-meta text-text-faint */
+.need .q{font:600 14px/1.5 var(--font-sans);color:var(--tx1);margin-top:var(--sp-1)} /* text-body font-semibold */
+.need .acts{display:flex;gap:var(--sp-2);align-self:center}
+
+/* Findings inbox row */
+.irow{display:grid;grid-template-columns:8px 1fr auto;gap:var(--sp-3);align-items:start;padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);cursor:pointer;position:relative}
+.irow:first-child{border-top:0}
+.irow:hover{background:var(--fill)}
+.irow .ud{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:var(--sp-2)}
+.irow.read .ud{visibility:hidden}
+.irow .who{font:500 12px/1.4 var(--font-sans);color:var(--tx3);display:flex;gap:var(--sp-1);align-items:center} /* text-meta */
+.irow .who .sep{color:var(--tx4)}
+.irow .ttl{font:600 14px/1.5 var(--font-sans);color:var(--tx1);margin-top:var(--sp-1)} /* text-body font-semibold */
+.irow.read .ttl{font-weight:500;color:var(--tx2)}
+.irow .sum{font:400 13px/1.4 var(--font-sans);color:var(--tx3);margin-top:var(--sp-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} /* text-label text-text-faint truncate */
+.irow .when{font:500 11px/1.3 var(--font-mono);color:var(--tx4);margin-top:var(--sp-1);text-align:right} /* text-micro font-mono tabular-nums */
+.irow .hov{position:absolute;right:var(--sp-3);top:50%;transform:translateY(-50%);display:flex;gap:var(--sp-1);opacity:0}
+.irow:hover .hov{opacity:1}
+.irow:hover .when{visibility:hidden}
+
+/* Queue panel */
+.queue{display:grid;grid-template-columns:320px 1fr}
+.slots{padding:var(--sp-3) var(--sp-4);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;gap:var(--sp-2)}
+.slot{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-md);background:var(--accent-bg);font:500 13px/1.4 var(--font-sans);color:var(--tx1)}
+.slot .el{margin-left:auto;font:500 11px/1.3 var(--font-mono);color:var(--accent-tx)}
+.slot.free{background:transparent;border:1px dashed var(--border);color:var(--tx4)}
+.waiting{padding:var(--sp-3) var(--sp-4)}
+.wl{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) 0;font:500 13px/1.4 var(--font-sans);color:var(--tx2)}
+.wl .pos{width:20px;height:20px;border-radius:50%;background:var(--fill-active);display:grid;place-items:center;font:600 11px/1 var(--font-mono);color:var(--tx2)}
+.wl .since{margin-left:auto;font:500 11px/1.3 var(--font-mono);color:var(--tx4)}
+.qnote{font:400 12px/1.4 var(--font-sans);color:var(--tx4);margin-top:var(--sp-2)}
+.qlabel{font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx4);margin-bottom:var(--sp-1)} /* <Eyebrow> */
+
+/* Routines table */
+.rt-head,.rt-row{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,1.2fr) 96px 40px;gap:var(--sp-3);align-items:center;padding:0 var(--sp-4)}
+.rt-head{padding-top:var(--sp-2);padding-bottom:var(--sp-2);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx4);border-bottom:1px solid var(--border-subtle)}
+.rt-row{padding-top:var(--sp-3);padding-bottom:var(--sp-3);border-top:1px solid var(--border-subtle);cursor:pointer}
+.rt-head+.rt-row{border-top:0}
+.rt-row:hover{background:var(--fill)}
+.rt-row .nm{display:flex;align-items:center;gap:var(--sp-3);min-width:0}
+.rt-row .nm b{font:600 14px/1.5 var(--font-sans);color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block} /* text-body font-semibold */
+.rt-row .nm small{font:400 12px/1.4 var(--font-mono);color:var(--tx4);display:block} /* text-meta font-mono text-text-quiet */
+.rt-row .cad{font:500 13px/1.4 var(--font-sans);color:var(--tx2)} /* text-label */
+.rt-row .cad small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.rt-row .nx{font:500 12px/1.4 var(--font-mono);color:var(--tx3)}
+.rt-row.paused .nm b,.rt-row.paused .cad{color:var(--tx4)}
+/* Routine glyph tile: "grid place-items-center w-8 h-8 rounded-md bg-fill text-text-faint" (lucide size=14) */
+.ricon{width:32px;height:32px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--fill);color:var(--tx3);flex-shrink:0}
+/* Outcome = <Pill tone=… size="meta">. Pill chrome: "inline-flex items-center gap-2 rounded-full px-2 py-px font-semibold text-meta".
+   Tones used: accent (Findings, Running), neutral+border (Nothing new), warn (Queued), danger (Failed, Needs you) — `danger` is a NEW tone
+   on the existing Pill (bg-danger-bg text-danger), not a new primitive. The leading dot is <StatusDot>. */
+.oc{display:inline-flex;align-items:center;gap:var(--sp-2);padding:1px var(--sp-2);border-radius:var(--r-full);font:600 12px/1.4 var(--font-sans);white-space:nowrap}
+.oc .dot{width:6px;height:6px}
+.oc.find,.oc.run{background:var(--accent-bg);color:var(--accent)}
+.oc.find .dot{background:var(--accent)}
+.oc.none{background:transparent;color:var(--tx2);border:1px solid var(--border)}
+.oc.fail,.oc.need{background:var(--danger-bg);color:var(--danger)}
+.oc.fail .dot,.oc.need .dot{background:var(--danger)}
+.oc.wait{background:var(--warn-bg);color:var(--warn)}
+.oc.wait .dot{background:var(--warn)}
+.lastrun{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0;align-items:flex-start}
+.lastrun small{font:400 12px/1.4 var(--font-sans);color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+/* <Toggle> — track 32×18-ish, knob 14px (existing primitive, do not restyle). */
+.sw{display:inline-block;vertical-align:middle;width:32px;height:18px;border-radius:var(--r-full);background:var(--accent-solid);border:1px solid var(--accent-solid);position:relative;cursor:pointer}
+.sw::after{content:"";position:absolute;top:1px;left:15px;width:14px;height:14px;border-radius:50%;background:var(--on-accent)}
+.sw.off{background:var(--fill-active);border-color:var(--border)}
+.sw.off::after{left:1px;background:var(--tx3)}
+
+.conv-row{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);font:500 13px/1.4 var(--font-sans);color:var(--tx2)}
+.conv-row:first-child{border-top:0}
+.conv-row .in{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.conv-row .in a{color:var(--accent-tx);text-decoration:none}
+.conv-row .r{margin-left:auto;font:500 12px/1.4 var(--font-mono);color:var(--tx3)}
+.conv-row .mk{margin-left:var(--sp-2)}
+.conv-row .once{width:160px;font:400 12px/1.4 var(--font-sans);color:var(--tx4);text-align:right;margin-left:var(--sp-2)}
+
+/* ================= NEW: Routine detail ================= */
+.hero{display:flex;gap:var(--sp-4);align-items:flex-start}
+.hero .ricon{width:40px;height:40px;border-radius:var(--r-lg);background:var(--accent-bg);color:var(--accent-tx)}
+.hero .ricon .ic{width:20px;height:20px}
+.hero h1{font:600 24px/1.25 var(--font-sans);margin:0} /* text-display */
+.facts{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-2)}
+/* Facts row = <Chip> (29px, rounded-md, border, bg-bg-soft, text-meta). Clickable "destination" chip = <Chip on> + Dropdown. */
+.fact{display:inline-flex;align-items:center;gap:var(--sp-2);height:29px;padding:0 var(--sp-3);border-radius:var(--r-md);border:1px solid var(--border);background:var(--card);font:500 12px/1 var(--font-sans);color:var(--tx2)}
+.fact .ic{width:13px;height:13px;color:var(--tx3)}
+.fact.m{font-family:var(--font-mono)}
+.fact.sw2{cursor:pointer;border-color:var(--accent);background:var(--accent-bg);color:var(--accent-tx)}
+.fact.sw2 .ic{color:var(--accent-tx)}
+.hero .acts{margin-left:auto;display:flex;gap:var(--sp-2);flex-shrink:0}
+.nextline{font:400 13px/1.4 var(--font-sans);color:var(--tx3);margin-top:var(--sp-3)} /* text-label text-text-faint */
+.nextline b{color:var(--tx1);font-weight:600}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:var(--sp-6);margin-top:var(--sp-8);align-items:start}
+.runrow{display:grid;grid-template-columns:80px 112px minmax(0,1fr) 64px;gap:var(--sp-3);align-items:center;padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);cursor:pointer}
+.runrow:first-child{border-top:0}
+.runrow:hover{background:var(--fill)}
+.runrow .d{font:500 12px/1.4 var(--font-mono);color:var(--tx3)}
+.runrow .d small{display:block;color:var(--tx4);font-size:11px}
+.runrow .tt{font:500 13px/1.4 var(--font-sans);color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} /* text-label */
+.runrow.quiet .tt{color:var(--tx3);font-weight:400}
+.runrow .tt small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.runrow .du{font:500 11px/1.3 var(--font-mono);color:var(--tx4);text-align:right}
+.runrow.unread .tt{font-weight:600}
+.side{display:flex;flex-direction:column;gap:var(--sp-4)}
+.panel-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-4) 0}
+.panel-h h4{margin:0;font:600 13px/1.4 var(--font-sans);color:var(--tx1)} /* text-label font-semibold */
+.panel-h .ic{color:var(--tx3)}
+.panel-h .r{margin-left:auto;display:flex;gap:var(--sp-1)}
+.panel-sub{padding:var(--sp-1) var(--sp-4) 0;font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+/* Memory body = <OutputWell variant="standalone"> look: bg-inset, border-subtle, rounded-md, font-mono text-meta */
+.notes{margin:var(--sp-3) var(--sp-4) var(--sp-4);padding:var(--sp-3);border-radius:var(--r-md);background:var(--inset);border:1px solid var(--border-subtle);
+  font:400 12px/1.6 var(--font-mono);color:var(--tx2);white-space:pre-wrap}
+.notes .h{color:var(--tx1);font-weight:600}
+.notes .new{background:var(--diff-add);border-radius:var(--r-xs)}
+.instr{margin:var(--sp-3) var(--sp-4) var(--sp-4);font:400 13px/1.55 var(--font-sans);color:var(--tx2)}
+.skillchip{display:inline-flex;align-items:center;padding:0 var(--sp-2);border-radius:var(--r-full);background:var(--accent-bg);color:var(--accent-tx);font:500 12px/1.6 var(--font-mono)}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:var(--sp-2) var(--sp-3);padding:var(--sp-3) var(--sp-4) var(--sp-4);font:400 12px/1.4 var(--font-sans)}
+.kv dt{color:var(--tx4)}
+.kv dd{margin:0;color:var(--tx2)}
+
+/* ================= NEW: a run (existing ChatPanel + two additions) ================= */
+.runbar{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-2) var(--sp-6);background:var(--panel);border-bottom:1px solid var(--border-subtle);font:400 12px/1.4 var(--font-sans);color:var(--tx3)} /* text-meta */
+.runbar .ic{color:var(--accent-tx)}
+.runbar b{color:var(--tx1);font-weight:600}
+.runbar .sep{color:var(--tx4)}
+.runbar .r{margin-left:auto;display:flex;gap:var(--sp-2)}
+.tscroll{flex:1;overflow-y:auto;padding:var(--sp-6) 0;min-height:0}
+.wrap{padding:0 var(--transcript-inset);display:flex;flex-direction:column;gap:var(--turn-gap)}
+.turn{display:flex;flex-direction:column;gap:var(--block-gap)}
+.trigger{display:flex;align-items:center;gap:var(--sp-2);font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.trigger .ic{color:var(--accent-tx)}
+.trigger .line{flex:1;height:1px;background:var(--border-subtle)}
+/* The routine's prompt renders through <MessageBubble> with an Eyebrow label above the text. */
+.promptcard{border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--fill);padding:var(--sp-3) var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);margin-left:auto;max-width:min(88%,var(--measure))}
+.promptcard .lbl{display:flex;align-items:center;gap:var(--sp-1);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx4);margin-bottom:var(--sp-1)}
+.amsg{font:400 15px/var(--prose-lh) var(--font-sans);color:var(--tx1);display:flex;flex-direction:column;gap:var(--block-gap)}
+.amsg p{margin:0}
+.ict{font-family:var(--font-mono);font-size:.86em;background:var(--fill);border:1px solid var(--border-subtle);padding:1px var(--sp-1);border-radius:var(--r-xs)}
+.tline{display:flex;flex-direction:column;gap:var(--tool-line-gap)}
+.tl{display:flex;align-items:center;gap:var(--sp-2);font:500 12px/1.6 var(--font-mono);color:var(--tx3)} /* the existing collapsed tool-activity line */
+.tl .g{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.tl b{color:var(--tx2);font-weight:600}
+.tl .r{margin-left:auto;color:var(--tx4);font-size:11px}
+/* Report card — the ask-card chrome (Cards.tsx PermissionCard): rounded-lg border bg-bg-soft shadow-md; 32px badge; footer on bg-bg-elev. */
+.report{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-md);overflow:hidden}
+.report-h{display:flex;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4) var(--sp-3);align-items:flex-start}
+.report-h .bdg{width:32px;height:32px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--accent-bg);color:var(--accent-tx);flex-shrink:0}
+.report-h .k{font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--accent-tx)}
+.report-h h5{margin:var(--sp-1) 0 0;font:600 15px/1.4 var(--font-sans);color:var(--tx1)} /* text-prose font-semibold */
+.report-h .body{min-width:0;flex:1}
+.report ul{margin:var(--sp-2) 0 0;padding:0 0 0 var(--sp-4);font:400 14px/1.6 var(--font-sans);color:var(--tx2)} /* text-body */
+.report ul li{margin:var(--sp-1) 0}
+.report ul b{color:var(--tx1)}
+.report .up{color:var(--ok);font-weight:600}
+.report .down{color:var(--danger);font-weight:600}
+.report-f{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-4);border-top:1px solid var(--border-subtle);background:var(--panel);font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.report-f .r{margin-left:auto;display:flex;gap:var(--sp-2)}
+/* Composer = the existing InputArea, untouched. */
+.composer{flex-shrink:0;padding:0 0 var(--sp-3)}
+.comp-in{max-width:var(--measure);margin:0 auto;padding:0 28px}
+.cbox{border:1px solid var(--border-strong);border-radius:var(--r-lg);background:var(--card);padding:var(--sp-3) var(--sp-4);display:flex;align-items:flex-start;gap:var(--sp-3);box-shadow:var(--shadow-sm)}
+.cbox .ta{flex:1;font:400 15px/1.55 var(--font-sans);color:var(--tx3);min-height:22px}
+.cbox .send{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:var(--fill);color:var(--tx3);display:grid;place-items:center}
+.metarow{display:flex;align-items:center;gap:var(--sp-2);margin-top:var(--sp-2)}
+.msplit{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;height:29px;background:var(--card)} /* <SplitChip> */
+.msplit span{white-space:nowrap;height:100%;padding:0 var(--sp-3);font:500 12px/1 var(--font-sans);color:var(--tx2);display:inline-flex;align-items:center;gap:var(--sp-1)}
+.msplit span+span{border-left:1px solid var(--border)}
+.msplit .lvl{color:var(--accent-tx);font-weight:600}
+.msplit .ic{width:13px;height:13px}
+.mbtn{display:inline-flex;align-items:center;gap:var(--sp-1);height:28px;padding:0 var(--sp-2);border-radius:var(--r-sm);color:var(--tx3);font:500 12px/1 var(--font-sans)}
+.spacer{margin-left:auto}
+.comp-hint{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.umsg{align-self:flex-end;background:var(--fill);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-3) var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);max-width:min(88%,var(--measure))} /* <MessageBubble> */
+
+/* In-chat "Routine created" card — <Card elevated={false}> with a dl body and an actions row. */
+.rcard{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-sm);overflow:hidden;max-width:var(--inline-max-w)}
+.rcard-h{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4)}
+.rcard-h .ricon{background:var(--accent-bg);color:var(--accent-tx)}
+.rcard-h .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.rcard-h b{display:block;font:600 14px/1.5 var(--font-sans);color:var(--tx1)}
+.rcard-b{display:grid;grid-template-columns:96px 1fr;gap:var(--sp-1) var(--sp-3);margin:0;padding:0 var(--sp-4) var(--sp-3);font:400 13px/1.4 var(--font-sans)}
+.rcard-b dt{color:var(--tx4)} .rcard-b dd{margin:0;color:var(--tx2)}
+.rcard-f{display:flex;gap:var(--sp-2);padding:var(--sp-2) var(--sp-4);border-top:1px solid var(--border-subtle);background:var(--panel)}
+
+/* ================= NEW: modals — <Modal size="lg" tall> (560px) ================= */
+.scrim{position:absolute;inset:0 0 0 -256px;background:rgb(0 0 0 / .4);display:flex;align-items:flex-start;justify-content:center;padding-top:var(--sp-8);z-index:5} /* Modal backdrop bg-black/40 */
+.modal{width:560px;max-height:800px;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:var(--r-xl);background:var(--card);box-shadow:var(--shadow-lg);overflow:hidden}
+.modal-h{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-4) var(--sp-5);border-bottom:1px solid var(--border-subtle)}
+.modal-h h2{margin:0;font:600 17px/1.3 var(--font-sans)} /* text-title font-semibold */
+.modal-h .r{margin-left:auto}
+.modal-b{padding:var(--sp-4) var(--sp-5);overflow-y:auto;display:flex;flex-direction:column;gap:var(--sp-4)}
+.modal-f{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-5);border-top:1px solid var(--border-subtle);background:var(--panel)}
+/* Field label = Field's LABEL_CLS: "block text-micro font-semibold uppercase text-text-muted"; help = "text-meta text-text-faint". */
+.fld label{display:block;font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx2);margin-bottom:var(--sp-2)}
+.fld .help{font:400 12px/1.4 var(--font-sans);color:var(--tx3);margin-top:var(--sp-1)}
+/* Inputs = <Field> chrome: "bg-bg-soft border border-border-strong rounded-md text-body px-4 py-3" (focus: border-accent) */
+.inp{border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--card);padding:var(--sp-2) var(--sp-3);display:flex;align-items:center;gap:var(--sp-2);font:400 14px/1.5 var(--font-sans);color:var(--tx1);white-space:nowrap;overflow:hidden}
+.inp .ic{color:var(--tx3)}
+.inp.mono{font-family:var(--font-mono)}
+.inp .chev{margin-left:auto;color:var(--tx4)}
+.tarea{min-height:96px;border:1px solid var(--accent);border-radius:var(--r-md);background:var(--card);padding:var(--sp-3);font:400 14px/1.55 var(--font-sans);color:var(--tx1)}
+.tarea .cur{display:inline-block;width:2px;height:16px;background:var(--accent);vertical-align:-3px;animation:pulse 1s steps(1) infinite}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)}
+/* Segmented control = Settings' SegmentedField chrome (bg-fill p-1 rounded-md; active segment bg-bg-soft shadow-sm text-text). */
+.seg{display:inline-flex;flex-wrap:wrap;background:var(--fill);border-radius:var(--r-md);padding:var(--sp-1);gap:var(--sp-1)}
+.seg span{padding:var(--sp-1) var(--sp-2);border-radius:var(--r-sm);font:500 12px/1.4 var(--font-sans);color:var(--tx3);cursor:pointer;white-space:nowrap}
+.seg span.on{background:var(--card);color:var(--tx1);box-shadow:var(--shadow-sm)}
+.when{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.when .inp{width:96px}
+.when .tz{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.rcs{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2)}
+/* Radio card = <MenuOption selected> look: border, selected → border-accent bg-accent-bg. */
+.rc{border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);display:flex;gap:var(--sp-2);cursor:pointer;background:var(--card)}
+.rc.on{border-color:var(--accent);background:var(--accent-bg)}
+.rc .rb{width:16px;height:16px;border-radius:50%;border:2px solid var(--border-strong);flex-shrink:0;display:grid;place-items:center}
+.rc.on .rb{border-color:var(--accent-solid)}
+.rc.on .rb::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent-solid)}
+.rc b{display:block;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.rc small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+/* Memory/advice notes = <Callout tone="info" size="note"> */
+.memnote{display:flex;gap:var(--sp-2);align-items:flex-start;padding:var(--sp-2) var(--sp-3);border-left:2px solid var(--accent);border-radius:0 var(--r-sm) var(--r-sm) 0;background:var(--accent-bg);font:400 12px/1.4 var(--font-sans);color:var(--tx2)}
+.memnote .ic{color:var(--accent-tx);margin-top:1px}
+.memnote b{color:var(--tx1);font-weight:600}
+.from{display:flex;gap:var(--sp-3);align-items:center;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-md);background:var(--panel);border:1px solid var(--border-subtle)}
+.from .ic{color:var(--tx3)}
+.from b{display:block;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.from small{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
+.from .arrow{margin-left:auto;display:flex;align-items:center;gap:var(--sp-1);font:600 12px/1 var(--font-sans);color:var(--accent-tx);white-space:nowrap}
+.diffbox{border:1px solid var(--border-subtle);border-radius:var(--r-md);overflow:hidden}
+.diffbox .was{padding:var(--sp-2) var(--sp-3);background:var(--diff-del);font:400 13px/1.5 var(--font-sans);color:var(--tx2);text-decoration:line-through}
+.diffbox .now{padding:var(--sp-2) var(--sp-3);background:var(--card);font:400 14px/1.55 var(--font-sans);color:var(--tx1);border-top:1px solid var(--border-subtle)}
+.seed{padding:var(--sp-3);border-radius:var(--r-md);background:var(--inset);border:1px solid var(--border-subtle);font:400 12px/1.6 var(--font-mono);color:var(--tx2);white-space:pre-wrap}
+.kept{display:flex;flex-direction:column;gap:var(--sp-1);font:400 12px/1.4 var(--font-sans);color:var(--tx3)}
+.kept div{display:flex;gap:var(--sp-2);align-items:flex-start}
+.kept .ic{color:var(--ok);margin-top:1px}
+.kept b{color:var(--tx1);font-weight:600}
+.pick{display:flex;flex-direction:column;gap:var(--sp-2)}
+.mini3{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:var(--sp-2)}
+.mini3 .inp{font-size:13px}
+.fade{opacity:.55;pointer-events:none}
+
+/* Notification toast = the existing toast stack chrome (agent-file / download toasts). */
+.toast{position:absolute;right:var(--sp-5);top:96px;width:320px;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-md);padding:var(--sp-3) var(--sp-4);display:flex;gap:var(--sp-3);z-index:4}
+.toast .bdg{width:28px;height:28px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--accent-bg);color:var(--accent-tx);flex-shrink:0}
+.toast .k{font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.toast b{display:block;font:600 13px/1.4 var(--font-sans);color:var(--tx1)}
+.toast .acts{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
+</style>
+
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></symbol>
+<symbol id="i-hook" viewBox="0 0 24 24"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+<symbol id="i-panel" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></symbol>
+<symbol id="i-cto" viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 0 6h-1v1a4 4 0 0 1-8 0v-1H7a3 3 0 0 1 0-6h1V6a4 4 0 0 1 4-4z"/></symbol>
+<symbol id="i-routine" viewBox="0 0 24 24"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/></symbol>
+<symbol id="i-memory" viewBox="0 0 24 24"><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><rect width="16" height="20" x="4" y="2" rx="2"/><path d="M9.5 8h5"/><path d="M9.5 12H16"/><path d="M9.5 16H14"/></symbol>
+<symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
+<symbol id="i-bug" viewBox="0 0 24 24"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></symbol>
+<symbol id="i-package" viewBox="0 0 24 24"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m3.3 7 7.703 4.734a2 2 0 0 0 1.994 0L20.7 7"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/></symbol>
+<symbol id="i-crash" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+<symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-sidebar-add" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M14 12h4"/><path d="M16 10v4"/></symbol>
+<symbol id="i-msg" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+<symbol id="i-rotate" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+<symbol id="i-queue" viewBox="0 0 24 24"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></symbol>
+</defs></svg>
+
+<div class="deck">
+  <div class="deck-h">
+    <h1>Routines — mockup</h1>
+    <span class="sub">Scheduled tasks that start a fresh session each run, without adding rows to the sidebar</span>
+    <div class="tabs" id="tabs">
+      <button data-s="overview" class="on">1 · Routines</button>
+      <button data-s="detail">2 · A routine</button>
+      <button data-s="run">3 · A run</button>
+      <button data-s="create">4 · New routine</button>
+      <button data-s="chat">5 · From a chat</button>
+      <button data-s="toroutine">6 · Follow-up → routine</button>
+      <button data-s="tochat">7 · Routine → chat</button>
+    </div>
+    <button class="themeb" id="theme">Dark theme</button>
+  </div>
+  <p class="caption" id="cap"></p>
+
+  <div class="app" data-screen="routines">
+    <!-- ============ RAIL ============ -->
+    <aside class="rail">
+      <div class="drag"><i></i><i></i><i></i></div>
+      <div class="rail-h">
+        <h2>Workspace</h2>
+        <div class="acts">
+          <button class="iconbtn" title="Search"><svg class="ic s"><use href="#i-search"/></svg></button>
+        </div>
+      </div>
+      <div class="rail-scroll" data-density="comfortable">
+        <div class="nav">
+          <button class="navrow"><span class="dot ok"></span><span class="t">CTO</span></button>
+          <button class="navrow" id="nav-routines" data-go="overview"><svg class="ic s"><use href="#i-routine"/></svg><span class="t">Routines</span><span class="cnt-badge danger" title="1 run needs you">1</span><span class="cnt-badge acc" title="3 new findings">3</span></button>
+        </div>
+        <div class="create"><svg class="ic xs"><use href="#i-plus"/></svg>New workspace<span class="k">⌘N</span></div>
+        <div class="grp">
+          <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>ronda</div>
+          <div class="srow" id="row-chat" data-go="chat"><span class="dot ok"></span><span class="t">Analytics review</span><span class="age">6m</span></div>
+          <div class="srow"><span class="dot"></span><span class="t">Onboarding emails</span><span class="age">2h</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>better-ui</div>
+          <div class="srow"><span class="dot run"></span><span class="t">Deploy new billing service</span><span class="age">2m</span></div>
+          <div class="srow"><span class="dot att"></span><span class="t">Investigate 500s in /api</span><span class="age">8m</span></div>
+          <div class="srow"><span class="dot"></span><span class="t">Refactor auth middleware</span><span class="age">1d</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>ethernal</div>
+          <div class="srow"><span class="dot warn"></span><span class="t">Add CSV export</span><span class="age">14m</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-h"><svg class="ic"><use href="#i-chev-r"/></svg>marketing</div>
+        </div>
+      </div>
+      <div class="rail-foot">Settings…</div>
+    </aside>
+
+    <!-- ============ MAIN ============ -->
+    <div class="mainpane">
+
+      <!-- ===== 1. OVERVIEW ===== -->
+      <div class="screen on" data-screen="overview">
+        <div class="topb">
+          <span class="crumb">Routines</span>
+          <span class="sp"><button class="iconbtn" title="More"><svg class="ic"><use href="#i-more"/></svg></button></span>
+        </div>
+        <div class="scroll">
+          <div class="page">
+            <div class="ph">
+              <div>
+                <h1>Routines</h1>
+                <p>Recurring work that starts a fresh session each time it runs. Results land here and stay out of the sidebar.</p>
+              </div>
+              <div class="acts"><button class="btn pri" data-go="create"><svg class="ic"><use href="#i-plus"/></svg>New routine</button></div>
+            </div>
+
+            <div class="sec">
+              <div class="sec-h"><h3>Needs you</h3><span class="n">1</span></div>
+              <div class="need">
+                <span class="badge"><svg class="ic"><use href="#i-help"/></svg></span>
+                <div class="tx">
+                  <div class="k">Weekly bug triage · better-ui · asked 12m ago · paused until you answer</div>
+                  <div class="q">“14 bug reports are older than 90 days with no repro. Close them as stale, or keep them at P3?”</div>
+                </div>
+                <div class="acts"><button class="btn pri" data-go="run">Answer</button></div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="sec-h"><h3>New findings</h3><span class="n">3</span><span class="r"><button class="link">Mark all read</button></span></div>
+              <div class="box">
+                <div class="irow" data-go="run">
+                  <span class="ud"></span>
+                  <div>
+                    <div class="who"><svg class="ic xs"><use href="#i-chart"/></svg>Daily analytics digest <span class="sep">·</span> ronda</div>
+                    <div class="ttl">Signups up 18% week over week; checkout errors doubled since Tuesday</div>
+                    <div class="sum">412 signups (vs 349). Checkout error rate 2.1% → 4.3%, all on Safari 17 — started with Tuesday's deploy.</div>
+                  </div>
+                  <div class="when">9:04</div>
+                  <div class="hov"><button class="btn ghost"><svg class="ic"><use href="#i-check"/></svg>Mark read</button><button class="btn">Open</button></div>
+                </div>
+                <div class="irow">
+                  <span class="ud"></span>
+                  <div>
+                    <div class="who"><svg class="ic xs"><use href="#i-crash"/></svg>Crash report sweep <span class="sep">·</span> better-ui</div>
+                    <div class="ttl">New crash in transcript list on iOS 26.1 — 23 users</div>
+                    <div class="sum">Index out of range while a compaction lands mid-scroll. Matches an issue closed in September; likely a regression.</div>
+                  </div>
+                  <div class="when">7:02</div>
+                </div>
+                <div class="irow">
+                  <span class="ud"></span>
+                  <div>
+                    <div class="who"><svg class="ic xs"><use href="#i-package"/></svg>Dependency audit <span class="sep">·</span> ethernal</div>
+                    <div class="ttl">2 high-severity advisories; draft PR opened with the upgrades</div>
+                    <div class="sum">axios and express-session. Tests pass on the branch; the session upgrade changes a cookie default — flagged in the PR.</div>
+                  </div>
+                  <div class="when">Fri</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="sec-h"><h3>Running now</h3><span class="hint">2 at a time; the rest wait their turn</span></div>
+              <div class="box queue">
+                <div class="slots">
+                  <div class="qlabel">Running</div>
+                  <div class="slot"><span class="dot run"></span>Docs drift check<span class="el">3m 41s</span></div>
+                  <div class="slot"><span class="dot run"></span>Competitor pricing scan<span class="el">0m 52s</span></div>
+                </div>
+                <div class="waiting">
+                  <div class="qlabel">Waiting</div>
+                  <div class="wl"><span class="pos">1</span>Error budget check<span class="since">queued 10:00 · starts in ~1m</span></div>
+                  <div class="wl"><span class="pos">2</span>Dependency audit <span class="oc none" style="margin-left:var(--sp-1)">you pressed Run now</span><span class="since">queued 10:01</span></div>
+                  <div class="qnote">A run is never skipped because the box is busy; it waits here. A routine that's already waiting isn't queued twice. A run waiting on your answer gives up its slot.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="sec-h"><h3>Your routines</h3><span class="n">7</span><span class="r"><button class="link">All projects ▾</button></span></div>
+              <div class="box">
+                <div class="rt-head"><span>Routine</span><span>When</span><span>Last run</span><span>Next</span><span></span></div>
+                <div class="rt-row" data-go="detail">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-chart"/></svg></span><span><b>Daily analytics digest</b><small>ronda</small></span></div>
+                  <div class="cad">Weekdays · 9:00<small>Read-only</small></div>
+                  <div class="lastrun"><span><span class="oc find"><span class="dot"></span>Findings</span></span><small>Today 9:04 · 2m 14s</small></div>
+                  <div class="nx">Fri 9:00</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-bug"/></svg></span><span><b>Weekly bug triage</b><small>better-ui</small></span></div>
+                  <div class="cad">Thursdays · 9:30<small>Read-only</small></div>
+                  <div class="lastrun"><span><span class="oc need"><span class="dot" style="background:var(--danger)"></span>Needs you</span></span><small>Waiting for your answer · 12m</small></div>
+                  <div class="nx">—</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-crash"/></svg></span><span><b>Crash report sweep</b><small>better-ui</small></span></div>
+                  <div class="cad">Daily · 7:00<small>Read-only</small></div>
+                  <div class="lastrun"><span><span class="oc find"><span class="dot"></span>Findings</span></span><small>Today 7:02 · caught up after restart</small></div>
+                  <div class="nx">Tomorrow 7:00</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-book"/></svg></span><span><b>Docs drift check</b><small>better-ui</small></span></div>
+                  <div class="cad">Wednesdays · 8:30<small>Read-only</small></div>
+                  <div class="lastrun"><span><span class="oc run"><span class="dot run"></span>Running</span></span><small>You pressed Run now · 3m ago</small></div>
+                  <div class="nx">Wed 8:30</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-package"/></svg></span><span><b>Dependency audit</b><small>ethernal</small></span></div>
+                  <div class="cad">Fridays · 14:00<small>Can make changes · own branch</small></div>
+                  <div class="lastrun"><span><span class="oc wait"><span class="dot"></span>Queued · #2</span></span><small>Last: Fri 14:09 · draft PR #482</small></div>
+                  <div class="nx">Fri 14:00</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-tag"/></svg></span><span><b>Competitor pricing scan</b><small>marketing</small></span></div>
+                  <div class="cad">Thursdays · 10:00<small>Read-only</small></div>
+                  <div class="lastrun"><span><span class="oc run"><span class="dot run"></span>Running</span></span><small>Started 52s ago</small></div>
+                  <div class="nx">Thu 6 Nov</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-shield"/></svg></span><span><b>Error budget check</b><small>ronda</small></span></div>
+                  <div class="cad">Hourly<small>Read-only · tells you only on failure</small></div>
+                  <div class="lastrun"><span><span class="oc wait"><span class="dot"></span>Queued · #1</span></span><small>Last: 9:00 · nothing new</small></div>
+                  <div class="nx">11:00</div>
+                  <div><span class="sw"></span></div>
+                </div>
+                <div class="rt-row paused">
+                  <div class="nm"><span class="ricon"><svg class="ic s"><use href="#i-tag"/></svg></span><span><b>Release notes draft</b><small>better-ui</small></span></div>
+                  <div class="cad">Paused<small>was Fridays · 16:00</small></div>
+                  <div class="lastrun"><span><span class="oc fail"><span class="dot"></span>Failed</span></span><small>Fri 16:00 · GitHub token expired</small></div>
+                  <div class="nx">—</div>
+                  <div><span class="sw off"></span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="sec-h"><h3>Follow-ups in a chat</h3><span class="n">3</span><span class="hint">&nbsp;· these run inside an existing chat instead of starting a new one</span></div>
+              <div class="box">
+                <div class="conv-row"><svg class="ic s" style="color:var(--tx3)"><use href="#i-msg"/></svg><div>Check whether the deploy finished<div class="in">every 5 min · in <a href="#">Deploy new billing service</a></div></div><span class="r">in 3m</span><button class="btn ghost mk" data-go="toroutine"><svg class="ic"><use href="#i-routine"/></svg>Make it a routine</button></div>
+                <div class="conv-row"><svg class="ic s" style="color:var(--tx3)"><use href="#i-msg"/></svg><div>Write up what changed in billing this week<div class="in">Fridays · 17:00 · in <a href="#">Deploy new billing service</a></div></div><span class="r">Fri 17:00</span><button class="btn mk" data-go="toroutine"><svg class="ic"><use href="#i-routine"/></svg>Make it a routine</button></div>
+                <div class="conv-row"><svg class="ic s" style="color:var(--tx3)"><use href="#i-msg"/></svg><div>Remind me to push the release<div class="in">once · in <a href="#">Add CSV export</a></div></div><span class="r">today 17:30</span><span class="once">one-time</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 2. DETAIL ===== -->
+      <div class="screen" data-screen="detail">
+        <div class="topb">
+          <span class="crumb"><span class="mut" data-go="overview">Routines</span><span class="slash">/</span>Daily analytics digest</span>
+          <span class="sp"><button class="iconbtn" title="More"><svg class="ic"><use href="#i-more"/></svg></button></span>
+        </div>
+        <div class="scroll">
+          <div class="page">
+            <div class="hero">
+              <span class="ricon"><svg class="ic"><use href="#i-chart"/></svg></span>
+              <div style="min-width:0">
+                <h1>Daily analytics digest</h1>
+                <div class="facts">
+                  <span class="fact"><svg class="ic"><use href="#i-clock"/></svg>Weekdays at 9:00</span>
+                  <span class="fact m"><svg class="ic"><use href="#i-folder"/></svg>~/projects/ronda</span>
+                  <span class="fact"><svg class="ic"><use href="#i-eye"/></svg>Read-only</span>
+                  <span class="fact"><svg class="ic"><use href="#i-spark"/></svg>Sonnet 5.5 · Medium</span>
+                  <span class="fact"><svg class="ic"><use href="#i-bell"/></svg>Notify on findings</span>
+                  <span class="fact sw2" data-go="tochat" title="Change where it runs"><svg class="ic"><use href="#i-routine"/></svg>New session each run<svg class="ic"><use href="#i-chev-d"/></svg></span>
+                </div>
+                <div class="nextline">Next run <b>tomorrow at 9:00</b> · 23 runs since 1 Oct · about 41k tokens a run</div>
+              </div>
+              <div class="acts">
+                <button class="btn"><svg class="ic"><use href="#i-pencil"/></svg>Edit</button>
+                <button class="btn"><svg class="ic"><use href="#i-pause"/></svg>Pause</button>
+                <button class="btn pri"><svg class="ic"><use href="#i-play"/></svg>Run now</button>
+              </div>
+            </div>
+
+            <div class="cols">
+              <div>
+                <div class="sec-h"><h3>Runs</h3><span class="n">23</span><span class="r"><button class="link">Findings only</button></span></div>
+                <div class="box">
+                  <div class="runrow unread" data-go="run"><div class="d">Thu 30<small>9:02</small></div><div><span class="oc find"><span class="dot"></span>Findings</span></div><div class="tt">Signups up 18% WoW; checkout errors doubled since Tuesday<small>Safari 17 only — lines up with Tuesday's deploy</small></div><div class="du">2m 14s</div></div>
+                  <div class="runrow quiet"><div class="d">Wed 29<small>9:01</small></div><div><span class="oc none">Nothing new</span></div><div class="tt">All metrics within normal range</div><div class="du">1m 48s</div></div>
+                  <div class="runrow"><div class="d">Tue 28<small>9:07</small></div><div><span class="oc find"><span class="dot"></span>Findings</span></div><div class="tt">Activation dipped to 31% after the onboarding copy change<small>Waited 6 min in line behind Dependency audit</small></div><div class="du">2m 30s</div></div>
+                  <div class="runrow"><div class="d">Mon 27<small>9:41</small></div><div><span class="oc find"><span class="dot"></span>Findings</span></div><div class="tt">Weekend traffic 2.3× normal — a Hacker News link<small>Caught up at 9:41: the box was restarting at 9:00</small></div><div class="du">2m 02s</div></div>
+                  <div class="runrow quiet"><div class="d">Fri 24<small>9:01</small></div><div><span class="oc none">Nothing new</span></div><div class="tt">All metrics within normal range</div><div class="du">1m 39s</div></div>
+                  <div class="runrow"><div class="d">Thu 23<small>9:00</small></div><div><span class="oc fail"><span class="dot"></span>Failed</span></div><div class="tt">PostHog returned 401 — the API key was rotated<small>Fixed by updating the posthog_key secret · re-ran at 11:12</small></div><div class="du">0m 18s</div></div>
+                  <div class="runrow quiet"><div class="d">Wed 22<small>9:01</small></div><div><span class="oc none">Nothing new</span></div><div class="tt">All metrics within normal range</div><div class="du">1m 51s</div></div>
+                </div>
+              </div>
+
+              <div class="side">
+                <div class="box">
+                  <div class="panel-h"><svg class="ic s"><use href="#i-memory"/></svg><h4>What it remembers</h4><span class="r"><button class="iconbtn" title="Edit"><svg class="ic s"><use href="#i-pencil"/></svg></button></span></div>
+                  <div class="panel-sub">Every run reads this first and updates it at the end. Last changed by Thursday's run.</div>
+<div class="notes"><span class="h">## Baselines (trailing 4 wks)</span>
+signups/day ≈ 50 · activation 34%
+checkout error rate ≈ 2%
+
+<span class="h">## Watching</span>
+- onboarding copy change (Oct 27):
+  activation 31% → recovering
+<span class="new">- checkout errors on Safari 17
+  since Tue deploy — 4.3% (Oct 30)</span>
+
+<span class="h">## Ignore</span>
+- weekend dips; HN spikes</div>
+                </div>
+                <div class="box">
+                  <div class="panel-h"><svg class="ic s"><use href="#i-msg"/></svg><h4>Instructions</h4><span class="r"><button class="iconbtn" title="Edit"><svg class="ic s"><use href="#i-pencil"/></svg></button></span></div>
+                  <div class="instr">Use <span class="skillchip">$posthog-digest</span> for yesterday. Compare against the baselines you remember. Only report changes beyond ±10% or anything new in errors; otherwise say there's nothing new.</div>
+                </div>
+                <div class="box">
+                  <dl class="kv">
+                    <dt>Triggers</dt><dd>Schedule · Run now · <a href="#" style="color:var(--accent-tx)">webhook URL</a></dd>
+                    <dt>Missed runs</dt><dd>Run once on catch-up, up to 6h late</dd>
+                    <dt>Keeps</dt><dd>30 days of runs; unread runs are never deleted</dd>
+                  </dl>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 3. RUN ===== -->
+      <div class="screen" data-screen="run">
+        <div class="topb">
+          <span class="crumb"><span class="mut" data-go="overview">Routines</span><span class="slash">/</span><span class="mut" data-go="detail">Daily analytics digest</span><span class="slash">/</span>Thu 30 Oct · 9:02</span>
+          <span class="tag"><svg class="ic"><use href="#i-eye"/></svg>read-only</span>
+          <span class="sp">
+            <button class="btn"><svg class="ic"><use href="#i-sidebar-add"/></svg>Keep in sidebar</button>
+            <button class="iconbtn" title="Artifacts"><svg class="ic"><use href="#i-panel"/></svg></button>
+            <button class="iconbtn" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+          </span>
+        </div>
+        <div class="runbar">
+          <svg class="ic s"><use href="#i-routine"/></svg>
+          <span><b>Scheduled run</b> <span class="sep">·</span> started 9:02 <span class="sep">·</span> 2m 14s <span class="sep">·</span> 38.2k tokens</span>
+          <span class="r"><button class="btn ghost">‹ Wed</button><button class="btn ghost" disabled>Fri ›</button></span>
+        </div>
+        <div class="tscroll">
+          <div class="wrap">
+            <div class="turn">
+              <div class="trigger"><svg class="ic xs"><use href="#i-clock"/></svg>Weekdays at 9:00<span class="line"></span></div>
+              <div class="promptcard"><div class="lbl"><svg class="ic xs"><use href="#i-routine"/></svg>Routine instructions</div>Use <span class="skillchip">$posthog-digest</span> for yesterday. Compare against the baselines you remember. Only report changes beyond ±10% or anything new in errors; otherwise say there's nothing new.</div>
+            </div>
+            <div class="turn">
+              <div class="tline">
+                <div class="tl"><span class="g"></span><b>Memory</b> read · 14 lines<span class="r">from Wed run</span></div>
+                <div class="tl"><span class="g"></span><b>Skill</b> posthog-digest</div>
+                <div class="tl"><span class="g"></span><b>posthog.query</b> signups, activation · Oct 29<span class="r">0.8s</span></div>
+                <div class="tl"><span class="g"></span><b>posthog.query</b> $exception by browser · 7d<span class="r">1.2s</span></div>
+                <div class="tl"><span class="g"></span><b>Bash</b> git log --since=“Oct 27” --oneline<span class="r">6 lines</span></div>
+              </div>
+              <div class="amsg">
+                <p>Signups are well above baseline. The bigger issue is checkout errors: they started climbing Tuesday afternoon and every one of them is on Safari 17. Tuesday's deploy <span class="ict">a41c9e2</span> changed the payment form's date input, which matches the error.</p>
+              </div>
+              <div class="tline">
+                <div class="tl"><span class="g"></span><b>Memory</b> updated · +2 lines</div>
+              </div>
+              <div class="report">
+                <div class="report-h">
+                  <span class="bdg"><svg class="ic"><use href="#i-chart"/></svg></span>
+                  <div class="body"><div class="k">Findings</div><h5>Signups up 18% week over week; checkout errors doubled since Tuesday</h5>
+                <ul>
+                  <li><b>Signups</b> 412 vs 349 last week <span class="up">+18%</span> — mostly organic search</li>
+                  <li><b>Checkout errors</b> 2.1% → 4.3% <span class="down">×2</span> — Safari 17 only, since deploy <span class="ict">a41c9e2</span></li>
+                  <li><b>Activation</b> back to 33% after Monday's dip — no action needed</li>
+                </ul></div>
+                </div>
+                <div class="report-f"><svg class="ic s"><use href="#i-bell"/></svg>Notified you at 9:04<span class="r"><button class="btn">Fix it in a new session</button></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="comp-in">
+            <div class="cbox"><span class="ta">Ask a follow-up about this run…</span><button class="send"><svg class="ic s"><use href="#i-send"/></svg></button></div>
+            <div class="metarow">
+              <div class="msplit"><span><svg class="ic"><use href="#i-spark"/></svg>Sonnet 5.5 <svg class="ic xs" style="color:var(--tx4)"><use href="#i-chev-d"/></svg></span><span><span class="lvl">Medium</span></span></div>
+              <span class="spacer"></span>
+              <span class="comp-hint">Replies stay with this run · “Keep in sidebar” makes it a normal session</span>
+            </div>
+          </div>
+        </div>
+        <div class="toast">
+          <span class="bdg"><svg class="ic s"><use href="#i-routine"/></svg></span>
+          <div><div class="k">Daily analytics digest · findings</div><b>Checkout errors doubled since Tuesday</b><div class="acts"><button class="btn pri">Open</button><button class="btn ghost">Dismiss</button></div></div>
+        </div>
+      </div>
+
+      <!-- ===== 4. CREATE (modal over overview) ===== -->
+      <div class="screen" data-screen="create">
+        <div class="topb fade"><span class="crumb">Routines</span></div>
+        <div class="scroll fade"><div class="page"><div class="ph"><div><h1>Routines</h1><p>Recurring work that starts a fresh session each time it runs. Results land here and stay out of the sidebar.</p></div></div></div></div>
+        <div class="scrim">
+          <div class="modal">
+            <div class="modal-h"><svg class="ic" style="color:var(--accent-tx)"><use href="#i-routine"/></svg><h2>New routine</h2><span class="r"><button class="iconbtn"><svg class="ic"><use href="#i-x"/></svg></button></span></div>
+            <div class="modal-b">
+              <div class="fld">
+                <label>Name</label>
+                <div class="inp">Weekly bug triage — ethernal</div>
+              </div>
+              <div class="fld">
+                <label>What should it do each time?</label>
+                <div class="tarea">Read the bug reports opened or updated in the last 7 days (GitHub issues labelled <span class="ict">bug</span> + Sentry new issues). De-duplicate, give each a priority P0–P3 with one line of reasoning, and list the top 5 to fix this week. Ask me before closing anything.<span class="cur"></span></div>
+                <div class="help">Write it for someone starting fresh each time. Tip: try it once in a normal chat first.</div>
+              </div>
+              <div class="row2">
+                <div class="fld"><label>Folder</label><div class="inp mono"><svg class="ic s"><use href="#i-folder"/></svg>~/projects/ethernal<svg class="ic xs chev"><use href="#i-chev-d"/></svg></div></div>
+                <div class="fld"><label>Model</label><div class="inp"><svg class="ic s"><use href="#i-spark"/></svg>Opus 5.5 · High<svg class="ic xs chev"><use href="#i-chev-d"/></svg></div></div>
+              </div>
+              <div class="fld">
+                <label>When</label>
+                <div class="when">
+                  <div class="seg"><span>Hourly</span><span>Daily</span><span>Weekdays</span><span class="on">Weekly</span><span>Monthly</span><span>Custom</span></div>
+                </div>
+                <div class="when" style="margin-top:var(--sp-2)">
+                  <div class="seg"><span class="on">Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+                  <div class="inp mono">10:00</div>
+                  <span class="tz">box time · Europe/Paris · first run Mon 3 Nov</span>
+                </div>
+              </div>
+              <div class="fld">
+                <label>What it's allowed to do</label>
+                <div class="rcs">
+                  <div class="rc on"><span class="rb"></span><span><b>Read and report</b><small>Can read files and use your connectors. Can't edit anything.</small></span></div>
+                  <div class="rc"><span class="rb"></span><span><b>Make changes</b><small>Works on its own branch each run and can open a draft PR.</small></span></div>
+                </div>
+              </div>
+              <div class="fld">
+                <label>Tell me</label>
+                <div class="seg"><span class="on">When it finds something</span><span>Every run</span><span>Only if it fails</span><span>Never</span></div>
+              </div>
+              <div class="memnote"><svg class="ic s"><use href="#i-memory"/></svg><span>Each run starts fresh but reads <b>what the routine remembers</b> from earlier runs, then updates it. You can read and edit that on the routine's page.</span></div>
+            </div>
+            <div class="modal-f">
+              <button class="btn"><svg class="ic"><use href="#i-play"/></svg>Test run now</button>
+              <span class="spacer"></span>
+              <button class="btn ghost">Cancel</button>
+              <button class="btn pri">Create routine</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 6. FOLLOW-UP -> ROUTINE ===== -->
+      <div class="screen" data-screen="toroutine">
+        <div class="topb fade"><span class="crumb">Routines</span></div>
+        <div class="scroll fade"><div class="page"><div class="ph"><div><h1>Routines</h1><p>Recurring work that starts a fresh session each time it runs. Results land here and stay out of the sidebar.</p></div></div></div></div>
+        <div class="scrim">
+          <div class="modal">
+            <div class="modal-h"><svg class="ic" style="color:var(--accent-tx)"><use href="#i-routine"/></svg><h2>Make it a routine</h2><span class="r"><button class="iconbtn"><svg class="ic"><use href="#i-x"/></svg></button></span></div>
+            <div class="modal-b">
+              <div class="from">
+                <svg class="ic"><use href="#i-msg"/></svg>
+                <div><b>Write up what changed in billing this week</b><small>Fridays · 17:00 · runs inside “Deploy new billing service”</small></div>
+                <span class="arrow"><svg class="ic s"><use href="#i-chev-r"/></svg>New session each run</span>
+              </div>
+              <div class="fld">
+                <label>Instructions, rewritten to make sense without the chat</label>
+                <div class="diffbox">
+                  <div class="was">Write up what changed in billing this week</div>
+                  <div class="now">Write up what changed in the billing service this week: merged PRs touching <span class="ict">services/billing</span>, migrations run, and any Stripe webhook failures in Sentry. Compare against last week's write-up and call out anything still unresolved.</div>
+                </div>
+                <div class="help">A fresh session can't see the chat, so “this week” and “billing” are spelled out. Edit freely.</div>
+              </div>
+              <div class="fld">
+                <label>It will start out knowing</label>
+<div class="seed">- billing lives in services/billing; deploys via
+  scripts/deploy-billing.sh (from this chat, Oct 21)
+- Stripe webhook retries were flaky until the
+  Oct 28 fix: confirm they stay quiet
+- last write-up (Oct 24): 3 PRs, 1 migration</div>
+                <div class="help">Taken from the chat. This becomes the routine's memory, and every run reads and updates it.</div>
+              </div>
+              <div class="mini3">
+                <div class="fld"><label>Folder</label><div class="inp mono"><svg class="ic s"><use href="#i-folder"/></svg>~/projects/better-ui</div></div>
+                <div class="fld"><label>When</label><div class="inp"><svg class="ic s"><use href="#i-clock"/></svg>Fridays · 17:00</div></div>
+                <div class="fld"><label>Allowed to</label><div class="inp"><svg class="ic s"><use href="#i-eye"/></svg>Read and report</div></div>
+              </div>
+              <div class="kept">
+                <div><svg class="ic s"><use href="#i-check"/></svg><span>The chat keeps the 3 write-ups it already received. It just stops getting new ones.</span></div>
+                <div><svg class="ic s"><use href="#i-check"/></svg><span>Same schedule, so the next run is still <b>Friday at 17:00</b>, now on the Routines page.</span></div>
+                <div><svg class="ic s"><use href="#i-check"/></svg><span>You can move it back into a chat later from the routine's page.</span></div>
+              </div>
+            </div>
+            <div class="modal-f">
+              <button class="btn"><svg class="ic"><use href="#i-play"/></svg>Test run now</button>
+              <span class="spacer"></span>
+              <button class="btn ghost">Cancel</button>
+              <button class="btn pri">Make it a routine</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 7. ROUTINE -> CHAT ===== -->
+      <div class="screen" data-screen="tochat">
+        <div class="topb fade"><span class="crumb"><span class="mut">Routines</span><span class="slash">/</span>Daily analytics digest</span></div>
+        <div class="scroll fade"><div class="page"><div class="hero"><span class="ricon"><svg class="ic"><use href="#i-chart"/></svg></span><div><h1>Daily analytics digest</h1></div></div></div></div>
+        <div class="scrim">
+          <div class="modal">
+            <div class="modal-h"><svg class="ic" style="color:var(--accent-tx)"><use href="#i-msg"/></svg><h2>Run it inside a chat</h2><span class="r"><button class="iconbtn"><svg class="ic"><use href="#i-x"/></svg></button></span></div>
+            <div class="modal-b">
+              <div class="from">
+                <svg class="ic"><use href="#i-routine"/></svg>
+                <div><b>Daily analytics digest</b><small>Weekdays · 9:00 · new session each run · 23 runs</small></div>
+                <span class="arrow"><svg class="ic s"><use href="#i-chev-r"/></svg>Inside a chat</span>
+              </div>
+              <div class="fld">
+                <label>Which chat?</label>
+                <div class="pick">
+                  <div class="rc on"><span class="rb"></span><span><b>Analytics review</b><small>ronda · the chat this routine was created from · active 6m ago</small></span></div>
+                  <div class="rc"><span class="rb"></span><span><b>A new chat just for this</b><small>Shows up in the sidebar as “Daily analytics digest”. Every run adds to it.</small></span></div>
+                  <div class="rc"><span class="rb"></span><span><b>Another chat…</b><small>Pick any session in the sidebar.</small></span></div>
+                </div>
+              </div>
+              <div class="fld">
+                <label>What changes</label>
+                <div class="kept">
+                  <div><svg class="ic s"><use href="#i-check"/></svg><span>Each run posts into <b>Analytics review</b> and can see everything said there, so you can reply to a finding directly.</span></div>
+                  <div><svg class="ic s"><use href="#i-check"/></svg><span>Its memory (14 lines) is posted into the chat once. From then on the chat itself is the memory. The note is kept as it was, in case you move it back.</span></div>
+                  <div><svg class="ic s"><use href="#i-check"/></svg><span>If you're in the middle of something at 9:00, the run waits until the chat is idle. It never interrupts you.</span></div>
+                  <div><svg class="ic s"><use href="#i-check"/></svg><span>The 23 past runs stay in this routine's history.</span></div>
+                </div>
+              </div>
+              <div class="memnote"><svg class="ic s"><use href="#i-help"/></svg><span>Good for check-ins you want to discuss. For independent daily reports, a new session each run keeps the chat from growing every day.</span></div>
+            </div>
+            <div class="modal-f">
+              <span class="spacer"></span>
+              <button class="btn ghost">Cancel</button>
+              <button class="btn pri">Move into chat</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 5. FROM A CHAT ===== -->
+      <div class="screen" data-screen="chat">
+        <div class="topb">
+          <span class="crumb"><span class="mut">ronda</span><span class="slash">/</span>Analytics review</span>
+          <span class="tag"><svg class="ic"><use href="#i-branch"/></svg>main</span>
+          <span class="sp"><button class="iconbtn"><svg class="ic"><use href="#i-panel"/></svg></button><button class="iconbtn"><svg class="ic"><use href="#i-more"/></svg></button></span>
+        </div>
+        <div class="tscroll">
+          <div class="wrap">
+            <div class="turn">
+              <div class="amsg"><p>Here's yesterday at a glance: 61 signups (+12% on the 4-week average), activation 34%, checkout error rate 2.0%. Nothing unusual.</p></div>
+            </div>
+            <div class="umsg">Perfect, that's exactly what I want. Can you do this every weekday at 9 and only ping me when something's off?</div>
+            <div class="turn">
+              <div class="amsg"><p>Done. I've turned what we just did into a routine. Each run starts from a clean session, compares against what it remembers from earlier runs, and only notifies you when a number moves more than 10% or a new error appears.</p></div>
+              <div class="rcard">
+                <div class="rcard-h"><span class="ricon"><svg class="ic s"><use href="#i-routine"/></svg></span><div><div class="k">Routine created</div><b>Daily analytics digest</b></div></div>
+                <dl class="rcard-b">
+                  <dt>When</dt><dd>Weekdays at 9:00 · first run tomorrow</dd>
+                  <dt>Folder</dt><dd>~/projects/ronda · read-only</dd>
+                  <dt>Tell you</dt><dd>When it finds something</dd>
+                  <dt>Starts knowing</dt><dd>The baselines from this chat (4 lines)</dd>
+                </dl>
+                <div class="rcard-f"><button class="btn" data-go="detail">Open routine</button><button class="btn ghost"><svg class="ic"><use href="#i-play"/></svg>Run now</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="comp-in">
+            <div class="cbox"><span class="ta">Reply, or describe the next task…</span><button class="send"><svg class="ic s"><use href="#i-send"/></svg></button></div>
+            <div class="metarow">
+              <div class="msplit"><span><svg class="ic"><use href="#i-spark"/></svg>Opus 5.5 <svg class="ic xs" style="color:var(--tx4)"><use href="#i-chev-d"/></svg></span><span><span class="lvl">High</span></span></div>
+              <span class="spacer"></span>
+              <span class="mbtn" title="Routines and follow-ups"><svg class="ic s"><use href="#i-clock"/></svg></span>
+              <span class="mbtn"><svg class="ic s"><use href="#i-key"/></svg></span>
+              <span class="mbtn"><svg class="ic s"><use href="#i-hook"/></svg></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes-spec">
+    <h3>Decisions shown in this mockup</h3>
+    <ul>
+      <li><b>One sidebar row, never one per run.</b> “Routines” sits under CTO. A red count means runs that need you; a blue count means unread findings.</li>
+      <li><b>Every run is a fresh session that lives on the Routines page.</b> Opening one shows the normal transcript with a header saying which routine and run it is. Replying keeps it on the Routines page. <b>Keep in sidebar</b> turns it into a normal session.</li>
+      <li><b>Memory is always on and always visible.</b> It isn't a setting. Each routine has one “What it remembers” note that every run reads first and updates at the end. Changes are highlighted, you can edit it, and the transcript shows the read and update steps.</li>
+      <li><b>A run ends with a report.</b> “Findings” is unread and notifies you if the routine is set to. “Nothing new” is filed quietly and already marked read. “Failed” and “Needs you” always notify.</li>
+      <li><b>Routines have their own queue, and runs are never dropped.</b> Two run at once. The rest wait in order and show their place in line. A routine that's already waiting isn't queued twice. Runs missed while the box was off run once when it comes back, up to 6 hours late. The history notes when a run waited or caught up.</li>
+      <li><b>The old per-chat scheduler becomes part of Routines.</b> One store and one engine with two destinations: “new session each run” (a routine) or “inside this chat” (a follow-up). Follow-ups are listed at the bottom of the Routines page. The composer's clock button still shows the current chat's follow-ups. The AI uses the same tool for both and picks the destination, as it does in ChatGPT and z.ai.</li>
+      <li><b>A job can move either way.</b> Since both kinds live in one store, moving is just changing where it posts. <b>Follow-up → routine:</b> the instructions are rewritten to stand alone and what the chat knew becomes the routine's memory. <b>Routine → chat:</b> the memory is posted into the chat once and then the chat is the context, while the note is kept as it was so you can move it back. Nothing already delivered moves: past runs stay where they were.</li>
+      <li><b>Three ways to create one:</b> the form, asking in any chat, or “turn this chat into a routine”. Created from a chat, it starts with the baselines from that conversation already in its memory.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const caps = {
+  overview: "<b>Routines page.</b> Opened from the single Routines row in the sidebar. From top to bottom: what's blocked on you, unread findings, the run queue, all routines, and follow-ups that run inside an existing chat.",
+  detail: "<b>One routine.</b> Run history (findings in full, quiet runs dimmed, waits and catch-ups noted on the run), what it remembers, its instructions, and when it runs.",
+  run: "<b>One run.</b> The normal transcript with a run header and previous/next arrows, the memory read and update steps, and the closing report card. The notification is shown bottom-right.",
+  create: "<b>New routine.</b> A short form. Memory isn't a choice here; the form just explains it. “Test run now” runs it once before saving.",
+  toroutine: "<b>Follow-up → routine.</b> From the “Make it a routine” button on a follow-up. The AI rewrites the instructions so they make sense without the chat and turns what the chat knew into the routine's starting memory. Schedule and folder carry over.",
+  tochat: "<b>Routine → chat.</b> From the “New session each run ▾” chip on a routine's page. You choose the chat; its memory is posted there once, and past runs stay in the routine's history.",
+  chat: "<b>Created from a chat.</b> “Do it once, then schedule it.” The routine starts with what this conversation already worked out."
+};
+function go(s){
+  document.querySelectorAll(".screen").forEach(e=>e.classList.toggle("on",e.dataset.screen===s));
+  document.querySelectorAll("#tabs button").forEach(b=>b.classList.toggle("on",b.dataset.s===s));
+  const r=document.getElementById("nav-routines"), c=document.getElementById("row-chat");
+  r.classList.toggle("on",s!=="chat"); c.classList.toggle("on",s==="chat");
+  document.getElementById("cap").innerHTML=caps[s];
+}
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-s],[data-go]"); if(!t) return;
+  go(t.dataset.s||t.dataset.go);
+});
+document.getElementById("theme").onclick=e=>{
+  const h=document.documentElement, d=h.dataset.theme==="dark";
+  h.dataset.theme=d?"light":"dark"; e.target.textContent=d?"Dark theme":"Light theme";
+};
+go(location.hash.slice(1)||"overview");
+addEventListener("hashchange",()=>go(location.hash.slice(1)||"overview"));
+</script>
+</body>
+</html>
