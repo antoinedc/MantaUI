@@ -71,7 +71,7 @@ export type RoutineAccess = "read" | "edit";
 export type RoutineNotify = "findings" | "always" | "failures" | "never";
 export type RoutineDestination =
   | { type: "new-session" }
-  | { type: "session"; sessionID: string; followupId: string }; // moved into a chat (§8.2)
+  | { type: "session"; sessionID: string; followupId: string; enabledBeforeMove: boolean }; // moved into a chat (§8.2)
 
 export interface Routine {
   id: string;                 // 8 hex
@@ -280,8 +280,10 @@ computes `memoryDiff.added` (lines in new not in old, trimmed, non-empty), sets
 run gets 400 `{error:"routine_report only works inside a routine run"}`. Calling it
 again overwrites (last wins), at most 3 accepted calls per run (`reportCount`), then
 400. The report is also refused (400 "this run has already finished") unless the run
-is `running` or `needs_input` — after settle only the human memory editor writes
-memory. The tool always sends its OWN `context.sessionID`; a bearer holder could still
+is `running` or `needs_input`, OR it settled less than 60 s ago (race with settle /
+reconnect): in that grace window the report replaces a synthesized report (§4.4) and
+its memory is applied only if the routine's memory has not changed since the settle.
+Outside it, only the human memory editor writes memory. The tool always sends its OWN `context.sessionID`; a bearer holder could still
 target another live run's session id, which is accepted as the box's trust model
 (single user) — memory is therefore treated as untrusted data (the delimited block in
 `buildRunPrompt`).
@@ -548,7 +550,10 @@ preset that reproduces it exactly, else Custom.
   The R1 table row shows Pill neutral+border "In a chat" in Last run and "—" in Next.
 
 `routines:move-to-routines(id)` deletes the linked follow-up (if it still exists),
-sets destination `new-session`, sets `enabled:true`, recomputes `nextRunAt`.
+sets destination `new-session`, restores `enabled = destination.enabledBeforeMove`
+(the orphan path below sets `enabledBeforeMove` untouched and records `disabledBy:"orphan"`;
+move-back from an orphan therefore re-enables only if it was enabled before the move),
+recomputes `nextRunAt`.
 
 Orphans: if a moved routine's follow-up job no longer exists OR is `disabled` (e.g.
 schedule.mjs auto-disabled it because the folder vanished), `tick` sets the routine `enabled:false` and lists it in
