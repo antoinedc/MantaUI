@@ -1,6 +1,6 @@
 # Cold-cache handoff + the Summary model setting
 
-Status: draft v4 (review rounds: DeepSeek V4.1 Flash ×3, GPT-6 Astra ×2) ·
+Status: draft v5 (review rounds: DeepSeek V4.1 Flash ×4, GPT-6 Astra ×3) ·
 Branch: `feat/cold-cache-handoff`
 Builds on: `2026-10-26-auto-handoff.md` (handoff engine, record, card),
 `2026-10-20-optimizer-sticky-trims.md` (prices, measured cache TTL).
@@ -88,8 +88,13 @@ type `AppConfig` declares them optional and read-only.
 ### A2. Channels (pinned)
 
 - `summary-model:status` → `SummaryModelStatus`
+- `summary-model:search` `{ query }` → `{ models: Candidate[] }` — every
+  ELIGIBLE model (A3 step 1) whose name/id contains the query, case-
+  insensitive, at most 50, same ordering; lets the user reach any eligible
+  model beyond the 30-entry shortlist.
 - `summary-model:set` `{ providerID, modelID } | { none: true }` →
-  `SummaryModelStatus`. Server validates the model is in `candidates`
+  `SummaryModelStatus`. Server validates the model against the FULL eligible
+  set of its last snapshot (not the displayed shortlist)
   (else `400 "That model isn't available as a summary model."`), stamps
   `source: "user"`, `pickedAt: now`, clears `summaryModelOptOut`; `none`
   writes `summaryModel: null`, `summaryModelOptOut: true`.
@@ -103,7 +108,8 @@ interface SummaryModelStatus {
   reason?: string;               // one human sentence for every state but "ok"
   betterAvailable: boolean;      // auto pick is no longer the top candidate
   candidates: Array<{          // at most 30: every quality-passing model in pick order,
-                               // then the rest by price; the current model always included
+                               // then the rest by price. The current model appears here only
+                               // while valid; an unavailable one is reported via `current` + `state`
     providerID: string; modelID: string; name: string;
     priceLabel: string | null;   // e.g. "$0.80 / $4 per M" or "subscription"
     recommended: boolean;        // the auto-pick
@@ -227,7 +233,8 @@ The optimizer's existing cache-gated `resolveModelPrice` is unchanged.
 "Summary model" row, driven by `summary-model:status` (fetched on open and
 after every `summary-model:set`):
 - picker over `candidates` (recommended marked; `qualityKnown: false` shown as
-  "not rated"), plus "None — use each conversation's own model";
+  "not rated") with a search box backed by `summary-model:search`, plus
+  "None — use each conversation's own model";
 - explanation: "Writes handoffs after a long break, session titles and
   remembered instructions. Conversation text is sent to this model.";
 - `reason` shown for every non-`ok` state; `betterAvailable` → "A cheaper
@@ -263,8 +270,9 @@ server-written handoff, after it settles:
 
 New injected engine deps (`wiring.mjs`): `cacheTtlMs()` (shared optimizer
 summary's effective TTL, `COMPACT_CACHE_TTL_FALLBACK_MS` fallback — same
-source as background compaction), `summaryModel()` (A5 Summary model or
-null), `generateCheap(model, instruction, { signal })` (strict).
+source as background compaction), `summaryModel()` (the Summary model when
+its status is `ok`, else null — NEVER `resolveCheapWriter`, which may return
+the session's own model and is for titles/extraction only), `generateCheap(model, instruction, { signal })` (strict).
 `produceText` reads the transcript ONCE and passes it to the condenser and
 to `gather.facts(sid, { messages })`.
 
@@ -296,7 +304,8 @@ message. Levels:
   the ~38k minimum budget):
   - earlier compaction summary (newest message with `summary: true`, emitted
     first as `Earlier summary:`, older messages skipped): ≤ 8 000;
-  - first exchange (the original ask), floor L3, user text ≤ 2 000 (head
+  - the first RENDERED exchange (the original ask; when an earlier summary
+    exists, the first exchange after it), floor L3, user text ≤ 2 000 (head
     kept);
   - newest exchange, floor L2: user text ≤ 4 000, assistant prose ≤ 250,
     tool lines ≤ 40 newest (`… N more tool calls`), errored-tool clips ≤ 500
@@ -370,8 +379,9 @@ rewriteEstimate?: {            // present whenever the last attempt was condense
 - `writer` is set when text is produced (both paths).
 - `rewriteEstimate` is computed when a condensed attempt settles (ready or
   failed):
-  `rates = priceForPrompt(resolveListPrice(session model), estTokens)`;
-  `writeRate = isOneHourModel(...) ? rates.cacheWrite1h : rates.cacheWrite`;
+  `oneHour = isOneHourModel(session model)` (evaluated once);
+  `rates = priceForPrompt(resolveListPrice({ …session model, oneHour }), estTokens)`;
+  `writeRate = oneHour ? rates.cacheWrite1h : rates.cacheWrite`;
   `estCostUsd = (writeRate × estTokens + rates.output × 2 000) / 1e6`;
   null when unpriced.
 - `canRewrite` is NOT stored. `touch(rec)` (called on every mutation) and
@@ -416,16 +426,26 @@ gains `rewrite`), rpc `handoff:rewrite {id}`, `httpApi.handoffRewrite(id)` →
    now.");
 3. any operation holds the session (another record's retry, a compaction,
    a start) → `busy` (409);
-4. acquire the token; persist `internal.attempt = { id, kind: "rewrite",
-   prev: { state, text, writer, reason, rewriteEstimate, textReady } }`; set
-   `internal.forceWriter = "session"`, state `generating`; persist; detach.
+4. acquire the token; set `internal.attempt = { id, kind: "rewrite",
+   prev: { state, text, writer, reason, rewriteEstimate, textReady } }`,
+   `internal.forceWriter = "session"`, state `generating`; persist; detach
+   `produceText(rec, { token })`. If anything throws BEFORE the detach
+   (e.g. the persist), the action restores the in-memory record from `prev`,
+   clears `attempt`/`forceWriter`, releases its token, and rethrows. Only a
+   successful dispatch hands the token to `produceText`.
+
+**Attempts.** Every run that GENERATES (create's server path, retry,
+rewrite) sets `internal.attempt = { id, kind }` together with state
+`generating` (rewrite adds `prev`). Its result is written only if the record
+still exists, is still `generating`, and `attempt.id` matches; otherwise it
+is discarded. The supplied-complete-body path (an agent's full handoff,
+planned or not) does not generate, creates no attempt, and finalises exactly
+as today (from `requested`, guarded by the existing cancelled check plus
+dismissed) — no model call, immediate ready card / planned send unchanged.
 
 `forceWriter` (`"session"` | `"condensed"`) is one-shot: `produceText`
 reads and deletes it; `chooseWriter` rule 1 generalises to "`forced` set →
 that writer".
-Before writing any result, `produceText` verifies the record still exists,
-is still `generating`, and `internal.attempt.id` matches; otherwise it
-discards its result.
 
 Outcomes:
 - success → `ready` with the new text, `writer.path = "session"`, no
@@ -529,7 +549,11 @@ auto-rename caller (passes `sessionId`).
   replacement / for send records and republished on replacement; start
   resume still re-enters; compaction releases only its own token;
   failed rewrite restores the ready card with all fields; stale result
-  discarded when `attempt.id` changed; boot recovery restores an interrupted
+  discarded when `attempt.id` changed; a complete agent body still becomes
+  ready (and a planned send still starts) with no model call and no attempt;
+  a rejected persist during `rewrite` restores the card and releases the
+  lock; `summary-model:set` accepts an eligible model outside the shortlist
+  and `search` finds it; the B1 dep never returns the session model; boot recovery restores an interrupted
   rewrite and fails other generating records; `publicRecord`/`publicEvent`
   expose `writer`/`canRewrite`/`rewriteEstimate`.
 - titles / extraction — Summary model used; none → session's own model;
