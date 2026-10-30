@@ -24,6 +24,7 @@
 - heading "What it remembers" [level=4]
 - button "Edit memory"
 - text: "/Every run reads this first and updates it at the end\\. Last changed by Thursday's run\\. ## Baselines \\(trailing 4 wks\\) signups\\/day ≈ \\d+ · activation \\d+% checkout error rate ≈ 2% ## Watching - onboarding copy change \\(Oct \\d+\\): activation \\d+% → recovering - checkout errors on Safari \\d+ since Tue deploy — 4\\.3% \\(Oct \\d+\\) ## Ignore - weekend dips; HN spikes/"
+- button "Show more"
 - heading "Instructions" [level=4]
 - button "Edit instructions"
 - text: /Use \$posthog-digest for yesterday\. Compare against the baselines you remember\. Only report changes beyond ±\d+% or anything new in errors; otherwise say there's nothing new\./

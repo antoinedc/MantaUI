@@ -11,7 +11,10 @@ import { createRoutinesStore, ROUTINES_T0 } from "./api/demoRoutines";
 import { RoutinesPane } from "./RoutinesPane";
 import { RoutineEditor } from "./RoutineEditor";
 import { RoutineRunContext, type RoutineRunContextValue } from "./routineRunContext";
-import { RoutineToolCard } from "./RoutineRunParts";
+import { RoutineToolCard, routineHeaderChrome } from "./RoutineRunParts";
+import { ShowMore } from "./RoutinesParts";
+import { ScheduledTasksCard } from "./PanelCards";
+import type { ScheduledJob } from "../shared/types";
 import { useStore } from "./store";
 import { pinDemoClock } from "./clock";
 import type { RoutinesSummary } from "../shared/routines";
@@ -52,20 +55,20 @@ describe("Routines", () => {
       onOpenRoutine: vi.fn(),
       onOpenRun: vi.fn(),
       onNewRoutine: vi.fn(),
-      onConvert: vi.fn(),
-      onOpenSession: vi.fn(),
       ...over,
     };
     h = mount(<RoutinesPane {...props} />);
     return props;
   }
 
-  it("draws the five sections from the summary, eight routines in the table", () => {
+  it("draws the four sections from the summary, eight routines in the table, no follow-ups section", () => {
     mountPane();
     const text = h!.text();
-    for (const t of ["Needs you", "New findings", "Running now", "Your routines", "Follow-ups in a chat"]) {
+    for (const t of ["Needs you", "New findings", "Running now", "Your routines"]) {
       expect(text.toLowerCase()).toContain(t.toLowerCase());
     }
+    expect(text.toLowerCase()).not.toContain("follow-ups in a chat");
+    expect(h!.container.querySelector(".manta-routines-followups")).toBeNull();
     expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(8);
     expect(text).toContain("14 bug reports are older than 90 days");
     expect(text).toContain("Tomorrow 9:00");
@@ -77,7 +80,6 @@ describe("Routines", () => {
     expect(h!.container.querySelector(".manta-routines-needs")).toBeNull();
     expect(h!.container.querySelector(".manta-routines-findings")).toBeNull();
     expect(h!.container.querySelector(".manta-routines-queue")).toBeNull();
-    expect(h!.container.querySelector(".manta-routines-followups")).toBeNull();
     expect(h!.container.querySelector(".manta-routines-table")).toBeTruthy();
   });
 
@@ -121,15 +123,6 @@ describe("Routines", () => {
     const sw = h!.container.querySelector('[aria-label="Enable Daily analytics digest"]') as HTMLElement;
     await click(h!, sw);
     expect(routinesUpdate).toHaveBeenCalledWith("a1b2c3d4", { enabled: false });
-  });
-
-  it("Make it a routine on a recurring follow-up hands the follow-up to the caller; a one-time one has no button", async () => {
-    const p = mountPane();
-    const buttons = [...h!.container.querySelectorAll(".manta-routines-followups button")].filter((b) => b.textContent?.includes("Make it a routine"));
-    expect(buttons.length).toBe(2);
-    await click(h!, buttons[1]);
-    expect(p.onConvert).toHaveBeenCalledWith(expect.objectContaining({ id: "fu_billing" }));
-    expect(h!.text()).toContain("one-time");
   });
 
   describe("the editor", () => {
@@ -250,5 +243,96 @@ describe("Routines", () => {
       h = mount(<RoutineToolCard part={{ type: "tool", tool: "routine_create", state: { status: "running" } }} />);
       expect(h.text()).toBe("");
     });
+  });
+});
+
+describe("follow-ups: Make it a routine lives in the chat's ⏰ card", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  const job = (over: Partial<ScheduledJob>): ScheduledJob => ({
+    id: "job00001",
+    cron: "0 9 * * 1-5",
+    prompt: "check deploy",
+    recurring: true,
+    label: "",
+    kind: "prompt",
+    sessionID: "ses_1",
+    directory: "/x",
+    createdAt: 0,
+    lastFiredMinute: null,
+    ...over,
+  });
+
+  it("offers it on a recurring prompt follow-up only, and hands the job to the caller", async () => {
+    installMockApi();
+    const onConvert = vi.fn();
+    const jobs = [job({}), job({ id: "job00002", recurring: false }), job({ id: "job00003", kind: "notify" }), job({ id: "job00004", routineId: "abcd1234" })];
+    h = mount(<ScheduledTasksCard jobs={jobs} error={null} onDelete={vi.fn()} onClose={vi.fn()} onConvert={onConvert} />);
+    const buttons = [...h.container.querySelectorAll("button")].filter((b) => b.textContent === "Make it a routine");
+    expect(buttons.length).toBe(1);
+    await click(h, buttons[0]);
+    expect(onConvert).toHaveBeenCalledWith(expect.objectContaining({ id: "job00001" }));
+  });
+
+  it("has no button when the caller doesn't support converting", () => {
+    installMockApi();
+    h = mount(<ScheduledTasksCard jobs={[job({})]} error={null} onDelete={vi.fn()} onClose={vi.fn()} />);
+    expect(h.text()).not.toContain("Make it a routine");
+  });
+});
+
+describe("ShowMore", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    vi.restoreAllMocks();
+  });
+
+  it("shows no toggle when the text fits", () => {
+    installMockApi();
+    h = mount(<ShowMore lines={3}>short</ShowMore>);
+    expect(h.text()).not.toContain("Show more");
+  });
+
+  it("clamps overflowing text and toggles Show more / Show less", async () => {
+    installMockApi();
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(400);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100);
+    h = mount(<ShowMore lines={3}>long text</ShowMore>);
+    const clamp = h.container.firstElementChild!.firstElementChild as HTMLElement;
+    expect(clamp.style.overflow).toBe("hidden");
+    await click(h, buttonByText(h, "Show more"));
+    expect(clamp.style.overflow).toBe("");
+    await click(h, buttonByText(h, "Show less"));
+    expect(clamp.style.overflow).toBe("hidden");
+  });
+});
+
+describe("a run's header", () => {
+  it("has a Close button that goes back to the Routines list", async () => {
+    installMockApi();
+    const s = createRoutinesStore();
+    const sum = await s.summary();
+    const run = sum.lastRuns[sum.routines[0].id]!;
+    const onBack = vi.fn();
+    const chrome = routineHeaderChrome({
+      run,
+      routine: sum.routines[0],
+      prevRunId: null,
+      nextRunId: null,
+      onNavigate: vi.fn(),
+      onKeep: vi.fn(),
+      onBack,
+      onOpenRoutine: vi.fn(),
+      onFixIt: vi.fn(),
+    });
+    const h = mount(<>{chrome.lead}</>);
+    await click(h, h.container.querySelector('[aria-label="Close run"]'));
+    expect(onBack).toHaveBeenCalled();
+    h.unmount();
   });
 });

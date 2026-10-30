@@ -339,8 +339,9 @@ function Shell() {
   }, [activeDraftId]);
   useEffect(() => {
     const onOpen = (e: Event) => {
-      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
-      if (id) setRoutinesView({ page: "routine", id });
+      const detail = (e as CustomEvent<{ id?: string; runId?: string }>).detail;
+      if (detail?.runId) setRoutinesView({ page: "run", runId: detail.runId });
+      else if (detail?.id) setRoutinesView({ page: "routine", id: detail.id });
     };
     window.addEventListener("manta-open-routine", onOpen);
     return () => window.removeEventListener("manta-open-routine", onOpen);
@@ -773,18 +774,19 @@ function Shell() {
     return window.api.onCtoState((s) => setCtoState(s));
   }, [apiGeneration]);
 
-  // Selecting any session closes the CTO pane (it "replaces the active
-  // session panel", so leaving to a session must reveal that panel again).
-  const prevActiveProject = useRef(activeProjectName);
+  // Selecting any session or draft closes the CTO and Routines panes (they
+  // "replace the active session panel", so leaving to a session must reveal that
+  // panel again). Keyed on the navigation counter, not on the selection: picking a
+  // session in the project you came from — or the very session that was active —
+  // changes no project and maybe no window, and must still close the pane.
+  const navSeq = useStore((s) => s.navSeq);
+  const prevNavSeq = useRef(navSeq);
   useEffect(() => {
-    if (activeProjectName !== prevActiveProject.current) {
-      prevActiveProject.current = activeProjectName;
-      if (activeProjectName) {
-        setCtoOpen(false);
-        setRoutinesViewRaw(null);
-      }
-    }
-  }, [activeProjectName, setCtoOpen]);
+    if (navSeq === prevNavSeq.current) return;
+    prevNavSeq.current = navSeq;
+    setCtoOpen(false);
+    setRoutinesViewRaw(null);
+  }, [navSeq, setCtoOpen]);
 
   // ---- Subscription usage alerts (BET-739, server-first WS09) ----
   // The BOX decides when a 90% / limit alert fires (src/server/usageAlerts.mjs)

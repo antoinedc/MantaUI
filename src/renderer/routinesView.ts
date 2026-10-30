@@ -253,12 +253,13 @@ export function lastRunDetail(run: RoutineRun, now: number): string {
   }
 }
 
-/** The title of a run row: the report's title, else the failure / status sentence. */
+/** The title of a run row: the report's title, else the failure / question. Empty when the
+ *  outcome pill beside it already says everything (no "Running" twice). */
 export function runTitle(run: RoutineRun): string {
   if (run.report?.title) return run.report.title;
   if (run.error) return run.error;
   if (run.status === "needs_input" && run.question) return run.question;
-  return outcomeView(run).label;
+  return "";
 }
 
 /** The note under a run title: the report summary line is for findings; notes carry waits / catch-ups. */

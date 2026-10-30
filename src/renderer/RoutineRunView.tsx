@@ -8,7 +8,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Routine, RoutineRun } from "../shared/routines";
+import { X } from "lucide-react";
 import { ChatPanel } from "./ChatPanel";
+import { IconButton } from "./IconButton";
 import { RoutinesHeader, CrumbLink, CrumbSep, PageColumn } from "./RoutinesParts";
 import { errMessage, routinesToast, runAction, useRoutinesRefetch } from "./routinesData";
 import { basename, fixItSeed, isTerminal, runCrumbLabel } from "./routinesView";
@@ -125,7 +127,7 @@ export function RoutineRunView({
   if (!data) {
     return (
       <div className="manta-routines-run flex h-full w-full flex-col bg-bg" data-screen="routines">
-        <RoutinesHeader>
+        <RoutinesHeader right={<IconButton label="Close run" title="Close and go back to Routines" size="xl" icon={<X />} onClick={onBack} />}>
           <CrumbLink onClick={onBack}>Routines</CrumbLink>
         </RoutinesHeader>
         <PageColumn>
@@ -139,7 +141,7 @@ export function RoutineRunView({
   if (!run.sessionID || run.status === "queued") {
     return (
       <div className="manta-routines-run flex h-full w-full flex-col bg-bg" data-screen="routines">
-        <RoutinesHeader>
+        <RoutinesHeader right={<IconButton label="Close run" title="Close and go back to Routines" size="xl" icon={<X />} onClick={onBack} />}>
           <CrumbLink onClick={onBack}>Routines</CrumbLink>
           <CrumbSep />
           <CrumbLink onClick={() => onOpenRoutine(routine.id)}>{routine.name}</CrumbLink>

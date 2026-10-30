@@ -447,6 +447,11 @@ type State = {
   // view is a real session. Mutually exclusive with the session active state in
   // the sense that navigating to a real session (setActive) clears it.
   activeDraftId: string | null;
+  // Bumped on every user navigation to a session or a draft (setActive / createDraft /
+  // setActiveDraft) — even onto the one already active — so full-pane views (CTO,
+  // Routines) can step aside. Selection state alone can't say "the user clicked the
+  // session that was already selected".
+  navSeq: number;
   drafts: NewSessionDraft[];
   // A one-shot prompt for a freshly-created chat session to auto-submit on its
   // first mount (draft → new-session flow). Consumed (cleared) by the panel
@@ -872,6 +877,7 @@ export const useStore = create<State>((set, get) => ({
   recentWindows: [],
   projects: [],
   activeProjectName: null,
+  navSeq: 0,
   activeWindowByProject: {},
   activeDraftId: null,
   drafts: [],
@@ -966,6 +972,7 @@ export const useStore = create<State>((set, get) => ({
         activeDraftId: null,
         status,
         recentWindows,
+        navSeq: prev.navSeq + 1,
       };
     });
   },
@@ -1005,6 +1012,7 @@ export const useStore = create<State>((set, get) => ({
         },
       ],
       activeDraftId: id,
+      navSeq: prev.navSeq + 1,
     }));
     return id;
   },
@@ -1026,7 +1034,7 @@ export const useStore = create<State>((set, get) => ({
       }
       return { drafts, activeDraftId };
     }),
-  setActiveDraft: (id) => set({ activeDraftId: id }),
+  setActiveDraft: (id) => set((prev) => ({ activeDraftId: id, navSeq: prev.navSeq + 1 })),
   setAutoSubmitPrompt: (p) => set({ autoSubmitPrompt: p }),
   setSeedPrompt: (p) => set({ seedPrompt: p }),
 

@@ -36,11 +36,14 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
   error,
   onDelete,
   onClose,
+  onConvert,
 }: {
   jobs: ScheduledJob[];
   error: string | null;
   onDelete: (id: string) => void;
   onClose: () => void;
+  // "Make it a routine" on a recurring prompt follow-up (routines spec §8.1). Omitted → no button.
+  onConvert?: (job: ScheduledJob) => void;
 }) {
   return (
     <div
@@ -94,6 +97,15 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
                     )}
                   </div>
                 </div>
+                {onConvert && j.recurring && (j.kind ?? "prompt") === "prompt" && !j.routineId && (
+                  <button
+                    onClick={() => onConvert(j)}
+                    className="shrink-0 px-2 py-px rounded-xs text-accent-tx hover:bg-accent-bg border border-accent/30 text-label"
+                    title="Run this in a fresh session each time, on the Routines page"
+                  >
+                    Make it a routine
+                  </button>
+                )}
                 <button
                   onClick={() => onDelete(j.id)}
                   className="shrink-0 px-2 py-px rounded-xs text-danger hover:bg-danger-bg border border-danger/30 text-label"

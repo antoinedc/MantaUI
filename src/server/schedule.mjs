@@ -325,8 +325,16 @@ export async function deleteJob(id, { load = loadJobs, save = saveJobs, publish 
   return { ok: true, deleted: true };
 }
 
+// `sessionID` may also be an ARRAY of session ids: an auto-handoff replacement chain
+// (handoff engine chainOf). A job keeps the id of the session that created it and
+// its firings follow the chain to the live successor, so the successor's list must
+// include its predecessors' jobs or the ⏰ card reads "No scheduled tasks".
 export async function listJobs(sessionID, { load = loadJobs } = {}) {
   const jobs = await load();
+  if (Array.isArray(sessionID)) {
+    const ids = new Set(sessionID.filter(Boolean));
+    return ids.size ? jobs.filter((j) => ids.has(j.sessionID)) : jobs;
+  }
   return sessionID ? jobs.filter((j) => j.sessionID === sessionID) : jobs;
 }
 

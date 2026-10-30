@@ -2689,7 +2689,10 @@ export function buildHandlers({
     // loop live in src/server/schedule.mjs; these just read/mutate it. Delete
     // publishes schedule.updated so the ScheduledTasksCard refetches live.
     // preload: ipcRenderer.invoke(IPC.scheduleList, sessionId)  → args[0] = sessionId?
-    "schedule:list": (sessionId) => scheduleListJobs(sessionId || undefined),
+    // A session's list includes the jobs of its whole auto-handoff replacement chain:
+    // the jobs keep the creating session's id and fire into the live successor.
+    "schedule:list": (sessionId) =>
+      scheduleListJobs(sessionId && handoff?.chainOf ? handoff.chainOf(sessionId) : sessionId || undefined),
     // preload: ipcRenderer.invoke(IPC.scheduleDelete, id)  → args[0] = id
     "schedule:delete": (id) =>
       scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),

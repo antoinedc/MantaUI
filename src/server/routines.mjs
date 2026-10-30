@@ -500,6 +500,8 @@ export function createRoutinesEngine(deps) {
     generateText = async () => "",
     schedule = { listJobs: async () => [], createJob: async () => ({ ok: false, error: "follow-ups are unavailable" }), deleteJob: async () => ({ ok: true, deleted: false }) },
     log = (...a) => console.warn(...a),
+    // Auto-handoff: the live session a follow-up's (possibly replaced) session id now fires into.
+    resolveSession = (sid) => sid,
     home = homedir(),
     mint = mintSessionId,
     setTimer = (fn, ms) => {
@@ -653,6 +655,13 @@ export function createRoutinesEngine(deps) {
     const nextMinute = new Date(Math.floor(t / 60_000) * 60_000 + 60_000);
     const names = new Map();
     for (const p of projs) for (const w of p.windows ?? []) if (w.opencodeSessionId) names.set(w.opencodeSessionId, w.name);
+    const live = (sid) => {
+      try {
+        return resolveSession(sid) || sid;
+      } catch {
+        return sid;
+      }
+    };
     return (jobs ?? [])
       .filter((j) => (j.kind ?? "prompt") === "prompt")
       .map((j) => {
@@ -667,8 +676,8 @@ export function createRoutinesEngine(deps) {
           label: j.label ?? "",
           cron: j.cron,
           recurring: !!j.recurring,
-          sessionID: j.sessionID,
-          sessionName: names.get(j.sessionID) ?? null,
+          sessionID: live(j.sessionID),
+          sessionName: names.get(live(j.sessionID)) ?? null,
           nextFireAt,
           routineId: j.routineId ?? null,
         };

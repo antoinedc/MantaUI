@@ -1,15 +1,15 @@
 // ===== Routines page (R1) =====
 //
 // The page behind the single "Routines" sidebar row: what is blocked on the
-// user, unread findings, the run queue, every routine, and the follow-ups that
-// run inside an existing chat. Sections with nothing to show are omitted
-// (except "Your routines", which shows its empty state). The summary comes
-// from App's single subscription; this component only renders it and routes
-// the user's gestures (open a routine / a run, answer, run, convert).
+// user, unread findings, the run queue and every routine. Follow-ups that run
+// inside a chat are managed from that chat's ⏰ card, not here. Sections with
+// nothing to show are omitted (except "Your routines", which shows its empty
+// state). The summary comes from App's single subscription; this component only
+// renders it and routes the user's gestures (open a routine / a run, answer, run).
 
 import { useState } from "react";
-import { CalendarClock, Check, CircleHelp, MessageCircle, Plus, Shield } from "lucide-react";
-import type { FollowupRow, Routine, RoutineRun, RoutinesSummary } from "../shared/routines";
+import { CalendarClock, Check, CircleHelp, Plus, Shield } from "lucide-react";
+import type { Routine, RoutineRun, RoutinesSummary } from "../shared/routines";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { Eyebrow } from "./Eyebrow";
@@ -55,15 +55,6 @@ function onActivate(fn: () => void) {
   };
 }
 
-/** A follow-up's next fire: "in 3m" inside the hour, then the Next-column wording. */
-export function followupNextLabel(ms: number | null, now: number): string {
-  if (ms == null) return "—";
-  const mins = Math.round((ms - now) / 60_000);
-  if (mins >= 0 && mins < 60) return `in ${Math.max(1, mins)}m`;
-  const label = nextLabel(ms, now);
-  return /^\d/.test(label) ? `today ${label}` : label;
-}
-
 export function RoutinesPane({
   summary,
   error,
@@ -71,8 +62,6 @@ export function RoutinesPane({
   onOpenRoutine,
   onOpenRun,
   onNewRoutine,
-  onConvert,
-  onOpenSession,
 }: {
   summary: RoutinesSummary | null;
   error: string | null;
@@ -80,8 +69,6 @@ export function RoutinesPane({
   onOpenRoutine: (id: string) => void;
   onOpenRun: (runId: string) => void;
   onNewRoutine: () => void;
-  onConvert: (f: FollowupRow) => void;
-  onOpenSession: (sessionId: string) => void;
 }) {
   const now = useNowMs();
   const [showAllFindings, setShowAllFindings] = useState(false);
@@ -123,8 +110,6 @@ export function RoutinesPane({
               onOpenRoutine={onOpenRoutine}
               onOpenRun={onOpenRun}
               onNewRoutine={onNewRoutine}
-              onConvert={onConvert}
-              onOpenSession={onOpenSession}
             />
           )}
         </PageColumn>
@@ -142,8 +127,6 @@ function PaneSections({
   onOpenRoutine,
   onOpenRun,
   onNewRoutine,
-  onConvert,
-  onOpenSession,
 }: {
   summary: RoutinesSummary;
   now: number;
@@ -153,8 +136,6 @@ function PaneSections({
   onOpenRoutine: (id: string) => void;
   onOpenRun: (runId: string) => void;
   onNewRoutine: () => void;
-  onConvert: (f: FollowupRow) => void;
-  onOpenSession: (sessionId: string) => void;
 }) {
   const needsCount = summary.needs.length + summary.orphaned.length;
   const findings = showAllFindings ? summary.findings : summary.findings.slice(0, FINDINGS_COLLAPSED);
@@ -319,20 +300,6 @@ function PaneSections({
         )}
       </div>
 
-      {summary.followups.length > 0 && (
-        <div className="manta-routines-followups mt-8">
-          <SectionHead
-            title="Follow-ups in a chat"
-            count={summary.followups.length}
-            hint="· these run inside an existing chat instead of starting a new one"
-          />
-          <Box>
-            {summary.followups.map((f) => (
-              <FollowupItem key={f.id} f={f} now={now} onConvert={() => onConvert(f)} onOpenSession={onOpenSession} />
-            ))}
-          </Box>
-        </div>
-      )}
     </>
   );
 }
@@ -532,44 +499,6 @@ function RoutineRow({
           }}
         />
       </div>
-    </div>
-  );
-}
-
-function FollowupItem({
-  f,
-  now,
-  onConvert,
-  onOpenSession,
-}: {
-  f: FollowupRow;
-  now: number;
-  onConvert: () => void;
-  onOpenSession: (sessionId: string) => void;
-}) {
-  const first = (f.label || f.prompt).split("\n")[0];
-  const cadence = f.recurring ? cadenceText(f.cron) : "once";
-  return (
-    <div className="flex items-center gap-3 border-t border-border-subtle px-4 py-3 text-label font-medium text-text-muted first:border-t-0">
-      <MessageCircle size={14} className="shrink-0 text-text-faint" aria-hidden />
-      <div className="min-w-0">
-        <div className="truncate">{first}</div>
-        <div className="text-meta font-normal text-text-quiet">
-          {cadence} · in{" "}
-          <button type="button" className="text-accent-tx hover:underline" onClick={() => onOpenSession(f.sessionID)}>
-            {f.sessionName ?? "its chat"}
-          </button>
-        </div>
-      </div>
-      <span className="ml-auto text-meta font-mono text-text-faint">{followupNextLabel(f.nextFireAt, now)}</span>
-      {f.recurring && !f.routineId ? (
-        <Button tone="ghost" onClick={onConvert}>
-          <CalendarClock size={14} aria-hidden />
-          Make it a routine
-        </Button>
-      ) : (
-        <span className="w-40 text-right text-meta text-text-quiet">{f.routineId ? "moved routine" : "one-time"}</span>
-      )}
     </div>
   );
 }

@@ -512,6 +512,13 @@ preset that reproduces it exactly, else Custom.
 ## 8. Moving between follow-up and routine (owner request)
 
 ### 8.1 Follow-up → routine
+Entry point (revised 2026-10-30): "Make it a routine" on a follow-up row of the chat's
+⏰ scheduled-tasks card. The Routines page no longer lists follow-ups (the section was
+too cluttered); a chat's own follow-ups are managed from that chat. The ⏰ card (and
+`schedule:list` / the AI's `schedule_list`) includes the jobs of the session's whole
+auto-handoff replacement chain, since a job keeps its creating session's id and its
+firings follow the chain to the live successor.
+
 1. UI opens R6 → `routines:convert-preview(followupId)`: server loads the job, reads the
    last 40 messages of the follow-up's session (text parts only, ≤ 24k chars), and calls
    `generateText` (the cheap-model one-shot in `opencode.mjs`) with a fixed prompt that
