@@ -1,0 +1,35 @@
+- button "Routines"
+- text: / Daily analytics digest
+- heading "Daily analytics digest" [level=1]
+- button /Weekdays at 9:\d+/
+- button "~/projects/ronda"
+- button "Read-only"
+- button "Sonnet 5.5 · Medium"
+- button "Notify on findings"
+- button "New session each run"
+- text: /Next run tomorrow at 9:\d+ · \d+ runs since 1 Oct · about [\d,.]+[bkmBKM]+ tokens a run/
+- button "Edit"
+- button "Pause"
+- button "Run now"
+- text: /Runs \d+/
+- button "Findings only"
+- button /Thu \d+ 9:\d+ Findings Signups up \d+% week over week; checkout errors doubled since Tuesday Safari \d+ only — lines up with Tuesday's deploy [\d,.]+[bkmBKM]+ \d+[hmsp]+/
+- button /Wed \d+ 9:\d+ Nothing new All metrics within normal range [\d,.]+[bkmBKM]+ \d+[hmsp]+/
+- button /Tue \d+ 9:\d+ Findings Activation dipped to \d+% after the onboarding copy change Waited 6 min in line behind Dependency audit [\d,.]+[bkmBKM]+ \d+[hmsp]+/
+- 'button /Mon \d+ 9:\d+ Findings Weekend traffic 2\.3× normal — a Hacker News link Caught up at 9:\d+: the box was restarting at 9:\d+ [\d,.]+[bkmBKM]+ \d+[hmsp]+/'
+- button /Fri \d+ 9:\d+ Nothing new All metrics within normal range [\d,.]+[bkmBKM]+ \d+[hmsp]+/
+- button /Thu \d+ 9:\d+ Failed PostHog returned \d+ — the API key was rotated Fixed by updating the posthog_key secret · re-ran at \d+:\d+ [\d,.]+[bkmBKM]+ \d+[hmsp]+/
+- button /Wed \d+ 9:\d+ Nothing new All metrics within normal range [\d,.]+[bkmBKM]+ \d+[hmsp]+/
+- button "Show older"
+- heading "What it remembers" [level=4]
+- button "Edit memory"
+- text: "/Every run reads this first and updates it at the end\\. Last changed by Thursday's run\\. ## Baselines \\(trailing 4 wks\\) signups\\/day ≈ \\d+ · activation \\d+% checkout error rate ≈ 2% ## Watching - onboarding copy change \\(Oct \\d+\\): activation \\d+% → recovering - checkout errors on Safari \\d+ since Tue deploy — 4\\.3% \\(Oct \\d+\\) ## Ignore - weekend dips; HN spikes/"
+- heading "Instructions" [level=4]
+- button "Edit instructions"
+- text: /Use \$posthog-digest for yesterday\. Compare against the baselines you remember\. Only report changes beyond ±\d+% or anything new in errors; otherwise say there's nothing new\./
+- term: Triggers
+- definition: Schedule · Run now
+- term: Missed runs
+- definition: /Run once on catch-up, up to \d+[hmsp]+ late/
+- term: Keeps
+- definition: /\d+ days of runs; unread runs are never deleted/

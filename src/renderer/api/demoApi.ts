@@ -41,6 +41,16 @@ import { annotateView } from "../../server/transcriptView.mjs";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
+import {
+  ROUTINES_ACTIVE_SESSION,
+  analyticsChatMessages,
+  createRoutinesStore,
+  routineRunMessages,
+  routinesExtraModels,
+  routinesProjects,
+  routinesSessionList,
+  routinesStatus,
+} from "./demoRoutines.js";
 
 // Resolved once at module load — the demo transport is only ever imported
 // from bootDemo(), which has already decided we are in demo mode. The state
@@ -50,6 +60,11 @@ const DEMO_STATE =
   typeof window === "undefined"
     ? "full"
     : pickDemoState(new URLSearchParams(window.location.search));
+
+// The Routines fixture states (docs/screens/routines): their own sidebar, sessions and
+// transcripts, served only here so no other baseline moves.
+const IS_ROUTINES = DEMO_STATE === "routines" || DEMO_STATE === "routines-chat";
+const routinesStore = createRoutinesStore();
 
 // "reconnecting" — the real transport (httpApi) reports the events-WebSocket
 // connection state into the store via `setConnectionState`; demo mode has no
@@ -331,7 +346,7 @@ const syncSnapshot = (): Promise<{
     gen: "demo",
     seq: 1,
     changed: {
-      projects: DEMO_STATE === "empty" ? [] : demoState.projects,
+      projects: DEMO_STATE === "empty" ? [] : IS_ROUTINES ? routinesProjects : demoState.projects,
       config: demoState.config,
       stale: false,
     },
@@ -344,7 +359,7 @@ const syncSnapshot = (): Promise<{
 const onStatusEvent = (
   cb: (batch: unknown[]) => void,
 ): (() => void) => {
-  const batch = Object.entries(demoState.status).flatMap(([session, byWindow]) =>
+  const batch = Object.entries(IS_ROUTINES ? routinesStatus : demoState.status).flatMap(([session, byWindow]) =>
     Object.entries(byWindow).map(([windowIndex, s]) => ({
       session,
       windowIndex: Number(windowIndex),
@@ -400,8 +415,18 @@ const previewArtifactsImageMessage = {
 const viewed = (messages: OpencodeMessage[]): OpencodeMessage[] =>
   annotateView(messages as never) as unknown as OpencodeMessage[];
 
+// The Routines states serve a transcript for exactly two sessions: the routine run's
+// (opened from the Routines pane) and, in `routines-chat`, the "Analytics review" chat.
+const routinesTranscript = (sessionId: string): OpencodeMessage[] => {
+  if (sessionId === "ses_run_digest_thu30") return routineRunMessages();
+  if (sessionId === ROUTINES_ACTIVE_SESSION && DEMO_STATE === "routines-chat") return analyticsChatMessages();
+  return [];
+};
+
 const opencodeMessages = (sessionId: string, opts?: { limit?: number; view?: boolean }) =>
-  forActiveSession(
+  IS_ROUTINES
+    ? Promise.resolve(((list) => (opts?.view ? viewed(list) : list))(routinesTranscript(sessionId)))
+    : forActiveSession(
     sessionId,
     ((list) => (opts?.view ? viewed(list) : list))(
       DEMO_STATE === "artifacts"
@@ -417,8 +442,8 @@ const opencodeMessages = (sessionId: string, opts?: { limit?: number; view?: boo
 // stream position, so a message.updated event causes the rendered copy to
 // grow one phase at a time. Served marks the phase as applied so the harness
 // knows not to screenshot while the splice debounce is still pending.
-const opencodeMessage = (_sessionId: string, messageId: string, opts?: { view?: boolean }) => {
-  const list = isStream ? revealedTranscript(streamStep) : demoState.messages;
+const opencodeMessage = (sessionId: string, messageId: string, opts?: { view?: boolean }) => {
+  const list = IS_ROUTINES ? routinesTranscript(sessionId) : isStream ? revealedTranscript(streamStep) : demoState.messages;
   const hit = list.find((m) => m.info.id === messageId) ?? null;
   if (isStream && hit && !hit.info.time?.completed) {
     streamServed = true;
@@ -441,10 +466,10 @@ const opencodeVcsBranch = (_directory?: string): Promise<string | null> =>
 // carries `time.updated` for each session; the renderer stamps that onto
 // the sidebar's age label so even idle windows show a sensible elapsed.
 const opencodeListSessions = (_directory?: string): Promise<typeof demoState.sessions> =>
-  Promise.resolve(demoState.sessions);
+  Promise.resolve(IS_ROUTINES ? routinesSessionList : demoState.sessions);
 
 const opencodeModels = (): Promise<typeof demoState.models> =>
-  Promise.resolve(demoState.models);
+  Promise.resolve(IS_ROUTINES ? [...demoState.models, ...routinesExtraModels] : demoState.models);
 
 const opencodeDefaultModel = (): Promise<{ providerID: string; modelID: string } | null> =>
   Promise.resolve(demoState.config.defaultModel ?? null);
@@ -652,6 +677,21 @@ export const explicitMethods = {
   onAutoUpdateError,
   opencodeProviderAuth,
   claudeLoginCancel,
+  routinesSummary: routinesStore.summary,
+  routinesGet: routinesStore.get,
+  routinesCreate: routinesStore.create,
+  routinesUpdate: routinesStore.update,
+  routinesDelete: routinesStore.delete,
+  routinesRunNow: routinesStore.runNow,
+  routinesRunGet: routinesStore.runGet,
+  routinesMarkRead: routinesStore.markRead,
+  routinesMemorySet: routinesStore.memorySet,
+  routinesKeepInSidebar: routinesStore.keepInSidebar,
+  routinesConvertPreview: routinesStore.convertPreview,
+  routinesConvertCommit: routinesStore.convertCommit,
+  routinesMoveToChat: routinesStore.moveToChat,
+  routinesMoveBack: routinesStore.moveBack,
+  onRoutinesUpdated: () => () => {},
 } as const;
 
 // ===========================================================================
@@ -666,6 +706,11 @@ export const explicitMethods = {
 //     destructuring / `.catch(() => {})` stays quiet.
 // ===========================================================================
 type AnyMethod = (...args: unknown[]) => unknown;
+const routinesQuietReads: Record<string, AnyMethod> = {
+  ctoDigestGet: () => Promise.resolve({ digest: null, stale: false }),
+  ctoCardsGet: () => Promise.resolve({ cards: [], count: 0 }),
+  ctoFinishedGet: () => Promise.resolve({ items: [] }),
+};
 const subscriptionMethod = /^on[A-Z]/;
 const proxyTarget = explicitMethods as unknown as Record<string, AnyMethod>;
 const demoApiProxy = new Proxy(proxyTarget, {
@@ -673,6 +718,9 @@ const demoApiProxy = new Proxy(proxyTarget, {
     if (typeof prop === "symbol") return undefined;
     const explicit = target[prop];
     if (explicit) return explicit;
+    // The Routines states keep the always-mounted CTO pane quiet: its three overview reads would
+    // otherwise resolve to null and raise "Couldn't refresh …" toasts over the screen under review.
+    if (IS_ROUTINES && prop in routinesQuietReads) return routinesQuietReads[prop];
     // Subscription methods: calling the returned function with a callback
     // hands back a no-op unsubscribe so the renderer's cleanup logic stays
     // happy. Non-subscription methods: call returns a Promise<null>.

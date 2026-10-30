@@ -45,6 +45,12 @@
 //                  data: URL), isolated here so the preview-overlay capture
 //                  (BET-661) has an image to render without touching the
 //                  shared fixture or any other baseline.
+// "routines"      — the Routines feature's fixture (docs/screens/routines/mockup.html):
+//                  eight routines, a run history, the queue, follow-ups, and the
+//                  mockup's own workspace list in the sidebar. The clock is pinned
+//                  to Thu 30 Oct 2025 10:01 so the mockup's weekday labels hold.
+// "routines-chat" — the same box with the "Analytics review" chat active and a
+//                  completed routine_create tool call in its transcript (R5).
 export const DEMO_STATES = [
   "full",
   "empty",
@@ -56,6 +62,8 @@ export const DEMO_STATES = [
   "upgrade-failed",
   "stream",
   "artifacts",
+  "routines",
+  "routines-chat",
 ] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 
