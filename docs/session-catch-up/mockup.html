@@ -46,27 +46,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* "N new steps" — the whole pill is a button. */
-.manta-catchup-pill[data-tone="new"] {
-  color: var(--accent-tx);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--font-size-xs);
-}
-.manta-catchup-pill[data-tone="new"]:hover { border-color: var(--accent); }
 .manta-catchup-pill[data-tone="error"] {
   border-color: rgb(var(--danger-rgb) / 0.5);
   color: var(--danger);
-}
-/* Fading out (the "new steps" pill after its dwell). */
-.manta-catchup-pill[data-leaving="true"] {
-  opacity: 0;
-  transform: translate(-50%, var(--sp-1));
-  pointer-events: none;
-}
-.manta-catchup-pill:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 /* Inline text action inside the pill: "Cancel", "Retry". */
 .manta-catchup-pill__action {
@@ -178,7 +160,6 @@ body[data-s="failedheld"] .pill-slot[data-show~="failedheld"] { display: inline-
 <div class="ctl">State:
   <button data-b="catching" class="on" onclick="set('catching')">1 · Catching up</button>
   <button data-b="held" onclick="set('held')">2 · Enter pressed while catching up</button>
-  <button data-b="new" onclick="set('new')">3 · Caught up (sent)</button>
   <button data-b="failed" onclick="set('failed')">4a · Failed</button>
   <button data-b="failedheld" onclick="set('failedheld')">4b · Failed, message held</button>
 </div>
@@ -207,10 +188,6 @@ body[data-s="failedheld"] .pill-slot[data-show~="failedheld"] { display: inline-
       <span class="manta-catchup-pill__label">Catching up… · will send when ready</span>
       <button type="button" class="manta-catchup-pill__action">Cancel</button>
     </div>
-    <!-- 3 · new steps (button; dwell then data-leaving) -->
-    <button type="button" class="manta-catchup-pill pill-slot" data-tone="new" data-show="new" aria-label="Show 3 new steps">
-      <span class="manta-catchup-pill__label">3 new steps · your message was sent into the running turn</span>
-    </button>
     <!-- 4 · failed -->
     <div class="manta-catchup-pill pill-slot" data-tone="error" data-show="failed failedheld" role="status" aria-live="polite">
       <span class="manta-catchup-pill__label">Couldn't load the latest steps</span>
