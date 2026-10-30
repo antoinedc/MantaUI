@@ -1172,6 +1172,53 @@ and worktree all belong to it.
   `scripts/opencode-v2/c1-smoke.mjs` — pure/IO-injected logic only, no live
   HTTP/tmux outside the smoke's sandbox.
 
+## Routines — MantaUI-native AI tool (`src/server/routines.mjs`)
+
+Scheduled work whose every run starts a FRESH, headless opencode session (no tmux
+window, no sidebar row); results land on a Routines page as a structured report.
+Spec: `docs/superpowers/specs/2026-10-30-routines-design.md` (behaviour/wire),
+`docs/screens/routines/contract.md` (UI). Distinct from "follow-ups" (`schedule.mjs`,
+a prompt injected into an existing chat), which keep working unchanged and convert
+to/from routines. Key facts:
+
+- **Server-owned, dependency-injected** (`createRoutinesEngine`, like schedule/
+  delegate). Store `~/.manta/routines.json` (`{version, routines, runs}`), memory in
+  `~/.manta/routines/<id>/memory.md` (≤16 KiB). ONE async lock around every
+  read-modify-write; **no opencode/git/tmux I/O under it** (decide + persist → unlock →
+  I/O → lock → record). A slot is RESERVED under the lock at dispatch (run flips to
+  `running`, session id pre-minted + persisted) before any I/O.
+- **Cron via `croner`** (5-part mode, box-local time; `legacyMode` DOM/DOW OR). The
+  15-minute floor checks the next 20 occurrences. Catch-up: one run for any number of
+  missed slots, `skipped` record outside `catchUpHours`.
+- **Own FIFO queue + concurrency** (`routinesConcurrency` in config, 1..5, default 2),
+  independent of delegate's cap. One `queued` run per routine. `needs_input` frees its slot;
+  answering resumes it immediately even over the cap.
+- **Run sessions are created with the internal marker** (`withInternalMarker`, so the
+  delegate reconciler never adopts them) + `metadata.manta.routineId/runId`, a permission
+  ruleset that never asks (read: `edit` denied; bash still runs — "read" is not a sandbox),
+  and a worktree via `local.gitAddWorktree` for `access:"edit"` (fail-closed; a worktree is
+  NEVER force-removed — retention/delete keep a dirty one, checked against `baseSha`).
+  Auto-handoff skips sessions carrying `manta.routineId`.
+- **Completion** is event-driven (`observeRaw`: `form.*`, `permission.*`,
+  `session.execution.*`; `observeLifecycle`: `session.error`, `session.deleted`) with
+  `onReconnect()` (also first, at boot, before the first tick) and `sweep()` (60 s:
+  30-min timeout with `abortReason`, 7-day needs_input, retention) as the backstop.
+  `routine_report` (`POST /api/routines/report`) stores the report + memory; a run that
+  ends without one is re-prompted once, then gets a synthesized report.
+- **Wire**: `routines:*` rpc channels (`rpc.mjs`), `/api/routines*` for the AI tools
+  (class-2 errors), bus `routines.updated` hints (renderer refetches). Server-only run
+  fields (`abortReason`, `erroredWith`, `phaseSince`, `submittedAt`, …) are stripped on
+  the wire (`runWire`). Notifications go through `push.fireNotify` with `routineRunId`,
+  no `sessionID`, tag `routine-<id>`.
+- **Moved into a chat** (`routines:move-to-chat`): the routine becomes a `schedule.mjs`
+  job carrying optional `routineId` + a one-shot `preamble` (its memory); moving back
+  deletes the job. An orphaned moved routine (follow-up gone/disabled) is disabled by
+  `tick` and listed in `RoutinesSummary.orphaned`, never silently re-routed.
+- **Plugin tools** `routine_create/list/update/run/delete/report` live in
+  `docs/opencode-plugins-v2/manta/tools/routines.ts` (V2-only; no V1 twin — listed in
+  `V2_ONLY` in `scripts/opencode-v2/plugin-pack.test.mjs`).
+- Tests: `src/server/routines.test.mjs` (injected fakes; never live opencode/tmux).
+
 ## App control — MantaUI-native AI tool (`src/server/appControl.mjs`)
 
 The seventh **MantaUI-native opencode tool**: an opencode session can drive
