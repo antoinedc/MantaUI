@@ -16,7 +16,8 @@ they decide review outcomes):
    (`1`=4 `2`=8 `3`=12 `4`=16 `5`=20 `6`=24 `8`=32 `10`=40 `12`=48). Type comes from the
    roles `text-display`(24) `text-title`(17) `text-prose`(15) `text-body`(14)
    `text-label`(13) `text-meta`(12) `text-micro`(11) `text-code`(13).
-3. **No new tokens.** Every value used here resolves to an existing token. The ONLY
+3. **No new tokens.** Primitive changes in this feature (each a variant/prop on an existing primitive, recorded in `docs/components.md` + `src/renderer/primitives.test.ts` in the same PR): `Pill` tone `danger`; `StatusDot` tone `accent` (static); `Field` prop `multiline` (+`rows`).
+    Every value used here resolves to an existing token. The ONLY
    primitive change is one new tone on `Pill`: `danger` → `"bg-danger-bg text-danger"`
    (a variant on an existing primitive; it already has two adopters in this feature —
    the outcome pill and the "Needs you" pill — and must be added to the Pill
@@ -71,7 +72,7 @@ Badge counts come from the routines summary (`needsYou`, `unread`); both hidden 
 ## R1 — Routines page (`RoutinesPane.tsx`, hook `manta-routines-pane`, `data-screen="routines"`)
 
 Header bar: the same 46px bar the CTO pane uses — crumb text `Routines` in
-`text-label font-medium text-text`; right: `IconButton` (Ellipsis, label "More").
+`text-label font-medium text-text`. No right-side controls.
 
 Column: `<div class="mx-auto px-6 py-8" style={{maxWidth:"var(--cto-col-max-w)"}}>`
 (identical to `CtoPanel.tsx`).
@@ -84,7 +85,7 @@ Column: `<div class="mx-auto px-6 py-8" style={{maxWidth:"var(--cto-col-max-w)"}
 **Section** wrapper `mt-8`; section head `flex items-center gap-2 mb-3`:
 `<Eyebrow>` title + count `text-micro font-mono tabular-nums text-text-quiet` + optional
 right slot (`ml-auto`). Optional hint text `text-meta text-text-quiet`.
-Text-link buttons ("Mark all read", "All projects ▾", "Findings only"):
+Text-link buttons ("Mark all read", "Findings only", "Show all", "Show older"):
 `rounded-sm px-2 py-1 text-meta font-medium text-accent-tx hover:bg-accent-bg`.
 List container ("box"): `rounded-lg border border-border-subtle bg-bg-soft overflow-hidden`.
 
@@ -92,7 +93,7 @@ Sections render in this order and are **omitted entirely when empty** (except "Y
 routines", which shows the empty state E1):
 
 ### R1.1 Needs you (`manta-routines-needs`)
-One card per run in `needs_input`:
+One card per run in `needs_input`, then one per orphaned routine (spec §8.2: CircleHelp badge; line 1 "<name> · <project>"; line 2 "<name> lost its chat. Move it back to Routines?"; `<Button tone="primary">Move back</Button>`). Run card:
 `flex items-start gap-3 rounded-lg border border-border bg-bg-soft px-4 py-3 shadow-sm`
 with `style={{borderLeftWidth:"var(--need-edge-w)", borderLeftColor:"var(--danger)"}}`
 (the CTO needs-you edge). Contents: 32px badge `grid place-items-center w-8 h-8 rounded-md bg-danger-bg text-danger` (CircleHelp 16; Shield for a permission ask);
@@ -124,7 +125,7 @@ The whole section is omitted when nothing is running AND nothing is waiting.
 Header row + rows share `grid grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,1.2fr)_96px_40px] items-center gap-3 px-4`.
 - header `py-2 border-b border-border-subtle` cells in `<Eyebrow>` style (text-micro semibold uppercase tracking text-text-quiet): Routine · When · Last run · Next · (empty)
 - row `py-3 border-t border-border-subtle first-of-type:border-t-0 cursor-pointer hover:bg-fill` (click → R2):
-  - Routine: glyph tile `grid place-items-center w-8 h-8 rounded-md bg-fill text-text-faint` (icon 14) + name `truncate text-body font-semibold text-text` / project `text-meta font-mono text-text-quiet`
+  - Routine: glyph tile `grid place-items-center w-8 h-8 rounded-md bg-fill text-text-faint` (icon 14) + name `truncate text-body font-semibold text-text` / project `text-meta font-mono text-text-quiet` (= `projectName ?? basename(directory)`)
   - When: `text-label font-medium text-text-muted` cadence (`describeCron`) / `text-meta text-text-quiet` access ("Read-only" | "Can make changes · own branch") + ", tells you only on failure" when notify≠findings
   - Last run: `flex flex-col items-start gap-1`: outcome `<Pill>` (see Outcome map) / `truncate text-meta text-text-quiet` detail
   - Next: `text-meta font-mono text-text-faint` ("Fri 9:00", "Tomorrow 7:00", "11:00", "Thu 6 Nov", "—" when paused/needs-input)
@@ -141,7 +142,8 @@ Header row + rows share `grid grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,
 | needs_input | danger (new tone) | `error` | Needs you |
 | failed | danger | `error` | Failed |
 | cancelled / timed_out | neutral + border | none | Stopped / Timed out |
-| skipped (manual "skip") | neutral + border | none | Skipped |
+| skipped (missed while the box was off) | neutral + border | none | Skipped |
+| moved into a chat (routine row only) | neutral + border | none | In a chat |
 
 ### R1.5 Follow-ups in a chat (`manta-routines-followups`)
 Head: `<Eyebrow>`"Follow-ups in a chat" + count + hint " · these run inside an existing chat instead of starting a new one".
@@ -161,7 +163,8 @@ Column as R1.
 - glyph tile `w-10 h-10 rounded-lg bg-accent-bg text-accent-tx` (icon 20)
 - `h1 text-display font-semibold`; facts row `mt-2 flex flex-wrap gap-2` of `<Chip>`s: Clock cadence · Folder path (mono: wrap content in `font-mono`) · Eye "Read-only" | Pencil "Can make changes" · Sparkles model+effort · Bell notify policy · and the destination chip `<Chip on>` (CalendarClock) "New session each run" + ChevronDown → `Dropdown` with two `MenuOption`s: "New session each run" (selected) / "Inside a chat…" (opens R7).
 - `mt-3 text-label text-text-faint` "Next run **<b class='font-semibold text-text'>tomorrow at 9:00</b>** · 23 runs since 1 Oct · about 41k tokens a run"
-- right `ml-auto flex gap-2`: `<Button tone="default">`(Pencil) Edit (opens R4 prefilled) · `<Button tone="default">`(Pause/Play) Pause|Resume · `<Button tone="primary">`(Play) Run now.
+- right `ml-auto flex gap-2`: `<Button tone="default">`(Pencil) Edit (opens R4 prefilled) · `<Button tone="default">`(Pause/Play) Pause|Resume · `<Button tone="primary">`(Play) Run now. "Run now" when a run is already waiting shows the inline `text-meta text-text-faint` note "Already waiting in line" next to the buttons for 4 s.
+A routine moved into a chat replaces Pause/Run now with `<Button tone="default">Move back to Routines</Button>`, shows `<Callout tone="info" size="note">` "Runs inside <chat> every <cadence>." under the hero, and the destination chip reads "Inside <chat>".
 
 **Two columns** `mt-8 grid grid-cols-[minmax(0,1fr)_320px] gap-6 items-start`:
 
@@ -174,7 +177,7 @@ Left — Runs: section head (`<Eyebrow>`Runs + count + "Findings only" link togg
 Paginated: 30 rows, then "Show older" text-link.
 
 Right — `flex flex-col gap-4`, three boxes:
-1. **What it remembers** (`manta-routines-memory`): head `flex items-center gap-2 px-4 pt-3` NotebookText(14, text-text-faint) + `text-label font-semibold text-text` title + `ml-auto` `<IconButton icon={<Pencil/>} label="Edit memory"/>`; sub `px-4 pt-1 text-meta text-text-quiet` "Every run reads this first and updates it at the end. Last changed by <run label>."; body `<OutputWell variant="standalone">` (mono, `text-meta`, `whitespace-pre-wrap`), margin `mx-4 mt-3 mb-4`. Lines added by the most recent run are wrapped in `<span class="bg-diff-add rounded-xs">`. Lines starting with `## ` render `font-semibold text-text`. Edit → the body becomes a mono `<textarea>` with the Field chrome + Save/Cancel `<Button>`s; a "Clear" `<Button tone="danger">` sits in the edit footer.
+1. **What it remembers** (`manta-routines-memory`): head `flex items-center gap-2 px-4 pt-3` NotebookText(14, text-text-faint) + `text-label font-semibold text-text` title + `ml-auto` `<IconButton icon={<Pencil/>} label="Edit memory"/>`; sub `px-4 pt-1 text-meta text-text-quiet` "Every run reads this first and updates it at the end. Last changed by <run label>."; body `<OutputWell variant="standalone">` (mono, `text-meta`, `whitespace-pre-wrap`), margin `mx-4 mt-3 mb-4`. Lines added by the most recent run are wrapped in `<span class="bg-diff-add rounded-xs">`. Lines starting with `## ` render `font-semibold text-text`. Edit → the body becomes `<Field multiline mono rows={12}>` + Save/Cancel `<Button>`s; a "Clear" `<Button tone="danger">` sits in the edit footer.
 2. **Instructions**: same head (MessageCircle) + `<IconButton>`Pencil (opens R4); body `mx-4 mt-3 mb-4 text-label text-text-muted` with `$skill` tokens rendered as `inline-flex rounded-full bg-accent-bg px-2 font-mono text-meta text-accent-tx`.
 3. **Settings list**: `<dl class="grid grid-cols-[96px_1fr] gap-x-3 gap-y-2 px-4 pt-3 pb-4 text-meta">` dt `text-text-quiet`, dd `text-text-muted`: Triggers ("Schedule · Run now"), Missed runs ("Run once on catch-up, up to 6h late"), Keeps ("30 days of runs; unread runs are never deleted").
 
@@ -182,7 +185,7 @@ Right — `flex flex-col gap-4`, three boxes:
 
 The run's transcript IS the existing `ChatPanel` mounted on the run's session id. Two
 additions only:
-- **Header**: ChatPanel's `SessionHeader` with the crumb replaced by `Routines / <routine> / <Thu 30 Oct · 9:02>` and a `<Tag icon={<Eye/>}>read-only</Tag>` (or `<Tag icon={<GitBranch/>}>{branch}</Tag>` for edit routines). Right side prepends `<Button tone="default">`(PanelLeftOpen) "Keep in sidebar".
+- **Header**: ChatPanel's `SessionHeader` with the session menu HIDDEN and the crumb replaced by `Routines / <routine> / <Thu 30 Oct · 9:02>` and a `<Tag icon={<Eye/>}>read-only</Tag>` (or `<Tag icon={<GitBranch/>}>{branch}</Tag>` for edit routines). Right side prepends `<Button tone="default">`(PanelLeftOpen) "Keep in sidebar".
 - **Run bar** below the header (`manta-routines-runbar`): `flex items-center gap-3 px-6 py-2 bg-bg-elev border-b border-border-subtle text-meta text-text-faint` — CalendarClock(14, text-accent-tx), `<b class="font-semibold text-text">Scheduled run</b>` (or "Manual run" / "Catch-up run" / "Webhook run") · started 9:02 · 2m 14s · 38.2k tokens; right `ml-auto flex gap-2`: `<Button tone="ghost">‹ Wed</Button>` `<Button tone="ghost" disabled>Fri ›</Button>` (prev/next run of the same routine).
 - **Transcript**: the routine's prompt renders as the first user turn. It is the normal `MessageBubble`, with an `<Eyebrow>`-styled label row inside it ("Routine instructions", CalendarClock 12). Above it a divider row `flex items-center gap-2 text-meta font-medium text-text-faint` (Clock 12 text-accent-tx · cadence text · `flex-1 h-px bg-border-subtle`). The memory read/update show up as ordinary collapsed tool lines (they ARE tool calls).
 - **Report card** (`manta-routines-report`) — rendered after the last assistant message when the run has a report. Chrome = the permission/ask card chrome (`rounded-lg border border-border bg-bg-soft shadow-md overflow-hidden`):
@@ -197,11 +200,11 @@ Body `px-5 py-4 flex flex-col gap-4 overflow-y-auto`. Footer `flex items-center 
 
 Fields (labels use Field's `LABEL_CLS`; help uses `text-meta text-text-faint`):
 1. **Name** — `<Field mono={false}>`.
-2. **What should it do each time?** — multiline: a `<textarea>` with Field's input chrome (`w-full bg-bg-soft border border-border-strong rounded-md text-body text-text px-3 py-3 focus:border-accent`), `min-h-24`. Help: "Write it for someone starting fresh each time. Tip: try it once in a normal chat first."
+2. **What should it do each time?** — `<Field multiline rows={4} mono={false}>`. `multiline` is a NEW prop on the existing Field primitive (renders a `<textarea>` with the same INPUT_BASE chrome, `resize-y`); adopters in this feature: this field, the memory editor (R2) and the convert modal (R6). Help: "Write it for someone starting fresh each time. Tip: try it once in a normal chat first."
 3. Row `grid grid-cols-2 gap-3`: **Folder** (opens the existing `FolderPickerModal`; display = Field look, mono, Folder icon leading, ChevronDown trailing) · **Model** (`<SplitChip>`-free: a Field-look button that opens the existing `ModelMenu`; "Default" when unset).
-4. **When** — segmented control `inline-flex flex-wrap gap-1 rounded-md bg-fill p-1`; segment `rounded-sm px-2 py-1 text-meta font-medium text-text-faint`, active `bg-bg-soft text-text shadow-sm` (this is the Settings `SegmentedField` look — reuse that component if it is exported; else lift it into a shared primitive and migrate Settings in the same PR, per the two-adopter rule). Options: Hourly · Daily · Weekdays · Weekly · Monthly · Custom. Second row depends on choice: Weekly → day segmented (Mon..Sun, multi-select) + time Field (`w-24`, mono, `HH:MM`); Daily/Weekdays → time Field; Monthly → day-of-month Field + time; Hourly → minute Field ("at :MM"); Custom → cron Field (mono) + live `describeCron` preview. Help line `text-meta text-text-quiet`: "box time · <IANA tz> · first run <date>".
+4. **When** — the existing `<ChipGroup>` (Chip.tsx; Settings' `SegmentedField` wraps it). Options: Hourly · Daily · Weekdays · Weekly · Monthly · Custom. Second row depends on choice: Weekly → seven `<Chip on>` day toggles (Mon..Sun, multi-select) in an `inline-flex flex-wrap gap-2` wrapper + time Field (`w-24`, mono, `HH:MM`); Daily/Weekdays → time Field; Monthly → day-of-month Field + time; Hourly → minute Field ("at :MM"); Custom → cron Field (mono) + live `describeCron` preview. Help line `text-meta text-text-quiet`: "box time · <IANA tz> · first run <date>".
 5. **What it's allowed to do** — `grid grid-cols-2 gap-2` of two radio cards: `flex gap-2 rounded-md border border-border bg-bg-soft p-3 cursor-pointer`, selected `border-accent bg-accent-bg`; radio dot 16px `rounded-full border-2 border-border-strong`, selected `border-accent-solid` with an 8px `bg-accent-solid` inner dot; title `text-label font-semibold text-text`, sub `text-meta text-text-faint`. "Read and report — Can read files, run commands and use your connectors. File edits are blocked." / "Make changes — Works on its own branch each run and can open a draft PR."
-6. **Tell me** — segmented: When it finds something · Every run · Only if it fails · Never.
+6. **Tell me** — `<ChipGroup>`: When it finds something · Every run · Only if it fails · Never.
 7. `<Callout tone="info" size="note">` with NotebookText: "Each run starts fresh but reads **what the routine remembers** from earlier runs, then updates it. You can read and edit that on the routine's page."
 
 Validation errors render under the field as `text-meta text-danger`. Create is disabled until name, instructions, folder and a valid schedule exist.
@@ -219,8 +222,8 @@ Footer `flex gap-2 px-4 py-2 border-t border-border-subtle bg-bg-elev`: `<Button
 
 Body blocks (gap-4):
 1. "from" strip: `flex items-center gap-3 rounded-md border border-border-subtle bg-bg-elev px-3 py-2` — MessageCircle · `text-label font-semibold text-text` prompt / `text-meta text-text-quiet` "<cadence> · runs inside “<session>”" · `ml-auto flex items-center gap-1 text-meta font-semibold text-accent-tx` ChevronRight "New session each run".
-2. **Instructions, rewritten to make sense without the chat**: box `rounded-md border border-border-subtle overflow-hidden`; old `bg-diff-del px-3 py-2 text-label text-text-muted line-through`; new `border-t border-border-subtle bg-bg-soft px-3 py-2 text-body text-text` — an editable textarea (same text). Help "A fresh session can't see the chat, so “this week” and “billing” are spelled out. Edit freely." While the rewrite is generating: the new block shows `MantaLoader size="inline"` + "Rewriting…"; on failure it falls back to the original text with a `text-meta text-warn` note "Couldn't rewrite automatically — edit it so it stands alone."
-3. **It will start out knowing**: `<OutputWell variant="standalone">` (mono, editable on click) + help "Taken from the chat. This becomes the routine's memory, and every run reads and updates it."
+2. **Instructions, rewritten to make sense without the chat**: box `rounded-md border border-border-subtle overflow-hidden`; old `bg-diff-del px-3 py-2 text-label text-text-muted line-through`; new = `<Field multiline mono={false} rows={4}>` directly under the struck-through old text. Help "A fresh session can't see the chat, so “this week” and “billing” are spelled out. Edit freely." While the rewrite is generating: the new block shows `MantaLoader size="inline"` + "Rewriting…"; on failure it falls back to the original text with a `text-meta text-warn` note "Couldn't rewrite automatically — edit it so it stands alone."
+3. **It will start out knowing**: `<Field multiline mono rows={6}>` + help "Taken from the chat. This becomes the routine's memory, and every run reads and updates it."
 4. `grid grid-cols-[1.3fr_1fr_1fr] gap-2` of read-only Field-look boxes: Folder · When · Allowed to (each opens its editor inline on click).
 5. Checklist `flex flex-col gap-1 text-meta text-text-faint`, each item `flex gap-2` with Check(14, text-ok): the three sentences from the mockup.
 Footer: Test run now · Cancel · `<Button tone="primary">Make it a routine</Button>`.

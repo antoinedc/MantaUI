@@ -353,10 +353,10 @@ body { background: var(--panel); color: var(--tx1); font: 400 15px/var(--ui-lh) 
 .tarea{min-height:96px;border:1px solid var(--accent);border-radius:var(--r-md);background:var(--card);padding:var(--sp-3);font:400 14px/1.55 var(--font-sans);color:var(--tx1)}
 .tarea .cur{display:inline-block;width:2px;height:16px;background:var(--accent);vertical-align:-3px;animation:pulse 1s steps(1) infinite}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)}
-/* Segmented control = Settings' SegmentedField chrome (bg-fill p-1 rounded-md; active segment bg-bg-soft shadow-sm text-text). */
-.seg{display:inline-flex;flex-wrap:wrap;background:var(--fill);border-radius:var(--r-md);padding:var(--sp-1);gap:var(--sp-1)}
-.seg span{padding:var(--sp-1) var(--sp-2);border-radius:var(--r-sm);font:500 12px/1.4 var(--font-sans);color:var(--tx3);cursor:pointer;white-space:nowrap}
-.seg span.on{background:var(--card);color:var(--tx1);box-shadow:var(--shadow-sm)}
+/* Option groups = <ChipGroup> (Chip chrome: h-[29px] rounded-md border border-border bg-bg-soft text-meta text-text-muted px-[11px]; on = border-accent bg-accent-bg text-accent-tx). */
+.seg{display:inline-flex;flex-wrap:wrap;gap:var(--sp-2)}
+.seg span{display:inline-flex;align-items:center;height:29px;padding:0 11px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--card);font:400 12px/1 var(--font-sans);color:var(--tx2);cursor:pointer;white-space:nowrap}
+.seg span.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent-tx)}
 .when{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
 .when .inp{width:96px}
 .when .tz{font:400 12px/1.4 var(--font-sans);color:var(--tx4)}
@@ -501,7 +501,6 @@ body { background: var(--panel); color: var(--tx1); font: 400 15px/var(--ui-lh) 
       <div class="screen on" data-screen="overview">
         <div class="topb">
           <span class="crumb">Routines</span>
-          <span class="sp"><button class="iconbtn" title="More"><svg class="ic"><use href="#i-more"/></svg></button></span>
         </div>
         <div class="scroll">
           <div class="page">
@@ -577,7 +576,7 @@ body { background: var(--panel); color: var(--tx1); font: 400 15px/var(--ui-lh) 
             </div>
 
             <div class="sec">
-              <div class="sec-h"><h3>Your routines</h3><span class="n">7</span><span class="r"><button class="link">All projects ▾</button></span></div>
+              <div class="sec-h"><h3>Your routines</h3><span class="n">7</span></div>
               <div class="box">
                 <div class="rt-head"><span>Routine</span><span>When</span><span>Last run</span><span>Next</span><span></span></div>
                 <div class="rt-row" data-go="detail">
@@ -655,7 +654,6 @@ body { background: var(--panel); color: var(--tx1); font: 400 15px/var(--ui-lh) 
       <div class="screen" data-screen="detail">
         <div class="topb">
           <span class="crumb"><span class="mut" data-go="overview">Routines</span><span class="slash">/</span>Daily analytics digest</span>
-          <span class="sp"><button class="iconbtn" title="More"><svg class="ic"><use href="#i-more"/></svg></button></span>
         </div>
         <div class="scroll">
           <div class="page">
@@ -736,7 +734,6 @@ checkout error rate ≈ 2%
           <span class="sp">
             <button class="btn"><svg class="ic"><use href="#i-sidebar-add"/></svg>Keep in sidebar</button>
             <button class="iconbtn" title="Artifacts"><svg class="ic"><use href="#i-panel"/></svg></button>
-            <button class="iconbtn" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
           </span>
         </div>
         <div class="runbar">
@@ -830,7 +827,7 @@ checkout error rate ≈ 2%
               <div class="fld">
                 <label>What it's allowed to do</label>
                 <div class="rcs">
-                  <div class="rc on"><span class="rb"></span><span><b>Read and report</b><small>Can read files, run commands and use your connectors. File edits are blocked.</small></span></div>
+                  <div class="rc on"><span class="rb"></span><span><b>Read and report</b><small>Can read files, run commands and use your connectors. Its edit tools are off; commands still run in your folder.</small></span></div>
                   <div class="rc"><span class="rb"></span><span><b>Make changes</b><small>Works on its own branch each run and can open a draft PR.</small></span></div>
                 </div>
               </div>
