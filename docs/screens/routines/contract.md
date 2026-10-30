@@ -18,11 +18,10 @@ they decide review outcomes):
    `text-label`(13) `text-meta`(12) `text-micro`(11) `text-code`(13).
 3. **No new tokens.** Primitive changes in this feature (each a variant/prop on an existing primitive, recorded in `docs/components.md` + `src/renderer/primitives.test.ts` in the same PR): `Pill` tone `danger`; `StatusDot` tone `accent` (static); `Field` prop `multiline` (+`rows`).
     Every value used here resolves to an existing token. The ONLY
-   primitive change is one new tone on `Pill`: `danger` → `"bg-danger-bg text-danger"`
-   (a variant on an existing primitive; it already has two adopters in this feature —
-   the outcome pill and the "Needs you" pill — and must be added to the Pill
-   comment block and `docs/components.md`). Likewise `StatusDot` gains one static tone
-   `accent` (`bg-accent`, no pulse) for the "Findings" pill.
+   primitive changes are the three listed above: `Pill` tone `danger` →
+   `"bg-danger-bg text-danger"`; `StatusDot` static tone `accent` (`bg-accent`, no pulse);
+   `Field` `multiline` + `rows`. Each is added to the primitive's comment block and to
+   `docs/components.md` (also record the existing, undocumented `Callout size: md|note`).
 4. Every new region carries a `manta-routines-*` hook class (listed below) so the
    visual registry can crop it. Hooks carry no styles.
 5. Colour mapping used below: `text-text`=--tx1, `text-text-muted`=--tx2,
@@ -31,7 +30,7 @@ they decide review outcomes):
    `bg-inset`=--inset, `bg-fill`/`bg-fill-hover`/`bg-fill-active`, `border-border-subtle`,
    `border-border`, `border-border-strong`, `text-accent-tx`, `bg-accent-bg`,
    `bg-accent-solid`, `text-on-accent`, `bg-danger-bg`, `text-danger`, `bg-warn-bg`,
-   `text-warn`, `bg-ok-bg`, `text-ok`, `bg-diff-add`, `bg-diff-del`. If a utility
+   `text-warn`, `bg-ok-bg`, `text-ok`, `bg-[var(--diff-add)]`, `bg-[var(--diff-del)]`. If a utility
    above does not exist in `tailwind.config.js` yet, add the colour key mapping to the
    existing CSS variable there (config wiring, not a new token).
 
@@ -177,7 +176,7 @@ Left — Runs: section head (`<Eyebrow>`Runs + count + "Findings only" link togg
 Paginated: 30 rows, then "Show older" text-link.
 
 Right — `flex flex-col gap-4`, three boxes:
-1. **What it remembers** (`manta-routines-memory`): head `flex items-center gap-2 px-4 pt-3` NotebookText(14, text-text-faint) + `text-label font-semibold text-text` title + `ml-auto` `<IconButton icon={<Pencil/>} label="Edit memory"/>`; sub `px-4 pt-1 text-meta text-text-quiet` "Every run reads this first and updates it at the end. Last changed by <run label>."; body `<OutputWell variant="standalone">` (mono, `text-meta`, `whitespace-pre-wrap`), margin `mx-4 mt-3 mb-4`. Lines added by the most recent run are wrapped in `<span class="bg-diff-add rounded-xs">`. Lines starting with `## ` render `font-semibold text-text`. Edit → the body becomes `<Field multiline mono rows={12}>` + Save/Cancel `<Button>`s; a "Clear" `<Button tone="danger">` sits in the edit footer.
+1. **What it remembers** (`manta-routines-memory`): head `flex items-center gap-2 px-4 pt-3` NotebookText(14, text-text-faint) + `text-label font-semibold text-text` title + `ml-auto` `<IconButton icon={<Pencil/>} label="Edit memory"/>`; sub `px-4 pt-1 text-meta text-text-quiet` "Every run reads this first and updates it at the end. Last changed by <run label>."; body `<OutputWell variant="standalone">` (mono, `text-meta`, `whitespace-pre-wrap`), margin `mx-4 mt-3 mb-4`. Lines added by the most recent run are wrapped in `<span class="bg-[var(--diff-add)] rounded-xs">`. Lines starting with `## ` render `font-semibold text-text`. Edit → the body becomes `<Field multiline mono rows={12}>` + Save/Cancel `<Button>`s; a "Clear" `<Button tone="danger">` sits in the edit footer.
 2. **Instructions**: same head (MessageCircle) + `<IconButton>`Pencil (opens R4); body `mx-4 mt-3 mb-4 text-label text-text-muted` with `$skill` tokens rendered as `inline-flex rounded-full bg-accent-bg px-2 font-mono text-meta text-accent-tx`.
 3. **Settings list**: `<dl class="grid grid-cols-[96px_1fr] gap-x-3 gap-y-2 px-4 pt-3 pb-4 text-meta">` dt `text-text-quiet`, dd `text-text-muted`: Triggers ("Schedule · Run now"), Missed runs ("Run once on catch-up, up to 6h late"), Keeps ("30 days of runs; unread runs are never deleted").
 
@@ -222,7 +221,7 @@ Footer `flex gap-2 px-4 py-2 border-t border-border-subtle bg-bg-elev`: `<Button
 
 Body blocks (gap-4):
 1. "from" strip: `flex items-center gap-3 rounded-md border border-border-subtle bg-bg-elev px-3 py-2` — MessageCircle · `text-label font-semibold text-text` prompt / `text-meta text-text-quiet` "<cadence> · runs inside “<session>”" · `ml-auto flex items-center gap-1 text-meta font-semibold text-accent-tx` ChevronRight "New session each run".
-2. **Instructions, rewritten to make sense without the chat**: box `rounded-md border border-border-subtle overflow-hidden`; old `bg-diff-del px-3 py-2 text-label text-text-muted line-through`; new = `<Field multiline mono={false} rows={4}>` directly under the struck-through old text. Help "A fresh session can't see the chat, so “this week” and “billing” are spelled out. Edit freely." While the rewrite is generating: the new block shows `MantaLoader size="inline"` + "Rewriting…"; on failure it falls back to the original text with a `text-meta text-warn` note "Couldn't rewrite automatically — edit it so it stands alone."
+2. **Instructions, rewritten to make sense without the chat**: box `rounded-md border border-border-subtle overflow-hidden`; old `bg-[var(--diff-del)] px-3 py-2 text-label text-text-muted line-through`; new = `<Field multiline mono={false} rows={4}>` directly under the struck-through old text. Help "A fresh session can't see the chat, so “this week” and “billing” are spelled out. Edit freely." While the rewrite is generating: the new block shows `MantaLoader size="inline"` + "Rewriting…"; on failure it falls back to the original text with a `text-meta text-warn` note "Couldn't rewrite automatically — edit it so it stands alone."
 3. **It will start out knowing**: `<Field multiline mono rows={6}>` + help "Taken from the chat. This becomes the routine's memory, and every run reads and updates it."
 4. `grid grid-cols-[1.3fr_1fr_1fr] gap-2` of read-only Field-look boxes: Folder · When · Allowed to (each opens its editor inline on click).
 5. Checklist `flex flex-col gap-1 text-meta text-text-faint`, each item `flex gap-2` with Check(14, text-ok): the three sentences from the mockup.

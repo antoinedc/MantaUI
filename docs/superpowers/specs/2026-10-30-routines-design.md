@@ -79,7 +79,7 @@ export interface Routine {
   prompt: string;             // instructions, 1..8000 chars
   icon: RoutineIcon;          // default "calendar-clock"
   directory: string;          // absolute (tilde expanded server-side), must exist
-  projectName: string | null; // resolved server-side on read: the tmux project whose window cwd is directory or a parent of it; null if none (UI falls back to basename(directory))
+  projectName: string | null; // resolved server-side on read: the tmux project with the LONGEST window cwd that equals or is a parent of directory, ignoring a cwd equal to $HOME; null if none (UI falls back to basename(directory))
   cron: string;               // 5-field, box-local time; validated with croner
   access: RoutineAccess;      // default "read"
   model: { providerID: string; modelID: string; variant?: string } | null; // null = opencode default
@@ -115,8 +115,8 @@ export interface RoutineRun {
   queuedAt: number;
   startedAt: number | null;
   endedAt: number | null;
-  sessionID: string | null;    // set when the session is created
-  worktree: { path: string; branch: string } | null; // access:"edit" only
+  sessionID: string | null;    // pre-minted and persisted at dispatch (§4.2 step 1), before the session exists
+  worktree: { path: string; branch: string; baseSha: string } | null; // access:"edit" only; baseSha = `git rev-parse HEAD` in the new worktree right after creation
   report: RoutineReport | null;
   error: string | null;        // human sentence, e.g. "PostHog returned 401" or "timed out after 30 minutes"
   notes: string[];             // human sentences shown under the title: "Waited 6 min in line behind Dependency audit", "Caught up at 9:41: the box was restarting at 9:00"
@@ -167,7 +167,7 @@ Validation (server, every write): name/prompt length; `directory` exists and is 
 directory; cron valid per croner in 5-field mode (`mode:"5-part"`) **and** no two of its next
 20 occurrences are less than 15 minutes apart (reject `*/5` etc. with "Routines can run at most every 15 minutes — use a
 follow-up in a chat for faster checks"); icon in the set; notify/access enums;
-`catchUpHours` 0..24 (0 = never catch up: every missed slot becomes a `skipped` record). Errors are 400 `{error: "<human sentence>"}`.
+`catchUpHours` 0..24 (0 = never catch up: a missed occurrence becomes ONE `skipped` record per tick, with the number of missed slots in its note). Errors are 400 `{error: "<human sentence>"}`.
 
 Config: `routinesConcurrency` in `~/.manta/config.json` (integer 1..5, default 2), read
 per tick. No Settings UI in v1.
@@ -279,7 +279,9 @@ computes `memoryDiff.added` (lines in new not in old, trimmed, non-empty), sets
 `routine.memoryUpdatedByRunId`. Returns `{ok:true}`; a session that is not a routine
 run gets 400 `{error:"routine_report only works inside a routine run"}`. Calling it
 again overwrites (last wins), at most 3 accepted calls per run (`reportCount`), then
-400. The tool always sends its OWN `context.sessionID`; a bearer holder could still
+400. The report is also refused (400 "this run has already finished") unless the run
+is `running` or `needs_input` — after settle only the human memory editor writes
+memory. The tool always sends its OWN `context.sessionID`; a bearer holder could still
 target another live run's session id, which is accepted as the box's trust model
 (single user) — memory is therefore treated as untrusted data (the delimited block in
 `buildRunPrompt`).
@@ -301,7 +303,9 @@ Every handler ignores runs that are already terminal.
   `question` = the form's first field label / "Allow <tool>: <pattern>?", notify
   (blocking tier, §6.3), publish; frees its slot (dispatch runs).
 - `form.replied` / `form.cancelled` / `permission.replied` → back to `running`
-  (does not need a slot — the user is present; it may exceed the cap briefly).
+  immediately, without waiting for a slot (the user is present and waiting for the
+  answer to take effect). Invariant: `running` may exceed `concurrency` only by runs
+  resumed this way; dispatch of `queued` runs still waits until `running < concurrency`.
 - `session.execution.succeeded|failed|interrupted` → **settle**: confirm the session
   is not in `oc.listActiveSessionIds()` (if it is, wait for the next event / sweep).
   Then:
@@ -330,7 +334,7 @@ Every handler ignores runs that are already terminal.
 Prune runs that are terminal AND read AND not `keptInSidebar` AND older than 30 days,
 and anything beyond the newest 200 runs per routine under the same conditions. Pruning
 deletes the opencode session (`oc.deleteSessionRaw`) and the run's worktree ONLY if it
-is clean (no uncommitted or untracked changes, no commits ahead of its base) — a dirty
+is clean (no uncommitted or untracked changes, no commits ahead of `worktree.baseSha`, checked with `git rev-list --count <baseSha>..<branch>`) — a dirty
 worktree and its branch are left on disk and the record is dropped with a server log
 line; a worktree is never force-removed. The same rule applies when a routine is
 deleted. Unread,
@@ -347,7 +351,7 @@ survive as ordinary sidebar sessions.
 | `routines:summary` | `routinesSummary()` | — | `RoutinesSummary` |
 | `routines:get` | `routinesGet(id, opts?)` | `id, {beforeSeq?: number /*page cursor: runs with seq < beforeSeq*/, findingsOnly?: boolean}` | `RoutineDetail` |
 | `routines:create` | `routinesCreate(input)` | `RoutineInput` (below) | `Routine` |
-| `routines:update` | `routinesUpdate(id, patch)` | `Partial<RoutineInput> & {enabled?: boolean}` | `Routine` |
+| `routines:update` | `routinesUpdate(id, patch)` | `Partial<RoutineInput>` | `Routine` |
 | `routines:delete` | `routinesDelete(id)` | `id` | `{deleted: boolean}` |
 | `routines:run-now` | `routinesRunNow(id)` | `id` | `{run: RoutineRun, alreadyQueued: boolean}` |
 | `routines:run-get` | `routinesRunGet(runId)` | `runId` | `{run: RoutineRun, routine: Routine, prevRunId: string\|null, nextRunId: string\|null}` |
@@ -472,7 +476,7 @@ continue the run's session in place (the run record does not change status).
 "Keep in sidebar" → server `routines:keep-in-sidebar`: target project = (1) the tmux
 session whose window cwd equals or is a parent of the run's directory, else (2) the
 project of `routine.createdFrom.sessionID` if that window still exists, else (3) a NEW
-project (tmux session) named `basename(directory)` with that cwd; `tmux.newWindow({chatMode:true, existingSessionId: run.sessionID, name: routine.name})`,
+project (tmux session) named `basename(directory)` with that cwd; `tmux.newWindow({sessionName, windowName: routine.name, cwd, chatMode: true, existingSessionId: run.sessionID, oc})` (`existingSessionId` is already supported — delegate uses it; do not rebuild it),
 set `keptInSidebar`. The renderer then switches to that window (closes the pane).
 
 "Fix it in a new session" (report footer) → opens the existing new-session draft in the
@@ -544,7 +548,7 @@ preset that reproduces it exactly, else Custom.
   The R1 table row shows Pill neutral+border "In a chat" in Last run and "—" in Next.
 
 `routines:move-to-routines(id)` deletes the linked follow-up (if it still exists),
-sets destination `new-session`, recomputes `nextRunAt`.
+sets destination `new-session`, sets `enabled:true`, recomputes `nextRunAt`.
 
 Orphans: if a moved routine's follow-up job no longer exists OR is `disabled` (e.g.
 schedule.mjs auto-disabled it because the folder vanished), `tick` sets the routine `enabled:false` and lists it in
