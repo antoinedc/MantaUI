@@ -4,6 +4,8 @@ Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) a
 1440×900 against `docs/screens/routines/mockup.html`. Baselines recorded for the
 seven `routines-*` rows only. Differences left on purpose or open:
 
+Last reviewed: 2026-10-30 (2e1604d8)
+
 ## Deliberate
 
 - **Demo clock is Thu 30 Oct 2025 10:01** (not the shared 2023 `DEMO_T0`) so the
