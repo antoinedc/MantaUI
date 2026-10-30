@@ -19,6 +19,7 @@ import {
   routineIcon,
   runDateParts,
   runDuration,
+  runTitle,
   scheduleToCron,
   splitInstructions,
   whenLabel,
@@ -223,5 +224,18 @@ describe("icons + routine tool parts", () => {
     expect(routineIdOfToolPart({ state: { output: "Created routine \"X\" (id 4f5e6d7c). Next run: tomorrow 9:00" } })).toBe("4f5e6d7c");
     expect(routineIdOfToolPart({ state: { input: { id: "11223344" }, output: "Updated." } })).toBe("11223344");
     expect(routineIdOfToolPart({ state: { output: "no id here" } })).toBeNull();
+  });
+});
+
+describe("runTitle", () => {
+  it("never repeats the outcome pill: an in-progress or plain run has no title of its own", () => {
+    expect(runTitle(run({ status: "running", endedAt: null }))).toBe("");
+    expect(runTitle(run({ status: "queued", startedAt: null, endedAt: null }))).toBe("");
+    expect(runTitle(run({ status: "done" }))).toBe("");
+  });
+  it("uses the report title, the error, or the question", () => {
+    expect(runTitle(run({ report: { outcome: "findings", title: "Signups up", summary: "", body: "" } as never }))).toBe("Signups up");
+    expect(runTitle(run({ status: "failed", error: "Session crashed" }))).toBe("Session crashed");
+    expect(runTitle(run({ status: "needs_input", question: "Which env?" }))).toBe("Which env?");
   });
 });

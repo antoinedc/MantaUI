@@ -144,11 +144,10 @@ Header row + rows share `grid grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,
 | skipped (missed while the box was off) | neutral + border | none | Skipped |
 | moved into a chat (routine row only) | neutral + border | none | In a chat |
 
-### R1.5 Follow-ups in a chat (`manta-routines-followups`)
-Head: `<Eyebrow>`"Follow-ups in a chat" + count + hint " · these run inside an existing chat instead of starting a new one".
-Row `flex items-center gap-3 px-4 py-3 border-t border-border-subtle first:border-t-0 text-label font-medium text-text-muted`:
-`<MessageCircle size={14} class="text-text-faint"/>` · text column (prompt first line, then `text-meta text-text-quiet` "<cadence> · in <a class=text-accent-tx>Session name</a>" — link opens that sidebar session) ·
-`ml-auto text-meta font-mono text-text-faint` next-fire · recurring → `<Button tone="ghost">`(CalendarClock) "Make it a routine" (opens R6); one-time → `w-40 text-right text-meta text-text-quiet` "one-time".
+### R1.5 Follow-ups in a chat — removed (2026-10-30)
+The Routines page no longer lists follow-ups. "Make it a routine" (opens R6) is a button
+on each recurring prompt row of the chat's ⏰ scheduled-tasks card (`ScheduledTasksCard`,
+`text-label` bordered accent mini-button beside Cancel).
 
 ### E1 — Empty state (no routines at all)
 In place of all sections: `<Card>` with header glyph tile (CalendarClock, accent tile `bg-accent-bg text-accent-tx`), `text-body font-semibold` "No routines yet", `text-label text-text-faint` "Ask in any chat — “every weekday at 9, summarize yesterday's analytics” — or create one here.", actions `<Button tone="primary">New routine</Button>`.

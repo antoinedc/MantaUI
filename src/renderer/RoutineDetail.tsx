@@ -38,6 +38,7 @@ import {
   PageColumn,
   RoutineGlyph,
   RoutinesHeader,
+  ShowMore,
   SectionHead,
   TextLink,
   useNowMs,
@@ -370,7 +371,7 @@ export function RoutineDetail({
                       </div>
                     ) : (
                       <OutputWell variant="standalone">
-                        <div className="whitespace-pre-wrap text-meta leading-relaxed">
+                        <ShowMore lines={6} className="whitespace-pre-wrap text-meta leading-relaxed">
                           {memory.trim() === ""
                             ? "(nothing yet — the first run will write it)"
                             : memoryLines(memory, memRun?.memoryDiff?.added).map((l, i, all) => (
@@ -385,7 +386,7 @@ export function RoutineDetail({
                                   {i < all.length - 1 ? "\n" : ""}
                                 </span>
                               ))}
-                        </div>
+                        </ShowMore>
                       </OutputWell>
                     )}
                   </div>
@@ -400,16 +401,18 @@ export function RoutineDetail({
                     <IconButton icon={<Pencil />} label="Edit instructions" onClick={edit} />
                   </span>
                 </div>
-                <div className="mx-4 mb-4 mt-3 whitespace-pre-wrap text-label text-text-muted">
-                  {splitInstructions(routine.prompt).map((p, i) =>
-                    p.kind === "skill" ? (
-                      <span key={i} className="inline-flex rounded-full bg-accent-bg px-2 font-mono text-meta text-accent-tx">
-                        {p.text}
-                      </span>
-                    ) : (
-                      <span key={i}>{p.text}</span>
-                    ),
-                  )}
+                <div className="mx-4 mb-4 mt-3">
+                  <ShowMore lines={5} className="whitespace-pre-wrap text-label text-text-muted">
+                    {splitInstructions(routine.prompt).map((p, i) =>
+                      p.kind === "skill" ? (
+                        <span key={i} className="inline-flex rounded-full bg-accent-bg px-2 font-mono text-meta text-accent-tx">
+                          {p.text}
+                        </span>
+                      ) : (
+                        <span key={i}>{p.text}</span>
+                      ),
+                    )}
+                  </ShowMore>
                 </div>
               </Box>
 

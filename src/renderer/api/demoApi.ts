@@ -692,6 +692,8 @@ export const explicitMethods = {
   routinesMoveToChat: routinesStore.moveToChat,
   routinesMoveBack: routinesStore.moveBack,
   onRoutinesUpdated: () => () => {},
+  // Only the Routines states serve a chat's follow-ups; every other state keeps the Proxy fallback.
+  ...(IS_ROUTINES ? { scheduleList: routinesStore.scheduleList } : {}),
 } as const;
 
 // ===========================================================================

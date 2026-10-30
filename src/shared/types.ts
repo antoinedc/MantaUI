@@ -2479,6 +2479,8 @@ export type ScheduledJob = {
   directory: string;
   createdAt: number;
   lastFiredMinute: string | null;
+  // Set when this follow-up is a routine that was moved into the chat (routines spec §8.2).
+  routineId?: string;
 };
 
 // Subscription plan usage (BET-737) — the rolling 5-hour session window +

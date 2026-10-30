@@ -3,6 +3,7 @@
 - button "Daily analytics digest"
 - text: /\/ Thu \d+ Oct · 9:\d+ read-only/
 - button "Keep in sidebar"
+- button "Close run"
 - text: /Scheduled run · started 9:\d+ · [\d,.]+[bkmBKM]+ \d+[hmsp]+ · [\d,.]+[bkmBKM]+ tokens/
 - button "‹ Previous"
 - button "Next ›" [disabled]

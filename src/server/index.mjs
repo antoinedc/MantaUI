@@ -812,6 +812,7 @@ const routinesEngine = createRoutinesEngine({
   publish: (evt) => bus.publish(evt),
   config: () => local.configGet(),
   generateText: (a) => oc.generateText(a),
+  resolveSession: (sid) => handoffEngine.resolveAdmissionTarget(sid).target,
   schedule: {
     listJobs: () => listJobs(undefined),
     createJob: (input) => createJob(input, BUS_PUBLISH_DEPS),
@@ -4464,7 +4465,8 @@ const handleRequest = async (req, res) => {
       }
       if (req.method === "GET") {
         const sessionID = url.searchParams.get("sessionID") || undefined;
-        const jobs = await listJobs(sessionID);
+        // Include the jobs of the session's auto-handoff chain (they fire into this session).
+        const jobs = await listJobs(sessionID ? handoffEngine.chainOf(sessionID) : undefined);
         respondJson(res, 200, { jobs });
         return;
       }

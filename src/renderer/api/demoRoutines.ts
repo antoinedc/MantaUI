@@ -22,7 +22,7 @@ import type {
   RoutineRun,
   RoutinesSummary,
 } from "../../shared/routines.js";
-import type { OpencodeMessage, OpencodeModel, OpencodeSessionListItem, Project } from "../../shared/types.js";
+import type { OpencodeMessage, OpencodeModel, OpencodeSessionListItem, Project, ScheduledJob } from "../../shared/types.js";
 
 const at = (d: number, h: number, m: number, s = 0): number => new Date(2025, 9, d, h, m, s).getTime();
 const atN = (d: number, h: number, m: number): number => new Date(2025, 10, d, h, m).getTime();
@@ -660,8 +660,28 @@ export function createRoutinesStore() {
     return Promise.resolve(r);
   };
 
+  // The ⏰ card of a chat: its follow-ups as scheduled jobs (where "Make it a routine" lives).
+  function scheduleList(sessionId?: string): ScheduledJob[] {
+    return followups
+      .filter((f) => !sessionId || f.sessionID === sessionId)
+      .map((f) => ({
+        id: f.id,
+        cron: f.cron,
+        prompt: f.prompt,
+        recurring: f.recurring,
+        label: f.label,
+        kind: "prompt" as const,
+        sessionID: f.sessionID,
+        directory: "/home/dev/projects/better-ui",
+        createdAt: ROUTINES_T0,
+        lastFiredMinute: null,
+        ...(f.routineId ? { routineId: f.routineId } : {}),
+      }));
+  }
+
   return {
     summary: () => Promise.resolve(summary()),
+    scheduleList: (sessionId?: string) => Promise.resolve(scheduleList(sessionId)),
     get: (id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }) => {
       try {
         return Promise.resolve(get(id, opts));

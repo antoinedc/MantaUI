@@ -1228,3 +1228,19 @@ describe("applyConfig cacheTtl coercion", () => {
     expect(useStore.getState().cacheTtl).toBe("5m");
   });
 });
+
+// Full-pane views (CTO, Routines) close on ANY navigation, including onto the session
+// that was already active — so every navigation bumps navSeq, even a no-op selection.
+describe("navSeq", () => {
+  it("bumps on setActive (also onto the already-active window), createDraft and setActiveDraft", () => {
+    useStore.setState({ projects: [proj({ tmuxSession: "p", windows: [{ index: 0, name: "a", active: true, paneCurrentPath: "/x", opencodeSessionId: null }] })] });
+    const n0 = useStore.getState().navSeq;
+    useStore.getState().setActive("p", 0);
+    useStore.getState().setActive("p", 0);
+    expect(useStore.getState().navSeq).toBe(n0 + 2);
+    const id = useStore.getState().createDraft("new-project");
+    expect(useStore.getState().navSeq).toBe(n0 + 3);
+    useStore.getState().setActiveDraft(id);
+    expect(useStore.getState().navSeq).toBe(n0 + 4);
+  });
+});

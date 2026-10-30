@@ -1,6 +1,6 @@
 // ===== Follow-up → routine (R6) =====
 //
-// "Make it a routine" on a follow-up row. The box rewrites the follow-up's
+// "Make it a routine" on a follow-up (a row of a chat's ⏰ card). The box rewrites the follow-up's
 // instructions so they stand alone and turns what the chat knew into the
 // routine's starting memory (`routines:convert-preview`); the user edits both
 // and commits (`routines:convert-commit`), which moves the job out of the chat.
@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, Clock, Eye, Folder, MessageCircle, Pencil, Play } from "lucide-react";
 import type { FollowupRow, Routine, RoutineAccess } from "../shared/routines";
+import type { ScheduledJob } from "../shared/types";
 import { Button } from "./Button";
 import { Field, INPUT_BASE, LABEL_CLS } from "./Field";
 import { FolderPickerModal } from "./FolderPickerModal";
@@ -26,6 +27,21 @@ import { cadenceText, tildePath } from "./routinesView";
 import { resolveSessionOwner, useStore } from "./store";
 import { nextCronRun } from "./chatUtils";
 import { nowMs } from "./clock";
+
+/** A chat's scheduled job, in the shape the modal reads. */
+export function followupFromJob(j: ScheduledJob): FollowupRow {
+  return {
+    id: j.id,
+    prompt: j.prompt,
+    label: j.label ?? "",
+    cron: j.cron,
+    recurring: j.recurring,
+    sessionID: j.sessionID,
+    sessionName: null,
+    nextFireAt: null,
+    routineId: j.routineId ?? null,
+  };
+}
 
 const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 

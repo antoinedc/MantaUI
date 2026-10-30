@@ -10,6 +10,7 @@ import {
   firstCronMatchAtOrAfter,
   createJob,
   createScheduler,
+  listJobs,
 } from "./schedule.mjs";
 
 // ----------------------------------------------------------------------------
@@ -842,4 +843,17 @@ test("a rejected delivery keeps the preamble for the next firing; a queued or co
   };
   await createScheduler(h.deps).tick();
   assert.equal(h.jobs[0].preamble, "P", "a failed send never delivered it");
+});
+
+test("listJobs takes a replacement chain: a successor session lists its predecessors' jobs", async () => {
+  const jobs = [
+    { id: "a", sessionID: "ses_old" },
+    { id: "b", sessionID: "ses_new" },
+    { id: "c", sessionID: "ses_other" },
+  ];
+  const load = async () => jobs;
+  assert.deepEqual((await listJobs(["ses_old", "ses_new"], { load })).map((j) => j.id), ["a", "b"]);
+  assert.deepEqual((await listJobs("ses_new", { load })).map((j) => j.id), ["b"]);
+  assert.equal((await listJobs(undefined, { load })).length, 3);
+  assert.equal((await listJobs([], { load })).length, 3);
 });

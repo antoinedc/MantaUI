@@ -160,6 +160,7 @@ function makeWorld({ concurrency = 2 } = {}) {
     },
     schedule,
     log: (...a) => w.logs.push(a.join(" ")),
+    resolveSession: (sid) => w.replacedBy?.[sid] ?? sid,
     home: "/home/dev",
     mint: () => `ses_run${++seq}`,
     setTimer: (fn, ms) => void w.timers.push({ fn, ms }),
@@ -1455,4 +1456,14 @@ test("a routine deleted while its run is still starting leaves no orphan session
   assert.deepEqual([...new Set(w.aborted)], [w.created[0].id]);
   assert.equal(w.sessions.has(w.created[0].id), false);
   assert.equal(w.store.runs.length, 0);
+});
+
+test("summary: a follow-up created in a session that was later handed off points at the live successor", async () => {
+  const w = makeWorld();
+  w.projects = [{ tmuxSession: "better-ui", windows: [{ paneCurrentPath: "/proj", name: "Chat", index: 1, opencodeSessionId: "ses_new" }] }];
+  w.replacedBy = { ses_old: "ses_new" };
+  w.jobs.push({ id: "job00001", cron: "0 9 * * 1-5", prompt: "check deploy", label: "", recurring: true, kind: "prompt", sessionID: "ses_old" });
+  const s = await w.engine.summary();
+  assert.equal(s.followups[0].sessionID, "ses_new");
+  assert.equal(s.followups[0].sessionName, "Chat");
 });

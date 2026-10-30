@@ -13,14 +13,15 @@
 // through the transcript's memo chain.
 
 import { useContext, useEffect, useState } from "react";
-import { Bell, CalendarClock, Clock, Eye, GitBranch, PanelLeftOpen, Play } from "lucide-react";
+import { Bell, CalendarClock, Clock, Eye, GitBranch, PanelLeftOpen, Play, X } from "lucide-react";
 import { Button } from "./Button";
 import { Eyebrow } from "./Eyebrow";
+import { IconButton } from "./IconButton";
 import { MarkdownBody } from "./MarkdownBody";
 import { MessageBubble } from "./MessageBubble";
 import { OutputWell } from "./OutputWell";
 import { Tag } from "./Tag";
-import { CrumbLink, CrumbSep } from "./RoutinesParts";
+import { CrumbLink, CrumbSep, ShowMore } from "./RoutinesParts";
 import { routinesToast, runAction } from "./routinesData";
 import { RoutineRunContext, type RoutineRunBinding } from "./routineRunContext";
 import { routineIdOfToolPart, routineToolKind } from "./routineToolParts";
@@ -43,7 +44,7 @@ import { nextCronRun } from "./chatUtils";
 import type { Routine } from "../shared/routines";
 
 
-/** The SessionHeader slots of a routine run: crumb, tag and the Keep-in-sidebar button. */
+/** The SessionHeader slots of a routine run: crumb, tag, the Keep-in-sidebar button and Close (back to the list). */
 export function routineHeaderChrome(b: RoutineRunBinding) {
   const when = runCrumbLabel(b.run.startedAt ?? b.run.queuedAt);
   return {
@@ -67,10 +68,13 @@ export function routineHeaderChrome(b: RoutineRunBinding) {
         </Tag>
       ),
     lead: (
-      <Button tone="default" onClick={b.onKeep}>
-        <PanelLeftOpen size={14} aria-hidden />
-        Keep in sidebar
-      </Button>
+      <span className="flex items-center gap-2">
+        <Button tone="default" onClick={b.onKeep}>
+          <PanelLeftOpen size={14} aria-hidden />
+          Keep in sidebar
+        </Button>
+        <IconButton label="Close run" title="Close and go back to Routines" size="xl" icon={<X />} onClick={b.onBack} />
+      </span>
     ),
   };
 }
@@ -136,15 +140,17 @@ export function RoutinePromptBlock() {
             </span>
           </Eyebrow>
         </div>
-        {splitInstructions(routine.prompt).map((p, i) =>
-          p.kind === "skill" ? (
-            <span key={i} className="inline-flex rounded-full bg-accent-bg px-2 font-mono text-meta text-accent-tx">
-              {p.text}
-            </span>
-          ) : (
-            <span key={i}>{p.text}</span>
-          ),
-        )}
+        <ShowMore lines={5}>
+          {splitInstructions(routine.prompt).map((p, i) =>
+            p.kind === "skill" ? (
+              <span key={i} className="inline-flex rounded-full bg-accent-bg px-2 font-mono text-meta text-accent-tx">
+                {p.text}
+              </span>
+            ) : (
+              <span key={i}>{p.text}</span>
+            ),
+          )}
+        </ShowMore>
       </MessageBubble>
       <div className="text-meta text-text-faint">
         {lines === 0 ? (
@@ -157,7 +163,9 @@ export function RoutinePromptBlock() {
         {memOpen && lines > 0 && (
           <div className="mt-2">
             <OutputWell variant="standalone">
-              <div className="whitespace-pre-wrap text-meta">{run.memoryAtStart}</div>
+              <ShowMore lines={6} className="whitespace-pre-wrap text-meta">
+                {run.memoryAtStart}
+              </ShowMore>
             </OutputWell>
           </div>
         )}

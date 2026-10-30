@@ -4,7 +4,7 @@ Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) a
 1440×900 against `docs/screens/routines/mockup.html`. Baselines recorded for the
 seven `routines-*` rows only. Differences left on purpose or open:
 
-Last reviewed: 2026-10-30 (0223498a)
+Last reviewed: 2026-10-30 (aa171972)
 
 ## Deliberate
 
@@ -34,6 +34,15 @@ Last reviewed: 2026-10-30 (0223498a)
   mockup says 14; the "Another chat…" row opens a picker instead of an inline list.
 - **Created-from-chat card** takes its memory line count from the tool input, so the
   fixture's input has 4 lines to match the mockup.
+- **No "Follow-ups in a chat" section** on the Routines page (owner request,
+  2026-10-30: too cluttered). "Make it a routine" moved to the chat's ⏰ card, so the
+  `routines-convert` row opens the modal from there.
+- **Run header has a Close (×)** beside "Keep in sidebar" that returns to the list;
+  the mockup relies on the crumb only.
+- **Instructions and memory are clamped** (5 / 6 lines) with Show more / Show less
+  on the routine page and in a run.
+- **Run rows have no title of their own** when the outcome pill already says it all
+  (no "Running" / "Done" twice).
 - **Create editor** is typed into with real gestures by the registry row (the mockup
   is pre-filled); Folder shows the first project's folder, Model "Default".
 

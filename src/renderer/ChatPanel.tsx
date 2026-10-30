@@ -108,13 +108,14 @@ import { RoutineRunContext, type RoutineRunBinding, type RoutineRunContextValue 
 import { RoutineReportCard, RoutineRunBar, routineHeaderChrome } from "./RoutineRunParts";
 import { routineToolKind } from "./routineToolParts";
 import { SessionHeader } from "./SessionHeader";
+import { ConvertToRoutineModal, followupFromJob } from "./ConvertToRoutineModal";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap, concatUserMessageText } from "./chatUtils";
 import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import type { RowLocation } from "./toolActivity";
-import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeInboxItem, ScheduledJob, VoiceNoteRecord } from "../shared/types";
 import { planBusySend, shouldClearDraft } from "./inboxState";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
@@ -3119,6 +3120,11 @@ export function ChatPanel({
   // (Build here / Delegate / Send feedback) while their async call is in
   // flight — SQL no loading state existed before.
   const [pendingAction, setPendingAction] = useState<"build" | "delegate" | "feedback" | null>(null);
+  // "Make it a routine" from the ⏰ card (routines spec §8.1): the follow-up being converted.
+  const [convertJob, setConvertJob] = useState<ScheduledJob | null>(null);
+  const convertWindowName = useStore(
+    (s) => s.projects.find((p) => p.tmuxSession === tmuxSession)?.windows.find((w) => w.index === windowIndex)?.name ?? null,
+  );
   // Routine run (spec §6.5): the context the transcript rows read, and the tail
   // report card when the run has a report but the transcript has no routine_report call.
   const routineFirstUserId = useMemo(
@@ -3307,6 +3313,7 @@ export function ChatPanel({
             jobs={schedules}
             error={scheduleError}
             onClose={closePanel}
+            onConvert={setConvertJob}
             onDelete={(id) => {
               setSchedules((prev) => prev.filter((j) => j.id !== id));
               window.api.scheduleDelete(id).then(() => refreshSchedules()).catch((e: unknown) => {
@@ -3360,7 +3367,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [viewOnly, permissions, pendingApproval, approvalError, decideApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, inboxActionsEnabled, inboxGateNote, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [viewOnly, permissions, pendingApproval, approvalError, decideApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, inboxActionsEnabled, inboxGateNote, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, setConvertJob, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   // Previous sessions (spec §9): the chosen older session shown read-only in THIS
@@ -3668,6 +3675,22 @@ export function ChatPanel({
           onCancel={() => setConnectGithubOpen(false)}
         />
       </Modal>
+      <ConvertToRoutineModal
+        // The job may be stored under a session this chat replaced (auto-handoff), so the folder
+        // and the "runs inside" name come from THIS chat.
+        followup={convertJob && sessionId ? { ...followupFromJob(convertJob), sessionID: sessionId, sessionName: convertWindowName } : null}
+        onClose={() => setConvertJob(null)}
+        onConverted={(r) => {
+          setConvertJob(null);
+          void refreshSchedules();
+          window.dispatchEvent(new CustomEvent("manta-open-routine", { detail: { id: r.id } }));
+        }}
+        onTestRun={(_r, runId) => {
+          setConvertJob(null);
+          void refreshSchedules();
+          window.dispatchEvent(new CustomEvent("manta-open-routine", { detail: { runId } }));
+        }}
+      />
     </div>
     </RoutineRunContext.Provider>
   );

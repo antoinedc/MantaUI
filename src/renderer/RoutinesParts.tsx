@@ -2,11 +2,11 @@
 //
 // The small pieces every Routines screen draws the same way: the pane header
 // bar, a section head (Eyebrow + count + optional right slot), the accent
-// text-link button, the outcome Pill, the routine glyph tile and the live
-// clock. They compose the existing primitives; nothing here re-implements a
+// text-link button, the outcome Pill, the routine glyph tile, the live
+// clock and the show-more clamp. They compose the existing primitives; nothing here re-implements a
 // primitive's chrome.
 
-import type { ReactNode, Ref } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { CalendarClock, Check, ChevronDown, X } from "lucide-react";
 import { IconButton } from "./IconButton";
 import { INPUT_BASE, LABEL_CLS } from "./Field";
@@ -250,6 +250,45 @@ export function CheckLine({ children }: { children: ReactNode }) {
     <div className="flex gap-2">
       <Check size={14} className="mt-[2px] shrink-0 text-ok" aria-hidden />
       <span>{children}</span>
+    </div>
+  );
+}
+
+/**
+ * Long text clamped to `lines` lines with a Show more / Show less toggle. The toggle
+ * only appears when the text actually overflows the clamp (measured, so short text
+ * draws exactly as before). `className` carries the text styling.
+ */
+export function ShowMore({ lines = 5, className = "", children }: { lines?: number; className?: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || open) return;
+    const check = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, children]);
+  return (
+    <div>
+      <div
+        ref={ref}
+        className={className}
+        style={open ? undefined : { display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: lines, overflow: "hidden" }}
+      >
+        {children}
+      </div>
+      {(overflows || open) && (
+        <div className="-ml-2 mt-1 font-sans">
+          <TextLink onClick={() => setOpen(!open)} pressed={open}>
+            {open ? "Show less" : "Show more"}
+          </TextLink>
+        </div>
+      )}
     </div>
   );
 }

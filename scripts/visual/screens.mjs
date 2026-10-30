@@ -788,7 +788,9 @@ export const SCREENS = [
     final: ".manta-routines-convert",
     region: ".manta-routines-convert",
     actions: async (page) => {
-      await page.getByRole("button", { name: "Open Routines" }).click();
+      // "Make it a routine" lives on a follow-up row of the chat's ⏰ card.
+      await page.getByText("Deploy new billing service").first().click();
+      await page.getByRole("button", { name: "schedules" }).click();
       await page.getByRole("button", { name: "Make it a routine" }).nth(1).click();
       await page.waitForSelector(".manta-routines-convert", { state: "visible" });
       await page.getByText("Write up what changed in the billing service this week").first().waitFor();
@@ -799,7 +801,7 @@ export const SCREENS = [
     },
     mockupRegion: ".screen.on .modal",
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
   },
   {
     id: "routines-tochat",
