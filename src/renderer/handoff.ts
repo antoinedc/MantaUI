@@ -263,6 +263,17 @@ export function describeHandoffError(e: unknown): string {
   return raw || "Something went wrong.";
 }
 
+/**
+ * Wording for a refused/failed Rewrite. The box's cause is specific ("This
+ * handoff is being written right now."), so a sentence is shown as the box wrote
+ * it; only a bare code (`busy`, `not_ready`, …) goes through the generic map.
+ */
+export function describeRewriteError(e: unknown): string {
+  const raw = String((e as Error)?.message ?? e ?? "").trim();
+  if (!raw || /^[a-z_]+$/i.test(raw)) return describeHandoffError(e);
+  return raw;
+}
+
 // ---------------------------------------------------------------------------
 // Previous sessions (§9)
 // ---------------------------------------------------------------------------

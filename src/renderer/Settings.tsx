@@ -26,6 +26,7 @@ import { ModelsWeCouldntIdentify } from "./ModelsWeCouldntIdentify";
 import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { OptimizerCard } from "./OptimizerCard";
+import { SummaryModelCard } from "./SummaryModelCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
@@ -1213,6 +1214,7 @@ export function Settings({
           <ModelsWeCouldntIdentify />
           <GroupCard title="Models">
             <ModelsCard />
+            <SummaryModelCard />
             <ModelLedgerCard />
             <OptimizerCard />
           </GroupCard>

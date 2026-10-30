@@ -2423,6 +2423,7 @@ export function ChatPanel({
           const raw = await window.api.opencodeGenerateTitle({
             directory: cwd ?? "",
             instruction: buildTitleInstruction(buildTitlePromptInput(messages)),
+            sessionId,
           });
           if (await renameWindow(raw)) lastAutoRenamedTurnRef.current = turns;
         } catch {
@@ -2446,6 +2447,7 @@ export function ChatPanel({
         const raw = await window.api.opencodeGenerateTitle({
           directory: cwd ?? "",
           instruction: buildTitleInstruction(input),
+          sessionId,
         });
         await renameWindow(raw);
       } catch {

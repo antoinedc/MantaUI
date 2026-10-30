@@ -8,6 +8,7 @@ import {
   carriableAttachments,
   creatingRecord,
   describeHandoffError,
+  describeRewriteError,
   describeHandoffSource,
   draftRecordFor,
   eventOfRecord,
@@ -211,6 +212,19 @@ describe("mode", () => {
     expect(normalizeHandoffMode("auto")).toBe("auto");
     expect(normalizeHandoffMode("off")).toBe("off");
     expect(normalizeHandoffMode("suggest")).toBe("suggest");
+  });
+});
+
+describe("describeRewriteError", () => {
+  it("shows the box's sentence as written", () => {
+    expect(describeRewriteError(new Error("This handoff is being written right now."))).toBe(
+      "This handoff is being written right now.",
+    );
+  });
+  it("maps a bare code through the generic wording", () => {
+    expect(describeRewriteError(new Error("busy"))).toMatch(/busy/);
+    expect(describeRewriteError(new Error("not_ready"))).toMatch(/isn't ready/);
+    expect(describeRewriteError(undefined)).toBe("Something went wrong.");
   });
 });
 

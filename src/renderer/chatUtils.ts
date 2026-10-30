@@ -141,6 +141,52 @@ export function formatModelContextSize(
   return `${Math.round(context / 1000)}k`;
 }
 
+// A model id as a person would say it: provider prefix and trailing date stamp
+// dropped ("anthropic/claude-sonnet-4-5-20250929" → "claude-sonnet-4-5").
+export function shortModelId(modelID: string | null | undefined): string {
+  const id = (modelID ?? "").trim();
+  if (!id) return "";
+  const last = id.slice(id.lastIndexOf("/") + 1);
+  return last.replace(/-\d{8}$/, "") || id;
+}
+
+// The quiet line on a handoff card whose text was written from a trimmed
+// transcript (cold-cache spec B6). null for a session-written handoff, so the
+// card renders nothing at all in the common case.
+export function describeHandoffWriter(
+  writer: { path: "session" | "condensed"; modelID?: string } | null | undefined,
+): string | null {
+  if (!writer || writer.path !== "condensed") return null;
+  const name = shortModelId(writer.modelID) || "the Summary model";
+  return `Written by ${name} from a trimmed transcript — the full history wasn't re-read.`;
+}
+
+// "$1.20" · "$0.03" · "<$0.01"; null when the figure is unknown (unpriced or not
+// a finite, non-negative number).
+export function formatUsdEstimate(usd: number | null | undefined): string | null {
+  if (typeof usd !== "number" || !Number.isFinite(usd) || usd < 0) return null;
+  if (usd > 0 && usd < 0.01) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
+}
+
+// The Rewrite button's label (cold-cache spec B6): the session's own model and
+// what re-reading the whole history on it would cost. A priced estimate shows as
+// dollars ("list price" on a subscription, where nothing is actually billed);
+// an unpriced one falls back to the context size it would re-read.
+export function describeRewriteButton(est: {
+  modelID: string;
+  estTokens: number;
+  estCostUsd: number | null;
+  subscription: boolean;
+}): string {
+  const name = shortModelId(est.modelID) || "this conversation's model";
+  const usd = formatUsdEstimate(est.estCostUsd);
+  let tail: string | null = null;
+  if (usd) tail = est.subscription ? `≈ ${usd} list price` : `≈ ${usd}`;
+  else if (Number.isFinite(est.estTokens) && est.estTokens > 0) tail = `≈ ${formatTokens(est.estTokens)}`;
+  return tail ? `Rewrite with ${name} (${tail})` : `Rewrite with ${name}`;
+}
+
 // Find the opencode session title for a given session id, from the session
 // list returned by opencodeListSessions (GET /session). opencode names a
 // session from its first user message only when it has one — a manta-created

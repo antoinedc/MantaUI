@@ -174,6 +174,17 @@ export type AppConfig = {
   // other AppConfig field — no dedicated IPC channel needed. Absent/empty =
   // every known model is registered.
   deactivatedSubagents?: string[];
+  // Summary model (cold-cache handoff spec A1). READ-ONLY here: written only by
+  // the box's summary-model module; `config:update` strips both keys, so change
+  // them with window.api.summaryModelSet, never configUpdate.
+  readonly summaryModel?: {
+    providerID: string;
+    modelID: string;
+    source: "auto" | "user";
+    pickedAt: number;
+  } | null;
+  /** True = the user chose "None"; the box never auto-picks a Summary model. */
+  readonly summaryModelOptOut?: boolean;
   // BET-215: models the user has explicitly hidden from the chat main-agent
   // picker. Same shape and opt-out semantics as `deactivatedSubagents` — a
   // model whose "providerID/modelID" key is in this set is filtered out of

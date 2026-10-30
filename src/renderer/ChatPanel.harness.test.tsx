@@ -1670,6 +1670,8 @@ describe("ChatPanel auto-rename first-turn fallback (BET-1100 follow-up)", () =>
     expect(JSON.stringify(genCalls[0][0])).toContain(
       "I'm just checking the manta setup",
     );
+    // The box picks the title's model from the chat window's session id.
+    expect((genCalls[0][0] as { sessionId?: string }).sessionId).toBe("ses_test");
     const renames = api.calls.tmuxRenameWindow ?? [];
     expect(renames.length).toBe(1);
     expect(renames[0][0]).toEqual({
