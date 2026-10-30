@@ -113,14 +113,21 @@ function loadCasesFile() {
   return cases;
 }
 
-// By-hand model client: reuse the box's throwaway-session cheap-agent path
-// (runThrowawayAgent) so the eval exercises a real summary+probe model turn.
+// By-hand model client: the box's one-shot generate call (runThrowawayAgent) on an
+// explicit model — MANTA_EVAL_MODEL="provider/model", else the box's default model —
+// so the eval exercises a real summary+probe model turn.
 function makeModel() {
   const directory = process.env.MANTA_EVAL_DIR ?? process.env.HOME ?? "/root";
   let oc = null;
+  let model = null;
   return async ({ instruction }) => {
     if (!oc) oc = await import("../../src/server/opencode.mjs");
-    return oc.runThrowawayAgent({ directory, instruction, agent: "title" });
+    if (!model) {
+      const [providerID, ...rest] = (process.env.MANTA_EVAL_MODEL ?? "").split("/");
+      model = providerID && rest.length ? { providerID, modelID: rest.join("/") } : await oc.getDefaultModel();
+      if (!model) throw new Error("no model: set MANTA_EVAL_MODEL=provider/model or connect a provider");
+    }
+    return oc.runThrowawayAgent({ directory, instruction, agent: "title", model });
   };
 }
 

@@ -240,6 +240,64 @@ describe("HandoffCardView", () => {
     expect(noticeText(h!)).toMatch(/busy/);
   });
 
+  describe("cold-cache writer line + Rewrite (spec B6)", () => {
+    const estimate = { providerID: "anthropic", modelID: "claude-opus-5-5", estTokens: 300_000, estCostUsd: 2.5, subscription: false };
+    const rewriteBtn = () => buttons(h!).find((b) => (b.textContent ?? "").startsWith("Rewrite")) as HTMLButtonElement | undefined;
+    const writerLine = () => h!.container.querySelector('[data-testid="handoff-writer"]')?.textContent ?? "";
+
+    it("a session-written card shows no writer line and no Rewrite", async () => {
+      open(rec({ writer: { path: "session" } }));
+      expect(writerLine()).toBe("");
+      expect(rewriteBtn()).toBeUndefined();
+    });
+
+    it("a condensed ready card says who wrote it and offers a priced Rewrite", async () => {
+      open(rec({ writer: { path: "condensed", providerID: "x", modelID: "deepseek-v4-flash" }, canRewrite: true, rewriteEstimate: estimate }));
+      expect(writerLine()).toBe("Written by deepseek-v4-flash from a trimmed transcript — the full history wasn't re-read.");
+      expect(rewriteBtn()!.textContent).toBe("Rewrite with claude-opus-5-5 (≈ $2.50)");
+      expect(rewriteBtn()!.disabled).toBe(false);
+    });
+
+    it("Rewrite is shown iff canRewrite === true, even with an estimate present", async () => {
+      open(rec({ writer: { path: "condensed" }, canRewrite: false, rewriteEstimate: estimate }));
+      expect(rewriteBtn()).toBeUndefined();
+    });
+
+    it("a failed card shows Rewrite next to Retry", async () => {
+      open(rec({ state: "failed", reason: "x couldn't write the handoff: timeout", canRewrite: true, rewriteEstimate: { ...estimate, estCostUsd: null } }));
+      expect(byText(h!, "Retry")).toBeTruthy();
+      expect(rewriteBtn()!.textContent).toBe("Rewrite with claude-opus-5-5 (≈ 300k tokens)");
+    });
+
+    it("pressing Rewrite calls handoff:rewrite", async () => {
+      open(rec({ canRewrite: true, rewriteEstimate: estimate }), {
+        handoffRewrite: () => Promise.resolve({ handoff: rec({ state: "generating", updatedAt: 5 }) }),
+      });
+      await press(h!, rewriteBtn());
+      expect(api.calls.handoffRewrite).toEqual([[{ id: "hof_a" }]]);
+    });
+
+    it("a refused Rewrite shows the box's message in the card", async () => {
+      open(rec({ canRewrite: true, rewriteEstimate: estimate }), {
+        handoffRewrite: () => Promise.reject(new Error("This handoff is being written right now.")),
+      });
+      await press(h!, rewriteBtn());
+      expect(noticeText(h!)).toBe("This handoff is being written right now.");
+    });
+
+    it("a restored condensed ready card shows its reason", async () => {
+      open(rec({ writer: { path: "condensed" }, reason: "The rewrite was interrupted by a restart." }));
+      expect(h!.container.querySelector('[data-testid="handoff-reason"]')?.textContent).toBe("The rewrite was interrupted by a restart.");
+    });
+
+    it("a session-written or writer-less ready card never shows a reason (e.g. 'you kept working')", async () => {
+      open(rec({ writer: { path: "session" }, reason: "you kept working" }));
+      expect(h!.container.querySelector('[data-testid="handoff-reason"]')).toBeNull();
+      open(rec({ reason: "you kept working" }));
+      expect(h!.container.querySelector('[data-testid="handoff-reason"]')).toBeNull();
+    });
+  });
+
   describe("dismiss", () => {
     const dismissBtn = () => h!.container.querySelector('button[aria-label="Dismiss handoff"]') as HTMLButtonElement | null;
 

@@ -17,9 +17,11 @@
 //     `tmux` objects, so the whole protocol is unit-testable with a fake world.
 
 import { randomUUID } from "node:crypto";
-import { COOLDOWN_MS, DEFAULT_HANDOFF_MODE, HANDOFF_MODES, decideAutoTrigger, entryPlan, handoffBudget, normalizeMode } from "./policy.mjs";
-import { buildGeneratePrompt, composeHandoffText, factLines, missingHeadings } from "./text.mjs";
-import { continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord } from "./state.mjs";
+import { COOLDOWN_MS, DEFAULT_HANDOFF_MODE, HANDOFF_MODES, chooseWriter, decideAutoTrigger, entryPlan, estimateRewriteCostUsd, handoffBudget, normalizeMode } from "./policy.mjs";
+import { buildCondensedPrompt, buildGeneratePrompt, buildReminder, composeHandoffText, estimateTokens, factGroups, missingHeadings } from "./text.mjs";
+import { condenseBudget, condenseTranscript, inputBudget, lastAssistantCompletedAt } from "./condense.mjs";
+import { continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord, rewriteBlockedReason } from "./state.mjs";
+import { priceForPrompt } from "../optimizer/prices.mjs";
 
 export class HandoffError extends Error {
   /** @param {string} code @param {string} message @param {{ handoff?: object }} [extra] */
@@ -50,6 +52,9 @@ const PREAMBLE_SEP = "\n\n---\n\n";
 const OP_GENERATE = "handoff-generate";
 const OP_START = "handoff-start";
 const MAX_POST_ATTEMPTS = 4;
+/** A cheap summary write gets this long before it is abandoned (spec B3). */
+const CONDENSED_TIMEOUT_MS = 60_000;
+const DEFAULT_CACHE_TTL_MS = 300_000;
 const MAX_CHAIN = 50;
 const isDefinite = (e) => typeof e?.status === "number" && e.status >= 400 && e.status < 500;
 const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -108,6 +113,15 @@ export function createHandoffEngine(deps = {}) {
     quietDelayMs = 500,
     cooldownMs = COOLDOWN_MS,
     lookupTimeoutMs = 2000,
+    // ---- cold-cache handoff (spec B1/B5): all injected, all with safe defaults ----
+    cacheTtlMs = async () => DEFAULT_CACHE_TTL_MS, // effective prompt-cache TTL, ms
+    summaryModel = async () => null, // the Summary model iff its status is ok, else null — NEVER the session's own model
+    generateCheap = async () => {
+      throw new Error("no summary writer is wired");
+    }, // (model, instruction, { signal }) => Promise<string>; strict: throws with err.status
+    listPrice = async () => null, // ({ providerID, modelID }) => { listPrice, oneHour, subscription } | null — see wiring.mjs
+    log = (...a) => console.log(...a),
+    condensedTimeoutMs = CONDENSED_TIMEOUT_MS,
   } = deps;
 
   const isJobSession = deps.isJobSession ?? (async (sid) => (await runningJobOwner(sid)) !== null);
@@ -121,7 +135,8 @@ export function createHandoffEngine(deps = {}) {
   // ---- in-memory runtime state (starts empty on every boot) -----------------
   const reservations = new Map(); // target session -> admissions in flight
   const userRev = new Map(); // target session -> accepted admissions so far
-  const ops = new Map(); // session -> "handoff-generate" | "handoff-start" | "compaction"
+  const ops = new Map(); // session -> { kind: "handoff-generate" | "handoff-start" | "compaction", token }
+  const startTokens = new Map(); // record id -> the operation token its start holds (released with the run)
   const releasing = new Set(); // targets whose held queue must drain before anything posts directly
   const draining = new Set();
   const running = new Set(); // record ids with a runStart in flight
@@ -148,10 +163,13 @@ export function createHandoffEngine(deps = {}) {
     saveTail = p.catch(() => {});
     return p;
   }
+  const replacedAt = (rec) => Boolean(state.links[rec?.fromSessionId]?.replacedBy);
+  /** The ONLY way a record leaves the engine: the public view, with whether its source session was replaced. */
+  const present = (rec) => publicRecord(rec, { replaced: replacedAt(rec) });
   function touch(rec) {
     rec.updatedAt = now();
     try {
-      publish({ kind: "handoff", payload: publicEvent(rec) });
+      publish({ kind: "handoff", payload: publicEvent(rec, { replaced: replacedAt(rec) }) });
     } catch (e) {
       warn("[handoff] publish failed:", e?.message ?? e);
     }
@@ -178,14 +196,33 @@ export function createHandoffEngine(deps = {}) {
   }
 
   // ---- §6.2 one maintenance operation per session -----------------------------
-  function acquireOperation(sessionId, op) {
+  // The registry holds { kind, token }. A release frees only the lock its own token took, so a stale or
+  // foreign release can never free someone else's operation.
+  /**
+   * @returns {string|null} a fresh token, or null when any operation holds the session. `reentrant: true`
+   * succeeds when the held kind equals `kind` and returns the HELD token (a start / resume / recovery re-enters).
+   */
+  function acquireOperation(sessionId, kind, { reentrant = false } = {}) {
     const cur = ops.get(sessionId);
-    if (cur && cur !== op) return false;
-    ops.set(sessionId, op);
-    return true;
+    if (cur) return reentrant && cur.kind === kind ? cur.token : null;
+    const token = `op_${randomUUID().replaceAll("-", "")}`;
+    ops.set(sessionId, { kind, token });
+    return token;
   }
-  function releaseOperation(sessionId, op) {
-    if (ops.get(sessionId) === op) ops.delete(sessionId);
+  function releaseOperation(sessionId, token) {
+    if (token && ops.get(sessionId)?.token === token) ops.delete(sessionId);
+  }
+  const opKind = (sessionId) => ops.get(sessionId)?.kind ?? null;
+  /** Recovery only: take the session's lock whoever holds it. The previous holder's token no longer releases anything. */
+  function takeOperation(sessionId, kind) {
+    const token = `op_${randomUUID().replaceAll("-", "")}`;
+    ops.set(sessionId, { kind, token });
+    return token;
+  }
+  /** Release the lock a start holds, then forget its token. */
+  function releaseStart(rec) {
+    releaseOperation(rec.fromSessionId, startTokens.get(rec.id));
+    startTokens.delete(rec.id);
   }
 
   // ---- §6.1 the resolver -------------------------------------------------------
@@ -492,13 +529,25 @@ export function createHandoffEngine(deps = {}) {
     return Object.values(state.records).some((r) => r.successorId === sessionId && r.state === "starting");
   }
 
-  async function gatherFactLines(sessionId) {
+  /** The fact lines, split into the ones the size cap may never drop and the rest. `messages` = the transcript already read. */
+  async function gatherFacts(sessionId, messages) {
     try {
-      const raw = await gather.facts?.(sessionId);
-      return raw ? factLines(raw) : [];
+      const raw = await gather.facts?.(sessionId, { messages: messages ?? undefined });
+      return raw ? factGroups(raw) : { protectedFacts: [], facts: [] };
     } catch (e) {
       warn("[handoff] gathering facts failed:", e?.message ?? e);
-      return [];
+      return { protectedFacts: [], facts: [] };
+    }
+  }
+
+  /** The transcript, read ONCE per produced text (null when it can't be read). */
+  async function readTranscript(sessionId) {
+    try {
+      const m = await gather.messages?.(sessionId);
+      return Array.isArray(m) ? m : null;
+    } catch (e) {
+      warn("[handoff] reading the transcript failed:", e?.message ?? e);
+      return null;
     }
   }
 
@@ -545,53 +594,266 @@ export function createHandoffEngine(deps = {}) {
     throw lastErr ?? new Error("generation failed");
   }
 
+  const modelName = (m) => m?.name || `${m?.providerID}/${m?.modelID}`;
+
+  /** A person-readable cause from a failed model call (spec B3). */
+  function describeCause(e) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError" || /timed? ?out/i.test(String(e?.message ?? ""))) return "it timed out";
+    if (e?.status === 429) return "it is rate limited";
+    if (e?.status === 402 || /credit|quota|billing/i.test(String(e?.message ?? ""))) return "it is out of credit";
+    if (e?.status === 401 || e?.status === 403) return "it isn't authorised";
+    const m = String(e?.message ?? "").replace(/\s+/g, " ").trim();
+    return m ? m.slice(0, 120) : "it returned an error";
+  }
+
+  /** The model a Rewrite would bill: the session's own (settings first, then what its last step used). */
+  async function sessionModelOf(sid, messages) {
+    try {
+      const rs = await oc.readSession(sid);
+      const m = rs?.state === "found" ? settingsOf(rs.session).model : undefined;
+      if (m?.providerID && m?.modelID) return { providerID: m.providerID, modelID: m.modelID };
+    } catch {
+      /* fall through */
+    }
+    const seen = stepCtx.get(sid);
+    if (seen?.providerID && seen?.modelID) return { providerID: seen.providerID, modelID: seen.modelID };
+    for (const m of [...(messages ?? [])].reverse()) {
+      if (m?.info?.role === "assistant" && m.info.providerID && m.info.modelID) return { providerID: m.info.providerID, modelID: m.info.modelID };
+    }
+    return null;
+  }
+
+  /** What a Rewrite is expected to cost (spec B5); null when the session's model is unknown. Never throws, never NaN. */
+  async function buildRewriteEstimate(rec, messages) {
+    const estTokens = rec.contextTokens;
+    if (typeof estTokens !== "number" || !Number.isFinite(estTokens)) return null;
+    const model = await sessionModelOf(rec.fromSessionId, messages);
+    if (!model) return null;
+    let lp = null;
+    try {
+      lp = await listPrice(model);
+    } catch (e) {
+      warn("[handoff] pricing the rewrite failed:", e?.message ?? e);
+    }
+    const oneHour = lp?.oneHour === true;
+    const rates = priceForPrompt(lp?.listPrice ?? null, estTokens);
+    return { providerID: model.providerID, modelID: model.modelID, estTokens, estCostUsd: estimateRewriteCostUsd({ rates, oneHour, estTokens }), subscription: lp?.subscription === true };
+  }
+
+  /** The Summary model writes a handoff from a condensed transcript. Throws Error(reason sentence). */
+  async function writeCondensed({ summary, goal, messages }) {
+    const limit = summary.limit?.context;
+    const overhead = estimateTokens(buildCondensedPrompt({ goal, transcript: "" }));
+    const cond = condenseTranscript(messages, { maxTokens: condenseBudget({ contextLimit: limit, promptOverhead: overhead }) });
+    const prompt = buildCondensedPrompt({ goal, transcript: cond.text });
+    const inputTokens = estimateTokens(prompt);
+    if (inputTokens > inputBudget(limit)) throw Object.assign(new Error(`The conversation is too large for ${modelName(summary)}.`), { settled: true });
+    const model = { providerID: summary.providerID, modelID: summary.modelID };
+    let instruction = prompt;
+    let cause = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let text;
+      try {
+        text = await generateCheap(model, instruction, { signal: AbortSignal.timeout(condensedTimeoutMs) });
+      } catch (e) {
+        warn("[handoff] the summary model failed:", e?.message ?? e);
+        throw Object.assign(new Error(`${modelName(summary)} couldn't write the handoff: ${describeCause(e)}.`), { settled: true });
+      }
+      const body = typeof text === "string" ? text.trim() : "";
+      const missing = body ? missingHeadings(body) : [];
+      if (body && missing.length === 0) return { body, inputTokens };
+      cause = body ? `it left out ${missing.join(", ")}` : "it returned nothing";
+      instruction = `${prompt}${buildReminder(body ? missing : [])}`;
+    }
+    throw Object.assign(new Error(`${modelName(summary)} couldn't write the handoff: ${cause}.`), { settled: true });
+  }
+
   /**
    * Fill `rec.text` and move it to `ready` (or `failed`). The agent's own body is
-   * used when it carries every template heading; otherwise the server generates.
+   * used when it carries every template heading (no model call, no attempt);
+   * otherwise the server generates — with the session's own model, or, for a
+   * long-idle session, the Summary model over a condensed transcript (B1). A run
+   * launched by `launchGeneration` arrives with its lock `token` and its attempt;
+   * one that starts here (a record that waited for its turn to end) takes both
+   * itself. The lock is held until the FINAL state is persisted.
    * @returns {Promise<boolean>} whether the record is now `ready`
    */
-  async function produceText(rec) {
+  async function produceText(rec, { token = null } = {}) {
     const j = rec.internal;
     const sid = rec.fromSessionId;
+    let held = token;
+    let attemptId = j.attempt?.id ?? null;
+    let writer = null; // "session" | "condensed", once decided
+    let why = null;
+    let transcript = null;
+    let model = null;
+    let inputTokens;
+    let idleMs = null;
+    let ttl = null;
+    // The result is written only while this very run still owns the record.
+    const live = () =>
+      state.records[rec.id] === rec &&
+      (attemptId ? rec.state === "generating" && j.attempt?.id === attemptId : rec.state !== "cancelled" && rec.state !== "dismissed");
+    const logLine = (outcome) => {
+      if (!writer) return;
+      try {
+        log(`[handoff] writer=${writer} reason=${why} ctx=${rec.contextTokens ?? "?"} idle=${idleMs === null ? "?" : Math.round(idleMs / 1000)}s ttl=${ttl === null ? "?" : Math.round(ttl / 1000)}s model=${model ? `${model.providerID}/${model.modelID}` : "session"} in=${inputTokens ?? "-"} outcome=${outcome}`);
+      } catch {
+        /* a log line must never fail a handoff */
+      }
+    };
     const fail = async (reason) => {
-      if (rec.state === "cancelled") return false; // stopped / paused meanwhile: nothing to report
-      rec.state = "failed";
+      if (!live()) return false;
+      const est = writer === "condensed" ? await buildRewriteEstimate(rec, transcript) : undefined;
+      if (!live()) return false;
+      const prev = j.attempt?.prev;
+      if (prev?.state === "ready") {
+        // A failed rewrite gives the ready card back, with every field it had.
+        rec.state = "ready";
+        rec.text = prev.text;
+        rec.writer = prev.writer;
+        rec.rewriteEstimate = prev.rewriteEstimate;
+        j.textReady = prev.textReady;
+      } else {
+        rec.state = "failed";
+        if (est) rec.rewriteEstimate = est;
+      }
       rec.reason = reason;
+      if (writer) {
+        j.lastWriter = writer;
+        j.lastKind = j.attempt?.kind;
+      }
+      j.attempt = undefined;
+      j.forceWriter = undefined;
       touch(rec);
       await persist();
       if (j.plan?.disposition === "send") onPendingSendCleared(sid);
+      logLine("failed");
       return false;
     };
-    let body = j.body && missingHeadings(j.body).length === 0 ? j.body : null;
-    if (!body) {
-      if (!acquireOperation(sid, OP_GENERATE)) return fail("Another operation is running on this conversation. Try again in a moment.");
-      try {
-        if (rec.state === "cancelled") return false;
-        rec.state = "generating";
-        rec.reason = undefined;
-        j.baselineRevision ??= userRev.get(followReplacement(sid)) ?? 0;
-        touch(rec);
-        await persist();
-        if (!(await sessionQuiet(sid))) return fail("The conversation wasn't idle, so the handoff prompt couldn't be written. Try again when it is.");
-        try {
-          body = await generateText(sid, j.goal);
-        } catch (e) {
-          warn("[handoff] generation failed:", e?.message ?? e);
-          return fail("The model couldn't write the handoff prompt. Try again.");
+    try {
+      let body = j.body && missingHeadings(j.body).length === 0 ? j.body : null;
+      if (!body) {
+        if (!held) {
+          held = acquireOperation(sid, OP_GENERATE);
+          if (!held) return fail("Another operation is running on this conversation. Try again in a moment.");
+          if (rec.state === "cancelled") return false; // stopped / paused meanwhile: nothing to report
+          attemptId = `att_${randomUUID().replaceAll("-", "")}`;
+          j.attempt = { id: attemptId, kind: "auto" };
+          rec.state = "generating";
+          rec.reason = undefined;
+          j.baselineRevision ??= userRev.get(followReplacement(sid)) ?? 0;
+          touch(rec);
+          await persist();
         }
-      } finally {
-        releaseOperation(sid, OP_GENERATE);
+        const forced = j.forceWriter ?? null;
+        j.forceWriter = undefined; // one-shot
+        if (!(await sessionQuiet(sid))) {
+          if (forced) writer = forced; // a sticky attempt stays sticky across an early failure
+          return fail("The conversation wasn't idle, so the handoff prompt couldn't be written. Try again when it is.");
+        }
+        transcript = await readTranscript(sid);
+        const completedAt = lastAssistantCompletedAt(transcript);
+        idleMs = completedAt === null ? null : Math.max(0, now() - completedAt);
+        try {
+          ttl = Number(await cacheTtlMs());
+          if (!(ttl > 0)) ttl = DEFAULT_CACHE_TTL_MS;
+        } catch {
+          ttl = DEFAULT_CACHE_TTL_MS;
+        }
+        let summary = null;
+        try {
+          summary = (await summaryModel()) ?? null;
+        } catch (e) {
+          warn("[handoff] the summary model lookup failed:", e?.message ?? e);
+        }
+        ({ writer, reason: why } = chooseWriter({ disposition: j.plan?.disposition ?? null, contextTokens: rec.contextTokens, idleMs, cacheTtlMs: ttl, summaryModel: summary, forced }));
+        if (writer === "condensed") {
+          if (!summary) return fail("No summary model is available.");
+          model = { providerID: summary.providerID, modelID: summary.modelID };
+          if (!transcript) return fail(`${modelName(summary)} couldn't write the handoff: the conversation couldn't be read.`);
+          try {
+            ({ body, inputTokens } = await writeCondensed({ summary, goal: j.goal, messages: transcript }));
+          } catch (e) {
+            if (!e?.settled) warn("[handoff] the condensed write failed:", e?.message ?? e);
+            return fail(e?.settled ? e.message : `${modelName(summary)} couldn't write the handoff: ${describeCause(e)}.`);
+          }
+        } else {
+          try {
+            body = await generateText(sid, j.goal);
+          } catch (e) {
+            warn("[handoff] generation failed:", e?.message ?? e);
+            return fail("The model couldn't write the handoff prompt. Try again.");
+          }
+        }
       }
+      const { protectedFacts, facts } = await gatherFacts(sid, transcript);
+      const est = writer === "condensed" ? await buildRewriteEstimate(rec, transcript) : undefined;
+      if (!live()) return false;
+      rec.text = composeHandoffText({ body, facts, protectedFacts }).text;
+      j.textReady = true;
+      rec.state = "ready";
+      rec.reason = undefined;
+      rec.writer = writer === "condensed" ? { path: "condensed", providerID: model.providerID, modelID: model.modelID, ...(inputTokens !== undefined ? { inputTokens } : {}) } : { path: "session" };
+      if (est) rec.rewriteEstimate = est;
+      else delete rec.rewriteEstimate; // present only while the last attempt was condensed
+      if (writer) {
+        j.lastWriter = writer;
+        j.lastKind = j.attempt?.kind;
+      }
+      j.attempt = undefined;
+      j.forceWriter = undefined;
+      touch(rec);
+      await persist();
+      logLine("ready");
+      return true;
+    } catch (e) {
+      if (e?.crash) throw e;
+      // Something unexpected (a failed save, a throwing dependency): the run ends visibly, never stuck on `generating`.
+      warn("[handoff] producing the text failed:", e?.message ?? e);
+      try {
+        return await fail("The handoff couldn't be finished. Try again.");
+      } catch {
+        return false;
+      }
+    } finally {
+      releaseOperation(sid, held);
     }
-    const lines = await gatherFactLines(sid);
-    if (rec.state === "cancelled") return false;
-    rec.text = composeHandoffText({ body, facts: lines }).text;
-    j.textReady = true;
-    rec.state = "ready";
-    rec.reason = undefined;
-    touch(rec);
-    await persist();
-    return true;
+  }
+
+  /**
+   * The ONE way a run that GENERATES starts (create's server path, retry, rewrite):
+   * take the lock → set the attempt and `generating` → persist → dispatch
+   * `produceText` with the token. Any failure before the dispatch restores the
+   * record, releases the lock and rethrows.
+   * @param {any} rec
+   * @param {{ kind: "create"|"retry"|"rewrite", prev?: any, forceWriter?: "session"|"condensed"|null }} o
+   */
+  async function launchGeneration(rec, { kind, prev = null, forceWriter = null }) {
+    const j = rec.internal;
+    const sid = rec.fromSessionId;
+    const token = acquireOperation(sid, OP_GENERATE);
+    if (!token) throw new HandoffError("busy", "Another operation is running on this conversation.", { handoff: present(rec) });
+    const before = { state: rec.state, reason: rec.reason, attempt: j.attempt, forceWriter: j.forceWriter, baseline: j.baselineRevision };
+    try {
+      j.attempt = { id: `att_${randomUUID().replaceAll("-", "")}`, kind, ...(prev ? { prev } : {}) };
+      j.forceWriter = forceWriter ?? undefined;
+      j.baselineRevision ??= userRev.get(followReplacement(sid)) ?? 0;
+      rec.state = "generating";
+      rec.reason = undefined;
+      touch(rec);
+      await persist();
+    } catch (e) {
+      rec.state = before.state;
+      rec.reason = before.reason;
+      j.attempt = before.attempt;
+      j.forceWriter = before.forceWriter;
+      j.baselineRevision = before.baseline;
+      releaseOperation(sid, token);
+      touch(rec);
+      throw e;
+    }
+    detach(`${kind} generate`, () => produceText(rec, { token }));
   }
 
   // ---- create (the routes' / the tool's entry) ------------------------------------
@@ -632,7 +894,7 @@ export function createHandoffEngine(deps = {}) {
         touch(rec);
         await persist();
       }
-      return publicRecord(rec);
+      return present(rec);
     }
     // /handoff and the button.
     let active = false;
@@ -645,18 +907,21 @@ export function createHandoffEngine(deps = {}) {
       touch(rec);
       await persist();
     } else {
-      if (ops.has(sid)) {
+      if (opKind(sid)) {
         delete state.records[rec.id];
         throw new HandoffError("busy", "Another operation is running on this conversation.");
       }
-      rec.state = "generating";
-      touch(rec);
-      await persist();
-      detach("generate", async () => {
-        if (await produceText(rec)) return;
-      });
+      try {
+        await launchGeneration(rec, { kind: "create" });
+      } catch (e) {
+        // Nothing was handed to the writer: the card never existed.
+        rec.state = "cancelled";
+        touch(rec);
+        delete state.records[rec.id];
+        throw e;
+      }
     }
-    return publicRecord(rec);
+    return present(rec);
   }
 
   // ---- turn end --------------------------------------------------------------------
@@ -701,7 +966,7 @@ export function createHandoffEngine(deps = {}) {
     if (mode === "suggest" && recordsFor(sid).some((r) => r.trigger === "auto" && r.state === "ready")) return;
     // A failed automatic attempt costs a full-history generation: don't loop on it.
     if (recordsFor(sid).some((r) => r.trigger === "auto" && r.state === "failed" && now() - r.updatedAt < cooldownMs)) return;
-    if (ops.has(sid)) return; // another maintenance operation owns the session (§6.2)
+    if (opKind(sid)) return; // another maintenance operation owns the session (§6.2)
     // The cheap decision first (budget vs the last measured context); only a
     // session that is actually over budget pays for the lookups below.
     let ctx = stepCtx.get(sid) ?? null;
@@ -826,14 +1091,14 @@ export function createHandoffEngine(deps = {}) {
     if (!allowed.includes(disposition)) throw new HandoffError("invalid", "disposition must be send or draft");
     if (text !== undefined && typeof text !== "string") throw new HandoffError("invalid", "text must be a string");
     if (rec.state === "starting" || rec.state === "committed") {
-      throw new HandoffError("already_started", "This handoff was already started.", { handoff: publicRecord(rec) });
+      throw new HandoffError("already_started", "This handoff was already started.", { handoff: present(rec) });
     }
-    if (rec.state !== "ready") throw new HandoffError("not_ready", "This handoff isn't ready yet.", { handoff: publicRecord(rec) });
+    if (rec.state !== "ready") throw new HandoffError("not_ready", "This handoff isn't ready yet.", { handoff: present(rec) });
     const pred = rec.fromSessionId;
     if (how === "clear" && state.links[pred]?.replacedBy) {
       // Another card for this conversation already replaced it: starting a second
       // replacement from a stale conversation would fork the chain.
-      throw new HandoffError("already_started", "This conversation was already handed off.", { handoff: publicRecord(rec) });
+      throw new HandoffError("already_started", "This conversation was already handed off.", { handoff: present(rec) });
     }
     // A stop / pause flagged this planned start while it was waiting: it never takes the fence. An explicit press
     // by the user is a new decision and clears the flag.
@@ -844,23 +1109,23 @@ export function createHandoffEngine(deps = {}) {
       touch(rec);
       await persist();
       if (isSendRecord(rec)) onPendingSendCleared(pred);
-      return publicRecord(rec);
+      return present(rec);
     }
     let branchWindow = null;
     if (how === "new-session") {
       // A branch needs a project to put its window in.
       const w = await tmux.findWindow?.(pred);
-      if (!w) throw new HandoffError("no_window", "There is no window to place a new session next to.", { handoff: publicRecord(rec) });
+      if (!w) throw new HandoffError("no_window", "There is no window to place a new session next to.", { handoff: present(rec) });
       branchWindow = { sessionName: w.sessionName, name: w.name, cwd: w.cwd };
     }
     // ---- synchronous check-and-set from here to the first await ----
     if (rec.state !== "ready") {
-      throw new HandoffError("already_started", "This handoff was already started.", { handoff: publicRecord(rec) });
+      throw new HandoffError("already_started", "This handoff was already started.", { handoff: present(rec) });
     }
-    const cur = ops.get(pred);
-    if (cur && cur !== OP_START) throw new HandoffError("busy", "Another operation is running on this conversation.", { handoff: publicRecord(rec) });
-    if (state.fences[pred]) throw new HandoffError("busy", "Another handoff is starting on this conversation.", { handoff: publicRecord(rec) });
-    ops.set(pred, OP_START);
+    const cur = opKind(pred);
+    if (cur && cur !== OP_START) throw new HandoffError("busy", "Another operation is running on this conversation.", { handoff: present(rec) });
+    if (state.fences[pred]) throw new HandoffError("busy", "Another handoff is starting on this conversation.", { handoff: present(rec) });
+    startTokens.set(rec.id, acquireOperation(pred, OP_START, { reentrant: true }));
     const j = rec.internal;
     if (origin === "user") j.baselineRevision = userRev.get(pred) ?? 0; // an explicit press: only what is in flight now matters
     j.textOverride = text !== undefined && text.trim() ? text : undefined;
@@ -887,7 +1152,7 @@ export function createHandoffEngine(deps = {}) {
       rec.successorId = undefined;
       rec.messageId = undefined;
       rec.step = undefined;
-      releaseOperation(pred, OP_START);
+      releaseStart(rec);
       throw e;
     }
     running.add(rec.id);
@@ -897,16 +1162,16 @@ export function createHandoffEngine(deps = {}) {
       running.delete(rec.id);
     }
     if (rec.state === "ready" && rec.reason) {
-      throw new HandoffError("busy", "The conversation changed while the handoff was starting, so nothing was changed.", { handoff: publicRecord(rec) });
+      throw new HandoffError("busy", "The conversation changed while the handoff was starting, so nothing was changed.", { handoff: present(rec) });
     }
-    return publicRecord(rec);
+    return present(rec);
   }
 
   function tryFence(rec, { recovering }) {
     const sid = rec.fromSessionId;
     if ((reservations.get(sid) ?? 0) !== 0) return "you kept working";
     if (!recovering && (userRev.get(sid) ?? 0) !== rec.internal.baselineRevision) return "you kept working";
-    const other = ops.get(sid);
+    const other = opKind(sid);
     if (other && other !== OP_START) return "another operation is running on this conversation";
     if (state.fences[sid] && state.fences[sid].recordId !== rec.id) return "another handoff is starting on this conversation";
     state.fences[sid] = { successorId: rec.successorId, recordId: rec.id };
@@ -924,7 +1189,7 @@ export function createHandoffEngine(deps = {}) {
     rec.disposition = undefined;
     rec.successorId = undefined;
     rec.messageId = undefined;
-    releaseOperation(sid, OP_START);
+    releaseStart(rec);
     touch(rec);
     await persist();
     if (rec.internal.plan?.disposition === "send") onPendingSendCleared(sid);
@@ -952,7 +1217,7 @@ export function createHandoffEngine(deps = {}) {
     rec.messageId = undefined;
     rec.internal.created = false;
     rec.internal.commit = undefined;
-    releaseOperation(pred, OP_START);
+    releaseStart(rec);
     touch(rec);
     await persist();
     if (rec.internal.plan?.disposition === "send" || rec.disposition === "send") onPendingSendCleared(pred);
@@ -1179,6 +1444,8 @@ export function createHandoffEngine(deps = {}) {
     if (rec.how === "clear") {
       lp.replacedBy = succ;
       ls.replaces = pred;
+      // The replaced conversation's cards can no longer be rewritten: republish them.
+      for (const other of recordsFor(pred)) if (other !== rec && (other.state === "ready" || other.state === "failed")) touch(other);
       if (state.fences[pred]?.recordId === rec.id) delete state.fences[pred]; // the fence becomes the permanent link
       const moved = state.held[pred];
       if (moved?.length) {
@@ -1297,7 +1564,7 @@ export function createHandoffEngine(deps = {}) {
     }
     rec.state = "committed";
     rec.step = undefined;
-    releaseOperation(pred, OP_START);
+    releaseStart(rec);
     touch(rec);
     await hook("committed");
     await persist();
@@ -1307,7 +1574,8 @@ export function createHandoffEngine(deps = {}) {
     const rec = state.records[id];
     if (!rec || rec.state !== "starting" || running.has(id)) return;
     running.add(id);
-    ops.set(rec.fromSessionId, OP_START);
+    // Recovery goes forward whatever holds the session: re-enter a start's lock, or take it over (the old token stops mattering).
+    startTokens.set(id, acquireOperation(rec.fromSessionId, OP_START, { reentrant: true }) ?? takeOperation(rec.fromSessionId, OP_START));
     try {
       await runStart(rec, { recovering: true });
     } finally {
@@ -1319,26 +1587,42 @@ export function createHandoffEngine(deps = {}) {
   async function retry(id) {
     const rec = state.records[id];
     if (!rec) throw new HandoffError("expired", "This handoff has expired.");
-    if (rec.state !== "failed") throw new HandoffError("not_ready", "Only a failed handoff can be retried.", { handoff: publicRecord(rec) });
+    if (rec.state !== "failed") throw new HandoffError("not_ready", "Only a failed handoff can be retried.", { handoff: present(rec) });
     const j = rec.internal;
     j.created = false;
     j.commit = undefined;
     j.settings = undefined;
     rec.how = undefined;
     rec.disposition = undefined;
-    rec.reason = undefined;
     j.baselineRevision = userRev.get(followReplacement(rec.fromSessionId)) ?? 0;
     if (j.textReady) {
+      rec.reason = undefined;
       rec.state = "ready";
       touch(rec);
       await persist();
     } else {
-      rec.state = "generating";
-      touch(rec);
-      await persist();
-      detach("retry generate", () => produceText(rec));
+      // A failed condensed attempt retries condensed (even if the cache has warmed since); a failed rewrite stays on the
+      // session's own model. Only a Rewrite ever moves a handoff from the cheap path to the expensive one.
+      const forceWriter = j.lastWriter === "condensed" ? "condensed" : j.lastKind === "rewrite" ? "session" : null;
+      await launchGeneration(rec, { kind: "retry", forceWriter });
     }
-    return publicRecord(rec);
+    return present(rec);
+  }
+
+  /**
+   * Write the handoff again from the FULL history on the session's own model — the
+   * one route from a condensed card to the expensive path. The check-and-set is
+   * synchronous up to the persist; the work runs detached.
+   */
+  async function rewrite(id) {
+    const rec = state.records[id];
+    if (!rec) throw new HandoffError("expired", "This handoff has expired.");
+    const blocked = rewriteBlockedReason(rec, { replaced: replacedAt(rec) });
+    if (blocked) throw new HandoffError("not_ready", blocked, { handoff: present(rec) });
+    const j = rec.internal;
+    const prev = { state: rec.state, text: rec.text, writer: rec.writer, reason: rec.reason, rewriteEstimate: rec.rewriteEstimate, textReady: j.textReady };
+    await launchGeneration(rec, { kind: "rewrite", prev, forceWriter: "session" });
+    return present(rec);
   }
 
   /** Hide a `ready`/`failed` card and stop proposing handoffs in its session (explicit /handoff and the button still work). */
@@ -1346,13 +1630,13 @@ export function createHandoffEngine(deps = {}) {
     const rec = state.records[id];
     if (!rec) throw new HandoffError("expired", "This handoff has expired.");
     if (rec.state !== "ready" && rec.state !== "failed") {
-      throw new HandoffError("not_ready", "This handoff can no longer be dismissed.", { handoff: publicRecord(rec) });
+      throw new HandoffError("not_ready", "This handoff can no longer be dismissed.", { handoff: present(rec) });
     }
     rec.state = "dismissed";
     state.dismissedSessions[rec.fromSessionId] = now();
     touch(rec);
     await persist();
-    return publicRecord(rec);
+    return present(rec);
   }
 
   async function setMode(sessionId, mode) {
@@ -1437,7 +1721,7 @@ export function createHandoffEngine(deps = {}) {
     const records = Object.values(state.records)
       .filter((r) => r.fromSessionId === sessionId || r.successorId === sessionId)
       .sort((a, b) => b.createdAt - a.createdAt)
-      .map(publicRecord);
+      .map((r) => present(r));
     const preds = predecessorIds(sessionId);
     const looked = await Promise.all(preds.map((p) => lookupSession(p.id)));
     const predecessors = preds.map((p, i) => ({ ...p, ...looked[i] }));
@@ -1463,7 +1747,7 @@ export function createHandoffEngine(deps = {}) {
 
   function get(id) {
     const rec = state.records[id];
-    return rec ? publicRecord(rec) : null;
+    return rec ? present(rec) : null;
   }
 
   /** §15: the plugin's budget policy. Authoritative per session only — null when this session has no measurement. */
@@ -1480,8 +1764,21 @@ export function createHandoffEngine(deps = {}) {
     let changed = false;
     for (const rec of Object.values(state.records)) {
       if (rec.state === "generating") {
-        rec.state = "failed";
-        rec.reason = "interrupted by a restart";
+        const a = rec.internal.attempt;
+        if (a?.kind === "rewrite" && a.prev?.state === "ready") {
+          // An interrupted rewrite gives the card it started from back.
+          rec.state = "ready";
+          rec.text = a.prev.text;
+          rec.writer = a.prev.writer;
+          rec.rewriteEstimate = a.prev.rewriteEstimate;
+          rec.internal.textReady = a.prev.textReady;
+          rec.reason = "The rewrite was interrupted by a restart.";
+        } else {
+          rec.state = "failed";
+          rec.reason = "interrupted by a restart";
+        }
+        rec.internal.attempt = undefined;
+        rec.internal.forceWriter = undefined;
         touch(rec);
         changed = true;
       }
@@ -1524,6 +1821,7 @@ export function createHandoffEngine(deps = {}) {
     create,
     start: startRecord,
     retry,
+    rewrite,
     dismiss,
     setMode,
     modeFor,

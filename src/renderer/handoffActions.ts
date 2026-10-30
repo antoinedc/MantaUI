@@ -8,7 +8,7 @@
 
 import type { HandoffHow, HandoffMode, HandoffRecord } from "../shared/api";
 import { announceRecord, applyRecord, loadSession, patchSessionInfo, useHandoffStore } from "./handoffStore";
-import { describeHandoffError } from "./handoff";
+import { describeHandoffError, describeRewriteError } from "./handoff";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveSessionOwner, useStore } from "./store";
 
@@ -112,6 +112,22 @@ export async function retryHandoff(id: string): Promise<void> {
     applyRecord(res.handoff);
   } catch (e) {
     throw new Error(describeHandoffError(e));
+  }
+}
+
+/**
+ * Rewrite a ready/failed handoff in the session itself (the expensive path the
+ * card prices on its button). The box answers with the record now `generating`;
+ * its settle arrives on the bus. Rejects with the box's own sentence (busy, not
+ * ready, …) so the card can show why nothing happened.
+ */
+export async function rewriteHandoff(id: string): Promise<void> {
+  try {
+    const res = await window.api.handoffRewrite({ id });
+    if (!res?.handoff) throw new Error("The box didn't return the handoff.");
+    applyRecord(res.handoff);
+  } catch (e) {
+    throw new Error(describeRewriteError(e));
   }
 }
 

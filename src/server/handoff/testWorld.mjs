@@ -37,9 +37,20 @@ export function createWorld({ mode = "auto" } = {}) {
     heldFailures: [],
     timers: [],
     disk: { json: null },
-    failures: { send: [], create: [], generate: [] }, // queues of {status?, land?, hang?}
+    failures: { send: [], create: [], generate: [], cheap: [] }, // queues of {status?, land?, hang?}
     generateText: FULL_BODY,
     generateCalls: [],
+    // ---- cold-cache handoff: the Summary model, the cache TTL, prices, the transcript the engine reads ----
+    summary: null, // the Summary model dep: { providerID, modelID, name, limit: { context } } | null
+    cacheTtl: 300_000,
+    cheapText: FULL_BODY, // string | (call) => string
+    cheapCalls: [],
+    prices: null, // the listPrice dep's answer
+    transcript: null, // gather.messages: {info, parts}[] | null
+    measure: null, // gather.measureContext
+    factsArgs: [],
+    transcriptReads: 0,
+    logs: [],
     crashAt: null,
     seq: 0,
   };
@@ -146,7 +157,21 @@ export function createWorld({ mode = "auto" } = {}) {
       jobStatusOf: async (sid) => w.statuses.get(sid) ?? null,
       onPendingSendCleared: (sid) => w.cleared.push(sid),
       onHeldFailure: (f) => w.heldFailures.push(f),
-      gather: { facts: async () => null, measureContext: async () => null },
+      gather: {
+        facts: async (sid, o) => (w.factsArgs.push(o ?? null), null),
+        measureContext: async () => w.measure,
+        messages: async () => (w.transcriptReads++, w.transcript),
+      },
+      log: (line) => w.logs.push(line),
+      cacheTtlMs: async () => w.cacheTtl,
+      summaryModel: async () => w.summary,
+      listPrice: async () => w.prices,
+      generateCheap: async (model, instruction, opts) => {
+        w.cheapCalls.push({ model, instruction, opts });
+        const f = failureFor("cheap");
+        if (f) throw f.status ? httpError(f.status) : new Error("timeout");
+        return typeof w.cheapText === "function" ? w.cheapText({ model, instruction }) : w.cheapText;
+      },
       contextLimitFor: () => 400_000, // budget = 60% = 240k; the over-budget fixtures use 250k+
       hooks: { step: async (name) => { if (w.crashAt === name) throw new Crash(name); } },
       timers: { setTimeout: (fn) => { w.timers.push(fn); return { unref() {} }; } },
@@ -186,4 +211,34 @@ export async function readyRecord(w, { sessionId = "ses_p", engine = w.engine, t
   const r = await engine.create({ sessionId, trigger, action: "suggest", body: FULL_BODY });
   if (r.state !== "ready") throw new Error(`expected ready, got ${r.state}`);
   return r;
+}
+
+export const SUMMARY_MODEL = Object.freeze({ providerID: "deepseek", modelID: "deepseek-chat", name: "DeepSeek Chat", limit: { context: 128_000 } });
+export const OPUS_PRICES = Object.freeze({ listPrice: { input: 15, output: 75, cacheWrite: 18.75, source: "catalog" }, oneHour: false, subscription: false });
+
+/** A transcript whose last assistant message completed at `completedAt` (idle time = now − that). */
+export function transcriptAt(completedAt, { users = ["Fix the login bug in auth.ts"] } = {}) {
+  const msgs = [];
+  users.forEach((u, i) => {
+    msgs.push({ info: { id: `u${i}`, role: "user", time: { created: completedAt - 1000 + i } }, parts: [{ type: "text", text: u }] });
+    msgs.push({ info: { id: `a${i}`, role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", time: { created: completedAt - 900 + i, completed: completedAt + i } }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "x".repeat(5000) } }, { type: "text", text: "Done." }] });
+  });
+  return msgs;
+}
+
+/**
+ * A world whose conversation is large and has been idle past the cache TTL, with a Summary model and prices:
+ * a user-triggered handoff takes the cold (condensed) path.
+ */
+export function coldWorld(opts = {}) {
+  const w = createWorld(opts);
+  w.addSession("ses_p");
+  w.addWindow("proj", 3, "work", "ses_p");
+  w.clock = 4_000_000;
+  w.transcript = transcriptAt(1_000);
+  w.measure = { tokens: 120_000, providerID: "anthropic", modelID: "claude-opus-4-8" };
+  w.summary = SUMMARY_MODEL;
+  w.prices = OPUS_PRICES;
+  w.engine = w.build();
+  return w;
 }

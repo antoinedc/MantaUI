@@ -22,6 +22,10 @@ import {
   detectTypeaheadTrigger,
   dedupeAgainstBuiltins,
   formatModelContextSize,
+  shortModelId,
+  describeHandoffWriter,
+  formatUsdEstimate,
+  describeRewriteButton,
   shouldClearMissingModel,
   findSessionTitle,
   formatHiddenTodosSummary,
@@ -4495,5 +4499,47 @@ describe("contextModelLabel (WS11 D2 decision 4)", () => {
     expect(contextModelLabel(models, { providerID: "x", modelID: "mystery" }, "selected", "Other")).toBe("mystery");
     expect(contextModelLabel(models, null, undefined, "Other")).toBe("Other");
     expect(contextModelLabel(models, undefined, null, null)).toBeNull();
+  });
+});
+
+describe("cold-cache handoff labels (spec B6)", () => {
+  it("shortModelId drops provider prefix and date stamp", () => {
+    expect(shortModelId("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4-5");
+    expect(shortModelId("deepseek/deepseek-v4-flash")).toBe("deepseek-v4-flash");
+    expect(shortModelId("gpt-6-sol")).toBe("gpt-6-sol");
+    expect(shortModelId("")).toBe("");
+    expect(shortModelId(undefined)).toBe("");
+  });
+
+  it("describeHandoffWriter speaks only for a condensed writer", () => {
+    expect(describeHandoffWriter(undefined)).toBeNull();
+    expect(describeHandoffWriter({ path: "session", modelID: "opus" })).toBeNull();
+    expect(describeHandoffWriter({ path: "condensed", modelID: "deepseek-v4-flash" })).toBe(
+      "Written by deepseek-v4-flash from a trimmed transcript — the full history wasn't re-read.",
+    );
+    expect(describeHandoffWriter({ path: "condensed" })).toBe(
+      "Written by the Summary model from a trimmed transcript — the full history wasn't re-read.",
+    );
+  });
+
+  it("formatUsdEstimate renders cents, a floor for tiny amounts, null for unknown", () => {
+    expect(formatUsdEstimate(1.2)).toBe("$1.20");
+    expect(formatUsdEstimate(0)).toBe("$0.00");
+    expect(formatUsdEstimate(0.004)).toBe("<$0.01");
+    expect(formatUsdEstimate(null)).toBeNull();
+    expect(formatUsdEstimate(undefined)).toBeNull();
+    expect(formatUsdEstimate(Number.NaN)).toBeNull();
+    expect(formatUsdEstimate(-1)).toBeNull();
+  });
+
+  it("describeRewriteButton prices in dollars, labels subscriptions list price, and falls back to tokens", () => {
+    const base = { modelID: "claude-opus-5-5", estTokens: 300_000, estCostUsd: 2.5, subscription: false };
+    expect(describeRewriteButton(base)).toBe("Rewrite with claude-opus-5-5 (≈ $2.50)");
+    expect(describeRewriteButton({ ...base, subscription: true })).toBe("Rewrite with claude-opus-5-5 (≈ $2.50 list price)");
+    expect(describeRewriteButton({ ...base, estCostUsd: null })).toBe("Rewrite with claude-opus-5-5 (≈ 300k tokens)");
+    expect(describeRewriteButton({ ...base, estCostUsd: null, subscription: true })).toBe(
+      "Rewrite with claude-opus-5-5 (≈ 300k tokens)",
+    );
+    expect(describeRewriteButton({ ...base, estCostUsd: null, estTokens: 0 })).toBe("Rewrite with claude-opus-5-5");
   });
 });

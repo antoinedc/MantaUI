@@ -937,7 +937,59 @@ export interface HandoffRecord {
   // to reading the predecessor's transcript when they are absent.
   fromTitle?: string;
   contextTokens?: number;
+  /** Who wrote `text`: the session itself (full history) or the Summary model from a condensed transcript. */
+  writer?: HandoffWriter;
+  /** Derived by the box. The card shows Rewrite iff this is exactly `true`. */
+  canRewrite?: boolean;
+  /** Present whenever the last attempt was condensed: what Rewrite on the session's own model would cost. */
+  rewriteEstimate?: HandoffRewriteEstimate;
 }
+
+export interface HandoffWriter {
+  path: "session" | "condensed";
+  providerID?: string;
+  modelID?: string;
+  inputTokens?: number;
+}
+
+export interface HandoffRewriteEstimate {
+  /** The session's own model — the one Rewrite would use. */
+  providerID: string;
+  modelID: string;
+  /** The session's context size — the number the button shows when no cost is known. */
+  estTokens: number;
+  /** List-price estimate in USD; null when unpriced. On a subscription it is a list-price equivalent. */
+  estCostUsd: number | null;
+  subscription: boolean;
+}
+
+// ===== Summary model (docs/superpowers/specs/2026-10-30-cold-cache-handoff.md Part A) =====
+
+export interface SummaryModelCandidate {
+  providerID: string;
+  modelID: string;
+  name: string;
+  /** e.g. "$0.80 / $4 per M" or "subscription"; null when unpriced. */
+  priceLabel: string | null;
+  /** The auto-pick. */
+  recommended: boolean;
+  /** Passed the box's quality gate; false renders as "not rated". */
+  qualityKnown: boolean;
+}
+
+export interface SummaryModelStatus {
+  current: { providerID: string; modelID: string; name: string; source: "auto" | "user" } | null;
+  /** unavailable = the configured model isn't connected any more; unknown = the model list couldn't be read. */
+  state: "ok" | "unset" | "opted-out" | "unavailable" | "unknown";
+  /** One human sentence for every state but "ok". */
+  reason?: string;
+  /** The auto pick is no longer the top candidate. */
+  betterAvailable: boolean;
+  /** At most 30 on the box. */
+  candidates: SummaryModelCandidate[];
+}
+
+export type SummaryModelSetInput = { providerID: string; modelID: string } | { none: true };
 
 export interface HandoffLinks {
   /** Set on a predecessor that was replaced (clear). */
@@ -990,6 +1042,10 @@ export interface HandoffEventPayload {
   state: HandoffState;
   how?: HandoffHow;
   disposition?: HandoffDisposition;
+  /** The same derived fields the record carries (the box publishes them on every event). */
+  writer?: HandoffWriter;
+  canRewrite?: boolean;
+  rewriteEstimate?: HandoffRewriteEstimate;
 }
 
 export interface HandoffCreateInput {
@@ -1597,6 +1653,8 @@ export interface Api {
   handoffGet(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
   handoffStart(input: HandoffStartInput): Promise<{ handoff: HandoffRecord }>;
   handoffRetry(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
+  /** Re-write a ready/failed handoff in the session itself (the expensive path); only offered while `canRewrite`. */
+  handoffRewrite(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
   handoffDraftConsumed(input: { id: string; draftRevision: number }): Promise<void>;
   /** Dismiss a ready/failed card and stop unasked handoff proposals in its session. */
   handoffDismiss(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
@@ -1606,6 +1664,14 @@ export interface Api {
   // on the preload bridge and on demoApi (Proxy fallback returns a no-op
   // unsubscribe).
   onHandoff(cb: (payload: HandoffEventPayload) => void): () => void;
+
+  // Summary model (cold-cache handoff spec Part A): the one model that reads
+  // conversation text for handoffs after a long break, session titles and
+  // remembered instructions. Status is computed on the box from its last
+  // snapshot (fast); `set` rejects with the box's message for an unavailable model.
+  summaryModelStatus(): Promise<SummaryModelStatus>;
+  summaryModelSearch(input: { query: string }): Promise<{ models: SummaryModelCandidate[] }>;
+  summaryModelSet(input: SummaryModelSetInput): Promise<SummaryModelStatus>;
 
   // Inline media (BET-1148). The box publishes ONE `media` bus kind with an
   // `action` discriminator (begin / show / fail); the desktop subscribes once
@@ -1818,7 +1884,9 @@ export interface Api {
 
   // Auto-rename: generate a short title via a throwaway opencode session.
   // Returns the RAW model reply ("" on timeout/failure); caller sanitizes.
-  opencodeGenerateTitle(input: { directory: string; instruction: string }): Promise<string>;
+  // `sessionId` is the chat window's opencode session: the box resolves which
+  // model writes the title from it (Summary model, else that session's own).
+  opencodeGenerateTitle(input: { directory: string; instruction: string; sessionId: string }): Promise<string>;
 
   // Subscription provider auth (BET-308 / BET-309): a single discriminated
   // channel that drives the connect/disconnect UI for Claude, Codex, and

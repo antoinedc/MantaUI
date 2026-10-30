@@ -1414,10 +1414,14 @@ export const httpApi: Api = {
   handoffGet: (input) => rpc("handoff:get", input),
   handoffStart: (input) => rpc("handoff:start", input),
   handoffRetry: (input) => rpc("handoff:retry", input),
+  handoffRewrite: (input) => rpc("handoff:rewrite", input),
   handoffDraftConsumed: (input) => rpc("handoff:draft-consumed", input),
   handoffDismiss: (input) => rpc("handoff:dismiss", input),
   handoffSetMode: (input) => rpc("handoff:set-mode", input),
   onHandoff: (cb) => on<HandoffEventPayload>("handoff", cb),
+  summaryModelStatus: () => rpc("summary-model:status", {}),
+  summaryModelSearch: (input) => rpc("summary-model:search", input),
+  summaryModelSet: (input) => rpc("summary-model:set", input),
 
   // BET-1148: the box publishes ONE `media` bus kind with an `action`
   // discriminator (begin / show / fail) whenever the media tools land a

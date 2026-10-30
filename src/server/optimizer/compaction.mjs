@@ -156,8 +156,11 @@ export function createCompactionScheduler({
   enabled = () => true,
   onCompacted = null,
   // Auto-handoff §6.2: the shared per-session operation registry. `acquire`
-  // returns false when another maintenance operation (a handoff's generation or
-  // start) owns the session — it is then skipped, cooldown untouched.
+  // returns a falsy value when another maintenance operation (a handoff's
+  // generation or start) owns the session — it is then skipped, cooldown
+  // untouched — else the owner TOKEN, which this scheduler holds for the
+  // compaction and hands back to `release(sessionID, token)` (a release only
+  // frees the lock its own token took).
   acquire = null,
   release = null,
   // Auto-handoff §5: per-candidate gate. Returns false when the session's own
@@ -234,7 +237,11 @@ export function createCompactionScheduler({
         }
         if (!ok) continue;
       }
-      if (typeof acquire === "function" && !acquire(c.sessionID)) continue;
+      let token = null;
+      if (typeof acquire === "function") {
+        token = acquire(c.sessionID);
+        if (!token) continue;
+      }
 
       const pct = contextLimitForPct(c.contextTokens, c.contextLimit);
       // Guard 2 (persisted cooldown): stamp the attempt BEFORE the call so a
@@ -291,7 +298,7 @@ export function createCompactionScheduler({
         );
       } finally {
         inflight.delete(c.sessionID);
-        if (typeof release === "function") release(c.sessionID);
+        if (typeof release === "function" && token) release(c.sessionID, token);
         await persist();
       }
     }

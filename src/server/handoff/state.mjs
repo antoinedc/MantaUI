@@ -104,8 +104,37 @@ export async function pruneLinks(state, exists) {
   }
 }
 
-/** The client-facing record: the §11 contract fields only — internals stay on the box. */
-export function publicRecord(r) {
+const isSendRecord = (r) => r?.internal?.plan?.disposition === "send" || r?.disposition === "send";
+
+/**
+ * PURE. Whether a Rewrite (a full-history generation on the session's own model)
+ * can be offered on a record right now: it settled (`ready`/`failed`), it was
+ * written from a trimmed transcript (`rewriteEstimate` exists), it is not a
+ * send, and its source session was not replaced. Transient locks are NOT part of
+ * it — they publish nothing when released; the action itself answers `busy`.
+ * @param {any} r
+ * @param {{ replaced?: boolean }} [o]
+ */
+export function rewriteAvailable(r, { replaced = false } = {}) {
+  return rewriteBlockedReason(r, { replaced }) === null;
+}
+
+/** PURE. Why a Rewrite isn't available (a sentence a person can read), or null when it is. */
+export function rewriteBlockedReason(r, { replaced = false } = {}) {
+  if (!r) return "This handoff has expired.";
+  if (r.state === "generating") return "This handoff is being written right now.";
+  if (r.state !== "ready" && r.state !== "failed") return "This handoff can't be rewritten right now.";
+  if (isSendRecord(r)) return "A handoff that starts a new conversation can't be rewritten.";
+  if (replaced) return "This conversation was already handed off.";
+  if (!r.rewriteEstimate) return "Only a handoff written from a trimmed transcript can be rewritten.";
+  return null;
+}
+
+/**
+ * The client-facing record: the §11 contract fields only — internals stay on the box.
+ * `replaced` = the record's source session has been replaced (it feeds `canRewrite`).
+ */
+export function publicRecord(r, { replaced = false } = {}) {
   if (!r) return null;
   const out = {
     id: r.id,
@@ -117,12 +146,14 @@ export function publicRecord(r) {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
-  for (const k of ["successorId", "messageId", "step", "how", "disposition", "reason", "contextTokens"]) if (r[k] !== undefined) out[k] = r[k];
+  for (const k of ["successorId", "messageId", "step", "how", "disposition", "reason", "contextTokens", "writer", "rewriteEstimate"]) if (r[k] !== undefined) out[k] = r[k];
+  out.canRewrite = rewriteAvailable(r, { replaced });
   return out;
 }
 
-export function publicEvent(r) {
+export function publicEvent(r, { replaced = false } = {}) {
   const p = { id: r.id, fromSessionId: r.fromSessionId, state: r.state };
-  for (const k of ["successorId", "how", "disposition"]) if (r[k] !== undefined) p[k] = r[k];
+  for (const k of ["successorId", "how", "disposition", "writer", "rewriteEstimate"]) if (r[k] !== undefined) p[k] = r[k];
+  p.canRewrite = rewriteAvailable(r, { replaced });
   return p;
 }

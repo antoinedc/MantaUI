@@ -21,12 +21,14 @@ import { Pill } from "./Pill";
 import { renderMarkdown } from "./MarkdownBody";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { normalizeHandoffMode } from "./handoff";
+import { describeHandoffWriter, describeRewriteButton } from "./chatUtils";
 import { useHandoffRecord, useHandoffSession } from "./handoffStore";
 import {
   copyHandoffText,
   dismissHandoff,
   openSessionWindow,
   retryHandoff,
+  rewriteHandoff,
   setSessionHandoffMode,
   startHandoff,
 } from "./handoffActions";
@@ -42,7 +44,7 @@ import {
 } from "./handoff";
 
 type Notice = { tone: "ok" | "error"; text: string };
-type Busy = "copy" | "dismiss" | "clear" | "new-session" | "edit-clear" | "edit-new-session" | "retry" | "open" | null;
+type Busy = "copy" | "dismiss" | "clear" | "new-session" | "edit-clear" | "edit-new-session" | "retry" | "rewrite" | "open" | null;
 
 const NOTICE_CLS = { ok: "text-ok", error: "text-danger" } as const;
 
@@ -97,6 +99,23 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
     });
 
   const anyBusy = busy !== null;
+  // Rewrite is the box's call (`canRewrite`, derived); the card never infers it.
+  const canRewrite = record.canRewrite === true;
+  const est = record.rewriteEstimate;
+  const rewriteLabel = est ? describeRewriteButton(est) : "Rewrite";
+  const writerLine = ready ? describeHandoffWriter(record.writer) : null;
+  const rewriteButton = canRewrite ? (
+    <Button
+      tone="default"
+      loading={busy === "rewrite"}
+      disabled={anyBusy}
+      title="Write this handoff again in the conversation itself, re-reading its whole history on its own model"
+      onClick={() => void run("rewrite", () => rewriteHandoff(record.id))}
+    >
+      {busy === "rewrite" ? "Rewriting…" : rewriteLabel}
+    </Button>
+  ) : null;
+
   const off = !ready || anyBusy;
   const offTitle = ready ? undefined : "Available once the handoff is ready";
 
@@ -147,9 +166,12 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
           record.state === "requested" || record.state === "generating" ? undefined : (
             <>
               {failed ? (
-                <Button tone="default" loading={busy === "retry"} disabled={anyBusy} onClick={() => void run("retry", () => retryHandoff(record.id))}>
-                  {busy === "retry" ? "Retrying…" : "Retry"}
-                </Button>
+                <>
+                  <Button tone="default" loading={busy === "retry"} disabled={anyBusy} onClick={() => void run("retry", () => retryHandoff(record.id))}>
+                    {busy === "retry" ? "Retrying…" : "Retry"}
+                  </Button>
+                  {rewriteButton}
+                </>
               ) : (
                 <>
                   <Button
@@ -189,6 +211,7 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
                   >
                     {busy === "new-session" ? "Starting…" : "Start in new session"}
                   </Button>
+                  {rewriteButton}
                   <button
                     type="button"
                     disabled={off}
@@ -228,6 +251,16 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
           ) : (
             <div className="text-text-faint">
               {record.state === "requested" || record.state === "generating" ? "Writing the handoff…" : "No text."}
+            </div>
+          )}
+          {writerLine && (
+            <div className="mt-2 text-text-faint" data-testid="handoff-writer">
+              {writerLine}
+            </div>
+          )}
+          {!failed && record.state === "ready" && record.writer?.path === "condensed" && record.reason && (
+            <div className="mt-2 text-warn break-words" role="status" data-testid="handoff-reason">
+              {record.reason}
             </div>
           )}
           {failed && record.reason && (

@@ -25,7 +25,7 @@ import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport, isLegacyReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { createOptimizerSeries } from "./optimizer/series.mjs";
-import { createOptimizerPrices, PRICES_PATH } from "./optimizer/prices.mjs";
+import { createOptimizerPrices, PRICES_PATH, resolveListPrice, isOneHourModel } from "./optimizer/prices.mjs";
 import { createActivityLog } from "./optimizer/activityLog.mjs";
 import { createPacingState } from "./optimizer/pacing.mjs";
 import {
@@ -33,9 +33,8 @@ import {
   COMPACT_POLL_MS,
   COMPACT_CACHE_TTL_FALLBACK_MS,
 } from "./optimizer/compaction.mjs";
-import { createConstraintStore, extractionInstruction, transcriptText } from "./optimizer/constraints.mjs";
+import { createConstraintStore, createConstraintExtractor, transcriptText } from "./optimizer/constraints.mjs";
 import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAIN_MS } from "./optimizer/tuner.mjs";
-import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { parseTailnetHosts } from "./tailnet.mjs";
 import { getDb, partExists } from "./opencodeDb.mjs";
@@ -186,7 +185,12 @@ import { createUsageResumeEngine } from "./usageResume.mjs";
 import { createProviderHealth } from "./providerHealth.mjs";
 import {
   startModelCatalogPoller as startRoutingModelCatalog,
+  onModelCatalogRefreshed,
+  matchModel as catalogMatchModel,
+  allModels as catalogAllModels,
 } from "./modelCatalog.mjs";
+import { createSummaryModel } from "./summaryModel.mjs";
+import { SUBSCRIPTION_PROVIDERS } from "./subscriptionProviders.mjs";
 import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS, fetchLedgerRows, latestLedgerRowsBySession } from "./modelLedger.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
@@ -534,6 +538,45 @@ const { stop: stopUploadCleanupPoller } = startUploadCleanupPoller({
   uploadRoot: uploadRoot(),
 });
 
+// The Summary model (cold-cache handoff spec, Part A): the connected model that
+// writes handoffs after a long break, session titles and remembered instructions.
+// The reconciler picks one at boot (and after a provider change / catalogue
+// refresh); the choice lives in config.json, written only by this module.
+// Connected SUBSCRIPTION providers = those the box holds a credential for.
+async function connectedSubscriptionIds() {
+  const held = new Set(await oc.readAuthedProviderIds());
+  return new Set(SUBSCRIPTION_PROVIDERS.map((p) => p.id).filter((id) => held.has(id)));
+}
+const summaryModel = createSummaryModel({
+  listModels: () => oc.listModels({}, { strict: true }),
+  configGet: () => local.configGet(),
+  configUpdate: async (patch) => {
+    const next = await local.configUpdate(patch);
+    syncState.applyConfig(next);
+    return next;
+  },
+  catalog: { matchModel: (id, facts) => catalogMatchModel(id, facts), allModels: () => catalogAllModels() },
+  loadPriceCatalog: () => readJsonSync(PRICES_PATH, null),
+  readOpencodeConfig,
+  subscriptionIds: connectedSubscriptionIds,
+  lastUsedModel: (sid) => oc.lastUsedModel(sid),
+});
+// Triggers (never inside config:get): boot — retried a few times when opencode isn't
+// answering yet —, a login landing, each catalogue refresh. Provider key / disconnect
+// / Claude sign-in nudge it from the rpc handlers.
+function reconcileSummaryModelAtBoot(attempt = 0) {
+  summaryModel
+    .reconcile()
+    .then(() => summaryModel.status())
+    .then((s) => {
+      if (s.state === "unknown" && attempt < 5) setTimeout(() => reconcileSummaryModelAtBoot(attempt + 1), 30_000).unref();
+    })
+    .catch((e) => console.warn("[summary-model] boot reconcile failed:", e?.message ?? e));
+}
+reconcileSummaryModelAtBoot();
+onProviderOauthLanded(() => summaryModel.reconcile());
+onModelCatalogRefreshed(() => void summaryModel.reconcile());
+
 // Shared prompt-delivery engine (BET-375). ONE instance, shared by every
 // sender that injects a prompt into an opencode session: the scheduled-prompt
 // poller, the capability-job notifier, peer messages, and inbound webhooks.
@@ -561,7 +604,35 @@ const handoffEngine = createProductionHandoff({
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   contextLimitFor,
   constraints: { snapshot: () => optimizerConstraints.snapshot() },
-  extractConstraints: (sid) => extractAndStoreConstraints(sid),
+  extractConstraints: (sid, opts) => extractAndStoreConstraints(sid, opts),
+  // Cold-cache handoff (spec B1): the Summary model ONLY when its status is `ok`
+  // (never the session's own model), the shared effective cache TTL, a strict
+  // session-less one-shot, and the session model's list price for the Rewrite estimate.
+  summaryModel: () => summaryModel.activeModel(),
+  cacheTtlMs: async () => {
+    try {
+      return optimizerCacheTtlMs((await optimizerSummary())?.ttl ?? null);
+    } catch {
+      return COMPACT_CACHE_TTL_FALLBACK_MS;
+    }
+  },
+  generateCheap: (model, instruction, { signal } = {}) => oc.generateTextStrict({ instruction, model, signal }),
+  listPrice: async ({ providerID, modelID }) => {
+    try {
+      const [config, providers, models, subs] = await Promise.all([
+        readOpencodeConfig().catch(() => null),
+        oc.getProviders().catch(() => null),
+        oc.listModels().catch(() => []),
+        connectedSubscriptionIds().catch(() => new Set()),
+      ]);
+      const model = models.find((m) => m.providerID === providerID && m.id === modelID) ?? null;
+      const oneHour = isOneHourModel({ config, providers, providerID, modelID });
+      const listPrice = resolveListPrice({ providerID, modelID, config, catalog: readJsonSync(PRICES_PATH, null), model, oneHour });
+      return { listPrice, oneHour, subscription: subs.has(providerID) };
+    } catch {
+      return null;
+    }
+  },
   loadState: () => readJsonSync(statePath("handoffs.json"), null),
   saveState: (snapshot) => writeJsonAtomic(statePath("handoffs.json"), JSON.stringify(snapshot, null, 2)),
 });
@@ -1831,32 +1902,18 @@ const optimizerConstraints = createConstraintStore({
   now: Date.now,
 });
 
-// Extract the standing instructions from a session's FULL history (before the
-// compaction rewrites it) and store them. Reuses opencode's throwaway-session
-// cheap-agent mechanism (oc.runThrowawayAgent — the SAME one generateSessionTitle
-// uses) with the title-style cheap agent; no second mechanism is built.
-// Best-effort: any failure leaves the store without constraints for this
-// session, and the plugin then hands the compaction prompt through untouched.
-async function extractAndStoreConstraints(sessionID) {
-  if (typeof sessionID !== "string" || sessionID === "") return;
-  try {
-    let dir = "";
-    try {
-      dir = await oc.getSessionDirectory(sessionID);
-    } catch {
-      /* directory lookup is best-effort — a miss yields the prompt alone */
-    }
-    let raw = "";
-    if (dir) {
-      const msgs = await oc.listMessages(sessionID);
-      const instruction = extractionInstruction(transcriptText(msgs));
-      raw = await oc.runThrowawayAgent({ directory: dir, instruction, agent: "title" });
-    }
-    await optimizerConstraints.set(sessionID, parseConstraints(raw));
-  } catch (e) {
-    console.warn(`[optimizer] constraint extraction failed session=${sessionID}:`, e?.message ?? e);
-  }
-}
+// Extract the standing instructions from a session's history (before a
+// compaction rewrites it, or when a handoff's facts are gathered) and store
+// them. Writer = the Summary model, else the session's own last-used model;
+// input = the condensed transcript; strict, so a failure keeps the previous
+// constraints. See createConstraintExtractor.
+const extractAndStoreConstraints = createConstraintExtractor({
+  resolveWriter: (sid) => summaryModel.resolveCheapWriter(sid),
+  listMessages: (sid) => oc.listMessages(sid),
+  contextLimitFor,
+  generate: ({ instruction, model }) => oc.generateTextStrict({ instruction, model }),
+  store: optimizerConstraints,
+});
 
 // Cold-start candidate window: how far back the ledger fallback looks for
 // sessions when tmux reported no chat windows.
@@ -2052,7 +2109,7 @@ const compactionScheduler = createCompactionScheduler({
   eligible: async (sid) => (await handoffEngine.modeFor(sid)) === "off",
   // §6.2: one maintenance operation per session.
   acquire: (sid) => handoffEngine.acquireOperation(sid, "compaction"),
-  release: (sid) => handoffEngine.releaseOperation(sid, "compaction"),
+  release: (sid, token) => handoffEngine.releaseOperation(sid, token),
 });
 
 const stopCompactionScheduler = startPoller(() => compactionScheduler.tick(), {
@@ -2157,6 +2214,7 @@ rpcHandlers = buildHandlers({
   opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
   handoff: handoffEngine,
+  summaryModel,
   delegateView,
   sessionStatus,
   // BET-1252: routing-services readers shared with delegate (the routing:choose

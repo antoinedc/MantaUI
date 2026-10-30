@@ -56,7 +56,7 @@ function fakes(over = {}) {
     isCtoConversationSession: async (sid) => sid === "ses_cto",
     contextLimitFor: () => 1_000_000,
     constraints: { snapshot: async () => ({ sessions: { ses_p: { constraints: ["no emojis"], at: 5 } } }) },
-    extractConstraints: async (sid) => void calls.push(["extract", sid]),
+    extractConstraints: async (sid, opts) => void calls.push(["extract", sid, opts]),
     loadState: () => (disk.json ? JSON.parse(disk.json) : null),
     saveState: async (s) => void (disk.json = JSON.stringify(s)),
     ...over,
@@ -80,9 +80,48 @@ test("the production engine builds a ready card from the box's real-shaped reads
   assert.match(done.text, /  > Patched\. Should I also run the migration\?/);
   assert.match(done.text, /- \(inferred\) standing instructions/);
   assert.ok(f.calls.some((c) => c[0] === "extract" && c[1] === "ses_p"), "the constraints (at=5) predate the last user message (100): re-extracted first");
+  const extractCall = f.calls.find((c) => c[0] === "extract");
+  assert.ok(Array.isArray(extractCall[2]?.messages) && extractCall[2].messages.length === 2, "the extractor gets the transcript facts already read, not a second read");
   assert.ok(f.calls.find((c) => c[0] === "generate")[2].startsWith("<!-- manta-handoff-generate -->"));
   assert.ok(f.published.some((e) => e.kind === "handoff"));
   assert.ok(JSON.parse(f.disk.json).records[rec.id], "persisted");
+});
+
+test("the cold-cache params reach the engine: a long-idle big session is written by the Summary model from a condensed transcript; the user's own requests are carried verbatim", async () => {
+  const cheap = [];
+  const f = fakes({
+    summaryModel: async () => ({ providerID: "deepseek", modelID: "deepseek-chat", name: "DeepSeek Chat", limit: { context: 128_000 } }),
+    cacheTtlMs: async () => 300_000,
+    generateCheap: async (model, instruction) => (cheap.push({ model, instruction }), FULL_BODY),
+    listPrice: async () => ({ listPrice: { input: 15, output: 75, cacheWrite: 18.75 }, oneHour: false, subscription: false }),
+  });
+  f.p.oc.listMessages = async (sid, opts) => [
+    { info: { role: "user", time: { created: 100 } }, parts: [{ type: "text", text: "Please fix the login bug" }] },
+    { info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", time: { completed: 200 }, tokens: { input: 10, cache: { read: 90_000, write: 30_000 } } }, parts: [{ type: "text", text: "Patched." }] },
+  ];
+  const engine = createProductionHandoff({ ...f.p, delegate: f.p.delegate });
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "user" });
+  await settle(10);
+  const done = engine.get(rec.id);
+  assert.equal(done.state, "ready");
+  assert.equal(cheap.length, 1);
+  assert.deepEqual(cheap[0].model, { providerID: "deepseek", modelID: "deepseek-chat" });
+  assert.match(cheap[0].instruction, /user: Please fix the login bug/);
+  assert.equal(f.calls.some((c) => c[0] === "generate"), false, "the session's own model was not asked");
+  assert.match(done.text, /your requests in this conversation \(verbatim, oldest first\):\n {2}> Please fix the login bug/);
+  assert.equal(done.writer.path, "condensed");
+  assert.equal(done.canRewrite, true);
+});
+
+test("without the cold-cache params (an un-updated caller) every handoff is written by the session itself", async () => {
+  const f = fakes();
+  f.p.oc.listMessages = async () => [{ info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", time: { completed: 1 }, tokens: { input: 10, cache: { read: 400_000, write: 0 } } }, parts: [] }];
+  const engine = createProductionHandoff(f.p);
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "user" });
+  await settle(10);
+  assert.equal(engine.get(rec.id).state, "ready");
+  assert.ok(f.calls.some((c) => c[0] === "generate"));
+  assert.equal(engine.get(rec.id).canRewrite, false);
 });
 
 test("start through the production adapters: restamps the window, re-points jobs, copies settings, posts to the successor", async () => {
@@ -154,7 +193,7 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   // §4.5: idle compaction stands aside per session unless that session's mode is off, and shares the operation registry (§6.2)
   assert.match(index, /eligible: async \(sid\) => \(await handoffEngine\.modeFor\(sid\)\) === "off"/);
   assert.match(index, /acquire: \(sid\) => handoffEngine\.acquireOperation\(sid, "compaction"\)/);
-  assert.match(index, /release: \(sid\) => handoffEngine\.releaseOperation\(sid, "compaction"\)/);
+  assert.match(index, /release: \(sid, token\) => handoffEngine\.releaseOperation\(sid, token\)/);
   // §6.3 ownership
   assert.match(index, /deferSettlement: \(sid\) => handoffEngine\.hasPendingSend\(sid\)/);
   assert.match(index, /cancelPendingHandoff: \(sid\) => handoffEngine\.cancelPendingSends\(sid\)/);

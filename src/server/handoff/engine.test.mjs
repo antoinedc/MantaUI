@@ -608,14 +608,17 @@ test("create validates its input", async () => {
 
 test("operation registry: a compaction (or another handoff phase) blocks generation and start; user admissions are never blocked", async () => {
   const w = standardWorld();
-  assert.equal(w.engine.acquireOperation("ses_p", "compaction"), true);
-  assert.equal(w.engine.acquireOperation("ses_p", "handoff-generate"), false);
+  const compaction = w.engine.acquireOperation("ses_p", "compaction");
+  assert.match(compaction, /^op_/);
+  assert.equal(w.engine.acquireOperation("ses_p", "handoff-generate"), null);
   await assert.rejects(w.engine.create({ sessionId: "ses_p", trigger: "user" }), (e) => e.code === "busy");
   const r = await readyRecord(w);
   await assert.rejects(w.engine.start(r.id, START_SEND), (e) => e.code === "busy");
   assert.deepEqual(await w.engine.admitPrompt({ sessionId: "ses_p", text: "still fine" }), { deliveredTo: "ses_p" });
-  w.engine.releaseOperation("ses_p", "compaction");
-  assert.equal(w.engine.acquireOperation("ses_p", "handoff-generate"), true);
+  w.engine.releaseOperation("ses_p", "not-the-token");
+  assert.equal(w.engine.acquireOperation("ses_p", "handoff-generate"), null, "a foreign token frees nothing");
+  w.engine.releaseOperation("ses_p", compaction);
+  assert.match(w.engine.acquireOperation("ses_p", "handoff-generate"), /^op_/);
 });
 
 // ---- misc --------------------------------------------------------------------------------------

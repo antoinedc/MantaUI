@@ -204,7 +204,7 @@ test("the user kept working while the handoff was being written: the automatic s
 
 test("a compaction (or any other operation) owning the session blocks the automatic trigger", async () => {
   const w = standardWorld();
-  assert.equal(w.engine.acquireOperation("ses_p", "compaction"), true);
+  assert.ok(w.engine.acquireOperation("ses_p", "compaction"));
   await turn(w.engine, "ses_p");
   assert.equal(records(w).length, 0);
 });

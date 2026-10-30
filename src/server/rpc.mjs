@@ -612,6 +612,8 @@ export function buildHandlers({
   syncSubagentsDetailed = providers.syncSubagentsDetailed,
   // WS11 D4: the custom endpoints behind `opencode:get-providers` (injectable for tests).
   getProviderEndpoints = providers.getProviderEndpoints,
+  // `opencode:set-providers` writer (injectable so a test never edits a live opencode.jsonc).
+  setProviders = providers.setProviders,
   // WS11 D5: the one session-name allocator (injectable so a test gets a fresh one).
   nameAllocator = sharedNameAllocator,
   getUsageAlerts = getUsageAlertsImpl,
@@ -653,6 +655,11 @@ export function buildHandlers({
   // (tests) → admissions take the raw route and the handoff:* channels answer
   // an actionable error.
   handoff = null,
+  // The Summary model setting (src/server/summaryModel.mjs `createSummaryModel`).
+  // Null when not wired (tests) → the summary-model:* channels answer an
+  // actionable error, titles are skipped (never an opencode-chosen model), and
+  // provider connect/disconnect has no reconciler to nudge.
+  summaryModel = null,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -667,6 +674,15 @@ export function buildHandlers({
     if (!handoff) throw Object.assign(new Error("auto-handoff isn't available on this box"), { code: "unavailable", name: "HandoffError" });
     return handoff;
   }
+  function requireSummaryModel() {
+    if (!summaryModel) throw Object.assign(new Error("The summary model setting isn't available on this box."), { rpcStatus: 503 });
+    return summaryModel;
+  }
+  // A provider connected / disconnected: the Summary model may need a new pick.
+  // Detached — the connect response must not wait on (or fail with) the reconciler.
+  const nudgeSummaryModel = () => {
+    void Promise.resolve(summaryModel?.reconcile?.()).catch((e) => console.warn("[summary-model] reconcile after a provider change failed:", e?.message ?? e));
+  };
   function handoffExpired() {
     return Object.assign(new Error("This handoff has expired."), { code: "expired", name: "HandoffError" });
   }
@@ -966,7 +982,15 @@ export function buildHandlers({
     // a TTL change that can't reach opencode fails loudly instead of leaving
     // the mirror claiming something the box does not do. Both directions are a
     // config-file edit + live reload (V2): nothing restarts, no turn ends.
-    "config:update": async (patch) => {
+    "config:update": async (rawPatch) => {
+      // The Summary model's stored choice is written only by summaryModel.mjs
+      // (summary-model:set / the reconciler): a generic config write can never
+      // set or clobber it.
+      let patch = rawPatch;
+      if (patch && typeof patch === "object" && ("summaryModel" in patch || "summaryModelOptOut" in patch)) {
+        const { summaryModel: _s, summaryModelOptOut: _o, ...rest } = patch;
+        patch = rest;
+      }
       if (patch?.handoffMode !== undefined && !["auto", "suggest", "off"].includes(patch.handoffMode)) {
         throw new Error('handoffMode must be "auto", "suggest" or "off"');
       }
@@ -2134,7 +2158,7 @@ export function buildHandlers({
     // set-providers: apply upsert/remove mutations to opencode.jsonc.
     // Args: { upsert?: ProviderInput[], remove?: string[] }
     "opencode:set-providers": (input) =>
-      providers.setProviders(input ?? {}).then((res) => {
+      setProviders(input ?? {}).then((res) => {
         // W8 #2 (BET-1536): a provider configuration change clears the
         // affected keys — config churn is not evidence either way (a new key
         // or baseURL invalidates the old failures) — and the endpoints
@@ -2150,6 +2174,8 @@ export function buildHandlers({
         } catch (e) {
           console.warn("[provider-health] config-change clear failed:", e?.message ?? e);
         }
+        // Custom endpoints changed: the Summary model may need a new pick.
+        if (res?.ok) nudgeSummaryModel();
         return res;
       }),
 
@@ -2378,6 +2404,7 @@ export function buildHandlers({
     },
     "handoff:start": async (input) => ({ handoff: await requireHandoff().start(input?.id, input ?? {}) }),
     "handoff:retry": async (input) => ({ handoff: await requireHandoff().retry(input?.id) }),
+    "handoff:rewrite": async (input) => ({ handoff: await requireHandoff().rewrite(input?.id) }),
     "handoff:dismiss": async (input) => ({ handoff: await requireHandoff().dismiss(input?.id) }),
     "handoff:set-mode": async (input) => ({ mode: await requireHandoff().setMode(input?.sessionId, input?.mode) }),
     "handoff:draft-consumed": async (input) => {
@@ -2479,8 +2506,19 @@ export function buildHandlers({
     // opencode:generate-title
     // Auto-rename: throwaway-session title generation. Mirror of desktop
     // IPC.opencodeGenerateTitle. Returns the RAW model reply (caller sanitizes).
-    "opencode:generate-title": ({ directory, instruction }) =>
-      oc.generateSessionTitle({ directory, instruction }),
+    // The writer is the Summary model, else the conversation's own last-used
+    // model; with neither the title is skipped ("") so the renderer retries on
+    // the next turn — opencode is never left to pick a model.
+    "opencode:generate-title": async ({ directory, instruction, sessionId }) => {
+      const writer = await summaryModel?.resolveCheapWriter(sessionId);
+      if (!writer) return "";
+      return oc.generateSessionTitle({ directory, instruction, model: { providerID: writer.providerID, modelID: writer.modelID } });
+    },
+
+    // ---- the Summary model setting (cold-cache handoff spec, A2) ----
+    "summary-model:status": () => requireSummaryModel().status(),
+    "summary-model:search": (input) => requireSummaryModel().search({ query: input?.query }),
+    "summary-model:set": (input) => requireSummaryModel().set(input ?? {}),
 
     // ---- subscription provider auth (BET-308 / BET-309) ----
     // Single discriminated channel: status / start / code / key / disconnect.
@@ -2511,7 +2549,10 @@ export function buildHandlers({
           return { action: "code", ok: false, error: "bad_response" };
         }
         const r = await oc.completeProviderOauth(id, methodIndex, code);
-        if (r?.ok) notifyOauthLanded({ id, epoch: undefined });
+        if (r?.ok) {
+          notifyOauthLanded({ id, epoch: undefined });
+          nudgeSummaryModel();
+        }
         return { action: "code", ok: !!r?.ok, error: r?.ok ? undefined : r?.error };
       }
       if (action === "oauth-status") {
@@ -2549,6 +2590,7 @@ export function buildHandlers({
           return { action: "key", ok: false, error: "bad_response" };
         }
         const r = await oc.setProviderApiKey(id, key);
+        if (r?.ok) nudgeSummaryModel();
         return { action: "key", ok: !!r?.ok, error: r?.ok ? undefined : r?.error };
       }
       if (action === "disconnect") {
@@ -2577,6 +2619,7 @@ export function buildHandlers({
             error: restart?.error,
           };
         }
+        nudgeSummaryModel();
         return { action: "disconnect", ok: true };
       }
       // BET-354: Claude login status check. The renderer's connect card
@@ -2613,6 +2656,7 @@ export function buildHandlers({
           // which is a correct no-op rather than an error.
           backupPath: entry?.backupPath ?? null,
         });
+        if (progress?.state === "completed" && progress.connected) nudgeSummaryModel();
         return { action: "claude-status", ok: true, progress };
       }
       // Unknown action — surface as a generic failure so the renderer's

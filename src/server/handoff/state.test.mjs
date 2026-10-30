@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RECORD_RETENTION_MAX, RECORD_RETENTION_MS, continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicRecord } from "./state.mjs";
+import { RECORD_RETENTION_MAX, RECORD_RETENTION_MS, continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord, rewriteAvailable, rewriteBlockedReason } from "./state.mjs";
 
 const DAY = 24 * 3600_000;
 const rec = (id, state, updatedAt, successorId) => ({ id, fromSessionId: "ses_p", kind: "auto", trigger: "auto", state, text: "t", createdAt: updatedAt, updatedAt, successorId, internal: { secret: 1 } });
@@ -73,5 +73,40 @@ test("links are kept while either end exists and pruned when neither does", asyn
 test("the public record exposes the contract fields only", () => {
   const p = publicRecord(rec("r", "ready", 5));
   assert.equal(p.internal, undefined);
-  assert.deepEqual(Object.keys(p).sort(), ["createdAt", "fromSessionId", "id", "kind", "state", "text", "trigger", "updatedAt"]);
+  assert.deepEqual(Object.keys(p).sort(), ["canRewrite", "createdAt", "fromSessionId", "id", "kind", "state", "text", "trigger", "updatedAt"]);
+});
+
+test("rewriteAvailable: settled + condensed estimate + not a send + not replaced; each missing piece names its cause", () => {
+  const est = { providerID: "p", modelID: "m", estTokens: 1, estCostUsd: null, subscription: false };
+  const base = { ...rec("r", "ready", 5), rewriteEstimate: est, internal: {} };
+  assert.equal(rewriteAvailable(base), true);
+  assert.equal(rewriteAvailable({ ...base, state: "failed" }), true);
+  assert.equal(rewriteAvailable({ ...base, state: "generating" }), false);
+  assert.match(rewriteBlockedReason({ ...base, state: "generating" }), /being written right now/);
+  for (const state of ["requested", "starting", "committed", "dismissed", "cancelled"]) assert.equal(rewriteAvailable({ ...base, state }), false, state);
+  assert.equal(rewriteAvailable({ ...base, rewriteEstimate: undefined }), false);
+  assert.match(rewriteBlockedReason({ ...base, rewriteEstimate: undefined }), /trimmed transcript/);
+  assert.equal(rewriteAvailable({ ...base, internal: { plan: { disposition: "send" } } }), false);
+  assert.equal(rewriteAvailable({ ...base, disposition: "send" }), false);
+  assert.match(rewriteBlockedReason({ ...base, disposition: "send" }), /new conversation/);
+  assert.equal(rewriteAvailable(base, { replaced: true }), false);
+  assert.match(rewriteBlockedReason(base, { replaced: true }), /already handed off/);
+  assert.equal(rewriteAvailable(null), false);
+});
+
+test("publicRecord / publicEvent carry writer, rewriteEstimate and a boolean canRewrite — never the internals", () => {
+  const est = { providerID: "p", modelID: "m", estTokens: 9, estCostUsd: 1.5, subscription: true };
+  const r = { ...rec("r", "ready", 5), writer: { path: "condensed", providerID: "x", modelID: "y", inputTokens: 3 }, rewriteEstimate: est, internal: { attempt: { id: "a" }, lastWriter: "condensed" } };
+  const p = publicRecord(r);
+  assert.deepEqual(p.writer, r.writer);
+  assert.deepEqual(p.rewriteEstimate, est);
+  assert.equal(p.canRewrite, true);
+  assert.equal(publicRecord(r, { replaced: true }).canRewrite, false);
+  assert.equal(p.internal, undefined);
+  const e = publicEvent(r);
+  assert.equal(e.canRewrite, true);
+  assert.deepEqual(e.writer, r.writer);
+  assert.deepEqual(e.rewriteEstimate, est);
+  assert.equal(publicEvent({ ...r, state: "generating" }).canRewrite, false);
+  assert.equal(publicEvent(rec("r2", "ready", 5)).canRewrite, false);
 });

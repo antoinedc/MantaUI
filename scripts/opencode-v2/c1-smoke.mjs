@@ -339,8 +339,8 @@ try {
   check("listModels: connected anthropic models, normalized (limit.context, cost, capabilities)", models.some((m) => m.providerID === "anthropic" && m.id === "claude-haiku-4-5" && m.limit.context > 0 && m.capabilities.toolcall === true), j(models.slice(0, 1)));
   const def = await oc.getProviders();
   check("getProviders: anthropic connected via the env key", def.connected.includes("anthropic"));
-  check("pickCheapModel picks a Haiku-class model", /haiku/.test((await oc.pickCheapModel())?.id ?? ""));
-  const title = await oc.generateSessionTitle({ instruction: "Reply with a 2-word title for: fixing a login bug. Output only the title." });
+  const haiku = models.find((m) => m.providerID === "anthropic" && /haiku/.test(m.id));
+  const title = await oc.generateSessionTitle({ model: haiku, instruction: "Reply with a 2-word title for: fixing a login bug. Output only the title." });
   check("generateSessionTitle → one-shot text with no session created", title.trim().length > 0, j(title));
   await oc.compactSession(s1.id);
   await until("compaction frames", () => of(s1.id, "compaction").some((f) => f.payload.phase === "ended"), 60_000);

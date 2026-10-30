@@ -93,3 +93,40 @@ test("trigger cooldown: 30 minutes after the session's creation by a handoff", (
   assert.equal(decideAutoTrigger({ ...base, successorCreatedAt: base.now - COOLDOWN_MS }).fire, true);
   assert.equal(decideAutoTrigger({ ...base, successorCreatedAt: null }).fire, true);
 });
+
+// ---- chooseWriter / estimateRewriteCostUsd ---------------------------------------
+
+import { CONDENSE_MIN_TOKENS, WARM_MARGIN_MS, chooseWriter, estimateRewriteCostUsd } from "./policy.mjs";
+
+const TTL = 300_000;
+const cold = { disposition: undefined, contextTokens: 100_000, idleMs: TTL * 2, cacheTtlMs: TTL, summaryModel: { providerID: "p", modelID: "m" }, forced: null };
+
+test("chooseWriter: a cold, large, card-bound handoff with a summary model is condensed", () => {
+  assert.deepEqual(chooseWriter(cold), { writer: "condensed", reason: "cold" });
+});
+
+test("chooseWriter: each rule, in order (first match wins)", () => {
+  assert.deepEqual(chooseWriter({ ...cold, forced: "session" }), { writer: "session", reason: "forced" }, "forced beats everything");
+  assert.deepEqual(chooseWriter({ ...cold, forced: "condensed", disposition: "send", contextTokens: 10, summaryModel: null }), { writer: "condensed", reason: "forced" }, "…including a send, a small context and no summary model");
+  assert.deepEqual(chooseWriter({ ...cold, disposition: "send" }), { writer: "session", reason: "unseen-send" }, "a send never condenses");
+  assert.deepEqual(chooseWriter({ ...cold, contextTokens: undefined }), { writer: "session", reason: "no-measurement" });
+  assert.deepEqual(chooseWriter({ ...cold, contextTokens: Number.NaN }), { writer: "session", reason: "no-measurement" });
+  assert.deepEqual(chooseWriter({ ...cold, contextTokens: CONDENSE_MIN_TOKENS - 1 }), { writer: "session", reason: "small" });
+  assert.deepEqual(chooseWriter({ ...cold, idleMs: 1000 }), { writer: "session", reason: "warm" });
+  assert.deepEqual(chooseWriter({ ...cold, summaryModel: null }), { writer: "session", reason: "no-summary-model" });
+});
+
+test("chooseWriter: the size and warm-margin boundaries", () => {
+  assert.equal(chooseWriter({ ...cold, contextTokens: CONDENSE_MIN_TOKENS }).writer, "condensed", "32 000 itself is large enough");
+  assert.equal(chooseWriter({ ...cold, idleMs: TTL - WARM_MARGIN_MS }).writer, "condensed", "exactly ttl − margin is cold");
+  assert.equal(chooseWriter({ ...cold, idleMs: TTL - WARM_MARGIN_MS - 1 }).writer, "session", "one ms earlier is still warm");
+  assert.equal(chooseWriter({ ...cold, idleMs: undefined }).reason, "warm", "an unknown idle time is treated as warm");
+});
+
+test("estimateRewriteCostUsd: cache write of the whole context + 2 000 output tokens; the 1h rate when 1h; never NaN", () => {
+  const rates = { input: 5, output: 25, cacheWrite: 6.25, cacheWrite1h: 10 };
+  assert.equal(estimateRewriteCostUsd({ rates, oneHour: false, estTokens: 300_000 }), (6.25 * 300_000 + 25 * 2000) / 1e6);
+  assert.equal(estimateRewriteCostUsd({ rates, oneHour: true, estTokens: 300_000 }), (10 * 300_000 + 25 * 2000) / 1e6);
+  assert.equal(estimateRewriteCostUsd({ rates: null, oneHour: false, estTokens: 1 }), null);
+  assert.equal(estimateRewriteCostUsd({ rates: { output: 25, cacheWrite: 6 }, oneHour: true, estTokens: 100 }), null, "1h without a 1h rate → NaN → null");
+});

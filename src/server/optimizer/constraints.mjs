@@ -12,14 +12,14 @@
 //
 // This module is the STORE + the pure text-joining helpers. Injected I/O
 // (`load`/`save` for statePath("optimizer-constraints.json"), an injected
-// clock) keep it testable; the actual model call happens in the wiring, which
-// reuses opencode's throwaway-session cheap-agent mechanism
-// (oc.runThrowawayAgent — the SAME mechanism generateSessionTitle uses; no
-// second one is built).
+// clock) keep it testable; the model call is `createConstraintExtractor` below
+// (Summary model, else the session's own, over a condensed transcript).
 //
 // State shape: { sessions: { "<sessionID>": { constraints: string[], at } } }
 
 import { parseConstraints, CONSTRAINT_EXTRACT_PROMPT } from "../../shared/constraintPin.mjs";
+import { condenseTranscript, condenseBudget } from "../handoff/condense.mjs";
+import { estimateTokens } from "../handoff/text.mjs";
 
 export { CONSTRAINT_EXTRACT_PROMPT };
 
@@ -123,4 +123,47 @@ export function createConstraintStore({ load, save, now = Date.now, parse = pars
   }
 
   return { get, set, snapshot };
+}
+
+/** The most condensed-transcript tokens an extraction reads (cold-cache handoff spec A5). */
+export const EXTRACT_MAX_TOKENS = 24_000;
+
+/**
+ * Extract a session's standing instructions and store them.
+ *
+ * The writer is whatever `resolveWriter(sessionId)` returns (the Summary model,
+ * else the session's own last-used model); with none, nothing is asked. The
+ * input is the CONDENSED transcript — tool output gone, at most
+ * min(24k, the writer's budget) tokens — and the call is STRICT: when anything
+ * fails the PREVIOUS constraints stay (an empty list is only ever stored for a
+ * reply that actually came back). Best-effort: never throws.
+ *
+ * @param {object} d
+ * @param {(sessionId: string) => Promise<{ providerID: string, modelID: string }|null>} d.resolveWriter
+ * @param {(sessionId: string) => Promise<any[]>} d.listMessages  used when the caller passes no messages
+ * @param {(providerID: string, modelID: string) => number|null} d.contextLimitFor
+ * @param {(a: { instruction: string, model: { providerID: string, modelID: string } }) => Promise<string>} d.generate  strict: throws on failure
+ * @param {{ set: (sessionId: string, constraints: string[]) => Promise<any> }} d.store
+ * @param {(msg: string, err?: any) => void} [d.warn]
+ * @returns {(sessionId: string, opts?: { messages?: any[] }) => Promise<void>}
+ */
+export function createConstraintExtractor({ resolveWriter, listMessages, contextLimitFor, generate, store, warn = (m, e) => console.warn(m, e ?? "") }) {
+  return async function extractAndStoreConstraints(sessionID, { messages } = {}) {
+    if (typeof sessionID !== "string" || sessionID === "") return;
+    try {
+      const writer = await resolveWriter(sessionID);
+      if (!writer) {
+        warn(`[optimizer] constraint extraction skipped session=${sessionID}: no model to write it`);
+        return;
+      }
+      const msgs = Array.isArray(messages) ? messages : await listMessages(sessionID);
+      const limit = contextLimitFor(writer.providerID, writer.modelID);
+      const fits = typeof limit === "number" && limit > 0 ? condenseBudget({ contextLimit: limit, promptOverhead: estimateTokens(CONSTRAINT_EXTRACT_PROMPT) }) : EXTRACT_MAX_TOKENS;
+      const { text } = condenseTranscript(msgs, { maxTokens: Math.min(EXTRACT_MAX_TOKENS, fits) });
+      const raw = await generate({ instruction: extractionInstruction(text), model: { providerID: writer.providerID, modelID: writer.modelID } });
+      await store.set(sessionID, parseConstraints(raw));
+    } catch (e) {
+      warn(`[optimizer] constraint extraction failed session=${sessionID} (previous constraints kept):`, e?.message ?? e);
+    }
+  };
 }

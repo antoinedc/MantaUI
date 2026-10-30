@@ -71,7 +71,8 @@ import {
   getDefaultModel,
   generateSessionTitle,
   generateText,
-  pickCheapModel,
+  generateTextStrict,
+  lastUsedModel,
   runThrowawayAgent,
   estimateMessageListTokens,
   listModels,
@@ -1518,29 +1519,15 @@ test("listModels returns [] when nothing is connected and on a transport throw",
   _setOcTransport(null);
 });
 
-test("pickCheapModel prefers a small-model name on a real (non-free-tier) provider, cheapest first", async () => {
-  const models = [
-    { providerID: "opencode", id: "free", cost: { input: 0 } },
-    { providerID: "anthropic", id: "claude-opus-5-5", cost: { input: 5 } },
-    { providerID: "anthropic", id: "claude-haiku-5-5", cost: { input: 1 } },
-    { providerID: "openai", id: "gpt-mini", cost: { input: 0.5 } },
-    { providerID: "anthropic", id: "old-haiku", status: "deprecated", cost: { input: 0.1 } },
-  ];
-  assert.equal((await pickCheapModel(async () => models)).id, "gpt-mini");
-  assert.equal(await pickCheapModel(async () => []), null);
-  assert.equal(await pickCheapModel(async () => { throw new Error("x"); }), null);
-  assert.equal((await pickCheapModel(async () => [{ providerID: "a", id: "big", cost: { input: 3 } }, { providerID: "a", id: "bigger", cost: { input: 4 } }])).id, "big");
-});
-
 // ---------------------------------------------------------------------------
 // one-shot text (auto-rename / constraint extraction)
 // ---------------------------------------------------------------------------
 
-test("generateSessionTitle uses POST /api/experimental/generate on a cheap connected model — no session is created", async () => {
+test("generateSessionTitle uses POST /api/experimental/generate on the GIVEN model — no session is created", async () => {
   const calls = await withV2(
     { ...PROVIDER_ROUTES(), "POST /api/experimental/generate": { data: { text: "Fix login bug" } } },
     async () => {
-      assert.equal(await generateSessionTitle({ directory: "/w", instruction: "title this" }), "Fix login bug");
+      assert.equal(await generateSessionTitle({ directory: "/w", instruction: "title this", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" } }), "Fix login bug");
     },
   );
   const gen = only(calls, "POST", "/api/experimental/generate")[0];
@@ -1550,15 +1537,51 @@ test("generateSessionTitle uses POST /api/experimental/generate on a cheap conne
   assert.equal("format" in gen.body, false, "never a structured-output field");
 });
 
-test("generateText returns '' on any failure; an explicit model is used as given; runThrowawayAgent delegates", async () => {
+test("generateText without a model makes NO request and returns '' — opencode never chooses", async () => {
+  const calls = await withV2({ ...PROVIDER_ROUTES(), "POST /api/experimental/generate": { data: { text: "x" } } }, async () => {
+    assert.equal(await generateText({ instruction: "x" }), "");
+    assert.equal(await generateText({ instruction: "x", model: null }), "");
+    assert.equal(await generateSessionTitle({ directory: "/w", instruction: "x" }), "");
+  });
+  assert.equal(only(calls, "POST", "/api/experimental/generate").length, 0);
+});
+
+test("generateText returns '' on any failure; an explicit model is used as given; runThrowawayAgent delegates its model", async () => {
   await withV2({ "POST /api/experimental/generate": () => new Response("x", { status: 503 }) }, async () => {
     assert.equal(await generateText({ instruction: "x", model: { providerID: "p", id: "m" } }), "");
   });
   const calls = await withV2({ "POST /api/experimental/generate": { data: { text: "ok" } } }, async () => {
     assert.equal(await generateText({ instruction: "x", model: { providerID: "p", modelID: "m" } }), "ok");
-    assert.equal(await runThrowawayAgent({ directory: "/w", instruction: "y", agent: "title" }) !== undefined, true);
+    assert.equal(await runThrowawayAgent({ directory: "/w", instruction: "y", agent: "title", model: { providerID: "p", modelID: "m" } }), "ok");
   });
   assert.deepEqual(calls[0].body.model, { providerID: "p", id: "m" });
+  assert.deepEqual(calls[1].body.model, { providerID: "p", id: "m" });
+});
+
+test("generateTextStrict throws with the HTTP status instead of returning '', and refuses a call with no model", async () => {
+  await withV2({ "POST /api/experimental/generate": () => new Response("slow down", { status: 429 }) }, async () => {
+    await assert.rejects(() => generateTextStrict({ instruction: "x", model: { providerID: "p", modelID: "m" } }), (e) => e.status === 429);
+  });
+  await assert.rejects(() => generateTextStrict({ instruction: "x" }), (e) => e.status === 400);
+  await withV2({ "POST /api/experimental/generate": { data: { text: "fine" } } }, async () => {
+    assert.equal(await generateTextStrict({ instruction: "x", model: { providerID: "p", modelID: "m" } }), "fine");
+  });
+});
+
+test("lastUsedModel: the newest assistant message that names a model, else null", async () => {
+  const A2 = (id, model) => ({ ...A(id, [{ type: "text", text: "x" }]), model });
+  await withV2(
+    { "GET /api/session/ses_a/message": () => ({ data: [IDLE("msg_9"), A2("msg_8", { id: "new", providerID: "p" }), U("msg_6", "hi2"), A2("msg_3", { id: "old", providerID: "p" }), U("msg_1", "hi")], cursor: { next: null } }) },
+    async () => {
+      assert.deepEqual(await lastUsedModel("ses_a"), { providerID: "p", modelID: "new" });
+    },
+  );
+  await withV2({ "GET /api/session/ses_u/message": () => ({ data: [U("msg_1", "hi")], cursor: { next: null } }) }, async () => {
+    assert.equal(await lastUsedModel("ses_u"), null);
+  });
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.equal(await lastUsedModel("ses_a"), null);
+  _setOcTransport(null);
 });
 
 // ---------------------------------------------------------------------------
