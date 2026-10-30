@@ -26,9 +26,10 @@ about one full turn just to write a ~1.5k-token handoff.
 
 A second, related problem: every "cheap one-shot" call on the box (session
 titles, standing-instruction extraction) goes through `pickCheapModel`, which
-picks the cheapest connected model from ANY provider and ignores the user's
-model consent list — so conversation text can silently reach a provider the
-user never chose for it. The Summary model setting (Part A) fixes both.
+picks the cheapest connected model from ANY provider, invisibly — the user
+can neither see nor change which model reads their conversation for these
+jobs. The Summary model setting (Part A) makes that one visible, editable
+choice, and fixes the handoff cost.
 
 ## Research (2026-10-30)
 
@@ -60,8 +61,8 @@ Libraries considered: none apply. Provider compaction APIs (Anthropic
 opencode's generate surface; OpenAI's output is opaque and model-locked;
 Anthropic's reads full history on the session model. The box already has
 every building block: the models.dev catalogue (`modelCatalog.mjs`), the
-quality score (`shared/modelQuality.mjs`), consent filtering
-(`listRoutableModels`), prices (`optimizer/prices.mjs`), the session-less
+quality score (`shared/modelQuality.mjs`), the connected-model list
+(`listModels`), prices (`optimizer/prices.mjs`), the session-less
 generate call, and the effective cache TTL.
 
 ---
@@ -112,8 +113,13 @@ When the summary model is unset or unavailable:
 in `src/shared/summaryModel.mjs` (pure, shared so Settings can show the same
 ranking). Steps:
 
-1. **Eligible** = `listRoutableModels("sub", cfg)` (the user's consent set —
-   deactivated models are never picked) minus: deprecated; provider
+1. **Eligible** = every CONNECTED model (`listModels`), deliberately
+   ignoring the main-model and subagent activation lists
+   (`deactivatedMainModels`, `deactivatedSubagents`, `optInModels`). Those
+   lists say which models the user wants to *chat with or delegate to*; a
+   user commonly switches off small models (e.g. Haiku) for prompts while
+   still wanting them for background chores like this. The Summary model
+   setting is its own, separate choice. Minus: deprecated; provider
    `opencode` (Manta's free tier — rate-limited, and its data terms differ);
    models whose `limit.context` < 64 000 or unknown; models that don't output
    text.
@@ -345,7 +351,8 @@ the only way to the expensive path.
 
 ## Tests (pure / injected)
 
-- `summaryModel.test.mjs` — eligibility (consent, deprecated, `opencode`,
+- `summaryModel.test.mjs` — eligibility (a model deactivated for chat/subagents IS still
+  eligible; deprecated, `opencode`,
   context, text output); quality floor incl. catalogue-matched OpenRouter
   ids and unknown ids skipped; subscription preference; blended-price
   ranking; no-catalogue family fallback; nothing → null + reason.
