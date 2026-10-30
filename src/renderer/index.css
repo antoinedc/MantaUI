@@ -211,27 +211,9 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* "N new steps" — the whole pill is a button. */
-.manta-catchup-pill[data-tone="new"] {
-  color: var(--accent-tx);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--font-size-xs);
-}
-.manta-catchup-pill[data-tone="new"]:hover { border-color: var(--accent); }
 .manta-catchup-pill[data-tone="error"] {
   border-color: rgb(var(--danger-rgb) / 0.5);
   color: var(--danger);
-}
-/* Fading out (the "new steps" pill after its dwell). */
-.manta-catchup-pill[data-leaving="true"] {
-  opacity: 0;
-  transform: translate(-50%, var(--sp-1));
-  pointer-events: none;
-}
-.manta-catchup-pill:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 /* Inline text action inside the pill: "Cancel", "Retry". */
 .manta-catchup-pill__action {

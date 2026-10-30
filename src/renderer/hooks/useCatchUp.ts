@@ -14,40 +14,24 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Attachment } from "../chatShared";
-import {
-  CATCH_UP_HELD_FAILED_COPY,
-  countNewSteps,
-  firstNewStepMessageId,
-  type CatchUpPillState,
-} from "../chatUtils";
+import { CATCH_UP_HELD_FAILED_COPY, type CatchUpPillState } from "../chatUtils";
 import type { CatchUpResult, CatchUpStatus } from "./useTranscriptState";
 
 /** A fast catch-up never shows the plain "Catching up…" pill. */
 export const CATCH_UP_PILL_DELAY_MS = 200;
-/** How long the "N new steps" pill stays before it fades. */
-export const NEW_STEPS_DWELL_MS = 2400;
-/** The pill's fade (`--motion-slow`) before it is unmounted. */
-const NEW_STEPS_FADE_MS = 300;
 
 type Delivery = "steer" | "queue";
 type Hold = { textOverride?: string; attachmentsOverride?: Attachment[]; delivery?: Delivery };
-type NewPill = { n: number; firstId: string | null; sentInto: "running" | "idle" | null };
 
 export type CatchUpPillProps = {
   state: CatchUpPillState;
-  newSteps: number;
-  sentInto: "running" | "idle" | null;
-  leaving: boolean;
   onCancel: () => void;
   onRetry: () => void;
-  onShow: () => void;
-  onDwellPause: (paused: boolean) => void;
 };
 
 export function useCatchUp(params: {
   sessionId: string;
   isActive: boolean;
-  running: boolean;
   status: CatchUpStatus;
   catchUp: () => Promise<CatchUpResult>;
   resetCatchUp: () => void;
@@ -58,16 +42,11 @@ export function useCatchUp(params: {
   /** Whether the composer holds something submit() would send right now (text, or a path-ref attachment). */
   hasDraftRef: React.MutableRefObject<boolean>;
   setSendError: (v: string | null) => void;
-  scrollToMessage: (messageId: string) => string | null;
 }) {
-  const { sessionId, isActive, running, status, catchUp, resetCatchUp, sendRef, hasDraftRef, setSendError, scrollToMessage } = params;
+  const { sessionId, isActive, status, catchUp, resetCatchUp, sendRef, hasDraftRef, setSendError } = params;
 
   const statusRef = useRef(status);
   statusRef.current = status;
-  const runningRef = useRef(running);
-  runningRef.current = running;
-  const scrollRef = useRef(scrollToMessage);
-  scrollRef.current = scrollToMessage;
   const setSendErrorRef = useRef(setSendError);
   setSendErrorRef.current = setSendError;
   const catchUpRef = useRef(catchUp);
@@ -83,10 +62,8 @@ export function useCatchUp(params: {
   }, []);
 
   const [show200, setShow200] = useState(false);
-  const [caught, setCaught] = useState<{ n: number; firstId: string | null } | null>(null);
-  const [newPill, setNewPill] = useState<NewPill | null>(null);
-  const [leaving, setLeaving] = useState(false);
-  const [dwellPaused, setDwellPaused] = useState(false);
+  // Bumped on each successful catch-up; the release effect runs after it commits.
+  const [caught, setCaught] = useState(0);
   // Bumped by every run() and by deactivation: a continuation whose token is no
   // longer current applies nothing.
   const tokenRef = useRef(0);
@@ -104,16 +81,10 @@ export function useCatchUp(params: {
     const token = ++tokenRef.current;
     // Read synchronously by a submit that lands before the status commit.
     statusRef.current = "catching";
-    setNewPill(null);
-    setLeaving(false);
-    setDwellPaused(false);
     const r = await catchUpRef.current();
     if (token !== tokenRef.current) return;
     if (r.ok) {
-      setCaught({
-        n: r.before ? countNewSteps(r.before, r.after) : 0,
-        firstId: r.before ? firstNewStepMessageId(r.before, r.after) : null,
-      });
+      setCaught((c) => c + 1);
       return;
     }
     if (r.stale) return;
@@ -130,35 +101,12 @@ export function useCatchUp(params: {
   // composer, model, plan and background box.
   useEffect(() => {
     if (!caught) return;
-    let sentInto: "running" | "idle" | null = null;
     const h = holdRef.current;
-    if (h) {
-      dropHold();
-      const willSend = h.textOverride !== undefined ? h.textOverride.trim() !== "" : hasDraftRef.current;
-      if (willSend) {
-        sentInto = runningRef.current ? "running" : "idle";
-        sendRef.current?.(h.textOverride, h.attachmentsOverride, h.delivery);
-      }
-    }
-    setCaught(null);
-    if (caught.n >= 1) setNewPill({ n: caught.n, firstId: caught.firstId, sentInto });
+    if (!h) return;
+    dropHold();
+    const willSend = h.textOverride !== undefined ? h.textOverride.trim() !== "" : hasDraftRef.current;
+    if (willSend) sendRef.current?.(h.textOverride, h.attachmentsOverride, h.delivery);
   }, [caught, dropHold, sendRef, hasDraftRef]);
-
-  // "N new steps" dwell: visible, then fade, then unmount. Hover / focus pauses
-  // the dwell; leaving restarts it.
-  useEffect(() => {
-    if (!newPill) return;
-    if (leaving) {
-      const t = setTimeout(() => {
-        setNewPill(null);
-        setLeaving(false);
-      }, NEW_STEPS_FADE_MS);
-      return () => clearTimeout(t);
-    }
-    if (dwellPaused) return;
-    const t = setTimeout(() => setLeaving(true), NEW_STEPS_DWELL_MS);
-    return () => clearTimeout(t);
-  }, [newPill, leaving, dwellPaused]);
 
   // Deactivation / session change: the in-flight result is stale, the hold is
   // dropped silently (the text stays in this panel's composer), the pill goes.
@@ -168,10 +116,6 @@ export function useCatchUp(params: {
       tokenRef.current++;
       resetCatchUp();
       dropHold();
-      setCaught(null);
-      setNewPill(null);
-      setLeaving(false);
-      setDwellPaused(false);
     };
   }, [isActive, sessionId, resetCatchUp, dropHold]);
 
@@ -197,14 +141,6 @@ export function useCatchUp(params: {
   );
   const submitAfterTurn = useCallback(() => trySend(undefined, undefined, "queue"), [trySend]);
 
-  const onShow = useCallback(() => {
-    const id = newPill?.firstId;
-    if (id) scrollRef.current(id);
-    setNewPill(null);
-    setLeaving(false);
-    setDwellPaused(false);
-  }, [newPill]);
-
   const state: CatchUpPillState | null =
     !isActive
       ? null
@@ -216,20 +152,13 @@ export function useCatchUp(params: {
             : null
         : status === "failed"
           ? "error"
-          : newPill
-            ? "new"
-            : null;
+          : null;
 
   const pill: CatchUpPillProps | null = state
     ? {
         state,
-        newSteps: newPill?.n ?? 0,
-        sentInto: newPill?.sentInto ?? null,
-        leaving: state === "new" && leaving,
         onCancel: dropHold,
         onRetry: () => void run(),
-        onShow,
-        onDwellPause: setDwellPaused,
       }
     : null;
 

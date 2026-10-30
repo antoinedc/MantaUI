@@ -1532,14 +1532,12 @@ export function ChatPanel({
   const catchUpCtl = useCatchUp({
     sessionId,
     isActive,
-    running,
     status: catchUpStatus,
     catchUp,
     resetCatchUp,
     sendRef: catchUpSendRef,
     hasDraftRef: catchUpHasDraftRef,
     setSendError,
-    scrollToMessage,
   });
   voiceSubmitRef.current = catchUpCtl.submit;
   const runCatchUp = catchUpCtl.run;

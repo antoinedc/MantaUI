@@ -145,31 +145,9 @@ describe("ChatPanel session catch-up", () => {
       await resolveCatchUp(T0);
     });
 
-    it("a fast catch-up never shows the plain pill, but still shows the 'new steps' pill", async () => {
+    it("a fast catch-up never shows a pill, even when new steps arrived", async () => {
       await reactivate();
       await resolveCatchUp(T1);
-      expect(pill()?.textContent).toBe("1 new step");
-      expect(pill()?.tagName).toBe("BUTTON");
-      expect(pill()?.getAttribute("aria-label")).toBe("Show 1 new step");
-    });
-
-    it("the 'new steps' pill dwells, fades, then unmounts", async () => {
-      await reactivate();
-      await resolveCatchUp(T1);
-      await sleep(2000);
-      expect(pill()).not.toBeNull();
-      expect(pill()?.getAttribute("data-leaving")).toBeNull();
-      await sleep(600);
-      expect(pill()?.getAttribute("data-leaving")).toBe("true");
-      await sleep(400);
-      expect(pill()).toBeNull();
-    }, 10000);
-
-    it("no new steps → no pill at all", async () => {
-      await reactivate();
-      await sleep(260);
-      expect(pill()).not.toBeNull();
-      await resolveCatchUp(T0);
       expect(pill()).toBeNull();
     });
 
@@ -184,16 +162,6 @@ describe("ChatPanel session catch-up", () => {
       expect(jump().dataset.shown).toBe("true");
     });
 
-    it("clicking the 'new steps' pill scrolls to the first new message and dismisses it", async () => {
-      await reactivate();
-      await resolveCatchUp(T1);
-      // Following the tail: the jump button is hidden. Going to a message detaches.
-      expect(jump().dataset.shown).toBe("false");
-      await click(pill());
-      expect(jump().dataset.shown).toBe("true");
-      expect(pill()).toBeNull();
-    });
-
     it("Retry re-runs the catch-up fetch", async () => {
       await reactivate();
       await act(async () => pending[0].reject(new Error("offline")));
@@ -205,7 +173,7 @@ describe("ChatPanel session catch-up", () => {
       await sleep(260);
       expect(pill()?.textContent).toBe("Catching up…");
       await resolveCatchUp(T1, 1);
-      expect(pill()?.textContent).toBe("1 new step");
+      expect(pill()).toBeNull();
     });
   });
 
@@ -227,7 +195,7 @@ describe("ChatPanel session catch-up", () => {
       await key("Enter");
       await resolveCatchUp(T1);
       expect(promptTexts()).toEqual(["go ahead"]);
-      expect(pill()?.textContent).toBe("1 new step · your message was sent");
+      expect(pill()).toBeNull();
       // The composer emptied, so the Send button plays its exit animation.
       await sleep(500);
       expect(heldSend()).toBeNull();
@@ -244,7 +212,7 @@ describe("ChatPanel session catch-up", () => {
       expect(calls).toHaveLength(1);
       expect(calls[0][1]).toBe("one more thing");
       expect(calls[0][6]).toEqual({ delivery: "steer", messageID: expect.stringMatching(/^msg_/) });
-      expect(pill()?.textContent).toBe("1 new step · your message was sent into the running turn");
+      expect(pill()).toBeNull();
     });
 
     it("⌥Enter is held as 'after this turn' and released with delivery queue", async () => {
@@ -269,14 +237,14 @@ describe("ChatPanel session catch-up", () => {
       expect(promptTexts()).toEqual(["first"]);
     });
 
-    it("releasing into an emptied composer sends nothing and shows no suffix", async () => {
+    it("releasing into an emptied composer sends nothing", async () => {
       await reactivate();
       await type("never mind");
       await key("Enter");
       await type("");
       await resolveCatchUp(T1);
       expect(promptTexts()).toEqual([]);
-      expect(pill()?.textContent).toBe("1 new step");
+      expect(pill()).toBeNull();
     });
 
     it("Cancel on the pill drops the hold and keeps the text", async () => {
@@ -290,7 +258,7 @@ describe("ChatPanel session catch-up", () => {
       expect(pill()?.textContent ?? "Catching up…").toBe("Catching up…");
       await resolveCatchUp(T1);
       expect(promptTexts()).toEqual([]);
-      expect(pill()?.textContent).toBe("1 new step");
+      expect(pill()).toBeNull();
     });
 
     it("cancelling after the plain pill has shown reverts to it at once", async () => {
@@ -380,7 +348,7 @@ describe("ChatPanel session catch-up", () => {
       expect(pill()?.textContent).toContain("will send when ready");
       await resolveCatchUp(T1);
       expect(promptTexts()).toEqual(["spoken words"]);
-      expect(pill()?.textContent).toBe("1 new step · your message was sent");
+      expect(pill()).toBeNull();
     });
 
     it("a voice take → send when not catching up sends at once", async () => {

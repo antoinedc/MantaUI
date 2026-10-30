@@ -11,36 +11,8 @@ import type { CatchUpPillProps } from "./hooks/useCatchUp";
 export const SPINNER_CLASS =
   "w-3 h-3 shrink-0 rounded-full border-2 border-accent/35 border-t-accent-tx animate-spin motion-reduce:animate-none";
 
-export function CatchUpPill({
-  state,
-  newSteps,
-  sentInto,
-  leaving,
-  onCancel,
-  onRetry,
-  onShow,
-  onDwellPause,
-}: CatchUpPillProps) {
-  const view = describeCatchUpPill({ state, newSteps, sentInto });
-  if (view.action === "show") {
-    return (
-      <button
-        type="button"
-        className="manta-catchup-pill"
-        data-testid="catchup-pill"
-        data-tone="new"
-        data-leaving={leaving ? "true" : undefined}
-        aria-label={`Show ${newSteps} new step${newSteps === 1 ? "" : "s"}`}
-        onClick={onShow}
-        onMouseEnter={() => onDwellPause(true)}
-        onMouseLeave={() => onDwellPause(false)}
-        onFocus={() => onDwellPause(true)}
-        onBlur={() => onDwellPause(false)}
-      >
-        <span className="manta-catchup-pill__label">{view.label}</span>
-      </button>
-    );
-  }
+export function CatchUpPill({ state, onCancel, onRetry }: CatchUpPillProps) {
+  const view = describeCatchUpPill({ state });
   return (
     <div
       className="manta-catchup-pill"

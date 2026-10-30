@@ -47,41 +47,18 @@ not** (the pill takes its place); it comes back when the pill goes.
 |---|---|---|
 | catching | `catching` for ≥ 200 ms and no held send | spinner + "Catching up…" |
 | held | `catching` and a send is held (shown immediately, no 200 ms wait) | spinner + "Catching up… · will send when ready" + **Cancel** |
-| new | catch-up succeeded and N ≥ 1 new steps arrived | "N new step(s)" + optional suffix (below). Whole pill is a button |
 | error | catch-up failed | "Couldn't load the latest steps" + **Retry** (danger tone, Retry also danger) |
 
-- **new** has no arrow (re-activation pins a following transcript to the tail,
-  so the new content may be above, below or on screen — an arrow would lie).
-- **new** suffixes, only when the hold release actually submitted something
-  (non-empty text or an override; see B4): `running` was true at release →
-  " · your message was sent into the running turn"; otherwise
-  " · your message was sent". No release, or an empty release → no suffix.
-  Singular "1 new step".
-- **new** dwell: visible 2400 ms, then `data-leaving="true"` (fades over
-  `--motion-slow`), then unmounted after the fade. Hover or keyboard focus
-  pauses the dwell; leaving restarts it. Clicking scrolls to the **first new
-  message** using the existing message-scroll path (which already detaches
-  follow) and dismisses the pill. If N = 0 the new pill is not shown at all.
-- A fast catch-up (< 200 ms) never shows the "Catching up…" pill, but still
-  shows the "new" pill when N ≥ 1.
+- A fast catch-up (< 200 ms) never shows the pill.
+- Once caught up the pill simply goes; there is no "N new steps" follow-up
+  (removed 2026-10-30 at the owner's request — the new steps are visible in
+  the transcript itself).
 - **error** stays until: Retry succeeds, a later full refetch for the session
   succeeds, or the panel is deactivated. Retry re-runs the catch-up fetch
   (state → `catching`, a fresh 200 ms timer).
-- Accessibility: catching/held/error pills are `role="status"`
-  `aria-live="polite"`; the new pill is a `<button>` with
-  `aria-label="Show N new step(s)"`. Cancel / Retry are real `<button>`s.
+- Accessibility: the pill is `role="status"`
+  `aria-live="polite"`. Cancel / Retry are real `<button>`s.
   Reduced motion: no spin, no slide/fade (PART 1 + `motion-reduce:` handle it).
-
-### B3. "New steps" count
-
-Pure helper `countNewSteps(before, after)` in `src/renderer/chatUtils.ts`:
-the number of parts in `after` (any message role) that are of type `"tool"`,
-`"background-result"`, or `"text"` with non-empty trimmed text, whose part id
-is not present anywhere in `before`, and whose message id does not start with
-`optimistic-`. `firstNewStepMessageId(before, after)` → the id of the message
-holding the first such part in transcript order, or null. `before` is the
-transcript as committed at the moment the catch-up fetch started (read through
-a ref, not a stale closure).
 
 ### B4. Held send
 
@@ -116,7 +93,7 @@ inspecting `textOverride`.
   `input`, attachments, model, plan, background box) with the recorded args.
   With no `textOverride`, whatever is in the composer at that moment is what
   is sent, with all of `submit`'s normal validation; its errors surface the
-  usual way. Empty composer → nothing is sent and the pill gets no suffix.
+  usual way. Empty composer → nothing is sent.
 - Catch-up **fails** with a hold → nothing is sent, the hold is dropped, the
   text stays, and the existing send-error strip shows exactly:
   "Not sent: couldn't load the latest steps. Retry, or press Enter to send
@@ -158,8 +135,7 @@ inspecting `textOverride`.
 
 - Pill: the `.manta-catchup-pill` family from mockup PART 1, added verbatim to
   `src/renderer/index.css` right after the `.manta-jump-latest` rules.
-  Attributes: `data-tone="new" | "error"` (absent = neutral),
-  `data-leaving="true"` during the fade.
+  Attribute: `data-tone="error"` (absent = neutral).
 - Spinner (pill + held Send): exactly
   `w-3 h-3 shrink-0 rounded-full border-2 border-accent/35 border-t-accent-tx animate-spin motion-reduce:animate-none`
   with `aria-hidden="true"`.
@@ -185,8 +161,7 @@ inspecting `textOverride`.
   wrappers. ChatPanel only wires it.
 - `src/renderer/CatchUpPill.tsx` (new) — the pill, rendered in the transcript
   region wrapper next to the jump-to-latest button.
-- `src/renderer/chatUtils.ts` — `countNewSteps`, `firstNewStepMessageId`,
-  `describeCatchUpPill({ state, newSteps, sentInto })` returning
+- `src/renderer/chatUtils.ts` — `describeCatchUpPill({ state })` returning
   `{ label, tone, action }` (pure, tested).
 - `src/renderer/ChatPanel.tsx` — reactivation effect calls `catchUp()`
   instead of `scheduleRefetch()` when owed; deactivation/session change calls
@@ -208,10 +183,7 @@ system for window-level messages.
 
 ## Tests (required)
 
-- `chatUtils.test.ts`: `countNewSteps` (tool, text, empty text, background-result,
-  user-role text, optimistic ids, unchanged parts), `firstNewStepMessageId`,
-  `describeCatchUpPill` (every B2 row, both suffixes, no suffix on empty
-  release, singular).
+- `chatUtils.test.ts`: `describeCatchUpPill` (every B2 row).
 - Hook tests (`useTranscriptState`): success applies + idle; failure keeps
   transcript + `failed` + owed; result discarded after deactivation / session
   change / newer catch-up (nothing applied, owed kept); ordinary refetch clears
@@ -221,11 +193,11 @@ system for window-level messages.
   after 200 ms; held pill immediately; jump-to-latest hidden while the pill
   shows; Enter while catching holds, released through submit after success
   (idle path and busy path with the held delivery, incl. ⌥Enter → `"queue"`);
-  release into an empty composer sends nothing and shows no suffix; Cancel via
+  release into an empty composer sends nothing; Cancel via
   pill and via held Send; failed + held shows the exact send-error copy and
   sends nothing; Enter while `failed` sends normally; deactivation drops the
-  hold; the `/clear` bridge is NOT held during catch-up; new pill click scrolls
-  to the first new message; Retry re-runs the fetch.
+  hold; the `/clear` bridge is NOT held during catch-up; Retry re-runs the
+  fetch; the pill goes once caught up.
 
 ## Review log
 
@@ -235,5 +207,5 @@ path not `textOverride` (the `/clear` bridge and voice-note retry go through
 `onSubmitAfterTurn`; owed flag re-marked on any non-success; generation guard
 for in-flight results; ordinary timer re-checks activity; count includes
 background results and any role; suffix only when something was sent; no
-arrow on the new pill; label `min-width:0`; Retry in danger tone; background
+arrow on the new pill (the "new steps" pill itself was later removed); label `min-width:0`; Retry in danger tone; background
 variant of the held Send; `refreshing` behaviour stated; five extra tests.
