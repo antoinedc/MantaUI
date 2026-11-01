@@ -8,13 +8,13 @@
 # the darwin-arm64 tarball's native node-pty binding, `shasum` instead of
 # `sha256sum`, and the "installer never prints a systemctl command on macOS"
 # rule. This workflow runs the REAL installer end-to-end on a GitHub-hosted
-# macos-14 (Apple Silicon) runner and asserts it reaches the pairing code —
+# macos-15 (Apple Silicon) runner and asserts it reaches the pairing code —
 # then proves the code is live by claiming it and driving one authenticated RPC.
 #
-# RUNNER CHOICE: GitHub-hosted `macos-14` (arm64), NOT the self-hosted runner
+# RUNNER CHOICE: GitHub-hosted `macos-15` (arm64), NOT the self-hosted runner
 # and NOT Codemagic. It costs zero wall-clock on `manta-dev-runner` (the single
 # self-hosted box every PR queues behind — see AGENTS.md "CI runs on ONE
-# runner"), and the repo already builds the darwin-arm64 tarball on macos-14 in
+# runner"), and the repo already builds the darwin-arm64 tarball on macos-15 in
 # server-tarball-deploy.yml, so the image is known-good for this stack.
 #
 # NOT A REQUIRED CHECK. It is manual (workflow_dispatch) + a weekly cron. It
@@ -77,7 +77,7 @@ on:
           - real
   schedule:
     # Mondays 06:00 UTC — catches drift in install.sh, the darwin tarball, or
-    # the macos-14 image without anyone remembering to run it.
+    # the macos-15 image without anyone remembering to run it.
     - cron: "0 6 * * 1"
   pull_request:
     # Only for PRs that touch the install path itself. Runs the BRANCH copy of
@@ -103,7 +103,7 @@ concurrency:
 jobs:
   smoke:
     name: install on macOS (Apple Silicon)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
 
     env:
