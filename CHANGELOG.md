@@ -8,6 +8,42 @@ User-facing changes per release. Each release names the components it ships:
 Desktop and Box share one version number (`package.json`); iOS has its own
 (`MARKETING_VERSION` in `mobile/native/project.yml`).
 
+## 1.2.0 — Box + Desktop — 2026-11-01
+
+Ships: Box `server-v1.2.0`, Desktop `mac-v1.2.0` / `win-v1.2.0`, Website
+`web-v1.2.0` (publishes the box update manifest only). iOS and Gateway
+unchanged.
+
+### Routines
+- **Scheduled work in its own fresh session.** A routine runs on a schedule
+  (daily report, weekly triage…), each run in a new headless session that never
+  clutters the sidebar, and files a short report on the new **Routines** page.
+  Each routine keeps notes between runs, can be read-only or work on its own git
+  branch, and notifies you per its policy. The AI can create and manage them
+  (`routine_*` tools).
+- **A routine's page is a run inbox**: runs on the left, the selected run's
+  report on the right. Notifications open the run directly.
+- **Follow up** on any run turns it into an ordinary sidebar session with its
+  transcript intact.
+- Follow-ups in a chat (the ⏰ card) and routines convert into each other; the ⏰
+  card now also lists jobs that moved to a handed-off successor session.
+
+### Long conversations
+- **Cheaper handoffs when the cache has gone cold.** If a conversation's prompt
+  cache has expired, the handoff summary is written from a condensed transcript
+  by a cheap model instead of re-reading the whole history at full price. The
+  handoff card names the writer and offers **Rewrite**.
+- **Summary model setting.** Pick which model writes handoff summaries, session
+  titles and other one-shot text; it is chosen from all connected models.
+
+### Desktop
+- **Catching up on return.** Coming back to a session that moved while hidden
+  fetches it at once and shows a "Catching up…" pill; a message sent meanwhile
+  (typed or by voice) is held and sent once the transcript is current. Failures
+  show with Retry.
+- Menus opened inside a dialog now sit above it; breadcrumb links are clickable
+  on macOS.
+
 ## 1.1.0 — Box + Desktop · iOS 1.2.0 — 2026-10-29
 
 Ships: Box `server-v1.1.0`, Desktop `mac-v1.1.0` / `win-v1.1.0`, iOS
