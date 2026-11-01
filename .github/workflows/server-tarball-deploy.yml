@@ -11,7 +11,7 @@
 # tarball natively (no QEMU, no cross-compile — node-pty's native binding
 # cannot be cross-compiled), then publishes BOTH tarballs + the combined
 # manifest in a single deploy. BET-275 adds darwin-arm64 (Apple Silicon) as
-# a third arch for the macOS box path; the darwin build runs on a macos-14
+# a third arch for the macOS box path; the darwin build runs on a macos-15
 # runner (native Mach-O binding for node-pty).
 #
 # WHAT IT DEPLOYS
@@ -23,7 +23,7 @@
 #
 # BUILD HOST CHOICE
 #   GitHub-hosted ubuntu-latest (x64) + ubuntu-24.04-arm (linux-arm64) +
-#   macos-14 (darwin-arm64) runners, one pack.mjs invocation per arch.
+#   macos-15 (darwin-arm64) runners, one pack.mjs invocation per arch.
 #   node-pty's prebuilt .node binding compiles natively for its runner's ABI
 #   — no QEMU, no cross-compile (BET-262 design constraint; the darwin Node
 #   is macOS-only and the node-pty binding MUST be a Mach-O arm64 binary).
@@ -158,7 +158,7 @@ jobs:
       matrix:
         arch: [x64, arm64, darwin-arm64]
     runs-on: >-
-      ${{ matrix.arch == 'darwin-arm64' && 'macos-14'
+      ${{ matrix.arch == 'darwin-arm64' && 'macos-15'
           || matrix.arch == 'arm64' && 'ubuntu-24.04-arm'
           || 'ubuntu-latest' }}
     timeout-minutes: 30

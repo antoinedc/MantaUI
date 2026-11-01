@@ -211,7 +211,7 @@ MantaUI is a **PUBLIC** repo, so GitHub-hosted standard runner minutes are free
 and effectively unlimited, with **20 concurrent jobs**. On 2026-08-01 the repo
 dropped its last self-hosted runner (`manta-dev-runner`, the old single dev-box
 runner that serialized every job into one queue) and moved **every** workflow to
-`ubuntu-latest` (or `macos-14` / `windows-latest` where needed). Before the
+`ubuntu-latest` (or `macos-15` / `windows-latest` where needed). Before the
 2026-07-27 pass a PR cost **13.2 minutes of exclusive runner time** across six
 jobs in three workflow files, four of them repeating the same checkout and
 `npm ci`; the one-runner queue that motivated that cost discipline is gone.
@@ -249,7 +249,7 @@ is cached on the lockfile hash and Playwright browsers on the same key, so
 that was the bulk of the waste. With jobs parallel, splitting a job out no longer
 queues other PRs — only keep a step a step when the logic is co-located.
 
-**`macos-install-smoke.yml`** (GitHub-hosted `macos-14`, Apple Silicon) installs
+**`macos-install-smoke.yml`** (GitHub-hosted `macos-15`, Apple Silicon) installs
 the box END-TO-END the way a user does (`curl mantaui.com/install.sh | bash`) and asserts the macOS-only path
 actually works: LaunchAgents load and stay alive, manta-server + opencode answer
 on loopback, the tail prints a 6-digit pairing code, no `systemctl` advice is
@@ -3656,10 +3656,10 @@ any of them breaks the macOS path.
   `SKIP_PUBLIC_TLS` gate** — the macOS install dies on `:80`/`:443`
   binding without sudo, and there's no path to making public TLS work
   on macOS in v1.
-- **`darwin-arm64` tarball built on `macos-14` GitHub runner.** The
+- **`darwin-arm64` tarball built on `macos-15` GitHub runner.** The
   `server-tarball-deploy.yml` workflow matrix is
   `[x64, arm64, darwin-arm64]`, with `runs-on` switching to
-  `macos-14` for the darwin leg. Cannot cross-compile: node-pty's
+  `macos-15` for the darwin leg. Cannot cross-compile: node-pty's
   native ABI is host-tied, so the macOS build MUST run on a Mac.
   Don't add a `darwin-x64` job — Apple Silicon Macs are the only ones
   we ship a box for.
