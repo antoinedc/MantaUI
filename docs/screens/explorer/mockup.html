@@ -35,7 +35,7 @@
     .mk-win-tree       → sidebar hidden (⌘B) + tree open + code at a line
     .mk-win-expanded   → Explorer expanded, transcript folded to the rail
     .mk-links          → path-link states in the transcript
-    .mk-hover          → path hover card
+    .mk-states         → empty / loading / error / empty file
     .mk-source         → Markdown "Source" view
     .mk-refusals       → the four can't-preview states
     .mk-copy           → copy confirmation, copy menu, download toast
@@ -109,7 +109,13 @@
      on macOS it reserves the traffic lights: pl-20 + titlebar-drag. */
   .shead { height: 44px; flex: none; display: flex; align-items: center; gap: var(--sp-2);
            padding: 0 var(--sp-3); border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .win.is-noside .shead { padding-left: 80px; /* pl-20 */ }
+  /* SidebarToggle — pinned once per window, right of the traffic lights (macOS) */
+  .sbt { position: absolute; top: 10px; left: 76px; z-index: 5; }
+  /* every pane header: padding-left: max(own, var(--sidebar-hidden-inset)); macOS hidden = 112px */
+  .win { --sidebar-hidden-inset: 0px; }
+  .win.is-noside { --sidebar-hidden-inset: 112px; }
+  .shead { padding-left: max(var(--sp-3), var(--sidebar-hidden-inset)); }
+  .win.is-expanded .xp-top { padding-left: max(var(--sp-2), calc(var(--sidebar-hidden-inset) - 44px)); }
   .crumb { font-size: var(--font-size-small); font-weight: var(--weight-medium); color: var(--tx1); }
   .crumb .mut { color: var(--tx3); }
   .tag { display: inline-flex; align-items: center; gap: var(--sp-1); height: 22px; padding: 0 var(--sp-2);
@@ -184,7 +190,7 @@
   .git.m { color: var(--warn); } .git.a { color: var(--ok); } .git.d { color: var(--danger); } .git.u { color: var(--tx3); }
   .ind1 { padding-left: var(--sp-3); } .ind2 { padding-left: var(--sp-6); } .ind0 { padding-left: 0; }
   .spacer12 { width: 12px; flex: none; }
-  .trh { width: 6px; margin: 0 -3px; flex: none; cursor: col-resize; position: relative; z-index: 2; }
+  .trh { width: 8px; margin: 0 -4px; flex: none; cursor: col-resize; position: relative; z-index: 2; }
 
   /* ---- viewer ---- */
   .vw { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--canvas); }
@@ -222,17 +228,21 @@
   .sx-f { color: var(--info); } .sx-n { color: var(--warn); } .sx-h { color: var(--accent-tx); font-weight: var(--weight-semibold); }
 
   /* rendered Markdown — MarkdownBody, unchanged, in a px-6 py-5 column capped at --measure */
-  .md { padding: var(--sp-5) var(--sp-6); max-width: var(--measure); color: var(--tx1);
-        font-size: var(--font-size-body); line-height: var(--prose-lh); }
-  .md h1 { font-size: 17px; /* text-title */ font-weight: var(--weight-semibold); margin: 0 0 var(--sp-3); }
-  .md h2 { font-size: var(--font-size-body); font-weight: var(--weight-semibold); margin: var(--sp-5) 0 var(--sp-2); }
-  .md p, .md ul { margin: 0 0 var(--sp-3); }
-  .md ul { padding-left: var(--sp-5); }
+  /* MarkdownBody, unchanged, inside flex-col gap-[var(--block-gap)] px-6 py-5 text-prose.
+     Heading/table margins are MarkdownBody's own inline exceptions (22/6, 18/5, 14). */
+  .md { padding: var(--sp-5) var(--sp-6); max-width: var(--measure); color: var(--tx1); display: flex; flex-direction: column;
+        gap: var(--block-gap); font-size: var(--font-size-body); line-height: var(--prose-lh); overflow-wrap: anywhere; }
+  .md > * { margin: 0; }
+  .md h1 { font-size: 17px; /* text-title */ font-weight: var(--weight-semibold); margin: 22px 0 6px; letter-spacing: -0.01em; }
+  .md h1:first-child { margin-top: 0; }
+  .md h2 { font-size: var(--font-size-body); font-weight: var(--weight-semibold); margin: 18px 0 5px; }
+  .md ul { margin-left: var(--sp-2); padding: 0; list-style: disc inside; }
   .md code { font-family: var(--font-mono); font-size: .88em; color: var(--accent-tx); }
-  .md table { border-collapse: collapse; margin: 14px 0; }
-  .md th, .md td { border: 1px solid var(--border); padding: var(--sp-1) var(--sp-3); text-align: left; }
+  .md .tbl { margin: 14px 0; overflow-x: auto; }
+  .md table { border-collapse: collapse; }
+  .md th, .md td { border: 1px solid var(--border-subtle); padding: var(--sp-1) var(--sp-3); text-align: left; }
   .md th { background: var(--card); font-weight: var(--weight-medium); }
-  .md blockquote { margin: 0 0 var(--sp-3); padding-left: var(--sp-3); border-left: 2px solid var(--border); font-style: italic; color: var(--tx2); }
+  .md blockquote { padding-left: var(--sp-3); border-left: 2px solid var(--border); font-style: italic; color: var(--tx2); }
 
   /* ---- expanded: transcript folds into a w-11 rail ---- */
   .rail { display: none; width: 44px; flex: none; flex-direction: column; align-items: center; gap: var(--sp-3);
@@ -266,6 +276,12 @@
   .btn { margin-top: var(--sp-3); display: inline-flex; align-items: center; gap: var(--sp-2); border-radius: var(--r-md);
          padding: var(--sp-1) var(--sp-3); font: var(--weight-medium) var(--font-size-small)/1.6 var(--font-sans);
          background: var(--accent-solid); color: var(--on-accent); border: 0; }
+
+  /* Button tone default */
+  .btn2 { margin-top: var(--sp-3); display: inline-flex; align-items: center; border-radius: var(--r-md); padding: var(--sp-1) var(--sp-3);
+          font: var(--weight-medium) var(--font-size-small)/1.6 var(--font-sans); background: var(--fill); color: var(--tx1); border: 1px solid var(--border); }
+  /* Skeleton stand-in */
+  .sk { display: block; height: 12px; border-radius: var(--r-xs); background: var(--fill-active); margin: var(--sp-1) 0; }
 
   /* ---- copy / menu / toast ---- */
   .dd { width: 224px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg);
@@ -329,10 +345,11 @@
   <div class="themebar">Theme <button data-theme-set="dark">Dark</button><button data-theme-set="light">Light</button></div>
 
   <!-- ======================= 1. DEFAULT (live) ======================= -->
-  <h2>1 · Default — Explorer open, tree hidden <span style="color:var(--tx3);font-size:var(--font-size-small);font-weight:400">(live: drag the divider, ⌘B / Ctrl+B, ⇧⌘E, ⌥⌘E, click paths)</span></h2>
+  <h2>1 · Default — Explorer open, tree hidden <span style="color:var(--tx3);font-size:var(--font-size-small);font-weight:400">(live: drag the divider, ⌘B / Ctrl+B, ⇧⌘E, ⌥⌘E, click paths, ⌘-click)</span></h2>
   <p class="cap">Sidebar · transcript · divider · Explorer. The path the viewer is showing is outlined in the transcript.</p>
   <div class="win mk-win-default is-notree" id="live">
     <div class="lights"><i></i><i></i><i></i></div>
+    <button class="ib sbt" data-act="sidebar" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
     <aside class="side">
       <div class="sgrp">manta</div>
       <div class="srow on"><span class="dot run"></span>peek-range-fix</div>
@@ -344,7 +361,6 @@
     <div class="content">
       <section class="tpane">
         <header class="shead">
-          <button class="ib" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
           <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
           <span class="tag">fix/peek-range</span>
           <span class="sp">
@@ -401,15 +417,16 @@
                 <span class="seg" role="group" aria-label="Markdown view"><button class="on" data-mode="rendered">Rendered</button><button data-mode="source">Source</button></span>
                 <button class="ib" data-copy title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
                 <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
               </div>
               <div class="vbody">
                 <div data-file="md">
                   <div class="md" data-view="rendered">
                     <h1>Peek &amp; download scope</h1>
-                    <p>Inline media and the artifacts panel read files through the same route. Both now share <strong>one</strong> rule: any regular file inside the user's home directory.</p>
+                    <div>Inline media and the artifacts panel read files through the same route. Both now share <strong>one</strong> rule: any regular file inside the user's home directory.</div>
                     <h2>Rules</h2>
                     <ul><li>Paths resolve against <code>$HOME</code>; <code>~</code> is expanded at the edge.</li><li>Anything outside home answers <code>403</code>.</li><li>Downloads are non-destructive.</li></ul>
-                    <table><tr><th>Route</th><th>Before</th><th>After</th></tr><tr><td><code>/api/peek</code></td><td>home</td><td>home</td></tr><tr><td><code>/api/download</code></td><td>outbox</td><td>home</td></tr></table>
+                    <div class="tbl"><table><tr><th>Route</th><th>Before</th><th>After</th></tr><tr><td><code>/api/peek</code></td><td>home</td><td>home</td></tr><tr><td><code>/api/download</code></td><td>outbox</td><td>home</td></tr></table></div>
                     <blockquote>Display and download must never disagree — see <span class="fl" data-open="peek" data-line="28">src/server/peek.mjs:28</span>.</blockquote>
                   </div>
                   <div class="cm" data-view="source" hidden></div>
@@ -430,11 +447,11 @@
   <p class="cap">The header reserves the macOS window controls. The tree opens inside the Explorer and narrows the viewer, never the transcript. Lines 28–30 are the target range.</p>
   <div class="win mk-win-tree is-noside" id="w2">
     <div class="lights"><i></i><i></i><i></i></div>
+    <button class="ib sbt" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
     <aside class="side"></aside>
     <div class="content">
       <section class="tpane">
         <header class="shead">
-          <button class="ib" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
           <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
           <span class="tag">fix/peek-range</span>
           <span class="sp">
@@ -466,6 +483,7 @@
                 <span class="bc"><bdi>src / server / <b>peek.mjs</b> <span class="at">· lines 28–30</span></bdi></span>
                 <button class="ib" title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
                 <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
               </div>
               <div class="vbody"><div class="cm" data-code="peek"></div></div>
               <div class="vfoot"><span>JavaScript</span><span>142 lines</span><span>4.8 KB</span><span class="sp"></span><span>Ln 28</span></div>
@@ -477,10 +495,11 @@
   </div>
 
   <!-- ======================= 3. EXPANDED ======================= -->
-  <h2>3 · Expanded — ⇧⌘E, ⌘-click, or drag past 85 %</h2>
+  <h2>3 · Expanded — expand button, ⇧⌘E, ⌘-click (or a window narrower than 680 px)</h2>
   <p class="cap">The file fills the window right of the sidebar. The transcript folds to a rail that still shows the session's status dot (here: the agent is working). Esc, ⇧⌘E or a click on the rail restores the exact split.</p>
   <div class="win mk-win-expanded is-expanded is-notree" id="w3">
     <div class="lights"><i></i><i></i><i></i></div>
+    <button class="ib sbt" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
     <aside class="side">
       <div class="sgrp">manta</div>
       <div class="srow on"><span class="dot run"></span>peek-range-fix</div>
@@ -510,6 +529,7 @@
                 <span class="bc"><bdi>src / server / <b>peek.mjs</b> <span class="at">· lines 28–30</span></bdi></span>
                 <button class="ib" title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
                 <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
               </div>
               <div class="vbody"><div class="cm" data-code="peek"></div></div>
               <div class="vfoot"><span>JavaScript</span><span>142 lines</span><span>4.8 KB</span><span class="sp"></span><span>Ln 28</span></div>
@@ -535,17 +555,13 @@
       </div>
     </div>
 
-    <div class="box mk-hover">
-      <h3>5 · Hover card (400 ms)</h3>
-      <div class="amsg" style="margin-bottom:var(--sp-2)"><span class="fl is-hover">src/server/peek.mjs<span class="ln">:28</span></span></div>
-      <div class="hcard">
-        <div class="top"><span class="nm">src/server/peek.mjs</span>
-          <button class="ib" title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
-          <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button></div>
-        <div class="meta">JavaScript · 142 lines · 4.8 KB · modified 2 min ago</div>
-        <div class="well">27  // Guard: path must stay inside home
-28  const home = homedir() + "/";
-29  if (resolved !== home &amp;&amp; …</div>
+    <div class="box mk-states">
+      <h3>5 · Empty, loading, error</h3>
+      <div class="refusals">
+        <div class="refuse"><svg class="ic s20"><use href="#i-folder-tree"/></svg><span class="t">No file open</span><span class="s">Click a file path in the conversation, or open the tree</span><span class="btn2">Show tree</span></div>
+        <div class="refuse" style="align-items:stretch;text-align:left;justify-content:flex-start"><span class="sk" style="width:60%"></span><span class="sk" style="width:85%"></span><span class="sk" style="width:40%"></span><span class="s" style="text-align:center;margin-top:var(--sp-3)">Loading (Skeleton, after 150 ms)</span></div>
+        <div class="refuse"><svg class="ic s20"><use href="#i-file-warn"/></svg><span class="t">Couldn't load this file</span><span class="s">The box didn't answer. Check the connection.</span><span class="btn2">Retry</span></div>
+        <div class="refuse"><span class="s">Empty file</span></div>
       </div>
     </div>
 
@@ -557,6 +573,7 @@
           <span class="seg"><button>Rendered</button><button class="on">Source</button></span>
           <button class="ib"><svg class="ic"><use href="#i-copy"/></svg></button>
           <button class="ib"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
         </div>
         <div class="vbody"><div class="cm" data-code="md"></div></div>
       </div>
@@ -573,7 +590,7 @@
     </div>
 
     <div class="box mk-copy">
-      <h3>8 · Copy and download feedback</h3>
+      <h3>8 · Copy feedback, More menu, download toast</h3>
       <div style="display:flex;gap:var(--sp-6);align-items:flex-start;flex-wrap:wrap">
         <div style="display:flex;flex-direction:column;gap:var(--sp-2);align-items:flex-start">
           <span style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--font-size-xs);color:var(--tx3)">
@@ -581,8 +598,7 @@
             <button class="ib ok"><svg class="ic"><use href="#i-check"/></svg></button> copied (1.5 s)
           </span>
           <div class="dd" role="menu">
-            <div class="mi is-active"><svg class="ic s14"><use href="#i-copy"/></svg>Copy contents</div>
-            <div class="mi"><svg class="ic s14"><use href="#i-link"/></svg>Copy path<span class="k">⌥ click</span></div>
+            <div class="mi is-active"><svg class="ic s14"><use href="#i-link"/></svg>Copy path</div>
             <div class="mi"><svg class="ic s14"><use href="#i-link"/></svg>Copy relative path</div>
           </div>
         </div>
@@ -591,7 +607,7 @@
     </div>
 
     <div class="box mk-quickopen">
-      <h3>9 · Quick open (⌘P in the Explorer)</h3>
+      <h3>9 · Quick open (⌘P in the Explorer) — searches the session folder</h3>
       <div class="pal">
         <div class="in"><svg class="ic"><use href="#i-search"/></svg>peek</div>
         <div class="list">
@@ -599,7 +615,7 @@
           <div class="it"><svg class="ic s14"><use href="#i-file"/></svg><span>src/server/<mark>peek</mark>.test.mjs</span></div>
           <div class="it"><svg class="ic s14"><use href="#i-file"/></svg><span>docs/<mark>peek</mark>-scope.md</span><span class="r git a">A</span></div>
         </div>
-        <div class="ft"><span><kbd>↑↓</kbd> move</span><span><kbd>⏎</kbd> open</span><span><kbd>⌘⏎</kbd> open expanded</span><span><kbd>esc</kbd> close</span></div>
+        <div class="ft"><span><kbd>↑↓</kbd> move</span><span><kbd>⏎</kbd> open</span><span><kbd>esc</kbd> close</span></div>
       </div>
     </div>
   </div>
@@ -691,7 +707,7 @@ document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('c
 (function(){
   const W = document.getElementById('live'), C = W.querySelector('.content'), XP = W.querySelector('.xp'),
         RH = W.querySelector('.rh'), T = W.querySelector('.tree'), TRH = W.querySelector('.trh');
-  const MIN_T = 360, MIN_F = 320, SNAP = .85, DEF = .48;
+  const MIN_T = 360, MIN_F = 320, DEF = .48;
   const st = { side: true, tree: false, exp: false, open: true, ratio: DEF, treeW: 176 };
   function layout(){
     W.classList.toggle('is-noside', !st.side); W.classList.toggle('is-notree', !st.tree);
@@ -699,7 +715,7 @@ document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('c
     W.querySelector('[data-act=tree]').classList.toggle('on', st.tree);
     W.querySelector('.shead [data-act=close]').classList.toggle('on', st.open);
     const ex = W.querySelector('[data-act=expand] use'); ex.setAttribute('href', st.exp ? '#i-min' : '#i-max');
-    W.querySelector('.shead [data-act=sidebar]').title = st.side ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)';
+    W.querySelector('[data-act=sidebar]').title = st.side ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)';
     T.style.width = st.treeW + 'px';
     requestAnimationFrame(() => { const w = C.getBoundingClientRect().width;
       const fw = Math.max(MIN_F, Math.min(w - MIN_T, Math.round(w * st.ratio))); if (!st.exp) XP.style.width = fw + 'px'; });
@@ -716,8 +732,6 @@ document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('c
   RH.addEventListener('pointerdown', e => {
     RH.setPointerCapture(e.pointerId); RH.classList.add('is-drag'); const r = C.getBoundingClientRect();
     const mv = ev => { const fw = r.right - ev.clientX, ratio = fw / r.width;
-      if (ratio > SNAP) { st.exp = true; up(); return layout(); }
-      if (fw < MIN_F - 120) { st.open = false; up(); return layout(); }
       st.ratio = Math.max(MIN_F / r.width, Math.min((r.width - MIN_T) / r.width, ratio)); layout(); };
     const up = () => { RH.classList.remove('is-drag'); RH.removeEventListener('pointermove', mv); RH.removeEventListener('pointerup', up); };
     RH.addEventListener('pointermove', mv); RH.addEventListener('pointerup', up);

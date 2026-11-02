@@ -70,73 +70,84 @@ Put them in `src/renderer/explorer/layout.ts` with a comment pointing here.
 
 | Name | Value | Notes |
 |---|---|---|
-| `EXPLORER_DEFAULT_RATIO` | 0.48 | Explorer share of the content width (sidebar excluded) |
-| `TRANSCRIPT_MIN_PX` / `EXPLORER_MIN_PX` | 360 / 320 | enforced on every container resize |
-| `EXPAND_SNAP_RATIO` | 0.85 | drag past → Expanded, ratio left unchanged |
-| `CLOSE_SNAP_PX` | 200 | drag the Explorer narrower than this → close it |
-| `TREE_DEFAULT_PX` / range | 176 (`w-44`) / 140–320 | |
-| `HOVER_DELAY_MS` | 400 | path hover card |
-| `COPY_CONFIRM_MS` | 1500 | same as CopyButton |
+| `EXPLORER_DEFAULT_SIZE` | `"48%"` | Explorer `defaultSize` (v4 string = percent) |
+| `TRANSCRIPT_MIN_PX` / `EXPLORER_MIN_PX` | 360 / 320 | `minSize` numbers (v4 numbers = px) |
+| `AUTO_EXPAND_BELOW_PX` | 680 | content narrower than both minimums → Expanded |
+| `TREE_DEFAULT_PX` / range | 176 (`w-44`) / 140 – (explorer − 200) | tree toggle disabled when explorer < 340 |
+| `VIEWER_MIN_PX` | 200 | |
+| `SIDEBAR_WIDTH_PX` | 256 (`w-64`) | slide distance |
+| `SIDEBAR_HIDDEN_INSET_PX` | macOS 112 · others 40 | value of `--sidebar-hidden-inset` while hidden |
+| `COPY_CONFIRM_MS` | 1500 | |
+| `LOADING_DELAY_MS` | 150 | skeleton appears only after this |
+| `UPDATED_PILL_MS` | 3000 | |
 | Sidebar animation | `--motion-slow` + `--ease-out` | "panel slides" in the motion scale |
+
+v2 only (do NOT build): hover card, drag snaps.
 
 ---
 
 ## E0 — Window composition (`App.tsx`)
 
 ```
-<div class="flex h-full">                                   ← existing
-  <Sidebar/>                         w-64 (existing). Hidden = stays mounted, slides out:
-                                     -ml-64, transition-[margin] duration-[var(--motion-slow)]
-                                     ease-[var(--ease-out)], then aria-hidden + inert.
-  <PanelGroup direction="horizontal" class="manta-explorer-split flex-1 min-w-0">
-    <Panel  id="transcript" minSize={…}>  <ChatPanel …/> </Panel>
-    <PanelResizeHandle …/>                (E2)
-    <Panel  id="explorer" collapsible minSize={…}> <ExplorerPanel …/> </Panel>
-  </PanelGroup>
+<div class="flex h-full" style={{"--sidebar-hidden-inset": hidden ? `${SIDEBAR_HIDDEN_INSET_PX}px` : "0px"}}>
+  <SidebarToggle/>                  (E1a — pinned, absolute, top-left)
+  <Sidebar/>                        w-64; hidden = stays mounted, style={{marginLeft: -SIDEBAR_WIDTH_PX}},
+                                    class "transition-[margin] duration-[var(--motion-slow)] ease-[var(--ease-out)]",
+                                    inert + aria-hidden when hidden
+  [chat session]
+  <Group orientation="horizontal" class="manta-explorer-split min-w-0 flex-1">
+    <Panel id="transcript" minSize={TRANSCRIPT_MIN_PX} collapsible collapsedSize={0}> <ChatPanel …/> </Panel>
+    [explorer shown && !expanded] <Separator …/>            (E2)
+    [explorer shown] <Panel id="explorer" defaultSize={EXPLORER_DEFAULT_SIZE} minSize={EXPLORER_MIN_PX}> <ExplorerPanel …/> </Panel>
+  </Group>
+  [artifacts shown] <ArtifactsPanel …/>                    (unchanged)
 </div>
 ```
+- `react-resizable-panels` **v4** API: `Group` / `Panel` / `Separator`,
+  `orientation`, numbers = px, strings = %. No percentage conversion code.
+- Existing mounted ChatPanels stay mounted (App keeps visited panels alive) —
+  the Group wraps the ACTIVE chat's column only; do not remount inactive panels.
+- Per-session layout persistence via `onLayoutChange` (debounced 250 ms) into
+  `manta:explorer:<sessionId>`; Expanded = `panelRef.collapse()` on the
+  transcript Panel.
+- Right slot: `setRightPanel(sessionId, which)` is the only writer (spec
+  §Layout); the `manta-open-review` handler and the ⌘I handler call it.
+- Not mounted for terminal, CTO, routines, drafts.
 
-- Library: `react-resizable-panels`. Sizes are percentages; convert the px minimums
-  to % on container resize (one `ResizeObserver` effect).
-- **Per-session layout.** Store `{ ratio, open, treeOpen, treeWidth }` per opencode
-  session id in `localStorage` key `manta:explorer:<sessionId>` (device-local, like
-  the per-session model override). A session never seen before gets: open = false,
-  ratio = default, tree closed. `expanded` is in memory only.
-- `sidebarHidden` is app-wide, `localStorage` key `manta:sidebarHidden`.
-- The Artifacts panel keeps its own implementation and slot; Explorer and Artifacts
-  are mutually exclusive in the right slot (opening one closes the other).
+## E1a — Sidebar toggle (`SidebarToggle.tsx`, hook `manta-sidebar-toggle`)
+
+`<IconButton icon={<PanelLeft/>} label={hidden ? "Show sidebar" : "Hide sidebar"} title="… (⌘B)" hook="manta-sidebar-toggle"/>`
+in a wrapper `absolute z-20 titlebar-no-drag` at `top: 10px` and
+`left: 76px` on macOS (right of the traffic lights) / `left: 8px` elsewhere
+(layout constants). Rendered once, by App, above the sidebar AND the panes, so
+it is visible in every pane and in Expanded mode.
 
 ## E1 — Session header (`SessionHeader.tsx`, existing `manta-session-header`)
 
-Two additions, nothing else changes:
+- Left padding: replace `pl-3` with
+  `style={{paddingLeft: "max(var(--sp-3), var(--sidebar-hidden-inset))"}}`.
+  The same rule goes on the terminal pane header, CTO header, Routines header
+  and NewSessionScreen header. On macOS the padded strip keeps `titlebar-drag`.
+- **Explorer toggle**: a registry entry pushed **immediately before** the
+  Artifacts entry (the registry keeps insertion order), same shape:
+  `<IconButton icon={<FolderTree className={open ? "text-[var(--accent-tx)]" : undefined}/>}
+  label={open ? "Hide file explorer" : "Show file explorer"} title="… (⌘E)"
+  hook="manta-explorer-toggle" />`. Shown for chat sessions only.
 
-1. **Sidebar toggle**, first child, before the crumb:
-   `<IconButton icon={<PanelLeft/>} label={hidden ? "Show sidebar" : "Hide sidebar"}
-   title="… (⌘B)" hook="manta-sidebar-toggle" />`.
-2. **Explorer toggle**, registered beside the Artifacts toggle (same registry entry
-   shape, priority 81 so it sits left of Artifacts):
-   `<IconButton icon={<FolderTree className={open ? "text-[var(--accent-tx)]" : undefined}/>}
-   label={open ? "Hide file explorer" : "Show file explorer"} title="… (⌘E)"
-   hook="manta-explorer-toggle" />` — the exact pattern the Artifacts toggle uses.
-
-**Sidebar hidden on macOS:** the header gets `pl-20` instead of `pl-3` and the
-`titlebar-drag` class (its buttons `titlebar-no-drag`), so the window controls sit
-in the header and the window stays draggable. Windows/Linux: unchanged `pl-3`.
-
-## E2 — Resize handle (`PanelResizeHandle`, hook `manta-explorer-handle`)
+## E2 — Separator (`Separator`, hook `manta-explorer-handle`)
 
 ```
-<PanelResizeHandle class="manta-explorer-handle group relative z-10 -mx-1 flex w-2 shrink-0 cursor-col-resize justify-center outline-none"
-                   aria-label="Resize file explorer">
+<Separator class="manta-explorer-handle group relative z-10 -mx-1 flex w-2 shrink-0 cursor-col-resize justify-center outline-none"
+           aria-label="Resize file explorer">
   <span class="h-full w-px bg-border transition-colors
                group-hover:w-[2px] group-hover:bg-accent
-               group-data-[resize-handle-state=drag]:w-[2px] group-data-[resize-handle-state=drag]:bg-accent
+               group-active:w-[2px] group-active:bg-accent
                group-focus-visible:w-[2px] group-focus-visible:bg-accent" />
-</PanelResizeHandle>
+</Separator>
 ```
-Double-click → default ratio. ←/→ when focused resize (the library's keyboard
-support). The handle's 1 px `--border` line IS the Explorer's left border — do not
-add `border-l` to the panel as well.
+Double-click → `EXPLORER_DEFAULT_SIZE` (library `disableDoubleClick` stays
+false; implement via the group's `setLayout`). ←/→ when focused (library). The
+1 px `--border` line IS the Explorer's left border — no `border-l` on the panel.
 
 ## E3 — Explorer shell + top bar (`ExplorerPanel.tsx`, hooks `manta-explorer`, `manta-explorer-top`)
 
@@ -144,7 +155,8 @@ add `border-l` to the panel as well.
 <section class="manta-explorer flex h-full min-w-0 bg-bg-elev">
   [expanded] <ExplorerRail/>                                  (E9)
   <div class="flex min-w-0 flex-1 flex-col">
-    <div class="manta-explorer-top flex h-11 shrink-0 items-center gap-1 border-b border-border px-2">
+    <div class="manta-explorer-top flex h-11 shrink-0 items-center gap-1 border-b border-border px-2"
+         style={expanded ? {paddingLeft: "max(var(--sp-2), calc(var(--sidebar-hidden-inset) - 44px))"} : undefined}>
       <IconButton icon={<ListTree className={treeOpen ? "text-[var(--accent-tx)]" : undefined}/>}
                   label={treeOpen ? "Hide file tree" : "Show file tree"} title="… (⌥⌘E)" />
       <span class="flex min-w-0 flex-1 items-center gap-2 text-label font-semibold text-text">
@@ -157,7 +169,7 @@ add `border-l` to the panel as well.
     </div>
     <div class="flex min-h-0 flex-1">
       [treeOpen] <ExplorerTree/> + tree handle                 (E4)
-      <ExplorerViewer/>                                        (E5–E8)
+      <ExplorerViewer/>  or  <ExplorerEmpty/>                  (E5–E8, E12b)
     </div>
   </div>
 </section>
@@ -180,8 +192,9 @@ Built on `@headless-tree/react`; this section is only the chrome.
   </div>
   <div role="tree" class="min-h-0 flex-1 overflow-y-auto px-1 pb-2"> rows </div>
 </div>
-+ tree handle: <div class="relative z-10 -mx-1 w-2 shrink-0 cursor-col-resize" role="separator" aria-label="Resize file tree"/>
-  (same 1px→2px accent treatment as E2; the line is the tree's border-r)
++ tree handle (8 px = w-2, same as E2): <div class="group relative z-10 -mx-1 w-2 shrink-0 cursor-col-resize" role="separator"
+  aria-orientation="vertical" aria-label="Resize file tree" tabIndex={0}/> — hover/drag/focus shows a 2px bg-accent line;
+  the tree's own border-r is the idle line. ←/→ resize by 16 px.
 ```
 
 Row (`role="treeitem"`, `aria-level`, `aria-expanded` on folders, `aria-selected`):
@@ -195,8 +208,11 @@ Row (`role="treeitem"`, `aria-level`, `aria-expanded` on folders, `aria-selected
   [git] <span class="ml-auto font-mono text-micro font-semibold {M:'text-warn' A:'text-ok' D:'text-danger' ?:'text-text-faint'}">{M|A|D|?}</span>
 </div>
 ```
-Git-ignored entries: `text-text-faint`, never auto-expanded. Dot-files hidden unless
-the filter text starts with `.`.
+Git-ignored entries AND dot-files: `text-text-faint`; ignored folders never
+auto-expand. `.git` is never listed. `link-outside` entries: `text-text-faint`,
+no chevron, `cursor-default`, title "Links outside your home folder". Truncated
+folder: a final non-interactive row `pl-[depth*12] text-meta text-text-faint`
+"{n} more not shown — use quick open (⌘P)". Conflict badge `!` uses `text-danger`.
 
 ## E5 — File bar (`ExplorerViewer.tsx`, hook `manta-explorer-filebar`)
 
@@ -208,8 +224,10 @@ the filter text starts with `.`.
            [line] <span class="text-text-faint">· line {n}</span> | <span>· lines {a}–{b}</span></bdi>
     </span>                                       ← truncates from the LEFT, name always visible
     [markdown only] <Segmented label="Markdown view" options={["Rendered","Source"]} />   (P1)
-    <IconButton icon={copied ? <Check class="text-ok"/> : <Copy/>} label="Copy contents" … />   (E11)
+    [updated] <Pill tone="neutral" size="meta">Updated</Pill>       (3 s after a refresh changed the file)
+    <IconButton icon={copied ? <Check class="text-ok"/> : <Copy/>} label={copied ? "Copied" : "Copy contents"} … />   (E13)
     <IconButton icon={<Download/>} label="Download" title={`Download ${name}`} />
+    <IconButton icon={<MoreHorizontal/>} label="More" ariaHaspopup="menu" … />  → Dropdown (E13)
   </div>
   <div class="min-h-0 flex-1 overflow-auto"> E6 | E7 | E10 </div>
   <ExplorerFooter/>                                                  (E8)
@@ -234,6 +252,10 @@ Props: `label` (required), `options: {id, label}[]`, `value`, `onChange`, `fill?
 panel's `mb-2` stays on its wrapper, not in the primitive.
 
 ## E6 — Code view (`CodeViewer.tsx`, CodeMirror 6 read-only, hook `manta-explorer-code`)
+
+Imports: `HighlightStyle`, `syntaxHighlighting`, `LanguageDescription` from
+`@codemirror/language`; `tags` from `@lezer/highlight`; `languages` from
+`@codemirror/language-data`. `@uiw/react-codemirror` with `basicSetup={false}`.
 
 Extensions: `EditorState.readOnly.of(true)`, `EditorView.editable.of(false)`,
 `lineNumbers()`, `highlightSpecialChars()`, `search({top: true})` +
@@ -296,13 +318,15 @@ ignored (the surface is `--canvas`), exactly as CodeBlock ignores it. The mockup
 ## E7 — Rendered Markdown (hook `manta-explorer-md`)
 
 ```
-<div class="manta-explorer-md max-w-[var(--measure)] px-6 py-5">
-  <MarkdownBody text={file} linkResolver={…}/>          ← unchanged component
+<div class="manta-explorer-md flex max-w-[var(--measure)] flex-col gap-[var(--block-gap)] break-words px-6 py-5 text-prose text-text">
+  <MarkdownBody text={file} fileContext={{ owner, fileDir }}/>      ← component look unchanged
 </div>
 ```
-`MarkdownBody` gets ONE optional prop for this surface: a resolver that turns a
-relative link / image `src` into an Explorer navigation / `/api/peek` URL. No style
-changes to MarkdownBody. Raw HTML stays unrendered.
+`gap-[var(--block-gap)]` is the transcript's own block rhythm (MarkdownBody
+sets only heading/table margins). `fileContext` changes behaviour only:
+relative links → Explorer navigation, relative images → authenticated blob
+loader (spec §Markdown). > 50 000 chars → Source (E6) with a `Callout tone="info"
+size="note"` "Large file — showing source" above it.
 
 ## E8 — Footer (hook `manta-explorer-footer`)
 
@@ -324,14 +348,14 @@ Explorer shell:
 <button class="manta-explorer-rail flex w-11 shrink-0 flex-col items-center gap-3 border-r border-border bg-bg pt-3 hover:bg-fill-hover"
         aria-label="Back to transcript" title="Back to transcript (Esc)">
   <Minimize2 size={16} class="text-text-faint"/>
-  <StatusDot tone={running ? "running" : needsYou ? "warn" : "idle"}/>
+  <StatusDot tone={needsYou ? "warn" : running ? "running" : "idle"}/>
   <span class="rotate-180 text-meta text-text-faint [writing-mode:vertical-rl]">Transcript</span>
 </button>
 ```
 (The rail is one button; the glyph is not a nested IconButton.) Restore returns to
 the ratio held before expanding.
 
-## E10 — Path link (`FileLink` in `Linkified.tsx`, hook `manta-file-link`)
+## E10 — Path link (`FileLink` in `Linkified.tsx`, hook `manta-file-link`) and ToolCard `argPath`
 
 The ONE anchor for confirmed file paths, sibling of `ExternalLink`:
 ```
@@ -348,21 +372,17 @@ The ONE anchor for confirmed file paths, sibling of `ExternalLink`:
 - `active` = the file (and range) currently shown in this session's Explorer.
 - A path that is unresolved, missing or outside home renders as plain text /
   plain inline code — never a link with a disabled look.
-- `stopPropagation` on click, like `ExternalLink`, so a tool-card header doesn't toggle.
+- `stopPropagation` on click, like `ExternalLink`.
 
-## E11 — Hover card (hook `manta-explorer-hover`)
+**ToolCard `argPath` slot.** An `<a>` inside the header `<button>` is invalid,
+so a card with `argPath` renders its header as
+`<div class="…same header classes…" onClick={toggle}>` containing: the status
+dot, the name, the `FileLink` (outside code: add `font-mono text-[0.88em]`),
+the meta, and the chevron wrapped in the ONLY focusable disclosure control
+`<button aria-expanded aria-label="Show details" class="rounded-xs p-1 …IconButton md chrome">`.
+Cards without `argPath` keep today's `<button>` header unchanged.
 
-`<Popover placement="below">` with the shared `POPOVER_SURFACE` chrome, `w-72 p-3`:
-```
-<div class="flex items-center gap-1">
-  <span class="min-w-0 flex-1 truncate font-mono text-label text-text">{relPath}</span>
-  <IconButton Copy …/> <IconButton Download …/>
-</div>
-<div class="mb-2 text-meta text-text-faint">{language} · {lines} lines · {size} · modified {rel}</div>
-<OutputWell variant="standalone">{3 lines around the target, each prefixed with its number}</OutputWell>
-```
-Opens after `HOVER_DELAY_MS`, closes on leave (with the usual grace into the card).
-Binary / too-large files: no OutputWell; the meta line says why.
+## E11 — (v2) Hover card — not built in v1
 
 ## E12 — Can't-preview states (hook `manta-explorer-refusal`)
 
@@ -382,18 +402,33 @@ Centred in the viewer body (the mockup boxes them only to show four at once):
 | ENOENT | `FileX` | No longer exists | Moved or deleted after it was mentioned | no |
 | EACCES | `Lock` | Can't read this file | The box user has no permission to open it | no |
 
-Images / PDF / video use the existing `ArtifactPreview` renderers inside the body.
+Images / video: `MediaBody` (extracted from `ArtifactPreview`, which then uses
+it too). PDF: centred `<Button tone="default">Open preview</Button>` that opens
+the existing ArtifactPreview overlay for the path.
+
+## E12b — Empty / loading / error (hook `manta-explorer-state`)
+
+Same centred column as E12:
+- **Empty** (no file opened in this session): icon `FolderTree` 20, title
+  "No file open", detail "Click a file path in the conversation, or open the
+  tree", `<Button tone="default">Show tree</Button>`.
+- **Loading**: nothing for `LOADING_DELAY_MS`, then the existing `Skeleton`
+  (3 lines) at the top of the body, `px-6 py-5`.
+- **Error**: icon `FileWarning` 20, title "Couldn't load this file", detail =
+  the safe reason text, `<Button tone="default">Retry</Button>`.
+- **Empty file**: `text-meta text-text-faint px-6 py-5` "Empty file".
 
 ## E13 — Copy and download feedback
 
-- **Copy contents**: IconButton; on success swap the glyph to `<Check class="text-ok"/>`
-  for `COPY_CONFIRM_MS`, label "Copied". On failure: error toast "Couldn't copy —
-  the clipboard is unavailable". (Do NOT reuse `CopyButton` as-is: it swallows the
-  failure.) Disabled with a reason in `title` for binary / too-large files.
-- **Copy menu**: right-click or ⌥-click on the copy button opens
-  `Dropdown` (align end) with `MenuItem`s: Copy contents (`Copy` 14) · Copy path
-  (`Link` 14, trailing hint "⌥ click") · Copy relative path (`Link` 14).
-- **Download**: `saveToDownloads(absPath)` — its toasts are the whole UI. Nothing new.
+- **Copy contents**: IconButton; on success the glyph becomes
+  `<Check class="text-ok"/>` and the label "Copied" for `COPY_CONFIRM_MS`. On
+  failure: error toast "Couldn't copy — the clipboard is unavailable". (Do NOT
+  reuse `CopyButton`: it swallows failures.) Disabled with the reason in `title`
+  for binary / too-large / not-yet-loaded files.
+- **More** (`MoreHorizontal` IconButton, `ariaHaspopup="menu"`) → `Dropdown`
+  (align end, width menu) with `MenuItem`s: Copy path (`Link` 14) · Copy relative
+  path (`Link` 14). Success → toast "Path copied"; failure → the same error toast.
+- **Download**: `saveToDownloads(absPath)` — its toasts are the whole UI.
 
 ## E14 — Quick open (hook `manta-explorer-quickopen`)
 
@@ -406,7 +441,8 @@ Images / PDF / video use the existing `ArtifactPreview` renderers inside the bod
   [git] <span class="ml-auto font-mono text-micro font-semibold {tone}">{M|A|D|?}</span>
 </div>
 ```
-Footer hints add `⌘⏎ open expanded` to PaletteShell's existing ones.
+PaletteShell is unchanged (no hook prop, no modified-Enter): put the
+`manta-explorer-quickopen` hook on the list wrapper rendered as its children.
 
 ---
 
@@ -416,7 +452,7 @@ Footer hints add `⌘⏎ open expanded` to PaletteShell's existing ones.
 `manta-explorer-handle`, `manta-explorer`, `manta-explorer-top`, `manta-explorer-tree`,
 `manta-explorer-row`, `manta-explorer-filebar`, `manta-explorer-code`,
 `manta-explorer-md`, `manta-explorer-footer`, `manta-explorer-rail`,
-`manta-file-link`, `manta-explorer-hover`, `manta-explorer-refusal`,
+`manta-file-link`, `manta-explorer-refusal`, `manta-explorer-state`,
 `manta-explorer-quickopen`.
 
 ## Visual registry rows (`scripts/visual/screens.mjs`)
@@ -427,7 +463,8 @@ Footer hints add `⌘⏎ open expanded` to PaletteShell's existing ones.
 | `explorer-tree` | full window | `.mk-win-tree` | sidebar hidden, tree open, `src/server/peek.mjs:28-30` |
 | `explorer-expanded` | full window | `.mk-win-expanded` | same file, expanded, session running |
 | `explorer-links` | transcript turn with paths | `.mk-links` | demo turn with every link state |
-| `explorer-hover` | `.manta-explorer-hover` | `.mk-hover` | hover `src/server/peek.mjs:28` |
+| `explorer-states` | `.manta-explorer-state` | `.mk-states` | empty / loading / error fixtures |
+| `explorer-narrow` | full window at 900×700 | `.mk-win-expanded` | Explorer opened in a narrow window → Expanded |
 | `explorer-md-source` | `.manta-explorer` | `.mk-source` | Source view |
 | `explorer-refusal` | `.manta-explorer-refusal` | `.mk-refusals` (one tile per row variant) | each refusal fixture |
 | `explorer-quickopen` | `.manta-explorer-quickopen` | `.mk-quickopen` | ⌘P, query `peek` |
