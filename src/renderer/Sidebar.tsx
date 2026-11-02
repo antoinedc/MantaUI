@@ -27,6 +27,7 @@ import {
   isUnknownChannelError,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
+import { SIDEBAR_WIDTH_PX } from "./explorer/layout";
 import { SessionRow as RailSessionRow, ROW_SELECTED, type SessionStatus } from "./SessionRow";
 import { StatusDot } from "./StatusDot";
 import { dotTone, badgeLabel } from "./ctoView";
@@ -92,10 +93,12 @@ type Props = {
   routinesBadge: { needsYou: number; unread: number };
   /** The Routines pane is the visible view (selected-row state). */
   routinesOpen?: boolean;
+  /** ⌘B: the sidebar slides away but stays mounted (`inert`, so nothing in it is reachable). */
+  hidden?: boolean;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, hidden = false },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -648,7 +651,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   };
 
   return (
-    <aside className="w-64 shrink-0 border-r border-border bg-bg-elev flex flex-col">
+    <aside
+      className="w-64 shrink-0 border-r border-border bg-bg-elev flex flex-col transition-[margin] duration-[var(--motion-slow)] ease-[var(--ease-out)]"
+      style={{ marginLeft: hidden ? -SIDEBAR_WIDTH_PX : 0 }}
+      aria-hidden={hidden || undefined}
+      {...(hidden ? ({ inert: "" } as Record<string, string>) : {})}
+    >
       {/* Top drag strip. On macOS this is dead space the traffic-lights
           overlay (top-left, over the sidebar) — keep it. On Windows the
           caption buttons are top-right (over the main area), so the sidebar's
@@ -659,7 +667,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       <div
         className={
           "px-3 pb-2 flex items-center justify-between" +
-          (IS_WINDOWS ? " titlebar-drag" : "")
+          (IS_WINDOWS ? " titlebar-drag pl-11" : "")
         }
       >
         <div className="flex items-center gap-2 min-w-0">

@@ -6,6 +6,30 @@ import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
+import { ArtifactPreview } from "./ArtifactPreview";
+import { SidebarToggle } from "./SidebarToggle";
+import { ExplorerSplit } from "./explorer/ExplorerPanel";
+import {
+  getExplorerSession,
+  openFile as openExplorerFile,
+  setRightPanel,
+  setTreeOpen,
+  shownRightPanel,
+  toggleArtifacts,
+  toggleExpanded,
+  toggleExplorer,
+  toggleSidebarHidden,
+  useShownRightPanel,
+  useSidebarHidden,
+} from "./explorer/explorerStore";
+import { SIDEBAR_HIDDEN_INSET_PX } from "./explorer/layout";
+import { artifactForPath } from "./explorer/previewPath";
+import {
+  EXPLORER_OPEN_EVENT,
+  PREVIEW_PATH_EVENT,
+  type OpenFileRequest,
+} from "./explorer/types";
+import { saveToDownloads } from "./downloadFeedback";
 import { GlobalToasts } from "./GlobalToasts";
 import { Settings } from "./Settings";
 import { RoutinesRoot, type RoutinesView } from "./RoutinesRoot";
@@ -75,16 +99,6 @@ const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
 // the old 120s left almost no headroom and would flip the bar back to a
 // clickable state while the box was still updating.
 const BOX_UPGRADE_MAX_MS = 600_000;
-
-// BET-659: Artifacts panel open/closed — device-local, default CLOSED. Lazy
-// read with try/catch (repo convention — localStorage can throw).
-function loadArtifactsOpen(): boolean {
-  try {
-    return localStorage.getItem("manta:artifacts:open") === "1";
-  } catch {
-    return false;
-  }
-}
 
 // A toast body with a leading glyph. The two scheduled-at-reset confirmations
 // used a ⏰ EMOJI, which is the schedules card's glyph and the only emoji in
@@ -1431,6 +1445,10 @@ function Shell() {
     };
   }, []);
 
+  // The Explorer's window keys only apply while a chat pane is the visible view.
+  const explorerKeysLive =
+    activeChatSessionId != null && mode === "chat" && !ctoOpen && !routinesView && !settingsOpen;
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
@@ -1440,6 +1458,37 @@ function Shell() {
         setSettingsOpen(true);
         e.preventDefault();
         return;
+      }
+      // Cmd+B = hide / show the left sidebar, on every pane (Settings is a
+      // modal over the shell, so it keeps its own keys).
+      if ((e.key === "b" || e.key === "B") && !e.shiftKey && !e.altKey && !settingsOpen) {
+        toggleSidebarHidden();
+        e.preventDefault();
+        return;
+      }
+      // File explorer keys. Chat pane only (the Explorer exists per chat
+      // session). `code` rather than `key`: ⌥E types a dead key on macOS.
+      if ((e.code === "KeyE" || e.key.toLowerCase() === "e") && explorerKeysLive) {
+        const sid = activeChatSessionId;
+        if (!sid) return;
+        if (!e.shiftKey && !e.altKey) {
+          toggleExplorer(sid);
+          e.preventDefault();
+          return;
+        }
+        // ⇧⌘E and ⌥⌘E act on an OPEN Explorer only.
+        if (shownRightPanel(sid) === "explorer") {
+          if (e.shiftKey && !e.altKey) {
+            toggleExpanded(sid);
+            e.preventDefault();
+            return;
+          }
+          if (e.altKey && !e.shiftKey) {
+            setTreeOpen(sid, !getExplorerSession(sid).layout.treeOpen);
+            e.preventDefault();
+            return;
+          }
+        }
       }
       // Option+Cmd+Up/Down = step through (project, window) tuples in sidebar
       // order, wrapping around at both ends.
@@ -1490,6 +1539,7 @@ function Shell() {
         (e.key === "f" || e.key === "F") &&
         !e.shiftKey &&
         !e.altKey &&
+        !e.defaultPrevented &&
         !settingsOpen &&
         activeChatSessionId != null &&
         mode === "chat"
@@ -1507,7 +1557,7 @@ function Shell() {
         activeChatSessionId != null &&
         mode === "chat"
       ) {
-        setArtifactsOpen((v) => !v);
+        toggleArtifacts(activeChatSessionId);
         e.preventDefault();
         return;
       }
@@ -1524,7 +1574,7 @@ function Shell() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [projects, activeProjectName, activeWindowByProject, jumpToWindow, settingsOpen, activeChatSessionId, mode]);
+  }, [projects, activeProjectName, activeWindowByProject, jumpToWindow, settingsOpen, activeChatSessionId, mode, explorerKeysLive]);
 
   // Generic "open Settings on section X" bridge, the same window-CustomEvent
   // convention as the schedules/secrets bridges. The composer-level menus
@@ -1548,10 +1598,38 @@ function Shell() {
   // artifacts panel (ArtifactsPanel separately switches itself to its Review
   // tab). Same window-CustomEvent convention as manta-open-settings above.
   useEffect(() => {
-    const handler = () => setArtifactsOpen(true);
+    const handler = () => setRightPanel(activeChatRef.current, "artifacts");
     window.addEventListener("manta-open-review", handler);
     return () => window.removeEventListener("manta-open-review", handler);
   }, []);
+
+  // A path link anywhere in a transcript asks for its owner session's Explorer.
+  // The owner was captured when the link rendered, so the open never lands in
+  // "whichever session is active when it arrives".
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const req = (ev as CustomEvent<OpenFileRequest>).detail;
+      if (req?.owner?.sessionId && req.abs) openExplorerFile(req);
+    };
+    window.addEventListener(EXPLORER_OPEN_EVENT, handler);
+    return () => window.removeEventListener(EXPLORER_OPEN_EVENT, handler);
+  }, []);
+
+  // A terminal absolute-path click (and httpApi.peekRemoteFile) opens the file
+  // in the existing artifact preview overlay: terminal windows get no Explorer.
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const path = (ev as CustomEvent<{ path?: string }>).detail?.path;
+      if (path) setPreviewPath(path);
+    };
+    window.addEventListener(PREVIEW_PATH_EVENT, handler);
+    return () => window.removeEventListener(PREVIEW_PATH_EVENT, handler);
+  }, []);
+  const previewArtifacts = useMemo(
+    () => (previewPath ? [artifactForPath(previewPath)] : []),
+    [previewPath],
+  );
 
   const activeWinName = activeProject?.windows.find(
     (w) => w.index === activeWindowByProject[activeProjectName!],
@@ -1608,17 +1686,11 @@ function Shell() {
   //     is disruptive.
   const [confirmServerUpdate, setConfirmServerUpdate] = useState(false);
 
-  // BET-659: Artifacts panel open/closed. Owned here because the toggle lives
-  // in the SessionHeader (deep inside ChatPanel) while the panel mounts as a
-  // sibling of <main> — both need the same value.
-  const [artifactsOpen, setArtifactsOpen] = useState(loadArtifactsOpen);
-  useEffect(() => {
-    try {
-      localStorage.setItem("manta:artifacts:open", artifactsOpen ? "1" : "0");
-    } catch {
-      /* best-effort persist */
-    }
-  }, [artifactsOpen]);
+  // The right slot (Explorer vs Artifacts) and the sidebar flag live in
+  // explorerStore; `setRightPanel` is the only writer. The Artifacts open flag
+  // keeps its global `manta:artifacts:open` key there.
+  const shownRight = useShownRightPanel(activeChatSessionId);
+  const sidebarHidden = useSidebarHidden();
 
   // BET-713 fix: a SUCCESSFUL box self-upgrade restarts manta-server before the
   // `server:update-apply` RPC resolves, so the renderer's fetch dies with a bare
@@ -1982,9 +2054,17 @@ function Shell() {
     // scripts/visual/screens.mjs), matching NewSessionScreen's. One stable
     // attribute per screen root, so the harness never depends on a class name
     // or a DOM position — both of which a redesign is expected to change.
-    <div data-screen="session" className="h-full w-full flex bg-bg text-text">
+    <div
+      data-screen="session"
+      className="h-full w-full flex bg-bg text-text relative"
+      // While the sidebar is hidden every pane header pads its left edge by this
+      // much so nothing sits under the pinned toggle (and the traffic lights).
+      style={{ "--sidebar-hidden-inset": sidebarHidden ? `${SIDEBAR_HIDDEN_INSET_PX}px` : "0px" } as CSSProperties}
+    >
+      <SidebarToggle hidden={sidebarHidden} onToggle={toggleSidebarHidden} />
       <Sidebar
         ref={sidebarRef}
+        hidden={sidebarHidden}
         onOpenSettings={() => setSettingsOpen(true)}
         onNewProject={openNewProject}
         onNewSessionInProject={openNewSessionInProject}
@@ -2094,7 +2174,10 @@ function Shell() {
           />
         )}
         {!isChatPaneActive && !routinesView && (
-        <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
+        <div
+          className="titlebar-drag h-12 border-b border-border flex items-center pr-4 gap-2 min-w-0"
+          style={{ paddingLeft: "max(var(--sp-4), var(--sidebar-hidden-inset, 0px))" }}
+        >
           <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
               <span className="text-text-faint shrink-0">
@@ -2258,6 +2341,7 @@ function Shell() {
                   : null;
                 return (
                   <PanelShell key={`chat:${sid}`} active={isActiveChat}>
+                    <ExplorerSplit sessionId={sid} cwd={owner?.cwd ?? ""} active={isActiveChat && owner != null}>
                     <ChatPanel
                       sessionId={sid}
                       tmuxSession={owner?.tmuxSession ?? null}
@@ -2269,8 +2353,8 @@ function Shell() {
                       mode={mode}
                       onModeChange={setMode}
                       availableLaunchers={availableLaunchers}
-                      artifactsOpen={artifactsOpen}
-                      onToggleArtifacts={() => setArtifactsOpen((v) => !v)}
+                      artifactsOpen={shownRightPanel(sid) === "artifacts"}
+                      onToggleArtifacts={() => toggleArtifacts(sid)}
                       autoSubmit={
                         autoSubmitPrompt?.sid === sid ? autoSubmitPrompt : undefined
                       }
@@ -2278,6 +2362,7 @@ function Shell() {
                       unregisterModelControl={unregisterModelControl}
                       seedPrompt={seedPrompt?.sid === sid ? seedPrompt : undefined}
                     />
+                    </ExplorerSplit>
                   </PanelShell>
                 );
               })}
@@ -2325,7 +2410,7 @@ function Shell() {
         <ArtifactsPanel
           sessionId={activeChatSessionId}
           cwd={activeChatCwd}
-          open={artifactsOpen}
+          open={shownRight === "artifacts"}
         />
       )}
       {settingsOpen && (
@@ -2354,6 +2439,15 @@ function Shell() {
           // restarting.
           onDesktopUpdate={() => void runDesktopDownload()}
           desktopRestarting={desktopRestarting}
+        />
+      )}
+      {previewPath && (
+        <ArtifactPreview
+          artifacts={previewArtifacts}
+          index={0}
+          onClose={() => setPreviewPath(null)}
+          onDownload={(a) => void saveToDownloads(a.href)}
+          onAttach={null}
         />
       )}
       {searchOpen && activeChatSessionId != null && (
