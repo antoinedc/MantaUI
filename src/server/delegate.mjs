@@ -2885,7 +2885,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       return null;
     }
     let outcome = { status, error };
-    if (interrupted) outcome = live.stopRequested ? { status: "stopped", error: "stopped by user" } : { status: "failed", error: "interrupted" };
+    if (interrupted) outcome = live.stopRequested ? { status: "stopped", error: "stopped by user" } : { status: "failed", error: error || "interrupted" };
 
     const manta = completionOwnerOf(live) === "manta";
     const next = {
@@ -2909,9 +2909,10 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   });
   if (paused) {
     pauseInterrupts.delete(paused.id);
-    return { ok: true, paused: true };
+    return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };
+  const endedAs = updated.status;
 
   if (typeof deps.onJobTerminal === "function") {
     try {
@@ -2930,7 +2931,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   pauseInterrupts.delete(updated.id);
   if (updated.completionDelivery === "pending") await deliverJobResult(updated.id, deps);
   await finishV2Cleanup(updated, deps, { held: resourcesHeld });
-  return { ok: true };
+  return { ok: true, status: endedAs };
 }
 
 // What a finished V2 job leaves behind: nothing in the sidebar. Its window is
@@ -3199,6 +3200,79 @@ async function descendantEvidence(job, active, deps) {
   return { complete: true, newestSyntheticAt: newest };
 }
 
+// ---- Lost runs: opencode stopped mid-turn and will never report an outcome ----
+// V2 records no outcome for a turn killed by a restart / crash and does not resume it: the
+// session just leaves the active set. A run is judged lost only after the child was seen in
+// that state on >= 2 checks spanning LOST_RUN_GRACE_MS, with `time.updated` unchanged, no
+// active descendant and nothing pending for a person. In-memory only: a manta-server restart
+// restarts the grace.
+export const LOST_RUN_GRACE_MS = 90_000;
+export const LOST_RUN_MESSAGE = "the run was cut off — opencode stopped before it finished";
+const LOST_RUN_MAX_RECORDS = 500;
+const LOST_RUN_RECORD_TTL_MS = 60 * 60_000;
+const lostRuns = new Map(); // job id -> { firstSeenAt, checks, sessionUpdatedAt, updatedAt }
+
+/** Test seam: forget every absence record. */
+export function _resetLostRuns() {
+  lostRuns.clear();
+}
+
+async function anyDescendantActive(childId, active, deps) {
+  if (typeof deps.listChildSessions !== "function") return false;
+  const seen = new Set([childId]);
+  let layer = [childId];
+  for (let depth = 0; layer.length > 0; depth++) {
+    if (depth >= TREE_MAX_DEPTH) throw new Error("descendant tree too deep");
+    const next = [];
+    for (const parent of layer) {
+      for (const kid of await deps.listChildSessions(parent)) {
+        if (seen.has(kid.id)) continue;
+        seen.add(kid.id);
+        if (seen.size > TREE_MAX_SESSIONS) throw new Error("too many descendants");
+        if (active.has(kid.id)) return true;
+        next.push(kid.id);
+      }
+    }
+    layer = next;
+  }
+  return false;
+}
+
+async function judgeLostRun(job, session, active, deps, { confirmed }) {
+  const unsettled = { settled: false, reason: "no-outcome" };
+  const updatedAt = session?.time?.updated;
+  if (!confirmed || !Number.isFinite(updatedAt)) return unsettled;
+  const now = (deps.now ?? Date.now)();
+  try {
+    if (await anyDescendantActive(job.childSessionID, active, deps)) {
+      lostRuns.delete(job.id);
+      return unsettled;
+    }
+    for (const read of [deps.listPermissions, deps.listQuestions]) {
+      if (typeof read !== "function") continue;
+      const pending = await read(job.childSessionID);
+      if (Array.isArray(pending) && pending.length > 0) return unsettled;
+    }
+  } catch (e) {
+    console.warn(`[delegate] could not judge whether ${job.id} was cut off:`, e?.message ?? e);
+    return unsettled;
+  }
+
+  for (const [id, r] of lostRuns) if (now - r.updatedAt > LOST_RUN_RECORD_TTL_MS) lostRuns.delete(id);
+  while (lostRuns.size >= LOST_RUN_MAX_RECORDS) lostRuns.delete(lostRuns.keys().next().value);
+  let rec = lostRuns.get(job.id);
+  if (!rec || rec.sessionUpdatedAt !== updatedAt) rec = { firstSeenAt: now, checks: 0, sessionUpdatedAt: updatedAt, updatedAt: now };
+  rec.checks += 1;
+  rec.updatedAt = now;
+  lostRuns.set(job.id, rec);
+  if (rec.checks < 2 || now - rec.firstSeenAt < LOST_RUN_GRACE_MS) return { settled: false, reason: "lost-pending" };
+
+  const res = await finishV2Job(job, "failed", LOST_RUN_MESSAGE, deps, { interrupted: true });
+  lostRuns.delete(job.id);
+  if (res?.alreadyTerminal) return { settled: false, reason: "terminal" };
+  return { settled: true, status: res?.status ?? "failed", lost: true };
+}
+
 /**
  * Decide, from authoritative reads only, what state a V2 job is in — the ONE
  * evaluator behind the live pump, reconnect, boot and the sweeper. Never guesses:
@@ -3238,6 +3312,8 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   }
   if (rs.state === "unknown") return { settled: false, reason: "unknown" };
   const manta = completionOwnerOf(job) === "manta";
+  // Only a launch that was already confirmed running on entry can be judged lost.
+  const confirmed = job.launchState === "running";
 
   if (rs.state === "missing") {
     // A child that was never confirmed to exist (create lost / never sent) stays
@@ -3272,8 +3348,12 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
     await dropResumeRestore(job, deps);
   }
-  if (active.has(job.childSessionID)) return { settled: false, reason: "active" };
-  if (!outcome || !fresh) return { settled: false, reason: "no-outcome" };
+  if (active.has(job.childSessionID)) {
+    lostRuns.delete(job.id);
+    return { settled: false, reason: "active" };
+  }
+  if (!outcome || !fresh) return judgeLostRun(job, session, active, deps, { confirmed });
+  lostRuns.delete(job.id);
 
   // (An interrupted run is never going to reply to a descendant's result, so the
   // descendant predicate doesn't apply to it: a pause must not wait on a subagent.)

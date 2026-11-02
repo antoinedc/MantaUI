@@ -1156,6 +1156,7 @@ and worktree all belong to it.
   min become `failed "timed out after 30 minutes"` (sweeper). Terminal jobs
   retained 7 days or 50 records, whichever bites first; the window +
   worktree are NEVER removed by the sweeper — only by an explicit delete.
+- **Lost runs.** V2 records no outcome for a turn killed by an opencode restart/crash and never resumes it — the child just leaves the active set, so a job (opencode-owned ones have no timeout) would stay `running` forever. `settleV2Job` (driven by the 60 s sweep and the reconnect reconcile) judges a run lost only when the child was seen not-active with no fresh outcome on ≥ 2 checks spanning `LOST_RUN_GRACE_MS` (90 s), `time.updated` unchanged, no active descendant and no pending permission/question; it then ends through `finishV2Job` (stopRequested → stopped, Manta-owned pauseRequested → paused, else `failed` "the run was cut off — opencode stopped before it finished"). The absence record is in memory (a restart only restarts the grace); a failed read leaves it unchanged; unconfirmed launches and handoff-pending jobs are never judged. Tests: `delegateLostRuns.test.mjs`.
 - **No `peers`-style status/inspect tool here** — background jobs are
   ordinary sibling sessions, so `peers_inspect` already covers "what is that
   job doing", and the tool description says so. `delegate_list` is for
