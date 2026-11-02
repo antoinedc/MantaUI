@@ -1322,6 +1322,9 @@ const delegateEngine = createDelegateEngine({
   // wrapped command run's launch, and the one result posted to the parent (N7).
   readSession: (sid) => oc.readSession(sid),
   listActiveIds: () => oc.listActiveSessionIds(),
+  // A run waiting on a person is never judged cut off (delegate.judgeLostRun).
+  listPermissions: (sid) => oc.listPermissions(sid),
+  listQuestions: (sid) => oc.listQuestions(sid),
   listChildSessions: (sid) => oc.listChildSessions(sid),
   listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
   listInbox: (sid) => oc.listInbox(sid),

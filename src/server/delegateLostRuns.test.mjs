@@ -1,0 +1,301 @@
+// Lost runs: a background job whose child opencode stopped mid-turn (restart / crash) leaves the active
+// set and never records an outcome. settleV2Job judges it lost only after a grace of repeated, unchanged
+// observations. Every opencode / tmux / git call is a fake; nothing live.
+import { test, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import { settleV2Job, reconcileV2Jobs, LOST_RUN_GRACE_MS, LOST_RUN_MESSAGE, _resetLostRuns } from "./delegate.mjs";
+
+const T0 = 1_700_000_000_000;
+const PARENT = "ses_parent";
+const CHILD = "ses_child0000000000000000000000000000";
+const GRACE = LOST_RUN_GRACE_MS;
+
+beforeEach(() => _resetLostRuns());
+
+function world(jobOver = {}) {
+  const base = {
+    id: "aaaa1111",
+    name: "fix-the-bug",
+    prompt: "Fix the bug",
+    parentSessionID: PARENT,
+    parentDirectory: "/repo",
+    childSessionID: CHILD,
+    tmuxSession: "proj",
+    windowIndex: null,
+    worktree: null,
+    branch: null,
+    origin: "delegate",
+    actor: "user",
+    correlation: null,
+    status: "running",
+    createdAt: T0,
+    startedAt: T0,
+    finishedAt: null,
+    result: null,
+    error: null,
+    engine: "v2",
+    completionOwner: "manta",
+    attempt: 1,
+    launchState: "running",
+    submittedAt: T0,
+    completionMessageId: null,
+    completionDelivery: null,
+    launch: { text: "Fix the bug", model: null, messageId: "msg_open" },
+    cleanedUp: null,
+    ...jobOver,
+  };
+  const jobs = [base];
+  const sessions = new Map([[CHILD, { id: CHILD, parentID: PARENT, directory: "/repo", time: { created: T0, updated: T0 + 10 } }]]);
+  const active = new Set();
+  const calls = { synth: [], clear: [] };
+  const fail = { listActive: null, readSession: null, listChildren: null, perms: null };
+  const pending = { permissions: [], questions: [] };
+  const state = { now: T0 + 1000 };
+  const deps = {
+    load: async () => jobs.map((j) => structuredClone(j)),
+    save: async (next) => {
+      jobs.splice(0, jobs.length, ...next.map((j) => structuredClone(j)));
+    },
+    publish: () => {},
+    now: () => state.now,
+    readSession: async (sid) => {
+      if (fail.readSession) throw fail.readSession;
+      const s = sessions.get(sid);
+      return s ? { state: "found", session: structuredClone(s) } : { state: "missing" };
+    },
+    listActiveIds: async () => {
+      if (fail.listActive) throw fail.listActive;
+      return [...active];
+    },
+    listChildSessions: async (sid) => {
+      if (fail.listChildren) throw fail.listChildren;
+      return [...sessions.values()].filter((s) => s.parentID === sid).map((s) => structuredClone(s));
+    },
+    listPermissions: async () => {
+      if (fail.perms) throw fail.perms;
+      return pending.permissions;
+    },
+    listQuestions: async () => pending.questions,
+    listRawTimeline: async (sid, { type } = {}) => (sid === CHILD && (!type || type === "user") ? [{ type: "user", id: "msg_open" }] : []),
+    listInbox: async () => [],
+    listMessages: async () => [],
+    clearProgress: async (sid) => calls.clear.push(sid),
+    postSynthetic: async (sid, body) => {
+      calls.synth.push({ sid, body });
+    },
+    deliver: async () => ({ delivered: true }),
+    isCtoConversationSession: async () => false,
+    openCommandWindows: () => [],
+    listProjects: async () => [],
+    killWindow: async () => {},
+    replacementChain: (sid) => [sid],
+    sessionExists: async () => true,
+    oc: {},
+  };
+  return { deps, jobs, sessions, active, calls, fail, pending, state, job: () => jobs[0], child: () => sessions.get(CHILD) };
+}
+
+const settle = (w) => settleV2Job(w.job(), w.deps);
+const lostSettle = async (w) => {
+  const first = await settle(w);
+  w.state.now += GRACE;
+  return [first, await settle(w)];
+};
+
+test("a: opencode-owned, absent, no outcome — first check leaves it running; a check past the grace fails it with the message", async () => {
+  const w = world({ completionOwner: "opencode", origin: "observed", parentSessionID: null, runStartedAt: T0, submittedAt: null, launch: undefined });
+  const first = await settle(w);
+  assert.deepEqual(first, { settled: false, reason: "lost-pending" });
+  w.state.now += GRACE - 1;
+  assert.equal((await settle(w)).settled, false, "not before the grace");
+  assert.equal(w.job().status, "running");
+  w.state.now += 1;
+  const res = await settle(w);
+  assert.equal(res.settled, true);
+  assert.equal(res.status, "failed");
+  assert.equal(res.lost, true);
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+  assert.equal(w.job().error, "the run was cut off — opencode stopped before it finished");
+  assert.equal(w.calls.synth.length, 0, "opencode owns the result");
+});
+
+test("b: a stale previous outcome (idle < runStartedAt) is still a lost run, not a finish", async () => {
+  const w = world({ completionOwner: "opencode", origin: "observed", parentSessionID: null, runStartedAt: T0 + 500, submittedAt: null, launch: undefined });
+  Object.assign(w.child(), { outcome: "succeeded", time: { idle: T0 + 100, updated: T0 + 600 } });
+  const [first, second] = await lostSettle(w);
+  assert.equal(first.reason, "lost-pending");
+  assert.equal(second.settled, true);
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+});
+
+test("c: the child seen active between checks resets the grace", async () => {
+  const w = world();
+  await settle(w);
+  w.state.now += GRACE - 10_000;
+  w.active.add(CHILD);
+  assert.equal((await settle(w)).reason, "active");
+  w.active.delete(CHILD);
+  w.state.now += 20_000; // would be past the original grace
+  assert.equal((await settle(w)).reason, "lost-pending", "the record restarted");
+  assert.equal(w.job().status, "running");
+  w.state.now += GRACE;
+  assert.equal((await settle(w)).settled, true);
+});
+
+test("d: time.updated advancing resets the grace", async () => {
+  const w = world();
+  await settle(w);
+  w.state.now += GRACE - 10_000;
+  w.child().time.updated += 5;
+  assert.equal((await settle(w)).reason, "lost-pending");
+  w.state.now += 20_000;
+  assert.equal((await settle(w)).settled, false, "grace counted from the advance");
+  w.state.now += GRACE;
+  assert.equal((await settle(w)).settled, true);
+});
+
+test("e: a Manta-owned submitted job lost → failed, and exactly one result reaches the parent", async () => {
+  const w = world();
+  const [first, second] = await lostSettle(w);
+  assert.equal(first.settled, false);
+  assert.equal(second.settled, true);
+  assert.equal(second.status, "failed");
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+  assert.equal(w.job().completionDelivery, "delivered");
+  assert.equal(w.calls.synth.length, 1);
+  assert.equal(w.calls.synth[0].sid, PARENT);
+  // later sweeps do nothing more
+  w.state.now += GRACE;
+  assert.equal((await settle(w)).settled, false);
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.calls.synth.length, 1);
+});
+
+test("f: stopRequested → stopped; Manta-owned pauseRequested → paused", async () => {
+  const stopped = world({ stopRequested: true });
+  const [, s] = await lostSettle(stopped);
+  assert.equal(s.settled, true);
+  assert.equal(s.status, "stopped");
+  assert.equal(stopped.job().status, "stopped");
+
+  const paused = world({ pauseRequested: true });
+  const [, p] = await lostSettle(paused);
+  assert.equal(p.settled, true);
+  assert.equal(p.status, "paused");
+  assert.equal(paused.job().status, "paused");
+  assert.equal(paused.calls.synth.length, 0, "a pause reports nothing");
+
+  // an opencode-owned job can't be parked: it fails
+  const owned = world({ completionOwner: "opencode", origin: "observed", pauseRequested: true, runStartedAt: T0, submittedAt: null, launch: undefined });
+  const [, o] = await lostSettle(owned);
+  assert.equal(o.status, "failed");
+});
+
+test("g: an unconfirmed launch is never settled by this rule", async () => {
+  for (const over of [
+    { launchState: "creating", submittedAt: null },
+    { launchState: "submitting", submittedAt: T0 },
+    { launchState: "uncertain", submittedAt: T0 },
+    { launchState: "running", submittedAt: null },
+  ]) {
+    const w = world(over);
+    const [a, b] = await lostSettle(w);
+    assert.equal(a.settled, false, JSON.stringify(over));
+    assert.equal(b.settled, false, JSON.stringify(over));
+    assert.equal(w.job().status, "running", JSON.stringify(over));
+  }
+  // an uncertain launch proven admitted by its user message is confirmed on THAT check only
+  const w = world({ launchState: "uncertain", submittedAt: T0 });
+  const [a, b] = await lostSettle(w);
+  assert.equal(a.settled, false);
+  assert.equal(b.settled, false, "the confirming check does not count");
+  assert.equal(w.job().launchState, "running");
+});
+
+test("h: a handoff pending on the child defers", async () => {
+  const w = world();
+  w.deps.deferSettlement = () => true;
+  const [a, b] = await lostSettle(w);
+  assert.equal(a.reason, "handoff-pending");
+  assert.equal(b.reason, "handoff-pending");
+  assert.equal(w.job().status, "running");
+});
+
+test("i: a pending permission / question, or an active descendant, keeps it running", async () => {
+  const perm = world();
+  perm.pending.permissions = [{ id: "per_1" }];
+  const [pa, pb] = await lostSettle(perm);
+  assert.equal(pa.settled || pb.settled, false);
+
+  const q = world();
+  q.pending.questions = [{ id: "frm_1" }];
+  const [qa, qb] = await lostSettle(q);
+  assert.equal(qa.settled || qb.settled, false);
+  q.pending.questions = [];
+  assert.equal((await settle(q)).reason, "lost-pending", "answered → the grace starts only now");
+  q.state.now += GRACE;
+  assert.equal((await settle(q)).settled, true);
+
+  const kids = world();
+  kids.sessions.set("ses_kid", { id: "ses_kid", parentID: CHILD, time: { updated: T0 } });
+  kids.sessions.set("ses_grand", { id: "ses_grand", parentID: "ses_kid", time: { updated: T0 } });
+  kids.active.add("ses_grand");
+  const [ka, kb] = await lostSettle(kids);
+  assert.equal(ka.settled || kb.settled, false);
+  assert.equal(kids.job().status, "running");
+  // the tree going quiet restarts the grace rather than finishing at once
+  kids.active.clear();
+  assert.equal((await settle(kids)).reason, "lost-pending");
+  kids.state.now += GRACE;
+  assert.equal((await settle(kids)).settled, true);
+});
+
+test("j: a read that throws leaves the record unchanged", async () => {
+  const w = world();
+  await settle(w); // record at checks=1, firstSeenAt = now
+  w.state.now += GRACE;
+  w.fail.perms = new Error("opencode 500");
+  assert.equal((await settle(w)).settled, false);
+  w.fail.perms = null;
+  w.fail.listChildren = new Error("fetch failed");
+  assert.equal((await settle(w)).settled, false);
+  w.fail.listChildren = null;
+  w.fail.listActive = new Error("fetch failed");
+  assert.equal((await settle(w)).reason, "unknown");
+  w.fail.listActive = null;
+  w.fail.readSession = new Error("fetch failed");
+  assert.equal((await settle(w)).reason, "unknown");
+  w.fail.readSession = null;
+  assert.equal(w.job().status, "running");
+  // the failed reads neither advanced nor cleared the record: the next good check settles
+  assert.equal((await settle(w)).settled, true);
+});
+
+test("a fresh outcome still wins, and a session with no time.updated is never judged lost", async () => {
+  const done = world();
+  Object.assign(done.child(), { outcome: "succeeded", time: { idle: T0 + 50, updated: T0 + 50 } });
+  const res = await settle(done);
+  assert.equal(res.settled, true);
+  assert.equal(res.status, "done");
+  assert.equal(done.job().status, "done");
+
+  const blind = world();
+  delete blind.child().time;
+  const [a, b] = await lostSettle(blind);
+  assert.equal(a.reason, "no-outcome");
+  assert.equal(b.reason, "no-outcome");
+  assert.equal(blind.job().status, "running");
+});
+
+test("the sweep's reconcile drives it: two passes a grace apart end the job", async () => {
+  const w = world({ completionOwner: "opencode", origin: "observed", parentSessionID: null, runStartedAt: T0, submittedAt: null, launch: undefined });
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.job().status, "running");
+  w.state.now += GRACE + 60_000;
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+});
