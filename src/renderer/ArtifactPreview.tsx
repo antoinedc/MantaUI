@@ -29,6 +29,7 @@ import { clientToken, serverBase, authHeaders } from "./api/httpApi";
 import {
   countPreviewLines,
   formatBytes,
+  MAX_PREVIEW_BYTES,
   formatPreviewFooter,
   isWithinPreviewSize,
   previewLanguage,
@@ -37,6 +38,8 @@ import {
 } from "./chatUtils";
 import { CodeBlock } from "./MarkdownBody";
 import { IconButton } from "./IconButton";
+import { MediaBody } from "./explorer/MediaBody";
+import { fetchPeekBlob } from "./explorer/filePeek";
 import type { Artifact } from "./artifacts";
 
 /** Data + render context for the currently shown artifact once its body has
@@ -73,6 +76,21 @@ async function loadArtifact(
     return { status: "ready", kind: "image", url: artifact.href, size: artifact.href.length };
   }
 
+  // image / video / pdf: the shared authenticated blob loader (it refuses a
+  // body over the size limit without reading it) and an object URL.
+  if (type !== "text") {
+    const got = await fetchPeekBlob(artifact.href, { signal });
+    if (!got.ok) {
+      return got.reason === "too-large"
+        ? { status: "too-large", size: got.size ?? MAX_PREVIEW_BYTES + 1 }
+        : { status: "error" };
+    }
+    const url = URL.createObjectURL(got.blob);
+    const size = got.blob.size;
+    if (type === "video") return { status: "ready", kind: "video", url, size };
+    return { status: "ready", kind: type === "pdf" ? "pdf" : "image", url, size };
+  }
+
   const base = `${serverBase()}/api/peek?path=${encodeURIComponent(artifact.href)}`;
   const headers = authHeaders(clientToken());
 
@@ -95,22 +113,14 @@ async function loadArtifact(
   }
   if (!res.ok) return { status: "error" };
 
-  if (type === "text") {
-    const text = await res.text();
-    return {
-      status: "ready",
-      kind: "text",
-      text,
-      lines: countPreviewLines(text),
-      language: previewLanguage(artifact.label),
-    };
-  }
-
-  // image / pdf: keep the body as bytes and address it via an object URL.
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  if (type === "video") return { status: "ready", kind: "video", url, size };
-  return { status: "ready", kind: type === "pdf" ? "pdf" : "image", url, size };
+  const text = await res.text();
+  return {
+    status: "ready",
+    kind: "text",
+    text,
+    lines: countPreviewLines(text),
+    language: previewLanguage(artifact.label),
+  };
 }
 
 export function ArtifactPreview({
@@ -303,31 +313,13 @@ export function ArtifactPreview({
             </div>
           )}
 
-          {loaded.status === "ready" && loaded.kind === "image" && (
-            <div className="m-auto p-4 w-full h-full grid place-items-center">
-              <img
-                src={loaded.url}
-                alt={artifact.label}
-                className="max-w-full max-h-full object-contain"
-                onLoad={(e) => {
-                  const el = e.currentTarget;
-                  setDims({ width: el.naturalWidth, height: el.naturalHeight });
-                }}
-              />
-            </div>
-          )}
-
-          {loaded.status === "ready" && loaded.kind === "video" && (
-            <div className="m-auto p-4 w-full h-full grid place-items-center">
-              {/* No autoplay: an explicit play control + first-frame poster. */}
-              <video
-                src={loaded.url}
-                controls
-                preload="metadata"
-                title={artifact.label}
-                className="max-w-full max-h-full"
-              />
-            </div>
+          {loaded.status === "ready" && (loaded.kind === "image" || loaded.kind === "video") && (
+            <MediaBody
+              kind={loaded.kind}
+              url={loaded.url}
+              label={artifact.label}
+              onDims={setDims}
+            />
           )}
 
           {loaded.status === "ready" && loaded.kind === "pdf" && (
