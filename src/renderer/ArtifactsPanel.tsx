@@ -55,6 +55,7 @@ import { saveToDownloads } from "./downloadFeedback";
 import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ReviewPane } from "./ReviewPane";
+import { Segmented } from "./Segmented";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
 import { getMantaPreload } from "./preloadAccess";
 import { UpdateBoxNote } from "./components/UpdateBoxNote";
@@ -923,29 +924,14 @@ export function ArtifactsPanel({
               its own two-segment switch above the kind tabs — not a fifth
               labelled+counted slice. Segmented-toggle precedent: the Settings
               segmented rows (aria-pressed + raised active segment). */}
-          <div
-            className="mb-2 flex p-1 bg-inset border border-border-subtle rounded-md"
-            role="group"
-            aria-label="Artifacts panel mode"
-          >
-            {(Object.keys(MODE_LABEL) as PanelMode[]).map((m) => {
-              const active = mode === m;
-              return (
-                <button
-                  key={m}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => setMode(m)}
-                  className={
-                    "relative z-10 flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm text-meta font-medium " +
-                    "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
-                    (active ? "bg-raised shadow-sm text-text" : "text-text-faint hover:text-text")
-                  }
-                >
-                  {MODE_LABEL[m]}
-                </button>
-              );
-            })}
+          <div className="mb-2">
+            <Segmented
+              label="Artifacts panel mode"
+              options={(Object.keys(MODE_LABEL) as PanelMode[]).map((m) => ({ id: m, label: MODE_LABEL[m] }))}
+              value={mode}
+              onChange={setMode}
+              fill
+            />
           </div>
 
           {/* Tab bar: Links / Images / Files / Plans with counts, Links always

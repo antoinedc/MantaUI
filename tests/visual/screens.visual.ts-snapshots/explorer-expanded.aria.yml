@@ -1,0 +1,66 @@
+- button "Hide sidebar"
+- complementary:
+  - heading "Workspace" [level=2]
+  - button "Search sessions"
+  - tree "Sessions":
+    - button "Open the CTO overview"
+    - button "Open Routines": Routines 1 3
+    - button "New workspace Ctrl+N"
+    - treeitem "manta Close project" [expanded]:
+      - text: ""
+      - button "Close project"
+    - treeitem "peek-range-fix Pin" [selected]:
+      - text: ""
+      - button "Pin"
+    - treeitem /routines-ui [\d,.]+[bkmBKM]+ Pin/:
+      - text: ""
+      - button "Pin"
+    - treeitem /ios-catch-up [\d,.]+[bkmBKM]+ Pin/:
+      - text: ""
+      - button "Pin"
+    - button "New session Ctrl+T"
+    - treeitem "ronda Close project" [expanded]:
+      - text: ""
+      - button "Close project"
+    - treeitem "billing-webhooks Pin":
+      - text: ""
+      - button "Pin"
+    - button "New session Ctrl+T"
+  - button "Settings…"
+- main:
+  - text: manta / peek-range-fix fix/peek-range
+  - button "Hide file explorer"
+  - button "Show artifacts"
+  - button "Session actions"
+  - button "Read a file, edited a file"
+  - text: The display route and the download route used different scopes.
+  - link /src\/server\/peek\.mjs:\d+-\d+/:
+    - /url: "#"
+  - text: allows anything under home, while the download handler only allowed the outbox. I aligned both and wrote it up in
+  - link "docs/peek-scope.md":
+    - /url: "#"
+  - text: /\. Brewed for \d+[hmsp]+/
+  - status
+  - textbox "Reply, or describe the next task…"
+  - button "Opus 4.7"
+  - button "High"
+  - button "Fast mode" [disabled]
+  - button "Attach files"
+  - button "schedules"
+  - button "secrets"
+  - button "webhooks"
+  - button "Permissions on — click to bypass"
+  - 'button "Handoff: suggest"'
+  - button "Back to transcript"
+  - button "Show file tree"
+  - text: fix-peek-range
+  - button "Quick open"
+  - button "Restore split"
+  - button "Close file explorer"
+  - text: /src \/ server \/ peek\.mjs · lines \d+–\d+/
+  - button "Copy contents"
+  - button "Download"
+  - button "More"
+  - textbox
+  - text: /JavaScript \d+ lines 4\.8 KB Ln \d+/
+- complementary "Artifacts"

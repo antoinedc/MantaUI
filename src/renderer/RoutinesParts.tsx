@@ -27,7 +27,8 @@ export function useNowMs(tickMs = 1000): number {
 export function RoutinesHeader({ children, right }: { children: ReactNode; right?: ReactNode }) {
   return (
     <div
-      className="manta-routines-header titlebar-drag flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle pl-4 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))]"
+      className="manta-routines-header titlebar-drag flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle pr-[calc(var(--sp-3)+var(--titlebar-inset-right))]"
+      style={{ paddingLeft: "max(var(--sp-4), var(--sidebar-hidden-inset, 0px))" }}
     >
       <div className="flex min-w-0 items-center gap-2 whitespace-nowrap text-label font-medium text-text">{children}</div>
       {right && <div className="titlebar-no-drag ml-auto flex items-center gap-2">{right}</div>}

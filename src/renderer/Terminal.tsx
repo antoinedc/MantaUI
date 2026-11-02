@@ -7,6 +7,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { getMantaPreload } from "./preloadAccess";
 import { IS_MAC } from "./platform";
+import { PREVIEW_PATH_EVENT } from "./explorer/types";
+import { terminalPassesSidebarKey } from "./explorer/layout";
 import { terminalShortcut } from "./chatUtils";
 import { useResolvedTheme } from "./theme";
 import { useStore } from "./store";
@@ -172,9 +174,9 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
             },
             text: p,
             activate: () => {
-              window.api.peekRemoteFile(p).catch((e) => {
-                pushAppToast({ tone: "error", message: e instanceof Error ? e.message : String(e) });
-              });
+              // The App opens the existing preview overlay for this box path
+              // (its own error state covers a missing / unreadable file).
+              window.dispatchEvent(new CustomEvent(PREVIEW_PATH_EVENT, { detail: { path: p } }));
             },
             decorations: { underline: true, pointerCursor: true },
           });
@@ -298,6 +300,11 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
         window.api.ptyWrite(sessionKey, "\x1b\r");
         return false;
       }
+
+      // ⌘B hides / shows the app sidebar: xterm must not consume it, so it
+      // reaches the window handler. (Off macOS plain Ctrl+B is tmux's prefix and
+      // must reach the PTY — see terminalShortcut — so only ⌘B is passed through.)
+      if (terminalPassesSidebarKey(ev, IS_MAC)) return false;
 
       // macOS: Cmd+C/V/F/K. Everywhere else: Ctrl+Shift+C/V/F/K. Plain Ctrl
       // on Windows/Linux is the application modifier and must reach the

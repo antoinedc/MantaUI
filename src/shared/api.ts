@@ -1,3 +1,4 @@
+import type { FsResolveInput, FsResolveResult, FsListInput, FsListResult, FsGitStatusResult } from "./fsTypes.js";
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
   FollowupRow,
@@ -1182,6 +1183,13 @@ export interface Api {
   gitRemoveWorktree(input: { path: string; force: boolean }): Promise<{ removed: boolean; reason?: "dirty" | "other" }>;
 
   fsListDirs(partial: string): Promise<DirListing>;
+
+  // File explorer (docs/superpowers/specs/2026-11-02-file-explorer.md).
+  // Every read goes through the shared canonical-home policy; expected
+  // outcomes come back as { ok:false, reason }, never as a throw.
+  fsResolvePaths(input: FsResolveInput): Promise<FsResolveResult>;
+  fsList(input: FsListInput): Promise<FsListResult>;
+  fsGitStatus(input: { root: string }): Promise<FsGitStatusResult>;
 
   // BET-1091: create an empty, git-initialised scratch project directory
   // under `root`, returning the real absolute path. The renderer (stage 4)

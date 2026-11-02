@@ -76,6 +76,7 @@ import { shouldForceReconnect } from "../chatUtils";
 import { normalizeUpgradeStatus } from "../upgradeGateLogic";
 import { ship } from "../log";
 import { onRunConnection, onRunEpoch } from "../runEpoch";
+import { PREVIEW_PATH_EVENT } from "../explorer/types";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -867,6 +868,9 @@ export const httpApi: Api = {
 
   // -- filesystem --
   fsListDirs: (partial) => rpc(IPC.fsListDirs, partial),
+  fsResolvePaths: (input) => rpc(IPC.fsResolvePaths, input),
+  fsList: (input) => rpc(IPC.fsList, input),
+  fsGitStatus: (input) => rpc(IPC.fsGitStatus, input),
   // BET-1091: create an empty, git-initialised scratch project directory.
   projectCreateScratch: (input) => rpc(IPC.projectCreateScratch, input),
 
@@ -979,36 +983,12 @@ export const httpApi: Api = {
   getPathForFile: (_file: File): string => "",
 
   // -- misc --
-  // Desktop HTTP-mode: route through window.__mantaPreload so the main process
-  // can fetch from /api/peek and open the file with shell.openPath (the
-  // renderer has no direct shell access). Falls back to the RPC channel for
-  // mobile/web where the server IS the box and reads the file natively.
-  //
-  // BET-127 review note: there is no ipcMain.handle(IPC.peekRemoteFile, ...)
-  // registered in src/main/index.ts today, so the preload call below always
-  // rejects ("no handler registered"). Pre-BET-127, the __mantaPreload probe
-  // checked a name (peekRemoteFileHttp) the preload never exposed, so it
-  // never matched and fell through to the RPC no-op — a silent, pre-existing
-  // no-op UX for a known-broken feature. BET-127 fixed the probe's NAME to
-  // match what the preload actually exposes (peekRemoteFile), which is
-  // correct and required, but that alone would have flipped the observed
-  // behavior from "click does nothing" to "click pops an alert()" purely as
-  // a side effect of a naming fix in a cleanup PR — not an intended UX
-  // change. We catch the rejection here and fall through to the same RPC
-  // no-op as before, preserving the pre-existing silent-degrade behavior
-  // until a real ipcMain handler lands (tracked as a follow-up; see BET-127
-  // PR discussion).
+  // A terminal absolute-path click: the App listens for this window event and
+  // opens the existing artifact preview overlay for the box path (which has its
+  // own loading / error / Download states). This replaced an RPC no-op that left
+  // the click doing nothing at all.
   peekRemoteFile: async (remotePath) => {
-    const preload = (window as { __mantaPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__mantaPreload;
-    if (preload?.peekRemoteFile) {
-      try {
-        return await preload.peekRemoteFile(remotePath);
-      } catch {
-        // No ipcMain handler yet — degrade silently (see note above) rather
-        // than surface an IPC error to the user.
-      }
-    }
-    return rpc(IPC.peekRemoteFile, remotePath);
+    window.dispatchEvent(new CustomEvent(PREVIEW_PATH_EVENT, { detail: { path: remotePath } }));
   },
 
   // -- agent → device file push (outbox) --

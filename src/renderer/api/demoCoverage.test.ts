@@ -187,7 +187,6 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeCreateEphemeralSession",
   "opencodeDeleteSessionRaw",
   "opencodeDiscoverModels",
-  "opencodeFindFiles",
   "opencodeForkSession",
   "opencodeGenerateTitle",
   "opencodeGetProviders",

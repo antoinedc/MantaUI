@@ -8,13 +8,17 @@
 // Extracted from ChatPanel.tsx (M0.5). Pure leaf module — no dependency on the
 // message/tool rendering stack, so it imports cleanly from anywhere.
 
-import { memo } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useState } from "react";
 import { Highlight, themes, type Language } from "prism-react-renderer";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeSlug from "rehype-slug";
 import type { Components as MarkdownComponents } from "react-markdown";
-import { ExternalLink, Linkified } from "./Linkified";
+import { ExternalLink, Linkified, PathCandidate } from "./Linkified";
 import { findLinks } from "./linkify";
+import { findPaths, findWholePath, parsePathRef } from "./pathLinks";
+import { ExplorerOwnerContext } from "./explorer/ownerContext";
+import type { MarkdownFileContext } from "./explorer/types";
 import { CopyButton } from "./CopyButton";
 import { useResolvedTheme } from "./theme";
 
@@ -72,6 +76,135 @@ function remarkLinkifySchemeless() {
   return (tree: MdNode) => linkifyTextNodes(tree);
 }
 
+// File paths in prose (spec: 2026-11-02-file-explorer.md §Path links). Every
+// candidate becomes a `manta-file:` link; the `a` override below only renders
+// it as a FileLink once the box confirms the path exists, otherwise it is the
+// same plain text as before. Same skip rules as the URL pass (NO_LINKIFY).
+const FILE_SCHEME = "manta-file:";
+
+function linkPathTextNodes(node: MdNode): void {
+  const kids = node.children;
+  if (!kids || NO_LINKIFY.has(node.type)) return;
+  for (let i = 0; i < kids.length; i++) {
+    const kid = kids[i];
+    if (kid.type !== "text" || !kid.value) {
+      linkPathTextNodes(kid);
+      continue;
+    }
+    const found = findPaths(kid.value);
+    if (found.length === 0) continue;
+    const parts: MdNode[] = [];
+    let at = 0;
+    for (const m of found) {
+      if (m.start > at) parts.push({ type: "text", value: kid.value.slice(at, m.start) });
+      parts.push({
+        type: "link",
+        url: `${FILE_SCHEME}${encodeURIComponent(m.raw)}`,
+        children: [{ type: "text", value: m.raw }],
+      });
+      at = m.end;
+    }
+    if (at < kid.value.length) parts.push({ type: "text", value: kid.value.slice(at) });
+    kids.splice(i, 1, ...parts);
+    i += parts.length - 1;
+  }
+}
+
+function remarkLinkPaths() {
+  return (tree: MdNode) => linkPathTextNodes(tree);
+}
+
+// react-markdown drops every scheme outside its allow-list; ours must pass.
+function urlTransform(url: string): string {
+  return url.startsWith(FILE_SCHEME) ? url : defaultUrlTransform(url);
+}
+
+const REMARK_PLUGINS = [remarkGfm, remarkLinkifySchemeless];
+const REMARK_PLUGINS_PATHS = [remarkGfm, remarkLinkifySchemeless, remarkLinkPaths];
+const REHYPE_PLUGINS_FILE = [rehypeSlug];
+
+// Present only while MarkdownBody renders a FILE in the Explorer: relative
+// links and images then go through the viewer instead of the browser.
+const MdFileContext = createContext<MarkdownFileContext | null>(null);
+
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const safeDecode = (s: string) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
+
+function MdAnchor({ href, children }: { node?: unknown } & React.AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const file = useContext(MdFileContext);
+  if (href?.startsWith(FILE_SCHEME)) {
+    return <PathCandidate match={parsePathRef(safeDecode(href.slice(FILE_SCHEME.length)))} mono fallback={children} />;
+  }
+  if (!file || !href || HAS_SCHEME.test(href)) {
+    // http(s)/mailto open externally; any other scheme renders as plain text
+    // (ExternalLink's own rule, and the same for the transcript).
+    return <ExternalLink href={href}>{children}</ExternalLink>;
+  }
+  return (
+    <a
+      href={href}
+      className="underline"
+      style={{ color: "var(--accent-tx)" }}
+      onClick={(e) => {
+        // Relative file link or `#heading`: navigate the Explorer, never the renderer.
+        e.preventDefault();
+        e.stopPropagation();
+        file.openLink(href);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+const IMG_CLASS = "max-w-full rounded-xs";
+const IMG_STYLE = { border: "1px solid var(--border-subtle)" };
+
+function RelativeImage({ src, alt, resolve }: { src: string; alt: string; resolve: MarkdownFileContext["resolveImage"] }) {
+  const [loaded, setLoaded] = useState<{ src: string; url: string | null } | null>(null);
+  useEffect(() => {
+    let live = true;
+    resolve(src).then(
+      (url) => live && setLoaded({ src, url }),
+      () => live && setLoaded({ src, url: null }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [src, resolve]);
+  if (loaded?.src === src && loaded.url) return <img src={loaded.url} alt={alt} className={IMG_CLASS} style={IMG_STYLE} />;
+  return <span className="text-text-faint">{alt}</span>;
+}
+
+function MdImage({ src, alt }: { node?: unknown } & React.ImgHTMLAttributes<HTMLImageElement>) {
+  const file = useContext(MdFileContext);
+  const url = typeof src === "string" ? src : undefined;
+  if (!file) return <img src={url} alt={alt ?? ""} className={IMG_CLASS} style={IMG_STYLE} />;
+  // The box's files only: an external image is never loaded (CSP blocks it
+  // anyway), it is a link showing its alt text.
+  if (!url) return <>{alt ?? ""}</>;
+  if (HAS_SCHEME.test(url)) return <ExternalLink href={url}>{alt || url}</ExternalLink>;
+  return <RelativeImage src={url} alt={alt ?? ""} resolve={file.resolveImage} />;
+}
+
+// Inline code: unstyled on purpose. URLs inside it become links, and when the
+// WHOLE span is a path the box confirms (`src/a.ts:12`, `AGENTS.md`) the span
+// holds a FileLink instead — the <code> keeps its styling either way.
+function InlineCode({ text }: { text: string }) {
+  const owner = useContext(ExplorerOwnerContext);
+  const file = useContext(MdFileContext);
+  const asPath = owner != null && file == null;
+  const match = useMemo(() => (asPath ? findWholePath(text) : null), [text, asPath]);
+  const plain = <Linkified text={text} schemeless="whole" />;
+  return <code>{match ? <PathCandidate match={match} fallback={plain} /> : plain}</code>;
+}
+
 // Hoisted out so component identity is stable — re-rendering on every keystroke
 // otherwise causes react-markdown to throw away CodeBlock state (the Highlight
 // component would re-tokenize).
@@ -82,12 +215,7 @@ const MD_COMPONENTS: MarkdownComponents = {
     node?: unknown;
     children?: React.ReactNode;
   } & React.HTMLAttributes<HTMLElement>) {
-    // Unstyled on purpose: only URLs inside it change (they become links).
-    return (
-      <code>
-        <Linkified text={childrenToString(children)} schemeless="whole" />
-      </code>
-    );
+    return <InlineCode text={childrenToString(children)} />;
   },
   pre({ children }: { children?: React.ReactNode }) {
     // Pull the language + body out of the nested <code className="language-x">.
@@ -102,9 +230,7 @@ const MD_COMPONENTS: MarkdownComponents = {
     }
     return <pre>{children}</pre>;
   },
-  a({ node: _node, href, children }: { node?: unknown } & React.AnchorHTMLAttributes<HTMLAnchorElement>) {
-    return <ExternalLink href={href}>{children}</ExternalLink>;
-  },
+  a: MdAnchor,
   // BET-413: real headings restored. MD_COMPONENTS previously downgraded every
   // heading to a <div> at near-body size. The sizes/weights below are the
   // "Balanced" values from the issue; most of the skimmability comes from the
@@ -113,32 +239,36 @@ const MD_COMPONENTS: MarkdownComponents = {
   // rest); they are intentional exceptions because heading spacing is
   // asymmetric and the container `gap` cannot express that. Values are exact
   // px (not on the 4px spacing grid) so they are written as inline styles.
-  h1: ({ children }) => (
+  h1: ({ id, children }) => (
     <h1
+      id={id}
       className="text-title font-semibold text-text"
       style={{ marginTop: "22px", marginBottom: "6px", letterSpacing: "-0.01em" }}
     >
       {children}
     </h1>
   ),
-  h2: ({ children }) => (
+  h2: ({ id, children }) => (
     <h2
+      id={id}
       className="text-prose font-semibold text-text"
       style={{ marginTop: "18px", marginBottom: "5px" }}
     >
       {children}
     </h2>
   ),
-  h3: ({ children }) => (
+  h3: ({ id, children }) => (
     <h3
+      id={id}
       className="text-body font-semibold text-text-muted"
       style={{ marginTop: "14px", marginBottom: "3px" }}
     >
       {children}
     </h3>
   ),
-  h4: ({ children }) => (
+  h4: ({ id, children }) => (
     <h4
+      id={id}
       className="text-body font-semibold text-text-muted"
       style={{ marginTop: "14px", marginBottom: "3px" }}
     >
@@ -204,14 +334,7 @@ const MD_COMPONENTS: MarkdownComponents = {
     </td>
   ),
   // Images: max-width 100%, curved corners, --border-subtle (BET-413).
-  img: ({ src, alt }) => (
-    <img
-      src={typeof src === "string" ? src : undefined}
-      alt={alt ?? ""}
-      className="max-w-full rounded-xs"
-      style={{ border: "1px solid var(--border-subtle)" }}
-    />
-  ),
+  img: MdImage,
   hr: () => <hr className="border-border" />,
 };
 
@@ -226,8 +349,20 @@ const MARKDOWN_MAX_CHARS = 50_000;
 // Memoized so re-rendering a parent (AssistantPart, MessageRow) whose
 // own props/state haven't changed doesn't re-parse the markdown AST
 // and re-tokenize Prism inside CodeBlock. `text` is the only prop and
-// is a primitive — default shallow comparator works.
-export const MarkdownBody = memo(function MarkdownBody({ text }: { text: string }) {
+// is a primitive — default shallow comparator works. `fileContext`, when given,
+// must be identity-stable (the Explorer viewer memoizes it).
+//
+// Path links need an Explorer owner (ExplorerOwnerContext) and are off while
+// rendering a file in the Explorer (`fileContext`): there, links are the
+// document's own and go through `fileContext`.
+export const MarkdownBody = memo(function MarkdownBody({
+  text,
+  fileContext,
+}: {
+  text: string;
+  fileContext?: MarkdownFileContext;
+}) {
+  const owner = useContext(ExplorerOwnerContext);
   if (text.length > MARKDOWN_MAX_CHARS) {
     // Oversized: bypass markdown + Prism to keep the main thread responsive.
     return (
@@ -236,11 +371,17 @@ export const MarkdownBody = memo(function MarkdownBody({ text }: { text: string 
       </pre>
     );
   }
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm, remarkLinkifySchemeless]} components={MD_COMPONENTS}>
+  const body = (
+    <ReactMarkdown
+      remarkPlugins={owner != null && !fileContext ? REMARK_PLUGINS_PATHS : REMARK_PLUGINS}
+      rehypePlugins={fileContext ? REHYPE_PLUGINS_FILE : undefined}
+      urlTransform={urlTransform}
+      components={MD_COMPONENTS}
+    >
       {preprocessForStream(text)}
     </ReactMarkdown>
   );
+  return fileContext ? <MdFileContext.Provider value={fileContext}>{body}</MdFileContext.Provider> : body;
 });
 
 // react-markdown passes children as ReactNode (array of strings/elements). For

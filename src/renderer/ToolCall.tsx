@@ -12,7 +12,7 @@
 //     module cycle that is safe because both references are used only at
 //     render time).
 
-import { memo, useState } from "react";
+import { memo, useContext, useState } from "react";
 import { motion } from "framer-motion";
 import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import type { OpencodePart } from "../shared/types";
@@ -20,7 +20,10 @@ import { toolTitle } from "../shared/opencodeV2.mjs";
 import { filePartViewToEntry, resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
-import { Linkified } from "./Linkified";
+import { Linkified, FileLink } from "./Linkified";
+import { displayPath, toolArgPath } from "./pathLinks";
+import { useResolvedPath } from "./usePathResolution";
+import { ExplorerOwnerContext } from "./explorer/ownerContext";
 import {
   BashBody,
   GlobBody,
@@ -291,12 +294,30 @@ export const ToolCall = memo(function ToolCall({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const toggle = () => setExpanded((v) => !v);
 
+  // Read / Edit / Write / MultiEdit / apply_patch / List: the path comes from
+  // the tool INPUT. It is a link only once the box confirms it exists in home
+  // (a just-created file links after the tool finishes and the path is re-asked).
+  const owner = useContext(ExplorerOwnerContext);
+  const argRaw = toolArgPath(rawTool, state);
+  const resolved = useResolvedPath(owner, argRaw);
+  const argPath =
+    owner && argRaw && resolved ? (
+      <FileLink
+        abs={resolved.abs}
+        text={displayPath(argRaw, owner.cwd)}
+        kind={resolved.kind}
+        owner={owner}
+        mono
+      />
+    ) : undefined;
+
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       <ToolCard
         tone={tone}
         name={toolName}
         arg={title}
+        argPath={argPath}
         meta={metaNode}
         copyText={copyText || undefined}
         expanded={expanded}

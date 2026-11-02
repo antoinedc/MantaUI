@@ -102,6 +102,8 @@ import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
+import { ExplorerOwnerProvider } from "./explorer/ownerContext";
+import type { ExplorerOwner } from "./explorer/types";
 import { QuoteToolbar } from "./QuoteToolbar";
 import { Composer } from "./Composer";
 import { RoutineRunContext, type RoutineRunBinding, type RoutineRunContextValue } from "./routineRunContext";
@@ -255,6 +257,14 @@ export function ChatPanel({
   // model picker). ChatPanel keeps only what its OWN (non-composer) paths read.
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const pushAppToast = useStore((s) => s.pushAppToast);
+  // Path links in this transcript belong to this session's Explorer. Only a
+  // real chat window has one: a read-only previous-session view, a routine run
+  // or a pane whose window is gone gets no owner, so no path links render.
+  const hasExplorer = tmuxSession != null && windowIndex != null && !readOnlyView && !routineRun && !!cwd;
+  const explorerOwner = useMemo<ExplorerOwner | null>(
+    () => (hasExplorer ? { sessionId, cwd } : null),
+    [hasExplorer, sessionId, cwd],
+  );
   const configDefaultModel = useStore((s) => s.defaultModel);
   // BET-1274 10d: the routing preset drives the Auto row's display label; the
   // value lives on the same store block Settings writes (modelRouting.preset).
@@ -3541,6 +3551,7 @@ export function ChatPanel({
           onQuoteNewSession={quoteNewSessionNow}
         />
         <VoicePlaybackProvider active={isActive}>
+          <ExplorerOwnerProvider owner={explorerOwner}>
           <Transcript
             messages={messages}
             virtuosoRef={virtuosoRef}
@@ -3578,6 +3589,7 @@ export function ChatPanel({
             motionStateRef={motionStateRef}
             rowLocatorRef={rowLocatorRef}
           />
+          </ExplorerOwnerProvider>
         </VoicePlaybackProvider>
         {/* The catch-up pill takes the jump button's place while it is shown. */}
         {catchUpCtl.pill && <CatchUpPill {...catchUpCtl.pill} />}

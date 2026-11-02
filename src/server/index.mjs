@@ -14,9 +14,9 @@ import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat, mkdir, rm, readdir } from "node:fs/promises";
-import { createWriteStream, createReadStream } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname, normalize, resolve, basename } from "node:path";
+import { dirname, join, extname, normalize, basename } from "node:path";
 import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { uploadRoot, statePath } from "../shared/paths.mjs";
@@ -49,7 +49,8 @@ import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
-import { createPeekHandler } from "./peek.mjs";
+import { createPeekHandler, createDownloadHandler } from "./peek.mjs";
+import { createHomePath } from "./homePath.mjs";
 import { createProjectsHandler } from "./projectsRoute.mjs";
 import { createUploadHandler } from "./uploadRoute.mjs";
 import { CTO_SAFE_500_MESSAGE, HOOK_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
@@ -3764,6 +3765,7 @@ const MIME = {
   ".mp4": "video/mp4",
   ".webm": "video/webm",
   ".mov": "video/quicktime",
+  ".pdf": "application/pdf",
   ".m4v": "video/x-m4v",
   ".webmanifest": "application/manifest+json",
 };
@@ -3882,15 +3884,13 @@ function respondJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
-// /api/peek handler with the real route logic in src/server/peek.mjs (tested
-// directly in peek.test.mjs — no mock). Injected with the real fs/homedir.
-const peekHandler = createPeekHandler({
-  homedir,
-  stat,
-  createReadStream,
-  pipeline,
-  MIME,
-});
+// /api/peek + /api/download handlers with the real route logic in
+// src/server/peek.mjs (tested directly in peek.test.mjs — no mock). Both read
+// through the shared home-scoped file-access policy (homePath.mjs), injected
+// here with the real fs/homedir.
+const { openInHome } = createHomePath({ homedir });
+const peekHandler = createPeekHandler({ openInHome, pipeline, MIME });
+const handleDownload = createDownloadHandler({ openInHome, pipeline });
 
 // /api/projects handler with the real route logic in src/server/projectsRoute.mjs
 // (tested directly in projectsRoute.test.mjs — BET-1458, the BET-1454
@@ -3925,47 +3925,6 @@ const UPLOAD_ROOT = uploadRoot();
 // Injected with the box's upload root (~/.manta-uploads).
 const uploadHandler = createUploadHandler({ uploadRoot: UPLOAD_ROOT });
 const handoffHandler = createHandoffHandler({ engine: handoffEngine, readJson: (req) => readJsonBody(req) });
-
-// Agent → device download: stream a file back to the device as a browser
-// download. Path-traversal guarded with the SAME home-scoped rule /api/peek
-// uses (see peek.mjs): expand a leading `~`, resolve, and require the result
-// to stay inside the user's home dir. The outbox lives under home, so outbox
-// toast Save + artifacts downloads are unaffected (the historical guard was
-// "inside OUTBOX_ROOT", which is a strict subset of home). Widening to home
-// also lets INLINE media downloaded via media_show (whose /api/peek display
-// path already serves any home file to the same bearer) be saved — previously
-// those returned 403 and the download button threw "download failed". This
-// does not expand the readable set for an authenticated client. NON-destructive:
-// the source is left in place; its lifetime is the artifact TTL, swept by
-// `expireArtifacts`, not by a download. Re-download is always allowed.
-async function handleDownload(req, res, url) {
-  const raw = url.searchParams.get("path") ?? "";
-  let resolved = raw;
-  if (resolved === "~") resolved = homedir() + "/";
-  else if (resolved.startsWith("~/")) resolved = homedir() + resolved.slice(1);
-  else resolved = resolve(resolved);
-  const home = homedir() + "/";
-  if (resolved !== home && !resolved.startsWith(home)) {
-    respondJson(res, 403, { error: "path outside home directory" });
-    return;
-  }
-  try {
-    const st = await stat(resolved);
-    if (!st.isFile()) throw new Error("not a file");
-    res.writeHead(200, {
-      "content-type": "application/octet-stream",
-      "content-length": String(st.size),
-      "content-disposition": `attachment; filename="${basename(resolved).replace(/"/g, "")}"`,
-    });
-    await pipeline(createReadStream(resolved), res);
-  } catch (e) {
-    if (!res.headersSent) {
-      respondJson(res, 404, { error: String(e?.message ?? e) });
-    } else {
-      res.destroy();
-    }
-  }
-}
 
 // ---------- voice notes (BET-834) ----------
 //

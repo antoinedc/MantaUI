@@ -123,6 +123,13 @@ test("opencode:models asks listModels in strict mode, so an unreadable catalogue
   assert.deepEqual(seen, [{ strict: true }]);
 });
 
+test("the file explorer's fs:* channels are registered", () => {
+  const handlers = buildHandlers(makeDeps([]).deps);
+  for (const channel of ["fs:resolve-paths", "fs:list", "fs:git-status"]) {
+    assert.equal(typeof handlers[channel], "function", `${channel} is not registered`);
+  }
+});
+
 test("tmux:new-window resolves empty cwd from project defaultCwd", async () => {
   const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
   const handlers = buildHandlers(deps);

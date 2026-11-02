@@ -91,6 +91,22 @@
 /** Desktop viewport every desktop screen is captured at. One number, one place. */
 export const DESKTOP_VIEWPORT = { width: 1440, height: 900 };
 
+
+/** Explorer rows: the `explorer` demo state, and the two helpers their gestures share. */
+const EXPLORER_URL = "/app/index.html?demo&desktop&state=explorer";
+
+/** Click a file path in a transcript turn (the main session's last turn by default). */
+async function exOpen(page, text, scope = '[data-message-id="msg_ex_a1"]') {
+  await page.locator(`${scope} .manta-file-link`, { hasText: text }).first().click();
+}
+
+/** The mockup is drawn dark; follow the capture's colour scheme like the app does. */
+async function exMockupTheme(page) {
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+}
+
 /** @type {Screen[]} */
 export const SCREENS = [
   {
@@ -849,6 +865,281 @@ export const SCREENS = [
       await page.click('[data-s="tochat"]');
     },
     mockupRegion: ".screen.on .modal",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+
+  // ---- File explorer (docs/screens/explorer) -----------------------------
+  // Every row boots the `explorer` demo state and reaches its screen with real
+  // gestures: clicking a path in the transcript, the sidebar / tree toggles,
+  // the quick-open button. `exOpen` clicks a transcript path; the file bytes
+  // come from the demo's pretend file system (src/renderer/api/demoExplorerFs.ts).
+  // The mockup is drawn dark, so every mockupActions sets its theme to match the
+  // capture's colour scheme (compare.mjs: VISUAL_COLOR_SCHEME, default light).
+  {
+    id: "explorer-default",
+    title: "File explorer — open on docs/peek-scope.md, tree closed",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-md",
+    actions: async (page) => {
+      await exOpen(page, "docs/peek-scope.md");
+      await page.waitForSelector(".manta-explorer-footer", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-win-default",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-tree",
+    title: "File explorer — sidebar hidden, tree open, code at a line",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-tree",
+    actions: async (page) => {
+      await exOpen(page, "src/server/peek.mjs:28");
+      await page.waitForSelector(".manta-explorer-code", { state: "visible" });
+      await page.getByRole("button", { name: "Hide sidebar" }).click();
+      await page.getByRole("button", { name: "Show file tree" }).click();
+      await page.waitForSelector(".manta-explorer-tree", { state: "visible" });
+      await page.locator(".manta-explorer-tree").getByRole("treeitem", { name: /docs/ }).click();
+      await page.getByRole("treeitem", { name: /peek-scope\.md/ }).waitFor();
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-win-tree",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-expanded",
+    title: "File explorer — expanded, transcript folded to the rail",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-rail",
+    actions: async (page) => {
+      await exOpen(page, "src/server/peek.mjs:28");
+      await page.waitForSelector(".manta-explorer-code", { state: "visible" });
+      await page.getByRole("button", { name: "Expand" }).click();
+      await page.waitForSelector(".manta-explorer-rail", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-win-expanded",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-links",
+    title: "Path links in the transcript — every link state",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: '[data-message-id="msg_ex_links"] .manta-file-link',
+    region: '[data-message-id="msg_ex_links"]',
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await page.waitForSelector('[data-message-id="msg_ex_links"] .manta-file-link', { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-links .amsg",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-states",
+    title: "File explorer — empty (nothing open yet)",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-state",
+    region: ".manta-explorer-state",
+    actions: async (page) => {
+      await page.getByRole("button", { name: "Show file explorer" }).click();
+      await page.waitForSelector(".manta-explorer-state", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-states .refuse:nth-child(1)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-states-error",
+    title: "File explorer — couldn't load (the box didn't answer)",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-state",
+    region: ".manta-explorer-state",
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await exOpen(page, "~/notes/flaky.md", '[data-message-id="msg_ex_cant"]');
+      await page.waitForSelector(".manta-explorer-state", { state: "visible" });
+      await page.getByText("Couldn’t load this file").waitFor();
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-states .refuse:nth-child(3)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-states-loading",
+    title: "File explorer — loading skeleton (slow box)",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: '.manta-explorer-state[aria-label="Loading"]',
+    region: ".manta-explorer-state",
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await exOpen(page, "~/notes/slow.md", '[data-message-id="msg_ex_cant"]');
+      await page.waitForSelector('.manta-explorer-state[aria-label="Loading"]', { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-states .refuse:nth-child(2)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-narrow",
+    title: "File explorer in a narrow window — opens Expanded",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-rail",
+    actions: async (page) => {
+      await exOpen(page, "src/server/peek.mjs:28");
+      await page.waitForSelector(".manta-explorer-rail", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-win-expanded",
+    viewport: { width: 900, height: 700 },
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-md-source",
+    title: "File explorer — Markdown Source view",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-code",
+    region: ".manta-explorer",
+    actions: async (page) => {
+      await exOpen(page, "docs/peek-scope.md");
+      await page.waitForSelector(".manta-explorer-md", { state: "visible" });
+      await page.getByRole("button", { name: "Source", exact: true }).click();
+      await page.waitForSelector(".manta-explorer-code", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-source .vw",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-refusal",
+    title: "File explorer can't preview — Too large to preview",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-refusal",
+    region: ".manta-explorer-refusal",
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await exOpen(page, "~/downloads/video.mov", '[data-message-id="msg_ex_cant"]');
+      await page.locator(".manta-explorer-refusal", { hasText: "Too large to preview" }).waitFor();
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-refusals .refuse:nth-child(1)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-refusal-binary",
+    title: "File explorer can't preview — Binary file",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-refusal",
+    region: ".manta-explorer-refusal",
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await exOpen(page, "~/downloads/app.sqlite", '[data-message-id="msg_ex_cant"]');
+      await page.locator(".manta-explorer-refusal", { hasText: "Binary file" }).waitFor();
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-refusals .refuse:nth-child(2)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-refusal-missing",
+    title: "File explorer can't preview — No longer exists",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-refusal",
+    region: ".manta-explorer-refusal",
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await exOpen(page, "~/notes/old-plan.md", '[data-message-id="msg_ex_cant"]');
+      await page.locator(".manta-explorer-refusal", { hasText: "No longer exists" }).waitFor();
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-refusals .refuse:nth-child(3)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-refusal-permission",
+    title: "File explorer can't preview — Can’t read this file",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-refusal",
+    region: ".manta-explorer-refusal",
+    actions: async (page) => {
+      await page.getByText("routines-ui", { exact: true }).first().click();
+      await exOpen(page, "~/notes/private.txt", '[data-message-id="msg_ex_cant"]');
+      await page.locator(".manta-explorer-refusal", { hasText: "Can’t read this file" }).waitFor();
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-refusals .refuse:nth-child(4)",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-effort-picker-btn","manta-model-picker-btn","manta-model-picker-btn","manta-session-menu-trigger","manta-session-menu-trigger"],
+  },
+  {
+    id: "explorer-quickopen",
+    title: "File explorer — quick open, query “peek”",
+    url: EXPLORER_URL,
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-quickopen",
+    region: ".manta-explorer-quickopen",
+    actions: async (page) => {
+      await exOpen(page, "docs/peek-scope.md");
+      await page.waitForSelector(".manta-explorer-md", { state: "visible" });
+      await page.getByRole("button", { name: "Quick open" }).click();
+      await page.getByPlaceholder("Go to file…").fill("peek");
+      await page.waitForSelector(".manta-explorer-quickopen [role=option]", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-quickopen .list",
     viewport: DESKTOP_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
   },

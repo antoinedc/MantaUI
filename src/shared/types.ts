@@ -1436,6 +1436,9 @@ export const IPC = {
 
   // Directory autocomplete: given a partial path, list matching subdirectories
   fsListDirs: "fs:list-dirs",
+  fsResolvePaths: "fs:resolve-paths",
+  fsList: "fs:list",
+  fsGitStatus: "fs:git-status",
 
   // BET-1091: create an empty, git-initialised scratch project directory
   // under `root`, returning the real absolute path for the session-creation

@@ -38,6 +38,7 @@ describe("pickDemoState — every member is a valid DemoState", () => {
       "artifacts",
       "routines",
       "routines-chat",
+      "explorer",
     ]);
   });
 });

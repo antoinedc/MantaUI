@@ -461,7 +461,7 @@ export const MessageRow = memo(function MessageRow({
           commandInfo?.inline && text.startsWith(`/${commandInfo.name}`) ? (
             <MessageBubble entering={entering}>
               <span className="text-accent-tx" data-testid="user-slash-token">/{commandInfo.name}</span>
-              <Linkified text={text.slice(commandInfo.name.length + 1)} />
+              <Linkified text={text.slice(commandInfo.name.length + 1)} paths />
             </MessageBubble>
           ) : commandInfo && !commandInfo.inline ? (
             <UserCommandBar
@@ -471,7 +471,7 @@ export const MessageRow = memo(function MessageRow({
             />
           ) : (
             <MessageBubble entering={entering}>
-              <Linkified text={text} />
+              <Linkified text={text} paths />
             </MessageBubble>
           )
         )}

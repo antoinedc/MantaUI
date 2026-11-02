@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — File explorer</title>
+
+<!--
+  THE SPEC for the file explorer. This file is the design contract, not a
+  picture of one. Read docs/visual-verification.md before editing, and
+  docs/screens/explorer/contract.md for the region-by-region translation into
+  primitives + Tailwind classes.
+
+  PROVENANCE: the interactive "Layout A" prototype the owner chose on
+  2026-11-02 (Files dock, sidebar hidden with ⌘B, tree hidden by default,
+  resizable split, expanded mode), re-expressed token-for-token. This file
+  replaces that prototype; it wins on any disagreement.
+
+  Rules that make this a contract:
+  1. It loads the app's REAL token stylesheet. There is not one hex literal
+     below. Every colour / spacing / radius / shadow / type stack is a token;
+     sizes not in tokens.css are Tailwind type roles (noted inline) or
+     Tailwind dimension steps (h-6 = 24px, h-7 = 28px, h-11 = 44px,
+     w-11 = 44px, w-44 = 176px, w-72 = 288px).
+  2. EXCEPTION, deliberately outside conformance: syntax-highlight colours in
+     the code views. The app takes them from the SAME prism-react-renderer
+     theme objects the transcript's CodeBlock uses (vsDark / github), adapted
+     to CodeMirror. The .sx-* classes below are stand-ins so the page reads as
+     code; do not copy them.
+  3. Window 1 is live (drag the divider, ⌘B / Ctrl+B, tree, expand, click a
+     path). Its DEFAULT render — before any interaction — is the contract
+     state. Windows 2 and 3 are static captures of the other two states.
+
+  ============================ CONFORMANCE SCOPE ============================
+    .mk-win-default    → app window, session with Explorer open (default state)
+    .mk-win-tree       → sidebar hidden (⌘B) + tree open + code at a line
+    .mk-win-expanded   → Explorer expanded, transcript folded to the rail
+    .mk-links          → path-link states in the transcript
+    .mk-states         → empty / loading / error / empty file
+    .mk-source         → Markdown "Source" view
+    .mk-refusals       → the four can't-preview states
+    .mk-copy           → copy confirmation, copy menu, download toast
+    .mk-quickopen      → ⌘P quick open
+  The left sidebar's own content and the composer are drawn only for
+  context; they are covered by their existing contracts
+  (docs/screens/session/mockup.html) and are NOT in scope here.
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* ---- page chrome (NOT part of the contract; it only lays the regions out) */
+  body { margin: 0; padding: var(--sp-8) var(--sp-6) var(--sp-12); background: var(--canvas);
+         color: var(--tx1); font-family: var(--font-sans); line-height: var(--ui-lh); }
+  .pg { max-width: 1320px; margin: 0 auto; }
+  .pg h1 { font-size: 24px; /* text-display */ margin: 0 0 var(--sp-2); letter-spacing: -0.01em; }
+  .pg h2 { font-size: 17px; /* text-title */ margin: var(--sp-12) 0 var(--sp-1); }
+  .pg .lede, .pg .cap { color: var(--tx3); font-size: var(--font-size-small); margin: 0 0 var(--sp-4); max-width: 860px; }
+  .pg .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-6); }
+  .pg .box { background: var(--panel); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: var(--sp-4); }
+  .pg .box h3 { margin: 0 0 var(--sp-3); font-size: var(--font-size-small); color: var(--tx2); }
+  .themebar { display: flex; gap: var(--sp-2); align-items: center; margin-bottom: var(--sp-6); font-size: var(--font-size-xs); color: var(--tx3); }
+  .themebar button { font: inherit; color: var(--tx2); background: var(--fill); border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-2); cursor: pointer; }
+  .notes { margin-top: var(--sp-6); color: var(--tx2); font-size: var(--font-size-small); max-width: 900px; }
+  .notes li { margin: var(--sp-1) 0; }
+
+  /* shared icon */
+  .ic { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 2;
+        stroke-linecap: round; stroke-linejoin: round; }
+  .ic.s14 { width: 14px; height: 14px; }
+  .ic.s12 { width: 12px; height: 12px; }
+  .ic.s20 { width: 20px; height: 20px; }
+
+  /* IconButton md — rounded-xs p-1, 16px glyph, text-text-faint → hover text-text bg-fill-hover */
+  .ib { display: inline-flex; align-items: center; justify-content: center; padding: var(--sp-1);
+        border-radius: var(--r-xs); color: var(--tx3); border: 0; background: transparent; cursor: pointer; flex: none; }
+  .ib:hover { color: var(--tx1); background: var(--fill-hover); }
+  .ib.on { color: var(--accent-tx); }
+  .ib.ok { color: var(--ok); }
+
+  /* ================= WINDOW — the contract starts here ================== */
+  .win { position: relative; height: 620px; display: flex; overflow: hidden;
+         border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--canvas);
+         box-shadow: var(--shadow-lg); user-select: none; }
+  .lights { position: absolute; left: 14px; top: 14px; display: flex; gap: var(--sp-2); z-index: 4; }
+  .lights i { width: 12px; height: 12px; border-radius: var(--r-full); background: var(--border); display: block; }
+
+  /* sidebar — context only (existing contract) */
+  .side { width: 256px; /* w-64 */ flex: none; background: var(--panel); border-right: 1px solid var(--border);
+          padding: 48px var(--sp-2) var(--sp-2); /* h-12 drag strip above */
+          transition: margin-left var(--motion-slow) var(--ease-out); }
+  .win.is-noside .side { margin-left: -257px; visibility: hidden; transition: margin-left var(--motion-slow) var(--ease-out), visibility 0s var(--motion-slow); }
+  .side { overflow: hidden; }
+  .srow { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 10px; /* --row-py/--row-px */
+          border-radius: var(--r-md); color: var(--tx2); font-size: var(--font-size-small); white-space: nowrap; }
+  .srow.on { background: var(--fill-active); color: var(--tx1); }
+  .sgrp { font-size: var(--font-size-2xs); color: var(--tx3); text-transform: uppercase; letter-spacing: .08em;
+          padding: var(--sp-3) 10px var(--sp-1); }
+  .dot { width: var(--step-dot); height: var(--step-dot); border-radius: var(--r-full); background: var(--tx4); flex: none; }
+  .dot.run { background: var(--accent); }
+  .dot.warn { background: var(--warn); }
+
+  .content { flex: 1; min-width: 0; display: flex; position: relative; }
+
+  /* ---- transcript pane ---- */
+  .tpane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  /* SessionHeader — h-11, pl-3, border-b border-border. With the sidebar hidden
+     on macOS it reserves the traffic lights: pl-20 + titlebar-drag. */
+  .shead { height: 44px; flex: none; display: flex; align-items: center; gap: var(--sp-2);
+           padding: 0 var(--sp-3); border-bottom: 1px solid var(--border); white-space: nowrap; }
+  /* SidebarToggle — pinned once per window, right of the traffic lights (macOS) */
+  .sbt { position: absolute; top: 10px; left: 76px; z-index: 5; }
+  /* every pane header: padding-left: max(own, var(--sidebar-hidden-inset)); macOS hidden = 112px */
+  .win { --sidebar-hidden-inset: 0px; }
+  .win.is-noside { --sidebar-hidden-inset: 112px; }
+  .shead { padding-left: max(var(--sp-3), var(--sidebar-hidden-inset)); }
+  .win.is-expanded .xp-top { padding-left: max(var(--sp-2), calc(var(--sidebar-hidden-inset) - 44px)); }
+  .crumb { font-size: var(--font-size-small); font-weight: var(--weight-medium); color: var(--tx1); }
+  .crumb .mut { color: var(--tx3); }
+  .tag { display: inline-flex; align-items: center; gap: var(--sp-1); height: 22px; padding: 0 var(--sp-2);
+         border-radius: var(--r-full); border: 1px solid var(--border); background: var(--fill);
+         font: var(--weight-medium) var(--font-size-2xs)/1 var(--font-mono); color: var(--tx3); }
+  .shead .sp { margin-left: auto; display: flex; align-items: center; gap: var(--sp-1); }
+
+  .scroll { flex: 1; overflow: hidden; padding: var(--sp-6) 28px; /* --transcript-inset */
+            display: flex; flex-direction: column; gap: var(--block-gap); }
+  .umsg { align-self: flex-end; background: var(--fill); border: 1px solid var(--border-subtle); border-radius: var(--r-lg);
+          padding: 11px var(--sp-4); font-size: var(--font-size-body); line-height: var(--prose-lh); max-width: 80%; }
+  .amsg { font-size: var(--font-size-body); line-height: var(--prose-lh); color: var(--tx1); }
+  .amsg p { margin: 0 0 var(--sp-2); }
+  .tool { display: flex; align-items: center; gap: var(--sp-2); border: 1px solid var(--border-subtle);
+          border-radius: var(--r-md); background: var(--panel); padding: var(--step-row-y) var(--sp-3);
+          font-size: var(--font-size-small); color: var(--tx3); }
+  .tool b { color: var(--tx1); font-weight: var(--weight-semibold); }
+  .tool .r { margin-left: auto; font-size: var(--font-size-xs); }
+  .composer { flex: none; margin: 0 var(--sp-5) var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-xl);
+              background: var(--card); padding: var(--sp-3) var(--sp-4); color: var(--tx3); font-size: var(--font-size-body); }
+
+  /* ---- FileLink: a path the box confirmed exists ----
+     inherits the inline-code mono size; accent-tx; dotted underline (URLs are
+     solid — the dotted style is what tells a file from a web link). */
+  .fl { font-family: var(--font-mono); font-size: .88em; color: var(--accent-tx); cursor: pointer;
+        text-decoration: underline dotted; text-decoration-color: rgb(var(--accent-rgb) / .5);
+        text-underline-offset: 3px; border-radius: var(--r-xs); padding: 0 var(--sp-px); margin: 0 calc(-1 * var(--sp-px)); }
+  .fl:hover, .fl.is-hover { background: var(--accent-bg); text-decoration-style: solid; }
+  .fl.is-active { background: var(--accent-bg); text-decoration: none;
+                  box-shadow: inset 0 0 0 1px rgb(var(--accent-rgb) / .4); }
+  .fl .ln { color: var(--tx3); }
+  .ic-plain { font-family: var(--font-mono); font-size: .88em; color: var(--tx2); }  /* unresolved path = plain inline code */
+  .ext { color: var(--accent-tx); text-decoration: underline; }                         /* ExternalLink, unchanged */
+
+  /* ---- resize handle (PanelResizeHandle): 8px hit area, 1px line, 2px accent on hover/drag/focus ---- */
+  .rh { width: 8px; margin: 0 -4px; flex: none; position: relative; z-index: 3; cursor: col-resize;
+        display: flex; justify-content: center; outline: none; }
+  .rh::before { content: ""; width: 1px; height: 100%; background: var(--border); }
+  .rh:hover::before, .rh.is-drag::before, .rh:focus-visible::before { width: 2px; background: var(--accent); }
+
+  /* ---- EXPLORER panel: border-l border-border bg-bg-elev (same surface as the Artifacts panel) ---- */
+  .xp { flex: none; display: flex; min-width: 0; background: var(--panel); }
+  .xp-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  /* top bar — h-11 so it lines up with the session header */
+  .xp-top { height: 44px; flex: none; display: flex; align-items: center; gap: var(--sp-1);
+            padding: 0 var(--sp-2) 0 var(--sp-2); border-bottom: 1px solid var(--border); }
+  .xp-root { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; flex: 1;
+             font-size: var(--font-size-small); font-weight: var(--weight-semibold); color: var(--tx1); }
+  .xp-root .ic { color: var(--tx3); }
+  .xp-root span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vsep { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 var(--sp-1); flex: none; }
+
+  .xp-body { flex: 1; min-height: 0; display: flex; }
+
+  /* ---- tree (hidden by default) — w-44 default, 140–320 drag range ---- */
+  .tree { width: 176px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--border-subtle); }
+  .win.is-notree .tree, .win.is-notree .trh { display: none; }
+  .tree-head { display: flex; align-items: center; gap: var(--sp-1); padding: var(--sp-2); }
+  /* the Artifacts panel search input, verbatim */
+  .filter { flex: 1; min-width: 0; background: var(--canvas); border: 1px solid var(--border); border-radius: var(--r-xs);
+            padding: var(--sp-1) var(--sp-2); font-size: var(--font-size-xs); line-height: 1.4; color: var(--tx3); }
+  .rows { flex: 1; overflow: hidden; padding: 0 var(--sp-1) var(--sp-2); }
+  .tr { height: 24px; display: flex; align-items: center; gap: var(--sp-1); padding-right: var(--sp-2);
+        border-radius: var(--r-sm); font-size: var(--font-size-small); color: var(--tx2); white-space: nowrap; cursor: pointer; }
+  .tr:hover { background: var(--fill-hover); }
+  .tr.is-sel { background: var(--accent-bg); color: var(--tx1); }
+  .tr.is-ignored { color: var(--tx3); }
+  .tr .chev { color: var(--tx3); }
+  .tr .glyph { color: var(--tx3); }
+  .tr .nm { overflow: hidden; text-overflow: ellipsis; }
+  .tr .git { margin-left: auto; font: var(--weight-semibold) var(--font-size-2xs)/1 var(--font-mono); }
+  .git.m { color: var(--warn); } .git.a { color: var(--ok); } .git.d { color: var(--danger); } .git.u { color: var(--tx3); }
+  .ind1 { padding-left: var(--sp-3); } .ind2 { padding-left: var(--sp-6); } .ind0 { padding-left: 0; }
+  .spacer12 { width: 12px; flex: none; }
+  .trh { width: 8px; margin: 0 -4px; flex: none; cursor: col-resize; position: relative; z-index: 2; }
+
+  /* ---- viewer ---- */
+  .vw { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--canvas); }
+  /* file bar — h-10, bg-bg-elev */
+  .fbar { height: 40px; flex: none; display: flex; align-items: center; gap: var(--sp-1);
+          padding: 0 var(--sp-2) 0 var(--sp-3); background: var(--panel); border-bottom: 1px solid var(--border-subtle); }
+  .bc { flex: 1; min-width: 0; font: var(--font-size-xs)/1 var(--font-mono); color: var(--tx3);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+  .bc bdi { direction: ltr; }
+  .bc b { color: var(--tx1); font-weight: var(--weight-medium); }
+  .bc .at { color: var(--tx3); }
+
+  /* Segmented — the Artifacts panel mode-switch chrome, lifted into a primitive */
+  .seg { display: flex; padding: var(--sp-1); background: var(--inset); border: 1px solid var(--border-subtle);
+         border-radius: var(--r-md); flex: none; }
+  .seg button { font: var(--weight-medium) var(--font-size-xs)/1.4 var(--font-sans); padding: var(--sp-1) var(--sp-2);
+                border-radius: var(--r-sm); border: 0; background: transparent; color: var(--tx3); cursor: pointer; }
+  .seg button.on { background: var(--raised); color: var(--tx1); box-shadow: var(--shadow-sm); }
+  .seg.is-hidden { visibility: hidden; }
+
+  .vbody { flex: 1; min-height: 0; overflow: auto; }
+  .vfoot { height: 28px; flex: none; display: flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-3);
+           background: var(--panel); border-top: 1px solid var(--border-subtle); font-size: var(--font-size-xs); color: var(--tx3); }
+  .vfoot .sp { flex: 1; }
+
+  /* code view (CodeMirror, read-only) — text-code 13/1.55 mono; gutter text-text-quiet */
+  .cm { font: 13px/1.55 var(--font-mono); padding: var(--sp-2) 0; white-space: pre; color: var(--tx1); }
+  .cm .l { display: flex; padding-right: var(--sp-4); }
+  .cm .g { width: 48px; flex: none; padding-right: var(--sp-4); text-align: right; color: var(--tx4); }
+  /* target line(s): bg-accent-bg + the 2px accent bar (the Callout "note" bar width) */
+  .cm .l.is-target { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
+  .cm .l.is-target .g { color: var(--accent-tx); }
+  /* syntax stand-ins — OUT of conformance, see header note */
+  .sx-k { color: var(--accent-tx); } .sx-s { color: var(--ok); } .sx-c { color: var(--tx3); font-style: italic; }
+  .sx-f { color: var(--info); } .sx-n { color: var(--warn); } .sx-h { color: var(--accent-tx); font-weight: var(--weight-semibold); }
+
+  /* rendered Markdown — MarkdownBody, unchanged, in a px-6 py-5 column capped at --measure */
+  /* MarkdownBody, unchanged, inside flex-col gap-[var(--block-gap)] px-6 py-5 text-prose.
+     Heading/table margins are MarkdownBody's own inline exceptions (22/6, 18/5, 14). */
+  .md { padding: var(--sp-5) var(--sp-6); max-width: var(--measure); color: var(--tx1); display: flex; flex-direction: column;
+        gap: var(--block-gap); font-size: var(--font-size-body); line-height: var(--prose-lh); overflow-wrap: anywhere; }
+  .md > * { margin: 0; }
+  .md h1 { font-size: 17px; /* text-title */ font-weight: var(--weight-semibold); margin: 22px 0 6px; letter-spacing: -0.01em; }
+  .md h1:first-child { margin-top: 0; }
+  .md h2 { font-size: var(--font-size-body); font-weight: var(--weight-semibold); margin: 18px 0 5px; }
+  .md ul { margin-left: var(--sp-2); padding: 0; list-style: disc inside; }
+  .md code { font-family: var(--font-mono); font-size: .88em; color: var(--accent-tx); }
+  .md .tbl { margin: 14px 0; overflow-x: auto; }
+  .md table { border-collapse: collapse; }
+  .md th, .md td { border: 1px solid var(--border-subtle); padding: var(--sp-1) var(--sp-3); text-align: left; }
+  .md th { background: var(--card); font-weight: var(--weight-medium); }
+  .md blockquote { padding-left: var(--sp-3); border-left: 2px solid var(--border); font-style: italic; color: var(--tx2); }
+
+  /* ---- expanded: transcript folds into a w-11 rail ---- */
+  .rail { display: none; width: 44px; flex: none; flex-direction: column; align-items: center; gap: var(--sp-3);
+          padding-top: var(--sp-3); background: var(--canvas); border-right: 1px solid var(--border); cursor: pointer; }
+  .rail:hover { background: var(--fill-hover); }
+  .rail .vl { writing-mode: vertical-rl; transform: rotate(180deg); font-size: var(--font-size-xs); color: var(--tx3); }
+  .win.is-expanded .tpane, .win.is-expanded .rh { display: none; }
+  .win.is-expanded .xp { flex: 1; width: auto !important; }
+  .win.is-expanded .rail { display: flex; }
+  .win.is-closed .xp, .win.is-closed .rh { display: none; }
+
+  /* ---- hover card: the Dropdown surface chrome (bg-bg-soft rounded-lg shadow-lg border-border) ---- */
+  .hcard { width: 288px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg);
+           box-shadow: var(--shadow-lg); padding: var(--sp-3); }
+  .hcard .top { display: flex; align-items: center; gap: var(--sp-1); }
+  .hcard .nm { flex: 1; min-width: 0; font: var(--font-size-small)/1.4 var(--font-mono); color: var(--tx1);
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hcard .meta { font-size: var(--font-size-xs); color: var(--tx3); margin: 0 0 var(--sp-2); }
+  /* OutputWell standalone */
+  .well { background: var(--inset); border: 1px solid var(--border-subtle); border-radius: var(--r-md);
+          padding: 9px var(--sp-3); font: 12.5px/1.55 var(--font-mono); white-space: pre; overflow: hidden; color: var(--tx1); }
+
+  /* ---- refusal states ---- */
+  .refusals { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-3); }
+  .refuse { background: var(--canvas); border: 1px solid var(--border-subtle); border-radius: var(--r-md);
+            padding: var(--sp-8) var(--sp-4); text-align: center; display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); }
+  .refuse .ic { color: var(--tx3); margin-bottom: var(--sp-1); }
+  .refuse .t { font-size: var(--font-size-small); font-weight: var(--weight-medium); color: var(--tx1); }
+  .refuse .s { font-size: var(--font-size-xs); color: var(--tx3); }
+  /* Button tone primary */
+  .btn { margin-top: var(--sp-3); display: inline-flex; align-items: center; gap: var(--sp-2); border-radius: var(--r-md);
+         padding: var(--sp-1) var(--sp-3); font: var(--weight-medium) var(--font-size-small)/1.6 var(--font-sans);
+         background: var(--accent-solid); color: var(--on-accent); border: 0; }
+
+  /* Button tone default */
+  .btn2 { margin-top: var(--sp-3); display: inline-flex; align-items: center; border-radius: var(--r-md); padding: var(--sp-1) var(--sp-3);
+          font: var(--weight-medium) var(--font-size-small)/1.6 var(--font-sans); background: var(--fill); color: var(--tx1); border: 1px solid var(--border); }
+  /* Skeleton stand-in */
+  .sk { display: block; height: 12px; border-radius: var(--r-xs); background: var(--fill-active); margin: var(--sp-1) 0; }
+
+  /* ---- copy / menu / toast ---- */
+  .dd { width: 224px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg);
+        box-shadow: var(--shadow-lg); padding: var(--sp-1); }
+  .mi { display: flex; align-items: center; gap: var(--sp-2); padding: 6px var(--sp-2); border-radius: var(--r-sm);
+        font-size: var(--font-size-small); color: var(--tx2); }
+  .mi.is-active { background: var(--fill-hover); color: var(--tx1); }
+  .mi .k { margin-left: auto; font-size: var(--font-size-xs); color: var(--tx3); }
+  .toast { display: inline-flex; align-items: center; gap: var(--sp-3); background: var(--raised); border: 1px solid var(--border);
+           border-radius: var(--r-lg); box-shadow: var(--shadow-md); padding: var(--sp-2) var(--sp-3); font-size: var(--font-size-small); }
+  .toast .ic { color: var(--ok); }
+  .toast a { color: var(--accent-tx); }
+
+  /* ---- quick open: PaletteShell, unchanged ---- */
+  .pal { width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-lg); overflow: hidden; }
+  .pal .in { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--border-subtle);
+             font-size: var(--font-size-body); color: var(--tx1); }
+  .pal .in .ic { color: var(--tx3); }
+  .pal .list { padding: var(--sp-1) var(--sp-2); }
+  .pal .it { display: flex; align-items: center; gap: var(--sp-2); padding: 6px var(--sp-2); border-radius: var(--r-sm);
+             font: var(--font-size-small)/1.4 var(--font-mono); color: var(--tx2); }
+  .pal .it.is-sel { background: var(--accent-bg); color: var(--tx1); }
+  .pal .it mark { background: none; color: var(--accent-tx); font-weight: var(--weight-semibold); }
+  .pal .it .r { margin-left: auto; font-family: var(--font-sans); font-size: var(--font-size-xs); }
+  .pal .ft { display: flex; gap: var(--sp-4); padding: var(--sp-2) var(--sp-4); border-top: 1px solid var(--border-subtle);
+             background: var(--inset); font-size: var(--font-size-xs); color: var(--tx3); }
+  kbd { font: var(--font-size-2xs) var(--font-mono); color: var(--tx3); background: var(--raised); border: 1px solid var(--border-subtle);
+        border-radius: var(--r-xs); padding: 0 var(--sp-1); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- lucide glyphs; contract.md maps each id to its lucide-react name -->
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></symbol>
+  <symbol id="i-panel-right" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></symbol>
+  <symbol id="i-folder-tree" viewBox="0 0 24 24"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.9a1 1 0 0 1-.88-.55l-.42-.85a1 1 0 0 0-.92-.6H13a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M3 5a2 2 0 0 0 2 2h3"/><path d="M3 3v13a2 2 0 0 0 2 2h3"/></symbol>
+  <symbol id="i-list-tree" viewBox="0 0 24 24"><path d="M21 12h-8"/><path d="M21 6H8"/><path d="M21 18h-8"/><path d="M3 6v4c0 1.1.9 2 2 2h3"/><path d="M3 10v6c0 1.1.9 2 2 2h3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
+  <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-max" viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/></symbol>
+  <symbol id="i-min" viewBox="0 0 24 24"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+  <symbol id="i-file-x" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m14.5 12.5-5 5"/><path d="m9.5 12.5 5 5"/></symbol>
+  <symbol id="i-file-warn" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-binary" viewBox="0 0 24 24"><rect x="14" y="14" width="4" height="6" rx="2"/><rect x="6" y="4" width="4" height="6" rx="2"/><path d="M6 20h4"/><path d="M14 10h4"/><path d="M6 14h2v6"/><path d="M14 4h2v6"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+</svg>
+
+<div class="pg" data-screen="explorer">
+  <h1>File explorer</h1>
+  <p class="lede">Design contract. Every value resolves to a token in <code>src/renderer/tokens.css</code>; switch theme to check both. Region-by-region classes and primitives are in <code>docs/screens/explorer/contract.md</code>.</p>
+  <div class="themebar">Theme <button data-theme-set="dark">Dark</button><button data-theme-set="light">Light</button></div>
+
+  <!-- ======================= 1. DEFAULT (live) ======================= -->
+  <h2>1 · Default — Explorer open, tree hidden <span style="color:var(--tx3);font-size:var(--font-size-small);font-weight:400">(live: drag the divider, ⌘B / Ctrl+B, ⇧⌘E, ⌥⌘E, click paths, ⌘-click)</span></h2>
+  <p class="cap">Sidebar · transcript · divider · Explorer. The path the viewer is showing is outlined in the transcript.</p>
+  <div class="win mk-win-default is-notree" id="live">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <button class="ib sbt" data-act="sidebar" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+    <aside class="side">
+      <div class="sgrp">manta</div>
+      <div class="srow on"><span class="dot run"></span>peek-range-fix</div>
+      <div class="srow"><span class="dot"></span>routines-ui</div>
+      <div class="srow"><span class="dot warn"></span>ios-catch-up</div>
+      <div class="sgrp">ronda</div>
+      <div class="srow"><span class="dot"></span>billing-webhooks</div>
+    </aside>
+    <div class="content">
+      <section class="tpane">
+        <header class="shead">
+          <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
+          <span class="tag">fix/peek-range</span>
+          <span class="sp">
+            <button class="ib on" data-act="close" title="Hide file explorer (⌘E)"><svg class="ic"><use href="#i-folder-tree"/></svg></button>
+            <button class="ib" title="Show artifacts (⌘I)"><svg class="ic"><use href="#i-panel-right"/></svg></button>
+            <button class="ib" title="Session menu"><svg class="ic"><use href="#i-more"/></svg></button>
+          </span>
+        </header>
+        <div class="scroll">
+          <div class="umsg">Why does the download 403 for media shown inline?</div>
+          <div class="tool"><b>Read</b><span class="fl" data-open="peek">src/server/peek.mjs</span><span class="r">142 lines</span></div>
+          <div class="tool"><b>Edit</b><span class="fl" data-open="index">src/server/index.mjs<span class="ln">:3927</span></span><span class="r" style="color:var(--ok)">+6 −2</span></div>
+          <div class="amsg">
+            <p>The display route and the download route used different scopes. <span class="fl" data-open="peek" data-line="28">src/server/peek.mjs<span class="ln">:28</span></span> allows anything under home, while the download handler only allowed the outbox.</p>
+            <p>I aligned both and wrote it up in <span class="fl is-active" data-open="md">docs/peek-scope.md</span>.</p>
+          </div>
+        </div>
+        <div class="composer">Message the agent…</div>
+      </section>
+      <div class="rh" tabindex="0" role="separator" aria-orientation="vertical" aria-label="Resize file explorer" title="Drag to resize · double-click to reset"></div>
+      <section class="xp" style="width:520px">
+        <div class="rail" data-act="restore" title="Back to transcript (Esc)">
+          <button class="ib"><svg class="ic"><use href="#i-min"/></svg></button>
+          <span class="dot run"></span>
+          <span class="vl">Transcript</span>
+        </div>
+        <div class="xp-col">
+          <div class="xp-top">
+            <button class="ib" data-act="tree" title="Show file tree (⌥⌘E)"><svg class="ic"><use href="#i-list-tree"/></svg></button>
+            <span class="xp-root"><svg class="ic s14"><use href="#i-folder"/></svg><span>fix-peek-range</span></span>
+            <button class="ib" title="Quick open (⌘P)"><svg class="ic"><use href="#i-search"/></svg></button>
+            <button class="ib" data-act="expand" title="Expand (⇧⌘E)"><svg class="ic"><use href="#i-max"/></svg></button>
+            <button class="ib" data-act="close" title="Close (⌘E)"><svg class="ic"><use href="#i-x"/></svg></button>
+          </div>
+          <div class="xp-body">
+            <div class="tree">
+              <div class="tree-head"><div class="filter">Filter files</div><button class="ib" title="Up to parent folder (fix-peek-range → better-ui)"><svg class="ic"><use href="#i-up"/></svg></button></div>
+              <div class="rows">
+                <div class="tr ind0"><svg class="ic s12 chev"><use href="#i-chev-d"/></svg><svg class="ic s14 glyph"><use href="#i-folder"/></svg><span class="nm">docs</span></div>
+                <div class="tr ind1 is-sel" data-open="md"><span class="spacer12"></span><svg class="ic s14 glyph"><use href="#i-file"/></svg><span class="nm">peek-scope.md</span><span class="git a">A</span></div>
+                <div class="tr ind0"><svg class="ic s12 chev"><use href="#i-chev-d"/></svg><svg class="ic s14 glyph"><use href="#i-folder"/></svg><span class="nm">src</span></div>
+                <div class="tr ind1"><svg class="ic s12 chev"><use href="#i-chev-d"/></svg><svg class="ic s14 glyph"><use href="#i-folder"/></svg><span class="nm">server</span></div>
+                <div class="tr ind2" data-open="index"><span class="spacer12"></span><svg class="ic s14 glyph"><use href="#i-file"/></svg><span class="nm">index.mjs</span><span class="git m">M</span></div>
+                <div class="tr ind2" data-open="peek"><span class="spacer12"></span><svg class="ic s14 glyph"><use href="#i-file"/></svg><span class="nm">peek.mjs</span><span class="git m">M</span></div>
+                <div class="tr ind2"><span class="spacer12"></span><svg class="ic s14 glyph"><use href="#i-file"/></svg><span class="nm">range.mjs</span></div>
+                <div class="tr ind0"><span class="spacer12"></span><svg class="ic s14 glyph"><use href="#i-file"/></svg><span class="nm">AGENTS.md</span></div>
+                <div class="tr ind0 is-ignored"><svg class="ic s12 chev"><use href="#i-chev-r"/></svg><svg class="ic s14 glyph"><use href="#i-folder"/></svg><span class="nm">node_modules</span></div>
+              </div>
+            </div>
+            <div class="trh" title="Resize tree"></div>
+            <div class="vw">
+              <div class="fbar">
+                <span class="bc"><bdi>docs / <b>peek-scope.md</b></bdi></span>
+                <span class="seg" role="group" aria-label="Markdown view"><button class="on" data-mode="rendered">Rendered</button><button data-mode="source">Source</button></span>
+                <button class="ib" data-copy title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
+                <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+              </div>
+              <div class="vbody">
+                <div data-file="md">
+                  <div class="md" data-view="rendered">
+                    <h1>Peek &amp; download scope</h1>
+                    <div>Inline media and the artifacts panel read files through the same route. Both now share <strong>one</strong> rule: any regular file inside the user's home directory.</div>
+                    <h2>Rules</h2>
+                    <ul><li>Paths resolve against <code>$HOME</code>; <code>~</code> is expanded at the edge.</li><li>Anything outside home answers <code>403</code>.</li><li>Downloads are non-destructive.</li></ul>
+                    <div class="tbl"><table><tr><th>Route</th><th>Before</th><th>After</th></tr><tr><td><code>/api/peek</code></td><td>home</td><td>home</td></tr><tr><td><code>/api/download</code></td><td>outbox</td><td>home</td></tr></table></div>
+                    <blockquote>Display and download must never disagree — see <span class="fl" data-open="peek" data-line="28">src/server/peek.mjs:28</span>.</blockquote>
+                  </div>
+                  <div class="cm" data-view="source" hidden></div>
+                </div>
+                <div data-file="peek" hidden><div class="cm" data-code="peek"></div></div>
+                <div data-file="index" hidden><div class="cm" data-code="index"></div></div>
+              </div>
+              <div class="vfoot"><span data-f="lang">Markdown</span><span data-f="lines">18 lines</span><span data-f="size">612 B</span><span class="sp"></span><span>modified 2 min ago</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ======================= 2. SIDEBAR HIDDEN + TREE ======================= -->
+  <h2>2 · ⌘B — sidebar hidden, tree open, opened at a line</h2>
+  <p class="cap">The header reserves the macOS window controls. The tree opens inside the Explorer and narrows the viewer, never the transcript. Lines 28–30 are the target range.</p>
+  <div class="win mk-win-tree is-noside" id="w2">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <button class="ib sbt" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+    <aside class="side"></aside>
+    <div class="content">
+      <section class="tpane">
+        <header class="shead">
+          <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
+          <span class="tag">fix/peek-range</span>
+          <span class="sp">
+            <button class="ib on" title="Hide file explorer (⌘E)"><svg class="ic"><use href="#i-folder-tree"/></svg></button>
+            <button class="ib" title="Show artifacts (⌘I)"><svg class="ic"><use href="#i-panel-right"/></svg></button>
+            <button class="ib" title="Session menu"><svg class="ic"><use href="#i-more"/></svg></button>
+          </span>
+        </header>
+        <div class="scroll">
+          <div class="amsg"><p>The guard lives in <span class="fl is-active">src/server/peek.mjs<span class="ln">:28-30</span></span>. It now matches the download route.</p></div>
+        </div>
+        <div class="composer">Message the agent…</div>
+      </section>
+      <div class="rh"></div>
+      <section class="xp" style="width:700px">
+        <div class="xp-col">
+          <div class="xp-top">
+            <button class="ib on" title="Hide file tree (⌥⌘E)"><svg class="ic"><use href="#i-list-tree"/></svg></button>
+            <span class="xp-root"><svg class="ic s14"><use href="#i-folder"/></svg><span>fix-peek-range</span></span>
+            <button class="ib" title="Quick open (⌘P)"><svg class="ic"><use href="#i-search"/></svg></button>
+            <button class="ib" title="Expand (⇧⌘E)"><svg class="ic"><use href="#i-max"/></svg></button>
+            <button class="ib" title="Close (⌘E)"><svg class="ic"><use href="#i-x"/></svg></button>
+          </div>
+          <div class="xp-body">
+            <div class="tree" data-tree-clone></div>
+            <div class="trh"></div>
+            <div class="vw">
+              <div class="fbar">
+                <span class="bc"><bdi>src / server / <b>peek.mjs</b> <span class="at">· lines 28–30</span></bdi></span>
+                <button class="ib" title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
+                <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+              </div>
+              <div class="vbody"><div class="cm" data-code="peek"></div></div>
+              <div class="vfoot"><span>JavaScript</span><span>142 lines</span><span>4.8 KB</span><span class="sp"></span><span>Ln 28</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ======================= 3. EXPANDED ======================= -->
+  <h2>3 · Expanded — expand button, ⇧⌘E, ⌘-click (or a window narrower than 680 px)</h2>
+  <p class="cap">The file fills the window right of the sidebar. The transcript folds to a rail that still shows the session's status dot (here: the agent is working). Esc, ⇧⌘E or a click on the rail restores the exact split.</p>
+  <div class="win mk-win-expanded is-expanded is-notree" id="w3">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <button class="ib sbt" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+    <aside class="side">
+      <div class="sgrp">manta</div>
+      <div class="srow on"><span class="dot run"></span>peek-range-fix</div>
+      <div class="srow"><span class="dot"></span>routines-ui</div>
+      <div class="srow"><span class="dot warn"></span>ios-catch-up</div>
+    </aside>
+    <div class="content">
+      <section class="tpane"></section>
+      <div class="rh"></div>
+      <section class="xp">
+        <div class="rail" title="Back to transcript (Esc)">
+          <button class="ib"><svg class="ic"><use href="#i-min"/></svg></button>
+          <span class="dot run"></span>
+          <span class="vl">Transcript</span>
+        </div>
+        <div class="xp-col">
+          <div class="xp-top">
+            <button class="ib" title="Show file tree (⌥⌘E)"><svg class="ic"><use href="#i-list-tree"/></svg></button>
+            <span class="xp-root"><svg class="ic s14"><use href="#i-folder"/></svg><span>fix-peek-range</span></span>
+            <button class="ib" title="Quick open (⌘P)"><svg class="ic"><use href="#i-search"/></svg></button>
+            <button class="ib" title="Restore split (Esc)"><svg class="ic"><use href="#i-min"/></svg></button>
+            <button class="ib" title="Close (⌘E)"><svg class="ic"><use href="#i-x"/></svg></button>
+          </div>
+          <div class="xp-body">
+            <div class="vw">
+              <div class="fbar">
+                <span class="bc"><bdi>src / server / <b>peek.mjs</b> <span class="at">· lines 28–30</span></bdi></span>
+                <button class="ib" title="Copy contents"><svg class="ic"><use href="#i-copy"/></svg></button>
+                <button class="ib" title="Download"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+              </div>
+              <div class="vbody"><div class="cm" data-code="peek"></div></div>
+              <div class="vfoot"><span>JavaScript</span><span>142 lines</span><span>4.8 KB</span><span class="sp"></span><span>Ln 28</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ======================= 4–9. DETAILS ======================= -->
+  <h2>Details</h2>
+  <div class="grid2">
+    <div class="box mk-links">
+      <h3>4 · Path links in the transcript</h3>
+      <div class="amsg">
+        <p>Confirmed file, relative to the session: <span class="fl">src/server/peek.mjs</span></p>
+        <p>With a line / range: <span class="fl">peek.mjs<span class="ln">:28</span></span> · <span class="fl">peek.mjs<span class="ln">:28-34</span></span></p>
+        <p>Home and absolute: <span class="fl">~/notes/todo.md</span> · <span class="fl">/home/dev/projects/manta/AGENTS.md</span></p>
+        <p>Hovered: <span class="fl is-hover">docs/peek-scope.md</span> · Shown in the Explorer: <span class="fl is-active">docs/peek-scope.md</span></p>
+        <p>Missing, outside home, or not yet confirmed — stays inline code: <span class="ic-plain">src/server/gone.mjs</span> · <span class="ic-plain">/etc/caddy/Caddyfile</span></p>
+        <p>A web link, for contrast (unchanged): <span class="ext">mantaui.com/downloads</span></p>
+      </div>
+    </div>
+
+    <div class="box mk-states">
+      <h3>5 · Empty, loading, error</h3>
+      <div class="refusals">
+        <div class="refuse"><svg class="ic s20"><use href="#i-folder-tree"/></svg><span class="t">No file open</span><span class="s">Click a file path in the conversation, or open the tree</span><span class="btn2">Show tree</span></div>
+        <div class="refuse" style="align-items:stretch;text-align:left;justify-content:flex-start"><span class="sk" style="width:60%"></span><span class="sk" style="width:85%"></span><span class="sk" style="width:40%"></span><span class="s" style="text-align:center;margin-top:var(--sp-3)">Loading (Skeleton, after 150 ms)</span></div>
+        <div class="refuse"><svg class="ic s20"><use href="#i-file-warn"/></svg><span class="t">Couldn't load this file</span><span class="s">The box didn't answer. Check the connection.</span><span class="btn2">Retry</span></div>
+        <div class="refuse"><span class="s">Empty file</span></div>
+      </div>
+    </div>
+
+    <div class="box mk-source">
+      <h3>6 · Markdown "Source" view</h3>
+      <div class="vw" style="border:1px solid var(--border-subtle);border-radius:var(--r-md);overflow:hidden;height:300px">
+        <div class="fbar">
+          <span class="bc"><bdi>docs / <b>peek-scope.md</b></bdi></span>
+          <span class="seg"><button>Rendered</button><button class="on">Source</button></span>
+          <button class="ib"><svg class="ic"><use href="#i-copy"/></svg></button>
+          <button class="ib"><svg class="ic"><use href="#i-download"/></svg></button>
+                <button class="ib" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+        </div>
+        <div class="vbody"><div class="cm" data-code="md"></div></div>
+      </div>
+    </div>
+
+    <div class="box mk-refusals">
+      <h3>7 · Files the viewer won't show</h3>
+      <div class="refusals">
+        <div class="refuse"><svg class="ic s20"><use href="#i-file-warn"/></svg><span class="t">Too large to preview</span><span class="s">video.mov is 812 MB · the limit is 25 MB</span><span class="btn"><svg class="ic s14"><use href="#i-download"/></svg>Download</span></div>
+        <div class="refuse"><svg class="ic s20"><use href="#i-binary"/></svg><span class="t">Binary file</span><span class="s">app.sqlite can't be shown as text</span><span class="btn"><svg class="ic s14"><use href="#i-download"/></svg>Download</span></div>
+        <div class="refuse"><svg class="ic s20"><use href="#i-file-x"/></svg><span class="t">No longer exists</span><span class="s">Moved or deleted after it was mentioned</span></div>
+        <div class="refuse"><svg class="ic s20"><use href="#i-lock"/></svg><span class="t">Can't read this file</span><span class="s">The box user has no permission to open it</span></div>
+      </div>
+    </div>
+
+    <div class="box mk-copy">
+      <h3>8 · Copy feedback, More menu, download toast</h3>
+      <div style="display:flex;gap:var(--sp-6);align-items:flex-start;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:var(--sp-2);align-items:flex-start">
+          <span style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--font-size-xs);color:var(--tx3)">
+            <button class="ib"><svg class="ic"><use href="#i-copy"/></svg></button> idle
+            <button class="ib ok"><svg class="ic"><use href="#i-check"/></svg></button> copied (1.5 s)
+          </span>
+          <div class="dd" role="menu">
+            <div class="mi is-active"><svg class="ic s14"><use href="#i-link"/></svg>Copy path</div>
+            <div class="mi"><svg class="ic s14"><use href="#i-link"/></svg>Copy relative path</div>
+          </div>
+        </div>
+        <div class="toast"><svg class="ic"><use href="#i-check"/></svg>Saved peek-scope.md to /Users/antoine/Downloads<a>Reveal</a></div>
+      </div>
+    </div>
+
+    <div class="box mk-quickopen">
+      <h3>9 · Quick open (⌘P in the Explorer) — searches the session folder</h3>
+      <div class="pal">
+        <div class="in"><svg class="ic"><use href="#i-search"/></svg>peek</div>
+        <div class="list">
+          <div class="it is-sel"><svg class="ic s14"><use href="#i-file"/></svg><span>src/server/<mark>peek</mark>.mjs</span><span class="r git m">M</span></div>
+          <div class="it"><svg class="ic s14"><use href="#i-file"/></svg><span>src/server/<mark>peek</mark>.test.mjs</span></div>
+          <div class="it"><svg class="ic s14"><use href="#i-file"/></svg><span>docs/<mark>peek</mark>-scope.md</span><span class="r git a">A</span></div>
+        </div>
+        <div class="ft"><span><kbd>↑↓</kbd> move</span><span><kbd>⏎</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Spec notes</h2>
+  <ul class="notes">
+    <li><b>Loudest element</b> is the file content. Chrome bars are <code>--panel</code>, content is <code>--canvas</code>, so the document reads as a page on the same surface as the transcript.</li>
+    <li><b>Alignment.</b> The Explorer top bar is exactly the session header's height (44px), so both bottom borders form one line across the window.</li>
+    <li><b>What grows.</b> Dragging the divider moves width between transcript and Explorer only; the sidebar and tree keep their widths. ⌘B gives the sidebar's width to both panes in their current proportion. Opening the tree takes width from the viewer only.</li>
+    <li><b>Breadcrumb</b> truncates from the LEFT so the file name always stays visible.</li>
+    <li><b>The Rendered / Source control is shown only for Markdown</b>; for other files its slot collapses (no gap is left).</li>
+    <li><b>The rail is not empty decoration</b>: its status dot follows the session (working / needs you / idle) so a question is never hidden behind the expanded file.</li>
+    <li><b>Light theme</b> uses the same tokens; nothing in this file has a per-theme override.</li>
+  </ul>
+</div>
+
+<script>
+/* Page behaviour only — none of this is part of the contract. */
+const CODE = {
+  peek: { start: 18, target: [28, 30], lines: [
+    ['  ', ['k','return async function'], ' ', ['f','handlePeek'], '(req, res, url) {'],
+    ['    ', ['k','const'], ' raw = url.searchParams.', ['f','get'], '(', ['s','"path"'], ') ?? ', ['s','""'], ';'],
+    ['    ', ['k','if'], ' (!raw) {'],
+    ['      ', ['f','writeJsonError'], '(res, ', ['n','400'], ', { error: ', ['s','"path is required"'], ' });'],
+    ['      ', ['k','return'], ';'],
+    ['    }'],
+    ['    ', ['c','// Expand ~ to $HOME so callers can pass ~/foo/bar.']],
+    ['    ', ['k','let'], ' resolved = raw;'],
+    ['    ', ['k','if'], ' (resolved === ', ['s','"~"'], ') resolved = ', ['f','homedir'], '() + ', ['s','"/"'], ';'],
+    ['    ', ['k','else'], ' resolved = ', ['f','resolve'], '(resolved);'],
+    ['    ', ['c','// Guard: resolved path must stay inside the user\'s home dir.']],
+    ['    ', ['k','const'], ' home = ', ['f','homedir'], '() + ', ['s','"/"'], ';'],
+    ['    ', ['k','if'], ' (resolved !== home && !resolved.', ['f','startsWith'], '(home)) {'],
+    ['      ', ['f','writeJsonError'], '(res, ', ['n','403'], ', { error: ', ['s','"path outside home directory"'], ' });'],
+    ['      ', ['k','return'], ';'],
+    ['    }'],
+    ['    ', ['k','let'], ' s;'],
+    ['    ', ['k','try'], ' {'],
+    ['      s = ', ['k','await'], ' ', ['f','stat'], '(resolved);'],
+    ['    } ', ['k','catch'], ' (e) {'],
+    ['      ', ['k','if'], ' (e?.code === ', ['s','"ENOENT"'], ') {'],
+    ['        ', ['f','writeJsonError'], '(res, ', ['n','404'], ', { error: ', ['s','"not found"'], ' });'],
+    ['        ', ['k','return'], ';'],
+    ['      }'],
+  ]},
+  index: { start: 3920, target: [3927, 3927], lines: [
+    [['c','// GET /api/download?path=<abs> — saves a box file to the client.']],
+    [['c','// Same home-scoped rule as /api/peek: anything the transcript can']],
+    [['c','// display, it can also save.']],
+    [['k','if'], ' (req.method === ', ['s','"GET"'], ' && path === ', ['s','"/api/download"'], ') {'],
+    ['  ', ['k','const'], ' rel = url.searchParams.', ['f','get'], '(', ['s','"path"'], ') ?? ', ['s','""'], ';'],
+    ['  ', ['k','const'], ' abs = ', ['f','resolveHomePath'], '(rel);'],
+    ['  ', ['k','if'], ' (!abs) ', ['k','return'], ' ', ['f','writeJsonError'], '(res, ', ['n','403'], ', { error: ', ['s','"outside home"'], ' });'],
+    ['  ', ['k','return'], ' ', ['f','streamFile'], '(res, abs, { disposition: ', ['s','"attachment"'], ' });'],
+    ['}'],
+  ]},
+  md: { start: 1, target: [0, 0], lines: [
+    [['h','# Peek & download scope']], [''],
+    ['Inline media and the artifacts panel read files through'],
+    ['the same route. Both now share ', ['k','**one**'], ' rule: any regular'],
+    ['file inside the user\'s home directory.'], [''],
+    [['h','## Rules']], [''],
+    [['f','-'], ' Paths resolve against ', ['s','`$HOME`'], '; ', ['s','`~`'], ' is expanded at the edge.'],
+    [['f','-'], ' Anything outside home answers ', ['s','`403`'], '.'],
+    [['f','-'], ' Downloads are non-destructive.'], [''],
+    ['| Route | Before | After |'], ['|---|---|---|'],
+    ['| ', ['s','`/api/peek`'], ' | home | home |'], ['| ', ['s','`/api/download`'], ' | outbox | home |'], [''],
+    [['c','> Display and download must never disagree.']],
+  ]},
+};
+function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+function renderCode(el, id){
+  const c = CODE[id]; let h = '';
+  c.lines.forEach((parts, i) => {
+    const n = c.start + i, tgt = n >= c.target[0] && n <= c.target[1];
+    const body = parts.map(p => Array.isArray(p) ? `<span class="sx-${p[0]}">${esc(p[1])}</span>` : esc(p)).join('');
+    h += `<div class="l${tgt ? ' is-target' : ''}"><span class="g">${n}</span><span>${body}</span></div>`;
+  });
+  el.innerHTML = h;
+}
+document.querySelectorAll('[data-code]').forEach(el => renderCode(el, el.dataset.code));
+document.querySelectorAll('[data-view="source"]').forEach(el => renderCode(el, 'md'));
+document.querySelectorAll('[data-tree-clone]').forEach(el => { el.innerHTML = document.querySelector('#live .tree').innerHTML;
+  el.querySelectorAll('.is-sel').forEach(r => r.classList.remove('is-sel'));
+  el.querySelectorAll('.tr').forEach(r => { if (r.textContent.trim().startsWith('peek.mjs')) r.classList.add('is-sel'); }); });
+document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => document.documentElement.dataset.theme = b.dataset.themeSet));
+
+/* live window */
+(function(){
+  const W = document.getElementById('live'), C = W.querySelector('.content'), XP = W.querySelector('.xp'),
+        RH = W.querySelector('.rh'), T = W.querySelector('.tree'), TRH = W.querySelector('.trh');
+  const MIN_T = 360, MIN_F = 320, DEF = .48;
+  const st = { side: true, tree: false, exp: false, open: true, ratio: DEF, treeW: 176 };
+  function layout(){
+    W.classList.toggle('is-noside', !st.side); W.classList.toggle('is-notree', !st.tree);
+    W.classList.toggle('is-expanded', st.exp); W.classList.toggle('is-closed', !st.open);
+    W.querySelector('[data-act=tree]').classList.toggle('on', st.tree);
+    W.querySelector('.shead [data-act=close]').classList.toggle('on', st.open);
+    const ex = W.querySelector('[data-act=expand] use'); ex.setAttribute('href', st.exp ? '#i-min' : '#i-max');
+    W.querySelector('[data-act=sidebar]').title = st.side ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)';
+    T.style.width = st.treeW + 'px';
+    requestAnimationFrame(() => { const w = C.getBoundingClientRect().width;
+      const fw = Math.max(MIN_F, Math.min(w - MIN_T, Math.round(w * st.ratio))); if (!st.exp) XP.style.width = fw + 'px'; });
+  }
+  function act(a){
+    if (a === 'sidebar') st.side = !st.side;
+    if (a === 'tree') { st.open = true; st.tree = !st.tree; }
+    if (a === 'expand') { st.open = true; st.exp = !st.exp; }
+    if (a === 'restore') st.exp = false;
+    if (a === 'close') { st.open = !st.open; st.exp = false; }
+    layout();
+  }
+  W.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); act(b.dataset.act); }));
+  RH.addEventListener('pointerdown', e => {
+    RH.setPointerCapture(e.pointerId); RH.classList.add('is-drag'); const r = C.getBoundingClientRect();
+    const mv = ev => { const fw = r.right - ev.clientX, ratio = fw / r.width;
+      st.ratio = Math.max(MIN_F / r.width, Math.min((r.width - MIN_T) / r.width, ratio)); layout(); };
+    const up = () => { RH.classList.remove('is-drag'); RH.removeEventListener('pointermove', mv); RH.removeEventListener('pointerup', up); };
+    RH.addEventListener('pointermove', mv); RH.addEventListener('pointerup', up);
+  });
+  RH.addEventListener('dblclick', () => { st.ratio = DEF; layout(); });
+  RH.addEventListener('keydown', e => { if (e.key === 'ArrowLeft') { st.ratio += .03; layout(); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { st.ratio -= .03; layout(); e.preventDefault(); } });
+  TRH.addEventListener('pointerdown', e => { TRH.setPointerCapture(e.pointerId); const x0 = e.clientX, w0 = st.treeW;
+    const mv = ev => { st.treeW = Math.max(140, Math.min(320, w0 + ev.clientX - x0)); T.style.width = st.treeW + 'px'; };
+    const up = () => { TRH.removeEventListener('pointermove', mv); TRH.removeEventListener('pointerup', up); };
+    TRH.addEventListener('pointermove', mv); TRH.addEventListener('pointerup', up); });
+  document.addEventListener('keydown', e => { const m = e.metaKey || e.ctrlKey;
+    if (m && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); act('sidebar'); }
+    if (m && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); act('expand'); }
+    if (m && e.altKey && e.code === 'KeyE') { e.preventDefault(); act('tree'); }
+    if (e.key === 'Escape' && st.exp) act('restore'); });
+  window.addEventListener('resize', layout);
+  const FILES = { md: ['docs / <b>peek-scope.md</b>', 'Markdown', '18 lines', '612 B', true],
+                  peek: ['src / server / <b>peek.mjs</b>', 'JavaScript', '142 lines', '4.8 KB'],
+                  index: ['src / server / <b>index.mjs</b>', 'JavaScript', '5,811 lines', '212 KB'] };
+  function open(id, el, ev){
+    const f = FILES[id]; st.open = true; if (ev && (ev.metaKey || ev.ctrlKey)) st.exp = true;
+    W.querySelectorAll('[data-file]').forEach(x => x.hidden = x.dataset.file !== id);
+    const line = el && el.dataset.line;
+    W.querySelector('.bc bdi').innerHTML = f[0] + (line ? ` <span class="at">· line ${line}</span>` : '');
+    W.querySelector('.fbar .seg').style.display = f[4] ? '' : 'none';
+    W.querySelector('[data-f=lang]').textContent = f[1]; W.querySelector('[data-f=lines]').textContent = f[2]; W.querySelector('[data-f=size]').textContent = f[3];
+    W.querySelectorAll('.scroll .fl').forEach(x => x.classList.toggle('is-active', x === el || (!el?.closest('.scroll') && x.dataset.open === id && !x.dataset.line)));
+    W.querySelectorAll('.tr[data-open]').forEach(x => x.classList.toggle('is-sel', x.dataset.open === id));
+    const tg = W.querySelector(`[data-file="${id}"] .is-target`), vb = W.querySelector('.vbody');
+    setTimeout(() => { vb.scrollTop = tg ? tg.offsetTop - 80 : 0; }, 0); layout();
+  }
+  W.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', ev => open(el.dataset.open, el, ev)));
+  W.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
+    W.querySelectorAll('.seg button').forEach(x => x.classList.toggle('on', x === b));
+    W.querySelector('[data-view=rendered]').hidden = b.dataset.mode === 'source';
+    W.querySelector('[data-view=source]').hidden = b.dataset.mode !== 'source'; }));
+  W.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
+    const u = b.querySelector('use'); u.setAttribute('href', '#i-check'); b.classList.add('ok');
+    setTimeout(() => { u.setAttribute('href', '#i-copy'); b.classList.remove('ok'); }, 1500); }));
+  layout();
+})();
+</script>
+</body>
+</html>

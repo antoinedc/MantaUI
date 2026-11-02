@@ -69,7 +69,8 @@ describe("top-of-window bars clear the Windows caption buttons", () => {
     const el = h.container.firstElementChild as HTMLElement;
     expect(el).not.toBeNull();
     expect(el.className).toContain(INSET);
-    expect(el.className).toContain("pl-3");
+    // The left pad is the explorer-era `max(<own pad>, sidebar-hidden inset)` rule (inline style), not `pl-3`.
+    expect(el.style.paddingLeft).toBe("max(var(--sp-3), var(--sidebar-hidden-inset, 0px))");
     // A symmetric px-3 is what put the session menu under the caption controls.
     expect(el.className).not.toContain("px-3");
     // Reservation must be token-driven, not a hardcoded Windows width.

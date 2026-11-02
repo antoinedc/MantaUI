@@ -19,7 +19,7 @@ import {
   type ReactNode,
 } from "react";
 import { formatTokenCount } from "../shared/formatTokens.mjs";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, Loader2, History, ArrowRightLeft } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, FolderTree, Loader2, History, ArrowRightLeft } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -45,7 +45,9 @@ import { Callout } from "./Callout";
 import { ForgeMark, hasForgeMark } from "./ForgeMark";
 import { Dropdown, MenuItem } from "./MenuItem";
 import { Popover } from "./Popover";
-import { useStore } from "./store";
+import { useStore, resolveSessionOwner } from "./store";
+import { MOD_KEY } from "./platform";
+import { toggleExplorer, useExplorerOpen } from "./explorer/explorerStore";
 import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
 import { previousEntryLabel, type PreviousSessionEntry } from "./handoff";
@@ -239,6 +241,8 @@ export function SessionHeader({
   const artifactsToggle = onToggleArtifacts
     ? { isOpen: artifactsOpen === true, toggle: onToggleArtifacts }
     : null;
+  const explorerOpen = useExplorerOpen(sessionId ?? null);
+  const hasOwnerWindow = useStore((s) => (sessionId ? resolveSessionOwner(s.projects, sessionId) !== null : false));
   const crumb = breadcrumb
     ? breadcrumb.window
       ? `${breadcrumb.project} / ${breadcrumb.window}`
@@ -358,6 +362,25 @@ export function SessionHeader({
       ),
     });
   }
+  // File explorer toggle — immediately BEFORE the Artifacts entry (the registry
+  // keeps insertion order). Chat sessions only: it needs an owning window to
+  // resolve the session folder from. 81 so it is never auto-hidden (≥ 80) and
+  // is not id-tie-sorted behind "artifacts" (selectStatusItems).
+  if (artifactsToggle && sessionId && hasOwnerWindow) {
+    registry.push({
+      id: "explorer",
+      priority: 81,
+      render: () => (
+        <IconButton
+          icon={<FolderTree className={explorerOpen ? "text-[var(--accent-tx)]" : undefined} />}
+          label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
+          title={`${explorerOpen ? "Hide file explorer" : "Show file explorer"} (${MOD_KEY}E)`}
+          hook="manta-explorer-toggle"
+          onClick={() => toggleExplorer(sessionId)}
+        />
+      ),
+    });
+  }
   if (artifactsToggle) {
     registry.push({
       id: "artifacts",
@@ -406,8 +429,8 @@ export function SessionHeader({
     <>
       <div
         ref={headerRef}
-        className="manta-session-header flex items-center gap-2 h-11 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
-        style={{ WebkitAppRegion: "drag" } as CSSProperties}
+        className="manta-session-header flex items-center gap-2 h-11 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
+        style={{ paddingLeft: "max(var(--sp-3), var(--sidebar-hidden-inset, 0px))", WebkitAppRegion: "drag" } as CSSProperties}
       >
       {/* Breadcrumb — workspace / session. This names WHERE YOU ARE, and it is
             the header's primary job: one window shows many sessions across

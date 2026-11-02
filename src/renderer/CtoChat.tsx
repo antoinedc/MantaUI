@@ -629,7 +629,10 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
       className="h-full w-full flex flex-col bg-bg font-sans text-prose relative"
     >
       {/* Slim header: identity + dashboard escape hatch + inspector toggle. */}
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-subtle">
+      <div
+        className="shrink-0 flex items-center gap-2 pr-4 py-2 border-b border-border-subtle"
+        style={{ paddingLeft: "max(var(--sp-4), var(--sidebar-hidden-inset, 0px))" }}
+      >
         <h1 className="text-body font-semibold text-text">CTO</h1>
         <span className="text-meta text-text-faint truncate">
           {rebinding

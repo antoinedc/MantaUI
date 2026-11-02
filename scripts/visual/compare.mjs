@@ -40,6 +40,8 @@ import { SCREENS, getScreen } from "./screens.mjs";
 import { writeComposite } from "./composite.mjs";
 
 const OUT_DIR = join(ROOT, ".visual-out");
+/** `VISUAL_COLOR_SCHEME=dark` captures both halves dark; the default is light. */
+const COLOR_SCHEME = process.env.VISUAL_COLOR_SCHEME === "dark" ? "dark" : "light";
 
 function log(msg) {
   process.stdout.write(`[visual:compare] ${msg}\n`);
@@ -82,7 +84,7 @@ async function capture(browser, baseURL, screen) {
     viewport: screen.viewport,
     deviceScaleFactor: 2,
     reducedMotion: "reduce",
-    colorScheme: "light",
+    colorScheme: COLOR_SCHEME,
   });
   const page = await context.newPage();
   let app;
@@ -116,7 +118,7 @@ async function capture(browser, baseURL, screen) {
     viewport: screen.viewport,
     deviceScaleFactor: 2,
     reducedMotion: "reduce",
-    colorScheme: "light",
+    colorScheme: COLOR_SCHEME,
   });
   const mpage = await mctx.newPage();
   let mock;
