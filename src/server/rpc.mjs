@@ -90,6 +90,7 @@ import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./fo
 import { clearStoredToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 import { resolveProjectCwd as sharedResolveProjectCwd } from "./projectCwd.mjs";
+import { createFiles } from "./files.mjs";
 
 // The number of rules (event entries) in a repo's rules YAML — shown in
 // Settings [G1] so a valid repo reads "3 rules".
@@ -519,6 +520,9 @@ async function knownOpencodeSessionIds(oc) {
     return new Set(sessions.map((s) => s?.id).filter(Boolean));
   } catch { return null; }
 }
+
+// File explorer channels (fs:resolve-paths / fs:list / fs:git-status); real fs + git.
+const explorerFiles = createFiles();
 
 export function buildHandlers({
   tmux,
@@ -1088,6 +1092,15 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.fsListDirs, partial)  → args[0] = partial (string)
     "fs:list-dirs": (partial) => local.fsListDirs(partial),
+
+    // File explorer (docs/superpowers/specs/2026-11-02-file-explorer.md). All three
+    // read through the home-scoped policy; expected outcomes are returned, not thrown.
+    // preload: IPC.fsResolvePaths → args[0] = { base, paths }
+    "fs:resolve-paths": (i) => explorerFiles.resolvePaths(i),
+    // preload: IPC.fsList → args[0] = { dir, limit? }
+    "fs:list": (i) => explorerFiles.listDir(i),
+    // preload: IPC.fsGitStatus → args[0] = { root }
+    "fs:git-status": (i) => explorerFiles.gitStatus(i),
 
     // BET-1091: create an empty, git-initialised scratch project directory.
     // Returns the real absolute path for stage 4 to feed into the existing
