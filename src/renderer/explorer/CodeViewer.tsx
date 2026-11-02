@@ -211,7 +211,7 @@ export function CodeViewer({
   }, [view, text, line, endLine, compartments]);
 
   return (
-    <div className="manta-explorer-code h-full">
+    <div className="manta-explorer-code h-full [&>div]:h-full">
       <CodeMirror
         value={initialText.current}
         height="100%"

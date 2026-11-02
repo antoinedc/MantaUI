@@ -4,7 +4,7 @@
 // state, so no other baseline moves.
 //
 //   peek-range-fix   the mockup's session: Read / Edit tool rows + a reply that
-//                    links src/server/peek.mjs:28 and docs/peek-scope.md; running.
+//                    links src/server/peek.mjs:28-30 and docs/peek-scope.md; running.
 //   routines-ui      every path-link state, then the files the viewer can't show.
 //   ios-catch-up     idle shell with a pending ask (the sidebar's amber dot).
 
@@ -153,7 +153,7 @@ function peekRangeFixMessages(): OpencodeMessage[] {
           a,
           "prt_ex_a1_text",
           [
-            "The display route and the download route used different scopes. src/server/peek.mjs:28 allows anything under home, while the download handler only allowed the outbox.",
+            "The display route and the download route used different scopes. src/server/peek.mjs:28-30 allows anything under home, while the download handler only allowed the outbox.",
             "",
             "I aligned both and wrote it up in docs/peek-scope.md.",
           ].join("\n"),

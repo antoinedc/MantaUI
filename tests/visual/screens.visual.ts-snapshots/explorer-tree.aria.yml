@@ -1,0 +1,53 @@
+- button "Show sidebar"
+- main:
+  - text: manta / peek-range-fix fix/peek-range
+  - button "Hide file explorer"
+  - button "Show artifacts"
+  - button "Session actions"
+  - text: /Why does the download \d+ for media shown inline\?/
+  - button "Read a file, edited a file"
+  - text: The display route and the download route used different scopes.
+  - link /src\/server\/peek\.mjs:\d+-\d+/:
+    - /url: "#"
+  - text: allows anything under home, while the download handler only allowed the outbox. I aligned both and wrote it up in
+  - link "docs/peek-scope.md":
+    - /url: "#"
+  - text: /\. Brewed for \d+[hmsp]+/
+  - status
+  - textbox "Reply, or describe the next task…"
+  - button "Opus 4.7"
+  - button "High"
+  - button "Fast mode" [disabled]
+  - button "Attach files"
+  - button "schedules"
+  - button "secrets"
+  - button "webhooks"
+  - button "Permissions on — click to bypass"
+  - 'button "Handoff: suggest"'
+  - separator "Resize file explorer"
+  - button "Hide file tree"
+  - text: fix-peek-range
+  - button "Quick open"
+  - button "Expand"
+  - button "Close file explorer"
+  - textbox "Filter files"
+  - button "Up to parent folder"
+  - tree "Files":
+    - treeitem "docs" [expanded] [level=1]
+    - treeitem "peek-scope.md" [level=2]
+    - treeitem "node_modules" [level=1]
+    - treeitem "src" [expanded] [level=1]
+    - treeitem "server" [expanded] [level=2]
+    - treeitem "index.mjs" [level=3]
+    - treeitem "peek.mjs" [level=3] [selected]
+    - treeitem "peek.test.mjs" [level=3]
+    - treeitem "range.mjs" [level=3]
+    - treeitem "AGENTS.md" [level=1]
+  - separator "Resize file tree"
+  - text: /src \/ server \/ peek\.mjs · lines \d+–\d+/
+  - button "Copy contents"
+  - button "Download"
+  - button "More"
+  - textbox
+  - text: /JavaScript \d+ lines 4\.8 KB Ln \d+/
+- complementary "Artifacts"

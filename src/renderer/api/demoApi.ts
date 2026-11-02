@@ -580,12 +580,15 @@ const projectCreateScratch = (input: { root: string; name: string }): Promise<{ 
 //                       same major, which drives the "Box needs an upgrade"
 //                       card. minClient stays 0.0.0 so it isn't ALSO a skew.
 // Every other state keeps the aligned default (same major, match, no skew).
+// The wire major is 1 (DEFAULT_COMPATIBILITY_MATRIX), so the 0.0.13 pair reads "incompatible" and
+// raises the blocking banner over the screen under review. The explorer rows are captured without it.
+const EXPLORER_DEMO_VERSION = "1.0.0";
 const getClientVersion = (): Promise<{ version: string }> =>
-  Promise.resolve({ version: "0.0.13" });
+  Promise.resolve({ version: IS_EXPLORER ? EXPLORER_DEMO_VERSION : "0.0.13" });
 
 const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }> =>
   Promise.resolve({
-    version: DEMO_STATE === "incompatible" ? "1.0.0" : DEMO_STATE === "server-update" ? "0.0.10" : "0.0.13",
+    version: IS_EXPLORER ? EXPLORER_DEMO_VERSION : DEMO_STATE === "incompatible" ? "1.0.0" : DEMO_STATE === "server-update" ? "0.0.10" : "0.0.13",
     minClient: DEMO_STATE === "version-skew" ? "0.1.0" : "0.0.0",
     opencodeVersion: "0.0.0",
     // The demo box groups tool calls into runs (viewed() above).
@@ -756,9 +759,9 @@ const demoApiProxy = new Proxy(proxyTarget, {
     if (typeof prop === "symbol") return undefined;
     const explicit = target[prop];
     if (explicit) return explicit;
-    // The Routines states keep the always-mounted CTO pane quiet: its three overview reads would
+    // The Routines and explorer states keep the always-mounted CTO pane quiet: its three overview reads would
     // otherwise resolve to null and raise "Couldn't refresh …" toasts over the screen under review.
-    if (IS_ROUTINES && prop in routinesQuietReads) return routinesQuietReads[prop];
+    if ((IS_ROUTINES || IS_EXPLORER) && prop in routinesQuietReads) return routinesQuietReads[prop];
     // Subscription methods: calling the returned function with a callback
     // hands back a no-op unsubscribe so the renderer's cleanup logic stays
     // happy. Non-subscription methods: call returns a Promise<null>.

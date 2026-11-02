@@ -1,0 +1,26 @@
+- text: "Confirmed file, relative to the session:"
+- link "src/server/peek.mjs":
+  - /url: "#"
+- text: "With a line / range:"
+- link /src\/server\/peek\.mjs:\d+/:
+  - /url: "#"
+- text: ·
+- link /src\/server\/peek\.mjs:\d+-\d+/:
+  - /url: "#"
+- text: "Home and absolute:"
+- link "~/notes/todo.md":
+  - /url: "#"
+- text: ·
+- link "/home/dev/projects/manta/AGENTS.md":
+  - /url: "#"
+- text: "A plain link to a file that is not open:"
+- link "docs/peek-scope.md":
+  - /url: "#"
+- text: "Missing, outside home, or not yet confirmed — stays inline code:"
+- code: src/server/gone.mjs
+- text: ·
+- code: /etc/caddy/Caddyfile
+- text: "A web link, for contrast (unchanged):"
+- link "mantaui.com/downloads":
+  - /url: https://mantaui.com/downloads
+- text: /Ruminated for \d+[hmsp]+/

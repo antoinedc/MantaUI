@@ -78,10 +78,11 @@ emits (e.g. `onScreenshotDetected` on a phone: nothing fires it, so nothing is
 missing and no control is dead). That is a listener, not an action. Do not
 generalise it into a licence to stub actions — that generalisation is the bug.
 
-**Known outstanding violation** (fix it, don't copy it): `peekRemoteFile` in
-`httpApi.ts` falls through to an RPC no-op because no `ipcMain` handler was ever
-registered, so clicking an absolute path in the terminal does nothing at all.
-The comment there explains why it was left; the explanation is not a defence.
+**Former violation, fixed (file explorer):** `peekRemoteFile` in `httpApi.ts`
+used to fall through to an RPC no-op, so clicking an absolute path in the
+terminal did nothing at all. It now dispatches the `PREVIEW_PATH_EVENT` window
+event, which App turns into the artifact preview overlay for that path (its own
+loading / error / Download states). Keep it a real action.
 
 ## Layout
 
@@ -114,8 +115,9 @@ The comment there explains why it was left; the explanation is not a defence.
   `src/shared/api.ts`, which typechecks `httpApi`. NOTE: it still *declares*
   ~30 methods but nearly all are dead in HTTP mode (their `ipcMain` handlers
   were removed) — the runtime only needs the OS bridges + `authClaim`/`authPair`.
-  Exactly one declared method is dead: `peekRemoteFile`. See BET-124 / the
-  preload-shrink epic.
+  The preload's `peekRemoteFile` declaration is a dead leftover (the live one is
+  `httpApi`'s — a terminal path click opens the preview overlay). See BET-124 /
+  the preload-shrink epic.
 - `src/main/` — Electron main process, now **OS-integration + pairing only**:
   screenshot detector, clipboard, drag-drop, `desktopPresence.ts`,
   `desktopNotify.ts`, `autoUpdate.ts`, `auth.ts` (pairing claim), `config.ts`
@@ -347,6 +349,15 @@ Window-scoped, in `App.tsx`. xterm-internal handlers (⌘C/V/F/K) live in
 | ⌘I          | Toggle the Artifacts panel (chat pane active only) |
 | ⌘,          | Open Settings                                |
 | ⇧⌘M         | Voice (chat composer): tap toggles recording on/off, hold is push-to-talk |
+| ⌘B          | Hide / show the left sidebar (app-wide, persisted) |
+| ⌘E          | Toggle the file Explorer (chat session) |
+| ⇧⌘E / ⌥⌘E   | Explorer open: expand ↔ restore / toggle its tree |
+| ⌘P          | Focus inside the Explorer: quick open |
+
+The Explorer's full keyboard table (viewer, tree, quick open, divider, Esc
+precedence) is the "Keyboard" section of
+`docs/superpowers/specs/2026-11-02-file-explorer.md`; ⌥⌘E on a pane too narrow
+for the tree refuses with a toast (`TREE_TOO_NARROW_REASON`).
 
 The voice row is a capture-phase handler in `src/renderer/hooks/useVoice.ts`,
 not a window-scoped `App.tsx` one; while a take is active, `Enter` stops +
@@ -373,11 +384,11 @@ renderer can't read it directly). A window-level dragover/drop swallow in
 absolute remote path is written into the PTY for claude to read.
 
 **Click out (peek).** xterm `LinkProvider` for absolute paths + an explicit
-click handler on `WebLinksAddon`. Path click → `GET
-<serverUrl>/api/peek?path=<abs>&session=<name>` streams the remote file bytes
-back → `__mantaPreload.peekRemoteFile` returns them to the renderer, which
-opens the file with the OS default app. URL click →
-`shell.openExternal`. **Don't rely on WebLinksAddon's default** — its
+click handler on `WebLinksAddon`. A terminal path click → `peekRemoteFile` →
+the `PREVIEW_PATH_EVENT` window event → App opens the artifact preview overlay,
+which reads the file with `GET <serverUrl>/api/peek?path=<abs>` (Bearer header).
+Chat transcripts open paths in the Explorer instead (see "File explorer").
+URL click → `shell.openExternal`. **Don't rely on WebLinksAddon's default** — its
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
 URLs silently no-op.
 
@@ -426,6 +437,17 @@ require-confirm toast the user hasn't answered isn't re-offered every 3s.
   `agentFileToast` in the store, App.tsx owns the one `onAgentFileReady`
   listener, the active ChatPanel renders it. De-dupe on collision via
   `uniqueLocalPath` (`report.pdf` → `report (1).pdf`).
+- **`/api/peek` and `/api/download` share ONE file-access policy
+  (`src/server/homePath.mjs`, file explorer).** Both call `openInHome`: expand
+  `~`, `realpath` the path, require the canonical path to be inside the
+  canonical home, then `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` and check
+  that the opened file is a regular file with the same dev/ino that was vetted
+  (a swap between check and open is `changed`). The bytes stream from that
+  handle. Failures are `{ error, reason }` with a safe literal (class-1 500
+  contract): `missing` 404, `outside-home` 403, `not-file` 404, `permission`
+  403, `changed` / `unavailable` 503. An empty or relative path is 400 (these
+  routes take absolute or `~` paths only; relative ones are resolved by
+  `fs:resolve-paths` first). The `fs:*` channels use the same helper.
 - **`/api/download` is scoped to the user's HOME dir, not to the outbox
   (BET-1195).** Inline media shown via `media_show` can sit at ANY path inside
   home — the tool never copies it into the mailbox — so an outbox-only guard
@@ -471,6 +493,54 @@ require-confirm toast the user hasn't answered isn't re-offered every 3s.
   a dead "Reveal" button; `revealInFolder` is a no-op. `MobileApp.tsx` wires the
   `onAgentFileReady` listener (mirror of `App.tsx`). Pure scan logic
   (`createOutboxScanner`, `listOutbox`) is tested in `src/server/outbox.test.mjs`.
+
+## File explorer (clickable paths + in-app viewer)
+
+Chat sessions turn file paths the box confirms into links; a click opens the
+file in a per-session **Explorer** panel (read-only CodeMirror viewer, rendered
+Markdown, images/video, optional tree, quick open, expand). Design sources:
+`docs/superpowers/specs/2026-11-02-file-explorer.md` (behaviour),
+`docs/screens/explorer/contract.md` (exact primitives/classes/constants),
+`docs/screens/explorer/mockup.html` (wins on looks),
+`docs/screens/explorer/conformance.md` (deliberate differences).
+
+- **Server.** `src/server/homePath.mjs` is the one canonical-home policy (see
+  `/api/peek`, above); `src/server/files.mjs` serves `fs:resolve-paths`,
+  `fs:list` and `fs:git-status` (wire types in `src/shared/fsTypes.ts`). Quick
+  open reuses `opencode:find-files`. Expected refusals are RETURNED as
+  `{ok:false, reason}`, never thrown.
+- **Links (renderer).** `pathLinks.ts` (pure detection), `usePathResolution.ts`
+  (batched, cached, invalidated by file-changing tools and `resync`), `FileLink`
+  in `Linkified.tsx` (the one anchor for a confirmed path; unconfirmed paths stay
+  plain text), the remark plugin + `fileContext` in `MarkdownBody.tsx`, and the
+  `argPath` slot on `ToolCard`. Ownership is captured at render time as
+  `{sessionId, cwd}`; clicks fire `EXPLORER_OPEN_EVENT`.
+- **Panel.** `src/renderer/explorer/`: `ExplorerPanel.tsx` (shell, top bar, rail),
+  `ExplorerTree.tsx` (headless-tree), `ExplorerViewer.tsx` + `CodeViewer.tsx`
+  (CodeMirror 6, colours from the transcript's prism themes via
+  `prismHighlight.ts`), `ExplorerQuickOpen.tsx`, `MediaBody.tsx`, `filePeek.ts`
+  (authenticated reads + size/binary guards), `layout.ts` (constants),
+  `explorerStore.ts` (state).
+- **Layout state.** Per session: `manta:explorer:<sessionId>` =
+  `{open, ratio, treeOpen, treeWidth}` in localStorage (debounced); the open
+  file, tree root, history and Expanded flag are in memory. The right slot holds
+  EITHER the Explorer or Artifacts: `setRightPanel(sessionId, "explorer" |
+  "artifacts" | "none")` is its only writer — every opener (toggles, ⌘E / ⌘I,
+  path clicks, `manta-open-review`) goes through it. Split via
+  `react-resizable-panels` v4; a content width under 680 px shows the Explorer
+  Expanded.
+- **Sidebar toggle.** ⌘B hides the sidebar (`manta:sidebarHidden`); one pinned
+  `SidebarToggle` is always visible, and while hidden App sets
+  `--sidebar-hidden-inset` (macOS 112 px, else 40 px) which every pane header
+  pads itself by (`max(own padding, var(--sidebar-hidden-inset))`).
+- **Demo seam.** The `explorer` demo state (`?demo&desktop&state=explorer`) serves
+  a "manta" workspace (`api/demoExplorer.ts`) over a pretend filesystem
+  (`api/demoExplorerFs.ts`, names/sizes equal to the mockup's); the viewer's file
+  reads go through `setPeekFetch` in `explorer/filePeek.ts`, which demo mode
+  points at the fixture. The `explorer-*` visual rows reach their states by
+  clicking real path links. The mockup is drawn dark, so those rows set the
+  mockup's theme from the capture's colour scheme; `VISUAL_COLOR_SCHEME=dark
+  npm run visual:compare -- <id>` reviews the dark pairing (default light).
 
 ## Mobile / web client (`src/server/`) — BET-559: web client retired
 

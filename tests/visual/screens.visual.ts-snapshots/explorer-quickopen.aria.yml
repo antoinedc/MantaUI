@@ -1,0 +1,13 @@
+- listbox "Files":
+  - option "src/server/peek.mjs M" [selected]:
+    - text: ""
+    - mark: peek
+    - text: ""
+  - option "src/server/peek.test.mjs":
+    - text: ""
+    - mark: peek
+    - text: ""
+  - option "docs/peek-scope.md A":
+    - text: ""
+    - mark: peek
+    - text: ""

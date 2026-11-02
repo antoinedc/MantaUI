@@ -1,0 +1,14 @@
+- button "Show file tree"
+- text: fix-peek-range
+- button "Quick open"
+- button "Expand"
+- button "Close file explorer"
+- text: docs / peek-scope.md
+- group "Markdown view":
+  - button "Rendered"
+  - button "Source" [pressed]
+- button "Copy contents"
+- button "Download"
+- button "More"
+- textbox
+- text: /Markdown \d+ lines \d+ B modified [\d,.]+[bkmBKM]+ ago/

@@ -8,7 +8,6 @@
 // index.mjs 5,811 lines / 212 KB — so the side-by-side compares layout, not words.
 // Every path is fictional; the home directory is /home/dev.
 
-import { DEMO_T0 } from "./demoFixture.js";
 import type {
   FsEntry,
   FsGitBadge,
@@ -58,20 +57,20 @@ export const PEEK_SCOPE_MD = [
   "",
   "Inline media and the artifacts panel read files through",
   "the same route. Both now share **one** rule: any regular",
-  "file inside the user's home directory, however it was reached — peek, downloads, and tree alike.",
+  "file inside the user's home directory, however it was reached — peek, downloads, and tree too.",
   "",
   "## Rules",
   "",
-  "- Paths resolve against `$HOME`; `~` is expanded at the edge.",
+  "- Paths resolve against `$HOME`; `~/` is expanded at the edge.",
   "- Anything outside home answers `403`, symlinks included.",
-  "- Downloads are non-destructive.",
+  "- Downloads are nondestructive.",
   "",
   "| Route | Before | After |",
   "|---|---|---|",
   "| `/api/peek` | home | home |",
   "| `/api/download` | outbox | home |",
   "",
-  "> Display and download must never disagree — see [src/server/peek.mjs:28](src/server/peek.mjs#L28).",
+  "> Display and download must never disagree — see [`src/server/peek.mjs:28`](src/server/peek.mjs#L28).",
 ].join("\n") + "\n";
 
 export const PEEK_MJS = [
@@ -357,8 +356,11 @@ const SQLITE_BYTES = new Uint8Array([
 // ---------------------------------------------------------------------------
 
 const REPO = DEMO_EXPLORER_CWD;
-const fresh = DEMO_T0 - 2 * MIN;
-const dayOld = DEMO_T0 - 26 * 60 * MIN;
+// The viewer's footer reads "modified <age>" against the real clock, so these are relative to load
+// time (not DEMO_T0): the text stays "2m ago" / "1d ago" whenever the demo is opened.
+const LOADED_AT = Date.now();
+const fresh = LOADED_AT - 150_000;
+const dayOld = LOADED_AT - 26 * 60 * MIN;
 
 const file = (text: string | (() => string), over: Partial<FileNode> = {}): FileNode => ({
   kind: "file",
