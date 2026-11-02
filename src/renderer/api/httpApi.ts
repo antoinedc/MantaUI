@@ -867,6 +867,9 @@ export const httpApi: Api = {
 
   // -- filesystem --
   fsListDirs: (partial) => rpc(IPC.fsListDirs, partial),
+  fsResolvePaths: (input) => rpc(IPC.fsResolvePaths, input),
+  fsList: (input) => rpc(IPC.fsList, input),
+  fsGitStatus: (input) => rpc(IPC.fsGitStatus, input),
   // BET-1091: create an empty, git-initialised scratch project directory.
   projectCreateScratch: (input) => rpc(IPC.projectCreateScratch, input),
 
