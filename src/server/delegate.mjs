@@ -3155,11 +3155,12 @@ function toolBlockFor(assistantRecords, childId) {
  * is empty. Returns `{complete, newestSyntheticAt}`; throws when something could
  * not be read (the caller treats that as "unknown", never "finished").
  */
-async function descendantEvidence(job, active, deps) {
-  if (typeof deps.listChildSessions !== "function") return { complete: true, newestSyntheticAt: null };
+// Every descendant of a session as `{ id, parent }`, breadth-first. Throws on an
+// oversized tree or a failed read (callers treat that as "unknown").
+async function listDescendants(rootId, deps) {
   const nodes = [];
-  const seen = new Set([job.childSessionID]);
-  let layer = [job.childSessionID];
+  const seen = new Set([rootId]);
+  let layer = [rootId];
   for (let depth = 0; layer.length > 0; depth++) {
     if (depth >= TREE_MAX_DEPTH) throw new Error("descendant tree too deep");
     const next = [];
@@ -3174,6 +3175,12 @@ async function descendantEvidence(job, active, deps) {
     }
     layer = next;
   }
+  return nodes;
+}
+
+async function descendantEvidence(job, active, deps) {
+  if (typeof deps.listChildSessions !== "function") return { complete: true, newestSyntheticAt: null };
+  const nodes = await listDescendants(job.childSessionID, deps);
   if (nodes.length === 0) return { complete: true, newestSyntheticAt: null };
   if (nodes.some((n) => active.has(n.id))) return { complete: false, newestSyntheticAt: null };
 
@@ -3219,23 +3226,7 @@ export function _resetLostRuns() {
 
 async function anyDescendantActive(childId, active, deps) {
   if (typeof deps.listChildSessions !== "function") return false;
-  const seen = new Set([childId]);
-  let layer = [childId];
-  for (let depth = 0; layer.length > 0; depth++) {
-    if (depth >= TREE_MAX_DEPTH) throw new Error("descendant tree too deep");
-    const next = [];
-    for (const parent of layer) {
-      for (const kid of await deps.listChildSessions(parent)) {
-        if (seen.has(kid.id)) continue;
-        seen.add(kid.id);
-        if (seen.size > TREE_MAX_SESSIONS) throw new Error("too many descendants");
-        if (active.has(kid.id)) return true;
-        next.push(kid.id);
-      }
-    }
-    layer = next;
-  }
-  return false;
+  return (await listDescendants(childId, deps)).some((n) => active.has(n.id));
 }
 
 async function judgeLostRun(job, session, active, deps, { confirmed }) {
