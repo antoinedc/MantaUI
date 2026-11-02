@@ -25,6 +25,13 @@ export const SIDEBAR_WIDTH_PX = 256;
 /** Width of the Expanded rail (`w-11`). */
 export const RAIL_WIDTH_PX = 44;
 
+/** Copy confirmation glyph/label hold. */
+export const COPY_CONFIRM_MS = 1500;
+/** A load shows its skeleton only after this long. */
+export const LOADING_DELAY_MS = 150;
+/** The "Updated" pill in the file bar. */
+export const UPDATED_PILL_MS = 3000;
+
 /** Value of `--sidebar-hidden-inset` while the sidebar is hidden. */
 export function sidebarHiddenInsetPx(isMac: boolean): number {
   return isMac ? 112 : 40;
@@ -52,6 +59,9 @@ export function shouldAutoExpand(contentWidth: number): boolean {
 export function treeToggleDisabled(explorerWidth: number): boolean {
   return explorerWidth > 0 && explorerWidth < TREE_TOGGLE_MIN_EXPLORER_PX;
 }
+
+/** Why the tree can't open: the disabled button's title and ⌥⌘E's toast. */
+export const TREE_TOO_NARROW_REASON = "Widen the explorer to show the tree";
 
 /** `clamp(stored, 140, explorerWidth − 200)`; the lower bound wins on a tiny Explorer. */
 export function clampTreeWidth(stored: number, explorerWidth: number): number {

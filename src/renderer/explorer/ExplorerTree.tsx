@@ -16,10 +16,9 @@ import { Button } from "../Button";
 import { IconButton } from "../IconButton";
 import { MOD_KEY } from "../platform";
 import { Skeleton } from "../Skeleton";
-import { basename, isInsideRoot } from "./layout";
+import { LOADING_DELAY_MS, basename, isInsideRoot } from "./layout";
 import type { ExplorerTreeProps } from "./types";
 
-const LOADING_DELAY_MS = 150;
 const INDENT_PX = 12;
 
 type NodeKind = "root" | "dir" | "file" | "link-outside" | "more" | "error";

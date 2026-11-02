@@ -20,6 +20,7 @@ import {
   dirname,
   explorerLayoutKey,
   isInsideRoot,
+  treeToggleDisabled,
 } from "./layout";
 
 export type RightPanel = "explorer" | "artifacts" | "none";
@@ -188,6 +189,18 @@ export function useExplorerOpen(sessionId: string | null): boolean {
   return useSyncExternalStore(subscribe, () => (sessionId ? loadSession(sessionId).layout.open : false));
 }
 
+/**
+ * Whether this exact target (file + line range) is what the session's Explorer
+ * is showing right now. The snapshot is a boolean, so a transcript full of path
+ * links re-renders only the ones whose answer flips.
+ */
+export function useFileTargetActive(sessionId: string, abs: string, line?: number, endLine?: number): boolean {
+  return useSyncExternalStore(subscribe, () => {
+    const s = loadSession(sessionId);
+    return s.layout.open && sameTarget(s.file, { abs, line, endLine });
+  });
+}
+
 export function useSidebarHidden(): boolean {
   return useSyncExternalStore(subscribe, () => loadApp().sidebarHidden);
 }
@@ -272,6 +285,25 @@ export function setRatio(sessionId: string, ratio: number): void {
 export function setTreeOpen(sessionId: string, open: boolean): void {
   if (loadSession(sessionId).layout.treeOpen === open) return;
   patchLayout(sessionId, { treeOpen: open });
+}
+
+/** Measured width of a session's Explorer column; the shell reports it so a key
+ *  handler outside the panel can tell whether the tree has room. In memory only. */
+const explorerWidths = new Map<string, number>();
+
+export function reportExplorerWidth(sessionId: string, width: number | null): void {
+  if (width == null) explorerWidths.delete(sessionId);
+  else explorerWidths.set(sessionId, width);
+}
+
+/**
+ * ⌥⌘E. Flips the tree, unless the Explorer is too narrow to show one — then
+ * nothing changes and the caller shows the reason (returns false).
+ */
+export function toggleTree(sessionId: string): boolean {
+  if (treeToggleDisabled(explorerWidths.get(sessionId) ?? 0)) return false;
+  setTreeOpen(sessionId, !loadSession(sessionId).layout.treeOpen);
+  return true;
 }
 
 export function setTreeWidth(sessionId: string, width: number): void {
@@ -386,6 +418,7 @@ export function resetExplorerStore(): void {
   for (const t of persistTimers.values()) clearTimeout(t);
   persistTimers.clear();
   sessions.clear();
+  explorerWidths.clear();
   app = null;
   emit();
 }

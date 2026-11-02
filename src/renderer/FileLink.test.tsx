@@ -16,6 +16,7 @@ import { FileLink, Linkified } from "./Linkified";
 import { ExplorerOwnerProvider } from "./explorer/ownerContext";
 import { RESOLVE_DEBOUNCE_MS, resetPathResolution } from "./usePathResolution";
 import { bumpFileGeneration } from "./explorer/fileChanges";
+import { openFile, resetExplorerStore, setRightPanel } from "./explorer/explorerStore";
 import { EXPLORER_OPEN_EVENT, type ExplorerOwner, type OpenFileRequest } from "./explorer/types";
 import type { FsResolveInput, FsResolved } from "../shared/fsTypes";
 import type { OpencodeMessage, OpencodePart } from "../shared/types";
@@ -405,6 +406,35 @@ describe("path links", () => {
     it("without fileContext an <img> is unchanged", () => {
       h = mount(<MarkdownBody text="![x](https://a.com/x.png)" />);
       expect(h.container.querySelector("img")?.getAttribute("src")).toBe("https://a.com/x.png");
+    });
+  });
+  describe("active state (contract E10)", () => {
+    const link = (a: string, line?: number, endLine?: number) => (
+      <FileLink abs={a} text="x" line={line} endLine={endLine} owner={owner} />
+    );
+    const isActive = () => fileLinks(h!)[0].className.includes("bg-accent-bg no-underline");
+
+    afterEach(() => resetExplorerStore());
+
+    it("is active only for the file + range the owner's Explorer is showing", () => {
+      h = mount(<>{link(`${CWD}/a.ts`, 28, 30)}</>);
+      expect(isActive()).toBe(false);
+      act(() => openFile({ abs: `${CWD}/a.ts`, line: 28, endLine: 30, owner }));
+      expect(isActive()).toBe(true);
+      act(() => openFile({ abs: `${CWD}/a.ts`, line: 28, owner }));
+      expect(isActive()).toBe(false);
+      act(() => openFile({ abs: `${CWD}/a.ts`, line: 28, endLine: 30, owner }));
+      expect(isActive()).toBe(true);
+    });
+
+    it("is not active when that session's Explorer is closed, nor for another session's file", () => {
+      h = mount(<>{link(`${CWD}/a.ts`)}</>);
+      act(() => openFile({ abs: `${CWD}/a.ts`, owner: { sessionId: "ses_other", cwd: CWD } }));
+      expect(isActive()).toBe(false);
+      act(() => openFile({ abs: `${CWD}/a.ts`, owner }));
+      expect(isActive()).toBe(true);
+      act(() => setRightPanel(owner.sessionId, "none"));
+      expect(isActive()).toBe(false);
     });
   });
 });

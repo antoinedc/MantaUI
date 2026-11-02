@@ -299,6 +299,15 @@ describe("right slot: Explorer vs Artifacts", () => {
     expect(q('[data-testid="tree"]')).toBeNull();
   });
 
+  it("⌥⌘E on a too-narrow Explorer changes nothing and says why", async () => {
+    await mountApp();
+    key({ key: "e", ...mod });
+    store.reportExplorerWidth("ses_a", 300);
+    key({ key: "´", code: "KeyE", ...mod, altKey: true });
+    expect(store.getExplorerSession("ses_a").layout.treeOpen).toBe(false);
+    expect(useStore.getState().appToasts.map((t) => t.message)).toContain("Widen the explorer to show the tree");
+  });
+
   it("⌘F conversation search returns early when something already consumed the key", async () => {
     await mountApp();
     const inner = document.createElement("div");

@@ -15,6 +15,7 @@ import { findLinks, type FindLinksOptions } from "./linkify";
 import { findPaths, lineSuffix, type PathMatch } from "./pathLinks";
 import { usePathResolution } from "./usePathResolution";
 import { ExplorerOwnerContext } from "./explorer/ownerContext";
+import { useFileTargetActive } from "./explorer/explorerStore";
 import { dispatchOpenFile, type ExplorerOwner } from "./explorer/types";
 
 // Only these schemes become anchors: the href can come from model output, and
@@ -57,7 +58,7 @@ export function FileLink({
   kind = "file",
   owner,
   mono = false,
-  active = false,
+  active: activeProp = false,
 }: {
   /** Canonical path the box confirmed. */
   abs: string;
@@ -69,9 +70,11 @@ export function FileLink({
   /** Captured where the link RENDERS — never "whichever session is active later". */
   owner: ExplorerOwner;
   mono?: boolean;
-  /** This is the file (and range) currently open in the session's Explorer. */
+  /** Force the active look (the link otherwise derives it from the owner's Explorer). */
   active?: boolean;
 }) {
+  const shown = useFileTargetActive(owner.sessionId, abs, line, endLine);
+  const active = activeProp || shown;
   const suffix = lineSuffix(line, endLine);
   return (
     <a

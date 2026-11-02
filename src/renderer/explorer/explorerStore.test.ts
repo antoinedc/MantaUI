@@ -8,6 +8,7 @@ import {
   navigateHistory,
   openFile,
   parseLayout,
+  reportExplorerWidth,
   resetExplorerStore,
   restoreExplorer,
   setNarrow,
@@ -20,6 +21,7 @@ import {
   toggleArtifacts,
   toggleExpanded,
   toggleExplorer,
+  toggleTree,
 } from "./explorerStore";
 
 const owner = (sessionId: string, cwd = "/home/u/proj") => ({ sessionId, cwd });
@@ -230,5 +232,22 @@ describe("openFile", () => {
     expect(navigateHistory("a", -1)).toBe(true);
     expect(navigateHistory("a", -1)).toBe(true);
     expect(navigateHistory("a", -1)).toBe(false);
+  });
+});
+
+describe("toggleTree (⌥⌘E)", () => {
+  it("flips the tree, and refuses — leaving state alone — when the Explorer is too narrow", () => {
+    expect(toggleTree("a")).toBe(true);
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
+    expect(toggleTree("a")).toBe(true);
+    expect(getExplorerSession("a").layout.treeOpen).toBe(false);
+
+    reportExplorerWidth("a", 300);
+    expect(toggleTree("a")).toBe(false);
+    expect(getExplorerSession("a").layout.treeOpen).toBe(false);
+
+    reportExplorerWidth("a", 400);
+    expect(toggleTree("a")).toBe(true);
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
   });
 });

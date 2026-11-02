@@ -30,6 +30,7 @@ import {
   clampTreeWidth,
   railTone,
   shouldAutoExpand,
+  TREE_TOO_NARROW_REASON,
   treeToggleDisabled,
 } from "./layout";
 import {
@@ -43,6 +44,7 @@ import {
   setRatio,
   setRightPanel,
   setRoot,
+  reportExplorerWidth,
   setTreeOpen,
   setTreeWidth,
   toggleExpanded,
@@ -214,6 +216,10 @@ export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: stri
   const treeDisabled = treeToggleDisabled(colWidth);
   const treeVisible = st.layout.treeOpen && !treeDisabled;
   const treeWidth = clampTreeWidth(st.layout.treeWidth, colWidth);
+  useEffect(() => {
+    reportExplorerWidth(sessionId, colWidth);
+    return () => reportExplorerWidth(sessionId, null);
+  }, [sessionId, colWidth]);
 
   const [quickOpen, setQuickOpen] = useState(false);
   const quickOpenRef = useRef(false);
@@ -307,7 +313,7 @@ export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: stri
               label={st.layout.treeOpen ? "Hide file tree" : "Show file tree"}
               title={
                 treeDisabled
-                  ? "Widen the explorer to show the tree"
+                  ? TREE_TOO_NARROW_REASON
                   : `${st.layout.treeOpen ? "Hide file tree" : "Show file tree"} (${KEYS.tree})`
               }
               disabled={treeDisabled}

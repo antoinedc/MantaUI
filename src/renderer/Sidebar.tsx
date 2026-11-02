@@ -667,7 +667,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       <div
         className={
           "px-3 pb-2 flex items-center justify-between" +
-          (IS_WINDOWS ? " titlebar-drag pl-11" : "")
+          (IS_WINDOWS ? " titlebar-drag pl-12" : "")
         }
       >
         <div className="flex items-center gap-2 min-w-0">

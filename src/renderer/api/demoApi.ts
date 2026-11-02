@@ -41,6 +41,22 @@ import { annotateView } from "../../server/transcriptView.mjs";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
+import { setPeekFetch } from "../explorer/filePeek.js";
+import {
+  DEMO_EXPLORER_CWD,
+  demoFindFiles,
+  demoFsGitStatus,
+  demoFsList,
+  demoFsResolvePaths,
+  demoPeekFetch,
+} from "./demoExplorerFs.js";
+import {
+  EXPLORER_BRANCH,
+  explorerProjects,
+  explorerSessionList,
+  explorerStatus,
+  explorerTranscript,
+} from "./demoExplorer.js";
 import {
   ROUTINES_ACTIVE_SESSION,
   analyticsChatMessages,
@@ -65,6 +81,12 @@ const DEMO_STATE =
 // transcripts, served only here so no other baseline moves.
 const IS_ROUTINES = DEMO_STATE === "routines" || DEMO_STATE === "routines-chat";
 const routinesStore = createRoutinesStore();
+
+// The file explorer's fixture state (docs/screens/explorer): the "manta" workspace over a pretend
+// filesystem. The viewer's file reads have no box to ask, so they are answered from that same fixture
+// (every demo state — the explorer reads files in any of them).
+const IS_EXPLORER = DEMO_STATE === "explorer";
+setPeekFetch(demoPeekFetch);
 
 // "reconnecting" — the real transport (httpApi) reports the events-WebSocket
 // connection state into the store via `setConnectionState`; demo mode has no
@@ -346,7 +368,7 @@ const syncSnapshot = (): Promise<{
     gen: "demo",
     seq: 1,
     changed: {
-      projects: DEMO_STATE === "empty" ? [] : IS_ROUTINES ? routinesProjects : demoState.projects,
+      projects: DEMO_STATE === "empty" ? [] : IS_ROUTINES ? routinesProjects : IS_EXPLORER ? explorerProjects : demoState.projects,
       config: demoState.config,
       stale: false,
     },
@@ -359,7 +381,7 @@ const syncSnapshot = (): Promise<{
 const onStatusEvent = (
   cb: (batch: unknown[]) => void,
 ): (() => void) => {
-  const batch = Object.entries(IS_ROUTINES ? routinesStatus : demoState.status).flatMap(([session, byWindow]) =>
+  const batch = Object.entries(IS_ROUTINES ? routinesStatus : IS_EXPLORER ? explorerStatus : demoState.status).flatMap(([session, byWindow]) =>
     Object.entries(byWindow).map(([windowIndex, s]) => ({
       session,
       windowIndex: Number(windowIndex),
@@ -426,6 +448,8 @@ const routinesTranscript = (sessionId: string): OpencodeMessage[] => {
 const opencodeMessages = (sessionId: string, opts?: { limit?: number; view?: boolean }) =>
   IS_ROUTINES
     ? Promise.resolve(((list) => (opts?.view ? viewed(list) : list))(routinesTranscript(sessionId)))
+    : IS_EXPLORER
+    ? Promise.resolve(((list) => (opts?.view ? viewed(list) : list))(explorerTranscript(sessionId)))
     : forActiveSession(
     sessionId,
     ((list) => (opts?.view ? viewed(list) : list))(
@@ -443,7 +467,7 @@ const opencodeMessages = (sessionId: string, opts?: { limit?: number; view?: boo
 // grow one phase at a time. Served marks the phase as applied so the harness
 // knows not to screenshot while the splice debounce is still pending.
 const opencodeMessage = (sessionId: string, messageId: string, opts?: { view?: boolean }) => {
-  const list = IS_ROUTINES ? routinesTranscript(sessionId) : isStream ? revealedTranscript(streamStep) : demoState.messages;
+  const list = IS_ROUTINES ? routinesTranscript(sessionId) : IS_EXPLORER ? explorerTranscript(sessionId) : isStream ? revealedTranscript(streamStep) : demoState.messages;
   const hit = list.find((m) => m.info.id === messageId) ?? null;
   if (isStream && hit && !hit.info.time?.completed) {
     streamServed = true;
@@ -460,13 +484,13 @@ const opencodeQuestions = (sessionId?: string) => forActiveSession(sessionId, [d
 
 // Footer branch chip — single string for the active window's cwd.
 const opencodeVcsBranch = (_directory?: string): Promise<string | null> =>
-  Promise.resolve(demoState.branch);
+  Promise.resolve(IS_EXPLORER ? EXPLORER_BRANCH : demoState.branch);
 
 // Session list drives `backfillLastMessageTimes` (BET-119). The fixture
 // carries `time.updated` for each session; the renderer stamps that onto
 // the sidebar's age label so even idle windows show a sensible elapsed.
 const opencodeListSessions = (_directory?: string): Promise<typeof demoState.sessions> =>
-  Promise.resolve(IS_ROUTINES ? routinesSessionList : demoState.sessions);
+  Promise.resolve(IS_ROUTINES ? routinesSessionList : IS_EXPLORER ? explorerSessionList : demoState.sessions);
 
 const opencodeModels = (): Promise<typeof demoState.models> =>
   Promise.resolve(IS_ROUTINES ? [...demoState.models, ...routinesExtraModels] : demoState.models);
@@ -533,6 +557,14 @@ const gitListWorktrees = (cwd: string): Promise<WorktreeInfo[]> =>
 // filesystem tree to create a directory in, so it returns a plausible path
 // named after the requested (already-slugified) name. Stubbed explicitly so
 // the coverage test's unimplemented list stays accurate.
+// File explorer (docs/screens/explorer): a pretend filesystem under /home/dev, the same in every demo
+// state. A path the session's folder can't see resolves as "missing", so a transcript's paths stay text.
+const fsResolvePaths = (input: Parameters<typeof demoFsResolvePaths>[0]) => Promise.resolve(demoFsResolvePaths(input));
+const fsList = (input: Parameters<typeof demoFsList>[0]) => Promise.resolve(demoFsList(input));
+const fsGitStatus = (input: { root: string }) => Promise.resolve(demoFsGitStatus(input));
+const opencodeFindFiles = (input: { query: string; directory: string }) =>
+  Promise.resolve(demoFindFiles(input.query, input.directory || DEMO_EXPLORER_CWD));
+
 const projectCreateScratch = (input: { root: string; name: string }): Promise<{ path: string; name: string }> =>
   Promise.resolve({ path: "/home/demo/projects/" + input.name, name: input.name });
 
@@ -669,6 +701,10 @@ export const explicitMethods = {
   outboxList,
   artifactsList,
   fsListDirs,
+  fsResolvePaths,
+  fsList,
+  fsGitStatus,
+  opencodeFindFiles,
   gitListWorktrees,
   projectCreateScratch,
   getClientVersion,

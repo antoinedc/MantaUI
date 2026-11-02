@@ -3765,6 +3765,7 @@ const MIME = {
   ".mp4": "video/mp4",
   ".webm": "video/webm",
   ".mov": "video/quicktime",
+  ".pdf": "application/pdf",
   ".m4v": "video/x-m4v",
   ".webmanifest": "application/manifest+json",
 };

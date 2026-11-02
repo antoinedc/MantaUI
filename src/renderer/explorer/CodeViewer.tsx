@@ -18,6 +18,7 @@ import {
   Decoration,
   EditorView,
   GutterMarker,
+  drawSelection,
   gutterLineClass,
   highlightSpecialChars,
   keymap,
@@ -141,6 +142,7 @@ export function CodeViewer({
     () => [
       lineNumbers(),
       highlightSpecialChars(),
+      drawSelection(),
       search({ top: true }),
       keymap.of([...searchKeymap, { key: "Mod-l", run: gotoLine, preventDefault: true }]),
       // A non-editable content element is not focusable by itself; ⌘F / ⌘L need focus.

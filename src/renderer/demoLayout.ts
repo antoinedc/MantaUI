@@ -51,6 +51,9 @@
 //                  to Thu 30 Oct 2025 10:01 so the mockup's weekday labels hold.
 // "routines-chat" — the same box with the "Analytics review" chat active and a
 //                  completed routine_create tool call in its transcript (R5).
+// "explorer"      — the file explorer's fixture (docs/screens/explorer/mockup.html): a
+//                  "manta" workspace whose transcripts carry file paths, over a pretend
+//                  /home/dev filesystem the Explorer lists and reads.
 export const DEMO_STATES = [
   "full",
   "empty",
@@ -64,6 +67,7 @@ export const DEMO_STATES = [
   "artifacts",
   "routines",
   "routines-chat",
+  "explorer",
 ] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 

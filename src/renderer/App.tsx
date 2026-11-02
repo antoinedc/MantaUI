@@ -10,19 +10,18 @@ import { ArtifactPreview } from "./ArtifactPreview";
 import { SidebarToggle } from "./SidebarToggle";
 import { ExplorerSplit } from "./explorer/ExplorerPanel";
 import {
-  getExplorerSession,
   openFile as openExplorerFile,
   setRightPanel,
-  setTreeOpen,
   shownRightPanel,
   toggleArtifacts,
   toggleExpanded,
   toggleExplorer,
   toggleSidebarHidden,
+  toggleTree,
   useShownRightPanel,
   useSidebarHidden,
 } from "./explorer/explorerStore";
-import { SIDEBAR_HIDDEN_INSET_PX } from "./explorer/layout";
+import { SIDEBAR_HIDDEN_INSET_PX, TREE_TOO_NARROW_REASON } from "./explorer/layout";
 import { artifactForPath } from "./explorer/previewPath";
 import {
   EXPLORER_OPEN_EVENT,
@@ -1484,7 +1483,7 @@ function Shell() {
             return;
           }
           if (e.altKey && !e.shiftKey) {
-            setTreeOpen(sid, !getExplorerSession(sid).layout.treeOpen);
+            if (!toggleTree(sid)) pushAppToastStore({ message: TREE_TOO_NARROW_REASON });
             e.preventDefault();
             return;
           }
@@ -1574,7 +1573,7 @@ function Shell() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [projects, activeProjectName, activeWindowByProject, jumpToWindow, settingsOpen, activeChatSessionId, mode, explorerKeysLive]);
+  }, [projects, activeProjectName, activeWindowByProject, jumpToWindow, settingsOpen, activeChatSessionId, mode, explorerKeysLive, pushAppToastStore]);
 
   // Generic "open Settings on section X" bridge, the same window-CustomEvent
   // convention as the schedules/secrets bridges. The composer-level menus

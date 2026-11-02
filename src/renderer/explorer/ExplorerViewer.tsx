@@ -36,7 +36,7 @@ import { saveToDownloads } from "../downloadFeedback";
 import { CodeViewer, languageDescriptionFor } from "./CodeViewer";
 import { MediaBody, usePeekedMedia, type MediaDims } from "./MediaBody";
 import { createImageResolver, loadPeekedFile, type MediaKind, type PeekFailure, type PeekOutcome } from "./filePeek";
-import { basename, dirname, isInsideRoot } from "./layout";
+import { COPY_CONFIRM_MS, LOADING_DELAY_MS, UPDATED_PILL_MS, basename, dirname, isInsideRoot } from "./layout";
 import {
   PREVIEW_PATH_EVENT,
   type ExplorerViewerProps,
@@ -45,10 +45,6 @@ import {
   type MdView,
 } from "./types";
 
-// Timings from contract §Constants.
-const COPY_CONFIRM_MS = 1500;
-const LOADING_DELAY_MS = 150;
-const UPDATED_PILL_MS = 3000;
 /** Markdown above this many characters opens in Source. */
 export const LARGE_MARKDOWN_CHARS = 50_000;
 

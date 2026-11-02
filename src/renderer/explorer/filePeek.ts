@@ -71,6 +71,21 @@ function peekUrl(abs: string): string {
   return `${serverBase()}/api/peek?path=${encodeURIComponent(abs)}`;
 }
 
+/** How one file's bytes are asked for. Production reads the box's /api/peek. */
+export type PeekFetch = (
+  abs: string,
+  init: { method: "GET" | "HEAD"; headers: Record<string, string>; signal?: AbortSignal },
+) => Promise<Response>;
+
+const boxPeekFetch: PeekFetch = (abs, init) => fetch(peekUrl(abs), init);
+
+let peekFetch: PeekFetch = boxPeekFetch;
+
+/** The demo transport's seam: it has no box, so it answers from its own fixture. `null` restores the box. */
+export function setPeekFetch(next: PeekFetch | null): void {
+  peekFetch = next ?? boxPeekFetch;
+}
+
 function baseName(abs: string): string {
   return abs.slice(abs.lastIndexOf("/") + 1);
 }
@@ -89,9 +104,8 @@ async function readFailure(res: Response): Promise<PeekFailure> {
 type Head = { ok: true; size: number | null; contentType: string | null } | { ok: false; reason: PeekFailure };
 
 async function peekHead(abs: string, signal: AbortSignal | undefined): Promise<Head> {
-  const url = peekUrl(abs);
   const headers = authHeaders(clientToken());
-  const head = await fetch(url, { method: "HEAD", headers, signal });
+  const head = await peekFetch(abs, { method: "HEAD", headers, signal });
   if (head.ok) {
     const len = head.headers.get("content-length");
     const n = len == null || len === "" ? null : Number(len);
@@ -103,7 +117,7 @@ async function peekHead(abs: string, signal: AbortSignal | undefined): Promise<H
   }
   // HEAD has no body: ask again for one byte to learn the reason.
   try {
-    const probe = await fetch(url, { method: "GET", headers: { ...headers, range: "bytes=0-0" }, signal });
+    const probe = await peekFetch(abs, { method: "GET", headers: { ...headers, range: "bytes=0-0" }, signal });
     if (!probe.ok) return { ok: false, reason: await readFailure(probe) };
     void probe.body?.cancel().catch(() => {});
   } catch (e) {
@@ -170,7 +184,7 @@ export async function loadPeekedFile(abs: string, signal?: AbortSignal): Promise
     if (head.size != null && head.size > MAX_PREVIEW_BYTES) return { status: "too-large", size: head.size };
     if (media && head.size != null) return { status: "media", kind: media, size: head.size };
 
-    const res = await fetch(peekUrl(abs), { method: "GET", headers: authHeaders(clientToken()), signal });
+    const res = await peekFetch(abs, { method: "GET", headers: authHeaders(clientToken()), signal });
     if (!res.ok) return { status: "failed", reason: await readFailure(res) };
     const body = await readBounded(res, MAX_PREVIEW_BYTES);
     if ("tooLarge" in body) return { status: "too-large", size: head.size ?? MAX_PREVIEW_BYTES + 1 };
@@ -198,7 +212,7 @@ export async function fetchPeekBlob(
 ): Promise<BlobOutcome> {
   const maxBytes = opts.maxBytes ?? MAX_PREVIEW_BYTES;
   try {
-    const res = await fetch(peekUrl(abs), { method: "GET", headers: authHeaders(clientToken()), signal: opts.signal });
+    const res = await peekFetch(abs, { method: "GET", headers: authHeaders(clientToken()), signal: opts.signal });
     if (!res.ok) return { ok: false, reason: await readFailure(res) };
     const declared = Number(res.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > maxBytes) {
