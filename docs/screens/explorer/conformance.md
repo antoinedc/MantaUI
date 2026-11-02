@@ -5,7 +5,7 @@ fourteen `explorer-*` rows. Light and dark were both reviewed for `explorer-defa
 `-tree`, `-links` and `-quickopen` (`VISUAL_COLOR_SCHEME=dark`); the rest in light.
 Baselines recorded for all fourteen rows. Differences left on purpose or open:
 
-Last reviewed: 2026-11-02 (16317b01)
+Last reviewed: 2026-11-02 (67b38ac7)
 
 ## Deliberate
 
