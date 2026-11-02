@@ -64,6 +64,7 @@ import type {
   StreamRetryPayload,
   StreamRunningPayload,
   StreamToolRunsPayload,
+  StreamToolBoundaryPayload,
   StreamSessionErrorPayload,
   StreamStepEndedPayload,
   StreamContextPayload,
@@ -87,6 +88,7 @@ import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { ingestRunFrame, opencodeMessagesTracked } from "../runEpoch";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
+import { FILE_CHANGING_TOOLS, bumpAllFileGenerations, bumpFileGeneration } from "../explorer/fileChanges";
 
 /** The compaction card's state; `firstLine` is the box's summary line once it ended. */
 export type CompactionState = { reason: string; text: string; phase: "running" | "done"; firstLine?: string | null };
@@ -551,6 +553,9 @@ export function useSseBus(params: {
       // Client-synthesised by httpApi when the events socket reconnects (frames
       // may have been missed): resync this panel. Carries no session id.
       if (ev.sub === "resync") {
+        // Files may have changed while frames were missed: every session's
+        // path links and Explorer re-check (explorer/fileChanges.ts).
+        bumpAllFileGenerations();
         // Answers still in flight predate the reconnect: stale, drop them, then
         // re-seed the inbox (K3).
         tracker?.markResync();
@@ -559,6 +564,19 @@ export function useSseBus(params: {
         void refreshPermissions();
         void refreshQuestions();
         return;
+      }
+      // File-changing tool finished (frame `toolBoundary`, payload
+      // `{tool, status: "completed" | "error"}`, emitted once per tool part by
+      // the box with the id of the session that ran it): re-check path links and
+      // the Explorer. A subagent's run counts for its parent too — the child
+      // has no window of its own, so the parent's generation is the one the
+      // visible links and Explorer watch.
+      if (ev.sub === "toolBoundary" && ev.sessionId) {
+        const own = ev.sessionId === sessionId;
+        if ((own || childSessionIds.current.has(ev.sessionId)) && FILE_CHANGING_TOOLS.has((ev.payload as StreamToolBoundaryPayload | null)?.tool ?? "")) {
+          bumpFileGeneration(ev.sessionId);
+          if (!own) bumpFileGeneration(sessionId);
+        }
       }
       if (ev.sessionId !== sessionId) {
         if (ev.sessionId && childSessionIds.current.has(ev.sessionId)) handleChildFrame(ev);

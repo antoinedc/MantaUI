@@ -40,6 +40,7 @@ export function ToolCard({
   tone,
   name,
   arg,
+  argPath,
   meta,
   copyText,
   expanded,
@@ -56,6 +57,14 @@ export function ToolCard({
   name: string;
   /** The muted, ellipsis-truncated argument / path. */
   arg?: string;
+  /**
+   * A confirmed file path link (a `FileLink`) shown in place of `arg`. An
+   * anchor cannot live inside the disclosure `<button>`, so a card with this
+   * slot toggles from a click on the header row instead, and its chevron is the
+   * one focusable disclosure control (explorer contract E10). Cards without it
+   * render exactly as before.
+   */
+  argPath?: ReactNode;
   /** Optional right-aligned metadata node (e.g. "+38 −4"). */
   meta?: ReactNode;
   /**
@@ -77,9 +86,18 @@ export function ToolCard({
   const chevron = onToggle ? (
     <button
       type="button"
-      onClick={onToggle}
-      aria-label={expanded ? "Collapse" : "Expand"}
-      title={expanded ? "Collapse" : "Expand"}
+      onClick={
+        argPath != null
+          ? (e) => {
+              // The whole header row also toggles; one press, one toggle.
+              e.stopPropagation();
+              onToggle();
+            }
+          : onToggle
+      }
+      aria-expanded={argPath != null ? (expanded ?? false) : undefined}
+      aria-label={argPath != null ? "Show details" : expanded ? "Collapse" : "Expand"}
+      title={argPath != null ? (expanded ? "Hide details" : "Show details") : expanded ? "Collapse" : "Expand"}
       className={ACTION}
     >
       <ChevronRight
@@ -94,15 +112,35 @@ export function ToolCard({
     <>
       {tone != null && <StatusDot tone={tone} />}
       <span className={NAME}>{name}</span>
-      {arg != null && (
-        <span className={ARG} title={arg}>
-          {arg}
-        </span>
+      {argPath != null ? (
+        <span className={ARG}>{argPath}</span>
+      ) : (
+        arg != null && (
+          <span className={ARG} title={arg}>
+            {arg}
+          </span>
+        )
       )}
     </>
   );
 
   const metaSlot = meta != null && <span className={META}>{meta}</span>;
+
+  if (argPath != null) {
+    return (
+      <div className={SHELL}>
+        <div className={onToggle ? `${HEADER} cursor-pointer` : HEADER} onClick={onToggle}>
+          <div className={TOGGLE}>
+            {info}
+            {metaSlot}
+          </div>
+          {copy && <span onClick={(e) => e.stopPropagation()}>{copy}</span>}
+          {chevron}
+        </div>
+        {children != null && children}
+      </div>
+    );
+  }
 
   return (
     <div className={SHELL}>
