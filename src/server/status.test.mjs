@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseStatus, countSubagents, collectPanes, MARK } from "./status.mjs";
+import { parseStatus, countSubagents, collectPanes, terminalTargets, MARK } from "./status.mjs";
 
 // ----------------------------------------------------------------------------
 // countSubagents — pure helper
@@ -192,6 +192,37 @@ test("collectPanes isolates a per-window capture-pane failure without rejecting 
   // produced a slot — the whole tick did not reject.
   assert.equal(parsed[1].running, false);
   assert.equal(parsed[1].subagents, 0);
+});
+
+test("terminalTargets keeps terminal windows and drops chat-mode (stamped) ones", () => {
+  const out = "a:0\t\nb:1\tses_abc\nc:2\t\n\nlegacy:3\n";
+  assert.deepEqual(terminalTargets(out), ["a:0", "c:2", "legacy:3"]);
+});
+
+test("collectPanes never captures a chat-mode window", async () => {
+  const captured = [];
+  const fakeRun = async (cmd, args) => {
+    if (args[0] === "list-windows") {
+      assert.ok(args.includes("#{session_name}:#{window_index}\t#{@manta-session-id}"));
+      return { stdout: "p:1\tses_one\np:2\t\np:3\tses_two\n" };
+    }
+    captured.push(args[2]);
+    return { stdout: "" };
+  };
+  const parsed = parseStatus(await collectPanes(fakeRun));
+  assert.deepEqual(captured, ["p:2"]);
+  assert.deepEqual(parsed.map((w) => `${w.session}:${w.windowIndex}`), ["p:2"]);
+});
+
+test("collectPanes spawns nothing beyond the list when every window is chat-mode", async () => {
+  let calls = 0;
+  const fakeRun = async (cmd, args) => {
+    calls++;
+    if (args[0] === "list-windows") return { stdout: "p:1\tses_one\np:2\tses_two\n" };
+    throw new Error("capture-pane must not run");
+  };
+  assert.equal(await collectPanes(fakeRun), "");
+  assert.equal(calls, 1);
 });
 
 test("collectPanes returns empty string when no windows exist", async () => {

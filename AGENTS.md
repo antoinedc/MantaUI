@@ -1915,10 +1915,14 @@ compare against the regexes. The bottom of an alt-screen has the spinner
 ~10 lines above the input box, so a naive tail-line check misses it; the
 regex matches anywhere in the captured body.
 
-**Chat-mode windows are NOT served by this poller.** Their tmux pane runs
-`sleep infinity` (the holder); `capture-pane` returns blank output, BUSY_RE
-can't match, so the poller would silently report `running:false` forever
-for chat windows. Sidebar status for chat-mode flows through a separate
+**Chat-mode windows are NOT served by this poller — it skips them.** Their tmux
+pane runs `sleep infinity` (the holder); `capture-pane` returns blank output, so
+the poller lists windows with their `@manta-session-id` stamp and captures only
+unstamped (terminal) ones (`terminalTargets`). Capturing every chat window used
+to cost one process spawn per window every 2 s on the server's main thread —
+measured 2026-11-02 at ~64% of manta-server's main-thread time with ~50 chat
+windows, and a cause of the server going unresponsive under memory pressure.
+Do not reintroduce per-chat-window captures. Sidebar status for chat-mode flows through a separate
 path: an `onOpencodeEvent` subscription in `App.tsx` calls
 `setChatRunning(sessionId, running)` on `session.status` / `session.idle`
 and `setChatAttention(sessionId, kind)` on `question.asked` /

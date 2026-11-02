@@ -1,9 +1,9 @@
 // Per-window activity poller for the mobile server.
 //
 // Ports src/main/status.ts to local tmux execution (no SSH hop — this process
-// IS the remote). Every ~2s we capture the last N lines of every tmux pane in
-// one tmux pass, detect claude's busy markers, and publish a WindowStatus[]
-// batch on the event bus so mobile sidebar dots work.
+// IS the remote). Every ~2s we capture the last N lines of every TERMINAL
+// tmux pane (chat-mode windows are skipped — see terminalTargets), detect
+// claude's busy markers, and publish a WindowStatus[] batch on the event bus.
 //
 // Detection heuristic is identical to the desktop: BUSY_RE looks for claude's
 // live status line (spinner glyph + verb + ellipsis + parenthesised duration),
@@ -91,13 +91,29 @@ export function parseStatus(stdout) {
 //      so parseStatus's MARK-delimited demux stays stable regardless of
 //      which capture resolves first.
 
+// Chat-mode windows (stamped with `@manta-session-id`) are skipped: their pane
+// runs `sleep infinity`, so a capture is always blank, and their status comes
+// from the opencode stream instead. Capturing them anyway cost one process spawn
+// per chat window every 2 s on the server's main thread — with ~50 chat windows
+// that was most of the server's CPU time.
+export function terminalTargets(listStdout) {
+  return listStdout
+    .split("\n")
+    .map((l) => {
+      const tab = l.indexOf("\t");
+      return tab < 0 ? { target: l.trim(), chat: false } : { target: l.slice(0, tab).trim(), chat: l.slice(tab + 1).trim() !== "" };
+    })
+    .filter((w) => w.target && !w.chat)
+    .map((w) => w.target);
+}
+
 export async function collectPanes(runFn = run) {
-  // Step 1: list all windows.
+  // Step 1: list all windows, with each one's chat-session stamp.
   let winStdout;
   try {
     const r = await runFn("tmux", [
       "list-windows", "-a",
-      "-F", "#{session_name}:#{window_index}",
+      "-F", "#{session_name}:#{window_index}\t#{@manta-session-id}",
     ]);
     winStdout = r.stdout;
   } catch {
@@ -105,10 +121,7 @@ export async function collectPanes(runFn = run) {
     return "";
   }
 
-  const targets = winStdout
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const targets = terminalTargets(winStdout);
 
   if (targets.length === 0) return "";
 
