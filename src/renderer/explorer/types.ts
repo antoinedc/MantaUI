@@ -56,3 +56,23 @@ export type ExplorerTreeProps = {
   width: number;
   refreshKey: number;
 };
+
+/** Optional context MarkdownBody gets when it renders a FILE in the Explorer
+ *  (links track implements the MarkdownBody side; viewer track provides it).
+ *  With it, MarkdownBody: adds heading ids (rehype-slug); routes relative and
+ *  `#fragment` hrefs to `openLink` (preventDefault); keeps http(s) as
+ *  ExternalLink; renders other schemes as plain text; loads relative image
+ *  `src` through `resolveImage` (→ blob: URL or null = show alt text); renders
+ *  external images as an ExternalLink with the alt text. */
+export type MarkdownFileContext = {
+  openLink: (href: string) => void;
+  resolveImage: (src: string) => Promise<string | null>;
+};
+
+/** Props the shell passes to the viewer track's quick-open palette. */
+export type ExplorerQuickOpenProps = {
+  owner: ExplorerOwner;
+  open: boolean;
+  onClose: () => void;
+  onOpen: (req: OpenFileRequest) => void;
+};
