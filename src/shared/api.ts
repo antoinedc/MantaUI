@@ -201,6 +201,36 @@ export type UpgradeView =
 /** `POST /api/upgrade/retry` and `/rollback` outcome. */
 export type UpgradeActionResult = { ok: true } | { ok: false; error: string };
 
+// "What's new" (RPC `server:changelog`). One entry per released version of the
+// server's CHANGELOG.md; the server owns parsing and validation.
+export type ChangelogHighlight = {
+  title: string;
+  text: string;
+  /** One of WHATS_NEW_ICONS (src/shared/whatsNewAllowlist.mjs). */
+  icon: string;
+  /** `"routines"` or `"settings:<section>"` when valid on the server, else null. */
+  action: string | null;
+};
+export type ChangelogEntry = {
+  version: string;
+  date: string | null;
+  /** Lowercase, normalised: "server" | "desktop" | "ios" | "website" | "gateway". */
+  components: string[];
+  /** sha256 hex of the entry's raw section text. */
+  fingerprint: string;
+  headline: string | null;
+  highlights: ChangelogHighlight[];
+  markdown: string;
+};
+export type ServerChangelog = {
+  /** The server's id; null when it has none (nothing to key acknowledgements on). */
+  serverId: string | null;
+  /** Newest first, at most 10. */
+  entries: ChangelogEntry[];
+  /** The server's CHANGELOG.md was missing or unreadable (entries is then empty). */
+  unavailable?: true;
+};
+
 // Reclaim disk space after a copy-mode migration (cleanup spec K7). `GET /api/upgrade/reclaim`
 // says whether the old V1 history can be deleted and how much that frees; `POST` deletes it.
 export type ReclaimState = "none" | "running" | "failed" | "done";
@@ -1966,6 +1996,10 @@ export interface Api {
   // migrates. A body without `capabilities` is an older box (an empty set); a
   // rejection means "could not ask", never "old box".
   apiVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
+  // "What's new" (spec 2026-11-03-whats-new-modal): the server's own changelog,
+  // newest first (at most 10 entries) plus its id, which keys the device's
+  // acknowledgements. An older server has no such channel and the call rejects.
+  serverChangelog(): Promise<ServerChangelog>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version
   // via Electron's `app.getVersion()`. Combined with the server's
