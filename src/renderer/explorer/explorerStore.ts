@@ -258,7 +258,7 @@ export function setRightPanel(sessionId: string | null, which: RightPanel): void
 
 /**
  * The header icon and ⌘E. Opening always shows the tree (2026-11-03 §7b); a path
- * link goes through `openFile` instead and keeps the stored tree preference.
+ * link goes through `openFileFromTranscript` instead and opens without it.
  */
 export function toggleExplorer(sessionId: string): void {
   const opening = shownRightPanel(sessionId) !== "explorer";
@@ -413,6 +413,17 @@ export function openFile(req: OpenFileRequest): void {
     root: isInsideRoot(root, req.abs) ? cur.root : dirname(req.abs),
     history,
   });
+}
+
+/**
+ * A file link in the transcript. When it opens the Explorer, the file opens
+ * without the tree; a link clicked while the Explorer is already open leaves
+ * the tree as the user has it. Directory links still show the tree.
+ */
+export function openFileFromTranscript(req: OpenFileRequest): void {
+  const sessionId = req.owner.sessionId;
+  if (req.kind !== "dir" && shownRightPanel(sessionId) !== "explorer") setTreeOpen(sessionId, false);
+  openFile(req);
 }
 
 /** ⌘[ (−1) / ⌘] (+1). False when there is nowhere to go. */

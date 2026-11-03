@@ -7,6 +7,7 @@ import {
   isEffectivelyExpanded,
   navigateHistory,
   openFile,
+  openFileFromTranscript,
   parseLayout,
   reportExplorerWidth,
   resetExplorerStore,
@@ -193,6 +194,21 @@ describe("openFile", () => {
     expect(getExplorerSession("a").layout.treeOpen).toBe(false);
     setTreeOpen("a", true);
     openFile({ abs: "/home/u/proj/b.ts", owner: owner("a") });
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
+  });
+
+  it("a transcript file link opens the Explorer without the tree; an open Explorer keeps it", () => {
+    setTreeOpen("a", true);
+    openFileFromTranscript({ abs: "/home/u/proj/a.ts", owner: owner("a") });
+    expect(shownRightPanel("a")).toBe("explorer");
+    expect(getExplorerSession("a").layout.treeOpen).toBe(false);
+    setTreeOpen("a", true);
+    openFileFromTranscript({ abs: "/home/u/proj/b.ts", owner: owner("a") });
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
+  });
+
+  it("a transcript directory link still shows the tree", () => {
+    openFileFromTranscript({ abs: "/home/u/proj/src", kind: "dir", owner: owner("a") });
     expect(getExplorerSession("a").layout.treeOpen).toBe(true);
   });
 

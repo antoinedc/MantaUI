@@ -12,7 +12,7 @@ import { useTitleBarOverlaySync } from "./titleBarOverlay";
 import { IS_MAC } from "./platform";
 import { ExplorerSplit } from "./explorer/ExplorerPanel";
 import {
-  openFile as openExplorerFile,
+  openFileFromTranscript,
   setRightPanel,
   shownRightPanel,
   toggleArtifacts,
@@ -1610,7 +1610,7 @@ function Shell() {
   useEffect(() => {
     const handler = (ev: Event) => {
       const req = (ev as CustomEvent<OpenFileRequest>).detail;
-      if (req?.owner?.sessionId && req.abs) openExplorerFile(req);
+      if (req?.owner?.sessionId && req.abs) openFileFromTranscript(req);
     };
     window.addEventListener(EXPLORER_OPEN_EVENT, handler);
     return () => window.removeEventListener(EXPLORER_OPEN_EVENT, handler);
