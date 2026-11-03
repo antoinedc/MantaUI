@@ -326,17 +326,19 @@ describe("right slot: Explorer vs Artifacts", () => {
     key({ key: "E", ...mod, shiftKey: true });
     expect(store.getExplorerSession("ses_a").expanded).toBe(false);
 
-    expect(q('[data-testid="tree"]')).toBeNull();
+    // ⌘E opens with the tree (2026-11-03 §7b).
+    expect(q('[data-testid="tree"]')).not.toBeNull();
     // ⌥E types a dead key on macOS, so the handler matches on `code`.
     key({ key: "´", code: "KeyE", ...mod, altKey: true });
-    expect(q('[data-testid="tree"]')).not.toBeNull();
-    key({ key: "´", code: "KeyE", ...mod, altKey: true });
     expect(q('[data-testid="tree"]')).toBeNull();
+    key({ key: "´", code: "KeyE", ...mod, altKey: true });
+    expect(q('[data-testid="tree"]')).not.toBeNull();
   });
 
   it("⌥⌘E on a too-narrow Explorer changes nothing and says why", async () => {
     await mountApp();
     key({ key: "e", ...mod });
+    store.setTreeOpen("ses_a", false);
     store.reportExplorerWidth("ses_a", 300);
     key({ key: "´", code: "KeyE", ...mod, altKey: true });
     expect(store.getExplorerSession("ses_a").layout.treeOpen).toBe(false);

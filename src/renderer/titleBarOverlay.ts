@@ -29,7 +29,7 @@ export function cssColorToHex(value: string): string | null {
 
 /**
  * `color` is the background of the header under the buttons: the panel surface
- * (`--panel`, `bg-elev`) when the Explorer or Artifacts is the right-hand
+ * (`--panel`, the panel surface) when the Explorer or Artifacts is the right-hand
  * column, else the canvas the session / titlebar header sits on.
  */
 export function readOverlayColors(rightPanelShown: boolean): { color: string; symbolColor: string } | null {

@@ -3,9 +3,9 @@
 Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) for the
 fifteen `explorer-*` rows. Light and dark were both reviewed for `explorer-default`,
 `-tree`, `-links` and `-quickopen` (`VISUAL_COLOR_SCHEME=dark`); the rest in light.
-Baselines recorded for all fifteen rows (follow-up 2026-11-03: `-default`, `-tree`, `-expanded`, `-narrow` re-recorded for the sidebar button; `-banner-hidden-sidebar` added). Differences left on purpose or open:
+Baselines recorded for all fifteen rows (follow-up 2026-11-03: `-default`, `-tree`, `-expanded`, `-narrow` re-recorded for the sidebar button; `-banner-hidden-sidebar` added; then `-states` (no "Show tree" button), `-links` ("unreadable" copy, no home limit) and `-banner-hidden-sidebar` (opens with the tree) re-recorded for §7). Differences left on purpose or open:
 
-Last reviewed: 2026-11-03 (FINAL-COMMIT-SHA)
+Last reviewed: 2026-11-03 (08cba97b)
 
 ## Deliberate
 
@@ -23,7 +23,7 @@ Last reviewed: 2026-11-03 (FINAL-COMMIT-SHA)
   clearance of its own, as in the mockup's `.mk-win-banner`. Differences: the banner copy
   ("Reconnecting… attempt 2 · next try in 5.0s" vs the mockup's), the demo's own
   transcript and root folder (`billing`), and the Explorer open on its empty state rather
-  than a file. The macOS window controls themselves are not drawn (the mockup's three dots
+  than a file, with the tree open (opening from the header icon shows the tree). The macOS window controls themselves are not drawn (the mockup's three dots
   are; a browser capture has none).
 - **Motion is not pixel-verified.** The open / close / Expanded slide and the Segmented
   pill are transitions; every row captures the settled state (animations disabled). They
