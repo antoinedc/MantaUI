@@ -141,6 +141,7 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
+import { createUsageCalibration } from "./usageCalibration.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
@@ -902,7 +903,12 @@ const stopAccountsUsageEvents = bus.subscribe((evt) => {
 // `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
 // /api/accounts/refresh below); each call also proves the plugin is installed,
 // which is what turns per-conversation routing on (accounts.mjs).
+// K (full 5h windows per weekly window), measured from paired readings the usage
+// poller feeds it below; read by the placement rules through `kFor` and by the
+// `usage:calibration` RPC.
+const usageCalibration = createUsageCalibration();
 const seatAssigner = createSeatAssigner({
+  // TODO(phase3): kFor: (provider) => usageCalibration.readerFor(provider)
   accounts: accountsService,
   listSeatSnapshots,
   onChange: (provider) => accountsEvents.updated(provider),
@@ -974,6 +980,7 @@ const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
   // Optimizer P2.3 (BET-1345): the pacing controller observes the SAME publish
   // point as recordWindowObservations — no second poller, no adapter change.
   pacing: optimizerPacing,
+  calibration: usageCalibration,
   seats: accountsService,
   onUnauthorized: usageOnUnauthorized,
   onSeatSignedOut: (args) => claudeSeatHealth.onSignedOut(args),
@@ -2230,6 +2237,7 @@ const stopTuner = startPoller(async () => {
 void stopTuner;
 
 rpcHandlers = buildHandlers({
+  usageCalibration,
   routines: routinesEngine,
   tmux,
   oc,

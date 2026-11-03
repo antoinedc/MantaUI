@@ -331,6 +331,13 @@ export function createUsagePoller({
   // UsageSnapshot[] (and the per-seat snapshots) whenever the content actually
   // changes. Null in tests / direct users → no history recording.
   observe = null,
+  // K calibration (spec 2026-11-03 §6): unlike `observe` (which only fires when
+  // the published content changes) this fires after EVERY successful tick with
+  // the per-seat snapshots that were actually fetched this tick — a reading
+  // carried forward from an earlier tick (failed fetch, backoff) is left out, so
+  // each snapshot's `fetchedAt` is the real time of its reading. Not called when
+  // a tick fetched nothing. A throw never fails a poll.
+  onPolled = null,
   seats = null,
   // Until requests are routed per conversation (the manta-accounts plugin has
   // not been seen) the aggregate follows the SERVING (live) seat. A boolean or
@@ -373,6 +380,9 @@ export function createUsagePoller({
   // gets its own budget.
   let staleRetries = 0;
   let staleRetry = null;
+  // Seat snapshots `pollSeat` returned from an earlier tick instead of a fresh
+  // fetch (a WeakSet, so nothing outlives the tick that used it).
+  const carriedSeatSnaps = new WeakSet();
 
   function warnOnce(adapterId, e) {
     if (failing.has(adapterId)) return;
@@ -445,7 +455,10 @@ export function createUsagePoller({
     const carried = () => {
       const prev = carryForward(seatSnapshots, adapter.id, nowMs, undefined, seat.seatId);
       // Re-label: the user may have renamed the seat since the carried reading.
-      return prev ? { ...prev, ...identity, windows: prev.windows } : null;
+      if (!prev) return null;
+      const relabelled = { ...prev, ...identity, windows: prev.windows };
+      carriedSeatSnaps.add(relabelled);
+      return relabelled;
     };
     const until = backoffUntil.get(key);
     if (until != null && nowMs < until) return carried();
@@ -658,6 +671,16 @@ export function createUsagePoller({
         observe?.(decorated, decoratedSeats);
         publish?.({ kind: "usage.updated", payload: { snapshots: decorated, seatSnapshots: decoratedSeats } });
       }
+      if (typeof onPolled === "function") {
+        const fresh = decoratedSeats.filter((_, i) => !carriedSeatSnaps.has(seatResults[i]));
+        if (fresh.length > 0) {
+          try {
+            onPolled(fresh);
+          } catch (e) {
+            console.warn("[usage] onPolled failed:", e?.message ?? e);
+          }
+        }
+      }
     } finally {
       inFlight = false;
     }
@@ -694,7 +717,7 @@ let activeAlerts = null;
 
 /**
  * @param {{ publish: (evt: object) => void }} bus
- * @param {{ intervalMs?: number, pacing?: object }} [opts]
+ * @param {{ intervalMs?: number, pacing?: object, calibration?: { onPolled: (seatSnapshots: UsageSnapshot[]) => void } }} [opts]
  *   `pacing` is the optimizer pacing state (src/server/optimizer/pacing.mjs),
  *   observed from the SAME tap as recordWindowObservations — no second poller,
  *   no adapter change.
@@ -702,7 +725,7 @@ let activeAlerts = null;
  */
 export function startUsagePoller(
   bus,
-  { intervalMs = POLL_MS, pacing = null, seats = null, onUnauthorized = null, onSeatSignedOut = null, onSeatOk = null } = {},
+  { intervalMs = POLL_MS, pacing = null, seats = null, onUnauthorized = null, onSeatSignedOut = null, onSeatOk = null, calibration = null } = {},
 ) {
   // WS09 SF-M16: the 90% / limit alerts live on the box. They are fed from the
   // SAME observe tap (no second poller) and published as raw `usage.alert`
@@ -714,6 +737,8 @@ export function startUsagePoller(
     onUnauthorized,
     onSeatSignedOut,
     onSeatOk,
+    // K calibration: one paired observation per fresh seat reading, every tick.
+    onPolled: calibration ? (fresh) => calibration.onPolled(fresh) : null,
     observe: (results, seatResults) => {
       recordWindowObservations(results, seatResults);
       pacing?.observe?.(results);
