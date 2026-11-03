@@ -12,6 +12,7 @@
   "ignore": [
     "**/node_modules/**",
     "**/dist/**",
-    "**/out/**"
+    "**/out/**",
+    "**/scripts/seats/baseline/**"
   ]
 }
