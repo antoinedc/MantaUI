@@ -105,6 +105,13 @@ function key(init: KeyboardEventInit & { key: string }, target: EventTarget = wi
   return ev;
 }
 
+// The Explorer's content unmounts once its close slide has ended; jsdom fires no
+// `transitionend`, so this waits out the split's timer fallback.
+const slideEnd = () =>
+  act(async () => {
+    await new Promise((r) => setTimeout(r, 300));
+  });
+
 function split(sessionId = "ses_a", active = true) {
   return (
     <ExplorerSplit sessionId={sessionId} cwd="/home/u/proj" active={active}>
@@ -114,7 +121,7 @@ function split(sessionId = "ses_a", active = true) {
 }
 
 describe("ExplorerSplit", () => {
-  it("keeps the transcript mounted across open / close (never remounts the chat)", () => {
+  it("keeps the transcript mounted across open / close (never remounts the chat)", async () => {
     h = mount(split());
     const chat = h.container.querySelector('[data-testid="chat-ses_a"]');
     expect(q(".manta-explorer")).toBeNull();
@@ -122,8 +129,52 @@ describe("ExplorerSplit", () => {
     expect(q(".manta-explorer")).not.toBeNull();
     expect(h.container.querySelector('[data-testid="chat-ses_a"]')).toBe(chat);
     act(() => store.setRightPanel("ses_a", "none"));
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
     expect(h.container.querySelector('[data-testid="chat-ses_a"]')).toBe(chat);
+  });
+
+  it("slides: data-animating while opening / closing, content held at a fixed width, then settled", async () => {
+    widthOf = (el) => (el.classList.contains("manta-explorer-split") ? 1000 : 0);
+    h = mount(split());
+    const root = () => q(".manta-explorer-split")!;
+    expect(root().hasAttribute("data-animating")).toBe(false);
+    act(() => store.setRightPanel("ses_a", "explorer"));
+    expect(root().hasAttribute("data-animating")).toBe(true);
+    // The stored ratio (a percentage) of 1000 px: the target open width.
+    const ratio = store.getExplorerSession("ses_a").layout.ratio;
+    expect(q(".manta-explorer")!.style.width).toBe(`${Math.round((1000 * ratio) / 100)}px`);
+    await slideEnd();
+    expect(root().hasAttribute("data-animating")).toBe(false);
+    expect(q(".manta-explorer")!.style.width).toBe("");
+
+    act(() => store.setRightPanel("ses_a", "none"));
+    // Still mounted (sliding shut), the split animating, no handle.
+    expect(root().hasAttribute("data-animating")).toBe(true);
+    expect(q(".manta-explorer")).not.toBeNull();
+    expect(q('[aria-label="Resize file explorer"]')).toBeNull();
+    await slideEnd();
+    expect(root().hasAttribute("data-animating")).toBe(false);
+    expect(q(".manta-explorer")).toBeNull();
+  });
+
+  it("a chat that becomes visible with its Explorer open rests there: no slide", async () => {
+    store.setRightPanel("ses_a", "explorer");
+    h = mount(split("ses_a", false));
+    expect(q(".manta-explorer")).toBeNull();
+    h.rerender(split("ses_a", true));
+    expect(q(".manta-explorer")).not.toBeNull();
+    expect(q(".manta-explorer-split")!.hasAttribute("data-animating")).toBe(false);
+  });
+
+  it("opening and closing never overwrite the stored ratio", async () => {
+    store.setRatio("ses_a", 42);
+    h = mount(split());
+    act(() => store.setRightPanel("ses_a", "explorer"));
+    await slideEnd();
+    act(() => store.setRightPanel("ses_a", "none"));
+    await slideEnd();
+    expect(store.getExplorerSession("ses_a").layout.ratio).toBe(42);
   });
 
   it("mounts the Explorer only for the active chat", () => {
@@ -219,7 +270,7 @@ describe("ExplorerPanel top bar", () => {
     expect(store.getExplorerSession("ses_a").layout.treeWidth).toBe(160);
   });
 
-  it("expand / restore / close buttons act", () => {
+  it("expand / restore / close buttons act", async () => {
     store.setRightPanel("ses_a", "explorer");
     h = mount(split());
     click(q('[aria-label="Expand"]'));
@@ -228,6 +279,7 @@ describe("ExplorerPanel top bar", () => {
     expect(store.getExplorerSession("ses_a").expanded).toBe(false);
     click(q('[aria-label="Close file explorer"]'));
     expect(store.shownRightPanel("ses_a")).toBe("none");
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
   });
 
@@ -341,7 +393,7 @@ describe("Expanded: rail and Esc", () => {
     expect(store.getExplorerSession("ses_a").expanded).toBe(false);
   });
 
-  it("in a narrow window Esc / the rail go back to the transcript by closing the Explorer", () => {
+  it("in a narrow window Esc / the rail go back to the transcript by closing the Explorer", async () => {
     widthOf = () => 600;
     store.setRightPanel("ses_a", "explorer");
     h = mount(split());
@@ -349,6 +401,7 @@ describe("Expanded: rail and Esc", () => {
     expect(q('[aria-label="Back to transcript"]')).not.toBeNull();
     key({ key: "Escape" });
     expect(store.shownRightPanel("ses_a")).toBe("none");
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
   });
 

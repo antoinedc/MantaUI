@@ -137,6 +137,12 @@ afterEach(() => {
 
 const q = (sel: string) => h!.container.querySelector<HTMLElement>(sel);
 const qa = (sel: string) => [...h!.container.querySelectorAll<HTMLElement>(sel)];
+// The Explorer's content unmounts once its close slide has ended; jsdom fires no
+// `transitionend`, so this waits out the split's timer fallback.
+const slideEnd = () =>
+  act(async () => {
+    await new Promise((r) => setTimeout(r, 300));
+  });
 function key(init: KeyboardEventInit & { key: string }) {
   const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
   act(() => {
@@ -243,6 +249,7 @@ describe("right slot: Explorer vs Artifacts", () => {
     expect(q('[data-testid="artifacts"]')!.dataset.open).toBe("false");
 
     key({ key: "i", ...mod });
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
     expect(q('[data-testid="artifacts"]')!.dataset.open).toBe("true");
     expect(q('[data-testid="chat-ses_a"]')!.dataset.artifacts).toBe("true");
@@ -253,6 +260,7 @@ describe("right slot: Explorer vs Artifacts", () => {
     expect(localStorage.getItem("manta:artifacts:open")).toBe("0");
 
     key({ key: "e", ...mod });
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
     expect(q('[data-testid="artifacts"]')!.dataset.open).toBe("false");
   });
@@ -264,6 +272,7 @@ describe("right slot: Explorer vs Artifacts", () => {
     act(() => {
       window.dispatchEvent(new CustomEvent("manta-open-review"));
     });
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
     expect(q('[data-testid="artifacts"]')!.dataset.open).toBe("true");
   });
@@ -272,6 +281,7 @@ describe("right slot: Explorer vs Artifacts", () => {
     await mountApp();
     key({ key: "e", ...mod });
     click(q('[data-testid="chat-artifacts-ses_a"]'));
+    await slideEnd();
     expect(q(".manta-explorer")).toBeNull();
     expect(q('[data-testid="artifacts"]')!.dataset.open).toBe("true");
     click(q('[data-testid="chat-artifacts-ses_a"]'));

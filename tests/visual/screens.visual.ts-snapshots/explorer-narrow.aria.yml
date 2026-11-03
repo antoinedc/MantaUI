@@ -1,6 +1,6 @@
-- button "Hide sidebar"
 - complementary:
   - heading "Workspace" [level=2]
+  - button "Hide sidebar"
   - button "Search sessions"
   - tree "Sessions":
     - button "Open the CTO overview"

@@ -103,6 +103,17 @@ html, body, #root {
   border-color: var(--warn);
 }
 
+/* Explorer open / close / Expanded slide. react-resizable-panels sizes panels
+   with flex-grow, so the slide is a transition on it. ExplorerSplit sets
+   data-animating only for a programmatic open / close / Expanded toggle, never
+   during a drag or a key resize (those stay 1:1). */
+.manta-explorer-split[data-animating] > [data-panel] {
+  transition: flex-grow var(--motion-base) var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-explorer-split[data-animating] > [data-panel] { transition: none; }
+}
+
 /* The recording state dot's own pulse (BET-836): opacity 1 -> 0.25 -> 1,
    1.4 s ease-in-out, infinite. Suppressed under reduced-motion — the dot is
    decorative (the waveform + timer carry the live signal). Paused applies no

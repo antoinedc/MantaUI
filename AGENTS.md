@@ -529,10 +529,24 @@ Markdown, images/video, optional tree, quick open, expand). Design sources:
   path clicks, `manta-open-review`) goes through it. Split via
   `react-resizable-panels` v4; a content width under 680 px shows the Explorer
   Expanded.
-- **Sidebar toggle.** ⌘B hides the sidebar (`manta:sidebarHidden`); one pinned
-  `SidebarToggle` is always visible, and while hidden App sets
-  `--sidebar-hidden-inset` (macOS 112 px, else 40 px) which every pane header
-  pads itself by (`max(own padding, var(--sidebar-hidden-inset))`).
+- **Sidebar button + window corners.** ⌘B hides the sidebar
+  (`manta:sidebarHidden`). There is no floating control: the button
+  (`SidebarToggleButton`) sits in the sidebar's Workspace header left of search,
+  and while the sidebar is hidden `<SidebarRevealButton/>` is the first control of
+  the top-left pane header (session header, terminal titlebar, CTO, Routines; the
+  Explorer top bar in Expanded). Exactly one element owns each window corner:
+  App sets `--tl-inset-x` / `--banner-inset-x` / `--pane-inset-x` /
+  `--pane-inset-top` (`cornerInsetVars` in `explorer/layout.ts`; the old
+  `--sidebar-hidden-inset` is gone) — the top banner reads `--banner-inset-x`, pane
+  headers read `--pane-inset-x`. On Windows exactly one header per column stack
+  reserves `--titlebar-inset-right`. Full rules: `docs/screens/explorer/contract.md`
+  (§Window-corner variables); `tests/visual/window-controls.visual.ts` guards that
+  nothing sits under the OS controls.
+- **Explorer slide.** The visible chat keeps a collapsible Explorer panel
+  (collapsed = closed) that slides on a `flex-grow` transition while
+  `data-animating` is on the split (programmatic open / close / Expanded only,
+  never a drag); its content holds a fixed width during the slide and unmounts
+  after a close. `Segmented`'s active highlight is one `layoutId` pill.
 - **Demo seam.** The `explorer` demo state (`?demo&desktop&state=explorer`) serves
   a "manta" workspace (`api/demoExplorer.ts`) over a pretend filesystem
   (`api/demoExplorerFs.ts`, names/sizes equal to the mockup's); the viewer's file

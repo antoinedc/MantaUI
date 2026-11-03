@@ -1,20 +1,22 @@
 // The Explorer shell (spec §Layout / §Explorer panel, contract E0–E4, E9):
 //   - ExplorerSplit: the resizable transcript | Explorer split around one chat
-//     panel. It is always present for a visited chat (a single transcript Panel
-//     when the Explorer is closed), so opening / closing the Explorer never
-//     remounts the ChatPanel it wraps.
+//     panel. It is always present for a visited chat, so opening / closing the
+//     Explorer never remounts the ChatPanel it wraps. The visible chat keeps a
+//     collapsible Explorer Panel (collapsed = closed) that slides open / shut;
+//     the other visited chats keep their transcript Panel only.
 //   - ExplorerPanel: top bar, tree toggle / handle, quick open, history, the
 //     Expanded rail; the tree and the viewer are the other tracks' components.
 // State lives in explorerStore.ts; this file is chrome + keyboard wiring.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
+import { Group, Panel, Separator, useGroupRef, usePanelRef } from "react-resizable-panels";
 import { Folder, ListTree, Maximize2, Minimize2, Search, X } from "lucide-react";
 import { IconButton } from "../IconButton";
 import { StatusDot } from "../StatusDot";
 import { SidebarRevealButton } from "../SidebarToggle";
 import { useStore, resolveSessionOwner } from "../store";
 import { IS_MAC } from "../platform";
+import { MOTION_BASE } from "../chatMotion";
 import { ExplorerViewer } from "./ExplorerViewer";
 import { ExplorerTree } from "./ExplorerTree";
 import { ExplorerQuickOpen } from "./ExplorerQuickOpen";
@@ -76,6 +78,10 @@ function useElementWidth(ref: RefObject<HTMLElement | null>): number {
 // Split
 // ---------------------------------------------------------------------------
 
+// The slide's end is `transitionend`; this is the fallback when none fires
+// (reduced motion, a hidden window, jsdom): the --motion-base token + 50 ms.
+const SLIDE_FALLBACK_MS = Math.round(MOTION_BASE * 1000) + 50;
+
 export function ExplorerSplit({
   sessionId,
   cwd,
@@ -92,6 +98,7 @@ export function ExplorerSplit({
   const showExplorer = active && st.layout.open;
   const expanded = isEffectivelyExpanded(st);
   const groupRef = useGroupRef();
+  const explorerRef = usePanelRef();
   const groupEl = useRef<HTMLDivElement | null>(null);
 
   const ratioRef = useRef(st.layout.ratio);
@@ -101,13 +108,24 @@ export function ExplorerSplit({
   const showRef = useRef(showExplorer);
   showRef.current = showExplorer;
 
-  // The ratio the Explorer Panel opens with. Frozen while it is mounted: the
-  // library re-lays-out when a Panel's constraint props change, so a live value
-  // would fight the user's drag. Re-read each time the Explorer is (re)opened.
-  const openRatio = useRef(st.layout.ratio);
-  const wasShown = useRef(false);
-  if (showExplorer && !wasShown.current) openRatio.current = st.layout.ratio;
-  wasShown.current = showExplorer;
+  // The Explorer Panel's size when it mounts (a chat becoming visible): its
+  // resting size, so switching chats never slides. Frozen for the Panel's life:
+  // the library re-lays-out when a Panel's constraint props change, so a live
+  // value would fight the user's drag. Every later change goes through
+  // setLayout below.
+  const initialSize = useRef("0%");
+  const wasActive = useRef(false);
+  if (active && !wasActive.current) initialSize.current = showExplorer ? `${st.layout.ratio}%` : "0%";
+  wasActive.current = active;
+
+  // A programmatic open / close / Expanded toggle is "animating": the split
+  // root carries data-animating (the CSS transition on the panels' flex-grow)
+  // and the Explorer's content holds a fixed pixel width so it slides instead
+  // of re-wrapping every frame. `closing` keeps the content mounted until the
+  // close has finished, so a closed Explorer runs no effects or fetches.
+  const [anim, setAnim] = useState<{ width: number } | null>(null);
+  const [closing, setClosing] = useState(false);
+  const mountContent = active && (showExplorer || closing);
 
   // Narrow window → the Explorer shows Expanded; wide again → back to the split.
   // A zero width (hidden / pre-layout) says nothing, so it is ignored.
@@ -124,24 +142,67 @@ export function ExplorerSplit({
     return () => ro.disconnect();
   }, [sessionId, active]);
 
-  // Expanded is declarative: the transcript Panel's size is pinned to 0 (a pixel
-  // minimum the window can't satisfy would otherwise leave the layout invalid).
-  // Leaving Expanded re-applies the stored ratio exactly.
-  const prevExpanded = useRef(expanded);
-  useEffect(() => {
-    const was = prevExpanded.current;
-    prevExpanded.current = expanded;
-    if (!showExplorer || expanded || !was) return;
-    const t = setTimeout(() => {
+  // The layout the split should rest at. Expanded is declarative (the transcript
+  // Panel's size is pinned to 0 by its constraints, which a pixel minimum the
+  // window can't satisfy would otherwise leave invalid), so only the other
+  // states are applied explicitly. Leaving Expanded / opening re-applies the
+  // stored ratio exactly.
+  const applyLayout = useCallback(
+    (open: boolean) => {
       try {
-        const r = ratioRef.current;
-        groupRef.current?.setLayout({ transcript: 100 - r, explorer: r });
+        if (!open) groupRef.current?.setLayout({ transcript: 100, explorer: 0 });
+        else if (!expandedRef.current) {
+          const r = ratioRef.current;
+          groupRef.current?.setLayout({ transcript: 100 - r, explorer: r });
+        }
       } catch (e) {
-        console.warn("explorer: couldn't restore the split ratio", e);
+        console.warn("explorer: couldn't apply the split layout", e);
       }
-    }, 0);
+    },
+    [groupRef],
+  );
+
+  const prev = useRef({ active, show: showExplorer, expanded });
+  useLayoutEffect(() => {
+    const was = prev.current;
+    prev.current = { active, show: showExplorer, expanded };
+    // A chat that just became visible rests at its size: no slide.
+    if (!active || !was.active) return;
+    const opened = showExplorer && !was.show;
+    const closed = !showExplorer && was.show;
+    const toggledExpanded = showExplorer && was.show && expanded !== was.expanded;
+    if (!opened && !closed && !toggledExpanded) return;
+
+    const groupW = groupEl.current?.getBoundingClientRect().width ?? 0;
+    const before = explorerRef.current?.getSize().inPixels ?? 0;
+    const after = !showExplorer ? 0 : expanded ? groupW : (groupW * ratioRef.current) / 100;
+    // The larger of the two widths: the content never reflows mid-slide.
+    groupEl.current?.setAttribute("data-animating", "");
+    setAnim({ width: Math.round(Math.max(before, after)) });
+    if (closed) setClosing(true);
+    // After the Panels' constraint props have been re-registered for this render.
+    const t = setTimeout(() => applyLayout(showExplorer), 0);
     return () => clearTimeout(t);
-  }, [showExplorer, expanded, groupRef]);
+  }, [active, showExplorer, expanded, explorerRef, applyLayout]);
+
+  // End of the slide: `transitionend`, or the fallback timer.
+  useEffect(() => {
+    if (!anim) return;
+    const el = groupEl.current;
+    const finish = () => {
+      setAnim(null);
+      setClosing(false);
+    };
+    const onEnd = (e: TransitionEvent) => {
+      if (e.propertyName === "flex-grow" && (e.target as Element).hasAttribute("data-panel")) finish();
+    };
+    el?.addEventListener("transitionend", onEnd);
+    const t = setTimeout(finish, SLIDE_FALLBACK_MS);
+    return () => {
+      el?.removeEventListener("transitionend", onEnd);
+      clearTimeout(t);
+    };
+  }, [anim]);
 
   const resetRatio = () => {
     setRatio(sessionId, EXPLORER_DEFAULT_RATIO);
@@ -158,9 +219,11 @@ export function ExplorerSplit({
       className="manta-explorer-split min-w-0 flex-1"
       groupRef={groupRef}
       elementRef={groupEl}
+      data-animating={anim ? "" : undefined}
       onLayoutChanged={(layout, meta) => {
-        // Only a drag / key press is the user's ratio; constraint-driven
-        // layouts (narrow window, Expanded) must not overwrite it.
+        // Only a drag / key press is the user's ratio; constraint-driven and
+        // animated layouts (narrow window, Expanded, open / close) must not
+        // overwrite it.
         if (!meta.isUserInteraction || !showRef.current || expandedRef.current) return;
         if (typeof layout.explorer === "number" && layout.explorer > 0) setRatio(sessionId, layout.explorer);
       }}
@@ -182,14 +245,20 @@ export function ExplorerSplit({
           <span className="h-full w-px bg-border transition-colors group-hover:w-[2px] group-hover:bg-accent group-active:w-[2px] group-active:bg-accent group-focus-visible:w-[2px] group-focus-visible:bg-accent" />
         </Separator>
       )}
-      {showExplorer && (
+      {active && (
         <Panel
           id="explorer"
-          defaultSize={`${openRatio.current}%`}
+          panelRef={explorerRef}
+          defaultSize={initialSize.current}
           minSize={EXPLORER_MIN_PX}
+          collapsible
+          collapsedSize={0}
+          // Dragging the handle never collapses the Explorer: closing is the
+          // X / ⌘E, so the stored open state and the panel can't disagree.
+          collapsedThreshold="100%"
           style={{ overflow: "hidden" }}
         >
-          <ExplorerPanel sessionId={sessionId} cwd={cwd} />
+          {mountContent && <ExplorerPanel sessionId={sessionId} cwd={cwd} heldWidth={anim?.width ?? null} />}
         </Panel>
       )}
     </Group>
@@ -200,7 +269,16 @@ export function ExplorerSplit({
 // Panel
 // ---------------------------------------------------------------------------
 
-export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: string }) {
+export function ExplorerPanel({
+  sessionId,
+  cwd,
+  heldWidth = null,
+}: {
+  sessionId: string;
+  cwd: string;
+  /** Fixed pixel width while the split slides, so the content doesn't reflow. */
+  heldWidth?: number | null;
+}) {
   const st = useExplorerSession(sessionId);
   const mdView = useMdView();
   const expanded = isEffectivelyExpanded(st);
@@ -285,7 +363,11 @@ export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: stri
     : `Expand (${KEYS.expand})`;
 
   return (
-    <section ref={sectionRef} className="manta-explorer flex h-full min-w-0 bg-bg-elev">
+    <section
+      ref={sectionRef}
+      className="manta-explorer flex h-full min-w-0 bg-bg-elev"
+      style={heldWidth != null ? { width: heldWidth } : undefined}
+    >
       {expanded && (
         <button
           type="button"

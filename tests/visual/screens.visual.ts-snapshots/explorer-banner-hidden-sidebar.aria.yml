@@ -1,0 +1,55 @@
+- main:
+  - status:
+    - text: /Reconnecting… attempt 2 · next try in [\d,.]+[hmsp]+/
+    - button "Retry now"
+  - button "Show sidebar"
+  - text: infra / Deploy new billing service feat/orders-csv-export
+  - button "Hide file explorer"
+  - button "Show artifacts"
+  - button "Session actions"
+  - text: File retention-report.pdf · application/pdf File migration-notes.md · text/markdown
+  - button "Image" [expanded]
+  - button "Collapse"
+  - button "Open image preview": ⚠ Couldn’t load this media
+  - button "Image" [expanded]
+  - button "Collapse"
+  - button "Open image preview": ⚠ Couldn’t load this media
+  - text: "Three densities side by side — compact is the one that survives at 1280px:"
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density
+  - text: . Todo 2/5
+  - button "Dismiss todo list"
+  - text: "/Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - radio "Match the JSON shape"
+  - text: Customer-friendly
+  - radio "Customer-friendly"
+  - text: Custom (specify in notes)
+  - radio "Custom (specify in notes)"
+  - textbox "Or type your own answer…"
+  - separator
+  - button "Submit" [disabled]
+  - button "Dismiss"
+  - text: Run a shell command? bash
+  - button "Allow once"
+  - button "Always allow alembic upgrade *"
+  - button "Reject"
+  - status
+  - textbox "Reply, or describe the next task…"
+  - button "Opus 4.7"
+  - button "High"
+  - button "Fast mode" [disabled]
+  - button "Attach files"
+  - button "schedules"
+  - button "secrets"
+  - button "webhooks"
+  - button "Permissions on — click to bypass"
+  - 'button "Handoff: suggest"'
+  - separator "Resize file explorer"
+  - button "Show file tree"
+  - text: billing
+  - button "Quick open"
+  - button "Expand"
+  - button "Close file explorer"
+  - text: No file open Click a file path in the conversation, or open the tree
+  - button "Show tree"
+- complementary "Artifacts"

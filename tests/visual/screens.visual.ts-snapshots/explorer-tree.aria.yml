@@ -1,5 +1,5 @@
-- button "Show sidebar"
 - main:
+  - button "Show sidebar"
   - text: manta / peek-range-fix fix/peek-range
   - button "Hide file explorer"
   - button "Show artifacts"
