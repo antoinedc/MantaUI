@@ -66,6 +66,10 @@ const ICONS: Record<string, LucideIcon> = {
   "calendar-clock": CalendarClock,
 };
 
+// User-facing wording is "server", never "box": the Settings nav still calls this
+// section "Box", but this window must not.
+const LINK_LABELS: Partial<Record<SettingSectionId, string>> = { box: "Server" };
+
 export type WhatsNewActions = {
   /** Open the Routines list. Absent → a `routines` card shows no link. */
   onOpenRoutines?: () => void;
@@ -86,7 +90,7 @@ export function resolveWhatsNewAction(action: string | null, handlers: WhatsNewA
   const section = SETTING_SECTIONS.find((s) => s.id === id);
   const open = handlers.onOpenSettings;
   if (!section || !open) return null;
-  return { label: `Open ${section.label} settings`, run: () => open(section.id) };
+  return { label: `Open ${LINK_LABELS[section.id] ?? section.label} settings`, run: () => open(section.id) };
 }
 
 /** Rendered notes drop the `Ships: …` paragraph — tag names are noise. */
@@ -207,13 +211,13 @@ export function WhatsNewModal({
             style={{ background: "radial-gradient(120% 140% at 0% 0%, rgb(var(--accent-rgb) / 0.2), transparent 60%)" }}
           >
             <div className={EYEBROW}>MANTA {newest.version}</div>
-            <h2 className="mt-2 text-title font-semibold text-text">{title}</h2>
+            <h2 tabIndex={-1} className="mt-2 text-title font-semibold text-text outline-none">{title}</h2>
             <p className="mt-1 text-meta text-text-faint">New on your server.</p>
           </div>
         ) : (
           <div className="border-b border-border-subtle px-6 pb-3 pt-5">
             <div className={EYEBROW}>{previous ? `UPDATED · ${previous} → ${newest.version}` : `UPDATED · ${newest.version}`}</div>
-            <h2 className="mt-2 text-title font-semibold text-text">{title}</h2>
+            <h2 tabIndex={-1} className="mt-2 text-title font-semibold text-text outline-none">{title}</h2>
             {(chips.length > 0 || date) && (
               <div className="mt-2 flex flex-wrap items-center gap-2 text-meta text-text-quiet">
                 {chips.map((c) => (

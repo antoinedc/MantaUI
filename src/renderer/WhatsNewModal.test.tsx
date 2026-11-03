@@ -131,6 +131,18 @@ describe("WhatsNewModal", () => {
       expect(text()).not.toContain("Open ");
     });
 
+    it("the box settings section is worded Server, and no string in the window says box", () => {
+      const entry: ChangelogEntry = {
+        ...ROUTINES_ENTRY,
+        components: ["box", "desktop"],
+        highlights: [{ title: "Pairing", icon: "zap", text: "Pair from the server page.", action: "settings:box" }],
+      };
+      open([entry, { ...OLDER_ENTRY, components: ["box"] }], { onOpenSettings: () => {} });
+      expect(text()).toContain("Open Server settings →");
+      click(button("See notes"));
+      expect(document.body.textContent).not.toMatch(/box/i);
+    });
+
     it("an unknown icon falls back to the default instead of breaking the card", () => {
       const entry: ChangelogEntry = { ...ROUTINES_ENTRY, highlights: [{ title: "Odd", icon: "no-such-icon", text: "x", action: null }] };
       open([entry]);
@@ -181,6 +193,16 @@ describe("WhatsNewModal", () => {
   });
 
   describe("footer and closing", () => {
+    it.each([
+      ["B", [ROUTINES_ENTRY], "Routines are here"],
+      ["A", [NOTES_ENTRY], "What's new in Manta 1.3.0"],
+    ])("%s: initial focus is on the heading, not the first link", (_n, entries, title) => {
+      open(entries as ChangelogEntry[], { onOpenRoutines: () => {}, onOpenSettings: () => {} });
+      const h2 = [...document.body.querySelectorAll("h2")].find((e) => e.textContent === title);
+      expect(h2?.getAttribute("tabindex")).toBe("-1");
+      expect(document.activeElement).toBe(h2);
+    });
+
     it("Got it closes", () => {
       const onClose = open([NOTES_ENTRY]);
       click(button("Got it"));
@@ -232,6 +254,7 @@ describe("pure helpers", () => {
     expect(resolveWhatsNewAction("routines", { onOpenRoutines: run })?.label).toBe("Open Routines");
     expect(resolveWhatsNewAction("routines", {})).toBeNull();
     expect(resolveWhatsNewAction("settings:voice", { onOpenSettings: run })?.label).toBe("Open Voice settings");
+    expect(resolveWhatsNewAction("settings:box", { onOpenSettings: run })?.label).toBe("Open Server settings");
     expect(resolveWhatsNewAction("settings:voice", {})).toBeNull();
     expect(resolveWhatsNewAction("settings:cto", { onOpenSettings: run })).toBeNull();
     expect(resolveWhatsNewAction(null, { onOpenRoutines: run })).toBeNull();
