@@ -1053,8 +1053,9 @@ export function describeNextRun(
 // `reconcileOptimisticUser` is the single source of truth for stripping the
 // optimistic placeholder the moment the canonical server message arrives.
 // It is called from `spliceMessage`'s insert path: if the incoming message
-// is role "user" AND the previous messages contain an `optimistic-user-*`
-// entry, that entry is dropped before the real message is appended.
+// is role "user" AND the previous messages contain its optimistic twin (same
+// id, or a command placeholder), that entry is dropped before the real message
+// is appended.
 //
 // Pure + exported so the contract is unit-tested and can't silently regress.
 
@@ -1066,24 +1067,83 @@ export function describeNextRun(
  * Rules:
  *   - Only fires for `incoming.info.role === "user"`. Assistant / system
  *     messages never trigger reconciliation (they have no optimistic twin).
- *   - Drops every message whose id starts with `optimistic-user-`. In
- *     practice there is at most one per send, but we scan all of them
- *     defensively — a prior run that failed to reconcile could have left
- *     a stale one behind.
+ *   - Drops the optimistic row carrying the SAME id as `incoming` (a prompt's
+ *     placeholder is minted with the id it will have), and every slash-command
+ *     placeholder (`optimistic-user-*`: the box mints a command's id, so any
+ *     user message replaces it). An unrelated user message (another device, a
+ *     background result) leaves a pending prompt's placeholder alone.
  *   - Returns `prev` unchanged when there is no optimistic entry to drop,
  *     so the caller's splice can proceed with the canonical array.
  */
-export function reconcileOptimisticUser<M extends { info: { id: string; role: string } }>(
+export function reconcileOptimisticUser<M extends { info: { id: string; role: string; optimistic?: true } }>(
   prev: M[] | null | undefined,
   incoming: M,
 ): M[] | null | undefined {
   if (incoming.info.role !== "user") return prev;
   if (!prev || prev.length === 0) return prev;
-  // Scan for any optimistic placeholder. If none found, return the original
+  // Scan for the placeholder of THIS send. If none found, return the original
   // reference so the caller's splice operates on the canonical array.
-  const next = prev.filter((m) => !m.info.id.startsWith("optimistic-user-"));
+  const next = prev.filter(
+    (m) =>
+      !(m.info.optimistic === true && m.info.id === incoming.info.id) &&
+      !m.info.id.startsWith(OPTIMISTIC_COMMAND_PREFIX),
+  );
   if (next.length === prev.length) return prev; // no optimistic entry to drop
   return next;
+}
+
+/**
+ * Id prefix of the placeholder for a slash command's user message. The box
+ * mints a command's message id, so the placeholder cannot carry it and is
+ * replaced by the first user message instead. A prompt's placeholder carries
+ * the id the message will have (see `buildOptimisticUserMessage`).
+ */
+export const OPTIMISTIC_COMMAND_PREFIX = "optimistic-user-";
+
+/**
+ * The optimistic transcript row for a message this panel just sent: the same
+ * shape the box's canonical user message has (text part, one `file` part per
+ * attachment), so an attachment shows from the first frame. `optimistic` marks
+ * it; its id is the id the prompt is sent with, so the canonical message
+ * replaces it by id.
+ */
+export function buildOptimisticUserMessage(args: {
+  id: string;
+  sessionId: string;
+  text: string;
+  attachments: ReadonlyArray<{ remotePath: string; mime: string; filename?: string }>;
+  now: number;
+}): OpencodeMessage {
+  const { id, sessionId, text, attachments, now } = args;
+  return {
+    info: { id, sessionID: sessionId, role: "user", optimistic: true, time: { created: now } },
+    parts: [
+      { id: `${id}:text:0`, messageID: id, sessionID: sessionId, type: "text", text },
+      ...attachments.map((a, i) => ({
+        id: `${id}:file:${i}`,
+        messageID: id,
+        sessionID: sessionId,
+        type: "file",
+        mime: a.mime,
+        ...(a.filename ? { filename: a.filename } : {}),
+        url: `file://${a.remotePath}`,
+      })),
+    ],
+  };
+}
+
+/**
+ * The transcript list minus every USER row the Pending card is showing — a
+ * message shows in the transcript or in the card, never both. Returns the same
+ * array when nothing is hidden (rows stay memo-stable); never mutates.
+ */
+export function hideCardPendingRows<M extends { info: { id: string; role: string } }, L extends M[] | null | undefined>(
+  messages: L,
+  cardIds: ReadonlySet<string>,
+): L {
+  if (!messages || messages.length === 0 || cardIds.size === 0) return messages;
+  const next = messages.filter((m) => !(m.info.role === "user" && cardIds.has(m.info.id)));
+  return (next.length === messages.length ? messages : next) as L;
 }
 
 // ===== Live tool output =====

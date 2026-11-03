@@ -346,7 +346,8 @@ describe("ChatPanel busy send + inbox", () => {
       const viaAlt = api.calls.opencodePrompt ?? [];
       expect(viaAlt).toHaveLength(1);
       expect(viaAlt[0][1]).toBe("hello idle");
-      expect((viaAlt[0][6] as { delivery?: string } | undefined)?.delivery).toBeUndefined();
+      // An idle send mints its message id client-side but carries no delivery.
+      expect(viaAlt[0][6]).toEqual({ messageID: expect.stringMatching(/^msg_/) });
       h!.unmount();
       h = null;
 
@@ -356,7 +357,9 @@ describe("ChatPanel busy send + inbox", () => {
       await key("Enter");
       const viaEnter = api.calls.opencodePrompt ?? [];
       expect(viaEnter).toHaveLength(1);
-      expect(viaAlt[0]).toEqual(viaEnter[0]);
+      // Same call as Enter apart from the minted id.
+      expect(viaAlt[0].slice(0, 6)).toEqual(viaEnter[0].slice(0, 6));
+      expect(viaEnter[0][6]).toEqual({ messageID: expect.stringMatching(/^msg_/) });
     });
   });
 

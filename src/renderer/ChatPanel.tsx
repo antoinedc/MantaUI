@@ -34,6 +34,9 @@ import { useModelsPicker } from "./modelsPicker";
 import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
+  OPTIMISTIC_COMMAND_PREFIX,
+  buildOptimisticUserMessage,
+  hideCardPendingRows,
   selectActiveTodos,
   turnInfoFromView,
   computeLiveTurn,
@@ -896,6 +899,15 @@ export function ChatPanel({
       ...localPending.filter((l) => !realIds.has(l.id)).map(({ settledAt: _s, ...l }) => l),
     ];
   }, [inboxItems, idleHiddenIds, localPending]);
+  // A message shows in the transcript OR in the card, never both: the
+  // transcript drops the user rows the card is displaying (an optimistic row
+  // carries its message's final id; a canonical row of a still-pending message
+  // is listed by the box too). While an idle send's item is hidden from the
+  // card the transcript keeps showing it.
+  const shownMessages = useMemo(
+    () => hideCardPendingRows(messages, new Set(cardItems.map((i) => i.id))),
+    [messages, cardItems],
+  );
   // One action in flight per row: cancel (×, ↑ edit last) and the delivery
   // change (Send now / Wait) share the busy set, so a row's controls are all
   // disabled while any of them is awaiting the box.
@@ -1816,35 +1828,40 @@ export function ChatPanel({
     // Optimistic transcript append — show the user's message NOW. The next
     // message-refetch (triggered by SSE) will overwrite `messages` entirely
     // with the canonical state.
-    const optimisticUserId = `optimistic-user-${Date.now()}`;
-    setMessages((prev) => [
-      ...(prev ?? []),
-      {
-        info: {
-          id: optimisticUserId,
-          sessionID: sessionId,
-          role: "user",
-          time: { created: Date.now() },
-        },
-        parts: [
-          {
-            id: `${optimisticUserId}-text`,
-            messageID: optimisticUserId,
-            type: "text",
-            text,
-          },
-        ],
-      },
-    ]);
+    //
+    // A prompt's row carries the id the message is sent with, so the box's
+    // canonical message replaces it exactly and the card/transcript can tell
+    // they are the same message. A slash command's id is minted by the box, so
+    // its placeholder keeps the prefix id and goes with the first user message.
+    // Only media chips become multimodal FileParts; path-ref chips were already
+    // folded into `text` above.
+    const readyAttachments = submitAttachments
+      .filter((a) => a.status === "ready" && a.remotePath && !a.asPathRef)
+      .map((a) => ({
+        remotePath: a.remotePath!,
+        mime: a.mime,
+        filename: a.filename,
+      }));
+    const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
+    const cmdName = slashMatch ? slashMatch[1] : null;
+    const knownCommand =
+      cmdName && commandsRef.current ? commandsRef.current.find((c) => c.name === cmdName) : null;
+    const optimisticUserId =
+      knownCommand && slashMatch ? `${OPTIMISTIC_COMMAND_PREFIX}${Date.now()}` : mintMessageId();
+    const optimisticRow = buildOptimisticUserMessage({
+      id: optimisticUserId,
+      sessionId,
+      text,
+      attachments: readyAttachments,
+      now: Date.now(),
+    });
+    setMessages((prev) => [...(prev ?? []), optimisticRow]);
     // Force-pin to the tail. The scroll is deferred to the force-tail effect
     // because the optimistic row above has not been committed yet — scrolling
     // here would land on the previous last message.
     forceTailRef.current = true;
 
     // Slash-command path: manta-local builtins → opencode commands → normal prompt.
-    const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
-    const cmdName = slashMatch ? slashMatch[1] : null;
-
     if (cmdName && MANTA_BUILTIN_NAMES.has(cmdName)) {
       setRunning(false);
       // manta builtins are renderer-only — no prompt actually sent, so strip
@@ -1871,19 +1888,6 @@ export function ChatPanel({
       }
       return;
     }
-
-    const knownCommand =
-      cmdName && commandsRef.current ? commandsRef.current.find((c) => c.name === cmdName) : null;
-
-    // Only media chips become multimodal FileParts; path-ref chips were
-    // already folded into `text` above.
-    const readyAttachments = submitAttachments
-      .filter((a) => a.status === "ready" && a.remotePath && !a.asPathRef)
-      .map((a) => ({
-        remotePath: a.remotePath!,
-        mime: a.mime,
-        filename: a.filename,
-      }));
 
     // Refuse only what the model positively declares it cannot take. A file
     // that maps to no media mode ("other") is refused on its own — that is a
@@ -2050,6 +2054,7 @@ export function ChatPanel({
           readyAttachments,
           resolvedMentions.length > 0 ? resolvedMentions : undefined,
           planAgent,
+          { messageID: optimisticUserId },
         );
       }
       setAttachments([]);
@@ -3553,7 +3558,7 @@ export function ChatPanel({
         <VoicePlaybackProvider active={isActive}>
           <ExplorerOwnerProvider owner={explorerOwner}>
           <Transcript
-            messages={messages}
+            messages={shownMessages ?? messages}
             virtuosoRef={virtuosoRef}
             sessionId={sessionId}
             setMessages={setMessages}

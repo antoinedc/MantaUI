@@ -3061,6 +3061,9 @@ export type OpencodeMessageInfo = {
   // True on a background child's result message (a `background-result` part,
   // OpencodeBackgroundResultPart below) — not something the model said.
   background?: true;
+  // Renderer-only: a user row the panel appended for a send the box has not
+  // confirmed yet. Never sent by the box.
+  optimistic?: true;
   time?: { created?: number; completed?: number };
   // assistant-only fields surfaced here for the model/cost line in the UI:
   modelID?: string;
