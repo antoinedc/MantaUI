@@ -47,6 +47,8 @@ import {
   resolveToolOutput,
   trimOutputEdges,
   reconcileOptimisticUser,
+  hideCardPendingRows,
+  buildOptimisticUserMessage,
   shouldForceReconnect,
   authProviderSeatId,
   shouldReconnectOnAppStateChange,
@@ -1315,6 +1317,80 @@ describe("reconcileOptimisticUser", () => {
     const incoming: Msg = assistantMsg("msg_real");
     // Assistant incoming → never reconciles, even if optimistic is present.
     expect(reconcileOptimisticUser(prev, incoming)).toBe(prev);
+  });
+
+  describe("a sent prompt's placeholder carries its final id", () => {
+    type OMsg = { info: { id: string; role: string; optimistic?: true } };
+    const row = (id: string, optimistic?: true): OMsg => ({ info: { id, role: "user", ...(optimistic ? { optimistic } : {}) } });
+
+    it("removes a same-id optimistic row", () => {
+      const prev: OMsg[] = [row("msg_a", true)];
+      expect(reconcileOptimisticUser(prev, row("msg_a"))).toEqual([]);
+    });
+
+    it("keeps a pending optimistic row when a DIFFERENT user message arrives", () => {
+      const prev: OMsg[] = [row("msg_a", true)];
+      expect(reconcileOptimisticUser(prev, row("msg_other"))).toBe(prev);
+    });
+
+    it("still drops a command placeholder on any user message", () => {
+      const prev: OMsg[] = [row("optimistic-user-1", true), row("msg_a", true)];
+      const result = reconcileOptimisticUser(prev, row("msg_other"));
+      expect(result!.map((m) => m.info.id)).toEqual(["msg_a"]);
+    });
+  });
+});
+
+// ===== hideCardPendingRows / buildOptimisticUserMessage =====
+
+describe("hideCardPendingRows", () => {
+  const m = (id: string, role: string) => ({ info: { id, role } });
+
+  it("hides a user row whose id is in the card", () => {
+    const msgs = [m("u1", "user"), m("u2", "user")];
+    expect(hideCardPendingRows(msgs, new Set(["u2"]))!.map((x) => x.info.id)).toEqual(["u1"]);
+  });
+
+  it("keeps a user row that is not in the card", () => {
+    const msgs = [m("u1", "user")];
+    expect(hideCardPendingRows(msgs, new Set(["other"]))).toBe(msgs);
+  });
+
+  it("never hides assistant rows, even with a matching id", () => {
+    const msgs = [m("a1", "assistant")];
+    expect(hideCardPendingRows(msgs, new Set(["a1"]))).toBe(msgs);
+  });
+
+  it("returns the same array reference when nothing is hidden (empty card, empty/null list)", () => {
+    const msgs = [m("u1", "user")];
+    expect(hideCardPendingRows(msgs, new Set())).toBe(msgs);
+    expect(hideCardPendingRows(null, new Set(["u1"]))).toBeNull();
+    const empty: ReturnType<typeof m>[] = [];
+    expect(hideCardPendingRows(empty, new Set(["u1"]))).toBe(empty);
+  });
+
+  it("does not mutate its input", () => {
+    const msgs = [m("u1", "user"), m("a1", "assistant")];
+    hideCardPendingRows(msgs, new Set(["u1"]));
+    expect(msgs).toHaveLength(2);
+  });
+});
+
+describe("buildOptimisticUserMessage", () => {
+  it("is a marked user row with the given id, a text part and a file part per attachment (canonical part shape)", () => {
+    const msg = buildOptimisticUserMessage({
+      id: "msg_x",
+      sessionId: "ses_1",
+      text: "look",
+      attachments: [{ remotePath: "/home/u/shot.png", mime: "image/png", filename: "shot.png" }, { remotePath: "/home/u/a.pdf", mime: "application/pdf" }],
+      now: 42,
+    });
+    expect(msg.info).toEqual({ id: "msg_x", sessionID: "ses_1", role: "user", optimistic: true, time: { created: 42 } });
+    expect(msg.parts).toEqual([
+      { id: "msg_x:text:0", messageID: "msg_x", sessionID: "ses_1", type: "text", text: "look" },
+      { id: "msg_x:file:0", messageID: "msg_x", sessionID: "ses_1", type: "file", mime: "image/png", filename: "shot.png", url: "file:///home/u/shot.png" },
+      { id: "msg_x:file:1", messageID: "msg_x", sessionID: "ses_1", type: "file", mime: "application/pdf", url: "file:///home/u/a.pdf" },
+    ]);
   });
 });
 
