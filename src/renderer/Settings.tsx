@@ -1501,7 +1501,7 @@ export function Settings({
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="titlebar-drag h-10 shrink-0" />
+        <div className="titlebar-drag h-11 shrink-0" />
         <div className="flex items-center gap-3 p-4 border-b border-border">
           <div className="flex-1">
             <div className="max-w-sm">
@@ -1509,7 +1509,6 @@ export function Settings({
             </div>
           </div>
           <button onClick={onClose} className="text-text-muted hover:text-text text-body px-3 py-2 rounded-xs hover:bg-bg-elev transition-colors inline-flex items-center" aria-label="Close settings"><X size={16} aria-hidden="true" /></button>
-          <div className="titlebar-inset-right" />
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">

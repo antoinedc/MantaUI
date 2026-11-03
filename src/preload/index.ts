@@ -117,6 +117,9 @@ const api = {
   revealInFolder: (localPath: string): Promise<void> =>
     ipcRenderer.invoke(IPC.revealInFolder, localPath),
 
+  setTitleBarOverlay: (colors: { color: string; symbolColor: string }): Promise<void> =>
+    ipcRenderer.invoke(IPC.setTitleBarOverlay, colors),
+
   // BET-1156: the one desktop download-to-downloads path. Main fetches
   // /api/download with the box token, writes to downloadsDir, and returns the
   // saved local path ("" on failure). Mirrors revealInFolder — OS-integration

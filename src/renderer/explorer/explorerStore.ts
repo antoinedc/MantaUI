@@ -201,6 +201,15 @@ export function useFileTargetActive(sessionId: string, abs: string, line?: numbe
   });
 }
 
+/** This session's Explorer is open and filling the content (Expanded). */
+export function useExplorerExpanded(sessionId: string | null): boolean {
+  return useSyncExternalStore(subscribe, () => {
+    if (!sessionId) return false;
+    const s = loadSession(sessionId);
+    return s.layout.open && isEffectivelyExpanded(s);
+  });
+}
+
 export function useSidebarHidden(): boolean {
   return useSyncExternalStore(subscribe, () => loadApp().sidebarHidden);
 }

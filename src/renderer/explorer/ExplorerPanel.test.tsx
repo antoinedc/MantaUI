@@ -316,6 +316,25 @@ describe("Expanded: rail and Esc", () => {
     expect(store.shownRightPanel("ses_a")).toBe("explorer");
   });
 
+  it("the rail and the top bar clear the corner through the pane inset variables", () => {
+    expandedSession();
+    expect(q(".manta-explorer-rail")!.style.paddingTop).toBe("max(var(--sp-3), var(--pane-inset-top, 0px))");
+    expect(q(".manta-explorer-top")!.style.paddingLeft).toBe("max(var(--sp-2), calc(var(--pane-inset-x, 0px) - 44px))");
+  });
+
+  it("the top bar leads with the sidebar restore button only while the sidebar is hidden, and only in Expanded", () => {
+    expandedSession();
+    const top = () => q(".manta-explorer-top")!;
+    expect(top().querySelector(".manta-sidebar-toggle")).toBeNull();
+    act(() => store.setSidebarHidden(true));
+    expect(top().querySelectorAll(".manta-sidebar-toggle")).toHaveLength(1);
+    // First control, before the tree toggle.
+    expect(top().firstElementChild!.querySelector(".manta-sidebar-toggle")).not.toBeNull();
+    // In the split the SessionHeader beside it carries the button, not this bar.
+    act(() => store.setExpanded("ses_a", false));
+    expect(top().querySelector(".manta-sidebar-toggle")).toBeNull();
+  });
+
   it("clicking the rail restores", () => {
     expandedSession();
     click(q(".manta-explorer-rail"));

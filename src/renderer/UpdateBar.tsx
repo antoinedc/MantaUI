@@ -89,10 +89,16 @@ export function UpdateBar({
     // needs the same reservation. `--titlebar-inset-right` evaluates to 0 on
     // macOS/Linux (neither defines the `titlebar-area-*` env vars), so this is
     // exactly `px-3` everywhere else. `tone` swaps ONLY the tint classes.
+    //
+    // The left pad is the mirror image: when this bar is the window's top edge
+    // and the sidebar is hidden, it — not the header below — owns the clearance
+    // for the macOS traffic lights (`--banner-inset-x`, 0 otherwise). It is also
+    // the window's top edge, so it drags the window; its buttons opt out.
     <div
-      className={`shrink-0 ${
+      className={`titlebar-drag shrink-0 ${
         danger ? "bg-danger/10 border-danger/30" : "bg-accent/10 border-accent/30"
-      } border-b pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2`}
+      } border-b pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2`}
+      style={{ paddingLeft: "max(var(--sp-3), var(--banner-inset-x, 0px))" }}
     >
       <span className="flex-1 truncate">{statusLabel}</span>
       {busy || progress ? (
@@ -119,14 +125,14 @@ export function UpdateBar({
             onClick={() => {
               onAction();
             }}
-            className={bannerBtn}
+            className={`titlebar-no-drag ${bannerBtn}`}
           >
             {actionLabel}
           </button>
           {dismissible && onDismiss && (
             <button
               onClick={() => onDismiss()}
-              className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+              className="titlebar-no-drag shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
               title="Dismiss"
               aria-label="Dismiss update"
             >

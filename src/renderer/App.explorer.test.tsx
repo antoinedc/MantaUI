@@ -9,15 +9,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { installCanvasStub, installMockApi, mount, resetStore, type Harness } from "./testHarness";
 import { useStore } from "./store";
+import { SidebarRevealButton } from "./SidebarToggle";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).__MANTA_CHANNEL__ = "prod";
 installCanvasStub();
 
 // Heavy / unrelated panes are stubs: this file is about the shell around them.
+// Each stubbed pane renders <SidebarRevealButton/> where its real header does (the
+// first child); the real headers' wiring is asserted in their own tests.
 vi.mock("./ChatPanel", () => ({
   ChatPanel: (p: { sessionId: string; artifactsOpen?: boolean; onToggleArtifacts?: () => void }) => (
     <div data-testid={`chat-${p.sessionId}`} data-artifacts={String(p.artifactsOpen)}>
+      <SidebarRevealButton />
       <button type="button" data-testid={`chat-artifacts-${p.sessionId}`} onClick={p.onToggleArtifacts}>
         artifacts
       </button>
@@ -25,8 +29,20 @@ vi.mock("./ChatPanel", () => ({
   ),
 }));
 vi.mock("./Terminal", () => ({ Terminal: () => <div data-testid="terminal" /> }));
-vi.mock("./CtoPanel", () => ({ CtoPanel: () => <div data-testid="cto" /> }));
-vi.mock("./RoutinesRoot", () => ({ RoutinesRoot: () => <div data-testid="routines" /> }));
+vi.mock("./CtoPanel", () => ({
+  CtoPanel: () => (
+    <div data-testid="cto">
+      <SidebarRevealButton />
+    </div>
+  ),
+}));
+vi.mock("./RoutinesRoot", () => ({
+  RoutinesRoot: () => (
+    <div data-testid="routines">
+      <SidebarRevealButton />
+    </div>
+  ),
+}));
 vi.mock("./ArtifactsPanel", () => ({
   ArtifactsPanel: (p: { open: boolean }) => <aside data-testid="artifacts" data-open={String(p.open)} />,
 }));
@@ -128,6 +144,8 @@ function key(init: KeyboardEventInit & { key: string }) {
   });
   return ev;
 }
+/** The one match of `sel` that is not inside the (inert while hidden) sidebar. */
+const outsideInert = (sel: string) => qa(sel).find((el) => !el.closest("[inert]")) ?? null;
 function click(el: Element | null) {
   expect(el).not.toBeNull();
   act(() => {
@@ -153,13 +171,16 @@ describe("⌘B sidebar + the pinned toggle", () => {
     // The hidden sidebar stays mounted (same node), just slid away.
     expect(q("aside")).toBe(aside);
     expect(aside.style.marginLeft).toBe("-256px");
-    // Panes pad their headers by the inset while it is hidden.
-    expect(q('[data-screen="session"]')!.style.getPropertyValue("--sidebar-hidden-inset")).toMatch(/^(112|40)px$/);
+    // While hidden the pane header owns the corner clearance (nothing off macOS
+    // beyond the RTL caption inset); visible, there is none to give.
+    const root = () => q('[data-screen="session"]')!;
+    expect(root().style.getPropertyValue("--pane-inset-x")).toBe("var(--tl-inset-x)");
+    expect(root().style.getPropertyValue("--tl-inset-x")).not.toBe("0px");
 
-    click(q(".manta-sidebar-toggle"));
+    click(outsideInert(".manta-sidebar-toggle"));
     expect(localStorage.getItem("manta:sidebarHidden")).toBe("0");
     expect(q("aside")!.hasAttribute("inert")).toBe(false);
-    expect(q('[data-screen="session"]')!.style.getPropertyValue("--sidebar-hidden-inset")).toBe("0px");
+    expect(root().style.getPropertyValue("--tl-inset-x")).toBe("0px");
   });
 
   it("starts hidden when it was left hidden", async () => {
@@ -168,13 +189,13 @@ describe("⌘B sidebar + the pinned toggle", () => {
     expect(q("aside")!.hasAttribute("inert")).toBe(true);
   });
 
-  it("the toggle exists exactly once on a chat pane, a terminal pane, the CTO pane and Routines — outside the inert sidebar", async () => {
+  it("a restore control exists exactly once on a chat pane, a terminal pane (the App titlebar), the CTO pane and Routines — outside the inert sidebar", async () => {
     act(() => store.setSidebarHidden(true)); // hidden is the case that needs a restore control
     await mountApp();
     const check = (where: string) => {
-      const toggles = qa(".manta-sidebar-toggle");
+      // Inactive panes stay mounted under display:none; only the visible pane counts.
+      const toggles = qa(".manta-sidebar-toggle").filter((t) => !t.closest('[inert], [style*="display: none"]'));
       expect(toggles, where).toHaveLength(1);
-      expect(toggles[0].closest("[inert]"), where).toBeNull();
       expect(toggles[0].getAttribute("aria-label"), where).toBe("Show sidebar");
     };
     check("chat");
@@ -189,7 +210,11 @@ describe("⌘B sidebar + the pinned toggle", () => {
     check("terminal");
 
     // CTO and Routines panes are opened from the (inert while hidden) sidebar,
-    // so reveal it, click through, and hide it again.
+    // so reveal it, click through, and hide it again. (From a chat window: over
+    // a terminal window the App titlebar stays up above the CTO pane's own header.)
+    await act(async () => {
+      await useStore.getState().setActive("p", 0);
+    });
     act(() => store.setSidebarHidden(false));
     click(q('[aria-label="Open the CTO overview"]'));
     act(() => store.setSidebarHidden(true));

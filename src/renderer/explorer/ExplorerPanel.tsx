@@ -12,6 +12,7 @@ import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
 import { Folder, ListTree, Maximize2, Minimize2, Search, X } from "lucide-react";
 import { IconButton } from "../IconButton";
 import { StatusDot } from "../StatusDot";
+import { SidebarRevealButton } from "../SidebarToggle";
 import { useStore, resolveSessionOwner } from "../store";
 import { IS_MAC } from "../platform";
 import { ExplorerViewer } from "./ExplorerViewer";
@@ -50,7 +51,6 @@ import {
   toggleExpanded,
   useExplorerSession,
   useMdView,
-  useSidebarHidden,
 } from "./explorerStore";
 
 // Shortcut labels for titles (⌘ off macOS is Ctrl).
@@ -203,10 +203,7 @@ export function ExplorerSplit({
 export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: string }) {
   const st = useExplorerSession(sessionId);
   const mdView = useMdView();
-  const sidebarHidden = useSidebarHidden();
   const expanded = isEffectivelyExpanded(st);
-  // Hidden sidebar on macOS: the rail is the window's top-left, under the traffic lights.
-  const railClearsTrafficLights = sidebarHidden && IS_MAC;
   const owner = useMemo<ExplorerOwner>(() => ({ sessionId, cwd }), [sessionId, cwd]);
   const root = st.root ?? cwd;
 
@@ -293,7 +290,11 @@ export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: stri
         <button
           type="button"
           onClick={() => restoreExplorer(sessionId)}
-          className={`manta-explorer-rail flex w-11 shrink-0 flex-col items-center gap-3 border-r border-border bg-bg ${railClearsTrafficLights ? "pt-10" : "pt-3"} hover:bg-fill-hover`}
+          className="manta-explorer-rail flex w-11 shrink-0 flex-col items-center gap-3 border-r border-border bg-bg hover:bg-fill-hover"
+          // The rail is the window's top-left in Expanded mode, narrower than the
+          // macOS traffic lights: its content starts below them while the sidebar
+          // is hidden and no banner owns that corner (`--pane-inset-top`, else 0).
+          style={{ paddingTop: "max(var(--sp-3), var(--pane-inset-top, 0px))" }}
           aria-label="Back to transcript"
           title="Back to transcript (Esc)"
         >
@@ -305,8 +306,9 @@ export function ExplorerPanel({ sessionId, cwd }: { sessionId: string; cwd: stri
       <div ref={colRef} className="flex min-w-0 flex-1 flex-col">
         <div
           className="manta-explorer-top titlebar-drag flex h-11 shrink-0 items-center gap-1 border-b border-border px-2"
-          style={expanded ? { paddingLeft: "max(var(--sp-2), calc(var(--sidebar-hidden-inset, 0px) - 44px))" } : undefined}
+          style={expanded ? { paddingLeft: "max(var(--sp-2), calc(var(--pane-inset-x, 0px) - 44px))" } : undefined}
         >
+          {expanded && <SidebarRevealButton />}
           <span className="titlebar-no-drag inline-flex">
             <IconButton
               icon={<ListTree className={st.layout.treeOpen ? "text-[var(--accent-tx)]" : undefined} />}

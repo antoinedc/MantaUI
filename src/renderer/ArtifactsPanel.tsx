@@ -893,9 +893,12 @@ export function ArtifactsPanel({
 
         {/* Header: title + actions, then the tab bar. Compact and borderless to
             match the design's `.phead`/`.ptop` rhythm (sp-3 top, sp-3 gap to
-            the tabs) — not a 44px titlebar with a divider. */}
+            the tabs) — not a 44px titlebar with a divider. This panel touches
+            the window's right edge while open, so its title row (not the session
+            header beside it) reserves the OS caption buttons' strip — 0 off
+            Windows. */}
         <div className="shrink-0 px-3 pt-3">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex items-center justify-between pr-[var(--titlebar-inset-right)]">
             <span className="min-w-0 truncate text-label font-semibold text-text">
               Artifacts
             </span>

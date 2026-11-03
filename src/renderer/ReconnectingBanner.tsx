@@ -48,15 +48,19 @@ export function ReconnectingBanner({ state, onRetryNow }: ReconnectingBannerProp
       // Same top-of-window caption-button reservation as UpdateBar — this
       // banner also renders above the titlebar row and also carries a
       // right-aligned button ("Retry now"), which the Windows caption buttons
-      // covered. 0 on macOS/Linux, so identical to `px-3` there.
-      className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2"
+      // covered. 0 on macOS/Linux, so identical to `px-3` there. The left pad
+      // clears the macOS traffic lights when this bar is the window's top edge
+      // over a hidden sidebar (`--banner-inset-x`, 0 otherwise); as that top
+      // edge it also drags the window, and its button opts out.
+      className="titlebar-drag shrink-0 bg-accent/10 border-b border-accent/30 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2"
+      style={{ paddingLeft: "max(var(--sp-3), var(--banner-inset-x, 0px))" }}
     >
       <span className="flex-1 truncate">
         {renderCopy(state)}
       </span>
       <button
         onClick={onRetryNow}
-        className={BANNER_BTN}
+        className={`titlebar-no-drag ${BANNER_BTN}`}
         title="Reset backoff and reconnect immediately"
       >
         Retry now

@@ -47,7 +47,8 @@ import { Dropdown, MenuItem } from "./MenuItem";
 import { Popover } from "./Popover";
 import { useStore, resolveSessionOwner } from "./store";
 import { MOD_KEY } from "./platform";
-import { toggleExplorer, useExplorerOpen } from "./explorer/explorerStore";
+import { toggleExplorer, useExplorerExpanded, useExplorerOpen, useShownRightPanel } from "./explorer/explorerStore";
+import { SidebarRevealButton } from "./SidebarToggle";
 import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
 import { previousEntryLabel, type PreviousSessionEntry } from "./handoff";
@@ -243,6 +244,17 @@ export function SessionHeader({
     : null;
   const explorerOpen = useExplorerOpen(sessionId ?? null);
   const hasOwnerWindow = useStore((s) => (sessionId ? resolveSessionOwner(s.projects, sessionId) !== null : false));
+  // The header that touches the window's right edge reserves the OS caption
+  // buttons' strip (Windows). When a right-hand panel is shown it is that
+  // panel's header that does (Explorer top bar / Artifacts title row), so this
+  // one gives the strip back. A host with no panel toggle never has one; an
+  // Explorer with no owning window is not rendered.
+  const rightPanel = useShownRightPanel(sessionId ?? null);
+  const panelOwnsRightEdge =
+    !!artifactsToggle && !routineChrome && (rightPanel === "artifacts" || (rightPanel === "explorer" && hasOwnerWindow));
+  // The Explorer's Expanded mode folds this header away; its top bar then
+  // carries the sidebar restore button instead, so exactly one copy shows.
+  const explorerExpanded = useExplorerExpanded(sessionId ?? null) && hasOwnerWindow;
   const crumb = breadcrumb
     ? breadcrumb.window
       ? `${breadcrumb.project} / ${breadcrumb.window}`
@@ -429,9 +441,12 @@ export function SessionHeader({
     <>
       <div
         ref={headerRef}
-        className="manta-session-header flex items-center gap-2 h-11 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
-        style={{ paddingLeft: "max(var(--sp-3), var(--sidebar-hidden-inset, 0px))", WebkitAppRegion: "drag" } as CSSProperties}
+        className={`manta-session-header flex items-center gap-2 h-11 ${
+          panelOwnsRightEdge ? "pr-3" : "pr-[calc(var(--sp-3)+var(--titlebar-inset-right))]"
+        } border-b border-border shrink-0 min-w-0`}
+        style={{ paddingLeft: "max(var(--sp-3), var(--pane-inset-x, 0px))", WebkitAppRegion: "drag" } as CSSProperties}
       >
+      {!explorerExpanded && <SidebarRevealButton />}
       {/* Breadcrumb — workspace / session. This names WHERE YOU ARE, and it is
             the header's primary job: one window shows many sessions across
             many workspaces, and the branch alone does not identify one. It is

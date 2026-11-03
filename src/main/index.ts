@@ -37,7 +37,7 @@ import {
   readClipboardImageBuffer,
 } from "./screenshotDetector.js";
 import { checkForUpdates } from "./autoUpdate.js";
-import { titleBarOptions } from "./windowChrome.js";
+import { titleBarOptions, titleBarOverlayUpdate } from "./windowChrome.js";
 import {
   shouldAllowNavigation,
   externalUrlOrNull,
@@ -368,6 +368,17 @@ function registerHandlers(): void {
       : localPath;
     if (!existsSync(abs)) return;
     shell.showItemInFolder(abs);
+  });
+
+  // Windows caption buttons follow the theme (renderer sends the resolved header
+  // colours). Pure validation + the win32 gate live in windowChrome.ts.
+  ipcMain.handle(IPC.setTitleBarOverlay, (e, colors: unknown) => {
+    const overlay = titleBarOverlayUpdate(process.platform, colors);
+    if (!overlay) {
+      if (process.platform === "win32") console.warn("setTitleBarOverlay: refused non-#RRGGBB colours", colors);
+      return;
+    }
+    BrowserWindow.fromWebContents(e.sender)?.setTitleBarOverlay(overlay);
   });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));

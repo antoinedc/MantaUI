@@ -2,8 +2,6 @@
 // tokens (docs/screens/explorer/contract.md §Constants; same precedent as the
 // Artifacts panel's 340 px default width). Pure helpers only.
 
-import { IS_MAC } from "../platform";
-
 /** Explorer `defaultSize` (react-resizable-panels v4: a string is a percent). */
 export const EXPLORER_DEFAULT_SIZE = "48%";
 /** The same default as a plain percent, for stored ratios. */
@@ -32,16 +30,32 @@ export const LOADING_DELAY_MS = 150;
 /** The "Updated" pill in the file bar. */
 export const UPDATED_PILL_MS = 3000;
 
-/** Value of `--sidebar-hidden-inset` while the sidebar is hidden. */
-export function sidebarHiddenInsetPx(isMac: boolean): number {
-  return isMac ? 112 : 40;
-}
-export const SIDEBAR_HIDDEN_INSET_PX = sidebarHiddenInsetPx(IS_MAC);
+/** Left edge of app content clear of the macOS traffic lights (x 14 … ~70). */
+export const TRAFFIC_LIGHT_INSET_PX = 76;
+/** Top edge of the Expanded rail's content clear of the traffic lights. */
+export const TRAFFIC_LIGHT_INSET_TOP_PX = 40;
 
-/** Pinned sidebar toggle position (right of the macOS traffic lights). */
-export const SIDEBAR_TOGGLE_TOP_PX = 10;
-export function sidebarToggleLeftPx(isMac: boolean): number {
-  return isMac ? 76 : 8;
+export type CornerInsetInput = { isMac: boolean; sidebarHidden: boolean; bannerShown: boolean };
+
+/**
+ * The four CSS variables that give each window corner one owner (spec §1).
+ * The traffic lights only cover app content while the sidebar is hidden; a top
+ * banner is then the element at the window's top-left and owns the clearance, so
+ * the pane headers below it do not repeat it. `--titlebar-inset-left` is the
+ * caption-button width on right-to-left Windows (0 everywhere else).
+ */
+export function cornerInsetVars({ isMac, sidebarHidden, bannerShown }: CornerInsetInput): Record<string, string> {
+  const tl = !sidebarHidden
+    ? "0px"
+    : isMac
+      ? `max(${TRAFFIC_LIGHT_INSET_PX}px, var(--titlebar-inset-left, 0px))`
+      : "var(--titlebar-inset-left, 0px)";
+  return {
+    "--tl-inset-x": tl,
+    "--banner-inset-x": bannerShown ? "var(--tl-inset-x)" : "0px",
+    "--pane-inset-x": bannerShown ? "0px" : "var(--tl-inset-x)",
+    "--pane-inset-top": isMac && sidebarHidden && !bannerShown ? `${TRAFFIC_LIGHT_INSET_TOP_PX}px` : "0px",
+  };
 }
 
 /** localStorage keys. */
