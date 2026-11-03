@@ -143,6 +143,13 @@ test("the release ships the V2 plugins and no longer the V1 plugin directory", (
   assert.ok(!include.includes("docs/opencode-plugins"));
 });
 
+test("the release ships CHANGELOG.md and owns it on the box, so an update replaces it", () => {
+  const include = evalArrayLiteral("INCLUDE");
+  const owned = evalArrayLiteral("OWNED_ON_BOX", { INCLUDE: include });
+  assert.ok(include.includes("CHANGELOG.md"), "the server serves its release notes from CHANGELOG.md");
+  assert.ok(owned.includes("CHANGELOG.md"));
+});
+
 // --- stageOpencodeBinary: the pinned OpenCode V2 binary rides in the tarball ----------------
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";

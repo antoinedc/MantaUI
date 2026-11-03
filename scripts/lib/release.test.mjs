@@ -198,6 +198,22 @@ test("replace_release_payload replaces every included path, including runtime", 
   }
 });
 
+test("replace_release_payload replaces a stale top-level CHANGELOG.md with the release's", () => {
+  const pkg = makePkg([...PKG_INCLUDES, "CHANGELOG.md"]);
+  writeTree(pkg, { "CHANGELOG.md": "## 1.3.0 — new" });
+  const dest = makeInstalledDest();
+  writeTree(dest, { "CHANGELOG.md": "## 1.2.0 — stale" });
+  try {
+    const { status } = runReplace(pkg, dest);
+    assert.equal(status, 0);
+    assert.equal(readTree(dest)["CHANGELOG.md"], "## 1.3.0 — new");
+    assertNoStagingDirs(dest);
+  } finally {
+    rmSync(pkg, { recursive: true, force: true });
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
 test("the list is read from the INCOMING RELEASE.json, not the installed one", () => {
   const pkg = makePkg(PKG_INCLUDES);
   const dest = makeInstalledDest(); // installed includes omits `runtime`

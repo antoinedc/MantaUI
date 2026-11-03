@@ -1,17 +1,17 @@
 # Changelog
 
 User-facing changes per release. Each release names the components it ships:
-**Box** (server, `server-v*`), **Desktop** (macOS `mac-v*` + Windows `win-v*`),
+**Server** (`server-v*`), **Desktop** (macOS `mac-v*` + Windows `win-v*`),
 **iOS** (`ios-v*`, TestFlight), **Website** (`web-v*`), **Gateway**
 (`gateway-v*`). A component not listed in a release did not change.
 
-Desktop and Box share one version number (`package.json`); iOS has its own
+Desktop and Server share one version number (`package.json`); iOS has its own
 (`MARKETING_VERSION` in `mobile/native/project.yml`).
 
-## 1.3.0 — Box + Desktop — 2026-11-03
+## 1.3.0 — Server + Desktop — 2026-11-03
 
-Ships: Box `server-v1.3.0`, Desktop `mac-v1.3.0` / `win-v1.3.0`, Website
-`web-v1.3.0` (publishes the box update manifest only). iOS and Gateway
+Ships: Server `server-v1.3.0`, Desktop `mac-v1.3.0` / `win-v1.3.0`, Website
+`web-v1.3.0` (publishes the server update manifest only). iOS and Gateway
 unchanged.
 
 ### File explorer (Desktop)
@@ -21,12 +21,12 @@ unchanged.
   opens with the tree showing and slides in and out.
 - **Clickable file paths.** Paths the agent mentions in the transcript, in tool
   cards and in the terminal open straight in the viewer.
-- **Files anywhere on the box.** Preview, download and browse are no longer
+- **Files anywhere on the server.** Preview, download and browse are no longer
   limited to the home folder.
 - **⌘B toggles the sidebar**, with a button pinned in the session header.
   Window corners are tidied up, and Windows gets themed caption buttons.
 
-### Multiple Claude accounts (Box)
+### Multiple Claude accounts (Server)
 - **Spend the quota that expires first.** New and rebalanced conversations go to
   the account whose weekly allowance resets soonest, so less paid quota lapses
   unused, while the 5-hour window is still packed where that costs nothing.
@@ -39,13 +39,13 @@ unchanged.
   in the pending card, never both, and keeps its attachments while sending.
 - **Background jobs cut off by an opencode restart now end** with a result
   instead of looking busy forever.
-- **Lighter box.** The status poller no longer spawns a process for every chat
+- **Lighter server.** The status poller no longer spawns a process for every chat
   window every two seconds.
 
-## 1.2.0 — Box + Desktop — 2026-11-01
+## 1.2.0 — Server + Desktop — 2026-11-01
 
-Ships: Box `server-v1.2.0`, Desktop `mac-v1.2.0` / `win-v1.2.0`, Website
-`web-v1.2.0` (publishes the box update manifest only). iOS and Gateway
+Ships: Server `server-v1.2.0`, Desktop `mac-v1.2.0` / `win-v1.2.0`, Website
+`web-v1.2.0` (publishes the server update manifest only). iOS and Gateway
 unchanged.
 
 ### Routines
@@ -78,10 +78,10 @@ unchanged.
 - Menus opened inside a dialog now sit above it; breadcrumb links are clickable
   on macOS.
 
-## 1.1.0 — Box + Desktop · iOS 1.2.0 — 2026-10-29
+## 1.1.0 — Server + Desktop · iOS 1.2.0 — 2026-10-29
 
-Ships: Box `server-v1.1.0`, Desktop `mac-v1.1.0` / `win-v1.1.0`, iOS
-`ios-v1.2.0`, Website `web-v1.1.0` (publishes the box update manifest only).
+Ships: Server `server-v1.1.0`, Desktop `mac-v1.1.0` / `win-v1.1.0`, iOS
+`ios-v1.2.0`, Website `web-v1.1.0` (publishes the server update manifest only).
 Gateway unchanged.
 
 ### Talking to a running agent
@@ -90,7 +90,7 @@ Gateway unchanged.
   "after this turn" instead. Desktop and iOS.
 - **Pending messages card.** Messages waiting for the agent are listed above the
   composer with **Send now**, **Wait** and **×**; **↑** edits the last one. The
-  list lives on the box, so it survives a reload and shows on every device.
+  list lives on the server, so it survives a reload and shows on every device.
 - **Background slash commands.** An opencode command or skill can be run in the
   background from the composer; it gets its own card and result in the
   transcript.
@@ -133,10 +133,10 @@ Gateway unchanged.
 ### iOS
 - Send while the agent is running, with the pending-messages list.
 - Broad parity with desktop (waves A–C): the same session, transcript and
-  background-job behaviour, with shared logic moved onto the box.
+  background-job behaviour, with shared logic moved onto the server.
 - Handoff cards.
 
-### Box
+### Server
 - Follows the desktop's timezone.
 - Model catalogue is cached, so sessions stop resetting to "Server default"
   (and a catalogue read taken mid-restart is no longer cached as good).
@@ -147,5 +147,5 @@ Gateway unchanged.
 
 ## 1.0.0 — 2026-10-23
 
-OpenCode V2 cutover: the box runs a pinned OpenCode V2 and migrates existing
+OpenCode V2 cutover: the server runs a pinned OpenCode V2 and migrates existing
 history automatically on update. Earlier releases are recorded only in git tags.

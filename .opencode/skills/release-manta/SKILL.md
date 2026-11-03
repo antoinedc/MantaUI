@@ -36,7 +36,7 @@ Diff each component's paths from ITS last tag to `origin/main`
 
 | Component | Tag | Paths that make it "changed" |
 |---|---|---|
-| Box server | `server-v*` | `src/server src/shared scripts docs/opencode-tools docs/opencode-plugins-v2 package.json package-lock.json` |
+| Server | `server-v*` | `src/server src/shared scripts docs/opencode-tools docs/opencode-plugins-v2 package.json package-lock.json` |
 | Desktop (mac + win, always together) | `mac-v*`, `win-v*` | `src/renderer src/main src/preload src/shared electron-builder*.yml assets package.json` |
 | iOS | `ios-v*` | `mobile/native` |
 | Website | `web-v*` | `website scripts/install.sh llms-install.md` — **and also whenever the box server is released** (`website/updates/server.json` is published by the web deploy; without it boxes never see the update) |
@@ -64,10 +64,10 @@ Read bodies (`git show -s <sha>`) of anything whose subject is unclear.
   **patch** if fixes only, **major** only for a wire-contract break (that also
   needs `supportedMajor` in `src/shared/compatibility.mjs` — never bump major
   without the user's explicit go-ahead).
-- **Desktop + box share `package.json` `version`.** If either changed, bump it:
+- **Desktop + server share `package.json` `version`.** If either changed, bump it:
   `npm version X.Y.Z --no-git-tag-version --ignore-scripts` (updates
   `package-lock.json` too).
-- **Box released → also set `website/updates/server.json` `version`** to the
+- **Server released → also set `website/updates/server.json` `version`** to the
   same value (that file drives the "Update the box?" banner).
 - **iOS:** bump `MARKETING_VERSION` in `mobile/native/project.yml` (the
   xcodegen source of truth; leave the derived `project.pbxproj` alone). Never
@@ -79,7 +79,7 @@ Read bodies (`git show -s <sha>`) of anything whose subject is unclear.
 Add a new top section under the intro, newest first:
 
 ```
-## <desktop/box version> — <components> · iOS <ios version> — YYYY-MM-DD
+## <desktop/server version> — <components> · iOS <ios version> — YYYY-MM-DD
 
 Ships: <exact tags>. <Unchanged components> unchanged.
 
@@ -88,16 +88,67 @@ Ships: <exact tags>. <Unchanged components> unchanged.
 ```
 
 Rules: plain user-facing language (behaviour, not function names); group by
-theme, then a short per-surface section (Desktop / iOS / Box); merge related
+theme, then a short per-surface section (Desktop / iOS / Server); merge related
 commits into one bullet; skip internal refactors unless they change behaviour;
 name both platforms when a feature landed on both.
+
+**Write "server", never "box"**, in every user-facing line. The heading's
+component label is `Server` (e.g. `## 1.4.0 — Server + Desktop — 2026-11-10`).
+Tag names (`server-v1.4.0`) stay as they are.
+
+**Decide on highlights.** The desktop shows a "What's new" window after an
+update. If the release has 1–3 changes a user would want to go and try (a new
+capability or a visibly new surface), add a highlights block as an HTML comment
+directly under the heading (invisible on GitHub), above the `Ships:` line:
+
+```
+## 1.4.0 — Server + Desktop — 2026-11-10
+
+<!-- highlights
+headline: Routines are here
+items:
+  - title: Routines
+    icon: repeat
+    text: Recurring work in a fresh session each run, with a report you can follow up on.
+    action: routines
+  - title: Cheaper handoffs
+    icon: arrow-left-right
+    text: Cold-cache handoffs are written by a cheap model from a condensed transcript.
+    action: settings:models
+-->
+
+Ships: …
+```
+
+- Fixes, polish and internal work never qualify. Zero qualifying changes → no
+  block (the window then shows the release notes). Never pad to three.
+- `headline` is optional (default "What's new in Manta X.Y.Z"). 1–3 `items`.
+- Each item: `title` ≤ 3 words, `text` ≤ 110 characters.
+- `icon` — exactly one of: `sparkles` (default), `repeat`, `arrow-left-right`,
+  `refresh-cw`, `zap`, `message-square`, `terminal`, `folder`, `settings`,
+  `shield`, `bell`, `mic`, `gauge`, `git-branch`, `calendar-clock`.
+- `action` — optional, exactly one of: `routines`, or `settings:<section>` with
+  `<section>` one of `general`, `box`, `accounts`, `models`, `sessions`,
+  `files`, `extensions`, `secrets`, `voice` (these are internal section ids;
+  `box` is the Settings section about the server, whatever its label says).
+- More than 3 items, bad YAML or a wrong shape makes the whole block ignored.
+
+Validate before committing:
+
+```bash
+node scripts/release/check-changelog.mjs
+```
+
+It runs the server's own parser on `CHANGELOG.md`, exits non-zero on an invalid
+block or an unknown icon/action, and prints what the newest entry will show
+(window B with N cards, or window A = release notes).
 
 ## 5. Bump PR → merge
 
 ```bash
 git switch -c chore/release-X.Y.Z
 git add package.json package-lock.json website/updates/server.json mobile/native/project.yml CHANGELOG.md
-git commit -m "chore(release): X.Y.Z (box + desktop), iOS A.B.C"
+git commit -m "chore(release): X.Y.Z (server + desktop), iOS A.B.C"
 git push -u origin HEAD
 gh pr create --title "chore(release): …" --body "<what / tags to push / verification>"
 gh pr checks --watch            # typecheck-test is the required check

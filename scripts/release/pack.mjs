@@ -159,6 +159,7 @@ const INCLUDE = [
   "package-lock.json",
   "README.md",
   "llms-install.md",
+  "CHANGELOG.md", // read by the server for the desktop's "What's new" window; release-owned so an update replaces it
 ];
 
 // Paths the release OWNS on an installed box — the list self-update.sh
