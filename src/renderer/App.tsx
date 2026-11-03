@@ -61,6 +61,8 @@ import { boxNeedsMajorUpgrade } from "./upgradeGateLogic";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
 import { UsageResumeModal } from "./UsageResumeModal";
+import { WhatsNewModal } from "./WhatsNewModal";
+import { useWhatsNew } from "./useWhatsNew";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import {
@@ -1824,6 +1826,22 @@ function Shell() {
     if (upgradeGate.visible && upgradeGate.connected) setUpdateRefreshKey((k) => k + 1);
   }, [upgradeGate.visible, upgradeGate.connected]);
 
+  // "What's new" after an update: fetched on connect / reconnect / gate clear, and
+  // held back while anything else owns the screen. Settings → About opens it by
+  // hand (`showEntry`).
+  const whatsNew = useWhatsNew({
+    connected: connectionState.state === "connected",
+    apiGeneration,
+    gateVisible: upgradeGate.visible,
+    blocked:
+      settingsOpen ||
+      searchOpen ||
+      previewPath != null ||
+      confirmServerUpdate ||
+      updateAllConfirmBody != null ||
+      resumeModalOpen,
+  });
+
   // BET-1195: the DESKTOP leg's presentation, decided by the pure shared helper
   // (`desktopUpdateBusy`) so the banner and Settings can never disagree. null
   // while no desktop update is running; otherwise the download label/progress
@@ -2454,6 +2472,11 @@ function Shell() {
           // restarting.
           onDesktopUpdate={() => void runDesktopDownload()}
           desktopRestarting={desktopRestarting}
+          // About → "What's new": close Settings, then show the newest entry.
+          onShowWhatsNew={(entry) => {
+            setSettingsOpen(false);
+            whatsNew.showEntry(entry);
+          }}
         />
       )}
       {previewPath && (
@@ -2527,6 +2550,19 @@ function Shell() {
           the limit toast's "Keep going at reset"; closing stamps last-looked
           so "new" badges clear. The box supplies the rows (and their names). */}
       <UsageResumeModal open={resumeModalOpen} onClose={() => setResumeModalOpen(false)} />
+      {whatsNew.view && (
+        <WhatsNewModal
+          key={whatsNew.view.entries[0].version}
+          entries={whatsNew.view.entries}
+          previous={whatsNew.view.previous}
+          onClose={whatsNew.close}
+          onOpenRoutines={() => setRoutinesView({ page: "list" })}
+          onOpenSettings={(section) => {
+            setSettingsSection(section);
+            setSettingsOpen(true);
+          }}
+        />
+      )}
     </div>
   );
 }

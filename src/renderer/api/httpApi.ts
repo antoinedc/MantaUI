@@ -1543,6 +1543,7 @@ export const httpApi: Api = {
   // version the box's release ships. Settings → About may render it in this
   // same round-trip — no new IPC channel.
   getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>(IPC.getServerVersion),
+  serverChangelog: () => rpc("server:changelog", {}),
   apiVersion: async () => {
     const res = await fetchWithTimeout(
       `${serverBase()}/api/version`,

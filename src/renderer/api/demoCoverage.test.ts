@@ -231,6 +231,7 @@ export const DEMO_UNIMPLEMENTED = [
   "secretsSessionInfo",
   "secretsSet",
   "secretsUpdate",
+  "serverChangelog",
   "serverCliUpdate",
   "serverUpdateApply",
   "serverUpdateCheck",
