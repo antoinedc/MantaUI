@@ -8,6 +8,37 @@ User-facing changes per release. Each release names the components it ships:
 Desktop and Server share one version number (`package.json`); iOS has its own
 (`MARKETING_VERSION` in `mobile/native/project.yml`).
 
+## 1.3.1 — Server + Desktop — 2026-11-03
+
+<!-- highlights
+headline: Know what changed
+items:
+  - title: What's new
+    icon: sparkles
+    text: After an update, a short window shows what's new on your server — once, then never again.
+    action: settings:general
+  - title: Release notes
+    icon: bell
+    text: Big releases get highlight cards like these; smaller ones show their release notes.
+  - title: Routines
+    icon: repeat
+    text: Recurring work in a fresh session each run, with a report you can follow up on.
+    action: routines
+-->
+
+Ships: Server `server-v1.3.1`, Desktop `mac-v1.3.1` / `win-v1.3.1`. TEST ENTRY —
+not a real release.
+
+### Updates
+- **"What's new" after an update.** The first time you connect after the server
+  updates, a window shows what changed. Closing it records that you've seen it.
+- **Settings → About → What's new** reopens it at any time.
+- **Highlights are decided per release.** Releases with something to try get
+  cards; the rest show plain release notes.
+
+### Server
+- Release notes now ship with the server, so they stay current after an update.
+
 ## 1.3.0 — Server + Desktop — 2026-11-03
 
 Ships: Server `server-v1.3.0`, Desktop `mac-v1.3.0` / `win-v1.3.0`, Website
