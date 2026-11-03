@@ -21,7 +21,7 @@ import { formatTokens } from "../shared/formatTokens.mjs";
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
 import { isDeprecated } from "../shared/modelGuide.mjs";
-import { bestSeatByRank, leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
+import { bestSeatByRank, leastLoadedSeat, seatLoad, shortWindowState } from "../shared/seatChoice.mjs";
 import { windowTone } from "../shared/usageWindowTone.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
@@ -2924,9 +2924,10 @@ export function selectConversationSeat(
 /**
  * Where a NEW conversation / a move would go, as a seat id other than
  * `currentSeatId`. Prefers the server-provided `nextSeatId`; when that is the
- * current seat itself (or absent on an older box) it ranks the other usable
- * seats with seatChoice's `bestSeatByRank` — the order the server's own
- * placement uses (earliest weekly reset first, then load); K is unknown here
+ * current seat itself (or absent on an older box) it mirrors the server's R1
+ * tiers over the other usable seats — room and a 5h window under 95, then room,
+ * ranked with seatChoice's `bestSeatByRank` (earliest weekly reset first, then
+ * load), then the least loaded; K is unknown here
  * (`kFor: () => null`), so slack never reorders. Null when there is no other
  * usable seat. `nowMs` is the caller's clock.
  */
@@ -2940,7 +2941,30 @@ export function nextSeatHint(
   if (others.length === 0) return null;
   const served = view.nextSeatId ? others.find((s) => s.id === view.nextSeatId) : undefined;
   if (served) return served.id;
-  return bestSeatByRank(others.map(asSeatSnapshot), { nowMs, kFor: () => null, activeSeatId: view.activeSeatId })?.seatId ?? null;
+  // The server's R1 tiers (seatAssignment.chooseSeatByDeadline): a seat with room and a known 5h
+  // window under 95 first, then any seat with room, each ranked by `bestSeatByRank`; and only when
+  // every seat is full the least loaded one.
+  const snaps = others.map(asSeatSnapshot);
+  const rankOpts = { nowMs, kFor: () => null, activeSeatId: view.activeSeatId };
+  const soft = snaps.filter((x) => !snapFull(x) && shortPctKnown(x, nowMs) < SEAT_MOVE_LOAD_PCT);
+  const room = snaps.filter((x) => !snapFull(x));
+  for (const tier of [soft, room]) {
+    const pick = bestSeatByRank(tier, rankOpts);
+    if (pick) return pick.seatId;
+  }
+  return leastLoadedSeat(snaps, { activeSeatId: view.activeSeatId })?.seatId ?? null;
+}
+
+/** seatAssignment.isSeatFull for a renderer snapshot (that module is server-only): exhausted, or a window at 100. */
+function snapFull(snap: ReturnType<typeof asSeatSnapshot>): boolean {
+  return snap.exhausted === true || (seatLoad(snap) ?? -1) >= 100;
+}
+
+/** The 5h window's pct when its reading is known and fresh (seatAssignment.shortPct), else Infinity — never "soft". */
+function shortPctKnown(snap: ReturnType<typeof asSeatSnapshot>, nowMs: number): number {
+  if (shortWindowState(snap, { nowMs }).state === "unknown") return Infinity;
+  const w = snap.windows.find((x) => x && x.kind === "session");
+  return typeof w?.pct === "number" && Number.isFinite(w.pct) ? w.pct : Infinity;
 }
 
 /** Auto mode only: the conversation's seat is past the move line AND rule 3

@@ -369,6 +369,7 @@ export function createUsageCalibration({
         if (!obs) continue;
         const key = `${snap.provider}:${snap.seatId}`;
         const list = (s.seats[key] ??= []);
+        // A burst keeps its FIRST reading; safe, because an interval that crosses a reset or a stale reading is rejected anyway.
         if (list.length > 0 && obs.t - list[list.length - 1].t < MIN_SAMPLE_GAP_MS) continue;
         list.push(obs);
         weeklyProviders.add(snap.provider);

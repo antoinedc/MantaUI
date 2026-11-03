@@ -99,6 +99,27 @@ describe("nextSeatHint", () => {
     expect(leastLoadedSeat(v.accounts.flatMap((a) => a.seats).filter((s) => s.id !== "s1").map((s) => ({ seatId: s.id, windows: s.windows })), { activeSeatId: "s1" })?.seatId).toBe("s2");
     expect(nextSeatHint(v, "s1", NOW)).toBe("s3");
   });
+  describe("without a server hint it mirrors R1: seats with room first", () => {
+    const H = 3_600_000;
+    // s2 resets its weekly first; s3 later. Only the tier decides between them in these cases.
+    const withSeats = (s2: [number, number, number], s3: [number, number, number]) => {
+      const v = threeSeatView({ nextSeatId: null });
+      const mk = (x: [number, number, number], weeklyIn: number) => [win("session", x[0], { resetsAt: NOW + 3 * H }), win("weekly", x[1], { resetsAt: NOW + weeklyIn * H })];
+      v.accounts[0].seats[1].windows = mk(s2, s2[2]);
+      v.accounts[1].seats[0].windows = mk(s3, s3[2]);
+      return v;
+    };
+    it("a full seat (weekly 100 %) with the earliest deadline is not named", () => {
+      expect(nextSeatHint(withSeats([20, 100, 1], [20, 20, 72]), "s1", NOW)).toBe("s3");
+    });
+    it("a seat whose 5h window is at 97 % with the earlier deadline loses to one with room", () => {
+      expect(nextSeatHint(withSeats([97, 30, 1], [20, 20, 72]), "s1", NOW)).toBe("s3");
+    });
+    it("when every other seat is full or past 95 it still names one (room first, then least loaded)", () => {
+      expect(nextSeatHint(withSeats([97, 30, 1], [96, 20, 72]), "s1", NOW)).toBe("s2");
+      expect(nextSeatHint(withSeats([100, 100, 1], [100, 100, 72]), "s1", NOW)).not.toBeNull();
+    });
+  });
   it("skips a signed-out seat and is null with nowhere to go", () => {
     const v = threeSeatView({ nextSeatId: "s2" });
     v.accounts[0].seats[1].status = "signed-out";
