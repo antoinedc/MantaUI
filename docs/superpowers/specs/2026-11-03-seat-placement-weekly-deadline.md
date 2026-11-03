@@ -1,6 +1,6 @@
 # Seat placement: spend the quota that expires first — design (v3)
 
-Status: DRAFT v3 for review · 2026-11-03 · branch `limit-usage`
+Status: v3 — reviewed (Astra, 3 rounds): ready with Should fixes, applied below · 2026-11-03 · branch `limit-usage`
 
 v3 (after review round 2): slack is no longer a priority key (a non-slack
 seat expiring sooner must go first — see the counter-example in §2.5); an
@@ -92,10 +92,11 @@ opencode V2 ledger, 2026-10-08 → 11-03. The replay is
   **short window** is the seat's `session` window (5 h), whether or not it is
   stale, started or reported; the **long windows** are its `weekly` and
   `weekly_scoped:*` windows. A seat's long windows for model `m` =
-  `long(W(s,m))` (applicable ones only). Span is inferred from `kind`
-  (`session` = 5 h, `weekly*` = 7 d) and cross-checked against
-  `resetsAt − startedAt` when both are reported (a mismatch > 10 % is logged
-  once and the inferred span is used).
+  `long(W(s,m))` (applicable ones only). Span: the reported `resetsAt − startedAt`
+  when both are present and plausible (1 h … 31 d); else the provider's
+  documented default for the kind (`session` = 5 h, `weekly*` = 7 d for
+  claude / codex / kimi — a table in `seatChoice.mjs`); else **unknown**, and
+  every slack computation that needs it is `null`.
 - `K_w` — full short windows per long window `w`. Per provider and window
   kind, from the calibration store (§6); defaults: `weekly` 7.5 (Claude),
   model caps `0.5 · K_weekly` (a 50 % sub-cap, with no per-model multiplier
@@ -154,12 +155,15 @@ used as a tie-break (§2.4); it is NOT a priority over an earlier deadline.
 ```
 deadline(s,m) = min resetsAt over fresh long(W(s,m)) with a known resetsAt   // null if none
 rank(s,m)     = ( deadline(s,m) ?? +Infinity,          // earliest weekly reset first (known before unknown)
-                  −(seatSlackPts(s,m) ?? 0),           // among equal deadlines, the seat losing more
+                  −max(0, seatSlackPts(s,m) ?? 0),     // among equal deadlines, the seat losing more (unknown = 0)
                   loadRank(s,m),                       // seatChoice.rank: known load < no reading < exhausted
                   s.seatId === activeSeatId ? 0 : 1 )
 ```
 
-lexicographic; deadlines within `RESET_TIE_MS` (60 s) are equal. **Legacy
+lexicographic. Deadline ties are NOT pairwise: `bestSeatByRank` takes the
+earliest known deadline `d0` and treats every seat with `deadline ≤ d0 +
+RESET_TIE_MS` as the tie group (the anchoring `soonestResettingSeat` already
+uses), then orders the group by the remaining keys — a transitive order. **Legacy
 mode**: when, for the provider and model, no seat has a fresh long window
 with a known `resetsAt` (a 5h-only provider; every weekly inactive or
 unknown), the WHOLE legacy policy runs — `chooseSeat`'s escape-route tiers,
@@ -209,7 +213,7 @@ Rows are evaluated top to bottom; the first whose condition holds decides.
 |---|---|---|
 | R0 | `legacyMode` (§2.4) | the unchanged legacy `chooseSeat` / `decideMove` / `resetSoonMove`. |
 | R1 | no assignment, or `s` no longer exists | `best(softTarget ∧ ¬blocked)` → `best(softTarget)` → `best(hardTarget)` → least-loaded usable seat → none (`live: true`). The escape-route tier of the org-affinity spec is dropped outside legacy mode (deadline order makes the same-org sibling the natural escape; a test keeps the "Org A {10,90}, Org B {30,30}" case and documents its new answer). |
-| R2 | `¬s.usable` (dead) | `best(same org ∧ hardTarget ∧ ¬blocked)` → `best(other org ∧ hardTarget ∧ load<70)` → `best(other org ∧ hardTarget)` → same tiers with `blocked` → least-loaded usable seat over ALL others, full or not (today's fallback). Reason `unusable`. |
+| R2 | `¬s.usable` (dead) | tiers with `¬blocked` applied to EVERY tier: `best(same org ∧ hardTarget)` → `best(other org ∧ hardTarget ∧ load<70)` → `best(other org ∧ hardTarget)`; nothing → the same three tiers again over `blocked` seats; nothing → least-loaded usable seat over ALL others, full or not (today's fallback). Reason `unusable`. |
 | R3 | `¬eligible(s,m)` (a window of `W(s,m)` at 100, `limited`, or `exhausted`) | same tiers as R2 without the final fallback; reason `exhausted`. None → **stay** (the retry watch re-decides, as today). |
 | R4 | `pct(short) ≥ 95` (soft pressure) | `best(same org ∧ softTarget ∧ ¬blocked)` → if `crossOK`, `best(other org ∧ softTarget ∧ load<70 ∧ ¬blocked)` → **stay** (finish the window). Reason `load`. |
 | R5 | ∃ same-org `x` with `softTarget(x) ∧ ¬blocked(x) ∧ betterByMargin(x, s)` and `t − lastAutoMoveAt(conv) ≥ MIN_DWELL_MS` | **Rebalance** to `best` of them (reason `rebalance`, same org only, free). |
@@ -325,9 +329,13 @@ move to") — it evaluates a conversation with no move history.
 
 ### 5.3 `src/server/seatAssignment.mjs`
 
-- `decideSeat` dispatches on `legacyMode` (R0) to the existing
-  `chooseSeat` / `decideMove` / `resetSoonMove` — kept verbatim — or to the
-  new `chooseSeatByDeadline` (R1) / `decideMoveByDeadline` (R2–R6).
+- Two exported dispatchers are the ONLY entry points anyone calls:
+  `placementFor(args)` (R0 → legacy `chooseSeat`, else `chooseSeatByDeadline`)
+  and `moveFor(args)` (R0 → legacy `decideMove`, else `decideMoveByDeadline`).
+  `decideSeat` uses them; `nextSeatFor` / `moveTargetFor` in
+  `accountsViews.mjs` call the SAME two, so a hint can never run the legacy
+  chooser while the resolver runs the new one. `chooseSeat` / `decideMove` /
+  `resetSoonMove` stay exported for their tests but have no other caller.
 - Constants kept: `MOVE_AT_PCT`, `MOVE_TARGET_BELOW_PCT` (the "< 70" tier),
   `MOVE_BACK_BLOCK_MS`, `CROSS_ORG_CAP_MS`, `RESET_SOON_MS`,
   `LIMITED_MARK_MS`. Added: `SAME_ORG_REBALANCE_MS = 6 h`,
@@ -370,7 +378,11 @@ writes a line with `reason: "reconsider"` only when it moved.
 ```
 
 `seat` is `null` on the no-seat path; `reason` ∈ `assigned | kept |
-moved:<why> | single | none | reconsider`. **Fail-open**: the writer is
+moved:<why> | single | none | reconsider | gap`. When the bounded queue
+drops lines, the writer resets its per-session dedupe state and the next
+line written is `{"t", "reason":"gap", "dropped": n}` so a reader can tell a
+dropped transition from a long unchanged interval; readers must treat the
+interval before a `gap` as unattributed. **Fail-open**: the writer is
 called after the decision is returned to the caller's promise chain
 (`queueMicrotask`), swallows every error (one `console.warn` per minute),
 and keeps an in-memory queue bounded at 1,000 lines — overflow drops the
@@ -398,16 +410,25 @@ spacing, with no `resetsAt` / `stale`, so its intervals cannot be validated.
 
 - **Paired observations** `~/.manta/usage-calibration-samples.json`
   (`{version:1, seats: {"<provider>:<seatId>": [{t, short:{pct,resetsAt,stale}, long:{kind,pct,resetsAt,stale}[]}]}}`),
-  appended at the poller's observe tap from the per-seat snapshots on every
-  tick (≈ 10 min), pruned to 14 days, debounced-saved like the history.
+  appended from a new `onPolled(seatSnapshots)` hook in `createUsagePoller`
+  that fires after EVERY successful tick (the existing `observe` hook fires
+  only when the content key changes, so it cannot give a cadence), carrying
+  each seat's real `fetchedAt`; a carried-forward reading (same object as
+  last tick, i.e. a failed fetch) is skipped. Pruned to 14 days,
+  debounced-saved like the history.
 - For each seat and the **`weekly` kind only** (model caps are never fitted —
   Opus traffic moves the short window without moving a Fable cap, so the
   ratio is not identifiable from mixed traffic; `weekly_scoped:*` keeps
   `0.5 · K_weekly`): walk consecutive observations; an interval qualifies
   when both windows are fresh at both ends, both `resetsAt` are unchanged
   across it (no reset crossed), both deltas are ≥ 0 (a negative delta is a
-  missed reset or a provider correction: reject), `Δlong ≥ 1`, and the
-  interval is ≤ 20 min. Accumulate `ΣΔshort`, `ΣΔlong`.
+  missed reset or a provider correction: reject and break the run), and the
+  interval is ≤ 20 min. Qualifying intervals that are contiguous form a
+  **run**; a run's `ΣΔshort` and `ΣΔlong` are accumulated together (a
+  zero-`Δlong` interval stays in its run — with rounded percentages the
+  weekly often lags the 5h by several intervals, and dropping those would
+  bias `K` low). A run contributes to the seat's sums only when its
+  `ΣΔlong ≥ 1`.
 - `K_seat = ΣΔshort / ΣΔlong`; provider `K = median over seats`.
 - Guards: `ΣΔlong ≥ 20` points per seat, ≥ 3 seats, and
   `(p90 − p10) / median ≤ 0.2` across seats; otherwise the default, and the
@@ -422,8 +443,10 @@ spacing, with no `resetsAt` / `stale`, so its intervals cannot be validated.
   bounded, known direction without changing a placement. Reading lag (a
   reading up to 10 min old) shifts both deltas alike and cancels in the
   ratio over ≥ 20 points.
-- Runs from the observe tap, debounced to once per hour, and on boot; pure
-  `estimateK(samples, {nowMs})` tested with synthetic series.
+- Runs from the sampler, debounced to once per hour, and on boot; pure
+  `estimateK(samples, {nowMs})` tested with synthetic series (including
+  quantised low-rate usage where the weekly increments every third
+  interval).
 
 Validation (part of acceptance, manual, documented in the PR): a 30-minute
 single-model run on one seat for Opus, reading the three windows before and
@@ -448,10 +471,14 @@ measured.
 Replaces `replay-draft.mjs`. Two policies, both the REAL pure code:
 
 - **before**: `src/server/seatAssignment.mjs` and `src/shared/seatChoice.mjs`
-  copied verbatim from the pinned pre-change commit (`f95bfe2b`, recorded in
-  the fixture dir's `PINNED.md`) into `scripts/seats/baseline/` — the full
-  pure closure of `decideSeat` (both files import nothing else but
-  `accounts.mjs`'s `ACCOUNT_PROVIDERS`, which is inlined). `decideSeat` is
+  from the pinned pre-change commit (`f95bfe2b`, recorded in
+  `scripts/seats/baseline/PINNED.md`) into `scripts/seats/baseline/`:
+  `seatChoice.mjs` verbatim; `seatAssignment.mjs` with the service half
+  (`createSeatAssigner` and its `jsonStore` / `paths` / `accounts` imports)
+  removed and `ACCOUNT_PROVIDERS = ["claude","codex"]` inlined — the pure
+  functions above `// The service` are the closure of `decideSeat`. A test
+  diffs the vendored pure section against `git show f95bfe2b:…` to prove it
+  is unmodified. `decideSeat` is
   pure; the harness reproduces `place()`'s record updates (`left`,
   `crossOrgMovedAt`, `movedAt`, `model`) in ~30 lines, shared by both
   policies, with the two policy-specific fields (`lastAutoMoveAt`) handled
@@ -536,7 +563,9 @@ the harness lands and may be loosened in the PR with the numbers shown.
 1. Contract (`models`), routing applicability (§4), attribution log,
    calibration store + `K` estimator + RPC. No placement change — `kFor` is
    wired but `decideMove`/`chooseSeat` still run the old rules. Ships first;
-   observe the attribution log and the measured `K` for ≥ 3 days.
+   after ≥ 3 days check that the attribution log and the paired-observation
+   series are filling (collection validation). The measured `K` itself needs
+   the 14-day series and is accepted later; the default serves until then.
 2. Placement rules R0–R6 + replay harness, in automatic mode (already the
    opt-in). The activity log carries every decision's evidence; the seat
    view shows slack/deadline per seat.
