@@ -1039,6 +1039,14 @@ export function createSeatAssigner({
     });
   }
 
+  /** The stored assignment of the conversation this session belongs to, or null (unknown provider / bad id / none). */
+  function assignmentOf(provider, sessionId) {
+    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return null;
+    const s = ensure();
+    const root = s.children[sessionId]?.root ?? sessionId;
+    return s.providers[provider]?.[root]?.seatId ? s.providers[provider][root] : null;
+  }
+
   /**
    * A turn of this conversation failed with a limit-type error: treat the seat it
    * is on as full for LIMITED_MARK_MS, whatever the (possibly lagging) usage
@@ -1046,11 +1054,9 @@ export function createSeatAssigner({
    * @returns {string|null} the seat marked, or null (no assignment)
    */
   function markLimited(provider, sessionId) {
-    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return null;
-    const s = ensure();
-    const root = s.children[sessionId]?.root ?? sessionId;
-    const seatId = s.providers[provider]?.[root]?.seatId;
-    if (!seatId) return null;
+    const at = assignmentOf(provider, sessionId);
+    if (!at) return null;
+    const { seatId } = at;
     limitedUntil.set(`${provider}:${seatId}`, now() + LIMITED_MARK_MS);
     return seatId;
   }
@@ -1062,12 +1068,9 @@ export function createSeatAssigner({
    * @returns {boolean|null} null = the conversation has no assignment for this provider
    */
   function conversationSeatFull(provider, sessionId) {
-    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return null;
-    const s = ensure();
-    const root = s.children[sessionId]?.root ?? sessionId;
-    const seatId = s.providers[provider]?.[root]?.seatId;
-    if (!seatId) return null;
-    return isSeatFull(snapshotsFor(provider).find((x) => x?.seatId === seatId), { model: s.providers[provider][root].model ?? null });
+    const at = assignmentOf(provider, sessionId);
+    if (!at) return null;
+    return isSeatFull(snapshotsFor(provider).find((x) => x?.seatId === at.seatId), { model: at.model ?? null });
   }
 
   /**

@@ -369,22 +369,28 @@ const fakeFetch = (byToken) => async (_u, init) => {
   return { ok: Boolean(p), status: p ? 200 : 401, json: async () => p };
 };
 
+// Real accounts-service paths under `root`, with two directory seats (tok-A, tok-B) and a live login (tok-A-live).
+async function seatFixturePaths(root) {
+  const paths = {
+    storePath: join(root, "state", "accounts.json"),
+    seatsRoot: join(root, "secrets", "accounts"),
+    claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
+    codexAuthPath: join(root, "home", "opencode-auth.json"),
+    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
+  };
+  await mkdir(join(root, "home", ".claude"), { recursive: true });
+  for (const [id, tok] of [["seat-1", "tok-A"], ["seat-2", "tok-B"]]) {
+    await mkdir(join(paths.seatsRoot, "claude", id), { recursive: true });
+    await writeFile(join(paths.seatsRoot, "claude", id, ".credentials.json"), creds(tok));
+  }
+  await writeFile(paths.claudeLivePath, creds("tok-A-live"));
+  return paths;
+}
+
 test("seatStates (real accounts service): a live seat has no credential; a directory seat exposes its FILE and expiry, never a token", async () => {
   const root = await mkdtemp(join(tmpdir(), "seat-assign-"));
   try {
-    const paths = {
-      storePath: join(root, "state", "accounts.json"),
-      seatsRoot: join(root, "secrets", "accounts"),
-      claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
-      codexAuthPath: join(root, "home", "opencode-auth.json"),
-    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
-    };
-    await mkdir(join(root, "home", ".claude"), { recursive: true });
-    for (const [id, tok] of [["seat-1", "tok-A"], ["seat-2", "tok-B"]]) {
-      await mkdir(join(paths.seatsRoot, "claude", id), { recursive: true });
-      await writeFile(join(paths.seatsRoot, "claude", id, ".credentials.json"), creds(tok));
-    }
-    await writeFile(paths.claudeLivePath, creds("tok-A-live"));
+    const paths = await seatFixturePaths(root);
     const profiles = {
       "tok-A": { account: { uuid: "u-A", email: "a@x" }, organization: org },
       "tok-A-live": { account: { uuid: "u-A", email: "a@x" }, organization: org },
@@ -426,19 +432,7 @@ test("seatStates (real accounts service): a live seat has no credential; a direc
 test("seatStates (real): a seat whose credentials are unreadable is not usable and is never assigned", async () => {
   const root = await mkdtemp(join(tmpdir(), "seat-assign-"));
   try {
-    const paths = {
-      storePath: join(root, "state", "accounts.json"),
-      seatsRoot: join(root, "secrets", "accounts"),
-      claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
-      codexAuthPath: join(root, "home", "opencode-auth.json"),
-    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
-    };
-    await mkdir(join(root, "home", ".claude"), { recursive: true });
-    for (const [id, tok] of [["seat-1", "tok-A"], ["seat-2", "tok-B"]]) {
-      await mkdir(join(paths.seatsRoot, "claude", id), { recursive: true });
-      await writeFile(join(paths.seatsRoot, "claude", id, ".credentials.json"), creds(tok));
-    }
-    await writeFile(paths.claudeLivePath, creds("tok-A-live"));
+    const paths = await seatFixturePaths(root);
     const profiles = {
       "tok-A": { account: { uuid: "u-A" }, organization: org },
       "tok-A-live": { account: { uuid: "u-A" }, organization: org },
@@ -729,12 +723,18 @@ test("the service: a manual switch is recorded as a move but NOT announced; a fu
   assert.equal(events.length, 0);
 });
 
-test("the service: a cross-org move stamps crossOrgMovedAt and a second one within 5h is refused; same-org is free", async () => {
+// A conversation "c" placed on seat-1 (org A), with seat-2 (org A) and seat-3 (org B) around it.
+async function placedOnSeat1AcrossOrgs() {
   const snaps = [snap(1, 20), snap(2, 80), snap(3, 80)];
   const events = [];
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
   const a = assigner(fakeAccounts(two({ seats })), { snaps, onMoved: (e) => events.push(e) });
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
+  return { snaps, events, a };
+}
+
+test("the service: a cross-org move stamps crossOrgMovedAt and a second one within 5h is refused; same-org is free", async () => {
+  const { snaps, events, a } = await placedOnSeat1AcrossOrgs();
   snaps.splice(0, 3, snap(1, 97), snap(2, 96), snap(3, 30)); // the same org has nothing under 95; only the other org has room under 70
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-3");
   const rec = a.saved.providers.claude.c;
@@ -753,11 +753,7 @@ test("the service: a cross-org move stamps crossOrgMovedAt and a second one with
 });
 
 test("the service: a capped conversation whose whole org is full still crosses orgs (no stall until reset)", async () => {
-  const snaps = [snap(1, 20), snap(2, 80), snap(3, 80)];
-  const events = [];
-  const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
-  const a = assigner(fakeAccounts(two({ seats })), { snaps, onMoved: (e) => events.push(e) });
-  assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
+  const { snaps, events, a } = await placedOnSeat1AcrossOrgs();
   snaps.splice(0, 3, snap(1, 97), snap(2, 96), snap(3, 30));
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-3", "first cross-org move");
   a.tick(HOUR);

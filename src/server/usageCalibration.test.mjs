@@ -221,13 +221,19 @@ const snapFrom = (seatId, o, provider = "claude") => ({
   ],
 });
 
-test("onPolled accumulates paired observations, estimates hourly, and writes the store only when the result changed", () => {
+// A harness fed 200 polls (10 min apart) from `seatCount` seats whose weekly follows K = 7.5.
+function pollSeats(seatCount) {
   const h = harness();
-  const all = [1, 2, 3, 4].map((n) => series({ K: 7.5, steps: 200, offset: n * 5, quant: (x) => Math.round(x * 10) / 10 }));
+  const all = Array.from({ length: seatCount }, (_, i) => series({ K: 7.5, steps: 200, offset: (i + 1) * 5, quant: (x) => Math.round(x * 10) / 10 }));
   for (let i = 0; i < 200; i++) {
     h.setNow(T0 + i * STEP);
     h.cal.onPolled(all.map((s, n) => snapFrom(`seat-${n + 1}`, s[i])));
   }
+  return h;
+}
+
+test("onPolled accumulates paired observations, estimates hourly, and writes the store only when the result changed", () => {
+  const h = pollSeats(4);
   const last = h.saved.at(-1);
   near(last.providers.claude.kByKind.weekly.value, 7.5);
   assert.equal(last.providers.claude.kByKind.weekly.seats, 4);
@@ -333,12 +339,7 @@ test("the calibration store is read lazily and memoised for 60 s", () => {
 });
 
 test("snapshot(): per provider the measured values, defaults, spread and sample count (+ optional extra stats)", () => {
-  const h = harness();
-  const all = [1, 2, 3].map((n) => series({ K: 7.5, steps: 200, offset: n * 5, quant: (x) => Math.round(x * 10) / 10 }));
-  for (let i = 0; i < 200; i++) {
-    h.setNow(T0 + i * STEP);
-    h.cal.onPolled(all.map((s, n) => snapFrom(`seat-${n + 1}`, s[i])));
-  }
+  const h = pollSeats(3);
   const snap = h.cal.snapshot();
   assert.equal(snap.providers.claude.kByKind.weekly.seats, 3);
   assert.deepEqual(snap.providers.claude.defaults, { weekly: 7.5 });
