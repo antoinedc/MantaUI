@@ -13,6 +13,9 @@ export interface WindowState {
   resetsAt?: number;
   binding?: boolean;
   stale?: boolean;
+  active?: boolean;
+  scope?: string;
+  models?: string[];
 }
 
 export interface AccountState {
@@ -42,6 +45,13 @@ export interface ShadowPriceInput {
   tokensPerPct: number | null;
   protection?: boolean;
 }
+
+/** The windows that limit a request for `candidate` (not stale, not inactive,
+ *  applicable to its `modelID ?? id`). */
+export function applicableLiveWindows(
+  account: AccountState | null | undefined,
+  candidate: { providerID?: string; modelID?: string; id?: string } | null | undefined,
+): WindowState[];
 
 export function depletionFactor(balance: number | undefined): number;
 

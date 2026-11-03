@@ -97,6 +97,24 @@ test("normalizeWindow: derives pct from used + limit", () => {
   assert.equal(w.limit, 200);
 });
 
+test("normalizeWindow: `models` derives from `scope`; explicit `models` wins; unscoped windows carry none", () => {
+  const fromScope = normalizeWindow({ kind: "weekly_scoped:fable", pct: 10, scope: "Fable" });
+  assert.deepEqual(fromScope.models, ["fable"]);
+  assert.equal(fromScope.scope, "Fable", "scope kept as is");
+  assert.equal(fromScope.kind, "weekly_scoped:fable", "kind kept as is");
+  assert.deepEqual(normalizeWindow({ pct: 1, scope: "Sonnet 4.5" }).models, ["sonnet45"]);
+  // explicit models wins over scope; tokens are normalised and de-duplicated
+  assert.deepEqual(normalizeWindow({ pct: 1, scope: "Fable", models: ["Opus", "OPUS", "Claude-Sonnet"] }).models, ["opus", "claudesonnet"]);
+  assert.deepEqual(normalizeWindow({ pct: 1, models: ["Opus"] }).models, ["opus"]);
+  // empty / unnormalisable / non-string models ⇒ falls back to scope, else absent
+  assert.deepEqual(normalizeWindow({ pct: 1, scope: "Fable", models: [] }).models, ["fable"]);
+  assert.deepEqual(normalizeWindow({ pct: 1, scope: "Fable", models: ["—", 3] }).models, ["fable"]);
+  assert.equal("models" in normalizeWindow({ pct: 1, models: ["—"] }), false);
+  assert.equal("models" in normalizeWindow({ pct: 1, scope: "—" }), false);
+  assert.equal("models" in normalizeWindow({ kind: "weekly", pct: 1 }), false);
+  assert.equal("models" in normalizeWindow({ kind: "session", pct: 1, models: "fable" }), false);
+});
+
 test("normalizeWindow: derives used from remaining + limit, then pct", () => {
   const w = normalizeWindow({ remaining: 61, limit: 200 });
   assert.equal(w.used, 139);

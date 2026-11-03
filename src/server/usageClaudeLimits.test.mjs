@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { isUsageAtLimit } from "./usageStopper.mjs";
 import { normalizeWindow } from "./usageAdapters/normalizeWindow.mjs";
+import { windowAppliesToModel } from "../shared/seatChoice.mjs";
 
 const res = (body, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -160,9 +161,38 @@ test("isUsageAtLimit: skips inactive windows only", () => {
 
 test("normalizeWindow: carries scope and active:false, never writes active:true", () => {
   assert.deepEqual(normalizeWindow({ kind: "k", pct: 5, scope: "Fable", active: false }), {
-    kind: "k", label: "", pct: 5, scope: "Fable", active: false,
+    kind: "k", label: "", pct: 5, scope: "Fable", models: ["fable"], active: false,
   });
   const w = normalizeWindow({ kind: "k", pct: 5, active: true });
   assert.equal("active" in w, false);
   assert.equal("scope" in w, false);
+});
+
+test("claude adapter (Team): a model-scoped weekly carries `models` from the scope name; unscoped windows carry none", async () => {
+  const snap = await fetchSnap({
+    five_hour: { utilization: 5, resets_at: "2026-10-08T16:59:59+00:00" },
+    limits: [
+      { kind: "weekly", group: "weekly", percent: 62, resets_at: "2026-10-14T05:00:00+00:00", scope: null, is_active: true },
+      { kind: "weekly_scoped", group: "weekly", percent: 100, resets_at: "2026-10-14T05:00:00+00:00", scope: { model: { display_name: "Fable" } }, is_active: true },
+    ],
+  });
+  const [session, weekly, fable] = snap.windows;
+  assert.equal("models" in session, false);
+  assert.equal("models" in weekly, false);
+  assert.deepEqual(fable.models, ["fable"]);
+  assert.equal(fable.scope, "Fable");
+  assert.equal(fable.kind, "weekly_scoped:fable");
+  // and the shared applicability rule reads it: Fable yes, Opus / unknown no
+  assert.equal(windowAppliesToModel(fable, "anthropic/claude-fable-5-1"), true);
+  assert.equal(windowAppliesToModel(fable, "anthropic/claude-opus-5-5"), false);
+  assert.equal(windowAppliesToModel(fable, null), false);
+  assert.equal(windowAppliesToModel(weekly, null), true);
+});
+
+test("claude adapter: Pro/Max (seven_day) windows carry no `models` (all models)", async () => {
+  const snap = await fetchSnap({
+    five_hour: { utilization: 5, resets_at: "2026-10-08T16:59:59+00:00" },
+    seven_day: { utilization: 40, resets_at: "2026-10-14T05:00:00+00:00" },
+  });
+  assert.deepEqual(snap.windows.map((w) => "models" in w), [false, false]);
 });

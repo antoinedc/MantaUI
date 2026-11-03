@@ -76,6 +76,7 @@ function scopedWeekly(limit) {
     pct: limitPct(limit),
     resetsAt: limit.resets_at,
     scope: name,
+    models: [name],
     active: limit.is_active === false ? false : undefined,
   });
 }

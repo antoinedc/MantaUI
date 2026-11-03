@@ -4,6 +4,7 @@ import {
   depletionFactor,
   CREDIT_PREMIUM,
   RESET_RAMP_MS,
+  applicableLiveWindows,
 } from "./marginalCost.mjs";
 import type { AccountState, MargCostModel } from "./marginalCost.mjs";
 
@@ -266,5 +267,33 @@ describe("marginalCost — pacing shadow price (regression pins)", () => {
     expect(res.cost).toBe(baseline.cost);
     expect(res.basis).toBe(baseline.basis);
     expect(res.basis).toBe("credit-depletion");
+  });
+});
+
+describe("applicableLiveWindows", () => {
+  const session = { kind: "session", pct: 10 };
+  const weekly = { kind: "weekly", pct: 20 };
+  const fableCap = { kind: "weekly_scoped:fable", scope: "Fable", pct: 100 };
+  const modelsOnly = { kind: "weekly", pct: 50, models: ["opus"] };
+  const account: AccountState = { kind: "subscription", windows: [session, weekly, fableCap, modelsOnly, { kind: "weekly", pct: 99, stale: true }, { kind: "weekly_scoped:x", scope: "Fable", pct: 5, active: false }] };
+
+  it("filters stale, inactive and windows scoped to another model; reads modelID ?? id", () => {
+    expect(applicableLiveWindows(account, { providerID: "a", modelID: "claude-fable-5" } as any)).toEqual([session, weekly, fableCap]);
+    expect(applicableLiveWindows(account, { providerID: "a", id: "claude-opus-5-5" } as any)).toEqual([session, weekly, modelsOnly]);
+    expect(applicableLiveWindows(account, { providerID: "a", modelID: "claude-sonnet-5" } as any)).toEqual([session, weekly]);
+  });
+
+  it("unknown model ⇒ only unscoped windows; no account ⇒ none", () => {
+    expect(applicableLiveWindows(account, {} as any)).toEqual([session, weekly]);
+    expect(applicableLiveWindows(account, null)).toEqual([session, weekly]);
+    expect(applicableLiveWindows(null, { id: "x" } as any)).toEqual([]);
+    expect(applicableLiveWindows({ kind: "subscription" }, { id: "x" } as any)).toEqual([]);
+  });
+
+  it("marginalCost: a model-scoped 100% cap exhausts only the model it names", () => {
+    const acct: AccountState = { kind: "subscription", windows: [{ pct: 10 }, fableCap] };
+    expect(marginalCost({ model: { id: "claude-fable-5", cost: { input: 15, output: 15 } } as any, account: acct, nowMs: 0 }).exhausted).toBe(true);
+    expect(marginalCost({ model: { id: "claude-opus-5-5", cost: { input: 15, output: 15 } } as any, account: acct, nowMs: 0 }).exhausted).toBe(false);
+    expect(marginalCost({ model: MODEL, account: acct, nowMs: 0 }).exhausted).toBe(false);
   });
 });

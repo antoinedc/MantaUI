@@ -13,7 +13,7 @@ import { endpointKey } from "./endpointKey.mjs";
 import { qualityScore, tierForScore, meetsFloor, AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 import { resolveIdentity } from "./modelIdentity.mjs";
 import { autoEligibility, MISSING } from "./autoEligibility.mjs";
-import { marginalCost } from "./marginalCost.mjs";
+import { marginalCost, applicableLiveWindows } from "./marginalCost.mjs";
 import { blendedPrice } from "./blendedPrice.mjs";
 import { shouldDerank } from "./toolReliability.mjs";
 
@@ -171,8 +171,8 @@ export function modelUsability(candidate, services = {}, nowMs = 0) {
   const endpointHealth = ENDPOINT_HEALTH_EXCLUDED[services.endpointHealth?.[key]];
   if (endpointHealth) return { model: key, usable: false, reason: `endpoint ${endpointHealth}`, resetsAt: null };
   if (account && marginalCost({ model: candidate, account, nowMs }).exhausted) {
-    const full = (Array.isArray(account.windows) ? account.windows : [])
-      .filter((w) => w?.stale !== true && isNum(w?.pct) && w.pct >= 100 && isNum(w?.resetsAt));
+    const full = applicableLiveWindows(account, candidate)
+      .filter((w) => isNum(w?.pct) && w.pct >= 100 && isNum(w?.resetsAt));
     // Usable again only once EVERY exhausted window has reset.
     const resetsAt = full.length ? Math.max(...full.map((w) => w.resetsAt)) : null;
     return { model: key, usable: false, reason: "plan usage limit reached", resetsAt };
