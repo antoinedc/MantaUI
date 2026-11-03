@@ -743,7 +743,8 @@ const MAX_SUCCESSOR_HOPS = 8;
  * cannot nest across workspaces), and must not make the nesting a cycle:
  *   1. the nearest windowed ancestor of the child session (the existing walk);
  *   2. the replacement successor (handoff `replacedBy`, transitive, cycle-safe, max 8 hops) of the
- *      session's parent or of any ancestor — the live end of the chain that has a window;
+ *      session's parent or of any ancestor — the live end of the chain that has a window — and, failing
+ *      that, of the record's CURRENT `displayParentID` (the one that lost its window), reported as rule 2;
  *   3. the driver: the windowed session whose own transcript most recently named the child session's id
  *      (tool-call input or output, any message type) within DRIVER_WINDOW_MS. One read-only DB task for
  *      the whole batch (`deps.findSessionReferences`); no DB / budget hit → this rule is skipped;
@@ -849,6 +850,10 @@ export async function resolveDisplayParents(targets, deps = {}, opts = {}) {
         successor = live[live.length - 1];
         break;
       }
+    }
+    if (!successor && typeof job.displayParentID === "string" && job.displayParentID) {
+      const live = successorsOf(job.displayParentID).filter((s) => acceptable(job, s));
+      if (live.length > 0) successor = live[live.length - 1];
     }
     if (successor) {
       out.set(job.id, { displayParentID: successor, rule: 2 });
@@ -2708,7 +2713,8 @@ async function patchJob(id, patch, deps = {}, { onlyIf } = {}) {
 
 /**
  * Auto-handoff commit (§6.3): move every job that belonged to `fromSessionId` onto
- * `toSessionId`. `parent` re-points jobs the session STARTED; `child` re-points a
+ * `toSessionId`. `parent` re-points jobs the session STARTED (`parentSessionID`) and
+ * the rows nested under it for display (`displayParentID`); `child` re-points a
  * running job whose OWN session was the one replaced. Idempotent — a recovery
  * re-runs it. Returns how many records changed.
  * @param {{ fromSessionId: string, toSessionId: string, parent?: boolean, child?: boolean }} a
@@ -2721,13 +2727,14 @@ export async function repointJobSessions({ fromSessionId, toSessionId, parent = 
     const next = jobs.map((j) => {
       let u = j;
       if (parent && j.parentSessionID === fromSessionId) u = { ...u, parentSessionID: toSessionId };
+      if (parent && j.displayParentID === fromSessionId) u = { ...u, displayParentID: toSessionId };
       if (child && j.childSessionID === fromSessionId) u = { ...u, childSessionID: toSessionId };
       if (u !== j) changed++;
       return u;
     });
     if (changed > 0) {
       await save(next);
-      for (const j of next) if (j.parentSessionID === toSessionId || j.childSessionID === toSessionId) publish?.({ kind: "delegate.updated", payload: { id: j.id, status: j.status, launchState: j.launchState, activity: j.activity } });
+      for (const j of next) if (j.parentSessionID === toSessionId || j.displayParentID === toSessionId || j.childSessionID === toSessionId) publish?.({ kind: "delegate.updated", payload: { id: j.id, status: j.status, launchState: j.launchState, activity: j.activity } });
     }
     return changed;
   });
