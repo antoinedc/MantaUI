@@ -1027,6 +1027,35 @@ export const SCREENS = [
     surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
   },
   {
+    // The reported bug: macOS, sidebar hidden, a top banner. The banner is the
+    // window's top-left element, so IT clears the traffic lights and the header
+    // below it does not. The registry has no platform field, so the row emulates
+    // macOS itself: the platform is read once at module load, hence init script
+    // + reload (the same emulation tests/visual/window-controls.visual.ts uses).
+    id: "explorer-banner-hidden-sidebar",
+    title: "File explorer — macOS, sidebar hidden, reconnecting banner owns the traffic-light corner",
+    url: "/app/index.html?demo&desktop&state=reconnecting",
+    ready: '[data-screen="session"]',
+    final: ".manta-explorer-top",
+    actions: async (page) => {
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
+        Object.defineProperty(navigator, "userAgentData", { get: () => ({ platform: "macOS" }) });
+        localStorage.setItem("manta:sidebarHidden", "1");
+      });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[role="status"]', { state: "visible" });
+      await page.getByRole("button", { name: "Show file explorer" }).click();
+      await page.waitForSelector(".manta-explorer-top", { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/explorer/mockup.html",
+    mockupActions: exMockupTheme,
+    mockupRegion: ".mk-win-banner",
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
     id: "explorer-md-source",
     title: "File explorer — Markdown Source view",
     url: EXPLORER_URL,

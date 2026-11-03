@@ -77,6 +77,18 @@ describe("right slot exclusivity (setRightPanel)", () => {
     expect(shownRightPanel("a")).toBe("none");
   });
 
+  it("the toggle (header icon / ⌘E) opens with the tree; closing leaves the preference", () => {
+    expect(getExplorerSession("a").layout.treeOpen).toBe(false);
+    toggleExplorer("a");
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
+    setTreeOpen("a", false);
+    toggleExplorer("a");
+    expect(shownRightPanel("a")).toBe("none");
+    expect(getExplorerSession("a").layout.treeOpen).toBe(false);
+    toggleExplorer("a");
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
+  });
+
   it("closing resets Expanded so the transcript is back next time", () => {
     setRightPanel("a", "explorer");
     toggleExpanded("a");
@@ -174,6 +186,14 @@ describe("openFile", () => {
     expect(s.root).toBeNull();
     openFile({ abs: "/home/u/proj/b.md", owner: owner("a") });
     expect(getExplorerSession("a").history.entries).toHaveLength(2);
+  });
+
+  it("a file link keeps the stored tree preference", () => {
+    openFile({ abs: "/home/u/proj/a.ts", owner: owner("a") });
+    expect(getExplorerSession("a").layout.treeOpen).toBe(false);
+    setTreeOpen("a", true);
+    openFile({ abs: "/home/u/proj/b.ts", owner: owner("a") });
+    expect(getExplorerSession("a").layout.treeOpen).toBe(true);
   });
 
   it("⌘-click expands", () => {

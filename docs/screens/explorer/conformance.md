@@ -1,13 +1,34 @@
 # File explorer — conformance notes
 
 Compared with `npm run visual:compare -- <id>` (app left, `mockup.html` right) for the
-fourteen `explorer-*` rows. Light and dark were both reviewed for `explorer-default`,
+fifteen `explorer-*` rows. Light and dark were both reviewed for `explorer-default`,
 `-tree`, `-links` and `-quickopen` (`VISUAL_COLOR_SCHEME=dark`); the rest in light.
-Baselines recorded for all fourteen rows. Differences left on purpose or open:
+Baselines recorded for all fifteen rows (follow-up 2026-11-03: `-default`, `-tree`, `-expanded`, `-narrow` re-recorded for the sidebar button; `-banner-hidden-sidebar` added; then `-states` (no "Show tree" button), `-links` ("unreadable" copy, no home limit) and `-banner-hidden-sidebar` (opens with the tree) re-recorded for §7). Differences left on purpose or open:
 
-Last reviewed: 2026-11-02 (67b38ac7)
+Last reviewed: 2026-11-03 (08cba97b)
 
 ## Deliberate
+
+- **Sidebar header is context.** The mockup's Workspace header draws only the title, the
+  sidebar button and search (the button left of search, as in the app); the app's header
+  can also show the stopped-conversations pill and the "Syncing…" label. With the sidebar
+  hidden the button is the pane header's first control (`-tree`, `-banner-hidden-sidebar`),
+  and the structure snapshots list it first inside `main` (it used to sit above the
+  sidebar as a floating sibling).
+- **`explorer-banner-hidden-sidebar` is the reported bug, drawn from the demo's
+  `reconnecting` state**: macOS emulated (the registry has no platform field, so the row
+  sets the platform with an init script and reloads, like
+  `tests/visual/window-controls.visual.ts`), sidebar hidden, banner above the header. The
+  banner's text starts right of the traffic lights and the header below it carries no
+  clearance of its own, as in the mockup's `.mk-win-banner`. Differences: the banner copy
+  ("Reconnecting… attempt 2 · next try in 5.0s" vs the mockup's), the demo's own
+  transcript and root folder (`billing`), and the Explorer open on its empty state rather
+  than a file, with the tree open (opening from the header icon shows the tree). The macOS window controls themselves are not drawn (the mockup's three dots
+  are; a browser capture has none).
+- **Motion is not pixel-verified.** The open / close / Expanded slide and the Segmented
+  pill are transitions; every row captures the settled state (animations disabled). They
+  are covered by unit tests (`ExplorerPanel.test.tsx`, `Segmented.test.tsx`) and were
+  checked in a real browser by sampling panel widths mid-slide.
 
 - **Window chrome and rail content are context, not design.** The mockup draws a window
   frame (traffic lights, a Theme bar) and a sidebar that lists only the projects; the
@@ -73,6 +94,13 @@ Last reviewed: 2026-11-02 (67b38ac7)
   (the transcript is the rail), as in the mockup's expanded window.
 
 ## Open
+
+- Baselines outside the explorer rows that were already out of date on `main` before this
+  follow-up (they fail against the committed pixels / structure on a clean checkout of the
+  base commit: `welcome`, `session*`, `upgrade-failed`, `session-header`, `session-composer`,
+  `folder-picker`, `session-menu`, `model-picker`, `artifacts-*`; `effort-picker` and
+  `ctx-pill` do not run at all) were NOT re-recorded here, so their sidebar-header change
+  (the new button) is not yet in them. Re-record them together with the unrelated drift.
 
 - Hover and Shown-in-the-Explorer link states, the copy-confirmed button, the More menu
   and the download toast (mockup §8) have no registry row; the `More` trigger's popup is

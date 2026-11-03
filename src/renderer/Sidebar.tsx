@@ -30,6 +30,7 @@ import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { SIDEBAR_WIDTH_PX } from "./explorer/layout";
 import { SessionRow as RailSessionRow, ROW_SELECTED, type SessionStatus } from "./SessionRow";
 import { StatusDot } from "./StatusDot";
+import { SidebarToggleButton } from "./SidebarToggle";
 import { dotTone, badgeLabel } from "./ctoView";
 import type { CtoState } from "../shared/api.js";
 import { useRailGlide } from "./RailGlide";
@@ -666,9 +667,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       {IS_WINDOWS ? null : <div className="titlebar-drag h-12 shrink-0" />}
       <div
         className={
-          "px-3 pb-2 flex items-center justify-between" +
-          (IS_WINDOWS ? " titlebar-drag pl-12" : "")
+          "pr-3 pb-2 flex items-center justify-between" +
+          (IS_WINDOWS ? " titlebar-drag" : "")
         }
+        // Right-to-left Windows puts the caption buttons on the LEFT of the window,
+        // over this header; `--titlebar-inset-left` is their width (0 everywhere else).
+        style={{ paddingLeft: "max(var(--sp-3), var(--titlebar-inset-left, 0px))" }}
       >
         <div className="flex items-center gap-2 min-w-0">
           <h2 className="text-meta font-semibold uppercase tracking-wider text-text-muted">
@@ -704,6 +708,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               </Pill>
             </button>
           )}
+          <SidebarToggleButton hidden={hidden} />
           <IconButton
             icon={<Search />}
             label="Search sessions"

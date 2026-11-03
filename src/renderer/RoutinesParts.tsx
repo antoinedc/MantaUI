@@ -11,6 +11,7 @@ import { CalendarClock, Check, ChevronDown, X } from "lucide-react";
 import { IconButton } from "./IconButton";
 import { INPUT_BASE, LABEL_CLS } from "./Field";
 import { Eyebrow } from "./Eyebrow";
+import { SidebarRevealButton } from "./SidebarToggle";
 import { Pill } from "./Pill";
 import { StatusDot } from "./StatusDot";
 import { nowMs, useClockTick } from "./clock";
@@ -28,8 +29,9 @@ export function RoutinesHeader({ children, right }: { children: ReactNode; right
   return (
     <div
       className="manta-routines-header titlebar-drag flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle pr-[calc(var(--sp-3)+var(--titlebar-inset-right))]"
-      style={{ paddingLeft: "max(var(--sp-4), var(--sidebar-hidden-inset, 0px))" }}
+      style={{ paddingLeft: "max(var(--sp-4), var(--pane-inset-x, 0px))" }}
     >
+      <SidebarRevealButton />
       <div className="flex min-w-0 items-center gap-2 whitespace-nowrap text-label font-medium text-text">{children}</div>
       {right && <div className="titlebar-no-drag ml-auto flex items-center gap-2">{right}</div>}
     </div>

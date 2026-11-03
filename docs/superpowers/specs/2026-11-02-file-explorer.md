@@ -168,7 +168,7 @@ Window = sidebar · transcript · separator · Explorer (chat sessions only).
 - **Top bar** (44 px, aligned with the session header): tree toggle, root
   folder name, quick open, expand/restore, close.
 - **Empty** (no file opened yet this session): centred message "Click a file
-  path in the conversation, or open the tree" + a "Show tree" button.
+  path in the conversation, or open the tree" + a "Show tree" button. *(Superseded by 2026-11-03 §7: no button; opening from the header icon / ⌘E shows the tree; the tree's "up" and every file route are no longer limited to home.)*
 - **File bar:** breadcrumb relative to the tree root (truncates from the left),
   Rendered/Source (`Segmented`, Markdown only), Copy contents, Download, and a
   "More" menu (Copy path, Copy relative path).
@@ -260,6 +260,8 @@ xterm must pass ⌘B through (its custom key handler returns false for it).
 ## Contract
 
 ### Shared file-access policy (`src/server/homePath.mjs`, new, pure + injected fs)
+
+> **Superseded by 2026-11-03 §7a:** the home boundary and `outside-home` are removed; the module is now `filePath.mjs` (`resolvePath` / `openPath`). Everything below about "inside home" no longer applies.
 
 ONE helper used by `/api/peek`, `/api/download` and every `fs:*` channel (the
 lexical checks in `peek.mjs` and the download route are replaced by it):

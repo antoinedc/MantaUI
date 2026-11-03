@@ -1,35 +1,34 @@
-// The ONE always-visible ⌘B control (spec §Layout → Left sidebar). Rendered once
-// by App, pinned at the window's top-left above both the sidebar and the panes,
-// so a hidden sidebar always has a restore control — in every pane and in the
-// Explorer's Expanded mode. z-40 clears the new-session draft layer (z-30).
+// The ⌘B control (spec 2026-11-03 §2). One `IconButton`, two homes:
+//   - sidebar visible → inside the sidebar's Workspace header, left of search
+//     (Sidebar renders <SidebarToggleButton/> there);
+//   - sidebar hidden  → the first control of the top-left pane header
+//     (<SidebarRevealButton/>, rendered as the first child of every pane header).
 
 import { PanelLeft } from "lucide-react";
 import { IconButton } from "./IconButton";
-import { IS_MAC, MOD_KEY } from "./platform";
-import { SIDEBAR_TOGGLE_TOP_PX, sidebarToggleLeftPx } from "./explorer/layout";
+import { MOD_KEY } from "./platform";
+import { toggleSidebarHidden, useSidebarHidden } from "./explorer/explorerStore";
 
-export function SidebarToggle({
-  hidden,
-  onToggle,
-  isMac = IS_MAC,
-}: {
-  hidden: boolean;
-  onToggle: () => void;
-  isMac?: boolean;
-}) {
+export function SidebarToggleButton({ hidden }: { hidden: boolean }) {
   const label = hidden ? "Show sidebar" : "Hide sidebar";
   return (
-    <div
-      className="absolute z-40 titlebar-no-drag"
-      style={{ top: SIDEBAR_TOGGLE_TOP_PX, left: sidebarToggleLeftPx(isMac) }}
-    >
-      <IconButton
-        icon={<PanelLeft />}
-        label={label}
-        title={`${label} (${MOD_KEY}B)`}
-        hook="manta-sidebar-toggle"
-        onClick={onToggle}
-      />
-    </div>
+    <IconButton
+      icon={<PanelLeft />}
+      label={label}
+      title={`${label} (${MOD_KEY}B)`}
+      hook="manta-sidebar-toggle"
+      onClick={toggleSidebarHidden}
+    />
+  );
+}
+
+/** The restore control a pane header carries while the sidebar is hidden; nothing while it is visible. */
+export function SidebarRevealButton() {
+  const hidden = useSidebarHidden();
+  if (!hidden) return null;
+  return (
+    <span className="titlebar-no-drag inline-flex shrink-0">
+      <SidebarToggleButton hidden />
+    </span>
   );
 }

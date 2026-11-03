@@ -1548,6 +1548,9 @@ export const IPC = {
   downloadFileToDownloads: "agent:download-to-downloads",
   // Reveal a local file in Finder / the OS file manager.
   revealInFolder: "shell:reveal-in-folder",
+  // Windows only: recolour the OS caption-button overlay to follow the theme.
+  // A background sync from the renderer, not a user control; a no-op elsewhere.
+  setTitleBarOverlay: "window:set-title-bar-overlay",
   // main → renderer push: a new file appeared in the remote ~/.manta-outbox/.
   // Payload: { remotePath, name, size, sessionName?, autoPulled, localPath? }.
   // When config.allowAgentPush is on, main pulls first and sets autoPulled:true

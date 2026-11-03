@@ -208,6 +208,14 @@ describe("ArtifactsPanel — renders the box's artifacts:list", () => {
     second.h.unmount();
   });
 
+  it("its title row reserves the OS caption buttons' strip (the panel touches the window's right edge)", async () => {
+    const { h } = await openPanel(vi.fn().mockResolvedValue(SAMPLE));
+    const row = buttonByLabel(h, "Search artifacts")!.parentElement!.parentElement as HTMLElement;
+    expect(row.textContent).toContain("Artifacts");
+    expect(row.className).toContain("pr-[var(--titlebar-inset-right)]");
+    h.unmount();
+  });
+
   it("searching filters the current tab client-side and badges follow", async () => {
     const { h } = await openPanel(vi.fn().mockResolvedValue(SAMPLE));
     await click(h, buttonByLabel(h, "Search artifacts")!);

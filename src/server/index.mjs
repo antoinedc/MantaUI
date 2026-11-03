@@ -50,7 +50,7 @@ import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createPeekHandler, createDownloadHandler } from "./peek.mjs";
-import { createHomePath } from "./homePath.mjs";
+import { createFilePath } from "./filePath.mjs";
 import { createProjectsHandler } from "./projectsRoute.mjs";
 import { createUploadHandler } from "./uploadRoute.mjs";
 import { CTO_SAFE_500_MESSAGE, HOOK_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
@@ -3886,11 +3886,11 @@ function respondJson(res, status, obj) {
 
 // /api/peek + /api/download handlers with the real route logic in
 // src/server/peek.mjs (tested directly in peek.test.mjs — no mock). Both read
-// through the shared home-scoped file-access policy (homePath.mjs), injected
+// through the shared file-access policy (filePath.mjs), injected
 // here with the real fs/homedir.
-const { openInHome } = createHomePath({ homedir });
-const peekHandler = createPeekHandler({ openInHome, pipeline, MIME });
-const handleDownload = createDownloadHandler({ openInHome, pipeline });
+const { openPath } = createFilePath({ homedir });
+const peekHandler = createPeekHandler({ openPath, pipeline, MIME });
+const handleDownload = createDownloadHandler({ openPath, pipeline });
 
 // /api/projects handler with the real route logic in src/server/projectsRoute.mjs
 // (tested directly in projectsRoute.test.mjs — BET-1458, the BET-1454

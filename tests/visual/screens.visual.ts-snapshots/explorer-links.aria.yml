@@ -16,7 +16,7 @@
 - text: "A plain link to a file that is not open:"
 - link "docs/peek-scope.md":
   - /url: "#"
-- text: "Missing, outside home, or not yet confirmed — stays inline code:"
+- text: "Missing, unreadable, or not yet confirmed — stays inline code:"
 - code: src/server/gone.mjs
 - text: ·
 - code: /etc/caddy/Caddyfile

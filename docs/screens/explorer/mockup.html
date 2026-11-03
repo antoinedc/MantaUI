@@ -34,6 +34,7 @@
     .mk-win-default    → app window, session with Explorer open (default state)
     .mk-win-tree       → sidebar hidden (⌘B) + tree open + code at a line
     .mk-win-expanded   → Explorer expanded, transcript folded to the rail
+    .mk-win-banner     → macOS, sidebar hidden, a top banner owning the traffic-light corner
     .mk-links          → path-link states in the transcript
     .mk-states         → empty / loading / error / empty file
     .mk-source         → Markdown "Source" view
@@ -88,10 +89,16 @@
 
   /* sidebar — context only (existing contract) */
   .side { width: 256px; /* w-64 */ flex: none; background: var(--panel); border-right: 1px solid var(--border);
-          padding: 48px var(--sp-2) var(--sp-2); /* h-12 drag strip above */
+          padding: 48px var(--sp-2) var(--sp-2); /* h-12 drag strip above the Workspace header */
           transition: margin-left var(--motion-slow) var(--ease-out); }
   .win.is-noside .side { margin-left: -257px; visibility: hidden; transition: margin-left var(--motion-slow) var(--ease-out), visibility 0s var(--motion-slow); }
   .side { overflow: hidden; }
+  /* Workspace header: the sidebar button sits immediately left of search, in a gap-1 group */
+  .shd { display: flex; align-items: center; justify-content: space-between; margin: 0 calc(var(--sp-2) * -1);
+         padding: 0 var(--sp-3) var(--sp-2); }
+  .shd .t { font-size: var(--font-size-xs); font-weight: var(--weight-semibold); text-transform: uppercase;
+            letter-spacing: .08em; color: var(--tx3); }
+  .shd .g { display: flex; align-items: center; gap: var(--sp-1); }
   .srow { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 10px; /* --row-py/--row-px */
           border-radius: var(--r-md); color: var(--tx2); font-size: var(--font-size-small); white-space: nowrap; }
   .srow.on { background: var(--fill-active); color: var(--tx1); }
@@ -109,13 +116,33 @@
      on macOS it reserves the traffic lights: pl-20 + titlebar-drag. */
   .shead { height: 44px; flex: none; display: flex; align-items: center; gap: var(--sp-2);
            padding: 0 var(--sp-3); border-bottom: 1px solid var(--border); white-space: nowrap; }
-  /* SidebarToggle — pinned once per window, right of the traffic lights (macOS) */
-  .sbt { position: absolute; top: 10px; left: 76px; z-index: 5; }
-  /* every pane header: padding-left: max(own, var(--sidebar-hidden-inset)); macOS hidden = 112px */
-  .win { --sidebar-hidden-inset: 0px; }
-  .win.is-noside { --sidebar-hidden-inset: 112px; }
-  .shead { padding-left: max(var(--sp-3), var(--sidebar-hidden-inset)); }
-  .win.is-expanded .xp-top { padding-left: max(var(--sp-2), calc(var(--sidebar-hidden-inset) - 44px)); }
+  /* Window-corner inset variables (macOS drawn). The traffic lights cover x 14…~70, y 14…~28.
+       --tl-inset-x     76px while the sidebar is hidden, else 0
+       --banner-inset-x --tl-inset-x when a top banner shows, else 0 (banners read it)
+       --pane-inset-x   0 when a banner shows, else --tl-inset-x (pane headers read it)
+       --pane-inset-top 40px while hidden and no banner, else 0 (the Expanded rail reads it) */
+  .win { --tl-inset-x: 0px; --banner-inset-x: 0px; --pane-inset-x: 0px; --pane-inset-top: 0px; }
+  .win.is-noside { --tl-inset-x: 76px; --pane-inset-x: var(--tl-inset-x); --pane-inset-top: 40px; }
+  .win.is-noside.has-banner { --banner-inset-x: var(--tl-inset-x); --pane-inset-x: 0px; --pane-inset-top: 0px; }
+  .shead { padding-left: max(var(--sp-3), var(--pane-inset-x)); }
+  .win.is-expanded .xp-top { padding-left: max(var(--sp-2), calc(var(--pane-inset-x) - 44px)); }
+  /* SidebarRevealButton — the FIRST control of the top-left pane header, only while the sidebar is hidden
+     (the session header; in Expanded the Explorer top bar instead, since the session header is folded away). */
+  .sbr { display: none; }
+  .win.is-noside .shead .sbr { display: inline-flex; }
+  .win.is-noside.is-expanded .shead .sbr { display: none; }
+  .win.is-noside.is-expanded .xp-top .sbr { display: inline-flex; }
+  /* A top banner (ReconnectingBanner / UpdateBar): when it is the window's top edge it owns the
+     traffic-light clearance and drags the window; its right edge reserves the Windows caption buttons. */
+  .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .banner { flex: none; display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3);
+            padding-left: max(var(--sp-3), var(--banner-inset-x));
+            background: color-mix(in srgb, var(--accent) 10%, transparent);
+            border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+            font-size: var(--font-size-xs); color: var(--tx1); }
+  .banner .msg { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .banner .bb { font: inherit; color: var(--tx2); background: var(--fill); border: 1px solid var(--border);
+                border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-2); }
   .crumb { font-size: var(--font-size-small); font-weight: var(--weight-medium); color: var(--tx1); }
   .crumb .mut { color: var(--tx3); }
   .tag { display: inline-flex; align-items: center; gap: var(--sp-1); height: 22px; padding: 0 var(--sp-2);
@@ -246,7 +273,7 @@
 
   /* ---- expanded: transcript folds into a w-11 rail ---- */
   .rail { display: none; width: 44px; flex: none; flex-direction: column; align-items: center; gap: var(--sp-3);
-          padding-top: var(--sp-3); background: var(--canvas); border-right: 1px solid var(--border); cursor: pointer; }
+          padding-top: max(var(--sp-3), var(--pane-inset-top)); background: var(--canvas); border-right: 1px solid var(--border); cursor: pointer; }
   .rail:hover { background: var(--fill-hover); }
   .rail .vl { writing-mode: vertical-rl; transform: rotate(180deg); font-size: var(--font-size-xs); color: var(--tx3); }
   .win.is-expanded .tpane, .win.is-expanded .rh { display: none; }
@@ -346,11 +373,14 @@
 
   <!-- ======================= 1. DEFAULT (live) ======================= -->
   <h2>1 · Default — Explorer open, tree hidden <span style="color:var(--tx3);font-size:var(--font-size-small);font-weight:400">(live: drag the divider, ⌘B / Ctrl+B, ⇧⌘E, ⌥⌘E, click paths, ⌘-click)</span></h2>
-  <p class="cap">Sidebar · transcript · divider · Explorer. The path the viewer is showing is outlined in the transcript.</p>
+  <p class="cap">Sidebar · transcript · divider · Explorer. The sidebar button sits in the sidebar header, left of search. The path the viewer is showing is outlined in the transcript.</p>
   <div class="win mk-win-default is-notree" id="live">
     <div class="lights"><i></i><i></i><i></i></div>
-    <button class="ib sbt" data-act="sidebar" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
     <aside class="side">
+      <div class="shd"><span class="t">Workspace</span><span class="g">
+        <button class="ib" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+        <button class="ib" title="Search sessions (⌘K)"><svg class="ic"><use href="#i-search"/></svg></button>
+      </span></div>
       <div class="sgrp">manta</div>
       <div class="srow on"><span class="dot run"></span>peek-range-fix</div>
       <div class="srow"><span class="dot"></span>routines-ui</div>
@@ -361,6 +391,7 @@
     <div class="content">
       <section class="tpane">
         <header class="shead">
+          <button class="ib sbr" data-act="sidebar" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
           <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
           <span class="tag">fix/peek-range</span>
           <span class="sp">
@@ -389,6 +420,7 @@
         </div>
         <div class="xp-col">
           <div class="xp-top">
+            <button class="ib sbr" data-act="sidebar" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
             <button class="ib" data-act="tree" title="Show file tree (⌥⌘E)"><svg class="ic"><use href="#i-list-tree"/></svg></button>
             <span class="xp-root"><svg class="ic s14"><use href="#i-folder"/></svg><span>fix-peek-range</span></span>
             <button class="ib" title="Quick open (⌘P)"><svg class="ic"><use href="#i-search"/></svg></button>
@@ -444,14 +476,14 @@
 
   <!-- ======================= 2. SIDEBAR HIDDEN + TREE ======================= -->
   <h2>2 · ⌘B — sidebar hidden, tree open, opened at a line</h2>
-  <p class="cap">The header reserves the macOS window controls. The tree opens inside the Explorer and narrows the viewer, never the transcript. Lines 28–30 are the target range.</p>
+  <p class="cap">The sidebar button is the header's first control, right of the macOS window controls (the header's left padding is <code>--pane-inset-x</code>). The tree opens inside the Explorer and narrows the viewer, never the transcript. Lines 28–30 are the target range.</p>
   <div class="win mk-win-tree is-noside" id="w2">
     <div class="lights"><i></i><i></i><i></i></div>
-    <button class="ib sbt" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
     <aside class="side"></aside>
     <div class="content">
       <section class="tpane">
         <header class="shead">
+          <button class="ib sbr" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
           <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
           <span class="tag">fix/peek-range</span>
           <span class="sp">
@@ -499,8 +531,11 @@
   <p class="cap">The file fills the window right of the sidebar. The transcript folds to a rail that still shows the session's status dot (here: the agent is working). Esc, ⇧⌘E or a click on the rail restores the exact split.</p>
   <div class="win mk-win-expanded is-expanded is-notree" id="w3">
     <div class="lights"><i></i><i></i><i></i></div>
-    <button class="ib sbt" data-act="sidebar" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
     <aside class="side">
+      <div class="shd"><span class="t">Workspace</span><span class="g">
+        <button class="ib" title="Hide sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+        <button class="ib" title="Search sessions (⌘K)"><svg class="ic"><use href="#i-search"/></svg></button>
+      </span></div>
       <div class="sgrp">manta</div>
       <div class="srow on"><span class="dot run"></span>peek-range-fix</div>
       <div class="srow"><span class="dot"></span>routines-ui</div>
@@ -540,25 +575,75 @@
     </div>
   </div>
 
-  <!-- ======================= 4–9. DETAILS ======================= -->
+  <!-- ======================= 4. BANNER OWNS THE CORNER ======================= -->
+  <h2>4 · A top banner over a hidden sidebar (macOS)</h2>
+  <p class="cap">With the sidebar hidden, the banner is what sits at the window's top-left, so it carries the traffic-light clearance (<code>--banner-inset-x</code>, text starts right of them) and the pane header below it drops its own (<code>--pane-inset-x</code> = 0). The sidebar button is still the header's first control.</p>
+  <div class="win mk-win-banner is-noside has-banner" id="w4">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <aside class="side"></aside>
+    <div class="main-col">
+      <div class="banner"><span class="msg">Reconnecting to your box… retrying in 4 s</span><button class="bb">Retry now</button></div>
+      <div class="content">
+        <section class="tpane">
+          <header class="shead">
+            <button class="ib sbr" title="Show sidebar (⌘B)"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+            <span class="crumb"><span class="mut">manta /</span> peek-range-fix</span>
+            <span class="tag">fix/peek-range</span>
+            <span class="sp">
+              <button class="ib on" title="Hide file explorer (⌘E)"><svg class="ic"><use href="#i-folder-tree"/></svg></button>
+              <button class="ib" title="Show artifacts (⌘I)"><svg class="ic"><use href="#i-panel-right"/></svg></button>
+              <button class="ib" title="Session menu"><svg class="ic"><use href="#i-more"/></svg></button>
+            </span>
+          </header>
+          <div class="scroll">
+            <div class="amsg"><p>The guard lives in <span class="fl is-active">src/server/peek.mjs<span class="ln">:28-30</span></span>. It now matches the download route.</p></div>
+          </div>
+          <div class="composer">Message the agent…</div>
+        </section>
+        <div class="rh"></div>
+        <section class="xp" style="width:520px">
+          <div class="xp-col">
+            <div class="xp-top">
+              <button class="ib" title="Show file tree (⌥⌘E)"><svg class="ic"><use href="#i-list-tree"/></svg></button>
+              <span class="xp-root"><svg class="ic s14"><use href="#i-folder"/></svg><span>fix-peek-range</span></span>
+              <button class="ib" title="Quick open (⌘P)"><svg class="ic"><use href="#i-search"/></svg></button>
+              <button class="ib" title="Expand (⇧⌘E)"><svg class="ic"><use href="#i-max"/></svg></button>
+              <button class="ib" title="Close (⌘E)"><svg class="ic"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="xp-body">
+              <div class="vw">
+                <div class="fbar">
+                  <span class="bc"><bdi>src / server / <b>peek.mjs</b> <span class="at">· lines 28–30</span></bdi></span>
+                </div>
+                <div class="vbody"><div class="cm" data-code="peek"></div></div>
+                <div class="vfoot"><span>JavaScript</span><span>142 lines</span><span>4.8 KB</span><span class="sp"></span><span>Ln 28</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= 5–10. DETAILS ======================= -->
   <h2>Details</h2>
   <div class="grid2">
     <div class="box mk-links">
-      <h3>4 · Path links in the transcript</h3>
+      <h3>5 · Path links in the transcript</h3>
       <div class="amsg">
         <p>Confirmed file, relative to the session: <span class="fl">src/server/peek.mjs</span></p>
         <p>With a line / range: <span class="fl">peek.mjs<span class="ln">:28</span></span> · <span class="fl">peek.mjs<span class="ln">:28-34</span></span></p>
         <p>Home and absolute: <span class="fl">~/notes/todo.md</span> · <span class="fl">/home/dev/projects/manta/AGENTS.md</span></p>
         <p>Hovered: <span class="fl is-hover">docs/peek-scope.md</span> · Shown in the Explorer: <span class="fl is-active">docs/peek-scope.md</span></p>
-        <p>Missing, outside home, or not yet confirmed — stays inline code: <span class="ic-plain">src/server/gone.mjs</span> · <span class="ic-plain">/etc/caddy/Caddyfile</span></p>
+        <p>Missing, unreadable, or not yet confirmed — stays inline code: <span class="ic-plain">src/server/gone.mjs</span> · <span class="ic-plain">/etc/caddy/Caddyfile</span></p>
         <p>A web link, for contrast (unchanged): <span class="ext">mantaui.com/downloads</span></p>
       </div>
     </div>
 
     <div class="box mk-states">
-      <h3>5 · Empty, loading, error</h3>
+      <h3>6 · Empty, loading, error</h3>
       <div class="refusals">
-        <div class="refuse"><svg class="ic s20"><use href="#i-folder-tree"/></svg><span class="t">No file open</span><span class="s">Click a file path in the conversation, or open the tree</span><span class="btn2">Show tree</span></div>
+        <div class="refuse"><svg class="ic s20"><use href="#i-folder-tree"/></svg><span class="t">No file open</span><span class="s">Click a file path in the conversation, or open the tree</span></div>
         <div class="refuse" style="align-items:stretch;text-align:left;justify-content:flex-start"><span class="sk" style="width:60%"></span><span class="sk" style="width:85%"></span><span class="sk" style="width:40%"></span><span class="s" style="text-align:center;margin-top:var(--sp-3)">Loading (Skeleton, after 150 ms)</span></div>
         <div class="refuse"><svg class="ic s20"><use href="#i-file-warn"/></svg><span class="t">Couldn't load this file</span><span class="s">The box didn't answer. Check the connection.</span><span class="btn2">Retry</span></div>
         <div class="refuse"><span class="s">Empty file</span></div>
@@ -566,7 +651,7 @@
     </div>
 
     <div class="box mk-source">
-      <h3>6 · Markdown "Source" view</h3>
+      <h3>7 · Markdown "Source" view</h3>
       <div class="vw" style="border:1px solid var(--border-subtle);border-radius:var(--r-md);overflow:hidden;height:300px">
         <div class="fbar">
           <span class="bc"><bdi>docs / <b>peek-scope.md</b></bdi></span>
@@ -580,7 +665,7 @@
     </div>
 
     <div class="box mk-refusals">
-      <h3>7 · Files the viewer won't show</h3>
+      <h3>8 · Files the viewer won't show</h3>
       <div class="refusals">
         <div class="refuse"><svg class="ic s20"><use href="#i-file-warn"/></svg><span class="t">Too large to preview</span><span class="s">video.mov is 812 MB · the limit is 25 MB</span><span class="btn"><svg class="ic s14"><use href="#i-download"/></svg>Download</span></div>
         <div class="refuse"><svg class="ic s20"><use href="#i-binary"/></svg><span class="t">Binary file</span><span class="s">app.sqlite can't be shown as text</span><span class="btn"><svg class="ic s14"><use href="#i-download"/></svg>Download</span></div>
@@ -590,7 +675,7 @@
     </div>
 
     <div class="box mk-copy">
-      <h3>8 · Copy feedback, More menu, download toast</h3>
+      <h3>9 · Copy feedback, More menu, download toast</h3>
       <div style="display:flex;gap:var(--sp-6);align-items:flex-start;flex-wrap:wrap">
         <div style="display:flex;flex-direction:column;gap:var(--sp-2);align-items:flex-start">
           <span style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--font-size-xs);color:var(--tx3)">
@@ -607,7 +692,7 @@
     </div>
 
     <div class="box mk-quickopen">
-      <h3>9 · Quick open (⌘P in the Explorer) — searches the session folder</h3>
+      <h3>10 · Quick open (⌘P in the Explorer) — searches the session folder</h3>
       <div class="pal">
         <div class="in"><svg class="ic"><use href="#i-search"/></svg>peek</div>
         <div class="list">
@@ -715,7 +800,7 @@ document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('c
     W.querySelector('[data-act=tree]').classList.toggle('on', st.tree);
     W.querySelector('.shead [data-act=close]').classList.toggle('on', st.open);
     const ex = W.querySelector('[data-act=expand] use'); ex.setAttribute('href', st.exp ? '#i-min' : '#i-max');
-    W.querySelector('[data-act=sidebar]').title = st.side ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)';
+    W.querySelectorAll('[data-act=sidebar]').forEach(b => { b.title = st.side ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)'; });
     T.style.width = st.treeW + 'px';
     requestAnimationFrame(() => { const w = C.getBoundingClientRect().width;
       const fw = Math.max(MIN_F, Math.min(w - MIN_T, Math.round(w * st.ratio))); if (!st.exp) XP.style.width = fw + 'px'; });

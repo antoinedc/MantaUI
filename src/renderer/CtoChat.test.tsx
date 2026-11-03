@@ -28,6 +28,7 @@ import {
 } from "./testHarness";
 import { CtoChat } from "./CtoChat";
 import { CtoPanel } from "./CtoPanel";
+import { resetExplorerStore, setSidebarHidden } from "./explorer/explorerStore";
 import { historyKey, appendPromptHistory } from "./chatShared";
 import { CTO_HISTORY_SCOPE } from "./hooks/useComposerController";
 import type { CtoConversationState, CtoSubmissionProjection } from "../shared/api";
@@ -243,6 +244,8 @@ async function mountFailingSubmit(
 
   beforeEach(() => {
     resetStore();
+    localStorage.clear();
+    resetExplorerStore();
   });
 
   afterEach(() => {
@@ -277,6 +280,19 @@ async function mountFailingSubmit(
     // A read-only open creates no worker/turn: no submits, no prompts.
     expect(api.calls.ctoConversationSubmit?.length ?? 0).toBe(0);
     expect(api.calls.opencodePrompt?.length ?? 0).toBe(0);
+  });
+
+  it("its header leads with the sidebar restore button only while the sidebar is hidden, and reserves the caption strip", async () => {
+    h = mountCto();
+    await h.flush();
+    const header = h.container.querySelector("h1")!.parentElement as HTMLElement;
+    expect(header.querySelector(".manta-sidebar-toggle")).toBeNull();
+    expect(header.className).toContain("var(--titlebar-inset-right)");
+    expect(header.style.paddingLeft).toBe("max(var(--sp-4), var(--pane-inset-x, 0px))");
+
+    act(() => setSidebarHidden(true));
+    expect(header.querySelectorAll(".manta-sidebar-toggle")).toHaveLength(1);
+    expect(header.firstElementChild!.querySelector(".manta-sidebar-toggle")).not.toBeNull();
   });
 
   it("shows an explicit error with a working Retry when the open fails", async () => {

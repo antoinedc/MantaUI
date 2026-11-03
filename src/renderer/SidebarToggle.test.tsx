@@ -1,37 +1,52 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { mount, type Harness } from "./testHarness";
-import { SidebarToggle } from "./SidebarToggle";
+import { SidebarRevealButton, SidebarToggleButton } from "./SidebarToggle";
+import { getAppState, resetExplorerStore, setSidebarHidden } from "./explorer/explorerStore";
 
 let h: Harness | null = null;
+beforeEach(() => {
+  localStorage.clear();
+  resetExplorerStore();
+});
 afterEach(() => {
   h?.unmount();
   h = null;
 });
 
-describe("SidebarToggle", () => {
-  it("is a labelled button that restores / hides and reports its state in its name", () => {
-    const onToggle = vi.fn();
-    h = mount(<SidebarToggle hidden={false} onToggle={onToggle} />);
-    const btn = h.container.querySelector<HTMLButtonElement>(".manta-sidebar-toggle")!;
-    expect(btn.getAttribute("aria-label")).toBe("Hide sidebar");
-    act(() => btn.click());
-    expect(onToggle).toHaveBeenCalledTimes(1);
+describe("SidebarToggleButton", () => {
+  it("is a labelled button that flips the sidebar and reports its state in its name", () => {
+    h = mount(<SidebarToggleButton hidden={false} />);
+    const btn = () => h!.container.querySelector<HTMLButtonElement>(".manta-sidebar-toggle")!;
+    expect(btn().getAttribute("aria-label")).toBe("Hide sidebar");
+    expect(btn().getAttribute("title")).toMatch(/Hide sidebar \(.*B\)/);
+    act(() => btn().click());
+    expect(getAppState().sidebarHidden).toBe(true);
+    expect(localStorage.getItem("manta:sidebarHidden")).toBe("1");
 
-    h.rerender(<SidebarToggle hidden onToggle={onToggle} />);
-    expect(h.container.querySelector(".manta-sidebar-toggle")!.getAttribute("aria-label")).toBe("Show sidebar");
-    expect(h.container.querySelector(".manta-sidebar-toggle")!.getAttribute("title")).toMatch(/Show sidebar \(.*B\)/);
+    h.rerender(<SidebarToggleButton hidden />);
+    expect(btn().getAttribute("aria-label")).toBe("Show sidebar");
+    expect(btn().getAttribute("title")).toMatch(/Show sidebar \(.*B\)/);
+    act(() => btn().click());
+    expect(getAppState().sidebarHidden).toBe(false);
+  });
+});
+
+describe("SidebarRevealButton", () => {
+  it("renders nothing while the sidebar is visible", () => {
+    h = mount(<SidebarRevealButton />);
+    expect(h.container.innerHTML).toBe("");
   });
 
-  it("sits right of the macOS traffic lights, at the edge elsewhere, and is not a drag region", () => {
-    h = mount(<SidebarToggle hidden onToggle={() => {}} isMac />);
-    let wrap = h.container.firstElementChild as HTMLElement;
-    expect(wrap.style.left).toBe("76px");
-    expect(wrap.style.top).toBe("10px");
-    expect(wrap.className).toContain("titlebar-no-drag");
-    h.rerender(<SidebarToggle hidden onToggle={() => {}} isMac={false} />);
-    wrap = h.container.firstElementChild as HTMLElement;
-    expect(wrap.style.left).toBe("8px");
+  it("appears while the sidebar is hidden, restores it on press, and is not a drag region", () => {
+    h = mount(<SidebarRevealButton />);
+    act(() => setSidebarHidden(true));
+    const btn = h.container.querySelector<HTMLButtonElement>(".manta-sidebar-toggle")!;
+    expect(btn.getAttribute("aria-label")).toBe("Show sidebar");
+    expect((h.container.firstElementChild as HTMLElement).className).toContain("titlebar-no-drag");
+    act(() => btn.click());
+    expect(getAppState().sidebarHidden).toBe(false);
+    expect(h.container.innerHTML).toBe("");
   });
 });

@@ -1,7 +1,7 @@
 // ===== Path-link resolution (batching, cache, invalidation) =====
 //
 // Turns detected path candidates into confirmed links: the box's
-// `fs:resolve-paths` says which candidates exist as a file/folder inside home.
+// `fs:resolve-paths` says which candidates exist as a readable file/folder on the box.
 // Spec: docs/superpowers/specs/2026-11-02-file-explorer.md §Path links.
 //
 // ONE module-level resolver shared by every link in the app:
@@ -153,7 +153,7 @@ function signature(sessionId: string, cwd: string, paths: readonly string[]): st
 /**
  * Resolve `paths` (as written in the transcript) against the owner's folder.
  * Returns a lookup that yields the confirmed target, or undefined while the
- * path is unresolved / missing / outside home. No owner → nothing resolves and
+ * path is unresolved / missing / unreadable. No owner → nothing resolves and
  * nothing is requested.
  */
 export function usePathResolution(

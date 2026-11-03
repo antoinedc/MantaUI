@@ -7,7 +7,9 @@ import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { ArtifactPreview } from "./ArtifactPreview";
-import { SidebarToggle } from "./SidebarToggle";
+import { SidebarRevealButton } from "./SidebarToggle";
+import { useTitleBarOverlaySync } from "./titleBarOverlay";
+import { IS_MAC } from "./platform";
 import { ExplorerSplit } from "./explorer/ExplorerPanel";
 import {
   openFile as openExplorerFile,
@@ -21,7 +23,7 @@ import {
   useShownRightPanel,
   useSidebarHidden,
 } from "./explorer/explorerStore";
-import { SIDEBAR_HIDDEN_INSET_PX, TREE_TOO_NARROW_REASON } from "./explorer/layout";
+import { cornerInsetVars, TREE_TOO_NARROW_REASON } from "./explorer/layout";
 import { artifactForPath } from "./explorer/previewPath";
 import {
   EXPLORER_OPEN_EVENT,
@@ -2048,6 +2050,18 @@ function Shell() {
     ? (resolveSessionOwner(projects, activeChatSessionId)?.cwd ?? null)
     : null;
 
+  // Which top banners render (the four renders below read these same flags).
+  // The window's top-left corner then belongs to the banner, not the pane
+  // headers under it (spec 2026-11-03 §1).
+  const showReconnecting = !showOnboarding && activeBanner === "reconnecting";
+  const showIncompatible = !showOnboarding && activeBanner === "incompatible";
+  const showInFlightUpdate = !showOnboarding && (boxUpgrading || updatingTargetId != null || desktopRestarting);
+  const showUpdates =
+    !showOnboarding && activeBanner === "updates" && updateBanner !== null && !boxUpgrading && updatingTargetId == null;
+  const topBannerShown = showReconnecting || showIncompatible || showInFlightUpdate || showUpdates;
+
+  useTitleBarOverlaySync(shownRight);
+
   return (
     // data-screen is the visual harness's handle on the app shell (see
     // scripts/visual/screens.mjs), matching NewSessionScreen's. One stable
@@ -2056,11 +2070,11 @@ function Shell() {
     <div
       data-screen="session"
       className="h-full w-full flex bg-bg text-text relative"
-      // While the sidebar is hidden every pane header pads its left edge by this
-      // much so nothing sits under the pinned toggle (and the traffic lights).
-      style={{ "--sidebar-hidden-inset": sidebarHidden ? `${SIDEBAR_HIDDEN_INSET_PX}px` : "0px" } as CSSProperties}
+      // The OS window controls overlay the app's corners (macOS traffic lights
+      // top-left while the sidebar is hidden). Exactly one element owns each
+      // corner — the banner if one shows, else the pane header — and reads these.
+      style={cornerInsetVars({ isMac: IS_MAC, sidebarHidden, bannerShown: topBannerShown }) as CSSProperties}
     >
-      <SidebarToggle hidden={sidebarHidden} onToggle={toggleSidebarHidden} />
       <Sidebar
         ref={sidebarRef}
         hidden={sidebarHidden}
@@ -2084,13 +2098,13 @@ function Shell() {
             available" (a downloaded desktop auto-update) is no longer a bar —
             it is a small --accent dot on the Settings entry in the sidebar
             footer; the bar is reserved for states that actually block you. */}
-        {!showOnboarding && activeBanner === "reconnecting" && (
+        {showReconnecting && (
           <ReconnectingBanner
             state={connectionState}
             onRetryNow={() => window.api.connectionRetryNow()}
           />
         )}
-        {!showOnboarding && activeBanner === "incompatible" && (
+        {showIncompatible && (
           <UpdateBar
             text={
               <>
@@ -2124,7 +2138,7 @@ function Shell() {
             state matters most. `boxUpgrading` stays true until the version
             re-check confirms the box advanced (or the 120s cap / a real early
             failure). */}
-        {!showOnboarding && (boxUpgrading || updatingTargetId != null || desktopRestarting) && (
+        {showInFlightUpdate && (
           <UpdateBar
             text={updateBanner?.text ?? "Updating…"}
             actionLabel={updateBanner?.actionLabel ?? "Update"}
@@ -2154,8 +2168,7 @@ function Shell() {
             }
           />
         )}
-        {!showOnboarding && activeBanner === "updates" && updateBanner &&
-          !boxUpgrading && updatingTargetId == null && (
+        {showUpdates && updateBanner && (
           <UpdateBar
             text={updateBanner.text}
             actionLabel={updateBanner.actionLabel}
@@ -2172,11 +2185,14 @@ function Shell() {
             busyLabel={boxRestarting ? "Restarting the server…" : "Updating the server…"}
           />
         )}
-        {!isChatPaneActive && !routinesView && (
+        {/* The CTO and Routines panes carry their own header; this one would
+            stack above it naming the hidden terminal. */}
+        {!isChatPaneActive && !routinesView && !ctoOpen && (
         <div
-          className="titlebar-drag h-12 border-b border-border flex items-center pr-4 gap-2 min-w-0"
-          style={{ paddingLeft: "max(var(--sp-4), var(--sidebar-hidden-inset, 0px))" }}
+          className="titlebar-drag h-11 border-b border-border flex items-center pr-4 gap-2 min-w-0"
+          style={{ paddingLeft: "max(var(--sp-4), var(--pane-inset-x, 0px))" }}
         >
+          <SidebarRevealButton />
           <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
               <span className="text-text-faint shrink-0">

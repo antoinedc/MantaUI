@@ -69,6 +69,10 @@ export interface MantaPreload {
   readLocalFile(path: string): Promise<ArrayBuffer>;
   openExternal(url: string): Promise<void>;
   revealInFolder(localPath: string): Promise<void>;
+  // Windows: recolour the OS caption buttons (`#RRGGBB` both) so they follow
+  // the theme and the header under them. Main no-ops off win32 and refuses
+  // anything but `#RRGGBB`.
+  setTitleBarOverlay(colors: { color: string; symbolColor: string }): Promise<void>;
   // BET-1156: the one desktop download-to-downloads path. Main fetches
   // `/api/download?path=<remotePath>` with the box token and writes the bytes
   // to `downloadsDir` (default `~/Downloads`), deduping a name collision.

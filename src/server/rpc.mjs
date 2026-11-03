@@ -1094,7 +1094,7 @@ export function buildHandlers({
     "fs:list-dirs": (partial) => local.fsListDirs(partial),
 
     // File explorer (docs/superpowers/specs/2026-11-02-file-explorer.md). All three
-    // read through the home-scoped policy; expected outcomes are returned, not thrown.
+    // read through the shared file-access policy; expected outcomes are returned, not thrown.
     // preload: IPC.fsResolvePaths → args[0] = { base, paths }
     "fs:resolve-paths": (i) => explorerFiles.resolvePaths(i),
     // preload: IPC.fsList → args[0] = { dir, limit? }

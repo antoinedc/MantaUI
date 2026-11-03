@@ -3,12 +3,11 @@ import {
   AUTO_EXPAND_BELOW_PX,
   basename,
   clampTreeWidth,
+  cornerInsetVars,
   dirname,
   isInsideRoot,
   railTone,
   shouldAutoExpand,
-  sidebarHiddenInsetPx,
-  sidebarToggleLeftPx,
   terminalPassesSidebarKey,
   treeToggleDisabled,
 } from "./layout";
@@ -42,11 +41,45 @@ describe("explorer layout helpers", () => {
     expect(railTone({ attentionKind: "idle", running: false })).toBe("idle");
   });
 
-  it("uses the platform inset / toggle position", () => {
-    expect(sidebarHiddenInsetPx(true)).toBe(112);
-    expect(sidebarHiddenInsetPx(false)).toBe(40);
-    expect(sidebarToggleLeftPx(true)).toBe(76);
-    expect(sidebarToggleLeftPx(false)).toBe(8);
+  describe("cornerInsetVars — one owner for the top-left corner", () => {
+    const mac76 = "max(76px, var(--titlebar-inset-left, 0px))";
+
+    it("sidebar visible: nothing to clear, banner or not", () => {
+      for (const isMac of [true, false]) {
+        for (const bannerShown of [true, false]) {
+          expect(cornerInsetVars({ isMac, sidebarHidden: false, bannerShown })).toEqual({
+            "--tl-inset-x": "0px",
+            "--banner-inset-x": bannerShown ? "var(--tl-inset-x)" : "0px",
+            "--pane-inset-x": bannerShown ? "0px" : "var(--tl-inset-x)",
+            "--pane-inset-top": "0px",
+          });
+        }
+      }
+    });
+
+    it("macOS, sidebar hidden, no banner: the pane header and the rail clear the traffic lights", () => {
+      expect(cornerInsetVars({ isMac: true, sidebarHidden: true, bannerShown: false })).toEqual({
+        "--tl-inset-x": mac76,
+        "--banner-inset-x": "0px",
+        "--pane-inset-x": "var(--tl-inset-x)",
+        "--pane-inset-top": "40px",
+      });
+    });
+
+    it("macOS, sidebar hidden, banner showing: the banner owns the clearance, the panes below do not repeat it", () => {
+      expect(cornerInsetVars({ isMac: true, sidebarHidden: true, bannerShown: true })).toEqual({
+        "--tl-inset-x": mac76,
+        "--banner-inset-x": "var(--tl-inset-x)",
+        "--pane-inset-x": "0px",
+        "--pane-inset-top": "0px",
+      });
+    });
+
+    it("other OSes, sidebar hidden: only the RTL caption-button width, never the traffic-light inset", () => {
+      const v = cornerInsetVars({ isMac: false, sidebarHidden: true, bannerShown: false });
+      expect(v["--tl-inset-x"]).toBe("var(--titlebar-inset-left, 0px)");
+      expect(v["--pane-inset-top"]).toBe("0px");
+    });
   });
 
   it("path helpers", () => {

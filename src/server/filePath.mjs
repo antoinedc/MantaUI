@@ -1,13 +1,14 @@
-// homePath.mjs — the ONE file-access policy for everything that reads a file on
+// filePath.mjs — the ONE file-access policy for everything that reads a file on
 // the box on a client's behalf: /api/peek, /api/download and the fs:* channels
-// (docs/superpowers/specs/2026-11-02-file-explorer.md §Shared file-access policy).
+// (docs/superpowers/specs/2026-11-02-file-explorer.md §Shared file-access policy,
+// widened by 2026-11-03-explorer-followup.md §7a).
 //
-// Threat model: the client is authenticated. The guard keeps reads inside the
-// user's home directory and stops symlink escapes (a link under home that points
-// at /etc, a `..` walk out of home). An attacker who can already create symlinks
-// inside home has a shell as the user, so the open-time identity check below
-// (same dev/ino as the path we vetted, O_NOFOLLOW, regular files only) is
-// proportionate — it closes the resolve→open race, it is not a sandbox.
+// Threat model: the client is authenticated as the box user, so any absolute
+// path that user can read is allowed; the OS file permissions are the real
+// limit. What stays: input checks, `~` expansion, realpath (`..` and symlinks
+// resolve to their real target), regular-file / directory kind checks, and the
+// open-time identity check (same dev/ino as the path we vetted, O_NOFOLLOW,
+// regular files only), which closes the resolve→open race.
 //
 // All fs is injected so a test can drive this with real tmp directories and a
 // fake home.
@@ -30,28 +31,20 @@ function reasonFromErrno(e) {
     case "EPERM":
       return "permission";
     default:
-      console.warn("[homePath] unexpected fs error:", e?.message ?? e);
+      console.warn("[filePath] unexpected fs error:", e?.message ?? e);
       return "unavailable";
   }
 }
 
-export function createHomePath({
+export function createFilePath({
   homedir = osHomedir,
   realpath = fsp.realpath,
   stat = fsp.stat,
   open = fsp.open,
 } = {}) {
-  async function resolveInHome(raw, { base } = {}) {
+  async function resolvePath(raw, { base } = {}) {
     if (typeof raw !== "string" || raw === "" || raw.includes("\0")) {
       return { ok: false, reason: "invalid_input" };
-    }
-
-    let home;
-    try {
-      home = await realpath(homedir());
-    } catch (e) {
-      console.warn("[homePath] cannot resolve the home directory:", e?.message ?? e);
-      return { ok: false, reason: "unavailable" };
     }
 
     let abs;
@@ -60,7 +53,7 @@ export function createHomePath({
     else if (isAbsolute(raw)) abs = resolve(raw);
     else {
       if (typeof base !== "string") return { ok: false, reason: "invalid_input" };
-      const b = await resolveInHome(base);
+      const b = await resolvePath(base);
       if (!b.ok) return b;
       if (!b.stat.isDirectory()) return { ok: false, reason: "not-file" };
       abs = resolve(b.abs, raw);
@@ -72,11 +65,6 @@ export function createHomePath({
     } catch (e) {
       return { ok: false, reason: reasonFromErrno(e) };
     }
-    const prefix = home.endsWith("/") ? home : home + "/";
-    if (canonical !== home && !canonical.startsWith(prefix)) {
-      return { ok: false, reason: "outside-home" };
-    }
-
     let st;
     try {
       st = await stat(canonical);
@@ -88,10 +76,10 @@ export function createHomePath({
 
   // Byte access. The caller owns the returned FileHandle and must close it
   // (a stream made with handle.createReadStream() closes it on end/destroy).
-  async function openInHome(raw, opts) {
+  async function openPath(raw, opts) {
     let lastReason = "changed";
     for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await resolveInHome(raw, opts);
+      const r = await resolvePath(raw, opts);
       if (!r.ok) return r;
 
       let handle;
@@ -127,5 +115,5 @@ export function createHomePath({
     return { ok: false, reason: lastReason };
   }
 
-  return { resolveInHome, openInHome };
+  return { resolvePath, openPath };
 }

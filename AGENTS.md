@@ -350,7 +350,7 @@ Window-scoped, in `App.tsx`. xterm-internal handlers (⌘C/V/F/K) live in
 | ⌘,          | Open Settings                                |
 | ⇧⌘M         | Voice (chat composer): tap toggles recording on/off, hold is push-to-talk |
 | ⌘B          | Hide / show the left sidebar (app-wide, persisted) |
-| ⌘E          | Toggle the file Explorer (chat session) |
+| ⌘E          | Toggle the file Explorer (chat session); opening it always shows the tree |
 | ⇧⌘E / ⌥⌘E   | Explorer open: expand ↔ restore / toggle its tree |
 | ⌘P          | Focus inside the Explorer: quick open |
 
@@ -438,24 +438,24 @@ require-confirm toast the user hasn't answered isn't re-offered every 3s.
   listener, the active ChatPanel renders it. De-dupe on collision via
   `uniqueLocalPath` (`report.pdf` → `report (1).pdf`).
 - **`/api/peek` and `/api/download` share ONE file-access policy
-  (`src/server/homePath.mjs`, file explorer).** Both call `openInHome`: expand
-  `~`, `realpath` the path, require the canonical path to be inside the
-  canonical home, then `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` and check
+  (`src/server/filePath.mjs`, file explorer).** Both call `openPath`: expand
+  `~`, `realpath` the path (so `..` and symlinks resolve to their real
+  target), then `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` and check
   that the opened file is a regular file with the same dev/ino that was vetted
   (a swap between check and open is `changed`). The bytes stream from that
   handle. Failures are `{ error, reason }` with a safe literal (class-1 500
-  contract): `missing` 404, `outside-home` 403, `not-file` 404, `permission`
-  403, `changed` / `unavailable` 503. An empty or relative path is 400 (these
+  contract): `missing` 404, `not-file` 404, `permission` 403, `changed` / `unavailable` 503. An empty or relative path is 400 (these
   routes take absolute or `~` paths only; relative ones are resolved by
   `fs:resolve-paths` first). The `fs:*` channels use the same helper.
-- **`/api/download` is scoped to the user's HOME dir, not to the outbox
-  (BET-1195).** Inline media shown via `media_show` can sit at ANY path inside
-  home — the tool never copies it into the mailbox — so an outbox-only guard
-  meant a file the transcript happily DISPLAYED (`/api/peek`, already
-  home-scoped, same bearer) could not be SAVED: the download 403'd, the desktop
-  bridge returned `""`, and the renderer threw a bare "download failed". The two
-  routes now share one rule. This does not widen what an authenticated client
-  can read; it only stops display and download from disagreeing.
+- **There is NO home boundary on file access (2026-11-03 explorer follow-up
+  §7a; BET-1195 history).** The client is authenticated as the box user, so any
+  absolute path that user can read is allowed on `/api/peek`, `/api/download`
+  and the `fs:*` channels; the OS file permissions are the real limit (an
+  unreadable path is `permission` / 403). Display and download must keep
+  agreeing — an outbox-only or home-only guard on one of them is what made a
+  file the transcript DISPLAYED fail to SAVE (the download 403'd, the desktop
+  bridge returned `""`, and the renderer threw a bare "download failed").
+  `media_show` (`media.mjs`) keeps its own home rule; it is a separate surface.
 - **Every download REPORTS ITSELF (BET-1198) — `saveToDownloads` in
   `src/renderer/downloadFeedback.ts` is the one non-toast call site.** The
   inline-media hover/preview Download and the artifacts row were previously
@@ -504,7 +504,7 @@ Markdown, images/video, optional tree, quick open, expand). Design sources:
 `docs/screens/explorer/mockup.html` (wins on looks),
 `docs/screens/explorer/conformance.md` (deliberate differences).
 
-- **Server.** `src/server/homePath.mjs` is the one canonical-home policy (see
+- **Server.** `src/server/filePath.mjs` is the one file-access policy (see
   `/api/peek`, above); `src/server/files.mjs` serves `fs:resolve-paths`,
   `fs:list` and `fs:git-status` (wire types in `src/shared/fsTypes.ts`). Quick
   open reuses `opencode:find-files`. Expected refusals are RETURNED as
@@ -529,10 +529,24 @@ Markdown, images/video, optional tree, quick open, expand). Design sources:
   path clicks, `manta-open-review`) goes through it. Split via
   `react-resizable-panels` v4; a content width under 680 px shows the Explorer
   Expanded.
-- **Sidebar toggle.** ⌘B hides the sidebar (`manta:sidebarHidden`); one pinned
-  `SidebarToggle` is always visible, and while hidden App sets
-  `--sidebar-hidden-inset` (macOS 112 px, else 40 px) which every pane header
-  pads itself by (`max(own padding, var(--sidebar-hidden-inset))`).
+- **Sidebar button + window corners.** ⌘B hides the sidebar
+  (`manta:sidebarHidden`). There is no floating control: the button
+  (`SidebarToggleButton`) sits in the sidebar's Workspace header left of search,
+  and while the sidebar is hidden `<SidebarRevealButton/>` is the first control of
+  the top-left pane header (session header, terminal titlebar, CTO, Routines; the
+  Explorer top bar in Expanded). Exactly one element owns each window corner:
+  App sets `--tl-inset-x` / `--banner-inset-x` / `--pane-inset-x` /
+  `--pane-inset-top` (`cornerInsetVars` in `explorer/layout.ts`; the old
+  `--sidebar-hidden-inset` is gone) — the top banner reads `--banner-inset-x`, pane
+  headers read `--pane-inset-x`. On Windows exactly one header per column stack
+  reserves `--titlebar-inset-right`. Full rules: `docs/screens/explorer/contract.md`
+  (§Window-corner variables); `tests/visual/window-controls.visual.ts` guards that
+  nothing sits under the OS controls.
+- **Explorer slide.** The visible chat keeps a collapsible Explorer panel
+  (collapsed = closed) that slides on a `flex-grow` transition while
+  `data-animating` is on the split (programmatic open / close / Expanded only,
+  never a drag); its content holds a fixed width during the slide and unmounts
+  after a close. `Segmented`'s active highlight is one `layoutId` pill.
 - **Demo seam.** The `explorer` demo state (`?demo&desktop&state=explorer`) serves
   a "manta" workspace (`api/demoExplorer.ts`) over a pretend filesystem
   (`api/demoExplorerFs.ts`, names/sizes equal to the mockup's); the viewer's file

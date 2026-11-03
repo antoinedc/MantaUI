@@ -212,12 +212,19 @@ describe("ExplorerTree", () => {
       expect(p.onRootChange).toHaveBeenCalledWith("/home/dev");
     });
 
-    it("is disabled at the home folder, with a reason", async () => {
-      parent = { ok: false, reason: "outside-home" };
-      await show({ root: "/home/dev" });
+    it("is disabled at /, with a reason (no lookup needed)", async () => {
+      await show({ root: "/" });
       const up = h!.container.querySelector<HTMLButtonElement>('button[aria-label="Up to parent folder"]')!;
       expect(up.disabled).toBe(true);
-      expect(up.title).toBe("Already at your home folder");
+      expect(up.title).toBe("Already at the top folder (/)");
+    });
+
+    it("climbs past home", async () => {
+      parent = { ok: true, abs: "/home" };
+      await show({ root: "/home/dev" });
+      const up = h!.container.querySelector<HTMLButtonElement>('button[aria-label="Up to parent folder"]')!;
+      expect(up.disabled).toBe(false);
+      expect(up.title).toBe("Up to home");
     });
   });
 
@@ -227,19 +234,6 @@ describe("ExplorerTree", () => {
     const last = rows().at(-1)!;
     expect(last.textContent).toMatch(/^2003 more not shown — use quick open \(.*P\)$/);
     expect(last.getAttribute("role")).toBeNull();
-  });
-
-  it("shows links that leave home as inert rows", async () => {
-    listings[ROOT] = { ok: true, dir: ROOT, total: 1, truncated: false, entries: [entry(ROOT, "etc", "link-outside")] };
-    const p = await show();
-    const row = rowFor("etc")!;
-    expect(row.title).toBe("Links outside your home folder");
-    expect(row.className).toContain("text-text-faint");
-    expect(row.className).toContain("cursor-default");
-    expect(row.querySelector("svg.lucide-chevron-right, svg.lucide-chevron-down")).toBeNull();
-    await click(row);
-    expect(p.onOpen).not.toHaveBeenCalled();
-    expect(api.fsList).toHaveBeenCalledTimes(1);
   });
 
   it("reveals and selects the opened file, loading its folders", async () => {

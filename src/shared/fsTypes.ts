@@ -4,7 +4,6 @@
 
 export type FsReason =
   | "missing"
-  | "outside-home"
   | "not-file"
   | "permission"
   | "changed"
@@ -20,7 +19,7 @@ export type FsResolved =
 
 export type FsResolveResult = { results: FsResolved[] };
 
-export type FsEntryKind = "file" | "dir" | "link-outside";
+export type FsEntryKind = "file" | "dir";
 
 export type FsEntry = {
   name: string;
