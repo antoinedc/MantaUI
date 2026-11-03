@@ -21,7 +21,7 @@
 // plus `kFor` (provider-bound K reader; ignored by the baseline). The harness
 // reproduces place()'s record updates (`left`, `crossOrgMovedAt`, `movedAt`,
 // `model`) once, for every policy; `recordMove` lets a policy stamp its own
-// fields (the weekly-deadline policy's `lastAutoMoveAt`).
+// fields (none today: the dwell reads `assignedAt`, which applyDecision stamps).
 //   • baseline — the pre-change code, vendored at a pinned commit
 //     (scripts/seats/baseline/PINNED.md; a test proves it unmodified).
 //   • after    — the live src/server/seatAssignment.mjs `decideSeat`, with the same
@@ -42,8 +42,10 @@
 //
 // DEMAND FLOOR. Offered work below the weekly capacity forces `1 − offered/capacity` of a
 // weekly to expire under any policy (whole trace, warm-up included: the counted weeks reach
-// back into it). The expiry gate and the `both` table report expired, the floor, and
-// `expired above floor = max(0, expired − floor)`, the part a placement could prevent.
+// back into it); a second floor is taken over each counted reset's preceding 7 days. The
+// LOWER of the two is "the floor used". The expiry gate and the `both` table report expired,
+// both floors, and `expired above floor = max(0, expired − floor used)`, the part a placement
+// could prevent.
 //
 // RETRY ON FULL (default on, `--no-retry` to turn off). A request that fills its seat
 // leaves the rest of its work unserved; the real system answers that with a limit
@@ -83,18 +85,11 @@ export const POLICY_LOADERS = {
     const m = await import("./baseline/seatAssignment.mjs");
     return { name: "baseline", decideSeat: m.decideSeat, recordMove: null };
   },
-  // The live module. `decideSeat` reads the stamps place() writes (movedAt / reason /
-  // assignedAt → when the conversation last moved), which applyDecision already
-  // records; `lastAutoMoveAt` is stamped too so a record reads the same in a dump.
+  // The live module. `decideSeat` reads only what place() stamps (assignedAt, movedAt, left,
+  // crossOrgMovedAt, model), all of which applyDecision records.
   after: async () => {
     const m = await import("../../src/server/seatAssignment.mjs");
-    return {
-      name: "after",
-      decideSeat: m.decideSeat,
-      recordMove: (rec, _decision, _existing, nowMs) => {
-        rec.lastAutoMoveAt = nowMs;
-      },
-    };
+    return { name: "after", decideSeat: m.decideSeat, recordMove: null };
   },
 };
 
@@ -194,7 +189,7 @@ function firstResetAfter(anchor, t0) {
   return rw;
 }
 
-const emptyMetrics = () => ({ capacityAllPts: 0, offeredAllPts: 0, offered: 0, served: 0, expiredWeeklyPct: 0, seatWeeks: 0, moves: {}, crossMoves: 0, sameMoves: 0, resentMTok: 0 });
+const emptyMetrics = () => ({ countedFloorSumPct: 0, capacityAllPts: 0, offeredAllPts: 0, offered: 0, served: 0, expiredWeeklyPct: 0, seatWeeks: 0, moves: {}, crossMoves: 0, sameMoves: 0, resentMTok: 0 });
 
 /**
  * One policy over one workload.
@@ -222,6 +217,11 @@ export function simulate({ clock, seats: seatDefs, workload, policy, warmupMs = 
   const kFor = (kind) => (kind === "weekly" ? believedK : typeof kind === "string" && kind.startsWith("weekly_scoped") ? 0.5 * believedK : null);
 
   const m = emptyMetrics();
+  // Offered work per bin, cumulated: the floor of one counted seat-week needs the work offered in its 7 days.
+  const offeredPrefix = new Float64Array(workload.bins + 1);
+  for (let b = 0; b < workload.bins; b++) offeredPrefix[b + 1] = offeredPrefix[b] + workload.requestsByBin[b].reduce((a, r) => a + r.d, 0);
+  const weekBins = Math.round(WEEK / binMs);
+  const weekCapacityPts = seats.length * 100 * K;
   const assignments = new Map(); // conv id → record
   const history = []; // seat states at the start of each recent bin (for provider lag)
   const copyState = () => seats.map((s) => ({ s5: s.s5, r5: s.r5, w: s.w, rw: s.rw }));
@@ -270,6 +270,9 @@ export function simulate({ clock, seats: seatDefs, workload, policy, warmupMs = 
         if (measured) {
           m.expiredWeeklyPct += 100 - s.w;
           m.seatWeeks += 1;
+          // The floor of THIS seat-week: the pool's work offered in the 7 days before its reset against a full week
+          // of pool capacity (a week cut by the trace start has less work to offer, so more of it must expire).
+          m.countedFloorSumPct += Math.max(0, 100 * (1 - (offeredPrefix[b] - offeredPrefix[Math.max(0, b - weekBins)]) / weekCapacityPts));
         }
         s.w = s.closed ? 100 : 0; // a closed seat is gone after its reset (scenario worlds without replenishment)
         s.rw += WEEK;
@@ -328,11 +331,15 @@ export function loadTrace(path = TRACE_PATH) {
 export function summarise(m, { K }) {
   const weeks = m.seatWeeks || 1;
   const expiredPerSeatWeekPct = m.expiredWeeklyPct / weeks;
-  const floorPct = m.capacityAllPts > 0 ? Math.max(0, 100 * (1 - m.offeredAllPts / m.capacityAllPts)) : 0;
+  const wholeFloorPct = m.capacityAllPts > 0 ? Math.max(0, 100 * (1 - m.offeredAllPts / m.capacityAllPts)) : 0;
+  const countedFloorPct = m.countedFloorSumPct / weeks;
+  const floorPct = Math.min(wholeFloorPct, countedFloorPct);
   return {
     servedPct: m.offered > 0 ? (100 * m.served) / m.offered : 0,
     offeredPts: m.offeredAllPts,
     capacityPts: m.capacityAllPts,
+    wholeFloorPct,
+    countedFloorPct,
     floorPct,
     expiredPerSeatWeekPct,
     expiredAboveFloorPct: Math.max(0, expiredPerSeatWeekPct - floorPct),
@@ -356,7 +363,7 @@ export function runSeeds({ trace, policy, scale, seeds = SEEDS, streams = 6, lag
 
 export function aggregate(rows) {
   const stat = (f) => ({ mean: mean(rows.map(f)), sd: sd(rows.map(f)) });
-  return { servedPct: stat((r) => r.servedPct), floorPct: stat((r) => r.floorPct), expiredPerSeatWeekPct: stat((r) => r.expiredPerSeatWeekPct), expiredAboveFloorPct: stat((r) => r.expiredAboveFloorPct), expiredPerSeatWeekPts: stat((r) => r.expiredPerSeatWeekPts), moves: stat((r) => r.moves), crossMoves: stat((r) => r.crossMoves), resentMTok: stat((r) => r.resentMTok) };
+  return { servedPct: stat((r) => r.servedPct), wholeFloorPct: stat((r) => r.wholeFloorPct), countedFloorPct: stat((r) => r.countedFloorPct), floorPct: stat((r) => r.floorPct), expiredPerSeatWeekPct: stat((r) => r.expiredPerSeatWeekPct), expiredAboveFloorPct: stat((r) => r.expiredAboveFloorPct), expiredPerSeatWeekPts: stat((r) => r.expiredPerSeatWeekPts), moves: stat((r) => r.moves), crossMoves: stat((r) => r.crossMoves), resentMTok: stat((r) => r.resentMTok) };
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +419,9 @@ export function formatComparison(out) {
   row("", out.map((r) => r.policy), diff ? "after − baseline (paired, mean ± sd)" : "");
   const metric = (label, f, agg, d = 1) => row(label, out.map((r) => fmt(agg(r), d)), diff ? fmtSigned(pairedDiff(base.rows, after.rows, f), d) : "");
   metric("served %", (r) => r.servedPct, (r) => r.servedPct);
-  metric("demand floor, % per seat-wk", (r) => r.floorPct, (r) => r.floorPct);
+  metric("floor, whole trace", (r) => r.wholeFloorPct, (r) => r.wholeFloorPct);
+  metric("floor, counted seat-weeks", (r) => r.countedFloorPct, (r) => r.countedFloorPct);
+  metric("floor used (the lower)", (r) => r.floorPct, (r) => r.floorPct);
   metric("expired weekly, % per seat-wk", (r) => r.expiredPerSeatWeekPct, (r) => r.expiredPerSeatWeekPct);
   metric("  expired above floor", (r) => r.expiredAboveFloorPct, (r) => r.expiredAboveFloorPct);
   metric("expired weekly, 5h-pts/seat-wk", (r) => r.expiredPerSeatWeekPts, (r) => r.expiredPerSeatWeekPts, 0);

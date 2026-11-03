@@ -134,12 +134,39 @@ test("fail-open: a failing disk never throws or rejects, warns at most once a mi
     broken = false;
     log.record(req({ session: "d" }));
     await log.flush();
-    assert.deepEqual((await readAttribution({ dir, provider: "claude" })).map((l) => l.session), ["d"]);
+    const after = await readAttribution({ dir, provider: "claude" });
+    assert.deepEqual(after.map((l) => l.session ?? `gap:${l.dropped}`), ["gap:3", "d"], "the three lost lines are counted and marked");
     // a throwing logger or a hostile argument getter cannot break `record` either
     const hostile = createSeatAttribution({ dir, log: { warn() { throw new Error("logger broke"); } }, fs: { ...fs, appendFile: async () => { throw new Error("x"); } } });
     hostile.record({ get provider() { throw new Error("getter"); } });
     hostile.record(req());
     await assert.doesNotReject(hostile.flush());
+  });
+});
+
+test("a failed disk write counts as lost lines: the next successful write starts with a gap of the right size, and the dedupe state is forgotten", async () => {
+  await withDir(async (dir) => {
+    const c = clock();
+    let broken = true;
+    const fs = { mkdir, chmod, stat: fsStat, rename, rm: fsRm, appendFile: async (...a) => (broken ? Promise.reject(new Error("EIO")) : appendFile(...a)) };
+    const log = createSeatAttribution({ dir, now: c.now, log: quiet, fs });
+    log.record(req({ session: "x" }));
+    log.record(req({ session: "y" }));
+    await log.flush();
+    assert.equal(log.stats().dropped, 2, "the failed batch of two is dropped");
+    c.tick(1000);
+    broken = false;
+    log.record(req({ session: "x" })); // same (session, seat, model) as the lost line: must NOT be deduped away
+    await log.flush();
+    const lines = await readAttribution({ dir, provider: "claude" });
+    assert.deepEqual(lines.map((l) => l.session ?? `gap:${l.dropped}`), ["gap:2", "x"]);
+    assert.equal(lines[0].reason, "gap");
+    assert.equal(log.stats().dropped, 2);
+    // a later, healthy line carries no gap
+    c.tick(1000);
+    log.record(req({ session: "z" }));
+    await log.flush();
+    assert.deepEqual((await readAttribution({ dir, provider: "claude" })).map((l) => l.session ?? "gap").slice(-1), ["z"]);
   });
 });
 

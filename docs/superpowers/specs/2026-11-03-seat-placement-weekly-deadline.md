@@ -216,7 +216,7 @@ Rows are evaluated top to bottom; the first whose condition holds decides.
 | R2 | `¬s.usable` (dead) | tiers with `¬blocked` applied to EVERY tier: `best(same org ∧ hardTarget)` → `best(other org ∧ hardTarget ∧ load<70)` → `best(other org ∧ hardTarget)`; nothing → the same three tiers again over `blocked` seats; nothing → least-loaded usable seat over ALL others, full or not (today's fallback). Reason `unusable`. |
 | R3 | `¬eligible(s,m)` (a window of `W(s,m)` at 100, `limited`, or `exhausted`) | same tiers as R2 without the final fallback; reason `exhausted`. None → **stay** (the retry watch re-decides, as today). |
 | R4 | `pct(short) ≥ 95` (soft pressure) | `best(same org ∧ softTarget ∧ ¬blocked)` → if `crossOK`, `best(other org ∧ softTarget ∧ load<70 ∧ ¬blocked)` → **stay** (finish the window). Reason `load`. |
-| R5 | ∃ same-org `x` with `softTarget(x) ∧ ¬blocked(x) ∧ betterByMargin(x, s)` and `t − lastAutoMoveAt(conv) ≥ MIN_DWELL_MS` | **Rebalance** to `best` of them (reason `rebalance`, same org only, free). |
+| R5 | ∃ same-org `x` with `softTarget(x) ∧ ¬blocked(x) ∧ betterByMargin(x, s)` and `t − assignedAt(conv) ≥ MIN_DWELL_MS` | **Rebalance** to `best` of them (reason `rebalance`, same org only, free). |
 | R6 | otherwise | **Stay**. |
 
 `betterByMargin(x, s)`: `deadline(x)` is finite and (`deadline(s)` is null
@@ -224,8 +224,10 @@ or `deadline(x) ≤ deadline(s) − SAME_ORG_REBALANCE_MS`). Two unknown
 deadlines never rebalance; a known one beats an unknown one only when the
 target's is known. Slack is not part of the margin test.
 
-Every move (R2–R5) records `left[s] = t` and `lastAutoMoveAt = t`
-(`movedAt`, already stored). `MIN_DWELL_MS` bounds **optional** moves only
+Every move (R2–R5) records `left[s] = t` and `assignedAt = t` (as `place()`
+already does for every move, a manual switch included; `movedAt` is stored
+too). The dwell runs from the last placement or move, i.e. from `assignedAt`.
+`MIN_DWELL_MS` bounds **optional** moves only
 (R5): a forced move (R2–R4) may follow a rebalance within the dwell, and a
 forced move may return to a recently-left seat as a last resort — both are
 today's behaviour. What is guaranteed: R5 fires at most once per
@@ -234,8 +236,8 @@ today's behaviour. What is guaranteed: R5 fires at most once per
 two seats cannot trade a conversation back and forth under R5 (the second
 move would need the first seat's deadline to be earlier by the margin, the
 opposite of what let the first move happen, until a reset — and then the
-dwell and the block apply). `lastAutoMoveAt` for a conversation that has
-never moved is its `assignedAt`.
+dwell and the block apply). A conversation that has never moved is dwelt from
+the time it was placed.
 
 **Which model decides (unchanged from the code):** `place()` decides with
 the REQUEST's model (`requestModel ?? existing.model`), for a root and a
@@ -481,8 +483,8 @@ measured.
   is unmodified. `decideSeat` is
   pure; the harness reproduces `place()`'s record updates (`left`,
   `crossOrgMovedAt`, `movedAt`, `model`) in ~30 lines, shared by both
-  policies, with the two policy-specific fields (`lastAutoMoveAt`) handled
-  by the policy adapter.
+  policies, with an optional per-policy `recordMove` hook for any
+  policy-specific field (none today).
 - **after**: the live modules.
 
 Workload: a committed anonymised trace (`src/server/fixtures/seat-demand-trace.json`:
@@ -508,6 +510,11 @@ the expiry no placement can avoid: with offered work `O` and weekly capacity `C`
 (both in 5h-points, over the whole trace — warm-up included, because the counted
 weeks reach back into it), `floor = max(0, 1 − O/C)` as a % of a weekly per
 seat-week, the unit of "expired"; `expiredAboveFloor = max(0, expired − floor)`.
+A second floor is taken over each counted reset's own preceding 7 days (the
+pool's work offered in those 7 days against one week of pool capacity, a week
+cut by the trace start included; averaged over the counted resets) and both are
+printed; the **lower** of the two is the floor used, so neither estimate can
+grant more excuse than it supports.
 Without it the gate is unreachable whenever demand is below capacity (at 0.4 the
 floor is 28 % and the baseline expires 34 %, so "≤ 60 % of the baseline" asks for
 20 %). The harness also retries a request that filled its seat once, on fresh
@@ -537,12 +544,12 @@ for both policies. Without that, a request overflowing a 5h window is lost, whic
 charges the policy that packs the 5h window for a loss the live system does not
 have (no-retry, scale 0.4 / 0.6: served −0.7 / −1.5 pt; `--no-retry` reproduces it).
 
-| scale | served % baseline → after (Δ) | demand floor | expired weekly, % per seat-wk (Δ) | expired above floor (after / baseline) | moves (rebalance) | cross-org moves | re-sent Mtok |
+| scale | served % baseline → after (Δ) | demand floor (whole trace / counted) | expired weekly, % per seat-wk (Δ) | expired above floor (after / baseline) | moves (rebalance) | cross-org moves | re-sent Mtok |
 |---|---|---|---|---|---|---|---|
-| 0.4 | 100.0 → 100.0 (−0.0 ± 0.0) | 28.4 | 33.7 → 30.8 (−2.8 ± 1.0) | 5.2 → 2.4 (46 %) | 616 → 312 (78) | 0 → 0 | 0.0 → 0.1 |
-| 0.6 | 99.4 → 99.9 (+0.5 ± 0.4) | 0.0 | 3.1 → 0.1 (−3.1 ± 0.5) | 3.1 → 0.1 (3 %) | 461 → 490 (68) | 80 → 6 | 26.9 → 1.8 |
-| 0.8 | 74.4 → 78.6 (+4.1 ± 0.4) | 0.0 | 0.0 → 0.1 | 0.0 → 0.1 | 554 → 707 (41) | 229 → 351 | 81.2 → 125.3 |
-| 1.0 | 60.1 → 59.9 (−0.2 ± 0.3) | 0.0 | 0.0 → 0.0 | 0.0 → 0.0 | 639 → 704 (39) | 368 → 424 | 130.5 → 151.1 |
+| 0.4 | 100.0 → 100.0 (−0.0 ± 0.0) | 28.4 / 30.1 | 33.7 → 30.8 (−2.8 ± 1.0) | 5.2 → 2.4 (46 %) | 616 → 312 (78) | 0 → 0 | 0.0 → 0.1 |
+| 0.6 | 99.4 → 99.9 (+0.5 ± 0.4) | 0.0 / 3.5 | 3.1 → 0.1 (−3.1 ± 0.5) | 3.1 → 0.1 (3 %) | 461 → 490 (68) | 80 → 6 | 26.9 → 1.8 |
+| 0.8 | 74.4 → 78.6 (+4.1 ± 0.4) | 0.0 / 0.0 | 0.0 → 0.1 | 0.0 → 0.1 | 554 → 707 (41) | 229 → 351 | 81.2 → 125.3 |
+| 1.0 | 60.1 → 59.9 (−0.2 ± 0.3) | 0.0 / 0.0 | 0.0 → 0.0 | 0.0 → 0.0 | 639 → 704 (39) | 368 → 424 | 130.5 → 151.1 |
 
 Reading: the served gate holds at every scale; the §2.5 counter-example serves
 250 under `after` (200 under the baseline). Above the demand floor the rule
@@ -614,6 +621,10 @@ first and moves more through `exhausted`. The raw (un-floored) expiry ratio at
    opt-in). The activity log carries every decision's evidence; the seat
    view shows slack/deadline per seat.
 3. (Follow-up specs) priced cross-org moves; per-model cost `μ`; pool pacing.
+
+The seat fields `slack` / `deadlineAt` (`accounts:seat-view`) and the
+`usage:calibration` RPC have no renderer consumer yet — a UI follow-up (the
+seat list showing why a seat is preferred; the K / spread dashboard).
 
 Each step is one PR and independently revertible. Rollback of step 2 is a
 revert — the attribution log and calibration store are additive.

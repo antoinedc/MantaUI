@@ -479,9 +479,8 @@ export function placementFor(args) {
   return chooseSeatByDeadline(args);
 }
 
-/** When this conversation last moved on its own (a manual switch does not count), else when it was placed. */
-function lastAutoMoveAt(existing) {
-  if (Number.isFinite(existing?.movedAt) && existing.reason !== "manual") return existing.movedAt;
+/** When this conversation was last placed or moved (`place()` stamps `assignedAt` on every one, a manual switch included). */
+function lastPlacedAt(existing) {
   return Number.isFinite(existing?.assignedAt) ? existing.assignedAt : -Infinity;
 }
 
@@ -567,7 +566,7 @@ export function decideMoveByDeadline({ existing, seats, seatSnapshots = [], nowM
   }
 
   // R5 — optional, same org only: a seat whose weekly resets 6h+ earlier, at most once per MIN_DWELL_MS.
-  if (nowMs - lastAutoMoveAt(existing) < MIN_DWELL_MS) return null;
+  if (nowMs - lastPlacedAt(existing) < MIN_DWELL_MS) return null;
   const ownDeadline = seatDeadlineAt(own, { nowMs, model });
   const better = (c) => {
     const d = seatDeadlineAt(c.snap, { nowMs, model });

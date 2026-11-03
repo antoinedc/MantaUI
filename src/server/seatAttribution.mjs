@@ -128,8 +128,19 @@ export function createSeatAttribution({
         await writeProvider(provider, lines);
       } catch (e) {
         warn(`writing ${provider}.jsonl failed`, e);
+        loseBatch(provider, lines);
       }
     }
+  }
+
+  /** A batch that never reached the disk is lost lines like an overflow: count them, and forget "unchanged since" so a `gap` precedes the next line. */
+  function loseBatch(provider, lines) {
+    let n = 0;
+    for (const l of lines) n += l.reason === "gap" ? (Number.isFinite(l.dropped) ? l.dropped : 0) : 1; // a gap marker carries earlier losses forward
+    const real = lines.filter((l) => l.reason !== "gap").length;
+    droppedTotal += real;
+    droppedByProvider.set(provider, (droppedByProvider.get(provider) ?? 0) + n);
+    for (const key of [...last.keys()]) if (key.startsWith(`${provider}\0`)) last.delete(key);
   }
 
   function schedule() {
@@ -174,7 +185,9 @@ export function createSeatAttribution({
   /** Resolves once everything queued so far is on disk (or has failed). Never rejects. */
   async function flush() {
     try {
-      while (queue.length > 0 || droppedByProvider.size > 0) await mutex.runExclusive(drainOnce);
+      // Only the queue is looped on: a failing disk re-registers its losses, which must not keep this spinning.
+      while (queue.length > 0) await mutex.runExclusive(drainOnce);
+      if (droppedByProvider.size > 0) await mutex.runExclusive(drainOnce);
       await mutex.runExclusive(async () => {});
     } catch (e) {
       warn("flush failed", e);

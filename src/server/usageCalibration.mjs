@@ -23,6 +23,7 @@ import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const MIN_MS = 60_000;
+const MIN_SAMPLE_GAP_MS = MIN_MS; // a burst of ticks (a failed fetch replayed, a manual refresh) adds one observation
 const DAY_MS = 86_400_000;
 
 export const SAMPLES_RETENTION_DAYS = 14;
@@ -94,7 +95,7 @@ const sameReset = (a, b) => {
   return Math.abs(a - b) <= RESET_JITTER_MS;
 };
 
-const weeklyOf = (o) => o?.long?.find((l) => l?.kind === WEEKLY_KIND) ?? null;
+const weeklyOf = (o) => (Array.isArray(o?.long) ? o.long.find((l) => l?.kind === WEEKLY_KIND) ?? null : null);
 
 /** {ds, dl} for a qualifying interval, null otherwise. */
 function qualifyingInterval(a, b) {
@@ -211,7 +212,7 @@ export function normalizeStore(raw) {
     }
     out.providers[id] = {
       kByKind,
-      defaults: p.defaults && typeof p.defaults === "object" ? p.defaults : {},
+      defaults: Object.fromEntries(Object.entries(isObject(p.defaults) ? p.defaults : {}).filter(([, v]) => finite(v) && v > 0)),
       ...(finite(p.spread) ? { spread: p.spread } : {}),
       ...(finite(p.samples) ? { samples: p.samples } : {}),
     };
@@ -221,12 +222,16 @@ export function normalizeStore(raw) {
 
 const emptySamples = () => ({ version: STORE_VERSION, seats: {} });
 
+const isObject = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+/** A stored observation the estimator can read: a time, a `short` object and a `long` array of objects. */
+const isObservation = (o) => isObject(o) && finite(o.t) && isObject(o.short) && Array.isArray(o.long) && o.long.every(isObject);
+
 function normalizeSamples(raw) {
   const out = emptySamples();
   const src = raw && typeof raw === "object" ? raw.seats : null;
   if (!src || typeof src !== "object") return out;
   for (const [key, arr] of Object.entries(src)) {
-    if (Array.isArray(arr) && key.includes(":")) out.seats[key] = arr.filter((o) => o && finite(o.t));
+    if (Array.isArray(arr) && key.includes(":")) out.seats[key] = arr.filter(isObservation);
   }
   return out;
 }
@@ -297,10 +302,26 @@ export function createUsageCalibration({
     saveTimer?.unref?.();
   };
 
+  /** Drop every seat's observations older than the retention window, and the keys that end up empty (a removed seat). */
+  const pruneSamples = (t) => {
+    const s = getSamples();
+    const cutoff = t - SAMPLES_RETENTION_DAYS * DAY_MS;
+    let changed = false;
+    for (const [key, list] of Object.entries(s.seats)) {
+      const keep = list.filter((o) => o.t >= cutoff);
+      if (keep.length === list.length) continue;
+      changed = true;
+      if (keep.length === 0) delete s.seats[key];
+      else s.seats[key] = keep;
+    }
+    if (changed) scheduleSave();
+  };
+
   const fingerprint = (value, spread) => JSON.stringify([value === null ? null : Math.round(value * 1000), spread === null ? null : Math.round(spread * 1000)]);
 
   function estimate() {
     const t = now();
+    pruneSamples(t);
     const result = estimateK(getSamples(), { nowMs: t });
     const current = getStore();
     const providers = { ...current.providers };
@@ -348,7 +369,7 @@ export function createUsageCalibration({
         if (!obs) continue;
         const key = `${snap.provider}:${snap.seatId}`;
         const list = (s.seats[key] ??= []);
-        if (list.length > 0 && list[list.length - 1].t >= obs.t) continue;
+        if (list.length > 0 && obs.t - list[list.length - 1].t < MIN_SAMPLE_GAP_MS) continue;
         list.push(obs);
         weeklyProviders.add(snap.provider);
         const cutoff = obs.t - SAMPLES_RETENTION_DAYS * DAY_MS;

@@ -1539,6 +1539,35 @@ describe("routing applicability of model-scoped windows", () => {
     }
   });
 
+  it("a {providerID, modelID} Fable candidate is priced by the cap at 95 through route(): above an Opus one, and above the same account without the cap", async () => {
+    const account = await teamAccount(95);
+    const noCap = { ...account, windows: account.windows.filter((w: any) => !w.scope) };
+    // The RPC shape: modelID, no id (the merged identity must keep the id the filter reads).
+    const asRpc = (id: string) => {
+      const { id: _drop, ...rest } = endpoint(id, { providerID: "anthropic", cost: { input: 15, output: 15, cacheRead: 1, cacheWrite: 1 } }) as any;
+      return { ...rest, modelID: id };
+    };
+    // A paid pay-per-token endpoint in the catalogue gives the subscription its exchange rate; the
+    // candidate under test is the incumbent, so `costs.incumbent` is ITS marginal cost whoever wins.
+    const paid = endpoint("paid-model", { providerID: "pay", cost: { input: 10, output: 10, cacheRead: 1, cacheWrite: 1 } });
+    const priced = (id: string, acct: any) => {
+      const c = asRpc(id);
+      const res: any = route({
+        catalog: [c, paid],
+        policy: { preset: "balanced" },
+        intent: { incumbent: c },
+        nowMs: NOW_MS,
+        services: { accounts: { anthropic: acct, pay: { kind: "credit", balance: 100 } }, declared: { [keyOf(c)]: { catalogId: id }, [keyOf(paid)]: { catalogId: "paid-model" } } },
+      });
+      expect(res.kind).toBe("selected");
+      return res.costs.incumbent as number;
+    };
+    const fableCost = priced("claude-fable-5-1", account);
+    const opusCost = priced("claude-opus-5-5", account);
+    expect(fableCost).toBeGreaterThan(opusCost);
+    expect(fableCost).toBeGreaterThan(priced("claude-fable-5-1", noCap));
+  });
+
   it("an Opus endpoint stays routable behind a full Fable cap", async () => {
     const account = await teamAccount(100);
     const only = endpoint("claude-opus-5-5", { providerID: "anthropic" });

@@ -1219,14 +1219,14 @@ import { MIN_DWELL_MS, SAME_ORG_REBALANCE_MS, chooseSeatByDeadline, decideMoveBy
     assert.equal(mv({}, [org(1), org(2), org(4)], [wk(1, { wIn: 60 }), wk(2, { wIn: 30 }), wk(4, { wIn: 20 })])?.seatId, "seat-4");
   });
 
-  test("R5: at most once per MIN_DWELL_MS per conversation (movedAt of the last automatic move, else assignedAt); a manual switch does not count", () => {
+  test("R5: at most once per MIN_DWELL_MS, counted from assignedAt (the last placement or move — a manual switch stamps it too)", () => {
     const seats = [org(1), org(2)];
     const snaps = [wk(1, { wIn: 48 }), wk(2, { wIn: 20 })];
     assert.equal(mv({ assignedAt: NOW - 30 * MIN }, seats, snaps), null, "placed 30 min ago");
     assert.equal(mv({ assignedAt: NOW - MIN_DWELL_MS }, seats, snaps)?.why, "rebalance", "exactly the dwell");
     assert.equal(mv({ assignedAt: NOW - 30 * MIN, movedFrom: "seat-9", movedAt: NOW - 30 * MIN, reason: "load" }, seats, snaps), null, "an automatic move 30 min ago");
-    assert.equal(mv({ assignedAt: NOW - 30 * MIN, movedFrom: "seat-9", movedAt: NOW - 30 * MIN, reason: "manual" }, seats, snaps), null, "manual → falls back to assignedAt, which a manual switch also stamps");
-    assert.equal(mv({ assignedAt: NOW - 3 * HOUR, movedFrom: "seat-9", movedAt: NOW - 2 * HOUR, reason: "manual" }, seats, snaps)?.why, "rebalance", "movedAt of a manual move is ignored");
+    assert.equal(mv({ assignedAt: NOW - 30 * MIN, movedFrom: "seat-9", movedAt: NOW - 30 * MIN, reason: "manual" }, seats, snaps), null, "a manual switch 30 min ago restarts the dwell too");
+    assert.equal(mv({ assignedAt: NOW - 3 * HOUR, movedFrom: "seat-9", movedAt: NOW - 3 * HOUR, reason: "load" }, seats, snaps)?.why, "rebalance", "a move 3 h ago no longer holds it");
     assert.equal(mv({ assignedAt: undefined }, seats, snaps)?.why, "rebalance", "no record of when → no dwell");
   });
 

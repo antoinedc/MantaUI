@@ -76,8 +76,8 @@ test("applyDecision reproduces place()'s record updates", () => {
   assert.equal(soon.left.a, undefined, "an optional reset-soon move leaves no block");
   const cross = applyDecision(existing, { reason: "moved", seatId: "b", from: "a", why: "exhausted", crossOrg: true }, t);
   assert.equal(cross.crossOrgMovedAt, t);
-  const stamped = applyDecision(existing, { reason: "moved", seatId: "b", from: "a", why: "load", crossOrg: false }, t, { policy: { recordMove: (rec, d, ex, now) => void (rec.lastAutoMoveAt = now) } });
-  assert.equal(stamped.lastAutoMoveAt, t);
+  const stamped = applyDecision(existing, { reason: "moved", seatId: "b", from: "a", why: "load", crossOrg: false }, t, { policy: { recordMove: (rec, d, ex, now) => void (rec.stampedAt = now) } });
+  assert.equal(stamped.stampedAt, t);
   assert.deepEqual(applyDecision(null, { reason: "assigned", seatId: "a" }, t, { model: "m" }), { seatId: "a", assignedAt: t, lastUsedAt: t, model: "m" });
   assert.equal(applyDecision(existing, { reason: "kept", seatId: "a" }, t), existing);
 });

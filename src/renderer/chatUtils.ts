@@ -21,7 +21,7 @@ import { formatTokens } from "../shared/formatTokens.mjs";
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
 import { isDeprecated } from "../shared/modelGuide.mjs";
-import { leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
+import { bestSeatByRank, leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
 import { windowTone } from "../shared/usageWindowTone.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
@@ -2924,20 +2924,23 @@ export function selectConversationSeat(
 /**
  * Where a NEW conversation / a move would go, as a seat id other than
  * `currentSeatId`. Prefers the server-provided `nextSeatId`; when that is the
- * current seat itself (or absent on an older box) it asks seatChoice's
- * leastLoadedSeat over the other usable seats — the function the server's own
- * rule 3 uses. Null when there is no other usable seat.
+ * current seat itself (or absent on an older box) it ranks the other usable
+ * seats with seatChoice's `bestSeatByRank` — the order the server's own
+ * placement uses (earliest weekly reset first, then load); K is unknown here
+ * (`kFor: () => null`), so slack never reorders. Null when there is no other
+ * usable seat. `nowMs` is the caller's clock.
  */
 export function nextSeatHint(
   view: ProviderView | null | undefined,
   currentSeatId: string | null | undefined,
+  nowMs: number = Date.now(),
 ): string | null {
   if (!view) return null;
   const others = allSeats(view).filter((s) => s.id !== currentSeatId && seatUsable(s));
   if (others.length === 0) return null;
   const served = view.nextSeatId ? others.find((s) => s.id === view.nextSeatId) : undefined;
   if (served) return served.id;
-  return leastLoadedSeat(others.map(asSeatSnapshot), { activeSeatId: view.activeSeatId })?.seatId ?? null;
+  return bestSeatByRank(others.map(asSeatSnapshot), { nowMs, kFor: () => null, activeSeatId: view.activeSeatId })?.seatId ?? null;
 }
 
 /** Auto mode only: the conversation's seat is past the move line AND rule 3
@@ -2946,11 +2949,12 @@ export function nextSeatHint(
 export function isMoveComing(
   view: ProviderView | null | undefined,
   current: { seat: SeatView } | null | undefined,
+  nowMs: number = Date.now(),
 ): boolean {
   if (!view || view.mode !== "auto" || !current) return false;
   const load = seatLoad(current.seat);
   if (load == null || load < SEAT_MOVE_LOAD_PCT) return false;
-  const targetId = nextSeatHint(view, current.seat.id);
+  const targetId = nextSeatHint(view, current.seat.id, nowMs);
   const target = targetId ? findSeat(view, targetId)?.seat : null;
   if (!target) return false;
   const targetLoad = seatLoad(target) ?? 0;

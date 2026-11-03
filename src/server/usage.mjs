@@ -40,6 +40,9 @@
  * @property {boolean} [binding] The provider says this window bites first.
  * @property {string} [scope]   Model display name a model-scoped window applies
  *   to ("Fable"); absent for account-wide windows.
+ * @property {string[]} [models] Model-name tokens (lowercase, alphanumeric) this
+ *   window applies to; absent means all models. Derived from `scope` when the
+ *   adapter reports only that (normalizeWindow); read by `windowAppliesToModel`.
  * @property {boolean} [active]  `false` when the provider says this window is
  *   not in force (shown greyed; never drives exhaustion, load or the dial).
  *   Absent means active.

@@ -59,7 +59,9 @@ for (const scale of SCALES) {
 
 // Expiry is gated above the demand floor: when the offered work is below the weekly capacity, that
 // much of the weekly must expire under ANY placement, so the gate measures only what a policy could
-// have prevented (`expiredAboveFloor = max(0, expired − floor)`, floor = max(0, 1 − offered/capacity)).
+// have prevented (`expiredAboveFloor = max(0, expired − floor)`, floor = max(0, 1 − offered/capacity)). Two floors
+// are computed (over the whole trace, and over each counted reset's preceding 7 days); the LOWER gates, so
+// neither estimate can grant more excuse than it supports.
 for (const scale of [0.4, 0.6]) {
   test(`scale ${scale}: after's expired weekly headroom above the demand floor is at most 60 % of baseline's`, async () => {
     const { b, a } = await resultsFor(scale);
@@ -69,10 +71,10 @@ for (const scale of [0.4, 0.6]) {
     const aft = aa.expiredAboveFloorPct.mean;
     const d = pairedDiff(b, a, (r) => r.expiredAboveFloorPct);
     const f = (x) => x.toFixed(2);
-    assert.ok(base > 0, `the gate would be vacuous: baseline expires nothing above the floor (floor ${ab.floorPct.mean.toFixed(2)}, expired ${ab.expiredPerSeatWeekPct.mean.toFixed(2)})`);
+    assert.ok(base > 0, `the gate would be vacuous: baseline expires nothing above the floor (floor ${ab.floorPct.mean.toFixed(2)} (whole trace ${ab.wholeFloorPct.mean.toFixed(2)}, counted ${ab.countedFloorPct.mean.toFixed(2)}), expired ${ab.expiredPerSeatWeekPct.mean.toFixed(2)})`);
     assert.ok(
       aft <= 0.6 * base,
-      `%/seat-wk — floor ${f(ab.floorPct.mean)}; baseline expired ${f(ab.expiredPerSeatWeekPct.mean)} (above floor ${f(base)}), after expired ${f(aa.expiredPerSeatWeekPct.mean)} (above floor ${f(aft)}) = ${base > 0 ? ((100 * aft) / base).toFixed(0) : "n/a"} % of baseline (above-floor diff ${f(d.mean)} ± sd ${f(d.sd)} over ${SEEDS.length} seeds; gate 60 %)`,
+      `%/seat-wk — floor used ${f(ab.floorPct.mean)} (whole trace ${f(ab.wholeFloorPct.mean)}, counted seat-weeks ${f(ab.countedFloorPct.mean)}; the lower one gates); baseline expired ${f(ab.expiredPerSeatWeekPct.mean)} (above floor ${f(base)}), after expired ${f(aa.expiredPerSeatWeekPct.mean)} (above floor ${f(aft)}) = ${base > 0 ? ((100 * aft) / base).toFixed(0) : "n/a"} % of baseline (above-floor diff ${f(d.mean)} ± sd ${f(d.sd)} over ${SEEDS.length} seeds; gate 60 %)`,
     );
   });
 }

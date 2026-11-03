@@ -360,3 +360,58 @@ test("a measurement that stops passing its guards drops back to the default", ()
   assert.equal(h.saved.at(-1).providers.claude.kByKind.weekly, undefined);
   assert.equal(h.cal.readerFor("claude")("weekly"), 7.5);
 });
+
+test("malformed stored observations are dropped on load: onPolled still appends, estimate runs, nothing is logged", () => {
+  const good = series({ steps: 3 });
+  const warned = [];
+  const samples = {
+    version: 1,
+    seats: {
+      "claude:seat-1": [good[0], { t: T0 + 1, short: null, long: [] }, { t: T0 + 2, short: { pct: 1 }, long: {} }, { t: T0 + 3, short: { pct: 1 }, long: [null, 3] }, null, 7, "x", { t: T0 + 4 }],
+      "claude:seat-2": [{ t: T0, short: [], long: [] }],
+    },
+  };
+  const h = {};
+  let nowMs = T0 + STEP;
+  const cal = createUsageCalibration({
+    load: () => null,
+    loadSamples: () => samples,
+    save: async () => {},
+    saveSamples: async (s) => void (h.saved = structuredClone(s)),
+    now: () => nowMs,
+    timers: { setTimeout: (fn) => (h.fire = fn), clearTimeout() {} },
+    log: { warn: (...a) => warned.push(a) },
+  });
+  cal.onPolled([snapFrom("seat-1", good[1])]);
+  assert.doesNotThrow(() => cal.estimate());
+  h.fire();
+  assert.deepEqual(h.saved.seats["claude:seat-1"].map((o) => o.t), [good[0].t, good[1].t], "only the well-formed observations are kept");
+  assert.deepEqual(warned, []);
+});
+
+test("estimate() prunes every seat's list: a removed seat's key disappears after 14 days", () => {
+  const old = series({ steps: 3 });
+  const h = harness({ samples: { version: 1, seats: { "claude:gone": old, "claude:seat-1": old } } });
+  h.setNow(T0 + 15 * DAY);
+  h.cal.onPolled([snapFrom("seat-1", ob(T0 + 15 * DAY, 5, 5, { sReset: T0 + 15 * DAY + H5 }))]);
+  h.queue.at(-1).fn();
+  const keys = Object.keys(h.savedSamples.at(-1).seats);
+  assert.deepEqual(keys, ["claude:seat-1"]);
+  assert.equal(h.savedSamples.at(-1).seats["claude:seat-1"].length, 1);
+});
+
+test("a burst of ticks 1 s apart adds one observation per seat", () => {
+  const h = harness();
+  const o = series({ steps: 1 })[0];
+  for (let i = 0; i < 5; i++) h.cal.onPolled([snapFrom("seat-1", { ...o, t: o.t + i * 1000 })]);
+  h.cal.onPolled([snapFrom("seat-1", { ...o, t: o.t + 61_000 })]);
+  h.queue[0].fn();
+  assert.equal(h.savedSamples[0].seats["claude:seat-1"].length, 2, "the first, then the one a minute later");
+});
+
+test("normalizeStore keeps only finite positive defaults", async () => {
+  const { normalizeStore } = await import("./usageCalibration.mjs");
+  const out = normalizeStore({ providers: { claude: { defaults: { weekly: 7.5, bad: "x", zero: 0, neg: -1, nan: NaN, nul: null }, kByKind: {} }, codex: { defaults: [1, 2] } } });
+  assert.deepEqual(out.providers.claude.defaults, { weekly: 7.5 });
+  assert.deepEqual(out.providers.codex.defaults, {});
+});

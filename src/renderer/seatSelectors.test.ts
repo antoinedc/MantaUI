@@ -86,9 +86,18 @@ describe("nextSeatHint", () => {
       ],
       { activeSeatId: v.activeSeatId },
     )?.seatId;
-    expect(nextSeatHint(v, "s1")).toBe(expected);
-    expect(nextSeatHint(v, "s1")).toBe("s2");
-    expect(nextSeatHint(threeSeatView({ nextSeatId: "s1" }), "s1")).toBe("s2");
+    expect(nextSeatHint(v, "s1", NOW)).toBe(expected);
+    expect(nextSeatHint(v, "s1", NOW)).toBe("s2");
+    expect(nextSeatHint(threeSeatView({ nextSeatId: "s1" }), "s1", NOW)).toBe("s2");
+  });
+  it("without a server hint, ranks by the earliest weekly reset — not by least load", () => {
+    const H = 3_600_000;
+    const v = threeSeatView({ nextSeatId: null });
+    // s2: lightly loaded, weekly resets in 3 days. s3: busier, weekly resets in 1 hour (its headroom expires first).
+    v.accounts[0].seats[1].windows = [win("session", 20, { resetsAt: NOW + 3 * H }), win("weekly", 15, { resetsAt: NOW + 72 * H })];
+    v.accounts[1].seats[0].windows = [win("session", 55, { resetsAt: NOW + 3 * H }), win("weekly", 30, { resetsAt: NOW + H })];
+    expect(leastLoadedSeat(v.accounts.flatMap((a) => a.seats).filter((s) => s.id !== "s1").map((s) => ({ seatId: s.id, windows: s.windows })), { activeSeatId: "s1" })?.seatId).toBe("s2");
+    expect(nextSeatHint(v, "s1", NOW)).toBe("s3");
   });
   it("skips a signed-out seat and is null with nowhere to go", () => {
     const v = threeSeatView({ nextSeatId: "s2" });

@@ -20,6 +20,13 @@ function pinned(path) {
   }
 }
 
+// The proof needs git and the pinned commit. Locally a box without them skips; in CI that would be a
+// silent loss of the guard, so there it fails.
+const unavailable = (t) => {
+  if (process.env.CI) assert.fail("git or the pinned commit is unavailable, and CI must not skip the vendored-baseline proof");
+  return t.skip("git or the pinned commit is unavailable");
+};
+
 const SERVICE_BANNER = "// ---------------------------------------------------------------------------\n// The service\n";
 const SERVICE_IMPORTS = [
   'import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";',
@@ -34,13 +41,13 @@ const VENDORED_IMPORTS =
 
 test("baseline seatChoice.mjs is byte-identical to the pinned commit", (t) => {
   const src = pinned("src/shared/seatChoice.mjs");
-  if (src === null) return t.skip("git or the pinned commit is unavailable");
+  if (src === null) return unavailable(t);
   assert.equal(vendored("seatChoice.mjs"), src);
 });
 
 test("baseline seatAssignment.mjs is the pinned pure section, with only the service imports swapped", (t) => {
   const src = pinned("src/server/seatAssignment.mjs");
-  if (src === null) return t.skip("git or the pinned commit is unavailable");
+  if (src === null) return unavailable(t);
   const cut = src.indexOf(SERVICE_BANNER);
   assert.ok(cut > 0, "the pinned file has the service banner");
   const pure = src.slice(0, cut);

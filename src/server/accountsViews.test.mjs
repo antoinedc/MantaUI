@@ -207,6 +207,33 @@ test("moveTargetFor regression: 94% has no move target, 95% does (the move line 
   assert.equal(at(95), "seat-2");
 });
 
+test("moveTargetFor with a weekly deadline in play: a seat high only on its WEEKLY gets no hint; one at 95+ on its 5h does (R4); a full one does (R3)", () => {
+  const NOW = 1_800_000_000_000;
+  const H = 3_600_000;
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+  ];
+  const wk = (n, session, weekly) => snap(n, [win("session", session, { resetsAt: NOW + 2 * H }), win("weekly", weekly, { resetsAt: NOW + (n === 1 ? 60 : 30) * H })]);
+  const at = (s1, w1) => moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [wk(1, s1, w1), wk(2, 5, 5)], counts: { "seat-1": 1 }, nowMs: NOW });
+  assert.equal(at(40, 97), null, "weekly at 97, 5h at 40: the resolver does not move it, so no hint");
+  assert.equal(at(97, 10), "seat-2", "5h at 97");
+  assert.equal(at(94, 10), null, "5h at 94");
+  assert.equal(at(40, 100), "seat-2", "a full weekly is a full seat (R3)");
+  // legacy mode (no weekly deadline anywhere) keeps the old reading: the highest window of any kind
+  const legacy = (s1, w1) => moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", s1), win("weekly", w1)]), snap(2, [win("session", 5)])], counts: { "seat-1": 1 }, nowMs: NOW });
+  assert.equal(legacy(40, 97), "seat-2");
+});
+
+test("countConversations (manual) asks the same dispatcher as the resolver", () => {
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+  ];
+  const counts = countConversations({ mode: "manual", activeSeatId: "seat-2", seats, seatSnapshots: [snap(1, []), snap(2, [])], assignments: { a: { seatId: "seat-1" }, b: { seatId: "seat-1" } } });
+  assert.deepEqual(counts, { "seat-2": 2 });
+});
+
 test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 1 (a NEW conversation)", () => {
   const v = buildProviderView({
     provider: "claude",
