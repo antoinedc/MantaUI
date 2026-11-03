@@ -52,7 +52,7 @@ changes (manual stays "every conversation on the active seat").
 All measured on this box (10 Claude seats = 2 orgs × 5 × `Team · Max 5x`),
 from `~/.manta/usage-history.json`, `~/.manta/seat-assignments.json` and the
 opencode V2 ledger, 2026-10-08 → 11-03. The replay is
-`scripts/seats/replay-draft.mjs` (draft; §8 replaces it).
+`scripts/seats/replay.mjs` (§8; `node scripts/seats/replay.mjs --policy both --scale 0.6`).
 
 1. **The weekly binds, not the 5h.** One full 5h window costs 12–15 % of a
    weekly (`K` ≈ 6.6–8.1, i.e. ≈ 7.5 of the 33.6 5h windows in a week).
@@ -468,7 +468,7 @@ measured.
 
 ## 8. Replay harness — `scripts/seats/replay.mjs`
 
-Replaces `replay-draft.mjs`. Two policies, both the REAL pure code:
+`scripts/seats/replay.mjs` (it replaced the draft). Two policies, both the REAL pure code:
 
 - **before**: `src/server/seatAssignment.mjs` and `src/shared/seatChoice.mjs`
   from the pinned pre-change commit (`f95bfe2b`, recorded in
@@ -498,7 +498,7 @@ unexpired headroom is NOT counted as waste. Metrics per policy and seed:
 served %, weekly points expired unused per seat-week, moves by reason and
 org crossing, re-sent tokens; reported as mean ± sd over seeds.
 
-Acceptance (`scripts/seats/replay.test.mjs`, seeds fixed): at demand scales
+Acceptance (`src/server/seatReplayAcceptance.test.mjs` — `scripts/` is outside the test globs; seeds fixed): at demand scales
 0.4, 0.6, 0.8, 1.0 the new rule's mean served share ≥ the old rule's − 0.5
 pt, and at 0.4 and 0.6 its mean expired headroom ≤ 60 % of the old rule's,
 with the sd of the difference reported; the §2.5 counter-example runs as a
@@ -507,8 +507,40 @@ stream count 2/6/12, `K` 6/7.5/9, lag 0/10 min, 20 % of traffic Fable.
 
 Simplifications in the script header: observed usage is a lower bound on
 offered demand; transfers are instantaneous; the trace's reset phases are
-this box's. The 60 % threshold is re-examined against the seed spread when
-the harness lands and may be loosened in the PR with the numbers shown.
+this box's. The numbers are produced by the harness, not quoted here — run
+`node scripts/seats/replay.mjs --policy both --scale <s>` (`--sensitivity` for
+the sensitivity rows, `--no-retry` for the model without the retry below); the
+measured table is under "Measured (implementation)".
+
+### Measured (implementation)
+
+`node scripts/seats/replay.mjs --policy both --scale <s>`, 5 seeds, 6 streams,
+lag 0, K 7.5 (policy told 7.5), 7-day warm-up excluded; mean ± sd over seeds,
+the last column the paired per-seed difference `after − baseline`. Offered
+demand is 72 / 107 / 143 / 179 % of weekly capacity at scales 0.4 / 0.6 / 0.8 / 1.0.
+
+Harness semantics that matter for reading it: a request that fills its seat is
+re-decided once on fresh readings (the live `reconsider` after a limit error),
+for both policies. Without that, a request overflowing a 5h window is lost, which
+charges the policy that packs the 5h window for a loss the live system does not
+have (no-retry, scale 0.4 / 0.6: served −0.7 / −1.5 pt; `--no-retry` reproduces it).
+
+| scale | served % baseline → after (Δ) | expired weekly, % per seat-wk (Δ) | moves (rebalance) | cross-org moves | re-sent Mtok |
+|---|---|---|---|---|---|
+| 0.4 | 100.0 → 100.0 (−0.0 ± 0.0) | 33.7 → 30.8 (−2.8 ± 1.0; 92 % of baseline) | 616 → 312 (78) | 0 → 0 | 0.0 → 0.1 |
+| 0.6 | 99.4 → 99.9 (+0.5 ± 0.4) | 3.1 → 0.1 (−3.1 ± 0.5; 2 % of baseline) | 461 → 490 (68) | 80 → 6 | 26.9 → 1.8 |
+| 0.8 | 74.4 → 78.6 (+4.1 ± 0.4) | 0.0 → 0.1 | 554 → 707 (41) | 229 → 351 | 81.2 → 125.3 |
+| 1.0 | 60.1 → 59.9 (−0.2 ± 0.3) | 0.0 → 0.0 | 639 → 704 (39) | 368 → 424 | 130.5 → 151.1 |
+
+Reading: the served gate holds at every scale; the §2.5 counter-example serves
+250 under `after` (200 under the baseline). The 60 % expiry gate holds at 0.6
+(2 %) and **does not hold at 0.4 (92 %)**: at 0.4 the offered work is 72 % of
+capacity, so at least ≈ 28 % of the weekly headroom must expire under any policy
+and the baseline is already within ≈ 5 pt of that floor — 60 % of the baseline
+(20 %) is below the floor. Above capacity (0.8, 1.0) the rule serves more at 0.8
+(+4 pt) and the same at 1.0, at the price of more cross-org moves (+123 / +56
+per run) and more re-sent history (+44 / +21 Mtok), because it concentrates load
+on the seat that expires first and moves more often through `exhausted`.
 
 ## 9. Libraries considered
 
@@ -556,7 +588,7 @@ the harness lands and may be loosened in the PR with the numbers shown.
   10 min yields three lines; child session recorded; single-seat and no-seat
   paths recorded; throwing writer never rejects `resolve()`; queue bound;
   rotation serialised; torn-line read.
-- `scripts/seats/replay.test.mjs`: §8 acceptance.
+- `src/server/seatReplayAcceptance.test.mjs`: §8 acceptance (plus `seatReplayHarness.test.mjs`: trace, workload, vendored baseline).
 
 ## 11. Rollout
 

@@ -51,8 +51,10 @@ test("the baseline policy runs end to end and is reproducible; its numbers are s
   assert.ok(lagged[0].servedPct > 80);
 });
 
-test("`after` is an explicit Phase 3 slot, not a silent default", async () => {
-  await assert.rejects(loadPolicy("after"), /not wired yet/);
+test("`after` loads the live decideSeat; an unknown policy is refused", async () => {
+  const after = await loadPolicy("after");
+  assert.equal(after.name, "after");
+  assert.equal(typeof after.decideSeat, "function");
   await assert.rejects(loadPolicy("nope"), /unknown policy/);
 });
 

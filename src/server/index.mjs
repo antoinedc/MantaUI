@@ -142,6 +142,7 @@ import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
 import { createUsageCalibration } from "./usageCalibration.mjs";
+import { createSeatAttribution } from "./seatAttribution.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
@@ -906,15 +907,18 @@ const stopAccountsUsageEvents = bus.subscribe((evt) => {
 // K (full 5h windows per weekly window), measured from paired readings the usage
 // poller feeds it below; read by the placement rules through `kFor` and by the
 // `usage:calibration` RPC.
-const usageCalibration = createUsageCalibration();
+// The per-request placement log; its queue counters ride on `usage:calibration`.
+const seatAttribution = createSeatAttribution();
+const usageCalibration = createUsageCalibration({ queueStats: () => seatAttribution.stats() });
 const seatAssigner = createSeatAssigner({
-  // TODO(phase3): kFor: (provider) => usageCalibration.readerFor(provider)
+  kFor: (provider) => usageCalibration.readerFor(provider),
+  attribution: seatAttribution,
   accounts: accountsService,
   listSeatSnapshots,
   onChange: (provider) => accountsEvents.updated(provider),
   onMoved: (evt) => {
-    // A reset-soon move is routine optimisation (the cache is shared within an org, so it costs nothing) — no in-chat notice.
-    if (evt.reason !== "reset-soon") accountsEvents.moved(evt);
+    // A reset-soon move and a weekly-deadline rebalance are routine optimisation (the cache is shared within an org, so they cost nothing) — no in-chat notice.
+    if (!evt.silent && evt.reason !== "reset-soon") accountsEvents.moved(evt);
     // Phase 4: every automatic move is also a line in the activity log — the
     // same trust surface the optimizer uses ("Moved a conversation from …").
     // `optimizerActivity` is declared further down; this runs long after startup.
@@ -937,6 +941,7 @@ const accountsManager = createAccountsManager({
   accounts: accountsService,
   seatAssigner,
   listSeatSnapshots,
+  kFor: (provider) => usageCalibration.readerFor(provider),
   claudeLogin: {
     start: (configDir, seatId) => startClaudeLogin("anthropic", { configDir, seatId }),
     cancel: (sessionKey) => {
