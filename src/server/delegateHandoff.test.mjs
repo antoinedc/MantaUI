@@ -58,6 +58,27 @@ test("repointJobSessions: parent jobs follow the successor; a replaced job sessi
   assert.equal(byId.j2.childSessionID, "ses_new");
 });
 
+test("repointJobSessions: a display parent follows the successor too (parent only), is published, idempotent", async () => {
+  const s = store([
+    job({ id: "d1", parentSessionID: "ses_gone", displayParentID: "ses_old" }),
+    job({ id: "d2", parentSessionID: "ses_gone", displayParentID: "ses_else" }),
+    job({ id: "d3", parentSessionID: "ses_old", displayParentID: "ses_old" }),
+  ]);
+  const published = [];
+  const deps = { load: s.load, save: s.save, publish: (e) => published.push(e.payload.id) };
+  assert.equal(await repointJobSessions({ fromSessionId: "ses_old", toSessionId: "ses_new", parent: false }, deps), 0, "parent: false leaves displayParentID alone");
+  assert.equal(s.get()[0].displayParentID, "ses_old");
+  assert.equal(await repointJobSessions({ fromSessionId: "ses_old", toSessionId: "ses_new" }, deps), 2, "d1 and d3 each count once");
+  const byId = Object.fromEntries(s.get().map((j) => [j.id, j]));
+  assert.equal(byId.d1.displayParentID, "ses_new");
+  assert.equal(byId.d1.parentSessionID, "ses_gone");
+  assert.equal(byId.d2.displayParentID, "ses_else");
+  assert.equal(byId.d3.parentSessionID, "ses_new", "common adopted shape: both fields move");
+  assert.equal(byId.d3.displayParentID, "ses_new");
+  assert.deepEqual(published, ["d1", "d3"], "each changed record is published exactly once");
+  assert.equal(await repointJobSessions({ fromSessionId: "ses_old", toSessionId: "ses_new" }, deps), 0, "second run changes nothing");
+});
+
 test("listJobs: a set of session ids covers the whole replacement chain; the single-id form is unchanged", async () => {
   const s = store([job({ id: "j1", parentSessionID: "a" }), job({ id: "j2", parentSessionID: "b" }), job({ id: "j3", parentSessionID: "c" })]);
   const deps = { load: s.load, readProgress: async () => null };

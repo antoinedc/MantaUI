@@ -124,6 +124,42 @@ test("rule 2: at most 8 hops", async () => {
   assert.equal((await resolveDisplayParent(job(), far.deps)).displayParentID, null);
 });
 
+test("rule 2: the successor of the record's current displayParentID settles it (no DB query), and refresh patches it", async () => {
+  const w = world({
+    sessions: { [CHILD]: "ses_old", ses_old: null },
+    windows: { [WS]: ["ses_succ", "ses_driver"] },
+    jobs: [job({ displayParentID: "ses_prev" })],
+    successors: { ses_prev: "ses_succ" },
+    references: refs(hit("ses_driver", T0 - 10)),
+  });
+  assert.deepEqual(await resolveDisplayParent(w.store[0], w.deps), { displayParentID: "ses_succ", rule: 2 });
+  assert.equal(w.calls.refs.length, 0, "no DB query when the successor rule settled it");
+  const patched = await refreshDisplayParents(w.deps);
+  assert.deepEqual([...patched.keys()], ["job00001"]);
+  assert.equal(w.store[0].displayParentID, "ses_succ");
+  assert.equal(w.store[0].parentSessionID, "ses_old");
+  assert.equal(w.calls.refs.length, 0);
+});
+
+test("rule 2: a displayParentID successor in another workspace is not acceptable and falls through", async () => {
+  const w = world({
+    sessions: { [CHILD]: "ses_old", ses_old: null },
+    windows: { [WS]: ["ses_driver"], other: ["ses_succ"] },
+    jobs: [job({ displayParentID: "ses_prev" })],
+    successors: { ses_prev: "ses_succ" },
+    references: refs(hit("ses_driver", T0 - 10)),
+  });
+  assert.deepEqual(await resolveDisplayParent(w.store[0], w.deps), { displayParentID: "ses_driver", rule: 3 });
+  const none = world({
+    sessions: { [CHILD]: "ses_old", ses_old: null },
+    windows: { [WS]: [], other: ["ses_succ"] },
+    jobs: [job({ displayParentID: "ses_prev" })],
+    successors: { ses_prev: "ses_succ" },
+    references: refs(),
+  });
+  assert.deepEqual(await resolveDisplayParent(none.store[0], none.deps), { displayParentID: null, rule: null });
+});
+
 // ---- rule 3: driver --------------------------------------------------------------------------
 
 test("rule 3: the windowed session that most recently named the child; asks the DB once, for every windowless record", async () => {
