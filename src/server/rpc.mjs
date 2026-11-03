@@ -85,6 +85,8 @@ import { withSummaryView, withSeriesView } from "./optimizer/view.mjs";
 import { createModelsPricing, withUnpricedGroups } from "./modelsPricing.mjs";
 import { createUsageResumeView } from "./usageResumeView.mjs";
 import { MIN_CLIENT } from "./version.mjs";
+import { loadChangelog } from "./changelog.mjs";
+import { loadAuth } from "./auth.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
 import { clearStoredToken } from "./forge/auth.mjs";
@@ -535,6 +537,11 @@ export function buildHandlers({
   push,
   serverVersion,
   opencodeVersion,
+  // "What's new" window: the parsed CHANGELOG.md and the box identity the desktop
+  // keys its acknowledgements on. Injectable so tests never read the real
+  // CHANGELOG.md or ~/.manta/auth.json.
+  loadChangelog: loadChangelogImpl = loadChangelog,
+  loadBoxAuth = () => loadAuth(),
   runServerSelfUpdate,
   // BET-1319: injectable so the disconnect restart is testable without a live
   // systemd unit. Defaults to the real module import (the `opencode:restart`
@@ -3013,6 +3020,20 @@ export function buildHandlers({
     // The JSON-RPC envelope wraps the body as
     // { result: { version, minClient, opencodeVersion } }.
     "server:version": () => ({ version: serverVersion, minClient: MIN_CLIENT, opencodeVersion, capabilities: [...BOX_CAPABILITIES] }),
+
+    // The server's newest release notes (CHANGELOG.md) plus its own id, which the
+    // desktop uses to remember what it has already shown. Never throws: a missing
+    // or broken file is `unavailable`, an absent identity is `serverId: null`.
+    "server:changelog": async () => {
+      let serverId = null;
+      try {
+        serverId = loadBoxAuth()?.box_id ?? null;
+      } catch (e) {
+        console.warn(`[changelog] could not read the server id: ${String(e?.message ?? e)}`);
+      }
+      const { entries, unavailable } = await loadChangelogImpl();
+      return unavailable ? { serverId, entries: [], unavailable: true } : { serverId, entries };
+    },
 
     // ---- plugins (BET-189 / BET-190) ----
     // Read the current plugin registry the Mac executor has published.
