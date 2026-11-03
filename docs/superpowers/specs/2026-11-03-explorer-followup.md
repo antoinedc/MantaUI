@@ -317,6 +317,83 @@ Show that once, during implementation, then keep the test.
 - Add one row: explorer with sidebar hidden + reconnecting banner (macOS
   emulation), the reported bug.
 
+## 7. Addendum (user decisions, 2026-11-03): no home limit, tree-first open
+
+### 7a. Every path the box user can read is reachable
+
+Today one shared policy (`src/server/homePath.mjs`) stops at the home
+directory. It covers:
+- `/api/peek`,
+- `/api/download`,
+- the explorer's `fs:resolve-paths` / `fs:list` / `fs:git-status`.
+
+As a result, `/mnt/…` text never becomes a link, and the tree's "up" stops at
+home. **Decision: drop the home boundary.** Any absolute path the box user can
+read is allowed.
+
+Rationale: the client is already authenticated as the box user. Home already
+holds the user's most sensitive files (keys, tokens), so the boundary protected
+little beyond them. The OS file permissions remain the real limit.
+
+**The policy itself:**
+- **Single source of truth.** It stays the ONE file-access policy for all
+  three. The routes must keep agreeing: display and download never disagree
+  (BET-1195).
+- **Rename** to reflect the new scope: `homePath.mjs` → `filePath.mjs`,
+  `resolveInHome` / `openInHome` → `resolvePath` / `openPath`. Update every
+  importer.
+- **What is kept:**
+  - the input checks (empty, NUL),
+  - `~` / `~/` expansion against `homedir()`,
+  - relative-to-`base` resolution,
+  - `realpath`,
+  - the regular-file / directory kind checks,
+  - the open-time identity check (`O_NOFOLLOW`, same dev/ino).
+- **What is removed:** only the prefix check and the `outside-home` reason.
+- **Errors:** errno mapping is unchanged. An unreadable path is still
+  `permission` (403 on the HTTP routes); a missing one is still `missing`.
+- **Wire type:** remove `outside-home` from `src/shared/fsTypes.ts`.
+
+**Downstream changes:**
+- Remove the renderer branches that handle `outside-home`:
+  - `ExplorerViewer` notice,
+  - `ExplorerTree` "home" up-state,
+  - `filePeek.ts`,
+  - `peek.mjs`'s 403 entry,
+  - the demo explorer fs (`demoExplorerFs.ts`) and its fixture copy.
+- **Tree "up":** it now climbs to `/`. At `/`, the up control is absent (or
+  disabled with a reason), the same pattern as any other unavailable action.
+- **Path links in transcript text** (`usePathResolution`) need no renderer
+  change. A path now links whenever it exists and is readable.
+
+**Out of scope:** `media_show` / `media.mjs` keep their own home rule.
+
+**Tests:**
+- The policy test uses a real tmp tree. It asserts that:
+  - a path outside the fake home now resolves;
+  - an unreadable file is `permission`;
+  - `..` / symlinks resolve to their real target;
+  - the identity check still rejects a swapped file at open.
+- The `files`, `peek` and download route tests are updated to match.
+- Update the AGENTS.md lines that say `/api/download` / `/api/peek` are
+  home-scoped.
+
+### 7b. Opening the Explorer shows the tree
+
+- **Opening from its header icon or ⌘E:** the Explorer always opens with the
+  tree visible (`treeOpen = true`, persisted as today).
+- **Opening because a path link was clicked:** unchanged. The user's stored
+  tree preference applies.
+- **Empty state:**
+  - The viewer's empty state shows only its "No file open" text.
+  - The **"Show tree" button is removed**, together with the `onShowTree` prop
+    and `showTree` callback.
+- **Tree too narrow** (Explorer column < 340 px): the existing disabled tree
+  toggle, with its reason, is the explanation. No auto-Expand.
+
+Update the explorer contract/mockup empty state (E12b), and the explorer rows'
+baselines and aria snapshots that show it.
+
 ## Out of scope
 
 - The Electron 31 → current upgrade: 31 is end-of-life, and there is a known
