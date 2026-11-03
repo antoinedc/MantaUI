@@ -41,7 +41,7 @@ import { useApplySetting } from "./settingsApply";
 import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
-import { voiceUi } from "./chatUtils";
+import { voiceUi, isUnknownChannelError } from "./chatUtils";
 import { describeUpdateTarget } from "../shared/updateTargets.mjs";
 import { UpdateBoxNote } from "./components/UpdateBoxNote";
 import { refreshUpdateTargets } from "./updateCheck";
@@ -59,7 +59,7 @@ import type {
   OpencodeReference,
   UpdateTarget,
 } from "../shared/types";
-import type { TopologyRestorePreview } from "../shared/api";
+import type { ChangelogEntry, TopologyRestorePreview } from "../shared/api";
 import {
   SETTINGS,
   SETTING_SECTIONS,
@@ -431,6 +431,7 @@ export function Settings({
   onCliUpdate,
   onDesktopUpdate,
   desktopRestarting = false,
+  onShowWhatsNew,
 }: {
   onClose: () => void;
   /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
@@ -464,6 +465,9 @@ export function Settings({
    *  Manta Desktop…" instead of a download percent the download no longer talks
    *  about. */
   desktopRestarting?: boolean;
+  /** About → "What's new": App closes Settings and opens the "What's new"
+   *  window for this entry. Absent → the link is not offered. */
+  onShowWhatsNew?: (entry: ChangelogEntry) => void;
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
@@ -585,6 +589,39 @@ export function Settings({
   // inside it: a failure of one leg still reports the other.
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
+
+  // About → "What's new": fetch the server's changelog and open the window for the
+  // newest entry. Every outcome is reported (never a silent no-op); an error is
+  // a human literal, never the raw failure text. Stored acknowledgements are not
+  // touched — only the automatic window records them.
+  const [whatsNewBusy, setWhatsNewBusy] = useState(false);
+  const openWhatsNew = async () => {
+    if (whatsNewBusy || !onShowWhatsNew) return;
+    setWhatsNewBusy(true);
+    try {
+      let res: Awaited<ReturnType<typeof window.api.serverChangelog>> | undefined;
+      try {
+        res = await window.api.serverChangelog();
+      } catch (e) {
+        // An older server has no such channel: that is "no notes", not a failure.
+        if (isUnknownChannelError(e instanceof Error ? e.message : String(e))) {
+          push({ id: `whatsnew-${Date.now()}`, message: "This server has no release notes yet." });
+          return;
+        }
+        console.warn("[whats-new] changelog fetch failed:", e);
+        push({ id: `err-whatsnew-${Date.now()}`, tone: "error", message: "Couldn't load release notes from the server — try again." });
+        return;
+      }
+      const newest = res && !res.unavailable && Array.isArray(res.entries) ? res.entries[0] : undefined;
+      if (!newest) {
+        push({ id: `whatsnew-${Date.now()}`, message: "This server has no release notes yet." });
+        return;
+      }
+      onShowWhatsNew(newest);
+    } finally {
+      setWhatsNewBusy(false);
+    }
+  };
 
   // BET-1160 never-stuck invariant: a fresh Settings open (re)mount resets the
   // transient in-flight update state to idle — no stale spinner, no button left
@@ -1059,6 +1096,11 @@ export function Settings({
                 <span className="text-meta text-text-faint">
                   Checked {new Date(checkedAt).toLocaleTimeString()}
                 </span>
+              )}
+              {onShowWhatsNew && (
+                <Button onClick={() => void openWhatsNew()} loading={whatsNewBusy} tone="ghost">
+                  What's new
+                </Button>
               )}
             </div>
 
