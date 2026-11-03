@@ -62,6 +62,14 @@
 //      assignment is still kept up to date (so `sessionAssignment` answers what
 //      the NEXT request will use) and a switch is recorded as a move with reason
 //      "manual" — but no `moved` event: the user did it on purpose.
+//   WEEKLY DEADLINE (seat-placement-weekly-deadline spec §3). When some seat has a
+//      fresh weekly window with a known reset, `placementFor` / `moveFor` run the
+//      deadline rules R1–R6 (`chooseSeatByDeadline` / `decideMoveByDeadline`): the
+//      seat whose weekly resets first is served first, packing the 5h where that
+//      costs nothing. Otherwise (a 5h-only provider, or no weekly reading) the
+//      legacy rules above run byte-for-byte. Those two dispatchers are the ONLY
+//      entry points; `chooseSeat` / `decideMove` / `resetSoonMove` stay for the
+//      legacy path and their tests.
 //
 // MODEL-SCOPED LIMITS. A usage window scoped to one model ("7d · Fable") limits only
 //   requests for that model (seatChoice `windowAppliesToModel`). Every load / full /
@@ -84,8 +92,21 @@
 
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { statePath } from "../shared/paths.mjs";
-import { leastLoadedSeat, isSeatExhausted, seatLoad, seatLoadWindow, nextResetAt, soonestResettingSeat } from "../shared/seatChoice.mjs";
+import {
+  leastLoadedSeat,
+  isSeatExhausted,
+  seatLoad,
+  seatLoadWindow,
+  nextResetAt,
+  soonestResettingSeat,
+  bestSeatByRank,
+  legacyMode,
+  seatDeadlineAt,
+  seatSlackPts,
+  shortWindowState,
+} from "../shared/seatChoice.mjs";
 import { ACCOUNT_PROVIDERS, notePluginSeen } from "./accounts.mjs";
+import { createSeatAttribution } from "./seatAttribution.mjs";
 
 const DAY_MS = 24 * 60 * 60_000;
 /** An assignment (or child link) nobody has touched for this long is dropped. */
@@ -106,6 +127,10 @@ export const RESET_SOON_MS = 60 * 60_000;
 /** A seat a failed turn reported as limited is treated as full for this long,
  *  even when the usage reading (up to a poll interval old) still says otherwise. */
 export const LIMITED_MARK_MS = 5 * 60_000;
+/** Weekly-deadline placement: a same-org rebalance needs a target whose weekly resets this much earlier. */
+export const SAME_ORG_REBALANCE_MS = 6 * 60 * 60_000;
+/** …and at most one such optional move per conversation per this long. */
+export const MIN_DWELL_MS = 60 * 60_000;
 const STORE_VERSION = 1;
 const MAX_ID_LEN = 200;
 
@@ -394,12 +419,191 @@ function resetSoonMove({ existing, cur, own, seats, bySeat, nowMs, activeSeatId 
   return best ? { seatId: best.seatId, from: cur.seatId, why: "reset-soon", trigger: null, crossOrg: false } : null;
 }
 
+// ---------------------------------------------------------------------------
+// Weekly-deadline rules (spec §3). Pure. `kFor(kind) → number|null` is the
+// provider-bound short-windows-per-long-window reader (null = slack unknown).
+// ---------------------------------------------------------------------------
+
+const noK = () => null;
+const isBlocked = (left, seatId, nowMs) => typeof left?.[seatId] === "number" && nowMs - left[seatId] < MOVE_BACK_BLOCK_MS;
+
+/** The short (5h) window's pct when its reading is known and fresh, else `null`. */
+function shortPct(snap, nowMs) {
+  if (shortWindowState(snap, { nowMs }).state === "unknown") return null;
+  const w = (snap?.windows ?? []).find((x) => x && x.kind === "session");
+  return Number.isFinite(w?.pct) ? w.pct : null;
+}
+
+/** `eligible ∧ short window known ∧ pct(short) < 95` (the soft-target predicate). */
+function isSoftTarget(snap, { nowMs, model }) {
+  if (isSeatFull(snap, { model })) return false;
+  const p = shortPct(snap, nowMs);
+  return p !== null && p < MOVE_AT_PCT;
+}
+
 /**
- * Rules 1–4 for one request, with no I/O.
- * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string,
- *            why?: "manual"|"load"|"exhausted"|"unusable"|"reset-soon", trigger?: {kind:string,pct:number}|null, crossOrg?: boolean}}
+ * Rule R1 — a conversation with no seat (or whose seat is gone) takes the seat
+ * whose weekly resets first: `best(softTarget ∧ ¬blocked)` → `best(softTarget)` →
+ * `best(hardTarget)` → the least-loaded usable seat. Manual mode never gets here
+ * (`placementFor` sends it to `chooseSeat`). `left` is the seats the conversation
+ * recently left (empty for a new one).
+ *
+ * @param {{activeSeatId: string|null, seats: Array<object>, seatSnapshots?: Array<object>, model?: string|null,
+ *          nowMs: number, kFor?: ((kind: string) => number|null)|null, left?: Record<string, number>}} args
+ * @returns {string|null}
  */
-export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0, model = null }) {
+export function chooseSeatByDeadline({ activeSeatId, seats, seatSnapshots = [], model = null, nowMs, kFor = null, left = {} }) {
+  const usable = seats.filter((s) => s.usable);
+  if (usable.length === 0) return null;
+  const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
+  const snaps = usable.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId });
+  const best = (pool) => bestSeatByRank(pool, { nowMs, model, kFor: kFor ?? noK, activeSeatId });
+  const soft = snaps.filter((x) => isSoftTarget(x, { nowMs, model }));
+  const tiers = [soft.filter((x) => !isBlocked(left, x.seatId, nowMs)), soft, snaps.filter((x) => !isSeatFull(x, { model }))];
+  for (const tier of tiers) {
+    const pick = best(tier);
+    if (pick) return pick.seatId;
+  }
+  return leastLoadedSeat(snaps, { activeSeatId, model })?.seatId ?? null;
+}
+
+/**
+ * Seat placement entry point: the legacy `chooseSeat` in manual mode, without a
+ * clock, or in legacy mode (no seat has a fresh weekly with a known reset for
+ * `model`); `chooseSeatByDeadline` otherwise. Same arguments as `chooseSeat`,
+ * plus `kFor` and `left`.
+ */
+export function placementFor(args) {
+  const { mode, seatSnapshots = [], model = null, nowMs = null } = args;
+  if (mode === "manual" || typeof nowMs !== "number" || legacyMode(seatSnapshots, { nowMs, model })) return chooseSeat(args);
+  return chooseSeatByDeadline(args);
+}
+
+/** When this conversation last moved on its own (a manual switch does not count), else when it was placed. */
+function lastAutoMoveAt(existing) {
+  if (Number.isFinite(existing?.movedAt) && existing.reason !== "manual") return existing.movedAt;
+  return Number.isFinite(existing?.assignedAt) ? existing.assignedAt : -Infinity;
+}
+
+/**
+ * Rules R2–R6 as one pure decision, same result shape as `decideMove` (`null` =
+ * stay): dead seat (R2), full/limited seat (R3), the short window at 95+ (R4), a
+ * same-org seat whose weekly resets 6h+ earlier (R5), else stay (R6). Within a
+ * tier the choice is the seat-rank order (earliest weekly reset first), not
+ * least-loaded. A rebalance carries `rebalance: {deadlineFrom, deadlineTo,
+ * slackFrom, slackTo}` for the activity log.
+ *
+ * @returns {null|{seatId:string, from:string, why:"load"|"exhausted"|"unusable"|"rebalance",
+ *                 trigger:{kind:string,pct:number}|null, crossOrg:boolean, rebalance?: object}}
+ */
+export function decideMoveByDeadline({ existing, seats, seatSnapshots = [], nowMs, activeSeatId = null, model = null, kFor = null }) {
+  const cur = seats.find((s) => s.seatId === existing.seatId);
+  if (!cur) return null;
+  const kForKind = kFor ?? noK;
+  const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
+  const own = bySeat.get(cur.seatId);
+  const left = existing.left ?? {};
+  const curOrg = seatOrgKey(cur);
+
+  const candidates = [];
+  for (const s of seats) {
+    if (!s.usable || s.seatId === cur.seatId) continue;
+    const snap = bySeat.get(s.seatId) ?? { seatId: s.seatId };
+    candidates.push({
+      seat: s,
+      snap,
+      same: seatOrgKey(s) === curOrg,
+      load: seatLoad(snap, { model }),
+      blocked: isBlocked(left, s.seatId, nowMs),
+      hard: !isSeatFull(snap, { model }),
+      soft: isSoftTarget(snap, { nowMs, model }),
+    });
+  }
+  const rankOpts = { nowMs, model, kFor: kForKind, activeSeatId };
+  const best = (pool) => {
+    const pick = bestSeatByRank(pool.map((c) => c.snap), rankOpts);
+    return pick ? pool.find((c) => c.snap === pick) : null;
+  };
+  const result = (c, why, trigger, extra = {}) => ({ seatId: c.seat.seatId, from: cur.seatId, why, trigger, crossOrg: seatOrgKey(c.seat) !== curOrg, ...extra });
+
+  // R2 / R3 — the seat cannot serve: same org, then other org under 70, then any
+  // other org, each tier over the seats not left within 5h, then the whole ladder
+  // again over the blocked ones. A forced move is exempt from the cross-org cap.
+  const forced = (why, trigger) => {
+    const ladder = (pool) => {
+      const hard = pool.filter((c) => c.hard);
+      const tiers = [hard.filter((c) => c.same), hard.filter((c) => !c.same && c.load !== null && c.load < MOVE_TARGET_BELOW_PCT), hard.filter((c) => !c.same)];
+      for (const tier of tiers) {
+        const pick = best(tier);
+        if (pick) return pick;
+      }
+      return null;
+    };
+    const chosen = ladder(candidates.filter((c) => !c.blocked)) ?? ladder(candidates.filter((c) => c.blocked));
+    if (chosen) return result(chosen, why, trigger);
+    if (why !== "unusable") return null;
+    // A dead seat must release its conversation even when every other seat is full.
+    const rest = seats.filter((s) => s.usable && s.seatId !== cur.seatId);
+    const fallback = leastLoadedSeat(rest.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId }), { activeSeatId, model });
+    const target = fallback ? seats.find((s) => s.seatId === fallback.seatId) : null;
+    return target ? result({ seat: target }, why, trigger) : null;
+  };
+
+  if (!cur.usable) return forced("unusable", null);
+  if (isSeatFull(own, { model })) return forced("exhausted", seatLoadWindow(own, { model }) ?? { kind: "exhausted", pct: 100 });
+
+  // R4 — the 5h window is at 95+: finish it where it is unless a seat with room exists.
+  const pressure = shortPct(own, nowMs);
+  if (pressure !== null && pressure >= MOVE_AT_PCT) {
+    const crossOK = !(typeof existing.crossOrgMovedAt === "number" && nowMs - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS);
+    const trigger = { kind: "session", pct: pressure };
+    const same = best(candidates.filter((c) => c.same && c.soft && !c.blocked));
+    if (same) return result(same, "load", trigger);
+    if (crossOK) {
+      const other = best(candidates.filter((c) => !c.same && c.soft && !c.blocked && c.load !== null && c.load < MOVE_TARGET_BELOW_PCT));
+      if (other) return result(other, "load", trigger);
+    }
+    return null;
+  }
+
+  // R5 — optional, same org only: a seat whose weekly resets 6h+ earlier, at most once per MIN_DWELL_MS.
+  if (nowMs - lastAutoMoveAt(existing) < MIN_DWELL_MS) return null;
+  const ownDeadline = seatDeadlineAt(own, { nowMs, model });
+  const better = (c) => {
+    const d = seatDeadlineAt(c.snap, { nowMs, model });
+    return d !== null && (ownDeadline === null || d <= ownDeadline - SAME_ORG_REBALANCE_MS);
+  };
+  const target = best(candidates.filter((c) => c.same && c.soft && !c.blocked && better(c)));
+  if (!target) return null;
+  const rebalance = {};
+  const put = (k, v) => {
+    if (typeof v === "number" && Number.isFinite(v)) rebalance[k] = v;
+  };
+  put("deadlineFrom", ownDeadline);
+  put("deadlineTo", seatDeadlineAt(target.snap, { nowMs, model }));
+  const slack = (snap) => seatSlackPts(snap, { nowMs, model, kFor: kForKind });
+  put("slackFrom", slack(own));
+  put("slackTo", slack(target.snap));
+  return result(target, "rebalance", null, { rebalance });
+}
+
+/**
+ * Seat move entry point: the legacy `decideMove` (which includes `resetSoonMove`)
+ * without a clock or in legacy mode, `decideMoveByDeadline` otherwise.
+ */
+export function moveFor(args) {
+  const { seatSnapshots = [], model = null, nowMs } = args;
+  if (typeof nowMs !== "number" || legacyMode(seatSnapshots, { nowMs, model })) return decideMove(args);
+  return decideMoveByDeadline(args);
+}
+
+/**
+ * Rules 1–4 for one request, with no I/O (R0–R6 when some seat has a weekly deadline).
+ * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string,
+ *            why?: "manual"|"load"|"exhausted"|"unusable"|"reset-soon"|"rebalance", trigger?: {kind:string,pct:number}|null, crossOrg?: boolean,
+ *            rebalance?: object}}
+ */
+export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0, model = null, kFor = null }) {
   if (mode === "manual") {
     // MANUAL MODE (spec §5.2): every conversation uses the active seat, whatever
     // its stored assignment says — picking a seat applies to ALL conversations
@@ -407,7 +611,7 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
     // existing) seat is MOVED, recorded as a manual move; one whose seat is
     // gone is simply placed. The active seat falls back exactly as `chooseSeat`
     // does when it cannot serve, so a request never fails on it.
-    const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model, nowMs });
+    const seatId = placementFor({ mode, activeSeatId, seats, seatSnapshots, model, nowMs, kFor });
     if (!seatId) return { seatId: null, reason: "none" };
     if (!existing) return { seatId, reason: "assigned" };
     if (existing.seatId === seatId) return { seatId, reason: "kept" };
@@ -420,13 +624,15 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
     const seat = seats.find((s) => s.seatId === existing.seatId);
     if (seat) {
       if (mode === "auto") {
-        const move = decideMove({ existing, seats, seatSnapshots, nowMs, activeSeatId, model });
-        if (move) return { seatId: move.seatId, reason: "moved", from: move.from, why: move.why, trigger: move.trigger, crossOrg: move.crossOrg };
+        const move = moveFor({ existing, seats, seatSnapshots, nowMs, activeSeatId, model, kFor });
+        if (move) {
+          return { seatId: move.seatId, reason: "moved", from: move.from, why: move.why, trigger: move.trigger, crossOrg: move.crossOrg, ...(move.rebalance ? { rebalance: move.rebalance } : {}) };
+        }
       }
       if (seat.usable) return { seatId: existing.seatId, reason: "kept" };
     }
   }
-  const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model, nowMs });
+  const seatId = placementFor({ mode, activeSeatId, seats, seatSnapshots, model, nowMs, kFor, left: existing?.left });
   return seatId ? { seatId, reason: "assigned" } : { seatId: null, reason: "none" };
 }
 
@@ -442,6 +648,12 @@ export function describeSeatMove(evt) {
   const to = evt.toLabel || evt.to || "another seat";
   let why = "";
   if (evt.reason === "reset-soon") return `Moved a conversation from ${from} to ${to} (its limit resets within the hour — its remaining quota goes first)`;
+  if (evt.reason === "rebalance") {
+    // The target's weekly resets sooner; when some of it could not be spent before
+    // then anyway, say that instead — that is the quota being rescued.
+    if (Number.isFinite(evt.slackTo) && evt.slackTo > 0) return `Moved a conversation from ${from} to ${to} (${to}'s weekly will not be used up before it resets)`;
+    return `Moved a conversation from ${from} to ${to} (${to}'s weekly resets sooner — spending that first)`;
+  }
   if (evt.reason === "unusable") why = " (signed out)";
   else if (evt.trigger) {
     const win = windowWord(evt.trigger.kind);
@@ -470,6 +682,10 @@ export function seatMoveActivityEntry(evt) {
     evidence.window = windowWord(evt.trigger.kind);
   }
   if (evt.crossOrg) evidence.crossOrg = "yes";
+  if (evt.reason === "rebalance") {
+    for (const k of ["deadlineFrom", "deadlineTo"]) if (Number.isFinite(evt[k])) evidence[k] = evt[k];
+    for (const k of ["slackFrom", "slackTo"]) if (Number.isFinite(evt[k])) evidence[k] = Math.round(evt[k]);
+  }
   return {
     kind: "seat-move",
     verdict: "applied",
@@ -517,12 +733,41 @@ export function createSeatAssigner({
   // unusable — a manual switch is the user's own act and is not announced).
   onChange = null,
   onMoved = null,
+  // Weekly-deadline hooks (both optional). `kFor(provider)` → the provider-bound
+  // `(kind) → short-windows-per-long-window | null` reader (absent ⇒ slack is
+  // unknown everywhere; deadlines still order). `attribution` is the per-request
+  // placement log (`seatAttribution.mjs`, default: the jsonl appender).
+  kFor = () => noK,
+  attribution = null,
   log = console,
 } = {}) {
   /** @type {ReturnType<typeof emptyAssignments>|null} */
   let store = null;
   const mutex = createMutex();
   const refreshing = new Map();
+  let defaultAttribution = null;
+
+  /** Record which seat/model served a request — after the decision, never able to fail it. */
+  function attribute(provider, session, root, seat, model, reason) {
+    queueMicrotask(() => {
+      try {
+        const writer = attribution ?? (defaultAttribution ??= createSeatAttribution({ log }));
+        const out = writer.record({ provider, session, root, seat, model, reason });
+        if (out && typeof out.then === "function") out.then(undefined, (e) => log.warn?.("[accounts] seat attribution failed:", e?.message ?? e));
+      } catch (e) {
+        log.warn?.("[accounts] seat attribution failed:", e?.message ?? e);
+      }
+    });
+  }
+
+  /** The conversation root for the paths that never reach `place` (no store write). */
+  function rootOf(sessionID, parentSessionID) {
+    try {
+      return resolveRoot({ sessionID, parentSessionID, children: ensure().children }).root;
+    } catch {
+      return sessionID;
+    }
+  }
 
   const ensure = () => (store ??= pruneAssignments(normalizeAssignments(load()), now()));
 
@@ -591,11 +836,18 @@ export function createSeatAssigner({
     // and its sub-agent) must land on the SAME seat, not race to two.
     return mutex.runExclusive(async () => {
       const states = await stateOf(provider);
+      const requestModel = isId(model) ? model : null;
       // No seats → today's single-credential behaviour. ONE seat → nothing to
       // choose between, and whatever login is live keeps serving.
-      if (!states) return { seatId: null, live: true };
-      if (states.seats.length === 1) return { seatId: states.seats[0].seatId, live: true };
-      return (await place(provider, states, sessionID, parentSessionID, { model: isId(model) ? model : null })).result;
+      if (!states) {
+        attribute(provider, sessionID, rootOf(sessionID, parentSessionID), null, requestModel, "none");
+        return { seatId: null, live: true };
+      }
+      if (states.seats.length === 1) {
+        attribute(provider, sessionID, rootOf(sessionID, parentSessionID), states.seats[0].seatId, requestModel, "single");
+        return { seatId: states.seats[0].seatId, live: true };
+      }
+      return (await place(provider, states, sessionID, parentSessionID, { model: requestModel })).result;
     });
   }
 
@@ -629,6 +881,7 @@ export function createSeatAssigner({
       seatSnapshots: snapshotsFor(provider),
       nowMs: t,
       model,
+      kFor: kFor(provider),
     });
     if (onlyMove && decision.reason !== "moved") return untouched;
     let dirty = false;
@@ -636,7 +889,10 @@ export function createSeatAssigner({
       s.children[link.child] = { root: link.root, at: t };
       dirty = true;
     }
-    if (!decision.seatId) return { result: { seatId: null, live: true }, decision };
+    if (!decision.seatId) {
+      attribute(provider, sessionID, root, null, model, "none");
+      return { result: { seatId: null, live: true }, decision };
+    }
 
     let assignmentsChanged = false;
     let movedEvent = null;
@@ -685,6 +941,8 @@ export function createSeatAssigner({
           reason: why,
           trigger: decision.trigger ?? null,
           crossOrg: decision.crossOrg === true,
+          // A rebalance is a routine optimisation: logged, but no chat notice.
+          ...(why === "rebalance" ? { silent: true, ...decision.rebalance } : {}),
         };
       }
     } else if (existing) {
@@ -703,6 +961,8 @@ export function createSeatAssigner({
       store = pruneAssignments(s, t);
       await persist();
     }
+    const outcome = onlyMove ? "reconsider" : decision.reason === "moved" ? `moved:${decision.why ?? "exhausted"}` : decision.reason;
+    attribute(provider, sessionID, root, decision.seatId, model, outcome);
     // After the write, and never allowed to fail the request.
     if (assignmentsChanged) tell(() => onChange?.(provider));
     if (movedEvent) tell(() => onMoved?.(movedEvent));

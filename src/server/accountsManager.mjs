@@ -104,6 +104,7 @@ const isNonEmptyString = (v) => typeof v === "string" && v.length > 0;
  * @param {() => Array<object>} [deps.listSeatSnapshots]
  * @param {() => number} [deps.now]
  * @param {(nowMs: number) => boolean} [deps.routingActive]
+ * @param {(provider: string) => ((kind: string) => number|null)} [deps.kFor]
  * @param {{
  *   start: (configDir: string, seatId: string) => Promise<object>,
  *   cancel: (sessionKey: string) => void,
@@ -121,6 +122,9 @@ export function createAccountsManager({
   listSeatSnapshots = () => [],
   now = () => Date.now(),
   routingActive = perConversationRoutingActive,
+  // `kFor(provider)` → the provider-bound short-windows-per-long-window reader the
+  // seat view's slack reads (absent ⇒ slack unknown; deadlines still show).
+  kFor = () => () => null,
   claudeLogin,
   codex,
   fetchProfile = fetchClaudeProfile,
@@ -205,6 +209,8 @@ export function createAccountsManager({
       seatSnapshots: listSeatSnapshots().filter((x) => x?.provider === provider),
       assignments: seatAssigner.assignments(provider),
       routingActive: routingActive(now()),
+      nowMs: now(),
+      kFor: kFor(provider),
     });
   }
 

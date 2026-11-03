@@ -9,8 +9,8 @@
 // `credentialDir` (a filesystem path) is deliberately not copied.
 
 import { moveCopy } from "./accountsCopy.mjs";
-import { seatLoad } from "../shared/seatChoice.mjs";
-import { chooseSeat, decideMove, MOVE_AT_PCT, isSeatFull } from "./seatAssignment.mjs";
+import { seatLoad, seatSlackPts, seatDeadlineAt } from "../shared/seatChoice.mjs";
+import { chooseSeat, placementFor, moveFor, MOVE_AT_PCT, isSeatFull } from "./seatAssignment.mjs";
 import { allSeats, findSeat } from "./accounts.mjs";
 
 /**
@@ -56,17 +56,18 @@ export function countConversations({ mode, activeSeatId, seats, seatSnapshots, a
  * The seat a NEW conversation would take (rule 1) — the very function the
  * server's resolver uses, so the hint cannot disagree with what then happens.
  * Manual mode: the active seat. (Where an existing conversation would MOVE is
- * `moveTargetFor`.)
+ * `moveTargetFor`.) `nowMs` / `kFor` (the provider-bound `(kind) => number|null`
+ * reader) switch on the weekly-deadline rules; without a clock it is the legacy chooser.
  * @returns {string|null}
  */
-export function nextSeatFor({ mode, activeSeatId, seats, seatSnapshots }) {
+export function nextSeatFor({ mode, activeSeatId, seats, seatSnapshots, nowMs = null, kFor = null }) {
   if (mode === "manual") return activeSeatId ?? null;
-  return chooseSeat({ mode: "auto", activeSeatId, seats, seatSnapshots });
+  return placementFor({ mode: "auto", activeSeatId, seats, seatSnapshots, nowMs, kFor });
 }
 
 /**
  * Where a conversation sitting on the most loaded seat that is at/over the move
- * threshold (and carries conversations) would go — the SAME `decideMove` the
+ * threshold (and carries conversations) would go — the SAME `moveFor` the
  * resolver runs, applied to a hypothetical conversation with no history of moves.
  * `null` in manual mode (no automatic moves), when no in-use seat is at the
  * threshold, or when that conversation would stay.
@@ -74,7 +75,7 @@ export function nextSeatFor({ mode, activeSeatId, seats, seatSnapshots }) {
  *          counts:Record<string,number>, nowMs?:number}} args
  * @returns {string|null}
  */
-export function moveTargetFor({ mode, activeSeatId, seats, seatSnapshots, counts, nowMs = 0 }) {
+export function moveTargetFor({ mode, activeSeatId, seats, seatSnapshots, counts, nowMs = 0, kFor = null }) {
   if (mode !== "auto") return null;
   const bySeat = new Map((seatSnapshots ?? []).filter((x) => x?.seatId).map((x) => [x.seatId, x]));
   let worst = null;
@@ -89,7 +90,7 @@ export function moveTargetFor({ mode, activeSeatId, seats, seatSnapshots, counts
     }
   }
   if (!worst) return null;
-  return decideMove({ existing: { seatId: worst.seatId }, seats, seatSnapshots: seatSnapshots ?? [], nowMs, activeSeatId })?.seatId ?? null;
+  return moveFor({ existing: { seatId: worst.seatId }, seats, seatSnapshots: seatSnapshots ?? [], nowMs, activeSeatId, kFor })?.seatId ?? null;
 }
 
 /**
@@ -100,9 +101,11 @@ export function moveTargetFor({ mode, activeSeatId, seats, seatSnapshots, counts
  * @param {Array<object>} args.seatSnapshots  this provider's per-seat usage readings
  * @param {Record<string, object>} args.assignments  this provider's conversation → assignment map
  * @param {boolean} args.routingActive
+ * @param {number} [args.nowMs]
+ * @param {((kind: string) => number|null)|null} [args.kFor]  provider-bound short-windows-per-long-window reader
  * @returns {object|null}  null when the provider has no seat
  */
-export function buildProviderView({ provider, state, states, seatSnapshots, assignments, routingActive, nowMs = 0 }) {
+export function buildProviderView({ provider, state, states, seatSnapshots, assignments, routingActive, nowMs = 0, kFor = null }) {
   if (allSeats(state).length === 0) return null;
   const stateBySeat = new Map((states?.seats ?? []).map((s) => [s.seatId, s]));
   const snapBySeat = new Map((seatSnapshots ?? []).filter((x) => x?.seatId).map((x) => [x.seatId, x]));
@@ -137,6 +140,9 @@ export function buildProviderView({ provider, state, states, seatSnapshots, assi
         load: snap ? seatLoad(snap) : null,
         fetchedAt: typeof snap?.fetchedAt === "number" ? snap.fetchedAt : null,
         conversations: counts[seat.id] ?? 0,
+        // Why a seat is preferred: its weekly reset, and whether some of its weekly room cannot be spent before it.
+        slack: (seatSlackPts(snap, { nowMs, kFor }) ?? 0) > 0,
+        deadlineAt: seatDeadlineAt(snap, { nowMs }),
       };
     }),
   }));
@@ -146,8 +152,8 @@ export function buildProviderView({ provider, state, states, seatSnapshots, assi
     mode,
     activeSeatId: state.activeSeatId ?? null,
     routingActive: Boolean(routingActive),
-    nextSeatId: nextSeatFor({ mode, activeSeatId: state.activeSeatId, seats: chooserSeats, seatSnapshots }),
-    moveTargetSeatId: moveTargetFor({ mode, activeSeatId: state.activeSeatId, seats: chooserSeats, seatSnapshots, counts, nowMs }),
+    nextSeatId: nextSeatFor({ mode, activeSeatId: state.activeSeatId, seats: chooserSeats, seatSnapshots, nowMs, kFor }),
+    moveTargetSeatId: moveTargetFor({ mode, activeSeatId: state.activeSeatId, seats: chooserSeats, seatSnapshots, counts, nowMs, kFor }),
     accounts,
   };
 }

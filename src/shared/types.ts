@@ -2600,6 +2600,10 @@ export type SeatView = {
   fetchedAt: number | null;
   /** Conversations currently assigned to this seat. */
   conversations: number;
+  /** Some of the seat's weekly room cannot be spent before it resets (seat-placement spec §2.3). */
+  slack?: boolean;
+  /** When the seat's earliest weekly window resets (epoch ms), or null when unknown. */
+  deadlineAt?: number | null;
 };
 
 export type AccountView = {

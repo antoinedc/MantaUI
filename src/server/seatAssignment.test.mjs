@@ -201,11 +201,13 @@ function fakeAccounts(initial) {
 function assigner(accounts, over = {}) {
   let saved = null;
   const saves = [];
-  let t = 1_000_000;
+  let t = over.now0 ?? 1_000_000;
   const svc = createSeatAssigner({
     accounts,
     listSeatSnapshots: () => over.snaps ?? [],
     refreshSeatCredentials: over.refresh ?? (async () => ({ ok: true })),
+    kFor: over.kFor,
+    attribution: over.attribution ?? { record() {} },
     load: () => over.load ?? saved,
     save: async (d) => {
       saved = structuredClone(d);
@@ -1030,5 +1032,379 @@ test("the service: a sub-agent on another model decides with its own model but n
     const rec = saved.providers.claude.conv;
     assert.equal(rec.reason, "reset-soon");
     assert.deepEqual(rec.left, { "seat-3": NOW - HOUR }, "the unexpired entry survives, the expired one is dropped, seat-1 is not added");
+  });
+}
+
+// ---- weekly-deadline rules (spec §3, R0–R6) ---------------------------------
+
+import { MIN_DWELL_MS, SAME_ORG_REBALANCE_MS, chooseSeatByDeadline, decideMoveByDeadline, moveFor, placementFor } from "./seatAssignment.mjs";
+
+{
+  const NOW = 100 * HOUR;
+  const MIN = 60_000;
+  // A seat: 5h at `pct` (resets in `sIn` h), weekly at `wPct` (resets in `wIn` h), optional Fable cap.
+  const wk = (n, { pct = 10, sIn = 2, wPct = 50, wIn = 48, fable = null, extra = {} } = {}) => ({
+    provider: "claude",
+    seatId: `seat-${n}`,
+    windows: [
+      { kind: "session", pct, resetsAt: NOW + sIn * HOUR },
+      { kind: "weekly", pct: wPct, resetsAt: NOW + wIn * HOUR },
+      ...(fable === null ? [] : [{ kind: "weekly_scoped:fable", scope: "Fable", pct: fable, resetsAt: NOW + wIn * HOUR }]),
+    ],
+    ...extra,
+  });
+  const org = (n, o = "A", over = {}) => inOrg(n, o, over);
+  const place = (seats, snaps, over = {}) => placementFor({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps, nowMs: NOW, ...over });
+  const mv = (existing, seats, snaps, over = {}) =>
+    moveFor({ existing: { seatId: "seat-1", assignedAt: NOW - 10 * HOUR, ...existing }, seats, seatSnapshots: snaps, nowMs: NOW, activeSeatId: null, ...over });
+  const K = (kind) => (kind === "weekly" ? 7.5 : null);
+
+  // R1 ---------------------------------------------------------------------
+  test("R1: a new conversation takes the seat whose weekly resets soonest — the 'seat 8' fixture, for Opus and for Fable", () => {
+    const seats = [org(1), org(2), org(8)];
+    const snaps = [wk(1, { wPct: 0, wIn: 48, fable: 0 }), wk(2, { wPct: 4, wIn: 18, fable: 0 }), wk(8, { wPct: 2, wIn: 12, fable: 0 })];
+    assert.equal(place(seats, snaps, { model: OPUS }), "seat-8");
+    assert.equal(place(seats, snaps, { model: FABLE }), "seat-8");
+    assert.equal(place(seats, snaps, { model: null }), "seat-8");
+  });
+
+  test("R1: with seat 8's Fable cap at 100, Fable picks the next-soonest seat and Opus still seat 8", () => {
+    const seats = [org(1), org(2), org(8)];
+    const snaps = [wk(1, { wPct: 0, wIn: 48, fable: 0 }), wk(2, { wPct: 4, wIn: 18, fable: 0 }), wk(8, { wPct: 2, wIn: 12, fable: 100 })];
+    assert.equal(place(seats, snaps, { model: FABLE }), "seat-2");
+    assert.equal(place(seats, snaps, { model: OPUS }), "seat-8");
+  });
+
+  test("R1: tiers — a soft seat beats an earlier-deadline seat at 95+; hard targets next; the least-loaded usable seat last; ¬blocked first", () => {
+    const seats = [org(1), org(2), org(3)];
+    // seat-1 resets first but its 5h is at 96 → not a soft target
+    assert.equal(place(seats, [wk(1, { pct: 96, wIn: 10 }), wk(2, { pct: 10, wIn: 30 }), wk(3, { pct: 10, wIn: 20 })]), "seat-3");
+    // every seat at 95+ → hard targets, by rank (earliest deadline)
+    assert.equal(place(seats, [wk(1, { pct: 97, wIn: 30 }), wk(2, { pct: 96, wIn: 10 }), wk(3, { pct: 99, wIn: 20 })]), "seat-2");
+    // everything full → the least-loaded usable seat
+    assert.equal(place(seats, [wk(1, { pct: 100, wIn: 30 }), wk(2, { pct: 100, wIn: 10, extra: { exhausted: true } }), wk(3, { pct: 100, wIn: 20 })], { activeSeatId: "seat-3" }), "seat-3");
+    // a recently-left seat is skipped while another soft seat exists, taken when it is the only one
+    const left = { "seat-2": NOW - HOUR };
+    assert.equal(place(seats, [wk(1, { wIn: 30 }), wk(2, { wIn: 10 }), wk(3, { pct: 99, wIn: 20 })], { left }), "seat-1");
+    assert.equal(place(seats, [wk(1, { pct: 99, wIn: 30 }), wk(2, { wIn: 10 }), wk(3, { pct: 99, wIn: 20 })], { left }), "seat-2");
+    assert.equal(place([org(1, "A", { usable: false })], []), null);
+    assert.equal(place([org(1), org(2, "A", { usable: false })], [wk(1), wk(2, { wIn: 1 })]), "seat-1", "an unusable seat is never chosen");
+  });
+
+  test("R1: a seat with no reading, or no weekly, ranks after every seat with a deadline; a stale 5h is not a soft target", () => {
+    const seats = [org(1), org(2), org(3)];
+    assert.equal(place(seats, [wk(1, { wIn: 60 }), snap(2, 0)]), "seat-1");
+    const stale = wk(2, { wIn: 5 });
+    stale.windows[0] = { kind: "session", pct: 10, stale: true };
+    assert.equal(place(seats, [wk(1, { wIn: 60 }), stale]), "seat-1", "unknown 5h state → not a soft target; seat-1 is");
+    assert.equal(place(seats, [stale], { activeSeatId: null }), "seat-2", "…but it is a hard target when nothing else is");
+  });
+
+  test("R1: equal deadlines are a tie group (within a minute) ordered by slack (with K), then load, then the active seat", () => {
+    const seats = [org(1), org(2)];
+    // seat-1: 5h at 50, weekly 100% left; seat-2: 5h at 10, weekly 60% left; both reset in 12h
+    const snaps = [wk(1, { pct: 50, wPct: 0, wIn: 12 }), wk(2, { pct: 10, wPct: 40, wIn: 12 })];
+    assert.equal(place(seats, snaps), "seat-2", "no K → slack unknown → least loaded");
+    assert.equal(place(seats, snaps, { kFor: K }), "seat-1", "seat-1 loses more weekly room it cannot spend");
+    const tie = [wk(1, { pct: 10, wIn: 12 }), wk(2, { pct: 10, wIn: 12 })];
+    assert.equal(place(seats, tie, { activeSeatId: "seat-2" }), "seat-2");
+    // a deadline 30s apart is the same group; 2 min apart is not
+    const near = [wk(1, { pct: 40, wPct: 0, wIn: 12 }), wk(2, { pct: 10, wPct: 0, wIn: 12 + 30 / 3600 })];
+    assert.equal(place(seats, near), "seat-2");
+    const far = [wk(1, { pct: 40, wPct: 0, wIn: 12 }), wk(2, { pct: 10, wPct: 0, wIn: 12 + 120 / 3600 })];
+    assert.equal(place(seats, far), "seat-1");
+  });
+
+  test("R0/R1: the org-affinity case 'org A {10, 90}, org B {30, 30}' — legacy mode → B·30; deadline mode → A·10 (the escape-route tier is dropped)", () => {
+    const seats = [org(1, "A"), org(2, "A"), org(3, "B"), org(4, "B")];
+    const loads = [10, 90, 30, 30];
+    const legacy = loads.map((l, i) => snap(i + 1, l));
+    assert.equal(place(seats, legacy), "seat-3", "no weekly → legacy mode, byte-for-byte");
+    const weekly = loads.map((l, i) => wk(i + 1, { pct: l, wIn: 48 }));
+    assert.equal(place(seats, weekly), "seat-1", "equal deadlines → load decides; no escape-route tier");
+  });
+
+  test("R0: manual mode and a missing clock always run the legacy chooser", () => {
+    const seats = [org(1), org(2)];
+    const snaps = [wk(1, { wIn: 48 }), wk(2, { wIn: 5 })];
+    assert.equal(placementFor({ mode: "manual", activeSeatId: "seat-1", seats, seatSnapshots: snaps, nowMs: NOW }), "seat-1");
+    assert.equal(placementFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps }), "seat-1", "no clock → least loaded (tie → active)");
+    assert.equal(chooseSeatByDeadline({ activeSeatId: "seat-1", seats, seatSnapshots: snaps, nowMs: NOW }), "seat-2");
+  });
+
+  // R2 / R3 ----------------------------------------------------------------
+  test("R2: a dead seat releases its conversation by rank — same org first, then other org under 70, then any; every tier skips seats left within 5h; last resort a full seat", () => {
+    const seats = [org(1, "A", { usable: false }), org(2, "A"), org(3, "B"), org(4, "A")];
+    const out = mv({}, seats, [wk(1), wk(2, { pct: 50, wIn: 40 }), wk(3, { pct: 5, wIn: 5 }), wk(4, { pct: 80, wIn: 20 })]);
+    assert.deepEqual(out, { seatId: "seat-4", from: "seat-1", why: "unusable", trigger: null, crossOrg: false }, "same org, earliest weekly (not the emptier one)");
+    // a blocked same-org seat loses to a free other-org one under 70… tiers are applied to non-blocked seats first
+    const blockedSame = mv({ left: { "seat-2": NOW - HOUR, "seat-4": NOW - HOUR } }, seats, [wk(1), wk(2), wk(3, { pct: 5, wIn: 5 }), wk(4)]);
+    assert.equal(blockedSame.seatId, "seat-3");
+    assert.equal(blockedSame.crossOrg, true);
+    // nothing but blocked seats → the ladder again over them
+    assert.equal(mv({ left: { "seat-2": NOW - HOUR } }, [org(1, "A", { usable: false }), org(2)], [wk(1), wk(2)]).seatId, "seat-2");
+    // every other seat full → the least-loaded usable seat, whatever it is
+    const fallback = mv({}, [org(1, "A", { usable: false }), org(2), org(3, "B")], [wk(2, { pct: 100, wIn: 10 }), wk(3, { pct: 100, wIn: 20, extra: { exhausted: true } })], { activeSeatId: "seat-2" });
+    assert.equal(fallback.seatId, "seat-2");
+    assert.equal(fallback.why, "unusable");
+    assert.equal(mv({}, [org(1, "A", { usable: false })], []), null);
+    assert.equal(mv({ crossOrgMovedAt: NOW - HOUR }, [org(1, "A", { usable: false }), org(3, "B")], [wk(3)]).seatId, "seat-3", "the cross-org cap does not trap a dead seat");
+  });
+
+  test("R3: a full / limited seat moves by rank; a forced move may return to a blocked seat as a last resort and ignores the dwell", () => {
+    const seats = [org(1), org(2), org(3)];
+    const full1 = wk(1, { pct: 100, wIn: 30 });
+    const out = mv({}, seats, [full1, wk(2, { pct: 60, wIn: 40 }), wk(3, { pct: 10, wIn: 20 })]);
+    assert.deepEqual(out, { seatId: "seat-3", from: "seat-1", why: "exhausted", trigger: { kind: "session", pct: 100 }, crossOrg: false });
+    // blocked seats come last: seat-3 is left within 5h → seat-2 wins even with a later deadline
+    assert.equal(mv({ left: { "seat-3": NOW - HOUR } }, seats, [full1, wk(2, { wIn: 40 }), wk(3, { wIn: 20 })]).seatId, "seat-2");
+    // …and when only the blocked seat has room it is still taken
+    assert.equal(mv({ left: { "seat-2": NOW - HOUR } }, [org(1), org(2)], [full1, wk(2)]).seatId, "seat-2");
+    // within the dwell window a forced move still happens
+    assert.equal(mv({ assignedAt: NOW - 5 * MIN, movedFrom: "seat-9", movedAt: NOW - 5 * MIN, reason: "rebalance" }, seats, [full1, wk(2), wk(3)]).why, "exhausted");
+    // a seat flagged exhausted (a 429 mark) counts even when the readings say 10%
+    assert.equal(mv({}, seats, [wk(1, { pct: 10, extra: { exhausted: true } }), wk(2), wk(3)]).why, "exhausted");
+    // nowhere to go → stay
+    assert.equal(mv({}, seats, [full1, wk(2, { pct: 100 }), wk(3, { wPct: 100 })]), null);
+    // the Fable cap is only a trigger for Fable
+    const capped = wk(1, { fable: 100 });
+    assert.equal(mv({}, seats, [capped, wk(2, { fable: 0 }), wk(3, { fable: 0 })], { model: OPUS }), null);
+    assert.equal(mv({}, seats, [capped, wk(2, { fable: 0, wIn: 40 }), wk(3, { fable: 0, wIn: 20 })], { model: FABLE }).seatId, "seat-3");
+  });
+
+  // R4 ---------------------------------------------------------------------
+  test("R4: the 5h window at 95+ moves to a same-org soft seat by rank, else an other-org seat under 70 (cap permitting), else stays", () => {
+    const seats = [org(1), org(2), org(3, "B")];
+    const hot = wk(1, { pct: 96, wIn: 48 });
+    assert.deepEqual(mv({}, seats, [hot, wk(2, { pct: 80, wIn: 30 }), wk(3, { pct: 5, wIn: 5 })]), { seatId: "seat-2", from: "seat-1", why: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false });
+    const other = mv({}, seats, [hot, wk(2, { pct: 95 }), wk(3, { pct: 30, wIn: 5 })]);
+    assert.deepEqual([other.seatId, other.crossOrg, other.why], ["seat-3", true, "load"]);
+    assert.equal(mv({ crossOrgMovedAt: NOW - HOUR }, seats, [hot, wk(2, { pct: 95 }), wk(3, { pct: 30 })]), null, "capped → finish the window");
+    assert.equal(mv({}, seats, [hot, wk(2, { pct: 95 }), wk(3, { pct: 70 })]), null, "other org must be under 70");
+    assert.equal(mv({}, seats, [hot, { seatId: "seat-2" }, wk(3, { pct: 30 })])?.seatId, "seat-3", "an unreadable 5h is not a soft target");
+    assert.equal(mv({ left: { "seat-2": NOW - HOUR } }, [org(1), org(2)], [hot, wk(2, { pct: 10 })]), null, "a blocked seat is never a soft target");
+    assert.equal(mv({}, seats, [wk(1, { pct: 94.9 }), wk(2, { pct: 0 }), wk(3, { pct: 0 })]), null, "94.9 is below the line");
+    assert.equal(mv({}, seats, [wk(1, { pct: 95 }), wk(2, { pct: 0 }), wk(3, { pct: 0 })])?.why, "load", "95 is on it");
+    // R4 stays even when R5 would have moved: pressure rows decide before the rebalance
+    assert.equal(mv({}, seats, [wk(1, { pct: 96, wIn: 48 }), wk(2, { pct: 96, wIn: 10 }), wk(3, { pct: 80 })]), null);
+  });
+
+  // R5 / R6 ----------------------------------------------------------------
+  test("R5: a same-org seat whose weekly resets 6h+ earlier takes the conversation (reason rebalance, free); 5h earlier does not", () => {
+    const seats = [org(1), org(2)];
+    const out = mv({}, seats, [wk(1, { wIn: 48 }), wk(2, { wIn: 41 })]);
+    assert.equal(out.seatId, "seat-2");
+    assert.equal(out.why, "rebalance");
+    assert.equal(out.crossOrg, false);
+    assert.equal(out.trigger, null);
+    assert.deepEqual(out.rebalance, { deadlineFrom: NOW + 48 * HOUR, deadlineTo: NOW + 41 * HOUR });
+    assert.equal(mv({}, seats, [wk(1, { wIn: 48 }), wk(2, { wIn: 43 })]), null, "5h earlier: not enough");
+    assert.equal(mv({}, seats, [wk(1, { wIn: 48 }), wk(2, { wIn: 48 - SAME_ORG_REBALANCE_MS / HOUR })])?.seatId, "seat-2", "exactly the margin counts");
+    // slack evidence, when K is known
+    const withK = mv({}, seats, [wk(1, { wIn: 48 }), wk(2, { wPct: 2, wIn: 12 })], { kFor: K });
+    assert.equal(withK.rebalance.slackTo > 0, true);
+    assert.equal(withK.rebalance.slackFrom < 0, true, "seat-1's week can still be fully spent");
+  });
+
+  test("R5: never between two unknown deadlines, never to another org, never to a blocked seat, never to a seat at 95+; a known target beats an unknown own deadline", () => {
+    const seats = [org(1), org(2), org(3, "B")];
+    // seat-1 and seat-2 have no weekly; seat-3 (other org) keeps the provider out of legacy mode
+    assert.equal(mv({}, seats, [snap(1, 10), snap(2, 10), wk(3, { wIn: 1 })]), null, "two unknown deadlines");
+    assert.equal(mv({}, seats, [wk(1, { wIn: 48 }), wk(2, { wIn: 48 }), wk(3, { wIn: 1 })]), null, "the earlier deadline is in another org");
+    assert.equal(mv({ left: { "seat-2": NOW - HOUR } }, seats, [wk(1, { wIn: 48 }), wk(2, { wIn: 10 }), wk(3, { wIn: 48 })]), null, "blocked");
+    assert.equal(mv({}, seats, [wk(1, { wIn: 48 }), wk(2, { pct: 95, wIn: 10 }), wk(3, { wIn: 48 })]), null, "not a soft target");
+    assert.equal(mv({}, seats, [snap(1, 10), wk(2, { wIn: 10 }), wk(3, { wIn: 48 })])?.seatId, "seat-2", "own deadline unknown, the target's known");
+    assert.equal(mv({}, seats, [wk(1, { wIn: 10 }), snap(2, 10), wk(3, { wIn: 48 })]), null, "a target with an unknown deadline never beats a known own one");
+    // among several qualifying seats the earliest deadline wins
+    assert.equal(mv({}, [org(1), org(2), org(4)], [wk(1, { wIn: 60 }), wk(2, { wIn: 30 }), wk(4, { wIn: 20 })])?.seatId, "seat-4");
+  });
+
+  test("R5: at most once per MIN_DWELL_MS per conversation (movedAt of the last automatic move, else assignedAt); a manual switch does not count", () => {
+    const seats = [org(1), org(2)];
+    const snaps = [wk(1, { wIn: 48 }), wk(2, { wIn: 20 })];
+    assert.equal(mv({ assignedAt: NOW - 30 * MIN }, seats, snaps), null, "placed 30 min ago");
+    assert.equal(mv({ assignedAt: NOW - MIN_DWELL_MS }, seats, snaps)?.why, "rebalance", "exactly the dwell");
+    assert.equal(mv({ assignedAt: NOW - 30 * MIN, movedFrom: "seat-9", movedAt: NOW - 30 * MIN, reason: "load" }, seats, snaps), null, "an automatic move 30 min ago");
+    assert.equal(mv({ assignedAt: NOW - 30 * MIN, movedFrom: "seat-9", movedAt: NOW - 30 * MIN, reason: "manual" }, seats, snaps), null, "manual → falls back to assignedAt, which a manual switch also stamps");
+    assert.equal(mv({ assignedAt: NOW - 3 * HOUR, movedFrom: "seat-9", movedAt: NOW - 2 * HOUR, reason: "manual" }, seats, snaps)?.why, "rebalance", "movedAt of a manual move is ignored");
+    assert.equal(mv({ assignedAt: undefined }, seats, snaps)?.why, "rebalance", "no record of when → no dwell");
+  });
+
+  test("R6: an unremarkable conversation stays — no earlier deadline, equal deadlines, healthy 5h", () => {
+    const seats = [org(1), org(2)];
+    assert.equal(mv({}, seats, [wk(1, { pct: 50, wIn: 30 }), wk(2, { pct: 0, wIn: 30 })]), null);
+    assert.equal(mv({}, seats, [wk(1, { pct: 50, wIn: 10 }), wk(2, { pct: 0, wIn: 60 })]), null, "already on the earliest deadline");
+  });
+
+  test("two seats cannot trade a conversation under R5: after a rebalance the old seat is blocked and the new one has the earlier deadline", () => {
+    const seats = [org(1), org(2)];
+    const snaps = [wk(1, { wIn: 48 }), wk(2, { wIn: 20 })];
+    const first = mv({}, seats, snaps);
+    assert.equal(first.seatId, "seat-2");
+    const rec = { seatId: "seat-2", assignedAt: NOW, movedFrom: "seat-1", movedAt: NOW, reason: "rebalance", left: { "seat-1": NOW } };
+    assert.equal(moveFor({ existing: rec, seats, seatSnapshots: snaps, nowMs: NOW + 2 * HOUR, activeSeatId: null }), null);
+    // even when seat-1's weekly then resets first, it is blocked until 5h have passed
+    const flipped = [wk(1, { wIn: 1 }), wk(2, { wIn: 20 })];
+    assert.equal(moveFor({ existing: rec, seats, seatSnapshots: flipped, nowMs: NOW + 2 * HOUR, activeSeatId: null }), null);
+  });
+
+  // R0 duplicated with a weekly window ----------------------------------------
+  test("every legacy decideMove case, rerun with an equal weekly window on every seat: the same answer except where the new rules differ", () => {
+    const addWeekly = (snaps) => snaps.map((s) => (s.windows ? { ...s, windows: [...s.windows, { kind: "weekly", pct: 10, resetsAt: NOW + 48 * HOUR }] } : s));
+    const full = (n) => snap(n, 100, { exhausted: true });
+    const A = (n, over) => inOrg(n, "A", over);
+    const B = (n, over) => inOrg(n, "B", over);
+    const cases = [
+      // [name, seats, snaps, existing extra, expected seat or null]
+      ["85 stays beside an empty seat", [seat(1), seat(2)], [snap(1, 85), snap(2, 0)], {}, null],
+      ["94.9 stays", [seat(1), seat(2)], [snap(1, 94.9), snap(2, 0)], {}, null],
+      ["95 moves", [seat(1), seat(2)], [snap(1, 95), snap(2, 0)], {}, "seat-2"],
+      ["same org beats an emptier other org", [A(1), A(2), A(3), B(4)], [snap(1, 96), snap(2, 40), snap(3, 20), snap(4, 0)], {}, "seat-3"],
+      ["a same-org seat at 75 is room for a 97", [A(1), A(2), B(3)], [snap(1, 97), snap(2, 75), snap(3, 10)], {}, "seat-2"],
+      ["a soft move stays when no same-org seat is under 95 and the other org is at 70", [A(1), A(2), B(3)], [snap(1, 97), snap(2, 95), snap(3, 70)], {}, null],
+      ["the other org under 70 takes it", [A(1), A(2), B(3)], [snap(1, 97), snap(2, 95), snap(3, 10)], {}, "seat-3"],
+      ["a capped soft cross-org move stays", [A(1), A(2), B(3)], [snap(1, 95), snap(2, 96), snap(3, 10)], { crossOrgMovedAt: NOW - HOUR }, null],
+      ["hard: same org with room beats the emptier other org", [A(1), A(2), B(3), B(4)], [snap(1, 100), snap(2, 92), snap(3, 10), snap(4, 5)], {}, "seat-2"],
+      ["hard: other org under 70 beats fuller", [A(1), A(2), B(3), B(4)], [full(1), full(2), snap(3, 85), snap(4, 40)], {}, "seat-4"],
+      ["hard: unknown load is room", [A(1), A(2), B(3)], [full(1), { seatId: "seat-2" }, snap(3, 10)], {}, "seat-2"],
+      ["hard: a capped conversation still crosses orgs", [A(1), A(2), B(3)], [snap(1, 100), snap(2, 100), snap(3, 85)], { crossOrgMovedAt: NOW - HOUR }, "seat-3"],
+      ["hard: nowhere to go", [A(1), A(2), B(3)], [full(1), snap(2, 100), full(3)], {}, null],
+      ["soft: a blocked seat is no target", [seat(1), seat(2), seat(3)], [snap(1, 97), snap(2, 5), snap(3, 96)], { left: { "seat-2": NOW - HOUR } }, null],
+      ["hard: a blocked seat is the last resort", [seat(1), seat(2)], [snap(1, 100), snap(2, 5)], { left: { "seat-2": NOW - HOUR } }, "seat-2"],
+      ["unusable seat", [A(1, { usable: false }), A(2), B(3)], [snap(1, 5), snap(2, 40), snap(3, 10)], {}, "seat-2"],
+    ];
+    for (const [name, seats, snaps, extra, expected] of cases) {
+      const legacy = decideMove({ existing: { seatId: "seat-1", ...extra }, seats, seatSnapshots: snaps, nowMs: NOW, activeSeatId: null });
+      assert.equal(legacy?.seatId ?? null, expected, `legacy: ${name}`);
+      const weekly = mv(extra, seats, addWeekly(snaps));
+      assert.equal(weekly?.seatId ?? null, expected, `deadline: ${name}`);
+    }
+  });
+
+  test("the legacy reset-soon fixture with a weekly window: the new rules do NOT chase a 5h reset (documented difference)", () => {
+    const at = (n, pct, inMs = null) => ({ provider: "claude", seatId: `seat-${n}`, windows: [{ kind: "session", pct, ...(inMs == null ? {} : { resetsAt: NOW + inMs }) }, { kind: "weekly", pct: 10, resetsAt: NOW + 48 * HOUR }] });
+    const seats = [org(1), org(2), org(3)];
+    const snaps = [at(1, 5, 4 * HOUR), at(2, 50, 30 * MIN), at(3, 0)];
+    assert.equal(decideMove({ existing: { seatId: "seat-1" }, seats, seatSnapshots: snaps, nowMs: NOW, activeSeatId: null })?.why, "reset-soon", "legacy chooser");
+    assert.equal(mv({}, seats, snaps), null, "deadline rules: equal weeklies → stay");
+    assert.equal(place(seats, [at(1, 0), at(2, 60, 30 * MIN), at(3, 10, 3 * HOUR)], { activeSeatId: "seat-1" }), "seat-1", "placement: load decides, not the 5h reset");
+  });
+
+  test("moveFor / placementFor: legacy mode (no seat has a weekly deadline for the model) is the unchanged legacy answer, including reset-soon", () => {
+    const at = (n, pct, inMs = null) => ({ provider: "claude", seatId: `seat-${n}`, windows: [{ kind: "session", pct, ...(inMs == null ? {} : { resetsAt: NOW + inMs }) }] });
+    const seats = [org(1), org(2), org(3)];
+    const snaps = [at(1, 5, 4 * HOUR), at(2, 50, 30 * MIN), at(3, 0)];
+    assert.equal(mv({}, seats, snaps)?.why, "reset-soon");
+    // an inactive or stale weekly does not leave legacy mode
+    const dead = snaps.map((s) => ({ ...s, windows: [...s.windows, { kind: "weekly", pct: 1, resetsAt: NOW + 48 * HOUR, active: false }] }));
+    assert.equal(mv({}, seats, dead)?.why, "reset-soon");
+  });
+
+  // The service ------------------------------------------------------------
+  test("the service: R1 places by weekly deadline and kFor reaches the decision", async () => {
+    const seats = [seat(1, { live: true, dir: null, credential: null }), seat(2)];
+    const snaps = [wk(1, { pct: 50, wPct: 0, wIn: 12 }), wk(2, { pct: 10, wPct: 40, wIn: 12 })];
+    const plain = assigner(fakeAccounts({ mode: "auto", activeSeatId: "seat-1", seats }), { snaps, now0: NOW });
+    assert.equal((await plain.svc.resolve("claude", "c")).seatId, "seat-2");
+    const withK = assigner(fakeAccounts({ mode: "auto", activeSeatId: "seat-1", seats }), { snaps, now0: NOW, kFor: (provider) => (provider === "claude" ? K : () => null) });
+    assert.equal((await withK.svc.resolve("claude", "c")).seatId, "seat-1", "slack tie-break through the injected reader");
+  });
+
+  test("the service: a rebalance is recorded, blocks the seat it left, is SILENT, carries the evidence, and cannot repeat inside the dwell", async () => {
+    const seats = [org(1, "A", { live: true, dir: null, credential: null, label: "Seat 1" }), org(2, "A", { label: "Seat 2" })];
+    const snaps = [wk(1, { wIn: 20 }), wk(2, { wIn: 48 })];
+    const events = [];
+    const a = assigner(fakeAccounts({ mode: "auto", activeSeatId: "seat-1", seats }), { snaps, now0: NOW, onMoved: (e) => events.push(e) });
+    assert.equal((await a.svc.resolve("claude", "c", null, { model: OPUS })).seatId, "seat-1", "placed on the earliest weekly");
+    // seat-1's weekly then resets (it now reads far in the future), seat-2's is 8h away
+    snaps.splice(0, 2, wk(1, { wIn: 100 }), wk(2, { wIn: 20 }));
+    assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1", "inside the dwell window: stays");
+    a.tick(MIN_DWELL_MS);
+    snaps.splice(0, 2, wk(1, { wIn: 100 }), wk(2, { wIn: 20 }));
+    const moved = await a.svc.resolve("claude", "c");
+    assert.equal(moved.seatId, "seat-2");
+    assert.equal(moved.live, false);
+    const rec = a.saved.providers.claude.c;
+    assert.equal(rec.reason, "rebalance");
+    assert.equal(rec.movedFrom, "seat-1");
+    assert.equal(rec.crossOrg, false);
+    assert.equal(rec.crossOrgMovedAt, undefined);
+    assert.equal(rec.trigger, undefined);
+    assert.deepEqual(Object.keys(rec.left), ["seat-1"], "a rebalance blocks the seat it left");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, "rebalance");
+    assert.equal(events[0].silent, true);
+    assert.equal(typeof events[0].deadlineFrom, "number");
+    assert.equal(typeof events[0].deadlineTo, "number");
+    // inside the next dwell window nothing else happens, whatever the readings say
+    a.tick(10 * MIN);
+    snaps.splice(0, 2, wk(1, { wIn: 1 }), wk(2, { wIn: 100 }));
+    assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2");
+    assert.equal(events.length, 1);
+  });
+
+  test("describeSeatMove / seatMoveActivityEntry: the rebalance wording and its evidence", () => {
+    const evt = { sessionId: "ses_secret", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Seat 2", reason: "rebalance", trigger: null, crossOrg: false, silent: true, deadlineFrom: 5000, deadlineTo: 4000, slackFrom: -120.4, slackTo: 350.6 };
+    assert.equal(describeSeatMove({ ...evt, slackTo: null }), "Moved a conversation from Seat 1 to Seat 2 (Seat 2's weekly resets sooner — spending that first)");
+    assert.equal(describeSeatMove(evt), "Moved a conversation from Seat 1 to Seat 2 (Seat 2's weekly will not be used up before it resets)");
+    const entry = seatMoveActivityEntry(evt);
+    assert.deepEqual(entry.evidence, { reason: "rebalance", deadlineFrom: 5000, deadlineTo: 4000, slackFrom: -120, slackTo: 351 });
+    assert.doesNotMatch(JSON.stringify(entry), /ses_secret/);
+    assert.deepEqual(seatMoveActivityEntry({ ...evt, slackFrom: undefined, slackTo: undefined }).evidence, { reason: "rebalance", deadlineFrom: 5000, deadlineTo: 4000 });
+  });
+
+  test("the service: a sub-agent on a capped model whose cap is full on the seat moves the whole conversation; the stored model stays the root's", async () => {
+    const seats = [seat(1, { live: true, dir: null, credential: null }), seat(2), seat(3)];
+    const snaps = [wk(1, { wIn: 10, fable: 100 }), wk(2, { wIn: 30, fable: 0 }), wk(3, { wIn: 20, fable: 0 })];
+    const events = [];
+    const a = assigner(fakeAccounts({ mode: "auto", activeSeatId: "seat-1", seats }), { snaps, now0: NOW, onMoved: (e) => events.push(e) });
+    assert.equal((await a.svc.resolve("claude", "root", null, { model: OPUS })).seatId, "seat-1");
+    const kid = await a.svc.resolve("claude", "kid", "root", { model: FABLE });
+    assert.equal(kid.seatId, "seat-3", "the conversation moves, by rank, to a seat with Fable room");
+    assert.equal(a.svc.assignments("claude").root.seatId, "seat-3");
+    assert.equal(a.svc.assignments("claude").root.model, OPUS);
+    assert.equal(events[0].reason, "exhausted");
+    assert.equal((await a.svc.resolve("claude", "root", null, { model: OPUS })).seatId, "seat-3", "the root follows");
+  });
+
+  test("the service: attribution is recorded on every path — assigned, kept, moved, single seat, no seat, reconsider only when it moved", async () => {
+    const records = [];
+    const attribution = { record: (r) => records.push(r) };
+    const settle = () => new Promise((r) => setImmediate(r));
+    const none = assigner(fakeAccounts(null), { attribution });
+    await none.svc.resolve("claude", "n1");
+    const one = assigner(fakeAccounts({ mode: "auto", activeSeatId: "seat-1", seats: [seat(1)] }), { attribution });
+    await one.svc.resolve("claude", "s1", "parent-s", { model: OPUS });
+    const snaps = [snap(1, 20), snap(2, 50)];
+    const a = assigner(fakeAccounts(two()), { snaps, attribution });
+    await a.svc.resolve("claude", "c", null, { model: OPUS });
+    await a.svc.resolve("claude", "c", null, { model: OPUS });
+    await a.svc.resolve("claude", "kid", "c", { model: "claude-sonnet-5-5" });
+    snaps.splice(0, 2, snap(1, 96), snap(2, 50));
+    await a.svc.reconsider("claude", "c");
+    assert.deepEqual((await a.svc.reconsider("claude", "ghost")), { moved: false });
+    await settle();
+    const pick = ({ session, root, seat, model, reason }) => ({ session, root, seat, model, reason });
+    assert.deepEqual(records.map(pick), [
+      { session: "n1", root: "n1", seat: null, model: null, reason: "none" },
+      { session: "s1", root: "parent-s", seat: "seat-1", model: OPUS, reason: "single" },
+      { session: "c", root: "c", seat: "seat-1", model: OPUS, reason: "assigned" },
+      { session: "c", root: "c", seat: "seat-1", model: OPUS, reason: "kept" },
+      { session: "kid", root: "c", seat: "seat-1", model: "claude-sonnet-5-5", reason: "kept" },
+      { session: "c", root: "c", seat: "seat-2", model: OPUS, reason: "reconsider" },
+    ]);
+    assert.ok(records.every((r) => r.provider === "claude"));
+  });
+
+  test("the service: a throwing or rejecting attribution writer never fails resolve()", async () => {
+    for (const attribution of [{ record() { throw new Error("disk on fire"); } }, { record: () => Promise.reject(new Error("rejected")) }]) {
+      const snaps = [snap(1, 80), snap(2, 10)];
+      const a = assigner(fakeAccounts(two()), { snaps, attribution });
+      const r = await a.svc.resolve("claude", "c");
+      assert.equal(r.seatId, "seat-2");
+      assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2");
+      assert.deepEqual(await a.svc.reconsider("claude", "c"), { moved: false });
+      await new Promise((res) => setImmediate(res));
+    }
   });
 }
