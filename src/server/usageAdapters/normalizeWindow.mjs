@@ -7,6 +7,8 @@
 // Pure. Never throws — a malformed/partial input resolves to `null`, which
 // callers treat as "drop this window" (never emit NaN/Infinity to the wire).
 
+import { normalizeModelToken } from "../../shared/seatChoice.mjs";
+
 // Coerce a possibly-string, possibly-nullish count to a finite number, or
 // `undefined` when it can't be. Several providers (Kimi) send counts as
 // strings; `Number("")` is 0 (not NaN) so we explicitly reject empty/blank
@@ -35,6 +37,13 @@ export function usageWindowLabel(seconds) {
   return `${Math.round(s / 86400)}d`;
 }
 
+// The distinct non-empty normalised tokens of a string list, or null when none.
+function modelTokens(list) {
+  if (!Array.isArray(list)) return null;
+  const tokens = [...new Set(list.filter((m) => typeof m === "string").map(normalizeModelToken).filter((t) => t !== ""))];
+  return tokens.length > 0 ? tokens : null;
+}
+
 /**
  * @param {object} raw
  * @param {"session"|"weekly"|string} [raw.kind]
@@ -46,6 +55,7 @@ export function usageWindowLabel(seconds) {
  * @param {number|string} [raw.resetsAt]   epoch seconds, epoch ms, or an ISO string
  * @param {boolean} [raw.binding]
  * @param {string} [raw.scope]   model display name a scoped window applies to
+ * @param {string[]} [raw.models] model names the window applies to (wins over `scope`)
  * @param {boolean} [raw.active] `false` when the provider says the window is not in force
  * @returns {import("../usage.mjs").UsageWindow | null}
  */
@@ -107,6 +117,11 @@ export function normalizeWindow(raw) {
   // pre-existing window keeps its exact shape.
   if (typeof raw.scope === "string" && raw.scope) window.scope = raw.scope;
   if (raw.active === false) window.active = false;
+  // Which models draw from this window, as normalised tokens (the same form
+  // `windowAppliesToModel` matches). Explicit `models` wins; else the scope name.
+  // A list that normalises to nothing is absent. `scope` itself is kept as is.
+  const models = modelTokens(raw.models) ?? modelTokens(typeof raw.scope === "string" ? [raw.scope] : undefined);
+  if (models) window.models = models;
 
   return window;
 }

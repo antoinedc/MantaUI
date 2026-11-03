@@ -138,6 +138,15 @@ export interface ChooseResult {
 
 export function chooseModel(input?: ChooseInput): ChooseResult;
 
+/** "Is this model usable RIGHT NOW?" — the router's hard exclusions only (health
+ *  registers + plan exhaustion for the candidate's own model). `resetsAt` is when
+ *  an exhausted/rate-limited account recovers, when known. */
+export function modelUsability(
+  candidate: { providerID?: string; modelID?: string; id?: string },
+  services?: { accounts?: Record<string, AccountState>; health?: Record<string, string>; healthUntil?: Record<string, number>; endpointHealth?: Record<string, string> },
+  nowMs?: number,
+): { model: string; usable: boolean; reason: string | null; resetsAt: number | null };
+
 /** Soft quota-scarcity rank for one provider: 2 = a live window at/above
  *  SCARCE_WINDOW_PCT resetting beyond SCARCE_RESET_HORIZON_MS; 1 = the pacing
  *  controller reports it well over pace / projected to run out; 0 otherwise. */

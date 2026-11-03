@@ -10,7 +10,17 @@ import {
   windowAppliesToModel,
   nextResetAt,
   soonestResettingSeat,
+  windowSpanMs,
+  shortWindowState,
+  longWindows,
+  windowSlackPts,
+  seatSlackPts,
+  seatDeadlineAt,
+  legacyMode,
+  seatRank,
+  bestSeatByRank,
 } from "./seatChoice.mjs";
+import { normalizeWindow } from "../server/usageAdapters/normalizeWindow.mjs";
 
 const win = (kind, pct, extra = {}) => ({ kind, label: kind, pct, ...extra });
 const seat = (seatId, windows, extra = {}) => ({
@@ -220,4 +230,219 @@ test("soonestResettingSeat: soonest within the horizon; resets under a minute ap
   assert.equal(soonestResettingSeat([at("a", 60, 20 * 60_000), at("b", 30, 20 * 60_000 + 30_000)], opts).seatId, "b", "a tie goes to the emptier seat");
   assert.equal(soonestResettingSeat([at("a", 60, 10 * 60_000), at("b", 30, 40 * 60_000)], opts).seatId, "a");
   assert.equal(soonestResettingSeat([at("late", 10, 2 * 3_600_000), seat("fresh", [win("session", 0)])], opts), null);
+});
+
+// ---------------------------------------------------------------------------
+// windowAppliesToModel — `models` precedence (spec §5.1)
+// ---------------------------------------------------------------------------
+
+test("windowAppliesToModel: explicit models wins over scope; empty/unnormalisable models falls back to scope", () => {
+  const opus = "anthropic/claude-opus-5-5";
+  const fable = "claude-fable-5-1";
+  // models says Opus even though the scope says Fable: models wins.
+  const w = { kind: "weekly_scoped:fable", scope: "Fable", models: ["opus"] };
+  assert.equal(windowAppliesToModel(w, opus), true);
+  assert.equal(windowAppliesToModel(w, fable), false);
+  assert.equal(windowAppliesToModel(w, null), false);
+  // models on an otherwise unscoped window scopes it.
+  const only = { kind: "weekly", models: ["fable"] };
+  assert.equal(windowAppliesToModel(only, fable), true);
+  assert.equal(windowAppliesToModel(only, opus), false);
+  assert.equal(windowAppliesToModel(only, null), false);
+  // several tokens: any matches.
+  assert.equal(windowAppliesToModel({ kind: "weekly", models: ["fable", "opus"] }, opus), true);
+  // [] / ["—"] are absent → legacy scope, then unscoped.
+  assert.equal(windowAppliesToModel({ kind: "weekly_scoped:fable", scope: "Fable", models: [] }, opus), false);
+  assert.equal(windowAppliesToModel({ kind: "weekly_scoped:fable", scope: "Fable", models: ["—"] }, fable), true);
+  assert.equal(windowAppliesToModel({ kind: "weekly", models: [] }, opus), true);
+  assert.equal(windowAppliesToModel({ kind: "weekly", models: [] }, null), true);
+  // no scope, no models: every model, including unknown.
+  assert.equal(windowAppliesToModel({ kind: "session" }, null), true);
+});
+
+test("windowAppliesToModel: byte-identical for the windows the adapter emits, with and without `models`", () => {
+  const raws = [
+    { kind: "session", label: "5h", pct: 10 },
+    { kind: "weekly", label: "7d", pct: 20, resetsAt: 2_000_000_000_000 },
+    { kind: "weekly_scoped:fable", label: "7d · Fable", pct: 100, scope: "Fable" },
+    { kind: "weekly_scoped:opus", label: "7d · Opus", pct: 5, scope: "Opus" },
+    { kind: "weekly_scoped:sonnet 4.5", label: "7d · Sonnet 4.5", pct: 5, scope: "Sonnet 4.5" },
+    { kind: "weekly_scoped:—", label: "x", pct: 5, scope: "—" },
+  ];
+  const modelsList = ["anthropic/claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5", "sonnet-4.5-x", null];
+  for (const raw of raws) {
+    const withModels = normalizeWindow({ ...raw, ...(raw.scope ? { models: [raw.scope] } : {}) });
+    const scopeOnly = normalizeWindow(raw);
+    const legacy = { ...scopeOnly };
+    delete legacy.models; // an older server's snapshot: no `models` at all
+    for (const m of modelsList) {
+      const a = windowAppliesToModel(withModels, m);
+      assert.equal(windowAppliesToModel(scopeOnly, m), a, `${raw.kind} / ${m} (scope-derived)`);
+      assert.equal(windowAppliesToModel(legacy, m), a, `${raw.kind} / ${m} (legacy, no models)`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Weekly-deadline helpers (spec §2, §5.2)
+// ---------------------------------------------------------------------------
+
+const H = 3_600_000;
+const NOW = 1_800_000_000_000;
+const K = (kind) => (kind === "weekly" ? 7.5 : kind.startsWith("weekly_scoped:") ? 3.75 : null);
+const sess = (pct, resetsInH, extra = {}) =>
+  win("session", pct, resetsInH === null ? extra : { resetsAt: NOW + resetsInH * H, ...extra });
+const wk = (pct, resetsInH, extra = {}) => win("weekly", pct, { resetsAt: NOW + resetsInH * H, ...extra });
+
+test("windowSpanMs: reported span when plausible; else provider default by kind; else null", () => {
+  assert.equal(windowSpanMs({ kind: "session" }), 5 * H);
+  assert.equal(windowSpanMs({ kind: "weekly" }), 168 * H);
+  assert.equal(windowSpanMs({ kind: "weekly_scoped:fable" }, "claude"), 168 * H);
+  assert.equal(windowSpanMs({ kind: "session", startedAt: 0, resetsAt: 3 * H }, "claude"), 3 * H);
+  // implausible reported spans (< 1h, > 31d) are ignored
+  assert.equal(windowSpanMs({ kind: "session", startedAt: 0, resetsAt: 60_000 }, "claude"), 5 * H);
+  assert.equal(windowSpanMs({ kind: "weekly", startedAt: 0, resetsAt: 40 * 24 * H }, "claude"), 168 * H);
+  // unknown provider has no default; an unknown kind never does
+  assert.equal(windowSpanMs({ kind: "session" }, "someone"), null);
+  assert.equal(windowSpanMs({ kind: "session", startedAt: 0, resetsAt: 2 * H }, "someone"), 2 * H);
+  assert.equal(windowSpanMs({ kind: "monthly" }, "claude"), null);
+});
+
+test("shortWindowState: running / not-started / unknown / stale", () => {
+  assert.deepEqual(shortWindowState(seat("a", [sess(16, 1)]), { nowMs: NOW }), { state: "running", roomNow: 84, nextResetAt: NOW + H });
+  assert.deepEqual(shortWindowState(seat("a", [sess(0, null)]), { nowMs: NOW }), { state: "not-started", roomNow: 100, nextResetAt: NOW + 5 * H });
+  assert.equal(shortWindowState(seat("a", [wk(10, 20)]), { nowMs: NOW }).state, "unknown");
+  assert.equal(shortWindowState(seat("a", []), { nowMs: NOW }).state, "unknown");
+  assert.equal(shortWindowState(null, { nowMs: NOW }).state, "unknown");
+  assert.equal(shortWindowState(seat("a", [sess(50, 1, { stale: true })]), { nowMs: NOW }).state, "unknown");
+  // a reset instant already passed, not yet re-read → unknown, not "running"
+  assert.equal(shortWindowState(seat("a", [sess(50, -0.1)]), { nowMs: NOW }).state, "unknown");
+  // a full window has no room
+  assert.equal(shortWindowState(seat("a", [sess(100, 2)]), { nowMs: NOW }).roomNow, 0);
+});
+
+test("windowSlackPts: seat 8 — weekly 98% left, R in 12h, short running with 84% room → ≈ 350", () => {
+  const s = seat("s8", [sess(16, 1), wk(2, 12)]);
+  const slack = windowSlackPts(s, s.windows[1], { nowMs: NOW, K: 7.5 });
+  assert.ok(Math.abs(slack - 350) <= 5, `slack ${slack}`);
+  assert.equal(slack, 98 * 7.5 - (84 + 100 * 3));
+});
+
+test("windowSlackPts: seat 1 — weekly 100% left, R in 48h, r in 40 min → not slack (−347)", () => {
+  const s = seat("s1", [sess(3, 40 / 60), wk(0, 48)]);
+  const slack = windowSlackPts(s, s.windows[1], { nowMs: NOW, K: 7.5 });
+  assert.equal(slack, 750 - (97 + 1000));
+  assert.ok(slack < 0);
+});
+
+test("windowSlackPts: not-started with R in 1h → capPts 100 (the window a request opens now outlives R)", () => {
+  const s = seat("a", [sess(0, null), wk(50, 1)]);
+  assert.equal(windowSlackPts(s, s.windows[1], { nowMs: NOW, K: 7.5 }), 50 * 7.5 - 100);
+});
+
+test("windowSlackPts: null when R unknown, K null, long window stale, or the short window is unknown/stale", () => {
+  const base = [sess(10, 1), wk(10, 12)];
+  const s = seat("a", base);
+  assert.notEqual(windowSlackPts(s, s.windows[1], { nowMs: NOW, K: 7.5 }), null);
+  const noR = { kind: "weekly", pct: 10 };
+  assert.equal(windowSlackPts(s, noR, { nowMs: NOW, K: 7.5 }), null);
+  assert.equal(windowSlackPts(s, { ...s.windows[1], resetsAt: NOW - 1 }, { nowMs: NOW, K: 7.5 }), null);
+  assert.equal(windowSlackPts(s, s.windows[1], { nowMs: NOW, K: null }), null);
+  assert.equal(windowSlackPts(s, { ...s.windows[1], stale: true }, { nowMs: NOW, K: 7.5 }), null);
+  const staleShort = seat("a", [sess(10, 1, { stale: true }), wk(10, 12)]);
+  assert.equal(windowSlackPts(staleShort, staleShort.windows[1], { nowMs: NOW, K: 7.5 }), null);
+  const noShort = seat("a", [wk(10, 12)]);
+  assert.equal(windowSlackPts(noShort, noShort.windows[0], { nowMs: NOW, K: 7.5 }), null);
+});
+
+test("longWindows / seatSlackPts / seatDeadlineAt: inactive and stale excluded; a Fable cap only counts for Fable", () => {
+  const fableCap = win("weekly_scoped:fable", 10, { scope: "Fable", resetsAt: NOW + 3 * H });
+  const s = seat("a", [sess(10, 1), wk(10, 40), fableCap, win("weekly_scoped:opus", 0, { scope: "Opus", resetsAt: NOW + H, active: false })]);
+  assert.deepEqual(longWindows(s, { model: "claude-opus-5-5" }).map((w) => w.kind), ["weekly"]);
+  assert.deepEqual(longWindows(s, { model: "claude-fable-5" }).map((w) => w.kind), ["weekly", "weekly_scoped:fable"]);
+  assert.deepEqual(longWindows(s, { model: null }).map((w) => w.kind), ["weekly"]);
+  assert.equal(seatDeadlineAt(s, { nowMs: NOW, model: "claude-opus-5-5" }), NOW + 40 * H);
+  assert.equal(seatDeadlineAt(s, { nowMs: NOW, model: "claude-fable-5" }), NOW + 3 * H);
+  // the inactive Opus cap (R in 1h) never makes it into the deadline
+  assert.equal(seatDeadlineAt(seat("a", [sess(1, 1), win("weekly_scoped:opus", 0, { scope: "Opus", resetsAt: NOW + H, active: false })]), { nowMs: NOW, model: "opus" }), null);
+  // slack takes the max over the applicable long windows with a known K
+  const only = seatSlackPts(s, { nowMs: NOW, model: "claude-opus-5-5", kFor: K });
+  assert.equal(only, windowSlackPts(s, s.windows[1], { nowMs: NOW, K: 7.5 }));
+  assert.equal(seatSlackPts(s, { nowMs: NOW, model: "claude-opus-5-5", kFor: () => null }), null);
+  assert.equal(seatSlackPts(s, { nowMs: NOW, model: "claude-opus-5-5" }), null);
+  const staleLong = seat("a", [sess(10, 1), wk(10, 12, { stale: true })]);
+  assert.equal(seatSlackPts(staleLong, { nowMs: NOW, model: null, kFor: K }), null);
+  assert.equal(seatDeadlineAt(staleLong, { nowMs: NOW, model: null }), null);
+});
+
+test("a stale SHORT window does not change which window is long", () => {
+  const fresh = seat("a", [sess(10, 1), wk(10, 12)]);
+  const stale = seat("a", [sess(10, 1, { stale: true }), wk(10, 12)]);
+  assert.deepEqual(longWindows(stale, { model: null }).map((w) => w.kind), longWindows(fresh, { model: null }).map((w) => w.kind));
+  assert.equal(seatDeadlineAt(stale, { nowMs: NOW, model: null }), seatDeadlineAt(fresh, { nowMs: NOW, model: null }));
+  assert.equal(seatSlackPts(stale, { nowMs: NOW, model: null, kFor: K }), null);
+});
+
+test("legacyMode: true for 5h-only, all-inactive weeklies, unknown resets; false once any seat has a fresh weekly with a reset", () => {
+  assert.equal(legacyMode([], { nowMs: NOW }), true);
+  assert.equal(legacyMode([seat("a", [sess(10, 1)]), seat("b", [sess(20, 2)])], { nowMs: NOW, model: null }), true);
+  assert.equal(legacyMode([seat("a", [sess(10, 1), wk(10, 12, { active: false })])], { nowMs: NOW, model: null }), true);
+  assert.equal(legacyMode([seat("a", [sess(10, 1), win("weekly", 10)])], { nowMs: NOW, model: null }), true);
+  assert.equal(legacyMode([seat("a", [sess(10, 1), wk(10, 12, { stale: true })])], { nowMs: NOW, model: null }), true);
+  assert.equal(legacyMode([seat("a", [sess(10, 1)]), seat("b", [sess(10, 1), wk(10, 12)])], { nowMs: NOW, model: null }), false);
+  // a Fable-only weekly reset does not leave legacy mode for an Opus decision
+  const fableOnly = seat("a", [sess(10, 1), win("weekly_scoped:fable", 10, { scope: "Fable", resetsAt: NOW + 5 * H })]);
+  assert.equal(legacyMode([fableOnly], { nowMs: NOW, model: "claude-opus-5-5" }), true);
+  assert.equal(legacyMode([fableOnly], { nowMs: NOW, model: "claude-fable-5" }), false);
+});
+
+test("seatRank: earlier deadline beats more slack; equal deadline → more slack → load → active seat", () => {
+  const rk = (s, activeSeatId = null) => seatRank(s, { nowMs: NOW, model: null, kFor: K, activeSeatId });
+  const early = seat("early", [sess(10, 1), wk(90, 2)]); // little to lose, but resets first
+  const slacky = seat("slacky", [sess(16, 1), wk(2, 12)]); // slack ≈ 350, resets later
+  assert.ok(rk(early)[0] < rk(slacky)[0]);
+  assert.ok(rk(slacky)[1] < 0, "slack encoded as a negative key");
+  assert.equal(bestSeatByRank([slacky, early], { nowMs: NOW, model: null, kFor: K }).seatId, "early");
+
+  // equal deadline: more slack first
+  const lowSlack = seat("lowSlack", [sess(16, 1), wk(50, 12)]);
+  const hiSlack = seat("hiSlack", [sess(16, 1), wk(2, 12)]);
+  assert.equal(bestSeatByRank([lowSlack, hiSlack], { nowMs: NOW, model: null, kFor: K }).seatId, "hiSlack");
+  // no slack known (kFor missing): load decides, then the active seat
+  const loaded = seat("loaded", [sess(80, 1), wk(80, 12)]);
+  const light = seat("light", [sess(5, 1), wk(5, 12)]);
+  assert.equal(bestSeatByRank([loaded, light], { nowMs: NOW, model: null }).seatId, "light");
+  const t1 = seat("t1", [sess(10, 1), wk(10, 12)]);
+  const t2 = seat("t2", [sess(10, 1), wk(10, 12)]);
+  assert.equal(bestSeatByRank([t1, t2], { nowMs: NOW, model: null, activeSeatId: "t2" }).seatId, "t2");
+  assert.equal(bestSeatByRank([t1, t2], { nowMs: NOW, model: null, activeSeatId: null }).seatId, "t1");
+  assert.deepEqual(rk(t2, "t2")[3], 0);
+  assert.deepEqual(rk(t1, "t2")[3], 1);
+});
+
+test("seatRank: unknown / Infinity deadlines rank last; slack key is never −0", () => {
+  const known = seat("known", [sess(95, 1), wk(99, 100)]);
+  const unknown = seat("unknown", [sess(0, 1)]);
+  const r = seatRank(unknown, { nowMs: NOW, model: null, kFor: K });
+  assert.equal(r[0], Infinity);
+  assert.ok(Object.is(r[1], 0));
+  assert.equal(bestSeatByRank([unknown, known], { nowMs: NOW, model: null, kFor: K }).seatId, "known");
+  // exhausted seat with an early deadline is still ranked by deadline — callers pass eligible pools
+  assert.equal(bestSeatByRank([], { nowMs: NOW }), null);
+  // nobody has a deadline: the rest of the key decides (load)
+  const a = seat("a", [sess(50, 1)]);
+  const b = seat("b", [sess(5, 1)]);
+  assert.equal(bestSeatByRank([a, b], { nowMs: NOW, model: null }).seatId, "b");
+});
+
+test("bestSeatByRank: the tie group is anchored on the earliest deadline (transitive; deadlines at 0 / 50 / 100 s)", () => {
+  const at = (id, secs, load) => seat(id, [sess(load, 1), win("weekly", load, { resetsAt: NOW + 10 * H + secs * 1000 })]);
+  const first = at("first", 0, 60);
+  const mid = at("mid", 50, 20);
+  const last = at("last", 100, 1); // least loaded, but 100 s > 0 + 60 s: outside the group
+  for (const order of [[first, mid, last], [last, mid, first], [mid, last, first], [last, first, mid]]) {
+    assert.equal(bestSeatByRank(order, { nowMs: NOW, model: null }).seatId, "mid", order.map((s) => s.seatId).join());
+  }
+  // with a wider tie window all three are one group → least loaded
+  assert.equal(bestSeatByRank([first, mid, last], { nowMs: NOW, model: null, tieMs: 120_000 }).seatId, "last");
 });

@@ -95,6 +95,10 @@ function buildEffective(m, dec, entry, catalogId) {
   const effective = {
     providerID: m?.providerID,
     id: m?.id,
+    // The RPC shape names the model `modelID`; endpointKey and the model-scoped
+    // window filter read `modelID ?? id`, so the merged description must keep it
+    // or the pricing path would see an unknown model where the exhaustion path sees Fable.
+    ...(m?.modelID !== undefined ? { modelID: m.modelID } : {}),
     family:
       typeof e?.family === "string" && e.family !== "" ? e.family : m?.family,
     capabilities: mergeCapabilities(m?.capabilities, e),

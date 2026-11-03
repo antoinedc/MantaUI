@@ -100,7 +100,7 @@ test("buildProviderView: the contract's shape, end to end", () => {
   assert.deepEqual({ id: v.accounts[0].id, label: v.accounts[0].label, orgName: v.accounts[0].orgName, plan: v.accounts[0].plan }, { id: "acct-1", label: "Work", orgName: "Useronda", plan: "Team · Max 5x" });
   assert.equal(v.accounts[1].orgName, null);
   const s1 = v.accounts[0].seats[0];
-  assert.deepEqual(Object.keys(s1).sort(), ["conversations", "email", "fetchedAt", "id", "label", "live", "load", "status", "windows"]);
+  assert.deepEqual(Object.keys(s1).sort(), ["conversations", "deadlineAt", "email", "fetchedAt", "id", "label", "live", "load", "slack", "status", "windows"]);
   assert.equal(s1.live, true);
   assert.equal(s1.load, 71);
   assert.equal(s1.conversations, 2);
@@ -207,6 +207,33 @@ test("moveTargetFor regression: 94% has no move target, 95% does (the move line 
   assert.equal(at(95), "seat-2");
 });
 
+test("moveTargetFor with a weekly deadline in play: a seat high only on its WEEKLY gets no hint; one at 95+ on its 5h does (R4); a full one does (R3)", () => {
+  const NOW = 1_800_000_000_000;
+  const H = 3_600_000;
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+  ];
+  const wk = (n, session, weekly) => snap(n, [win("session", session, { resetsAt: NOW + 2 * H }), win("weekly", weekly, { resetsAt: NOW + (n === 1 ? 60 : 30) * H })]);
+  const at = (s1, w1) => moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [wk(1, s1, w1), wk(2, 5, 5)], counts: { "seat-1": 1 }, nowMs: NOW });
+  assert.equal(at(40, 97), null, "weekly at 97, 5h at 40: the resolver does not move it, so no hint");
+  assert.equal(at(97, 10), "seat-2", "5h at 97");
+  assert.equal(at(94, 10), null, "5h at 94");
+  assert.equal(at(40, 100), "seat-2", "a full weekly is a full seat (R3)");
+  // legacy mode (no weekly deadline anywhere) keeps the old reading: the highest window of any kind
+  const legacy = (s1, w1) => moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", s1), win("weekly", w1)]), snap(2, [win("session", 5)])], counts: { "seat-1": 1 }, nowMs: NOW });
+  assert.equal(legacy(40, 97), "seat-2");
+});
+
+test("countConversations (manual) asks the same dispatcher as the resolver", () => {
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+  ];
+  const counts = countConversations({ mode: "manual", activeSeatId: "seat-2", seats, seatSnapshots: [snap(1, []), snap(2, [])], assignments: { a: { seatId: "seat-1" }, b: { seatId: "seat-1" } } });
+  assert.deepEqual(counts, { "seat-2": 2 });
+});
+
 test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 1 (a NEW conversation)", () => {
   const v = buildProviderView({
     provider: "claude",
@@ -228,3 +255,41 @@ test("buildSessionSeat: lastMove carries trigger + crossOrg when recorded, and o
   const old = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "exhausted" }) }, state: state(), states: states(), seatSnapshots: [] });
   assert.deepEqual(bareMove(old.lastMove), { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "exhausted" });
 });
+
+// ---- weekly-deadline rules through the views --------------------------------
+
+{
+  const NOW = 100 * 3_600_000;
+  const H = 3_600_000;
+  const withWeekly = (n, sessionPct, weeklyPct, weeklyInH) =>
+    snap(n, [win("session", sessionPct, { resetsAt: NOW + 2 * H }), win("weekly", weeklyPct, { resetsAt: NOW + weeklyInH * H })]);
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-3", usable: true, accountId: "acct-2", orgId: "org-B" },
+  ];
+
+  test("nextSeatFor: with a clock and weekly deadlines the seat resetting first wins; without a clock it is the legacy chooser", () => {
+    const snaps = [withWeekly(1, 10, 20, 48), withWeekly(2, 50, 2, 12), withWeekly(3, 10, 20, 40)];
+    assert.equal(nextSeatFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, nowMs: NOW }), "seat-2");
+    assert.equal(nextSeatFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps }), "seat-1", "no clock → least loaded, as before");
+  });
+
+  test("moveTargetFor: a conversation at 96% of its 5h goes to the same-org seat resetting first", () => {
+    const snaps = [withWeekly(1, 96, 20, 48), withWeekly(2, 50, 2, 12), withWeekly(3, 10, 20, 40)];
+    assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts: { "seat-1": 1 }, nowMs: NOW }), "seat-2");
+  });
+
+  test("buildProviderView: each seat carries {slack, deadlineAt}; slack needs a K, the deadline does not", () => {
+    // seat 2: weekly 98% left, resets in 12h → ≈ 350 5h-points unreachable with K = 7.5 (spec §2.3)
+    const snaps = [withWeekly(1, 10, 0, 48), withWeekly(2, 10, 2, 12), snap(3, [win("session", 10)])];
+    const args = { provider: "claude", state: state(), states: states(), seatSnapshots: snaps, assignments: {}, routingActive: true, nowMs: NOW };
+    const noK = buildProviderView(args);
+    assert.deepEqual([findSeatView(noK, "seat-2").slack, findSeatView(noK, "seat-2").deadlineAt], [false, NOW + 12 * H]);
+    const withK = buildProviderView({ ...args, kFor: (kind) => (kind === "weekly" ? 7.5 : null) });
+    assert.equal(findSeatView(withK, "seat-2").slack, true);
+    assert.equal(findSeatView(withK, "seat-1").slack, false);
+    assert.deepEqual([findSeatView(withK, "seat-3").slack, findSeatView(withK, "seat-3").deadlineAt], [false, null], "no weekly → no deadline");
+    assert.equal(withK.nextSeatId, "seat-2");
+  });
+}

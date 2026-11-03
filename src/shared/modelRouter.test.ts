@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { chooseModel, incumbentStillEligible, describeDecision, AGENT_TIER, quotaScarcity, SCARCE_RESET_HORIZON_MS, type RoutingServices } from "./modelRouter.mjs";
+import { chooseModel, modelUsability, incumbentStillEligible, describeDecision, AGENT_TIER, quotaScarcity, SCARCE_RESET_HORIZON_MS, type RoutingServices } from "./modelRouter.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
-import { RESET_RAMP_MS } from "./marginalCost.mjs";
+import { RESET_RAMP_MS, marginalCost, applicableLiveWindows } from "./marginalCost.mjs";
 // Per standing rule 9, candidates below are built with the REAL normaliser,
 // not a hand-written fixture — a fixture that disagreed with production is how
 // these defects survived a green suite. The services context is likewise built
@@ -1449,5 +1449,132 @@ describe("modelRouter — quota scarcity", () => {
     expect(res.model?.providerID).toBe("anthropic");
     // Before: the free endpoint made the exchange rate 0 → cost exactly 0.
     expect(res.trace.winner!.cost.value).toBeGreaterThan(0);
+  });
+});
+
+// Model-scoped caps in routing (seat-placement spec §4): the endpoint's own
+// model id decides which windows limit it. Accounts come from the REAL Claude
+// adapter + accountsFromSnapshots; candidates are real normalised endpoints
+// ({providerID, id}) and the RPC shape ({providerID, modelID}).
+describe("routing applicability of model-scoped windows", () => {
+  const SESSION_RESET = Date.parse("2026-10-08T16:59:59+00:00");
+  const FABLE_RESET = Date.parse("2026-10-14T05:00:00+00:00");
+  const WEEKLY_RESET = Date.parse("2026-10-13T05:00:00+00:00");
+
+  async function teamAccount(fablePct: number) {
+    const snap: any = await claudeSnapshot({
+      five_hour: { utilization: 15, resets_at: "2026-10-08T16:59:59+00:00" },
+      seven_day: null,
+      limits: [
+        { kind: "session", group: "session", percent: 15, resets_at: "2026-10-08T16:59:59+00:00", scope: null, is_active: true },
+        { kind: "weekly", group: "weekly", percent: 40, resets_at: "2026-10-13T05:00:00+00:00", scope: null, is_active: true },
+        { kind: "weekly_scoped", group: "weekly", percent: fablePct, resets_at: "2026-10-14T05:00:00+00:00", scope: { model: { display_name: "Fable" } }, is_active: true },
+      ],
+    });
+    return (accountFor(claudeAdapter, snap) as any).anthropic;
+  }
+
+  const NOW_MS = SESSION_RESET - 3_600_000;
+  const opus = { providerID: "anthropic", id: "claude-opus-5-5", cost: { input: 15, output: 15 } };
+  const fable = { providerID: "anthropic", id: "claude-fable-5-1", cost: { input: 15, output: 15 } };
+  const fableRpc = { providerID: "anthropic", modelID: "claude-fable-5-1", cost: { input: 15, output: 15 } };
+  const unknownModel = { providerID: "anthropic", cost: { input: 15, output: 15 } };
+
+  it("a full Fable cap does not exhaust an Opus endpoint, and does exhaust a Fable one (id and modelID shapes)", async () => {
+    const account = await teamAccount(100);
+    expect(account.windows.map((w: any) => w.kind)).toEqual(["session", "weekly", "weekly_scoped:fable"]);
+    expect(marginalCost({ model: opus, account, nowMs: NOW_MS }).exhausted).toBe(false);
+    expect(marginalCost({ model: fable, account, nowMs: NOW_MS }).exhausted).toBe(true);
+    expect(marginalCost({ model: fableRpc, account, nowMs: NOW_MS }).exhausted).toBe(true);
+  });
+
+  it("an unknown model (candidate without an id) ignores scoped windows", async () => {
+    const account = await teamAccount(100);
+    expect(marginalCost({ model: unknownModel, account, nowMs: NOW_MS }).exhausted).toBe(false);
+    expect(applicableLiveWindows(account, unknownModel).map((w: any) => w.kind)).toEqual(["session", "weekly"]);
+    expect(applicableLiveWindows(account, null).map((w: any) => w.kind)).toEqual(["session", "weekly"]);
+  });
+
+  it("the pacing price of an Opus endpoint ignores the Fable cap; a Fable endpoint is priced by it when it is the scarcest", async () => {
+    const account = await teamAccount(95);
+    const withCap = marginalCost({ model: opus, account, nowMs: NOW_MS, replacementCost: 10 });
+    const withoutCap = marginalCost({ model: opus, account: { ...account, windows: account.windows.filter((w: any) => !w.scope) }, nowMs: NOW_MS, replacementCost: 10 });
+    expect(withCap.cost).toBe(withoutCap.cost);
+    const fableCost = marginalCost({ model: fable, account, nowMs: NOW_MS, replacementCost: 10 });
+    expect(fableCost.cost).toBeGreaterThanOrEqual(withCap.cost);
+    expect(fableCost.exhausted).toBe(false);
+  });
+
+  it("modelUsability: Opus stays usable behind a full Fable cap; Fable is unusable, back at the cap's reset", async () => {
+    const account = await teamAccount(100);
+    const services = { accounts: { anthropic: account } };
+    expect(modelUsability(opus, services, NOW_MS)).toEqual({ model: "anthropic/claude-opus-5-5", usable: true, reason: null, resetsAt: null });
+    expect(modelUsability(fable, services, NOW_MS)).toEqual({
+      model: "anthropic/claude-fable-5-1", usable: false, reason: "plan usage limit reached", resetsAt: FABLE_RESET,
+    });
+    expect(modelUsability(fableRpc, services, NOW_MS).resetsAt).toBe(FABLE_RESET);
+    expect(modelUsability(unknownModel, services, NOW_MS).usable).toBe(true);
+  });
+
+  it("exhaustion and recovery use one filter: the weekly at 100% exhausts everyone and the latest applicable reset wins", async () => {
+    const account = await teamAccount(100);
+    const full = { ...account, windows: account.windows.map((w: any) => (w.kind === "weekly" ? { ...w, pct: 100 } : w)) };
+    const services = { accounts: { anthropic: full } };
+    expect(modelUsability(opus, services, NOW_MS)).toMatchObject({ usable: false, resetsAt: WEEKLY_RESET });
+    // Fable sees both full windows: usable again only once the LATER one resets.
+    expect(modelUsability(fable, services, NOW_MS)).toMatchObject({ usable: false, resetsAt: FABLE_RESET });
+    for (const m of [opus, fable, unknownModel]) {
+      const exhausted = marginalCost({ model: m, account: full, nowMs: NOW_MS }).exhausted;
+      expect(modelUsability(m, services, NOW_MS).usable).toBe(!exhausted);
+    }
+  });
+
+  it("an inactive or stale window never limits an endpoint", async () => {
+    const account = await teamAccount(100);
+    const inactive = { ...account, windows: account.windows.map((w: any) => (w.scope ? { ...w, active: false } : w)) };
+    const stale = { ...account, windows: account.windows.map((w: any) => (w.scope ? { ...w, stale: true } : w)) };
+    for (const a of [inactive, stale]) {
+      expect(marginalCost({ model: fable, account: a, nowMs: NOW_MS }).exhausted).toBe(false);
+      expect(applicableLiveWindows(a, fable).map((w: any) => w.kind)).toEqual(["session", "weekly"]);
+    }
+  });
+
+  it("a {providerID, modelID} Fable candidate is priced by the cap at 95 through route(): above an Opus one, and above the same account without the cap", async () => {
+    const account = await teamAccount(95);
+    const noCap = { ...account, windows: account.windows.filter((w: any) => !w.scope) };
+    // The RPC shape: modelID, no id (the merged identity must keep the id the filter reads).
+    const asRpc = (id: string) => {
+      const { id: _drop, ...rest } = endpoint(id, { providerID: "anthropic", cost: { input: 15, output: 15, cacheRead: 1, cacheWrite: 1 } }) as any;
+      return { ...rest, modelID: id };
+    };
+    // A paid pay-per-token endpoint in the catalogue gives the subscription its exchange rate; the
+    // candidate under test is the incumbent, so `costs.incumbent` is ITS marginal cost whoever wins.
+    const paid = endpoint("paid-model", { providerID: "pay", cost: { input: 10, output: 10, cacheRead: 1, cacheWrite: 1 } });
+    const priced = (id: string, acct: any) => {
+      const c = asRpc(id);
+      const res: any = route({
+        catalog: [c, paid],
+        policy: { preset: "balanced" },
+        intent: { incumbent: c },
+        nowMs: NOW_MS,
+        services: { accounts: { anthropic: acct, pay: { kind: "credit", balance: 100 } }, declared: { [keyOf(c)]: { catalogId: id }, [keyOf(paid)]: { catalogId: "paid-model" } } },
+      });
+      expect(res.kind).toBe("selected");
+      return res.costs.incumbent as number;
+    };
+    const fableCost = priced("claude-fable-5-1", account);
+    const opusCost = priced("claude-opus-5-5", account);
+    expect(fableCost).toBeGreaterThan(opusCost);
+    expect(fableCost).toBeGreaterThan(priced("claude-fable-5-1", noCap));
+  });
+
+  it("an Opus endpoint stays routable behind a full Fable cap", async () => {
+    const account = await teamAccount(100);
+    const only = endpoint("claude-opus-5-5", { providerID: "anthropic" });
+    const res = route({ catalog: [only], policy: { preset: "balanced" }, services: { accounts: { anthropic: account } } });
+    expect(res.model?.providerID).toBe("anthropic");
+    const fableOnly = endpoint("claude-fable-5-1", { providerID: "anthropic" });
+    const blocked = route({ catalog: [fableOnly], policy: { preset: "balanced" }, services: { accounts: { anthropic: account } } });
+    expect(blocked.model).toBeNull();
   });
 });

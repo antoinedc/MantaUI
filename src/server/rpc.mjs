@@ -598,6 +598,9 @@ export function buildHandlers({
   // `windows` is empty, matching the pre-P1.4 placeholder.
   usageSnapshots = () => [],
   usageHistory = () => ({}),
+  // Seat-placement K calibration store (src/server/usageCalibration.mjs). Null
+  // when not wired (tests) → `usage:calibration` answers an empty provider map.
+  usageCalibration = null,
   // BET-1343: the shared memoized `optimizer:summary` read model, hoisted to
   // index.mjs. Null when not injected → this builds its own (tests / fallback).
   optimizerSummary = null,
@@ -2746,6 +2749,9 @@ export function buildHandlers({
     // aggregates shape; this is the separate read for the seat detail.
     // Empty on a box without seats.
     "usage:list-seats": () => usageListSeatSnapshots(),
+    // Seat placement (spec 2026-11-03 §5.6): the measured/default K per provider
+    // and kind, with the spread and sample count the guards were judged on.
+    "usage:calibration": () => usageCalibration?.snapshot() ?? { providers: {} },
 
     // ---- usage-stop record (manta-server owned; BET-1047 stage 1) ----
     // Durable box-side record of conversations stopped by a plan-usage limit.

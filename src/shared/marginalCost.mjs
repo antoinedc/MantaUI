@@ -12,6 +12,7 @@
 
 import { blendedPrice } from "./blendedPrice.mjs";
 import { PROTECTION_LAMBDA_MULTIPLIER } from "./quotaPressure.mjs";
+import { windowAppliesToModel } from "./seatChoice.mjs";
 
 // --- Asymmetry: subscription < credit at equal scarcity ---------------------
 // A subscription's unused quota expires worthless; unused credit carries over
@@ -117,6 +118,25 @@ function subscriptionWindowCost(win, rate, nowMs) {
 }
 
 /**
+ * The account's windows that limit a request for `candidate` right now: not
+ * stale, not inactive, and applicable to the candidate's model (a model-scoped
+ * cap — e.g. a full Fable cap — never limits an Opus endpoint). The model id is
+ * the candidate's `modelID ?? id`, the same field `endpointKey` reads; a
+ * candidate without one is an unknown model, for which scoped windows do not
+ * apply. The ONE filter behind exhaustion, pacing and the "usable again at"
+ * time, so they can never disagree.
+ *
+ * @param {{windows?: object[]}|null|undefined} account
+ * @param {{modelID?: string, id?: string}|null|undefined} candidate
+ * @returns {object[]}
+ */
+export function applicableLiveWindows(account, candidate) {
+  const windows = Array.isArray(account?.windows) ? account.windows : [];
+  const modelId = candidate?.modelID ?? candidate?.id ?? null;
+  return windows.filter((w) => w && w.stale !== true && w.active !== false && windowAppliesToModel(w, modelId));
+}
+
+/**
  * The expected $ cost of running one turn on this endpoint, right now.
  *
  * Exhausted endpoints are flagged `exhausted: true` (cost set to Infinity so a
@@ -159,13 +179,14 @@ export function marginalCost(input = {}) {
   const { model, account, nowMs = 0, mix, reference, replacementCost, expectedTurnTokens, isLowStakes = false, shadowPrice } = input || {};
 
   // --- Exhausted first -------------------------------------------------------
-  const windows = Array.isArray(account?.windows) ? account.windows : [];
   // A stale reading must never escalate (UsageWindow.stale is set by the usage
   // poller the moment a window's reset instant passes and the provider has not
   // published the replacement numbers). A stale window contributes neither
   // exhaustion nor pace; if every window is stale the account has no usable
   // reading and is priced as if it had none, not as exhausted (BET-1269 5f).
-  const liveWindows = windows.filter((w) => w?.stale !== true);
+  // A window scoped to another model (a full Fable cap, seen by an Opus
+  // endpoint) is not live for this candidate either (applicableLiveWindows).
+  const liveWindows = applicableLiveWindows(account, model);
   const exhausted =
     account?.exhausted === true ||
     (account?.kind === "credit" && isNum(account?.balance) && account.balance <= 0) ||

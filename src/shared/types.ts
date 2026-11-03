@@ -2514,6 +2514,10 @@ export type UsageWindow = {
   // ("Fable"). Absent for account-wide windows. `kind` is then
   // "weekly_scoped:<name lowercased>".
   scope?: string;
+  // Model-name tokens this window applies to (lowercase, alphanumeric — the form
+  // `windowAppliesToModel` matches against the model id). Absent ⇒ falls back to
+  // `scope`, and with neither the window applies to every model.
+  models?: string[];
   // `false` when the provider says this window is not in force. It is shown
   // greyed ("not active") and must never drive exhaustion, seat load, or the
   // dial. Absent means active.
@@ -2599,6 +2603,10 @@ export type SeatView = {
   fetchedAt: number | null;
   /** Conversations currently assigned to this seat. */
   conversations: number;
+  /** Some of the seat's weekly room cannot be spent before it resets (seat-placement spec §2.3). */
+  slack?: boolean;
+  /** When the seat's earliest weekly window resets (epoch ms), or null when unknown. */
+  deadlineAt?: number | null;
 };
 
 export type AccountView = {

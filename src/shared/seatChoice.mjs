@@ -39,24 +39,46 @@ function windowScope(w) {
 
 const normalizeScope = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, "");
 
+/** The one normalisation of a model-name token (lowercase, alphanumerics only) —
+ *  shared with the usage adapters so `UsageWindow.models` and the match below
+ *  can never disagree. */
+export const normalizeModelToken = normalizeScope;
+
+/** The non-empty normalised tokens of a window's explicit `models`, or null when
+ *  it has none (absent, not an array, or every entry normalises to nothing). */
+function windowModelTokens(w) {
+  if (!Array.isArray(w?.models)) return null;
+  const tokens = w.models.filter((m) => typeof m === "string").map(normalizeScope).filter((t) => t !== "");
+  return tokens.length > 0 ? tokens : null;
+}
+
 /**
- * Does this window limit requests for `model`? An unscoped window limits every
- * model. A scoped window applies only when its scope name (lowercased, non-
- * alphanumerics removed) equals a token of the model id, where tokens are the
- * hyphen/dot/slash/colon/underscore-separated parts of the lowercased id ("Fable" ↔
- * `claude-fable-5`, `anthropic/claude-fable-5-1`; never `claude-opus-5-5`).
- * Model unknown → a scoped window does not apply.
+ * Does this window limit requests for `model`? Precedence:
+ *  1. a non-empty `models` array (normalised tokens) — the window applies only to
+ *     those models;
+ *  2. else the legacy `scope` / `weekly_scoped:<name>` token (an older snapshot
+ *     or fixture without `models` keeps its cap scoped);
+ *  3. else the window is unscoped and limits every model.
+ * A scoped window (by 1 or 2) applies only when one of its tokens equals a token
+ * of the model id, where tokens are the hyphen/dot/slash/colon/underscore-
+ * separated parts of the lowercased id ("Fable" ↔ `claude-fable-5`,
+ * `anthropic/claude-fable-5-1`; never `claude-opus-5-5`). Model unknown → a
+ * scoped window does not apply.
  *
- * @param {{scope?: string, kind?: string}|null|undefined} w
+ * @param {{scope?: string, kind?: string, models?: string[]}|null|undefined} w
  * @param {string|null|undefined} model  a model id, or null/undefined when unknown
  */
 export function windowAppliesToModel(w, model) {
-  const scope = windowScope(w);
-  if (scope === null) return true;
+  let wanted = windowModelTokens(w);
+  if (wanted === null) {
+    const scope = windowScope(w);
+    if (scope === null) return true;
+    wanted = [normalizeScope(scope)];
+  }
   if (typeof model !== "string" || model === "") return false;
-  const want = normalizeScope(scope);
-  if (want === "") return false;
-  return model.toLowerCase().split(/[-./:_]+/).some((t) => normalizeScope(t) === want);
+  if (wanted.every((t) => t === "")) return false;
+  const modelTokens = model.toLowerCase().split(/[-./:_]+/).map(normalizeScope);
+  return wanted.some((t) => t !== "" && modelTokens.includes(t));
 }
 
 /** @template {{active?: boolean}} W @param {W[]|null|undefined} windows @returns {W[]} */
@@ -223,4 +245,216 @@ export function aggregateSnapshot(seatSnapshots, { mode = "auto", activeSeatId =
   if (exhausted) out.exhausted = true;
   else delete out.exhausted;
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Weekly-deadline placement (seat-placement-weekly-deadline spec §2, §5.2).
+//
+// Windows have fixed ROLES by kind: the SHORT window is the seat's `session`
+// window (stale or not); the LONG windows are `weekly` and `weekly_scoped:*`.
+// Everything here is pure: the caller's clock (`nowMs`) and the per-kind
+// short-windows-per-long-window reader (`kFor(kind) → number|null`) are always
+// injected.
+// ---------------------------------------------------------------------------
+
+const HOUR_MS = 3_600_000;
+const SPAN_MIN_MS = HOUR_MS;
+const SPAN_MAX_MS = 31 * 24 * HOUR_MS;
+const SESSION_SPAN_MS = 5 * HOUR_MS;
+const WEEKLY_SPAN_MS = 7 * 24 * HOUR_MS;
+
+/** Providers whose documented window lengths are in the default table below. */
+const SPAN_DEFAULT_PROVIDERS = new Set(["claude", "codex", "kimi"]);
+
+const isFiniteNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+const isShortWindow = (w) => w?.kind === "session";
+const isLongKind = (kind) => typeof kind === "string" && (kind === "weekly" || kind.startsWith("weekly_scoped:"));
+
+/**
+ * A window's length in ms: the reported `resetsAt − startedAt` when both are
+ * present and plausible (1 h … 31 d); else the provider's documented default for
+ * the kind (`session` 5 h, `weekly*` 7 d — claude / codex / kimi); else `null`
+ * (unknown). `provider` omitted ⇒ the default table applies; a provider that is
+ * not in the table has no default.
+ *
+ * @param {{kind?: string, startedAt?: number, resetsAt?: number}|null|undefined} w
+ * @param {string|null} [provider]
+ * @returns {number|null}
+ */
+export function windowSpanMs(w, provider = null) {
+  if (isFiniteNum(w?.startedAt) && isFiniteNum(w?.resetsAt)) {
+    const span = w.resetsAt - w.startedAt;
+    if (span >= SPAN_MIN_MS && span <= SPAN_MAX_MS) return span;
+  }
+  if (typeof provider === "string" && provider !== "" && !SPAN_DEFAULT_PROVIDERS.has(provider)) return null;
+  if (isShortWindow(w)) return SESSION_SPAN_MS;
+  if (isLongKind(w?.kind)) return WEEKLY_SPAN_MS;
+  return null;
+}
+
+/**
+ * Where a seat's short (5 h) window stands at `nowMs`:
+ *  - `running`     fresh reading with a future `resetsAt` → room `100 − pct`, next fresh window at `resetsAt`;
+ *  - `not-started` fresh reading, no `resetsAt` (an idle window) → room 100, and the window a request
+ *                  would open now resets at `nowMs + span`;
+ *  - `unknown`     no reading, an inactive or stale one (`stale`, or `resetsAt ≤ nowMs` not yet re-read).
+ *
+ * @param {{provider?: string, windows?: object[]}|null|undefined} snap
+ * @param {{nowMs: number}} opts
+ * @returns {{state: "running"|"not-started"|"unknown", roomNow: number|null, nextResetAt: number|null}}
+ */
+export function shortWindowState(snap, { nowMs }) {
+  const unknown = { state: "unknown", roomNow: null, nextResetAt: null };
+  const w = (Array.isArray(snap?.windows) ? snap.windows : []).find((x) => x && isShortWindow(x));
+  if (!w || w.active === false || w.stale === true || !isFiniteNum(w.pct)) return unknown;
+  if (isFiniteNum(w.resetsAt)) {
+    if (w.resetsAt <= nowMs) return unknown;
+    return { state: "running", roomNow: Math.max(0, 100 - w.pct), nextResetAt: w.resetsAt };
+  }
+  const span = windowSpanMs(w, snap?.provider ?? null);
+  return { state: "not-started", roomNow: 100, nextResetAt: span === null ? null : nowMs + span };
+}
+
+/**
+ * The seat's long windows (`weekly`, `weekly_scoped:*`) that are active, fresh
+ * and apply to `model` — the long part of `W(s, m)`. Which window is long never
+ * depends on the short window.
+ *
+ * @template {{kind?: string}} W
+ * @param {{windows?: W[]}|null|undefined} snap
+ * @param {{model?: string|null}} [opts]
+ * @returns {W[]}
+ */
+export function longWindows(snap, { model = null } = {}) {
+  return (Array.isArray(snap?.windows) ? snap.windows : []).filter(
+    (w) => w && isLongKind(w.kind) && isWindowActive(w) && w.stale !== true && windowAppliesToModel(w, model),
+  );
+}
+
+/**
+ * 5h-points of long window `w` that no policy can spend before it resets:
+ * `roomPts − capPts`, where `roomPts = (100 − pct) · K` and
+ * `capPts = roomNow(short) + 100 · ⌈(R − r) / span(short)⌉⁺` (an upper bound).
+ * `null` (unknown, treated as not slack) when `K`, `R`, the short window, its
+ * span or `w` itself is unknown or stale. A positive value means some of `w`'s
+ * room is unreachable.
+ *
+ * @param {{provider?: string, windows?: object[]}|null|undefined} snap
+ * @param {{resetsAt?: number, pct?: number, stale?: boolean}|null|undefined} w
+ * @param {{nowMs: number, K: number|null|undefined}} opts
+ * @returns {number|null}
+ */
+export function windowSlackPts(snap, w, { nowMs, K }) {
+  if (!w || w.stale === true || !isFiniteNum(w.pct)) return null;
+  if (!isFiniteNum(K) || K <= 0) return null;
+  const R = w.resetsAt;
+  if (!isFiniteNum(R) || R <= nowMs) return null;
+  const short = shortWindowState(snap, { nowMs });
+  if (short.state === "unknown" || short.nextResetAt === null || short.roomNow === null) return null;
+  const shortWindow = (snap.windows ?? []).find((x) => x && isShortWindow(x));
+  const span = windowSpanMs(shortWindow, snap?.provider ?? null);
+  if (span === null) return null;
+  const n = Math.max(0, Math.ceil((R - short.nextResetAt) / span));
+  const capPts = short.roomNow + 100 * n;
+  const roomPts = (100 - w.pct) * K;
+  return roomPts - capPts;
+}
+
+/**
+ * The seat's slack for `model`: the largest known `windowSlackPts` over its long
+ * windows, `null` when none is known.
+ *
+ * @param {object|null|undefined} snap
+ * @param {{nowMs: number, model?: string|null, kFor?: ((kind: string) => number|null)|null}} opts
+ * @returns {number|null}
+ */
+export function seatSlackPts(snap, { nowMs, model = null, kFor = null }) {
+  let best = null;
+  for (const w of longWindows(snap, { model })) {
+    const K = typeof kFor === "function" ? kFor(w.kind) : null;
+    const s = windowSlackPts(snap, w, { nowMs, K });
+    if (s !== null && (best === null || s > best)) best = s;
+  }
+  return best;
+}
+
+/**
+ * When the seat's earliest applicable long window resets (epoch ms) — the
+ * deadline by which its weekly headroom is lost. `null` when no fresh long
+ * window with a future `resetsAt` applies to `model`.
+ *
+ * @param {object|null|undefined} snap
+ * @param {{nowMs: number, model?: string|null}} opts
+ * @returns {number|null}
+ */
+export function seatDeadlineAt(snap, { nowMs, model = null }) {
+  let best = null;
+  for (const w of longWindows(snap, { model })) {
+    if (!isFiniteNum(w.resetsAt) || w.resetsAt <= nowMs) continue;
+    if (best === null || w.resetsAt < best) best = w.resetsAt;
+  }
+  return best;
+}
+
+/**
+ * Legacy mode: no seat has a fresh long window with a known `resetsAt` for
+ * `model` (a 5h-only provider; every weekly inactive or unknown). The whole
+ * pre-deadline policy then runs unchanged.
+ *
+ * @param {object[]} snaps
+ * @param {{nowMs: number, model?: string|null}} opts
+ * @returns {boolean}
+ */
+export function legacyMode(snaps, { nowMs, model = null }) {
+  return !(Array.isArray(snaps) ? snaps : []).some((s) => s && seatDeadlineAt(s, { nowMs, model }) !== null);
+}
+
+/**
+ * The lexicographic rank of a seat, smaller is better:
+ * `[deadline ?? +Infinity, −max(0, slack ?? 0), load rank, active ? 0 : 1]`.
+ *
+ * @param {object} snap
+ * @param {{nowMs: number, model?: string|null, kFor?: ((kind: string) => number|null)|null, activeSeatId?: string|null}} opts
+ * @returns {[number, number, number, 0|1]}
+ */
+export function seatRank(snap, { nowMs, model = null, kFor = null, activeSeatId = null }) {
+  const deadline = seatDeadlineAt(snap, { nowMs, model });
+  const slack = seatSlackPts(snap, { nowMs, model, kFor });
+  return [
+    deadline ?? Infinity,
+    slack !== null && slack > 0 ? -slack : 0,
+    rank(snap, model),
+    activeSeatId != null && snap?.seatId === activeSeatId ? 0 : 1,
+  ];
+}
+
+/**
+ * The best seat by `seatRank`. Deadline ties are NOT pairwise: the earliest known
+ * deadline `d0` anchors a tie group (every seat with `deadline ≤ d0 + tieMs`),
+ * and the group is ordered by the remaining rank keys — a transitive order.
+ * Seats with an unknown deadline rank after every known one (they only compete
+ * among themselves when no seat has a known deadline). Ties keep input order.
+ *
+ * @template {{seatId?: string}} S
+ * @param {S[]} snaps
+ * @param {{nowMs: number, model?: string|null, kFor?: ((kind: string) => number|null)|null, activeSeatId?: string|null, tieMs?: number}} opts
+ * @returns {S|null}
+ */
+export function bestSeatByRank(snaps, { nowMs, model = null, kFor = null, activeSeatId = null, tieMs = RESET_TIE_MS }) {
+  const ranked = (Array.isArray(snaps) ? snaps : [])
+    .filter(Boolean)
+    .map((s) => ({ s, r: seatRank(s, { nowMs, model, kFor, activeSeatId }) }));
+  if (ranked.length === 0) return null;
+  const d0 = Math.min(...ranked.map((x) => x.r[0]));
+  const group = Number.isFinite(d0) ? ranked.filter((x) => x.r[0] <= d0 + tieMs) : ranked;
+  let best = group[0];
+  for (const x of group.slice(1)) {
+    for (let i = 1; i < 4; i++) {
+      if (x.r[i] === best.r[i]) continue;
+      if (x.r[i] < best.r[i]) best = x;
+      break;
+    }
+  }
+  return best.s;
 }

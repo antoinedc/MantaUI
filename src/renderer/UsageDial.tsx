@@ -131,7 +131,7 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
     snapshot && combined
       ? usageDialState({ ...snapshot, windows: combined.windows }, alwaysShow, { applyBlocking: false })
       : popoverState;
-  const moveComing = isMoveComing(view, current);
+  const moveComing = isMoveComing(view, current, nowMs);
 
   // Learn which seat this conversation is on (cached in the store; kept
   // current by `accounts.moved`, and re-read whenever the popover opens).
@@ -338,7 +338,7 @@ function UsagePopoverBody({
   const lastMove = formatLastMove(sessionSeat?.lastMove, nowMs);
   const groups = multi ? orderOtherSeats(view, current?.seat.id ?? null) : [];
   const otherCount = groups.reduce((n, g) => n + g.seats.length, 0);
-  const nextId = view && view.mode === "auto" ? nextSeatHint(view, current?.seat.id ?? null) : null;
+  const nextId = view && view.mode === "auto" ? nextSeatHint(view, current?.seat.id ?? null, nowMs) : null;
   // No assignment yet (a brand-new conversation): the windows above are the
   // aggregate — the seat a new conversation would start on. Say so.
   const startsOn =

@@ -141,6 +141,8 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
+import { createUsageCalibration } from "./usageCalibration.mjs";
+import { createSeatAttribution } from "./seatAttribution.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
@@ -902,13 +904,21 @@ const stopAccountsUsageEvents = bus.subscribe((evt) => {
 // `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
 // /api/accounts/refresh below); each call also proves the plugin is installed,
 // which is what turns per-conversation routing on (accounts.mjs).
+// K (full 5h windows per weekly window), measured from paired readings the usage
+// poller feeds it below; read by the placement rules through `kFor` and by the
+// `usage:calibration` RPC.
+// The per-request placement log; its queue counters ride on `usage:calibration`.
+const seatAttribution = createSeatAttribution();
+const usageCalibration = createUsageCalibration({ queueStats: () => seatAttribution.stats() });
 const seatAssigner = createSeatAssigner({
+  kFor: (provider) => usageCalibration.readerFor(provider),
+  attribution: seatAttribution,
   accounts: accountsService,
   listSeatSnapshots,
   onChange: (provider) => accountsEvents.updated(provider),
   onMoved: (evt) => {
-    // A reset-soon move is routine optimisation (the cache is shared within an org, so it costs nothing) — no in-chat notice.
-    if (evt.reason !== "reset-soon") accountsEvents.moved(evt);
+    // A reset-soon move and a weekly-deadline rebalance are routine optimisation (the cache is shared within an org, so they cost nothing) — no in-chat notice.
+    if (!evt.silent && evt.reason !== "reset-soon") accountsEvents.moved(evt);
     // Phase 4: every automatic move is also a line in the activity log — the
     // same trust surface the optimizer uses ("Moved a conversation from …").
     // `optimizerActivity` is declared further down; this runs long after startup.
@@ -931,6 +941,7 @@ const accountsManager = createAccountsManager({
   accounts: accountsService,
   seatAssigner,
   listSeatSnapshots,
+  kFor: (provider) => usageCalibration.readerFor(provider),
   claudeLogin: {
     start: (configDir, seatId) => startClaudeLogin("anthropic", { configDir, seatId }),
     cancel: (sessionKey) => {
@@ -974,6 +985,7 @@ const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
   // Optimizer P2.3 (BET-1345): the pacing controller observes the SAME publish
   // point as recordWindowObservations — no second poller, no adapter change.
   pacing: optimizerPacing,
+  calibration: usageCalibration,
   seats: accountsService,
   onUnauthorized: usageOnUnauthorized,
   onSeatSignedOut: (args) => claudeSeatHealth.onSignedOut(args),
@@ -2230,6 +2242,7 @@ const stopTuner = startPoller(async () => {
 void stopTuner;
 
 rpcHandlers = buildHandlers({
+  usageCalibration,
   routines: routinesEngine,
   tmux,
   oc,

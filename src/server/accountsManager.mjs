@@ -104,6 +104,7 @@ const isNonEmptyString = (v) => typeof v === "string" && v.length > 0;
  * @param {() => Array<object>} [deps.listSeatSnapshots]
  * @param {() => number} [deps.now]
  * @param {(nowMs: number) => boolean} [deps.routingActive]
+ * @param {(provider: string) => ((kind: string) => number|null)} [deps.kFor]
  * @param {{
  *   start: (configDir: string, seatId: string) => Promise<object>,
  *   cancel: (sessionKey: string) => void,
@@ -121,6 +122,9 @@ export function createAccountsManager({
   listSeatSnapshots = () => [],
   now = () => Date.now(),
   routingActive = perConversationRoutingActive,
+  // `kFor(provider)` → the provider-bound short-windows-per-long-window reader the
+  // seat view's slack reads (absent ⇒ slack unknown; deadlines still show).
+  kFor = () => () => null,
   claudeLogin,
   codex,
   fetchProfile = fetchClaudeProfile,
@@ -205,6 +209,8 @@ export function createAccountsManager({
       seatSnapshots: listSeatSnapshots().filter((x) => x?.provider === provider),
       assignments: seatAssigner.assignments(provider),
       routingActive: routingActive(now()),
+      nowMs: now(),
+      kFor: kFor(provider),
     });
   }
 
@@ -478,24 +484,35 @@ export function createAccountsManager({
     }
   }
 
+  /**
+   * The Codex login opencode just stored, when it is a NEW one (not the login that was
+   * live when the flow began), with the identity it carries; null when there is none.
+   */
+  async function readLandedCodexLogin(rec) {
+    const entry = await codex.readLive();
+    const isNew = Boolean(entry) && (!rec.prev || entry.access !== rec.prev.access || entry.refresh !== rec.prev.refresh);
+    if (!isNew) return null;
+    const identity = {
+      accountUuid: typeof entry.accountId === "string" && entry.accountId ? entry.accountId : null,
+      email: null,
+      orgId: null,
+      orgName: null,
+      plan: null,
+    };
+    return { entry, identity };
+  }
+
   /** opencode stored a new login while a Codex add-seat was waiting. */
   async function processCodexLanding(rec) {
     if (rec.state !== "pending" || rec.processing) return;
     rec.processing = true;
     try {
-      const entry = await codex.readLive();
-      const isNew = Boolean(entry) && (!rec.prev || entry.access !== rec.prev.access || entry.refresh !== rec.prev.refresh);
-      if (!isNew) {
+      const login = await readLandedCodexLogin(rec);
+      if (!login) {
         await failFlow(rec, "login-failed");
         return;
       }
-      const identity = {
-        accountUuid: typeof entry.accountId === "string" && entry.accountId ? entry.accountId : null,
-        email: null,
-        orgId: null,
-        orgName: null,
-        plan: null,
-      };
+      const { entry, identity } = login;
       // 1. The new login is kept in its seat directory BEFORE anything else.
       await writeSeatAuth(rec.dir, entry);
       // 2. The previous live login goes back — unless the "new" login is the
@@ -707,19 +724,12 @@ export function createAccountsManager({
     if (rec.state !== "pending" || rec.processing) return;
     rec.processing = true;
     try {
-      const entry = await codex.readLive();
-      const isNew = Boolean(entry) && (!rec.prev || entry.access !== rec.prev.access || entry.refresh !== rec.prev.refresh);
-      if (!isNew) {
+      const login = await readLandedCodexLogin(rec);
+      if (!login) {
         await failResign(rec, "login-failed");
         return;
       }
-      const identity = {
-        accountUuid: typeof entry.accountId === "string" && entry.accountId ? entry.accountId : null,
-        email: null,
-        orgId: null,
-        orgName: null,
-        plan: null,
-      };
+      const { entry, identity } = login;
       const store = await accounts.getStore();
       const seat = findSeat(store.providers.codex, (x) => x.id === rec.seatId)?.seat ?? null;
       const verdict = seat ? compareAccount("codex", seat, identity) : "missing";
