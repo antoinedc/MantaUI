@@ -5,7 +5,7 @@
 // BET-1146 review). All I/O is injected so a test can drive these exact
 // handlers with real fs + a fake response.
 //
-// Both routes read through `openInHome` (homePath.mjs, the shared file-access
+// Both routes read through `openPath` (filePath.mjs, the shared file-access
 // policy) and stream from the handle it opened, so the file that was vetted is
 // the file that is served. Failures are `{ error, reason }` with a safe literal
 // (class 1, BET-1460) — raw error text never reaches the body.
@@ -17,7 +17,6 @@ import { parseByteRange } from "./range.mjs";
 // map it to its own state.
 const REASON_RESPONSES = {
   missing: [404, "not found"],
-  "outside-home": [403, "path outside home directory"],
   "not-file": [404, "not a file"],
   permission: [403, "permission denied"],
   changed: [503, "file changed while it was being opened"],
@@ -43,14 +42,14 @@ function failStream(res, route, e) {
   else res.destroy();
 }
 
-export function createPeekHandler({ openInHome, pipeline, MIME }) {
+export function createPeekHandler({ openPath, pipeline, MIME }) {
   return async function handlePeek(req, res, url) {
     const raw = url.searchParams.get("path") ?? "";
     if (!raw) {
       writeJsonError(res, 400, { error: "path is required" });
       return;
     }
-    const opened = await openInHome(raw);
+    const opened = await openPath(raw);
     if (!opened.ok) {
       respondFsReason(res, opened.reason);
       return;
@@ -115,19 +114,19 @@ export function createPeekHandler({ openInHome, pipeline, MIME }) {
 }
 
 // Agent → device download: stream a file back to the device as a browser
-// download. Same home-scoped rule as /api/peek (the outbox lives under home, so
-// outbox toast Save + artifacts downloads are unaffected; inline media saved via
-// media_show can sit anywhere in home). NON-destructive: the source is left in
+// download. Same file-access policy as /api/peek (any regular file the box user
+// can read; both routes stay behind the auth gate, so display and download never
+// disagree — BET-1195). NON-destructive: the source is left in
 // place; its lifetime is the artifact TTL, swept by `expireArtifacts`, not by a
 // download. Re-download is always allowed.
-export function createDownloadHandler({ openInHome, pipeline }) {
+export function createDownloadHandler({ openPath, pipeline }) {
   return async function handleDownload(req, res, url) {
     const raw = url.searchParams.get("path") ?? "";
     if (!raw) {
       writeJsonError(res, 400, { error: "path is required" });
       return;
     }
-    const opened = await openInHome(raw);
+    const opened = await openPath(raw);
     if (!opened.ok) {
       respondFsReason(res, opened.reason);
       return;

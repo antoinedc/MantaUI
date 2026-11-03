@@ -172,7 +172,7 @@ const LINKS_TEXT = [
   "",
   "A plain link to a file that is not open: docs/peek-scope.md",
   "",
-  "Missing, outside home, or not yet confirmed — stays inline code: `src/server/gone.mjs` · `/etc/caddy/Caddyfile`",
+  "Missing, unreadable, or not yet confirmed — stays inline code: `src/server/gone.mjs` · `/etc/caddy/Caddyfile`",
   "",
   "A web link, for contrast (unchanged): [mantaui.com/downloads](https://mantaui.com/downloads)",
 ].join("\n");

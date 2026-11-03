@@ -6,7 +6,7 @@
  *  inferred from "the active session" after an async step. */
 export type ExplorerOwner = { sessionId: string; cwd: string };
 
-/** A file (or directory) inside home, already confirmed by fs:resolve-paths
+/** A file (or directory) on the box, already confirmed by fs:resolve-paths
  *  or listed by fs:list. `line`/`endLine` are 1-based and inclusive. */
 export type FileTarget = { abs: string; line?: number; endLine?: number };
 
@@ -35,13 +35,12 @@ export type ExplorerViewerProps = {
   owner: ExplorerOwner;
   /** Root the breadcrumb is relative to (tree root). */
   root: string;
-  /** null → the empty state (E12b) with "Show tree". */
+  /** null → the empty state (E12b): "No file open". */
   file: FileTarget | null;
   mdView: MdView;
   onMdViewChange: (v: MdView) => void;
   /** Navigate inside the Explorer (relative Markdown links, etc.). */
   onOpen: (req: OpenFileRequest) => void;
-  onShowTree: () => void;
   /** Bumped by the shell on focus / tool-completion invalidation → refetch. */
   refreshKey: number;
 };

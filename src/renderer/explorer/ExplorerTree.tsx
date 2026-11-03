@@ -21,7 +21,7 @@ import type { ExplorerTreeProps } from "./types";
 
 const INDENT_PX = 12;
 
-type NodeKind = "root" | "dir" | "file" | "link-outside" | "more" | "error";
+type NodeKind = "root" | "dir" | "file" | "more" | "error";
 type TreeNode = {
   id: string;
   name: string;
@@ -52,8 +52,6 @@ export function reasonMessage(reason: FsReason): string {
       return "This folder no longer exists";
     case "permission":
       return "No permission to open this folder";
-    case "outside-home":
-      return "Outside your home folder";
     default:
       return "Couldn’t read this folder";
   }
@@ -91,7 +89,7 @@ function useDelayed(ms: number): boolean {
   return on;
 }
 
-type Up = { state: "checking" } | { state: "ok"; abs: string } | { state: "home" } | { state: "failed" };
+type Up = { state: "checking" } | { state: "ok"; abs: string } | { state: "top" } | { state: "failed" };
 
 export function ExplorerTree(props: ExplorerTreeProps) {
   // A new root is a new tree (filter, expansion and caches start over).
@@ -204,14 +202,17 @@ function TreeBody({ owner, root, onRootChange, selected, onOpen, width, refreshK
   // --- the folder above ---
   useEffect(() => {
     let cancelled = false;
+    if (root.replace(/\/+$/, "") === "") {
+      setUp({ state: "top" });
+      return;
+    }
     setUp({ state: "checking" });
     window.api
       .fsResolvePaths({ base: root, paths: [".."] })
       .then(({ results }) => {
         if (cancelled) return;
         const r = results[0];
-        if (r && r.ok) setUp({ state: "ok", abs: r.abs });
-        else if (r && !r.ok && r.reason === "outside-home") setUp({ state: "home" });
+        if (r && r.ok) setUp(r.abs === root ? { state: "top" } : { state: "ok", abs: r.abs });
         else setUp({ state: "failed" });
       })
       .catch((e) => {
@@ -292,8 +293,8 @@ function TreeBody({ owner, root, onRootChange, selected, onOpen, width, refreshK
   const upTitle =
     up.state === "ok"
       ? `Up to ${basename(up.abs)}`
-      : up.state === "home"
-        ? "Already at your home folder"
+      : up.state === "top"
+        ? "Already at the top folder (/)"
         : up.state === "failed"
           ? "Can’t open the parent folder"
           : "Checking the parent folder…";
@@ -322,18 +323,15 @@ function TreeBody({ owner, root, onRootChange, selected, onOpen, width, refreshK
     }
 
     const isFolder = node.kind === "dir";
-    const isLink = node.kind === "link-outside";
     const isSelected = node.id === selected;
     const dim = node.entry?.ignored || node.entry?.hidden;
     const rel = isInsideRoot(root, node.id) ? node.id.slice(root.replace(/\/+$/, "").length + 1) : node.id;
-    const badge = !isFolder && !isLink ? changes[rel] : undefined;
+    const badge = !isFolder ? changes[rel] : undefined;
     const tone = isSelected
       ? "bg-accent-bg text-text"
-      : isLink
-        ? "text-text-faint"
-        : dim
-          ? "text-text-faint hover:bg-fill-hover"
-          : "text-text-muted hover:bg-fill-hover";
+      : dim
+        ? "text-text-faint hover:bg-fill-hover"
+        : "text-text-muted hover:bg-fill-hover";
     const base = item.getProps();
     return (
       <div
@@ -341,20 +339,18 @@ function TreeBody({ owner, root, onRootChange, selected, onOpen, width, refreshK
         key={item.getId()}
         aria-selected={isSelected}
         aria-expanded={isFolder ? item.isExpanded() : undefined}
-        title={isLink ? "Links outside your home folder" : node.id}
+        title={node.id}
         style={pad}
-        className={`manta-explorer-row flex h-6 items-center gap-1 rounded-sm pr-2 text-label ${
-          isLink ? "cursor-default" : "cursor-pointer"
-        } ${tone}`}
+        className={`manta-explorer-row flex h-6 cursor-pointer items-center gap-1 rounded-sm pr-2 text-label ${tone}`}
         onClick={() => {
           item.setFocused();
-          if (!isLink) activate(item);
+          activate(item);
         }}
         onKeyDown={(e) => {
           // The library binds arrows / Home / End; Enter and Space activate the row.
           if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
             e.preventDefault();
-            if (!isLink) activate(item);
+            activate(item);
           }
         }}
       >

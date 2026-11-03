@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 
 import { parseByteRange } from "./range.mjs";
 import { createPeekHandler, createDownloadHandler } from "./peek.mjs";
-import { createHomePath } from "./homePath.mjs";
+import { createFilePath } from "./filePath.mjs";
 
 const MIME = {
   ".txt": "text/plain; charset=utf-8",
@@ -22,12 +22,12 @@ const MIME = {
   ".png": "image/png",
 };
 
-// A throwaway "home" (and a sibling "outside" dir) so the real home-scoped
-// policy runs against real files without touching the maintainer's home.
+// A throwaway "home" (and a sibling "outside" dir) so the real
+// file-access policy runs against real files without touching the maintainer's home.
 let root;
 let home;
 let outside;
-let openInHome;
+let openPath;
 
 before(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), "peek-test-")));
@@ -36,7 +36,7 @@ before(async () => {
   await mkdir(home);
   await mkdir(outside);
   await writeFile(join(outside, "secret.txt"), "secret");
-  ({ openInHome } = createHomePath({ homedir: () => home }));
+  ({ openPath } = createFilePath({ homedir: () => home }));
 });
 
 after(async () => {
@@ -45,11 +45,11 @@ after(async () => {
 
 // The real handler, wired with the real policy + fs, driven in-process.
 function makeHandler() {
-  return createPeekHandler({ openInHome, pipeline, MIME });
+  return createPeekHandler({ openPath, pipeline, MIME });
 }
 
 function makeDownloadHandler() {
-  return createDownloadHandler({ openInHome, pipeline });
+  return createDownloadHandler({ openPath, pipeline });
 }
 
 // A Writable response that captures status + headers + streamed bytes.
@@ -306,27 +306,23 @@ test("/api/peek rejects missing path with 400", async () => {
   assert.deepEqual(JSON.parse(res.body.toString()), { error: "path is required" });
 });
 
-test("/api/peek rejects a path outside home with 403 + reason", async () => {
+test("/api/peek serves a file outside home (no home boundary)", async () => {
   const res = await runPeek({ path: join(outside, "secret.txt") });
-  assert.equal(res.statusCode, 403);
-  assert.deepEqual(JSON.parse(res.body.toString()), {
-    error: "path outside home directory",
-    reason: "outside-home",
-  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.toString(), "secret");
 });
 
-test("/api/peek rejects a .. escape with 403", async () => {
+test("/api/peek resolves a .. walk out of home to the real file", async () => {
   const res = await runPeek({ path: join(home, "..", "outside", "secret.txt") });
-  assert.equal(res.statusCode, 403);
-  assert.equal(JSON.parse(res.body.toString()).reason, "outside-home");
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.toString(), "secret");
 });
 
-test("/api/peek rejects a symlink that escapes home with 403 (never serves the target)", async () => {
+test("/api/peek follows a symlink to a target outside home", async () => {
   await symlink(join(outside, "secret.txt"), join(home, "peek-escape-link"));
   const res = await runPeek({ path: join(home, "peek-escape-link") });
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.body.toString().includes("secret"), false);
-  assert.equal(JSON.parse(res.body.toString()).reason, "outside-home");
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.toString(), "secret");
 });
 
 test("/api/peek serves a symlink that stays inside home", async () => {
@@ -376,7 +372,7 @@ test("/api/peek returns 403 + reason for an unreadable path", { skip: process.ge
 test("/api/peek maps changed/unavailable to 503 with safe bodies (no raw error text)", async () => {
   for (const reason of ["changed", "unavailable"]) {
     const handler = createPeekHandler({
-      openInHome: async () => ({ ok: false, reason }),
+      openPath: async () => ({ ok: false, reason }),
       pipeline,
       MIME,
     });
@@ -423,7 +419,7 @@ test("/api/download streams the file as an attachment and leaves it in place", a
   }
 });
 
-test("/api/download expands ~ and works anywhere inside home", async () => {
+test("/api/download expands ~ and anywhere", async () => {
   const ts = Date.now();
   await writeFile(join(home, `dl-home-${ts}.txt`), "x");
   const res = await runDownload(`~/dl-home-${ts}.txt`);
@@ -431,11 +427,17 @@ test("/api/download expands ~ and works anywhere inside home", async () => {
   assert.equal(res.body.toString(), "x");
 });
 
-test("/api/download refuses outside-home (also via symlink), missing, directory, empty path", async () => {
+test("/api/download serves a file outside home, also via symlink", async () => {
   await symlink(join(outside, "secret.txt"), join(home, "dl-escape-link"));
+  for (const path of [join(outside, "secret.txt"), join(home, "dl-escape-link")]) {
+    const res = await runDownload(path);
+    assert.equal(res.statusCode, 200, path);
+    assert.equal(res.body.toString(), "secret");
+  }
+});
+
+test("/api/download refuses missing, directory, empty path", async () => {
   const cases = [
-    [join(outside, "secret.txt"), 403, "outside-home"],
-    [join(home, "dl-escape-link"), 403, "outside-home"],
     [join(home, "dl-nope.txt"), 404, "missing"],
     [home, 404, "not-file"],
   ];
@@ -443,7 +445,6 @@ test("/api/download refuses outside-home (also via symlink), missing, directory,
     const res = await runDownload(path);
     assert.equal(res.statusCode, status, path);
     assert.equal(JSON.parse(res.body.toString()).reason, reason, path);
-    assert.equal(res.body.toString().includes("secret"), false);
   }
   const empty = await runDownload("");
   assert.equal(empty.statusCode, 400);

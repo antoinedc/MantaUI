@@ -256,8 +256,14 @@ export function setRightPanel(sessionId: string | null, which: RightPanel): void
   );
 }
 
+/**
+ * The header icon and ⌘E. Opening always shows the tree (2026-11-03 §7b); a path
+ * link goes through `openFile` instead and keeps the stored tree preference.
+ */
 export function toggleExplorer(sessionId: string): void {
-  setRightPanel(sessionId, shownRightPanel(sessionId) === "explorer" ? "none" : "explorer");
+  const opening = shownRightPanel(sessionId) !== "explorer";
+  setRightPanel(sessionId, opening ? "explorer" : "none");
+  if (opening) setTreeOpen(sessionId, true);
 }
 
 export function toggleArtifacts(sessionId: string | null): void {

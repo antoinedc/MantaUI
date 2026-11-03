@@ -14,16 +14,9 @@ const treeProps = vi.fn();
 const quickProps = vi.fn();
 
 vi.mock("./ExplorerViewer", () => ({
-  ExplorerViewer: (p: { file: { abs: string } | null; onShowTree: () => void }) => {
+  ExplorerViewer: (p: { file: { abs: string } | null }) => {
     viewerProps(p);
-    return (
-      <div data-testid="viewer">
-        {p.file ? p.file.abs : "empty"}
-        <button type="button" data-testid="show-tree" onClick={p.onShowTree}>
-          Show tree
-        </button>
-      </div>
-    );
+    return <div data-testid="viewer">{p.file ? p.file.abs : "empty"}</div>;
   },
 }));
 vi.mock("./ExplorerTree", () => ({
@@ -249,12 +242,10 @@ describe("ExplorerPanel top bar", () => {
     expect(q('[data-testid="tree"]')).toBeNull();
   });
 
-  it("the empty state's Show tree opens the tree", () => {
+  it("the empty viewer has no Show tree callback", () => {
     store.setRightPanel("ses_a", "explorer");
     h = mount(split());
-    click(q('[data-testid="show-tree"]'));
-    expect(store.getExplorerSession("ses_a").layout.treeOpen).toBe(true);
-    expect(q('[data-testid="tree"]')).not.toBeNull();
+    expect(viewerProps.mock.lastCall![0]).not.toHaveProperty("onShowTree");
   });
 
   it("clamps the tree width and resizes it with the keyboard (16 px)", () => {

@@ -33,7 +33,6 @@ export type PeekOutcome =
 
 const REASONS: ReadonlySet<string> = new Set<FsReason>([
   "missing",
-  "outside-home",
   "not-file",
   "permission",
   "changed",

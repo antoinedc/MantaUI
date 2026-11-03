@@ -138,7 +138,6 @@ describe("loadPeekedFile", () => {
   });
 
   it.each([
-    [403, { error: "x", reason: "outside-home" }, "outside-home"],
     [404, { error: "x", reason: "not-file" }, "not-file"],
     [404, { error: "x", reason: "missing" }, "missing"],
     [403, { error: "x", reason: "permission" }, "permission"],

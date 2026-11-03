@@ -42,7 +42,7 @@ describe("fixture files equal the mockup", () => {
 describe("fs:resolve-paths", () => {
   it("resolves relative, ~ and absolute paths; refuses the rest with the box's reasons", () => {
     const r = resolve(["src/server/peek.mjs", "~/notes/todo.md", "/home/dev/projects/manta/AGENTS.md", "src/server/gone.mjs", "/etc/caddy/Caddyfile", "../../../../../etc/passwd"]);
-    expect(r.map((x) => (x.ok ? x.kind : x.reason))).toEqual(["file", "file", "file", "missing", "outside-home", "outside-home"]);
+    expect(r.map((x) => (x.ok ? x.kind : x.reason))).toEqual(["file", "file", "file", "missing", "missing", "missing"]);
     const peek = r[0];
     expect(peek.ok && peek.abs).toBe(`${DEMO_EXPLORER_CWD}/src/server/peek.mjs`);
     expect(peek.ok && peek.size).toBe(bytes(PEEK_MJS));
@@ -64,7 +64,17 @@ describe("fs:list", () => {
 
   it("answers a missing / outside folder with a reason", () => {
     expect(demoFsList({ dir: `${DEMO_EXPLORER_CWD}/nope` })).toEqual({ ok: false, reason: "missing" });
-    expect(demoFsList({ dir: "/etc" })).toEqual({ ok: false, reason: "outside-home" });
+    expect(demoFsList({ dir: "/etc" })).toEqual({ ok: false, reason: "missing" });
+  });
+
+  it("the folders above home exist, down to /", () => {
+    const top = demoFsList({ dir: "/" });
+    if (!top.ok) throw new Error("not ok");
+    expect(top.entries.map((e) => e.abs)).toEqual(["/home"]);
+    const home = demoFsList({ dir: "/home" });
+    if (!home.ok) throw new Error("not ok");
+    expect(home.entries.map((e) => e.abs)).toEqual(["/home/dev"]);
+    expect(resolve([".."], "/home/dev")[0]).toMatchObject({ ok: true, abs: "/home", kind: "dir" });
   });
 });
 

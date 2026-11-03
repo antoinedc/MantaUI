@@ -2185,7 +2185,9 @@ function Shell() {
             busyLabel={boxRestarting ? "Restarting the server…" : "Updating the server…"}
           />
         )}
-        {!isChatPaneActive && !routinesView && (
+        {/* The CTO and Routines panes carry their own header; this one would
+            stack above it naming the hidden terminal. */}
+        {!isChatPaneActive && !routinesView && !ctoOpen && (
         <div
           className="titlebar-drag h-11 border-b border-border flex items-center pr-4 gap-2 min-w-0"
           style={{ paddingLeft: "max(var(--sp-4), var(--pane-inset-x, 0px))" }}

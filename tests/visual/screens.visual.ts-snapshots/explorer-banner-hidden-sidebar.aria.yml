@@ -45,11 +45,17 @@
   - button "Permissions on — click to bypass"
   - 'button "Handoff: suggest"'
   - separator "Resize file explorer"
-  - button "Show file tree"
+  - button "Hide file tree"
   - text: billing
   - button "Quick open"
   - button "Expand"
   - button "Close file explorer"
+  - textbox "Filter files"
+  - button "Up to parent folder"
+  - tree "Files":
+    - treeitem "modules" [level=1]
+    - treeitem "main.tf" [level=1]
+    - treeitem "variables.tf" [level=1]
+  - separator "Resize file tree"
   - text: No file open Click a file path in the conversation, or open the tree
-  - button "Show tree"
 - complementary "Artifacts"

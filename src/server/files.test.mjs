@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createFiles, defaultRunGit, FS_RESOLVE_MAX, FS_LIST_MAX } from "./files.mjs";
-import { createHomePath } from "./homePath.mjs";
+import { createFilePath } from "./filePath.mjs";
 
 let root;
 let home;
@@ -39,7 +39,7 @@ before(async () => {
   await mkdir(home);
   await mkdir(outside);
   await writeFile(join(outside, "secret.txt"), "secret");
-  files = createFiles({ homePath: createHomePath({ homedir: () => home }) });
+  files = createFiles({ filePath: createFilePath({ homedir: () => home }) });
 });
 
 after(async () => {
@@ -72,15 +72,17 @@ test("resolvePaths: files, dirs, relative-to-base, and every failure reason", as
   assert.equal(results[1].ok && results[1].kind, "dir");
   assert.equal(results[2].ok && results[2].abs, join(proj, "src", "a.ts"));
   assert.deepEqual(results[3], { input: "nope.ts", ok: false, reason: "missing" });
-  assert.deepEqual(results[4], { input: "../../outside/secret.txt", ok: false, reason: "outside-home" });
-  assert.deepEqual(results[5], { input: "escape", ok: false, reason: "outside-home" });
+  assert.equal(results[4].ok && results[4].abs, join(outside, "secret.txt"));
+  assert.equal(results[5].ok && results[5].abs, join(proj, "escape"));
+  assert.equal(results[5].ok && results[5].size, 6);
   assert.deepEqual(results[6], { input: 42, ok: false, reason: "invalid_input" });
   assert.deepEqual(results[7], { input: "", ok: false, reason: "invalid_input" });
 });
 
-test("resolvePaths: a base outside home fails every relative path with that reason", async () => {
-  const { results } = await files.resolvePaths({ base: outside, paths: ["secret.txt"] });
-  assert.deepEqual(results, [{ input: "secret.txt", ok: false, reason: "outside-home" }]);
+test("resolvePaths: a base outside home resolves its relative paths", async () => {
+  const { results } = await files.resolvePaths({ base: outside, paths: ["secret.txt", "/"] });
+  assert.equal(results[0].ok && results[0].abs, join(outside, "secret.txt"));
+  assert.equal(results[1].ok && results[1].kind, "dir");
 });
 
 test("resolvePaths: a FIFO is not-file", async () => {
@@ -155,7 +157,7 @@ test("listDir: git-ignored entries (files and dirs) are flagged from one check-i
   await mkdir(join(repo, "src"));
   let gitCalls = 0;
   const counting = createFiles({
-    homePath: createHomePath({ homedir: () => home }),
+    filePath: createFilePath({ homedir: () => home }),
     runGit: (...a) => {
       gitCalls++;
       return defaultRunGit(...a);
@@ -182,7 +184,7 @@ test("listDir: outside a git repo, or when git times out, nothing is ignored", a
   assert.equal(plain.entries[0].ignored, false);
 
   const timing = createFiles({
-    homePath: createHomePath({ homedir: () => home }),
+    filePath: createFilePath({ homedir: () => home }),
     runGit: async () => {
       const e = new Error("git timed out");
       e.timedOut = true;
@@ -194,7 +196,7 @@ test("listDir: outside a git repo, or when git times out, nothing is ignored", a
   assert.equal(r.entries[0].ignored, false);
 });
 
-test("listDir: symlinks — inside follows its target kind, outside is link-outside, broken is skipped", async () => {
+test("listDir: symlinks — every link follows its target kind (inside or outside home), broken is skipped", async () => {
   const d = join(home, "list-links");
   await mkdir(join(d, "realdir"), { recursive: true });
   await writeFile(join(d, "real.txt"), "12345");
@@ -209,15 +211,18 @@ test("listDir: symlinks — inside follows its target kind, outside is link-outs
   assert.equal(byName.dirlink.kind, "dir");
   assert.equal(byName.filelink.kind, "file");
   assert.equal(byName.filelink.size, 5);
-  assert.equal(byName["escape-file"].kind, "link-outside");
-  assert.equal(byName["escape-dir"].kind, "link-outside");
+  assert.equal(byName["escape-file"].kind, "file");
+  assert.equal(byName["escape-file"].size, 6);
+  assert.equal(byName["escape-dir"].kind, "dir");
   assert.equal(byName.broken, undefined);
   assert.equal(r.total, r.entries.length);
   assert.equal(byName["escape-dir"].abs, join(d, "escape-dir"));
 });
 
 test("listDir: failures are returned, not thrown", async () => {
-  assert.deepEqual(await files.listDir({ dir: outside }), { ok: false, reason: "outside-home" });
+  const out = await files.listDir({ dir: outside });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.entries.map((e) => e.name), ["secret.txt"]);
   assert.deepEqual(await files.listDir({ dir: join(home, "nope-dir") }), { ok: false, reason: "missing" });
   assert.deepEqual(await files.listDir({ dir: join(home, "cap.txt") }), { ok: false, reason: "not-file" });
   assert.deepEqual(await files.listDir({ dir: "relative" }), { ok: false, reason: "invalid_input" });
@@ -306,14 +311,14 @@ test("gitStatus: a clean repo has no changes; a non-git dir is not-git", async (
 });
 
 test("gitStatus: policy failures are returned", async () => {
-  assert.deepEqual(await files.gitStatus({ root: outside }), { ok: false, reason: "outside-home" });
+  assert.deepEqual(await files.gitStatus({ root: outside }), { ok: false, reason: "not-git" });
   assert.deepEqual(await files.gitStatus({ root: join(home, "nope") }), { ok: false, reason: "missing" });
   assert.deepEqual(await files.gitStatus({ root: join(home, "cap.txt") }), { ok: false, reason: "not-file" });
 });
 
 function fakeGit(handlers) {
   return createFiles({
-    homePath: createHomePath({ homedir: () => home }),
+    filePath: createFilePath({ homedir: () => home }),
     runGit: async (args) => handlers(args),
   });
 }

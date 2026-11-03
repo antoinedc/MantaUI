@@ -350,7 +350,7 @@ Window-scoped, in `App.tsx`. xterm-internal handlers (⌘C/V/F/K) live in
 | ⌘,          | Open Settings                                |
 | ⇧⌘M         | Voice (chat composer): tap toggles recording on/off, hold is push-to-talk |
 | ⌘B          | Hide / show the left sidebar (app-wide, persisted) |
-| ⌘E          | Toggle the file Explorer (chat session) |
+| ⌘E          | Toggle the file Explorer (chat session); opening it always shows the tree |
 | ⇧⌘E / ⌥⌘E   | Explorer open: expand ↔ restore / toggle its tree |
 | ⌘P          | Focus inside the Explorer: quick open |
 
@@ -438,24 +438,24 @@ require-confirm toast the user hasn't answered isn't re-offered every 3s.
   listener, the active ChatPanel renders it. De-dupe on collision via
   `uniqueLocalPath` (`report.pdf` → `report (1).pdf`).
 - **`/api/peek` and `/api/download` share ONE file-access policy
-  (`src/server/homePath.mjs`, file explorer).** Both call `openInHome`: expand
-  `~`, `realpath` the path, require the canonical path to be inside the
-  canonical home, then `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` and check
+  (`src/server/filePath.mjs`, file explorer).** Both call `openPath`: expand
+  `~`, `realpath` the path (so `..` and symlinks resolve to their real
+  target), then `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` and check
   that the opened file is a regular file with the same dev/ino that was vetted
   (a swap between check and open is `changed`). The bytes stream from that
   handle. Failures are `{ error, reason }` with a safe literal (class-1 500
-  contract): `missing` 404, `outside-home` 403, `not-file` 404, `permission`
-  403, `changed` / `unavailable` 503. An empty or relative path is 400 (these
+  contract): `missing` 404, `not-file` 404, `permission` 403, `changed` / `unavailable` 503. An empty or relative path is 400 (these
   routes take absolute or `~` paths only; relative ones are resolved by
   `fs:resolve-paths` first). The `fs:*` channels use the same helper.
-- **`/api/download` is scoped to the user's HOME dir, not to the outbox
-  (BET-1195).** Inline media shown via `media_show` can sit at ANY path inside
-  home — the tool never copies it into the mailbox — so an outbox-only guard
-  meant a file the transcript happily DISPLAYED (`/api/peek`, already
-  home-scoped, same bearer) could not be SAVED: the download 403'd, the desktop
-  bridge returned `""`, and the renderer threw a bare "download failed". The two
-  routes now share one rule. This does not widen what an authenticated client
-  can read; it only stops display and download from disagreeing.
+- **There is NO home boundary on file access (2026-11-03 explorer follow-up
+  §7a; BET-1195 history).** The client is authenticated as the box user, so any
+  absolute path that user can read is allowed on `/api/peek`, `/api/download`
+  and the `fs:*` channels; the OS file permissions are the real limit (an
+  unreadable path is `permission` / 403). Display and download must keep
+  agreeing — an outbox-only or home-only guard on one of them is what made a
+  file the transcript DISPLAYED fail to SAVE (the download 403'd, the desktop
+  bridge returned `""`, and the renderer threw a bare "download failed").
+  `media_show` (`media.mjs`) keeps its own home rule; it is a separate surface.
 - **Every download REPORTS ITSELF (BET-1198) — `saveToDownloads` in
   `src/renderer/downloadFeedback.ts` is the one non-toast call site.** The
   inline-media hover/preview Download and the artifacts row were previously
@@ -504,7 +504,7 @@ Markdown, images/video, optional tree, quick open, expand). Design sources:
 `docs/screens/explorer/mockup.html` (wins on looks),
 `docs/screens/explorer/conformance.md` (deliberate differences).
 
-- **Server.** `src/server/homePath.mjs` is the one canonical-home policy (see
+- **Server.** `src/server/filePath.mjs` is the one file-access policy (see
   `/api/peek`, above); `src/server/files.mjs` serves `fs:resolve-paths`,
   `fs:list` and `fs:git-status` (wire types in `src/shared/fsTypes.ts`). Quick
   open reuses `opencode:find-files`. Expected refusals are RETURNED as

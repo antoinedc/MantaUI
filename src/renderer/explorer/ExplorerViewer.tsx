@@ -176,17 +176,13 @@ function FailureView({
       />
     );
   }
-  if (reason === "permission" || reason === "outside-home") {
+  if (reason === "permission") {
     return (
       <StateColumn
         hook="manta-explorer-refusal"
         icon={<Lock size={20} className={glyph} aria-hidden />}
         title="Can’t read this file"
-        detail={
-          reason === "outside-home"
-            ? "It is outside your home folder"
-            : "The box user has no permission to open it"
-        }
+        detail="The box user has no permission to open it"
       />
     );
   }
@@ -227,7 +223,7 @@ function LoadingBody() {
   );
 }
 
-function ExplorerEmpty({ onShowTree }: { onShowTree: () => void }) {
+function ExplorerEmpty() {
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-bg">
       <div className="min-h-0 flex-1">
@@ -236,11 +232,7 @@ function ExplorerEmpty({ onShowTree }: { onShowTree: () => void }) {
           icon={<FolderTree size={20} className={glyph} aria-hidden />}
           title="No file open"
           detail="Click a file path in the conversation, or open the tree"
-        >
-          <Button tone="default" onClick={onShowTree}>
-            Show tree
-          </Button>
-        </StateColumn>
+        />
       </div>
     </div>
   );
@@ -284,7 +276,7 @@ function mediaLabel(kind: MediaKind): string {
 // ---------------------------------------------------------------------------
 
 export function ExplorerViewer(props: ExplorerViewerProps) {
-  if (!props.file) return <ExplorerEmpty onShowTree={props.onShowTree} />;
+  if (!props.file) return <ExplorerEmpty />;
   return <FileView key={props.file.abs} {...props} file={props.file} />;
 }
 

@@ -397,6 +397,12 @@ function nodes(): Map<string, Node> {
   add(`${REPO}/node_modules`, dir({ ignored: true }));
   add(`${REPO}/node_modules/.package-lock.json`, file('{ "name": "fix-peek-range", "lockfileVersion": 3 }\n', { mtimeMs: dayOld }));
 
+  // The demo's default session folder (its Explorer now opens with the tree).
+  const TF = `${DEMO_HOME}/projects/infra/terraform/billing`;
+  add(`${TF}/main.tf`, file('module "billing" {\n  source = "./modules/service"\n}\n', { mtimeMs: dayOld }));
+  add(`${TF}/variables.tf`, file('variable "region" {\n  type = string\n}\n', { mtimeMs: dayOld }));
+  add(`${TF}/modules/service/main.tf`, file('resource "aws_ecs_service" "billing" {}\n', { mtimeMs: dayOld }));
+
   add(`${DEMO_HOME}/notes/todo.md`, file(TODO_MD, { mtimeMs: dayOld }));
   // Resolves, then cannot be read: the viewer's four non-text outcomes + the two load states.
   add(`${DEMO_HOME}/notes/old-plan.md`, file("", { peek: { kind: "refuse", status: 404, reason: "missing" } }));
@@ -444,11 +450,11 @@ function normalize(base: string, raw: string): string {
   return `/${out.join("/")}`;
 }
 
-const insideHome = (abs: string) => abs === DEMO_HOME || abs.startsWith(`${DEMO_HOME}/`);
+// "/" and every folder on the way down to home exist; nothing else outside home does.
+const isHomeAncestor = (abs: string) => abs === "/" || `${DEMO_HOME}/`.startsWith(`${abs}/`);
 
 function lookup(abs: string): { ok: true; node: Node } | { ok: false; reason: FsReason } {
-  if (!insideHome(abs)) return { ok: false, reason: "outside-home" };
-  if (abs === DEMO_HOME) return { ok: true, node: dir() };
+  if (abs === DEMO_HOME || isHomeAncestor(abs)) return { ok: true, node: dir() };
   const node = nodes().get(abs);
   return node ? { ok: true, node } : { ok: false, reason: "missing" };
 }
@@ -479,6 +485,10 @@ export function demoFsList(input: FsListInput): FsListResult {
   if (hit.node.kind !== "dir") return { ok: false, reason: "not-file" };
   const prefix = dirAbs === "/" ? "/" : `${dirAbs}/`;
   const entries: FsEntry[] = [];
+  if (dirAbs !== DEMO_HOME && isHomeAncestor(dirAbs)) {
+    const name = DEMO_HOME.slice(prefix.length).split("/")[0];
+    entries.push({ name, abs: `${prefix}${name}`, kind: "dir", size: 0, mtimeMs: dayOld, hidden: false, ignored: false });
+  }
   for (const [abs, n] of nodes()) {
     if (!abs.startsWith(prefix) || abs.slice(prefix.length).includes("/")) continue;
     const name = abs.slice(prefix.length);
@@ -565,11 +575,7 @@ export async function demoPeekFetch(
 ): Promise<Response> {
   const abs = normalize(DEMO_HOME, rawPath);
   const hit = lookup(abs);
-  if (!hit.ok) {
-    return hit.reason === "missing"
-      ? refusal(404, "missing", "not found")
-      : refusal(403, hit.reason, "path outside home directory");
-  }
+  if (!hit.ok) return refusal(404, "missing", "not found");
   if (hit.node.kind !== "file") return refusal(404, "not-file", "not a file");
   const n = hit.node;
   switch (n.peek.kind) {

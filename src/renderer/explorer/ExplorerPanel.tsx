@@ -41,7 +41,6 @@ import {
   navigateHistory,
   openFile,
   restoreExplorer,
-  setExpanded,
   setMdView,
   setNarrow,
   setRatio,
@@ -347,12 +346,6 @@ export function ExplorerPanel({
 
   const onOpen = useCallback((req: OpenFileRequest) => openFile(req), []);
 
-  // "Show tree" from the empty state: a too-narrow Explorer widens (Expanded) first.
-  const showTree = useCallback(() => {
-    if (treeToggleDisabled(colWidth) && !isEffectivelyExpanded(stRef.current)) setExpanded(sessionId, true);
-    setTreeOpen(sessionId, true);
-  }, [colWidth, sessionId]);
-
   const rootName = basename(root);
   const narrow = st.narrow;
   const expandLabel = expanded ? (narrow ? "Back to transcript" : "Restore split") : "Expand";
@@ -456,7 +449,6 @@ export function ExplorerPanel({
             mdView={mdView}
             onMdViewChange={setMdView}
             onOpen={onOpen}
-            onShowTree={showTree}
             refreshKey={refreshKey}
           />
         </div>

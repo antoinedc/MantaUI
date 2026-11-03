@@ -262,7 +262,7 @@ Built on `@headless-tree/react`; this section is only the chrome.
            class="min-w-0 flex-1 bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none focus:border-accent placeholder:text-text-faint"/>
            ← the Artifacts panel search input, byte-identical classes
     <IconButton icon={<ArrowUp/>} label="Up to parent folder"
-                title={`Up to ${parentName}`}  disabled={atHome}  (disabled title: "Already at your home folder") />
+                title={`Up to ${parentName}`}  disabled={atTop}  (disabled title: "Already at the top folder (/)") />
   </div>
   <div role="tree" class="min-h-0 flex-1 overflow-y-auto px-1 pb-2"> rows </div>
 </div>
@@ -283,9 +283,8 @@ Row (`role="treeitem"`, `aria-level`, `aria-expanded` on folders, `aria-selected
 </div>
 ```
 Git-ignored entries AND dot-files: `text-text-faint`; ignored folders never
-auto-expand. `.git` is never listed. `link-outside` entries: `text-text-faint`,
-no chevron, `cursor-default`, title "Links outside your home folder". Truncated
-folder: a final non-interactive row `pl-[depth*12] text-meta text-text-faint`
+auto-expand. `.git` is never listed. Symlinks show as their target's kind (file or folder),
+wherever the target is. Truncated folder: a final non-interactive row `pl-[depth*12] text-meta text-text-faint`
 "{n} more not shown — use quick open (⌘P)". Conflict badge `!` uses `text-danger`.
 
 ## E5 — File bar (`ExplorerViewer.tsx`, hook `manta-explorer-filebar`)
@@ -457,7 +456,7 @@ The ONE anchor for confirmed file paths, sibling of `ExternalLink`:
   font. Outside code (tool-card args, plain text) add `font-mono text-[0.88em]` —
   the inline-code size MarkdownBody already uses.
 - `active` = the file (and range) currently shown in this session's Explorer.
-- A path that is unresolved, missing or outside home renders as plain text /
+- A path that is unresolved, missing or unreadable renders as plain text /
   plain inline code — never a link with a disabled look.
 - `stopPropagation` on click, like `ExternalLink`.
 
@@ -498,7 +497,9 @@ the existing ArtifactPreview overlay for the path.
 Same centred column as E12:
 - **Empty** (no file opened in this session): icon `FolderTree` 20, title
   "No file open", detail "Click a file path in the conversation, or open the
-  tree", `<Button tone="default">Show tree</Button>`.
+  tree". No button: opening the Explorer from its header icon or ⌘E always shows
+  the tree (a path link keeps the stored tree preference), and a too-narrow
+  Explorer explains itself through the disabled tree toggle.
 - **Loading**: nothing for `LOADING_DELAY_MS`, then the existing `Skeleton`
   (3 lines) at the top of the body, `px-6 py-5`.
 - **Error**: icon `FileWarning` 20, title "Couldn't load this file", detail =

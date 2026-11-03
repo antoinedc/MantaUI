@@ -2,17 +2,17 @@
 // file explorer (docs/superpowers/specs/2026-11-02-file-explorer.md §Server
 // channels). Wire types: src/shared/fsTypes.ts.
 //
-// Expected outcomes (missing, outside home, not a git repo, timeout) are
+// Expected outcomes (missing, unreadable, not a git repo, timeout) are
 // RETURNED as `{ ok:false, reason }`; an unexpected error is logged and thrown
 // as a fixed safe message (class 1, BET-1460). Every path goes through the
-// shared home-scoped policy (homePath.mjs). I/O is injected for tests:
+// shared file-access policy (filePath.mjs). I/O is injected for tests:
 //   runGit(args, { input?, timeout, maxBuffer }) → { code, stdout }
 //     — resolves for any exit code; rejects with `.timedOut` on timeout.
 
 import { execFile } from "node:child_process";
 import * as fsp from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { createHomePath } from "./homePath.mjs";
+import { createFilePath } from "./filePath.mjs";
 
 export const FS_RESOLVE_MAX = 200;
 export const FS_LIST_MAX = 2000;
@@ -62,13 +62,13 @@ function kindOfStat(st) {
 }
 
 export function createFiles({
-  homePath = createHomePath(),
+  filePath = createFilePath(),
   runGit = defaultRunGit,
   readdir = fsp.readdir,
   lstat = fsp.lstat,
   realpath = fsp.realpath,
 } = {}) {
-  const { resolveInHome } = homePath;
+  const { resolvePath } = filePath;
 
   async function resolvePaths({ base, paths } = {}) {
     if (typeof base !== "string" || !Array.isArray(paths)) throw new Error("invalid input");
@@ -76,7 +76,7 @@ export function createFiles({
     const results = await Promise.all(
       paths.map(async (input) => {
         if (typeof input !== "string") return { input, ok: false, reason: "invalid_input" };
-        const r = await resolveInHome(input, { base });
+        const r = await resolvePath(input, { base });
         if (!r.ok) return { input, ok: false, reason: r.reason };
         const kind = kindOfStat(r.stat);
         if (!kind) return { input, ok: false, reason: "not-file" };
@@ -111,7 +111,7 @@ export function createFiles({
       if (!Number.isFinite(limit) || limit < 1) return { ok: false, reason: "invalid_input" };
       cap = Math.min(Math.floor(limit), FS_LIST_MAX);
     }
-    const r = await resolveInHome(dir);
+    const r = await resolvePath(dir);
     if (!r.ok) return { ok: false, reason: r.reason };
     if (!r.stat.isDirectory()) return { ok: false, reason: "not-file" };
 
@@ -136,12 +136,10 @@ export function createFiles({
           if (d.isDirectory()) classified.push({ name: d.name, abs, kind: "dir" });
           else if (d.isFile()) classified.push({ name: d.name, abs, kind: "file" });
           else if (d.isSymbolicLink()) {
-            const link = await resolveInHome(join(r.canonical, d.name));
+            const link = await resolvePath(join(r.canonical, d.name));
             if (link.ok) {
               const kind = kindOfStat(link.stat);
               if (kind) classified.push({ name: d.name, abs, kind, stat: link.stat });
-            } else if (link.reason === "outside-home") {
-              classified.push({ name: d.name, abs, kind: "link-outside" });
             }
           }
         }),
@@ -228,7 +226,7 @@ export function createFiles({
   }
 
   async function gitStatus({ root } = {}) {
-    const r = await resolveInHome(root);
+    const r = await resolvePath(root);
     if (!r.ok) return { ok: false, reason: r.reason };
     if (!r.stat.isDirectory()) return { ok: false, reason: "not-file" };
     const opts = { timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER };

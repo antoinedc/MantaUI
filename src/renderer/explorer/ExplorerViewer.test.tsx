@@ -87,14 +87,12 @@ afterEach(() => {
 
 type Spies = {
   onOpen: Mock<ExplorerViewerProps["onOpen"]>;
-  onShowTree: Mock<ExplorerViewerProps["onShowTree"]>;
   onMdViewChange: Mock<ExplorerViewerProps["onMdViewChange"]>;
 };
 
 function props(over: Partial<ExplorerViewerProps> = {}): [ExplorerViewerProps, Spies] {
   const spies: Spies = {
     onOpen: vi.fn<ExplorerViewerProps["onOpen"]>(),
-    onShowTree: vi.fn<ExplorerViewerProps["onShowTree"]>(),
     onMdViewChange: vi.fn<ExplorerViewerProps["onMdViewChange"]>(),
   };
   return [
@@ -105,7 +103,6 @@ function props(over: Partial<ExplorerViewerProps> = {}): [ExplorerViewerProps, S
       mdView: "rendered",
       onMdViewChange: spies.onMdViewChange,
       onOpen: spies.onOpen,
-      onShowTree: spies.onShowTree,
       refreshKey: 0,
       ...over,
     },
@@ -162,12 +159,12 @@ describe("pure helpers", () => {
 });
 
 describe("empty / loading / error", () => {
-  it("shows the empty state and Show tree calls back", async () => {
-    const { spies } = await show({ file: null });
+  it("shows the empty state with no Show tree button", async () => {
+    await show({ file: null });
     expect(text()).toContain("No file open");
     expect(text()).toContain("Click a file path in the conversation, or open the tree");
-    await click(byText("Show tree"));
-    expect(spies.onShowTree).toHaveBeenCalledTimes(1);
+    expect(byText("Show tree")).toBeUndefined();
+    expect(h!.container.querySelector("button")).toBeNull();
   });
 
   it("shows the skeleton only after 150 ms without a response", async () => {
@@ -250,12 +247,6 @@ describe("refusals", () => {
     expect(text()).toContain("Can’t read this file");
     expect(text()).toContain("The box user has no permission to open it");
     expect(byText("Download")).toBeUndefined();
-  });
-
-  it("outside home: says so", async () => {
-    files[`${CWD}/src/a.mjs`] = { status: 403, reason: "outside-home" };
-    await show();
-    expect(text()).toContain("It is outside your home folder");
   });
 
   it("a transient server answer offers Retry", async () => {
