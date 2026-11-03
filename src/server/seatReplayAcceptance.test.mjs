@@ -57,13 +57,23 @@ for (const scale of SCALES) {
   });
 }
 
+// Expiry is gated above the demand floor: when the offered work is below the weekly capacity, that
+// much of the weekly must expire under ANY placement, so the gate measures only what a policy could
+// have prevented (`expiredAboveFloor = max(0, expired − floor)`, floor = max(0, 1 − offered/capacity)).
 for (const scale of [0.4, 0.6]) {
-  test(`scale ${scale}: after's expired weekly headroom is at most 60 % of baseline's`, async () => {
+  test(`scale ${scale}: after's expired weekly headroom above the demand floor is at most 60 % of baseline's`, async () => {
     const { b, a } = await resultsFor(scale);
-    const base = aggregate(b).expiredPerSeatWeekPct.mean;
-    const aft = aggregate(a).expiredPerSeatWeekPct.mean;
-    const d = pairedDiff(b, a, (r) => r.expiredPerSeatWeekPct);
-    assert.ok(aft <= 0.6 * base, `expired %/seat-wk: baseline ${base.toFixed(2)} after ${aft.toFixed(2)} = ${((100 * aft) / base).toFixed(0)} % of baseline (diff ${d.mean.toFixed(2)} ± sd ${d.sd.toFixed(2)} over ${SEEDS.length} seeds; gate 60 %)`);
+    const ab = aggregate(b);
+    const aa = aggregate(a);
+    const base = ab.expiredAboveFloorPct.mean;
+    const aft = aa.expiredAboveFloorPct.mean;
+    const d = pairedDiff(b, a, (r) => r.expiredAboveFloorPct);
+    const f = (x) => x.toFixed(2);
+    assert.ok(base > 0, `the gate would be vacuous: baseline expires nothing above the floor (floor ${ab.floorPct.mean.toFixed(2)}, expired ${ab.expiredPerSeatWeekPct.mean.toFixed(2)})`);
+    assert.ok(
+      aft <= 0.6 * base,
+      `%/seat-wk — floor ${f(ab.floorPct.mean)}; baseline expired ${f(ab.expiredPerSeatWeekPct.mean)} (above floor ${f(base)}), after expired ${f(aa.expiredPerSeatWeekPct.mean)} (above floor ${f(aft)}) = ${base > 0 ? ((100 * aft) / base).toFixed(0) : "n/a"} % of baseline (above-floor diff ${f(d.mean)} ± sd ${f(d.sd)} over ${SEEDS.length} seeds; gate 60 %)`,
+    );
   });
 }
 

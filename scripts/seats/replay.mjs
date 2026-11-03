@@ -40,6 +40,11 @@
 // with `stale` set the way the real poller sets it. The first 7 days are warm-up
 // and excluded; headroom still unexpired at the end is NOT counted as waste.
 //
+// DEMAND FLOOR. Offered work below the weekly capacity forces `1 − offered/capacity` of a
+// weekly to expire under any policy (whole trace, warm-up included: the counted weeks reach
+// back into it). The expiry gate and the `both` table report expired, the floor, and
+// `expired above floor = max(0, expired − floor)`, the part a placement could prevent.
+//
 // RETRY ON FULL (default on, `--no-retry` to turn off). A request that fills its seat
 // leaves the rest of its work unserved; the real system answers that with a limit
 // error, re-reads usage and re-decides (`reconsider`) before the retry. The harness
@@ -189,7 +194,7 @@ function firstResetAfter(anchor, t0) {
   return rw;
 }
 
-const emptyMetrics = () => ({ offered: 0, served: 0, expiredWeeklyPct: 0, seatWeeks: 0, moves: {}, crossMoves: 0, sameMoves: 0, resentMTok: 0 });
+const emptyMetrics = () => ({ capacityAllPts: 0, offeredAllPts: 0, offered: 0, served: 0, expiredWeeklyPct: 0, seatWeeks: 0, moves: {}, crossMoves: 0, sameMoves: 0, resentMTok: 0 });
 
 /**
  * One policy over one workload.
@@ -255,6 +260,7 @@ export function simulate({ clock, seats: seatDefs, workload, policy, warmupMs = 
   for (let b = 0; b < workload.bins; b++) {
     const t = startMs + b * binMs;
     const measured = t - startMs >= warmupMs;
+    m.capacityAllPts += (seats.length * 100 * K * binMs) / WEEK; // 5h-points the pool can serve in this bin (warm-up included)
     for (const s of seats) {
       if (s.r5 != null && t >= s.r5) {
         s.s5 = 0;
@@ -276,6 +282,7 @@ export function simulate({ clock, seats: seatDefs, workload, policy, warmupMs = 
     probe?.(snapshots, { nowMs: t, measured, model: MODEL });
 
     for (const { conv, d } of workload.requestsByBin[b]) {
+      m.offeredAllPts += d;
       if (measured) m.offered += d;
       const seat = decideAndApply(conv, snapshots, t, measured);
       if (!seat) continue;
@@ -309,13 +316,26 @@ export function loadTrace(path = TRACE_PATH) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-/** Reduce one seed's metrics to the reported numbers. */
+/**
+ * Reduce one seed's metrics to the reported numbers.
+ * `floorPct` is the expiry no policy can avoid: the offered work (in weekly units) is
+ * smaller than the weekly capacity, so `1 − offered/capacity` of a weekly must expire
+ * whatever the placement. It is taken over the WHOLE trace, warm-up included, because
+ * the weeks whose expiry is counted reach back into the warm-up. `expiredAboveFloorPct` is the part
+ * of the raw expiry a policy could actually have prevented (same unit: % of a weekly
+ * per seat-week).
+ */
 export function summarise(m, { K }) {
   const weeks = m.seatWeeks || 1;
   const expiredPerSeatWeekPct = m.expiredWeeklyPct / weeks;
+  const floorPct = m.capacityAllPts > 0 ? Math.max(0, 100 * (1 - m.offeredAllPts / m.capacityAllPts)) : 0;
   return {
     servedPct: m.offered > 0 ? (100 * m.served) / m.offered : 0,
+    offeredPts: m.offeredAllPts,
+    capacityPts: m.capacityAllPts,
+    floorPct,
     expiredPerSeatWeekPct,
+    expiredAboveFloorPct: Math.max(0, expiredPerSeatWeekPct - floorPct),
     expiredPerSeatWeekPts: expiredPerSeatWeekPct * K,
     moves: Object.values(m.moves).reduce((s, n) => s + n, 0),
     crossMoves: m.crossMoves,
@@ -336,7 +356,7 @@ export function runSeeds({ trace, policy, scale, seeds = SEEDS, streams = 6, lag
 
 export function aggregate(rows) {
   const stat = (f) => ({ mean: mean(rows.map(f)), sd: sd(rows.map(f)) });
-  return { servedPct: stat((r) => r.servedPct), expiredPerSeatWeekPct: stat((r) => r.expiredPerSeatWeekPct), expiredPerSeatWeekPts: stat((r) => r.expiredPerSeatWeekPts), moves: stat((r) => r.moves), crossMoves: stat((r) => r.crossMoves), resentMTok: stat((r) => r.resentMTok) };
+  return { servedPct: stat((r) => r.servedPct), floorPct: stat((r) => r.floorPct), expiredPerSeatWeekPct: stat((r) => r.expiredPerSeatWeekPct), expiredAboveFloorPct: stat((r) => r.expiredAboveFloorPct), expiredPerSeatWeekPts: stat((r) => r.expiredPerSeatWeekPts), moves: stat((r) => r.moves), crossMoves: stat((r) => r.crossMoves), resentMTok: stat((r) => r.resentMTok) };
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +412,9 @@ export function formatComparison(out) {
   row("", out.map((r) => r.policy), diff ? "after − baseline (paired, mean ± sd)" : "");
   const metric = (label, f, agg, d = 1) => row(label, out.map((r) => fmt(agg(r), d)), diff ? fmtSigned(pairedDiff(base.rows, after.rows, f), d) : "");
   metric("served %", (r) => r.servedPct, (r) => r.servedPct);
+  metric("demand floor, % per seat-wk", (r) => r.floorPct, (r) => r.floorPct);
   metric("expired weekly, % per seat-wk", (r) => r.expiredPerSeatWeekPct, (r) => r.expiredPerSeatWeekPct);
+  metric("  expired above floor", (r) => r.expiredAboveFloorPct, (r) => r.expiredAboveFloorPct);
   metric("expired weekly, 5h-pts/seat-wk", (r) => r.expiredPerSeatWeekPts, (r) => r.expiredPerSeatWeekPts, 0);
   metric("moves", (r) => r.moves, (r) => r.moves, 0);
   for (const k of reasons) {
