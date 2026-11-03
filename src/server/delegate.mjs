@@ -744,7 +744,7 @@ const MAX_SUCCESSOR_HOPS = 8;
  *   1. the nearest windowed ancestor of the child session (the existing walk);
  *   2. the replacement successor (handoff `replacedBy`, transitive, cycle-safe, max 8 hops) of the
  *      session's parent or of any ancestor — the live end of the chain that has a window — and, failing
- *      that, of the record's CURRENT `displayParentID` (the one that lost its window), reported as rule 2;
+ *      that, of the record's current display parent, `displayParentID ?? parentSessionID` (the one that lost its window), reported as rule 2;
  *   3. the driver: the windowed session whose own transcript most recently named the child session's id
  *      (tool-call input or output, any message type) within DRIVER_WINDOW_MS. One read-only DB task for
  *      the whole batch (`deps.findSessionReferences`); no DB / budget hit → this rule is skipped;
@@ -851,8 +851,9 @@ export async function resolveDisplayParents(targets, deps = {}, opts = {}) {
         break;
       }
     }
-    if (!successor && typeof job.displayParentID === "string" && job.displayParentID) {
-      const live = successorsOf(job.displayParentID).filter((s) => acceptable(job, s));
+    const currentParent = job.displayParentID ?? job.parentSessionID;
+    if (!successor && typeof currentParent === "string" && currentParent) {
+      const live = successorsOf(currentParent).filter((s) => acceptable(job, s));
       if (live.length > 0) successor = live[live.length - 1];
     }
     if (successor) {
