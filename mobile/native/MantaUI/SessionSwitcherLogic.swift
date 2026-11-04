@@ -43,6 +43,25 @@ enum SessionSwitcher {
         return 100 + gapBonus
     }
 
+    /// One project's sessions as candidates, most recent activity first (the
+    /// Latest-activity list's own ordering: chat windows by `lastActivity`, then
+    /// chat windows with no activity known yet, then terminal windows). Empty when
+    /// `name` is not among `projects`. Pass the VISIBLE projects, so a background
+    /// job's window is never offered.
+    static func candidates(
+        inProject name: String,
+        projects: [MantaProject],
+        lastActivity: (_ project: String, _ window: MantaWindow) -> Date?
+    ) -> [SessionSwitcherCandidate] {
+        guard let project = projects.first(where: { $0.tmuxSession == name }) else { return [] }
+        return SessionActivityOrder.flatten([project], lastActivity: lastActivity).map { entry in
+            SessionSwitcherCandidate(
+                key: SessionRouteLogic.windowKey(project: entry.project, windowIndex: entry.window.index),
+                project: entry.project, windowIndex: entry.window.index, name: entry.window.name
+            )
+        }
+    }
+
     /// Candidates to show for `query`. An empty query lists every candidate,
     /// most recently opened first (`recents` front = newest), never-opened ones
     /// after in list order. A typed query keeps only matches, best score first

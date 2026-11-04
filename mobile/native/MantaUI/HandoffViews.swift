@@ -448,11 +448,13 @@ struct HandoffPreviousSection: View {
                     Button { onOpen(entry) } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(store.title(for: entry.sessionId))
+                                Text(store.label(for: entry))
                                     .lineLimit(1)
-                                Text(entry.kind == .branchedFrom ? "Branched from" : "Handed off from")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                if entry.deleted {
+                                    Text("Deleted")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                             Spacer(minLength: 8)
                             Image(systemName: "chevron.right")

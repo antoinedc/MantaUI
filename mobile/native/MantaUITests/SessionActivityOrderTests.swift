@@ -393,4 +393,40 @@ final class SessionActivityOrderTests: XCTestCase {
         XCTAssertEqual(BackgroundJobFormat.failureReason(MantaError.server("")), "check the connection")
         XCTAssertEqual(BackgroundJobFormat.failureReason(CocoaError(.fileNoSuchFile)), "check the connection")
     }
+
+    // MARK: - Switcher opened from a chat: one project, newest activity first
+
+    func testProjectSwitcherListsOnlyThatProjectNewestActivityFirst() {
+        let projects = [
+            proj("a", [win(0, sid: "a0"), win(1, sid: "a1"), win(2, sid: "a2")]),
+            proj("b", [win(0, sid: "b0")]),
+        ]
+        let activity: [String: Double] = ["a0": 100, "a1": 300, "a2": 200, "b0": 999]
+        let candidates = SessionSwitcher.candidates(inProject: "a", projects: projects) { _, w in
+            w.opencodeSessionId.flatMap { activity[$0] }.map(self.date)
+        }
+        XCTAssertEqual(candidates.map(\.key), ["a#1", "a#2", "a#0"])
+        XCTAssertEqual(Set(candidates.map(\.project)), ["a"])
+    }
+
+    func testProjectSwitcherPutsUnknownActivityAndTerminalsAfterTheDatedSessions() {
+        let projects = [proj("a", [win(0), win(1, sid: "a1"), win(2, sid: "a2"), win(3, sid: "a3")])]
+        let candidates = SessionSwitcher.candidates(inProject: "a", projects: projects) { _, w in
+            w.opencodeSessionId == "a3" ? self.date(50) : nil
+        }
+        // a3 is dated; a1/a2 have no activity yet (list order); the terminal window (0) is last.
+        XCTAssertEqual(candidates.map(\.key), ["a#3", "a#1", "a#2", "a#0"])
+    }
+
+    func testProjectSwitcherNeverOffersAJobWindowWhenGivenTheVisibleProjects() {
+        let all = [proj("a", [win(0, sid: "a0"), win(1, sid: "job", owner: "job")])]
+        let visible = SessionJobWindows.visible(all, hidden: ["a": SessionJobWindows.hiddenIndices(project: all[0])])
+        let candidates = SessionSwitcher.candidates(inProject: "a", projects: visible) { _, _ in nil }
+        XCTAssertEqual(candidates.map(\.key), ["a#0"])
+    }
+
+    func testProjectSwitcherIsEmptyForAProjectTheBoxDoesNotList() {
+        let candidates = SessionSwitcher.candidates(inProject: "gone", projects: [proj("a", [win(0, sid: "a0")])]) { _, _ in nil }
+        XCTAssertTrue(candidates.isEmpty)
+    }
 }

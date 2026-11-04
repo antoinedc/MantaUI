@@ -875,6 +875,15 @@ final class SessionListStore: ObservableObject {
         }
     }
 
+    /// One project's visible sessions, most recent activity first (`lastActivity(for:)`:
+    /// opencode's `time.updated` joined with the live running/idle transitions) —
+    /// what the switcher opened from inside a chat of that project lists.
+    func switcherCandidates(inProject name: String) -> [SessionSwitcherCandidate] {
+        SessionSwitcher.candidates(inProject: name, projects: visibleProjects) { [self] _, window in
+            lastActivity(for: window)
+        }
+    }
+
     // MARK: - Launchers (spec 04 §2)
 
     /// Refresh which AI CLIs are installed and the user's saved launch flags.

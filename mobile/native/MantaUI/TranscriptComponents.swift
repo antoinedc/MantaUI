@@ -21,26 +21,89 @@ func mantaFontWeight(_ weight: CGFloat) -> Font.Weight {
 // edge to edge past the transcript's own padding, background `fill`, a 2px
 // `accent` left edge, radius 0 on the leading side and `--r-md` on the
 // trailing side, 15px/1.5 weight 500 `tx1`, padding `--sp-3`. No role caption.
+@MainActor
 struct UserBand: View {
     let text: String
     let tokens: Tokens
+    /// The row's identity (`TranscriptBlock.stableScrollID`): where "expanded" is
+    /// remembered, so it survives the cell being recycled.
+    let expansionID: String
+
+    @ObservedObject private var expansion = TranscriptExpansionStore.shared
+    /// Heights measured in the cell: the text as shown, and the whole text.
+    @State private var visibleHeight: CGFloat = 0
+    @State private var fullHeight: CGFloat = 0
+
+    private var expanded: Bool { expansion.isExpanded(expansionID) }
+    private var overflows: Bool { UserPromptClamp.overflows(fullHeight: fullHeight, visibleHeight: visibleHeight) }
+
+    private var promptFont: Font {
+        .manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium))
+    }
+
+    private var promptLineSpacing: CGFloat {
+        pointsFor(multiplier: 1.5, size: MantaDynamicType.scaled(Metrics.type.body))
+    }
 
     var body: some View {
-        Text(text)
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            promptText
+            if UserPromptClamp.showsToggle(expanded: expanded, overflows: overflows) {
+                Button { expansion.toggle(expansionID) } label: {
+                    Text(UserPromptClamp.toggleLabel(expanded: expanded))
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                        .foregroundColor(tokens.accent)
+                        .frame(minHeight: 32, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("user-band-toggle")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Metrics.spacing.sp3)
+        .background(tokens.fill, in: bandShape)
+        .overlay(alignment: .leading) {
+            tokens.accent
+                .frame(width: Metrics.spacing.spPx * 2)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("user-band")
+    }
+
+    private var promptText: some View {
+        Text(TranscriptLinkify.attributed(text, linkColor: tokens.accent))
             .textSelection(.enabled)
-            .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+            .font(promptFont)
             .foregroundColor(tokens.tx1)
-            .lineSpacing(pointsFor(multiplier: 1.5, size: MantaDynamicType.scaled(Metrics.type.body)))
+            .lineSpacing(promptLineSpacing)
+            .lineLimit(expanded ? nil : UserPromptClamp.lineLimit)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Metrics.spacing.sp3)
-            .background(tokens.fill, in: bandShape)
-            .overlay(alignment: .leading) {
-                tokens.accent
-                    .frame(width: Metrics.spacing.spPx * 2)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                visibleHeight = height
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("user-band")
+            // The whole text, laid out unclamped and never drawn: its height against the
+            // clamped text's says whether anything is hidden (the toggle is offered only
+            // then). A background takes no part in the row's own size.
+            .background(alignment: .topLeading) {
+                if !expanded, UserPromptClamp.mayOverflow(text) {
+                    Text(text)
+                        .font(promptFont)
+                        .lineSpacing(promptLineSpacing)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.size.height
+                        } action: { height in
+                            fullHeight = height
+                        }
+                        .hidden()
+                        .accessibilityHidden(true)
+                }
+            }
     }
 
     private var bandShape: some Shape {
@@ -70,7 +133,7 @@ struct MantaProse: View {
     let tokens: Tokens
 
     var body: some View {
-        MarkdownText(text)
+        MarkdownText(TranscriptMarkdownLinks.autolinked(text))
             .font(.manta(size: Metrics.type.body), for: .body)
             .font(.manta(size: Metrics.type.body + 4, weight: .semibold), for: .h1)
             .font(.manta(size: Metrics.type.body + 2, weight: .semibold), for: .h2)
@@ -122,7 +185,7 @@ struct LiveProseTail: View {
     let tokens: Tokens
 
     var body: some View {
-        Text(text)
+        Text(TranscriptLinkify.attributed(text, linkColor: tokens.accent))
             .textSelection(.enabled)
             .font(.system(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
@@ -411,7 +474,7 @@ struct StepRowView: View {
             .buttonStyle(.plain)
 
             if expanded, let output = step.output {
-                Text(ToolOutputPreview.tail(output))
+                Text(TranscriptLinkify.attributed(ToolOutputPreview.tail(output), linkColor: tokens.accent))
                     .textSelection(.enabled)
                     .font(.manta(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)

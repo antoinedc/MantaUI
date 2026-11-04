@@ -181,6 +181,36 @@ struct HandoffLinks: Decodable, Equatable, Sendable {
     }
 }
 
+/// One row of `chain.predecessors` in `handoff:list` (spec §"Seam pins"): the
+/// sessions before the one asked about, nearest first, then — last — the session
+/// the chain was branched from (`branchedFrom: true`). The box looks the title up
+/// itself; a title it could not read is absent and a session opencode no longer
+/// has says `deleted`.
+struct HandoffChainEntry: Decodable, Equatable, Sendable {
+    var id: String
+    var title: String?
+    var deleted: Bool
+    var branchedFrom: Bool
+
+    init(id: String, title: String? = nil, deleted: Bool = false, branchedFrom: Bool = false) {
+        self.id = id
+        self.title = title
+        self.deleted = deleted
+        self.branchedFrom = branchedFrom
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, title, deleted, branchedFrom }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        let name = ((try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        title = (name?.isEmpty ?? true) ? nil : name
+        deleted = ((try? c.decodeIfPresent(Bool.self, forKey: .deleted)) ?? nil) ?? false
+        branchedFrom = ((try? c.decodeIfPresent(Bool.self, forKey: .branchedFrom)) ?? nil) ?? false
+    }
+}
+
 /// A successor's pending delivery state (§7). Only what the client reads:
 /// the armed `preamble` and the `draft` + its revision.
 struct HandoffContinuation: Decodable, Equatable, Sendable {
@@ -221,14 +251,31 @@ struct HandoffListResult: Decodable, Equatable, Sendable {
     var records: [HandoffRecord]
     var links: HandoffLinks?
     var continuation: HandoffContinuation?
+    /// `chain.predecessors`, or nil on a box that predates it (the client then
+    /// walks `links` one hop at a time instead).
+    var chain: [HandoffChainEntry]?
 
-    init(records: [HandoffRecord] = [], links: HandoffLinks? = nil, continuation: HandoffContinuation? = nil) {
+    init(records: [HandoffRecord] = [], links: HandoffLinks? = nil, continuation: HandoffContinuation? = nil, chain: [HandoffChainEntry]? = nil) {
         self.records = records
         self.links = links
         self.continuation = continuation
+        self.chain = chain
     }
 
-    private enum CodingKeys: String, CodingKey { case records, links, continuation }
+    private enum CodingKeys: String, CodingKey { case records, links, continuation, chain }
+    private struct Chain: Decodable {
+        let predecessors: [HandoffChainEntry]
+        private enum Keys: String, CodingKey { case predecessors }
+        private struct Lossy: Decodable {
+            let entry: HandoffChainEntry?
+            init(from decoder: Decoder) throws { entry = try? HandoffChainEntry(from: decoder) }
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            let lossy = (try? c.decodeIfPresent([Lossy].self, forKey: .predecessors)) ?? []
+            predecessors = lossy.compactMap(\.entry)
+        }
+    }
     private struct Lossy: Decodable {
         let record: HandoffRecord?
         init(from decoder: Decoder) throws { record = try? HandoffRecord(from: decoder) }
@@ -240,6 +287,7 @@ struct HandoffListResult: Decodable, Equatable, Sendable {
         records = lossy.compactMap(\.record)
         links = (try? c.decodeIfPresent(HandoffLinks.self, forKey: .links)) ?? nil
         continuation = (try? c.decodeIfPresent(HandoffContinuation.self, forKey: .continuation)) ?? nil
+        chain = ((try? c.decodeIfPresent(Chain.self, forKey: .chain)) ?? nil)?.predecessors
     }
 }
 
@@ -619,10 +667,48 @@ struct HandoffPreviousEntry: Equatable, Identifiable, Sendable {
     enum Kind: Equatable, Sendable { case predecessor, branchedFrom }
     let sessionId: String
     let kind: Kind
+    /// The box's title for it, when it could read one.
+    var title: String? = nil
+    /// The session no longer exists on the box; opening it says so.
+    var deleted = false
     var id: String { "\(kind == .predecessor ? "p" : "b"):\(sessionId)" }
 }
 
 enum HandoffPrevious {
+    /// What the desktop shows for a session with no title.
+    static let untitled = "Untitled session"
+
+    /// The row's text: the session's name, or "Branched from <name>" for the
+    /// session a chain was branched from. `fallbackTitle` is a name learned some
+    /// other way (the session list) for an entry the box sent without one.
+    static func label(_ entry: HandoffPreviousEntry, fallbackTitle: String? = nil) -> String {
+        let name = displayTitle(entry, fallbackTitle: fallbackTitle)
+        return entry.kind == .branchedFrom ? "Branched from \(name)" : name
+    }
+
+    static func displayTitle(_ entry: HandoffPreviousEntry, fallbackTitle: String? = nil) -> String {
+        for candidate in [entry.title, fallbackTitle] {
+            if let name = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
+        }
+        return untitled
+    }
+
+    /// The list from the box's own `chain.predecessors` — already newest first,
+    /// with the branch origin last. One entry per session.
+    static func entries(chain: [HandoffChainEntry]) -> [HandoffPreviousEntry] {
+        var seen = Set<String>()
+        var out: [HandoffPreviousEntry] = []
+        for item in chain where !item.id.isEmpty && seen.insert(item.id).inserted {
+            out.append(HandoffPreviousEntry(
+                sessionId: item.id,
+                kind: item.branchedFrom ? .branchedFrom : .predecessor,
+                title: item.title,
+                deleted: item.deleted
+            ))
+        }
+        return out
+    }
+
     /// The lineage walk: `lineage[0]` is the session on screen, then its
     /// predecessor, and so on. Each predecessor is listed nearest-first (newest
     /// first); a branch origin follows the lineage member it belongs to.

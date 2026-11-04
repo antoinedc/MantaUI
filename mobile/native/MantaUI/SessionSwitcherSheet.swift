@@ -9,6 +9,10 @@ import SwiftUI
 
 struct SessionSwitcherSheet: View {
     @ObservedObject var sessionStore: SessionListStore
+    /// Limit the list to this project's sessions, most recent activity first (opened
+    /// from inside one of its chats). nil — or a project the box no longer lists —
+    /// searches every project, most recently opened first.
+    var project: String? = nil
     let onOpen: (SessionSwitcherCandidate) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -18,7 +22,12 @@ struct SessionSwitcherSheet: View {
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     private var results: [SessionSwitcherCandidate] {
-        SessionSwitcher.results(candidates: sessionStore.switcherCandidates, query: query, recents: sessionStore.recents)
+        if let project {
+            let scoped = sessionStore.switcherCandidates(inProject: project)
+            // Already newest-activity first: no recents, so an empty search keeps that order.
+            if !scoped.isEmpty { return SessionSwitcher.results(candidates: scoped, query: query, recents: []) }
+        }
+        return SessionSwitcher.results(candidates: sessionStore.switcherCandidates, query: query, recents: sessionStore.recents)
     }
 
     var body: some View {

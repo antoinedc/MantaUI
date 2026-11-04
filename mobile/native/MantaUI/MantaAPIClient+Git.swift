@@ -76,18 +76,4 @@ extension MantaAPIClient {
         input["body"] = body
         return try await callRequired("forge:thread-reply", args: [input], as: GitThreadReplyResult.self)
     }
-
-    /// `forge:inbox` — the work inbox, rows ready to render.
-    func forgeInbox() async throws -> WorkInboxResult {
-        try await callRequired("forge:inbox", args: [], as: WorkInboxResult.self)
-    }
-
-    /// `delegate:start` — a background job under `sessionID` in `directory`.
-    func delegateStart(prompt: String, sessionID: String, directory: String) async throws -> GitDelegateStartResult {
-        try await callRequired(
-            "delegate:start",
-            args: [["prompt": prompt, "sessionID": sessionID, "directory": directory]],
-            as: GitDelegateStartResult.self
-        )
-    }
 }
