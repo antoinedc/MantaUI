@@ -36,11 +36,17 @@ protocol SessionListMutationAPI {
     func configGet() async throws -> [String: JSONValue]?
     func launchersList() async throws -> [AvailableLauncher]
     func usageStoppedList() async throws -> SessionStoppedList
+    /// Session tree: ask the box to make (or find) the window of a virtual row.
+    func materialize(sessionId: String) async throws -> SessionMaterializeResult
 }
 
 @MainActor
 struct ServerSessionListMutations: SessionListMutationAPI {
     let api: MantaAPIClient
+
+    func materialize(sessionId: String) async throws -> SessionMaterializeResult {
+        try await api.sessionsMaterialize(sessionId: sessionId)
+    }
 
     func renameWindow(session: String, index: Int, newName: String) async throws {
         try await api.renameWindow(session: session, index: index, newName: newName)
@@ -153,8 +159,13 @@ final class SessionListStore: ObservableObject {
     /// Parent opencodeSessionID → count of non-terminal jobs nested under it
     /// (BET-1213). Drives the background-job subtitle via `rowStatus`.
     private var backgroundJobsBySession: [String: Int] = [:]
-    /// Project tmuxSession → child window indices hidden because they're jobs.
-    private var hiddenByProject: [String: Set<Int>] = [:]
+    /// Root opencodeSessionID → its descendants at any depth, from the session tree (stage (b)). Present only for the
+    /// roots of a project the box sent a `tree` for; those rows count from here (and the box's rollup) instead of from
+    /// `backgroundJobsBySession`.
+    private var treeDescendantsBySession: [String: [SessionTreeDescendant]] = [:]
+    /// Session ids whose virtual row is being opened right now (`materialize`) — a second tap does nothing, and the row
+    /// reads as busy.
+    @Published private(set) var materializing: Set<String> = []
     /// A refresh asked for while one was already in flight. The request used to
     /// be DROPPED (`guard !loading else { return }`) and never rescheduled, so
     /// the foreground/reconnect refresh that raced the launch fetch simply
@@ -316,37 +327,59 @@ final class SessionListStore: ObservableObject {
         projects.first(where: { $0.tmuxSession == session })?.windows.first(where: { $0.index == index })
     }
 
-    /// The windows that actually render for a project — its top-level rows with
-    /// background-job child windows filtered out (BET-1213).
+    /// A project's top-level rows, in order (BET-1213, session tree): with the box's `tree` its roots — window rows and
+    /// virtual rows; without one (an older box) its windows with the background-job windows filtered out.
+    func rows(in project: MantaProject) -> [SessionListRow] {
+        SessionTreeRows.rows(for: project)
+    }
+
+    /// The windows that actually render for a project — its window rows (a virtual row has no window).
     func visibleWindows(in project: MantaProject) -> [MantaWindow] {
-        let hidden = hiddenByProject[project.tmuxSession] ?? []
-        return project.windows.filter { !hidden.contains($0.index) }
+        rows(in: project).compactMap(\.asWindow)
     }
 
     /// The projects that actually render: background-job windows removed
-    /// (spec §2), and a project whose only windows were jobs dropped. Search,
+    /// (spec §2), and a project with nothing left to list dropped. Search,
     /// the Recent filter and both orderings all start from this, so a job
-    /// window can never surface through any of them.
+    /// window can never surface through any of them. Each project carries its
+    /// window rows only; `visibleProjectRows` is the same list with the virtual rows.
     var visibleProjects: [MantaProject] {
-        SessionJobWindows.visible(projects, hidden: hiddenByProject)
+        projects.compactMap { project -> MantaProject? in
+            let list = rows(in: project)
+            if list.isEmpty && SessionTreeRows.hadContent(project) { return nil }
+            var copy = project
+            copy.windows = list.compactMap(\.asWindow)
+            return copy
+        }
     }
 
-    /// Re-derive which windows are job windows and the per-parent live-job counts from the project list the box
-    /// sent (`windows[].job`). Called whenever the list changes.
+    /// What the list renders: every visible project with its rows, virtual rows included.
+    var visibleProjectRows: [SessionProjectRows] {
+        projects.compactMap { project -> SessionProjectRows? in
+            let list = rows(in: project)
+            if list.isEmpty && SessionTreeRows.hadContent(project) { return nil }
+            return SessionProjectRows(name: project.tmuxSession, rows: list)
+        }
+    }
+
+    /// Re-derive the per-parent live-job counts from the project list the box sent: `windows[].job` for a project
+    /// without a tree, the tree's roots and their descendants for one with. Called whenever the list changes.
     private func recomputeNesting() {
-        var hidden: [String: Set<Int>] = [:]
         var counts: [String: Int] = [:]
+        var descendants: [String: [SessionTreeDescendant]] = [:]
         for p in projects {
-            hidden[p.tmuxSession] = SessionJobWindows.hiddenIndices(project: p)
             for (index, count) in SessionJobWindows.activeChildCounts(project: p) {
                 if let w = p.windows.first(where: { $0.index == index }),
                    let sid = w.opencodeSessionId, !sid.isEmpty {
                     counts[sid] = count
                 }
             }
+            for (sid, found) in SessionTreeRows.rootDescendants(project: p) {
+                descendants[sid] = found
+            }
         }
-        hiddenByProject = hidden
         backgroundJobsBySession = counts
+        treeDescendantsBySession = descendants
     }
 
     /// How many per-directory session lists are fetched at once (desktop's
@@ -443,7 +476,7 @@ final class SessionListStore: ObservableObject {
         return SessionRowStatus(
             running: running || subagents > 0,
             attention: attention,
-            backgroundJobs: backgroundJobsBySession[sid] ?? 0,
+            backgroundJobs: backgroundJobCount(sessionId: sid, stream: stream),
             modelLabel: sessionMeta[sid]?.modelLabel,
             progressLabel: progressBySession[sid],
             lastActivity: sessionMeta[sid]?.lastActivity,
@@ -451,6 +484,47 @@ final class SessionListStore: ObservableObject {
             runningSubagents: subagents,
             halted: !sid.isEmpty && stoppedConversations.contains(sid)
         )
+    }
+
+    /// The row's live status, whichever kind of row it is.
+    func rowStatus(for row: SessionListRow) -> SessionRowStatus {
+        switch row {
+        case .window(let window): return rowStatus(for: window)
+        case .virtual(let virtual): return virtualRowStatus(virtual)
+        }
+    }
+
+    /// A virtual row's status — a session with no window, read from the same per-session maps by its session id
+    /// (the box sends `windowStatus` for every node with a session, window or virtual).
+    private func virtualRowStatus(_ virtual: SessionVirtualRow) -> SessionRowStatus {
+        let sid = virtual.sessionId
+        let stream = eventStore.sessionStates[sid]
+        let subagents = stream?.windowStatus?.subagents ?? 0
+        let running = (stream?.running == true) || (stream?.windowStatus?.busy == true)
+        let attention = !(stream?.questions?.questions.isEmpty ?? true)
+            || !(stream?.permissions?.permissions.isEmpty ?? true)
+            || stream?.windowStatus?.attention != nil
+        return SessionRowStatus(
+            running: running || subagents > 0,
+            attention: attention,
+            backgroundJobs: backgroundJobCount(sessionId: sid, stream: stream),
+            modelLabel: sessionMeta[sid]?.modelLabel,
+            progressLabel: progressBySession[sid],
+            lastActivity: sessionMeta[sid]?.lastActivity,
+            isTerminal: false,
+            runningSubagents: subagents,
+            halted: stoppedConversations.contains(sid)
+        )
+    }
+
+    /// "N background jobs" for a session. A root of a project the box sent a `tree` for counts its descendants at any
+    /// depth — the box's own rollup when it has reported, else the descendants the tree lists that are live; any other
+    /// window keeps the count derived from `windows[].job` (an older box).
+    private func backgroundJobCount(sessionId sid: String, stream: MantaSessionStreamState?) -> Int {
+        guard let descendants = treeDescendantsBySession[sid] else { return backgroundJobsBySession[sid] ?? 0 }
+        return SessionTreeRows.backgroundCount(descendants: descendants, reported: stream?.windowStatus?.subagents) { id in
+            self.eventStore.sessionStates[id]?.running == true
+        }
     }
 
     /// The instant to order this window by in the Latest-activity list: the
@@ -462,11 +536,52 @@ final class SessionListStore: ObservableObject {
         return SessionActivityOrder.latest(sessionMeta[sid]?.lastActivity, liveActivity[sid])
     }
 
+    /// `lastActivity(for:)` for a row of either kind.
+    func lastActivity(for row: SessionListRow) -> Date? {
+        switch row {
+        case .window(let window): return lastActivity(for: window)
+        case .virtual(let virtual): return SessionActivityOrder.latest(sessionMeta[virtual.sessionId]?.lastActivity, liveActivity[virtual.sessionId])
+        }
+    }
+
     /// How many of a project's visible windows are mid-turn (drives the group
     /// header chip). Hidden background-job windows are excluded — a job is
     /// represented by its parent's count, not by a running row of its own.
     func runningCount(in project: MantaProject) -> Int {
         visibleWindows(in: project).filter { rowStatus(for: $0).running }.count
+    }
+
+    /// The same count over a project's rows as the list shows them (virtual rows included).
+    func runningCount(in project: SessionProjectRows) -> Int {
+        project.rows.filter { rowStatus(for: $0).running }.count
+    }
+
+    // MARK: - Opening a virtual row (session tree, spec §4)
+
+    /// Ask the box to make the window of a virtual row. A second tap on the same row while this runs is `.ignored`.
+    /// On success the list is re-read first when it does not hold the window yet, so the caller can open it exactly
+    /// as it opens a window row; a refusal returns the box's sentence, a failed call the generic one.
+    func materialize(sessionId: String) async -> SessionMaterializeOutcome {
+        guard !sessionId.isEmpty, !materializing.contains(sessionId) else { return .ignored }
+        materializing.insert(sessionId)
+        let generation = boxGeneration
+        defer { if generation == boxGeneration { materializing.remove(sessionId) } }
+        let result: SessionMaterializeResult
+        do {
+            result = try await mutations.materialize(sessionId: sessionId)
+        } catch {
+            guard generation == boxGeneration else { return .ignored }
+            return .message(SessionMaterializeResult.failureMessage)
+        }
+        // The answer belongs to a box we have since left: do nothing with it.
+        guard generation == boxGeneration else { return .ignored }
+        switch result {
+        case .refused(_, let message):
+            return .message(message)
+        case .opened(let project, let windowIndex, let sid):
+            if window(session: project, index: windowIndex) == nil { await refresh() }
+            return .opened(project: project, windowIndex: windowIndex, sessionId: sid)
+        }
     }
 
     // MARK: - Progress (BET-791)
@@ -983,7 +1098,8 @@ final class SessionListStore: ObservableObject {
         sessionMeta = [:]
         progressBySession = [:]
         backgroundJobsBySession = [:]
-        hiddenByProject = [:]
+        treeDescendantsBySession = [:]
+        materializing = []
         pinnedWindows = []
         hapticsEnabled = true
         previouslyRunning = []

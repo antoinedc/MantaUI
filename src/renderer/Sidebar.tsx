@@ -4,15 +4,17 @@ import {
   useEffect,
   useImperativeHandle,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ReactElement } from "react";
-import { CalendarClock, ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause } from "lucide-react";
+import { CalendarClock, ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause, Radar } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
 import { InboxPalette } from "./InboxPalette";
-import type { Project, SessionClosePreview, SessionCloseResult, TmuxWindow } from "../shared/types";
+import type { Project, SessionClosePreview, SessionCloseResult, SessionTreeNode, TmuxWindow } from "../shared/types";
+import { buildRailGroups, virtualRowStatus, type RailGroup } from "./sessionTree";
 import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import {
@@ -42,6 +44,24 @@ import { Pill } from "./Pill";
 import { shouldShowStoppedMarker, unarmedStoppedCount } from "./usageResume";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
+
+const OPEN_SESSION_FAILED = "Couldn't open this session.";
+const OUTSIDE_LABEL = "started outside Manta";
+const OUTSIDE_TITLE = "Driven from outside Manta (a script or another tool)";
+
+// Roving-focus key of a window-less row. The `vrt:` prefix is 4 characters like `win:` / `job:`, so
+// `projectForNavKey` reads its project the same way; the node key (a session id) never contains a colon.
+function virtualNavKey(project: string, node: SessionTreeNode): string {
+  return `vrt:${project}:${node.key}`;
+}
+
+// The roving-focus key of a tree node, or null when it names nothing the rail can show (a window row whose window
+// is not in the project's list).
+function nodeNavKey(p: Project, node: SessionTreeNode, child: boolean): string | null {
+  if (node.kind === "virtual") return virtualNavKey(p.tmuxSession, node);
+  if (node.windowIndex == null || !p.windows.some((w) => w.index === node.windowIndex)) return null;
+  return `${child ? "job" : "win"}:${p.tmuxSession}:${node.windowIndex}`;
+}
 
 // Shared confirm-delete union (BET-414: extracted to kill the jscpd clone that
 // appeared in WindowRow + JobChildRow prop types).
@@ -374,25 +394,22 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     [pinnedRows],
   );
 
-  // Per-project job nesting, as the box decided it (each window carries `job.parentWindowIndex`). Keyed by tmuxSession.
-  const nesting = useMemo(() => {
-    const m = new Map<string, { hidden: Set<number>; children: Map<number, number[]> }>();
+  // Per-project rows, as the box decided them: its session tree when it sent one, else the windows nested by
+  // `job.parentWindowIndex` (an older box). Keyed by tmuxSession. Also the nav-key → window-less node lookup.
+  const rail = useMemo(() => {
+    const groups = new Map<string, RailGroup[]>();
+    const virtualTargets = new Map<string, { project: Project; node: SessionTreeNode }>();
     for (const p of projects) {
-      const hidden = new Set<number>();
-      const children = new Map<number, number[]>();
-      for (const w of p.windows) {
-        const parent = w.job?.parentWindowIndex;
-        if (parent == null) continue;
-        hidden.add(w.index);
-        const arr = children.get(parent) ?? [];
-        arr.push(w.index);
-        children.set(parent, arr);
+      const gs = buildRailGroups(p, (idx) => pinnedIds.has(windowPinId(p.tmuxSession, idx)));
+      groups.set(p.tmuxSession, gs);
+      for (const g of gs) {
+        for (const node of g.root ? [g.root, ...g.kids] : g.kids) {
+          if (node.kind === "virtual") virtualTargets.set(virtualNavKey(p.tmuxSession, node), { project: p, node });
+        }
       }
-      for (const arr of children.values()) arr.sort((x, y) => x - y);
-      m.set(p.tmuxSession, { hidden, children });
     }
-    return m;
-  }, [projects]);
+    return { groups, virtualTargets };
+  }, [projects, pinnedIds]);
 
   // Flat nav-order keys for keyboard tree nav (roving tabindex).
   const navKeys = useMemo(() => {
@@ -401,17 +418,54 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     for (const p of projects) {
       keys.push(`group:${p.tmuxSession}`);
       if (collapsed.has(p.tmuxSession)) continue;
-      const n = nesting.get(p.tmuxSession)!;
-      for (const w of p.windows) {
-        if (pinnedIds.has(windowPinId(p.tmuxSession, w.index))) continue;
-        if (n.hidden.has(w.index)) continue;
-        keys.push(`win:${p.tmuxSession}:${w.index}`);
-        const kids = n.children.get(w.index);
-        if (kids) for (const k of kids) keys.push(`job:${p.tmuxSession}:${k}`);
+      for (const g of rail.groups.get(p.tmuxSession) ?? []) {
+        if (g.root) {
+          const k = nodeNavKey(p, g.root, false);
+          if (k) keys.push(k);
+        }
+        for (const kid of g.kids) {
+          const k = nodeNavKey(p, kid, true);
+          if (k) keys.push(k);
+        }
       }
     }
     return keys;
-  }, [pinnedRows, pinnedIds, projects, collapsed, nesting]);
+  }, [pinnedRows, projects, collapsed, rail]);
+
+  // Opening a window-less row: the box makes (or finds) its window, then we select it. One open per row at a time.
+  const openingRef = useRef(new Set<string>());
+  const [opening, setOpening] = useState<ReadonlySet<string>>(new Set());
+  const openVirtual = async (proj: Project, node: SessionTreeNode) => {
+    const sid = node.sessionId;
+    const id = virtualNavKey(proj.tmuxSession, node);
+    if (!sid || openingRef.current.has(id)) return;
+    openingRef.current.add(id);
+    setOpening(new Set(openingRef.current));
+    try {
+      const res = await window.api.sessionsMaterialize({ sessionId: sid });
+      if (!res) throw new Error(OPEN_SESSION_FAILED);
+      if (res.ok === false) {
+        pushAppToast({ tone: "error", message: res.message });
+        return;
+      }
+      const find = () => {
+        const p = useStore.getState().projects.find((x) => x.tmuxSession === res.project);
+        return p && p.windows.some((w) => w.index === res.windowIndex) ? p : null;
+      };
+      let target = find();
+      if (!target) {
+        await refresh();
+        target = find();
+      }
+      if (!target) throw new Error(OPEN_SESSION_FAILED);
+      await activateWindow(target, res.windowIndex);
+    } catch {
+      pushAppToast({ tone: "error", message: OPEN_SESSION_FAILED });
+    } finally {
+      openingRef.current.delete(id);
+      setOpening(new Set(openingRef.current));
+    }
+  };
 
   // Reset focus if it falls off the list.
   useEffect(() => {
@@ -454,6 +508,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       toggleCollapse(focusedKey.slice("group:".length));
       return;
     }
+    const v = rail.virtualTargets.get(focusedKey);
+    if (v) {
+      void openVirtual(v.project, v.node);
+      return;
+    }
     const r = resolveFocusedWindow();
     if (r) void activateWindow(r.project, r.window.index);
   };
@@ -466,7 +525,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   // row would set `renameTarget` to that window's index with nothing on
   // screen listening for it (BET-726 review cycle 1 nit).
   const renameFocused = () => {
-    if (!focusedKey || focusedKey.startsWith("job:")) return;
+    if (!focusedKey || focusedKey.startsWith("job:") || focusedKey.startsWith("vrt:")) return;
     if (focusedKey.startsWith("group:")) {
       const session = focusedKey.slice("group:".length);
       startRename({ kind: "project", old: session }, session);
@@ -489,6 +548,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (!focusedKey) return;
     if (focusedKey.startsWith("group:")) {
       setConfirmDeleteFor({ kind: "project", project: focusedKey.slice("group:".length) });
+      return;
+    }
+    if (rail.virtualTargets.has(focusedKey)) {
+      showNotice("This session isn't open in a window, so there is nothing to close. Open it first.");
       return;
     }
     const r = resolveFocusedWindow();
@@ -639,6 +702,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         own?.running || own?.progressLabel?.trim() ? own?.progressLabel : rollup.busy ? "background work" : own?.progressLabel,
     };
   };
+
+  // A window-less row is halted when the box's rollup or its stopped-conversation record says a provider limit stopped it.
+  const isVirtualHalted = (node: SessionTreeNode): boolean =>
+    !!node.sessionId && (stoppedConversations.has(node.sessionId) || windowStatusBySession[node.sessionId]?.stopped === true);
 
   // Title tooltip for a window row: rename hint + job activity (the activity
   // formerly rendered as a second line now lives here, per BET-414 one-line rule).
@@ -870,12 +937,106 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           const projectDrafts = drafts.filter(
             (d) => d.mode !== "new-project" && d.mode.projectName === p.tmuxSession,
           );
-          const n = nesting.get(p.tmuxSession)!;
-          const topWindows = p.windows.filter(
-            (w) =>
-              !pinnedIds.has(windowPinId(p.tmuxSession, w.index)) &&
-              !n.hidden.has(w.index),
-          );
+          const railGroups = rail.groups.get(p.tmuxSession) ?? [];
+          // One indented row for a node: a window row (as before), or a window-less row the user opens on click.
+          const renderKid = (node: SessionTreeNode, lastChild: boolean) => {
+            if (node.kind === "virtual") {
+              const navKey = virtualNavKey(p.tmuxSession, node);
+              return (
+                <VirtualRow
+                  key={navKey}
+                  node={node}
+                  child
+                  lastChild={lastChild}
+                  status={virtualRowStatus(node.sessionId ? windowStatusBySession[node.sessionId] : undefined)}
+                  halted={isVirtualHalted(node)}
+                  opening={opening.has(navKey)}
+                  focused={focusedKey === navKey}
+                  onOpen={() => void openVirtual(p, node)}
+                />
+              );
+            }
+            const childWin = node.windowIndex == null ? undefined : p.windows.find((x) => x.index === node.windowIndex);
+            if (!childWin) return null;
+            const childIdx = childWin.index;
+            return (
+              <JobChildRow
+                key={`job:${p.tmuxSession}:${childIdx}`}
+                window={childWin}
+                isActive={rowsSelectable && isProjectActive && activeWinIdx === childIdx}
+                status={statusFor(p.tmuxSession, childIdx)}
+                focused={focusedKey === `job:${p.tmuxSession}:${childIdx}`}
+                lastChild={lastChild}
+                onActivate={() => activateWindow(p, childIdx)}
+                onClose={() =>
+                  setConfirmDeleteFor({
+                    kind: "session",
+                    project: p.tmuxSession,
+                    index: childIdx,
+                    name: childWin.name,
+                  })
+                }
+                title={rowTitle(childWin)}
+              />
+            );
+          };
+          const renderRoot = (node: SessionTreeNode) => {
+            if (node.kind === "virtual") {
+              const navKey = virtualNavKey(p.tmuxSession, node);
+              return (
+                <VirtualRow
+                  node={node}
+                  child={false}
+                  lastChild={false}
+                  status={virtualRowStatus(node.sessionId ? windowStatusBySession[node.sessionId] : undefined)}
+                  halted={isVirtualHalted(node)}
+                  opening={opening.has(navKey)}
+                  focused={focusedKey === navKey}
+                  onOpen={() => void openVirtual(p, node)}
+                />
+              );
+            }
+            const w = node.windowIndex == null ? undefined : p.windows.find((x) => x.index === node.windowIndex);
+            if (!w) return null;
+            return (
+              <WindowRow
+                project={p}
+                window={w}
+                isActive={rowsSelectable && isProjectActive && activeWinIdx === w.index}
+                status={statusFor(p.tmuxSession, w.index)}
+                pinned={pinnedIds.has(windowPinId(p.tmuxSession, w.index))}
+                halted={w.opencodeSessionId ? stoppedConversations.has(w.opencodeSessionId) : false}
+                focused={focusedKey === `win:${p.tmuxSession}:${w.index}`}
+                onActivate={() => activateWindow(p, w.index)}
+                onTogglePin={() => void togglePin(windowPinId(p.tmuxSession, w.index))}
+                onClose={() =>
+                  setConfirmDeleteFor({
+                    kind: "session",
+                    project: p.tmuxSession,
+                    index: w.index,
+                    name: w.name,
+                  })
+                }
+                onRename={() =>
+                  startRename(
+                    {
+                      kind: "window",
+                      project: p.tmuxSession,
+                      index: w.index,
+                      old: w.name,
+                    },
+                    w.name,
+                  )
+                }
+                renameTarget={renameTarget}
+                renameValue={renameValue}
+                setRenameValue={setRenameValue}
+                commitRename={commitRename}
+                cancelRename={() => setRenameTarget(null)}
+                title={rowTitle(w)}
+              />
+            );
+          };
           return (
             <div key={p.tmuxSession} className="mb-4">
               <GroupHeader
@@ -897,75 +1058,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
               {!isCollapsed && (
                 <div className="pl-2 space-y-px mt-px">
-                  {topWindows.map((w) => {
-                    const isActive = rowsSelectable && isProjectActive && activeWinIdx === w.index;
-                    const kids = n.children.get(w.index) ?? [];
-                    return (
-                      <div key={w.index}>
-                        <WindowRow
-                          project={p}
-                          window={w}
-                          isActive={isActive}
-                          status={statusFor(p.tmuxSession, w.index)}
-                          pinned={pinnedIds.has(windowPinId(p.tmuxSession, w.index))}
-                          halted={w.opencodeSessionId ? stoppedConversations.has(w.opencodeSessionId) : false}
-                          focused={focusedKey === `win:${p.tmuxSession}:${w.index}`}
-                          onActivate={() => activateWindow(p, w.index)}
-                          onTogglePin={() => void togglePin(windowPinId(p.tmuxSession, w.index))}
-                          onClose={() =>
-                            setConfirmDeleteFor({
-                              kind: "session",
-                              project: p.tmuxSession,
-                              index: w.index,
-                              name: w.name,
-                            })
-                          }
-                          onRename={() =>
-                            startRename(
-                              {
-                                kind: "window",
-                                project: p.tmuxSession,
-                                index: w.index,
-                                old: w.name,
-                              },
-                              w.name,
-                            )
-                          }
-                          renameTarget={renameTarget}
-                          renameValue={renameValue}
-                          setRenameValue={setRenameValue}
-                          commitRename={commitRename}
-                          cancelRename={() => setRenameTarget(null)}
-                          title={rowTitle(w)}
-                        />
-                        {kids.map((childIdx, i) => {
-                          const childWin = p.windows.find((x) => x.index === childIdx);
-                          if (!childWin) return null;
-                          const childActive = rowsSelectable && isProjectActive && activeWinIdx === childIdx;
-                          return (
-                            <JobChildRow
-                              key={`job:${p.tmuxSession}:${childIdx}`}
-                              window={childWin}
-                              isActive={childActive}
-                              status={statusFor(p.tmuxSession, childIdx)}
-                              focused={focusedKey === `job:${p.tmuxSession}:${childIdx}`}
-                              lastChild={i === kids.length - 1}
-                              onActivate={() => activateWindow(p, childIdx)}
-                              onClose={() =>
-                                setConfirmDeleteFor({
-                                  kind: "session",
-                                  project: p.tmuxSession,
-                                  index: childIdx,
-                                  name: childWin.name,
-                                })
-                              }
-                              title={rowTitle(childWin)}
-                            />
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
+                  {railGroups.map((g) => (
+                    <div key={g.key}>
+                      {g.root ? renderRoot(g.root) : null}
+                      {g.kids.map((kid, i) => renderKid(kid, i === g.kids.length - 1))}
+                    </div>
+                  ))}
 
                   {projectDrafts.length > 0 ? (
                     projectDrafts.map((d) => (
@@ -1396,6 +1494,64 @@ function JobChildRow({
       }
       onRequestDelete={onClose}
     />
+  );
+}
+
+// A shown session with no tmux window (a running subagent, a job child, a driven-from-outside root). It has no
+// window to close, rename or pin: the one action is opening it, which makes its window on the box and selects it.
+// Same four slots as a window row; the dot comes from the box's per-session rollup.
+function VirtualRow({
+  node,
+  child,
+  lastChild,
+  status,
+  halted,
+  opening,
+  focused,
+  onOpen,
+}: {
+  node: SessionTreeNode;
+  child: boolean;
+  lastChild: boolean;
+  status: WindowStatusUI | undefined;
+  halted: boolean;
+  /** The box is making this row's window — a second click is ignored until it answers. */
+  opening: boolean;
+  focused: boolean;
+  onOpen: () => void;
+}) {
+  const dot = dotFor(status);
+  const showHalted = shouldShowStoppedMarker(halted, dot.variant === "att");
+  return (
+    <div aria-busy={opening || undefined} className={opening ? "opacity-60" : undefined}>
+      <RailSessionRow
+        status={showHalted ? "halted" : dot.variant}
+        statusTitle={showHalted ? "Stopped by a provider limit" : dot.title}
+        child={child}
+        lastChild={lastChild}
+        name={node.title.trim() || "Untitled session"}
+        marquee
+        trailing={
+          node.outside ? (
+            <span
+              className="shrink-0 inline-flex items-center text-text-quiet"
+              title={OUTSIDE_TITLE}
+              aria-label={OUTSIDE_LABEL}
+              role="img"
+              data-testid="session-outside-mark"
+            >
+              <Radar size={12} aria-hidden="true" />
+            </span>
+          ) : undefined
+        }
+        title={opening ? "Opening…" : `Not open in a window — click to open${node.outside ? ` · ${OUTSIDE_TITLE}` : ""}`}
+        ariaLevel={child ? 2 : undefined}
+        ariaDisabled={opening}
+        tabIndex={focused ? 0 : -1}
+        ariaSelected={false}
+        onClick={opening ? undefined : onOpen}
+      />
+    </div>
   );
 }
 

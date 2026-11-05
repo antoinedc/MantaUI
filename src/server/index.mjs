@@ -1414,6 +1414,13 @@ const sessionStatus = createSessionStatus({
   loadStopped: async () => new Set(((await listStopped()).records ?? []).map((r) => r.conversation)),
   listActiveSessionIds: () => oc.listActiveSessionIds(),
   getSessionParent: (id) => oc.getSessionParent(id),
+  readSession: (sid) => oc.readSession(sid),
+  listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
+  isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
+  pendingAskSessionIds: () => streamInterp.knownSessionIds().filter((sid) => {
+    const state = streamInterp.getState(sid);
+    return state?.questions?.length > 0 || state?.permissions?.length > 0;
+  }),
   runningSince: (id) => streamInterp.getState(id)?.runningSince ?? null,
   // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
   onJobsChanged: () => syncState.refreshNow(),
@@ -1427,6 +1434,7 @@ const sessionStatus = createSessionStatus({
   isInternalSession: (sid) => isInternalSession(sid),
 });
 sessionStatusRef.current = sessionStatus;
+push.setSessionProjectsReader(() => syncState.snapshot().projects ?? []);
 bus.subscribe((evt) => sessionStatus.observe(evt));
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one

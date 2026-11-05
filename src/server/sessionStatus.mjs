@@ -16,8 +16,19 @@
 // handoff chain is one node); edges are (1) a Manta-owned job record's parent, (2) opencode's own `parentID`, (4) a
 // cached transcript-inferred driver for a root nobody opened. A window's root is its nearest windowed ancestor's root,
 // walking through windowless sessions, so a subagent's window coming and going never moves the rows below it.
+//
+// The session tree (stage (b), same spec §2/§3/§10): `Project.tree` is the rows the sidebar renders — every window
+// exactly once, plus VIRTUAL rows for shown sessions that have no window (a running subagent, a job child, an idle
+// ancestor that still holds shown descendants). Which sessions are shown, which project's tree they sit in and in
+// which order is decided here and nowhere else; `windowStatus` frames cover every shown node with a session.
+// Reads (a session's parent / title / directory, the inline-`task` classification) happen in background passes
+// that call `recompute()`; `annotateProjects` itself stays synchronous.
 
 import { completionOwnerOf, DRIVER_WINDOW_MS } from "./delegate.mjs";
+import { isMarkedInternal } from "./internalSessionMarker.mjs";
+
+/** A windowless session that just ended its turn stays a row this long (spec §2). */
+export const LINGER_MS = 30_000;
 
 // ----------------------------------------------------------------------------------------------------------------
 // Pure: nesting (moved verbatim from the desktop's computeJobNesting)
@@ -99,7 +110,7 @@ export function annotateJobs(projects, jobs) {
  * @param {Iterable<string>} running  session ids currently running a turn (incl. windowless ones)
  * @param {Record<string,string>} parents  child session id → parent session id
  * @param {Record<string,object>|object[]} jobs  background-job records; a `running` job counts as work in its child
- *   session AND (via displayParentID ?? parentSessionID) its parent
+ *   session AND (when the edges do not already name one) its `parentSessionID`. `displayParentID` is not read.
  */
 export function sessionsWithActiveWork(running, parents, jobs) {
   const links = new Map(Object.entries(parents ?? {}));
@@ -108,11 +119,7 @@ export function sessionsWithActiveWork(running, parents, jobs) {
     if (job.status !== "running" || job.supersededBy) continue;
     if (job.childSessionID) {
       seeds.push(job.childSessionID);
-      if (job.displayParentID) {
-        links.set(job.childSessionID, job.displayParentID);
-      } else if (job.parentSessionID && !links.has(job.childSessionID)) {
-        links.set(job.childSessionID, job.parentSessionID);
-      }
+      if (job.parentSessionID && !links.has(job.childSessionID)) links.set(job.childSessionID, job.parentSessionID);
     } else if (job.parentSessionID) {
       seeds.push(job.parentSessionID);
     }
@@ -129,23 +136,38 @@ export function sessionsWithActiveWork(running, parents, jobs) {
 }
 
 /**
- * One session's `windowStatus` payload from the three maps. Pure.
- * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs: object[], own: Map<string,{since?: number|null, attention?: string|null}>,
- *           stopped: Set<string>, activeWork?: Set<string>, childCounts?: Map<string, number> }} m  `activeWork` / `childCounts` may be passed to avoid recomputing them per session
+ * Descendants at ANY depth (by the parent edges, shown or collapsed) that are running or wait on a question /
+ * permission, counted per ancestor: a job started by a collapsed subagent counts toward the root it is shown under.
+ * A descendant counts once per ancestor; a cycle ends the walk. `displayParentID` is not read.
+ * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs?: object[], own?: Map<string,{attention?: string|null}>, pendingAsk?: Iterable<string> }} m
  */
 export function runningChildCounts(m) {
-  // DIRECT children (by the parent edges, and by delegate records' display parent) whose OWN session is running.
   const links = new Map(m.parentOf);
   for (const job of m.jobs ?? []) {
-    if (!job.childSessionID || job.supersededBy) continue;
-    const via = job.displayParentID ?? job.parentSessionID;
-    if (via) links.set(job.childSessionID, via);
+    if (!job.childSessionID || job.supersededBy || !job.parentSessionID || job.parentSessionID === job.childSessionID) continue;
+    if (!links.has(job.childSessionID) || completionOwnerOf(job) === "manta") links.set(job.childSessionID, job.parentSessionID);
   }
+  const active = new Set(m.running);
+  for (const [sid, st] of m.own ?? []) if (st?.attention === "question" || st?.attention === "permission") active.add(sid);
+  for (const sid of m.pendingAsk ?? []) active.add(sid);
   const counts = new Map();
-  for (const [child, parent] of links) if (m.running.has(child)) counts.set(parent, (counts.get(parent) ?? 0) + 1);
+  for (const a of active) {
+    const seen = new Set([a]);
+    let cur = links.get(a);
+    while (cur && !seen.has(cur)) {
+      counts.set(cur, (counts.get(cur) ?? 0) + 1);
+      seen.add(cur);
+      cur = links.get(cur);
+    }
+  }
   return counts;
 }
 
+/**
+ * One session's `windowStatus` payload from the maps. Pure.
+ * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs: object[], own: Map<string,{since?: number|null, attention?: string|null}>,
+ *           stopped: Set<string>, pendingAsk?: Iterable<string>, activeWork?: Set<string>, childCounts?: Map<string, number> }} m  `activeWork` / `childCounts` may be passed to avoid recomputing them per session
+ */
 export function deriveWindowStatus(m, sessionId) {
   const activeWork = m.activeWork ?? sessionsWithActiveWork(m.running, Object.fromEntries(m.parentOf), m.jobs);
   const subagents = (m.childCounts ?? runningChildCounts(m)).get(sessionId) ?? 0;
@@ -165,8 +187,58 @@ const nestingSignature = (projects) =>
     .map((p) => `${p.tmuxSession}:${(p.windows ?? []).filter((w) => w.job).map((w) => `${w.index}=${w.job.id}/${w.job.status}/${w.job.parentWindowIndex ?? "-"}`).join(",")}`)
     .join("|");
 
+/** What a client renders: the old nesting AND the tree (structure, titles, job status). A change re-reads the list. */
+const treeSignature = (projects) => `${nestingSignature(projects)}§${JSON.stringify((projects ?? []).map((p) => p.tree ?? null))}`;
+
 const jobsSignature = (list) =>
-  (list ?? []).map((j) => `${j.id}:${j.status}:${j.childSessionID ?? ""}:${j.supersededBy ?? ""}:${j.displayParentID ?? ""}`).sort().join("|");
+  (list ?? [])
+    .map((j) => `${j.id}:${j.status}:${j.childSessionID ?? ""}:${j.parentSessionID ?? ""}:${j.supersededBy ?? ""}:${j.tmuxSession ?? ""}:${j.origin ?? ""}:${j.completionDelivery ?? ""}:${j.launchState ?? ""}`)
+    .sort()
+    .join("|");
+
+const trimSlashes = (p) => (typeof p === "string" && p.length > 1 ? p.replace(/\/+$/, "") : p);
+
+/**
+ * The tmux project that owns a directory: an exact match on a project's cwd or a window's path wins; otherwise the most
+ * specific project path that contains the directory; last, a window inside it. "/" owns nothing. (The same direction
+ * delegate.mjs's `ownerByDirectory` matches; kept here so the tree needs nothing from delegate's internals.)
+ */
+export function ownerByDirectory(projects, directory) {
+  const dir = trimSlashes(directory);
+  if (typeof dir !== "string" || !dir.startsWith("/")) return null;
+  let best = null;
+  for (const p of Array.isArray(projects) ? projects : []) {
+    const paths = [p.defaultCwd, ...(p.windows || []).map((w) => w?.paneCurrentPath)].map(trimSlashes);
+    for (const pp of paths) {
+      if (typeof pp !== "string" || !pp.startsWith("/") || pp === "/") continue;
+      let score = 0;
+      if (pp === dir) score = 1_000_000 + pp.length;
+      else if (dir.startsWith(pp + "/")) score = pp.length;
+      else if (pp.startsWith(dir + "/")) score = 1;
+      if (score > 0 && (!best || score > best.score)) best = { score, tmuxSession: p.tmuxSession };
+    }
+  }
+  return best ? best.tmuxSession : null;
+}
+
+/**
+ * How a parent's assistant timeline records its `task` children: childId → "fg" (an inline foreground child: part of
+ * the parent's turn, never a row) | "bg" (a background subagent). The FIRST block naming a child wins, exactly the
+ * reconciler's rule (delegate.mjs `toolBlockFor` + the `background` test in `consider`).
+ */
+export function taskBlocksOf(assistantRecords) {
+  const out = new Map();
+  for (const rec of Array.isArray(assistantRecords) ? assistantRecords : []) {
+    for (const block of Array.isArray(rec?.content) ? rec.content : []) {
+      if (block?.type !== "tool") continue;
+      const md = block.state?.metadata;
+      const id = md?.sessionID ?? md?.sessionId;
+      if (typeof id !== "string" || !id || out.has(id)) continue;
+      out.set(id, block.state?.input?.background === true || md?.background === true ? "bg" : "fg");
+    }
+  }
+  return out;
+}
 
 export const DEFAULT_STATUS = Object.freeze({ running: false, busy: false, startedAt: null, attention: null, subagents: 0, stopped: false });
 const MAX_EDGES = 5000;
@@ -175,6 +247,12 @@ const RETRY_MS = [1000, 2000, 5000, 10000];
 const INFER_MIN_INTERVAL_MS = 60_000; // per root, between transcript lookups
 const UNKNOWN_READ_MIN_INTERVAL_MS = 5_000; // per session, between background parent reads
 const MAX_INFER_STATE = 2000;
+const MAX_TREE_STATE = 5000;
+const MAX_GATES_PER_PASS = 40; // background reads per pass; the rest wait for the next recompute
+const GATE_RETRY_MS = [1000, 2000, 5000, 10000];
+const NO_BLOCK_READS = 3; // reads of the parent's timeline that must all miss before a child is judged "not an inline task child"
+const TIMELINE_CACHE_MS = 1500;
+const INFO_REFRESH_MIN_MS = 10_000;
 const CYCLE = Symbol("cycle");
 
 const isTerminalStatus = (j) => j?.status === "done" || j?.status === "failed" || j?.status === "stopped";
@@ -193,6 +271,16 @@ const boundMap = (m, cap) => {
  * @param {() => Promise<string[]>} d.listActiveSessionIds  oc.listActiveSessionIds
  * @param {(id: string) => number|null|undefined} [d.runningSince]  the interpreter's start time of a running turn
  * @param {(id: string) => Promise<{status:"ok", parentID:string|null}|{status:"not-found"}|{status:"error"}>} d.getSessionParent
+ * @param {(id: string) => Promise<{state:"found", session: object}|{state:"missing"}|{state:"unknown"}>} [d.readSession]
+ *   one session record (parentID, title, directory, metadata). When given it REPLACES getSessionParent for every read, and
+ *   the title / directory / internal marker are cached with the parent edge (the tree needs them for virtual rows)
+ * @param {(id: string, opts: {type: string}) => Promise<object[]>} [d.listRawTimeline]  a session's raw timeline (the inline-`task`
+ *   classification reads the PARENT's assistant records; absent → every parented windowless session is treated as inline)
+ * @param {(sid: string) => boolean} [d.isHandoffSuccessor]  an uncommitted handoff successor is never a row
+ * @param {(sid: string) => ({parent: string|null}|undefined)} [d.linkOf]  rule 3: the explicit link entry of a session
+ *   (`undefined` = none; `{parent: null}` = a suppression: no explicit edge AND no inference for that child)
+ * @param {() => Iterable<string>} [d.linkEndpoints]  every session a link names (hydration candidates)
+ * @param {() => Iterable<string>} [d.pendingAskSessionIds]  sessions with a pending question / permission right now
  * @param {() => unknown} [d.onJobsChanged]  a job record changed (the session list's `job` fields must be re-read)
  * @param {(fn: () => void) => void} [d.schedule]  coalescing tick (default: setTimeout 0)
  * @param {(fn: () => void, ms: number) => unknown} [d.setTimer]  hydration retry timer
@@ -220,6 +308,24 @@ export function createSessionStatus(d) {
   const inferLookedUpAt = new Map(); // conv key -> when its last transcript lookup started
   const unknownReadAt = new Map(); // session id -> when a background parent read last started
   let placement = new Map(); // `${project}\0${sid}` -> last confidently projected parentWindowIndex
+  // ---- the tree's own state (all keyed by session id or conversation key; bounded) ----
+  const info = new Map(); // sid -> { title, directory, internal } from the one session read per candidate
+  const special = new Map(); // sid -> boolean: the CTO conversation or a provenance-internal session (decided once)
+  const inlineState = new Map(); // sid -> { state: "inline"|"no"|"unsure", reads }: is it an inline foreground `task` child?
+  const gateAt = new Map(); // sid -> when its last background gate evaluation started
+  const gateAttempts = new Map(); // sid -> consecutive evaluations that could not conclude
+  const timelineCache = new Map(); // parent sid -> { at, blocks } (the parent's `task` blocks)
+  const infoRefreshAt = new Map(); // sid -> when a refresh read last started
+  const lingerUntil = new Map(); // sid -> epoch ms until which an ended session stays a row
+  const lingerTimers = new Set(); // sids with a pending linger timer
+  const seqOfKey = new Map(); // conversation / window key -> process-monotonic order
+  const winSeq = new Map(); // `${project}\0${index}\0${sid}` -> order the window was first seen (root project choice)
+  let seqCounter = 0;
+  const rootProject = new Map(); // conversation key -> the project its root row was decided to sit in (retained)
+  let treeParents = new Map(); // `${project}\0${key}` -> last confidently placed parent key (or null)
+  let lastLayout = null; // the last tree layout (placementOf reads it)
+  let gateRunning = false;
+  let gateRetryPending = false;
   let lastProjects = null; // the last session list handed to annotateProjects (un-annotated)
   let hydratedOnce = false;
   let recomputePending = false;
@@ -235,6 +341,7 @@ export function createSessionStatus(d) {
   let hydrating = null;
   // Running edges seen on live frames WHILE a hydration read is in flight: the (older) read must not wipe them.
   let liveDuringHydration = null;
+  let learning = null; // the sessions this hydration has (re)read so far
   let nestingSig = null;
   let nestingPending = false;
   let pendingJobs = Promise.resolve();
@@ -277,17 +384,71 @@ export function createSessionStatus(d) {
     });
   }
 
-  function currentMaps() {
-    return { running, parentOf, jobs, own, stopped };
+  /** A list holding just the windowed sessions, for a pass before the first session list has arrived. */
+  function syntheticProjects() {
+    const windows = [...d.windowedSessionIds()].map((sid, index) => ({ index, name: "", opencodeSessionId: sid, paneCurrentPath: "" }));
+    return [{ tmuxSession: "", windows }];
   }
 
+  /**
+   * The payload of every shown node that has a session (window rows AND virtual rows, spec §3), keyed by the node's
+   * canonical session AND by every window stamped with any member of its conversation. Computed over the graph:
+   * `busy` = own turn, or anything running beneath it at any depth (shown or collapsed), or a running job below;
+   * `subagents` = running descendants at any depth plus those waiting on a question / permission.
+   */
   function allPayloads() {
-    const maps = currentMaps();
-    const activeWork = sessionsWithActiveWork(running, Object.fromEntries(parentOf), jobs);
-    // Once per flush, not once per windowed session (O(windows × edges) otherwise).
-    const childCounts = runningChildCounts(maps);
+    const { statusGraph: graph, layout } = computeAnnotated(lastProjects ?? syntheticProjects());
+    const targets = new Map(layout.statusNodes);
+    for (const sid of d.windowedSessionIds()) {
+      const n = graph.canon(sid);
+      const aliases = targets.get(n) ?? [n];
+      if (!aliases.includes(sid)) aliases.push(sid);
+      targets.set(n, aliases);
+    }
+    const runningNodes = new Set();
+    for (const sid of running) runningNodes.add(graph.canon(sid));
+    const askNodes = new Set();
+    const ownNodes = new Map();
+    for (const [sid, st] of own) {
+      const n = graph.canon(sid);
+      const e = ownNodes.get(n) ?? { since: null, attention: null };
+      if (st.attention && !e.attention) e.attention = st.attention;
+      if (running.has(sid) && st.since != null) e.since = st.since;
+      ownNodes.set(n, e);
+    }
+    for (const sid of pendingAskIds()) askNodes.add(graph.canon(sid));
+    const stoppedNodes = new Set();
+    for (const sid of stopped) stoppedNodes.add(graph.canon(sid));
+    // Running jobs, on nodes: a running job is work in its child AND (when the edges name no parent) its caller.
+    const jobsCanon = [];
+    const seeds = new Set([...runningNodes, ...askNodes]);
+    for (const j of jobs) {
+      if (j?.status !== "running" || j.supersededBy) continue;
+      const child = j.childSessionID ? graph.canon(j.childSessionID) : undefined;
+      const parent = j.parentSessionID ? graph.canon(j.parentSessionID) : undefined;
+      jobsCanon.push({ status: "running", childSessionID: child, parentSessionID: parent });
+      if (child) seeds.add(child);
+      else if (parent) seeds.add(parent);
+    }
+    // The edges above every seed (rules 1–4 on conversation nodes); nothing else is needed to roll status up.
+    const nodeParent = new Map();
+    for (const seed of seeds) {
+      let cur = seed;
+      for (let depth = 0; depth < MAX_DEPTH && cur && !nodeParent.has(cur); depth++) {
+        const p = graph.edgeParent(cur);
+        if (!p) break;
+        nodeParent.set(cur, p);
+        cur = p;
+      }
+    }
+    const m = { running: runningNodes, parentOf: nodeParent, jobs: [], own: ownNodes, stopped: stoppedNodes, pendingAsk: askNodes };
+    m.activeWork = sessionsWithActiveWork(runningNodes, Object.fromEntries(nodeParent), jobsCanon);
+    m.childCounts = runningChildCounts(m);
     const out = new Map();
-    for (const sid of d.windowedSessionIds()) out.set(sid, deriveWindowStatus({ ...maps, activeWork, childCounts }, sid));
+    for (const [node, aliases] of targets) {
+      const payload = deriveWindowStatus(m, node);
+      for (const sid of new Set([node, ...aliases])) out.set(sid, payload);
+    }
     return out;
   }
 
@@ -331,14 +492,25 @@ export function createSessionStatus(d) {
     const adopted = new Set(); // ... whose completion owner is opencode (observed / subagent)
     const ruleOne = new Map(); // child -> parent for Manta-owned records (the caller)
     const liveChildren = new Set();
+    const jobByChild = new Map(); // child -> the record shown on its row (last non-superseded one, as annotateJobs does)
     for (const j of jobs) {
       if (!j?.childSessionID || j.supersededBy) continue;
       annotated.add(j.childSessionID);
+      jobByChild.set(j.childSessionID, j);
       if (isLiveJob(j)) liveChildren.add(j.childSessionID);
       if (completionOwnerOf(j) === "opencode") adopted.add(j.childSessionID);
       else if (j.parentSessionID && j.parentSessionID !== j.childSessionID) ruleOne.set(j.childSessionID, j.parentSessionID);
     }
-    return { annotated, adopted, ruleOne, liveChildren };
+    return { annotated, adopted, ruleOne, liveChildren, jobByChild };
+  }
+
+  /** The explicit link entry of a session, defended against a throwing store. */
+  function linkEntry(sid) {
+    try {
+      return d.linkOf?.(sid);
+    } catch {
+      return undefined;
+    }
   }
 
   function buildGraph(projects) {
@@ -387,9 +559,9 @@ export function createSessionStatus(d) {
           canon = next;
         }
       }
-      const info = { members, oldest, canon };
-      for (const m of members) chains.set(m, info);
-      return info;
+      const entry = { members, oldest, canon };
+      for (const m of members) chains.set(m, entry);
+      return entry;
     };
     const canon = (sid) => chainInfo(sid).canon;
     const keyOf = (sid) => chainInfo(sid).oldest;
@@ -400,7 +572,16 @@ export function createSessionStatus(d) {
       windowsByNode.set(node, [...(windowsByNode.get(node) ?? []), ...list]);
     }
 
-    /** child node -> parent node: rule 1 (Manta-owned record), rule 2 (opencode's parentID), rule 4 (cached inference). */
+    /** A `session_unlink` suppression on any member (and no explicit link winning): no inference for this child. */
+    function isSuppressed(node) {
+      const { members } = chainInfo(node);
+      return members.some((m) => linkEntry(m)?.parent === null);
+    }
+
+    /**
+     * child node -> parent node: rule 1 (Manta-owned record), rule 2 (opencode's parentID), rule 3 (explicit link; a
+     * suppression entry ends the walk here: it is not an edge AND it disables rule 4), rule 4 (cached inference).
+     */
     function edgeParent(node) {
       const { members, oldest } = chainInfo(node);
       for (const m of members) {
@@ -411,6 +592,11 @@ export function createSessionStatus(d) {
         const p = parentOf.get(m);
         if (p && canon(p) !== node) return canon(p);
       }
+      for (const m of members) {
+        const p = linkEntry(m)?.parent;
+        if (typeof p === "string" && p && canon(p) !== node) return canon(p);
+      }
+      if (isSuppressed(node)) return null;
       const inf = inferred.get(oldest);
       if (inf && canon(inf) !== node) return canon(inf);
       return null;
@@ -466,19 +652,406 @@ export function createSessionStatus(d) {
       return { value: r === CYCLE || r === w.index ? null : r, certain, unknown };
     }
 
-    return { rec, windowsBySid, windowsByNode, canon, keyOf, chainInfo, edgeParent, walkUp, projectWindow };
+    return { rec, windowsBySid, windowsByNode, canon, keyOf, chainInfo, edgeParent, isSuppressed, walkUp, projectWindow, byIndex };
   }
 
-  /** The session list with each job window's `parentWindowIndex` taken from the graph (today's output until hydrated). */
+  // ---- the tree (spec §2, §3, §10) ----------------------------------------------------------------------------
+  //
+  // Pure over (projects, graph, held state). The only side effects are idempotent memo writes: a conversation's
+  // order `seq`, a root row's retained project. Whatever a pass cannot decide without a read is returned in `need`.
+
+  const winSeqOf = (project, w) => {
+    const k = `${project}\0${w.index}\0${w.sid}`;
+    let s = winSeq.get(k);
+    if (s === undefined) {
+      s = ++seqCounter;
+      winSeq.set(k, s);
+      boundMap(winSeq, MAX_TREE_STATE);
+    }
+    return s;
+  };
+  const seqOf = (key) => {
+    let s = seqOfKey.get(key);
+    if (s === undefined) {
+      s = ++seqCounter;
+      seqOfKey.set(key, s);
+      boundMap(seqOfKey, MAX_TREE_STATE);
+    }
+    return s;
+  };
+
+  /** Sessions with a pending question / permission: the interpreter's latch plus the injected live set. */
+  function pendingAskIds() {
+    const out = new Set();
+    for (const [sid, st] of own) if (st.attention === "question" || st.attention === "permission") out.add(sid);
+    try {
+      for (const sid of d.pendingAskSessionIds?.() ?? []) out.add(sid);
+    } catch {
+      /* the latch alone */
+    }
+    return out;
+  }
+
+  /**
+   * Is a WINDOWLESS node eligible to be a row? "ok" | "excluded" | "unknown". Exclusions (spec §2): marked internal, the CTO
+   * conversation, a provenance-internal session, an uncommitted handoff successor, an inline foreground `task` child. A
+   * child of a live job record is exempt (the record is the row). `need` collects the sessions a background read would resolve.
+   */
+  function gateOf(node, graph, need) {
+    const { members } = graph.chainInfo(node);
+    for (const m of members) {
+      try {
+        if (d.isHandoffSuccessor?.(m)) return "excluded";
+      } catch {
+        return "excluded";
+      }
+    }
+    const inf = info.get(node);
+    // A record can place an unread job child, but cannot override a known exclusion.
+    const liveJob = members.some((m) => graph.rec.liveChildren.has(m));
+    if (!inf) {
+      need.add(node);
+      return liveJob ? "ok" : "unknown";
+    }
+    if (inf.internal) return "excluded";
+    if (d.isCtoConversationSession || d.isInternalSession) {
+      const s = special.get(node);
+      if (s === undefined) {
+        need.add(node);
+        return "unknown";
+      }
+      if (s) return "excluded";
+    }
+    if (liveJob) return "ok";
+    if (parentOf.get(node)) {
+      const st = inlineState.get(node)?.state;
+      if (st === "inline") return "excluded";
+      if (st !== "no") {
+        need.add(node);
+        return "unknown";
+      }
+    }
+    return "ok";
+  }
+
+  /** The row for one window of the project, as the client sees it. */
+  const windowRowKey = (project, index) => `window:${project}:${index}`;
+
+  /**
+   * Before the first hydration: exactly today's rows. Every window is a row; a job window nests under the window
+   * `parentWindowIndex` names (the annotated list), siblings in window-index order.
+   */
+  function coldLayout(annotated, graph) {
+    const trees = new Map();
+    const statusNodes = new Map();
+    const primary = new Map(); // canonical node -> "project\0index" of its primary window
+    for (const [node, wins] of graph.windowsByNode) {
+      const w = [...wins].sort(graph.byIndex)[0];
+      primary.set(node, `${w.project}\0${w.index}`);
+    }
+    for (const p of annotated ?? []) {
+      const rows = new Map();
+      const order = [];
+      for (const w of p.windows ?? []) {
+        const sid = w.opencodeSessionId;
+        let row;
+        if (!sid) {
+          row = { key: windowRowKey(p.tmuxSession, w.index), sessionId: null, kind: "window", windowIndex: w.index, title: w.name ?? "", job: null, outside: false, children: [] };
+        } else {
+          const n = graph.canon(sid);
+          const aliases = statusNodes.get(n) ?? [];
+          if (!aliases.includes(sid)) aliases.push(sid);
+          statusNodes.set(n, aliases);
+          if (primary.get(n) === `${p.tmuxSession}\0${w.index}`) {
+            row = {
+              key: graph.keyOf(n),
+              sessionId: n,
+              kind: "window",
+              windowIndex: w.index,
+              title: w.name ?? "",
+              job: w.job ? { id: w.job.id, status: w.job.status, origin: graph.rec.jobByChild.get(sid)?.origin ?? "" } : null,
+              outside: false,
+              children: [],
+            };
+          } else {
+            row = { key: windowRowKey(p.tmuxSession, w.index), sessionId: sid, kind: "window", windowIndex: w.index, title: w.name ?? "", job: null, outside: false, children: [] };
+            row.extra = true;
+          }
+        }
+        rows.set(w.index, row);
+        order.push({ w, row });
+      }
+      const roots = [];
+      for (const { w, row } of order) {
+        const parent = w.job?.parentWindowIndex != null ? rows.get(w.job.parentWindowIndex) : null;
+        if (parent && !parent.extra && parent !== row) parent.children.push(row);
+        else roots.push(row);
+      }
+      const byWin = (a, b) => a.windowIndex - b.windowIndex;
+      for (const { row } of order) row.children.sort(byWin);
+      for (const { row } of order) delete row.extra;
+      roots.sort(byWin);
+      trees.set(p.tmuxSession, roots);
+    }
+    return { trees, statusNodes, placeIdx: new Map(), need: new Set(), parentKeys: new Map(), unknown: new Set() };
+  }
+
+  /** The hydrated tree: shown sessions, nesting, root placement, order. `annotated` is the list after `job` annotation. */
+  function layoutTree(projects, graph) {
+    const t = now();
+    const need = new Set();
+    const projectByName = new Map();
+    for (const p of projects ?? []) projectByName.set(p.tmuxSession, p);
+
+    // -- window-bearing nodes (a window is always a row), order seq assigned in (project, index) order
+    const nodes = new Map(); // canonical sid -> node
+    const terminal = [];
+    for (const p of projects ?? []) {
+      for (const w of p.windows ?? []) {
+        const sid = w?.opencodeSessionId;
+        if (!sid) {
+          terminal.push({ project: p.tmuxSession, w });
+          seqOf(windowRowKey(p.tmuxSession, w.index));
+          continue;
+        }
+        const n = graph.canon(sid);
+        let node = nodes.get(n);
+        if (!node) {
+          node = { sid: n, key: graph.keyOf(n), members: graph.chainInfo(n).members, windows: [], virtual: false };
+          nodes.set(n, node);
+          seqOf(node.key);
+        }
+        const win = { project: p.tmuxSession, index: w.index, name: w.name ?? "", path: w.paneCurrentPath ?? "", sid };
+        winSeqOf(p.tmuxSession, win);
+        node.windows.push(win);
+      }
+    }
+    const gone = (n) => graph.chainInfo(n).members.some((m) => missing.has(m));
+    const virtualNode = (n) => ({ sid: n, key: graph.keyOf(n), members: graph.chainInfo(n).members, windows: [], virtual: true });
+    // A conversation's directory / title: the canonical member's read, else any member's.
+    const infoOfNode = (N) => info.get(N.sid) ?? N.members.map((m) => info.get(m)).find(Boolean);
+    const recordFor = (N) => {
+      for (const m of N.members) {
+        const j = graph.rec.jobByChild.get(m);
+        if (j) return j;
+      }
+      return null;
+    };
+
+    // -- which windowless sessions are shown: running, pending ask, ended < LINGER_MS ago, or a live job's child
+    const shown = new Map(nodes);
+    const lingering = [];
+    for (const [sid, until] of lingerUntil) if (until > t) lingering.push(sid);
+    const candidates = [...running, ...pendingAskIds(), ...lingering, ...graph.rec.liveChildren];
+    for (const sid of candidates) {
+      const n = graph.canon(sid);
+      if (shown.has(n) || gone(n)) continue;
+      if (gateOf(n, graph, need) === "ok") shown.set(n, virtualNode(n));
+    }
+    // -- structural retention: an ancestor (by the edges) of a shown session stays while the descendant is shown
+    for (const N of [...shown.values()]) {
+      const walk = graph.walkUp(N.sid);
+      if (walk.end === "cycle") continue;
+      for (const a of walk.path) {
+        if (shown.has(a) || gone(a)) continue;
+        if (gateOf(a, graph, need) === "ok") shown.set(a, virtualNode(a));
+      }
+    }
+
+    // -- nesting + root placement; a windowless node that cannot be placed (or whose ancestry is unread) is not shown
+    const dropped = new Set();
+    const keyToSid = new Map();
+    for (const [sid, N] of shown) keyToSid.set(N.key, sid);
+    let parents = new Map();
+    let placed = new Map();
+    const unknown = new Set();
+    const parentKeys = new Map();
+    const authProjects = (N) => {
+      const s = new Set();
+      for (const w of N.windows) if (projectByName.has(w.project)) s.add(w.project);
+      if (N.windows.length === 0) {
+        const j = recordFor(N);
+        if (j?.tmuxSession && projectByName.has(j.tmuxSession)) s.add(j.tmuxSession);
+      }
+      return s;
+    };
+    const chooseProject = (N) => {
+      const byProject = new Map();
+      for (const w of N.windows) {
+        if (!projectByName.has(w.project)) continue;
+        const s = winSeqOf(w.project, w);
+        if (!byProject.has(w.project) || s < byProject.get(w.project)) byProject.set(w.project, s);
+      }
+      const cands = [...byProject].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1)).map(([p]) => p);
+      const j = recordFor(N);
+      if (j?.tmuxSession && projectByName.has(j.tmuxSession)) cands.push(j.tmuxSession);
+      const dir = infoOfNode(N)?.directory;
+      const owner = dir ? ownerByDirectory(projects, dir) : null;
+      if (owner && projectByName.has(owner)) cands.push(owner);
+      if (cands.length === 0) return null;
+      const prev = rootProject.get(N.key);
+      const pick = prev && cands.includes(prev) ? prev : cands[0];
+      rootProject.set(N.key, pick);
+      boundMap(rootProject, MAX_TREE_STATE);
+      return pick;
+    };
+
+    for (let iter = 0; iter < 8; iter++) {
+      parents = new Map();
+      placed = new Map();
+      unknown.clear();
+      parentKeys.clear();
+      const newDrops = new Set();
+      for (const [sid, N] of shown) {
+        if (dropped.has(sid)) continue;
+        const walk = graph.walkUp(sid);
+        let parent = null;
+        if (walk.end !== "cycle") {
+          for (const a of walk.path) {
+            if (shown.has(a) && !dropped.has(a)) {
+              parent = a;
+              break;
+            }
+          }
+        }
+        let certain = true;
+        if (!parent && walk.end === "unknown") {
+          certain = false;
+          for (const m of graph.chainInfo(walk.at).members) unknown.add(m);
+          // The last confidently placed nesting stands while the ancestry is unread.
+          const last = treeParents.get(N.key);
+          const lastSid = last ? keyToSid.get(last) : null;
+          if (lastSid && lastSid !== sid && shown.has(lastSid) && !dropped.has(lastSid) && !graph.walkUp(lastSid).path.includes(sid)) parent = lastSid;
+          else if (N.virtual && !N.members.some((m) => graph.rec.liveChildren.has(m))) {
+            newDrops.add(sid); // unknown is not root: not shown until its ancestry has been read
+            continue;
+          }
+        }
+        if (certain) parentKeys.set(N.key, parent ? shown.get(parent).key : null);
+        parents.set(sid, parent);
+      }
+      // A cycle through last-known parents (never through certain edges) breaks at the first repeat.
+      for (const start of parents.keys()) {
+        const seen = new Set([start]);
+        let cur = parents.get(start);
+        while (cur) {
+          if (seen.has(cur)) {
+            parents.set(start, null);
+            break;
+          }
+          seen.add(cur);
+          cur = parents.get(cur);
+        }
+      }
+      const memo = new Map();
+      const resolve = (sid) => {
+        if (memo.has(sid)) return memo.get(sid);
+        memo.set(sid, null);
+        const N = shown.get(sid);
+        const P = parents.get(sid);
+        let res = null;
+        if (P && !dropped.has(P) && shown.has(P)) {
+          const r = resolve(P);
+          if (r) {
+            const a = authProjects(N);
+            if (a.size === 0 || a.has(r.project)) res = { root: r.root, project: r.project, parent: P };
+          }
+        }
+        if (!res) {
+          const project = chooseProject(N);
+          if (project) res = { root: sid, project, parent: null };
+        }
+        memo.set(sid, res);
+        return res;
+      };
+      for (const sid of parents.keys()) {
+        const res = resolve(sid);
+        if (!res) newDrops.add(sid);
+        else placed.set(sid, res);
+      }
+      if (newDrops.size === 0) break;
+      for (const x of newDrops) dropped.add(x);
+    }
+
+    // -- build rows
+    const seqOfNode = new Map();
+    const built = new Map();
+    const lowestWindow = (N, project) => N.windows.filter((w) => w.project === project).sort((a, b) => a.index - b.index)[0] ?? null;
+    for (const [sid, res] of placed) {
+      const N = shown.get(sid);
+      const w = lowestWindow(N, res.project);
+      const j = recordFor(N);
+      const inf = infoOfNode(N);
+      const node = {
+        key: N.key,
+        sessionId: sid,
+        kind: w ? "window" : "virtual",
+        windowIndex: w ? w.index : null,
+        title: w ? w.name : (inf?.title?.trim() || (typeof j?.name === "string" && j.name.trim()) || "Session"),
+        job: j ? { id: j.id, status: j.status, origin: typeof j.origin === "string" ? j.origin : "" } : null,
+        outside: !w && !res.parent,
+        children: [],
+      };
+      built.set(sid, { node, w, N, res });
+      seqOfNode.set(node, seqOf(N.key));
+    }
+    const bySeq = (a, b) => seqOfNode.get(a) - seqOfNode.get(b);
+    for (const { node, res } of built.values()) if (res.parent) built.get(res.parent).node.children.push(node);
+    for (const { node } of built.values()) node.children.sort(bySeq);
+
+    const buckets = new Map(); // project -> [{ node, group, order }]
+    const push = (project, node, group, order) => {
+      const list = buckets.get(project) ?? [];
+      list.push({ node, group, order });
+      buckets.set(project, list);
+    };
+    const statusNodes = new Map();
+    const placeIdx = new Map();
+    for (const [sid, { node, w, N, res }] of built) {
+      if (!res.parent) {
+        if (node.kind === "window") push(res.project, node, 0, node.windowIndex);
+        else push(res.project, node, 1, seqOfNode.get(node));
+      }
+      // Every other window of the node (duplicates, or windows in another project) is its own childless row.
+      for (const x of N.windows) {
+        if (w && x.project === w.project && x.index === w.index) continue;
+        push(x.project, { key: windowRowKey(x.project, x.index), sessionId: x.sid, kind: "window", windowIndex: x.index, title: x.name, job: null, outside: false, children: [] }, 0, x.index);
+      }
+      const aliases = new Set([sid, ...N.windows.map((x) => x.sid)]);
+      statusNodes.set(sid, [...aliases]);
+      const rootEntry = built.get(res.root);
+      const proj = projectByName.get(res.project);
+      const directory = infoOfNode(N)?.directory ?? null;
+      for (const m of N.members) placeIdx.set(m, { project: res.project, canonicalSessionId: sid, directory, rootPath: rootEntry?.w?.path || null, defaultCwd: proj?.defaultCwd ?? null });
+    }
+    for (const { project, w } of terminal) {
+      push(project, { key: windowRowKey(project, w.index), sessionId: null, kind: "window", windowIndex: w.index, title: w.name ?? "", job: null, outside: false, children: [] }, 0, w.index);
+    }
+    const trees = new Map();
+    for (const p of projects ?? []) {
+      const list = buckets.get(p.tmuxSession) ?? [];
+      list.sort((a, b) => a.group - b.group || a.order - b.order);
+      trees.set(p.tmuxSession, list.map((x) => x.node));
+    }
+    return { trees, statusNodes, placeIdx, need, parentKeys, unknown };
+  }
+
+  /** The session list with each job window's `parentWindowIndex` taken from the graph (today's output until hydrated), and `tree`. */
   function computeAnnotated(projects) {
     const base = annotateJobs(projects, jobs);
-    if (!hydratedOnce) return { out: base, placement: placement, unknown: new Set(), graph: null };
     const graph = buildGraph(projects);
+    const attach = (list, layout) => list.map((p) => ({ ...p, tree: layout.trees.get(p.tmuxSession) ?? [] }));
+    if (!hydratedOnce) {
+      const layout = coldLayout(base, graph);
+      return { out: attach(base, layout), placement: placement, unknown: new Set(), graph: null, statusGraph: graph, layout };
+    }
     const nextPlacement = new Map();
     const unknown = new Set();
-    const out = base.map((p) => ({
+    const annotated = base.map((p) => ({
       ...p,
       windows: p.windows.map((w) => {
+        const sid = w.opencodeSessionId;
+        if (sid && !parentOf.has(sid) && !rootIds.has(sid) && !missing.has(sid)) unknown.add(sid);
         if (!w.job) return w;
         const r = graph.projectWindow(p.tmuxSession, w);
         const key = `${p.tmuxSession}\0${w.opencodeSessionId}`;
@@ -494,23 +1067,55 @@ export function createSessionStatus(d) {
         return value === w.job.parentWindowIndex ? w : { ...w, job: { ...w.job, parentWindowIndex: value } };
       }),
     }));
-    return { out, placement: nextPlacement, unknown, graph };
+    const layout = layoutTree(projects, graph);
+    for (const sid of layout.unknown) unknown.add(sid);
+    return { out: attach(annotated, layout), placement: nextPlacement, unknown, graph, statusGraph: graph, layout };
   }
 
   /** Re-derive the projection and, only when it differs from the list last served, refresh the session list. */
   function recompute() {
-    if (recomputePending || !d.onJobsChanged) return;
+    if (recomputePending) return;
     recomputePending = true;
     Promise.resolve()
       .then(() => {
         recomputePending = false;
         if (!lastProjects) return undefined;
-        const { out } = computeAnnotated(lastProjects);
-        return nestingSignature(out) !== nestingSig ? d.onJobsChanged() : undefined;
+        const res = computeAnnotated(lastProjects);
+        if (res.graph) {
+          triggerGates(res.layout.need);
+          resolveUnknown(res.unknown);
+        }
+        return d.onJobsChanged && treeSignature(res.out) !== nestingSig ? d.onJobsChanged() : undefined;
       })
       .catch(() => {
         recomputePending = false;
       });
+  }
+
+  /** One linger timer per lingering session: when it fires and the linger is over, the tree is recomputed. */
+  function startLinger(sid) {
+    lingerUntil.set(sid, now() + LINGER_MS);
+    boundMap(lingerUntil, MAX_TREE_STATE);
+    if (lingerTimers.has(sid)) return;
+    lingerTimers.add(sid);
+    const arm = (ms) =>
+      setTimer(() => {
+        const left = (lingerUntil.get(sid) ?? 0) - now();
+        if (left > 0) return arm(left + 5);
+        lingerTimers.delete(sid);
+        lingerUntil.delete(sid);
+        recompute();
+        return undefined;
+      }, ms);
+    arm(LINGER_MS + 5);
+  }
+
+  /** The one place a session's own turn flips; an ended turn lingers (spec §2). */
+  function setRunning(sid, on) {
+    const was = running.has(sid);
+    if (on) running.add(sid);
+    else running.delete(sid);
+    if (was && !on) startLinger(sid);
   }
 
   /** Run `fn` after whatever background work is queued; failures never escape. */
@@ -555,13 +1160,22 @@ export function createSessionStatus(d) {
     const t = now();
     const minGap = d.inferMinIntervalMs ?? INFER_MIN_INTERVAL_MS;
     const subjects = new Map(); // conv key -> { root, targets:Set, projects:Set, candidates:Set }
+    const virtualSeeds = new Set([...running, ...pendingAskIds(), ...graph.rec.liveChildren]);
     for (const p of projects ?? []) {
-      for (const w of p.windows ?? []) {
+      const candidates = [...(p.windows ?? [])];
+      for (const sid of virtualSeeds) {
+        if (graph.windowsBySid.has(sid)) continue;
+        const job = graph.rec.jobByChild.get(sid);
+        const owner = job?.tmuxSession ?? ownerByDirectory(projects, info.get(sid)?.directory);
+        if (owner === p.tmuxSession) candidates.push({ opencodeSessionId: sid });
+      }
+      for (const w of candidates) {
         const sid = w?.opencodeSessionId;
-        if (!sid || !graph.rec.annotated.has(sid)) continue;
+        if (!sid) continue;
         const walk = graph.walkUp(graph.canon(sid));
         if (walk.end !== "root" || walk.path.some((n) => graph.windowsByNode.has(n))) continue; // placed by a windowed ancestor, or not certain
         const root = walk.at;
+        if (graph.isSuppressed(root)) continue; // a `session_unlink` suppression: no inference for this child, ever
         const key = graph.keyOf(root);
         if (!eligibility.has(key)) {
           // Decided ONCE, when the root first needs an answer: a window the user opened (or nothing stamped) rules it out.
@@ -660,7 +1274,7 @@ export function createSessionStatus(d) {
           const node = fresh.canon(h.sessionId);
           const walk = fresh.walkUp(node);
           if (node === fresh.canon(s.root) || walk.end === "unknown" || walk.path.includes(fresh.canon(s.root))) continue;
-          if (fresh.edgeParent(fresh.canon(s.root))) break; // an authoritative parent appeared meanwhile: nothing to infer
+          if (fresh.edgeParent(fresh.canon(s.root)) || fresh.isSuppressed(fresh.canon(s.root))) break; // an authoritative parent / a suppression appeared meanwhile: nothing to infer
           inferred.set(key, fresh.keyOf(h.sessionId));
           boundMap(inferred, MAX_INFER_STATE);
           changed = true;
@@ -678,14 +1292,15 @@ export function createSessionStatus(d) {
       const p = evt.payload;
       if ((evt.sub === "running" || evt.sub === "turnComplete") && sid) {
         const on = p?.running === true;
-        if (on) running.add(sid);
-        else running.delete(sid);
+        setRunning(sid, on);
         ownState(sid).since = on ? (p?.since ?? null) : null;
         liveDuringHydration?.set(sid, { running: on, since: ownState(sid).since });
         dirty();
+        recompute();
       } else if (evt.sub === "attention" && sid) {
         ownState(sid).attention = p?.kind ?? null;
         dirty();
+        recompute();
       } else if (evt.sub === "childSession" && typeof p?.childSessionId === "string" && typeof p?.parentSessionId === "string") {
         const added = p.childSessionId !== p.parentSessionId && parentOf.get(p.childSessionId) !== p.parentSessionId;
         if (p.childSessionId !== p.parentSessionId) touchEdge(p.childSessionId, p.parentSessionId);
@@ -698,17 +1313,26 @@ export function createSessionStatus(d) {
     if (evt.kind === "handoff") {
       // A commit moves records and windows between members of one conversation: the node is the same, so nothing
       // should move — but verify, cheaply, rather than assume.
-      if (evt.payload?.state === "committed") recompute();
+      if (evt.payload?.state === "committed") {
+        dirty();
+        recompute();
+      }
       return;
     }
     if (evt.kind === "runningSet" && Array.isArray(evt.payload?.sessions)) {
-      running.clear();
+      const next = new Set(evt.payload.sessions.map((r) => r?.sessionId).filter(Boolean));
+      for (const sid of [...running]) if (!next.has(sid)) setRunning(sid, false);
       for (const r of evt.payload.sessions) {
         if (!r?.sessionId) continue;
         running.add(r.sessionId);
         ownState(r.sessionId).since = r.since ?? null;
       }
       dirty();
+      recompute();
+      return;
+    }
+    if (evt.kind === "opencode") {
+      observeRaw(evt.payload);
       return;
     }
     if (evt.kind === "delegate.updated") {
@@ -718,7 +1342,11 @@ export function createSessionStatus(d) {
       pendingJobs = refreshJobs()
         .then(async () => {
           dirty();
-          if (jobsSignature(jobs) !== before) await d.onJobsChanged?.();
+          if (jobsSignature(jobs) !== before) {
+            // With a served baseline, only a rendered-tree change refreshes the list.
+            if (lastProjects) recompute();
+            else await d.onJobsChanged?.();
+          }
         })
         .catch(() => {});
       return;
@@ -736,6 +1364,31 @@ export function createSessionStatus(d) {
     }
   }
 
+  /**
+   * One session read: its parent (the edge) and — when `readSession` is wired — its title, directory and internal marker,
+   * cached with it. `getSessionParent` alone (older wiring, tests) caches no info.
+   * @returns {Promise<{status:"ok", parentID:string|null}|{status:"not-found"}|{status:"error"}>}
+   */
+  async function readNode(id) {
+    if (typeof d.readSession !== "function") return d.getSessionParent(id);
+    let rs;
+    try {
+      rs = await d.readSession(id);
+    } catch {
+      return { status: "error" };
+    }
+    if (!rs || rs.state === "unknown") return { status: "error" };
+    if (rs.state === "missing") return { status: "not-found" };
+    const s = rs.session ?? {};
+    info.set(id, {
+      title: typeof s.title === "string" ? s.title : "",
+      directory: typeof s.directory === "string" && s.directory ? s.directory : null,
+      internal: isMarkedInternal(s),
+    });
+    boundMap(info, MAX_TREE_STATE);
+    return { status: "ok", parentID: typeof s.parentID === "string" && s.parentID ? s.parentID : null };
+  }
+
   /** Walk one session's ancestry from opencode's own records. Returns false when any read could not be answered. */
   async function resolveChain(id, visited) {
     let cur = id;
@@ -743,26 +1396,178 @@ export function createSessionStatus(d) {
     for (let depth = 0; depth < MAX_DEPTH && cur; depth++) {
       if (visited.has(cur)) break;
       visited.add(cur);
-      const r = await d.getSessionParent(cur);
+      const r = await readNode(cur);
       if (r.status === "error") return false;
       if (r.status === "not-found") {
         parentOf.delete(cur); // the session was deleted: that edge is gone
         missing.add(cur);
+        learning?.add(cur);
         break;
       }
       if (!r.parentID) {
         parentOf.delete(cur);
         rootIds.add(cur);
+        learning?.add(cur);
         missing.delete(cur);
         break;
       }
       missing.delete(cur);
       touchEdge(cur, r.parentID);
+      learning?.add(cur);
       // Stop once the parent is already known (its own chain was resolved earlier).
       if (rootIds.has(r.parentID) || parentOf.has(r.parentID)) break;
       cur = r.parentID;
     }
     return complete;
+  }
+
+  // ---- background reads for the tree: which windowless sessions may be rows --------------------------------------
+
+  /** The `task` blocks of a parent's assistant timeline (cached briefly: many children share one parent). */
+  async function taskBlocks(parent) {
+    const hit = timelineCache.get(parent);
+    if (hit && now() - hit.at < TIMELINE_CACHE_MS) return hit.blocks;
+    const blocks = taskBlocksOf((await d.listRawTimeline(parent, { type: "assistant" })) ?? []);
+    timelineCache.set(parent, { at: now(), blocks });
+    boundMap(timelineCache, 200);
+    return blocks;
+  }
+
+  /** Decide, once each, everything the exclusions need for one windowless session. Returns false when it could not conclude. */
+  async function evaluateGate(sid) {
+    if (!info.has(sid) || (!parentOf.has(sid) && !rootIds.has(sid))) {
+      const r = await readNode(sid);
+      if (r.status === "error") return false;
+      if (r.status === "not-found") {
+        missing.add(sid);
+        return true;
+      }
+      if (r.parentID) touchEdge(sid, r.parentID);
+      else {
+        parentOf.delete(sid);
+        rootIds.add(sid);
+      }
+      if (!info.has(sid)) return false; // no session reader wired: a windowless session can never be proven eligible
+    }
+    if ((d.isCtoConversationSession || d.isInternalSession) && !special.has(sid)) {
+      try {
+        const v = (await d.isCtoConversationSession?.(sid)) || (await d.isInternalSession?.(sid));
+        special.set(sid, !!v);
+        boundMap(special, MAX_TREE_STATE);
+      } catch {
+        return false; // a provenance store that cannot answer fails closed: not shown, retried
+      }
+    }
+    const parent = parentOf.get(sid);
+    const hasRecord = jobs.some((j) => j?.childSessionID === sid && !j.supersededBy);
+    if (parent && !hasRecord && inlineState.get(sid)?.state !== "inline" && inlineState.get(sid)?.state !== "no") {
+      if (typeof d.listRawTimeline !== "function") {
+        inlineState.set(sid, { state: "inline", reads: 0 }); // cannot prove it is not inline: never a row
+        return true;
+      }
+      let blocks;
+      try {
+        blocks = await taskBlocks(parent);
+      } catch {
+        return false; // an unreadable timeline keeps the session excluded
+      }
+      const kind = blocks.get(sid);
+      if (kind) {
+        inlineState.set(sid, { state: kind === "fg" ? "inline" : "no", reads: 0 });
+      } else {
+        // The block is stamped on the parent a moment after the child exists: several misses before "not a task child".
+        const reads = (inlineState.get(sid)?.reads ?? 0) + 1;
+        inlineState.set(sid, { state: reads >= NO_BLOCK_READS ? "no" : "unsure", reads });
+        timelineCache.delete(parent);
+        if (reads < NO_BLOCK_READS) return false;
+      }
+      boundMap(inlineState, MAX_TREE_STATE);
+    }
+    return true;
+  }
+
+  /** Run the background gate evaluations the tree asked for (throttled per session, bounded per pass), then recompute. */
+  function retryGates(ms) {
+    if (gateRetryPending) return;
+    gateRetryPending = true;
+    setTimer(() => {
+      gateRetryPending = false;
+      recompute();
+    }, ms);
+  }
+
+  function triggerGates(need) {
+    if (gateRunning || hydrating || !hydratedOnce || !need || need.size === 0) return;
+    const t = now();
+    const want = [];
+    let retryIn = Infinity;
+    for (const sid of need) {
+      const last = gateAt.get(sid);
+      const attempts = gateAttempts.get(sid) ?? 0;
+      const gap = attempts === 0 ? 1000 : GATE_RETRY_MS[Math.min(attempts, GATE_RETRY_MS.length - 1)];
+      if (last != null && t - last < gap) {
+        retryIn = Math.min(retryIn, gap - (t - last) + 5);
+        continue;
+      }
+      gateAt.set(sid, t);
+      want.push(sid);
+      if (want.length >= MAX_GATES_PER_PASS) break;
+    }
+    boundMap(gateAt, MAX_TREE_STATE);
+    if (want.length === 0) {
+      if (Number.isFinite(retryIn)) retryGates(retryIn);
+      return;
+    }
+    gateRunning = true;
+    void queueBackground(async () => {
+      let unresolved = false;
+      try {
+        for (const sid of want) {
+          let ok = false;
+          try {
+            ok = await evaluateGate(sid);
+          } catch {
+            ok = false;
+          }
+          if (ok) gateAttempts.delete(sid);
+          else {
+            gateAttempts.set(sid, (gateAttempts.get(sid) ?? 0) + 1);
+            unresolved = true;
+          }
+        }
+      } finally {
+        gateRunning = false;
+      }
+      recompute();
+      if (unresolved) retryGates(GATE_RETRY_MS[1] + 100);
+    });
+  }
+
+  /** A raw opencode event that may carry a directory move (or a retitle) for a session the tree has read. */
+  function observeRaw(raw) {
+    const type = raw?.type;
+    if (type !== "session.updated" && type !== "session.moved") return;
+    const sid = raw.data?.sessionID ?? raw.data?.session?.id ?? raw.properties?.sessionID ?? raw.properties?.info?.id ?? raw.sessionID;
+    const cur = typeof sid === "string" ? info.get(sid) : null;
+    if (!cur) return;
+    const dir = raw.data?.location?.directory ?? raw.data?.directory ?? raw.data?.session?.directory ?? raw.location?.directory ?? raw.properties?.info?.directory ?? null;
+    if (typeof dir === "string" && dir) {
+      if (dir !== cur.directory) {
+        info.set(sid, { ...cur, directory: dir });
+        recompute();
+      }
+      return;
+    }
+    const t = now();
+    const last = infoRefreshAt.get(sid);
+    if (last != null && t - last < INFO_REFRESH_MIN_MS) return;
+    infoRefreshAt.set(sid, t);
+    boundMap(infoRefreshAt, 1000);
+    void queueBackground(async () => {
+      const before = JSON.stringify(info.get(sid));
+      await readNode(sid);
+      if (JSON.stringify(info.get(sid)) !== before) recompute();
+    });
   }
 
   /**
@@ -775,11 +1580,14 @@ export function createSessionStatus(d) {
     hydrating = (async () => {
       let complete = true;
       const live = (liveDuringHydration = new Map());
-      rootIds.clear(); // re-learned by the walk below; keeps the set bounded
-      missing.clear();
+      // The old root / missing knowledge stays in force WHILE the walk runs (a pass in the middle must not read every
+      // windowless row as "ancestry unknown" and drop it); what the walk did not re-learn is cleared once it is done.
+      const stale = { roots: new Set(rootIds), missing: new Set(missing) };
+      learning = new Set();
       try {
         const ids = await d.listActiveSessionIds();
-        running.clear();
+        const next = new Set(ids);
+        for (const sid of [...running]) if (!next.has(sid)) setRunning(sid, false);
         for (const id of ids) {
           running.add(id);
           // The interpreter knows when a turn started even if no frame has been seen since this process began.
@@ -789,7 +1597,7 @@ export function createSessionStatus(d) {
         // A turn that started or ended while the read was in flight is newer than the list.
         for (const [id, v] of live) {
           if (v.running) running.add(id);
-          else running.delete(id);
+          else setRunning(id, false);
           ownState(id).since = v.running ? (v.since ?? ownState(id).since) : null;
         }
       } catch {
@@ -797,14 +1605,26 @@ export function createSessionStatus(d) {
       }
       if (!(await refreshJobs())) complete = false;
       await refreshStopped();
-      // Candidates: the running set, every windowed session, every job child that still has a place in the tree.
+      // Candidates: the running set, every windowed session, every job child that still has a place in the tree,
+      // every session with a pending ask, every session a link names.
       const seeds = new Set(running);
       for (const sid of d.windowedSessionIds()) seeds.add(sid);
       for (const j of jobs) if (j.childSessionID && !j.supersededBy && isLiveJob(j)) seeds.add(j.childSessionID);
+      for (const sid of pendingAskIds()) seeds.add(sid);
+      try {
+        for (const sid of d.linkEndpoints?.() ?? []) seeds.add(sid);
+      } catch {
+        /* no link store yet */
+      }
       const visited = new Set();
       for (const id of seeds) {
         if (!(await resolveChain(id, visited))) complete = false;
       }
+      if (complete) {
+        for (const sid of stale.roots) if (!learning.has(sid)) rootIds.delete(sid);
+        for (const sid of stale.missing) if (!learning.has(sid)) missing.delete(sid);
+      }
+      learning = null;
       evictIfNeeded();
       dirty();
       hydratedOnce = true; // reads that failed leave their sessions unplaced (last-known / today's), never roots
@@ -824,6 +1644,7 @@ export function createSessionStatus(d) {
     })().finally(() => {
       hydrating = null;
       liveDuringHydration = null;
+      learning = null;
     });
     return hydrating;
   }
@@ -850,14 +1671,40 @@ export function createSessionStatus(d) {
       lastProjects = projects;
       const res = computeAnnotated(projects);
       placement = res.placement;
-      const sig = nestingSignature(res.out);
+      lastLayout = res.layout;
+      if (res.graph) {
+        // The nesting the tree decided with certainty is what an uncertain pass falls back to.
+        for (const [key, parentKey] of res.layout.parentKeys) treeParents.set(key, parentKey);
+        boundMap(treeParents, MAX_TREE_STATE);
+      }
+      const sig = treeSignature(res.out);
       if (nestingSig !== null && sig !== nestingSig) nestingPending = true;
       nestingSig = sig;
       if (res.graph) {
         resolveUnknown(res.unknown);
+        triggerGates(res.layout.need);
         inferDrivers(projects, res.graph);
       }
       return res.out;
+    },
+    /**
+     * Seam for `sessions:materialize` (stage (b) second pass): where the row of `sessionId` — ANY member of its handoff
+     * conversation — is placed in the last tree: the project its root sits in, the node's canonical session, and a directory a
+     * holder window can start in (the session's own directory when opencode reported one, else the root window's pane path, else
+     * the project's `defaultCwd`; the caller verifies it exists on disk). `null` when the session is not a shown row.
+     * @param {string} sessionId
+     * @returns {{ project: string, canonicalSessionId: string, cwd: string | null } | null}
+     */
+    placementOf(sessionId) {
+      const hit = lastLayout?.placeIdx.get(sessionId);
+      if (!hit) return null;
+      const dir = hit.directory ?? null;
+      return { project: hit.project, canonicalSessionId: hit.canonicalSessionId, cwd: dir ?? hit.rootPath ?? hit.defaultCwd ?? null };
+    },
+    /** Seam for the link store: a link was written / removed — re-derive the tree and re-send the statuses. */
+    linksChanged() {
+      dirty();
+      recompute();
     },
     /** Resolves when background work (parent reads, the inference lookup) queued so far has finished. */
     settleBackground: () => background,
@@ -866,6 +1713,6 @@ export function createSessionStatus(d) {
      *  `delegate.updated` frame already carries the new `job` fields. */
     settled: () => pendingJobs,
     // Test seams.
-    _state: { running, parentOf, rootIds, missing, inferred, eligibility, get hydratedOnce() { return hydratedOnce; }, own, get jobs() { return jobs; }, set jobs(v) { jobs = v; }, get stopped() { return stopped; }, set stopped(v) { stopped = new Set(v); }, get retryScheduled() { return retryPending; } },
+    _state: { running, parentOf, rootIds, missing, inferred, eligibility, info, lingerUntil, inlineState, get hydratedOnce() { return hydratedOnce; }, own, get jobs() { return jobs; }, set jobs(v) { jobs = v; }, get stopped() { return stopped; }, set stopped(v) { stopped = new Set(v); }, get retryScheduled() { return retryPending; } },
   };
 }

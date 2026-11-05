@@ -20,6 +20,7 @@ import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency, type MediaEntry, type WidgetEntry } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
 import { refreshModelCatalog } from "./modelCatalog";
+import { windowsInRailOrder } from "./sessionTree";
 import type { ToastItem } from "./Toast";
 import {
   type Attachment,
@@ -1777,13 +1778,14 @@ export const useStore = create<State>((set, get) => ({
     }),
 }));
 
-// Convenience hook: flat list of all (project, window) tuples for Cmd+1..9
+// Convenience hook: flat list of all (project, window) tuples for Cmd+1..9. Window rows only, in the order the
+// sidebar shows them (the box's session tree when it sent one); window-less (virtual) rows have no tuple.
 export function flatSessions(projects: Project[]): Array<{
   project: Project;
   window: TmuxWindow;
 }> {
   const out: Array<{ project: Project; window: TmuxWindow }> = [];
-  for (const p of projects) for (const w of p.windows) out.push({ project: p, window: w });
+  for (const p of projects) for (const w of windowsInRailOrder(p)) out.push({ project: p, window: w });
   return out;
 }
 

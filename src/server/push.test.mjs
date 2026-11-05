@@ -570,6 +570,30 @@ test("buildSessionLabel → null for unknown / missing sessionID", () => {
   assert.equal(buildSessionLabel(null, "ses_a"), null);
 });
 
+test("buildSessionLabel attributes virtual descendants at any depth to their root window", () => {
+  const leaf = { sessionId: "leaf", title: "Investigate", kind: "virtual", children: [] };
+  const root = { sessionId: "root", title: "Release", kind: "window", children: [{ sessionId: "mid", title: "Coordinator", kind: "virtual", children: [leaf] }] };
+  const projects = [{ tmuxSession: "manta", windows: [], tree: [root] }];
+  assert.equal(buildSessionLabel(projects, "leaf"), "manta / Release › Investigate");
+  assert.equal(buildSessionLabel(projects, "mid"), "manta / Release › Coordinator");
+  assert.equal(buildSessionLabel(projects, "missing"), null);
+});
+
+test("buildSessionLabel always prefers a stamped window, even in a later project", () => {
+  const projects = [
+    { tmuxSession: "old", windows: [], tree: [{ sessionId: "child", title: "Old title", kind: "virtual", children: [] }] },
+    { tmuxSession: "live", windows: [{ opencodeSessionId: "child", name: "Opened" }] },
+  ];
+  assert.equal(buildSessionLabel(projects, "child"), "live / Opened");
+});
+
+test("buildSessionLabel handles virtual roots without a root window and preserves old-box fallback", () => {
+  const tree = [{ sessionId: "root", title: "Outside driver", kind: "virtual", children: [{ sessionId: "child", title: "Worker", kind: "virtual", children: [] }] }];
+  assert.equal(buildSessionLabel([{ tmuxSession: "p", tree }], "root"), "p / Outside driver");
+  assert.equal(buildSessionLabel([{ tmuxSession: "p", tree }], "child"), "p / Outside driver › Worker");
+  assert.equal(buildSessionLabel([{ tmuxSession: "p", windows: [] }], "child"), null);
+});
+
 // --- Desktop presence — away calculation + state (BET-1044) ----------------
 
 const NOW = 1_000_000_000;

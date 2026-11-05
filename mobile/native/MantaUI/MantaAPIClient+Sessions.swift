@@ -70,6 +70,12 @@ extension MantaAPIClient {
         return try await callRequired("sessions:close", args: [dict], as: SessionCloseResult.self)
     }
 
+    /// `sessions:materialize` (session tree, spec §4) — the box makes (or finds) the window of a virtual row. An
+    /// expected refusal comes back as `.refused` with a sentence for the user; only a transport / envelope failure throws.
+    func sessionsMaterialize(sessionId: String) async throws -> SessionMaterializeResult {
+        try await callRequired("sessions:materialize", args: [["sessionId": sessionId]], as: SessionMaterializeResult.self)
+    }
+
     /// `tmux:rename-session` — rename a project (the whole group).
     func tmuxRenameSession(oldName: String, newName: String) async throws {
         _ = try await callVoid("tmux:rename-session", args: [["oldName": oldName, "newName": newName]])

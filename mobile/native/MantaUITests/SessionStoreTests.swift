@@ -121,6 +121,33 @@ final class SessionListFake: SessionListMutationAPI {
         stoppedCalls += 1
         return try stopped.get()
     }
+
+    /// Session tree: the sessions asked to be materialised, in order. By session id; a session with no entry is
+    /// refused as not found. A queue: each call takes the next result, the last one repeats.
+    private(set) var materializeCalls: [String] = []
+    var materializeResults: [String: [Result<SessionMaterializeResult, Error>]] = [:]
+    /// Session ids whose `materialize` suspends until `releaseMaterialize`.
+    var heldMaterialize: Set<String> = []
+    private var materializeGates: [String: CheckedContinuation<Void, Never>] = [:]
+
+    func isHoldingMaterialize(_ sessionId: String) -> Bool { materializeGates[sessionId] != nil }
+
+    func releaseMaterialize(_ sessionId: String) {
+        materializeGates.removeValue(forKey: sessionId)?.resume()
+    }
+
+    func materialize(sessionId: String) async throws -> SessionMaterializeResult {
+        materializeCalls.append(sessionId)
+        if heldMaterialize.contains(sessionId) {
+            await withCheckedContinuation { materializeGates[sessionId] = $0 }
+        }
+        guard var queue = materializeResults[sessionId], !queue.isEmpty else {
+            return .refused(reason: "not-found", message: "This session no longer exists.")
+        }
+        let next = queue.count > 1 ? queue.removeFirst() : queue[0]
+        materializeResults[sessionId] = queue
+        return try next.get()
+    }
 }
 
 @MainActor

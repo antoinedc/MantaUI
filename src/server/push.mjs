@@ -487,7 +487,7 @@ export function shouldSuppressNotification(payload, label, isBackgroundJob) {
  * = window name). Pure — takes the already-fetched projects list so it can be
  * unit-tested without a live tmux.
  *
- * @param {Array<{tmuxSession:string, windows:Array<{name:string, opencodeSessionId:string|null}>}>} projects
+ * @param {Array<{tmuxSession:string, windows:Array<{name:string, opencodeSessionId:string|null}>, tree?:object[]}>} projects
  * @param {string|null} sessionId
  * @returns {string|null} "workspace / session-name", or null if not found.
  */
@@ -504,16 +504,40 @@ export function buildSessionLabel(projects, sessionId) {
       }
     }
   }
+  // Only after checking ALL windows: a stamped window always wins over a tree fallback.
+  for (const proj of projects) {
+    for (const root of proj?.tree ?? []) {
+      const pending = [root];
+      while (pending.length) {
+        const node = pending.pop();
+        if (node?.sessionId === sessionId) {
+          const rootName = root.title || "Session";
+          const name = node === root ? rootName : `${rootName} › ${node.title || "Session"}`;
+          return proj.tmuxSession ? `${proj.tmuxSession} / ${name}` : name;
+        }
+        pending.push(...(node?.children ?? []));
+      }
+    }
+  }
   return null;
 }
 
-// Resolve a sessionID → "workspace / session-name" by querying live tmux.
+let _sessionProjectsReader = null;
+
+/** The status owner's annotated projects (including virtual rows); no second tree builder in push. */
+export function setSessionProjectsReader(reader) {
+  _sessionProjectsReader = typeof reader === "function" ? reader : null;
+}
+
+// Resolve a sessionID → "workspace / session-name" by querying live tmux, then the session tree.
 // Best-effort: any failure returns null so the push falls back to generic copy.
 async function resolveSessionLabel(sessionId) {
   if (!sessionId) return null;
   try {
     const projects = await tmux.listProjects();
-    return buildSessionLabel(projects, sessionId);
+    const windowLabel = buildSessionLabel(projects, sessionId);
+    if (windowLabel) return windowLabel;
+    return buildSessionLabel(await _sessionProjectsReader?.(), sessionId);
   } catch {
     return null;
   }
@@ -975,6 +999,7 @@ export function _resetPushState() {
   _pending.clear();
   cancelAllDeferredMobile();
   _desktopSink = null;
+  _sessionProjectsReader = null;
   _focus = { sessionId: null, visible: false };
   _desktop = { lastSeen: 0, idleSeconds: 0, lockedSeconds: null, awayAt: Infinity };
 }

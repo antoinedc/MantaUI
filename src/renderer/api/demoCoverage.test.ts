@@ -237,6 +237,7 @@ export const DEMO_UNIMPLEMENTED = [
   "serverUpdateCheck",
   "sessionsClose",
   "sessionsClosePreview",
+  "sessionsMaterialize",
   "sessionsProposeName",
   "sessionsWindowStatus",
   "summaryModelSearch",
