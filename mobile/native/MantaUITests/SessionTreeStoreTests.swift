@@ -299,6 +299,29 @@ final class SessionTreeStoreTests: XCTestCase {
         XCTAssertTrue(store.materializing.isEmpty)
     }
 
+    func testABoxSwitchWhileTheListIsBeingReReadDropsTheOpenedAnswer() async {
+        let fake = SessionListFake()
+        fake.materializeResults[virtualID] = [opened()]
+        let (store, _) = makeStore(fake)
+        store.applyProjects([proj([win(0, sid: "ses_a")], tree: [windowNode(0, sid: "ses_a"), virtualNode(virtualID)])])
+        var release: CheckedContinuation<Void, Never>?
+        store.projectsReader = { [self] in
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in release = c }
+            return [proj([win(0, sid: "ses_a"), win(4, sid: virtualID)], tree: [windowNode(0, sid: "ses_a"), windowNode(4, sid: virtualID)])]
+        }
+
+        let first = Task { await store.materialize(sessionId: virtualID) }
+        var spins = 0
+        while release == nil, spins < 1000 { await Task.yield(); spins += 1 }
+        XCTAssertNotNil(release, "the post-materialize refresh is suspended")
+        store.resetForBoxChange()
+        release?.resume()
+
+        let result = await first.value
+        XCTAssertEqual(result, .ignored)
+        XCTAssertTrue(store.materializing.isEmpty)
+    }
+
     func testAnEmptySessionIdIsIgnored() async {
         let fake = SessionListFake()
         let (store, _) = makeStore(fake)

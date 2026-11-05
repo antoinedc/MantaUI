@@ -580,6 +580,8 @@ final class SessionListStore: ObservableObject {
             return .message(message)
         case .opened(let project, let windowIndex, let sid):
             if window(session: project, index: windowIndex) == nil { await refresh() }
+            // The box may have changed while the list was re-read: this answer is not for the new box.
+            guard generation == boxGeneration else { return .ignored }
             return .opened(project: project, windowIndex: windowIndex, sessionId: sid)
         }
     }

@@ -952,6 +952,60 @@ test("tree: structural retention and linger — an idle windowless root holds it
   assert.equal(h.timers.filter((t) => t.ms === LINGER_MS + 5).length, 2, "one for each ended session");
 });
 
+test("tree: a finished job's windowless child keeps its row through the linger, and a later turn of it shows again", async () => {
+  const rec = delegateRec("j", "C", "D", { tmuxSession: "p" });
+  const h = treeHarness({
+    projects: [pj("p", [w(1, "D")])],
+    active: ["C"],
+    jobRecords: [rec],
+    sessions: { D: {}, C: { parentID: "D", directory: "/work/p" } },
+    timelines: { D: [bgBlock("C")] },
+  });
+  await h.boot();
+  assert.equal(show(h.tree()), "w1[v:C]");
+  // The job ends and its result is delivered; the child's turn ends with it.
+  h.state.jobs = [{ ...rec, status: "done", completionDelivery: "delivered" }];
+  h.state.active = [];
+  await h.st.refreshJobs();
+  h.st.observe(stream("turnComplete", "C", { running: false }));
+  await h.settle();
+  assert.equal(show(h.tree()), "w1[v:C]", "the linger holds the row of a finished job's child");
+  h.clock.t += LINGER_MS - 1000;
+  assert.equal(show(h.tree()), "w1[v:C]");
+  h.clock.t += 2000;
+  assert.equal(show(h.tree()), "w1", "gone after the linger");
+  // A new turn on the same session is a row again.
+  h.state.active = ["C"];
+  h.st.observe(stream("running", "C", { running: true, since: 9 }));
+  await h.settle();
+  assert.equal(show(h.tree()), "w1[v:C]");
+});
+
+test("tree: a delivered job child stays as structural retention while a descendant runs", async () => {
+  const h = treeHarness({
+    projects: [pj("p", [w(1, "D")])],
+    active: ["G"],
+    jobRecords: [
+      delegateRec("js", "S", "D", { tmuxSession: "p", status: "done", completionDelivery: "delivered" }),
+      delegateRec("jg", "G", "S", { tmuxSession: "p" }),
+    ],
+    sessions: { D: {}, S: { parentID: "D", directory: "/work/p" }, G: { parentID: "S", directory: "/work/p" } },
+    timelines: { D: [bgBlock("S")], S: [bgBlock("G")] },
+  });
+  await h.boot();
+  assert.equal(show(h.tree()), "w1[v:S[v:G]]");
+});
+
+test("tree: a stopped job whose launch is uncertain is still a (virtual) row", async () => {
+  const h = treeHarness({
+    projects: [pj("p", [w(1, "D")])],
+    jobRecords: [adoptedRec("j", "C", "D", { tmuxSession: "p", status: "stopped", launchState: "uncertain" })],
+    sessions: { D: {}, C: { parentID: "D", directory: "/work/p" } },
+  });
+  await h.boot();
+  assert.equal(show(h.tree()), "w1[v:C]");
+});
+
 test("tree: the linger timer fires a recompute that refreshes the list once the linger is over", async () => {
   const h = treeHarness({ projects: [pj("p", [])], active: ["C"], sessions: { C: { directory: "/work/p" } } });
   await h.boot();

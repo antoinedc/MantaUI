@@ -257,7 +257,7 @@ const CYCLE = Symbol("cycle");
 
 const isTerminalStatus = (j) => j?.status === "done" || j?.status === "failed" || j?.status === "stopped";
 /** A job whose child still has a place in the tree: running/paused, or finished with its result not yet delivered. */
-const isLiveJob = (j) => !isTerminalStatus(j) || j?.completionDelivery === "pending";
+const isLiveJob = (j) => !isTerminalStatus(j) || j?.completionDelivery === "pending" || j?.launchState === "uncertain";
 const boundMap = (m, cap) => {
   while (m.size > cap) m.delete(m.keys().next().value);
 };
@@ -492,16 +492,18 @@ export function createSessionStatus(d) {
     const adopted = new Set(); // ... whose completion owner is opencode (observed / subagent)
     const ruleOne = new Map(); // child -> parent for Manta-owned records (the caller)
     const liveChildren = new Set();
+    const recordChildren = new Set(); // every non-superseded record's child: a delegate record proves a background (not inline) child
     const jobByChild = new Map(); // child -> the record shown on its row (last non-superseded one, as annotateJobs does)
     for (const j of jobs) {
       if (!j?.childSessionID || j.supersededBy) continue;
       annotated.add(j.childSessionID);
+      recordChildren.add(j.childSessionID);
       jobByChild.set(j.childSessionID, j);
       if (isLiveJob(j)) liveChildren.add(j.childSessionID);
       if (completionOwnerOf(j) === "opencode") adopted.add(j.childSessionID);
       else if (j.parentSessionID && j.parentSessionID !== j.childSessionID) ruleOne.set(j.childSessionID, j.parentSessionID);
     }
-    return { annotated, adopted, ruleOne, liveChildren, jobByChild };
+    return { annotated, adopted, ruleOne, liveChildren, recordChildren, jobByChild };
   }
 
   /** The explicit link entry of a session, defended against a throwing store. */
@@ -722,7 +724,7 @@ export function createSessionStatus(d) {
       if (s) return "excluded";
     }
     if (liveJob) return "ok";
-    if (parentOf.get(node)) {
+    if (parentOf.get(node) && !members.some((m) => graph.rec.recordChildren.has(m))) {
       const st = inlineState.get(node)?.state;
       if (st === "inline") return "excluded";
       if (st !== "no") {
@@ -1459,6 +1461,10 @@ export function createSessionStatus(d) {
     }
     const parent = parentOf.get(sid);
     const hasRecord = jobs.some((j) => j?.childSessionID === sid && !j.supersededBy);
+    if (parent && hasRecord && inlineState.get(sid)?.state !== "inline" && inlineState.get(sid)?.state !== "no") {
+      inlineState.set(sid, { state: "no", reads: 0 }); // a delegate record is background by definition
+      boundMap(inlineState, MAX_TREE_STATE);
+    }
     if (parent && !hasRecord && inlineState.get(sid)?.state !== "inline" && inlineState.get(sid)?.state !== "no") {
       if (typeof d.listRawTimeline !== "function") {
         inlineState.set(sid, { state: "inline", reads: 0 }); // cannot prove it is not inline: never a row
