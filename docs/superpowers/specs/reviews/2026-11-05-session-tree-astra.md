@@ -78,3 +78,22 @@ VERDICT: CHANGES REQUIRED
 Scope: stage (a) is not yet standalone (#14) and larger than necessary — the smallest first PR is the stable server-side ancestry resolver + the legacy projection, preserving established inferred relationships.
 
 VERDICT: CHANGES REQUIRED
+
+## Round 3 (spec r3)
+
+| # | Status | Remaining |
+|---|---|---|
+| 2, 3, 4, 5, 7, 8, 12, 13, 14, 17 | **Resolved** | — |
+| 6 | Partially | "chat panel does not depend on the directory" is false: selection supplies its cwd (`src/renderer/store.ts:1790–1811`), ChatPanel passes it to directory-scoped ops (`src/renderer/ChatPanel.tsx:1949, 2479–2503`); materialization must supply a valid cwd (`src/server/tmux.mjs:605–608`). |
+| 9 | Partially | window indices are project-local: "lowest index" needs a project tie-break and explicit duplicate placement. |
+| 10 | Partially | §6 still called adopted `parentSessionID` dead data (consumers: `src/server/delegate.mjs:409–412`, `src/server/delegateView.mjs:158`). |
+| 11 | Partially | duplicate-window rows need unique wire keys (#19). |
+| 15 | Partially | §5 defined only deletion; specify a durable suppression entry, precedence, and that linking again clears it. |
+| 16 | **Not resolved** | check/create/revalidate still races handoff (`src/server/handoff/engine.mjs:1428–1435, 1555–1565`): coordinate through shared exclusion or a handoff-owned operation. |
+
+18. **SHOULD — Inference now includes ordinary user conversations.** The existing resolver restricts targets to opencode-owned records (`src/server/delegate.mjs:759–762, 941–948`); restrict inference to adopted/externally driven roots and retained windowless ancestors.
+19. **NIT — Duplicate-window rows need distinct keys** (`window:<project>:<index>`).
+
+Scope: stage (a) appropriately narrowed; defer the link store to (b); apply exclusions to traversal only.
+
+VERDICT: CHANGES REQUIRED
