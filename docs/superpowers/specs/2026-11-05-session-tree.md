@@ -1,6 +1,6 @@
 # The session tree: rows are sessions, not windows
 
-Status: DRAFT r5 (2026-11-05), after Astra review rounds 1–4
+Status: FINAL r5 (2026-11-05) — approved by Astra at review round 5
 (`reviews/2026-11-05-session-tree-astra.md`). Scope: `src/server/` (session list, status, delegate, push labels),
 the desktop sidebar, the iOS session list, the manta opencode plugin (two new tools).
 

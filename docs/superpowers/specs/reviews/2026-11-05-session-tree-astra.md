@@ -109,3 +109,9 @@ VERDICT: CHANGES REQUIRED
 20. **NIT — One handoff test still describes the superseded algorithm** (mid-create restamp); replace with both serialised orderings.
 
 VERDICT: CHANGES REQUIRED
+
+## Round 5 (spec r5)
+
+| 9 | Resolved | 18 | Resolved | 20 | Resolved |
+
+No new findings. VERDICT: APPROVE
