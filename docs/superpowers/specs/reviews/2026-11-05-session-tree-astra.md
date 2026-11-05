@@ -51,3 +51,30 @@
     - **Exact change:** Add sourced package versions, publish dates, adoption and license information for evaluated candidates. Name the actual reusable persistence implementation and its locking/atomicity guarantees, or give a concrete fit-based reason for custom storage. Cover concurrent link writes and deterministic cycle handling.
 
 VERDICT: CHANGES REQUIRED
+
+## Round 2 (spec r2)
+
+| # | Finding → disposition | Why |
+|---|---|---|
+| 1 | **Resolved** | Legacy projection now targets the root window; A → B → C is explicitly tested. |
+| 2 | **Partially resolved** | Structural retention fixes linger-driven promotion. Ordering still mixes index-based ordering with an unspecified retained slot (§2). |
+| 3 | **Partially resolved** | Adopted display ancestry is correctly excluded. "Manta-owned" is incorrectly restricted to `origin:"delegate"`; see #13. |
+| 4 | **Partially resolved** | Links and transitional inference ship in (a), but inference eligibility still depends on window existence; see #14. |
+| 5 | **Resolved as an explicit trade-off** | Old-client loss of adopted rows is acknowledged; new-client fallback is specified. |
+| 6 | **Partially resolved** | User ownership protects windows, but worktree removal remains unspecified. Current cleanup removes the worktree **before** closing the window (`src/server/delegate.mjs:1722–1737`). |
+| 7 | **Partially resolved** | §7 still permits unknown candidates to become roots. The actual handoff event is `kind:"handoff"` with a payload (`src/server/handoff/engine.mjs:181–184, 1578–1583`). |
+| 8 | **Partially resolved** | "Current turn" is inaccurate: `toolBlockFor` scans the parent's assistant timeline (`src/server/delegate.mjs:3146–3153, 4674–4682`). |
+| 9 | **Partially resolved** | `key=sessionId` still changes on handoff; duplicate windows have no representation. |
+| 10 | **Partially resolved** | Calling adopted `parentSessionID` "dead data" is incorrect: job listing and parent presentation consume it (`src/server/delegate.mjs:409–412`; `src/server/delegateView.mjs:158`). |
+| 11 | **Partially resolved** | Duplicate-window reachability unspecified; `flatSessions` navigates every window (`src/renderer/store.ts:1781–1788`). |
+| 12 | **Partially resolved** | Metrics lack source references; the headless-tree row lacks maintenance/adoption evidence. |
+
+13. **SHOULD — Ownership must not be inferred from origin.** Wrapped commands have `origin:"command"` and `completionOwner:"manta"` (`src/server/delegate.mjs:4006–4029`); use `completionOwnerOf(record) === "manta"`.
+14. **BLOCKING — Transitional inference still depends on adoption windows.** §1.4 applies only to a windowless root; stage (a) retains adoption windows (`src/server/delegate.mjs:647–664, 678–710`). Apply inference to graph roots regardless of windows; cache it across window creation/removal.
+15. **SHOULD — Unlink can immediately restore the inferred relationship.** Define unlink as suppressing inference for that child.
+16. **BLOCKING — Materialization is not serialized with handoff.** The session-resource lock is delegate-private (`src/server/delegate.mjs:95`); handoff restamps windows itself (`src/server/handoff/engine.mjs:1428–1435`). Specify coordination + canonical revalidation.
+17. **SHOULD — "Unchanged" busy semantics omit the session's own work.** Today's active-work set includes running sessions themselves (`src/server/sessionStatus.mjs:96–120, 141–147`); counts are direct-children today (`:128–137`) — make the change explicit.
+
+Scope: stage (a) is not yet standalone (#14) and larger than necessary — the smallest first PR is the stable server-side ancestry resolver + the legacy projection, preserving established inferred relationships.
+
+VERDICT: CHANGES REQUIRED
