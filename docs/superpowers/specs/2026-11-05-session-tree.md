@@ -1,6 +1,6 @@
 # The session tree: rows are sessions, not windows
 
-Status: DRAFT r4 (2026-11-05), after Astra review rounds 1–3
+Status: DRAFT r5 (2026-11-05), after Astra review rounds 1–4
 (`reviews/2026-11-05-session-tree-astra.md`). Scope: `src/server/` (session list, status, delegate, push labels),
 the desktop sidebar, the iOS session list, the manta opencode plugin (two new tools).
 
@@ -77,17 +77,17 @@ already the node's.
 2. **opencode `parentID`**: read once per candidate and cached (`parentOf`), kept fresh by
    `session.created{parentID}` / `childSession` frames. A `task` child, a job's V2 child, a resumed attempt.
 3. **Explicit link** (§5): `child → parent` from `~/.manta/session-links.json`.
-4. **Inferred (transition only, adopted roots only)**: a node with no rule-1/2/3 parent that is NOT a
-   user-opened conversation — i.e. it has (or had) an adopted record (`completionOwner:"opencode"`), or it is a
-   windowless ancestor retained under §2 — whether or not it has a window right now (an adoption window must not
-   change its eligibility) — may take the windowed session whose
-   transcript most recently named it within 24 h (today's `sessionReferences` task, same throttle). It exists
-   so the cantina-style orchestrator keeps its nesting until its scripts call `session_link`; it is deleted in
-   stage (c). A root the user opened themselves (a window with `@manta-owner=user`, or no job record at all)
-   is never inferred under anything — one conversation mentioning another's id must not nest it. Once
-   inferred, the edge is cached per node for the life of the process and survives the node's windows being
-   created or removed (a different answer later does not move the row); a `session_unlink` suppression (§5)
-   wins over it.
+4. **Inferred (transition only)**: a node with no rule-1/2/3 parent that is NOT **user-opened** — user-opened
+   means: at the moment eligibility is first decided, the node has a window stamped `@manta-owner=user` (or
+   unstamped, i.e. made by the user before the stamp existed) — may take the windowed session whose transcript
+   most recently named it within 24 h (today's `sessionReferences` task, same throttle). Eligible, therefore:
+   a root with an adopted record, a windowless root, a windowless ancestor retained under §2; one conversation
+   the user opened mentioning another's id never nests it. It exists so the cantina-style orchestrator keeps
+   its nesting until its scripts call `session_link`; it is deleted in stage (c). **Eligibility is decided
+   once and the edge is cached** per node for the life of the process: it survives the node's windows being
+   created or removed, including the user materialising the node (a `user` window made AFTER the edge exists
+   does not revoke it) and an adoption window appearing on it; a different answer later does not move the row.
+   A `session_unlink` suppression (§5) wins over it.
 
 No stored display parent. A cycle (impossible from rules 1–2, possible from a bad link file or two inferred
 edges) breaks at the first repeated node on the walk from the child: that child becomes a root.
@@ -116,10 +116,14 @@ Then a session is **shown** when any of:
 Everything else is collapsed: edges pass through it.
 
 **Nesting**: a shown session's parent in the tree is its nearest shown ancestor. A shown session with no shown
-ancestor is a **root** of exactly one project: the tmux session of its window; else, for a job child, the
-record's `tmuxSession` (`targetProject` is honoured); else the project whose directory contains the session's
-directory (`ownerByDirectory`, its directory read with `parentID` and refreshed on `session.updated`); else it is
-not shown. Nesting is **within one project**: a parent whose root lies in another project (a job sent to
+ancestor is a **root** of exactly one project, decided in this order and then **retained** while it stays
+valid (the chosen project still exists and the reason still holds): (1) the project of a window stamped with
+it — when several projects have one, the project whose window for it has the earliest `seq` (ties: the
+tmux session name, lexicographic); (2) for a job child, the record's `tmuxSession` (`targetProject` is
+honoured); (3) the project whose directory contains the session's directory (`ownerByDirectory`, its directory
+read with `parentID` and refreshed on `session.updated`); else it is not shown. The node's window (§ Duplicate
+windows) is then the lowest-index window for it in THAT project — the two choices are not circular: the
+project is fixed first, the window second. Nesting is **within one project**: a parent whose root lies in another project (a job sent to
 `targetProject` by a caller elsewhere) makes the child a root of its own project. A root with no window is
 labelled *driven from outside* (today's "started outside Manta").
 
@@ -313,12 +317,14 @@ record field is removed from the wire types.
   never closes a `user`-owned window; subagent records unchanged.
 - `rpc.test.mjs`: `sessions:materialize` — creates once under the lock; two concurrent calls → one window; a
   session that gained a window returns it; refused with no owning project; refused during a pending handoff;
-  a commit landing mid-create → the window is restamped to the new canonical member; the list is refreshed
-  before the answer. `session_link` / `session_unlink`: refusals (authoritative edge, cycle), newest-wins,
+  both serialised orderings of a commit and a materialize on one chain (materialize then commit, commit then
+  materialize) end with exactly one window, stamped with the successor; the list is refreshed before the
+  answer. `session_link` / `session_unlink`: refusals (authoritative edge, cycle), newest-wins,
   unlink suppresses a cached inferred edge.
 - Edges: a wrapped `command` record is a rule-1 edge; an inferred edge is unaffected by an adoption window
-  appearing / disappearing on the root (stage (a) acceptance); a user-opened conversation that mentions another
-  user-opened root's id does not nest it; busy for a running root with no children.
+  appearing / disappearing on the root (stage (a) acceptance) and by the user materialising the node; a
+  user-opened conversation that mentions another user-opened root's id does not nest it; a root's project is
+  retained when a second window for it appears in another project; busy for a running root with no children.
 - Materialize × handoff: a commit and a materialize racing on one chain serialise (the window ends up stamped
   with the successor exactly once); a `user` window on a finished job is re-based to a directory that exists.
 - Renderer: `tree` rendering, fallback to `windows`, click materializes and selects, keybinds skip virtual

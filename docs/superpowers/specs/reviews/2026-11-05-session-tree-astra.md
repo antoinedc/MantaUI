@@ -97,3 +97,15 @@ VERDICT: CHANGES REQUIRED
 Scope: stage (a) appropriately narrowed; defer the link store to (b); apply exclusions to traversal only.
 
 VERDICT: CHANGES REQUIRED
+
+## Round 4 (spec r4)
+
+| # | Disposition | Remaining |
+|---|---|---|
+| 6, 10, 11, 15, 16, 19 | **Resolved** | — |
+| 9 | Partially | root placement ("the tmux session of its window") and window selection ("the project the root was placed in") were circular; specify a deterministic initial project tie-break, then retain it. |
+| 18 | Partially | "no job record at all" also excluded retained windowless ancestors; and a materialised (user-owned) window must not revoke an established inferred edge. |
+
+20. **NIT — One handoff test still describes the superseded algorithm** (mid-create restamp); replace with both serialised orderings.
+
+VERDICT: CHANGES REQUIRED
