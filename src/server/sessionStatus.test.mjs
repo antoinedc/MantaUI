@@ -371,7 +371,7 @@ const flushAll = async (h) => {
   await h.st.settleBackground();
 };
 
-function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, succ = {}, refs = null, active = [] } = {}) {
+function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, succ = {}, refs = null, active = [], isCto, isInternal } = {}) {
   const calls = { parent: [], refs: [], changed: 0 };
   const clock = { t: 1_000_000 };
   const state = { projects, jobs: jobRecords, fail: false };
@@ -394,6 +394,8 @@ function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, su
     chainOf: (sid) => chains[sid] ?? [sid],
     successorOf: (sid) => succ[sid] ?? null,
     findSessionReferences: refs ? async (a) => { calls.refs.push(a); return refs(a); } : undefined,
+    isCtoConversationSession: isCto,
+    isInternalSession: isInternal,
     now: () => clock.t,
     // the session list is re-read at once, as index.mjs's syncState.refreshNow does
     onJobsChanged: () => { calls.changed++; h.st.annotateProjects(state.projects); },
@@ -685,4 +687,47 @@ test("graph: a driver that descends from the root, or is itself a live job's chi
   assert.ok(!h.calls.refs[0].sessionIds.includes("K"), "a live job's child is never a candidate");
   assert.deepEqual(h.nesting(), { 3: null, 4: 1 }, "J nests under D, not under X (a child of R) or K (the newer hits)");
   assert.equal(h.st._state.inferred.size, 1, "only R was inferred");
+});
+
+test("graph: the CTO conversation and Manta-internal sessions are never nested by inference; a failing check fails closed without caching", async () => {
+  const mk = (extra) =>
+    graphHarness({
+      projects: proj1("p", [win(1, "D"), win(2, "J", "job")]),
+      jobRecords: [delegateRec("j", "J", "R")],
+      parents: { J: "R" },
+      refs: () => ({ hits: [{ target: "R", sessionId: "D", t: 5 }], complete: true }),
+      ...extra,
+    });
+  for (const [label, extra] of [
+    ["CTO conversation", { isCto: async (sid) => sid === "R", isInternal: async () => false }],
+    ["internal session", { isCto: async () => false, isInternal: async (sid) => sid === "R" }],
+  ]) {
+    const h = mk(extra);
+    await h.st.hydrate();
+    h.annotate();
+    await flushAll(h);
+    assert.equal(h.calls.refs.length, 0, `${label}: no transcript lookup`);
+    assert.equal(h.st._state.inferred.size, 0, `${label}: nothing cached`);
+    assert.equal(h.st._state.eligibility.get("R"), false, `${label}: decided once`);
+    assert.deepEqual(h.nesting(), { 2: null });
+    h.clock.t += 10 * 60_000;
+    h.annotate();
+    await flushAll(h);
+    assert.equal(h.calls.refs.length, 0, `${label}: never asked again`);
+  }
+
+  let broken = true;
+  const h = mk({ isCto: async () => { if (broken) throw new Error("store down"); return false; }, isInternal: async () => false });
+  await h.st.hydrate();
+  h.annotate();
+  await flushAll(h);
+  assert.equal(h.calls.refs.length, 0, "a throwing check: no lookup this pass");
+  assert.equal(h.st._state.eligibility.get("R"), true, "eligibility is not decided against the root by a failed check");
+  assert.deepEqual(h.nesting(), { 2: null });
+  broken = false;
+  h.clock.t += 61_000;
+  h.annotate();
+  await flushAll(h);
+  assert.equal(h.calls.refs.length, 1, "a later pass with a working check proceeds");
+  assert.deepEqual(h.nesting(), { 2: 1 });
 });

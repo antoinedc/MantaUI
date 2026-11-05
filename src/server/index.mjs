@@ -1422,6 +1422,9 @@ const sessionStatus = createSessionStatus({
   chainOf: (sid) => handoffEngine.chainOf(sid),
   successorOf: (sid) => handoffEngine.successorOf(sid),
   findSessionReferences,
+  // Manta's own sessions are never nested by the inferred edge (same predicates the delegate engine uses).
+  isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
+  isInternalSession: (sid) => isInternalSession(sid),
 });
 sessionStatusRef.current = sessionStatus;
 bus.subscribe((evt) => sessionStatus.observe(evt));

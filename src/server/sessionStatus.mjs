@@ -200,6 +200,8 @@ const boundMap = (m, cap) => {
  * @param {(sid: string) => string|null} [d.successorOf]  the session that replaced `sid`, one step
  * @param {(args: {sessionIds: string[], targets: string[], sinceMs: number}) => Promise<{hits: {target: string, sessionId: string, t: number}[], complete: boolean}|null>} [d.findSessionReferences]
  *   which windowed session's transcript named each target (the inferred edge; absent → no inference)
+ * @param {(sid: string) => Promise<boolean>} [d.isCtoConversationSession]  the CTO conversation is never nested by inference
+ * @param {(sid: string) => Promise<boolean>} [d.isInternalSession]  neither is a Manta-internal session
  * @param {() => number} [d.now]
  * @param {number} [d.inferMinIntervalMs]
  */
@@ -596,17 +598,14 @@ export function createSessionStatus(d) {
       }
       return out;
     };
-    const allTargets = new Set();
-    const allCandidates = new Set();
     for (const [key, s] of subjects) {
       s.candidates = candidatesFor(s, graph);
+      s.members = graph.chainInfo(s.root).members;
       if (s.candidates.size === 0) {
         subjects.delete(key);
         continue;
       }
       inferLookedUpAt.set(key, t);
-      for (const x of s.targets) allTargets.add(x);
-      for (const x of s.candidates) allCandidates.add(x);
     }
     boundMap(inferLookedUpAt, 500);
     if (subjects.size === 0) return;
@@ -614,6 +613,35 @@ export function createSessionStatus(d) {
     void queueBackground(async () => {
       let found = null;
       try {
+        // Manta's own sessions (the CTO conversation, internal helpers) are never nested by transcript inference.
+        // Decided once, like the user-opened rule; a check that cannot answer drops the root for this pass only.
+        if (d.isCtoConversationSession || d.isInternalSession) {
+          for (const [key, s] of [...subjects]) {
+            let excluded = false;
+            try {
+              for (const m of s.members) {
+                if ((await d.isCtoConversationSession?.(m)) || (await d.isInternalSession?.(m))) {
+                  excluded = true;
+                  break;
+                }
+              }
+            } catch {
+              subjects.delete(key); // fail closed, retried after the throttle window
+              continue;
+            }
+            if (excluded) {
+              eligibility.set(key, false);
+              subjects.delete(key);
+            }
+          }
+        }
+        if (subjects.size === 0) return;
+        const allTargets = new Set();
+        const allCandidates = new Set();
+        for (const s of subjects.values()) {
+          for (const x of s.targets) allTargets.add(x);
+          for (const x of s.candidates) allCandidates.add(x);
+        }
         found = await d.findSessionReferences({ sessionIds: [...allCandidates], targets: [...allTargets], sinceMs: t - DRIVER_WINDOW_MS });
       } catch {
         found = null;
