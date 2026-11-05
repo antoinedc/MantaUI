@@ -115,3 +115,7 @@ VERDICT: CHANGES REQUIRED
 | 9 | Resolved | 18 | Resolved | 20 | Resolved |
 
 No new findings. VERDICT: APPROVE
+
+## Orchestrator note after approval (r6)
+
+Live-data check before implementation: the cantina driver (window 16, `ses_4ccf23bb…`) names the subagents `ses_e8807c71…` / `ses_e8aa2e47…` (3 mentions each in 24 h) and never the root `ses_e8d7c1d0…` (0). §1.4 now looks up the root OR any collapsed session below it on the walk to a shown descendant. Eligibility, caching and precedence unchanged.

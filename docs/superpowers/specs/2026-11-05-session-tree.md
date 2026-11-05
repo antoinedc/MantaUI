@@ -1,6 +1,6 @@
 # The session tree: rows are sessions, not windows
 
-Status: FINAL r5 (2026-11-05) — approved by Astra at review round 5
+Status: FINAL r6 (2026-11-05) — approved by Astra at review round 5; r6 widens the §1.4 inference targets after a live-data check
 (`reviews/2026-11-05-session-tree-astra.md`). Scope: `src/server/` (session list, status, delegate, push labels),
 the desktop sidebar, the iOS session list, the manta opencode plugin (two new tools).
 
@@ -80,7 +80,11 @@ already the node's.
 4. **Inferred (transition only)**: a node with no rule-1/2/3 parent that is NOT **user-opened** — user-opened
    means: at the moment eligibility is first decided, the node has a window stamped `@manta-owner=user` (or
    unstamped, i.e. made by the user before the stamp existed) — may take the windowed session whose transcript
-   most recently named it within 24 h (today's `sessionReferences` task, same throttle). Eligible, therefore:
+   most recently named it **or any session below it on a walk to a shown descendant** (the collapsed
+   subagents between the root and the rows it holds) within 24 h (today's `sessionReferences` task, same
+   throttle). Measured on the live box (2026-11-05): the cantina driver's transcript names the two subagents
+   (3 mentions each) and never the root orchestrator itself (0), so a root-only lookup would lose today's
+   nesting. Eligible, therefore:
    a root with an adopted record, a windowless root, a windowless ancestor retained under §2; one conversation
    the user opened mentioning another's id never nests it. It exists so the cantina-style orchestrator keeps
    its nesting until its scripts call `session_link`; it is deleted in stage (c). **Eligibility is decided
