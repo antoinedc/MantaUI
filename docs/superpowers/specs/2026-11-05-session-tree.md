@@ -1,7 +1,8 @@
 # The session tree: rows are sessions, not windows
 
-Status: DRAFT r1 (2026-11-05), for review. Scope: `src/server/` (session list, status, delegate), the desktop
-sidebar, the iOS session list, the manta opencode plugin (one new tool).
+Status: DRAFT r2 (2026-11-05), after Astra review round 1
+(`reviews/2026-11-05-session-tree-astra.md`). Scope: `src/server/` (session list, status, delegate, push labels),
+the desktop sidebar, the iOS session list, the manta opencode plugin (two new tools).
 
 ## Problem
 
@@ -31,18 +32,21 @@ already has**; windows are a property of a row (the user opened it), not its ide
 
 ## Goal
 
-- The sidebar tree is a view over the **session graph** — opencode's `parentID` edges, handoff replacement
-  chains (one conversation), and job records — and never depends on a window existing.
-- A session that is running appears under its parent without anybody creating a window for it; nothing
-  creates or closes windows as a side effect of work starting or ending.
-- The user can still open any shown session (the holder window is made on demand) and still closes rows
-  themselves.
+- The sidebar tree is a view over the **session graph** — job records, opencode's `parentID` edges, explicit
+  links, handoff replacement chains (one conversation) — and never depends on a window existing.
+- **Stable-placement invariant**: the *root* a shown session sits under changes only when an edge changes
+  (a handoff commits, a link is written/removed) or that root's window is closed by the user. Turns starting
+  and ending, windows being made on demand, records finishing: none of these move a row to another root.
+- A running session appears under its parent without anybody creating a window for it; nothing creates or
+  closes windows as a side effect of work starting or ending, except a job's own launch window (unchanged).
+- The user can open any shown session (the holder window is made on demand) and closes rows themselves.
 - Delete the heuristics: `displayParentID`, `resolveDisplayParents`, the `sessionReferences` DB task, the
   reconciler's display-parent refresh, observed-session adoption windows.
 
-Non-goals: changing what a background **job** is (worktree, branch, result delivery, caps, pause/resume);
-changing terminal (claude-TUI) rows, which stay window-identified; multi-level rendering (the sidebar keeps
-"top-level row + its children", flattened — unchanged).
+Non-goals: changing what a background **job** is (worktree, branch, result delivery, caps, pause/resume, lost-run
+detection); terminal (claude-TUI) rows, which stay window-identified; showing inline foreground `task` children
+as rows (they stay transcript-only, AGENTS.md TERMINOLOGY); multi-level rendering (the sidebar keeps "root row +
+its descendants flattened" — unchanged).
 
 ## Design
 
@@ -50,142 +54,240 @@ changing terminal (claude-TUI) rows, which stay window-identified; multi-level r
 
 `createSessionStatus` already holds the pieces: the running set (`listActiveSessionIds` + `running`/
 `turnComplete` frames), parent edges (`childSession` frames + `resolveChain` reads of opencode's `parentID`),
-job records, pending asks. It becomes the **one tree builder**; nothing else decides nesting.
+job records, pending asks. It becomes the **one tree builder**; nothing else decides nesting, busy-beneath or
+child counts (`sessionsWithActiveWork` / `runningChildCounts` read the same graph — `displayParentID` leaves
+them too).
 
-Edges, in precedence (first that applies):
+**Conversation nodes first.** A handoff chain is one node. `handoffEngine.chainOf(sid)` returns the chain as a
+set; the **canonical member** is chosen deterministically: the member stamped on a window (lowest window index
+when several, same project); else the chain's live end (follow `replacedBy` from the oldest member; a cycle
+stops at the first repeat). Every session id below is canonicalised to its node before edges are read and
+before cycle detection. A committed handoff therefore never moves a row: the predecessor's descendants were
+already the node's.
 
-1. **Job record**: a record's `childSessionID` → `parentSessionID` (Manta-owned and subagent records; the
-   field never changes). This is already authoritative for result routing and matches opencode's edge
-   anyway (a V2 child is created under its parent).
-2. **opencode `parentID`**: for every running session and every job child, read once and cached as today
-   (`parentOf`); `session.created{parentID}` / `childSession` frames keep it fresh.
-3. **Explicit link** (§5): `~/.manta/session-links.json`, `child → parent`, written by a tool.
-4. **Handoff chain**: a session and its `replacedBy` successors are **one conversation node**; the node's
-   identity is the chain's live member (the one stamped on a window, else the newest). An edge to any chain
-   member is an edge to the node. (`handoffEngine.chainOf` / `successorOf`, as today.)
+**Edges** (child node → parent node), first that applies:
 
-No transcript scanning. No stored display parent. A cycle (impossible from opencode, possible from a bad link
-file) breaks at the repeated id: that child becomes a root.
+1. **Manta-owned job record** (`origin:"delegate"`, the current attempt — the record nothing supersedes):
+   `childSessionID → parentSessionID`. This is the caller; `repointJobSessions` moves it onto a handoff
+   successor at commit, which is the same node. (Adopted records are NOT an edge source: their
+   `parentSessionID` holds the *display* ancestor resolved at adoption and their `sessionParentID` a copy of
+   opencode's parent — rule 2 reads the source instead.)
+2. **opencode `parentID`**: read once per candidate and cached (`parentOf`), kept fresh by
+   `session.created{parentID}` / `childSession` frames. A `task` child, a job's V2 child, a resumed attempt.
+3. **Explicit link** (§5): `child → parent` from `~/.manta/session-links.json`.
+4. **Inferred (transition only, roots only)**: a node that would otherwise be a *windowless root* may take the
+   windowed session whose transcript most recently named it within 24 h (today's `sessionReferences` task, same
+   throttle). It exists so the cantina-style orchestrator keeps its nesting between stage (a) and the day its
+   scripts call `session_link`; it is deleted in stage (c). It never applies to a session that has a rule-1/2/3
+   parent, never to a job child, and its result is cached per node for the life of the process (a different
+   answer later does not move the row).
+
+No stored display parent. A cycle (impossible from rules 1–2, possible from a bad link file or two inferred
+edges) breaks at the first repeated node on the walk from the child: that child becomes a root.
 
 ### 2. Which sessions are rows
 
-A session is **shown** when any of:
+**Exclusions come first.** A session is never a row, and edges pass through it, when it is: marked internal
+(`metadata.manta.internal`: routine runs, title/compaction helpers, CTO inference sessions), the CTO
+conversation (`isCtoConversationSession`), a provenance-internal session (`isInternalSession`), an uncommitted
+handoff successor (`handoffEngine.isSuccessor`), or an **inline foreground `task` child** — a session whose
+parent's current turn holds a non-background `task` tool block for it (the reconciler's existing rule (e),
+`toolBlockFor`; an unreadable timeline keeps the session excluded, never shows it). These are exactly today's
+adoption exclusions (`consider`, `delegate.mjs` ~4640–4680), applied before anything else.
 
-- it is stamped on a tmux window (the user opened it, or a job launch made it) — a *window row*;
-- it is the child of a live job record (`running`/`paused`, or terminal with a pending/unposted result) — a
-  *window row* if it has a window, else a *virtual row*;
-- it is running, or has a pending question / permission, or ended within `LINGER_MS` (30 s; keeps a subagent
-  that loops turn-after-turn from blinking) — a *virtual row*.
+Then a session is **shown** when any of:
 
-Everything else (idle subagents, finished adopted sessions, Manta-internal sessions —
-`metadata.manta.internal`, routine runs) is not a row and is **collapsed**: edges pass through it.
+- it is stamped on a tmux window — a *window row* (terminal windows have no session and are window rows too);
+- it is the child of a live job record — `running`/`paused`, or terminal with `completionDelivery:"pending"` /
+  `launchState:"uncertain"` — a *window row* if it has a window, else a *virtual row*;
+- it is running, has a pending question / permission, or ended within `LINGER_MS` (30 s) — a *virtual row*;
+- **structural retention**: it is an ancestor (by the edges above) of a shown session. A windowless root that
+  went idle stays as a virtual row for as long as any descendant is shown, so the descendants are never
+  promoted to roots and demoted again on its next turn.
 
-**Nesting**: a shown session's parent in the tree is the nearest shown ancestor along the edges above. A shown
-session with no shown ancestor is a **root** of the project that owns it: the tmux session of its window, else
-the project whose directory contains the session's directory (`ownerByDirectory`), else it is not shown
-(nowhere to put it; today's "none" case). A root with no window is labelled *driven from outside* (today's
-"started outside Manta" wording).
+Everything else is collapsed: edges pass through it.
 
-The sidebar keeps its rendering: a root row, and beneath it every shown descendant flattened (today's lift to
-the top-level ancestor), ordered by (depth, start time). iOS keeps hiding children and showing the parent's
-count, as today.
+**Nesting**: a shown session's parent in the tree is its nearest shown ancestor. A shown session with no shown
+ancestor is a **root** of exactly one project: the tmux session of its window; else, for a job child, the
+record's `tmuxSession` (`targetProject` is honoured); else the project whose directory contains the session's
+directory (`ownerByDirectory`, its directory read with `parentID` and refreshed on `session.updated`); else it is
+not shown. Nesting is **within one project**: a parent whose root lies in another project (a job sent to
+`targetProject` by a caller elsewhere) makes the child a root of its own project. A root with no window is
+labelled *driven from outside* (today's "started outside Manta").
+
+**Ordering** (stable): roots keep today's order (window index; windowless roots after windowed ones, by first
+time seen in this process). Beneath a root, descendants are flattened as today (`computeJobNesting`'s lift)
+and ordered by window index for window rows, then virtual rows by first time seen; a row keeps its slot when
+it is materialised (its first-seen time, not its new index, orders it until the list is rebuilt from a restart).
+iOS keeps hiding descendants and showing the root's count (§3).
 
 ### 3. Wire
 
-`tmux:list` / `sync:snapshot` projects gain `tree: SessionNode[]`:
+`tmux:list` / `sync:snapshot` projects gain `tree: SessionNode[]` (roots, in order):
 
 ```ts
 type SessionNode = {
-  sessionId: string;              // the conversation node (handoff chain's live member)
+  key: string;                    // sessionId, or `win:<index>` for a terminal window
+  sessionId: string | null;       // the conversation node's canonical member; null for a terminal window
   kind: "window" | "virtual";
   windowIndex: number | null;     // "window" only
   title: string;                  // window name, else opencode's session title
   job: { id: string; status: DelegateStatus; origin: string } | null;
   outside: boolean;               // a root with no window (driven from outside)
-  children: SessionNode[];        // depth unlimited; clients flatten
+  children: SessionNode[];        // depth unlimited; clients flatten under the root
 };
 ```
 
-`windows[].job.parentWindowIndex` is **kept during the transition**, now computed from `tree` (a child's
-nearest *windowed* ancestor's index, as today's `computeJobNesting` output), so an older desktop / iOS keeps
-nesting exactly as before. `windowStatus` frames are emitted for every shown session (today: windowed only);
-their payload is unchanged. A `sessions.nesting` frame follows a `sync` delta whose tree changed, as today.
+**Legacy projection, kept through (b):** `windows[].job.parentWindowIndex` is computed FROM the tree as the
+index of the node's **root** when that root is a window row in the same project (exactly today's
+`computeJobNesting` output — the top-level ancestor, not the nearest; a three-window chain A → B → C yields A
+for both B and C), else `null`. Old desktop / iOS keep nesting as before. `windowStatus` frames are emitted
+for every shown node with a session (today: windowed only); payload unchanged. `sessions.nesting` follows a
+`sync` delta whose tree changed, as today.
+
+**Client fallback:** a new client renders `tree` when present and falls back to `windows` +
+`parentWindowIndex` when absent (old box). The compatibility matrix is untouched (wire major 1; fields only
+added). What an OLD client loses against a new box, from stage (b): rows for running subagents that no longer
+get adoption windows (it still sees job windows, nesting, counts of job children). That is accepted; the desktop
+auto-updates and iOS ships (b) before (c). Tested in both directions (§8).
+
+**Counts** (desktop badge, iOS "N background"): a root's count = its shown descendants that are running or have
+a pending ask (window or virtual; lingering and pending-result nodes do not count). `busy` = any running
+descendant (unchanged semantics, new graph).
 
 ### 4. Opening a virtual row
 
-Click → `sessions:materialize({ sessionId })` → the box creates the holder window stamped with that session in
-the owning project (`newWindow({ chatMode:true, existingSessionId })`, exactly what adoption does today) and
-answers `{ project, windowIndex }`; the client selects it. The row's kind flips to `window` on the next list.
-This is the backlog's "Open subagent as its own chat-mode window" (AGENTS.md, open work) and makes it the ONLY
-way a subagent gets a window. Keybinds (⌘1..9, ⌥⌘↑/↓) walk window rows only; a virtual row is reached by click.
+Click → `sessions:materialize({ sessionId })`:
+
+- under the session's resource lock (`withSessionResources`, the same lock the launch / cleanup / handoff
+  paths take), the box re-reads the tree; if the node already has a window it answers that one; otherwise it
+  creates the holder window in the node's **root's project** (`newWindow({ chatMode:true, existingSessionId })`)
+  and stamps it `@manta-owner=user`;
+- it refreshes the project list (`syncState.refreshNow()`) BEFORE answering `{ project, windowIndex }`, so the
+  client's `setActive` finds the window; the row keeps its tree slot (§2 ordering), pins and focus use the
+  returned index.
+
+Concurrent clicks resolve to one window (the lock + the re-read). A job finishing while a materialisation is in
+flight sees `@manta-owner=user` on the window and leaves it (below).
+
+**Who closes windows.** `finishV2CleanupLocked` / `cleanupTerminalJob` close only windows stamped
+`@manta-owner=job` (a job's launch window — a worktree row, or a subagent/background-command record's window
+made by a launch); a `user`-owned window is never closed by the box. Closing a `user` window of a session that
+is still running (`sessions:close`) kills the window; the session is still running, so its row returns as a
+virtual row (running work is never hidden). Closing a job row keeps today's semantics (`deleteJob`).
+
+Keybinds (⌘1..9, ⌥⌘↑/↓, `flatSessions`) walk window rows only; a virtual row is reached by click.
 
 ### 5. Sessions driven from outside
 
-An orchestrator that prompts a session through opencode's HTTP API (the cantina scripts) creates no edge, so
-that session is a root labelled *driven from outside*. That is the honest state, and it is stable. To nest it
-the driver says so: a manta plugin tool
+An orchestrator that prompts a session through opencode's HTTP API creates no edge, so that session is a root
+labelled *driven from outside*. To nest it the driver says so, with a manta plugin tool:
 
-`session_link({ sessionId })` — "nest `sessionId` under this conversation in the sidebar". Writes
-`child → caller` to `session-links.json` (one parent per child; the newest write wins; a link to a session
-that is a job child or has an opencode parent is refused — those edges are authoritative). `session_unlink`
-removes it. The guidance blurb tells orchestrators that drive sessions by script to call it once per session.
+- `session_link({ sessionId })` — "nest `sessionId` under this conversation". Writes `child → caller` (both
+  canonicalised) to `~/.manta/session-links.json` through `jsonStore.writeJsonAtomic` under its `createMutex`
+  (serialised writers, atomic file). One parent per child, newest write wins. Refused when the child already has
+  a rule-1/2 parent (those edges are authoritative) or when the link would close a cycle (walk from the caller
+  to a root; the child must not be on it). `session_unlink({ sessionId })` removes it. A link whose parent or
+  child session no longer exists is dropped on the next hydration.
+- The guidance blurb tells orchestrators that drive sessions by script to call it once per session. The
+  inferred rule (§1.4) covers them until they do, through stage (b).
 
-### 6. What stops
+### 6. What stops, and what happens to what exists
 
-- `adoptExistingSession` no longer creates windows; `origin:"observed"` adoption is **retired** (its only
-  product was a row, which §2 now derives from the running set + graph). `origin:"subagent"` records stay
-  (they carry the parent transcript's background card and result pairing) but are window-less until opened.
-- `displayParentID`, `resolveDisplayParents`, `refreshDisplayParents`, `sessionReferences` (dbTasks), the
-  reconciler's display-parent refresh and the `repointJobSessions` `displayParentID` branch are deleted.
-  Existing records keep the field as dead data until retention prunes them.
-- `finishV2CleanupLocked` keeps closing a *job's* window on finish (worktree removal is the reason it exists);
-  it no longer has an observed branch. A finished subagent's virtual row simply disappears after `LINGER_MS`.
-- The active-session reconciler stays for **lost-run** detection and subagent records only.
+- `adoptExistingSession` no longer creates windows and `origin:"observed"` adoption is **retired** (its only
+  product was a row, now derived). `origin:"subagent"` records stay (they carry the parent transcript's
+  background card and result pairing) and are window-less until opened.
+- **Existing records**: observed/subagent records already on a box keep settling through the V2 settlement
+  (`reconcileV2Jobs` / `judgeLostRun` — lost-run detection is that sweep's, not the adoption reconciler's, and is
+  unchanged); their windows are `job`-owned and close at finish as today; an inherited worktree they still hold
+  keeps the record from pruning, as today. Their `parentSessionID`/`displayParentID` are dead data until
+  retention prunes them. The active-session reconciler keeps only subagent adoption.
+- `displayParentID`, `resolveDisplayParents`, `refreshDisplayParents`, the `displayParentID` branch of
+  `repointJobSessions`, `sessionsWithActiveWork`/`runningChildCounts`' use of it, and (in (c)) the
+  `sessionReferences` DB task are deleted.
+- **Push labels**: `buildSessionLabel` resolves a stamped window; for a virtual session it falls back to
+  `<workspace> / <root window name> › <session title>` from the tree, so a question in a subagent is still
+  attributed to the conversation the user knows.
 
-### 7. Stages
+### 7. Hydration and invalidation
 
-(a) **Server tree, no client change.** `sessionStatus` builds `tree`; `parentWindowIndex` is derived from it;
-the display-parent machinery is bypassed (not yet deleted). Clients render exactly as before, minus the flapping
-for every case where the parent is a windowless ancestor (nesting now goes through collapsed sessions).
+**Candidates** = every windowed session + every live job child + the running set + sessions with a pending ask
++ every link endpoint. `hydrate()` resolves the ancestry of every candidate (today it seeds only the running
+set and running job children), reading `parentID`, `directory` and `title` once per session and caching them.
 
-(b) **Virtual rows + materialize.** Desktop sidebar renders `tree` (virtual rows styled as today's "started
-outside Manta" rows, with the running dot / attention); `sessions:materialize`; adoption stops creating windows;
-observed adoption retired. iOS: counts come from `tree`; a virtual child counts like a job child.
+**Unknown is not root.** A failed/unknown read leaves the session's last-known placement; a candidate never read
+successfully is placed by its job record (rule 1) or, failing that, as a root. Before the first hydration
+completes, the tree is the windows + job-record projection (exactly today's output), never a confident
+"everything is a root". Reads retry on the existing 1/2/5/10 s backoff; the live-during-hydration guard stays.
 
-(c) **Delete** the heuristics and the `displayParentID` field; `session_link` tool + guidance.
+**Recompute** (coalesced, one tick) on: `running`/`turnComplete`/`attention` frames, `childSession` frames,
+`delegate.updated` with a changed job signature, a handoff commit (`handoff.committed`), a link write, a window
+list change (`sync` projects delta), `session.updated` carrying a directory move, and linger expiry (one timer
+per lingering node). A recompute that changes the tree publishes the `sync` delta + `sessions.nesting`; status
+frames go out for nodes whose payload changed.
 
-(a) and (b) are each a PR; (c) follows once both clients have shipped (b) (compatibility matrix unchanged: the
-wire only gains fields).
+### 8. Stages
 
-### 8. Tests
+(a) **Server tree + legacy projection + `session_link`.** `sessionStatus` builds `tree`;
+`parentWindowIndex` is derived from it; the display-parent machinery is bypassed (not deleted); edges 1–4 live;
+the tool and its guidance ship. Clients render as before. This alone removes the flapping: a job child's root is
+its windowed ancestor whether or not the subagent between them has a window, and a windowless root is retained
+while its descendants are shown. Acceptance includes the cantina scenario: a windowless API-driven root with a
+`task` subagent that delegates, across ≥ 10 subagent turns — no `sessions.nesting` frame with a changed root.
 
-- `sessionStatus.test.mjs`: tree derivation — collapse through idle subagents; handoff chain as one node; a
-  job child under a windowless subagent nests under the subagent's windowed ancestor regardless of any window;
-  root placement by window then by directory; outside roots; linger; cycle from a bad link; `parentWindowIndex`
-  derivation equals today's `computeJobNesting` for every windowed case (property test over the existing
-  fixtures).
-- `delegate*.test.mjs`: no window is created by adoption; records unchanged otherwise; `repointJobSessions`
-  without the display branch.
-- `rpc.test.mjs`: `sessions:materialize` (creates once; a second call for a session that now has a window
-  returns it; refused for a session with no owning project).
-- Renderer: Sidebar renders virtual rows from `tree`; click materializes and selects; keybinds skip virtual
-  rows. iOS: `SessionJobWindows` counts from `tree`.
-- Live check before (c): cantina's tree stable across 10 subagent turns (no `sessions.nesting` churn).
+(b) **Virtual rows + materialize; no adoption windows.** Desktop sidebar renders `tree` (fallback to
+`windows`); `sessions:materialize`; `@manta-owner=user` rule; observed adoption retired; iOS counts from
+`tree`, virtual roots shown as rows (tap → materialize).
+
+(c) **Delete** `displayParentID`, the resolver, the refresh, the inferred edge and `sessionReferences`; the
+record field is removed from the wire types.
+
+(a) and (b) are one PR each; (c) after (b) has shipped on both clients.
+
+### 9. Tests
+
+- `sessionStatus.test.mjs` (pure tree): collapse through an idle subagent; an inline foreground `task` child
+  is never a row and edges pass through it; a chain is one node and the canonical member is stable across a
+  commit; a job child under a windowless subagent has its windowed ancestor as root with or without a window
+  for the subagent; structural retention (root idle > `LINGER_MS`, child running → root retained; both gone
+  after the child ends + linger); root placement by window, then job `tmuxSession`, then directory; cross-project
+  parent → own root; cycle from a bad link → root; stable ordering across materialisation; `parentWindowIndex`
+  equals today's `computeJobNesting` for every windowed case (A → B → C yields A for both) — property test
+  over the existing fixtures; counts and busy from the graph.
+- Hydration: cold boot before any read (projection only), a failed read keeps placement, reconnect, a
+  handoff successor never shown while uncommitted.
+- `delegate*.test.mjs`: adoption creates no window; `repointJobSessions` without the display branch; cleanup
+  never closes a `user`-owned window; subagent records unchanged.
+- `rpc.test.mjs`: `sessions:materialize` — creates once under the lock; two concurrent calls → one window; a
+  session that gained a window returns it; refused with no owning project; the list is refreshed before the
+  answer. `session_link` / `session_unlink`: refusals (authoritative edge, cycle), newest-wins.
+- Renderer: `tree` rendering, fallback to `windows`, click materializes and selects, keybinds skip virtual
+  rows, pins survive materialisation. iOS: counts from `tree`; virtual roots as rows.
+- Compat: new client × old box (fallback), old client × new box (job rows + nesting unchanged).
+- Live, before (c): cantina's tree across 10 subagent turns, no changed-root frames.
 
 ## Libraries considered
 
 | Need | Chosen | Considered / why rejected |
 |---|---|---|
 | Session graph (edges) | opencode's own session records + `childSession` events, already read by `sessionStatus` | nothing external applies; the data is opencode's |
-| Tree derivation (collapse, roots, flatten) | ~80 lines in `sessionStatus.mjs`, pure | `graphology` (3.6k★, MIT): general graph lib — we need one bounded walk over ≤ a few hundred edges; a dependency for this is weight, not value |
-| Durable link store | existing `statePath` JSON store pattern (atomic write) | `conf`/`lowdb`: the box already has one pattern for every store; adding a second is the wrong direction |
-| Sidebar rendering of nested rows | existing `Sidebar.tsx` rows (flattened children) | `@headless-tree/react` (already in the repo for the Explorer): built for deep expandable trees with keyboard nav; the sidebar is a flat list with an indented band and its own keybinds — adopting it means re-doing those for no visible gain. Revisit if a real expandable tree is wanted |
-| Session title for a virtual row | opencode's session title (read once with `parentID`) | — |
+| Tree derivation (canonicalise, collapse, roots, flatten, cycle break) | ~120 lines in `sessionStatus.mjs`, pure | `graphology` 0.26.0 (2025-01-26, MIT, 1 dep, 2.4M weekly downloads, 1.8k★, pushed 2026-11-05): a general graph model + algorithms. We need one bounded parent-walk over ≤ a few hundred edges with domain rules (exclusions, retention, project ownership) at every step; the algorithms it offers (traversal, components) are not the hard part and the rules would still be ours. Not worth a runtime dependency on the box |
+| Durable link store | `src/server/jsonStore.mjs` (`readJsonSync` / `writeJsonAtomic`: temp-file + rename, parent dir created; `createMutex` for serialised writers) — the repo's one store primitive, used by every `~/.manta/*.json` store | `lowdb` 7.0.1 (2023-12-26, MIT, 1 dep, 2.2M/wk): same temp-file write, no cross-call mutex, adds an adapter layer for a ~20-line file; `conf` 16.0.0 (2026-10-12, MIT, 9 deps, 25M/wk): Electron-oriented, schema/migrations/encryption we don't need. The existing primitive already gives atomicity + serialisation; a second store library would mean two write paths on the box |
+| Sidebar rendering of nested rows | existing `Sidebar.tsx` rows (flattened children) | `@headless-tree/react` 1.8 (already in the repo for the Explorer): built for deep expandable trees with its own keyboard model; the sidebar is a flat list with an indented band and app-level keybinds (⌘1..9, ⌥⌘↑/↓); adopting it means re-doing those for no visible gain. Revisit if a real expandable tree is wanted |
+| Session title / directory for a virtual row | opencode's session record (read once with `parentID`) | — |
+
+## Decisions (r2)
+
+- The transcript-inference edge survives through (b) as a roots-only, cached, lowest-precedence rule, and is
+  deleted in (c) once `session_link` is in use (Astra #4).
+- Inline foreground `task` children stay transcript-only; the tree reuses the adoption exclusions (Astra #8).
+- iOS shows virtual roots as rows in (b) (count-only had nowhere to put the count) (Astra #11).
+- A finished `subagent` record's virtual row vanishes after `LINGER_MS`; the transcript card is the durable
+  surface.
 
 ## Open questions
 
-1. Keep the transcript "driver" rule as a last resort during stage (a)? Proposal: no — a wrong nest is worse
-   than an honest *driven from outside* root, and `session_link` covers the orchestrator case explicitly.
-2. Should a finished `subagent` record's virtual row linger until its result is read in the parent transcript
-   (like a job), or vanish after `LINGER_MS`? Proposal: vanish; the transcript card is the durable surface.
-3. iOS: show virtual rows (tappable → materialize) or only count them? Proposal: count only in (b), rows later.
+1. `LINGER_MS` = 30 s: enough for the loop-prompted subagent case? (Retention makes it cosmetic for anything
+   with running descendants.)
+2. Should `session_link` be callable by the CTO work tools (`work_dispatch`) to nest a worker under the work
+   item's conversation? Out of scope here; noted.
