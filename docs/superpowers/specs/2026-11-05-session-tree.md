@@ -1,6 +1,6 @@
 # The session tree: rows are sessions, not windows
 
-Status: FINAL r6 (2026-11-05) — approved by Astra at review round 5; r6 widens the §1.4 inference targets after a live-data check
+Status: FINAL r7 (2026-11-05) — r7 adds the pinned stage (b) contract (§10); — approved by Astra at review round 5; r6 widens the §1.4 inference targets after a live-data check
 (`reviews/2026-11-05-session-tree-astra.md`). Scope: `src/server/` (session list, status, delegate, push labels),
 the desktop sidebar, the iOS session list, the manta opencode plugin (two new tools).
 
@@ -335,6 +335,35 @@ record field is removed from the wire types.
   rows, pins survive materialisation. iOS: counts from `tree`; virtual roots as rows.
 - Compat: new client × old box (fallback), old client × new box (job rows + nesting unchanged).
 - Live, before (c): cantina's tree across 10 subagent turns, no changed-root frames.
+
+### 10. Stage (b) contract (pinned before implementation)
+
+Pinned in code: `SessionTreeNode`, `Project.tree`, `SessionMaterializeResult`, `IPC.sessionsMaterialize`
+(`src/shared/types.ts`), `Api.sessionsMaterialize` (`src/shared/api.ts`).
+
+- **`Project.tree`** — roots in display order. Every window of the project appears exactly once (window rows:
+  chat windows keyed by conversation key, terminal windows and duplicate windows keyed
+  `window:<project>:<index>`), plus virtual rows. Each node's `children` are already ordered; clients flatten them
+  **depth-first pre-order** under the root (one indentation band, as today). Server-side order among siblings: §2
+  `seq`. `windows[].job.parentWindowIndex` keeps its stage (a) meaning for old clients.
+- **Status**: `windowStatus` frames and `sessions:window-status` cover every node with a `sessionId` (window AND
+  virtual). `subagents` = descendants at any depth that are running or wait on a question/permission.
+- **`sessions:materialize({sessionId})` → `SessionMaterializeResult`.** Never throws for an expected refusal.
+  `reason`: `handoff` ("A handoff of this conversation is in progress — try again in a moment."), `no-project`
+  ("No workspace owns this session."), `not-found` ("This session no longer exists."), `failed` ("Couldn't open
+  this session."). On `ok`, the project list has already been refreshed (the client can `setActive` at once).
+- **Links** (§5): store `~/.manta/session-links.json` (module `src/server/sessionLinks.mjs`). Plugin tools
+  `session_link({sessionId})` / `session_unlink({sessionId})` in `docs/opencode-plugins-v2/manta/tools/` →
+  `POST /api/session-links {action:"link"|"unlink", sessionID:<caller>, target:<sessionId>}` → `{ok:true}` or
+  `{ok:false, error}` (class 2: the message goes back to the model). Refusals: authoritative edge exists, cycle,
+  unknown session.
+- **Owner rule** (§4): windows the box closes at job finish are `@manta-owner=job` only; `sessions:materialize`
+  stamps `user`.
+- **Clients**: desktop renders `tree` when present (fallback: `windows`); a virtual row looks like today's
+  "started outside Manta" row style, shows its status dot from `windowStatus`, and on click calls
+  `sessionsMaterialize` then selects `{project, windowIndex}`; an `ok:false` shows `message` as an error toast.
+  Keybinds (`flatSessions`) walk window rows only. iOS decodes `tree` (optional), takes counts from it, shows
+  virtual ROOTS as rows (tap → materialize), hides descendants as today.
 
 ## Libraries considered
 
