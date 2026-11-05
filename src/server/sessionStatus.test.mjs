@@ -329,7 +329,7 @@ test("rootIds is cleared at the start of each hydration (bounded)", async () => 
   const h = harness({ windowed: ["p"], active: ["c"], parents: { c: { status: "ok", parentID: null } } });
   h.st._state.rootIds.add("stale-root");
   await h.st.hydrate();
-  assert.deepEqual([...h.st._state.rootIds], ["c"]);
+  assert.deepEqual([...h.st._state.rootIds], ["c", "p"], "the running set AND every windowed session are hydration candidates");
 });
 
 test("sessions.nesting: published once, AFTER the sync delta that carries the new nesting; never for activity-only changes", () => {
@@ -358,4 +358,331 @@ test("direct-child counts are computed once per flush (runningChildCounts) and m
   const m = { running: new Set(["a", "b"]), parentOf: new Map([["a", "p"], ["b", "p"], ["x", "p"]]), jobs: [], own: new Map(), stopped: new Set() };
   assert.equal(runningChildCounts(m).get("p"), 2);
   assert.equal(deriveWindowStatus(m, "p").subagents, 2);
+});
+
+// ---- the session graph (stage (a)): parentWindowIndex is a projection of the graph ----
+const win = (index, sid, owner = "user") => ({ index, name: `w${index}`, opencodeSessionId: sid, owner });
+const proj1 = (name, windows) => [{ tmuxSession: name, windows }];
+const delegateRec = (id, child, parent, extra = {}) => ({ id, status: "running", origin: "delegate", completionOwner: "manta", childSessionID: child, parentSessionID: parent, ...extra });
+const adoptedRec = (id, child, parent, extra = {}) => ({ id, status: "running", origin: "observed", completionOwner: "opencode", childSessionID: child, parentSessionID: parent, ...extra });
+const flushAll = async (h) => {
+  await h.st.settleBackground();
+  await new Promise((r) => setImmediate(r));
+  await h.st.settleBackground();
+};
+
+function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, succ = {}, refs = null, active = [] } = {}) {
+  const calls = { parent: [], refs: [], changed: 0 };
+  const clock = { t: 1_000_000 };
+  const state = { projects, jobs: jobRecords, fail: false };
+  const published = [];
+  const windowedIds = () => state.projects.flatMap((p) => p.windows.map((w) => w.opencodeSessionId).filter(Boolean));
+  const h = { calls, clock, state, published };
+  h.st = createSessionStatus({
+    publish: (e) => published.push(e),
+    windowedSessionIds: windowedIds,
+    loadJobs: async () => state.jobs,
+    listActiveSessionIds: async () => active,
+    getSessionParent: async (id) => {
+      calls.parent.push(id);
+      if (state.fail) return { status: "error" };
+      const p = typeof parents === "function" ? parents(id) : parents[id];
+      return { status: "ok", parentID: p ?? null };
+    },
+    schedule: () => {},
+    setTimer: () => {},
+    chainOf: (sid) => chains[sid] ?? [sid],
+    successorOf: (sid) => succ[sid] ?? null,
+    findSessionReferences: refs ? async (a) => { calls.refs.push(a); return refs(a); } : undefined,
+    now: () => clock.t,
+    // the session list is re-read at once, as index.mjs's syncState.refreshNow does
+    onJobsChanged: () => { calls.changed++; h.st.annotateProjects(state.projects); },
+  });
+  h.annotate = () => h.st.annotateProjects(state.projects);
+  /** { windowIndex: parentWindowIndex } of every job window of project `name` (default: the first). */
+  h.nesting = (name) => {
+    const p = h.annotate().find((x) => (name ? x.tmuxSession === name : true));
+    return Object.fromEntries(p.windows.filter((w) => w.job).map((w) => [w.index, w.job.parentWindowIndex]));
+  };
+  return h;
+}
+
+test("graph: before the first hydration the projection is exactly today's (display parents included)", async () => {
+  const projects = proj1("p", [win(1, "driver"), win(2, "child")]);
+  const rec = adoptedRec("j", "child", "gone", { displayParentID: "driver" });
+  const h = graphHarness({ projects, jobRecords: [rec] });
+  await h.st.refreshJobs();
+  assert.deepEqual(h.nesting(), { 2: 1 }, "cold: today's displayParentID nesting");
+  assert.equal(h.st._state.hydratedOnce, false);
+  await h.st.hydrate();
+  assert.deepEqual(h.nesting(), { 2: null }, "hydrated: the graph says the adopted row's opencode parent is a root, displayParentID is not read");
+});
+
+test("graph: property — for windowed parents the projection equals computeJobNesting over the existing fixtures", async () => {
+  const fixtures = [
+    [[win(0, "parent"), win(1, "child1"), win(2, "child2")], jobs],
+    [[win(0, "parent"), win(3, "doneChild")], jobs],
+    [[win(5, "orphanChild")], jobs],
+    [[win(0, "parent")], jobs],
+    [[win(0, "root"), win(1, "mid"), win(2, "leaf")], { b: { id: "b", status: "running", parentSessionID: "mid", childSessionID: "leaf" }, a: { id: "a", status: "running", parentSessionID: "root", childSessionID: "mid" } }],
+    [[win(0, "root"), win(1, "mid")], { a: { id: "a", status: "running", parentSessionID: "mid", childSessionID: "root" }, b: { id: "b", status: "running", parentSessionID: "root", childSessionID: "mid" } }],
+    [[win(1, "driver"), win(2, "child1"), win(3, "other")], { j: { id: "j", status: "running", parentSessionID: "other", childSessionID: "child1" } }],
+    [[win(1, "driver"), win(2, "child1")], { old: { id: "old", status: "done", parentSessionID: "driver", childSessionID: "child1", supersededBy: "next" }, live: { id: "live", status: "running", parentSessionID: "driver", childSessionID: "child1" } }],
+  ];
+  const rows = (p) => p[0].windows.map((w) => w.job?.parentWindowIndex ?? "none");
+  for (const [windows, records] of fixtures) {
+    const projects = proj1("p", windows);
+    const legacy = rows(annotateJobs(projects, Object.values(records)));
+    const h = graphHarness({ projects, jobRecords: Object.values(records) });
+    await h.st.hydrate();
+    assert.deepEqual(rows(h.annotate()), legacy, "first pass");
+    await flushAll(h);
+    assert.deepEqual(rows(h.annotate()), legacy, "after the background reads");
+  }
+});
+
+test("graph: A → B → C in three windows lifts both B and C to A", async () => {
+  const projects = proj1("p", [win(0, "A"), win(1, "B"), win(2, "C")]);
+  const h = graphHarness({ projects, jobRecords: [delegateRec("b", "B", "A"), delegateRec("c", "C", "B")] });
+  await h.st.hydrate();
+  assert.deepEqual(h.nesting(), { 1: 0, 2: 0 });
+});
+
+test("graph: a job under a windowless subagent nests under the windowed ancestor, whether or not the subagent has a window", async () => {
+  const records = [delegateRec("j", "J", "S")];
+  const parents = { S: "D", J: "S" };
+  const noWin = graphHarness({ projects: proj1("p", [win(1, "D"), win(2, "J", "job")]), jobRecords: records, parents });
+  await noWin.st.hydrate();
+  assert.deepEqual(noWin.nesting(), { 2: 1 });
+  const withWin = graphHarness({ projects: proj1("p", [win(1, "D"), win(2, "J", "job"), win(3, "S", "job")]), jobRecords: [...records, adoptedRec("s", "S", "D")], parents });
+  await withWin.st.hydrate();
+  assert.deepEqual(withWin.nesting(), { 2: 1, 3: 1 }, "the adopted subagent's window and its job both sit under D");
+});
+
+test("graph: a wrapped command record (manta-owned) is a rule-1 edge; an adopted record's parentSessionID is NOT read", async () => {
+  const projects = proj1("p", [win(1, "P"), win(2, "cmd", "job"), win(3, "adopted", "job")]);
+  const records = [delegateRec("c", "cmd", "P", { origin: "command" }), adoptedRec("a", "adopted", "P")];
+  const h = graphHarness({ projects, jobRecords: records, parents: { cmd: null, adopted: null } });
+  await h.st.refreshJobs();
+  assert.deepEqual(h.nesting(), { 2: 1, 3: 1 }, "cold: today's output nests both under P");
+  await h.st.hydrate();
+  assert.deepEqual(h.nesting(), { 2: 1, 3: null }, "hydrated: the command is nested by its record; the adopted row's opencode parent is a root");
+  const named = graphHarness({ projects, jobRecords: records, parents: { cmd: null, adopted: "P" } });
+  await named.st.hydrate();
+  assert.deepEqual(named.nesting(), { 2: 1, 3: 1 }, "an adopted row whose opencode parent is windowed still nests (rule 2)");
+});
+
+test("graph: a window in another project is not an ancestor; a cycle makes a root without looping", async () => {
+  const cross = [{ tmuxSession: "p", windows: [win(1, "P")] }, { tmuxSession: "q", windows: [win(1, "J", "job")] }];
+  const h = graphHarness({ projects: cross, jobRecords: [delegateRec("j", "J", "P")] });
+  await h.st.hydrate();
+  assert.deepEqual(h.nesting("q"), { 1: null });
+
+  const cyc = graphHarness({
+    projects: proj1("p", [win(1, "J", "job")]),
+    jobRecords: [delegateRec("j", "J", "X")],
+    parents: { X: "Y", Y: "X" },
+  });
+  await cyc.st.hydrate();
+  assert.deepEqual(cyc.nesting(), { 1: null });
+  const winCyc = graphHarness({ projects: proj1("p", [win(1, "A", "job"), win(2, "B", "job")]), jobRecords: [delegateRec("a", "A", "B"), delegateRec("b", "B", "A")] });
+  await winCyc.st.hydrate();
+  assert.deepEqual(winCyc.nesting(), { 1: null, 2: null });
+});
+
+test("graph: a handoff chain is one node — a job whose parent is the predecessor projects to the successor's window, and a commit moves nothing", async () => {
+  const records = [delegateRec("j", "J", "pred")];
+  // Before the commit: the predecessor has the window.
+  const before = graphHarness({ projects: proj1("p", [win(1, "pred"), win(2, "J", "job")]), jobRecords: records });
+  await before.st.hydrate();
+  assert.deepEqual(before.nesting(), { 2: 1 });
+  // After: the window is stamped with the successor; the record still names the predecessor.
+  const chain = ["pred", "succ"];
+  const after = graphHarness({
+    projects: proj1("p", [win(1, "succ"), win(2, "J", "job")]),
+    jobRecords: records,
+    chains: { pred: chain, succ: chain },
+    succ: { pred: "succ" },
+  });
+  await after.st.hydrate();
+  assert.deepEqual(after.nesting(), { 2: 1 });
+  after.annotate();
+  const changedBefore = after.calls.changed;
+  after.st.observe({ kind: "handoff", payload: { id: "h", fromSessionId: "pred", state: "committed" } });
+  await flushAll(after);
+  assert.equal(after.calls.changed, changedBefore, "a commit changes no projection → no list refresh");
+  // The canonical member is the lowest-index windowed one when several members have windows.
+  const two = ["P", "Q"];
+  const dup = graphHarness({ projects: proj1("p", [win(3, "P"), win(1, "Q"), win(4, "J", "job")]), jobRecords: [delegateRec("j", "J", "P")], chains: { P: two, Q: two } });
+  await dup.st.hydrate();
+  assert.deepEqual(dup.nesting(), { 4: 1 });
+});
+
+test("graph: a session whose parent read failed keeps its last-known projection; a session nobody has read yet is not a root", async () => {
+  const projects = proj1("p", [win(1, "D"), win(2, "J", "job")]);
+  const h = graphHarness({ projects, jobRecords: [delegateRec("j", "J", "S")], parents: { S: "D", J: "S" } });
+  await h.st.hydrate();
+  assert.deepEqual(h.nesting(), { 2: 1 });
+  // The edge S → D is lost (eviction) and the box cannot be read: unknown, so the old placement stands.
+  h.st._state.parentOf.delete("S");
+  h.st._state.rootIds.delete("S");
+  h.state.fail = true;
+  assert.deepEqual(h.nesting(), { 2: 1 }, "not demoted to a root");
+  await flushAll(h);
+  assert.deepEqual(h.nesting(), { 2: 1 }, "a failed background read changes nothing");
+  h.state.fail = false;
+  h.clock.t += 6000;
+  h.annotate();
+  await flushAll(h);
+  assert.deepEqual(h.nesting(), { 2: 1 }, "the retry re-learned the edge");
+  assert.ok(h.calls.parent.filter((s) => s === "S").length >= 2);
+});
+
+test("graph: a parent first seen after hydration is read in the background, then placed (until then: today's output)", async () => {
+  const projects = proj1("p", [win(1, "D"), win(2, "J", "job")]);
+  const h = graphHarness({ projects, jobRecords: [], parents: { S: "D" } });
+  await h.st.hydrate();
+  h.state.jobs = [delegateRec("j", "J", "S")];
+  await h.st.refreshJobs();
+  assert.deepEqual(h.nesting(), { 2: null }, "S is unknown: today's output (S has no window → top-level)");
+  await flushAll(h);
+  assert.equal(h.calls.changed, 1, "the list was refreshed once the read placed it");
+  assert.deepEqual(h.nesting(), { 2: 1 });
+});
+
+// ---- rule 4: the inferred driver ----
+function cantina({ withSubagentWindows = true, refs } = {}) {
+  const base = [win(16, "D"), win(10, "J1", "job"), win(12, "J2", "job")];
+  const subs = [win(1, "S1", "job"), win(2, "S2", "job")];
+  const h = graphHarness({
+    projects: proj1("cantina", withSubagentWindows ? [...base, ...subs] : base),
+    jobRecords: [adoptedRec("s1", "S1", "R"), adoptedRec("s2", "S2", "R"), delegateRec("j1", "J1", "S1"), delegateRec("j2", "J2", "S2")],
+    parents: { S1: "R", S2: "R", J1: "S1", J2: "S2" },
+    refs: refs ?? ((a) => ({ hits: [{ target: "S1", sessionId: "D", t: 9 }, { target: "S2", sessionId: "D", t: 8 }], complete: true })),
+  });
+  h.setSubagentWindows = (on) => { h.state.projects = proj1("cantina", on ? [...base, ...subs] : base); };
+  return h;
+}
+
+for (const withSubagentWindows of [true, false]) {
+  test(`graph: the cantina scenario (subagent windows ${withSubagentWindows ? "present" : "absent"} at first) — jobs stay under the driver across 12 alternations of the subagent windows`, async () => {
+    const h = cantina({ withSubagentWindows });
+    await h.st.hydrate();
+    h.annotate();
+    await flushAll(h);
+    assert.equal(h.calls.refs.length, 1, "one transcript lookup");
+    assert.deepEqual(h.calls.refs[0].sessionIds, ["D"], "only windowed sessions that are not job children are candidates");
+    assert.ok(["R", "S1", "S2"].every((t) => h.calls.refs[0].targets.includes(t)), "the root and the collapsed sessions below it are targets");
+    assert.equal(h.calls.changed, 1, "the new inferred edge refreshed the list once");
+    assert.equal(h.st._state.inferred.size, 1);
+    let on = withSubagentWindows;
+    for (let i = 0; i < 12; i++) {
+      on = !on;
+      h.setSubagentWindows(on);
+      const n = h.nesting();
+      assert.equal(n[10], 16, `J1 under D (round ${i}, subagent windows ${on})`);
+      assert.equal(n[12], 16, `J2 under D (round ${i})`);
+      if (on) {
+        assert.equal(n[1], 16, "the adopted subagent's own window is under D");
+        assert.equal(n[2], 16);
+      }
+      await flushAll(h);
+    }
+    assert.equal(h.calls.refs.length, 1, "the cached edge is never looked up again");
+    assert.equal(h.calls.changed, 1, "nothing else triggered a list refresh");
+  });
+}
+
+test("graph: an inferred edge is cached once and never revised; a later materialised user window on the root does not revoke it", async () => {
+  let answer = "D";
+  const h = graphHarness({
+    projects: proj1("p", [win(1, "D"), win(2, "D2"), win(3, "J", "job")]),
+    jobRecords: [delegateRec("j", "J", "R")],
+    parents: { J: "R" },
+    refs: () => ({ hits: [{ target: "R", sessionId: answer, t: 5 }], complete: true }),
+  });
+  await h.st.hydrate();
+  h.annotate();
+  await flushAll(h);
+  assert.deepEqual(h.nesting(), { 3: 1 });
+  answer = "D2";
+  h.clock.t += 10 * 60_000;
+  h.annotate();
+  await flushAll(h);
+  assert.equal(h.calls.refs.length, 1, "no second lookup");
+  assert.deepEqual(h.nesting(), { 3: 1 }, "not revised");
+  // The user materialises the root (a user-owned window for R) afterwards.
+  h.state.projects = proj1("p", [win(1, "D"), win(2, "D2"), win(3, "J", "job"), win(4, "R", "user")]);
+  assert.deepEqual(h.nesting(), { 3: 4 }, "the job now has a windowed ancestor of its own (R); the cached edge is untouched");
+  assert.equal(h.st._state.inferred.size, 1);
+});
+
+test("graph: a user-opened root is never inferred under anything; an incomplete or failing lookup caches nothing; lookups are throttled per root", async () => {
+  // A finished job window the user reopened (owner user) — a root the user opened.
+  const userRoot = graphHarness({
+    projects: proj1("p", [win(1, "D"), win(2, "R", "user")]),
+    jobRecords: [adoptedRec("r", "R", null, { status: "done" })],
+    refs: () => ({ hits: [{ target: "R", sessionId: "D", t: 5 }], complete: true }),
+  });
+  await userRoot.st.hydrate();
+  userRoot.annotate();
+  await flushAll(userRoot);
+  assert.equal(userRoot.calls.refs.length, 0, "ineligible → no lookup at all");
+  assert.deepEqual(userRoot.nesting(), { 2: null });
+
+  let mode = "incomplete";
+  const h = graphHarness({
+    projects: proj1("p", [win(1, "D"), win(2, "J", "job")]),
+    jobRecords: [delegateRec("j", "J", "R")],
+    parents: { J: "R" },
+    refs: () => {
+      if (mode === "throw") throw new Error("db down");
+      if (mode === "null") return null;
+      return { hits: [{ target: "R", sessionId: "D", t: 5 }], complete: mode !== "incomplete" };
+    },
+  });
+  await h.st.hydrate();
+  h.annotate();
+  await flushAll(h);
+  assert.equal(h.calls.refs.length, 1);
+  assert.equal(h.st._state.inferred.size, 0, "complete:false caches nothing");
+  h.annotate();
+  await flushAll(h);
+  assert.equal(h.calls.refs.length, 1, "a second pass inside 60 s does not call the DB");
+  for (const m of ["throw", "null"]) {
+    mode = m;
+    h.clock.t += 61_000;
+    h.annotate();
+    await flushAll(h);
+    assert.equal(h.st._state.inferred.size, 0, `${m} caches nothing`);
+  }
+  assert.equal(h.calls.refs.length, 3, "one lookup per minute per root");
+  mode = "ok";
+  h.clock.t += 61_000;
+  h.annotate();
+  await flushAll(h);
+  assert.equal(h.st._state.inferred.size, 1);
+  assert.deepEqual(h.nesting(), { 2: 1 });
+});
+
+test("graph: a driver that descends from the root, or is itself a live job's child, is never chosen", async () => {
+  const h = graphHarness({
+    projects: proj1("p", [win(1, "D"), win(2, "X"), win(3, "K", "job"), win(4, "J", "job")]),
+    jobRecords: [delegateRec("j", "J", "R"), delegateRec("k", "K", "Y")],
+    parents: { J: "R", X: "R", K: "Y", Y: null },
+    refs: () => ({
+      hits: [
+        { target: "R", sessionId: "X", t: 9 }, // X is a child of R: a cycle
+        { target: "R", sessionId: "K", t: 8 }, // K is a live job's child
+        { target: "R", sessionId: "D", t: 1 },
+      ],
+      complete: true,
+    }),
+  });
+  await h.st.hydrate();
+  h.annotate();
+  await flushAll(h);
+  assert.ok(!h.calls.refs[0].sessionIds.includes("K"), "a live job's child is never a candidate");
+  assert.deepEqual(h.nesting(), { 3: null, 4: 1 }, "J nests under D, not under X (a child of R) or K (the newer hits)");
+  assert.equal(h.st._state.inferred.size, 1, "only R was inferred");
 });

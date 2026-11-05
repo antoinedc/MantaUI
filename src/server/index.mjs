@@ -1288,6 +1288,15 @@ const webhookEngine = createWebhookEngine({
 // created earlier in module scope); until then it is a no-op, and a routing
 // failure never breaks the job's own terminal transition.
 let workOutcomeSink = null;
+// Which windowed session's transcript named each target session id (read-only, off-thread; null when the DB is
+// unavailable or the worker is busy — the rule that asked is then skipped).
+const findSessionReferences = async (args) => {
+  try {
+    return await runDbTask("sessionReferences", { ...args, budgetMs: 8_000 });
+  } catch {
+    return null;
+  }
+};
 const delegateEngine = createDelegateEngine({
   publish: (evt) => bus.publish(evt),
   deliver: (args) => promptDelivery.deliver(args),
@@ -1363,13 +1372,7 @@ const delegateEngine = createDelegateEngine({
   // windowless session, and which windowed session's transcript named a child session (read-only, off-thread;
   // null when the DB is unavailable or the worker is busy — the rule is then skipped).
   successorOf: (sid) => handoffEngine.successorOf(sid),
-  findSessionReferences: async (args) => {
-    try {
-      return await runDbTask("sessionReferences", { ...args, budgetMs: 8_000 });
-    } catch {
-      return null;
-    }
-  },
+  findSessionReferences,
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   // The CTO's ephemeral inference sessions (provenance tombstones): never adopted as observed jobs.
@@ -1414,6 +1417,11 @@ const sessionStatus = createSessionStatus({
   runningSince: (id) => streamInterp.getState(id)?.runningSince ?? null,
   // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
   onJobsChanged: () => syncState.refreshNow(),
+  // The session graph's conversation nodes (a handoff chain is one node) and the inferred-driver lookup (the same
+  // read-only, off-thread transcript scan the display-parent resolver uses; null when the DB is unavailable).
+  chainOf: (sid) => handoffEngine.chainOf(sid),
+  successorOf: (sid) => handoffEngine.successorOf(sid),
+  findSessionReferences,
 });
 sessionStatusRef.current = sessionStatus;
 bus.subscribe((evt) => sessionStatus.observe(evt));

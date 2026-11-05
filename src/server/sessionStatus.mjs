@@ -10,6 +10,14 @@
 // a task tool that completed after launching background work leaves `subagents` / `busy` up while its child runs.
 //
 // `createSessionStatus` is dependency-injected (no I/O of its own); the pure derivations are exported for tests.
+//
+// Nesting (session-tree stage (a), docs/superpowers/specs/2026-11-05-session-tree.md): `windows[].job.parentWindowIndex`
+// is a projection of the SESSION GRAPH, not a lookup of the record's parent among windows. Nodes are conversations (a
+// handoff chain is one node); edges are (1) a Manta-owned job record's parent, (2) opencode's own `parentID`, (4) a
+// cached transcript-inferred driver for a root nobody opened. A window's root is its nearest windowed ancestor's root,
+// walking through windowless sessions, so a subagent's window coming and going never moves the rows below it.
+
+import { completionOwnerOf, DRIVER_WINDOW_MS } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------------------------------------------
 // Pure: nesting (moved verbatim from the desktop's computeJobNesting)
@@ -164,6 +172,17 @@ export const DEFAULT_STATUS = Object.freeze({ running: false, busy: false, start
 const MAX_EDGES = 5000;
 const MAX_DEPTH = 32;
 const RETRY_MS = [1000, 2000, 5000, 10000];
+const INFER_MIN_INTERVAL_MS = 60_000; // per root, between transcript lookups
+const UNKNOWN_READ_MIN_INTERVAL_MS = 5_000; // per session, between background parent reads
+const MAX_INFER_STATE = 2000;
+const CYCLE = Symbol("cycle");
+
+const isTerminalStatus = (j) => j?.status === "done" || j?.status === "failed" || j?.status === "stopped";
+/** A job whose child still has a place in the tree: running/paused, or finished with its result not yet delivered. */
+const isLiveJob = (j) => !isTerminalStatus(j) || j?.completionDelivery === "pending";
+const boundMap = (m, cap) => {
+  while (m.size > cap) m.delete(m.keys().next().value);
+};
 
 /**
  * @param {object} d
@@ -177,6 +196,12 @@ const RETRY_MS = [1000, 2000, 5000, 10000];
  * @param {() => unknown} [d.onJobsChanged]  a job record changed (the session list's `job` fields must be re-read)
  * @param {(fn: () => void) => void} [d.schedule]  coalescing tick (default: setTimeout 0)
  * @param {(fn: () => void, ms: number) => unknown} [d.setTimer]  hydration retry timer
+ * @param {(sid: string) => string[]} [d.chainOf]  handoff replacement chain of a session (all members; default: just itself)
+ * @param {(sid: string) => string|null} [d.successorOf]  the session that replaced `sid`, one step
+ * @param {(args: {sessionIds: string[], targets: string[], sinceMs: number}) => Promise<{hits: {target: string, sessionId: string, t: number}[], complete: boolean}|null>} [d.findSessionReferences]
+ *   which windowed session's transcript named each target (the inferred edge; absent → no inference)
+ * @param {() => number} [d.now]
+ * @param {number} [d.inferMinIntervalMs]
  */
 export function createSessionStatus(d) {
   const schedule = d.schedule ?? ((fn) => setTimeout(fn, 0));
@@ -185,6 +210,20 @@ export function createSessionStatus(d) {
   const own = new Map(); // sid -> { since, attention }
   const parentOf = new Map(); // child -> parent (insertion order = LRU order for eviction)
   const rootIds = new Set(); // sessions an authoritative read said have NO parent
+  const missing = new Set(); // sessions an authoritative read said no longer exist (known, not unknown)
+  const now = d.now ?? (() => Date.now());
+  // Rule 4 (inferred edge), all keyed by the conversation key (a handoff chain's OLDEST member, stable across commits).
+  const inferred = new Map(); // child conv key -> parent conv key; decided once, cached for the process, never revised
+  const eligibility = new Map(); // conv key -> boolean, decided once: may this root take an inferred parent?
+  const inferLookedUpAt = new Map(); // conv key -> when its last transcript lookup started
+  const unknownReadAt = new Map(); // session id -> when a background parent read last started
+  let placement = new Map(); // `${project}\0${sid}` -> last confidently projected parentWindowIndex
+  let lastProjects = null; // the last session list handed to annotateProjects (un-annotated)
+  let hydratedOnce = false;
+  let recomputePending = false;
+  let inferRunning = false;
+  let resolveRunning = false;
+  let background = Promise.resolve();
   let jobs = [];
   let stopped = new Set();
   const lastEmitted = new Map(); // sid -> JSON of the last payload sent
@@ -280,6 +319,330 @@ export function createSessionStatus(d) {
     }
   }
 
+  // ---- the session graph --------------------------------------------------------------------------------------
+  //
+  // Built per pass from `projects` (which windows exist now) + the held edges. Nothing here does I/O.
+
+  /** Which job records make a session an annotated row, and which are adopted (opencode-owned). */
+  function recordIndex() {
+    const annotated = new Set(); // child session ids of non-superseded records (today's set of `job` windows)
+    const adopted = new Set(); // ... whose completion owner is opencode (observed / subagent)
+    const ruleOne = new Map(); // child -> parent for Manta-owned records (the caller)
+    const liveChildren = new Set();
+    for (const j of jobs) {
+      if (!j?.childSessionID || j.supersededBy) continue;
+      annotated.add(j.childSessionID);
+      if (isLiveJob(j)) liveChildren.add(j.childSessionID);
+      if (completionOwnerOf(j) === "opencode") adopted.add(j.childSessionID);
+      else if (j.parentSessionID && j.parentSessionID !== j.childSessionID) ruleOne.set(j.childSessionID, j.parentSessionID);
+    }
+    return { annotated, adopted, ruleOne, liveChildren };
+  }
+
+  function buildGraph(projects) {
+    const rec = recordIndex();
+    const windowsBySid = new Map(); // sid -> [{ project, index, owner, sid }]
+    for (const p of projects ?? []) {
+      for (const w of p.windows ?? []) {
+        if (!w?.opencodeSessionId) continue;
+        const list = windowsBySid.get(w.opencodeSessionId) ?? [];
+        // A window nothing stamped is the user's (tmux.resolveOwner maps absent → "user").
+        list.push({ project: p.tmuxSession, index: w.index, owner: w.owner ?? "user", sid: w.opencodeSessionId });
+        windowsBySid.set(w.opencodeSessionId, list);
+      }
+    }
+    const byIndex = (a, b) => a.index - b.index || (a.project < b.project ? -1 : a.project > b.project ? 1 : 0);
+
+    // Conversation nodes: a handoff chain is one node.
+    const chains = new Map(); // sid -> { members, oldest, canon }
+    const chainInfo = (sid) => {
+      const hit = chains.get(sid);
+      if (hit) return hit;
+      let members;
+      try {
+        members = d.chainOf?.(sid);
+      } catch {
+        members = null;
+      }
+      if (!Array.isArray(members) || !members.includes(sid)) members = [sid];
+      const hasPredecessor = new Set();
+      for (const m of members) {
+        const next = d.successorOf?.(m);
+        if (typeof next === "string" && next !== m && members.includes(next)) hasPredecessor.add(next);
+      }
+      const oldest = members.find((m) => !hasPredecessor.has(m)) ?? [...members].sort()[0];
+      const windowed = members.flatMap((m) => windowsBySid.get(m) ?? []).sort(byIndex);
+      let canon;
+      if (windowed.length > 0) {
+        canon = windowed[0].sid;
+      } else {
+        canon = oldest;
+        const seen = new Set([oldest]);
+        for (;;) {
+          const next = d.successorOf?.(canon);
+          if (typeof next !== "string" || !next || seen.has(next)) break;
+          seen.add(next);
+          canon = next;
+        }
+      }
+      const info = { members, oldest, canon };
+      for (const m of members) chains.set(m, info);
+      return info;
+    };
+    const canon = (sid) => chainInfo(sid).canon;
+    const keyOf = (sid) => chainInfo(sid).oldest;
+
+    const windowsByNode = new Map(); // canonical node -> windows of any member
+    for (const [sid, list] of windowsBySid) {
+      const node = canon(sid);
+      windowsByNode.set(node, [...(windowsByNode.get(node) ?? []), ...list]);
+    }
+
+    /** child node -> parent node: rule 1 (Manta-owned record), rule 2 (opencode's parentID), rule 4 (cached inference). */
+    function edgeParent(node) {
+      const { members, oldest } = chainInfo(node);
+      for (const m of members) {
+        const p = rec.ruleOne.get(m);
+        if (p && canon(p) !== node) return canon(p);
+      }
+      for (const m of members) {
+        const p = parentOf.get(m);
+        if (p && canon(p) !== node) return canon(p);
+      }
+      const inf = inferred.get(oldest);
+      if (inf && canon(inf) !== node) return canon(inf);
+      return null;
+    }
+    const isKnownRoot = (node) => chainInfo(node).members.some((m) => rootIds.has(m) || missing.has(m));
+
+    /** The ancestors above `start` (nodes), and how the walk ended: a known root, a cycle, or a node nobody has read. */
+    function walkUp(start) {
+      const path = [];
+      const seen = new Set([start]);
+      let cur = start;
+      for (let depth = 0; depth < MAX_DEPTH; depth++) {
+        const next = edgeParent(cur);
+        if (next) {
+          if (seen.has(next)) return { path, end: "cycle", at: cur };
+          seen.add(next);
+          path.push(next);
+          cur = next;
+          continue;
+        }
+        return { path, end: isKnownRoot(cur) ? "root" : "unknown", at: cur };
+      }
+      return { path, end: "root", at: cur };
+    }
+
+    /**
+     * The window `w` (of `projectName`) nests under: the root of its nearest windowed ancestor, walking through
+     * windowless sessions and lifting through ancestors that are themselves nested rows. `certain:false` when the
+     * walk reached a session nobody has read yet (unknown is not root).
+     */
+    function projectWindow(projectName, w) {
+      let certain = true;
+      const unknown = [];
+      const visited = new Set();
+      const rootOf = (win) => {
+        if (visited.has(win.index)) return CYCLE;
+        visited.add(win.index);
+        const walk = walkUp(canon(win.sid));
+        for (const node of walk.path) {
+          const wins = windowsByNode.get(node);
+          if (!wins) continue;
+          const here = wins.filter((x) => x.project === projectName && x.index !== win.index).sort(byIndex)[0];
+          if (!here) return win.index; // windowed only in another project: this row is a top-level row here
+          return rec.annotated.has(here.sid) ? rootOf(here) : here.index;
+        }
+        if (walk.end === "unknown") {
+          certain = false;
+          unknown.push(...chainInfo(walk.at).members);
+        }
+        return win.index;
+      };
+      const r = rootOf({ index: w.index, sid: w.opencodeSessionId });
+      return { value: r === CYCLE || r === w.index ? null : r, certain, unknown };
+    }
+
+    return { rec, windowsBySid, windowsByNode, canon, keyOf, chainInfo, edgeParent, walkUp, projectWindow };
+  }
+
+  /** The session list with each job window's `parentWindowIndex` taken from the graph (today's output until hydrated). */
+  function computeAnnotated(projects) {
+    const base = annotateJobs(projects, jobs);
+    if (!hydratedOnce) return { out: base, placement: placement, unknown: new Set(), graph: null };
+    const graph = buildGraph(projects);
+    const nextPlacement = new Map();
+    const unknown = new Set();
+    const out = base.map((p) => ({
+      ...p,
+      windows: p.windows.map((w) => {
+        if (!w.job) return w;
+        const r = graph.projectWindow(p.tmuxSession, w);
+        const key = `${p.tmuxSession}\0${w.opencodeSessionId}`;
+        let value;
+        if (r.certain) {
+          value = r.value;
+        } else {
+          for (const sid of r.unknown) unknown.add(sid);
+          const last = placement.get(key);
+          value = last !== undefined && (last === null || p.windows.some((x) => x.index === last)) ? last : w.job.parentWindowIndex;
+        }
+        nextPlacement.set(key, value);
+        return value === w.job.parentWindowIndex ? w : { ...w, job: { ...w.job, parentWindowIndex: value } };
+      }),
+    }));
+    return { out, placement: nextPlacement, unknown, graph };
+  }
+
+  /** Re-derive the projection and, only when it differs from the list last served, refresh the session list. */
+  function recompute() {
+    if (recomputePending || !d.onJobsChanged) return;
+    recomputePending = true;
+    Promise.resolve()
+      .then(() => {
+        recomputePending = false;
+        if (!lastProjects) return undefined;
+        const { out } = computeAnnotated(lastProjects);
+        return nestingSignature(out) !== nestingSig ? d.onJobsChanged() : undefined;
+      })
+      .catch(() => {
+        recomputePending = false;
+      });
+  }
+
+  /** Run `fn` after whatever background work is queued; failures never escape. */
+  function queueBackground(fn) {
+    background = background.then(fn).catch(() => {});
+    return background;
+  }
+
+  /** Read the ancestry of sessions the projection could not place because nobody had read them. */
+  function resolveUnknown(unknown) {
+    if (resolveRunning || hydrating || !hydratedOnce) return;
+    const t = now();
+    const want = [];
+    for (const sid of unknown) {
+      const last = unknownReadAt.get(sid);
+      if (last != null && t - last < UNKNOWN_READ_MIN_INTERVAL_MS) continue;
+      unknownReadAt.set(sid, t);
+      want.push(sid);
+    }
+    boundMap(unknownReadAt, 1000);
+    if (want.length === 0) return;
+    resolveRunning = true;
+    void queueBackground(async () => {
+      try {
+        const visited = new Set();
+        for (const sid of want) await resolveChain(sid, visited);
+        evictIfNeeded();
+      } finally {
+        resolveRunning = false;
+      }
+      recompute();
+    });
+  }
+
+  /**
+   * Rule 4. For each graph root that is not user-opened, the windowed session of the same project whose transcript most
+   * recently named the root OR a collapsed session between it and a row it holds (within DRIVER_WINDOW_MS). One lookup per
+   * pass, one per root per minute; the answer, once found, is cached for good. An incomplete / failed lookup caches nothing.
+   */
+  function inferDrivers(projects, graph) {
+    if (inferRunning || hydrating || !hydratedOnce || typeof d.findSessionReferences !== "function" || !graph) return;
+    const t = now();
+    const minGap = d.inferMinIntervalMs ?? INFER_MIN_INTERVAL_MS;
+    const subjects = new Map(); // conv key -> { root, targets:Set, projects:Set, candidates:Set }
+    for (const p of projects ?? []) {
+      for (const w of p.windows ?? []) {
+        const sid = w?.opencodeSessionId;
+        if (!sid || !graph.rec.annotated.has(sid)) continue;
+        const walk = graph.walkUp(graph.canon(sid));
+        if (walk.end !== "root" || walk.path.some((n) => graph.windowsByNode.has(n))) continue; // placed by a windowed ancestor, or not certain
+        const root = walk.at;
+        const key = graph.keyOf(root);
+        if (!eligibility.has(key)) {
+          // Decided ONCE, when the root first needs an answer: a window the user opened (or nothing stamped) rules it out.
+          eligibility.set(key, !(graph.windowsByNode.get(root) ?? []).some((x) => x.owner === "user"));
+          boundMap(eligibility, MAX_INFER_STATE);
+        }
+        if (!eligibility.get(key)) continue;
+        const last = inferLookedUpAt.get(key);
+        if (last != null && t - last < minGap) continue;
+        let s = subjects.get(key);
+        if (!s) subjects.set(key, (s = { root, targets: new Set(), projects: new Set(), candidates: new Set() }));
+        s.projects.add(p.tmuxSession);
+        for (const m of graph.chainInfo(root).members) s.targets.add(m);
+        for (const n of walk.path.slice(0, -1)) for (const m of graph.chainInfo(n).members) s.targets.add(m);
+        // An adopted row is named by its driver directly (its own transcript mentions the subagent, not the root).
+        if (graph.rec.adopted.has(sid)) s.targets.add(sid);
+      }
+    }
+    if (subjects.size === 0) return;
+    const live = new Set([...graph.rec.liveChildren].map((sid) => graph.canon(sid)));
+    const candidatesFor = (s, g) => {
+      const out = new Set();
+      for (const p of projects ?? []) {
+        if (!s.projects.has(p.tmuxSession)) continue;
+        for (const w of p.windows ?? []) {
+          const sid = w?.opencodeSessionId;
+          if (!sid) continue;
+          const node = g.canon(sid);
+          if (node === s.root || live.has(node)) continue;
+          const walk = g.walkUp(node);
+          if (walk.end === "unknown" || walk.path.includes(s.root)) continue;
+          out.add(sid);
+        }
+      }
+      return out;
+    };
+    const allTargets = new Set();
+    const allCandidates = new Set();
+    for (const [key, s] of subjects) {
+      s.candidates = candidatesFor(s, graph);
+      if (s.candidates.size === 0) {
+        subjects.delete(key);
+        continue;
+      }
+      inferLookedUpAt.set(key, t);
+      for (const x of s.targets) allTargets.add(x);
+      for (const x of s.candidates) allCandidates.add(x);
+    }
+    boundMap(inferLookedUpAt, 500);
+    if (subjects.size === 0) return;
+    inferRunning = true;
+    void queueBackground(async () => {
+      let found = null;
+      try {
+        found = await d.findSessionReferences({ sessionIds: [...allCandidates], targets: [...allTargets], sinceMs: t - DRIVER_WINDOW_MS });
+      } catch {
+        found = null;
+      } finally {
+        inferRunning = false;
+      }
+      if (!found || !Array.isArray(found.hits) || found.complete === false || !lastProjects) return;
+      const fresh = buildGraph(lastProjects); // state may have moved while the lookup ran
+      let changed = false;
+      for (const [key, s] of subjects) {
+        if (inferred.has(key)) continue;
+        const hits = found.hits
+          .filter((h) => s.targets.has(h?.target) && s.candidates.has(h?.sessionId))
+          .sort((a, b) => (b.t ?? 0) - (a.t ?? 0) || (a.sessionId < b.sessionId ? -1 : 1));
+        for (const h of hits) {
+          const node = fresh.canon(h.sessionId);
+          const walk = fresh.walkUp(node);
+          if (node === fresh.canon(s.root) || walk.end === "unknown" || walk.path.includes(fresh.canon(s.root))) continue;
+          if (fresh.edgeParent(fresh.canon(s.root))) break; // an authoritative parent appeared meanwhile: nothing to infer
+          inferred.set(key, fresh.keyOf(h.sessionId));
+          boundMap(inferred, MAX_INFER_STATE);
+          changed = true;
+          break;
+        }
+      }
+      if (changed) recompute();
+    });
+  }
+
   function observe(evt) {
     if (!evt || typeof evt !== "object") return;
     if (evt.kind === "stream") {
@@ -296,10 +659,18 @@ export function createSessionStatus(d) {
         ownState(sid).attention = p?.kind ?? null;
         dirty();
       } else if (evt.sub === "childSession" && typeof p?.childSessionId === "string" && typeof p?.parentSessionId === "string") {
+        const added = p.childSessionId !== p.parentSessionId && parentOf.get(p.childSessionId) !== p.parentSessionId;
         if (p.childSessionId !== p.parentSessionId) touchEdge(p.childSessionId, p.parentSessionId);
         evictIfNeeded();
         dirty();
+        if (added) recompute();
       }
+      return;
+    }
+    if (evt.kind === "handoff") {
+      // A commit moves records and windows between members of one conversation: the node is the same, so nothing
+      // should move — but verify, cheaply, rather than assume.
+      if (evt.payload?.state === "committed") recompute();
       return;
     }
     if (evt.kind === "runningSet" && Array.isArray(evt.payload?.sessions)) {
@@ -348,13 +719,16 @@ export function createSessionStatus(d) {
       if (r.status === "error") return false;
       if (r.status === "not-found") {
         parentOf.delete(cur); // the session was deleted: that edge is gone
+        missing.add(cur);
         break;
       }
       if (!r.parentID) {
         parentOf.delete(cur);
         rootIds.add(cur);
+        missing.delete(cur);
         break;
       }
+      missing.delete(cur);
       touchEdge(cur, r.parentID);
       // Stop once the parent is already known (its own chain was resolved earlier).
       if (rootIds.has(r.parentID) || parentOf.has(r.parentID)) break;
@@ -374,6 +748,7 @@ export function createSessionStatus(d) {
       let complete = true;
       const live = (liveDuringHydration = new Map());
       rootIds.clear(); // re-learned by the walk below; keeps the set bounded
+      missing.clear();
       try {
         const ids = await d.listActiveSessionIds();
         running.clear();
@@ -394,14 +769,18 @@ export function createSessionStatus(d) {
       }
       if (!(await refreshJobs())) complete = false;
       await refreshStopped();
+      // Candidates: the running set, every windowed session, every job child that still has a place in the tree.
       const seeds = new Set(running);
-      for (const j of jobs) if (j.status === "running" && j.childSessionID && !j.supersededBy) seeds.add(j.childSessionID);
+      for (const sid of d.windowedSessionIds()) seeds.add(sid);
+      for (const j of jobs) if (j.childSessionID && !j.supersededBy && isLiveJob(j)) seeds.add(j.childSessionID);
       const visited = new Set();
       for (const id of seeds) {
         if (!(await resolveChain(id, visited))) complete = false;
       }
       evictIfNeeded();
       dirty();
+      hydratedOnce = true; // reads that failed leave their sessions unplaced (last-known / today's), never roots
+      recompute();
       if (complete) {
         attempt = 0;
       } else {
@@ -440,17 +819,25 @@ export function createSessionStatus(d) {
      *  signal a client that does not follow `sync` deltas refreshes on (activity-only `delegate.updated` frames never
      *  do), published AFTER the list is readable so that refresh sees it. */
     annotateProjects(projects) {
-      const out = annotateJobs(projects, jobs);
-      const sig = nestingSignature(out);
+      lastProjects = projects;
+      const res = computeAnnotated(projects);
+      placement = res.placement;
+      const sig = nestingSignature(res.out);
       if (nestingSig !== null && sig !== nestingSig) nestingPending = true;
       nestingSig = sig;
-      return out;
+      if (res.graph) {
+        resolveUnknown(res.unknown);
+        inferDrivers(projects, res.graph);
+      }
+      return res.out;
     },
+    /** Resolves when background work (parent reads, the inference lookup) queued so far has finished. */
+    settleBackground: () => background,
     refreshJobs,
     /** Resolves once a job change in flight has reached the session list — so `tmux:list` read right after a
      *  `delegate.updated` frame already carries the new `job` fields. */
     settled: () => pendingJobs,
     // Test seams.
-    _state: { running, parentOf, rootIds, own, get jobs() { return jobs; }, set jobs(v) { jobs = v; }, get stopped() { return stopped; }, set stopped(v) { stopped = new Set(v); }, get retryScheduled() { return retryPending; } },
+    _state: { running, parentOf, rootIds, missing, inferred, eligibility, get hydratedOnce() { return hydratedOnce; }, own, get jobs() { return jobs; }, set jobs(v) { jobs = v; }, get stopped() { return stopped; }, set stopped(v) { stopped = new Set(v); }, get retryScheduled() { return retryPending; } },
   };
 }
