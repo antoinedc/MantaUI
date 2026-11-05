@@ -65,6 +65,7 @@ function world({ parent = {}, jobs: seed = [] } = {}) {
   });
 
   const deps = {
+    getWindowOption: async () => "job", // fixtures with windows model job-owned holders
     load: async () => jobs.map((j) => ({ ...j })),
     save: async (next) => {
       saves.push(structuredClone(next));
@@ -880,7 +881,8 @@ test("provisional adoption: an unclaimed child born in a command window is adopt
   assert.equal(j.name, "/review HEAD~1");
   assert.equal(j.childSessionID, "ses_nat");
   assert.equal(j.worktree, null);
-  assert.equal(w.calls.window[0].existingSessionId, "ses_nat");
+  assert.equal(w.calls.window.length, 0);
+  assert.equal(j.windowIndex, null);
   assert.equal(w.calls.synth.length, 0, "Manta posts nothing for it");
 });
 
@@ -992,7 +994,7 @@ test("no lost lifecycle: the existing task-subagent adoption reads the map too",
   assert.equal(j.completionOwner, "opencode");
 });
 
-test("an adopted native-command row completes from the raw outcome (still no Manta result), its window closes, the record stays", async () => {
+test("an adopted native-command row completes from the raw outcome (no result or window), the record stays", async () => {
   const w = world();
   w.state.openWindows = [{ name: "bg", arguments: "" }];
   const { engine, fire } = engineWithTimers(w);
@@ -1007,7 +1009,7 @@ test("an adopted native-command row completes from the raw outcome (still no Man
   const j = w.jobs.find((x) => x.childSessionID === "ses_nat");
   assert.equal(j.status, "done");
   assert.equal(w.calls.synth.length + w.calls.deliver.length, 0);
-  assert.equal(w.calls.kill.length, 1, "the window closes once the job finishes");
+  assert.equal(w.calls.kill.length, 0, "adoption never created a window");
   assert.equal(j.cleanedUp, true);
 });
 

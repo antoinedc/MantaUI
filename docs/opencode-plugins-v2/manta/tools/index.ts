@@ -19,6 +19,7 @@ import { tools as resourceSnapshot } from "./resource-snapshot.ts";
 import { tools as routines } from "./routines.ts";
 import { tools as schedule } from "./schedule.ts";
 import { tools as secrets } from "./secrets.ts";
+import { tools as sessionLinks } from "./session-links.ts";
 import { tools as sendFile } from "./send-file.ts";
 import { tools as sendToCto } from "./send-to-cto.ts";
 import { tools as servePage } from "./serve-page.ts";
@@ -44,6 +45,7 @@ export const allTools: ToolDef[] = [
   ...routines,
   ...schedule,
   ...secrets,
+  ...sessionLinks,
   ...sendFile,
   ...sendToCto,
   ...servePage,

@@ -22,6 +22,7 @@ import { buildCondensedPrompt, buildGeneratePrompt, buildReminder, composeHandof
 import { condenseBudget, condenseTranscript, inputBudget, lastAssistantCompletedAt } from "./condense.mjs";
 import { continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord, rewriteBlockedReason } from "./state.mjs";
 import { priceForPrompt } from "../optimizer/prices.mjs";
+import { createMutex } from "../jsonStore.mjs";
 
 export class HandoffError extends Error {
   /** @param {string} code @param {string} message @param {{ handoff?: object }} [extra] */
@@ -84,6 +85,23 @@ export function applyPreamble(kind, args, preamble) {
  * @param {object} deps  see the field comments below
  */
 export function createHandoffEngine(deps = {}) {
+  const chainLocks = new Map();
+  function withChainExclusive(sid, fn) {
+    // An uncommitted successor belongs to its predecessor's exclusion too.
+    const pending = Object.values(state.records).find((r) => r.successorId === sid && r.state === "starting");
+    let oldest = pending?.fromSessionId ?? sid;
+    const seen = new Set();
+    while (state.links[oldest]?.replaces && !seen.has(oldest)) {
+      seen.add(oldest);
+      oldest = state.links[oldest].replaces;
+    }
+    let entry = chainLocks.get(oldest);
+    if (!entry) chainLocks.set(oldest, entry = { lock: createMutex(), pending: 0 });
+    entry.pending++;
+    return entry.lock.runExclusive(fn).finally(() => {
+      if (--entry.pending === 0) chainLocks.delete(oldest);
+    });
+  }
   const {
     load = () => emptyState(),
     save = async () => {},
@@ -1552,24 +1570,26 @@ export function createHandoffEngine(deps = {}) {
       c.modeInherited = true;
       await persist();
     }
-    if (!c.attached) {
-      await attachWindow(rec);
-      await hook("attach");
-      c.attached = true;
-      await persist();
-    }
-    if (!c.linkWritten) {
-      writeLinks(rec);
-      c.linkWritten = true;
-      await hook("link");
-      await persist();
-    }
-    if (!c.ownership) {
-      if (rec.how === "clear") await ownership.repoint(pred, succ);
-      await hook("ownership");
-      c.ownership = true;
-      await persist();
-    }
+    await withChainExclusive(pred, async () => {
+      if (!c.attached) {
+        await attachWindow(rec);
+        await hook("attach");
+        c.attached = true;
+        await persist();
+      }
+      if (!c.linkWritten) {
+        writeLinks(rec);
+        c.linkWritten = true;
+        await hook("link");
+        await persist();
+      }
+      if (!c.ownership) {
+        if (rec.how === "clear") await ownership.repoint(pred, succ);
+        await hook("ownership");
+        c.ownership = true;
+        await persist();
+      }
+    });
     if (!c.stopChecked) {
       await interruptIfJobStopped(rec);
       c.stopChecked = true;
@@ -1845,6 +1865,7 @@ export function createHandoffEngine(deps = {}) {
     get,
     // ownership / listings
     hasPendingSend,
+    withChainExclusive,
     isSuccessor,
     chainOf,
     successorOf,

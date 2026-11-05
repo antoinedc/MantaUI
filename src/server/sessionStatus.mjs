@@ -572,10 +572,11 @@ export function createSessionStatus(d) {
       windowsByNode.set(node, [...(windowsByNode.get(node) ?? []), ...list]);
     }
 
-    /** A `session_unlink` suppression on any member (and no explicit link winning): no inference for this child. */
+    // A link written after a handoff replaces an older member's link/suppression too.
+    const nodeLink = (node) => chainInfo(node).members.map(linkEntry).filter(Boolean).sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0];
+    /** A `session_unlink` suppression: no inference for this child. */
     function isSuppressed(node) {
-      const { members } = chainInfo(node);
-      return members.some((m) => linkEntry(m)?.parent === null);
+      return nodeLink(node)?.parent === null;
     }
 
     /**
@@ -592,10 +593,8 @@ export function createSessionStatus(d) {
         const p = parentOf.get(m);
         if (p && canon(p) !== node) return canon(p);
       }
-      for (const m of members) {
-        const p = linkEntry(m)?.parent;
-        if (typeof p === "string" && p && canon(p) !== node) return canon(p);
-      }
+      const linked = nodeLink(node)?.parent;
+      if (typeof linked === "string" && linked && canon(linked) !== node) return canon(linked);
       if (isSuppressed(node)) return null;
       const inf = inferred.get(oldest);
       if (inf && canon(inf) !== node) return canon(inf);
@@ -1605,6 +1604,7 @@ export function createSessionStatus(d) {
       }
       if (!(await refreshJobs())) complete = false;
       await refreshStopped();
+      try { await d.pruneLinks?.(); } catch { complete = false; }
       // Candidates: the running set, every windowed session, every job child that still has a place in the tree,
       // every session with a pending ask, every session a link names.
       const seeds = new Set(running);
@@ -1693,13 +1693,46 @@ export function createSessionStatus(d) {
      * holder window can start in (the session's own directory when opencode reported one, else the root window's pane path, else
      * the project's `defaultCwd`; the caller verifies it exists on disk). `null` when the session is not a shown row.
      * @param {string} sessionId
-     * @returns {{ project: string, canonicalSessionId: string, cwd: string | null } | null}
+     * @returns {{ project: string, canonicalSessionId: string, cwd: string | null, rootPath: string | null, defaultCwd: string | null } | null}
      */
     placementOf(sessionId) {
       const hit = lastLayout?.placeIdx.get(sessionId);
       if (!hit) return null;
       const dir = hit.directory ?? null;
-      return { project: hit.project, canonicalSessionId: hit.canonicalSessionId, cwd: dir ?? hit.rootPath ?? hit.defaultCwd ?? null };
+      return { project: hit.project, canonicalSessionId: hit.canonicalSessionId, cwd: dir ?? hit.rootPath ?? hit.defaultCwd ?? null, rootPath: hit.rootPath, defaultCwd: hit.defaultCwd };
+    },
+    async resolveAncestry(sid) {
+      const visited = new Set();
+      const pending = [sid];
+      while (pending.length) {
+        const current = pending.pop();
+        const graph = buildGraph(lastProjects);
+        for (const member of graph.chainInfo(current).members) {
+          if (!await resolveChain(member, visited)) return false;
+        }
+        // Natural ancestry alone is insufficient for a cycle check: a persisted explicit edge
+        // or a job caller may lead into an ancestor this process has not read yet.
+        const fresh = buildGraph(lastProjects);
+        for (const ancestor of fresh.walkUp(fresh.canon(current)).path) {
+          if (!visited.has(ancestor)) pending.push(ancestor);
+        }
+      }
+      return true;
+    },
+    canonicalSessionOf: (sid) => buildGraph(lastProjects).canon(sid),
+    authoritativeParentOf(sid) {
+      const graph = buildGraph(lastProjects);
+      const node = graph.canon(sid);
+      for (const m of graph.chainInfo(node).members) {
+        for (const parent of [graph.rec.ruleOne.get(m), parentOf.get(m)]) {
+          if (parent && graph.canon(parent) !== node) return graph.canon(parent);
+        }
+      }
+      return null;
+    },
+    ancestorsOf(sid) {
+      const graph = buildGraph(lastProjects);
+      return graph.walkUp(graph.canon(sid)).path;
     },
     /** Seam for the link store: a link was written / removed — re-derive the tree and re-send the statuses. */
     linksChanged() {

@@ -21,6 +21,7 @@ import {
 import { buildContextPayload } from "./sessionContext.mjs";
 import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
 import { previewClose, closeSession } from "./sessionClose.mjs";
+import { materializeSession } from "./sessionMaterialize.mjs";
 import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName, tmuxSafeName, nameTaken } from "./sessionNaming.mjs";
 import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
 import { buildAccountRowStates } from "./accountsRowState.mjs";
@@ -1515,6 +1516,10 @@ export function buildHandlers({
     },
     // WS11 D7 (S14): every windowed session's `windowStatus` payload — a FULL replacement for the client.
     "sessions:window-status": async () => sessionStatus?.windowStatusMap() ?? {},
+    "sessions:materialize": (input) => materializeSession(input, {
+      handoff, sessionStatus, tmux, readSession: (sid) => oc.readSession(sid),
+      configGet: () => local.configGet(), refresh: () => syncState.refreshNow(),
+    }),
     // WS11 D6 (S10): the close flow — confirm copy, then worktree removal → kill → metadata → refresh — on the box.
     "sessions:close-preview": async (i) =>
       previewClose({

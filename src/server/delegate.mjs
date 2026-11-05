@@ -93,6 +93,8 @@ function createKeyedMutex() {
 }
 const sessionResources = createKeyedMutex();
 const withSessionResources = (childSessionID, fn) => sessionResources.runExclusive(childSessionID, fn);
+/** Narrow shared exclusion for on-demand holders (chain lock must be taken first). */
+export const withSessionLock = (sid, fn) => withSessionResources(sid, fn);
 
 // Max concurrently `running` jobs, counted box-wide. There is no `queued`
 // state — a job either starts immediately or is refused by the cap.
@@ -574,13 +576,13 @@ export function newestRecordFor(jobs, childSessionID) {
 }
 
 /**
- * Adopt a session that already exists into the job store + a window.
+ * Adopt a session that already exists into the job store (no window creation).
  *
  * Under `sessionResources(childSessionID)` then `jobsLock`: a session with a non-terminal
  * record is already adopted. Otherwise a NEW record is appended — linked to the session's
  * newest terminal record, which this helper finds ITSELF (`continues` / `supersededBy`, the
  * worktree transferred when it still exists on disk) — and a window stamped with the
- * session is reused or created. opencode (or a script) owns the run and reports its own
+ * session is reused if present, never created. opencode (or a script) owns the run and reports its own
  * result: `completionOwner:"opencode"`, so Manta never posts one.
  *
  * @param {{ childSessionID:string, owner:{tmuxSession:string}, displayParentID?:string|null, sessionParentID?:string|null,
@@ -603,7 +605,7 @@ export async function adoptExistingSession(input, deps = {}) {
 }
 
 async function adoptExistingSessionLocked(input, deps = {}) {
-  const { load = loadJobs, save = saveJobs, publish, newWindow, stampOwner, listProjects, oc, now = () => Date.now() } = deps;
+  const { load = loadJobs, save = saveJobs, publish, listProjects, now = () => Date.now() } = deps;
   const { childSessionID, owner, displayParentID = null, sessionParentID = null, name, prompt = "", model = null, origin, runStartedAt } = input ?? {};
   if (!childSessionID || !owner?.tmuxSession) return { ok: false, error: "childSessionID and an owning workspace are required" };
 
@@ -629,8 +631,7 @@ async function adoptExistingSessionLocked(input, deps = {}) {
         baseSha = prev.baseSha ?? null;
       }
 
-      // The window opens at the session's own directory; a finished delegate job's directory
-      // (its removed worktree) may be gone, in which case it falls back to where the job began.
+      // Keep a real parent directory for any inherited worktree's later cleanup.
       let cwd = input.cwd || input.parentDirectory;
       if (cwd && !(await pathExistsVia(deps, cwd))) {
         for (const alt of [worktree, prev?.parentDirectory, input.parentDirectory]) {
@@ -649,30 +650,11 @@ async function adoptExistingSessionLocked(input, deps = {}) {
         if (stamped) {
           tmuxSession = stamped.tmuxSession;
           windowIndex = stamped.windowIndex;
-        } else {
-          const created = await newWindow({
-            sessionName: tmuxSession,
-            windowName: windowNameFor(name),
-            cwd,
-            chatMode: true,
-            existingSessionId: childSessionID,
-            worktreePath: worktree,
-            oc,
-          });
-          windowIndex = created.windowIndex ?? null;
-          if (!(created.sessionId ?? childSessionID)) throw new Error("could not read the new window's opencode session id");
         }
       } catch (e) {
         return { ok: false, error: String(e?.message ?? e) };
       }
-      // Advisory metadata (@manta-owner): a stamp failure must not fail the adoption.
-      if (stampOwner && windowIndex != null) {
-        try {
-          await stampOwner(tmuxSession, windowIndex, "job");
-        } catch {
-          /* best-effort */
-        }
-      }
+      // Adoption records work, not windows. Never claim a user-opened holder.
 
       const t = now();
       const job = {
@@ -1734,6 +1716,25 @@ async function cleanupTerminalJobLocked(job, deps = {}) {
       return { cleanedUp: false, reason: "remove-failed" };
     }
   }
+  // A holder opened after launch may not be the record's old index. Find it by session stamp.
+  if (job?.worktree && typeof deps.listProjects === "function") {
+    const holders = (await deps.listProjects()).flatMap((p) => (p.windows ?? [])
+      .filter((w) => w.opencodeSessionId === job.childSessionID)
+      .map((w) => ({ tmuxSession: p.tmuxSession, windowIndex: w.index })));
+    for (const w of holders) {
+      const owner = await deps.getWindowOption?.(w.tmuxSession, w.windowIndex, "@manta-owner");
+      if (owner !== "job") {
+        try {
+          if (!deps.setWindowOption || !deps.rebaseHolder || !job.parentDirectory) throw new Error("holder rebase is unavailable");
+          await deps.rebaseHolder(w.tmuxSession, w.windowIndex, job.parentDirectory);
+          await deps.setWindowOption(w.tmuxSession, w.windowIndex, "@manta-worktree-path", "");
+        } catch (e) {
+          console.warn(`[delegate] re-basing the window of ${job.id} failed:`, e?.message ?? e);
+          return { cleanedUp: false, reason: "rebase-failed" };
+        }
+      }
+    }
+  }
   await closeJobWindowLocked(job, deps);
   return { cleanedUp: true };
 }
@@ -2141,7 +2142,7 @@ async function deleteJobLocked(id, lockedChild, deps, opts) {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === id);
     if (idx === -1) return { ok: false, error: "not found" };
-    const job = jobs[idx];
+    let job = jobs[idx];
     if (job.childSessionID !== lockedChild) return { moved: true };
 
     // A superseded run's window and worktree belong to its successor: only the record goes.
@@ -2149,6 +2150,13 @@ async function deleteJobLocked(id, lockedChild, deps, opts) {
       await save(jobs.filter((j) => j.id !== id));
       publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
       return { ok: true };
+    }
+
+    // A virtual job row may have been opened since this record's original holder closed.
+    // Explicit deletion still closes that holder, regardless of its owner stamp.
+    if (typeof deps.listProjects === "function") {
+      const stamped = findStampedWindow(await deps.listProjects(), job.childSessionID);
+      if (stamped) job = { ...job, tmuxSession: stamped.tmuxSession, windowIndex: stamped.windowIndex };
     }
 
     // V2 rows with no worktree (background commands / subagents): closing the
@@ -2160,7 +2168,7 @@ async function deleteJobLocked(id, lockedChild, deps, opts) {
       !job.worktree &&
       (!isTerminal(job) || job.launchState === "uncertain" || job.completionDelivery === "pending")
     ) {
-      await closeJobWindowLocked(job, deps);
+      await closeJobWindowLocked(job, deps, { explicit: true });
       jobs[idx] = { ...job, windowIndex: null };
       await save(jobs);
       publish?.({ kind: "delegate.updated", payload: { id, status: job.status, launchState: job.launchState } });
@@ -2721,6 +2729,11 @@ async function patchJob(id, patch, deps = {}, { onlyIf } = {}) {
  * @param {{ fromSessionId: string, toSessionId: string, parent?: boolean, child?: boolean }} a
  */
 export async function repointJobSessions({ fromSessionId, toSessionId, parent = true, child = true }, deps = {}) {
+  if (fromSessionId === toSessionId) return 0;
+  return withSessionResources(fromSessionId, () => withSessionResources(toSessionId, () => repointJobSessionsLocked({ fromSessionId, toSessionId, parent, child }, deps)));
+}
+
+async function repointJobSessionsLocked({ fromSessionId, toSessionId, parent, child }, deps) {
   const { load = loadJobs, save = saveJobs, publish } = deps;
   return jobsLock.runExclusive(async () => {
     const jobs = await load();
@@ -2759,7 +2772,7 @@ async function removeJobRecord(id, deps = {}) {
  * The caller holds `sessionResources(job.childSessionID)`; `closeJobWindow` below is the
  * variant for a caller that does not.
  */
-async function closeJobWindowLocked(job, deps = {}) {
+async function closeJobWindowLocked(job, deps = {}, { explicit = false } = {}) {
   const { killWindow, listProjects } = deps;
   if (!killWindow || job?.tmuxSession == null || job?.windowIndex == null) return false;
   try {
@@ -2771,6 +2784,8 @@ async function closeJobWindowLocked(job, deps = {}) {
         .find((w) => w.index === job.windowIndex);
       if (!win || win.opencodeSessionId !== job.childSessionID) return false;
     }
+    // Read at close time. An absent stamp is a user's window, never a cleanup target.
+    if (!explicit && await deps.getWindowOption?.(job.tmuxSession, job.windowIndex, "@manta-owner") !== "job") return false;
     await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
     return true;
   } catch (e) {
@@ -4582,11 +4597,9 @@ async function openJobSessionLocked(id, lockedChild, deps) {
 // ---------------------------------------------------------------------------
 // The active-session reconciler
 //
-// A session that is busy but has no job row is invisible: a script drove it through opencode's
-// HTTP API, a finished job was prompted again, a background `task` ran under a parent that has no
-// window, or work started while this server was restarting. Each tick lists the sessions with a
-// turn in flight and adopts the ones nothing tracks (origin "observed" — track-only: no result is
-// ever posted for them, they never count toward the cap).
+// The session graph now owns API-driven rows. Each tick only recovers a background task's
+// missing subagent record (for transcript cards/result pairing), without creating a window.
+// Existing observed records still settle through reconcileV2Jobs, unchanged.
 //
 // What it deliberately leaves alone: a session that already has a live row, one a launch in this
 // process is making, anything inside a live job's tree, Manta's own helper sessions, an inline
@@ -4595,9 +4608,6 @@ async function openJobSessionLocked(id, lockedChild, deps) {
 // ---------------------------------------------------------------------------
 
 const RECONCILE_TICKS = 2;
-// A child whose parent's `task` block can't be found yet is held a tick longer: the block is what
-// tells an inline child (never a row) from a background one.
-const RECONCILE_TICKS_NO_BLOCK = 3;
 
 const modelStringOf = (m) => (m?.providerID && (m.id ?? m.modelID) ? `${m.providerID}/${m.id ?? m.modelID}` : null);
 
@@ -4668,7 +4678,7 @@ export function createActiveSessionReconciler(deps = {}) {
     }
 
     // e. an inline `task` child is part of its parent's turn, never a row
-    let required = RECONCILE_TICKS;
+    let backgroundChild = false;
     if (session.parentID) {
       let timeline;
       try {
@@ -4680,16 +4690,18 @@ export function createActiveSessionReconciler(deps = {}) {
       if (block) {
         const background = block.state?.input?.background === true || block.state?.metadata?.background === true;
         if (!background) return skip(sid);
-      } else {
-        required = RECONCILE_TICKS_NO_BLOCK;
+        backgroundChild = true;
       }
     }
+
+    // API-driven roots are tree rows, not observed job records. Only background task children need adoption.
+    if (!backgroundChild) return skip(sid);
 
     // f. seen busy on consecutive ticks
     const entry = seen.get(sid) ?? { ticks: 0, since: now() };
     entry.ticks += 1;
     seen.set(sid, entry);
-    if (entry.ticks < required) return false;
+    if (entry.ticks < RECONCILE_TICKS) return false;
 
     // g. adopt
     const prev = newestRecordFor(records, sid);
@@ -4713,7 +4725,7 @@ export function createActiveSessionReconciler(deps = {}) {
         name: title.slice(0, 80) || "Background session",
         prompt: "",
         model: modelStringOf(session.model),
-        origin: "observed",
+        origin: "subagent",
         runStartedAt: entry.since,
       },
       deps,

@@ -2452,6 +2452,21 @@ test("launchers:list still lists every launcher, at the registry defaults, when 
   for (const l of list) for (const f of l.flags) assert.equal(f.value, f.default);
 });
 
+test("sessions:materialize is wired through handoff/tree/tmux and refreshes before returning an existing window", async () => {
+  const { deps, calls } = makeDeps([], [{ tmuxSession: "p", windows: [{ index: 3, opencodeSessionId: "s" }] }]);
+  let refreshed = false;
+  deps.syncState.refreshNow = async () => refreshed = true;
+  deps.oc.readSession = async (sid) => ({ state: "found", session: { id: sid } });
+  deps.handoff = { withChainExclusive: (_sid, fn) => fn(), chainOf: (sid) => [sid], hasPendingSend: () => false };
+  deps.sessionStatus = { canonicalSessionOf: (sid) => sid, annotateProjects: () => {}, placementOf: () => ({ project: "p", canonicalSessionId: "s" }) };
+  const handler = buildHandlers(deps)["sessions:materialize"];
+  assert.deepEqual(await handler({ sessionId: "s" }), { ok: true, project: "p", windowIndex: 3, sessionId: "s" });
+  assert.equal(refreshed, true);
+  assert.deepEqual(calls.newWindow, []);
+  deps.sessionStatus.placementOf = () => null;
+  assert.deepEqual(await handler({ sessionId: "s" }), { ok: false, reason: "no-project", message: "No workspace owns this session." });
+});
+
 test("sessions:close-preview / sessions:close are wired to the box's close flow (WS11 D6)", async () => {
   const live = [{ tmuxSession: "p", windows: [{ index: 0, name: "a", opencodeSessionId: "ses_a", worktreePath: "/wt/a" }, { index: 1, name: "t", worktreePath: null }] }];
   const { deps } = makeDeps([], live);

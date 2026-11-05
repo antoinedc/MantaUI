@@ -1192,14 +1192,14 @@ test("tree: placementOf answers the project, the canonical session and a startin
     timelines: { D: [bgBlock("S")] },
   });
   await h.boot();
-  assert.deepEqual(h.st.placementOf("S"), { project: "p", canonicalSessionId: "S", cwd: "/work/p/s" });
-  assert.deepEqual(h.st.placementOf("pred"), { project: "p", canonicalSessionId: "succ", cwd: "/work/p/succ" }, "either member of the chain finds the node");
-  assert.deepEqual(h.st.placementOf("succ"), { project: "p", canonicalSessionId: "succ", cwd: "/work/p/succ" });
+  assert.deepEqual(h.st.placementOf("S"), { project: "p", canonicalSessionId: "S", cwd: "/work/p/s", rootPath: "/work/p/d", defaultCwd: "/work/p" });
+  assert.deepEqual(h.st.placementOf("pred"), { project: "p", canonicalSessionId: "succ", cwd: "/work/p/succ", rootPath: null, defaultCwd: "/work/p" }, "either member of the chain finds the node");
+  assert.deepEqual(h.st.placementOf("succ"), { project: "p", canonicalSessionId: "succ", cwd: "/work/p/succ", rootPath: null, defaultCwd: "/work/p" });
   assert.equal(h.st.placementOf("nobody"), null);
   // No directory known: the root window's pane path, else the project's default.
   const noDir = treeHarness({ projects: [pj("p", [w(1, "D", { paneCurrentPath: "/work/p/d" })])], active: ["S"], sessions: { D: {}, S: { parentID: "D" } }, timelines: { D: [bgBlock("S")] } });
   await noDir.boot();
-  assert.deepEqual(noDir.st.placementOf("S"), { project: "p", canonicalSessionId: "S", cwd: "/work/p/d" });
+  assert.deepEqual(noDir.st.placementOf("S"), { project: "p", canonicalSessionId: "S", cwd: "/work/p/d", rootPath: "/work/p/d", defaultCwd: "/work/p" });
   const root = treeHarness({ projects: [pj("p", [], "/work/p")], active: ["R"], sessions: { R: { directory: "/work/p/r" } } });
   await root.boot();
   assert.equal(root.st.placementOf("R").cwd, "/work/p/r");
@@ -1266,7 +1266,8 @@ test("tree: production wiring supplies session reads, exclusions, pending asks a
     "state?.questions?.length > 0 || state?.permissions?.length > 0",
   ]) assert.ok(block.includes(text), text);
   assert.match(index, /push\.setSessionProjectsReader\(\(\) => syncState\.snapshot\(\)\.projects \?\? \[\]\)/);
-  assert.ok(!block.includes("linkOf:"), "the link store is a later pass");
+  assert.ok(block.includes("linkOf: (sid) => sessionLinks.linkOf(sid)"), "explicit links feed the graph");
+  assert.ok(block.includes("pruneLinks:"), "hydration prunes confirmed-deleted link endpoints");
 });
 
 test("tree: attention and childSession invalidate placement; committed handoff alone recomputes the canonical row", async () => {

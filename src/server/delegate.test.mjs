@@ -65,6 +65,7 @@ function jobStoreCore({ jobs, published, deliver, now }) {
     publish: (evt) => published.push(evt),
     deliver,
     listMessages: async () => [],
+    getWindowOption: async () => "job", // fixtures below model job-owned launch windows
     gitRun: async () => ({ stdout: "" }),
     now: typeof now === "function" ? now : () => 1_700_000_000_000,
   };
@@ -344,6 +345,7 @@ function cleanupHarness(owned) {
   return {
     killWindowCalls,
     removeCalls,
+    getWindowOption: async () => "job",
     ...(owned
       ? {
           listProjects: async () =>
@@ -1539,12 +1541,12 @@ const ADOPT_INPUT = {
   model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
 };
 
-test("adoptSubagentJob adopts a window with existingSessionId, no worktree, origin subagent", async () => {
+test("adoptSubagentJob records a window-less child, no worktree, origin subagent", async () => {
   const a = adoptHarness();
   const res = await adoptSubagentJob(ADOPT_INPUT, a.deps);
   assert.equal(res.ok, true);
-  assert.equal(a.newWindowCalls.length, 1);
-  assert.equal(a.newWindowCalls[0].existingSessionId, "ses_child");
+  assert.equal(a.newWindowCalls.length, 0);
+  assert.equal(res.job.windowIndex, null);
   assert.equal(a.gitAddWorktreeCalls, 0, "no worktree is created");
   const stored = a.jobs[0];
   assert.equal(stored.childSessionID, "ses_child");
@@ -1568,7 +1570,7 @@ test("adoptSubagentJob is idempotent for the same childSessionID", async () => {
   const second = await adoptSubagentJob(ADOPT_INPUT, a.deps);
   assert.equal(second.ok, true);
   assert.equal(second.alreadyAdopted, true);
-  assert.equal(a.newWindowCalls.length, 1, "newWindow called only once");
+  assert.equal(a.newWindowCalls.length, 0, "adoption creates no windows");
   assert.equal(a.jobs.length, 1);
 });
 
@@ -1628,7 +1630,7 @@ test("observeEvent adopts a running background:true subagent from a message.part
   assert.equal(a.jobs[0].childSessionID, "ses_child");
   assert.equal(a.jobs[0].origin, "subagent");
   assert.equal(a.jobs[0].status, "running");
-  assert.equal(a.newWindowCalls[0].existingSessionId, "ses_child");
+  assert.equal(a.newWindowCalls.length, 0);
   assert.equal(
     a.jobs[0].model,
     "anthropic/claude-haiku-4-5",
@@ -1725,13 +1727,13 @@ test("tickActivity does NOT publish when neither activity nor model changed", as
 // so they exercise the serialising wrapper, not the raw observeEvent.
 // ----------------------------------------------------------------------------
 
-test("BET-773: two identical adoption events produce exactly one window + one record", async () => {
+test("BET-773: two identical adoption events produce no window and exactly one record", async () => {
   const a = adoptHarness();
   const engine = createDelegateEngine(a.deps);
   const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part: backgroundPart() } };
   // Fire both without awaiting the first — the overlapping case.
   await Promise.all([engine.observeEvent(evt), engine.observeEvent(evt)]);
-  assert.equal(a.newWindowCalls.length, 1, "newWindow called exactly once");
+  assert.equal(a.newWindowCalls.length, 0, "adoption creates no windows");
   assert.equal(a.jobs.length, 1, "store holds exactly one record");
   assert.equal(a.jobs[0].origin, "subagent");
 });
