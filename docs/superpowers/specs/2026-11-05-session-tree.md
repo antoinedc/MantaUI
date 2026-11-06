@@ -1,6 +1,6 @@
 # The session tree: rows are sessions, not windows
 
-Status: FINAL r7 (2026-11-05) — r7 adds the pinned stage (b) contract (§10); — approved by Astra at review round 5; r6 widens the §1.4 inference targets after a live-data check
+Status: FINAL r8 — stage (c) shipped: the display-parent heuristics and the §1.4 inferred edge are DELETED (§1.4, §5, §6, §8 below are annotated); FINAL r7 (2026-11-05) — r7 adds the pinned stage (b) contract (§10); — approved by Astra at review round 5; r6 widens the §1.4 inference targets after a live-data check
 (`reviews/2026-11-05-session-tree-astra.md`). Scope: `src/server/` (session list, status, delegate, push labels),
 the desktop sidebar, the iOS session list, the manta opencode plugin (two new tools).
 
@@ -77,24 +77,13 @@ already the node's.
 2. **opencode `parentID`**: read once per candidate and cached (`parentOf`), kept fresh by
    `session.created{parentID}` / `childSession` frames. A `task` child, a job's V2 child, a resumed attempt.
 3. **Explicit link** (§5): `child → parent` from `~/.manta/session-links.json`.
-4. **Inferred (transition only)**: a node with no rule-1/2/3 parent that is NOT **user-opened** — user-opened
-   means: at the moment eligibility is first decided, the node has a window stamped `@manta-owner=user` (or
-   unstamped, i.e. made by the user before the stamp existed) — may take the windowed session whose transcript
-   most recently named it **or any session below it on a walk to a shown descendant** (the collapsed
-   subagents between the root and the rows it holds) within 24 h (today's `sessionReferences` task, same
-   throttle). Measured on the live box (2026-11-05): the cantina driver's transcript names the two subagents
-   (3 mentions each) and never the root orchestrator itself (0), so a root-only lookup would lose today's
-   nesting. Eligible, therefore:
-   a root with an adopted record, a windowless root, a windowless ancestor retained under §2; one conversation
-   the user opened mentioning another's id never nests it. It exists so the cantina-style orchestrator keeps
-   its nesting until its scripts call `session_link`; it is deleted in stage (c). **Eligibility is decided
-   once and the edge is cached** per node for the life of the process: it survives the node's windows being
-   created or removed, including the user materialising the node (a `user` window made AFTER the edge exists
-   does not revoke it) and an adoption window appearing on it; a different answer later does not move the row.
-   A `session_unlink` suppression (§5) wins over it.
+4. **Inferred (transition only) — DELETED in stage (c).** A node with no rule-1/2/3 parent used to take the
+   windowed session whose transcript most recently named it (24 h, `sessionReferences`). The edge, its per-node
+   cache, its user-opened eligibility check, its throttle and the DB lookup are gone: a node with no rule-1/2/3
+   parent is a root ("driven from outside") until its driver calls `session_link`. A `session_unlink`
+   suppression still makes the child a root. Precedence: explicit parent (rules 1–3) > suppression > none.
 
-No stored display parent. A cycle (impossible from rules 1–2, possible from a bad link file or two inferred
-edges) breaks at the first repeated node on the walk from the child: that child becomes a root.
+No stored display parent. A cycle (impossible from rules 1–2, possible from a bad link file) breaks at the first repeated node on the walk from the child: that child becomes a root.
 
 ### 2. Which sessions are rows
 
@@ -233,13 +222,12 @@ labelled *driven from outside*. To nest it the driver says so, with a manta plug
   a rule-1/2 parent (those edges are authoritative) or when the link would close a cycle (walk from the caller
   to a root; the child must not be on it). The store is
   `{ [child]: { parent: string|null, by: string, at: number } }`. `session_unlink({ sessionId })` writes
-  `{ parent: null }`: a **suppression** entry — the explicit edge is gone AND inference (§1.4) is disabled for
-  that child, durably, so the tool's success means the row is a root, never "unchanged because the cached
-  inference came back". Precedence: an explicit parent > a suppression > inference. A later `session_link`
-  replaces the suppression. An entry whose parent or child session no longer exists is dropped on the next
+  `{ parent: null }`: a **suppression** entry — the explicit edge is gone, durably, so the tool's success means
+  the row is a root. Precedence: an explicit parent > a suppression > none (inference was deleted in (c)). A later
+  `session_link` replaces the suppression. An entry whose parent or child session no longer exists is dropped on the next
   hydration.
-- The guidance blurb tells orchestrators that drive sessions by script to call it once per session. The
-  inferred rule (§1.4) covers them until they do, through stage (b).
+- The guidance blurb tells orchestrators that drive sessions by script to call it once per session; until they
+  do, such a session is a root (the inferred rule that used to cover them was deleted in (c)).
 
 ### 6. What stops, and what happens to what exists
 
@@ -249,13 +237,13 @@ labelled *driven from outside*. To nest it the driver says so, with a manta plug
 - **Existing records**: observed/subagent records already on a box keep settling through the V2 settlement
   (`reconcileV2Jobs` / `judgeLostRun` — lost-run detection is that sweep's, not the adoption reconciler's, and is
   unchanged); their windows are `job`-owned and close at finish as today; an inherited worktree they still hold
-  keeps the record from pruning, as today. Their `displayParentID` is no longer read by anything (deleted in
-  (c)); their `parentSessionID` keeps its consumers — job listing (`listJobs`), parent presentation
+  keeps the record from pruning, as today. Their `displayParentID` is gone (deleted in (c); an old record that still carries it is ignored and the
+  field is stripped from every wire read); their `parentSessionID` keeps its consumers — job listing (`listJobs`), parent presentation
   (`delegateView`) — and is only no longer read for nesting. The active-session reconciler keeps only subagent
   adoption.
 - `displayParentID`, `resolveDisplayParents`, `refreshDisplayParents`, the `displayParentID` branch of
-  `repointJobSessions`, `sessionsWithActiveWork`/`runningChildCounts`' use of it, and (in (c)) the
-  `sessionReferences` DB task are deleted.
+  `repointJobSessions`, `sessionsWithActiveWork`/`runningChildCounts`' use of it, and the
+  `sessionReferences` DB task are deleted (stage (c), done).
 - **Push labels**: `buildSessionLabel` resolves a stamped window; for a virtual session it falls back to
   `<workspace> / <root window name> › <session title>` from the tree, so a question in a subagent is still
   attributed to the conversation the user knows.
@@ -300,7 +288,9 @@ retired; `session_link` / `session_unlink` (§5) + guidance; desktop renders `tr
 iOS counts from `tree`, virtual roots shown as rows (tap → materialize).
 
 (c) **Delete** `displayParentID`, the resolver, the refresh, the inferred edge and `sessionReferences`; the
-record field is removed from the wire types.
+record field is removed from the wire types. **Done.** Adopted records' `parentSessionID` is still seeded at
+adoption from the nearest windowed ancestor (`resolveSessionOwner`'s `parentSessionID`) — it only feeds job
+listing / presentation and the pre-hydration projection, never the graph.
 
 (a) is one small PR (server only). (b) is one PR per side (box, desktop, iOS) behind the fallback. (c) after
 (b) has shipped on both clients.
@@ -324,11 +314,11 @@ record field is removed from the wire types.
   both serialised orderings of a commit and a materialize on one chain (materialize then commit, commit then
   materialize) end with exactly one window, stamped with the successor; the list is refreshed before the
   answer. `session_link` / `session_unlink`: refusals (authoritative edge, cycle), newest-wins,
-  unlink suppresses a cached inferred edge.
-- Edges: a wrapped `command` record is a rule-1 edge; an inferred edge is unaffected by an adoption window
-  appearing / disappearing on the root (stage (a) acceptance) and by the user materialising the node; a
-  user-opened conversation that mentions another user-opened root's id does not nest it; a root's project is
-  retained when a second window for it appears in another project; busy for a running root with no children.
+  unlink makes the child a root.
+- Edges: a wrapped `command` record is a rule-1 edge; a windowless API-driven root with no link is a root, nests
+  once `session_link`ed (stable across adoption windows appearing / disappearing, the stage (a) acceptance) and
+  is a root again after an unlink suppression; a root's project is retained when a second window for it appears
+  in another project; busy for a running root with no children.
 - Materialize × handoff: a commit and a materialize racing on one chain serialise (the window ends up stamped
   with the successor exactly once); a `user` window on a finished job is re-based to a directory that exists.
 - Renderer: `tree` rendering, fallback to `windows`, click materializes and selects, keybinds skip virtual
@@ -379,8 +369,8 @@ Figures: npm registry + download API and the GitHub API, queried 2026-11-05.
 
 ## Decisions (r2–r3)
 
-- The transcript-inference edge survives through (b) as a roots-only, cached, lowest-precedence rule, and is
-  deleted in (c) once `session_link` is in use (Astra #4).
+- The transcript-inference edge survived through (b) as a roots-only, cached, lowest-precedence rule, and was
+  deleted in (c) (Astra #4).
 - Inline foreground `task` children stay transcript-only; the tree reuses the adoption exclusions (Astra #8).
 - iOS shows virtual roots as rows in (b) (count-only had nowhere to put the count) (Astra #11).
 - A finished `subagent` record's virtual row vanishes after `LINGER_MS`; the transcript card is the durable

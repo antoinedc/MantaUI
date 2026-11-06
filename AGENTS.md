@@ -1248,7 +1248,7 @@ and worktree all belong to it.
   answering a user's "what's running?" question, not for waiting (do NOT
   poll).
 - Jobs appear in the session graph's sidebar tree, with or without a window.
-- Adopted records still carry the transitional `displayParentID` and its refresh machinery through stage (b), but the tree no longer reads it. The graph owns nesting; `parentSessionID` keeps job listing/result routing semantics. `session_link` explicitly nests API-driven sessions; `session_unlink` suppresses inference.
+- Nesting is the session graph (`sessionStatus.mjs`) and nothing else: Manta-owned job records, opencode's own `parentID`, and explicit `session_link`s. Nothing is inferred — an API-driven session with none of them is a root, and `session_unlink` records a suppression that makes it a root even if a link existed. `parentSessionID` on a record keeps its job listing/result routing meaning only. Records written before stage (c) may still carry a `displayParentID`; it is ignored and stripped from every wire read.
 - Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
   refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
   sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the

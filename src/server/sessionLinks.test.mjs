@@ -63,7 +63,6 @@ test("link actions: read unknowns, refuse self/native/job parents and cycles; wr
   assert.deepEqual(await w.action({ action: "link", sessionID: "a", target: "b" }), { ok: true });
   assert.match((await w.action({ action: "link", sessionID: "b", target: "a" })).error, /cycle/);
   assert.equal(w.changed(), 1);
-  w.status._state.inferred.set("b", "a");
   assert.deepEqual(await w.action({ action: "unlink", sessionID: "a", target: "b" }), { ok: true });
   assert.deepEqual(w.status.ancestorsOf("b"), []);
   assert.deepEqual(await w.action({ action: "link", sessionID: "c", target: "b" }), { ok: true });

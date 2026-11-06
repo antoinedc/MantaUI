@@ -718,9 +718,9 @@ resolution gotcha).
 
 When an orchestrator drives sessions through opencode's HTTP API, call
 `session_link({sessionId})` once per driven session so the sidebar nests it under
-this conversation. `session_unlink({sessionId})` removes that explicit edge and
-suppresses inferred nesting, making it a top-level row unless an authoritative
-job caller or opencode parent still owns its placement. Both tools return promptly.
+this conversation. `session_unlink({sessionId})` removes that explicit edge,
+making it a top-level row unless an authoritative job caller or opencode parent
+still owns its placement. Both tools return promptly.
 
 ## Manta handoff
 

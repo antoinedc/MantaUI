@@ -28,10 +28,10 @@ test("nesting: a terminal job stays nested; a job whose parent window is gone st
   assert.equal(none.hidden.size + none.children.size, 0);
 });
 
-test("nesting: the display parent wins, a nested parent is lifted to the top-level ancestor, a cycle stays top-level", () => {
+test("nesting: a nested parent is lifted to the top-level ancestor, a cycle stays top-level", () => {
   const p = mkProject("p", [{ index: 0, opencodeSessionId: "root" }, { index: 1, opencodeSessionId: "mid" }, { index: 2, opencodeSessionId: "leaf" }]);
   const lifted = computeJobNesting(p, {
-    a: { status: "running", parentSessionID: "x", displayParentID: "root", childSessionID: "mid" },
+    a: { status: "running", parentSessionID: "root", childSessionID: "mid" },
     b: { status: "running", parentSessionID: "mid", childSessionID: "leaf" },
   });
   assert.deepEqual(lifted.children.get(0), [1, 2]);
@@ -52,16 +52,15 @@ test("annotateJobs: windows carry job {id, status, parentWindowIndex}; others nu
   assert.equal(annotateJobs([mkProject("p", [{ index: 0, opencodeSessionId: "x", job: "stale" }])], [])[0].windows[0].job, null);
 });
 
-test("nesting: a job row nests by displayParentID ?? parentSessionID; superseded records are invisible", () => {
+test("nesting: a job row nests by parentSessionID; a retired displayParentID is ignored; superseded records are invisible", () => {
   const projects = mkProject("p", [{ index: 1, opencodeSessionId: "driver" }, { index: 2, opencodeSessionId: "child1" }, { index: 3, opencodeSessionId: "other" }]);
   const base = { status: "running", parentSessionID: "old", childSessionID: "child1" };
-  const a = computeJobNesting(projects, { j: { ...base, displayParentID: "driver" } });
+  const a = computeJobNesting(projects, { j: { ...base, parentSessionID: "driver" } });
   assert.deepEqual(a.children.get(1), [2]);
   assert.deepEqual([...a.hidden], [2]);
   const b = computeJobNesting(projects, { j: { ...base, parentSessionID: "other", displayParentID: "driver" } });
-  assert.deepEqual(b.children.get(1), [2]);
-  assert.equal(b.children.has(3), false);
-  assert.deepEqual(computeJobNesting(projects, { j: { ...base, parentSessionID: "other", displayParentID: null } }).children.get(3), [2]);
+  assert.deepEqual(b.children.get(3), [2], "displayParentID is not read");
+  assert.equal(b.children.has(1), false);
   assert.equal(computeJobNesting(projects, { j: base }).children.size, 0, "a windowless real parent leaves the row top-level");
   const old = { status: "done", parentSessionID: "driver", childSessionID: "child1", supersededBy: "next" };
   assert.equal(computeJobNesting(projects, { old }).children.size, 0);
@@ -75,7 +74,7 @@ test("active work: running sessions plus every ancestor; empty when idle; termin
   assert.deepEqual([...sessionsWithActiveWork(["a"], { a: "b", b: "a" }, {})].sort(), ["a", "b"]);
 });
 
-test("active work: a running job rolls up through the graph's edges — displayParentID is no longer read; superseded running records are ignored", () => {
+test("active work: a running job rolls up through the graph's edges; a retired displayParentID is not read; superseded running records are ignored", () => {
   const base = { status: "running", parentSessionID: "old", childSessionID: "child1" };
   assert.deepEqual([...sessionsWithActiveWork([], { child1: "old" }, { j: { ...base, displayParentID: "driver" } })].sort(), ["child1", "old"]);
   assert.deepEqual([...sessionsWithActiveWork([], {}, { j: { ...base, displayParentID: "driver" } })].sort(), ["child1", "old"], "no edge held: the record's parent");
@@ -155,7 +154,7 @@ test("a windowless grandchild running keeps its windowed grandparent busy (any d
   assert.equal(last(h, "g").subagents, 1, "subagents counts running descendants at ANY depth (mid is idle, leaf is running)");
 });
 
-test("busy through a running delegate job (and its display parent)", () => {
+test("busy through a running delegate job", () => {
   const h = harness({ windowed: ["p"], jobRecords: [{ id: "j", status: "running", parentSessionID: "p", childSessionID: "jc" }] });
   h.st._state.jobs = [{ id: "j", status: "running", parentSessionID: "p", childSessionID: "jc" }];
   h.st.observe(stream("running", "jc", { running: true, since: 1 }));
@@ -374,10 +373,10 @@ const flushAll = async (h) => {
   await h.st.settleBackground();
 };
 
-function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, succ = {}, refs = null, active = [], isCto, isInternal } = {}) {
-  const calls = { parent: [], refs: [], changed: 0 };
+function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, succ = {}, active = [], isCto, isInternal, links = {} } = {}) {
+  const calls = { parent: [], changed: 0 };
   const clock = { t: 1_000_000 };
-  const state = { projects, jobs: jobRecords, fail: false };
+  const state = { projects, jobs: jobRecords, fail: false, links };
   const published = [];
   const windowedIds = () => state.projects.flatMap((p) => p.windows.map((w) => w.opencodeSessionId).filter(Boolean));
   const h = { calls, clock, state, published };
@@ -396,7 +395,8 @@ function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, su
     setTimer: () => {},
     chainOf: (sid) => chains[sid] ?? [sid],
     successorOf: (sid) => succ[sid] ?? null,
-    findSessionReferences: refs ? async (a) => { calls.refs.push(a); return refs(a); } : undefined,
+    linkOf: (sid) => state.links[sid],
+    linkEndpoints: () => Object.entries(state.links).flatMap(([c, l]) => [c, l.parent].filter(Boolean)),
     isCtoConversationSession: isCto,
     isInternalSession: isInternal,
     now: () => clock.t,
@@ -412,15 +412,15 @@ function graphHarness({ projects, parents = {}, jobRecords = [], chains = {}, su
   return h;
 }
 
-test("graph: before the first hydration the projection is exactly today's (display parents included)", async () => {
+test("graph: before the first hydration the projection is the record's parentSessionID; hydrated, the graph decides (an adopted record is no edge source)", async () => {
   const projects = proj1("p", [win(1, "driver"), win(2, "child")]);
-  const rec = adoptedRec("j", "child", "gone", { displayParentID: "driver" });
+  const rec = adoptedRec("j", "child", "driver", { displayParentID: "other" });
   const h = graphHarness({ projects, jobRecords: [rec] });
   await h.st.refreshJobs();
-  assert.deepEqual(h.nesting(), { 2: 1 }, "cold: today's displayParentID nesting");
+  assert.deepEqual(h.nesting(), { 2: 1 }, "cold: parentSessionID nesting; displayParentID is not read");
   assert.equal(h.st._state.hydratedOnce, false);
   await h.st.hydrate();
-  assert.deepEqual(h.nesting(), { 2: null }, "hydrated: the graph says the adopted row's opencode parent is a root, displayParentID is not read");
+  assert.deepEqual(h.nesting(), { 2: null }, "hydrated: the graph says the adopted row's opencode parent is a root");
 });
 
 test("graph: property — for windowed parents the projection equals computeJobNesting over the existing fixtures", async () => {
@@ -555,31 +555,26 @@ test("graph: a parent first seen after hydration is read in the background, then
   assert.deepEqual(h.nesting(), { 2: 1 });
 });
 
-// ---- rule 4: the inferred driver ----
-function cantina({ withSubagentWindows = true, refs } = {}) {
+// ---- no inferred edge: a root nobody linked stays a root ----
+function cantina({ withSubagentWindows = true, links } = {}) {
   const base = [win(16, "D"), win(10, "J1", "job"), win(12, "J2", "job")];
   const subs = [win(1, "S1", "job"), win(2, "S2", "job")];
   const h = graphHarness({
     projects: proj1("cantina", withSubagentWindows ? [...base, ...subs] : base),
     jobRecords: [adoptedRec("s1", "S1", "R"), adoptedRec("s2", "S2", "R"), delegateRec("j1", "J1", "S1"), delegateRec("j2", "J2", "S2")],
     parents: { S1: "R", S2: "R", J1: "S1", J2: "S2" },
-    refs: refs ?? ((a) => ({ hits: [{ target: "S1", sessionId: "D", t: 9 }, { target: "S2", sessionId: "D", t: 8 }], complete: true })),
+    links,
   });
   h.setSubagentWindows = (on) => { h.state.projects = proj1("cantina", on ? [...base, ...subs] : base); };
   return h;
 }
 
 for (const withSubagentWindows of [true, false]) {
-  test(`graph: the cantina scenario (subagent windows ${withSubagentWindows ? "present" : "absent"} at first) — jobs stay under the driver across 12 alternations of the subagent windows`, async () => {
-    const h = cantina({ withSubagentWindows });
+  test(`graph: the cantina scenario with a session_link (subagent windows ${withSubagentWindows ? "present" : "absent"} at first) — jobs stay under the driver across 12 alternations of the subagent windows`, async () => {
+    const h = cantina({ withSubagentWindows, links: { R: { parent: "D", at: 1 } } });
     await h.st.hydrate();
     h.annotate();
     await flushAll(h);
-    assert.equal(h.calls.refs.length, 1, "one transcript lookup");
-    assert.deepEqual(h.calls.refs[0].sessionIds, ["D"], "only windowed sessions that are not job children are candidates");
-    assert.ok(["R", "S1", "S2"].every((t) => h.calls.refs[0].targets.includes(t)), "the root and the collapsed sessions below it are targets");
-    assert.equal(h.calls.changed, 1, "the new inferred edge refreshed the list once");
-    assert.equal(h.st._state.inferred.size, 1);
     let on = withSubagentWindows;
     for (let i = 0; i < 12; i++) {
       on = !on;
@@ -593,146 +588,34 @@ for (const withSubagentWindows of [true, false]) {
       }
       await flushAll(h);
     }
-    assert.equal(h.calls.refs.length, 1, "the cached edge is never looked up again");
-    assert.equal(h.calls.changed, 1, "nothing else triggered a list refresh");
   });
 }
 
-test("graph: an inferred edge is cached once and never revised; a later materialised user window on the root does not revoke it", async () => {
-  let answer = "D";
-  const h = graphHarness({
-    projects: proj1("p", [win(1, "D"), win(2, "D2"), win(3, "J", "job")]),
-    jobRecords: [delegateRec("j", "J", "R")],
-    parents: { J: "R" },
-    refs: () => ({ hits: [{ target: "R", sessionId: answer, t: 5 }], complete: true }),
-  });
-  await h.st.hydrate();
-  h.annotate();
-  await flushAll(h);
-  assert.deepEqual(h.nesting(), { 3: 1 });
-  answer = "D2";
-  h.clock.t += 10 * 60_000;
-  h.annotate();
-  await flushAll(h);
-  assert.equal(h.calls.refs.length, 1, "no second lookup");
-  assert.deepEqual(h.nesting(), { 3: 1 }, "not revised");
-  // The user materialises the root (a user-owned window for R) afterwards.
-  h.state.projects = proj1("p", [win(1, "D"), win(2, "D2"), win(3, "J", "job"), win(4, "R", "user")]);
-  assert.deepEqual(h.nesting(), { 3: 4 }, "the job now has a windowed ancestor of its own (R); the cached edge is untouched");
-  assert.equal(h.st._state.inferred.size, 1);
-});
-
-test("graph: a user-opened root is never inferred under anything; an incomplete or failing lookup caches nothing; lookups are throttled per root", async () => {
-  // A finished job window the user reopened (owner user) — a root the user opened.
-  const userRoot = graphHarness({
-    projects: proj1("p", [win(1, "D"), win(2, "R", "user")]),
-    jobRecords: [adoptedRec("r", "R", null, { status: "done" })],
-    refs: () => ({ hits: [{ target: "R", sessionId: "D", t: 5 }], complete: true }),
-  });
-  await userRoot.st.hydrate();
-  userRoot.annotate();
-  await flushAll(userRoot);
-  assert.equal(userRoot.calls.refs.length, 0, "ineligible → no lookup at all");
-  assert.deepEqual(userRoot.nesting(), { 2: null });
-
-  let mode = "incomplete";
-  const h = graphHarness({
-    projects: proj1("p", [win(1, "D"), win(2, "J", "job")]),
-    jobRecords: [delegateRec("j", "J", "R")],
-    parents: { J: "R" },
-    refs: () => {
-      if (mode === "throw") throw new Error("db down");
-      if (mode === "null") return null;
-      return { hits: [{ target: "R", sessionId: "D", t: 5 }], complete: mode !== "incomplete" };
-    },
-  });
-  await h.st.hydrate();
-  h.annotate();
-  await flushAll(h);
-  assert.equal(h.calls.refs.length, 1);
-  assert.equal(h.st._state.inferred.size, 0, "complete:false caches nothing");
-  h.annotate();
-  await flushAll(h);
-  assert.equal(h.calls.refs.length, 1, "a second pass inside 60 s does not call the DB");
-  for (const m of ["throw", "null"]) {
-    mode = m;
-    h.clock.t += 61_000;
-    h.annotate();
-    await flushAll(h);
-    assert.equal(h.st._state.inferred.size, 0, `${m} caches nothing`);
-  }
-  assert.equal(h.calls.refs.length, 3, "one lookup per minute per root");
-  mode = "ok";
-  h.clock.t += 61_000;
-  h.annotate();
-  await flushAll(h);
-  assert.equal(h.st._state.inferred.size, 1);
-  assert.deepEqual(h.nesting(), { 2: 1 });
-});
-
-test("graph: a driver that descends from the root, or is itself a live job's child, is never chosen", async () => {
-  const h = graphHarness({
-    projects: proj1("p", [win(1, "D"), win(2, "X"), win(3, "K", "job"), win(4, "J", "job")]),
-    jobRecords: [delegateRec("j", "J", "R"), delegateRec("k", "K", "Y")],
-    parents: { J: "R", X: "R", K: "Y", Y: null },
-    refs: () => ({
-      hits: [
-        { target: "R", sessionId: "X", t: 9 }, // X is a child of R: a cycle
-        { target: "R", sessionId: "K", t: 8 }, // K is a live job's child
-        { target: "R", sessionId: "D", t: 1 },
-      ],
-      complete: true,
-    }),
-  });
-  await h.st.hydrate();
-  h.annotate();
-  await flushAll(h);
-  assert.ok(!h.calls.refs[0].sessionIds.includes("K"), "a live job's child is never a candidate");
-  assert.deepEqual(h.nesting(), { 3: null, 4: 1 }, "J nests under D, not under X (a child of R) or K (the newer hits)");
-  assert.equal(h.st._state.inferred.size, 1, "only R was inferred");
-});
-
-test("graph: the CTO conversation and Manta-internal sessions are never nested by inference; a failing check fails closed without caching", async () => {
-  const mk = (extra) =>
+test("graph: a windowless API-driven root with no link is a root — nothing is inferred from a transcript naming it; a session_link nests it; an unlink suppression makes it a root again", async () => {
+  const mk = (links) =>
     graphHarness({
       projects: proj1("p", [win(1, "D"), win(2, "J", "job")]),
       jobRecords: [delegateRec("j", "J", "R")],
       parents: { J: "R" },
-      refs: () => ({ hits: [{ target: "R", sessionId: "D", t: 5 }], complete: true }),
-      ...extra,
+      links,
     });
-  for (const [label, extra] of [
-    ["CTO conversation", { isCto: async (sid) => sid === "R", isInternal: async () => false }],
-    ["internal session", { isCto: async () => false, isInternal: async (sid) => sid === "R" }],
-  ]) {
-    const h = mk(extra);
-    await h.st.hydrate();
-    h.annotate();
-    await flushAll(h);
-    assert.equal(h.calls.refs.length, 0, `${label}: no transcript lookup`);
-    assert.equal(h.st._state.inferred.size, 0, `${label}: nothing cached`);
-    assert.equal(h.st._state.eligibility.get("R"), false, `${label}: decided once`);
-    assert.deepEqual(h.nesting(), { 2: null });
-    h.clock.t += 10 * 60_000;
-    h.annotate();
-    await flushAll(h);
-    assert.equal(h.calls.refs.length, 0, `${label}: never asked again`);
-  }
+  const plain = mk({});
+  await plain.st.hydrate();
+  plain.annotate();
+  await flushAll(plain);
+  assert.deepEqual(plain.nesting(), { 2: null }, "driven from outside, no link: a root");
 
-  let broken = true;
-  const h = mk({ isCto: async () => { if (broken) throw new Error("store down"); return false; }, isInternal: async () => false });
-  await h.st.hydrate();
-  h.annotate();
-  await flushAll(h);
-  assert.equal(h.calls.refs.length, 0, "a throwing check: no lookup this pass");
-  assert.equal(h.st._state.eligibility.get("R"), true, "eligibility is not decided against the root by a failed check");
-  assert.deepEqual(h.nesting(), { 2: null });
-  broken = false;
-  h.clock.t += 61_000;
-  h.annotate();
-  await flushAll(h);
-  assert.equal(h.calls.refs.length, 1, "a later pass with a working check proceeds");
-  assert.deepEqual(h.nesting(), { 2: 1 });
+  const linked = mk({ R: { parent: "D", at: 5 } });
+  await linked.st.hydrate();
+  linked.annotate();
+  await flushAll(linked);
+  assert.deepEqual(linked.nesting(), { 2: 1 }, "the explicit link nests it");
+
+  const suppressed = mk({ R: { parent: null, at: 5 } });
+  await suppressed.st.hydrate();
+  suppressed.annotate();
+  await flushAll(suppressed);
+  assert.deepEqual(suppressed.nesting(), { 2: null }, "a suppression makes it a root");
 });
 
 // ---- the session tree (stage (b)) ----
@@ -745,8 +628,8 @@ const fgBlock = (child) => ({ content: [{ type: "tool", state: { metadata: { ses
  * A harness over createSessionStatus with the readers the tree needs. `sessions`: sid → { parentID, title, directory, metadata }
  * (a session absent from it does not exist); `timelines`: parent sid → assistant records; `links`: sid → { parent }.
  */
-function treeHarness({ projects, sessions = {}, timelines = {}, jobRecords = [], chains = {}, succ = {}, active = [], asks = [], links = {}, isSuccessor, special, refs } = {}) {
-  const calls = { read: [], timeline: [], changed: 0, refs: [] };
+function treeHarness({ projects, sessions = {}, timelines = {}, jobRecords = [], chains = {}, succ = {}, active = [], asks = [], links = {}, isSuccessor, special } = {}) {
+  const calls = { read: [], timeline: [], changed: 0 };
   const clock = { t: 1_000_000 };
   const state = { projects, jobs: jobRecords, active, asks, links, readFails: false };
   const published = [];
@@ -774,7 +657,6 @@ function treeHarness({ projects, sessions = {}, timelines = {}, jobRecords = [],
     pendingAskSessionIds: () => state.asks,
     isCtoConversationSession: special?.cto,
     isInternalSession: special?.internal,
-    findSessionReferences: refs ? async (a) => { calls.refs.push(a); return refs(a); } : undefined,
     chainOf: (sid) => chains[sid] ?? [sid],
     successorOf: (sid) => succ[sid] ?? null,
     schedule: () => {},
@@ -1095,7 +977,7 @@ test("tree: unknown is not root — a windowless session whose ancestry is unrea
   assert.equal(show(h.tree()), "w1[v:S[w2]]");
 });
 
-test("tree: explicit links add an edge, a suppression blocks inference, rule 1/2 beat a link, a link cycle breaks into roots", async () => {
+test("tree: explicit links add an edge, a suppression is not an edge, rule 1/2 beat a link, a link cycle breaks into roots", async () => {
   const projects = [pj("p", [w(1, "P"), w(2, "C", { owner: "user" }), w(3, "Q")])];
   const h = treeHarness({ projects, sessions: { P: {}, C: {}, Q: {} } });
   await h.boot();
@@ -1117,28 +999,21 @@ test("tree: explicit links add an edge, a suppression blocks inference, rule 1/2
   assert.equal(show(h.tree()), "w1 w2 w3");
 });
 
-test("tree: a suppression disables the inferred edge, durably; an explicit link outranks it", async () => {
+test("tree: nothing is inferred — a root with no link stays a root; an explicit link nests it; a suppression makes it a root, durably", async () => {
   const projects = [pj("p", [w(1, "D"), w(2, "J", { owner: "job" })])];
-  const refs = () => ({ hits: [{ target: "R", sessionId: "D", t: 5 }], complete: true });
-  const mk = (links) => treeHarness({ projects, jobRecords: [delegateRec("j", "J", "R")], sessions: { D: {}, R: {}, J: { parentID: "R" } }, links, refs, timelines: { D: [] } });
+  const mk = (links) => treeHarness({ projects, jobRecords: [delegateRec("j", "J", "R")], sessions: { D: {}, R: {}, J: { parentID: "R" } }, links, timelines: { D: [] } });
   const plain = mk({});
   await plain.boot();
-  assert.equal(plain.calls.refs.length, 1);
-  assert.equal(show(plain.tree()), "w1[v:R[w2]]", "the inferred edge nests R (an idle windowless root holding a shown job) under D");
+  assert.equal(show(plain.tree()), "w1 w2", "no link: J is a root (R has no place of its own)");
   const suppressed = mk({ R: { parent: null } });
   await suppressed.boot();
-  assert.equal(suppressed.calls.refs.length, 0, "no transcript lookup for a suppressed root");
-  assert.equal(show(suppressed.tree()), "w1 w2", "no explicit edge and no inference: J is a root (R has no place of its own)");
+  assert.equal(show(suppressed.tree()), "w1 w2", "a suppression: J is a root");
   const linked = mk({ R: { parent: "D" } });
   await linked.boot();
-  assert.equal(show(linked.tree()), "w1[v:R[w2]]");
-  // a suppression written AFTER an inference was cached still wins
-  const late = mk({});
-  await late.boot();
-  assert.equal(late.st._state.inferred.size, 1);
-  late.state.links = { R: { parent: null } };
-  late.st.linksChanged();
-  assert.equal(show(late.tree()), "w1 w2", "the cached inferred edge is ignored");
+  assert.equal(show(linked.tree()), "w1[v:R[w2]]", "the link nests R (an idle windowless root holding a shown job) under D");
+  linked.state.links = { R: { parent: null } };
+  linked.st.linksChanged();
+  assert.equal(show(linked.tree()), "w1 w2", "a later suppression replaces the link");
 });
 
 test("tree: a row keeps its slot when it gets a window — siblings are ordered by first appearance, not by window index", async () => {
@@ -1259,14 +1134,14 @@ test("tree: placementOf answers the project, the canonical session and a startin
   assert.equal(root.st.placementOf("R").cwd, "/work/p/r");
 });
 
-test("tree: the cantina scenario — rows keep their root across 10 subagent turns (windows appearing and vanishing for the subagents)", async () => {
+test("tree: the cantina scenario (linked) — rows keep their root across 10 subagent turns (windows appearing and vanishing for the subagents)", async () => {
   const base = [w(16, "D"), w(10, "J1", { owner: "job" }), w(12, "J2", { owner: "job" })];
   const subs = [w(1, "S1", { owner: "job" }), w(2, "S2", { owner: "job" })];
   const h = treeHarness({
     projects: [pj("cantina", base)],
     jobRecords: [adoptedRec("s1", "S1", "R"), adoptedRec("s2", "S2", "R"), delegateRec("j1", "J1", "S1"), delegateRec("j2", "J2", "S2")],
     sessions: { D: {}, R: { directory: "/work/cantina" }, S1: { parentID: "R" }, S2: { parentID: "R" }, J1: { parentID: "S1" }, J2: { parentID: "S2" } },
-    refs: () => ({ hits: [{ target: "S1", sessionId: "D", t: 9 }, { target: "S2", sessionId: "D", t: 8 }], complete: true }),
+    links: { R: { parent: "D" } },
     timelines: { R: [bgBlock("S1"), bgBlock("S2")] },
   });
   await h.boot();
@@ -1285,7 +1160,6 @@ test("tree: the cantina scenario — rows keep their root across 10 subagent tur
     await h.settle();
     assert.deepEqual(rootOf(), settled, `round ${i} after reads`);
   }
-  assert.equal(h.calls.refs.length, 1, "inferred once");
   assert.equal(Object.values(flatNodes(h.tree("cantina")).reduce((a, n) => ({ ...a, [n.key]: 1 }), {})).length, flatNodes(h.tree("cantina")).length, "no row twice");
 });
 
@@ -1435,11 +1309,13 @@ test("tree: a newly listed non-job window hydrates its parent instead of staying
   assert.equal(show(h.tree()), "w1[w2]");
 });
 
-test("tree: inference covers a windowless externally driven root without any adopted record", async () => {
-  const h = treeHarness({ projects: [pj("p", [w(1, "D")])], active: ["R"],
-    sessions: { D: {}, R: { directory: "/work/p", title: "Outside" } },
-    refs: () => ({ hits: [{ target: "R", sessionId: "D", t: 9 }], complete: true }) });
-  await h.boot();
-  assert.equal(show(h.tree()), "w1[v:R]");
-  assert.equal(h.calls.refs.length, 1);
+test("tree: a windowless externally driven root is a root until a session_link nests it", async () => {
+  const mk = (links) => treeHarness({ projects: [pj("p", [w(1, "D")])], active: ["R"], links,
+    sessions: { D: {}, R: { directory: "/work/p", title: "Outside" } } });
+  const plain = mk({});
+  await plain.boot();
+  assert.equal(show(plain.tree()), "w1 v:R", "driven from outside, no link: a root");
+  const linked = mk({ R: { parent: "D" } });
+  await linked.boot();
+  assert.equal(show(linked.tree()), "w1[v:R]");
 });
