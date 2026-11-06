@@ -8,6 +8,47 @@ User-facing changes per release. Each release names the components it ships:
 Desktop and Server share one version number (`package.json`); iOS has its own
 (`MARKETING_VERSION` in `mobile/native/project.yml`).
 
+## 1.4.0 — Server + Desktop · iOS 1.3.0 — 2026-11-06
+
+<!-- highlights
+headline: Background work stays where it belongs
+items:
+  - title: Session tree
+    icon: git-branch
+    text: Subagents and background jobs stay nested under the conversation that started them, window or not.
+-->
+
+Ships: Server `server-v1.4.0`, Desktop `mac-v1.4.0` / `win-v1.4.0`, iOS
+`ios-v1.3.0`, Website `web-v1.4.0` (publishes the server update manifest only).
+Gateway unchanged.
+
+### Sessions in the sidebar
+- **Background work stays nested.** Subagents and background jobs now sit under
+  the conversation that started them, at any depth, and no longer jump to the
+  top level when a subagent finishes a turn. A finished one stays visible for a
+  moment before it goes.
+- **Rows without a window.** A running subagent or background job shows as a
+  row even when it has no window; clicking it opens one.
+- **Orchestrators can nest what they drive.** A conversation that drives other
+  sessions through opencode's API can nest them under itself with the new
+  `session_link` tool (and undo it with `session_unlink`). Sessions that aren't
+  linked show at the top level.
+- **Fewer stray windows.** Subagents no longer get temporary windows, and the
+  server only closes windows it opened for a job — never one you opened.
+
+### Desktop
+- **What's new after an update.** A short window shows what changed in the
+  release you just got.
+- **Transcript file links** open the file directly, without opening the tree.
+
+### iOS
+- **Top-level rows without a window** show in the session list; tapping one
+  opens it.
+
+### Server
+- Notifications from a session without a window are titled with the
+  conversation it belongs to.
+
 ## 1.3.0 — Server + Desktop — 2026-11-03
 
 Ships: Server `server-v1.3.0`, Desktop `mac-v1.3.0` / `win-v1.3.0`, Website
