@@ -6,16 +6,16 @@
 //
 // Sources are AUTHORITATIVE ONLY: each session's own execution state (the interpreter's `running` / `turnComplete`
 // frames for ANY session id, and the connect-time running set), parent edges (`childSession` frames + delegate
-// records + opencode's own session records) and delegate jobs. A relationship is NEVER inferred from tool status, so
-// a task tool that completed after launching background work leaves `subagents` / `busy` up while its child runs.
+// records + opencode's own session records) and delegate jobs. A relationship is NEVER inferred (from tool status or anywhere else),
+// so a task tool that completed after launching background work leaves `subagents` / `busy` up while its child runs.
 //
 // `createSessionStatus` is dependency-injected (no I/O of its own); the pure derivations are exported for tests.
 //
 // Nesting (session-tree stage (a), docs/superpowers/specs/2026-11-05-session-tree.md): `windows[].job.parentWindowIndex`
 // is a projection of the SESSION GRAPH, not a lookup of the record's parent among windows. Nodes are conversations (a
-// handoff chain is one node); edges are (1) a Manta-owned job record's parent, (2) opencode's own `parentID`, (4) a
-// cached transcript-inferred driver for a root nobody opened. A window's root is its nearest windowed ancestor's root,
-// walking through windowless sessions, so a subagent's window coming and going never moves the rows below it.
+// handoff chain is one node); edges are (1) a Manta-owned job record's parent, (2) opencode's own `parentID`, (3) an
+// explicit `session_link`. Nothing is inferred: a session with none of them is a root. A window's root is its nearest
+// windowed ancestor's root, walking through windowless sessions, so a subagent's window coming and going never moves the rows below it.
 //
 // The session tree (stage (b), same spec §2/§3/§10): `Project.tree` is the rows the sidebar renders — every window
 // exactly once, plus VIRTUAL rows for shown sessions that have no window (a running subagent, a job child, an idle
@@ -24,7 +24,7 @@
 // Reads (a session's parent / title / directory, the inline-`task` classification) happen in background passes
 // that call `recompute()`; `annotateProjects` itself stays synchronous.
 
-import { completionOwnerOf, DRIVER_WINDOW_MS } from "./delegate.mjs";
+import { completionOwnerOf } from "./delegate.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
 
 /** A windowless session that just ended its turn stays a row this long (spec §2). */
@@ -35,7 +35,7 @@ export const LINGER_MS = 30_000;
 
 /**
  * Background-job nesting for one project. A job's child window (the window whose opencodeSessionId ===
- * job.childSessionID) nests under its parent window (job.displayParentID ?? job.parentSessionID) whenever both
+ * job.childSessionID) nests under its parent window (job.parentSessionID) whenever both
  * windows exist. Rows whose parent is itself nested are lifted to the nearest top-level ancestor (cycle-safe: a cycle
  * leaves its members top-level).
  * @returns {{ hidden: Set<number>, children: Map<number, number[]> }}
@@ -52,7 +52,7 @@ export function computeJobNesting(project, jobs) {
     if (!job.childSessionID || job.supersededBy) continue;
     const childWin = byOpencodeId.get(job.childSessionID);
     if (!childWin) continue;
-    const nestUnder = job.displayParentID ?? job.parentSessionID;
+    const nestUnder = job.parentSessionID;
     const parentWin = nestUnder ? byOpencodeId.get(nestUnder) : undefined;
     if (!parentWin || parentWin.index === childWin.index) continue;
     parentOf.set(childWin.index, parentWin.index);
@@ -110,7 +110,7 @@ export function annotateJobs(projects, jobs) {
  * @param {Iterable<string>} running  session ids currently running a turn (incl. windowless ones)
  * @param {Record<string,string>} parents  child session id → parent session id
  * @param {Record<string,object>|object[]} jobs  background-job records; a `running` job counts as work in its child
- *   session AND (when the edges do not already name one) its `parentSessionID`. `displayParentID` is not read.
+ *   session AND (when the edges do not already name one) its `parentSessionID`.
  */
 export function sessionsWithActiveWork(running, parents, jobs) {
   const links = new Map(Object.entries(parents ?? {}));
@@ -138,7 +138,7 @@ export function sessionsWithActiveWork(running, parents, jobs) {
 /**
  * Descendants at ANY depth (by the parent edges, shown or collapsed) that are running or wait on a question /
  * permission, counted per ancestor: a job started by a collapsed subagent counts toward the root it is shown under.
- * A descendant counts once per ancestor; a cycle ends the walk. `displayParentID` is not read.
+ * A descendant counts once per ancestor; a cycle ends the walk.
  * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs?: object[], own?: Map<string,{attention?: string|null}>, pendingAsk?: Iterable<string> }} m
  */
 export function runningChildCounts(m) {
@@ -244,9 +244,7 @@ export const DEFAULT_STATUS = Object.freeze({ running: false, busy: false, start
 const MAX_EDGES = 5000;
 const MAX_DEPTH = 32;
 const RETRY_MS = [1000, 2000, 5000, 10000];
-const INFER_MIN_INTERVAL_MS = 60_000; // per root, between transcript lookups
 const UNKNOWN_READ_MIN_INTERVAL_MS = 5_000; // per session, between background parent reads
-const MAX_INFER_STATE = 2000;
 const MAX_TREE_STATE = 5000;
 const MAX_GATES_PER_PASS = 40; // background reads per pass; the rest wait for the next recompute
 const GATE_RETRY_MS = [1000, 2000, 5000, 10000];
@@ -278,7 +276,7 @@ const boundMap = (m, cap) => {
  *   classification reads the PARENT's assistant records; absent → every parented windowless session is treated as inline)
  * @param {(sid: string) => boolean} [d.isHandoffSuccessor]  an uncommitted handoff successor is never a row
  * @param {(sid: string) => ({parent: string|null}|undefined)} [d.linkOf]  rule 3: the explicit link entry of a session
- *   (`undefined` = none; `{parent: null}` = a suppression: no explicit edge AND no inference for that child)
+ *   (`undefined` = none; `{parent: null}` = a suppression: no explicit edge — the child is a root)
  * @param {() => Iterable<string>} [d.linkEndpoints]  every session a link names (hydration candidates)
  * @param {() => Iterable<string>} [d.pendingAskSessionIds]  sessions with a pending question / permission right now
  * @param {() => unknown} [d.onJobsChanged]  a job record changed (the session list's `job` fields must be re-read)
@@ -286,12 +284,9 @@ const boundMap = (m, cap) => {
  * @param {(fn: () => void, ms: number) => unknown} [d.setTimer]  hydration retry timer
  * @param {(sid: string) => string[]} [d.chainOf]  handoff replacement chain of a session (all members; default: just itself)
  * @param {(sid: string) => string|null} [d.successorOf]  the session that replaced `sid`, one step
- * @param {(args: {sessionIds: string[], targets: string[], sinceMs: number}) => Promise<{hits: {target: string, sessionId: string, t: number}[], complete: boolean}|null>} [d.findSessionReferences]
- *   which windowed session's transcript named each target (the inferred edge; absent → no inference)
- * @param {(sid: string) => Promise<boolean>} [d.isCtoConversationSession]  the CTO conversation is never nested by inference
+ * @param {(sid: string) => Promise<boolean>} [d.isCtoConversationSession]  the CTO conversation is never a row
  * @param {(sid: string) => Promise<boolean>} [d.isInternalSession]  neither is a Manta-internal session
  * @param {() => number} [d.now]
- * @param {number} [d.inferMinIntervalMs]
  */
 export function createSessionStatus(d) {
   const schedule = d.schedule ?? ((fn) => setTimeout(fn, 0));
@@ -302,10 +297,6 @@ export function createSessionStatus(d) {
   const rootIds = new Set(); // sessions an authoritative read said have NO parent
   const missing = new Set(); // sessions an authoritative read said no longer exist (known, not unknown)
   const now = d.now ?? (() => Date.now());
-  // Rule 4 (inferred edge), all keyed by the conversation key (a handoff chain's OLDEST member, stable across commits).
-  const inferred = new Map(); // child conv key -> parent conv key; decided once, cached for the process, never revised
-  const eligibility = new Map(); // conv key -> boolean, decided once: may this root take an inferred parent?
-  const inferLookedUpAt = new Map(); // conv key -> when its last transcript lookup started
   const unknownReadAt = new Map(); // session id -> when a background parent read last started
   let placement = new Map(); // `${project}\0${sid}` -> last confidently projected parentWindowIndex
   // ---- the tree's own state (all keyed by session id or conversation key; bounded) ----
@@ -329,7 +320,6 @@ export function createSessionStatus(d) {
   let lastProjects = null; // the last session list handed to annotateProjects (un-annotated)
   let hydratedOnce = false;
   let recomputePending = false;
-  let inferRunning = false;
   let resolveRunning = false;
   let background = Promise.resolve();
   let jobs = [];
@@ -430,7 +420,7 @@ export function createSessionStatus(d) {
       if (child) seeds.add(child);
       else if (parent) seeds.add(parent);
     }
-    // The edges above every seed (rules 1–4 on conversation nodes); nothing else is needed to roll status up.
+    // The edges above every seed (rules 1–3 on conversation nodes); nothing else is needed to roll status up.
     const nodeParent = new Map();
     for (const seed of seeds) {
       let cur = seed;
@@ -486,10 +476,9 @@ export function createSessionStatus(d) {
   //
   // Built per pass from `projects` (which windows exist now) + the held edges. Nothing here does I/O.
 
-  /** Which job records make a session an annotated row, and which are adopted (opencode-owned). */
+  /** Which job records make a session an annotated row, and which are Manta-owned (rule-1 edges). */
   function recordIndex() {
     const annotated = new Set(); // child session ids of non-superseded records (today's set of `job` windows)
-    const adopted = new Set(); // ... whose completion owner is opencode (observed / subagent)
     const ruleOne = new Map(); // child -> parent for Manta-owned records (the caller)
     const liveChildren = new Set();
     const recordChildren = new Set(); // every non-superseded record's child: a delegate record proves a background (not inline) child
@@ -500,10 +489,9 @@ export function createSessionStatus(d) {
       recordChildren.add(j.childSessionID);
       jobByChild.set(j.childSessionID, j);
       if (isLiveJob(j)) liveChildren.add(j.childSessionID);
-      if (completionOwnerOf(j) === "opencode") adopted.add(j.childSessionID);
-      else if (j.parentSessionID && j.parentSessionID !== j.childSessionID) ruleOne.set(j.childSessionID, j.parentSessionID);
+      if (completionOwnerOf(j) !== "opencode" && j.parentSessionID && j.parentSessionID !== j.childSessionID) ruleOne.set(j.childSessionID, j.parentSessionID);
     }
-    return { annotated, adopted, ruleOne, liveChildren, recordChildren, jobByChild };
+    return { annotated, ruleOne, liveChildren, recordChildren, jobByChild };
   }
 
   /** The explicit link entry of a session, defended against a throwing store. */
@@ -517,13 +505,12 @@ export function createSessionStatus(d) {
 
   function buildGraph(projects) {
     const rec = recordIndex();
-    const windowsBySid = new Map(); // sid -> [{ project, index, owner, sid }]
+    const windowsBySid = new Map(); // sid -> [{ project, index, sid }]
     for (const p of projects ?? []) {
       for (const w of p.windows ?? []) {
         if (!w?.opencodeSessionId) continue;
         const list = windowsBySid.get(w.opencodeSessionId) ?? [];
-        // A window nothing stamped is the user's (tmux.resolveOwner maps absent → "user").
-        list.push({ project: p.tmuxSession, index: w.index, owner: w.owner ?? "user", sid: w.opencodeSessionId });
+        list.push({ project: p.tmuxSession, index: w.index, sid: w.opencodeSessionId });
         windowsBySid.set(w.opencodeSessionId, list);
       }
     }
@@ -576,17 +563,12 @@ export function createSessionStatus(d) {
 
     // A link written after a handoff replaces an older member's link/suppression too.
     const nodeLink = (node) => chainInfo(node).members.map(linkEntry).filter(Boolean).sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0];
-    /** A `session_unlink` suppression: no inference for this child. */
-    function isSuppressed(node) {
-      return nodeLink(node)?.parent === null;
-    }
-
     /**
      * child node -> parent node: rule 1 (Manta-owned record), rule 2 (opencode's parentID), rule 3 (explicit link; a
-     * suppression entry ends the walk here: it is not an edge AND it disables rule 4), rule 4 (cached inference).
+     * suppression entry ends the walk here: it is not an edge).
      */
     function edgeParent(node) {
-      const { members, oldest } = chainInfo(node);
+      const { members } = chainInfo(node);
       for (const m of members) {
         const p = rec.ruleOne.get(m);
         if (p && canon(p) !== node) return canon(p);
@@ -597,9 +579,6 @@ export function createSessionStatus(d) {
       }
       const linked = nodeLink(node)?.parent;
       if (typeof linked === "string" && linked && canon(linked) !== node) return canon(linked);
-      if (isSuppressed(node)) return null;
-      const inf = inferred.get(oldest);
-      if (inf && canon(inf) !== node) return canon(inf);
       return null;
     }
     const isKnownRoot = (node) => chainInfo(node).members.some((m) => rootIds.has(m) || missing.has(m));
@@ -653,7 +632,7 @@ export function createSessionStatus(d) {
       return { value: r === CYCLE || r === w.index ? null : r, certain, unknown };
     }
 
-    return { rec, windowsBySid, windowsByNode, canon, keyOf, chainInfo, edgeParent, isSuppressed, walkUp, projectWindow, byIndex };
+    return { rec, windowsBySid, windowsByNode, canon, keyOf, chainInfo, edgeParent, walkUp, projectWindow, byIndex };
   }
 
   // ---- the tree (spec §2, §3, §10) ----------------------------------------------------------------------------
@@ -1151,141 +1130,6 @@ export function createSessionStatus(d) {
     });
   }
 
-  /**
-   * Rule 4. For each graph root that is not user-opened, the windowed session of the same project whose transcript most
-   * recently named the root OR a collapsed session between it and a row it holds (within DRIVER_WINDOW_MS). One lookup per
-   * pass, one per root per minute; the answer, once found, is cached for good. An incomplete / failed lookup caches nothing.
-   */
-  function inferDrivers(projects, graph) {
-    if (inferRunning || hydrating || !hydratedOnce || typeof d.findSessionReferences !== "function" || !graph) return;
-    const t = now();
-    const minGap = d.inferMinIntervalMs ?? INFER_MIN_INTERVAL_MS;
-    const subjects = new Map(); // conv key -> { root, targets:Set, projects:Set, candidates:Set }
-    const virtualSeeds = new Set([...running, ...pendingAskIds(), ...graph.rec.liveChildren]);
-    for (const p of projects ?? []) {
-      const candidates = [...(p.windows ?? [])];
-      for (const sid of virtualSeeds) {
-        if (graph.windowsBySid.has(sid)) continue;
-        const job = graph.rec.jobByChild.get(sid);
-        const owner = job?.tmuxSession ?? ownerByDirectory(projects, info.get(sid)?.directory);
-        if (owner === p.tmuxSession) candidates.push({ opencodeSessionId: sid });
-      }
-      for (const w of candidates) {
-        const sid = w?.opencodeSessionId;
-        if (!sid) continue;
-        const walk = graph.walkUp(graph.canon(sid));
-        if (walk.end !== "root" || walk.path.some((n) => graph.windowsByNode.has(n))) continue; // placed by a windowed ancestor, or not certain
-        const root = walk.at;
-        if (graph.isSuppressed(root)) continue; // a `session_unlink` suppression: no inference for this child, ever
-        const key = graph.keyOf(root);
-        if (!eligibility.has(key)) {
-          // Decided ONCE, when the root first needs an answer: a window the user opened (or nothing stamped) rules it out.
-          eligibility.set(key, !(graph.windowsByNode.get(root) ?? []).some((x) => x.owner === "user"));
-          boundMap(eligibility, MAX_INFER_STATE);
-        }
-        if (!eligibility.get(key)) continue;
-        const last = inferLookedUpAt.get(key);
-        if (last != null && t - last < minGap) continue;
-        let s = subjects.get(key);
-        if (!s) subjects.set(key, (s = { root, targets: new Set(), projects: new Set(), candidates: new Set() }));
-        s.projects.add(p.tmuxSession);
-        for (const m of graph.chainInfo(root).members) s.targets.add(m);
-        for (const n of walk.path.slice(0, -1)) for (const m of graph.chainInfo(n).members) s.targets.add(m);
-        // An adopted row is named by its driver directly (its own transcript mentions the subagent, not the root).
-        if (graph.rec.adopted.has(sid)) s.targets.add(sid);
-      }
-    }
-    if (subjects.size === 0) return;
-    const live = new Set([...graph.rec.liveChildren].map((sid) => graph.canon(sid)));
-    const candidatesFor = (s, g) => {
-      const out = new Set();
-      for (const p of projects ?? []) {
-        if (!s.projects.has(p.tmuxSession)) continue;
-        for (const w of p.windows ?? []) {
-          const sid = w?.opencodeSessionId;
-          if (!sid) continue;
-          const node = g.canon(sid);
-          if (node === s.root || live.has(node)) continue;
-          const walk = g.walkUp(node);
-          if (walk.end === "unknown" || walk.path.includes(s.root)) continue;
-          out.add(sid);
-        }
-      }
-      return out;
-    };
-    for (const [key, s] of subjects) {
-      s.candidates = candidatesFor(s, graph);
-      s.members = graph.chainInfo(s.root).members;
-      if (s.candidates.size === 0) {
-        subjects.delete(key);
-        continue;
-      }
-      inferLookedUpAt.set(key, t);
-    }
-    boundMap(inferLookedUpAt, 500);
-    if (subjects.size === 0) return;
-    inferRunning = true;
-    void queueBackground(async () => {
-      let found = null;
-      try {
-        // Manta's own sessions (the CTO conversation, internal helpers) are never nested by transcript inference.
-        // Decided once, like the user-opened rule; a check that cannot answer drops the root for this pass only.
-        if (d.isCtoConversationSession || d.isInternalSession) {
-          for (const [key, s] of [...subjects]) {
-            let excluded = false;
-            try {
-              for (const m of s.members) {
-                if ((await d.isCtoConversationSession?.(m)) || (await d.isInternalSession?.(m))) {
-                  excluded = true;
-                  break;
-                }
-              }
-            } catch {
-              subjects.delete(key); // fail closed, retried after the throttle window
-              continue;
-            }
-            if (excluded) {
-              eligibility.set(key, false);
-              subjects.delete(key);
-            }
-          }
-        }
-        if (subjects.size === 0) return;
-        const allTargets = new Set();
-        const allCandidates = new Set();
-        for (const s of subjects.values()) {
-          for (const x of s.targets) allTargets.add(x);
-          for (const x of s.candidates) allCandidates.add(x);
-        }
-        found = await d.findSessionReferences({ sessionIds: [...allCandidates], targets: [...allTargets], sinceMs: t - DRIVER_WINDOW_MS });
-      } catch {
-        found = null;
-      } finally {
-        inferRunning = false;
-      }
-      if (!found || !Array.isArray(found.hits) || found.complete === false || !lastProjects) return;
-      const fresh = buildGraph(lastProjects); // state may have moved while the lookup ran
-      let changed = false;
-      for (const [key, s] of subjects) {
-        if (inferred.has(key)) continue;
-        const hits = found.hits
-          .filter((h) => s.targets.has(h?.target) && s.candidates.has(h?.sessionId))
-          .sort((a, b) => (b.t ?? 0) - (a.t ?? 0) || (a.sessionId < b.sessionId ? -1 : 1));
-        for (const h of hits) {
-          const node = fresh.canon(h.sessionId);
-          const walk = fresh.walkUp(node);
-          if (node === fresh.canon(s.root) || walk.end === "unknown" || walk.path.includes(fresh.canon(s.root))) continue;
-          if (fresh.edgeParent(fresh.canon(s.root)) || fresh.isSuppressed(fresh.canon(s.root))) break; // an authoritative parent / a suppression appeared meanwhile: nothing to infer
-          inferred.set(key, fresh.keyOf(h.sessionId));
-          boundMap(inferred, MAX_INFER_STATE);
-          changed = true;
-          break;
-        }
-      }
-      if (changed) recompute();
-    });
-  }
-
   function observe(evt) {
     if (!evt || typeof evt !== "object") return;
     if (evt.kind === "stream") {
@@ -1689,7 +1533,6 @@ export function createSessionStatus(d) {
       if (res.graph) {
         resolveUnknown(res.unknown);
         triggerGates(res.layout.need);
-        inferDrivers(projects, res.graph);
       }
       return res.out;
     },
@@ -1745,13 +1588,13 @@ export function createSessionStatus(d) {
       dirty();
       recompute();
     },
-    /** Resolves when background work (parent reads, the inference lookup) queued so far has finished. */
+    /** Resolves when background work (parent reads) queued so far has finished. */
     settleBackground: () => background,
     refreshJobs,
     /** Resolves once a job change in flight has reached the session list — so `tmux:list` read right after a
      *  `delegate.updated` frame already carries the new `job` fields. */
     settled: () => pendingJobs,
     // Test seams.
-    _state: { running, parentOf, rootIds, missing, inferred, eligibility, info, lingerUntil, inlineState, get hydratedOnce() { return hydratedOnce; }, own, get jobs() { return jobs; }, set jobs(v) { jobs = v; }, get stopped() { return stopped; }, set stopped(v) { stopped = new Set(v); }, get retryScheduled() { return retryPending; } },
+    _state: { running, parentOf, rootIds, missing, info, lingerUntil, inlineState, get hydratedOnce() { return hydratedOnce; }, own, get jobs() { return jobs; }, set jobs(v) { jobs = v; }, get stopped() { return stopped; }, set stopped(v) { stopped = new Set(v); }, get retryScheduled() { return retryPending; } },
   };
 }

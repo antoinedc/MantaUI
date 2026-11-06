@@ -38,7 +38,6 @@ import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAI
 import { startPoller } from "./startPoller.mjs";
 import { parseTailnetHosts } from "./tailnet.mjs";
 import { getDb, partExists } from "./opencodeDb.mjs";
-import { runDbTask } from "./dbOffload.mjs";
 import {
   resolvePolicy,
   validateRepoTable,
@@ -1289,15 +1288,6 @@ const webhookEngine = createWebhookEngine({
 // created earlier in module scope); until then it is a no-op, and a routing
 // failure never breaks the job's own terminal transition.
 let workOutcomeSink = null;
-// Which windowed session's transcript named each target session id (read-only, off-thread; null when the DB is
-// unavailable or the worker is busy — the rule that asked is then skipped).
-const findSessionReferences = async (args) => {
-  try {
-    return await runDbTask("sessionReferences", { ...args, budgetMs: 8_000 });
-  } catch {
-    return null;
-  }
-};
 const delegateEngine = createDelegateEngine({
   publish: (evt) => bus.publish(evt),
   deliver: (args) => promptDelivery.deliver(args),
@@ -1372,11 +1362,6 @@ const delegateEngine = createDelegateEngine({
   cancelPendingHandoff: (sid) => handoffEngine.cancelPendingSends(sid),
   isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
-  // Display parent of an adopted row (delegate.resolveDisplayParents): the replacement successor of a
-  // windowless session, and which windowed session's transcript named a child session (read-only, off-thread;
-  // null when the DB is unavailable or the worker is busy — the rule is then skipped).
-  successorOf: (sid) => handoffEngine.successorOf(sid),
-  findSessionReferences,
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   // The CTO's ephemeral inference sessions (provenance tombstones): never adopted as observed jobs.
@@ -1433,12 +1418,10 @@ const sessionStatus = createSessionStatus({
   runningSince: (id) => streamInterp.getState(id)?.runningSince ?? null,
   // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
   onJobsChanged: () => syncState.refreshNow(),
-  // The session graph's conversation nodes (a handoff chain is one node) and the inferred-driver lookup (the same
-  // read-only, off-thread transcript scan the display-parent resolver uses; null when the DB is unavailable).
+  // The session graph's conversation nodes (a handoff chain is one node).
   chainOf: (sid) => handoffEngine.chainOf(sid),
   successorOf: (sid) => handoffEngine.successorOf(sid),
-  findSessionReferences,
-  // Manta's own sessions are never nested by the inferred edge (same predicates the delegate engine uses).
+  // Manta's own sessions are never rows (same predicates the delegate engine uses).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   isInternalSession: (sid) => isInternalSession(sid),
 });

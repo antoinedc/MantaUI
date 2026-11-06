@@ -751,7 +751,7 @@ test("freshness: a resumed session's PREVIOUS outcome cannot finish its new reco
 const adoptInput = (over = {}) => ({
   childSessionID: "ses_adopted",
   owner: { tmuxSession: "proj" },
-  displayParentID: PARENT,
+  parentSessionID: PARENT,
   sessionParentID: PARENT,
   cwd: REPO,
   name: "explore",
@@ -801,13 +801,13 @@ test("resolveSessionOwner: nearest windowed ancestor, else the directory's proje
   w.sessions.set("ses_x", { id: "ses_x", parentID: "ses_p", directory: "/elsewhere" });
   const viaAncestor = await resolveSessionOwner("ses_x", w.deps);
   assert.equal(viaAncestor.status, "ok");
-  assert.equal(viaAncestor.displayParentID, PARENT);
+  assert.equal(viaAncestor.parentSessionID, PARENT);
   assert.equal(viaAncestor.owner.tmuxSession, "proj");
 
   w.sessions.set("ses_y", { id: "ses_y", directory: "/repo/sub/dir" });
   const viaDir = await resolveSessionOwner("ses_y", w.deps);
   assert.equal(viaDir.status, "ok");
-  assert.equal(viaDir.displayParentID, null);
+  assert.equal(viaDir.parentSessionID, null);
   assert.equal(viaDir.owner.tmuxSession, "proj");
 
   w.sessions.set("ses_z", { id: "ses_z", directory: "/nowhere" });
