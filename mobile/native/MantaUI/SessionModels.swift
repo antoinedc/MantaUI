@@ -74,8 +74,30 @@ struct MantaProject: Codable, Equatable, Sendable, Identifiable {
     var windows: [MantaWindow]
     var attached: Bool
     var mantaOwned: Bool?
+    /// The project's rows as the box decided them (session tree, stage (b)): roots in display order, each with its
+    /// descendants. Absent on an older box — the list then renders `windows` + `job.parentWindowIndex` as before.
+    var tree: [SessionTreeNode]? = nil
 
     var id: String { tmuxSession }
+
+    fileprivate enum CodingKeys: String, CodingKey {
+        case tmuxSession, defaultCwd, windows, attached, mantaOwned, tree
+    }
+}
+
+extension MantaProject {
+    // In an extension so the synthesized memberwise initializer survives. Decoding is what it always was, plus
+    // `tree`, which is tolerant: a malformed node is skipped, and a `tree` that is not an array reads as absent — a
+    // bad tree must never fail the whole project list.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tmuxSession = try c.decode(String.self, forKey: .tmuxSession)
+        defaultCwd = try c.decode(String.self, forKey: .defaultCwd)
+        windows = try c.decode([MantaWindow].self, forKey: .windows)
+        attached = try c.decode(Bool.self, forKey: .attached)
+        mantaOwned = try c.decodeIfPresent(Bool.self, forKey: .mantaOwned)
+        tree = ((try? c.decodeIfPresent(LenientSessionTree.self, forKey: .tree)) ?? nil)?.nodes
+    }
 }
 
 struct MantaWorktree: Codable, Equatable, Sendable {

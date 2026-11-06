@@ -64,7 +64,7 @@ after(async () => {
 });
 
 // Tools that never had a V1 file: V2 introduced them (routines: spec 2026-10-30).
-const V2_ONLY = ["handoff", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "todo_write"];
+const V2_ONLY = ["handoff", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "session_link", "session_unlink", "todo_write"];
 
 describe("tool inventory", () => {
   test("V1 inventory is the 45 tools the spec names", async () => {
@@ -330,6 +330,24 @@ describe("behavioural parity (V1 vs V2 against the same fake manta-server)", () 
 // ---------------------------------------------------------------------------
 // Plugin entry (index.ts) wiring
 // ---------------------------------------------------------------------------
+
+describe("session-link tools", () => {
+  test("link/unlink pass the caller and target through the shared authenticated registrar", async () => {
+    for (const action of ["link", "unlink"]) {
+      const calls = installFakeFetch(() => ({ status: 200, body: { ok: true } }));
+      const tool = v2.allTools.find((t) => t.name === `session_${action}`);
+      const out = await tool.execute({ sessionId: "ses_driven" }, CTX);
+      assert.match(out, action === "link" ? /linked/ : /unlinked/);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, "http://manta.test/api/session-links");
+      assert.equal(calls[0].method, "POST");
+      assert.equal(calls[0].headers.authorization, `Bearer ${TOKEN}`);
+      assert.deepEqual(calls[0].body, { action, sessionID: CTX.sessionID, target: "ses_driven" });
+      installFakeFetch(() => ({ status: 400, body: { ok: false, error: "This link would create a cycle." } }));
+      await assert.rejects(() => tool.execute({ sessionId: "ses_driven" }, CTX), /cycle/);
+    }
+  });
+});
 
 describe("plugin entry", () => {
   test("setup registers every tool once, wrapping results as { content }", async () => {

@@ -52,6 +52,7 @@ function world({ jobs: seed = [], paths = [] } = {}) {
   const warnings = [];
 
   const deps = {
+    getWindowOption: async () => "job", // seeded and launched holders model job ownership
     load: async () => jobs.map((j) => structuredClone(j)),
     save: async (next) => {
       jobs.splice(0, jobs.length, ...next.map((j) => structuredClone(j)));
@@ -841,7 +842,7 @@ test("observeEvent: a background task whose parent has NO window is adopted unde
   assert.equal(j.origin, "subagent");
   assert.equal(j.completionOwner, "opencode");
   assert.equal(j.runStartedAt, T0 + 5, "the task part's own start");
-  assert.equal(w.calls.window.length, 1);
+  assert.equal(w.calls.window.length, 0, "adoption records the child without creating a holder");
 });
 
 test("observeEvent: a windowless parent with no windowed ancestor lands in the directory's workspace; an owner-less one warns ONCE", async () => {
@@ -919,32 +920,17 @@ const quietly = async (fn) => {
   return warns;
 };
 
-test("reconciler: a windowless busy untracked session is adopted on the 2nd tick (observed, track-only), not the 1st", async () => {
+test("reconciler: a windowless API-driven session is never adopted (the tree owns its row)", async () => {
   const { w, tick } = recWorld();
   busy(w, "ses_script", { directory: "/repo/sub" });
   await tick();
   assert.equal(w.jobs.length, 0);
-  const firstSeen = w.state.now;
-  await tick();
-  assert.equal(w.jobs.length, 1);
-  const j = w.jobs[0];
-  assert.equal(j.origin, "observed");
-  assert.equal(j.completionOwner, "opencode");
-  assert.equal(j.status, "running");
-  assert.equal(j.attempt, 1);
-  assert.equal(j.continues, null);
-  assert.equal(j.runStartedAt, firstSeen, "the first tick the session was seen busy");
-  assert.equal(j.name, "Some script run");
-  assert.equal(w.calls.window.length, 1);
-  assert.equal(w.calls.window[0].existingSessionId, "ses_script");
-  assert.equal(w.calls.window[0].cwd, "/repo/sub");
-  assert.equal(countsTowardCap(j), false);
-  // idempotent
-  await tick(3);
-  assert.equal(w.jobs.length, 1);
+  await tick(6);
+  assert.equal(w.jobs.length, 0);
+  assert.equal(w.calls.window.length, 0);
 });
 
-test("reconciler: a child with no `task` block in its parent's timeline needs a 3rd tick; a background block needs 2; a foreground block never", async () => {
+test("reconciler: only a background task block is adopted after 2 ticks; missing and foreground blocks never", async () => {
   const mk = () => {
     const r = recWorld();
     r.w.sessions.set("ses_p", { id: "ses_p", directory: REPO });
@@ -955,13 +941,16 @@ test("reconciler: a child with no `task` block in its parent's timeline needs a 
   await none.tick(2);
   assert.equal(none.w.jobs.length, 0);
   await none.tick();
-  assert.equal(none.w.jobs.length, 1);
+  assert.equal(none.w.jobs.length, 0);
 
   const block = (background) => [{ type: "assistant", content: [{ type: "tool", state: { input: { background }, metadata: { sessionID: "ses_kid" } } }] }];
   const bg = mk();
   bg.w.timelines.set("ses_p", block(true));
   await bg.tick(2);
   assert.equal(bg.w.jobs.length, 1);
+  assert.equal(bg.w.jobs[0].origin, "subagent");
+  assert.equal(bg.w.jobs[0].windowIndex, null);
+  assert.equal(bg.w.calls.window.length, 0);
 
   const fg = mk();
   fg.w.timelines.set("ses_p", block(false));
@@ -972,6 +961,8 @@ test("reconciler: a child with no `task` block in its parent's timeline needs a 
 test("reconciler: the debounce is dropped when the session leaves `active`", async () => {
   const { w, tick, engine } = recWorld();
   busy(w, "ses_blip", {});
+  w.sessions.get("ses_blip").parentID = PARENT;
+  w.timelines.set(PARENT, [{ type: "assistant", content: [{ type: "tool", state: { input: { background: true }, metadata: { sessionID: "ses_blip" } } }] }]);
   await tick();
   w.active.delete("ses_blip");
   await tick();
@@ -1019,9 +1010,9 @@ test("reconciler: a windowless parent → its nearest windowed ancestor; no ance
   const warns = await quietly(() => tick(6));
   const byChild = (c) => w.jobs.find((j) => j.childSessionID === c);
   assert.equal(byChild("ses_viaancestor").parentSessionID, PARENT);
-  assert.equal(byChild("ses_viadir").parentSessionID, null);
+  assert.equal(byChild("ses_viadir"), undefined, "API-driven roots are not adopted");
   assert.equal(byChild("ses_noowner"), undefined);
-  assert.equal(warns.filter((m) => m.includes("ses_noowner")).length, 1);
+  assert.equal(warns.filter((m) => m.includes("ses_noowner")).length, 0, "API-driven roots need no job-owner resolution");
 });
 
 test("reconciler: unreadable reads skip the session without a warning; a failing listActiveIds is a no-op tick", async () => {
@@ -1065,6 +1056,8 @@ test("reconciler: a windowed session is never adopted, even when its only record
 test("reconciler: a session the handoff engine flags as an uncommitted successor is skipped", async () => {
   const { w } = recWorld();
   busy(w, "ses_succ", {});
+  w.sessions.get("ses_succ").parentID = PARENT;
+  w.timelines.set(PARENT, [{ type: "assistant", content: [{ type: "tool", state: { input: { background: true }, metadata: { sessionID: "ses_succ" } } }] }]);
   let flagged = true;
   w.deps.isHandoffSuccessor = (sid) => flagged && sid === "ses_succ";
   const engine = createDelegateEngine(w.deps);
@@ -1082,9 +1075,11 @@ test("reconciler: a session the handoff engine flags as an uncommitted successor
   assert.equal(w.jobs.length, 1, "adopted once the predicate no longer flags it");
 });
 
-test("reconciler: an observed record picked up here later settles on its own and posts nothing", async () => {
+test("reconciler: a background subagent picked up here later settles on its own without a window or result", async () => {
   const { w, tick, engine } = recWorld();
   busy(w, "ses_script", {});
+  w.sessions.get("ses_script").parentID = PARENT;
+  w.timelines.set(PARENT, [{ type: "assistant", content: [{ type: "tool", state: { input: { background: true }, metadata: { sessionID: "ses_script" } } }] }]);
   await tick(2);
   assert.equal(w.jobs.length, 1);
   w.say("ses_script", "script finished");
@@ -1093,7 +1088,7 @@ test("reconciler: an observed record picked up here later settles on its own and
   await engine.sweep();
   assert.equal(w.jobs[0].status, "done");
   assert.equal(w.calls.synth.length, 0);
-  assert.equal(w.calls.kill.length, 1);
+  assert.equal(w.calls.kill.length, 0);
 });
 
 // ---------------------------------------------------------------------------

@@ -104,6 +104,7 @@ import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
+import { createSessionLinks, createSessionLinkActions } from "./sessionLinks.mjs";
 import { createQuestionsDecorator } from "./questionsDecorator.mjs";
 import { runBoundaryOf } from "./transcriptRuns.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
@@ -1309,6 +1310,9 @@ const delegateEngine = createDelegateEngine({
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
     tmux.stampOwner(sessionName, windowIndex, owner),
+  getWindowOption: (s, i, name) => tmux.getWindowOption(s, i, name),
+  setWindowOption: (s, i, name, value) => tmux.setWindowOption(s, i, name, value),
+  rebaseHolder: (s, i, dir) => tmux.rebaseHolder(s, i, dir),
   gitAddWorktree: (input) => local.gitAddWorktree(input),
   gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
   gitRun: (args) => tmux.run("git", args),
@@ -1403,7 +1407,12 @@ const delegateView = createDelegateView({
 // WS11 D7 (S13, S14): per-window status (running / busy beneath / subagents / attention / stopped) and job nesting,
 // aggregated from authoritative sources only (the interpreter's own-session frames, parent edges, delegate records) and
 // published as one `windowStatus` frame per session whose payload changed.
+const sessionLinks = createSessionLinks({ changed: () => sessionStatusRef.current?.linksChanged() });
 const sessionStatus = createSessionStatus({
+  linkOf: (sid) => sessionLinks.linkOf(sid),
+  linkEndpoints: () => sessionLinks.endpoints(),
+  // Unknown reads retain an edge; only confirmed deletion prunes it. Hydration already reads these candidates.
+  pruneLinks: () => sessionLinks.prune(async (sid) => (await oc.readSession(sid))?.state !== "missing"),
   publish: (evt) => bus.publish(evt),
   windowedSessionIds: () => {
     const ids = [];
@@ -1414,6 +1423,13 @@ const sessionStatus = createSessionStatus({
   loadStopped: async () => new Set(((await listStopped()).records ?? []).map((r) => r.conversation)),
   listActiveSessionIds: () => oc.listActiveSessionIds(),
   getSessionParent: (id) => oc.getSessionParent(id),
+  readSession: (sid) => oc.readSession(sid),
+  listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
+  isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
+  pendingAskSessionIds: () => streamInterp.knownSessionIds().filter((sid) => {
+    const state = streamInterp.getState(sid);
+    return state?.questions?.length > 0 || state?.permissions?.length > 0;
+  }),
   runningSince: (id) => streamInterp.getState(id)?.runningSince ?? null,
   // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
   onJobsChanged: () => syncState.refreshNow(),
@@ -1427,6 +1443,8 @@ const sessionStatus = createSessionStatus({
   isInternalSession: (sid) => isInternalSession(sid),
 });
 sessionStatusRef.current = sessionStatus;
+const sessionLinkAction = createSessionLinkActions({ store: sessionLinks, readSession: (sid) => oc.readSession(sid), sessionStatus });
+push.setSessionProjectsReader(() => syncState.snapshot().projects ?? []);
 bus.subscribe((evt) => sessionStatus.observe(evt));
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one
@@ -5371,6 +5389,18 @@ const handleRequest = async (req, res) => {
   // session) are doing, and message them. Called by the remote AI's global
   // opencode `peers_list` / `peers_inspect` / `peers_message` tools.
   // See src/server/peers.mjs.
+  // Explicit session graph edges (class 2, manta plugin tools only).
+  if (path === "/api/session-links") {
+    if (req.method !== "POST") { respondJson(res, 405, { ok: false, error: "method not allowed" }); return; }
+    try {
+      const result = await sessionLinkAction(await readJsonBody(req));
+      respondJson(res, result.ok ? 200 : 400, result);
+    } catch (e) {
+      // class-2 (BET-1460): explicit-link tools relay actionable errors to the model.
+      respondJson(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+    return;
+  }
   if (path === "/api/peers") {
     try {
       if (req.method === "GET") {

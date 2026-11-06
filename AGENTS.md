@@ -1173,14 +1173,15 @@ and worktree all belong to it.
   `delegate_list`, the background cards and the sidebar, so a late settle of an
   old run can never touch the new one. Per-session resource lock guards every
   window/worktree side effect for a session.
-- **Active-session reconciler + observed records.** A 15s reconciler
-  (`reconcileActiveSessions`) adopts any busy opencode session that has no row
-  (started by a script via opencode's HTTP API, a `task` whose parent has no
-  window, or a finished job prompted again) as an `origin:"observed"` record —
-  labelled "started outside Manta" in the UI. Observed records are track-only:
-  `completionOwner:"opencode"` (Manta posts no result), never count toward the
-  five-job cap, no timeout, no Pause. Manta-internal sessions (title /
-  compaction / CTO helpers) are excluded via `metadata.manta.internal`.
+- **Active-session reconciler.** The 15s reconciler adopts only background
+  `task` children, as window-less `origin:"subagent"` records. API-driven
+  sessions are rows derived by `sessionStatus`, not new observed records.
+  Existing observed records still settle (including lost runs and inherited
+  worktrees); `completionOwner:"opencode"` means no Manta result, cap, timeout
+  or Pause. Adoption reuses an existing stamped window but never creates one
+  or changes its owner. Opening a virtual row materialises a `user` holder;
+  automatic cleanup closes only `job` holders and re-bases retained user
+  holders after worktree removal. Explicit job deletion keeps its semantics.
 - **Three-way mode selection is the model's choice.** `delegate`'s
   description steers it: use the built-in `task` tool in the foreground when
   you need the answer before you can continue, or with `background: true`
@@ -1246,8 +1247,8 @@ and worktree all belong to it.
   job doing", and the tool description says so. `delegate_list` is for
   answering a user's "what's running?" question, not for waiting (do NOT
   poll).
-- Jobs appear in the sidebar as ordinary sessions (their own window).
-- An adopted (opencode-owned) row whose real parent has no window also carries a display-only `displayParentID` — a windowed ancestor, a handoff successor, or the windowed session whose transcript named it in the last 24 h (`resolveDisplayParents` in `delegate.mjs`); the sidebar nests by `displayParentID ?? parentSessionID`, and `parentSessionID` (result routing) is never changed.
+- Jobs appear in the session graph's sidebar tree, with or without a window.
+- Adopted records still carry the transitional `displayParentID` and its refresh machinery through stage (b), but the tree no longer reads it. The graph owns nesting; `parentSessionID` keeps job listing/result routing semantics. `session_link` explicitly nests API-driven sessions; `session_unlink` suppresses inference.
 - Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
   refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
   sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the

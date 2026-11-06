@@ -425,7 +425,8 @@ export type WindowStatusPayload = {
   busy: boolean;
   startedAt: number | null;
   attention: "question" | "permission" | null;
-  /** Direct children whose own turn is running. */
+  /** Session tree (b): descendants at ANY depth whose own turn is running or that wait on a question /
+   *  permission (an older box: direct children whose own turn is running). */
   subagents: number;
   /** Stopped by a provider usage limit. */
   stopped: boolean;
@@ -462,7 +463,45 @@ export type Project = {
   // "not Manta-owned" — safe because the renderer treats both the
   // unknown and the known-false cases the same way.
   mantaOwned?: boolean;
+  // Session tree, stage (b) (docs/superpowers/specs/2026-11-05-session-tree.md §3, §10): the project's rows as
+  // the box decided them — roots in display order, each with its descendants. EVERY window of the project
+  // appears exactly once as a node (window rows), plus virtual rows (shown sessions with no window). Absent on an
+  // older box: the client then renders `windows` + `job.parentWindowIndex` exactly as before.
+  tree?: SessionTreeNode[];
 };
+
+/** One row of the session tree (spec §3 / §10). */
+export type SessionTreeNode = {
+  /** Stable row identity: the conversation key (a handoff chain's OLDEST member id), or
+   *  `window:<project>:<index>` for a terminal window or a duplicate window of a session. */
+  key: string;
+  /** The conversation's canonical (live) session id; null for a terminal window. */
+  sessionId: string | null;
+  /** `window`: the row has a tmux window (`windowIndex`); `virtual`: a shown session with no window. */
+  kind: "window" | "virtual";
+  windowIndex: number | null;
+  /** The window name, else opencode's session title. */
+  title: string;
+  /** The background-job record this row is the child of, if any. */
+  job: { id: string; status: string; origin: string } | null;
+  /** A root with no window and no known parent: work driven from outside Manta (an API script). */
+  outside: boolean;
+  /** Descendants, each node's children already in display order. Clients flatten them depth-first (pre-order)
+   *  under the root, one indentation band, as the sidebar does today. */
+  children: SessionTreeNode[];
+};
+
+/** `sessions:materialize` (spec §4): open a virtual row — the box makes (or finds) its window. */
+export type SessionMaterializeResult =
+  | { ok: true; project: string; windowIndex: number; sessionId: string }
+  | {
+      ok: false;
+      /** `handoff`: a handoff of this conversation is in progress (retry shortly); `no-project`: no workspace owns
+       *  it; `not-found`: the session no longer exists; `failed`: anything else. */
+      reason: "handoff" | "no-project" | "not-found" | "failed";
+      /** A safe, user-facing sentence (class 1). */
+      message: string;
+    };
 
 // Return shape of the tmux:new-session / tmux:new-window RPCs. Carries the
 // newly-created window's identity (sessionId + windowIndex) so the caller can
@@ -1418,6 +1457,7 @@ export const IPC = {
   tmuxNewWindow: "tmux:new-window",
   sessionsProposeName: "sessions:propose-name",
   sessionsClosePreview: "sessions:close-preview",
+  sessionsMaterialize: "sessions:materialize",
   sessionsClose: "sessions:close",
   sessionsWindowStatus: "sessions:window-status",
   tmuxRenameSession: "tmux:rename-session",

@@ -858,6 +858,12 @@ export async function stampOwner(sessionName, windowIndex, owner) {
   await setWindowOption(sessionName, windowIndex, "@manta-owner", owner);
 }
 
+/** Re-root a retained chat holder after its job's worktree was removed. */
+export async function rebaseHolder(sessionName, windowIndex, cwd) {
+  const dir = resolveCwdOrThrow(cwd);
+  await run("tmux", ["respawn-pane", "-k", "-c", dir, "-t", `${sessionName}:${windowIndex}`, "sleep", "infinity"]);
+}
+
 /**
  * Find the (sessionName, windowIndex) whose pane is rooted at `cwd`, or null
  * when no window matches. BET-871's read-point: forge:ship-preview resolves

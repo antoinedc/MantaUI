@@ -13,6 +13,7 @@ import type {
 import type {
   AccountsRowStates,
   SessionClosePreview,
+  SessionMaterializeResult,
   SessionCloseResult,
   WindowStatusPayload,
   SessionNameProposal,
@@ -1172,6 +1173,9 @@ export interface Api {
   // `windowStatus` frames).
   sessionsWindowStatus(): Promise<Record<string, WindowStatusPayload>>;
   sessionsClosePreview(input: { project: string; windowIndex?: number }): Promise<SessionClosePreview>;
+  /** Session tree (b): open a virtual row — the box makes (or finds) the session's window. Never throws for an
+   *  expected refusal: `{ok:false, reason, message}` (message is user-facing). */
+  sessionsMaterialize(input: { sessionId: string }): Promise<SessionMaterializeResult>;
   sessionsClose(input: {
     project: string;
     windowIndex?: number;

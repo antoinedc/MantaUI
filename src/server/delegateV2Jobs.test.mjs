@@ -67,6 +67,7 @@ function world({ jobs: seed = [], git = true } = {}) {
   };
 
   const deps = {
+    getWindowOption: async () => "job", // seeded and launched holders model job ownership
     sleep: async () => {},
     load: async () => jobs.map((j) => structuredClone(j)),
     save: async (next) => {

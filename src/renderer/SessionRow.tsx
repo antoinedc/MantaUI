@@ -132,6 +132,7 @@ export function SessionRow({
   tabIndex,
   ariaSelected,
   ariaLevel,
+  ariaDisabled,
   onClick,
   onContextMenu,
 }: {
@@ -161,6 +162,8 @@ export function SessionRow({
   tabIndex?: number;
   ariaSelected?: boolean;
   ariaLevel?: number;
+  /** The row is busy and ignores clicks (e.g. a window-less session being opened). */
+  ariaDisabled?: boolean;
   onClick?: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
@@ -179,6 +182,7 @@ export function SessionRow({
       data-rail-row=""
       aria-selected={ariaSelected}
       aria-level={ariaLevel}
+      aria-disabled={ariaDisabled || undefined}
       tabIndex={tabIndex}
       title={title}
       onClick={onClick}

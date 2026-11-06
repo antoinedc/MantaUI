@@ -23,6 +23,7 @@ import {
   setWindowOption,
   getWindowOption,
   stampOwner,
+  rebaseHolder,
   resolveOwner,
   findWindowForCwd,
   createStampedChatWindow,
@@ -37,6 +38,20 @@ import {
 // Install a fake tmux transport that records every command and returns a
 // window index of 0 for creation commands (matching `-P -F '#{window_index}'`).
 // Returns the recorder so a test can assert on the commands issued.
+test("rebaseHolder respawns only the holder at a real parent directory, with argv-safe paths", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "holder parent "));
+  const cmds = installFakeTmux();
+  try {
+    await rebaseHolder("p", 4, dir);
+    assert.deepEqual(cmds, [{ cmd: "tmux", args: ["respawn-pane", "-k", "-c", dir, "-t", "p:4", "sleep", "infinity"] }]);
+    await assert.rejects(() => rebaseHolder("p", 4, join(dir, "missing")));
+    assert.equal(cmds.length, 1, "missing cwd never reaches tmux");
+  } finally {
+    _setRun(null);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 function installFakeTmux() {
   const cmds = [];
   _setRun(async (cmd, args) => {

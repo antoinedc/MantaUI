@@ -102,7 +102,7 @@ struct SessionListView: View {
                     loadingState
                 } else if !store.loadedOnce {
                     unreachableState
-                } else if store.visibleProjects.isEmpty {
+                } else if store.visibleProjectRows.isEmpty {
                     // Visible, not raw: a box whose only windows are background
                     // jobs has no sessions to list, and "nothing named …" below
                     // would be the wrong message for it.
@@ -576,7 +576,7 @@ struct SessionListView: View {
             ForEach(filteredProjects) { project in
                 Section {
                     ForEach(rowEntries(project)) { entry in
-                        row(projectName: project.tmuxSession, entry: entry, showsProject: false)
+                        row(projectName: project.name, entry: entry, showsProject: false)
                             .listRowInsets(EdgeInsets(top: 0, leading: Metrics.spacing.sp3,
                                                       bottom: 0, trailing: Metrics.spacing.sp3))
                             .listRowSeparator(.hidden)
@@ -634,87 +634,56 @@ struct SessionListView: View {
     /// The flat list's rows. Search and the Recent filter have already run
     /// (`filteredProjects`), and job windows were removed before either.
     private var activityEntries: [SessionRowEntry] {
-        let flat = SessionActivityOrder.flatten(filteredProjects) { _, window in
-            store.lastActivity(for: window)
+        let flat = SessionRowsLogic.flatten(filteredProjects) { _, row in
+            store.lastActivity(for: row)
         }
         let count = flat.count
         return flat.enumerated().map { idx, item in
-            SessionRowEntry(project: item.project, window: item.window,
+            SessionRowEntry(project: item.project, row: item.row,
                             position: .at(index: idx, count: count))
         }
     }
 
-    private func rowEntries(_ project: MantaProject) -> [SessionRowEntry] {
+    private func rowEntries(_ project: SessionProjectRows) -> [SessionRowEntry] {
         // BET-1213: a background job's child window gets no row of its own on
         // mobile — it is hidden here and represented by the count on its
-        // parent row. Positions are computed over the VISIBLE windows so the
-        // first rendered row still rounds the card's top corner.
-        let visible = store.visibleWindows(in: project)
-        let count = visible.count
-        return visible.enumerated().map { idx, window in
-            SessionRowEntry(project: project.tmuxSession, window: window,
+        // parent row. With the box's session tree the rows are the tree's
+        // roots (window rows and virtual rows). Positions are computed over
+        // the VISIBLE rows so the first rendered row still rounds the card's
+        // top corner.
+        let count = project.rows.count
+        return project.rows.enumerated().map { idx, row in
+            SessionRowEntry(project: project.name, row: row,
                             position: .at(index: idx, count: count))
         }
     }
 
-    private var filteredProjects: [MantaProject] {
-        let searched = searchFiltered(store.visibleProjects)
+    private var filteredProjects: [SessionProjectRows] {
+        let searched = SessionRowsLogic.search(store.visibleProjectRows, query: searchText)
         let recencyFiltered = applyRecencyFilter(searched)
-        return sorted(recencyFiltered)
+        return SessionRowsLogic.pinnedFirst(recencyFiltered, pinned: store.pinnedWindows)
     }
 
-    /// The name search — a project-name match keeps the whole group; matching
-    /// window names only means typing the name of the project you were looking
-    /// at would empty the screen. BET-1349 runs the recency filter AFTER this,
-    /// and still applies it inside a name-matched group (a project match is
-    /// about names, not liveness).
-    private func searchFiltered(_ projects: [MantaProject]) -> [MantaProject] {
-        guard !searchText.isEmpty else { return projects }
-        let q = searchText.lowercased()
-        return projects.compactMap { p -> MantaProject? in
-            if p.tmuxSession.lowercased().contains(q) { return p }
-            let kept = p.windows.filter { $0.name.lowercased().contains(q) }
-            guard !kept.isEmpty else { return nil }
-            var copy = p
-            copy.windows = kept
-            return copy
-        }
-    }
-
-    /// The Recent filter (BET-1349): drop windows that fail the recency
-    /// predicate, and drop a project entirely when it has no surviving windows.
-    /// `.all` is an exact no-op on the input.
-    private func applyRecencyFilter(_ projects: [MantaProject]) -> [MantaProject] {
+    /// The Recent filter (BET-1349): drop rows that fail the recency
+    /// predicate, and drop a project entirely when it has no surviving rows.
+    /// `.all` is an exact no-op on the input. (The name search runs BEFORE this
+    /// and keeps a whole group on a project-name match — see
+    /// `SessionRowsLogic.search`; the recency filter still applies inside it.)
+    private func applyRecencyFilter(_ projects: [SessionProjectRows]) -> [SessionProjectRows] {
         guard filter == .recent else { return projects }
-        return projects.compactMap { p -> MantaProject? in
-            let kept = p.windows.filter {
-                SessionRecency.isRecent(store.rowStatus(for: $0), now: now, ttlMs: store.cacheTtlMs)
-            }
-            guard !kept.isEmpty else { return nil }
-            var copy = p
-            copy.windows = kept
-            return copy
-        }
-    }
-
-    /// Pinned windows to the top of their project — the ONE place a project's
-    /// row order is decided, so every path through `filteredProjects` sorts.
-    private func sorted(_ projects: [MantaProject]) -> [MantaProject] {
-        projects.map { p in
-            var copy = p
-            copy.windows = SessionOrder.sorted(p.windows, project: p.tmuxSession, pinned: store.pinnedWindows)
-            return copy
+        return SessionRowsLogic.filtered(projects) { row in
+            SessionRecency.isRecent(store.rowStatus(for: row), now: now, ttlMs: store.cacheTtlMs)
         }
     }
 
     @ViewBuilder
-    private func groupHeader(_ project: MantaProject) -> some View {
+    private func groupHeader(_ project: SessionProjectRows) -> some View {
         let running = store.runningCount(in: project)
-        // The total chip counts VISIBLE windows: hidden background-job rows are
+        // The total chip counts VISIBLE rows: hidden background-job rows are
         // no longer counted, matching the running chip (BET-1213).
-        let visibleCount = store.visibleWindows(in: project).count
+        let visibleCount = project.rows.count
         HStack(spacing: Metrics.spacing.sp2) {
-            Text(titleCased(project.tmuxSession))
+            Text(titleCased(project.name))
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .kerning(Metrics.type.headingTracking * Metrics.type.body)
                 .foregroundColor(tokens.tx2)
@@ -723,7 +692,7 @@ struct SessionListView: View {
                 chip("\(running) running", fg: tokens.accentTx, bg: tokens.accentSoft)
             }
             chip("\(visibleCount)", fg: tokens.tx4, bg: tokens.fill)
-            projectMenu(project)
+            projectMenu(project.name)
         }
         .padding(.top, Metrics.type.listGroupAbove)
         .padding(.bottom, Metrics.type.listGroupBelow)
@@ -747,21 +716,21 @@ struct SessionListView: View {
 
     /// The project header's actions (spec 04 §1/§7). Grouped ordering only — the
     /// flat ordering has no headers.
-    private func projectMenu(_ project: MantaProject) -> some View {
+    private func projectMenu(_ projectName: String) -> some View {
         Menu {
             Button {
-                sheetRoute = .create(project: project.tmuxSession, draft: nil, startNew: false)
+                sheetRoute = .create(project: projectName, draft: nil, startNew: false)
             } label: {
                 Label("New session here", systemImage: "plus")
             }
             Button {
-                sheetRoute = .renameProject(name: project.tmuxSession)
+                sheetRoute = .renameProject(name: projectName)
             } label: {
                 Label("Rename project…", systemImage: "pencil")
             }
             Divider()
             Button(role: .destructive) {
-                beginCloseProject(project.tmuxSession)
+                beginCloseProject(projectName)
             } label: {
                 Label("Close project…", systemImage: "xmark.circle")
             }
@@ -805,7 +774,62 @@ struct SessionListView: View {
 
     @ViewBuilder
     private func row(projectName: String, entry: SessionRowEntry, showsProject: Bool) -> some View {
-        let window = entry.window
+        switch entry.row {
+        case .window(let window):
+            windowRow(projectName: projectName, window: window, entry: entry, showsProject: showsProject)
+        case .virtual(let virtual):
+            virtualRow(projectName: projectName, virtual: virtual, entry: entry, showsProject: showsProject)
+        }
+    }
+
+    /// A session with no window (session tree): tap asks the box to make one, then opens it as a window row would.
+    /// It carries no swipe / context actions — rename, pin, fork and delete all act on a window, and this row has none
+    /// until it is opened (the row simply isn't offering what it can't do).
+    @ViewBuilder
+    private func virtualRow(projectName: String, virtual: SessionVirtualRow, entry: SessionRowEntry, showsProject: Bool) -> some View {
+        let caption = showsProject ? titleCased(projectName) : nil
+        let status = store.rowStatus(for: .virtual(virtual))
+        let opening = store.materializing.contains(virtual.sessionId)
+        Button {
+            openVirtual(virtual)
+        } label: {
+            SessionRowContent(
+                title: virtual.displayTitle,
+                status: status,
+                age: SessionRowAge.text(for: status, now: now, ttlMs: store.cacheTtlMs),
+                position: entry.position,
+                pinned: false,
+                projectCaption: caption,
+                tokens: tokens,
+                isVirtual: true,
+                outside: virtual.outside
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(opening)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(virtual.displayTitle), \(SessionRowSubtitle.virtualText(for: status, outside: virtual.outside, projectName: caption) ?? "")")
+        .accessibilityHint("Opens the session.")
+    }
+
+    private func openVirtual(_ virtual: SessionVirtualRow) {
+        Task {
+            switch await store.materialize(sessionId: virtual.sessionId) {
+            case .ignored:
+                break
+            case .message(let text):
+                SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
+                showFeedback(text)
+            case .opened(let project, let windowIndex, let sessionId):
+                let name = store.window(session: project, index: windowIndex)?.name ?? virtual.displayTitle
+                openRow = SessionRowEntry.id(project: project, windowIndex: windowIndex)
+                push(SessionOpenTarget(project: project, windowIndex: windowIndex, name: name, sessionId: sessionId))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func windowRow(projectName: String, window: MantaWindow, entry: SessionRowEntry, showsProject: Bool) -> some View {
         // The same display form the grouped list's headers use, so a project
         // reads identically in both orderings (the raw tmux name stays the
         // row's identity for open/pin/delete below).
@@ -815,7 +839,7 @@ struct SessionListView: View {
             push(SessionOpenTarget(project: projectName, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
-                window: window,
+                title: window.name,
                 status: store.rowStatus(for: window),
                 age: ageText(window, now: now),
                 position: entry.position,
@@ -1243,10 +1267,17 @@ struct SessionListView: View {
 /// corners and hairline separator.
 private struct SessionRowEntry: Identifiable {
     let project: String
-    let window: MantaWindow
+    let row: SessionListRow
     let position: SessionCardPosition
 
-    var id: String { Self.id(project: project, windowIndex: window.index) }
+    /// A window row keeps `project#index` (what the open-row highlight and the routes use); a virtual row is keyed by
+    /// its tree node, which is stable across renders.
+    var id: String {
+        switch row {
+        case .window(let window): return Self.id(project: project, windowIndex: window.index)
+        case .virtual(let virtual): return "\(project)#v:\(virtual.key)"
+        }
+    }
     static func id(project: String, windowIndex: Int) -> String { "\(project)#\(windowIndex)" }
 }
 
@@ -1278,7 +1309,7 @@ private struct SessionCardBackground: View {
 }
 
 private struct SessionRowContent: View {
-    let window: MantaWindow
+    let title: String
     let status: SessionRowStatus
     let age: String?
     let position: SessionCardPosition
@@ -1287,13 +1318,22 @@ private struct SessionRowContent: View {
     /// the flat Latest-activity list, which has no group headers to carry it.
     let projectCaption: String?
     let tokens: Tokens
+    /// A session with no window (session tree): its subtitle names a root driven from outside Manta.
+    var isVirtual = false
+    var outside = false
+
+    private var subtitleText: String? {
+        isVirtual
+            ? SessionRowSubtitle.virtualText(for: status, outside: outside, projectName: projectCaption)
+            : SessionRowSubtitle.text(for: status, projectName: projectCaption)
+    }
 
     var body: some View {
         HStack(spacing: Metrics.spacing.sp3) {
             SessionStatusDot(state: SessionDotState.forRow(status), tokens: tokens)
             VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
                 HStack(spacing: Metrics.spacing.sp1) {
-                    Text(window.name)
+                    Text(title)
                         .font(.manta(size: Metrics.type.rowName, weight: .medium))
                         .kerning(Metrics.type.rowNameTracking * Metrics.type.rowName)
                         .foregroundColor(tokens.tx1)
@@ -1304,7 +1344,7 @@ private struct SessionRowContent: View {
                             .foregroundColor(tokens.tx3)
                     }
                 }
-                if let subtitle = SessionRowSubtitle.text(for: status, projectName: projectCaption) {
+                if let subtitle = subtitleText {
                     Text(subtitle)
                         .font(.manta(size: Metrics.type.xs, weight: .medium))
                         .foregroundColor(subtitleColor)
