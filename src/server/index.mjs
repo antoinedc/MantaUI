@@ -1476,6 +1476,8 @@ let stopDelegateReconciler = null;
   // One-time repair (marker in the handoff state): cut handoff links made FROM a `task` subagent. Detached: reads
   // sessions with bounded concurrency and must not delay the recovery steps below.
   handoffEngine.repairTaskChildLinks().catch((e) => console.warn("[handoff] subagent link repair failed:", e?.message ?? e));
+  // The engine's periodic maintenance: unresolved relays, watched subagent links, leftover arrivals, expiry. Bounded per pass.
+  startPoller(() => handoffEngine.maintain(), { intervalMs: 60_000, label: "handoff", immediate: false });
   try {
     await delegateEngine.reconcileV2();
   } catch (e) {

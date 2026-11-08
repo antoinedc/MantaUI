@@ -242,7 +242,9 @@ test("an execution the result itself started is interrupted — and only that on
   unknown.engine.observeRaw(enqueued(OLD));
   const broken = world();
   broken.active.add(OLD);
-  broken.failures.timeline = true;
+  broken.beforeTimeline = async (sid) => {
+    if (sid === OLD) throw new Error("timeline unreadable"); // only the retired session's reads fail: the destination can be asked
+  };
   broken.engine.observeRaw(enqueued(OLD));
   await settle();
   assert.deepEqual(unknown.interrupted, []);
@@ -368,8 +370,11 @@ test("a result that lands on the predecessor during the fence — and whose job 
   await settle();
   assert.equal(w.engine._state.arrivals.ses_p.length, 1, "recorded");
   assert.equal(JSON.parse(w.disk.json).arrivals.ses_p[0].id, INBOX, "and persisted");
-  // the delegate engine's backstop runs when the child's record settles — before the commit there is no link
-  assert.deepEqual(await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD }), { relayed: false, reason: "live" });
+  // the delegate engine's backstop runs when the child's record settles — before the commit there is no link: it records the
+  // result through the same arrival path (the same id as the event's record, so it is still ONE arrival)
+  w.timelines.set("ses_p", [idle(), result()]);
+  assert.deepEqual(await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD }), { relayed: false, reason: "fenced" });
+  assert.equal(w.engine._state.arrivals.ses_p.length, 1);
   assert.equal(w.posts.filter((p) => p.kind === "synthetic").length, 0);
 
   release();
@@ -422,4 +427,254 @@ test("boot recovery: an arrival whose link now exists is relayed; one whose hand
   assert.equal(synthPosts(w, NEW).length, 1, "the committed one is relayed");
   assert.equal(synthPosts(w, "ses_live").length, 0);
   assert.deepEqual(w.engine._state.arrivals, {}, "consumed / dropped");
+});
+
+// ---- the backstop during a fence (a missed enqueue event) -------------------------------------------------
+
+test("the enqueue event was MISSED: the child settles during the fence, the backstop records the result, the commit relays it exactly once", async () => {
+  const { w, release, reached } = fencedWorld();
+  const r = await readyRecord(w);
+  const started = w.engine.start(r.id, { how: "clear", disposition: "send" });
+  await reached;
+  // no observeRaw at all: opencode's stream missed the enqueue. The result sits in the predecessor's timeline.
+  w.timelines.set("ses_p", [idle(), result()]);
+  assert.equal(w.engine._state.arrivals.ses_p, undefined);
+  assert.deepEqual(await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD }), { relayed: false, reason: "fenced" });
+  assert.deepEqual(await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD }), { relayed: false, reason: "fenced" }, "asking again records nothing new");
+  assert.equal(w.engine._state.arrivals.ses_p.length, 1);
+  assert.equal(JSON.parse(w.disk.json).arrivals.ses_p[0].id, INBOX, "persisted");
+  assert.equal(w.posts.filter((p) => p.kind === "synthetic").length, 0);
+
+  release();
+  const out = await started;
+  await settle();
+  assert.equal(out.state, "committed");
+  assert.equal(synthPosts(w, out.successorId).length, 1, "the successor received it");
+  assert.equal(synthPosts(w, out.successorId)[0].args.metadata.relayedMessageId, INBOX);
+  assert.deepEqual(await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD }), { relayed: true, reason: "already" });
+  assert.equal(w.posts.filter((p) => p.kind === "synthetic").length, 1, "exactly once");
+});
+
+test("the fenced backstop: a rolled-back handoff drops what it recorded; nothing for a child with no result", async () => {
+  const { w, release, reached } = fencedWorld();
+  const r = await readyRecord(w);
+  w.failures.send.push({ status: 400 });
+  const started = w.engine.start(r.id, { how: "clear", disposition: "send" });
+  await reached;
+  assert.deepEqual(await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD }), { relayed: false, reason: "none" });
+  w.timelines.set("ses_p", [idle(), result()]);
+  await w.engine.relayBackgroundResult({ sessionId: "ses_p", childSessionId: CHILD });
+  assert.equal(w.engine._state.arrivals.ses_p.length, 1);
+  release();
+  await started;
+  await settle();
+  assert.equal(w.engine._state.arrivals.ses_p, undefined);
+  assert.equal(w.posts.filter((p) => p.kind === "synthetic").length, 0);
+});
+
+// ---- unknown presence never authorizes a POST --------------------------------------------------------------
+
+test("a POST landed but its receipt wasn't saved; after a restart the destination can't be read — no POST; once readable and present the receipt completes without a POST", async () => {
+  const w = world();
+  w.timelines.set(OLD, [idle(), result()]);
+  w.engine.observeRaw(enqueued(OLD));
+  await settle();
+  assert.equal(synthPosts(w, NEW).length, 1);
+  const disk = JSON.parse(w.disk.json);
+  disk.relays = {}; // the receipt was never saved
+  w.disk.json = JSON.stringify(disk);
+  const reborn = w.build();
+  w.failReads.add(NEW); // opencode answers nothing for the destination right now
+  assert.deepEqual(await reborn.relayBackgroundResult({ sessionId: OLD, childSessionId: CHILD }), { relayed: false, reason: "deferred" });
+  assert.equal(synthPosts(w, NEW).length, 1, "unknown presence never posts");
+  const id = Object.keys(reborn._state.relays)[0];
+  assert.equal(reborn._state.relays[id].admitted, false, "deferred, durably");
+  assert.equal(JSON.parse(w.disk.json).relays[id].admitted, false);
+  assert.ok(reborn._state.relays[id].rec, "with what it takes to retry it");
+
+  w.failReads.delete(NEW);
+  await reborn.maintain();
+  assert.equal(reborn._state.relays[id].admitted, false, "(before the backoff is over nothing is retried)");
+  w.clock += 10 * 60_000;
+  await reborn.maintain();
+  assert.equal(synthPosts(w, NEW).length, 1, "present: the receipt is completed WITHOUT a POST");
+  assert.equal(reborn._state.relays[id].admitted, true);
+});
+
+test("an unreadable destination defers, an absent one posts: the strict read decides (a lenient null is not 'absent')", async () => {
+  const w = world();
+  w.failReads.add(NEW);
+  w.engine.observeRaw(enqueued(OLD));
+  await settle();
+  assert.equal(synthPosts(w, NEW).length, 0);
+  w.failReads.delete(NEW);
+  w.clock += 10 * 60_000;
+  await w.engine.maintain();
+  assert.equal(synthPosts(w, NEW).length, 1, "now absent for sure: one post");
+});
+
+test("a failed POST is retried by presence check — it may have landed — never blindly", async () => {
+  const w = world();
+  w.failures.send.push({ land: true }); // the connection reset after the message was accepted
+  w.engine.observeRaw(enqueued(OLD));
+  await settle();
+  assert.equal(synthPosts(w, NEW).length, 1);
+  const id = Object.keys(w.engine._state.relays)[0];
+  assert.equal(w.engine._state.relays[id].admitted, false);
+  w.clock += 10 * 60_000;
+  await w.engine.maintain();
+  assert.equal(synthPosts(w, NEW).length, 1, "found at the destination: recorded, not posted again");
+  assert.equal(w.engine._state.relays[id].admitted, true);
+});
+
+test("uncertain held-message retries share the rule: reads that fail never authorize a re-post; a readable 'missing' does", async () => {
+  const w = createWorld({ mode: "off" });
+  w.addSession("ses_t");
+  w.disk.json = JSON.stringify({ version: 1, records: {}, links: {}, held: { ses_t: [{ id: "msg_held", kind: "synthetic", args: { id: "msg_held", text: "x" }, at: 1, attempted: true }] } });
+  w.engine = w.build();
+  w.failReads.add("ses_t");
+  await w.engine._drainHeld("ses_t");
+  assert.equal(w.posts.length, 0, "the earlier attempt may have landed: no blind post");
+  assert.equal(w.engine._state.held.ses_t.length, 1, "still held");
+  w.failReads.delete("ses_t");
+  await w.runTimers();
+  assert.equal(w.posts.length, 1, "readable and absent: posted");
+  assert.equal(w.engine._state.held.ses_t, undefined);
+});
+
+// ---- the retry driver --------------------------------------------------------------------------------------
+
+test("cancel unknown: a later maintenance pass confirms and suppresses with zero POSTs, after the backoff", async () => {
+  const w = world();
+  w.inbox.set(OLD, [{ id: INBOX, type: "synthetic" }]);
+  w.active.add(OLD);
+  w.timelines.set(OLD, [idle()]);
+  w.onCancel = async () => {}; // proves nothing
+  w.engine.observeRaw(enqueued(OLD));
+  await settle();
+  const id = Object.keys(w.engine._state.relays)[0];
+  assert.equal(w.engine._state.relays[id].suppressed, null);
+  assert.ok(w.engine._state.relays[id].nextAt > w.clock, "backed off");
+  // it turned out to be delivered, and woke the session
+  w.onCancel = null;
+  w.inbox.set(OLD, []);
+  w.timelines.set(OLD, [idle(), result()]);
+  await w.engine.maintain();
+  assert.equal(w.engine._state.relays[id].suppressed, null, "not before the backoff is over");
+  assert.deepEqual(w.interrupted, []);
+  w.clock += 10 * 60_000;
+  await w.engine.maintain();
+  assert.deepEqual(w.interrupted, [OLD]);
+  assert.equal(w.engine._state.relays[id].suppressed, "interrupted");
+  assert.equal(w.engine._state.relays[id].nextAt, undefined);
+  assert.equal(synthPosts(w, NEW).length, 1, "zero additional POSTs");
+});
+
+test("boot recovery starts the retry too; a pass is bounded and each entry backs off", async () => {
+  const w = world();
+  w.failReads.add(NEW);
+  for (let i = 0; i < 6; i++) w.engine.observeRaw(enqueued(OLD, { inboxID: `msg_000${i}` }));
+  await settle();
+  assert.equal(Object.keys(w.engine._state.relays).length, 6);
+  assert.ok(Object.values(w.engine._state.relays).every((e) => !e.admitted && e.tries === 1));
+  w.clock += 10 * 60_000;
+  await w.engine.maintain({ limit: 4 });
+  const tries = Object.values(w.engine._state.relays).map((e) => e.tries).sort();
+  assert.deepEqual(tries, [1, 1, 2, 2, 2, 2], "four entries were attempted in that pass");
+  w.failReads.delete(NEW);
+  w.clock += 60 * 60_000;
+  const reborn = w.build();
+  await reborn.recover();
+  await settle(12);
+  assert.ok(Object.values(reborn._state.relays).every((e) => e.admitted), "recovery finished them");
+  assert.equal(synthPosts(w, NEW).length, 6);
+});
+
+test("unresolved relays are never pruned as receipts, survive an arrival flush, and expire hard after 7 days with a log line", async () => {
+  const w = world();
+  w.failReads.add(NEW);
+  w.engine.observeRaw(enqueued(OLD));
+  await settle();
+  const id = Object.keys(w.engine._state.relays)[0];
+  // a flush of arrivals recorded for the same session leaves relay records alone
+  w.engine._state.arrivals[OLD] = [{ id: "msg_other", metadata: { source: "subagent", childID: "ses_o" }, at: 1 }];
+  await w.engine.maintain();
+  assert.equal(w.engine._state.arrivals[OLD], undefined, "the arrivals were consumed");
+  assert.ok(w.engine._state.relays[id], "the unresolved relay survived the flush");
+  assert.equal(Object.keys(w.engine._state.relays).length, 2, "the flushed arrival is tracked durably too");
+  // 6 days: still there
+  w.clock += 6 * 24 * 3600_000;
+  await w.engine.maintain();
+  assert.ok(w.engine._state.relays[id]);
+  // past 7 days: dropped, logged
+  w.clock += 2 * 24 * 3600_000;
+  await w.engine.maintain();
+  assert.equal(w.engine._state.relays[id], undefined);
+  assert.ok(w.logs.some((l) => /dropped unresolved relay/.test(l) && l.includes(id)), "a log line says it was dropped");
+  assert.equal(JSON.parse(w.disk.json).relays[id], undefined);
+});
+
+// ---- the link cut while a relay is in flight (the original is live again) --------------------------------
+
+/** What the repair does to the link. */
+const cutLink = (w) => {
+  delete w.engine._state.links[OLD];
+  delete w.engine._state.links[NEW];
+};
+
+test("a cut racing a relay: before the admission nothing is posted to the now-live original; after it the receipt stays and nothing is suppressed", async () => {
+  // cut while the destination is being asked
+  const early = world();
+  early.beforeTimeline = async (sid) => {
+    if (sid === NEW) cutLink(early); // relayPresence's last read
+  };
+  early.engine.observeRaw(enqueued(OLD));
+  await settle();
+  assert.equal(early.posts.length, 0, "no second copy of its own result for the live original");
+  assert.deepEqual(early.cancelled.concat(early.interrupted), []);
+
+  // cut while the retired session is being inspected: the copy is admitted, the original is left alone
+  const mid = world();
+  mid.inbox.set(OLD, [{ id: INBOX, type: "synthetic" }]);
+  mid.active.add(OLD);
+  mid.timelines.set(OLD, [idle(), result()]);
+  mid.beforeInbox = async (sid) => {
+    if (sid === OLD) cutLink(mid);
+  };
+  mid.engine.observeRaw(enqueued(OLD));
+  await settle();
+  assert.equal(synthPosts(mid, NEW).length, 1, "the admitted receipt stays");
+  assert.deepEqual(mid.cancelled, [], "…but the now-live original is not cancelled");
+  assert.deepEqual(mid.interrupted, [], "…nor interrupted");
+  const entry = Object.values(mid.engine._state.relays)[0];
+  assert.equal(entry.admitted, true);
+  assert.equal(entry.suppressed, "left");
+
+  // cut between the second evidence read and the interrupt
+  const late = world();
+  late.active.add(OLD);
+  late.timelines.set(OLD, [idle(), result()]);
+  let reads = 0;
+  late.beforeTimeline = async (sid) => {
+    if (sid === OLD && ++reads === 2) cutLink(late);
+  };
+  late.engine.observeRaw(enqueued(OLD));
+  await settle();
+  assert.deepEqual(late.interrupted, []);
+  assert.equal(Object.values(late.engine._state.relays)[0].suppressed, "left");
+});
+
+test("the retry driver closes an entry whose link was cut: an admitted copy stays as a receipt, an unadmitted one is dropped", async () => {
+  const w = world();
+  w.failReads.add(NEW);
+  w.engine.observeRaw(enqueued(OLD)); // deferred
+  await settle();
+  const deferred = Object.keys(w.engine._state.relays)[0];
+  w.engine._state.relays.msg_admitted = { admitted: true, suppressed: null, at: w.clock, from: OLD, original: "msg_x", tries: 1, nextAt: 0 };
+  cutLink(w);
+  w.clock += 10 * 60_000;
+  await w.engine.maintain();
+  assert.equal(w.engine._state.relays[deferred], undefined, "nothing to relay for a live original");
+  assert.equal(w.engine._state.relays.msg_admitted.suppressed, "left");
+  assert.equal(w.posts.length, 0);
 });

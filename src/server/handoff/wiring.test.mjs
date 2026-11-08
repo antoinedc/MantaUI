@@ -228,6 +228,20 @@ test("index.mjs: the raw event pump feeds the relay, the delegate engine gets th
   assert.match(index, /handoffEngine\.observeRaw\(raw\)/);
   assert.match(index, /relayBackgroundResult: \(a\) => handoffEngine\.relayBackgroundResult\(a\)/);
   assert.match(index, /handoffEngine\.repairTaskChildLinks\(\)/);
+  assert.match(index, /startPoller\(\(\) => handoffEngine\.maintain\(\), \{ intervalMs: 60_000, label: "handoff", immediate: false \}\)/);
+});
+
+test("the production assembly gives the engine the STRICT message read (404 vs failure)", async () => {
+  const f = fakes();
+  const seen = [];
+  f.p.oc.readMessageStrict = async (sid, mid) => (seen.push([sid, mid]), { state: "missing" });
+  f.p.oc.listRawTimeline = async () => [];
+  f.disk.json = JSON.stringify({ version: 1, records: {}, links: { ses_old: linkOf(null, "ses_new"), ses_new: linkOf("ses_old", null) } });
+  const engine = createProductionHandoff(f.p);
+  engine.observeRaw({ type: "session.inbox.enqueued", data: { sessionID: "ses_old", inboxID: "msg_r", item: { type: "synthetic", payload: { text: "t", metadata: { source: "subagent", childID: "c" } } } } });
+  await settle(10);
+  assert.ok(seen.length >= 1 && seen[0][0] === "ses_new", "the destination was asked with the strict read before the post");
+  assert.equal(f.calls.filter((c) => c[0] === "postSynthetic").length, 1, "absent: one post");
 });
 
 // ---- the repair reads the job store STRICTLY (through the production assembly) --------------------------
@@ -241,7 +255,8 @@ function repairBox({ storeText }) {
   const jobStorePath = join(dir, "delegate-jobs.json");
   if (storeText !== undefined) writeFileSync(jobStorePath, storeText);
   const f = fakes();
-  f.sessions.set("X", { id: "X", parentID: "ses_root", directory: "/proj", time: { created: 1, idle: T0 + 120_000 } });
+  f.sessions.set("X", { id: "X", parentID: "ses_root", directory: "/proj", time: { created: 1 } });
+  f.p.oc.listRawTimeline = async (sid, o) => (sid === "X" && o?.type === "user" ? [{ id: "msg_u", type: "user", time: { created: T0 + 120_000 } }] : []); // the parent resumed X
   f.sessions.set("X1", { id: "X1", directory: "/proj", time: { created: T0 } });
   f.disk.json = JSON.stringify({ version: 1, records: {}, links: { X: linkOf(null, "X1"), X1: linkOf("X", null) } });
   const lenientReads = [];

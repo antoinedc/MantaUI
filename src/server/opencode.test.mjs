@@ -21,6 +21,7 @@ import {
   listMessagesForRebuild,
   REBUILD_WINDOW,
   getMessage,
+  readMessageStrict,
   slimTranscript,
   stripDuplicateToolOutput,
   runCommand,
@@ -1077,6 +1078,26 @@ test("getMessage maps ONE record (the splice / receipt path); null on a miss or 
   _setOcTransport(async () => { throw new Error("down"); });
   assert.equal(await getMessage("ses_a", "msg_1"), null);
   _setOcTransport(null);
+});
+
+test("readMessageStrict tells a 404 from every failure: found / missing / unknown (getMessage answers null for all of them)", async () => {
+  await withV2(
+    {
+      "GET /api/session/ses_a/message/msg_1": { data: U("msg_1", "hi") },
+      "GET /api/session/ses_a/message/msg_nope": () => new Response("nf", { status: 404 }),
+      "GET /api/session/ses_a/message/msg_500": () => new Response("boom", { status: 500 }),
+    },
+    async () => {
+      assert.deepEqual(await readMessageStrict("ses_a", "msg_1"), { state: "found" });
+      assert.deepEqual(await readMessageStrict("ses_a", "msg_nope"), { state: "missing" });
+      assert.deepEqual(await readMessageStrict("ses_a", "msg_500"), { state: "unknown" });
+      assert.equal(await getMessage("ses_a", "msg_500"), null, "the lenient read can't tell");
+    },
+  );
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.deepEqual(await readMessageStrict("ses_a", "msg_1"), { state: "unknown" });
+  _setOcTransport(null);
+  assert.deepEqual(await readMessageStrict("", "msg_1"), { state: "unknown" });
 });
 
 // ---------------------------------------------------------------------------

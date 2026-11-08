@@ -70,6 +70,8 @@ export function createProductionHandoff(p) {
       cancelInboxItem: (sid, inboxId) => oc.cancelInboxItem(sid, inboxId),
       listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
       getMessage: (sid, mid) => oc.getMessage(sid, mid),
+      // the STRICT read (404 = missing; any failure = unknown) — what "is this id already there?" decisions use
+      readMessage: (sid, mid) => oc.readMessageStrict(sid, mid),
       listActive: () => oc.listActiveSessionIds(),
       interrupt: (sid) => oc.abortSession(sid),
     },

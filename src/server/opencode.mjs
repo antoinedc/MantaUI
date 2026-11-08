@@ -567,6 +567,33 @@ export async function getMessage(sessionId, messageId, opts = {}) {
   }
 }
 
+/**
+ * Does a message exist? A STRICT read for decisions that must tell "not there" from "couldn't ask" (`getMessage` answers null
+ * for both): `GET /api/session/{id}/message/{messageID}` — 2xx `found`, 404 `missing`, anything else (another status, a
+ * network failure, a timeout) `unknown`. The record itself is not mapped or returned.
+ * @param {string} sessionId
+ * @param {string} messageId
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<{ state: "found" | "missing" | "unknown" }>}
+ */
+export async function readMessageStrict(sessionId, messageId, { signal } = {}) {
+  if (!sessionId || !messageId) return { state: "unknown" };
+  try {
+    /** @type {{ state: "missing" | "unknown" } | undefined} */
+    let refused;
+    await ocCall("readMessageStrict", (c, o) => c.session.message.get({ sessionID: sessionId, messageID: messageId }, o), {
+      signal,
+      ignoreBody: true, // a 2xx is `found` even when the record can't be decoded
+      onHttpError: (f) => {
+        refused = f.status === 404 ? { state: "missing" } : { state: "unknown" };
+      },
+    });
+    return refused ?? { state: "found" };
+  } catch {
+    return { state: "unknown" };
+  }
+}
+
 // BET-1270 6c: transport-level refusals (a non-2xx on the prompt POST itself)
 // carry the provider's Retry-After, but surface to the box as a THROWN error
 // rather than a `session.error` stream event — so the Retry-After never

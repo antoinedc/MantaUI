@@ -122,16 +122,34 @@ test("normalizeState keeps the durable provenance / arrivals / relay maps and dr
   assert.deepEqual(s.relays, { ok: { admitted: true, suppressed: "interrupted", at: 9, from: "p", original: "m1" }, odd: { admitted: false, suppressed: null, at: 1 } });
 });
 
-test("pruneRelays drops entries older than 7 days and the oldest beyond the cap", () => {
+test("normalizeState keeps the retry bookkeeping of an unresolved relay and the watched subagent links", () => {
+  const s = normalizeState({
+    relays: { d: { admitted: false, suppressed: null, at: 3, from: "p", original: "m", rec: { id: "m", text: "t", metadata: { a: 1 } }, tries: 2, nextAt: 99 }, bad: { admitted: false, at: 1, rec: {}, tries: -1, nextAt: "x" } },
+    repairs: { taskChildLinks: "2026-11-08T00:00:00.000Z", pendingTaskLinks: { P: { succ: "S", since: 5 }, Q: { succ: 1, since: 5 }, R: "x" } },
+  });
+  assert.deepEqual(s.relays.d, { admitted: false, suppressed: null, at: 3, from: "p", original: "m", rec: { id: "m", text: "t", metadata: { a: 1 } }, tries: 2, nextAt: 99 });
+  assert.deepEqual(s.relays.bad, { admitted: false, suppressed: null, at: 1 });
+  assert.deepEqual(s.repairs, { taskChildLinks: "2026-11-08T00:00:00.000Z", pendingTaskLinks: { P: { succ: "S", since: 5 } } });
+  assert.deepEqual(normalizeState({ repairs: { pendingTaskLinks: {} } }).repairs, {}, "an empty watch is not kept");
+});
+
+test("pruneRelays: completed receipts and unresolved work both expire after 7 days (the unresolved are reported); the cap evicts only completed receipts", () => {
   const day = 24 * 3600_000;
   const s = emptyState();
-  s.relays.old = { admitted: true, suppressed: null, at: 0 };
-  s.relays.fresh = { admitted: true, suppressed: null, at: 7 * day };
-  assert.equal(pruneRelays(s, 8 * day), 1);
+  s.relays.old = { admitted: true, suppressed: "idle", at: 0 };
+  s.relays.oldUnresolved = { admitted: true, suppressed: null, at: 0 };
+  s.relays.oldDeferred = { admitted: false, suppressed: null, at: 0 };
+  s.relays.fresh = { admitted: true, suppressed: "idle", at: 7 * day };
+  const expired = [];
+  assert.equal(pruneRelays(s, 8 * day, { onExpire: (id) => expired.push(id) }), 3);
   assert.deepEqual(Object.keys(s.relays), ["fresh"]);
+  assert.deepEqual(expired.sort(), ["oldDeferred", "oldUnresolved"], "only the unresolved are reported");
+
   const big = emptyState();
-  for (let i = 0; i < RELAY_MAX + 3; i++) big.relays[`r${i}`] = { admitted: true, suppressed: null, at: 1000 + i };
-  assert.equal(pruneRelays(big, 2000), 3);
+  for (let i = 0; i < RELAY_MAX + 3; i++) big.relays[`r${i}`] = { admitted: true, suppressed: "idle", at: 1000 + i };
+  big.relays.unresolved = { admitted: false, suppressed: null, at: 1 }; // the oldest of all
+  assert.equal(pruneRelays(big, 2000), 4);
+  assert.ok(big.relays.unresolved, "never evicted by the cap");
   assert.equal(big.relays.r0, undefined);
   assert.ok(big.relays[`r${RELAY_MAX + 2}`]);
 });

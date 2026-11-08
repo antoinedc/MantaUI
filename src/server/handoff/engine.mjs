@@ -21,7 +21,7 @@ import { isTaskChild, jobCompletionOwner, SUBAGENT_HANDOFF_MESSAGE } from "./tas
 import { COOLDOWN_MS, DEFAULT_HANDOFF_MODE, HANDOFF_MODES, chooseWriter, decideAutoTrigger, entryPlan, estimateRewriteCostUsd, handoffBudget, normalizeMode } from "./policy.mjs";
 import { buildCondensedPrompt, buildGeneratePrompt, buildReminder, composeHandoffText, estimateTokens, factGroups, missingHeadings } from "./text.mjs";
 import { condenseBudget, condenseTranscript, inputBudget, lastAssistantCompletedAt } from "./condense.mjs";
-import { continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, pruneRelays, publicEvent, publicRecord, rewriteBlockedReason } from "./state.mjs";
+import { continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, pruneRelays, publicEvent, publicRecord, relayUnresolved, rewriteBlockedReason } from "./state.mjs";
 import { priceForPrompt } from "../optimizer/prices.mjs";
 import { createMutex } from "../jsonStore.mjs";
 
@@ -346,13 +346,21 @@ export function createHandoffEngine(deps = {}) {
     await persist();
   }
 
-  /** The message is in the session's inbox or history. true / false / "unknown". */
+  /**
+   * The message is in the session's inbox or history. TRI-STATE: true / false / "unknown". `false` needs the inbox to be
+   * readable AND a strict message read that says 404 (`oc.readMessage`, which tells a miss from a failure; `getMessage`
+   * answers null for both, so it is only the fallback for a caller that doesn't supply the strict read).
+   */
   async function reconcile(target, id) {
     try {
       const inbox = await oc.listInbox(target);
       if (Array.isArray(inbox) && inbox.some((i) => i?.id === id)) return true;
-      if (await oc.getMessage(target, id)) return true;
-      return false;
+      if (typeof oc.readMessage === "function") {
+        const r = await oc.readMessage(target, id);
+        if (r?.state === "found") return true;
+        return r?.state === "missing" ? false : "unknown";
+      }
+      return (await oc.getMessage(target, id)) ? true : false;
     } catch {
       return "unknown";
     }
@@ -371,6 +379,7 @@ export function createHandoffEngine(deps = {}) {
       if (st.uncertain) {
         const found = await reconcile(target, id);
         if (found === true) return { outcome: "accepted" };
+        if (found === "unknown") continue; // can't tell whether the earlier attempt landed: asking again, never posting blind
       }
       reservations.set(target, (reservations.get(target) ?? 0) + 1);
       try {
@@ -1918,12 +1927,13 @@ export function createHandoffEngine(deps = {}) {
     }
   }
 
-  /** Cancel a pending item and decide the outcome from authoritative evidence only. @returns {Promise<"cancelled"|"delivered"|"unknown">} */
+  /** Cancel a pending item and decide the outcome from authoritative evidence only. @returns {Promise<"cancelled"|"delivered"|"unknown"|"live">} */
   async function cancelWithEvidence(sid, id) {
     const key = `${sid}\0${id}`;
     const w = { result: null };
     inboxWatch.set(key, w); // registered BEFORE the action: an event that lands while the request is in flight counts
     try {
+      if (!successorOf(sid)) return "live"; // right before the cancel: a link cut meanwhile makes the original live again
       await oc.cancelInboxItem(sid, id);
       if (!w.result && (await deliveredEvidence(sid, id))) w.result ??= "delivered";
       for (let waited = 0; !w.result && waited < cancelWaitMs; waited += 100) await sleep(100);
@@ -1944,11 +1954,14 @@ export function createHandoffEngine(deps = {}) {
   /**
    * Interrupt the retired session's execution ONLY if it is still the one this result started. The evidence is read twice
    * (the second read immediately before the interrupt, so execution turnover in between is seen); an ambiguous second read
-   * leaves the session alone. opencode offers no conditional interrupt (`POST /session/{id}/interrupt` takes no execution
-   * id), so the window between the second read and the interrupt landing — two round trips on one box — remains: an
-   * execution that ends and a new one that starts inside it would be interrupted. Accepted: it needs a turn change within
-   * milliseconds of a background result arriving on a session nobody is meant to be driving.
-   * @returns {Promise<"interrupted"|"idle"|"left">}
+   * leaves the session alone, and so does a link cut meanwhile (the original is live again).
+   *
+   * ACCEPTED RESIDUAL RACE: opencode 2.0.30 has no conditional interrupt — `POST /session/{id}/interrupt` takes no execution
+   * id and no precondition. So between the second read's response and opencode handling the interrupt request (a few
+   * milliseconds, one loopback round trip) an execution that ends and a new one that starts would be interrupted. It needs a
+   * turn change inside that window on a session that is not supposed to be driven; it is accepted, and revisited if opencode
+   * ever offers a conditional interrupt.
+   * @returns {Promise<"interrupted"|"idle"|"left"|"live">}
    */
   async function interruptIfWoken(sid, id) {
     const first = await readWake(sid, id);
@@ -1957,19 +1970,23 @@ export function createHandoffEngine(deps = {}) {
     const again = await readWake(sid, id);
     if (!again.active) return "idle";
     if (!again.woken) return "left";
+    if (!successorOf(sid)) return "live";
     await oc.interrupt(sid);
     return "interrupted";
   }
 
   /**
-   * Keep the retired session from acting on its copy. @returns {Promise<"cancelled"|"interrupted"|"idle"|"left"|null>}
-   * null = not settled (a failure, or a cancel nothing confirmed): a later detection retries it. Never throws.
+   * Keep the retired session from acting on its copy. @returns {Promise<"cancelled"|"interrupted"|"idle"|"left"|"live"|null>}
+   * null = not settled (a failure, or a cancel nothing confirmed): the retry driver and later detections retry it. `live` = the
+   * link was cut meanwhile, so the session is live again and was left alone. Never throws.
    */
   async function suppressRetired(sid, id) {
     try {
+      if (!successorOf(sid)) return "live";
       const inbox = await oc.listInbox(sid);
       if (Array.isArray(inbox) && inbox.some((i) => i?.id === id)) {
         const outcome = await cancelWithEvidence(sid, id);
+        if (outcome === "live") return "live";
         if (outcome === "cancelled") return "cancelled";
         if (outcome === "unknown") return null; // may or may not be delivered: don't guess
         // delivered while we were cancelling: it may have woken the session — the execution check decides
@@ -1981,16 +1998,65 @@ export function createHandoffEngine(deps = {}) {
     }
   }
 
-  /** Does the destination already have this relay id (delivered, in its inbox, or held for it)? Asked before (re)posting. */
-  async function relayPresent(target, id) {
-    if (state.held[target]?.some((i) => i.id === id)) return true;
-    if ((await reconcile(target, id)) === true) return true;
+  /**
+   * Does the destination already have this relay id? TRI-STATE, asked before (re)posting: `present` (held for it, in its inbox,
+   * its message read says so, or it is in the newest timeline page), `absent` (every source answered and none has it — the
+   * strict message read said 404), or `unknown` (a source failed and nothing says present). Only `absent` authorizes a POST.
+   * @returns {Promise<"present"|"absent"|"unknown">}
+   */
+  async function relayPresence(target, id) {
+    if (state.held[target]?.some((i) => i.id === id)) return "present";
+    const known = await reconcile(target, id); // inbox + the strict message read
+    if (known === true) return "present";
+    let timeline = null;
     try {
       const tl = await oc.listRawTimeline?.(target, { maxPages: 1 });
-      return Array.isArray(tl) && tl.some((r) => r?.id === id);
+      if (Array.isArray(tl)) timeline = tl;
     } catch {
-      return false;
+      /* unreadable: stays null */
     }
+    if (timeline?.some((r) => r?.id === id)) return "present";
+    return known === false && timeline !== null ? "absent" : "unknown";
+  }
+
+  const RELAY_RETRY_BASE_MS = 30_000;
+  const RELAY_RETRY_MAX_MS = 10 * 60_000;
+  const relayBackoff = (tries) => Math.min(RELAY_RETRY_MAX_MS, RELAY_RETRY_BASE_MS * 2 ** Math.max(0, tries - 1));
+  const pruneRelayState = () =>
+    pruneRelays(state, now(), {
+      onExpire: (id, r) => {
+        try {
+          log(`[handoff] dropped unresolved relay ${id} (result ${r.original ?? "?"} from ${r.from ?? "?"}): not completed within 7 days (${r.admitted ? "the retired session was never confirmed quiet" : "never admitted at the live end"})`);
+        } catch {
+          /* a log line must never fail a prune */
+        }
+      },
+    });
+
+  /**
+   * Record that a relay is not finished (the destination couldn't be asked, or the post failed): durable, with what it takes to
+   * retry it, so the retry driver (`maintain`) completes it later — admission by presence check, never by a blind repost.
+   */
+  async function deferRelay(id, sid, rec, why, reason) {
+    const prev = state.relays[id];
+    const tries = (prev?.tries ?? 0) + 1;
+    state.relays[id] = {
+      admitted: false,
+      suppressed: null,
+      at: prev?.at ?? now(),
+      from: sid,
+      original: rec.id,
+      rec: { id: rec.id, ...(typeof rec.text === "string" ? { text: rec.text } : {}), ...(typeof rec.description === "string" ? { description: rec.description } : {}), metadata: rec.metadata ?? {} },
+      tries,
+      nextAt: now() + relayBackoff(tries),
+    };
+    try {
+      log(`[handoff] relay of background result ${rec.id} from ${sid} deferred (attempt ${tries}): ${why}`);
+    } catch {
+      /* a log line must never fail a relay */
+    }
+    await persist().catch((e) => warn("[handoff] saving the relay state failed:", e?.message ?? e));
+    return { relayed: false, reason };
   }
 
   /** @param {string} sid the retired session  @param {{ id: string, text?: string, description?: string, metadata?: object }} rec its copy */
@@ -2004,7 +2070,12 @@ export function createHandoffEngine(deps = {}) {
     const run = (async () => {
       let entry = state.relays[id];
       if (!entry?.admitted) {
-        if (!(await relayPresent(followReplacement(sid), id))) {
+        const presence = await relayPresence(followReplacement(sid), id);
+        if (presence === "unknown") return await deferRelay(id, sid, rec, "the destination couldn't be read, so it isn't known whether the copy is already there", "deferred");
+        if (presence === "absent") {
+          // Re-checked in the same synchronous step as the admission (which resolves its target on entry): a link cut while we
+          // were reading means the original is live again and must not get a second copy of its own result.
+          if (!successorOf(sid)) return { relayed: false, reason: "live" };
           const body = {
             id,
             text: typeof rec.text === "string" ? rec.text : "",
@@ -2017,21 +2088,32 @@ export function createHandoffEngine(deps = {}) {
             await admit("synthetic", sid, body); // resolves to the live end; held while a handoff is in flight
           } catch (e) {
             warn(`[handoff] relaying a background result (${rec.id}) off ${sid} failed:`, e?.message ?? e);
-            return { relayed: false, reason: "error" };
+            // the POST may or may not have landed: the retry asks the destination before posting again
+            return await deferRelay(id, sid, rec, `the post failed (${e?.message ?? e})`, "error");
           }
         }
-        entry = state.relays[id] = { admitted: true, suppressed: null, at: now(), from: sid, original: rec.id };
-        pruneRelays(state, now());
+        entry = state.relays[id] = { admitted: true, suppressed: null, at: entry?.at ?? now(), from: sid, original: rec.id };
+        pruneRelayState();
         await persist().catch((e) => warn("[handoff] saving the relay state failed:", e?.message ?? e));
       }
       if (entry.suppressed == null) {
         const kept = await suppressRetired(sid, rec.id);
-        if (kept) {
+        if (kept === "live") {
+          // the link was cut meanwhile: the original is live again — nothing to suppress; the admitted copy stays
+          entry.suppressed = "left";
+          delete entry.tries;
+          delete entry.nextAt;
+        } else if (kept) {
           entry.suppressed = kept;
-          await persist().catch((e) => warn("[handoff] saving the relay state failed:", e?.message ?? e));
+          delete entry.tries;
+          delete entry.nextAt;
+        } else {
+          entry.tries = (entry.tries ?? 0) + 1;
+          entry.nextAt = now() + relayBackoff(entry.tries);
         }
+        await persist().catch((e) => warn("[handoff] saving the relay state failed:", e?.message ?? e));
         try {
-          log(`[handoff] relayed background result ${rec.id} from retired ${sid} to ${followReplacement(sid)} (retired session: ${kept ?? "unconfirmed, will retry"})`);
+          log(`[handoff] relayed background result ${rec.id} from retired ${sid} to ${followReplacement(sid)} (retired session: ${kept === "live" ? "live again, left alone" : (kept ?? "unconfirmed, will retry")})`);
         } catch {
           /* a log line must never fail a relay */
         }
@@ -2052,20 +2134,19 @@ export function createHandoffEngine(deps = {}) {
     void persist().catch((e) => warn("[handoff] saving an arrival failed:", e?.message ?? e));
   }
 
-  /** The link exists now: relay what arrived during the transition (the normal relay path); keep only what failed. */
+  /**
+   * The link exists now: relay what arrived during the transition (the normal relay path). Whatever a relay could not finish is
+   * owned by its durable relay record from then on (the retry driver), so the arrivals are consumed either way; the relay
+   * records themselves are never touched here.
+   */
   async function flushArrivals(pred) {
     const list = state.arrivals[pred];
     if (!list?.length) {
       delete state.arrivals[pred];
       return;
     }
-    const failed = [];
-    for (const a of [...list]) {
-      const r = await relayResult(pred, a);
-      if (!r.relayed) failed.push(a);
-    }
-    if (failed.length) state.arrivals[pred] = failed;
-    else delete state.arrivals[pred];
+    for (const a of [...list]) await relayResult(pred, a);
+    delete state.arrivals[pred];
     await persist();
   }
 
@@ -2091,12 +2172,13 @@ export function createHandoffEngine(deps = {}) {
 
   /**
    * The backstop for a missed or failed relay: find the newest result `childSessionId` posted to `sessionId` and relay it.
-   * No-op for a session that was never replaced.
+   * A session whose handoff is in flight (fenced) takes the SAME path as a live enqueue event: the result is recorded as an
+   * arrival, which the commit relays and a rollback drops. A session that was never replaced is a no-op.
    * @returns {Promise<{ relayed: boolean, reason?: string }>}
    */
   async function relayBackgroundResult({ sessionId, childSessionId } = {}) {
     if (typeof sessionId !== "string" || !sessionId || typeof childSessionId !== "string" || !childSessionId) return { relayed: false, reason: "invalid" };
-    if (!successorOf(sessionId)) return { relayed: false, reason: "live" };
+    if (!successorOf(sessionId) && !state.fences[sessionId]) return { relayed: false, reason: "live" };
     let rows;
     try {
       rows = await oc.listRawTimeline(sessionId, { type: "synthetic" });
@@ -2106,10 +2188,48 @@ export function createHandoffEngine(deps = {}) {
     }
     const rec = [...(Array.isArray(rows) ? rows : [])].reverse().find((r) => r?.metadata?.childID === childSessionId && typeof r.id === "string");
     if (!rec) return { relayed: false, reason: "none" };
-    return relayResult(sessionId, rec);
+    // the state may have moved while we were reading: decide on it now, synchronously
+    if (successorOf(sessionId)) return relayResult(sessionId, rec);
+    if (state.fences[sessionId]) {
+      recordArrival(sessionId, rec);
+      return { relayed: false, reason: "fenced" };
+    }
+    return { relayed: false, reason: "live" };
   }
 
-  // ---- one-time repair: handoff links made FROM a `task` subagent ---------------------------------------
+  /**
+   * Finish unresolved relay work, a bounded number per pass and with backoff (`nextAt`): admission when the destination
+   * answers (present ⇒ recorded without a post; absent ⇒ one post), suppression without ever reposting. An entry whose link was
+   * cut meanwhile (the original is live again) is closed: an admitted copy stays as a receipt, an unadmitted one is dropped.
+   */
+  async function retryUnresolvedRelays({ limit = 10 } = {}) {
+    const due = Object.entries(state.relays)
+      .filter(([, e]) => relayUnresolved(e) && (e.nextAt ?? 0) <= now())
+      .sort(([, a], [, b]) => a.at - b.at)
+      .slice(0, limit);
+    let changed = false;
+    for (const [id, e] of due) {
+      const from = e.from;
+      if (typeof from !== "string" || (!e.admitted && !e.rec)) {
+        delete state.relays[id]; // nothing to retry it with
+        changed = true;
+        continue;
+      }
+      if (!successorOf(from)) {
+        if (e.admitted) {
+          e.suppressed = "left";
+          delete e.tries;
+          delete e.nextAt;
+        } else delete state.relays[id];
+        changed = true;
+        continue;
+      }
+      await relayResult(from, e.rec ?? { id: e.original });
+    }
+    if (changed) await persist().catch((err) => warn("[handoff] saving the relay state failed:", err?.message ?? err));
+  }
+
+  // ---- repair: handoff links made FROM a `task` subagent ---------------------------------------------
   // Before the policy existed a subagent's own handoff replaced it, while its parent kept resuming the original id.
   // Cutting such a link makes the original its own conversation node again — but a cut is only right when the evidence
   // says the parent really kept driving the original. A delegate job's `childSessionID` is repointed to the successor at
@@ -2117,12 +2237,17 @@ export function createHandoffEngine(deps = {}) {
   //   a. `pred` is an ORIGINAL (not a Manta-made successor, and nothing replaced into it);
   //   b. `pred` has an opencode parent;
   //   c. no Manta-owned job record names ANY session of `pred`'s replacement chain as its child;
-  //   d. a run of `pred` ended (`time.idle`) more than REPAIR_DRIVEN_AFTER_MS after the successor was created (the parent kept resuming it).
-  // Anything that can't be read (the session, the successor, the STRICT job store) skips that link and leaves the marker unset.
+  //   d. `pred` has a `user` timeline record created AFTER the successor was created — the parent resuming it through `task`
+  //      posts user input; a background result is `synthetic` and does not count.
+  // Anything that can't be read (the session, the successor, the STRICT job store, the timeline) skips that link and leaves the
+  // marker unset. A link that meets a–c but not (yet) d is remembered in `state.repairs.pendingTaskLinks` — the initial scan sees
+  // only the past, so a parent that resumes the original LATER is caught by the periodic re-check (`maintain`), which cuts under
+  // the chain's exclusion with everything revalidated. The marker means "initial scan done".
   const REPAIR_TASK_LINKS = "taskChildLinks";
-  const REPAIR_DRIVEN_AFTER_MS = 60_000;
+  const PENDING_TASK_LINKS_MAX = 500;
+  const PENDING_TASK_LINKS_TTL_MS = 7 * 24 * 3600_000;
   const linkIsEmpty = (l) => !l || (!l.replacedBy && !l.replaces && !l.branchedFrom && !(l.branches?.length));
-  /** @returns {Promise<"cut"|"keep"|"failed">} */
+  /** @returns {Promise<"cut"|"keep"|"pending"|"failed">} */
   async function repairVerdict({ pred, succ }, getJobs) {
     if (state.successors[pred] || state.links[pred]?.replaces) return "keep"; // a. Manta-made
     let rs;
@@ -2157,11 +2282,54 @@ export function createHandoffEngine(deps = {}) {
       createdAt = ss.session?.time?.created;
     }
     if (typeof createdAt !== "number") return "failed";
-    const t = rs.session?.time;
-    // `time.idle` only moves when an execution ends; `time.updated` also moves on metadata/title writes (observed live:
-    // an idle session's `updated` bumped 17 min after its last turn), which would make an untouched original look driven.
-    const lastRunEnded = typeof t?.idle === "number" ? t.idle : 0;
-    return lastRunEnded > createdAt + REPAIR_DRIVEN_AFTER_MS ? "cut" : "keep";
+    let users;
+    try {
+      users = await oc.listRawTimeline(pred, { type: "user", maxPages: 1 }); // the newest user records: the newest decides
+    } catch {
+      return "failed";
+    }
+    if (!Array.isArray(users)) return "failed";
+    return users.some((r) => typeof r?.time?.created === "number" && r.time.created > createdAt) ? "cut" : "pending";
+  }
+
+  const pendingLinks = () => (state.repairs.pendingTaskLinks ??= {});
+  const dropPendingIfEmpty = () => {
+    if (state.repairs.pendingTaskLinks && Object.keys(state.repairs.pendingTaskLinks).length === 0) delete state.repairs.pendingTaskLinks;
+  };
+  const rememberPending = (pred, succ) => {
+    const p = pendingLinks();
+    if (p[pred]?.succ === succ) return;
+    p[pred] = { succ, since: now() };
+    const keys = Object.keys(p);
+    if (keys.length > PENDING_TASK_LINKS_MAX) for (const k of keys.sort((a, b) => p[a].since - p[b].since).slice(0, keys.length - PENDING_TASK_LINKS_MAX)) delete p[k];
+  };
+
+  /**
+   * Cut `pred → succ` — under the chain's exclusion (the same one a commit takes), with the link revalidated after acquiring it,
+   * no handoff of the chain in flight, and a–d judged again from fresh reads. Never touches records or provenance.
+   * @returns {Promise<"cut"|"gone"|"busy"|"keep"|"pending"|"failed">}
+   */
+  function tryCutLink({ pred, succ }, getJobs) {
+    return withChainExclusive(pred, async () => {
+      const l = state.links[pred];
+      if (l?.replacedBy !== succ || state.fences[pred]) return "gone";
+      const chain = new Set(chainOf(pred));
+      if (Object.values(state.records).some((r) => IN_FLIGHT_STATES.includes(r.state) && (chain.has(r.fromSessionId) || chain.has(r.successorId)))) return "busy";
+      const verdict = await repairVerdict({ pred, succ }, getJobs);
+      if (verdict !== "cut") return verdict;
+      const cur = state.links[pred];
+      if (cur?.replacedBy !== succ || state.fences[pred]) return "gone"; // a start slipped in during the reads
+      delete cur.replacedBy;
+      const s = state.links[succ];
+      if (s?.replaces === pred) {
+        delete s.replaces;
+        if (linkIsEmpty(s)) delete state.links[succ];
+      }
+      if (linkIsEmpty(cur)) delete state.links[pred];
+      if (state.repairs.pendingTaskLinks) delete state.repairs.pendingTaskLinks[pred];
+      dropPendingIfEmpty();
+      return "cut";
+    });
   }
 
   let repairing = null;
@@ -2173,7 +2341,7 @@ export function createHandoffEngine(deps = {}) {
         .map(([pred, l]) => ({ pred, succ: l.replacedBy }));
       let jobsRead = null;
       const getJobs = () => (jobsRead ??= loadJobsStrict());
-      const cut = [];
+      let split = 0;
       let failed = 0;
       let next = 0;
       await Promise.all(
@@ -2181,25 +2349,14 @@ export function createHandoffEngine(deps = {}) {
           for (;;) {
             const c = candidates[next++];
             if (!c) return;
-            const verdict = await repairVerdict(c, getJobs);
-            if (verdict === "cut") cut.push(c);
+            let verdict = await repairVerdict(c, getJobs);
+            if (verdict === "cut") verdict = await tryCutLink(c, getJobs); // judged again under the chain's exclusion
+            if (verdict === "cut") split++;
             else if (verdict === "failed") failed++;
+            else if (verdict === "pending" || verdict === "busy") rememberPending(c.pred, c.succ);
           }
         }),
       );
-      let split = 0;
-      for (const { pred, succ } of cut) {
-        const l = state.links[pred];
-        if (l?.replacedBy !== succ || state.fences[pred]) continue; // changed while we were reading
-        delete l.replacedBy;
-        const s = state.links[succ];
-        if (s?.replaces === pred) {
-          delete s.replaces;
-          if (linkIsEmpty(s)) delete state.links[succ];
-        }
-        if (linkIsEmpty(l)) delete state.links[pred];
-        split++;
-      }
       if (failed === 0) state.repairs[REPAIR_TASK_LINKS] = new Date(now()).toISOString();
       if (split > 0 || failed === 0 || successorsBackfilled) await persist();
       if (split > 0) {
@@ -2210,7 +2367,8 @@ export function createHandoffEngine(deps = {}) {
         }
       }
       try {
-        log(`[handoff] repair: split ${split} subagent handoff link(s)${failed ? ` (${failed} without evidence, retrying at the next start)` : ""}`);
+        const pending = Object.keys(state.repairs.pendingTaskLinks ?? {}).length;
+        log(`[handoff] repair: split ${split} subagent handoff link(s)${pending ? `, ${pending} watched for a later resume` : ""}${failed ? ` (${failed} without evidence, retrying at the next start)` : ""}`);
       } catch {
         /* a log line must never fail the repair */
       }
@@ -2219,6 +2377,85 @@ export function createHandoffEngine(deps = {}) {
       repairing = null;
     });
     return repairing;
+  }
+
+  const pendingCheckedAt = new Map(); // pred -> when this boot last re-checked it (rotation, so a pass of N never starves the rest)
+  /** The periodic re-check of the links the initial scan could not yet judge. Bounded per pass. */
+  async function recheckPendingTaskLinks({ limit = 10, concurrency = 2 } = {}) {
+    const p = state.repairs.pendingTaskLinks;
+    if (!p) return { split: 0 };
+    let changed = false;
+    for (const [pred, e] of Object.entries(p)) {
+      if (now() - e.since > PENDING_TASK_LINKS_TTL_MS) {
+        delete p[pred];
+        changed = true;
+      } else if (state.links[pred]?.replacedBy !== e.succ) {
+        delete p[pred]; // the link is gone or points elsewhere: nothing to watch
+        changed = true;
+      }
+    }
+    const batch = Object.entries(p)
+      .sort(([a], [b]) => (pendingCheckedAt.get(a) ?? 0) - (pendingCheckedAt.get(b) ?? 0))
+      .slice(0, limit);
+    let jobsRead = null;
+    const getJobs = () => (jobsRead ??= loadJobsStrict());
+    let split = 0;
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, batch.length) }, async () => {
+        for (;;) {
+          const entry = batch[next++];
+          if (!entry) return;
+          const [pred, e] = entry;
+          pendingCheckedAt.set(pred, now());
+          const verdict = await tryCutLink({ pred, succ: e.succ }, getJobs);
+          if (verdict === "cut") {
+            split++;
+            changed = true;
+            pendingCheckedAt.delete(pred);
+          } else if (verdict === "gone" || verdict === "keep") {
+            delete p[pred]; // no longer a candidate (a–c fail now, or the link changed)
+            changed = true;
+          } // pending / busy / failed: stays, re-checked on a later pass
+        }
+      }),
+    );
+    dropPendingIfEmpty();
+    if (changed) await persist();
+    if (split > 0) {
+      try {
+        onLinksChanged();
+      } catch (e) {
+        warn("[handoff] repair: refreshing the session graph failed:", e?.message ?? e);
+      }
+      try {
+        log(`[handoff] repair: split ${split} subagent handoff link(s) after the parent resumed the original`);
+      } catch {
+        /* a log line must never fail the repair */
+      }
+    }
+    return { split };
+  }
+
+  /**
+   * The engine's periodic maintenance (the box runs it every minute, and boot recovery starts it): finish unresolved relay work,
+   * re-check watched subagent links, relay leftover arrivals whose link now exists, expire what is too old. Bounded per pass.
+   */
+  let maintaining = null;
+  function maintain({ limit = 10 } = {}) {
+    maintaining ??= (async () => {
+      try {
+        if (pruneRelayState() > 0) await persist();
+        for (const pred of Object.keys(state.arrivals)) if (successorOf(pred)) await flushArrivals(pred);
+        await retryUnresolvedRelays({ limit });
+        await recheckPendingTaskLinks({ limit });
+      } catch (e) {
+        warn("[handoff] maintenance failed:", e?.message ?? e);
+      }
+    })().finally(() => {
+      maintaining = null;
+    });
+    return maintaining;
   }
 
   // ---- boot recovery (§5.5) ---------------------------------------------------------------------
@@ -2262,13 +2499,15 @@ export function createHandoffEngine(deps = {}) {
       if (successorOf(pred)) jobs.push(flushArrivals(pred));
       else if (!state.fences[pred]) delete state.arrivals[pred];
     }
+    // Unresolved relays and watched subagent links: finished in the background, never blocking recovery.
+    detach("maintenance", () => maintain());
     await Promise.allSettled(jobs);
   }
 
   /** Drop links while neither end exists; callers pass a definitive-absence probe. */
   async function sweep(exists) {
     pruneRecords(state, now());
-    pruneRelays(state, now());
+    pruneRelayState();
     if (typeof exists === "function") await pruneLinks(state, exists);
     await persist();
   }
@@ -2288,6 +2527,7 @@ export function createHandoffEngine(deps = {}) {
     onTurnEnd,
     relayBackgroundResult,
     repairTaskChildLinks,
+    maintain,
     // routes
     create,
     start: startRecord,

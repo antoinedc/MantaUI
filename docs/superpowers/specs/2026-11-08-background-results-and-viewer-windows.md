@@ -214,26 +214,52 @@ result landed in `L` as a `synthetic` (relayed metadata) and `L` ran a turn on i
   with the records. The live policy (agent refusal, `maybeAuto` skip) treats a session in it as NOT a task child.
 - **Repair rule.** A link `pred → succ` is cut only when (a) `pred` is an original (not in the set, nothing replaced into it),
   (b) it has an opencode parent, (c) no Manta-owned job record names ANY session of `pred`'s replacement chain (a delegate job's
-  `childSessionID` is repointed to the successor at commit, so "no record names pred" is not evidence), and (d) `pred`'s
-  `max(time.updated, time.idle)` is more than 60 s after the successor was created (`internal.successorCreatedAt`, else the
-  successor session's `time.created`) — the parent kept driving the original. A deleted pred/successor is settled (keep);
-  anything unreadable, including the job store, skips the link and leaves the marker unset. The job store is read STRICTLY
-  (`handoff/jobStore.mjs`: an absent file is empty; unreadable / unparsable / not `{jobs:[]}` throws).
+  `childSessionID` is repointed to the successor at commit, so "no record names pred" is not evidence), and (d) `pred` has a
+  **`user`-type timeline record created after the successor was created** (`internal.successorCreatedAt`, else the successor
+  session's `time.created`) — the parent resuming the original through `task` posts user input. A background result is
+  `synthetic` and does NOT count; neither do `time.updated` / `time.idle` (metadata writes and background wakes move them
+  without any parent involvement). A deleted pred/successor is settled (keep); anything unreadable — the session, the successor,
+  the timeline, the job store — skips the link and leaves the marker unset. The job store is read STRICTLY
+  (`handoff/jobStore.mjs`: an absent file is empty; unreadable / unparsable / not `{jobs:[]}` throws). Verified on the pinned
+  binary: `GET /session/{id}/message?type=user` returns the user records only.
+- **Watched links (the one-shot gap).** The marker means "initial scan done". A link that meets a–c but not d is recorded in
+  `state.repairs.pendingTaskLinks { [pred]: { succ, since } }` (≤ 500, expiring after 7 days). The engine's periodic maintenance
+  (`maintain()`, every 60 s from `index.mjs`, and once from boot recovery) re-checks them, a bounded number per pass. A cut
+  happens only under `withChainExclusive` for the chain (the exclusion a commit takes), with the link `pred → succ` revalidated
+  after acquiring it, no handoff record of the chain `requested` / `generating` / `starting` (so a commit's last steps, which run
+  after it lets go of the chain, block it — `ready` cards are inert and do not), and (a)–(d) judged again from fresh reads with
+  the strict job store. It never touches records or provenance. (There was no periodic handoff sweep before this; `maintain` is
+  it.)
 - **Arrivals during a fence.** A subagent synthetic enqueued on a session with `state.fences[sid]` is recorded in
-  `state.arrivals[sid]` (persisted, ≤ 50). At commit (replacement) each is relayed through the normal relay path; at rollback /
-  abort-to-ready they are dropped; boot recovery relays those whose link exists and drops those of a handoff that never committed.
-- **Durable relay state.** `state.relays[relayId] = { admitted, suppressed, at, from, original }`, pruned after 7 days and capped
-  at 2 000. Before posting, the destination is asked for the deterministic id (held queue, inbox + message by id, newest timeline
-  page); present ⇒ no POST. `admitted` and `suppressed` are separate: a relay whose suppression is unsettled (`null`) is retried
-  by a later detection without reposting.
+  `state.arrivals[sid]` (persisted, ≤ 50). `relayBackgroundResult` on a fenced session reads the newest result for the child and
+  records it through the SAME path (same id ⇒ one arrival), so a missed enqueue event is covered too. At commit (replacement)
+  each is relayed through the normal relay path; at rollback / abort-to-ready they are dropped; boot recovery relays those whose
+  link exists and drops those of a handoff that never committed.
+- **Durable relay state.** `state.relays[relayId] = { admitted, suppressed, at, from, original, rec?, tries?, nextAt? }`, expiring
+  after 7 days and capped at 2 000 completed receipts. `admitted` and `suppressed` are separate. **Destination presence is
+  tri-state** — `present` (held for it, in its inbox, a strict message read says so, or in the newest timeline page), `absent`
+  (every source answered and the strict read said 404; `opencode.readMessageStrict` tells 404 from any failure, where
+  `getMessage` answers null for both) or `unknown`. Only `absent` authorizes a POST; `unknown` defers the relay durably (the
+  record keeps what it takes to retry it). The uncertain held-message retry shares the helper: an unreadable destination
+  never authorizes a re-post. A failed POST is deferred the same way (it may have landed).
+- **Retry driver.** `maintain()` finishes unresolved relay records (`admitted:false` or `suppressed:null`), a bounded number per
+  pass, each with exponential backoff (30 s … 10 min): admission when the destination answers (present ⇒ recorded without a
+  post), suppression without ever reposting. Unresolved records are never evicted as completed receipts and never removed by
+  arrival flushing; they expire hard after 7 days with a log line. A record whose link was cut meanwhile is closed: an admitted
+  copy stays as a receipt (`suppressed: "left"`), an unadmitted one is dropped.
+- **Link cut vs a relay in flight.** `relayResult` re-checks `successorOf(sid)` in the same synchronous step as the admission, and
+  `suppressRetired` re-checks it before the cancel and before the interrupt: a link cut meanwhile means the original is live
+  again, so it is neither cancelled nor interrupted, and an already admitted receipt stays.
 - **Cancel is not proof.** After `DELETE /inbox/{id}` the outcome comes from opencode's own evidence, as in the stream interpreter's
   `cancelInbox`: `session.inbox.cancelled` seen on the raw stream ⇒ `cancelled`; `session.inbox.delivered` or the message existing
   ⇒ delivered (the execution check then decides); neither within 1.5 s ⇒ unknown (suppression stays open, nothing is interrupted).
   Verified on the pinned binary: a result queued behind a running turn is pending in the inbox, the cancel emits
   `session.inbox.cancelled`, and the retired session's timeline never gets the record.
-- **Interrupt binding.** The wake evidence (active, then the newest timeline page) is read twice; the second read is immediately
-  before the interrupt, and an ambiguous or changed second read leaves the session alone. opencode has no conditional interrupt
-  (`POST /session/{id}/interrupt` takes no execution id), so the window between the second read and the interrupt landing
-  (two round trips on one box) remains: an execution that ends and a new one that starts inside it would be interrupted.
+- **Interrupt binding — accepted residual race.** The wake evidence (active, then the newest timeline page) is read twice; the
+  second read is immediately before the interrupt, and an ambiguous or changed second read leaves the session alone. opencode
+  2.0.30 has no conditional interrupt (`POST /session/{id}/interrupt` takes no execution id or precondition), so between the
+  second read's response and opencode handling the interrupt request — a few milliseconds, one loopback round trip — an
+  execution that ends and a new one that starts would be interrupted. It needs a turn change inside that window on a session
+  nobody is meant to be driving; it is accepted, and revisited if opencode ever offers a conditional interrupt.
 
-The fence-to-commit window is now covered by the arrivals record above.
+The fence-to-commit window is covered by the arrivals record above (event path and backstop).

@@ -8,12 +8,14 @@
 //   held          target session -> [{id, kind, args, at}] admissions parked by a fence / claim / release
 //   dismissedSessions  session -> when the user dismissed its handoff suggestions
 //   sessionModes       session -> its own handoff mode (absent = the box default)
-//   repairs            one-time data repairs already done -> the ISO time they completed
+//   repairs            one-time data repairs already done -> the ISO time they completed; `pendingTaskLinks`
+//                      ({ [pred]: { succ, since } }) holds the subagent links the repair could not yet judge
 //   successors         session -> true for every session Manta made as a handoff successor (durable provenance:
 //                      never pruned with the records, so "original or Manta-made" survives record retention)
 //   arrivals           fenced session -> background results that landed on it during a handoff transition
 //                      (relayed to the successor at commit, dropped at rollback)
-//   relays             relay id -> { admitted, suppressed, at, from, original } (durable relay idempotency)
+//   relays             relay id -> { admitted, suppressed, at, from, original, rec?, tries?, nextAt? } (durable relay
+//                      idempotency; `admitted:false` / `suppressed:null` are UNRESOLVED work a retry driver finishes)
 
 import { randomBytes } from "node:crypto";
 import { HANDOFF_MODES } from "./policy.mjs";
@@ -43,7 +45,15 @@ export function normalizeState(raw) {
     for (const [k, v] of Object.entries(raw.sessionModes)) if (HANDOFF_MODES.includes(v)) s.sessionModes[k] = v;
   }
   if (isObj(raw.repairs)) {
-    for (const [k, v] of Object.entries(raw.repairs)) if (typeof v === "string" && v) s.repairs[k] = v;
+    for (const [k, v] of Object.entries(raw.repairs)) {
+      if (k === "pendingTaskLinks") {
+        const pending = {};
+        if (isObj(v)) {
+          for (const [pred, e] of Object.entries(v)) if (isObj(e) && typeof e.succ === "string" && e.succ && typeof e.since === "number" && Number.isFinite(e.since)) pending[pred] = { succ: e.succ, since: e.since };
+        }
+        if (Object.keys(pending).length > 0) s.repairs.pendingTaskLinks = pending;
+      } else if (typeof v === "string" && v) s.repairs[k] = v;
+    }
   }
   if (isObj(raw.successors)) {
     for (const [k, v] of Object.entries(raw.successors)) if (v === true) s.successors[k] = true;
@@ -69,6 +79,9 @@ export function normalizeState(raw) {
         at: v.at,
         ...(typeof v.from === "string" ? { from: v.from } : {}),
         ...(typeof v.original === "string" ? { original: v.original } : {}),
+        ...(isObj(v.rec) && typeof v.rec.id === "string" ? { rec: { id: v.rec.id, ...(typeof v.rec.text === "string" ? { text: v.rec.text } : {}), ...(typeof v.rec.description === "string" ? { description: v.rec.description } : {}), metadata: isObj(v.rec.metadata) ? v.rec.metadata : {} } } : {}),
+        ...(Number.isInteger(v.tries) && v.tries >= 0 ? { tries: v.tries } : {}),
+        ...(typeof v.nextAt === "number" && Number.isFinite(v.nextAt) ? { nextAt: v.nextAt } : {}),
       };
     }
   }
@@ -80,18 +93,28 @@ export const RELAY_SUPPRESSED = Object.freeze(["cancelled", "interrupted", "idle
 export const RELAY_RETENTION_MS = 7 * 24 * 3600_000;
 export const RELAY_MAX = 2000;
 
-/** PURE. Drop relay entries older than 7 days, then the oldest beyond the cap. @returns {number} how many were removed */
-export function pruneRelays(state, now, { maxAge = RELAY_RETENTION_MS, max = RELAY_MAX } = {}) {
+/** An entry that still owes work: the copy isn't at the live end yet, or the retired session isn't confirmed quiet. */
+export const relayUnresolved = (r) => r.admitted !== true || r.suppressed == null;
+
+/**
+ * PURE. Drop relay entries older than 7 days — completed receipts AND unresolved work (a hard expiry: `onExpire(id, entry)` is
+ * told about each unresolved one so it can be logged) — then evict the oldest COMPLETED receipts beyond the cap. Unresolved
+ * entries are never evicted by the cap.
+ * @returns {number} how many were removed
+ */
+export function pruneRelays(state, now, { maxAge = RELAY_RETENTION_MS, max = RELAY_MAX, onExpire } = {}) {
   let removed = 0;
   for (const [id, r] of Object.entries(state.relays)) {
     if (now - r.at > maxAge) {
+      if (relayUnresolved(r)) onExpire?.(id, r);
       delete state.relays[id];
       removed++;
     }
   }
-  const ids = Object.keys(state.relays);
-  if (ids.length > max) {
-    for (const id of ids.sort((a, b) => state.relays[a].at - state.relays[b].at).slice(0, ids.length - max)) {
+  const over = Object.keys(state.relays).length - max;
+  if (over > 0) {
+    const done = Object.keys(state.relays).filter((id) => !relayUnresolved(state.relays[id]));
+    for (const id of done.sort((x, y) => state.relays[x].at - state.relays[y].at).slice(0, over)) {
       delete state.relays[id];
       removed++;
     }
