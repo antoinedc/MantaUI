@@ -180,19 +180,22 @@ const DRIVEN = T0 + 120_000; // the parent kept resuming the session two minutes
  */
 function repairWorld() {
   const w = createWorld({ mode: "off" });
-  w.addSession("X", { parentID: "ses_root", time: { created: 1, updated: DRIVEN } });
-  w.addSession("X1", { parentID: "ses_root", time: { created: T0, updated: DRIVEN + 1 } }); // a successor that was later driven: still Manta-made
-  w.addSession("X2", { parentID: "ses_root", time: { created: T0 + 5, updated: T0 + 6 } });
-  w.addSession("Y", { time: { created: 1, updated: DRIVEN } });
+  w.addSession("X", { parentID: "ses_root", time: { created: 1, idle: DRIVEN } });
+  w.addSession("X1", { parentID: "ses_root", time: { created: T0, idle: DRIVEN + 1 } }); // a successor that was later driven: still Manta-made
+  w.addSession("X2", { parentID: "ses_root", time: { created: T0 + 5, idle: T0 + 6 } });
+  w.addSession("Y", { time: { created: 1, idle: DRIVEN } });
   w.addSession("Y1", { time: { created: T0 } });
-  w.addSession("Z", { parentID: "ses_root", time: { created: 1, updated: DRIVEN } });
-  w.addSession("Z1", { parentID: "ses_root", time: { created: T0, updated: T0 + 1 } });
-  w.addSession("W", { parentID: "ses_root", time: { created: 1, updated: T0 + 30_000 } });
+  w.addSession("Z", { parentID: "ses_root", time: { created: 1, idle: DRIVEN } });
+  w.addSession("Z1", { parentID: "ses_root", time: { created: T0, idle: T0 + 1 } });
+  w.addSession("W", { parentID: "ses_root", time: { created: 1, idle: T0 + 30_000 } });
   w.addSession("W1", { time: { created: T0 } });
+  // U: an original whose `updated` was bumped long after the handoff (a title / metadata write) but whose last RUN ended before it
+  w.addSession("U", { parentID: "ses_root", time: { created: 1, idle: T0 - 5, updated: DRIVEN } });
+  w.addSession("U1", { time: { created: T0 } });
   w.jobs = [{ childSessionID: "Z1", completionOwner: "manta" }];
   diskWith(w, {
-    records: { hof_x: rec("hof_x", "X", "X1"), hof_y: rec("hof_y", "Y", "Y1"), hof_z: rec("hof_z", "Z", "Z1"), hof_w: rec("hof_w", "W", "W1") },
-    links: { X: link(null, "X1"), X1: link("X", "X2"), X2: link("X1", null), Y: link(null, "Y1"), Y1: link("Y", null), Z: link(null, "Z1"), Z1: link("Z", null), W: link(null, "W1"), W1: link("W", null) },
+    records: { hof_x: rec("hof_x", "X", "X1"), hof_y: rec("hof_y", "Y", "Y1"), hof_z: rec("hof_z", "Z", "Z1"), hof_w: rec("hof_w", "W", "W1"), hof_u: rec("hof_u", "U", "U1") },
+    links: { X: link(null, "X1"), X1: link("X", "X2"), X2: link("X1", null), Y: link(null, "Y1"), Y1: link("Y", null), Z: link(null, "Z1"), Z1: link("Z", null), W: link(null, "W1"), W1: link("W", null), U: link(null, "U1"), U1: link("U", null) },
   });
   w.changed = 0;
   w.engine = w.build({ onLinksChanged: () => void w.changed++ });
@@ -210,7 +213,8 @@ test("repair: cuts only an ORIGINAL subagent the parent kept driving; successors
   assert.deepEqual(links.Y, link(null, "Y1"), "no parent");
   assert.deepEqual(links.Z, link(null, "Z1"), "the job record names the successor now: a repoint, not evidence");
   assert.deepEqual(links.W, link(null, "W1"), "nothing drove it after the handoff");
-  assert.equal(Object.keys(w.engine._state.records).length, 4, "records are never touched");
+  assert.deepEqual(links.U, link(null, "U1"), "a later `updated` bump without a run is not evidence");
+  assert.equal(Object.keys(w.engine._state.records).length, 5, "records are never touched");
   assert.equal(w.changed, 1, "the session graph is told once");
   const disk = JSON.parse(w.disk.json);
   assert.match(disk.repairs.taskChildLinks, /^\d{4}-\d\d-\d\dT/, "the marker is persisted with the cut");
@@ -223,7 +227,7 @@ test("repair: cuts only an ORIGINAL subagent the parent kept driving; successors
 test("repair: a real repoint followed by a restart never cuts, whatever the pred's timestamps say", async () => {
   // a delegate job's child C is handed off to C1; the job record is repointed to C1; the box restarts
   const w = createWorld({ mode: "off" });
-  w.addSession("C", { parentID: "ses_root", time: { created: 1, updated: DRIVEN } });
+  w.addSession("C", { parentID: "ses_root", time: { created: 1, idle: DRIVEN } });
   w.addSession("C1", { parentID: "ses_root", time: { created: T0 } });
   w.addWindow("proj", 3, "work", "C");
   w.jobs = [{ childSessionID: "C", completionOwner: "manta" }];
@@ -238,7 +242,7 @@ test("repair: a real repoint followed by a restart never cuts, whatever the pred
 
 test("repair: the 60 s rule is strict, and the successor's creation time falls back to the successor session when the record is gone", async () => {
   const w = createWorld({ mode: "off" });
-  w.addSession("E", { parentID: "ses_root", time: { created: 1, updated: T0 + 60_000 } }); // exactly 60 s: not enough
+  w.addSession("E", { parentID: "ses_root", time: { created: 1, idle: T0 + 60_000 } }); // exactly 60 s: not enough
   w.addSession("E1", { time: { created: T0 } });
   w.addSession("F", { parentID: "ses_root", time: { created: 1, idle: T0 + 60_001 } }); // `idle` counts like `updated`
   w.addSession("F1", { time: { created: T0 } });
@@ -262,7 +266,7 @@ test("repair: idempotent — a second run, and a run after a restart, read nothi
 
 test("repair: anything unreadable leaves the link, the marker unset and the other cuts landed; the next run finishes", async () => {
   const w = repairWorld();
-  w.addSession("V", { parentID: "ses_root", time: { created: 1, updated: DRIVEN } });
+  w.addSession("V", { parentID: "ses_root", time: { created: 1, idle: DRIVEN } });
   w.addSession("V1", { time: { created: T0 } });
   w.engine._state.links.V = link(null, "V1");
   w.engine._state.links.V1 = link("V", null);
@@ -284,7 +288,7 @@ test("repair: anything unreadable leaves the link, the marker unset and the othe
 
 test("repair: a deleted successor or predecessor is settled (nothing to cut), not a failure", async () => {
   const w = createWorld({ mode: "off" });
-  w.addSession("G", { parentID: "ses_root", time: { created: 1, updated: DRIVEN } }); // G1 was deleted
+  w.addSession("G", { parentID: "ses_root", time: { created: 1, idle: DRIVEN } }); // G1 was deleted
   w.addSession("H1", { time: { created: T0 } }); // H was deleted
   diskWith(w, { links: { G: link(null, "G1"), G1: link("G", null), H: link(null, "H1"), H1: link("H", null) } });
   w.engine = w.build();

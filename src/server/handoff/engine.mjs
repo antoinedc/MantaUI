@@ -2117,7 +2117,7 @@ export function createHandoffEngine(deps = {}) {
   //   a. `pred` is an ORIGINAL (not a Manta-made successor, and nothing replaced into it);
   //   b. `pred` has an opencode parent;
   //   c. no Manta-owned job record names ANY session of `pred`'s replacement chain as its child;
-  //   d. `pred` was active more than REPAIR_DRIVEN_AFTER_MS after the successor was created (the parent kept resuming it).
+  //   d. a run of `pred` ended (`time.idle`) more than REPAIR_DRIVEN_AFTER_MS after the successor was created (the parent kept resuming it).
   // Anything that can't be read (the session, the successor, the STRICT job store) skips that link and leaves the marker unset.
   const REPAIR_TASK_LINKS = "taskChildLinks";
   const REPAIR_DRIVEN_AFTER_MS = 60_000;
@@ -2158,8 +2158,10 @@ export function createHandoffEngine(deps = {}) {
     }
     if (typeof createdAt !== "number") return "failed";
     const t = rs.session?.time;
-    const lastActive = Math.max(typeof t?.updated === "number" ? t.updated : 0, typeof t?.idle === "number" ? t.idle : 0);
-    return lastActive > createdAt + REPAIR_DRIVEN_AFTER_MS ? "cut" : "keep";
+    // `time.idle` only moves when an execution ends; `time.updated` also moves on metadata/title writes (observed live:
+    // an idle session's `updated` bumped 17 min after its last turn), which would make an untouched original look driven.
+    const lastRunEnded = typeof t?.idle === "number" ? t.idle : 0;
+    return lastRunEnded > createdAt + REPAIR_DRIVEN_AFTER_MS ? "cut" : "keep";
   }
 
   let repairing = null;
