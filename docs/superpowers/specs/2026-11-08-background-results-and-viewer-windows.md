@@ -255,6 +255,24 @@ result landed in `L` as a `synthetic` (relayed metadata) and `L` ran a turn on i
   ⇒ delivered (the execution check then decides); neither within 1.5 s ⇒ unknown (suppression stays open, nothing is interrupted).
   Verified on the pinned binary: a result queued behind a running turn is pending in the inbox, the cancel emits
   `session.inbox.cancelled`, and the retired session's timeline never gets the record.
+- **Settlement reaches the engine for a fenced parent.** `delegate.mjs` no longer guards the relay on `successorOf(parent)` (null
+  while the parent is fenced, which is exactly when the backstop is needed): it always asks the engine, which decides live /
+  fenced / replaced and answers a live, unfenced session before any I/O.
+- **Upgrade lifecycle.** The maintenance poller's stop handle is in the upgrade pause/resume list, and pausing also calls
+  `handoffEngine.setPaused(true)`: while paused, relays defer durably (no backoff), suppression does not cancel / interrupt,
+  the repair and the watch-list re-check do not cut, and `maintain()` returns. `setPaused(false)` runs the repair and a
+  maintenance pass for what was deferred.
+- **Repair revalidation at the mutation point.** Under the chain exclusion, right before the cut: the whole chain's in-flight
+  state (requested / generating / starting records, or a fence on ANY member) is checked again, and ownership is re-read with a
+  FRESH strict job-store read (the verdict used a cached one). An unreadable store at that point is no permission.
+- **Chain lock across a split.** `withChainExclusive` recomputes the chain key after acquiring and re-queues on the new key when it
+  moved (bounded to 5 re-keys), so waiters queued under the old chain never run beside callers of the chain a cut produced.
+- **Marker version.** The repair's marker is `taskChildLinks@2`; a store with only the first build's `taskChildLinks` is scanned
+  once more (and gets its watch list).
+- **Bounded arrival draining.** `maintain({limit})` relays at most `limit` queued arrivals per pass, fairly (round-robin across
+  sessions from where the last pass stopped); unreached ones stay queued. Boot recovery drops arrivals of handoffs that never
+  committed and leaves relaying to that paced pass.
+
 - **Interrupt binding — accepted residual race.** The wake evidence (active, then the newest timeline page) is read twice; the
   second read is immediately before the interrupt, and an ambiguous or changed second read leaves the session alone. opencode
   2.0.30 has no conditional interrupt (`POST /session/{id}/interrupt` takes no execution id or precondition), so between the

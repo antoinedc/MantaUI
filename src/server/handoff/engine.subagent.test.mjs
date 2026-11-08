@@ -222,7 +222,7 @@ test("repair: cuts only an ORIGINAL subagent the parent resumed (a user record a
   assert.equal(Object.keys(w.engine._state.records).length, 5, "records are never touched");
   assert.equal(w.changed, 1, "the session graph is told once");
   const disk = JSON.parse(w.disk.json);
-  assert.match(disk.repairs.taskChildLinks, /^\d{4}-\d\d-\d\dT/, "the marker (initial scan done) is persisted with the cut");
+  assert.match(disk.repairs["taskChildLinks@2"], /^\d{4}-\d\d-\d\dT/, "the marker (initial scan done) is persisted with the cut");
   assert.deepEqual(Object.keys(disk.repairs.pendingTaskLinks).sort(), ["U", "W"], "met a–c but not d: watched for a later resume");
   assert.equal(disk.repairs.pendingTaskLinks.W.succ, "W1");
   assert.equal(typeof disk.repairs.pendingTaskLinks.W.since, "number");
@@ -289,8 +289,8 @@ test("repair: anything unreadable leaves the link, the marker unset and the othe
   assert.deepEqual(await w.engine.repairTaskChildLinks(), { split: 1, failed: 1 });
   assert.equal(w.engine._state.links.X, undefined, "the readable one was cut");
   assert.deepEqual(w.engine._state.links.V, link(null, "V1"), "the unreadable one is left");
-  assert.equal(w.engine._state.repairs.taskChildLinks, undefined);
-  assert.equal(JSON.parse(w.disk.json).repairs.taskChildLinks, undefined, "no marker on disk either");
+  assert.equal(w.engine._state.repairs["taskChildLinks@2"], undefined);
+  assert.equal(JSON.parse(w.disk.json).repairs["taskChildLinks@2"], undefined, "no marker on disk either");
   // …and so is a successor that can't be read when its creation time isn't recorded
   w.unreadable.clear();
   w.unreadable.add("V1");
@@ -303,7 +303,7 @@ test("repair: anything unreadable leaves the link, the marker unset and the othe
   w.failReads.clear();
   assert.deepEqual(await w.engine.repairTaskChildLinks(), { split: 1, failed: 0 });
   assert.equal(w.engine._state.links.V, undefined);
-  assert.ok(w.engine._state.repairs.taskChildLinks);
+  assert.ok(w.engine._state.repairs["taskChildLinks@2"]);
 });
 
 test("repair: a deleted successor or predecessor is settled (nothing to cut), not a failure", async () => {
@@ -314,7 +314,7 @@ test("repair: a deleted successor or predecessor is settled (nothing to cut), no
   diskWith(w, { links: { G: link(null, "G1"), G1: link("G", null), H: link(null, "H1"), H1: link("H", null) } });
   w.engine = w.build();
   assert.deepEqual(await w.engine.repairTaskChildLinks(), { split: 0, failed: 0 });
-  assert.ok(w.engine._state.repairs.taskChildLinks);
+  assert.ok(w.engine._state.repairs["taskChildLinks@2"]);
 });
 
 test("repair: an unreadable job store is no evidence — nothing is cut and the marker stays unset", async () => {
@@ -324,7 +324,7 @@ test("repair: an unreadable job store is no evidence — nothing is cut and the 
   assert.equal(out.split, 0);
   assert.ok(out.failed >= 1);
   assert.deepEqual(w.engine._state.links.X, link(null, "X1"));
-  assert.equal(w.engine._state.repairs.taskChildLinks, undefined);
+  assert.equal(w.engine._state.repairs["taskChildLinks@2"], undefined);
 });
 
 test("repair: reads are bounded to 4 at a time and the marker is set even when there is nothing to cut", async () => {
@@ -348,7 +348,7 @@ test("repair: reads are bounded to 4 at a time and the marker is set even when t
   w.engine = w.build({ onLinksChanged: () => void w.changed++ });
   assert.deepEqual(await w.engine.repairTaskChildLinks(), { split: 0, failed: 0 });
   assert.equal(w.changed, 0, "nothing changed: the graph is not poked");
-  assert.ok(w.engine._state.repairs.taskChildLinks);
+  assert.ok(w.engine._state.repairs["taskChildLinks@2"]);
   assert.equal(Object.keys(w.engine._state.links).length, 24);
   assert.equal(peak <= 4, true);
 });

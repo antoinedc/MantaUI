@@ -228,7 +228,11 @@ test("index.mjs: the raw event pump feeds the relay, the delegate engine gets th
   assert.match(index, /handoffEngine\.observeRaw\(raw\)/);
   assert.match(index, /relayBackgroundResult: \(a\) => handoffEngine\.relayBackgroundResult\(a\)/);
   assert.match(index, /handoffEngine\.repairTaskChildLinks\(\)/);
-  assert.match(index, /startPoller\(\(\) => handoffEngine\.maintain\(\), \{ intervalMs: 60_000, label: "handoff", immediate: false \}\)/);
+  assert.match(index, /startPoller\(\(\) => handoffEngine\.maintain\(\), \{ intervalMs: 60_000, label: "handoff", immediate: false \}\)\.stop/);
+  // the maintenance poller is in the upgrade's pause/resume list, and pausing also pauses the engine
+  assert.match(index, /upgradePausable = \{[^}]*handoff: pauseHandoffMaintenance/);
+  assert.match(index, /handoffEngine\.setPaused\(true\)/);
+  assert.match(index, /resumeHandoffMaintenance\(\);\s*upgradePausable\.handoff = pauseHandoffMaintenance;/);
 });
 
 test("the production assembly gives the engine the STRICT message read (404 vs failure)", async () => {
@@ -272,8 +276,8 @@ test("repair via the wiring: a malformed job store is no evidence — nothing is
   assert.equal(out.split, 0);
   assert.ok(out.failed >= 1);
   assert.deepEqual(engine._state.links.X, linkOf(null, "X1"));
-  assert.equal(engine._state.repairs.taskChildLinks, undefined);
-  assert.equal(f.disk.json && JSON.parse(f.disk.json).repairs?.taskChildLinks, undefined);
+  assert.equal(engine._state.repairs["taskChildLinks@2"], undefined);
+  assert.equal(f.disk.json && JSON.parse(f.disk.json).repairs?.["taskChildLinks@2"], undefined);
 });
 
 test("repair via the wiring: a store that isn't a { jobs: [] } document is no evidence either", async () => {
@@ -290,5 +294,5 @@ test("repair via the wiring: a readable store naming the chain keeps the link; a
   const absent = repairBox({});
   assert.deepEqual(await absent.engine.repairTaskChildLinks(), { split: 1, failed: 0 });
   assert.equal(absent.engine._state.links.X, undefined);
-  assert.ok(absent.engine._state.repairs.taskChildLinks);
+  assert.ok(absent.engine._state.repairs["taskChildLinks@2"]);
 });

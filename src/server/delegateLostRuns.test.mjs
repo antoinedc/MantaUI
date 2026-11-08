@@ -3,6 +3,7 @@
 // observations. Every opencode / tmux / git call is a fake; nothing live.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { createWorld as createHandoffWorld, readyRecord as handoffReadyRecord, settle as handoffSettle } from "./handoff/testWorld.mjs";
 import { settleV2Job, reconcileV2Jobs, LOST_RUN_GRACE_MS, LOST_RUN_MESSAGE, BORN_SLACK_MS, _resetLostRuns } from "./delegate.mjs";
 
 const T0 = 1_700_000_000_000;
@@ -440,10 +441,9 @@ test("relay backstop: an opencode-owned run whose parent was handed off asks for
 
   const live = ownedWorld({ synthetics: [synthetic("failed", "boom")] });
   const liveRelays = [];
-  live.deps.successorOf = () => null;
-  live.deps.relayBackgroundResult = async (a) => { liveRelays.push(a); };
+  live.deps.relayBackgroundResult = async (a) => { liveRelays.push(a); return { relayed: false, reason: "live" }; };
   await settle(live);
-  assert.deepEqual(liveRelays, [], "a live parent is left alone");
+  assert.deepEqual(liveRelays, [{ sessionId: PARENT, childSessionId: CHILD }], "the engine is asked and decides (live / fenced / replaced) — the caller keeps no guard of its own");
 
   const owned = world();
   Object.assign(owned.child(), { outcome: "succeeded", time: { created: T0, idle: T0 + 50, updated: T0 + 50 } });
@@ -452,6 +452,42 @@ test("relay backstop: an opencode-owned run whose parent was handed off asks for
   owned.deps.relayBackgroundResult = async (a) => { ownedRelays.push(a); };
   await settle(owned);
   assert.deepEqual(ownedRelays, [], "Manta posts its own results; nothing to relay");
+});
+
+test("relay backstop, end to end through settlement: the enqueue event was missed, the child settles DURING the parent's handoff fence, and after the commit the successor receives the result once", async () => {
+  // a REAL handoff engine over its fake world, parked inside the fence (after the successor exists, before the commit)
+  const hw = createHandoffWorld({ mode: "off" });
+  hw.addSession(PARENT);
+  hw.addWindow("proj", 3, "work", PARENT);
+  let open;
+  const parked = new Promise((r) => (open = r));
+  let reachedFence;
+  const reached = new Promise((r) => (reachedFence = r));
+  hw.engine = hw.build({ hooks: { step: async (n) => { if (n === "create") { reachedFence(); await parked; } } } });
+  const card = await handoffReadyRecord(hw, { sessionId: PARENT });
+  const started = hw.engine.start(card.id, { how: "clear", disposition: "send" });
+  await reached;
+  assert.ok(hw.engine._state.fences[PARENT], "the parent is fenced");
+  // opencode already posted the result to the parent (no enqueue event reached the engine)
+  const posted = { ...synthetic("failed", "boom"), id: "msg_missed_result" };
+  hw.timelines.set(PARENT, [{ id: "msg_idle0", type: "idle", time: { created: 1 } }, posted]);
+
+  // the delegate engine settles the opencode-owned child, wired as in index.mjs
+  const w = ownedWorld({ synthetics: [posted] });
+  w.deps.successorOf = (sid) => hw.engine.successorOf(sid); // null while fenced: the guard the caller used to keep
+  w.deps.relayBackgroundResult = (a) => hw.engine.relayBackgroundResult(a);
+  assert.equal((await settle(w)).settled, true);
+  await handoffSettle(10);
+  assert.equal(hw.engine._state.arrivals[PARENT]?.length, 1, "the settlement reached the engine, which recorded it for the commit");
+
+  open();
+  const out = await started;
+  await handoffSettle(10);
+  assert.equal(out.state, "committed");
+  const copies = hw.posts.filter((p) => p.kind === "synthetic" && p.target === out.successorId);
+  assert.equal(copies.length, 1, "the successor received the result exactly once");
+  assert.equal(copies[0].args.metadata.relayedMessageId, "msg_missed_result");
+  assert.equal(hw.posts.filter((p) => p.kind === "synthetic" && p.target === PARENT).length, 0);
 });
 
 test("relay backstop: a failing relay is logged, never thrown, and the record still settles", async () => {

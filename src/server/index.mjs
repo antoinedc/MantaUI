@@ -1474,6 +1474,22 @@ onCommandWindowClosed = (w) => delegateEngine.windowClosed(w);
 //      started while this server was down), then its poller starts — never before recovery is done.
 // Assigned once the chain reaches the last step; the upgrade pause/resume at the bottom reads it.
 let stopDelegateReconciler = null;
+// The handoff engine's maintenance poller. Part of the upgrade's pause/resume list (below): while the box migrates opencode the
+// engine is PAUSED too (it defers every post / cancel / interrupt / link cut) and the poller stops.
+let stopHandoffMaintenance = null;
+function startHandoffMaintenance() {
+  stopHandoffMaintenance?.();
+  stopHandoffMaintenance = startPoller(() => handoffEngine.maintain(), { intervalMs: 60_000, label: "handoff", immediate: false }).stop;
+}
+function pauseHandoffMaintenance() {
+  handoffEngine.setPaused(true);
+  stopHandoffMaintenance?.();
+  stopHandoffMaintenance = null;
+}
+function resumeHandoffMaintenance() {
+  startHandoffMaintenance();
+  handoffEngine.setPaused(false); // runs the repair and a maintenance pass for what was deferred
+}
 (async () => {
   try {
     await handoffEngine.recover();
@@ -1485,7 +1501,7 @@ let stopDelegateReconciler = null;
   // sessions with bounded concurrency and must not delay the recovery steps below.
   handoffEngine.repairTaskChildLinks().catch((e) => console.warn("[handoff] subagent link repair failed:", e?.message ?? e));
   // The engine's periodic maintenance: unresolved relays, watched subagent links, leftover arrivals, expiry. Bounded per pass.
-  startPoller(() => handoffEngine.maintain(), { intervalMs: 60_000, label: "handoff", immediate: false });
+  startHandoffMaintenance();
   try {
     await delegateEngine.reconcileV2();
   } catch (e) {
@@ -6569,7 +6585,7 @@ const handleRequest = async (req, res) => {
 // Durable, resumable state machine (src/server/upgradeV2.mjs). While it runs the box is in UPGRADE
 // MODE (see the gate right after the auth gate in handleRequest). Pausing background work = stopping
 // the three pollers that start turns / jobs on their own; resuming re-creates them.
-const upgradePausable = { schedule: stopSchedulePoller, routines: stopRoutinesPoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.() };
+const upgradePausable = { schedule: stopSchedulePoller, routines: stopRoutinesPoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.(), handoff: pauseHandoffMaintenance };
 const upgradeV2 = createUpgradeV2(
   createUpgradeDeps({
     mantaHome: PROJECT_ROOT,
@@ -6596,6 +6612,8 @@ const upgradeV2 = createUpgradeV2(
         upgradePausable.activity = delegateEngine.startActivityPoller().stop;
         stopDelegateReconciler = delegateEngine.startActiveSessionReconciler().stop;
         upgradePausable.reconciler = () => stopDelegateReconciler?.();
+        resumeHandoffMaintenance();
+        upgradePausable.handoff = pauseHandoffMaintenance;
       },
     },
   }),

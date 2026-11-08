@@ -3134,12 +3134,14 @@ async function readParentResultText(job, deps, { sinceMs = null } = {}) {
 }
 
 // opencode posts a background result to the session that launched it; when that session has since been handed
-// off, the result belongs to its live successor. Fire-and-forget: this is a reconcile, not a user action.
+// off — or its handoff is in flight (fenced) — the result belongs to its live successor. The handoff engine decides which
+// of live / fenced / replaced the parent is (and answers a live, unfenced one before doing any I/O), so there is no guard
+// here: a guard on "already replaced" is exactly what kept a fenced parent from ever reaching it.
+// Fire-and-forget: this is a reconcile, not a user action.
 function relayResultFromRetiredParent(job, deps) {
   const parent = job.sessionParentID;
   if (!parent || typeof deps.relayBackgroundResult !== "function") return;
   try {
-    if (!deps.successorOf?.(parent)) return;
     Promise.resolve(deps.relayBackgroundResult({ sessionId: parent, childSessionId: job.childSessionID })).catch((e) =>
       console.warn(`[delegate] relaying the result of ${job.id} off a retired session failed:`, e?.message ?? e));
   } catch (e) {

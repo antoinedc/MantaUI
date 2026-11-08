@@ -424,6 +424,7 @@ test("boot recovery: an arrival whose link now exists is relayed; one whose hand
   });
   w.engine = w.build();
   await w.engine.recover();
+  await settle(10); // the paced maintenance pass recovery starts
   assert.equal(synthPosts(w, NEW).length, 1, "the committed one is relayed");
   assert.equal(synthPosts(w, "ses_live").length, 0);
   assert.deepEqual(w.engine._state.arrivals, {}, "consumed / dropped");
