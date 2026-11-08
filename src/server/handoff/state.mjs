@@ -9,6 +9,11 @@
 //   dismissedSessions  session -> when the user dismissed its handoff suggestions
 //   sessionModes       session -> its own handoff mode (absent = the box default)
 //   repairs            one-time data repairs already done -> the ISO time they completed
+//   successors         session -> true for every session Manta made as a handoff successor (durable provenance:
+//                      never pruned with the records, so "original or Manta-made" survives record retention)
+//   arrivals           fenced session -> background results that landed on it during a handoff transition
+//                      (relayed to the successor at commit, dropped at rollback)
+//   relays             relay id -> { admitted, suppressed, at, from, original } (durable relay idempotency)
 
 import { randomBytes } from "node:crypto";
 import { HANDOFF_MODES } from "./policy.mjs";
@@ -18,7 +23,7 @@ export const RECORD_RETENTION_MAX = 500;
 export const TERMINAL_STATES = Object.freeze(["committed", "failed", "cancelled", "dismissed"]);
 
 export function emptyState() {
-  return { version: 1, records: {}, links: {}, continuations: {}, fences: {}, held: {}, dismissedSessions: {}, sessionModes: {}, repairs: {} };
+  return { version: 1, records: {}, links: {}, continuations: {}, fences: {}, held: {}, dismissedSessions: {}, sessionModes: {}, repairs: {}, successors: {}, arrivals: {}, relays: {} };
 }
 
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
@@ -40,7 +45,58 @@ export function normalizeState(raw) {
   if (isObj(raw.repairs)) {
     for (const [k, v] of Object.entries(raw.repairs)) if (typeof v === "string" && v) s.repairs[k] = v;
   }
+  if (isObj(raw.successors)) {
+    for (const [k, v] of Object.entries(raw.successors)) if (v === true) s.successors[k] = true;
+  }
+  if (isObj(raw.arrivals)) {
+    for (const [k, v] of Object.entries(raw.arrivals)) {
+      const list = (Array.isArray(v) ? v : []).filter((a) => isObj(a) && typeof a.id === "string" && a.id).map((a) => ({
+        id: a.id,
+        ...(typeof a.text === "string" ? { text: a.text } : {}),
+        ...(typeof a.description === "string" ? { description: a.description } : {}),
+        metadata: isObj(a.metadata) ? a.metadata : {},
+        at: typeof a.at === "number" && Number.isFinite(a.at) ? a.at : 0,
+      }));
+      if (list.length > 0) s.arrivals[k] = list;
+    }
+  }
+  if (isObj(raw.relays)) {
+    for (const [k, v] of Object.entries(raw.relays)) {
+      if (!isObj(v) || typeof v.at !== "number" || !Number.isFinite(v.at)) continue;
+      s.relays[k] = {
+        admitted: v.admitted === true,
+        suppressed: RELAY_SUPPRESSED.includes(v.suppressed) ? v.suppressed : null,
+        at: v.at,
+        ...(typeof v.from === "string" ? { from: v.from } : {}),
+        ...(typeof v.original === "string" ? { original: v.original } : {}),
+      };
+    }
+  }
   return s;
+}
+
+/** How a relay kept the retired session from acting on its copy (null = not settled yet, retried by a later detection). */
+export const RELAY_SUPPRESSED = Object.freeze(["cancelled", "interrupted", "idle", "left"]);
+export const RELAY_RETENTION_MS = 7 * 24 * 3600_000;
+export const RELAY_MAX = 2000;
+
+/** PURE. Drop relay entries older than 7 days, then the oldest beyond the cap. @returns {number} how many were removed */
+export function pruneRelays(state, now, { maxAge = RELAY_RETENTION_MS, max = RELAY_MAX } = {}) {
+  let removed = 0;
+  for (const [id, r] of Object.entries(state.relays)) {
+    if (now - r.at > maxAge) {
+      delete state.relays[id];
+      removed++;
+    }
+  }
+  const ids = Object.keys(state.relays);
+  if (ids.length > max) {
+    for (const id of ids.sort((a, b) => state.relays[a].at - state.relays[b].at).slice(0, ids.length - max)) {
+      delete state.relays[id];
+      removed++;
+    }
+  }
+  return removed;
 }
 
 /** `hof_` + 20 base36 characters (§15). */

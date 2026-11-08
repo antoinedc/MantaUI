@@ -207,7 +207,33 @@ End-to-end check on the sandboxed binary (retired parent `P` linked to live `L`,
 result landed in `L` as a `synthetic` (relayed metadata) and `L` ran a turn on it; `P`'s woken turn ended
 `idle: interrupted`; `P` had no other result.
 
-Not covered (flagged, not built): a result that opencode posts to the predecessor in the window between a handoff's fence
-and its commit (the link does not exist yet, so it lands on the predecessor and is not relayed by the event path); the
-delegate-side backstop (`relayBackgroundResult`, worker D) only acts once the link exists, so it covers that window only
-if the record settles after the commit.
+### Fix round (review findings) — what the implementation now does
+
+- **Provenance.** `state.successors { [sid]: true }` is written with the link at commit (replacement and branch), backfilled
+  synchronously at every start from `links[x].replaces` / `branchedFrom` and committed records' `successorId`, and never pruned
+  with the records. The live policy (agent refusal, `maybeAuto` skip) treats a session in it as NOT a task child.
+- **Repair rule.** A link `pred → succ` is cut only when (a) `pred` is an original (not in the set, nothing replaced into it),
+  (b) it has an opencode parent, (c) no Manta-owned job record names ANY session of `pred`'s replacement chain (a delegate job's
+  `childSessionID` is repointed to the successor at commit, so "no record names pred" is not evidence), and (d) `pred`'s
+  `max(time.updated, time.idle)` is more than 60 s after the successor was created (`internal.successorCreatedAt`, else the
+  successor session's `time.created`) — the parent kept driving the original. A deleted pred/successor is settled (keep);
+  anything unreadable, including the job store, skips the link and leaves the marker unset. The job store is read STRICTLY
+  (`handoff/jobStore.mjs`: an absent file is empty; unreadable / unparsable / not `{jobs:[]}` throws).
+- **Arrivals during a fence.** A subagent synthetic enqueued on a session with `state.fences[sid]` is recorded in
+  `state.arrivals[sid]` (persisted, ≤ 50). At commit (replacement) each is relayed through the normal relay path; at rollback /
+  abort-to-ready they are dropped; boot recovery relays those whose link exists and drops those of a handoff that never committed.
+- **Durable relay state.** `state.relays[relayId] = { admitted, suppressed, at, from, original }`, pruned after 7 days and capped
+  at 2 000. Before posting, the destination is asked for the deterministic id (held queue, inbox + message by id, newest timeline
+  page); present ⇒ no POST. `admitted` and `suppressed` are separate: a relay whose suppression is unsettled (`null`) is retried
+  by a later detection without reposting.
+- **Cancel is not proof.** After `DELETE /inbox/{id}` the outcome comes from opencode's own evidence, as in the stream interpreter's
+  `cancelInbox`: `session.inbox.cancelled` seen on the raw stream ⇒ `cancelled`; `session.inbox.delivered` or the message existing
+  ⇒ delivered (the execution check then decides); neither within 1.5 s ⇒ unknown (suppression stays open, nothing is interrupted).
+  Verified on the pinned binary: a result queued behind a running turn is pending in the inbox, the cancel emits
+  `session.inbox.cancelled`, and the retired session's timeline never gets the record.
+- **Interrupt binding.** The wake evidence (active, then the newest timeline page) is read twice; the second read is immediately
+  before the interrupt, and an ambiguous or changed second read leaves the session alone. opencode has no conditional interrupt
+  (`POST /session/{id}/interrupt` takes no execution id), so the window between the second read and the interrupt landing
+  (two round trips on one box) remains: an execution that ends and a new one that starts inside it would be interrupted.
+
+The fence-to-commit window is now covered by the arrivals record above.

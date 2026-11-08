@@ -33,6 +33,9 @@ export function createWorld({ mode = "auto" } = {}) {
     cancelled: [], // [sid, inboxId] of every cancelInboxItem
     timelines: new Map(), // sid -> raw timeline records (chronological)
     timelineReads: [],
+    emit: null, // (rawEvent) => void: where the fake opencode publishes its raw events (a test points it at engine.observeRaw)
+    onCancel: null, // async (sid, inboxId) => void: replaces the fake cancel
+    beforeTimeline: null, // async (sid, opts, nthRead) => void, run before every raw timeline read answers
     jobs: [], // the delegate job records the engine's loadJobs dep returns
     unreadable: new Set(), // sessions whose read answers "unknown" (opencode unreachable for them)
     beforeRead: null, // async (sid) => void, run at the start of every readSession
@@ -128,10 +131,13 @@ export function createWorld({ mode = "auto" } = {}) {
     listInbox: async (id) => w.inbox.get(id) ?? [],
     cancelInboxItem: async (sid, inboxId) => {
       w.cancelled.push([sid, inboxId]);
+      if (w.onCancel) return w.onCancel(sid, inboxId); // a test's own race (the item was delivered meanwhile, …)
       w.inbox.set(sid, (w.inbox.get(sid) ?? []).filter((i) => i.id !== inboxId));
+      w.emit?.({ type: "session.inbox.cancelled", data: { sessionID: sid, inboxID: inboxId } }); // opencode's evidence for a real cancel
     },
     listRawTimeline: async (sid, opts = {}) => {
       w.timelineReads.push([sid, opts]);
+      await w.beforeTimeline?.(sid, opts, w.timelineReads.length);
       if (w.failures.timeline) throw new Error("timeline unreadable");
       const all = w.timelines.get(sid) ?? [];
       return opts.type ? all.filter((r) => r.type === opts.type) : all;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RECORD_RETENTION_MAX, RECORD_RETENTION_MS, continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord, rewriteAvailable, rewriteBlockedReason } from "./state.mjs";
+import { RECORD_RETENTION_MAX, RECORD_RETENTION_MS, continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord, rewriteAvailable, rewriteBlockedReason, pruneRelays, RELAY_MAX } from "./state.mjs";
 
 const DAY = 24 * 3600_000;
 const rec = (id, state, updatedAt, successorId) => ({ id, fromSessionId: "ses_p", kind: "auto", trigger: "auto", state, text: "t", createdAt: updatedAt, updatedAt, successorId, internal: { secret: 1 } });
@@ -109,4 +109,29 @@ test("publicRecord / publicEvent carry writer, rewriteEstimate and a boolean can
   assert.deepEqual(e.rewriteEstimate, est);
   assert.equal(publicEvent({ ...r, state: "generating" }).canRewrite, false);
   assert.equal(publicEvent(rec("r2", "ready", 5)).canRewrite, false);
+});
+
+test("normalizeState keeps the durable provenance / arrivals / relay maps and drops malformed entries", () => {
+  const s = normalizeState({
+    successors: { a: true, b: false, c: "yes" },
+    arrivals: { p: [{ id: "m1", text: "t", metadata: { x: 1 }, at: 5 }, { text: "no id" }, null], q: [], r: "bad" },
+    relays: { ok: { admitted: true, suppressed: "interrupted", at: 9, from: "p", original: "m1" }, odd: { admitted: "yes", suppressed: "weird", at: 1 }, nope: { at: "x" }, bad: 3 },
+  });
+  assert.deepEqual(s.successors, { a: true });
+  assert.deepEqual(s.arrivals, { p: [{ id: "m1", text: "t", metadata: { x: 1 }, at: 5 }] });
+  assert.deepEqual(s.relays, { ok: { admitted: true, suppressed: "interrupted", at: 9, from: "p", original: "m1" }, odd: { admitted: false, suppressed: null, at: 1 } });
+});
+
+test("pruneRelays drops entries older than 7 days and the oldest beyond the cap", () => {
+  const day = 24 * 3600_000;
+  const s = emptyState();
+  s.relays.old = { admitted: true, suppressed: null, at: 0 };
+  s.relays.fresh = { admitted: true, suppressed: null, at: 7 * day };
+  assert.equal(pruneRelays(s, 8 * day), 1);
+  assert.deepEqual(Object.keys(s.relays), ["fresh"]);
+  const big = emptyState();
+  for (let i = 0; i < RELAY_MAX + 3; i++) big.relays[`r${i}`] = { admitted: true, suppressed: null, at: 1000 + i };
+  assert.equal(pruneRelays(big, 2000), 3);
+  assert.equal(big.relays.r0, undefined);
+  assert.ok(big.relays[`r${RELAY_MAX + 2}`]);
 });

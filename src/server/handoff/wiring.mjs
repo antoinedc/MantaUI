@@ -4,6 +4,7 @@
 // the boot, e.g. the delegate engine), so nothing here runs at import time.
 
 import { createHandoffEngine } from "./engine.mjs";
+import { readJobsStrict } from "./jobStore.mjs";
 import { extractEditedFiles, extractLastReply, extractTestRun, extractTodos, extractUserRequests, lastUserMessageAt } from "./text.mjs";
 import { normalizeMode } from "./policy.mjs";
 import { selectLatestTokenUsage } from "../../shared/streamInterpretation.mjs";
@@ -20,6 +21,7 @@ import { parseGitStatus } from "../peers.mjs";
  * @param {(providerID: string, modelID: string) => number|null} p.contextLimitFor
  * @param {{ snapshot: () => Promise<any> }} p.constraints  the optimizer constraint store
  * @param {(sid: string, opts?: { messages?: any[] }) => Promise<void>} p.extractConstraints
+ * @param {string} [p.jobStorePath]  the delegate job store file the repair reads strictly (default: the box's own)
  * @param {() => void} [p.onLinksChanged]  a replacement link was cut by the repair: re-read the session graph
  * @param {() => any} p.loadState  synchronous read of handoffs.json
  * @param {(snapshot: any) => Promise<void>} p.saveState
@@ -101,6 +103,8 @@ export function createProductionHandoff(p) {
     jobStatusOf: (sid) => p.delegate().jobStatusOf(sid),
     isJobSession: (sid) => p.delegate().isRunningJobSession(sid),
     loadJobs: () => p.delegate().loadRecords(),
+    // The repair's evidence: the job store read strictly (an unreadable file is an error, not "no jobs").
+    loadJobsStrict: async () => readJobsStrict(p.jobStorePath),
     onLinksChanged: () => p.onLinksChanged?.(),
     gather: {
       measureContext: async (sid) => {
