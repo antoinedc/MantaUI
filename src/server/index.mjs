@@ -1406,9 +1406,11 @@ const closeViewWindow = createViewWindowCloser({
   refresh: () => syncState.refreshNow(),
   chainOf: (sid) => handoffEngine.chainOf(sid),
   canonicalSessionOf: (sid) => sessionStatusRef.current?.canonicalSessionOf(sid) ?? sid,
+  withChainExclusive: (sid, fn) => handoffEngine.withChainExclusive(sid, fn),
 });
 const sessionStatus = createSessionStatus({
   closeViewWindow,
+  armViewWindow: ({ project, windowIndex }) => tmux.stampViewArmed(project, windowIndex),
   linkOf: (sid) => sessionLinks.linkOf(sid),
   linkEndpoints: () => sessionLinks.endpoints(),
   // Unknown reads retain an edge; only confirmed deletion prunes it. Hydration already reads these candidates.

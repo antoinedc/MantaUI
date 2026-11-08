@@ -23,6 +23,7 @@ import {
   setWindowOption,
   getWindowOption,
   stampOwner,
+  stampViewArmed,
   rebaseHolder,
   resolveOwner,
   findWindowForCwd,
@@ -1247,4 +1248,27 @@ test("maybeCreateChatSession: a hung opencode times out (so it cannot hold the a
   // The fast path is untouched, and a non-chat create makes nothing.
   assert.equal(await maybeCreateChatSession({ createSession: async () => ({ id: "ses_ok" }) }, true, "/x", ""), "ses_ok");
   assert.equal(await maybeCreateChatSession(oc, false, "/x", ""), null);
+});
+
+test("parseSessions reads @manta-view-armed as viewArmed, present only when armed", () => {
+  const wins =
+    "Capo\t1\tviewer\t0\t/p\tses_a\t\tview\t1\n" +   // armed viewer
+    "Capo\t2\tviewer2\t0\t/p\tses_b\t\tview\t\n" +   // unarmed viewer
+    "Capo\t3\told\t0\t/p\tses_c\t\tview\n" +          // no 9th column at all
+    "Capo\t4\tjunk\t0\t/p\tses_d\t\tview\t0";          // anything but 1 is unarmed
+  const cap = parseSessions("Capo\t1", wins).find((p) => p.tmuxSession === "Capo");
+  const byIndex = (i) => cap.windows.find((w) => w.index === i);
+  assert.equal(byIndex(1).viewArmed, true);
+  for (const i of [2, 3, 4]) assert.equal("viewArmed" in byIndex(i), false, `window ${i}`);
+});
+
+test("stampViewArmed sets @manta-view-armed to 1 on the window", async () => {
+  const cmds = [];
+  _setRun(async (cmd, args) => { cmds.push({ cmd, args }); return { stdout: "", stderr: "" }; });
+  try {
+    await stampViewArmed("proj", 5);
+  } finally {
+    _setRun(null);
+  }
+  assert.deepEqual(cmds.find((c) => c.args.includes("set-window-option")).args, ["set-window-option", "-t", "proj:5", "@manta-view-armed", "1"]);
 });

@@ -718,19 +718,20 @@ export function buildHandlers({
     return rest;
   }
   // The user's own send into a session: a viewer window showing it (any member of its handoff chain) becomes
-  // the user's, so the box never closes it. Awaited before the send goes out; never blocks it.
+  // the user's, so the box never closes it. Awaited before the send goes out; never blocks it. Ordered like
+  // sessions:materialize (chain exclusion, then the session lock, live window stamps).
   async function keepViewWindowsOpen(sessionId) {
     if (typeof sessionId !== "string" || !sessionId) return;
-    const listProjects =
-      typeof syncState?.snapshot === "function" ? async () => syncState.snapshot().projects
-        : typeof tmux?.listProjects === "function" ? () => tmux.listProjects()
-          : null;
-    if (!listProjects || typeof tmux?.stampOwner !== "function") return;
+    if (typeof tmux?.listProjects !== "function" || typeof tmux?.stampOwner !== "function") return;
     try {
-      const promoted = await promoteViewWindows([sessionId, ...(handoff?.chainOf?.(sessionId) ?? [])], {
-        listProjects,
+      const promoted = await promoteViewWindows(sessionId, {
+        peekProjects: typeof syncState?.snapshot === "function" ? async () => syncState.snapshot().projects : undefined,
+        listProjects: () => tmux.listProjects(),
         stampOwner: (...a) => tmux.stampOwner(...a),
-        lockKey: sessionStatus?.canonicalSessionOf?.(sessionId) ?? sessionId,
+        chainOf: (sid) => handoff?.chainOf?.(sid) ?? [],
+        canonicalSessionOf: (sid) => sessionStatus?.canonicalSessionOf?.(sid) ?? sid,
+        withChainExclusive: handoff?.withChainExclusive ? (sid, fn) => handoff.withChainExclusive(sid, fn) : undefined,
+        refresh: () => syncState?.refreshNow?.(),
       });
       if (promoted > 0) await Promise.resolve(syncState?.refreshNow?.()).catch(() => {});
     } catch (e) {

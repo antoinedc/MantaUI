@@ -2654,7 +2654,13 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       console.warn("[delegate] listMessages failed:", e?.message ?? e);
     }
     if (job.worktree && deps.gitRun) filesChanged = await countFilesChanged(job, deps);
-    if (!result && resultFallback) result = resultFallback;
+    if (!result && typeof resultFallback === "function") {
+      try {
+        result = (await resultFallback()) || null;
+      } catch (e) {
+        console.warn("[delegate] result fallback failed:", e?.message ?? e);
+      }
+    }
   }
 
   let paused = null;
@@ -3061,14 +3067,22 @@ const BACKGROUND_RESULT_MAX_CHARS = 2_000;
 /**
  * The instant the run this opencode-owned record describes began. Manta first sees a run some time after it
  * started, so a child created for it (within BORN_SLACK_MS of that sighting) began at its own creation — an
- * outcome from before the sighting is then still THIS run's. An older, resumed session keeps the sighting time:
- * its previous outcome must not finish the new record.
+ * outcome from before the sighting is then still THIS run's. That holds only for a PROVABLE first run: attempt 1,
+ * continuing nothing, and no other record of the child in the store (a resumed session's earlier outcome must
+ * never finish its new record, however recently the session was created). Anything unprovable keeps the sighting time.
  */
-function effectiveRunStart(job, session, manta) {
+async function effectiveRunStart(job, session, manta, deps) {
   if (manta || job.runStartedAt == null) return job.runStartedAt ?? null;
   const created = session?.time?.created;
-  if (Number.isFinite(created) && created >= job.runStartedAt - BORN_SLACK_MS) return Math.min(job.runStartedAt, created);
-  return job.runStartedAt;
+  if (!(Number.isFinite(created) && created >= job.runStartedAt - BORN_SLACK_MS)) return job.runStartedAt;
+  if ((job.attempt ?? 1) !== 1 || job.continues != null) return job.runStartedAt;
+  try {
+    const records = (await (deps.load ?? loadJobs)()) ?? [];
+    if (records.some((j) => j.childSessionID === job.childSessionID && j.id !== job.id)) return job.runStartedAt;
+  } catch {
+    return job.runStartedAt;
+  }
+  return Math.min(job.runStartedAt, created);
 }
 
 /** The text opencode posted to the parent for this child's run (the newest synthetic since `sinceMs`), or null. */
@@ -3171,7 +3185,7 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   // Which run does this outcome belong to? A Manta job: one at/after its submission. A session
   // opencode runs: one at/after the moment THIS run was first seen — a resumed session's
   // previous outcome must not finish its new record.
-  const runStart = effectiveRunStart(job, session, manta);
+  const runStart = await effectiveRunStart(job, session, manta, deps);
   const fresh =
     !manta && runStart != null
       ? idleAt != null && idleAt >= runStart
@@ -3210,14 +3224,14 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   }
   const t = outcomeToTerminal(outcome, { error: hint?.error });
   if (!t) return { settled: false, reason: "no-outcome" };
-  // A session opencode runs reports its own result to its parent: the real error / result text lives there.
+  // A session opencode runs reports its own result to its parent: the real error / result text lives there. Read
+  // only when needed: a failed run with no raw error now, a done run only if the child yields no text of its own.
   let resultFallback = null;
-  if (!manta && (t.status === "done" || (outcome === "failed" && !hint?.error))) {
+  if (!manta && outcome === "failed" && !hint?.error) {
     const body = await readParentResultText(job, deps, { sinceMs: runStart });
-    if (body) {
-      if (t.status === "done") resultFallback = body.slice(0, BACKGROUND_RESULT_MAX_CHARS);
-      else t.error = body.slice(0, BACKGROUND_ERROR_MAX_CHARS);
-    }
+    if (body) t.error = body.slice(0, BACKGROUND_ERROR_MAX_CHARS);
+  } else if (!manta && t.status === "done") {
+    resultFallback = async () => (await readParentResultText(job, deps, { sinceMs: runStart }))?.slice(0, BACKGROUND_RESULT_MAX_CHARS) ?? null;
   }
   // A delegate job has run only once the child holds the user message its opening
   // prompt became: an outcome without one belongs to something else (a move-applying
