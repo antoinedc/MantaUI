@@ -63,12 +63,18 @@ export const SUBSCRIPTION_PROVIDERS = [
     id: "openai",
     label: "Codex",
     plan: "ChatGPT Plus / Pro",
-    // Headless FIRST and deliberately: the browser variant redirects to
-    // localhost:1455 ON THE BOX, which is unreachable from the user's laptop
-    // or phone. Never let the browser variant win.
+    // ONLY the device-code flow works from a remote box. Every other ChatGPT
+    // sign-in redirects to a localhost callback ON THE BOX, unreachable from
+    // the user's laptop or phone: "Codex browser (legacy)" (localhost:1455)
+    // and, since opencode 2.0.30, "Sign in with ChatGPT"
+    // (`chatgpt-token-sharing`, 127.0.0.1:<random>/auth/callback). There is
+    // deliberately NO generic "chatgpt" rule — it would pick one of those.
+    // Matched by stable id first; the labels cover older/newer releases
+    // ("ChatGPT Pro/Plus (headless)" → "Codex device code (legacy)").
     prefer: [
+      { type: "oauth", id: "chatgpt-headless" },
+      { type: "oauth", match: "device code" },
       { type: "oauth", match: "headless" },
-      { type: "oauth", match: "chatgpt" },
     ],
     detect: [],
     console: null,
@@ -116,7 +122,8 @@ export function findSubscriptionProvider(id) {
  *      prompt flows are out of scope for this epic (see BET-308). A
  *      provider whose only methods are discarded resolves to `null`.
  *   3. Walk `entry.prefer` in order. For each rule, return the first
- *      surviving method whose `type` equals the rule's `type` and whose
+ *      surviving method whose `type` equals the rule's `type` and either
+ *      whose `id` equals the rule's `id` (when the rule has one) or whose
  *      `label`, lowercased, contains the rule's `match`, lowercased.
  *   4. Otherwise, fall back to the first surviving method with
  *      `type === "api"`.
@@ -139,9 +146,14 @@ export function resolveAuthMethod(entry, methods) {
   // Prefer rules first (in registry order).
   for (const rule of entry?.prefer ?? []) {
     const wantType = rule?.type;
+    const wantId = typeof rule?.id === "string" ? rule.id : null;
     const wantMatch = String(rule?.match ?? "").toLowerCase();
     for (const { m, i } of surviving) {
       if (m?.type !== wantType) continue;
+      if (wantId != null) {
+        if (m?.id === wantId) return { index: i, method: m };
+        continue;
+      }
       const label = String(m?.label ?? "").toLowerCase();
       if (label.includes(wantMatch)) return { index: i, method: m };
     }

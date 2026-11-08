@@ -686,7 +686,7 @@ test("opencode:provider-auth start keeps oauth-auto for non-anthropic with empty
   // Belt-and-braces: an "empty url" response from opencode for a
   // non-anthropic provider is NOT the Claude-specific path — we fall
   // through to the regular oauth-auto shape. Use openai (which has
-  // prefer rules for "headless" / "chatgpt", not the empty-URL Claude
+  // prefer rules for the device-code flow, not the empty-URL Claude
   // special case) with an oauth method that DOES match openai's prefer
   // rule so resolveAuthMethod returns a non-null result and we
   // actually exercise describeConnectShape's branch.
@@ -695,7 +695,7 @@ test("opencode:provider-auth start keeps oauth-auto for non-anthropic with empty
     ok: true,
     methods: {
       openai: [
-        { type: "oauth", label: "ChatGPT Pro/Plus (browser)" },
+        { type: "oauth", label: "Codex device code (legacy)" },
       ],
     },
   });
