@@ -3,7 +3,7 @@
 // observations. Every opencode / tmux / git call is a fake; nothing live.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { settleV2Job, reconcileV2Jobs, LOST_RUN_GRACE_MS, LOST_RUN_MESSAGE, _resetLostRuns } from "./delegate.mjs";
+import { settleV2Job, reconcileV2Jobs, LOST_RUN_GRACE_MS, LOST_RUN_MESSAGE, BORN_SLACK_MS, _resetLostRuns } from "./delegate.mjs";
 
 const T0 = 1_700_000_000_000;
 const PARENT = "ses_parent";
@@ -298,4 +298,166 @@ test("the sweep's reconcile drives it: two passes a grace apart end the job", as
   await reconcileV2Jobs(w.deps);
   assert.equal(w.job().status, "failed");
   assert.equal(w.job().error, LOST_RUN_MESSAGE);
+});
+
+// ---- opencode-owned runs: born-for-this-run freshness, real error text, relay backstop ----
+const CREATED = 1_794_154_339_553; // the live-box case: a child that failed within a second of its creation
+const IDLE = 1_794_154_339_764;
+const SEEN = 1_794_154_340_261; // when Manta first saw the run
+const DAY = 24 * 60 * 60_000;
+const envelope = (state, body) => `<subagent sessionID="${CHILD}" state="${state}" description="the task">\n${body}\n</subagent>`;
+const synthetic = (state, body, created = SEEN - 200) => ({
+  type: "synthetic",
+  id: `msg_${state}`,
+  text: envelope(state, body),
+  description: "the task",
+  metadata: { source: "subagent", childID: CHILD, state },
+  time: { created },
+});
+
+function ownedWorld({ created = CREATED, idle = IDLE, outcome = "failed", synthetics = [] } = {}) {
+  const w = world({
+    completionOwner: "opencode",
+    origin: "subagent",
+    parentSessionID: PARENT,
+    sessionParentID: PARENT,
+    startedAt: SEEN,
+    createdAt: SEEN,
+    runStartedAt: SEEN,
+    submittedAt: null,
+    launch: undefined,
+  });
+  w.state.now = SEEN + 1000;
+  w.sessions.set(CHILD, { id: CHILD, parentID: PARENT, directory: "/repo", outcome, time: { created, idle, updated: idle } });
+  const base = w.deps.listRawTimeline;
+  w.deps.listRawTimeline = async (sid, opts = {}) => (sid === PARENT && opts.type === "synthetic" ? synthetics : base(sid, opts));
+  return w;
+}
+
+test("born for this run: a child that failed before Manta saw it ends failed with the parent's error text, not 'cut off'", async () => {
+  const w = ownedWorld({ synthetics: [synthetic("failed", "Model unavailable: openrouter/openai/gpt-6.1-sol")] });
+  const res = await settle(w);
+  assert.equal(res.settled, true);
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, "Model unavailable: openrouter/openai/gpt-6.1-sol");
+  assert.equal(w.calls.synth.length, 0, "opencode owns the result");
+});
+
+test("born for this run: with nothing readable in the parent the error stays the generic text", async () => {
+  const w = ownedWorld();
+  assert.equal((await settle(w)).settled, true);
+  assert.equal(w.job().error, "The run failed.");
+  const unreadable = ownedWorld();
+  unreadable.deps.listRawTimeline = async (sid, opts = {}) => {
+    if (opts.type === "synthetic") throw new Error("timeline unavailable");
+    return [];
+  };
+  assert.equal((await settle(unreadable)).settled, true);
+  assert.equal(unreadable.job().error, "The run failed.");
+});
+
+test("a synthetic from before the run began, or about another child, is not this run's text", async () => {
+  const w = ownedWorld({
+    synthetics: [
+      synthetic("failed", "an old failure", CREATED - 5000),
+      { ...synthetic("failed", "someone else's failure"), metadata: { source: "subagent", childID: "ses_other", state: "failed" } },
+    ],
+  });
+  await settle(w);
+  assert.equal(w.job().error, "The run failed.");
+});
+
+test("the newest matching synthetic wins, and the error is capped at 500 characters", async () => {
+  const w = ownedWorld({ synthetics: [synthetic("failed", "first", SEEN - 300), synthetic("failed", "x".repeat(900), SEEN - 100)] });
+  await settle(w);
+  assert.equal(w.job().error, "x".repeat(500));
+});
+
+test("a raw error from the event is never replaced by the parent's text", async () => {
+  const w = ownedWorld({ synthetics: [synthetic("failed", "from the parent")] });
+  const res = await settleV2Job(w.job(), w.deps, { hint: { outcome: "failed", error: "Provider said no", at: IDLE } });
+  assert.equal(res.settled, true);
+  assert.equal(w.job().error, "Provider said no");
+});
+
+test("a done run with no assistant text takes the parent's result body (capped at 2000)", async () => {
+  const w = ownedWorld({ outcome: "succeeded", synthetics: [synthetic("completed", "y".repeat(3000))] });
+  const res = await settle(w);
+  assert.equal(res.status, "done");
+  assert.equal(w.job().result, "y".repeat(2000));
+  const withText = ownedWorld({ outcome: "succeeded", synthetics: [synthetic("completed", "from the parent")] });
+  withText.deps.listMessages = async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "the child's own last text" }] }];
+  await settle(withText);
+  assert.equal(withText.job().result, "the child's own last text", "the child's own text still comes first");
+});
+
+test("an older resumed session keeps the strict rule: its previous outcome cannot finish the new record", async () => {
+  const w = ownedWorld({ created: SEEN - 3 * DAY, idle: SEEN - 3 * DAY + 5000, synthetics: [synthetic("failed", "from the earlier run")] });
+  const [first, second] = await lostSettle(w);
+  assert.equal(first.reason, "lost-pending");
+  assert.equal(second.lost, true, "judged lost, not finished by the old outcome");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+});
+
+test("born within the slack: created up to 60 s before the sighting counts; 61 s does not", async () => {
+  const inside = ownedWorld({ created: SEEN - BORN_SLACK_MS, idle: SEEN - BORN_SLACK_MS + 10 });
+  assert.equal((await settle(inside)).settled, true);
+  const outside = ownedWorld({ created: SEEN - BORN_SLACK_MS - 1, idle: SEEN - BORN_SLACK_MS + 10 });
+  assert.equal((await settle(outside)).settled, false);
+});
+
+test("a Manta-owned job is unaffected by the born rule and never reads the parent's text", async () => {
+  const w = world();
+  Object.assign(w.child(), { outcome: "failed", time: { created: T0, idle: T0 + 50, updated: T0 + 50 } });
+  let read = false;
+  const base = w.deps.listRawTimeline;
+  w.deps.listRawTimeline = async (sid, opts = {}) => {
+    if (opts.type === "synthetic") read = true;
+    return base(sid, opts);
+  };
+  await settle(w);
+  assert.equal(w.job().error, "The run failed.");
+  assert.equal(read, false);
+});
+
+test("relay backstop: an opencode-owned run whose parent was handed off asks for the result to be relayed, once", async () => {
+  const w = ownedWorld({ synthetics: [synthetic("failed", "boom")] });
+  const relays = [];
+  w.deps.successorOf = (sid) => (sid === PARENT ? "ses_successor" : null);
+  w.deps.relayBackgroundResult = async (a) => { relays.push(a); return { relayed: true }; };
+  await settle(w);
+  await settle(w); // already terminal: nothing more
+  assert.deepEqual(relays, [{ sessionId: PARENT, childSessionId: CHILD }]);
+
+  const live = ownedWorld({ synthetics: [synthetic("failed", "boom")] });
+  const liveRelays = [];
+  live.deps.successorOf = () => null;
+  live.deps.relayBackgroundResult = async (a) => { liveRelays.push(a); };
+  await settle(live);
+  assert.deepEqual(liveRelays, [], "a live parent is left alone");
+
+  const owned = world();
+  Object.assign(owned.child(), { outcome: "succeeded", time: { created: T0, idle: T0 + 50, updated: T0 + 50 } });
+  const ownedRelays = [];
+  owned.deps.successorOf = () => "ses_successor";
+  owned.deps.relayBackgroundResult = async (a) => { ownedRelays.push(a); };
+  await settle(owned);
+  assert.deepEqual(ownedRelays, [], "Manta posts its own results; nothing to relay");
+});
+
+test("relay backstop: a failing relay is logged, never thrown, and the record still settles", async () => {
+  const w = ownedWorld({ synthetics: [synthetic("failed", "boom")] });
+  w.deps.successorOf = () => "ses_successor";
+  w.deps.relayBackgroundResult = async () => { throw new Error("relay broke"); };
+  const warn = console.warn;
+  const logged = [];
+  console.warn = (...a) => logged.push(a.join(" "));
+  try {
+    assert.equal((await settle(w)).settled, true);
+    await new Promise((r) => setImmediate(r));
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(w.job().status, "failed");
+  assert.ok(logged.some((l) => /relay broke/.test(l)));
 });

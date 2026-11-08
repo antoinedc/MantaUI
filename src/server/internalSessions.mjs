@@ -133,7 +133,8 @@ export function createInternalSessions({ store = internalSessionsStore, now = Da
     for (const p of projects ?? []) {
       const w = (p.windows ?? []).find((w) => w.opencodeSessionId === sessionID);
       if (w) {
-        info = { owner: w.owner ?? "user", project: p.tmuxSession, cwd: w.paneCurrentPath ?? p.defaultCwd };
+        // A viewer window ("view") is the user's own: the CTO pipeline classifies it as user.
+        info = { owner: !w.owner || w.owner === "view" ? "user" : w.owner, project: p.tmuxSession, cwd: w.paneCurrentPath ?? p.defaultCwd };
         break;
       }
     }

@@ -2548,3 +2548,80 @@ test("routines:* without an engine answers a sentence with a 503, and an engine 
   assert.equal(res.status, 409);
   assert.deepEqual(JSON.parse(res.body), { error: "Wait for the current run to finish." });
 });
+
+// ---- viewer windows: the user's own send makes the window theirs, before the send goes out ----
+
+function viewSendDeps() {
+  const { deps, calls } = bgDeps();
+  const order = [];
+  const live = [
+    {
+      tmuxSession: "p",
+      windows: [
+        { index: 1, opencodeSessionId: "ses_a", owner: "view" },
+        { index: 2, opencodeSessionId: "ses_a", owner: "view" },
+        { index: 3, opencodeSessionId: "ses_a", owner: "user" },
+        { index: 4, opencodeSessionId: "ses_other", owner: "view" },
+        { index: 5, opencodeSessionId: "ses_old", owner: "view" },
+      ],
+    },
+  ];
+  deps.syncState = { ...deps.syncState, snapshot: () => ({ projects: live }), refreshNow: async () => { order.push("refresh"); } };
+  deps.tmux = { ...deps.tmux, stampOwner: async (...a) => { order.push(["stamp", ...a]); } };
+  deps.oc = {
+    ...deps.oc,
+    sendPrompt: async () => { order.push("send"); return { ok: true }; },
+    runCommand: async () => { order.push("send"); },
+  };
+  deps.handoff = { chainOf: (sid) => (sid === "ses_a" ? ["ses_old", "ses_a"] : [sid]), admitPrompt: async () => { order.push("send"); return {}; }, guardCommand: (sid) => ({ target: sid }) };
+  return { handlers: buildHandlers(deps), order, deps, calls };
+}
+
+test("opencode:prompt promotes every viewer window of the session (and its handoff chain) to user BEFORE sending", async () => {
+  const { handlers, order } = viewSendDeps();
+  await handlers["opencode:prompt"]({ sessionId: "ses_a", text: "hi" });
+  const sendAt = order.indexOf("send");
+  const stamps = order.filter((e) => Array.isArray(e));
+  assert.deepEqual(stamps, [["stamp", "p", 1, "user"], ["stamp", "p", 2, "user"], ["stamp", "p", 5, "user"]], "only this conversation's viewer windows");
+  assert.ok(order.indexOf(stamps.at(-1)) < sendAt, "every stamp is awaited before the send is forwarded");
+});
+
+test("opencode:run-command promotes viewer windows too, and a session with none costs nothing", async () => {
+  const { handlers, order } = viewSendDeps();
+  await handlers["opencode:run-command"]({ sessionId: "ses_a", command: "review", arguments: "" });
+  assert.equal(order.filter((e) => Array.isArray(e)).length, 3);
+  assert.ok(order.indexOf("send") > order.findIndex((e) => Array.isArray(e)));
+  const none = viewSendDeps();
+  await none.handlers["opencode:prompt"]({ sessionId: "ses_nowindow", text: "hi" });
+  assert.deepEqual(none.order, ["send"]);
+});
+
+test("a failing promotion is logged and never blocks the send", async () => {
+  const { handlers, order, deps } = viewSendDeps();
+  deps.tmux.stampOwner = async () => { throw new Error("tmux exploded"); };
+  const warn = console.warn;
+  const logged = [];
+  console.warn = (...a) => logged.push(a.join(" "));
+  try {
+    const rpc = buildHandlers(deps);
+    await rpc["opencode:prompt"]({ sessionId: "ses_a", text: "hi" });
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(order, ["send"]);
+  assert.ok(logged.some((l) => /tmux exploded/.test(l)));
+  void handlers;
+});
+
+test("sessions:close with nothing named is a refusal, not a silent success", async () => {
+  const { deps } = makeDeps([], []);
+  deps.tmux.killWindow = async () => assert.fail("must not kill");
+  deps.tmux.killSession = async () => assert.fail("must not kill");
+  const handlers = buildHandlers(deps);
+  for (const input of [undefined, {}, { project: "" }, { windowIndex: 1 }, { project: "p", windowIndex: "1" }, { project: "p", windowIndex: 1.5 }]) {
+    const res = await handlers["sessions:close"](input);
+    assert.equal(res.ok, false, JSON.stringify(input));
+    assert.equal(res.reason, "invalid");
+    assert.equal(res.message, "No window was named.");
+  }
+});

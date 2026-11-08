@@ -21,7 +21,7 @@ import {
 import { buildContextPayload } from "./sessionContext.mjs";
 import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
 import { previewClose, closeSession } from "./sessionClose.mjs";
-import { materializeSession } from "./sessionMaterialize.mjs";
+import { materializeSession, promoteViewWindows } from "./sessionMaterialize.mjs";
 import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName, tmuxSafeName, nameTaken } from "./sessionNaming.mjs";
 import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
 import { buildAccountRowStates } from "./accountsRowState.mjs";
@@ -716,6 +716,26 @@ export function buildHandlers({
   function withoutDelivery(input) {
     const { delivery: _dropped, ...rest } = input;
     return rest;
+  }
+  // The user's own send into a session: a viewer window showing it (any member of its handoff chain) becomes
+  // the user's, so the box never closes it. Awaited before the send goes out; never blocks it.
+  async function keepViewWindowsOpen(sessionId) {
+    if (typeof sessionId !== "string" || !sessionId) return;
+    const listProjects =
+      typeof syncState?.snapshot === "function" ? async () => syncState.snapshot().projects
+        : typeof tmux?.listProjects === "function" ? () => tmux.listProjects()
+          : null;
+    if (!listProjects || typeof tmux?.stampOwner !== "function") return;
+    try {
+      const promoted = await promoteViewWindows([sessionId, ...(handoff?.chainOf?.(sessionId) ?? [])], {
+        listProjects,
+        stampOwner: (...a) => tmux.stampOwner(...a),
+        lockKey: sessionStatus?.canonicalSessionOf?.(sessionId) ?? sessionId,
+      });
+      if (promoted > 0) await Promise.resolve(syncState?.refreshNow?.()).catch(() => {});
+    } catch (e) {
+      console.warn("[sessions] viewer-window promotion before a send failed:", e?.message ?? e);
+    }
   }
   function withoutBackground(input) {
     const { background: _dropped, ...rest } = input;
@@ -1634,6 +1654,7 @@ export function buildHandlers({
     "opencode:prompt": async (input) => {
       await delegateView?.assertWritable(input?.sessionId);
       checkDelivery(input);
+      await keepViewWindowsOpen(input?.sessionId);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(withoutDelivery(input));
       }
@@ -2413,6 +2434,7 @@ export function buildHandlers({
     "opencode:run-command": async (input) => {
       await delegateView?.assertWritable(input?.sessionId);
       checkDelivery(input);
+      await keepViewWindowsOpen(input?.sessionId);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         // N2: the CTO conversation never runs a command in the background.
         if (input.background === true) throw new Error("Background runs aren't available for the CTO conversation");

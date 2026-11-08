@@ -103,6 +103,7 @@ import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
+import { createViewWindowCloser } from "./sessionMaterialize.mjs";
 import { createSessionLinks, createSessionLinkActions } from "./sessionLinks.mjs";
 import { createQuestionsDecorator } from "./questionsDecorator.mjs";
 import { runBoundaryOf } from "./transcriptRuns.mjs";
@@ -1393,7 +1394,17 @@ const delegateView = createDelegateView({
 // aggregated from authoritative sources only (the interpreter's own-session frames, parent edges, delegate records) and
 // published as one `windowStatus` frame per session whose payload changed.
 const sessionLinks = createSessionLinks({ changed: () => sessionStatusRef.current?.linksChanged() });
+// Viewer windows (`@manta-owner=view`, opened by sessions:materialize) close once their session has been finished a while.
+const closeViewWindow = createViewWindowCloser({
+  listProjects: () => tmux.listProjects(),
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  killWindow: (a) => tmux.killWindow(a),
+  refresh: () => syncState.refreshNow(),
+  chainOf: (sid) => handoffEngine.chainOf(sid),
+  canonicalSessionOf: (sid) => sessionStatusRef.current?.canonicalSessionOf(sid) ?? sid,
+});
 const sessionStatus = createSessionStatus({
+  closeViewWindow,
   linkOf: (sid) => sessionLinks.linkOf(sid),
   linkEndpoints: () => sessionLinks.endpoints(),
   // Unknown reads retain an edge; only confirmed deletion prunes it. Hydration already reads these candidates.
