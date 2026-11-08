@@ -1053,13 +1053,14 @@ export async function listChildSessions(parentId, { signal } = {}) {
  * `subagent` tool blocks that the message mapper hides or reshapes. `type`
  * narrows server-side ("synthetic", "assistant", "user", …). Throws on failure.
  * @param {string} sessionId
- * @param {{ type?: string, signal?: AbortSignal }} [opts]
+ * @param {{ type?: string, signal?: AbortSignal, maxPages?: number }} [opts] `maxPages` bounds the read to the NEWEST
+ *   `maxPages` pages (a page is `TIMELINE_PAGE` records); the result is still chronological
  * @returns {Promise<any[]>}
  */
-export async function listRawTimeline(sessionId, { type, signal } = {}) {
+export async function listRawTimeline(sessionId, { type, signal, maxPages = TIMELINE_MAX_PAGES } = {}) {
   const desc = [];
   let cursor = null;
-  for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
+  for (let page = 0; page < Math.min(TIMELINE_MAX_PAGES, Math.max(1, maxPages)); page++) {
     const body = await ocCall(
       "listRawTimeline",
       (c, o) =>

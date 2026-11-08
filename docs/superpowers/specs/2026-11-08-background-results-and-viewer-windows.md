@@ -175,4 +175,39 @@ named." }` (class-1 copy). A named window that no longer exists stays the curren
 
 ## Appendix — observed V2 event for a synthetic arrival
 
-(Worker H fills this in from the sandbox run.)
+Observed on the pinned binary (opencode 2.0.30) in a sandbox (`scripts/opencode-v2/sandbox.mjs` + `mock-anthropic.mjs`;
+nothing touched the live `:4096`, `~/.config/opencode`, `~/.local/share/opencode` or `~/.manta`). A V2-native background
+command (`commands.<name>.subagent: true`) was run on a parent session; when its child ended, the parent's stream carried,
+in this order (parent `ses_P`; fixture `src/server/fixtures/opencodeV2Events/10-background-arrival.events.json`, which also
+holds the parent's timeline):
+
+1. `session.inbox.enqueued` — `data: { inboxID, sessionID: ses_P, item: { type: "synthetic", delivery: "steer",
+   payload: { text, description, metadata: { source: "subagent", childID, agent, state } } } }`. **The body is nested
+   under `item.payload`** (not flat on `item`). This is the ONE event that announces the arrival and carries everything
+   needed to relay it. `inboxID` is the id the timeline record keeps.
+2. `session.execution.started` — `ses_P` (≈ 5 ms later; an idle parent is woken by the result).
+3. `session.inbox.delivered` — `{ sessionID, inboxID }` (≈ 30 ms after the enqueue). The timeline record's
+   `time.created` is this delivery time, i.e. AFTER `execution.started`: "execution started at/after delivery" cannot be
+   judged by timestamps.
+4. the woken execution's own events, then `session.execution.{succeeded|failed}`, and an `idle` record in the timeline.
+
+Consequences baked into the implementation:
+- Detection is `session.inbox.enqueued` with `item.type === "synthetic"` and `payload.metadata.source === "subagent"` on a
+  session with a replacement link. The delegate engine's own N7 post and a relayed copy have the same shape and are
+  harmless (they land on a live session, which is ignored).
+- By the time the handler runs the item is almost always already delivered, so the "still in the inbox → cancel" branch is
+  the rare case (a result arriving while the session is mid-turn); the interrupt branch is the common one.
+- "Did this result start the current execution" is judged from the raw timeline instead of timestamps: the record
+  before the result (skipping other background results, which join the same wake) is an `idle` record, and no `idle`
+  record follows the result. Every execution ends with an `idle` record (`succeeded` / `failed` / `interrupted`).
+- Posting the SAME `id` twice to `POST /session/{id}/synthetic` is accepted (204), de-duplicates the record, but wakes the
+  target a second time with an empty execution — so the engine also remembers the ids it relayed this boot.
+
+End-to-end check on the sandboxed binary (retired parent `P` linked to live `L`, real engine + real opencode client): the
+result landed in `L` as a `synthetic` (relayed metadata) and `L` ran a turn on it; `P`'s woken turn ended
+`idle: interrupted`; `P` had no other result.
+
+Not covered (flagged, not built): a result that opencode posts to the predecessor in the window between a handoff's fence
+and its commit (the link does not exist yet, so it lands on the predecessor and is not relayed by the event path); the
+delegate-side backstop (`relayBackgroundResult`, worker D) only acts once the link exists, so it covers that window only
+if the record settles after the commit.

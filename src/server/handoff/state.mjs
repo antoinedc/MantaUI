@@ -8,6 +8,7 @@
 //   held          target session -> [{id, kind, args, at}] admissions parked by a fence / claim / release
 //   dismissedSessions  session -> when the user dismissed its handoff suggestions
 //   sessionModes       session -> its own handoff mode (absent = the box default)
+//   repairs            one-time data repairs already done -> the ISO time they completed
 
 import { randomBytes } from "node:crypto";
 import { HANDOFF_MODES } from "./policy.mjs";
@@ -17,7 +18,7 @@ export const RECORD_RETENTION_MAX = 500;
 export const TERMINAL_STATES = Object.freeze(["committed", "failed", "cancelled", "dismissed"]);
 
 export function emptyState() {
-  return { version: 1, records: {}, links: {}, continuations: {}, fences: {}, held: {}, dismissedSessions: {}, sessionModes: {} };
+  return { version: 1, records: {}, links: {}, continuations: {}, fences: {}, held: {}, dismissedSessions: {}, sessionModes: {}, repairs: {} };
 }
 
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
@@ -35,6 +36,9 @@ export function normalizeState(raw) {
   }
   if (isObj(raw.sessionModes)) {
     for (const [k, v] of Object.entries(raw.sessionModes)) if (HANDOFF_MODES.includes(v)) s.sessionModes[k] = v;
+  }
+  if (isObj(raw.repairs)) {
+    for (const [k, v] of Object.entries(raw.repairs)) if (typeof v === "string" && v) s.repairs[k] = v;
   }
   return s;
 }

@@ -31,6 +31,7 @@ function pausedAt(w, name) {
 test("replacement + send: the successor is created with the predecessor's settings and receives the handoff as its first turn", async () => {
   const w = createWorld();
   w.addSession("ses_p", { parentID: "ses_root", agent: "plan" });
+  w.jobs = [{ childSessionID: "ses_p", completionOwner: "manta" }]; // a delegate job's child: a child by parentage, but Manta repoints it
   w.addWindow("proj", 3, "work", "ses_p");
   const engine = w.build();
   const r = await readyRecord(w, { engine });
@@ -778,7 +779,7 @@ test("an automatic record carries the context size that tripped the budget", asy
 
 test("error codes are exactly the pinned set (+ no_window, unavailable, generation_failed, dismissed)", async () => {
   const { ERROR_STATUS } = await import("./engine.mjs");
-  assert.deepEqual(ERROR_STATUS, { invalid: 400, expired: 404, already_started: 409, busy: 409, dismissed: 409, not_ready: 422, no_window: 422, generation_failed: 502, unavailable: 503 });
+  assert.deepEqual(ERROR_STATUS, { invalid: 400, expired: 404, already_started: 409, busy: 409, dismissed: 409, subagent: 409, not_ready: 422, no_window: 422, generation_failed: 502, unavailable: 503 });
   const w = standardWorld();
   await assert.rejects(w.engine.create({}), (e) => e.code === "invalid");
 });

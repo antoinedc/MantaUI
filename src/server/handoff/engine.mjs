@@ -16,7 +16,8 @@
 //   • Nothing talks to opencode or tmux except through the injected `oc` /
 //     `tmux` objects, so the whole protocol is unit-testable with a fake world.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { isTaskChild, SUBAGENT_HANDOFF_MESSAGE } from "./taskChild.mjs";
 import { COOLDOWN_MS, DEFAULT_HANDOFF_MODE, HANDOFF_MODES, chooseWriter, decideAutoTrigger, entryPlan, estimateRewriteCostUsd, handoffBudget, normalizeMode } from "./policy.mjs";
 import { buildCondensedPrompt, buildGeneratePrompt, buildReminder, composeHandoffText, estimateTokens, factGroups, missingHeadings } from "./text.mjs";
 import { condenseBudget, condenseTranscript, inputBudget, lastAssistantCompletedAt } from "./condense.mjs";
@@ -40,6 +41,7 @@ export const ERROR_STATUS = Object.freeze({
   already_started: 409,
   busy: 409,
   dismissed: 409,
+  subagent: 409,
   not_ready: 422,
   no_window: 422,
   generation_failed: 502,
@@ -140,6 +142,10 @@ export function createHandoffEngine(deps = {}) {
     listPrice = async () => null, // ({ providerID, modelID }) => { listPrice, oneHour, subscription } | null — see wiring.mjs
     log = (...a) => console.log(...a),
     condensedTimeoutMs = CONDENSED_TIMEOUT_MS,
+    // the delegate job records (to tell a `task` child from a delegate / wrapped-command child); throws when unreadable
+    loadJobs = async () => [],
+    // a replacement link was cut: the session graph must re-read its conversation nodes
+    onLinksChanged = () => {},
   } = deps;
 
   const isJobSession = deps.isJobSession ?? (async (sid) => (await runningJobOwner(sid)) !== null);
@@ -155,6 +161,23 @@ export function createHandoffEngine(deps = {}) {
         return false;
       }
     });
+  /**
+   * Is `sid` a `task` subagent's session (see taskChild.mjs)? `true` / `false`, or `null` when it can't be told
+   * (unreadable session or job store). The live policy treats null as "no" (today's behaviour); the repair skips.
+   */
+  async function taskChildState(sid, { getJobs = loadJobs } = {}) {
+    try {
+      const rs = await oc.readSession?.(sid);
+      if (rs?.state === "missing") return false; // gone: nothing to protect
+      if (rs?.state !== "found") return null;
+      const parentID = rs.session?.parentID;
+      if (typeof parentID !== "string" || !parentID) return false; // no opencode parent: no job store read needed
+      return isTaskChild({ session: { ...rs.session, id: sid }, jobs: await getJobs() });
+    } catch {
+      return null;
+    }
+  }
+  const isTaskChildSession = async (sid) => (await taskChildState(sid)) === true;
   const mintSessionId = deps.mintSessionId ?? (() => `ses_${randomUUID().replaceAll("-", "")}`);
   const mintMessageId = deps.mintMessageId ?? (() => `msg_${randomUUID().replaceAll("-", "")}`);
   const mintId = deps.mintRecordId ?? mintRecordId;
@@ -900,6 +923,9 @@ export function createHandoffEngine(deps = {}) {
     if (trigger === "agent" && isDismissed(sid)) {
       throw new HandoffError("dismissed", "The user dismissed handoff suggestions in this conversation. Do not suggest a handoff again unless the user asks.");
     }
+    // A subagent is addressed by its session id: a handoff by IT would orphan the successor. An explicit user /
+    // button press is the user's own decision and stays allowed.
+    if (trigger === "agent" && (await isTaskChildSession(sid))) throw new HandoffError("subagent", SUBAGENT_HANDOFF_MESSAGE);
     const resolved = await resolveMode(sid);
     const plan = entryPlan({ mode: resolved.mode, trigger, action, unattended: resolved.unattended });
     const rec = newRecord({
@@ -1021,6 +1047,7 @@ export function createHandoffEngine(deps = {}) {
     if (!decision.fire) return;
     if (await isExcluded(sid)) return;
     if (await isRoutineSession(sid)) return;
+    if (await isTaskChildSession(sid)) return; // its parent addresses it by this id: a successor would be orphaned
     if (mode === "auto" && (await isJobSession(sid))) return; // a job's turn end is its completion signal (§6.3)
     if (mode === "auto" && !(await tmux.findWindow?.(sid))) return; // nothing to take over
     const plan = entryPlan({ mode, trigger: "auto" });
@@ -1792,6 +1819,190 @@ export function createHandoffEngine(deps = {}) {
     return { contextTokens: ctx.tokens, budget, measuredAt: ctx.at, mode: isDismissed(sessionId) ? "off" : await modeFor(sessionId) };
   }
 
+  // ---- a background result that lands on a retired session ------------------------------------------
+  // opencode posts a background `task` subagent's result to the session id that launched it. After a handoff that is
+  // the retired predecessor: it would wake and answer on stale context while the live successor never hears of it.
+  // The result is re-admitted at the live end and the retired session is kept from acting on its copy.
+  const RELAYED_MAX = 500;
+  const relayedIds = new Set(); // relay ids admitted this boot (insertion order, bounded)
+  const relaying = new Map(); // relay id -> the in-flight relay
+  /** Deterministic, so a retry — or the event and the backstop both seeing the result — admits once. */
+  const relayMessageId = (sid, originalId) => `msg_${createHash("sha256").update(`${sid}\n${originalId}`).digest("hex").slice(0, 32)}`;
+  const isBackgroundResult = (r) => r?.type === "synthetic" && r.metadata?.source === "subagent";
+
+  /**
+   * Was the session's CURRENT execution started by this result? True only when the result arrived on an idle session
+   * (the record before it — skipping other background results, which join the same wake — is the `idle` that ended
+   * the previous execution) and no execution has ended since. Anything else means somebody else is driving it.
+   * PURE over the raw timeline (chronological).
+   */
+  function startedByResult(timeline, id) {
+    if (!Array.isArray(timeline)) return false;
+    const i = timeline.findIndex((r) => r?.id === id);
+    if (i < 0) return false;
+    if (timeline.slice(i + 1).some((r) => r?.type === "idle")) return false;
+    let j = i - 1;
+    while (j >= 0 && isBackgroundResult(timeline[j])) j--;
+    return j >= 0 && timeline[j]?.type === "idle";
+  }
+
+  /** Keep the retired session from acting on its copy. Failures are logged, never thrown. */
+  async function keepRetiredQuiet(sid, id) {
+    try {
+      const inbox = await oc.listInbox(sid);
+      if (Array.isArray(inbox) && inbox.some((i) => i?.id === id)) {
+        await oc.cancelInboxItem(sid, id);
+        return "cancelled";
+      }
+      const active = await oc.listActive();
+      if (!Array.isArray(active) || !active.includes(sid)) return "idle";
+      const timeline = await oc.listRawTimeline(sid, { maxPages: 1 }); // the newest page is enough: an older result is not what woke it
+      if (!startedByResult(timeline, id)) return "left"; // not provably the wake this result caused (or older than the window)
+      await oc.interrupt(sid);
+      return "interrupted";
+    } catch (e) {
+      warn(`[handoff] keeping ${sid} from acting on a relayed background result failed:`, e?.message ?? e);
+      return "failed";
+    }
+  }
+
+  /** @param {string} sid the retired session  @param {{ id: string, text?: string, description?: string, metadata?: object }} rec its copy */
+  function relayResult(sid, rec) {
+    if (!successorOf(sid)) return Promise.resolve({ relayed: false, reason: "live" });
+    const id = relayMessageId(sid, rec.id);
+    if (relayedIds.has(id)) return Promise.resolve({ relayed: true, reason: "already" });
+    const inFlight = relaying.get(id);
+    if (inFlight) return inFlight;
+    const run = (async () => {
+      const body = {
+        id,
+        text: typeof rec.text === "string" ? rec.text : "",
+        ...(typeof rec.description === "string" ? { description: rec.description } : {}),
+        metadata: { ...rec.metadata, relayedFrom: sid, relayedMessageId: rec.id },
+        delivery: "queue",
+        resume: true,
+      };
+      try {
+        await admit("synthetic", sid, body); // resolves to the live end; held while a handoff is in flight
+      } catch (e) {
+        warn(`[handoff] relaying a background result (${rec.id}) off ${sid} failed:`, e?.message ?? e);
+        return { relayed: false, reason: "error" };
+      }
+      relayedIds.add(id);
+      if (relayedIds.size > RELAYED_MAX) relayedIds.delete(relayedIds.values().next().value);
+      const kept = await keepRetiredQuiet(sid, rec.id);
+      try {
+        log(`[handoff] relayed background result ${rec.id} from retired ${sid} to ${followReplacement(sid)} (retired session: ${kept})`);
+      } catch {
+        /* a log line must never fail a relay */
+      }
+      return { relayed: true };
+    })().finally(() => relaying.delete(id));
+    relaying.set(id, run);
+    return run;
+  }
+
+  /** Feed every RAW opencode event here: a background result arriving on a retired session is relayed. Never throws. */
+  function observeRaw(raw) {
+    try {
+      if (raw?.type !== "session.inbox.enqueued") return;
+      const sid = raw.data?.sessionID;
+      const item = raw.data?.item;
+      const inboxID = raw.data?.inboxID ?? item?.id;
+      if (typeof sid !== "string" || typeof inboxID !== "string" || item?.type !== "synthetic") return;
+      const p = item.payload && typeof item.payload === "object" ? item.payload : item; // V2 nests the body under `payload`
+      if (p.metadata?.source !== "subagent") return;
+      if (!successorOf(sid)) return; // a live session takes its own results
+      void detach("background relay", () => relayResult(sid, { id: inboxID, text: p.text, description: p.description, metadata: p.metadata }));
+    } catch (e) {
+      warn("[handoff] observing a raw event failed:", e?.message ?? e);
+    }
+  }
+
+  /**
+   * The backstop for a missed or failed relay: find the newest result `childSessionId` posted to `sessionId` and relay it.
+   * No-op for a session that was never replaced.
+   * @returns {Promise<{ relayed: boolean, reason?: string }>}
+   */
+  async function relayBackgroundResult({ sessionId, childSessionId } = {}) {
+    if (typeof sessionId !== "string" || !sessionId || typeof childSessionId !== "string" || !childSessionId) return { relayed: false, reason: "invalid" };
+    if (!successorOf(sessionId)) return { relayed: false, reason: "live" };
+    let rows;
+    try {
+      rows = await oc.listRawTimeline(sessionId, { type: "synthetic" });
+    } catch (e) {
+      warn(`[handoff] reading ${sessionId}'s results failed:`, e?.message ?? e);
+      return { relayed: false, reason: "unreadable" };
+    }
+    const rec = [...(Array.isArray(rows) ? rows : [])].reverse().find((r) => r?.metadata?.childID === childSessionId && typeof r.id === "string");
+    if (!rec) return { relayed: false, reason: "none" };
+    return relayResult(sessionId, rec);
+  }
+
+  // ---- one-time repair: handoff links made FROM a `task` subagent ---------------------------------------
+  // Before the policy existed a subagent's own handoff replaced it, while its parent kept resuming the original id.
+  // Each such link is cut, so the original is its own conversation node again. Only links whose predecessor is an
+  // ORIGINAL task child go: a Manta-made successor copies its predecessor's parent but is never addressed by it.
+  const REPAIR_TASK_LINKS = "taskChildLinks";
+  const linkIsEmpty = (l) => !l || (!l.replacedBy && !l.replaces && !l.branchedFrom && !(l.branches?.length));
+  let repairing = null;
+  function repairTaskChildLinks({ concurrency = 4 } = {}) {
+    if (state.repairs[REPAIR_TASK_LINKS]) return Promise.resolve({ skipped: true, split: 0, failed: 0 });
+    repairing ??= (async () => {
+      const madeByManta = new Set(Object.values(state.records).map((r) => r.successorId).filter(Boolean));
+      const candidates = Object.entries(state.links)
+        .filter(([pred, l]) => l?.replacedBy && !madeByManta.has(pred) && !state.fences[pred])
+        .map(([pred, l]) => ({ pred, succ: l.replacedBy }));
+      let jobsRead = null;
+      const getJobs = () => (jobsRead ??= loadJobs());
+      const cut = [];
+      let failed = 0;
+      let next = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, candidates.length) }, async () => {
+          for (;;) {
+            const c = candidates[next++];
+            if (!c) return;
+            const verdict = await taskChildState(c.pred, { getJobs });
+            if (verdict === true) cut.push(c);
+            else if (verdict === null) failed++;
+          }
+        }),
+      );
+      let split = 0;
+      for (const { pred, succ } of cut) {
+        const l = state.links[pred];
+        if (l?.replacedBy !== succ || state.fences[pred]) continue; // changed while we were reading
+        delete l.replacedBy;
+        const s = state.links[succ];
+        if (s?.replaces === pred) {
+          delete s.replaces;
+          if (linkIsEmpty(s)) delete state.links[succ];
+        }
+        if (linkIsEmpty(l)) delete state.links[pred];
+        split++;
+      }
+      if (failed === 0) state.repairs[REPAIR_TASK_LINKS] = new Date(now()).toISOString();
+      if (split > 0 || failed === 0) await persist();
+      if (split > 0) {
+        try {
+          onLinksChanged();
+        } catch (e) {
+          warn("[handoff] repair: refreshing the session graph failed:", e?.message ?? e);
+        }
+      }
+      try {
+        log(`[handoff] repair: split ${split} subagent handoff link(s)${failed ? ` (${failed} unreadable, retrying at the next start)` : ""}`);
+      } catch {
+        /* a log line must never fail the repair */
+      }
+      return { split, failed };
+    })().finally(() => {
+      repairing = null;
+    });
+    return repairing;
+  }
+
   // ---- boot recovery (§5.5) ---------------------------------------------------------------------
   async function recover() {
     let changed = false;
@@ -1849,7 +2060,10 @@ export function createHandoffEngine(deps = {}) {
     releaseOperation,
     // triggers
     observeEvent,
+    observeRaw,
     onTurnEnd,
+    relayBackgroundResult,
+    repairTaskChildLinks,
     // routes
     create,
     start: startRecord,

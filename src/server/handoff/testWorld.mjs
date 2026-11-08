@@ -30,6 +30,12 @@ export function createWorld({ mode = "auto" } = {}) {
     created: [],
     deleted: [],
     interrupted: [],
+    cancelled: [], // [sid, inboxId] of every cancelInboxItem
+    timelines: new Map(), // sid -> raw timeline records (chronological)
+    timelineReads: [],
+    jobs: [], // the delegate job records the engine's loadJobs dep returns
+    unreadable: new Set(), // sessions whose read answers "unknown" (opencode unreachable for them)
+    beforeRead: null, // async (sid) => void, run at the start of every readSession
     statuses: new Map(), // session -> job status, for the engines that are given jobStatusOf by the world
     repointed: [],
     cleared: [],
@@ -71,7 +77,11 @@ export function createWorld({ mode = "auto" } = {}) {
   const failureFor = (queue) => (w.failures[queue].length ? w.failures[queue].shift() : null);
 
   const oc = {
-    readSession: async (id) => (w.sessions.has(id) ? { state: "found", session: { ...w.sessions.get(id), location: { directory: w.sessions.get(id).directory } } } : { state: "missing" }),
+    readSession: async (id) => {
+      await w.beforeRead?.(id);
+      if (w.unreadable.has(id)) return { state: "unknown" };
+      return w.sessions.has(id) ? { state: "found", session: { ...w.sessions.get(id), location: { directory: w.sessions.get(id).directory } } } : { state: "missing" };
+    },
     createSession: async (input) => {
       const f = failureFor("create");
       if (f) {
@@ -116,6 +126,16 @@ export function createWorld({ mode = "auto" } = {}) {
       accept(target, body.id, body.text, body);
     },
     listInbox: async (id) => w.inbox.get(id) ?? [],
+    cancelInboxItem: async (sid, inboxId) => {
+      w.cancelled.push([sid, inboxId]);
+      w.inbox.set(sid, (w.inbox.get(sid) ?? []).filter((i) => i.id !== inboxId));
+    },
+    listRawTimeline: async (sid, opts = {}) => {
+      w.timelineReads.push([sid, opts]);
+      if (w.failures.timeline) throw new Error("timeline unreadable");
+      const all = w.timelines.get(sid) ?? [];
+      return opts.type ? all.filter((r) => r.type === opts.type) : all;
+    },
     getMessage: async (sid, mid) => msgs(sid).get(mid) ?? null,
     listActive: async () => [...w.active],
     interrupt: async (id) => {
@@ -155,6 +175,7 @@ export function createWorld({ mode = "auto" } = {}) {
       tmux,
       ownership: { repoint: async (pred, succ) => void w.repointed.push([pred, succ]) },
       jobStatusOf: async (sid) => w.statuses.get(sid) ?? null,
+      loadJobs: async () => w.jobs,
       onPendingSendCleared: (sid) => w.cleared.push(sid),
       onHeldFailure: (f) => w.heldFailures.push(f),
       gather: {

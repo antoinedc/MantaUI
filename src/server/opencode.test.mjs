@@ -2368,6 +2368,18 @@ test("listRawTimeline returns the raw records chronologically, filters by type, 
   assert.equal(calls[1].query.type, "synthetic");
 });
 
+test("listRawTimeline { maxPages: 1 } reads only the newest page, still chronological", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a/message": () => ({ data: [{ id: "m3" }, { id: "m2" }], cursor: { next: "n" } }) },
+    async () => {
+      const rows = await listRawTimeline("ses_a", { maxPages: 1 });
+      assert.deepEqual(rows.map((r) => r.id), ["m2", "m3"]);
+    },
+  );
+  assert.equal(calls.length, 1, "no second page was asked for");
+  assert.equal(calls[0].query.order, "desc");
+});
+
 test("postSynthetic POSTs the body verbatim (explicit id, queue, resume) and carries err.status (404 = the parent is gone)", async () => {
   const body = { id: "msg_abc", text: "t", description: "/review", metadata: { source: "subagent" }, delivery: "queue", resume: true };
   const calls = await withV2({ "POST /api/session/ses_p/synthetic": null }, async () => {

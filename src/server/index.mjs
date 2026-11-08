@@ -607,6 +607,7 @@ const handoffEngine = createProductionHandoff({
   delegate: () => delegateEngine,
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   contextLimitFor,
+  onLinksChanged: () => sessionStatusRef.current?.linksChanged(),
   constraints: { snapshot: () => optimizerConstraints.snapshot() },
   extractConstraints: (sid, opts) => extractAndStoreConstraints(sid, opts),
   // Cold-cache handoff (spec B1): the Summary model ONLY when its status is `ok`
@@ -1362,6 +1363,9 @@ const delegateEngine = createDelegateEngine({
   cancelPendingHandoff: (sid) => handoffEngine.cancelPendingSends(sid),
   isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
+  // A background result opencode posted to a RETIRED session is re-admitted at the live end (handoff engine).
+  successorOf: (sid) => handoffEngine.successorOf(sid),
+  relayBackgroundResult: (a) => handoffEngine.relayBackgroundResult(a),
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   // The CTO's ephemeral inference sessions (provenance tombstones): never adopted as observed jobs.
@@ -1456,6 +1460,9 @@ let stopDelegateReconciler = null;
   } catch (e) {
     console.warn("[handoff] boot recovery failed:", e?.message ?? e);
   }
+  // One-time repair (marker in the handoff state): cut handoff links made FROM a `task` subagent. Detached: reads
+  // sessions with bounded concurrency and must not delay the recovery steps below.
+  handoffEngine.repairTaskChildLinks().catch((e) => console.warn("[handoff] subagent link repair failed:", e?.message ?? e));
   try {
     await delegateEngine.reconcileV2();
   } catch (e) {
@@ -3728,6 +3735,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     }
   }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
+  // A background result opencode posts to a RETIRED (handed-off) session is relayed to the live end.
+  handoffEngine.observeRaw(raw);
   // Delegate engine: raw child creation + execution outcomes (V2 jobs complete
   // from these, not from the adapted lifecycle below).
   delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));

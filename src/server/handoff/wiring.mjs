@@ -20,6 +20,7 @@ import { parseGitStatus } from "../peers.mjs";
  * @param {(providerID: string, modelID: string) => number|null} p.contextLimitFor
  * @param {{ snapshot: () => Promise<any> }} p.constraints  the optimizer constraint store
  * @param {(sid: string, opts?: { messages?: any[] }) => Promise<void>} p.extractConstraints
+ * @param {() => void} [p.onLinksChanged]  a replacement link was cut by the repair: re-read the session graph
  * @param {() => any} p.loadState  synchronous read of handoffs.json
  * @param {(snapshot: any) => Promise<void>} p.saveState
  *
@@ -64,6 +65,8 @@ export function createProductionHandoff(p) {
       sendPrompt: (args) => oc.sendPrompt(args),
       postSynthetic: (sid, body) => oc.postSynthetic(sid, body),
       listInbox: (sid) => oc.listInbox(sid),
+      cancelInboxItem: (sid, inboxId) => oc.cancelInboxItem(sid, inboxId),
+      listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
       getMessage: (sid, mid) => oc.getMessage(sid, mid),
       listActive: () => oc.listActiveSessionIds(),
       interrupt: (sid) => oc.abortSession(sid),
@@ -97,6 +100,8 @@ export function createProductionHandoff(p) {
     runningJobOwner: (sid) => p.delegate().runningJobOwner(sid),
     jobStatusOf: (sid) => p.delegate().jobStatusOf(sid),
     isJobSession: (sid) => p.delegate().isRunningJobSession(sid),
+    loadJobs: () => p.delegate().loadRecords(),
+    onLinksChanged: () => p.onLinksChanged?.(),
     gather: {
       measureContext: async (sid) => {
         const found = selectLatestTokenUsage(await oc.listMessages(sid, { slim: true }));
