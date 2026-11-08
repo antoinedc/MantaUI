@@ -725,7 +725,6 @@ export function buildHandlers({
     if (typeof tmux?.listProjects !== "function" || typeof tmux?.stampOwner !== "function") return;
     try {
       const promoted = await promoteViewWindows(sessionId, {
-        peekProjects: typeof syncState?.snapshot === "function" ? async () => syncState.snapshot().projects : undefined,
         listProjects: () => tmux.listProjects(),
         stampOwner: (...a) => tmux.stampOwner(...a),
         chainOf: (sid) => handoff?.chainOf?.(sid) ?? [],

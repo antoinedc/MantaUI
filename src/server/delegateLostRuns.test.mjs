@@ -315,7 +315,7 @@ const synthetic = (state, body, created = SEEN - 200) => ({
   time: { created },
 });
 
-function ownedWorld({ created = CREATED, idle = IDLE, outcome = "failed", synthetics = [] } = {}) {
+function ownedWorld({ created = CREATED, idle = IDLE, outcome = "failed", synthetics = [], childTimeline } = {}) {
   const w = world({
     completionOwner: "opencode",
     origin: "subagent",
@@ -329,8 +329,17 @@ function ownedWorld({ created = CREATED, idle = IDLE, outcome = "failed", synthe
   });
   w.state.now = SEEN + 1000;
   w.sessions.set(CHILD, { id: CHILD, parentID: PARENT, directory: "/repo", outcome, time: { created, idle, updated: idle } });
+  // The child's own raw timeline: by default ONE execution — its input, then it ended.
+  const timeline = childTimeline ?? [
+    { type: "user", id: "msg_in", time: { created: created + 10 } },
+    { type: "idle", id: "msg_idle", time: { created: idle }, outcome },
+  ];
   const base = w.deps.listRawTimeline;
-  w.deps.listRawTimeline = async (sid, opts = {}) => (sid === PARENT && opts.type === "synthetic" ? synthetics : base(sid, opts));
+  w.deps.listRawTimeline = async (sid, opts = {}) => {
+    if (sid === PARENT && opts.type === "synthetic") return synthetics;
+    if (sid === CHILD) return opts.type ? timeline.filter((r) => r.type === opts.type) : timeline;
+    return base(sid, opts);
+  };
   return w;
 }
 
@@ -400,7 +409,7 @@ test("an older resumed session keeps the strict rule: its previous outcome canno
 });
 
 test("born within the slack: created up to 60 s before the sighting counts; 61 s does not", async () => {
-  const inside = ownedWorld({ created: SEEN - BORN_SLACK_MS, idle: SEEN - BORN_SLACK_MS + 10 });
+  const inside = ownedWorld({ created: SEEN - BORN_SLACK_MS, idle: SEEN - BORN_SLACK_MS + 50 });
   assert.equal((await settle(inside)).settled, true);
   const outside = ownedWorld({ created: SEEN - BORN_SLACK_MS - 1, idle: SEEN - BORN_SLACK_MS + 10 });
   assert.equal((await settle(outside)).settled, false);
@@ -573,4 +582,71 @@ test("lazy parent read: an unreadable parent timeline leaves a done run's result
   const res = await settle(w);
   assert.equal(res.status, "done");
   assert.equal(w.job().result, null);
+});
+
+// ---- review round 2: "first run" is proven by opencode's own timeline of the child ----
+test("a child that ran INLINE and was resumed in the background within 60 s is not a first run: its lost second run is not finished by the inline outcome", async () => {
+  // No job record exists for the inline run — only opencode's timeline of the child knows it ran before.
+  const w = ownedWorld({
+    outcome: "succeeded",
+    idle: CREATED + 5000,
+    synthetics: [synthetic("completed", "the inline run's result")],
+    childTimeline: [
+      { type: "user", id: "msg_1", time: { created: CREATED + 10 } },
+      { type: "idle", id: "idle_1", time: { created: CREATED + 5000 }, outcome: "succeeded" },
+      { type: "user", id: "msg_2", time: { created: CREATED + 20_000 } }, // the background resume — then opencode died
+    ],
+  });
+  Object.assign(w.job(), { runStartedAt: CREATED + 20_000, startedAt: CREATED + 20_000 });
+  w.state.now = CREATED + 21_000;
+  assert.equal(w.jobs.length, 1, "no record of the inline run");
+  const [first, second] = await lostSettle(w);
+  assert.equal(first.reason, "lost-pending");
+  assert.equal(second.lost, true, "judged lost, not finished (done) by the inline run's outcome");
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+});
+
+test("the born allowance needs ONE execution in the child's own timeline; unreadable or unprovable keeps the strict rule", async () => {
+  const run = async (childTimeline, tweak) => {
+    const w = ownedWorld({ outcome: "failed", synthetics: [synthetic("failed", "Model unavailable: x")], childTimeline });
+    tweak?.(w);
+    return { w, res: await settle(w) };
+  };
+  const one = await run(undefined);
+  assert.equal(one.res.settled, true, "the original single-execution case still settles");
+  assert.equal(one.w.job().status, "failed");
+  assert.equal(one.w.job().error, "Model unavailable: x");
+
+  const runningFirst = await run([{ type: "user", id: "u", time: { created: CREATED + 10 } }, { type: "idle", id: "i", time: { created: IDLE }, outcome: "failed" }]);
+  assert.equal(runningFirst.res.settled, true);
+
+  const twoIdles = await run([
+    { type: "user", id: "u1", time: { created: CREATED + 10 } },
+    { type: "idle", id: "i1", time: { created: CREATED + 100 }, outcome: "succeeded" },
+    { type: "idle", id: "i2", time: { created: IDLE }, outcome: "failed" },
+  ]);
+  assert.equal(twoIdles.res.settled, false, "two executions");
+
+  const inputAfter = await run([
+    { type: "user", id: "u1", time: { created: CREATED + 10 } },
+    { type: "idle", id: "i1", time: { created: IDLE }, outcome: "failed" },
+    { type: "user", id: "u2", time: { created: IDLE + 1 } },
+  ]);
+  assert.equal(inputAfter.res.settled, false, "input after the first execution's end");
+
+  const unreadable = await run(undefined, (w) => {
+    const base = w.deps.listRawTimeline;
+    w.deps.listRawTimeline = async (sid, opts = {}) => {
+      if (sid === CHILD) throw new Error("timeline unavailable");
+      return base(sid, opts);
+    };
+  });
+  assert.equal(unreadable.res.settled, false, "unreadable");
+
+  const noReader = await run(undefined, (w) => { delete w.deps.listRawTimeline; });
+  assert.equal(noReader.res.settled, false, "no reader");
+
+  const undated = await run([{ type: "user", id: "u1" }, { type: "idle", id: "i1", time: {}, outcome: "failed" }]);
+  assert.equal(undated.res.settled, false, "an idle with no time cannot prove anything");
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { materializeSession, promoteViewWindows, createViewWindowCloser } from "./sessionMaterialize.mjs";
+import { materializeSession, promoteViewWindows, createViewWindowCloser, createViewWindowArmer } from "./sessionMaterialize.mjs";
 import { createHandoffEngine } from "./handoff/engine.mjs";
 import { createWorld, readyRecord } from "./handoff/testWorld.mjs";
 import { cleanupTerminalJob, adoptExistingSession, deleteJob } from "./delegate.mjs";
@@ -242,32 +242,42 @@ test("promoteViewWindows: restamps only viewer windows of the session's chain; o
   assert.equal(await promoteViewWindows("a", { listProjects: async () => { throw new Error("no tmux"); }, stampOwner, warn: () => {} }), 0);
 });
 
-test("promoteViewWindows: with nothing to promote it takes no exclusion and no lock; otherwise the order is materialize's", async () => {
+test("promoteViewWindows: with no LIVE viewer window it takes no exclusion and no lock; otherwise the order is materialize's", async () => {
   const idle = viewWorld({ sid: "S", owner: "user", armed: false });
   assert.equal(await idle.promote(), 0);
-  assert.deepEqual(idle.log, ["read"], "only the cheap peek: no exclusion, no refresh, no canonical lookup");
+  assert.deepEqual(idle.log, ["read"], "one cheap live read: no exclusion, no refresh, no canonical lookup");
 
   const w = viewWorld();
   assert.equal(await w.promote(), 1);
-  assert.deepEqual(w.log, ["read", "exclusive", "refresh", "canon:T", "read", "stamp"], "peek · chain exclusion · fresh list · canonical inside it · LIVE read · stamp");
+  assert.deepEqual(w.log, ["read", "exclusive", "refresh", "canon:T", "read", "stamp"], "live read · chain exclusion · fresh list · canonical inside it · LIVE read again · stamp");
   assert.equal(w.window.owner, "user");
 });
 
-test("promoteViewWindows: the stamps are read LIVE under the exclusion — a window already promoted or gone since the peek is left alone", async () => {
-  const w = viewWorld();
-  let peeked = false;
+test("promoteViewWindows: a cached list is never consulted — a viewer the sync snapshot lacks (or still shows) is judged by the live list", async () => {
+  // The live list has the viewer while any cached snapshot would not: promoted.
   const stamps = [];
   const n = await promoteViewWindows("T", {
-    peekProjects: async () => { peeked = true; return [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "view" }] }]; },
-    listProjects: async () => [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "user" }] }],
+    listProjects: async () => [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "view" }] }],
     stampOwner: async (...a) => stamps.push(a),
     chainOf: () => ["S", "T"],
-    withChainExclusive: w.exclusive,
     warn: () => {},
   });
-  assert.equal(peeked, true);
-  assert.equal(n, 0);
-  assert.deepEqual(stamps, [], "the stale snapshot said view; the live stamp said user");
+  assert.equal(n, 1);
+  assert.deepEqual(stamps, [["p", 7, "user"]]);
+  // Between the first live read and the one under the exclusions the window was promoted by someone else: nothing to stamp.
+  const reads = [
+    [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "view" }] }],
+    [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "user" }] }],
+  ];
+  const again = [];
+  const m = await promoteViewWindows("T", {
+    listProjects: async () => reads.shift(),
+    stampOwner: async (...a) => again.push(a),
+    chainOf: () => ["S", "T"],
+    warn: () => {},
+  });
+  assert.equal(m, 0);
+  assert.deepEqual(again, []);
 });
 
 test("view closer: kills a still-armed viewer window of a session that is still not running, in materialize's order", async () => {
@@ -346,4 +356,55 @@ test("interleaving: a closer that holds the exclusion first kills only a window 
   assert.equal(w.kills.length, 1);
   assert.deepEqual(w.kills[0].at, { sid: "S", owner: "view", armed: true }, "at the moment of the kill it was still the armed viewer of S");
   assert.equal(w.window, null);
+});
+
+// ---- arming validates identity ----
+function armWorld(window = { sid: "S", owner: "view", armed: false }) {
+  const w = viewWorld(window);
+  w.stamps = [];
+  w.arm = (sid = "S") => createViewWindowArmer({
+    listProjects: w.listProjects,
+    stampViewArmed: async (project, index) => { w.stamps.push([project, index, w.window && { ...w.window }]); },
+    refresh: async () => { w.log.push("refresh"); },
+    chainOf: () => ["S", "T"],
+    canonicalSessionOf: (s) => { w.log.push(`canon:${s}`); return s; },
+    withChainExclusive: (s, fn) => { w.log.push("exclusive"); return w.exclusive(s, fn); },
+  })({ project: "p", windowIndex: 7, sessionId: sid });
+  return w;
+}
+
+test("view armer: stamps a window that is still a viewer of that session (or a member of its chain), in materialize's order", async () => {
+  const w = armWorld();
+  assert.deepEqual(await w.arm("S"), { armed: true });
+  assert.deepEqual(w.log, ["exclusive", "refresh", "canon:S", "read"]);
+  assert.equal(w.stamps.length, 1);
+  const chain = armWorld({ sid: "T", owner: "view", armed: false });
+  assert.deepEqual(await chain.arm("S"), { armed: true }, "the window now carries a successor of the session");
+});
+
+test("view armer: never stamps a window that is not that session's viewer any more", async () => {
+  for (const patch of [{ sid: "Z" }, { owner: "user" }, { owner: "job" }]) {
+    const w = armWorld({ sid: "S", owner: "view", armed: false, ...patch });
+    assert.deepEqual(await w.arm("S"), { armed: false, reason: "changed" }, JSON.stringify(patch));
+    assert.deepEqual(w.stamps, []);
+  }
+  const gone = armWorld(null);
+  assert.equal((await gone.arm()).armed, false);
+  assert.deepEqual(gone.stamps, []);
+});
+
+test("interleaving: a tmux index reused by a viewer of an unrelated finished session between queueing and stamping is not armed", async () => {
+  const w = armWorld();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  // Something holds the chain exclusion (a handoff commit); the arm for S (viewer at index 7) queues behind it.
+  const holder = w.exclusive("S", async () => { await gate; });
+  const arming = w.arm("S");
+  await flush();
+  // Meanwhile the window at index 7 was closed and the index reused by a viewer of a different, finished session.
+  w.window = { sid: "OTHER", owner: "view", armed: false };
+  release();
+  await holder;
+  assert.deepEqual(await arming, { armed: false, reason: "changed" });
+  assert.deepEqual(w.stamps, [], "the reused index was not armed");
 });

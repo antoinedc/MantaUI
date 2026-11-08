@@ -2584,8 +2584,9 @@ test("opencode:prompt promotes every viewer window of the session (and its hando
   const stamps = order.filter((e) => Array.isArray(e));
   assert.deepEqual(stamps, [["stamp", "p", 1, "user"], ["stamp", "p", 2, "user"], ["stamp", "p", 5, "user"]], "only this conversation's viewer windows");
   assert.ok(order.indexOf(stamps.at(-1)) < sendAt, "every stamp is awaited before the send is forwarded");
-  assert.ok(order.indexOf("exclusive") < order.indexOf("live-read"), "inside the handoff chain exclusion, the window stamps are read LIVE before any restamp");
-  assert.ok(order.indexOf("live-read") < order.indexOf(stamps[0]));
+  const ex = order.indexOf("exclusive");
+  assert.ok(order.indexOf("live-read") >= 0 && order.indexOf("live-read") < ex, "a live read decides whether anything needs the exclusions");
+  assert.ok(order.indexOf("live-read", ex) > ex && order.indexOf("live-read", ex) < order.indexOf(stamps[0]), "inside the chain exclusion the stamps are read LIVE again before any restamp");
 });
 
 test("opencode:run-command promotes viewer windows too, and a session with none costs nothing", async () => {
@@ -2595,7 +2596,17 @@ test("opencode:run-command promotes viewer windows too, and a session with none 
   assert.ok(order.indexOf("send") > order.findIndex((e) => Array.isArray(e)));
   const none = viewSendDeps();
   await none.handlers["opencode:prompt"]({ sessionId: "ses_nowindow", text: "hi" });
-  assert.deepEqual(none.order, ["send"], "no viewer window in the snapshot: no exclusion, no live read, no stamp");
+  assert.deepEqual(none.order, ["live-read", "send"], "one live read finds no viewer window: no exclusion, no stamp");
+});
+
+test("opencode:prompt promotes a viewer window the sync snapshot does not have yet (the live list decides)", async () => {
+  const { handlers, order, deps } = viewSendDeps();
+  deps.syncState.snapshot = () => ({ projects: [] }); // a stale cache that has never heard of the viewer
+  const rpc = buildHandlers(deps);
+  await rpc["opencode:prompt"]({ sessionId: "ses_a", text: "hi" });
+  assert.equal(order.filter((e) => Array.isArray(e) && e[0] === "stamp").length, 3);
+  assert.ok(order.indexOf("live-read") < order.indexOf("exclusive"));
+  void handlers;
 });
 
 test("a failing promotion is logged and never blocks the send", async () => {

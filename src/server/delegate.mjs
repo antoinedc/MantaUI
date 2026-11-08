@@ -3065,11 +3065,33 @@ const BACKGROUND_ERROR_MAX_CHARS = 500;
 const BACKGROUND_RESULT_MAX_CHARS = 2_000;
 
 /**
+ * Did opencode run this child exactly once so far? The child's OWN raw timeline answers, not Manta's records (an
+ * inline `task` run leaves no job record): at most one `idle` record (one execution ended) and no `user` input at or
+ * after that first end (a resume). Unreadable or unprovable ⇒ false.
+ */
+async function singleExecutionProven(childSessionID, deps) {
+  if (typeof deps.listRawTimeline !== "function") return false;
+  try {
+    const rows = await deps.listRawTimeline(childSessionID);
+    if (!Array.isArray(rows)) return false;
+    const idles = rows.filter((r) => r?.type === "idle");
+    if (idles.length > 1) return false;
+    if (idles.length === 0) return true;
+    const endedAt = idles[0]?.time?.created;
+    if (!Number.isFinite(endedAt)) return false;
+    return !rows.some((r) => r?.type === "user" && !(Number.isFinite(r?.time?.created) && r.time.created < endedAt));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The instant the run this opencode-owned record describes began. Manta first sees a run some time after it
  * started, so a child created for it (within BORN_SLACK_MS of that sighting) began at its own creation — an
  * outcome from before the sighting is then still THIS run's. That holds only for a PROVABLE first run: attempt 1,
- * continuing nothing, and no other record of the child in the store (a resumed session's earlier outcome must
- * never finish its new record, however recently the session was created). Anything unprovable keeps the sighting time.
+ * continuing nothing, no other record of the child in the store, AND opencode's own timeline of the child showing
+ * a single execution (a session resumed from an inline `task` run has no record at all, yet its earlier outcome must
+ * never finish the new run). Anything unprovable keeps the sighting time.
  */
 async function effectiveRunStart(job, session, manta, deps) {
   if (manta || job.runStartedAt == null) return job.runStartedAt ?? null;
@@ -3082,6 +3104,7 @@ async function effectiveRunStart(job, session, manta, deps) {
   } catch {
     return job.runStartedAt;
   }
+  if (!(await singleExecutionProven(job.childSessionID, deps))) return job.runStartedAt;
   return Math.min(job.runStartedAt, created);
 }
 

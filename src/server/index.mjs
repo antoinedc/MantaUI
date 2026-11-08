@@ -103,7 +103,7 @@ import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
-import { createViewWindowCloser } from "./sessionMaterialize.mjs";
+import { createViewWindowArmer, createViewWindowCloser } from "./sessionMaterialize.mjs";
 import { createSessionLinks, createSessionLinkActions } from "./sessionLinks.mjs";
 import { createQuestionsDecorator } from "./questionsDecorator.mjs";
 import { runBoundaryOf } from "./transcriptRuns.mjs";
@@ -1394,19 +1394,27 @@ const delegateView = createDelegateView({
 // aggregated from authoritative sources only (the interpreter's own-session frames, parent edges, delegate records) and
 // published as one `windowStatus` frame per session whose payload changed.
 const sessionLinks = createSessionLinks({ changed: () => sessionStatusRef.current?.linksChanged() });
-// Viewer windows (`@manta-owner=view`, opened by sessions:materialize) close once their session has been finished a while.
-const closeViewWindow = createViewWindowCloser({
+// Viewer windows (`@manta-owner=view`, opened by sessions:materialize) are armed once their session is seen working and
+// close once it has been finished a while. Both take materialize's ordering: chain exclusion, then the session lock.
+const viewWindowOrdering = {
   listProjects: () => tmux.listProjects(),
-  listActiveSessionIds: () => oc.listActiveSessionIds(),
-  killWindow: (a) => tmux.killWindow(a),
   refresh: () => syncState.refreshNow(),
   chainOf: (sid) => handoffEngine.chainOf(sid),
   canonicalSessionOf: (sid) => sessionStatusRef.current?.canonicalSessionOf(sid) ?? sid,
   withChainExclusive: (sid, fn) => handoffEngine.withChainExclusive(sid, fn),
+};
+const closeViewWindow = createViewWindowCloser({
+  ...viewWindowOrdering,
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  killWindow: (a) => tmux.killWindow(a),
+});
+const armViewWindow = createViewWindowArmer({
+  ...viewWindowOrdering,
+  stampViewArmed: (project, windowIndex) => tmux.stampViewArmed(project, windowIndex),
 });
 const sessionStatus = createSessionStatus({
   closeViewWindow,
-  armViewWindow: ({ project, windowIndex }) => tmux.stampViewArmed(project, windowIndex),
+  armViewWindow,
   linkOf: (sid) => sessionLinks.linkOf(sid),
   linkEndpoints: () => sessionLinks.endpoints(),
   // Unknown reads retain an edge; only confirmed deletion prunes it. Hydration already reads these candidates.
