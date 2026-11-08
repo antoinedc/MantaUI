@@ -174,7 +174,6 @@ const ID = {
   comp: "f6a7b8c9",
   err: "a7b8c9d0",
   rel: "b8c9d0e1",
-  inc: "c9d0e1f2",
 };
 
 const initialRoutines = (): Routine[] => [
@@ -256,15 +255,6 @@ const initialRoutines = (): Routine[] => [
     projectName: "better-ui",
     enabled: false,
     nextRunAt: null,
-  }),
-  routine({
-    id: ID.inc,
-    name: "Production incident watch",
-    icon: "alert",
-    cron: "0 8 * * *",
-    directory: "/home/dev/projects/ronda",
-    projectName: "ronda",
-    nextRunAt: at(31, 8, 0),
   }),
 ];
 
@@ -412,6 +402,37 @@ const initialRuns = (rs: Routine[]): RoutineRun[] => {
         body: "",
       },
       reportCount: 1,
+      // Rolling updates: this report replaced the two unread weekly reports before it.
+      folds: [
+        { id: "run_da_28", seq: 28 },
+        { id: "run_da_29", seq: 29 },
+      ],
+      unreadAtStart: [
+        { id: "run_da_29", seq: 29, title: "axios advisory still unpatched", coverage: "full", rev: 1 },
+        { id: "run_da_28", seq: 28, title: "1 high-severity advisory in axios", coverage: "full", rev: 1 },
+      ],
+    }),
+    run(by(ID.dep), {
+      id: "run_da_28",
+      seq: 28,
+      status: "done",
+      queuedAt: at(10, 14, 0),
+      startedAt: at(10, 14, 0),
+      endedAt: at(10, 14, 6),
+      report: { outcome: "findings", title: "1 high-severity advisory in axios", summary: "", body: "" },
+      foldedInto: { id: "run_da_30", seq: 30 },
+      ...read(at(24, 14, 9)),
+    }),
+    run(by(ID.dep), {
+      id: "run_da_29",
+      seq: 29,
+      status: "done",
+      queuedAt: at(17, 14, 0),
+      startedAt: at(17, 14, 0),
+      endedAt: at(17, 14, 7),
+      report: { outcome: "findings", title: "axios advisory still unpatched", summary: "", body: "" },
+      foldedInto: { id: "run_da_30", seq: 30 },
+      ...read(at(24, 14, 9)),
     }),
     run(by(ID.dep), { id: "run_da_31", seq: 31, status: "queued", trigger: "manual", queuedAt: at(30, 10, 1), sessionID: null }),
     run(by(ID.comp), { id: "run_cp_8", seq: 8, status: "running", queuedAt: at(30, 10, 0, 9), startedAt: at(30, 10, 0, 9) }),
@@ -428,52 +449,6 @@ const initialRuns = (rs: Routine[]): RoutineRun[] => {
       ...read(at(24, 16, 30)),
     }),
 
-    // Rolling updates: run 16 replaced the two unread reports before it (the demo's "folded" states).
-    run(by(ID.inc), {
-      id: "run_in_14",
-      seq: 14,
-      status: "done",
-      queuedAt: at(28, 8, 0),
-      startedAt: at(28, 8, 0),
-      endedAt: at(28, 8, 2),
-      report: { outcome: "findings", title: "Checkout 5xx errors on /api/pay since 07:40", summary: "", body: "" },
-      foldedInto: { id: "run_in_16", seq: 16 },
-      ...read(at(30, 8, 3)),
-    }),
-    run(by(ID.inc), {
-      id: "run_in_15",
-      seq: 15,
-      status: "done",
-      queuedAt: at(29, 8, 0),
-      startedAt: at(29, 8, 0),
-      endedAt: at(29, 8, 2),
-      report: { outcome: "findings", title: "5xx still failing; the webhook queue is backing up", summary: "", body: "" },
-      foldedInto: { id: "run_in_16", seq: 16 },
-      ...read(at(30, 8, 3)),
-    }),
-    run(by(ID.inc), {
-      id: "run_in_16",
-      seq: 16,
-      status: "done",
-      queuedAt: at(30, 8, 0),
-      startedAt: at(30, 8, 0),
-      endedAt: at(30, 8, 3),
-      report: {
-        outcome: "findings",
-        title: "Checkout 5xx still open since Tue; webhook backlog cleared",
-        summary: "One incident is still open (checkout 5xx on /api/pay, since Tue 07:40). The webhook backlog from Wed has drained.",
-        body: ["- **Still open** — checkout 5xx on `/api/pay`, since Tue 07:40; error rate 3.1% today", "- **Resolved** — webhook queue backlog (Wed), drained overnight"].join("\n"),
-      },
-      notifiedAt: at(30, 8, 3),
-      folds: [
-        { id: "run_in_14", seq: 14 },
-        { id: "run_in_15", seq: 15 },
-      ],
-      unreadAtStart: [
-        { id: "run_in_15", seq: 15, title: "5xx still failing; the webhook queue is backing up", coverage: "full", rev: 1 },
-        { id: "run_in_14", seq: 14, title: "Checkout 5xx errors on /api/pay since 07:40", coverage: "full", rev: 1 },
-      ],
-    }),
   ];
 };
 

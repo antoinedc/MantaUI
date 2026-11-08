@@ -13,7 +13,7 @@ import {
   foldedIntoLine,
   isQuietRun,
   isResolvedUpdate,
-  replacesText,
+  replacesRefs,
   rollUpLabel,
   inboxTimeLabel,
   isUnreadRun,
@@ -329,11 +329,10 @@ describe("rolling updates — what the list and the pane say", () => {
   });
 
   it("'Replaces …' names up to four runs, then the first three and a count", () => {
-    expect(replacesText(run({}))).toBeNull();
-    expect(replacesText(run({ folds: refs(11) }))).toBe("Replaces #11 you hadn't read");
-    expect(replacesText(run({ folds: refs(11, 12) }))).toBe("Replaces #11, #12 you hadn't read");
-    expect(replacesText(run({ folds: refs(8, 9, 10, 11) }))).toBe("Replaces #8, #9, #10, #11 you hadn't read");
-    expect(replacesText(run({ folds: refs(7, 8, 9, 10, 11) }))).toBe("Replaces #7, #8, #9 and 2 more you hadn't read");
+    expect(replacesRefs(run({}))).toEqual({ shown: [], more: 0 });
+    expect(replacesRefs(run({ folds: refs(11, 12) }))).toEqual({ shown: refs(11, 12), more: 0 });
+    expect(replacesRefs(run({ folds: refs(8, 9, 10, 11) }))).toEqual({ shown: refs(8, 9, 10, 11), more: 0 });
+    expect(replacesRefs(run({ folds: refs(7, 8, 9, 10, 11) }))).toEqual({ shown: refs(7, 8, 9), more: 2 });
   });
 
   it("the About row and the editor draft carry the setting (a routine without the field reads as on)", () => {

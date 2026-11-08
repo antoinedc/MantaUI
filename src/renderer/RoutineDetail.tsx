@@ -675,16 +675,15 @@ function RunReading({
             <NotifiedLine run={run} />
           </span>
           {replaces.shown.length > 0 && (
-            <span className="flex flex-wrap items-center">
-              Replaces
+            <span>
+              Replaces{" "}
               {replaces.shown.map((f, i) => (
-                <span key={f.id} className="flex items-center">
-                  {i > 0 && ","}
+                <span key={f.id}>
+                  {i > 0 && ", "}
                   <TextLink onClick={() => onOpenRun(f.id)}>#{f.seq}</TextLink>
                 </span>
               ))}
-              {replaces.more > 0 && <span className="pl-1">and {replaces.more} more</span>}
-              <span className="pl-1">you hadn't read</span>
+              {replaces.more > 0 && ` and ${replaces.more} more`} you hadn't read
             </span>
           )}
           {hasSession && (

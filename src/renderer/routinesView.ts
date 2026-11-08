@@ -317,12 +317,6 @@ export function replacesRefs(run: Pick<RoutineRun, "folds">): { shown: RunRef[];
   return folds.length > 4 ? { shown: folds.slice(0, 3), more: folds.length - 3 } : { shown: folds, more: 0 };
 }
 
-/** "Replaces #11, #12 you hadn't read" (first 3 + "and N more" past 4); null when it replaced nothing. */
-export function replacesText(run: Pick<RoutineRun, "folds">): string | null {
-  const { shown, more } = replacesRefs(run);
-  if (shown.length === 0) return null;
-  return `Replaces ${shown.map((f) => `#${f.seq}`).join(", ")}${more > 0 ? ` and ${more} more` : ""} you hadn't read`;
-}
 
 /** The About row for the rolling-updates setting. */
 export function rollUpLabel(rollUp: boolean): string {

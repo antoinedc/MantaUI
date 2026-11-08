@@ -66,7 +66,7 @@ describe("Routines", () => {
     return props;
   }
 
-  it("draws the four sections from the summary, nine routines in the table, no follow-ups section", () => {
+  it("draws the four sections from the summary, eight routines in the table, no follow-ups section", () => {
     mountPane();
     const text = h!.text();
     for (const t of ["Needs you", "Unread", "Running now", "Your routines"]) {
@@ -74,7 +74,7 @@ describe("Routines", () => {
     }
     expect(text.toLowerCase()).not.toContain("follow-ups in a chat");
     expect(h!.container.querySelector(".manta-routines-followups")).toBeNull();
-    expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(9);
+    expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(8);
     expect(text).not.toMatch(/findings/i);
     expect(text).toContain("14 bug reports are older than 90 days");
     expect(text).toContain("Tomorrow 9:00");
@@ -620,16 +620,17 @@ describe("rolling updates on the routine page", () => {
     h = null;
   });
 
-  const INC = "c9d0e1f2";
+  const DEP = "e5f6a7b8"; // Dependency audit: run #30 replaced the unread #28 and #29
+  const norm = (t: string | null | undefined) => (t ?? "").replace(/\s+/g, " ").trim();
   type Store = ReturnType<typeof createRoutinesStore>;
-  async function mountInc(over: { runId?: string; map?: (d: Awaited<ReturnType<Store["get"]>>) => unknown } = {}) {
+  async function mountDep(over: { runId?: string; map?: (d: Awaited<ReturnType<Store["get"]>>) => unknown } = {}) {
     pinDemoClock(ROUTINES_T0);
     resetStore();
     const store = createRoutinesStore();
     const routinesGet = (id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }) => store.get(id, opts).then((d) => (over.map ? over.map(d) : d));
     installMockApi({ routinesGet, routinesRunGet: store.runGet, routinesMarkRead: store.markRead });
     const props = {
-      routineId: INC,
+      routineId: DEP,
       summary: await store.summary(),
       runId: over.runId,
       onBack: vi.fn(),
@@ -651,54 +652,64 @@ describe("rolling updates on the routine page", () => {
   const readingButton = (text: string) => [...reading().querySelectorAll("button")].find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
 
   it("opens on the update; a replaced run keeps its row, reads as read and quiet, and says where it went", async () => {
-    await mountInc();
-    expect(options().find((o) => o.getAttribute("aria-selected") === "true")?.textContent).toContain("Checkout 5xx still open since Tue");
-    const folded = options().filter((o) => o.textContent?.includes("Folded into #16"));
+    await mountDep();
+    expect(options().find((o) => o.getAttribute("aria-selected") === "true")?.textContent).toContain("2 high-severity advisories");
+    const folded = options().filter((o) => o.textContent?.includes("Folded into #30"));
     expect(folded.length).toBe(2);
     for (const row of folded) {
       expect(row.querySelector(".invisible")).toBeTruthy();
       expect(row.querySelector(".text-text-faint.font-normal")).toBeTruthy();
     }
-    expect(option("Checkout 5xx still open since Tue")?.querySelector(".font-normal")).toBeNull();
-    expect(option("Checkout 5xx still open since Tue")?.textContent).not.toContain("Folded into");
+    expect(option("2 high-severity advisories")?.querySelector(".font-normal")).toBeNull();
+    expect(option("2 high-severity advisories")?.textContent).not.toContain("Folded into");
   });
 
   it("the update names what it replaced; each #N selects that run, and a replaced run links back to its update", async () => {
-    const props = await mountInc();
-    expect(reading().textContent).toMatch(/Replaces\s*#14,\s*#15\s*you hadn't read/);
-    await click(h!, readingButton("#14") ?? null);
-    expect(props.onSelectRun).toHaveBeenLastCalledWith("run_in_14");
-    expect(reading().textContent).toContain("Folded into run #16 — read that one for the current picture.");
-    expect(reading().textContent).toContain("Checkout 5xx errors on /api/pay since 07:40");
-    await click(h!, readingButton("Open #16") ?? null);
-    expect(props.onSelectRun).toHaveBeenLastCalledWith("run_in_16");
+    const props = await mountDep();
+    expect(norm(reading().textContent)).toContain("Replaces #28, #29 you hadn't read");
+    await click(h!, readingButton("#28") ?? null);
+    expect(props.onSelectRun).toHaveBeenLastCalledWith("run_da_28");
+    expect(reading().textContent).toContain("Folded into run #30 — read that one for the current picture.");
+    expect(reading().textContent).toContain("1 high-severity advisory in axios");
+    await click(h!, readingButton("Open #30") ?? null);
+    expect(props.onSelectRun).toHaveBeenLastCalledWith("run_da_30");
     expect(reading().textContent).not.toContain("Folded into run");
   });
 
+  it("past four replaced runs the segment names the first three and counts the rest", async () => {
+    await mountDep({
+      map: (d) => ({
+        ...d,
+        runs: d.runs.map((r) => (r.id === "run_da_30" ? { ...r, folds: [24, 25, 26, 27, 28].map((seq) => ({ id: `run_da_${seq}`, seq })) } : r)),
+      }),
+    });
+    expect(norm(reading().textContent)).toContain("Replaces #24, #25, #26 and 2 more you hadn't read");
+  });
+
   it("an update that resolved everything is labelled Resolved and is not drawn as a quiet run", async () => {
-    await mountInc({
-      map: (d) => ({ ...d, runs: d.runs.map((r) => (r.id === "run_in_16" ? { ...r, report: { ...r.report!, outcome: "nothing" as const, title: "All clear" } } : r)) }),
+    await mountDep({
+      map: (d) => ({ ...d, runs: d.runs.map((r) => (r.id === "run_da_30" ? { ...r, report: { ...r.report!, outcome: "nothing" as const, title: "All clear" } } : r)) }),
     });
     expect(reading().textContent).toContain("Resolved");
     expect(option("All clear")?.querySelector(".font-normal")).toBeNull();
   });
 
   it("About says how unread reports are handled, and hides that row for a routine that runs inside a chat", async () => {
-    await mountInc({ runId: "about" });
+    await mountDep({ runId: "about" });
     expect(reading().textContent).toContain("Unread reports");
     expect(reading().textContent).toContain("Updated in place until you read it");
     h!.unmount();
-    await mountInc({ runId: "about", map: (d) => ({ ...d, routine: { ...d.routine, rollUp: false } }) });
+    await mountDep({ runId: "about", map: (d) => ({ ...d, routine: { ...d.routine, rollUp: false } }) });
     expect(reading().textContent).toContain("A new report each run");
     h!.unmount();
-    await mountInc({ runId: "about", map: (d) => ({ ...d, routine: { ...d.routine, destination: { type: "session", sessionID: "s", followupId: "f", enabledBeforeMove: true } } }) });
+    await mountDep({ runId: "about", map: (d) => ({ ...d, routine: { ...d.routine, destination: { type: "session", sessionID: "s", followupId: "f", enabledBeforeMove: true } } }) });
     expect(reading().textContent).not.toContain("Unread reports");
   });
 
   it("the run transcript says it picked up the unread reports and lists them on demand", async () => {
     installMockApi();
     const store = createRoutinesStore();
-    const { run, routine } = await store.runGet("run_in_16");
+    const { run, routine } = await store.runGet("run_da_30");
     const ctx: RoutineRunContextValue = { run, routine, prevRunId: null, nextRunId: null, onNavigate: vi.fn(), onKeep: vi.fn(), onBack: vi.fn(), onOpenRoutine: vi.fn(), onFollowUp: vi.fn(), firstUserMessageId: null };
     h = mount(
       <RoutineRunContext.Provider value={ctx}>
@@ -708,8 +719,8 @@ describe("rolling updates on the routine page", () => {
     expect(h.text()).toContain("Picked up 2 unread reports");
     expect(h.text()).not.toContain("5xx still failing");
     await click(h, buttonByText(h, "Picked up 2 unread reports ▸"));
-    expect(h.text()).toContain("#15 · 5xx still failing; the webhook queue is backing up");
-    expect(h.text()).toContain("#14 · Checkout 5xx errors on /api/pay since 07:40");
+    expect(h.text()).toContain("#29 · axios advisory still unpatched");
+    expect(h.text()).toContain("#28 · 1 high-severity advisory in axios");
   });
 });
 
