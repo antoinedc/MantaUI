@@ -456,6 +456,7 @@ const WIRE = [
       "GET /api/integration/openai": { data: { methods: [{ type: "oauth", id: "oa1" }] } },
       "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_1", url: "u", mode: "code" } },
       "POST /api/integration/openai/connect/oauth/att_1/complete": null,
+      "GET /api/integration/openai/connect/oauth/att_1": { data: { status: "complete", time: { created: 0, expires: 0 } } },
     },
     async () => {
       assert.equal((await oc.startProviderOauth("openai", 0)).ok, true);
@@ -469,7 +470,7 @@ const WIRE = [
       ["POST", "/api/integration/openai/connect/oauth/att_1/complete", {}, { code: "zzz" }],
       ["GET", "/api/integration/openai"],
       ["POST", "/api/integration/openai/connect/oauth", {}, { methodID: "oa1" }],
-      ["POST", "/api/integration/openai/connect/oauth/att_1/complete", {}, {}],
+      ["GET", "/api/integration/openai/connect/oauth/att_1"],
     ],
   ],
   [

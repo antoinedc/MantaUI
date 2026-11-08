@@ -2121,8 +2121,14 @@ export async function listProviderAuthMethods() {
   }
 }
 
-// providerID:methodIndex -> the OAuth attempt a later `complete` call belongs to.
+// providerID:methodIndex -> {attemptID, expires} of the OAuth attempt a later
+// `complete` call belongs to (`expires`: opencode's epoch-ms deadline, or null).
 const oauthAttempts = new Map();
+
+// How often an auto-mode (device-code) attempt's status is polled.
+const OAUTH_STATUS_POLL_MS = 2000;
+// Used only when opencode did not report the attempt's own expiry.
+const OAUTH_FALLBACK_WAIT_MS = 15 * 60 * 1000;
 
 /**
  * Start a provider's OAuth flow. Returns `{url, method:"auto"|"code", instructions}`;
@@ -2142,7 +2148,10 @@ export async function startProviderOauth(providerID, methodIndex) {
     });
     if (refused) return refused;
     const data = res?.data;
-    if (data?.attemptID) oauthAttempts.set(`${providerID}:${methodIndex}`, data.attemptID);
+    if (data?.attemptID) {
+      const expires = typeof data?.time?.expires === "number" ? data.time.expires : null;
+      oauthAttempts.set(`${providerID}:${methodIndex}`, { attemptID: data.attemptID, expires });
+    }
     return {
       ok: true,
       url: typeof data?.url === "string" ? data.url : "",
@@ -2156,20 +2165,34 @@ export async function startProviderOauth(providerID, methodIndex) {
 
 /**
  * Complete an OAuth flow. Serves BOTH modes with one function: a `code`-mode
- * flow sends the user-typed code; an `auto`-mode flow omits it, in which case
- * opencode's complete call BLOCKS until the user approves on the provider's page.
+ * flow sends the user-typed code; an `auto`-mode flow (`code === ""`) waits
+ * until the user approves on the provider's page, then resolves.
+ *
+ * The auto wait POLLS `GET …/connect/oauth/{attempt}` (pending | complete |
+ * failed | expired): opencode finishes a device-code attempt itself, and its
+ * `complete` call is for code-based attempts only — calling it without a code
+ * fails at once (500), which is how a successful Codex sign-in used to read as
+ * a failure. The poll is bounded by the attempt's own expiry.
  * @param {string} providerID
  * @param {number} methodIndex
  * @param {string} code   the user-typed code, or `""` for an `auto`-mode flow
+ * @param {{pollMs?: number}} [opts]
  */
-export async function completeProviderOauth(providerID, methodIndex, code) {
+export async function completeProviderOauth(providerID, methodIndex, code, { pollMs = OAUTH_STATUS_POLL_MS } = {}) {
+  const key = `${providerID}:${methodIndex}`;
+  const attempt = oauthAttempts.get(key);
+  if (!attempt) return { ok: false, error: "bad_response", detail: "no oauth attempt in progress" };
+  const { attemptID } = attempt;
+  // A newer start may have replaced the entry meanwhile; only forget our own.
+  const forget = () => {
+    if (oauthAttempts.get(key)?.attemptID === attemptID) oauthAttempts.delete(key);
+  };
+  if (typeof code !== "string" || code === "") return await waitForOauthAttempt(providerID, attempt, pollMs, forget);
   try {
-    const attemptID = oauthAttempts.get(`${providerID}:${methodIndex}`);
-    if (!attemptID) return { ok: false, error: "bad_response", detail: "no oauth attempt in progress" };
     let refused;
     await ocCall(
       "completeProviderOauth",
-      (c, o) => c.integration.oauth.complete({ integrationID: providerID, attemptID, ...(typeof code === "string" && code !== "" ? { code } : {}) }, o),
+      (c, o) => c.integration.oauth.complete({ integrationID: providerID, attemptID, code }, o),
       {
         ignoreBody: true,
         onHttpError: (f) => {
@@ -2178,11 +2201,56 @@ export async function completeProviderOauth(providerID, methodIndex, code) {
       },
     );
     if (refused) return refused;
-    oauthAttempts.delete(`${providerID}:${methodIndex}`);
+    forget();
     invalidateProvidersCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * Poll an auto-mode OAuth attempt until opencode reports it complete, failed or
+ * expired. A transient read failure keeps polling; an attempt opencode no longer
+ * knows (4xx) or one past its deadline ends the wait.
+ * @param {string} providerID
+ * @param {{attemptID: string, expires: number|null}} attempt
+ * @param {number} pollMs
+ * @param {() => void} forget
+ */
+async function waitForOauthAttempt(providerID, { attemptID, expires }, pollMs, forget) {
+  const deadline = (expires ?? Date.now() + OAUTH_FALLBACK_WAIT_MS) + pollMs;
+  for (;;) {
+    let refused;
+    let status;
+    try {
+      const res = await ocCall("oauthStatus", (c, o) => c.integration.oauth.status({ integrationID: providerID, attemptID }, o), {
+        onHttpError: (f) => {
+          if (f.status < 500) refused = failFrom(f);
+        },
+      });
+      status = res?.data;
+    } catch {
+      // opencode briefly unreachable: keep waiting until the deadline.
+    }
+    if (refused) {
+      forget();
+      return refused;
+    }
+    if (status?.status === "complete") {
+      forget();
+      invalidateProvidersCache();
+      return { ok: true };
+    }
+    if (status?.status === "failed") {
+      forget();
+      return { ok: false, error: "failed", detail: String(status.message ?? "").slice(0, 200) };
+    }
+    if (status?.status === "expired" || Date.now() >= deadline) {
+      forget();
+      return { ok: false, error: "expired" };
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
   }
 }
 
