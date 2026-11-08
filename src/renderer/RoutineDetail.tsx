@@ -617,7 +617,7 @@ function RunItem({ run, selected, waitingPos, onSelect }: { run: RoutineRun; sel
         <div className={`mt-1 line-clamp-2 text-label ${unread ? "font-semibold text-text" : quiet ? "font-normal text-text-faint" : "font-medium text-text"}`}>
           {runListTitle(run)}
         </div>
-        {folded && <div className="mt-0.5 text-micro text-text-quiet">{folded}</div>}
+        {folded && <div className="mt-1 text-micro text-text-quiet">{folded}</div>}
       </div>
       {view && (
         <span className="mt-1">
