@@ -11,7 +11,7 @@ import { createRoutinesStore, ROUTINES_T0 } from "./api/demoRoutines";
 import { RoutinesPane } from "./RoutinesPane";
 import { RoutineEditor } from "./RoutineEditor";
 import { RoutineRunContext, type RoutineRunContextValue } from "./routineRunContext";
-import { RoutineReportCard, RoutineToolCard, routineHeaderChrome } from "./RoutineRunParts";
+import { RoutinePromptBlock, RoutineReportCard, RoutineToolCard, routineHeaderChrome } from "./RoutineRunParts";
 import { RoutineDetail } from "./RoutineDetail";
 import { RoutinesRoot, type RoutinesView } from "./RoutinesRoot";
 import { Popover } from "./Popover";
@@ -66,7 +66,7 @@ describe("Routines", () => {
     return props;
   }
 
-  it("draws the four sections from the summary, eight routines in the table, no follow-ups section", () => {
+  it("draws the four sections from the summary, nine routines in the table, no follow-ups section", () => {
     mountPane();
     const text = h!.text();
     for (const t of ["Needs you", "Unread", "Running now", "Your routines"]) {
@@ -74,7 +74,7 @@ describe("Routines", () => {
     }
     expect(text.toLowerCase()).not.toContain("follow-ups in a chat");
     expect(h!.container.querySelector(".manta-routines-followups")).toBeNull();
-    expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(8);
+    expect(h!.container.querySelectorAll(".manta-routines-table [role=button]").length).toBe(9);
     expect(text).not.toMatch(/findings/i);
     expect(text).toContain("14 bug reports are older than 90 days");
     expect(text).toContain("Tomorrow 9:00");
@@ -184,9 +184,36 @@ describe("Routines", () => {
       await type(field("routine-time"), "08:30");
       await click(h!, docButton("Create routine") ?? null);
       expect(routinesCreate).toHaveBeenCalledWith(
-        expect.objectContaining({ name: "Digest", prompt: "Summarize yesterday", cron: "30 8 * * 1-5", access: "read", notify: "findings", directory: "/home/dev/projects/ronda" }),
+        expect.objectContaining({ name: "Digest", prompt: "Summarize yesterday", cron: "30 8 * * 1-5", access: "read", notify: "findings", rollUp: true, directory: "/home/dev/projects/ronda" }),
       );
       expect(props.onSaved).toHaveBeenCalled();
+    });
+
+    it("'If the last report is still unread' defaults to Update it, and the choice goes to the box", async () => {
+      const routinesCreate = vi.fn((input: unknown) => Promise.resolve({ id: "11112222", name: (input as { name: string }).name }));
+      mountEditor({ routinesCreate });
+      await h!.flush();
+      expect(document.body.textContent).toContain("If the last report is still unread");
+      expect(docButton("Update it")?.getAttribute("aria-pressed")).toBe("true");
+      expect(docButton("Add a new one")?.getAttribute("aria-pressed")).toBe("false");
+      await type(field("routine-name"), "Digest");
+      await type(field("routine-prompt"), "Summarize yesterday");
+      await click(h!, docButton("Add a new one") ?? null);
+      expect(docButton("Add a new one")?.getAttribute("aria-pressed")).toBe("true");
+      await click(h!, docButton("Create routine") ?? null);
+      expect(routinesCreate).toHaveBeenCalledWith(expect.objectContaining({ rollUp: false }));
+    });
+
+    it("editing a routine that adds a new report each run opens with that choice and saves a change to it", async () => {
+      const routinesUpdate = vi.fn((_id: string, input: unknown) => Promise.resolve({ id: "a1b2c3d4", name: "Digest", ...(input as object) }));
+      installMockApi({ routinesUpdate });
+      const routine = { ...summary.routines[0], rollUp: false };
+      h = mount(<RoutineEditor open routine={routine} tz="Europe/Paris" onClose={vi.fn()} onSaved={vi.fn()} onTestRun={vi.fn()} />);
+      await h.flush();
+      expect(docButton("Add a new one")?.getAttribute("aria-pressed")).toBe("true");
+      await click(h!, docButton("Update it") ?? null);
+      await click(h!, docButton("Save") ?? null);
+      expect(routinesUpdate).toHaveBeenCalledWith("a1b2c3d4", expect.objectContaining({ rollUp: true }));
     });
 
     it("Test run now saves the routine PAUSED, queues one run and hands its id to the caller", async () => {
@@ -583,6 +610,106 @@ describe("the routine page — the run inbox", () => {
     });
     expect(m.props.onSelectRun).not.toHaveBeenCalled();
     expect(reading().textContent).toContain("All metrics within normal range");
+  });
+});
+
+describe("rolling updates on the routine page", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const INC = "c9d0e1f2";
+  type Store = ReturnType<typeof createRoutinesStore>;
+  async function mountInc(over: { runId?: string; map?: (d: Awaited<ReturnType<Store["get"]>>) => unknown } = {}) {
+    pinDemoClock(ROUTINES_T0);
+    resetStore();
+    const store = createRoutinesStore();
+    const routinesGet = (id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }) => store.get(id, opts).then((d) => (over.map ? over.map(d) : d));
+    installMockApi({ routinesGet, routinesRunGet: store.runGet, routinesMarkRead: store.markRead });
+    const props = {
+      routineId: INC,
+      summary: await store.summary(),
+      runId: over.runId,
+      onBack: vi.fn(),
+      onSelectRun: vi.fn(),
+      onOpenTranscript: vi.fn(),
+      onClosePane: vi.fn(),
+      onEdit: vi.fn(),
+      onMoveToChat: vi.fn(),
+      onChanged: vi.fn(),
+    };
+    h = mount(<RoutineDetail {...props} />);
+    await h.flush();
+    await h.flush();
+    return props;
+  }
+  const reading = () => h!.container.querySelector(".manta-routines-reading") as HTMLElement;
+  const options = () => [...h!.container.querySelectorAll('.manta-routines-runlist [role="option"]')] as HTMLElement[];
+  const option = (text: string) => options().find((o) => o.textContent?.includes(text)) as HTMLElement | undefined;
+  const readingButton = (text: string) => [...reading().querySelectorAll("button")].find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
+
+  it("opens on the update; a replaced run keeps its row, reads as read and quiet, and says where it went", async () => {
+    await mountInc();
+    expect(options().find((o) => o.getAttribute("aria-selected") === "true")?.textContent).toContain("Checkout 5xx still open since Tue");
+    const folded = options().filter((o) => o.textContent?.includes("Folded into #16"));
+    expect(folded.length).toBe(2);
+    for (const row of folded) {
+      expect(row.querySelector(".invisible")).toBeTruthy();
+      expect(row.querySelector(".text-text-faint.font-normal")).toBeTruthy();
+    }
+    expect(option("Checkout 5xx still open since Tue")?.querySelector(".font-normal")).toBeNull();
+    expect(option("Checkout 5xx still open since Tue")?.textContent).not.toContain("Folded into");
+  });
+
+  it("the update names what it replaced; each #N selects that run, and a replaced run links back to its update", async () => {
+    const props = await mountInc();
+    expect(reading().textContent).toMatch(/Replaces\s*#14,\s*#15\s*you hadn't read/);
+    await click(h!, readingButton("#14") ?? null);
+    expect(props.onSelectRun).toHaveBeenLastCalledWith("run_in_14");
+    expect(reading().textContent).toContain("Folded into run #16 — read that one for the current picture.");
+    expect(reading().textContent).toContain("Checkout 5xx errors on /api/pay since 07:40");
+    await click(h!, readingButton("Open #16") ?? null);
+    expect(props.onSelectRun).toHaveBeenLastCalledWith("run_in_16");
+    expect(reading().textContent).not.toContain("Folded into run");
+  });
+
+  it("an update that resolved everything is labelled Resolved and is not drawn as a quiet run", async () => {
+    await mountInc({
+      map: (d) => ({ ...d, runs: d.runs.map((r) => (r.id === "run_in_16" ? { ...r, report: { ...r.report!, outcome: "nothing" as const, title: "All clear" } } : r)) }),
+    });
+    expect(reading().textContent).toContain("Resolved");
+    expect(option("All clear")?.querySelector(".font-normal")).toBeNull();
+  });
+
+  it("About says how unread reports are handled, and hides that row for a routine that runs inside a chat", async () => {
+    await mountInc({ runId: "about" });
+    expect(reading().textContent).toContain("Unread reports");
+    expect(reading().textContent).toContain("Updated in place until you read it");
+    h!.unmount();
+    await mountInc({ runId: "about", map: (d) => ({ ...d, routine: { ...d.routine, rollUp: false } }) });
+    expect(reading().textContent).toContain("A new report each run");
+    h!.unmount();
+    await mountInc({ runId: "about", map: (d) => ({ ...d, routine: { ...d.routine, destination: { type: "session", sessionID: "s", followupId: "f", enabledBeforeMove: true } } }) });
+    expect(reading().textContent).not.toContain("Unread reports");
+  });
+
+  it("the run transcript says it picked up the unread reports and lists them on demand", async () => {
+    installMockApi();
+    const store = createRoutinesStore();
+    const { run, routine } = await store.runGet("run_in_16");
+    const ctx: RoutineRunContextValue = { run, routine, prevRunId: null, nextRunId: null, onNavigate: vi.fn(), onKeep: vi.fn(), onBack: vi.fn(), onOpenRoutine: vi.fn(), onFollowUp: vi.fn(), firstUserMessageId: null };
+    h = mount(
+      <RoutineRunContext.Provider value={ctx}>
+        <RoutinePromptBlock />
+      </RoutineRunContext.Provider>,
+    );
+    expect(h.text()).toContain("Picked up 2 unread reports");
+    expect(h.text()).not.toContain("5xx still failing");
+    await click(h, buttonByText(h, "Picked up 2 unread reports ▸"));
+    expect(h.text()).toContain("#15 · 5xx still failing; the webhook queue is backing up");
+    expect(h.text()).toContain("#14 · Checkout 5xx errors on /api/pay since 07:40");
   });
 });
 
