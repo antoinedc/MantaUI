@@ -1703,19 +1703,91 @@ test("startProviderOauth resolves the method index to its id, returns url/mode; 
   assert.deepEqual(only(calls, "POST", "/api/integration/openai/connect/oauth/att_1/complete")[0].body, { code: "ABCD" });
 });
 
-test("completeProviderOauth omits code for an auto-mode flow; a 401 is `unauthorized`", async () => {
+test("completeProviderOauth for an auto-mode flow POLLS the attempt status (never calls complete) until it is complete", async () => {
+  const STATUS = "/api/integration/openai/connect/oauth/att_2";
+  const seq = ["pending", "pending", "complete"];
   const calls = await withV2(
     {
       "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "dev", type: "oauth" }] } },
-      "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_2", url: "u", instructions: "", mode: "auto" } },
-      "POST /api/integration/openai/connect/oauth/att_2/complete": null,
+      "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_2", url: "u", instructions: "", mode: "auto", time: { created: 0, expires: Date.now() + 60_000 } } },
+      [`GET ${STATUS}`]: () => ({ data: { status: seq.shift(), time: { created: 0, expires: 0 } } }),
     },
     async () => {
       assert.equal((await startProviderOauth("openai", 0)).method, "auto");
-      assert.deepEqual(await completeProviderOauth("openai", 0, ""), { ok: true });
+      assert.deepEqual(await completeProviderOauth("openai", 0, "", { pollMs: 1 }), { ok: true });
+      assert.equal((await completeProviderOauth("openai", 0, "", { pollMs: 1 })).ok, false, "the attempt is consumed");
     },
   );
-  assert.deepEqual(only(calls, "POST", "/api/integration/openai/connect/oauth/att_2/complete")[0].body, {});
+  assert.equal(only(calls, "GET", STATUS).length, 3);
+  assert.equal(only(calls, "POST", `${STATUS}/complete`).length, 0);
+});
+
+test("an auto-mode wait reports opencode's failed / expired outcomes and keeps polling through a transient error", async () => {
+  const STATUS = "/api/integration/openai/connect/oauth/att_4";
+  const routes = (statusFn) => ({
+    "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "dev", type: "oauth" }] } },
+    "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_4", url: "u", mode: "auto", time: { created: 0, expires: Date.now() + 60_000 } } },
+    [`GET ${STATUS}`]: statusFn,
+  });
+  let n = 0;
+  await withV2(
+    routes(() => (n++ === 0 ? new Response("boom", { status: 500 }) : { data: { status: "complete", time: {} } })),
+    async () => {
+      await startProviderOauth("openai", 0);
+      assert.deepEqual(await completeProviderOauth("openai", 0, "", { pollMs: 1 }), { ok: true }, "a 5xx status read is transient");
+    },
+  );
+  await withV2(
+    routes(() => new Response("gone", { status: 404 })),
+    async () => {
+      await startProviderOauth("openai", 0);
+      const r = await completeProviderOauth("openai", 0, "", { pollMs: 1 });
+      assert.equal(r.ok, false);
+      assert.equal(r.error, "bad_response", "an attempt opencode no longer knows ends the wait");
+    },
+  );
+  await withV2(
+    routes(() => ({ data: { status: "failed", message: "denied", time: {} } })),
+    async () => {
+      await startProviderOauth("openai", 0);
+      assert.deepEqual(await completeProviderOauth("openai", 0, "", { pollMs: 1 }), { ok: false, error: "failed", detail: "denied" });
+    },
+  );
+  await withV2(
+    routes(() => ({ data: { status: "expired", time: {} } })),
+    async () => {
+      await startProviderOauth("openai", 0);
+      assert.deepEqual(await completeProviderOauth("openai", 0, "", { pollMs: 1 }), { ok: false, error: "expired" });
+    },
+  );
+  let t = 0;
+  await withV2(
+    routes(() => {
+      if (t++ === 0) throw new Error("socket hang up");
+      return { data: { status: "complete", time: {} } };
+    }),
+    async () => {
+      await startProviderOauth("openai", 0);
+      assert.deepEqual(await completeProviderOauth("openai", 0, "", { pollMs: 1 }), { ok: true }, "a thrown read is transient");
+    },
+  );
+});
+
+test("an auto-mode wait gives up at the attempt's own expiry", async () => {
+  await withV2(
+    {
+      "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "dev", type: "oauth" }] } },
+      "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_5", url: "u", mode: "auto", time: { created: 0, expires: Date.now() - 1000 } } },
+      "GET /api/integration/openai/connect/oauth/att_5": { data: { status: "pending", time: {} } },
+    },
+    async () => {
+      await startProviderOauth("openai", 0);
+      assert.deepEqual(await completeProviderOauth("openai", 0, "", { pollMs: 1 }), { ok: false, error: "expired" });
+    },
+  );
+});
+
+test("a code-mode completeProviderOauth: a 401 is `unauthorized`", async () => {
   await withV2(
     {
       "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "dev", type: "oauth" }] } },
