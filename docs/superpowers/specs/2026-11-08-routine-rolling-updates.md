@@ -213,7 +213,9 @@ report (graceful path) on a run `c` with `c.foldedInto !== null`, the fold is un
 the same transaction: remove `c` from the replacing run's `folds`, set
 `c.foldedInto = null`, `c.readAt = null`. The user then sees the new content as its
 own unread report. (Window: ≤ 60 s after `c` settled; rare, but it must never hide new
-content.)
+content.) If that leaves the replacing run with `folds` empty and it is `done` with
+outcome `nothing`, it is no longer a resolved update: set its `readAt = t` (it becomes
+an ordinary quiet run). Touch both runs.
 
 ### 5.5 Read state (amends §6.4)
 
@@ -222,17 +224,20 @@ A **resolved update** is a run with `status === "done"`, `report.outcome ===
 
 - `finalize`: auto-read (`readAt = t`) applies to `done`+`nothing` **only when
   `folds` is empty** after `applyFold`; plus `cancelled` and `skipped` as today.
-- Graceful late report (it replaces the content the user may have seen): after
-  `applyFold`, set `readAt = t` if the new report is `nothing` with no folds, else
-  `readAt = null` — regardless of whether the user had opened the synthesized
-  version, because the content changed. This removes any need to know who set
-  `readAt` before.
+- Graceful late report on a run with status `done` (it replaces the content the
+  user may have seen): after `applyFold`, set `readAt = t` if the new report is
+  `nothing` with no folds, else `readAt = null` — regardless of whether the user had
+  opened the synthesized version, because the content changed. This removes any need
+  to know who set `readAt` before. For any other terminal status (`failed`,
+  `timed_out`, `cancelled` — the graceful path accepts them) the read state is NOT
+  touched by the outcome: today's rules for those statuses stand (a failure stays
+  unread until the user reads it).
 - `isFindingRun` (the "can be unread" predicate) includes resolved updates.
 - Summary `unread` / `findings` and the sidebar badge therefore show one item per
   routine after a fold; folded runs are read, so they drop out automatically.
 - Retention (§4.5): folded runs are ordinary read runs and may be pruned. A `folds`
-  or `foldedInto` ref may point at a pruned run; clients must cope (show the seq,
-  no link).
+  or `foldedInto` ref may point at a pruned run; clients handle it with the link rule
+  in §7.3 (the existing not-found path).
 
 ### 5.6 Overlapping runs of the same routine
 
@@ -266,11 +271,16 @@ setting's summary row for such routines (§7.3).
   honour tags it replaces the earlier banner. Earlier delivered notifications are
   not withdrawn (out of scope).
 - **Decide on the current state.** `notifyRun` runs after the lock is released and
-  currently decides from the clone `terminate` returned. It must re-read the run from
-  the store (outside the lock) and decide/compose from that fresh record, skipping
-  when `notifiedAt` is already set. So a late report that landed in between (e.g.
-  turning it into a silent resolved update) wins. Late reports themselves never send
-  a notification (unchanged).
+  currently decides from the clone `terminate` returned. For the TERMINAL path
+  (`afterFinal`) it must re-read the run from the store (outside the lock) and
+  decide/compose from that fresh record. So a late report that landed in between
+  (e.g. turning it into a silent resolved update) wins. Dedup is per phase, not via
+  `notifiedAt` (a needs_input question already set it, and the run must still notify
+  when it finishes): add a server-only `terminalNotified: boolean` (in
+  `RUN_SERVER_ONLY`), set when the terminal notification is sent, and skip the
+  terminal notification when it is already true. `notifiedAt` keeps its meaning for
+  the UI. The needs_input path is unchanged. Late reports themselves never send a
+  notification (unchanged).
 
 ## 7. UI (desktop renderer)
 
@@ -377,6 +387,10 @@ Base spec: add a short "Amended by 2026-11-08-routine-rolling-updates.md" note u
    a late report on an already-folded source un-folds it (both orderings).
 4d. `notifyRun` decides from the fresh record: a late report landing between
    `terminate` and `notifyRun` that turns the run into a resolved update → no push.
+   A run that asked a question (needs_input notified) and then finishes with findings
+   or fails still gets its terminal notification, exactly once.
+4e. Late report on a failed / timed-out run with outcome `nothing` → stays unread.
+4f. Un-folding the only fold of a resolved update makes that update read.
 5. Fold on done with a filed report: targets get `foldedInto`, `readAt`; run gets
    `folds`; summary `unread` drops to 1.
 6. No fold: failed, timed_out, synthesized-report done, `rollUp` off, needs_input.
