@@ -241,7 +241,7 @@ function repairBox({ storeText }) {
   const jobStorePath = join(dir, "delegate-jobs.json");
   if (storeText !== undefined) writeFileSync(jobStorePath, storeText);
   const f = fakes();
-  f.sessions.set("X", { id: "X", parentID: "ses_root", directory: "/proj", time: { created: 1, updated: T0 + 120_000 } });
+  f.sessions.set("X", { id: "X", parentID: "ses_root", directory: "/proj", time: { created: 1, idle: T0 + 120_000 } });
   f.sessions.set("X1", { id: "X1", directory: "/proj", time: { created: T0 } });
   f.disk.json = JSON.stringify({ version: 1, records: {}, links: { X: linkOf(null, "X1"), X1: linkOf("X", null) } });
   const lenientReads = [];
