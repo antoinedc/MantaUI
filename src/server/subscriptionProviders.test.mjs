@@ -46,10 +46,13 @@ describe("SUBSCRIPTION_PROVIDERS", () => {
     );
   });
 
-  it("preserves the documented openai prefer order: headless first, browser second", () => {
+  it("openai prefers ONLY the device-code flow (no generic 'chatgpt' rule that could pick a localhost redirect)", () => {
     const openai = findSubscriptionProvider("openai");
-    assert.equal(openai.prefer[0].match, "headless");
-    assert.equal(openai.prefer[1].match, "chatgpt");
+    assert.deepEqual(openai.prefer, [
+      { type: "oauth", id: "chatgpt-headless" },
+      { type: "oauth", match: "device code" },
+      { type: "oauth", match: "headless" },
+    ]);
   });
 
   it("kimi has an empty prefer array — generic API-key path is the only route", () => {
@@ -83,13 +86,38 @@ describe("resolveAuthMethod", () => {
     assert.equal(r.method.label, "ChatGPT Pro/Plus (headless)");
   });
 
-  it("falls through to chatgpt (browser) when headless is missing", () => {
+  it("never picks a browser (localhost-callback) variant when headless is missing — falls back to the API key", () => {
     const openai = findSubscriptionProvider("openai");
     const noHeadless = OPENAI_METHODS.filter((m) => !/headless/i.test(m.label));
     const r = resolveAuthMethod(openai, noHeadless);
     assert.ok(r);
-    assert.equal(r.index, 0);
-    assert.equal(r.method.label, "ChatGPT Pro/Plus (browser)");
+    assert.equal(r.method.type, "api");
+  });
+
+  // opencode 2.0.30's GET /api/integration/openai, mapped by toAuthMethod
+  // (key → api). "Sign in with ChatGPT" comes FIRST and redirects to
+  // 127.0.0.1:<port>/auth/callback on the box; only the device code works.
+  it("picks 'Codex device code (legacy)' over 'Sign in with ChatGPT' on opencode 2.0.30", () => {
+    const openai = findSubscriptionProvider("openai");
+    const methods = [
+      { type: "api", label: "API key" },
+      { type: "env", names: ["OPENAI_API_KEY"], label: "env" },
+      { id: "chatgpt-token-sharing", type: "oauth", label: "Sign in with ChatGPT" },
+      { id: "chatgpt-browser", type: "oauth", label: "Codex browser (legacy)" },
+      { id: "chatgpt-headless", type: "oauth", label: "Codex device code (legacy)" },
+    ];
+    const r = resolveAuthMethod(openai, methods);
+    assert.equal(r.index, 4);
+    assert.equal(r.method.id, "chatgpt-headless");
+  });
+
+  it("matches the device-code label when the method carries no id", () => {
+    const openai = findSubscriptionProvider("openai");
+    const methods = [
+      { type: "oauth", label: "Sign in with ChatGPT" },
+      { type: "oauth", label: "Codex device code (legacy)" },
+    ];
+    assert.equal(resolveAuthMethod(openai, methods).index, 1);
   });
 
   it("falls back to the api method when no prefer rule matches", () => {
