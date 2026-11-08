@@ -628,7 +628,7 @@ const fgBlock = (child) => ({ content: [{ type: "tool", state: { metadata: { ses
  * A harness over createSessionStatus with the readers the tree needs. `sessions`: sid → { parentID, title, directory, metadata }
  * (a session absent from it does not exist); `timelines`: parent sid → assistant records; `links`: sid → { parent }.
  */
-function treeHarness({ projects, sessions = {}, timelines = {}, jobRecords = [], chains = {}, succ = {}, active = [], asks = [], links = {}, isSuccessor, special } = {}) {
+function treeHarness({ projects, sessions = {}, timelines = {}, jobRecords = [], chains = {}, succ = {}, active = [], asks = [], links = {}, isSuccessor, special, closeViewWindow } = {}) {
   const calls = { read: [], timeline: [], changed: 0 };
   const clock = { t: 1_000_000 };
   const state = { projects, jobs: jobRecords, active, asks, links, readFails: false };
@@ -636,6 +636,7 @@ function treeHarness({ projects, sessions = {}, timelines = {}, jobRecords = [],
   const timers = [];
   const h = { calls, clock, state, published, timers, sessions, timelines };
   h.st = createSessionStatus({
+    closeViewWindow,
     publish: (e) => published.push(e),
     windowedSessionIds: () => state.projects.flatMap((p) => p.windows.map((w) => w.opencodeSessionId).filter(Boolean)),
     loadJobs: async () => state.jobs,
@@ -1318,4 +1319,112 @@ test("tree: a windowless externally driven root is a root until a session_link n
   const linked = mk({ R: { parent: "D" } });
   await linked.boot();
   assert.equal(show(linked.tree()), "w1[v:R]");
+});
+
+// ---- viewer windows (`@manta-owner=view`) ----
+function viewHarness(over = {}) {
+  const closed = [];
+  const result = { closed: true };
+  const h = treeHarness({
+    projects: [pj("p", [w(1, "V", { owner: "view" })])],
+    sessions: { V: { directory: "/work/p" } },
+    closeViewWindow: async (a) => { closed.push(a); return result; },
+    ...over,
+  });
+  h.closed = closed;
+  h.result = result;
+  h.tick = async (ms = 0) => { h.clock.t += ms; h.annotate(); await h.settle(); };
+  return h;
+}
+
+test("view windows: a finished session's viewer window closes after one linger — also when it finished before boot", async () => {
+  const h = viewHarness();
+  await h.boot();
+  assert.deepEqual(h.closed, [], "not at once: the clock starts at the first idle evaluation");
+  const timer = h.timers.find((t) => t.ms === LINGER_MS + 5);
+  assert.ok(timer, "a timer re-evaluates when the linger is due");
+  await h.tick(LINGER_MS - 1000);
+  assert.deepEqual(h.closed, []);
+  h.clock.t += 2000;
+  timer.fn();
+  await h.settle();
+  assert.deepEqual(h.closed, [{ project: "p", windowIndex: 1, sessionId: "V" }]);
+});
+
+test("view windows: a running session is never closed; the linger after its turn ends starts the clock", async () => {
+  const h = viewHarness({ active: ["V"] });
+  await h.boot();
+  await h.tick(10 * 60_000);
+  assert.deepEqual(h.closed, [], "running");
+  h.state.active = [];
+  h.st.observe(stream("turnComplete", "V", { running: false }));
+  await h.settle();
+  await h.tick(LINGER_MS - 1000);
+  assert.deepEqual(h.closed, [], "ended < one linger ago");
+  await h.tick(2000);
+  assert.equal(h.closed.length, 1);
+});
+
+test("view windows: a pending question / permission, a live job child, or work beneath it keeps the window", async () => {
+  const asking = viewHarness({ asks: ["V"] });
+  await asking.boot();
+  await asking.tick(5 * LINGER_MS);
+  assert.deepEqual(asking.closed, [], "pending ask");
+  asking.state.asks = [];
+  await asking.tick(0);
+  await asking.tick(LINGER_MS + 1);
+  assert.equal(asking.closed.length, 1, "answered → closes after a linger");
+
+  const job = viewHarness({ jobRecords: [delegateRec("j", "V", "P", { tmuxSession: "p" })] });
+  await job.boot();
+  await job.tick(5 * LINGER_MS);
+  assert.deepEqual(job.closed, [], "the child of a live job record");
+
+  const parent = viewHarness({ active: ["S"], sessions: { V: { directory: "/work/p" }, S: { parentID: "V", directory: "/work/p" } }, timelines: { V: [bgBlock("S")] } });
+  await parent.boot();
+  await parent.tick(5 * LINGER_MS);
+  assert.deepEqual(parent.closed, [], "a subagent runs beneath it");
+  parent.state.active = [];
+  parent.st.observe(stream("turnComplete", "S", { running: false }));
+  await parent.settle();
+  await parent.tick(0);
+  await parent.tick(2 * LINGER_MS);
+  assert.equal(parent.closed.length, 1, "once the work beneath is done too");
+});
+
+test("view windows: a window the user owns (user / job / unstamped) is never closed by this rule", async () => {
+  for (const owner of ["user", "job", undefined]) {
+    const h = viewHarness({ projects: [pj("p", [w(1, "V", { owner })])] });
+    await h.boot();
+    await h.tick(10 * LINGER_MS);
+    assert.deepEqual(h.closed, [], `owner ${owner}`);
+  }
+});
+
+test("view windows: promotion to user between evaluations cancels the close", async () => {
+  const h = viewHarness();
+  await h.boot();
+  await h.tick(LINGER_MS - 1000);
+  h.state.projects = [pj("p", [w(1, "V", { owner: "user" })])];
+  await h.tick(5 * LINGER_MS);
+  assert.deepEqual(h.closed, []);
+});
+
+test("view windows: a refused close (still stamped / running) is retried after another linger, not in a loop", async () => {
+  const h = viewHarness();
+  h.result.closed = false;
+  await h.boot();
+  await h.tick(LINGER_MS + 1);
+  assert.equal(h.closed.length, 1);
+  for (let i = 0; i < 5; i++) await h.tick(1000);
+  assert.equal(h.closed.length, 1, "no retry inside the next linger");
+  await h.tick(LINGER_MS);
+  assert.equal(h.closed.length, 2);
+});
+
+test("view windows: nothing is evaluated before the first hydration", async () => {
+  const cold = viewHarness();
+  cold.annotate();
+  await cold.tick(10 * LINGER_MS);
+  assert.deepEqual(cold.closed, [], "before hydration the running set is unknown");
 });

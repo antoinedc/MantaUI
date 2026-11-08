@@ -286,6 +286,9 @@ const boundMap = (m, cap) => {
  * @param {(sid: string) => string|null} [d.successorOf]  the session that replaced `sid`, one step
  * @param {(sid: string) => Promise<boolean>} [d.isCtoConversationSession]  the CTO conversation is never a row
  * @param {(sid: string) => Promise<boolean>} [d.isInternalSession]  neither is a Manta-internal session
+ * @param {(a: {project: string, windowIndex: number, sessionId: string}) => Promise<{closed: boolean}>} [d.closeViewWindow]
+ *   closes one viewer window (`@manta-owner=view`) whose session has been finished for LINGER_MS; it re-checks the window and
+ *   the session under the session's resource lock. Absent → viewer windows are never closed by the box.
  * @param {() => number} [d.now]
  */
 export function createSessionStatus(d) {
@@ -1064,12 +1067,79 @@ export function createSessionStatus(d) {
         if (res.graph) {
           triggerGates(res.layout.need);
           resolveUnknown(res.unknown);
+          evaluateViewWindows(lastProjects, res.graph);
         }
         return d.onJobsChanged && treeSignature(res.out) !== nestingSig ? d.onJobsChanged() : undefined;
       })
       .catch(() => {
         recomputePending = false;
       });
+  }
+
+  // ---- viewer windows (`@manta-owner=view`) -----------------------------------------------------------------------
+  //
+  // A window opened only to look at a session is closed once the session has been finished for LINGER_MS: its node has no
+  // running turn / pending ask / live job at or beneath it. "Finished since" is the first evaluation that saw it idle (a
+  // restart restarts the clock, so a window whose session ended while the server was down closes after one linger) or the
+  // end of the node's own linger, whichever is later. Evaluated on every tree pass; the injected closer re-checks.
+  const viewIdleSince = new Map(); // `${project}\0${index}\0${sid}` -> when it was first seen idle
+  const viewClosing = new Set();
+  let viewTimerAt = null;
+
+  function evaluateViewWindows(projects, graph) {
+    if (!d.closeViewWindow || !hydratedOnce || !graph) return;
+    const views = [];
+    for (const p of projects ?? []) {
+      for (const w of p.windows ?? []) if (w?.owner === "view" && w.opencodeSessionId) views.push({ project: p.tmuxSession, index: w.index, sid: w.opencodeSessionId });
+    }
+    if (views.length === 0) {
+      viewIdleSince.clear();
+      return;
+    }
+    const t = now();
+    // Every node with work at it or beneath it: the running / asking sessions and live job children, and their ancestors.
+    const activeNodes = new Set();
+    for (const seed of [...running, ...pendingAskIds(), ...graph.rec.liveChildren]) {
+      const n = graph.canon(seed);
+      activeNodes.add(n);
+      for (const a of graph.walkUp(n).path) activeNodes.add(a);
+    }
+    const seen = new Set();
+    let nextAt = null;
+    for (const v of views) {
+      const key = `${v.project}\0${v.index}\0${v.sid}`;
+      seen.add(key);
+      const node = graph.canon(v.sid);
+      if (activeNodes.has(node)) {
+        viewIdleSince.delete(key);
+        continue;
+      }
+      if (!viewIdleSince.has(key)) viewIdleSince.set(key, t);
+      let dueAt = viewIdleSince.get(key) + LINGER_MS;
+      for (const m of graph.chainInfo(node).members) dueAt = Math.max(dueAt, lingerUntil.get(m) ?? 0);
+      if (dueAt > t) {
+        nextAt = nextAt == null ? dueAt : Math.min(nextAt, dueAt);
+        continue;
+      }
+      if (viewClosing.has(key)) continue;
+      viewClosing.add(key);
+      Promise.resolve()
+        .then(() => d.closeViewWindow({ project: v.project, windowIndex: v.index, sessionId: v.sid }))
+        .then((res) => {
+          // Still stamped / still running → try again after another linger, never in a tight loop.
+          if (res?.closed !== true) viewIdleSince.set(key, now());
+        })
+        .catch((e) => console.warn(`[sessions] closing the viewer window ${v.project}:${v.index} failed:`, e?.message ?? e))
+        .finally(() => viewClosing.delete(key));
+    }
+    for (const key of [...viewIdleSince.keys()]) if (!seen.has(key)) viewIdleSince.delete(key);
+    if (nextAt != null && (viewTimerAt == null || viewTimerAt > nextAt)) {
+      viewTimerAt = nextAt;
+      setTimer(() => {
+        if (viewTimerAt === nextAt) viewTimerAt = null;
+        recompute();
+      }, Math.max(0, nextAt - t) + 5);
+    }
   }
 
   /** One linger timer per lingering session: when it fires and the linger is over, the tree is recomputed. */
@@ -1533,6 +1603,7 @@ export function createSessionStatus(d) {
       if (res.graph) {
         resolveUnknown(res.unknown);
         triggerGates(res.layout.need);
+        evaluateViewWindows(projects, res.graph);
       }
       return res.out;
     },

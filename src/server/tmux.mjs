@@ -282,9 +282,11 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
       // absolute path is stamped on `@manta-worktree-path`. Empty/null = not
       // a worktree window — clean-on-close must skip it.
       worktreePath: wtRaw ? wtRaw : null,
-      // @manta-owner — who owns this window: "user", "cto" or "job". Absent
-      // (nothing stamped it) or unrecognized ⇒ "user"; never backfilled. Only
-      // delegate.mjs stamps "job" today; nothing stamps "cto" yet.
+      // @manta-owner — who owns this window: "user", "cto", "job" or "view" (a
+      // window opened only to look at a session; the box closes it once the
+      // session finishes, until the user types into it). Absent (nothing stamped
+      // it) or unrecognized ⇒ "user"; never backfilled. Only delegate.mjs stamps
+      // "job" and only sessions:materialize stamps "view"; nothing stamps "cto" yet.
       owner: resolveOwner(ownerRaw),
     });
   }
@@ -301,7 +303,7 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
 // for tests.
 export function resolveOwner(raw) {
   const v = typeof raw === "string" ? raw.trim() : "";
-  return v === "cto" || v === "job" ? v : "user";
+  return v === "cto" || v === "job" || v === "view" ? v : "user";
 }
 
 // True iff a tmux invocation failed because there is genuinely no tmux server
@@ -844,7 +846,7 @@ export async function stampWorktreePath(sessionName, windowIndex, path) {
 
 /**
  * Stamp (or update) the @manta-owner user-option on a tmux window — which
- * actor owns the window: "user", "cto" or "job". Mirrors the
+ * actor owns the window: "user", "cto", "job" or "view". Mirrors the
  * restampSessionId pattern with its own option name so the stamps never
  * collide. Absent option ⇒ "user" (see resolveOwner); nothing backfills it.
  * delegate.mjs stamps "job" on the windows it creates; nothing stamps "cto"
@@ -852,7 +854,7 @@ export async function stampWorktreePath(sessionName, windowIndex, path) {
  *
  * @param {string} sessionName
  * @param {number} windowIndex
- * @param {"user"|"cto"|"job"} owner
+ * @param {"user"|"cto"|"job"|"view"} owner
  */
 export async function stampOwner(sessionName, windowIndex, owner) {
   await setWindowOption(sessionName, windowIndex, "@manta-owner", owner);

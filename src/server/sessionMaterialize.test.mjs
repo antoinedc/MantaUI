@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { materializeSession } from "./sessionMaterialize.mjs";
+import { materializeSession, promoteViewWindows, createViewWindowCloser } from "./sessionMaterialize.mjs";
 import { createHandoffEngine } from "./handoff/engine.mjs";
 import { createWorld, readyRecord } from "./handoff/testWorld.mjs";
 import { cleanupTerminalJob, adoptExistingSession, deleteJob } from "./delegate.mjs";
@@ -28,13 +28,13 @@ function world() {
   return { deps, windows, calls, run: (sid = "s") => materializeSession({ sessionId: sid }, deps) };
 }
 
-test("materialize serialises concurrent calls to one user holder, refreshes before every answer, reuses existing", async () => {
+test("materialize serialises concurrent calls to one viewer holder, refreshes before every answer, reuses existing", async () => {
   const w = world();
   const result = await Promise.all([w.run(), w.run(), w.run()]);
   assert.ok(result.every((r) => r.ok && r.windowIndex === 0 && r.sessionId === "s"));
   assert.equal(w.windows.length, 1);
   assert.equal(w.calls.filter(([k]) => k === "create").length, 1);
-  assert.deepEqual(w.calls.find(([k]) => k === "owner"), ["owner", "p", 0, "user"]);
+  assert.deepEqual(w.calls.find(([k]) => k === "owner"), ["owner", "p", 0, "view"]);
   // two fresh reads under the exclusions + one before the answer, per call
   assert.equal(w.calls.filter(([k]) => k === "refresh").length, 9);
   assert.equal(w.calls.at(-1)[0], "refresh");
@@ -176,4 +176,89 @@ test("automatic cleanup preserves a user no-worktree holder, but explicit job de
   assert.deepEqual(killed, []);
   assert.equal((await deleteJob("j", deps)).ok, true);
   assert.deepEqual(killed, [{ sessionName: "p", windowIndex: 8 }]);
+});
+
+test("materialize answers an existing window without restamping it (a user's window stays the user's)", async () => {
+  const w = world();
+  w.windows.push({ index: 4, opencodeSessionId: "s", owner: "user" });
+  assert.equal((await w.run()).windowIndex, 4);
+  assert.equal(w.calls.some(([k]) => k === "owner"), false);
+});
+
+test("promoteViewWindows: restamps only viewer windows of the named sessions, one failure never stops the rest", async () => {
+  const stamps = [];
+  const warned = [];
+  const listProjects = async () => [{ tmuxSession: "p", windows: [
+    { index: 1, opencodeSessionId: "a", owner: "view" },
+    { index: 2, opencodeSessionId: "a", owner: "user" },
+    { index: 3, opencodeSessionId: "b", owner: "view" },
+    { index: 4, opencodeSessionId: "old", owner: "view" },
+  ] }];
+  const stampOwner = async (...a) => { if (a[1] === 1) throw new Error("tmux down"); stamps.push(a); };
+  const n = await promoteViewWindows(["a", "old", null], { listProjects, stampOwner, warn: (m) => warned.push(m) });
+  assert.equal(n, 1);
+  assert.deepEqual(stamps, [["p", 4, "user"]]);
+  assert.equal(warned.length, 1);
+  assert.equal(await promoteViewWindows([], { listProjects: async () => assert.fail("nothing to look for"), stampOwner }), 0);
+  assert.equal(await promoteViewWindows(["a"], { listProjects: async () => { throw new Error("no tmux"); }, stampOwner, warn: () => {} }), 0);
+});
+
+function closerWorld(over = {}) {
+  const calls = [];
+  const state = { owner: "view", sid: "s", active: [] };
+  const deps = {
+    listProjects: async () => [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: state.sid, owner: state.owner }] }],
+    listActiveSessionIds: async () => state.active,
+    killWindow: async (a) => { calls.push(["kill", a]); },
+    refresh: async () => { calls.push(["refresh"]); },
+    chainOf: (sid) => (sid === "s" ? ["old", "s"] : [sid]),
+    canonicalSessionOf: (sid) => sid,
+    warn: () => {},
+    ...over,
+  };
+  return { deps, calls, state, close: () => createViewWindowCloser(deps)({ project: "p", windowIndex: 7, sessionId: "s" }) };
+}
+
+test("view closer: kills a still-viewer window of a session that is still not running, then refreshes", async () => {
+  const w = closerWorld();
+  assert.deepEqual(await w.close(), { closed: true });
+  assert.deepEqual(w.calls, [["kill", { sessionName: "p", windowIndex: 7 }], ["refresh"]]);
+});
+
+test("view closer: a window promoted or re-stamped since the decision is never closed; neither is a running session (any chain member)", async () => {
+  for (const [patch, reason] of [[{ owner: "user" }, "changed"], [{ owner: "job" }, "changed"], [{ sid: "other" }, "changed"], [{ active: ["s"] }, "running"], [{ active: ["old"] }, "running"]]) {
+    const w = closerWorld();
+    Object.assign(w.state, patch);
+    assert.deepEqual(await w.close(), { closed: false, reason }, JSON.stringify(patch));
+    assert.deepEqual(w.calls, []);
+  }
+  const gone = closerWorld({ listProjects: async () => [{ tmuxSession: "p", windows: [] }] });
+  assert.equal((await gone.close()).closed, false);
+});
+
+test("view closer: unreadable state leaves the window open; a failed refresh does not undo the close", async () => {
+  const unknown = closerWorld({ listActiveSessionIds: async () => { throw new Error("opencode down"); } });
+  assert.deepEqual(await unknown.close(), { closed: false, reason: "failed" });
+  assert.deepEqual(unknown.calls, []);
+  const refreshFails = closerWorld({ refresh: async () => { throw new Error("sync failed"); } });
+  assert.deepEqual(await refreshFails.close(), { closed: true });
+});
+
+test("view closer: runs under the session's resource lock, keyed by the canonical session", async () => {
+  const keys = [];
+  const w = closerWorld({ canonicalSessionOf: () => "canon", sessionLock: async (key, fn) => { keys.push(key); return fn(); } });
+  await w.close();
+  assert.deepEqual(keys, ["canon"]);
+});
+
+test("promoteViewWindows: the restamp runs under the session's lock, and only when there is something to promote", async () => {
+  const order = [];
+  const sessionLock = async (key, fn) => { order.push(["lock", key]); return fn(); };
+  const projects = [{ tmuxSession: "p", windows: [{ index: 1, opencodeSessionId: "a", owner: "view" }] }];
+  const base = { listProjects: async () => projects, stampOwner: async (...a) => { order.push(["stamp", ...a]); }, lockKey: "canon", sessionLock, warn: () => {} };
+  assert.equal(await promoteViewWindows(["a"], base), 1);
+  assert.deepEqual(order, [["lock", "canon"], ["stamp", "p", 1, "user"]]);
+  order.length = 0;
+  assert.equal(await promoteViewWindows(["zzz"], base), 0);
+  assert.deepEqual(order, [], "no viewer window → no lock taken");
 });

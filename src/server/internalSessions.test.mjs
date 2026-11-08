@@ -230,3 +230,15 @@ test("event provenance: a human CEO instruction updates presence WITHOUT becomin
   assert.deepEqual(engine.getPresence(), beforeEphemeral, "ephemeral cto activity is not presence");
   assert.equal(observations, 0);
 });
+
+test("a viewer window (owner view) is the user's own for the pipeline; job / unstamped keep their meaning", async () => {
+  const is = createInternalSessions();
+  const projects = async () => [{ tmuxSession: "work", windows: [
+    { opencodeSessionId: "viewed", owner: "view" },
+    { opencodeSessionId: "jobbed", owner: "job" },
+    { opencodeSessionId: "bare" },
+  ] }];
+  assert.equal((await is.resolvePipelineSession("viewed", projects)).owner, "user");
+  assert.equal((await is.resolvePipelineSession("jobbed", projects)).owner, "job");
+  assert.equal((await is.resolvePipelineSession("bare", projects)).owner, "user");
+});
