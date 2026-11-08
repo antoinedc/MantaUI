@@ -152,6 +152,7 @@ function routine(over: Partial<Routine> & Pick<Routine, "id" | "name" | "cron" |
     access: "read",
     model: null,
     notify: "findings",
+    rollUp: true,
     enabled: true,
     destination: { type: "new-session" },
     catchUpHours: 6,
@@ -173,6 +174,7 @@ const ID = {
   comp: "f6a7b8c9",
   err: "a7b8c9d0",
   rel: "b8c9d0e1",
+  inc: "c9d0e1f2",
 };
 
 const initialRoutines = (): Routine[] => [
@@ -255,6 +257,15 @@ const initialRoutines = (): Routine[] => [
     enabled: false,
     nextRunAt: null,
   }),
+  routine({
+    id: ID.inc,
+    name: "Production incident watch",
+    icon: "alert",
+    cron: "0 8 * * *",
+    directory: "/home/dev/projects/ronda",
+    projectName: "ronda",
+    nextRunAt: at(31, 8, 0),
+  }),
 ];
 
 let runSeq = 0;
@@ -282,6 +293,10 @@ function run(r: Routine, over: Partial<RoutineRun> & Pick<RoutineRun, "id" | "se
     reprompted: false,
     reportCount: over.report ? 1 : 0,
     memoryAtStart: "",
+    unreadAtStart: [],
+    folds: [],
+    foldedInto: null,
+    reportRev: over.report ? 1 : 0,
     ...over,
   };
 }
@@ -411,6 +426,53 @@ const initialRuns = (rs: Routine[]): RoutineRun[] => {
       endedAt: at(24, 16, 0, 20),
       error: "GitHub token expired",
       ...read(at(24, 16, 30)),
+    }),
+
+    // Rolling updates: run 16 replaced the two unread reports before it (the demo's "folded" states).
+    run(by(ID.inc), {
+      id: "run_in_14",
+      seq: 14,
+      status: "done",
+      queuedAt: at(28, 8, 0),
+      startedAt: at(28, 8, 0),
+      endedAt: at(28, 8, 2),
+      report: { outcome: "findings", title: "Checkout 5xx errors on /api/pay since 07:40", summary: "", body: "" },
+      foldedInto: { id: "run_in_16", seq: 16 },
+      ...read(at(30, 8, 3)),
+    }),
+    run(by(ID.inc), {
+      id: "run_in_15",
+      seq: 15,
+      status: "done",
+      queuedAt: at(29, 8, 0),
+      startedAt: at(29, 8, 0),
+      endedAt: at(29, 8, 2),
+      report: { outcome: "findings", title: "5xx still failing; the webhook queue is backing up", summary: "", body: "" },
+      foldedInto: { id: "run_in_16", seq: 16 },
+      ...read(at(30, 8, 3)),
+    }),
+    run(by(ID.inc), {
+      id: "run_in_16",
+      seq: 16,
+      status: "done",
+      queuedAt: at(30, 8, 0),
+      startedAt: at(30, 8, 0),
+      endedAt: at(30, 8, 3),
+      report: {
+        outcome: "findings",
+        title: "Checkout 5xx still open since Tue; webhook backlog cleared",
+        summary: "One incident is still open (checkout 5xx on /api/pay, since Tue 07:40). The webhook backlog from Wed has drained.",
+        body: ["- **Still open** — checkout 5xx on `/api/pay`, since Tue 07:40; error rate 3.1% today", "- **Resolved** — webhook queue backlog (Wed), drained overnight"].join("\n"),
+      },
+      notifiedAt: at(30, 8, 3),
+      folds: [
+        { id: "run_in_14", seq: 14 },
+        { id: "run_in_15", seq: 15 },
+      ],
+      unreadAtStart: [
+        { id: "run_in_15", seq: 15, title: "5xx still failing; the webhook queue is backing up", coverage: "full", rev: 1 },
+        { id: "run_in_14", seq: 14, title: "Checkout 5xx errors on /api/pay since 07:40", coverage: "full", rev: 1 },
+      ],
     }),
   ];
 };
@@ -563,9 +625,11 @@ export const analyticsChatMessages = (): OpencodeMessage[] =>
 // ---------------------------------------------------------------------------
 
 const TZ = "Europe/Paris";
-const isUnread = (r: RoutineRun) =>
-  r.readAt == null &&
-  (r.status === "failed" || r.status === "timed_out" || (r.status === "done" && r.report?.outcome === "findings"));
+// Mirrors the box (§5.5): an update that replaced unread reports and found everything resolved is unread too.
+const isResolvedUpdate = (r: RoutineRun) => r.status === "done" && r.report?.outcome === "nothing" && r.folds.length > 0;
+const isFinding = (r: RoutineRun) =>
+  r.status === "failed" || r.status === "timed_out" || (r.status === "done" && r.report?.outcome === "findings") || isResolvedUpdate(r);
+const isUnread = (r: RoutineRun) => r.readAt == null && isFinding(r);
 const when = (r: RoutineRun) => r.endedAt ?? r.startedAt ?? r.queuedAt;
 const newestFirst = (a: RoutineRun, b: RoutineRun) => when(b) - when(a);
 
@@ -615,7 +679,7 @@ export function createRoutinesStore() {
   function get(id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }): RoutineDetail {
     const r = find(id);
     let list = runs.filter((x) => x.routineId === id).sort((a, b) => b.seq - a.seq);
-    if (opts?.findingsOnly) list = list.filter((x) => x.report?.outcome === "findings");
+    if (opts?.findingsOnly) list = list.filter((x) => isFinding(x) && x.foldedInto == null);
     if (opts?.beforeSeq != null) list = list.filter((x) => x.seq < (opts.beforeSeq as number));
     const total = stats[id]?.runCount ?? runs.filter((x) => x.routineId === id).length;
     const page = list.slice(0, 30);
@@ -649,6 +713,7 @@ export function createRoutinesStore() {
       access: input.access ?? "read",
       model: input.model ?? null,
       notify: input.notify ?? "findings",
+      rollUp: input.rollUp ?? true,
       enabled: input.enabled ?? true,
       createdFrom: input.createdFrom ?? null,
       createdAt: ROUTINES_T0,
@@ -702,6 +767,7 @@ export function createRoutinesStore() {
         ...(patch.access !== undefined ? { access: patch.access } : {}),
         ...(patch.model !== undefined ? { model: patch.model } : {}),
         ...(patch.notify !== undefined ? { notify: patch.notify } : {}),
+        ...(patch.rollUp !== undefined ? { rollUp: patch.rollUp } : {}),
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
         updatedAt: ROUTINES_T0,
       };

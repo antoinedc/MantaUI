@@ -19,6 +19,7 @@ export interface Routine {
   access: RoutineAccess; // default "read"
   model: { providerID: string; modelID: string; variant?: string } | null; // null = opencode default
   notify: RoutineNotify; // default "findings"
+  rollUp: boolean; // default true: while the last report is unread, a run receives it and its report replaces it
   enabled: boolean;
   destination: RoutineDestination; // default {type:"new-session"}
   catchUpHours: number; // default 6, 0..24
@@ -38,6 +39,11 @@ export interface RoutineReport {
   title: string; // ≤ 160 chars
   summary: string; // ≤ 400 chars
   body: string; // markdown, ≤ 8000 chars, may be ""
+}
+
+export interface RunRef {
+  id: string;
+  seq: number;
 }
 
 export interface RoutineRun {
@@ -65,6 +71,11 @@ export interface RoutineRun {
   reprompted: boolean; // the one missing-report re-prompt has been used
   reportCount: number; // routine_report calls accepted for this run (max 3)
   memoryAtStart: string; // the memory text injected into this run's prompt
+  /** The unread runs handed to this run when it started (newest first); [] when none / rollUp off. */
+  unreadAtStart: Array<RunRef & { title: string; coverage: "full" | "title"; rev: number }>;
+  folds: RunRef[]; // runs this run's report replaced
+  foldedInto: RunRef | null; // set on a replaced run: the run that replaced it
+  reportRev: number; // bumped every time a report is stored on this run
 }
 
 export interface FollowupRow {
@@ -113,6 +124,7 @@ export interface RoutineInput {
   access?: RoutineAccess;
   model?: Routine["model"];
   notify?: RoutineNotify;
+  rollUp?: boolean; // default true
   catchUpHours?: number;
   memory?: string;
   createdFrom?: { sessionID: string } | null;

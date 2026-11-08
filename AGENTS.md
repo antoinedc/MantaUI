@@ -1279,6 +1279,15 @@ to/from routines. Key facts:
 - **Own FIFO queue + concurrency** (`routinesConcurrency` in config, 1..5, default 2),
   independent of delegate's cap. One `queued` run per routine. `needs_input` frees its slot;
   answering resumes it immediately even over the cap.
+- **Rolling updates** (spec `docs/superpowers/specs/2026-11-08-routine-rolling-updates.md`):
+  per-routine `rollUp` (default on). At reserve the run snapshots the routine's unread
+  terminal runs (`unreadAtStart`, prompt text stored as server-only `unreadPrompt` so a
+  crash-resend is identical); when it ends `done` with a model-FILED report, the fully
+  included ones whose `reportRev` is unchanged are marked read and `foldedInto` it
+  (`applyFold`, idempotent; failed/timed-out/synthesized runs never fold). A late report
+  on a folded run un-folds it. `done`+`nothing` with folds is a *resolved update*: unread,
+  pushed only under `always`. The terminal notification re-reads the run and is sent once
+  (`terminalNotified`).
 - **Run sessions are created with the internal marker** (`withInternalMarker`, so the
   delegate reconciler never adopts them) + `metadata.manta.routineId/runId`, a permission
   ruleset that never asks (read: `edit` denied; bash still runs — "read" is not a sandbox),

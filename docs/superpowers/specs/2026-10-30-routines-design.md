@@ -448,6 +448,10 @@ user can see exactly what the run started from and what it changed.
 Title `"<routine name> · findings|nothing new|failed|needs you"`, body = report title /
 error / question. Informational tier except needs_input (urgent). `notifiedAt` set.
 
+> Amended by `2026-11-08-routine-rolling-updates.md` §6: a resolved update (`done`+`nothing`
+> that replaced unread reports) is notified only under `always` (kind `resolved`), and the
+> terminal notification is decided from the run's current record and sent at most once.
+
 ### 6.4 Read state (single rule)
 A run is created with `readAt = null`. At settle, `readAt = now` for `done`+`nothing`,
 `skipped` and `cancelled`. So the only runs that can be **unread** are terminal runs
@@ -456,6 +460,10 @@ with status `done`+`findings`, `failed` or `timed_out` and `readAt === null`.
 first, max 20 (R1.2 lists them; failed ones show the danger Pill and the error as
 title). `readAt` is set when the user opens the run (R3), clicks "Mark read", or
 "Mark all read".
+
+> Amended by `2026-11-08-routine-rolling-updates.md` §5.5: a run whose report replaced
+> unread reports (`folds`) and reports `nothing` (a resolved update) is NOT auto-read and
+> counts as unread; the runs it replaced are marked read (`foldedInto`).
 
 ### 6.5 Viewing and continuing a run
 R3 mounts the existing `ChatPanel` on `run.sessionID` with `tmuxSession=null,

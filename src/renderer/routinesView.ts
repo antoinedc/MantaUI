@@ -25,6 +25,7 @@ import type {
   RoutineInput,
   RoutineNotify,
   RoutineRun,
+  RunRef,
   RunStatus,
   RunTrigger,
 } from "../shared/routines";
@@ -290,9 +291,42 @@ export function runSentence(run: RoutineRun): string {
   }
 }
 
+/** An update that replaced unread reports and found everything resolved: unread, but not quiet. */
+export function isResolvedUpdate(run: Pick<RoutineRun, "status" | "report" | "folds">): boolean {
+  return run.status === "done" && run.report?.outcome === "nothing" && (run.folds?.length ?? 0) > 0;
+}
+
 /** A terminal run the user hasn't read yet and has to look at (spec §6.4's only unread runs). */
-export function isUnreadRun(run: Pick<RoutineRun, "status" | "report" | "readAt">): boolean {
-  return run.readAt == null && isTerminal(run.status) && (run.report?.outcome === "findings" || run.status === "failed" || run.status === "timed_out");
+export function isUnreadRun(run: Pick<RoutineRun, "status" | "report" | "readAt" | "folds">): boolean {
+  return run.readAt == null && isTerminal(run.status) && (run.report?.outcome === "findings" || run.status === "failed" || run.status === "timed_out" || isResolvedUpdate(run));
+}
+
+/** A run the list shows muted: a "nothing" report with nothing replaced, or one an update has replaced. */
+export function isQuietRun(run: Pick<RoutineRun, "status" | "report" | "folds" | "foldedInto">): boolean {
+  return run.foldedInto != null || (run.report?.outcome === "nothing" && !isResolvedUpdate(run));
+}
+
+/** "Folded into #14" under a replaced run's title; null when it was not replaced. */
+export function foldedIntoLine(run: Pick<RoutineRun, "foldedInto">): string | null {
+  return run.foldedInto ? `Folded into #${run.foldedInto.seq}` : null;
+}
+
+/** The runs a "Replaces …" segment names: all of them up to 4, else the first 3 and a count of the rest. */
+export function replacesRefs(run: Pick<RoutineRun, "folds">): { shown: RunRef[]; more: number } {
+  const folds = run.folds ?? [];
+  return folds.length > 4 ? { shown: folds.slice(0, 3), more: folds.length - 3 } : { shown: folds, more: 0 };
+}
+
+/** "Replaces #11, #12 you hadn't read" (first 3 + "and N more" past 4); null when it replaced nothing. */
+export function replacesText(run: Pick<RoutineRun, "folds">): string | null {
+  const { shown, more } = replacesRefs(run);
+  if (shown.length === 0) return null;
+  return `Replaces ${shown.map((f) => `#${f.seq}`).join(", ")}${more > 0 ? ` and ${more} more` : ""} you hadn't read`;
+}
+
+/** The About row for the rolling-updates setting. */
+export function rollUpLabel(rollUp: boolean): string {
+  return rollUp ? "Updated in place until you read it" : "A new report each run";
 }
 
 /** The run list's selection id for the "About this routine" item. */
@@ -342,6 +376,12 @@ export const NOTIFY_OPTIONS: { value: RoutineNotify; label: string }[] = [
   { value: "always", label: "Every run" },
   { value: "failures", label: "Only if it fails" },
   { value: "never", label: "Never" },
+];
+
+/** The editor's "If the last report is still unread" choice (ChipGroup values are strings). */
+export const ROLL_UP_OPTIONS: { value: "update" | "new"; label: string }[] = [
+  { value: "update", label: "Update it" },
+  { value: "new", label: "Add a new one" },
 ];
 
 export function tellMeLabel(n: RoutineNotify): string {
@@ -558,6 +598,7 @@ export interface RoutineDraft {
   schedule: Schedule;
   access: Routine["access"];
   notify: RoutineNotify;
+  rollUp: boolean;
 }
 
 export function emptyDraft(directory = ""): RoutineDraft {
@@ -570,6 +611,7 @@ export function emptyDraft(directory = ""): RoutineDraft {
     schedule: { ...DEFAULT_SCHEDULE },
     access: "read",
     notify: "findings",
+    rollUp: true,
   };
 }
 
@@ -583,6 +625,7 @@ export function draftFromRoutine(r: Routine): RoutineDraft {
     schedule: cronToSchedule(r.cron),
     access: r.access,
     notify: r.notify,
+    rollUp: r.rollUp !== false,
   };
 }
 
@@ -615,6 +658,7 @@ export function draftToInput(d: RoutineDraft): RoutineInput {
     access: d.access,
     model: d.model,
     notify: d.notify,
+    rollUp: d.rollUp,
   };
 }
 

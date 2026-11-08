@@ -66,6 +66,12 @@ and the user is notified per the routine's policy. Each routine has a **memory**
   names, conventions, what to ignore) so the first run starts informed.
 - `access: "read"` (default) blocks file edits; `"edit"` gives each run its own
   git branch. Don't pick `"edit"` unless the user wants changes made.
+- `rollUp` (default `true`): while the user hasn't read a routine's last report, each
+  new run receives the unread reports and its own report replaces them, so the user
+  reads one up-to-date report. Pass `false` for "a new report every run". When your
+  run prompt lists unread reports, write ONE combined picture inside the report: what
+  is new, what is still open (say since when), what has been resolved; use outcome
+  `"nothing"` only if everything is resolved and nothing is new.
 - **When YOU are a routine run** (your first message says "You are running the
   scheduled routine …"): do the work, then call `routine_report` exactly once as
   your last action — `outcome` `"findings"` only if something deserves the user's

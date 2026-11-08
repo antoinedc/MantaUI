@@ -53,12 +53,16 @@ import {
   cadenceText,
   clockHM,
   defaultRunSelection,
+  foldedIntoLine,
+  isQuietRun,
   isTerminal,
   isUnreadRun,
   memoryLines,
   nextRunPhrase,
   notifyLabel,
   outcomeView,
+  replacesRefs,
+  rollUpLabel,
   runDateParts,
   runDuration,
   runElapsed,
@@ -467,6 +471,12 @@ export function RoutineDetail({
           <dd className="text-text-muted">
             {routine.catchUpHours > 0 ? `Run once on catch-up, up to ${routine.catchUpHours}h late` : "Never catch up"}
           </dd>
+          {!inChat && (
+            <>
+              <dt className="text-text-quiet">Unread reports</dt>
+              <dd className="text-text-muted">{rollUpLabel(routine.rollUp)}</dd>
+            </>
+          )}
           <dt className="text-text-quiet">Keeps</dt>
           <dd className="text-text-muted">30 days of runs; unread runs are never deleted</dd>
         </dl>
@@ -561,6 +571,7 @@ export function RoutineDetail({
                 waitingPos={waitingPosOf(selectedRun.id)}
                 now={now}
                 onSeeTranscript={() => onOpenTranscript(selectedRun.id)}
+                onOpenRun={select}
                 onFollowUp={() => void keepRunInSidebar(selectedRun.id, { onClosePane, onChanged, what: "open the run as a session" })}
               />
             ) : (
@@ -587,7 +598,8 @@ function ListItem({ selected, onSelect, children }: { selected: boolean; onSelec
 function RunItem({ run, selected, waitingPos, onSelect }: { run: RoutineRun; selected: boolean; waitingPos: number | null; onSelect: () => void }) {
   const { day, time } = runDateParts(run.startedAt ?? run.queuedAt);
   const unread = isUnreadRun(run);
-  const quiet = run.report?.outcome === "nothing";
+  const quiet = isQuietRun(run);
+  const folded = foldedIntoLine(run);
   const view = outcomeView(run, waitingPos);
   return (
     <div
@@ -605,6 +617,7 @@ function RunItem({ run, selected, waitingPos, onSelect }: { run: RoutineRun; sel
         <div className={`mt-1 line-clamp-2 text-label ${unread ? "font-semibold text-text" : quiet ? "font-normal text-text-faint" : "font-medium text-text"}`}>
           {runListTitle(run)}
         </div>
+        {folded && <div className="mt-0.5 text-micro text-text-quiet">{folded}</div>}
       </div>
       {view && (
         <span className="mt-1">
@@ -622,6 +635,7 @@ function RunReading({
   waitingPos,
   now,
   onSeeTranscript,
+  onOpenRun,
   onFollowUp,
 }: {
   run: RoutineRun;
@@ -629,6 +643,8 @@ function RunReading({
   waitingPos: number | null;
   now: number;
   onSeeTranscript: () => void;
+  /** Select a run by id (the page's `select`); a run that no longer exists takes its not-found path. */
+  onOpenRun: (runId: string) => void;
   onFollowUp: () => void;
 }) {
   const hasSession = run.sessionID != null;
@@ -649,6 +665,7 @@ function RunReading({
       run.tokens != null ? `${formatTokenCount(run.tokens)} tokens` : null,
     ].filter(Boolean);
     const added = run.memoryDiff?.added ?? [];
+    const replaces = replacesRefs(run);
     return (
       <>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-meta text-text-faint">
@@ -657,6 +674,19 @@ function RunReading({
             <span className="text-text-quiet">·</span>
             <NotifiedLine run={run} />
           </span>
+          {replaces.shown.length > 0 && (
+            <span className="flex flex-wrap items-center">
+              Replaces
+              {replaces.shown.map((f, i) => (
+                <span key={f.id} className="flex items-center">
+                  {i > 0 && ","}
+                  <TextLink onClick={() => onOpenRun(f.id)}>#{f.seq}</TextLink>
+                </span>
+              ))}
+              {replaces.more > 0 && <span className="pl-1">and {replaces.more} more</span>}
+              <span className="pl-1">you hadn't read</span>
+            </span>
+          )}
           {hasSession && (
             <span className="ml-auto flex gap-2">
               {transcriptButton("See transcript")}
@@ -666,6 +696,12 @@ function RunReading({
             </span>
           )}
         </div>
+        {run.foldedInto && (
+          <Callout tone="info" size="note">
+            Folded into run #{run.foldedInto.seq} — read that one for the current picture.{" "}
+            <TextLink onClick={() => onOpenRun(run.foldedInto!.id)}>Open #{run.foldedInto.seq}</TextLink>
+          </Callout>
+        )}
         <ReportCard run={run} routine={routine} footer={false} />
         {added.length > 0 && <MemoryUpdatedLine added={added} />}
       </>
