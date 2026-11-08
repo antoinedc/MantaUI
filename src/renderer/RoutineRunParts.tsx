@@ -28,6 +28,7 @@ import { routineIdOfToolPart, routineToolKind } from "./routineToolParts";
 import {
   cadenceText,
   clockHM,
+  isResolvedUpdate,
   memoryLineCount,
   nextDayWord,
   routineIcon,
@@ -121,9 +122,11 @@ export function RoutineRunBar({ binding }: { binding: RoutineRunBinding }) {
 export function RoutinePromptBlock() {
   const ctx = useContext(RoutineRunContext);
   const [memOpen, setMemOpen] = useState(false);
+  const [unreadOpen, setUnreadOpen] = useState(false);
   if (!ctx) return null;
   const { routine, run } = ctx;
   const lines = memoryLineCount(run.memoryAtStart);
+  const unread = run.unreadAtStart ?? [];
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       <div className="flex items-center gap-2 text-meta font-medium text-text-faint">
@@ -170,6 +173,22 @@ export function RoutinePromptBlock() {
           </div>
         )}
       </div>
+      {unread.length > 0 && (
+        <div className="text-meta text-text-faint">
+          <button type="button" className="hover:text-text" aria-expanded={unreadOpen} onClick={() => setUnreadOpen((v) => !v)}>
+            Picked up {unread.length} unread {unread.length === 1 ? "report" : "reports"} {unreadOpen ? "▾" : "▸"}
+          </button>
+          {unreadOpen && (
+            <ul className="mt-2 flex flex-col gap-1">
+              {unread.map((u) => (
+                <li key={u.id}>
+                  #{u.seq} · {u.title}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -206,7 +225,9 @@ function RoutineBadgeIcon({ icon }: { icon: string }) {
 }
 
 /** Only a run that didn't finish is labelled; a report needs no kind label. */
-function KindLabel({ status }: { status: RoutineRun["status"] }) {
+function KindLabel({ run }: { run: RoutineRun }) {
+  const status = run.status;
+  if (isResolvedUpdate(run)) return <div className="text-micro font-semibold uppercase tracking-wider text-text-faint">Resolved</div>;
   if (status === "failed") return <div className="text-micro font-semibold uppercase tracking-wider text-danger">Failed</div>;
   if (status === "timed_out") return <div className="text-micro font-semibold uppercase tracking-wider text-danger">Timed out</div>;
   return null;
@@ -244,7 +265,7 @@ export function ReportCard({
         <RoutineBadgeIcon icon={routine.icon} />
       </span>
       <div className="min-w-0 flex-1">
-        <KindLabel status={run.status} />
+        <KindLabel run={run} />
         <div className="mt-1 text-prose font-semibold text-text">{title}</div>
         {summary !== "" && summary !== body.trim() && <div className="mt-2 text-body text-text-muted">{summary}</div>}
         {body.trim() !== "" && (

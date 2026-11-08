@@ -9,6 +9,9 @@ import type { ToolDef } from "../lib/types.ts";
 
 const ICONS = ["calendar-clock", "chart", "bug", "alert", "package", "book", "tag", "shield"];
 
+const ROLL_UP_HELP =
+  "true (default): while the user hasn't read the last report, each run receives the unread reports and its report replaces them, so the user reads one up-to-date report. false: every run adds its own report.";
+
 const when = (ms: unknown): string =>
   typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toLocaleString() : "not scheduled";
 
@@ -26,7 +29,9 @@ export const tools: ToolDef[] = [
       "fresh each time: spell out what to look at and what to report. `memory` is what this",
       "conversation already established (baselines, names, conventions) so the first run starts",
       "informed; every run reads the routine's memory and updates it. access 'read' (default) blocks",
-      "file edits; 'edit' lets each run work on its own git branch.",
+      "file edits; 'edit' lets each run work on its own git branch. By default (`rollUp`) a run that",
+      "finds the user's last report still unread receives it and writes one up-to-date report that",
+      "replaces it.",
     ].join(" "),
     input: input(
       {
@@ -42,8 +47,9 @@ export const tools: ToolDef[] = [
         ),
         icon: oneOf(ICONS, "Glyph shown on the Routines page (default calendar-clock)."),
         memory: str("Facts from this conversation the first run should start knowing (baselines, conventions). Under 60 lines."),
+        rollUp: bool(ROLL_UP_HELP),
       },
-      ["access", "notify", "icon", "memory"],
+      ["access", "notify", "icon", "memory", "rollUp"],
     ),
     async execute(args, context) {
       const result = await call("POST", "/api/routines", {
@@ -54,6 +60,7 @@ export const tools: ToolDef[] = [
         ...(args.notify ? { notify: args.notify } : {}),
         ...(args.icon ? { icon: args.icon } : {}),
         ...(args.memory ? { memory: args.memory } : {}),
+        ...(typeof args.rollUp === "boolean" ? { rollUp: args.rollUp } : {}),
         sessionID: context.sessionID,
         directory: context.directory,
       });
@@ -72,7 +79,7 @@ export const tools: ToolDef[] = [
       return rows
         .map((r: any) => {
           const last = r.lastRun ? `${r.lastRun.status}${r.lastRun.title ? ` — ${r.lastRun.title}` : ""}` : "never run";
-          return `• [${r.id}] ${r.name} — ${r.cron}${r.enabled ? "" : " (paused)"} · next ${when(r.nextRunAt)} · last: ${last}`;
+          return `• [${r.id}] ${r.name} — ${r.cron}${r.enabled ? "" : " (paused)"} · next ${when(r.nextRunAt)} · last: ${last}${r.rollUp === false ? " · new report each run" : ""}`;
         })
         .join("\n");
     },
@@ -80,7 +87,7 @@ export const tools: ToolDef[] = [
   {
     name: "routine_update",
     description:
-      "Change a routine (name, prompt, schedule, access, notification policy, icon) or pause/resume it with " +
+      "Change a routine (name, prompt, schedule, access, notification policy, icon, rolling updates) or pause/resume it with " +
       "enabled. Get the id from routine_list or from routine_create.",
     input: input(
       {
@@ -92,8 +99,9 @@ export const tools: ToolDef[] = [
         notify: oneOf(["findings", "always", "failures", "never"], "When to notify the user."),
         icon: oneOf(ICONS, "Glyph shown on the Routines page."),
         enabled: bool("false pauses the routine, true resumes it."),
+        rollUp: bool(ROLL_UP_HELP),
       },
-      ["name", "prompt", "cron", "access", "notify", "icon", "enabled"],
+      ["name", "prompt", "cron", "access", "notify", "icon", "enabled", "rollUp"],
     ),
     async execute(args) {
       const { id, ...patch } = args;
@@ -129,7 +137,8 @@ export const tools: ToolDef[] = [
       "ONLY inside a routine run: file the run's result. Call it exactly once, as your last action. " +
       "outcome 'findings' when something deserves the user's attention, otherwise 'nothing'. " +
       "`memory` is the COMPLETE updated notes for the next run (baselines, what you are watching, " +
-      "what to ignore; under 60 lines); omit it to keep the notes unchanged.",
+      "what to ignore; under 60 lines); omit it to keep the notes unchanged. " +
+      "If your prompt lists reports the user hasn't read, your report replaces them: cover what is new, still open and resolved.",
     input: input(
       {
         outcome: oneOf(["findings", "nothing"], "findings if anything deserves the user's attention, otherwise nothing."),

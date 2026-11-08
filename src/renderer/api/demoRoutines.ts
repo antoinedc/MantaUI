@@ -152,6 +152,7 @@ function routine(over: Partial<Routine> & Pick<Routine, "id" | "name" | "cron" |
     access: "read",
     model: null,
     notify: "findings",
+    rollUp: true,
     enabled: true,
     destination: { type: "new-session" },
     catchUpHours: 6,
@@ -282,6 +283,10 @@ function run(r: Routine, over: Partial<RoutineRun> & Pick<RoutineRun, "id" | "se
     reprompted: false,
     reportCount: over.report ? 1 : 0,
     memoryAtStart: "",
+    unreadAtStart: [],
+    folds: [],
+    foldedInto: null,
+    reportRev: over.report ? 1 : 0,
     ...over,
   };
 }
@@ -397,6 +402,37 @@ const initialRuns = (rs: Routine[]): RoutineRun[] => {
         body: "",
       },
       reportCount: 1,
+      // Rolling updates: this report replaced the two unread weekly reports before it.
+      folds: [
+        { id: "run_da_28", seq: 28 },
+        { id: "run_da_29", seq: 29 },
+      ],
+      unreadAtStart: [
+        { id: "run_da_29", seq: 29, title: "axios advisory still unpatched", coverage: "full", rev: 1 },
+        { id: "run_da_28", seq: 28, title: "1 high-severity advisory in axios", coverage: "full", rev: 1 },
+      ],
+    }),
+    run(by(ID.dep), {
+      id: "run_da_28",
+      seq: 28,
+      status: "done",
+      queuedAt: at(10, 14, 0),
+      startedAt: at(10, 14, 0),
+      endedAt: at(10, 14, 6),
+      report: { outcome: "findings", title: "1 high-severity advisory in axios", summary: "", body: "" },
+      foldedInto: { id: "run_da_30", seq: 30 },
+      ...read(at(24, 14, 9)),
+    }),
+    run(by(ID.dep), {
+      id: "run_da_29",
+      seq: 29,
+      status: "done",
+      queuedAt: at(17, 14, 0),
+      startedAt: at(17, 14, 0),
+      endedAt: at(17, 14, 7),
+      report: { outcome: "findings", title: "axios advisory still unpatched", summary: "", body: "" },
+      foldedInto: { id: "run_da_30", seq: 30 },
+      ...read(at(24, 14, 9)),
     }),
     run(by(ID.dep), { id: "run_da_31", seq: 31, status: "queued", trigger: "manual", queuedAt: at(30, 10, 1), sessionID: null }),
     run(by(ID.comp), { id: "run_cp_8", seq: 8, status: "running", queuedAt: at(30, 10, 0, 9), startedAt: at(30, 10, 0, 9) }),
@@ -412,6 +448,7 @@ const initialRuns = (rs: Routine[]): RoutineRun[] => {
       error: "GitHub token expired",
       ...read(at(24, 16, 30)),
     }),
+
   ];
 };
 
@@ -563,9 +600,11 @@ export const analyticsChatMessages = (): OpencodeMessage[] =>
 // ---------------------------------------------------------------------------
 
 const TZ = "Europe/Paris";
-const isUnread = (r: RoutineRun) =>
-  r.readAt == null &&
-  (r.status === "failed" || r.status === "timed_out" || (r.status === "done" && r.report?.outcome === "findings"));
+// Mirrors the box (§5.5): an update that replaced unread reports and found everything resolved is unread too.
+const isResolvedUpdate = (r: RoutineRun) => r.status === "done" && r.report?.outcome === "nothing" && r.folds.length > 0;
+const isFinding = (r: RoutineRun) =>
+  r.status === "failed" || r.status === "timed_out" || (r.status === "done" && r.report?.outcome === "findings") || isResolvedUpdate(r);
+const isUnread = (r: RoutineRun) => r.readAt == null && isFinding(r);
 const when = (r: RoutineRun) => r.endedAt ?? r.startedAt ?? r.queuedAt;
 const newestFirst = (a: RoutineRun, b: RoutineRun) => when(b) - when(a);
 
@@ -615,7 +654,7 @@ export function createRoutinesStore() {
   function get(id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }): RoutineDetail {
     const r = find(id);
     let list = runs.filter((x) => x.routineId === id).sort((a, b) => b.seq - a.seq);
-    if (opts?.findingsOnly) list = list.filter((x) => x.report?.outcome === "findings");
+    if (opts?.findingsOnly) list = list.filter((x) => isFinding(x) && x.foldedInto == null);
     if (opts?.beforeSeq != null) list = list.filter((x) => x.seq < (opts.beforeSeq as number));
     const total = stats[id]?.runCount ?? runs.filter((x) => x.routineId === id).length;
     const page = list.slice(0, 30);
@@ -649,6 +688,7 @@ export function createRoutinesStore() {
       access: input.access ?? "read",
       model: input.model ?? null,
       notify: input.notify ?? "findings",
+      rollUp: input.rollUp ?? true,
       enabled: input.enabled ?? true,
       createdFrom: input.createdFrom ?? null,
       createdAt: ROUTINES_T0,
@@ -702,6 +742,7 @@ export function createRoutinesStore() {
         ...(patch.access !== undefined ? { access: patch.access } : {}),
         ...(patch.model !== undefined ? { model: patch.model } : {}),
         ...(patch.notify !== undefined ? { notify: patch.notify } : {}),
+        ...(patch.rollUp !== undefined ? { rollUp: patch.rollUp } : {}),
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
         updatedAt: ROUTINES_T0,
       };

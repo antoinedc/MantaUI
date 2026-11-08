@@ -42,6 +42,7 @@ import {
   scheduleToCron,
   tildePath,
   NOTIFY_OPTIONS,
+  ROLL_UP_OPTIONS,
   type RoutineDraft,
   type Schedule,
   type ScheduleKind,
@@ -316,6 +317,19 @@ export function RoutineEditor({ open, routine, tz, onClose, onSaved, onTestRun }
           </LabelledBlock>
           <LabelledBlock label="Tell me">
             <ChipGroup label="Notify" value={draft.notify} options={NOTIFY_OPTIONS} onChange={(notify) => patch({ notify })} />
+          </LabelledBlock>
+          <LabelledBlock label="If the last report is still unread">
+            <div className="flex flex-col gap-1">
+              <ChipGroup
+                label="Unread reports"
+                value={draft.rollUp ? "update" : "new"}
+                options={ROLL_UP_OPTIONS}
+                onChange={(v) => patch({ rollUp: v === "update" })}
+              />
+              <div className="text-meta text-text-quiet">
+                Updating keeps one up-to-date report until you read it — the next run folds in what you haven't seen.
+              </div>
+            </div>
           </LabelledBlock>
           <Callout tone="info" size="note">
             <span className="mr-1 inline-flex align-middle">

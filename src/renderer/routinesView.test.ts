@@ -7,8 +7,14 @@ import {
   cronToSchedule,
   defaultRunSelection,
   draftErrors,
+  draftFromRoutine,
   draftToInput,
   emptyDraft,
+  foldedIntoLine,
+  isQuietRun,
+  isResolvedUpdate,
+  replacesRefs,
+  rollUpLabel,
   inboxTimeLabel,
   isUnreadRun,
   lastRunDetail,
@@ -62,6 +68,10 @@ function run(over: Partial<RoutineRun>): RoutineRun {
     reprompted: false,
     reportCount: 0,
     memoryAtStart: "",
+    unreadAtStart: [],
+    folds: [],
+    foldedInto: null,
+    reportRev: 0,
     ...over,
   };
 }
@@ -282,5 +292,58 @@ describe("the run list", () => {
     expect(defaultRunSelection([newest, unread, older])).toBe("u");
     expect(defaultRunSelection([newest, run({ id: "r", report: found, readAt: 1 })])).toBe("n");
     expect(defaultRunSelection([])).toBe("about");
+  });
+});
+
+describe("rolling updates — what the list and the pane say", () => {
+  const nothing = { outcome: "nothing" as const, title: "All clear", summary: "", body: "" };
+  const findings = { outcome: "findings" as const, title: "News", summary: "", body: "" };
+  const refs = (...seqs: number[]) => seqs.map((seq) => ({ id: `r${seq}`, seq }));
+
+  it("a resolved update is unread and not quiet; a replaced run is quiet; a plain nothing is quiet", () => {
+    const resolved = run({ report: nothing, folds: refs(11) });
+    expect(isResolvedUpdate(resolved)).toBe(true);
+    expect(isUnreadRun(resolved)).toBe(true);
+    expect(isQuietRun(resolved)).toBe(false);
+    expect(isUnreadRun({ ...resolved, readAt: 5 })).toBe(false);
+
+    const plain = run({ report: nothing, readAt: 1 });
+    expect(isResolvedUpdate(plain)).toBe(false);
+    expect(isUnreadRun(run({ report: nothing }))).toBe(false);
+    expect(isQuietRun(plain)).toBe(true);
+
+    const replaced = run({ report: findings, readAt: 1, foldedInto: { id: "r14", seq: 14 } });
+    expect(isQuietRun(replaced)).toBe(true);
+    expect(isQuietRun(run({ report: findings }))).toBe(false);
+  });
+
+  it("the newest unread run is still the default selection, resolved updates included", () => {
+    const update = run({ id: "new", seq: 3, report: nothing, folds: refs(1, 2) });
+    const old = run({ id: "old", seq: 2, report: findings, readAt: 1, foldedInto: { id: "new", seq: 3 } });
+    expect(defaultRunSelection([update, old])).toBe("new");
+  });
+
+  it("'Folded into #N' only on a replaced run", () => {
+    expect(foldedIntoLine(run({ foldedInto: { id: "x", seq: 14 } }))).toBe("Folded into #14");
+    expect(foldedIntoLine(run({}))).toBeNull();
+  });
+
+  it("'Replaces …' names up to four runs, then the first three and a count", () => {
+    expect(replacesRefs(run({}))).toEqual({ shown: [], more: 0 });
+    expect(replacesRefs(run({ folds: refs(11, 12) }))).toEqual({ shown: refs(11, 12), more: 0 });
+    expect(replacesRefs(run({ folds: refs(8, 9, 10, 11) }))).toEqual({ shown: refs(8, 9, 10, 11), more: 0 });
+    expect(replacesRefs(run({ folds: refs(7, 8, 9, 10, 11) }))).toEqual({ shown: refs(7, 8, 9), more: 2 });
+  });
+
+  it("the About row and the editor draft carry the setting (a routine without the field reads as on)", () => {
+    expect(rollUpLabel(true)).toBe("Updated in place until you read it");
+    expect(rollUpLabel(false)).toBe("A new report each run");
+    const base = { name: "n", prompt: "p", directory: "/x" };
+    expect(emptyDraft().rollUp).toBe(true);
+    expect(draftToInput({ ...emptyDraft("/x"), ...base }).rollUp).toBe(true);
+    expect(draftToInput({ ...emptyDraft("/x"), ...base, rollUp: false }).rollUp).toBe(false);
+    const routine = { name: "n", prompt: "p", icon: "chart", directory: "/x", model: null, cron: "0 9 * * *", access: "read", notify: "findings" } as never;
+    expect(draftFromRoutine({ ...(routine as object), rollUp: false } as never).rollUp).toBe(false);
+    expect(draftFromRoutine(routine).rollUp).toBe(true);
   });
 });
