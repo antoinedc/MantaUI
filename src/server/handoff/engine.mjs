@@ -395,8 +395,9 @@ export function createHandoffEngine(deps = {}) {
    * Post with the idempotent-id discipline of §5.3 step 3: a definitive refusal
    * of the FIRST attempt is a refusal; anything uncertain is reconciled by id
    * (inbox + history), and an absent message is re-posted with the same id.
-   * `st.uncertain` carries across calls (and restarts, via `attempted`).
-   * @returns {Promise<{ outcome: "accepted"|"refused"|"pending", error?: any }>}
+   * `st.uncertain` carries across calls (and restarts, via `attempted`). `st.guardPause` (held admissions) makes every POST
+   * wait while the box is paused for its opencode upgrade: `paused` means nothing was posted and nothing was decided.
+   * @returns {Promise<{ outcome: "accepted"|"refused"|"pending"|"paused", error?: any }>}
    */
   async function postReconcile(target, kind, args, id, st) {
     for (let attempt = 0; attempt < MAX_POST_ATTEMPTS; attempt++) {
@@ -406,6 +407,7 @@ export function createHandoffEngine(deps = {}) {
         if (found === true) return { outcome: "accepted" };
         if (found === "unknown") continue; // can't tell whether the earlier attempt landed: asking again, never posting blind
       }
+      if (st.guardPause && isPaused()) return { outcome: "paused" }; // immediately before the POST
       reservations.set(target, (reservations.get(target) ?? 0) + 1);
       try {
         await rawPost(kind, target, args);
@@ -449,7 +451,7 @@ export function createHandoffEngine(deps = {}) {
       item.attempted = true;
       await persist();
     }
-    const res = await postReconcile(target, item.kind, args, item.id, { uncertain: wasAttempted });
+    const res = await postReconcile(target, item.kind, args, item.id, { uncertain: wasAttempted, guardPause: true });
     if (claiming) {
       if (res.outcome === "accepted") {
         delete cont.preamble;
@@ -474,7 +476,9 @@ export function createHandoffEngine(deps = {}) {
         const q = state.held[target];
         if (!q || q.length === 0) break;
         const item = q[0];
+        if (isPaused()) return pauseHeld(target, item); // checked again, right before the POST, inside postReconcile
         const res = await postHeldItem(target, item);
+        if (res.outcome === "paused") return pauseHeld(target, item);
         if (res.outcome === "pending") {
           scheduleRetry(`drain:${target}`, () => drainHeld(target));
           const w = waiters.get(item.id);
@@ -508,6 +512,19 @@ export function createHandoffEngine(deps = {}) {
       await persist();
     } finally {
       draining.delete(target);
+    }
+  }
+
+  /**
+   * The box is paused for its opencode upgrade: leave the held queue exactly as it is (the item stays at the head, its claim and
+   * `attempted` mark untouched, the hold stays in force) and start no retry timer — `setPaused(false)` restarts the drain. A
+   * caller waiting on its own admission is told the delivery is deferred (the item still goes out on resume).
+   */
+  function pauseHeld(target, item) {
+    const w = waiters.get(item.id);
+    if (w) {
+      waiters.delete(item.id);
+      w.reject(Object.assign(new Error("delivery is deferred while the box upgrades opencode"), { uncertain: true }));
     }
   }
 
@@ -2534,6 +2551,8 @@ export function createHandoffEngine(deps = {}) {
     const was = paused;
     paused = Boolean(value);
     if (was && !paused) {
+      // held messages first: they are somebody's words waiting for opencode (a fenced target is drained by its own commit)
+      for (const target of Object.keys(state.held)) if (state.held[target]?.length > 0 && !state.fences[target]) detach(`resume: drain ${target}`, () => drainHeld(target));
       detach("resume: repair", () => repairTaskChildLinks());
       detach("resume: maintenance", () => maintain());
     }

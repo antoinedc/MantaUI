@@ -320,3 +320,72 @@ test("relayBackgroundResult for a session that is neither replaced nor fenced an
   assert.equal(touched, 0);
   assert.deepEqual(w.timelineReads, []);
 });
+
+// ---- held deliveries wait out the upgrade pause --------------------------------------------------------------------
+
+const heldItem = (id, kind = "synthetic", extra = {}) => ({ id, kind, args: kind === "synthetic" ? { id, text: `t-${id}`, delivery: "queue", resume: true } : { messageID: id, text: `p-${id}` }, at: 1, ...extra });
+
+test("the pause begins while an armed successor's preamble claim is being persisted: the held message is NOT posted, stays held, and goes out once on resume", async () => {
+  const w = createWorld({ mode: "off" });
+  disk(w, { links: { OLD: link(null, "NEW"), NEW: link("OLD", null) }, continuations: { NEW: { recordId: "hof_none", preamble: "carried context" } } });
+  let engine;
+  engine = w.build({ hooks: { step: async (n) => { if (n === "claim") engine.setPaused(true); } } });
+  w.engine = engine;
+  const admission = engine.admitSynthetic("OLD", { id: "msg_relay", text: "result", metadata: { source: "subagent" }, delivery: "queue", resume: true }).catch((e) => e);
+  await settle(12);
+  assert.equal(w.posts.length, 0, "no POST while paused");
+  const err = await admission;
+  assert.equal(err.uncertain, true, "the waiting caller is told the delivery is deferred");
+  assert.equal(engine._state.held.NEW.length, 1, "the item is still held, untouched");
+  assert.ok(engine._state.continuations.NEW.claim, "with its claim");
+  assert.ok(engine._state.continuations.NEW.preamble);
+
+  engine.setPaused(false);
+  await settle(20);
+  assert.equal(w.posts.length, 1, "exactly once on resume");
+  assert.equal(w.posts[0].target, "NEW");
+  assert.match(w.posts[0].text, /^carried context[\s\S]*result$/, "with the preamble the claim carries");
+  assert.equal(engine._state.held.NEW, undefined);
+  assert.equal(engine._state.continuations.NEW.preamble, undefined);
+});
+
+test("a held relay's retry timer that fires after the pause posts nothing; the resume delivers it exactly once", async () => {
+  const w = createWorld({ mode: "off" });
+  disk(w, { links: { OLD: link(null, "NEW"), NEW: link("OLD", null) }, held: { NEW: [heldItem("msg_held_relay", "synthetic", { attempted: true })] } });
+  w.engine = w.build();
+  w.failReads.add("NEW"); // an earlier attempt may have landed and the destination can't be asked: pending, a retry timer is armed
+  await w.engine._drainHeld("NEW");
+  assert.equal(w.posts.length, 0);
+  assert.ok(w.timers.length >= 1, "a retry timer exists");
+  w.engine.setPaused(true);
+  w.failReads.delete("NEW"); // reads recover while paused
+  await w.runTimers();
+  assert.equal(w.posts.length, 0, "the timer fired during the pause and posted nothing");
+  assert.equal(w.engine._state.held.NEW.length, 1, "still held");
+  assert.equal(w.timers.length, 0, "and no new timer was armed for the pause");
+  w.engine.setPaused(false);
+  await settle(20);
+  assert.equal(w.posts.length, 1, "delivered exactly once after the resume");
+  assert.equal(w.engine._state.held.NEW, undefined);
+});
+
+test("held admissions in general wait (an ordinary prompt held for a handoff too), and the resume restarts the drain of every non-empty held target — not the fenced one", async () => {
+  const w = createWorld({ mode: "off" });
+  disk(w, {
+    held: { T1: [heldItem("msg_p1", "prompt"), heldItem("msg_s1")], T2: [heldItem("msg_p2", "prompt")], TF: [heldItem("msg_pf", "prompt")] },
+    fences: { TF: { successorId: "TFnext", recordId: "hof_f" } },
+  });
+  w.engine = w.build();
+  w.engine.setPaused(true);
+  await w.engine._drainHeld("T1");
+  await w.engine._drainHeld("T2");
+  await w.runTimers();
+  assert.equal(w.posts.length, 0, "no prompt or synthetic goes out during the upgrade");
+  assert.equal(w.engine._state.held.T1.length, 2);
+  assert.equal(w.engine._state.held.T2.length, 1);
+  w.engine.setPaused(false);
+  await settle(20);
+  assert.deepEqual(w.posts.map((p) => `${p.target}:${p.id}`).sort(), ["T1:msg_p1", "T1:msg_s1", "T2:msg_p2"], "each exactly once, T1 in order");
+  assert.deepEqual(w.posts.filter((p) => p.target === "T1").map((p) => p.id), ["msg_p1", "msg_s1"]);
+  assert.equal(w.engine._state.held.TF.length, 1, "a fenced target waits for its own commit");
+});
