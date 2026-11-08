@@ -461,3 +461,116 @@ test("relay backstop: a failing relay is logged, never thrown, and the record st
   assert.equal(w.job().status, "failed");
   assert.ok(logged.some((l) => /relay broke/.test(l)));
 });
+
+// ---- review round: born-for-run only for a provable first run; the parent is read lazily ----
+const firstRunRecord = (over = {}) => ({
+  id: "first000",
+  name: "fix-the-bug",
+  parentSessionID: PARENT,
+  sessionParentID: PARENT,
+  childSessionID: CHILD,
+  origin: "subagent",
+  engine: "v2",
+  completionOwner: "opencode",
+  status: "done",
+  attempt: 1,
+  continues: null,
+  runStartedAt: CREATED + 100,
+  finishedAt: CREATED + 5000,
+  supersededBy: "rec2",
+  ...over,
+});
+
+test("a resumed record never takes the born allowance: the first run's outcome cannot finish the second, which is lost", async () => {
+  // t=0 child created · t=5 s first run ends · t=20 s the session is resumed and recorded · the second run is cut off
+  const w = ownedWorld({ outcome: "succeeded", idle: CREATED + 5000, synthetics: [synthetic("completed", "the first run's result")] });
+  Object.assign(w.job(), { id: "rec2", attempt: 2, continues: "first000", runStartedAt: CREATED + 20_000, startedAt: CREATED + 20_000 });
+  w.jobs.push(firstRunRecord());
+  w.state.now = CREATED + 21_000;
+  const [first, second] = await lostSettle(w);
+  assert.equal(first.reason, "lost-pending");
+  assert.equal(second.lost, true, "judged lost, not finished by the first run's outcome");
+  assert.equal(w.job().status, "failed");
+  assert.equal(w.job().error, LOST_RUN_MESSAGE);
+});
+
+test("born allowance needs attempt 1, no continuation and no other record of the child in the store", async () => {
+  const strict = async (patch, others = []) => {
+    const w = ownedWorld({ outcome: "succeeded", idle: CREATED + 5000 });
+    Object.assign(w.job(), { runStartedAt: CREATED + 20_000 }, patch);
+    for (const o of others) w.jobs.push(o);
+    w.state.now = CREATED + 21_000;
+    return (await settle(w)).settled;
+  };
+  assert.equal(await strict({}), true, "a lone first record: the allowance applies");
+  assert.equal(await strict({ attempt: 2 }), false, "attempt 2");
+  assert.equal(await strict({ continues: "x" }), false, "continues another record");
+  assert.equal(await strict({}, [firstRunRecord({ id: "other", supersededBy: null, status: "stopped" })]), false, "another record of the same child, whatever its status");
+  assert.equal(await strict({}, [firstRunRecord({ id: "elsewhere", childSessionID: "ses_unrelated" })]), true, "another child's record is irrelevant");
+});
+
+test("an unreadable job store keeps the strict rule", async () => {
+  const w = ownedWorld({ outcome: "succeeded", idle: CREATED + 5000 });
+  w.job().runStartedAt = CREATED + 20_000;
+  const load = w.deps.load;
+  let calls = 0;
+  w.deps.load = async () => {
+    // the first read (effectiveRunStart) fails; later ones (finishV2Job) must still work
+    if (++calls === 1) throw new Error("store unreadable");
+    return load();
+  };
+  assert.equal((await settle(w)).settled, false);
+});
+
+function countParentReads(w) {
+  const reads = [];
+  const base = w.deps.listRawTimeline;
+  w.deps.listRawTimeline = async (sid, opts = {}) => {
+    if (sid === PARENT && opts.type === "synthetic") reads.push(sid);
+    return base(sid, opts);
+  };
+  return reads;
+}
+const childSaid = (text) => async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text }] }];
+
+test("lazy parent read: a done run whose child has text never reads the parent's timeline", async () => {
+  const w = ownedWorld({ outcome: "succeeded", synthetics: [synthetic("completed", "from the parent")] });
+  w.deps.listMessages = childSaid("the child's own text");
+  const reads = countParentReads(w);
+  assert.equal((await settle(w)).status, "done");
+  assert.equal(w.job().result, "the child's own text");
+  assert.deepEqual(reads, [], "zero parent-timeline reads");
+});
+
+test("lazy parent read: a done run with no child text reads the parent exactly once", async () => {
+  const w = ownedWorld({ outcome: "succeeded", synthetics: [synthetic("completed", "from the parent")] });
+  const reads = countParentReads(w);
+  await settle(w);
+  assert.equal(w.job().result, "from the parent");
+  assert.equal(reads.length, 1);
+});
+
+test("lazy parent read: a failed run with a raw error never reads the parent; one without reads it once", async () => {
+  const withError = ownedWorld({ synthetics: [synthetic("failed", "from the parent")] });
+  const none = countParentReads(withError);
+  await settleV2Job(withError.job(), withError.deps, { hint: { outcome: "failed", error: "Provider said no", at: IDLE } });
+  assert.deepEqual(none, []);
+  assert.equal(withError.job().error, "Provider said no");
+
+  const bare = ownedWorld({ synthetics: [synthetic("failed", "from the parent")] });
+  const once = countParentReads(bare);
+  await settle(bare);
+  assert.equal(once.length, 1);
+  assert.equal(bare.job().error, "from the parent");
+});
+
+test("lazy parent read: an unreadable parent timeline leaves a done run's result empty and still settles it", async () => {
+  const w = ownedWorld({ outcome: "succeeded" });
+  w.deps.listRawTimeline = async (sid, opts = {}) => {
+    if (opts.type === "synthetic") throw new Error("timeline unavailable");
+    return [];
+  };
+  const res = await settle(w);
+  assert.equal(res.status, "done");
+  assert.equal(w.job().result, null);
+});

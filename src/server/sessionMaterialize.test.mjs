@@ -185,7 +185,46 @@ test("materialize answers an existing window without restamping it (a user's win
   assert.equal(w.calls.some(([k]) => k === "owner"), false);
 });
 
-test("promoteViewWindows: restamps only viewer windows of the named sessions, one failure never stops the rest", async () => {
+// ---- viewer windows: promotion on a send, and the box's closer, share materialize's ordering ----
+
+/** One window, and the ordering primitives: a per-chain mutex (the handoff engine's chain exclusion) + the real session lock. */
+function viewWorld(window = { sid: "S", owner: "view", armed: true }) {
+  const w = { window, log: [], kills: [], active: [], gate: null };
+  let tail = Promise.resolve();
+  w.exclusive = (_sid, fn) => {
+    const run = tail.then(() => fn());
+    tail = run.catch(() => {});
+    return run;
+  };
+  w.listProjects = async () => {
+    w.log.push("read");
+    return [{ tmuxSession: "p", windows: w.window ? [{ index: 7, opencodeSessionId: w.window.sid, owner: w.window.owner, ...(w.window.armed ? { viewArmed: true } : {}) }] : [] }];
+  };
+  w.close = (sid = "S") => createViewWindowCloser({
+    listProjects: w.listProjects,
+    listActiveSessionIds: async () => { w.log.push("active"); if (w.gate) await w.gate; return w.active; },
+    killWindow: async (a) => { w.kills.push({ a, at: { ...w.window } }); w.window = null; },
+    refresh: async () => { w.log.push("refresh"); },
+    chainOf: () => ["S", "T"],
+    canonicalSessionOf: (s) => { w.log.push(`canon:${s}`); return s; },
+    withChainExclusive: (s, fn) => { w.log.push("exclusive"); return w.exclusive(s, fn); },
+    warn: () => {},
+  })({ project: "p", windowIndex: 7, sessionId: sid });
+  w.promote = (sid = "T", over = {}) => promoteViewWindows(sid, {
+    listProjects: w.listProjects,
+    stampOwner: async (_p, _i, owner) => { w.log.push("stamp"); if (w.window) w.window.owner = owner; },
+    chainOf: () => ["S", "T"],
+    canonicalSessionOf: (s) => { w.log.push(`canon:${s}`); return s; },
+    withChainExclusive: (s, fn) => { w.log.push("exclusive"); return w.exclusive(s, fn); },
+    refresh: async () => { w.log.push("refresh"); },
+    warn: () => {},
+    ...over,
+  });
+  return w;
+}
+const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
+
+test("promoteViewWindows: restamps only viewer windows of the session's chain; one failure never stops the rest", async () => {
   const stamps = [];
   const warned = [];
   const listProjects = async () => [{ tmuxSession: "p", windows: [
@@ -195,70 +234,116 @@ test("promoteViewWindows: restamps only viewer windows of the named sessions, on
     { index: 4, opencodeSessionId: "old", owner: "view" },
   ] }];
   const stampOwner = async (...a) => { if (a[1] === 1) throw new Error("tmux down"); stamps.push(a); };
-  const n = await promoteViewWindows(["a", "old", null], { listProjects, stampOwner, warn: (m) => warned.push(m) });
+  const n = await promoteViewWindows("a", { listProjects, stampOwner, chainOf: () => ["old", "a"], warn: (m) => warned.push(m) });
   assert.equal(n, 1);
   assert.deepEqual(stamps, [["p", 4, "user"]]);
   assert.equal(warned.length, 1);
-  assert.equal(await promoteViewWindows([], { listProjects: async () => assert.fail("nothing to look for"), stampOwner }), 0);
-  assert.equal(await promoteViewWindows(["a"], { listProjects: async () => { throw new Error("no tmux"); }, stampOwner, warn: () => {} }), 0);
+  assert.equal(await promoteViewWindows("", { listProjects: async () => assert.fail("no session"), stampOwner }), 0);
+  assert.equal(await promoteViewWindows("a", { listProjects: async () => { throw new Error("no tmux"); }, stampOwner, warn: () => {} }), 0);
 });
 
-function closerWorld(over = {}) {
-  const calls = [];
-  const state = { owner: "view", sid: "s", active: [] };
-  const deps = {
-    listProjects: async () => [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: state.sid, owner: state.owner }] }],
-    listActiveSessionIds: async () => state.active,
-    killWindow: async (a) => { calls.push(["kill", a]); },
-    refresh: async () => { calls.push(["refresh"]); },
-    chainOf: (sid) => (sid === "s" ? ["old", "s"] : [sid]),
-    canonicalSessionOf: (sid) => sid,
+test("promoteViewWindows: with nothing to promote it takes no exclusion and no lock; otherwise the order is materialize's", async () => {
+  const idle = viewWorld({ sid: "S", owner: "user", armed: false });
+  assert.equal(await idle.promote(), 0);
+  assert.deepEqual(idle.log, ["read"], "only the cheap peek: no exclusion, no refresh, no canonical lookup");
+
+  const w = viewWorld();
+  assert.equal(await w.promote(), 1);
+  assert.deepEqual(w.log, ["read", "exclusive", "refresh", "canon:T", "read", "stamp"], "peek · chain exclusion · fresh list · canonical inside it · LIVE read · stamp");
+  assert.equal(w.window.owner, "user");
+});
+
+test("promoteViewWindows: the stamps are read LIVE under the exclusion — a window already promoted or gone since the peek is left alone", async () => {
+  const w = viewWorld();
+  let peeked = false;
+  const stamps = [];
+  const n = await promoteViewWindows("T", {
+    peekProjects: async () => { peeked = true; return [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "view" }] }]; },
+    listProjects: async () => [{ tmuxSession: "p", windows: [{ index: 7, opencodeSessionId: "S", owner: "user" }] }],
+    stampOwner: async (...a) => stamps.push(a),
+    chainOf: () => ["S", "T"],
+    withChainExclusive: w.exclusive,
     warn: () => {},
-    ...over,
-  };
-  return { deps, calls, state, close: () => createViewWindowCloser(deps)({ project: "p", windowIndex: 7, sessionId: "s" }) };
-}
-
-test("view closer: kills a still-viewer window of a session that is still not running, then refreshes", async () => {
-  const w = closerWorld();
-  assert.deepEqual(await w.close(), { closed: true });
-  assert.deepEqual(w.calls, [["kill", { sessionName: "p", windowIndex: 7 }], ["refresh"]]);
+  });
+  assert.equal(peeked, true);
+  assert.equal(n, 0);
+  assert.deepEqual(stamps, [], "the stale snapshot said view; the live stamp said user");
 });
 
-test("view closer: a window promoted or re-stamped since the decision is never closed; neither is a running session (any chain member)", async () => {
-  for (const [patch, reason] of [[{ owner: "user" }, "changed"], [{ owner: "job" }, "changed"], [{ sid: "other" }, "changed"], [{ active: ["s"] }, "running"], [{ active: ["old"] }, "running"]]) {
-    const w = closerWorld();
-    Object.assign(w.state, patch);
+test("view closer: kills a still-armed viewer window of a session that is still not running, in materialize's order", async () => {
+  const w = viewWorld();
+  assert.deepEqual(await w.close(), { closed: true });
+  assert.deepEqual(w.log, ["exclusive", "refresh", "canon:S", "read", "active", "refresh"]);
+  assert.deepEqual(w.kills.map((k) => k.a), [{ sessionName: "p", windowIndex: 7 }]);
+});
+
+test("view closer: never kills a promoted, re-stamped, unarmed or running window (any chain member)", async () => {
+  for (const [patch, reason] of [
+    [{ owner: "user" }, "changed"], [{ owner: "job" }, "changed"], [{ sid: "other" }, "changed"], [{ armed: false }, "unarmed"],
+  ]) {
+    const w = viewWorld({ sid: "S", owner: "view", armed: true, ...patch });
     assert.deepEqual(await w.close(), { closed: false, reason }, JSON.stringify(patch));
-    assert.deepEqual(w.calls, []);
+    assert.deepEqual(w.kills, []);
   }
-  const gone = closerWorld({ listProjects: async () => [{ tmuxSession: "p", windows: [] }] });
+  for (const active of [["S"], ["T"]]) {
+    const w = viewWorld();
+    w.active = active;
+    assert.deepEqual(await w.close(), { closed: false, reason: "running" });
+    assert.deepEqual(w.kills, []);
+  }
+  const gone = viewWorld(null);
   assert.equal((await gone.close()).closed, false);
 });
 
 test("view closer: unreadable state leaves the window open; a failed refresh does not undo the close", async () => {
-  const unknown = closerWorld({ listActiveSessionIds: async () => { throw new Error("opencode down"); } });
-  assert.deepEqual(await unknown.close(), { closed: false, reason: "failed" });
-  assert.deepEqual(unknown.calls, []);
-  const refreshFails = closerWorld({ refresh: async () => { throw new Error("sync failed"); } });
-  assert.deepEqual(await refreshFails.close(), { closed: true });
+  const w = viewWorld();
+  const closer = createViewWindowCloser({
+    listProjects: w.listProjects, listActiveSessionIds: async () => { throw new Error("opencode down"); },
+    killWindow: async () => assert.fail("must not kill"), withChainExclusive: w.exclusive, warn: () => {},
+  });
+  assert.deepEqual(await closer({ project: "p", windowIndex: 7, sessionId: "S" }), { closed: false, reason: "failed" });
+  const refreshFails = viewWorld();
+  const closer2 = createViewWindowCloser({
+    listProjects: refreshFails.listProjects, listActiveSessionIds: async () => [],
+    killWindow: async () => { refreshFails.window = null; }, refresh: async () => { throw new Error("sync failed"); },
+    withChainExclusive: refreshFails.exclusive, warn: () => {},
+  });
+  assert.deepEqual(await closer2({ project: "p", windowIndex: 7, sessionId: "S" }), { closed: true });
 });
 
-test("view closer: runs under the session's resource lock, keyed by the canonical session", async () => {
-  const keys = [];
-  const w = closerWorld({ canonicalSessionOf: () => "canon", sessionLock: async (key, fn) => { keys.push(key); return fn(); } });
-  await w.close();
-  assert.deepEqual(keys, ["canon"]);
+test("interleaving: a closer queued behind a handoff commit and a promotion never kills the window the user now owns", async () => {
+  const w = viewWorld();
+  let releaseCommit;
+  const commitGate = new Promise((r) => { releaseCommit = r; });
+  // A handoff commit holds the chain exclusion and is about to restamp the window S → T…
+  const commit = w.exclusive("S", async () => { await commitGate; w.window.sid = "T"; w.log.push("commit"); });
+  // …while the box (acting on a decision made when the window still read as S) asks to close it, and the user sends.
+  const closing = w.close("S");
+  const promoting = w.promote("T");
+  await flush();
+  assert.deepEqual(w.log.filter((e) => e === "read" || e === "active"), ["read"], "only the promotion's cheap peek ran: the closer has not touched the window");
+  releaseCommit();
+  const [closed, promoted] = await Promise.all([closing, promoting, commit]).then(([c, p]) => [c, p]);
+  assert.deepEqual(closed, { closed: false, reason: "changed" }, "the live window is T now: not the one the decision was about");
+  assert.equal(promoted, 1);
+  assert.deepEqual(w.kills, []);
+  assert.deepEqual(w.window, { sid: "T", owner: "user", armed: true });
 });
 
-test("promoteViewWindows: the restamp runs under the session's lock, and only when there is something to promote", async () => {
-  const order = [];
-  const sessionLock = async (key, fn) => { order.push(["lock", key]); return fn(); };
-  const projects = [{ tmuxSession: "p", windows: [{ index: 1, opencodeSessionId: "a", owner: "view" }] }];
-  const base = { listProjects: async () => projects, stampOwner: async (...a) => { order.push(["stamp", ...a]); }, lockKey: "canon", sessionLock, warn: () => {} };
-  assert.equal(await promoteViewWindows(["a"], base), 1);
-  assert.deepEqual(order, [["lock", "canon"], ["stamp", "p", 1, "user"]]);
-  order.length = 0;
-  assert.equal(await promoteViewWindows(["zzz"], base), 0);
-  assert.deepEqual(order, [], "no viewer window → no lock taken");
+test("interleaving: a closer that holds the exclusion first kills only a window that is still an armed viewer at that moment", async () => {
+  const w = viewWorld();
+  let releaseGate;
+  w.gate = new Promise((r) => { releaseGate = r; });
+  const closing = w.close("S");
+  await flush();
+  assert.ok(w.log.includes("active"), "the closer read the window as S and is deciding");
+  const commit = w.exclusive("S", async () => { if (w.window) w.window.sid = "T"; w.log.push("commit"); });
+  const promoting = w.promote("T");
+  await flush();
+  assert.ok(!w.log.includes("commit"), "the commit waits for the closer");
+  releaseGate();
+  await Promise.all([closing, commit, promoting]);
+  assert.equal(w.kills.length, 1);
+  assert.deepEqual(w.kills[0].at, { sid: "S", owner: "view", armed: true }, "at the moment of the kill it was still the armed viewer of S");
+  assert.equal(w.window, null);
 });

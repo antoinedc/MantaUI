@@ -9,37 +9,52 @@ const messages = {
   failed: "Couldn't open this session.",
 };
 
+const passThrough = (_sid, fn) => fn();
+
 /**
  * The user typed into a session: a viewer window showing it becomes the user's own (the box never closes it).
  * Awaited before the send is forwarded; a failure is logged and never blocks the send.
+ *
+ * Ordered like `sessions:materialize` and the viewer-window closer: the handoff chain exclusion outer, the session
+ * resource lock inner, the canonical identity resolved inside the exclusion (after a fresh session list), and the
+ * window stamps read LIVE immediately before any restamp. `peekProjects` is only the cheap "is there anything to do at
+ * all" check (the sync snapshot): with no viewer window in it, no exclusion or lock is taken.
  */
-export async function promoteViewWindows(sessionIds, { listProjects, stampOwner, lockKey, sessionLock = withSessionLock, warn = console.warn }) {
-  const ids = new Set((sessionIds ?? []).filter((s) => typeof s === "string" && s));
-  if (ids.size === 0) return 0;
-  const viewWindows = async () => {
+export async function promoteViewWindows(sessionId, {
+  peekProjects, listProjects, stampOwner, chainOf = () => [], canonicalSessionOf = (sid) => sid,
+  withChainExclusive = passThrough, sessionLock = withSessionLock, refresh, warn = console.warn,
+}) {
+  if (typeof sessionId !== "string" || !sessionId) return 0;
+  const targets = () => new Set([sessionId, ...(chainOf(sessionId) ?? [])].filter((s) => typeof s === "string" && s));
+  const viewWindows = async (read) => {
+    const ids = targets();
     const found = [];
-    for (const p of (await listProjects()) ?? []) {
+    for (const p of (await read()) ?? []) {
       for (const w of p.windows ?? []) if (w.owner === "view" && ids.has(w.opencodeSessionId)) found.push({ project: p.tmuxSession, index: w.index });
     }
     return found;
   };
-  const promote = async () => {
-    let promoted = 0;
-    for (const w of await viewWindows()) {
-      try {
-        await stampOwner(w.project, w.index, "user");
-        promoted += 1;
-      } catch (e) {
-        warn(`[sessions] could not keep the window ${w.project}:${w.index} open after a send:`, e?.message ?? e);
-      }
-    }
-    return promoted;
-  };
   try {
-    // Nothing to promote costs no lock. Otherwise the restamp takes the lock the viewer-window closer decides under,
-    // so a close that already read the window as a viewer finishes (or refuses) before the send can be answered.
-    if (!(await viewWindows()).length) return 0;
-    return lockKey ? await sessionLock(lockKey, promote) : await promote();
+    if (!(await viewWindows(peekProjects ?? listProjects)).length) return 0;
+    return await withChainExclusive(sessionId, async () => {
+      try {
+        await refresh?.();
+      } catch (e) {
+        warn("[sessions] refresh before promoting a viewer window failed:", e?.message ?? e);
+      }
+      return sessionLock(canonicalSessionOf(sessionId), async () => {
+        let promoted = 0;
+        for (const w of await viewWindows(listProjects)) {
+          try {
+            await stampOwner(w.project, w.index, "user");
+            promoted += 1;
+          } catch (e) {
+            warn(`[sessions] could not keep the window ${w.project}:${w.index} open after a send:`, e?.message ?? e);
+          }
+        }
+        return promoted;
+      });
+    });
   } catch (e) {
     warn("[sessions] could not look for viewer windows before a send:", e?.message ?? e);
     return 0;
@@ -47,29 +62,38 @@ export async function promoteViewWindows(sessionIds, { listProjects, stampOwner,
 }
 
 /**
- * The closer behind sessionStatus's `closeViewWindow`: under the session's resource lock it re-reads the window and kills it
- * only if it is STILL a viewer window of that same session and the session (any member of its handoff chain) is still not
- * running. Anything unreadable leaves the window open.
+ * The closer behind sessionStatus's `closeViewWindow`. Same ordering as `sessions:materialize`: chain exclusion outer,
+ * session resource lock inner, canonical identity resolved inside the exclusion after a fresh session list; then the
+ * window is read LIVE and killed only if it is STILL a viewer window of that same session, still armed, and the session
+ * (any member of its handoff chain) is still not running. Anything unreadable leaves the window open.
  */
 export function createViewWindowCloser({
   listProjects, listActiveSessionIds, killWindow, refresh,
   chainOf = (sid) => [sid], canonicalSessionOf = (sid) => sid,
-  sessionLock = withSessionLock, warn = console.warn,
+  withChainExclusive = passThrough, sessionLock = withSessionLock, warn = console.warn,
 }) {
   return async function closeViewWindow({ project, windowIndex, sessionId }) {
     try {
-      return await sessionLock(canonicalSessionOf(sessionId), async () => {
-        const w = ((await listProjects()) ?? []).find((p) => p.tmuxSession === project)?.windows?.find((x) => x.index === windowIndex);
-        if (!w || w.owner !== "view" || w.opencodeSessionId !== sessionId) return { closed: false, reason: "changed" };
-        const active = new Set(await listActiveSessionIds());
-        if ([sessionId, ...chainOf(sessionId)].some((sid) => active.has(sid))) return { closed: false, reason: "running" };
-        await killWindow({ sessionName: project, windowIndex });
+      return await withChainExclusive(sessionId, async () => {
         try {
           await refresh?.();
         } catch (e) {
-          warn("[sessions] refresh after closing a viewer window failed:", e?.message ?? e);
+          warn("[sessions] refresh before closing a viewer window failed:", e?.message ?? e);
         }
-        return { closed: true };
+        return sessionLock(canonicalSessionOf(sessionId), async () => {
+          const w = ((await listProjects()) ?? []).find((p) => p.tmuxSession === project)?.windows?.find((x) => x.index === windowIndex);
+          if (!w || w.owner !== "view" || w.opencodeSessionId !== sessionId) return { closed: false, reason: "changed" };
+          if (w.viewArmed !== true) return { closed: false, reason: "unarmed" };
+          const active = new Set(await listActiveSessionIds());
+          if ([sessionId, ...chainOf(sessionId)].some((sid) => active.has(sid))) return { closed: false, reason: "running" };
+          await killWindow({ sessionName: project, windowIndex });
+          try {
+            await refresh?.();
+          } catch (e) {
+            warn("[sessions] refresh after closing a viewer window failed:", e?.message ?? e);
+          }
+          return { closed: true };
+        });
       });
     } catch (e) {
       warn(`[sessions] could not close the viewer window ${project}:${windowIndex}:`, e?.message ?? e);

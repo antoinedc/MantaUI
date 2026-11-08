@@ -2567,13 +2567,13 @@ function viewSendDeps() {
     },
   ];
   deps.syncState = { ...deps.syncState, snapshot: () => ({ projects: live }), refreshNow: async () => { order.push("refresh"); } };
-  deps.tmux = { ...deps.tmux, stampOwner: async (...a) => { order.push(["stamp", ...a]); } };
+  deps.tmux = { ...deps.tmux, listProjects: async () => { order.push("live-read"); return live; }, stampOwner: async (...a) => { order.push(["stamp", ...a]); } };
   deps.oc = {
     ...deps.oc,
     sendPrompt: async () => { order.push("send"); return { ok: true }; },
     runCommand: async () => { order.push("send"); },
   };
-  deps.handoff = { chainOf: (sid) => (sid === "ses_a" ? ["ses_old", "ses_a"] : [sid]), admitPrompt: async () => { order.push("send"); return {}; }, guardCommand: (sid) => ({ target: sid }) };
+  deps.handoff = { chainOf: (sid) => (sid === "ses_a" ? ["ses_old", "ses_a"] : [sid]), withChainExclusive: async (_sid, fn) => { order.push("exclusive"); return fn(); }, admitPrompt: async () => { order.push("send"); return {}; }, guardCommand: (sid) => ({ target: sid }) };
   return { handlers: buildHandlers(deps), order, deps, calls };
 }
 
@@ -2584,6 +2584,8 @@ test("opencode:prompt promotes every viewer window of the session (and its hando
   const stamps = order.filter((e) => Array.isArray(e));
   assert.deepEqual(stamps, [["stamp", "p", 1, "user"], ["stamp", "p", 2, "user"], ["stamp", "p", 5, "user"]], "only this conversation's viewer windows");
   assert.ok(order.indexOf(stamps.at(-1)) < sendAt, "every stamp is awaited before the send is forwarded");
+  assert.ok(order.indexOf("exclusive") < order.indexOf("live-read"), "inside the handoff chain exclusion, the window stamps are read LIVE before any restamp");
+  assert.ok(order.indexOf("live-read") < order.indexOf(stamps[0]));
 });
 
 test("opencode:run-command promotes viewer windows too, and a session with none costs nothing", async () => {
@@ -2593,7 +2595,7 @@ test("opencode:run-command promotes viewer windows too, and a session with none 
   assert.ok(order.indexOf("send") > order.findIndex((e) => Array.isArray(e)));
   const none = viewSendDeps();
   await none.handlers["opencode:prompt"]({ sessionId: "ses_nowindow", text: "hi" });
-  assert.deepEqual(none.order, ["send"]);
+  assert.deepEqual(none.order, ["send"], "no viewer window in the snapshot: no exclusion, no live read, no stamp");
 });
 
 test("a failing promotion is logged and never blocks the send", async () => {
@@ -2608,7 +2610,7 @@ test("a failing promotion is logged and never blocks the send", async () => {
   } finally {
     console.warn = warn;
   }
-  assert.deepEqual(order, ["send"]);
+  assert.equal(order.at(-1), "send", "the send still went out, after the failed promotion");
   assert.ok(logged.some((l) => /tmux exploded/.test(l)));
   void handlers;
 });

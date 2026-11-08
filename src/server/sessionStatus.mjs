@@ -1078,22 +1078,39 @@ export function createSessionStatus(d) {
 
   // ---- viewer windows (`@manta-owner=view`) -----------------------------------------------------------------------
   //
-  // A window opened only to look at a session is closed once the session has been finished for LINGER_MS: its node has no
-  // running turn / pending ask / live job at or beneath it. "Finished since" is the first evaluation that saw it idle (a
-  // restart restarts the clock, so a window whose session ended while the server was down closes after one linger) or the
-  // end of the node's own linger, whichever is later. Evaluated on every tree pass; the injected closer re-checks.
-  const viewIdleSince = new Map(); // `${project}\0${index}\0${sid}` -> when it was first seen idle
+  // A window opened only to look at a session is left alone until its session has been seen WORKING (running / asking /
+  // a live job at or beneath its node) while the window exists: that arms it, durably (a stamp on the window, so a
+  // restart keeps it). An armed window is closed once its node has been finished for LINGER_MS — counted from the first
+  // evaluation that saw it idle (a restart restarts the clock) or the end of the node's own linger, whichever is later.
+  // A window opened on a session that is not running is never armed and is never closed by the box. Evaluated on every
+  // tree pass; the injected closer re-checks everything under the exclusions.
+  const viewIdleSince = new Map(); // `${project}\0${index}\0${sid}` -> when it was first seen idle (armed windows only)
+  const viewArmedSeen = new Set(); // keys this process armed (the stamp is the durable record)
+  const viewArming = new Set();
   const viewClosing = new Set();
   let viewTimerAt = null;
+
+  function armViewWindow(v, key) {
+    if (!d.armViewWindow || viewArming.has(key)) return;
+    viewArming.add(key);
+    Promise.resolve()
+      .then(() => d.armViewWindow({ project: v.project, windowIndex: v.index, sessionId: v.sid }))
+      .then(() => viewArmedSeen.add(key))
+      .catch((e) => console.warn(`[sessions] could not arm the viewer window ${v.project}:${v.index}:`, e?.message ?? e))
+      .finally(() => viewArming.delete(key));
+  }
 
   function evaluateViewWindows(projects, graph) {
     if (!d.closeViewWindow || !hydratedOnce || !graph) return;
     const views = [];
     for (const p of projects ?? []) {
-      for (const w of p.windows ?? []) if (w?.owner === "view" && w.opencodeSessionId) views.push({ project: p.tmuxSession, index: w.index, sid: w.opencodeSessionId });
+      for (const w of p.windows ?? []) {
+        if (w?.owner === "view" && w.opencodeSessionId) views.push({ project: p.tmuxSession, index: w.index, sid: w.opencodeSessionId, armed: w.viewArmed === true });
+      }
     }
     if (views.length === 0) {
       viewIdleSince.clear();
+      viewArmedSeen.clear();
       return;
     }
     const t = now();
@@ -1109,9 +1126,15 @@ export function createSessionStatus(d) {
     for (const v of views) {
       const key = `${v.project}\0${v.index}\0${v.sid}`;
       seen.add(key);
+      const armed = v.armed || viewArmedSeen.has(key);
       const node = graph.canon(v.sid);
       if (activeNodes.has(node)) {
         viewIdleSince.delete(key);
+        if (!armed) armViewWindow(v, key);
+        continue;
+      }
+      if (!armed) {
+        viewIdleSince.delete(key); // opened on a session with no work: only observation arms it
         continue;
       }
       if (!viewIdleSince.has(key)) viewIdleSince.set(key, t);
@@ -1126,13 +1149,14 @@ export function createSessionStatus(d) {
       Promise.resolve()
         .then(() => d.closeViewWindow({ project: v.project, windowIndex: v.index, sessionId: v.sid }))
         .then((res) => {
-          // Still stamped / still running → try again after another linger, never in a tight loop.
+          // Still stamped / running → try again after another linger, never in a tight loop.
           if (res?.closed !== true) viewIdleSince.set(key, now());
         })
         .catch((e) => console.warn(`[sessions] closing the viewer window ${v.project}:${v.index} failed:`, e?.message ?? e))
         .finally(() => viewClosing.delete(key));
     }
     for (const key of [...viewIdleSince.keys()]) if (!seen.has(key)) viewIdleSince.delete(key);
+    for (const key of [...viewArmedSeen]) if (!seen.has(key)) viewArmedSeen.delete(key);
     if (nextAt != null && (viewTimerAt == null || viewTimerAt > nextAt)) {
       viewTimerAt = nextAt;
       setTimer(() => {
