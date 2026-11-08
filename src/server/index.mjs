@@ -103,6 +103,7 @@ import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
+import { createViewWindowArmer, createViewWindowCloser } from "./sessionMaterialize.mjs";
 import { createSessionLinks, createSessionLinkActions } from "./sessionLinks.mjs";
 import { createQuestionsDecorator } from "./questionsDecorator.mjs";
 import { runBoundaryOf } from "./transcriptRuns.mjs";
@@ -607,6 +608,7 @@ const handoffEngine = createProductionHandoff({
   delegate: () => delegateEngine,
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   contextLimitFor,
+  onLinksChanged: () => sessionStatusRef.current?.linksChanged(),
   constraints: { snapshot: () => optimizerConstraints.snapshot() },
   extractConstraints: (sid, opts) => extractAndStoreConstraints(sid, opts),
   // Cold-cache handoff (spec B1): the Summary model ONLY when its status is `ok`
@@ -1362,6 +1364,9 @@ const delegateEngine = createDelegateEngine({
   cancelPendingHandoff: (sid) => handoffEngine.cancelPendingSends(sid),
   isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
+  // A background result opencode posted to a RETIRED session is re-admitted at the live end (handoff engine).
+  successorOf: (sid) => handoffEngine.successorOf(sid),
+  relayBackgroundResult: (a) => handoffEngine.relayBackgroundResult(a),
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   // The CTO's ephemeral inference sessions (provenance tombstones): never adopted as observed jobs.
@@ -1393,7 +1398,27 @@ const delegateView = createDelegateView({
 // aggregated from authoritative sources only (the interpreter's own-session frames, parent edges, delegate records) and
 // published as one `windowStatus` frame per session whose payload changed.
 const sessionLinks = createSessionLinks({ changed: () => sessionStatusRef.current?.linksChanged() });
+// Viewer windows (`@manta-owner=view`, opened by sessions:materialize) are armed once their session is seen working and
+// close once it has been finished a while. Both take materialize's ordering: chain exclusion, then the session lock.
+const viewWindowOrdering = {
+  listProjects: () => tmux.listProjects(),
+  refresh: () => syncState.refreshNow(),
+  chainOf: (sid) => handoffEngine.chainOf(sid),
+  canonicalSessionOf: (sid) => sessionStatusRef.current?.canonicalSessionOf(sid) ?? sid,
+  withChainExclusive: (sid, fn) => handoffEngine.withChainExclusive(sid, fn),
+};
+const closeViewWindow = createViewWindowCloser({
+  ...viewWindowOrdering,
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  killWindow: (a) => tmux.killWindow(a),
+});
+const armViewWindow = createViewWindowArmer({
+  ...viewWindowOrdering,
+  stampViewArmed: (project, windowIndex) => tmux.stampViewArmed(project, windowIndex),
+});
 const sessionStatus = createSessionStatus({
+  closeViewWindow,
+  armViewWindow,
   linkOf: (sid) => sessionLinks.linkOf(sid),
   linkEndpoints: () => sessionLinks.endpoints(),
   // Unknown reads retain an edge; only confirmed deletion prunes it. Hydration already reads these candidates.
@@ -1449,6 +1474,22 @@ onCommandWindowClosed = (w) => delegateEngine.windowClosed(w);
 //      started while this server was down), then its poller starts — never before recovery is done.
 // Assigned once the chain reaches the last step; the upgrade pause/resume at the bottom reads it.
 let stopDelegateReconciler = null;
+// The handoff engine's maintenance poller. Part of the upgrade's pause/resume list (below): while the box migrates opencode the
+// engine is PAUSED too (it defers every post / cancel / interrupt / link cut) and the poller stops.
+let stopHandoffMaintenance = null;
+function startHandoffMaintenance() {
+  stopHandoffMaintenance?.();
+  stopHandoffMaintenance = startPoller(() => handoffEngine.maintain(), { intervalMs: 60_000, label: "handoff", immediate: false }).stop;
+}
+function pauseHandoffMaintenance() {
+  handoffEngine.setPaused(true);
+  stopHandoffMaintenance?.();
+  stopHandoffMaintenance = null;
+}
+function resumeHandoffMaintenance() {
+  startHandoffMaintenance();
+  handoffEngine.setPaused(false); // runs the repair and a maintenance pass for what was deferred
+}
 (async () => {
   try {
     await handoffEngine.recover();
@@ -1456,6 +1497,11 @@ let stopDelegateReconciler = null;
   } catch (e) {
     console.warn("[handoff] boot recovery failed:", e?.message ?? e);
   }
+  // One-time repair (marker in the handoff state): cut handoff links made FROM a `task` subagent. Detached: reads
+  // sessions with bounded concurrency and must not delay the recovery steps below.
+  handoffEngine.repairTaskChildLinks().catch((e) => console.warn("[handoff] subagent link repair failed:", e?.message ?? e));
+  // The engine's periodic maintenance: unresolved relays, watched subagent links, leftover arrivals, expiry. Bounded per pass.
+  startHandoffMaintenance();
   try {
     await delegateEngine.reconcileV2();
   } catch (e) {
@@ -3728,6 +3774,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     }
   }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
+  // A background result opencode posts to a RETIRED (handed-off) session is relayed to the live end.
+  handoffEngine.observeRaw(raw);
   // Delegate engine: raw child creation + execution outcomes (V2 jobs complete
   // from these, not from the adapted lifecycle below).
   delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));
@@ -6537,7 +6585,7 @@ const handleRequest = async (req, res) => {
 // Durable, resumable state machine (src/server/upgradeV2.mjs). While it runs the box is in UPGRADE
 // MODE (see the gate right after the auth gate in handleRequest). Pausing background work = stopping
 // the three pollers that start turns / jobs on their own; resuming re-creates them.
-const upgradePausable = { schedule: stopSchedulePoller, routines: stopRoutinesPoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.() };
+const upgradePausable = { schedule: stopSchedulePoller, routines: stopRoutinesPoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.(), handoff: pauseHandoffMaintenance };
 const upgradeV2 = createUpgradeV2(
   createUpgradeDeps({
     mantaHome: PROJECT_ROOT,
@@ -6564,6 +6612,8 @@ const upgradeV2 = createUpgradeV2(
         upgradePausable.activity = delegateEngine.startActivityPoller().stop;
         stopDelegateReconciler = delegateEngine.startActiveSessionReconciler().stop;
         upgradePausable.reconciler = () => stopDelegateReconciler?.();
+        resumeHandoffMaintenance();
+        upgradePausable.handoff = pauseHandoffMaintenance;
       },
     },
   }),

@@ -21,6 +21,7 @@ import {
   listMessagesForRebuild,
   REBUILD_WINDOW,
   getMessage,
+  readMessageStrict,
   slimTranscript,
   stripDuplicateToolOutput,
   runCommand,
@@ -1077,6 +1078,26 @@ test("getMessage maps ONE record (the splice / receipt path); null on a miss or 
   _setOcTransport(async () => { throw new Error("down"); });
   assert.equal(await getMessage("ses_a", "msg_1"), null);
   _setOcTransport(null);
+});
+
+test("readMessageStrict tells a 404 from every failure: found / missing / unknown (getMessage answers null for all of them)", async () => {
+  await withV2(
+    {
+      "GET /api/session/ses_a/message/msg_1": { data: U("msg_1", "hi") },
+      "GET /api/session/ses_a/message/msg_nope": () => new Response("nf", { status: 404 }),
+      "GET /api/session/ses_a/message/msg_500": () => new Response("boom", { status: 500 }),
+    },
+    async () => {
+      assert.deepEqual(await readMessageStrict("ses_a", "msg_1"), { state: "found" });
+      assert.deepEqual(await readMessageStrict("ses_a", "msg_nope"), { state: "missing" });
+      assert.deepEqual(await readMessageStrict("ses_a", "msg_500"), { state: "unknown" });
+      assert.equal(await getMessage("ses_a", "msg_500"), null, "the lenient read can't tell");
+    },
+  );
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.deepEqual(await readMessageStrict("ses_a", "msg_1"), { state: "unknown" });
+  _setOcTransport(null);
+  assert.deepEqual(await readMessageStrict("", "msg_1"), { state: "unknown" });
 });
 
 // ---------------------------------------------------------------------------
@@ -2366,6 +2387,18 @@ test("listRawTimeline returns the raw records chronologically, filters by type, 
   assert.equal(calls[0].query.order, "desc");
   assert.equal(calls[1].query.cursor, "n");
   assert.equal(calls[1].query.type, "synthetic");
+});
+
+test("listRawTimeline { maxPages: 1 } reads only the newest page, still chronological", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a/message": () => ({ data: [{ id: "m3" }, { id: "m2" }], cursor: { next: "n" } }) },
+    async () => {
+      const rows = await listRawTimeline("ses_a", { maxPages: 1 });
+      assert.deepEqual(rows.map((r) => r.id), ["m2", "m3"]);
+    },
+  );
+  assert.equal(calls.length, 1, "no second page was asked for");
+  assert.equal(calls[0].query.order, "desc");
 });
 
 test("postSynthetic POSTs the body verbatim (explicit id, queue, resume) and carries err.status (404 = the parent is gone)", async () => {

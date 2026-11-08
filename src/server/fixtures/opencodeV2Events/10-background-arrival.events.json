@@ -1,0 +1,149 @@
+{
+ "note": "Observed on opencode 2.0.30 (sandbox, scripts/opencode-v2/sandbox.mjs): a V2-native background command's child ended and opencode posted its result to the parent as a synthetic inbox item. Raw events for the PARENT session, in arrival order; the parent's timeline follows. See the appendix of docs/superpowers/specs/2026-11-08-background-results-and-viewer-windows.md.",
+ "parentSessionID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+ "events": [
+  {
+   "id": "evt_1bc22ec0c001zYb8Op1lzAmEiS",
+   "created": 1794157767692,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/tmp/manta-rec/project"
+   },
+   "data": {
+    "inboxID": "msg_1bc22e9d50016sBQiQbsKK3KLk",
+    "sessionID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "item": {
+     "type": "synthetic",
+     "payload": {
+      "text": "<subagent sessionID=\"ses_e43dd167effeKEwPYZPDUurVpu\" state=\"error\" description=\"native bg\">\nFree usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go\n</subagent>",
+      "description": "native bg",
+      "metadata": {
+       "source": "subagent",
+       "childID": "ses_e43dd167effeKEwPYZPDUurVpu",
+       "agent": "build",
+       "state": "error"
+      }
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1bc22ec11001ibLGqgJQNZavQz",
+   "created": 1794157767697,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd"
+   },
+   "durable": {
+    "aggregateID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1bc22ec3200162bXNKFBQGnit4",
+   "created": 1794157767730,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/tmp/manta-rec/dirs/repo"
+   },
+   "data": {
+    "sessionID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "inboxID": "msg_1bc22e9d50016sBQiQbsKK3KLk"
+   },
+   "durable": {
+    "aggregateID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1bc22ed76001ehntuNWJ7ixSWz",
+   "created": 1794157768054,
+   "type": "session.execution.failed",
+   "data": {
+    "sessionID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "error": {
+     "type": "provider.quota",
+     "message": "Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go",
+     "status": 429,
+     "response": {
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go\"}}"
+     }
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e43dd1bd3ffeAm1dqJPnP8j5Qd",
+    "seq": 7,
+    "version": 1
+   }
+  }
+ ],
+ "timeline": [
+  {
+   "id": "msg_1bc22e9d50016sBQiQbsKK3KLk",
+   "metadata": {
+    "source": "subagent",
+    "childID": "ses_e43dd167effeKEwPYZPDUurVpu",
+    "agent": "build",
+    "state": "error"
+   },
+   "time": {
+    "created": 1794157767730
+   },
+   "text": "<subagent sessionID=\"ses_e43dd167effeKEwPYZPDUurVpu\" state=\"error\" description=\"native bg\">\nFree usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go\n</subagent>",
+   "description": "native bg",
+   "type": "synthetic"
+  },
+  {
+   "id": "msg_1bc22ec4c001FfpAGtwyvI23lb",
+   "time": {
+    "created": 1794157767809,
+    "completed": 1794157768044
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "iceman-free",
+    "providerID": "opencode"
+   },
+   "content": [],
+   "snapshot": {
+    "start": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "end": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "files": []
+   },
+   "finish": "error",
+   "error": {
+    "type": "provider.quota",
+    "message": "Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go",
+    "status": 429,
+    "response": {
+     "body": "{\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go\"}}"
+    }
+   }
+  },
+  {
+   "id": "msg_1bc22ed76001ehntuNWJ7ixSWz",
+   "time": {
+    "created": 1794157768054
+   },
+   "type": "idle",
+   "outcome": "failed",
+   "error": {
+    "type": "provider.quota",
+    "message": "Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go",
+    "status": 429,
+    "response": {
+     "body": "{\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go\"}}"
+    }
+   }
+  }
+ ]
+}

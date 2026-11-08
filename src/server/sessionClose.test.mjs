@@ -233,3 +233,21 @@ test("deleteConversation without the confirmed conversation id is refused before
     assert.ok(!f.calls.some((c) => c[0] === "killWindow" || c[0] === "remove"), "nothing killed or removed");
   }
 });
+
+test("close: nothing named / not a window is refused with a sentence and touches nothing", async () => {
+  for (const input of [undefined, null, {}, { project: "" }, { project: 7 }, { windowIndex: 1 }, { project: "p", windowIndex: "1" }, { project: "p", windowIndex: 0.5 }, { project: "p", windowIndex: Number.NaN }]) {
+    const { d, calls } = fakes();
+    const r = await closeSession(input, d);
+    assert.equal(r.ok, false, JSON.stringify(input));
+    assert.equal(r.reason, "invalid");
+    assert.equal(r.message, "No window was named.");
+    assert.equal(r.error, "No window was named.", "clients that render `error` show it too");
+    assert.deepEqual(calls, []);
+  }
+  // A project close (no windowIndex) and a window that no longer exists keep today's behaviour.
+  const { d, calls } = fakes();
+  assert.equal((await closeSession({ project: "p" }, d)).ok, true);
+  assert.equal(calls[0][0], "remove");
+  const gone = fakes();
+  assert.equal((await closeSession({ project: "p", windowIndex: 9 }, gone.d)).ok, true);
+});

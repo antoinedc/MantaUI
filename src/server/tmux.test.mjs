@@ -23,6 +23,7 @@ import {
   setWindowOption,
   getWindowOption,
   stampOwner,
+  stampViewArmed,
   rebaseHolder,
   resolveOwner,
   findWindowForCwd,
@@ -824,13 +825,15 @@ test("parseSessions resolves @manta-owner with a user default", () => {
     "Capo\t1\tmain\t0\t/home/dev/projects/capo\t\t\t\n" +      // absent owner -> user
     "Capo\t2\tjob\t0\t/home/dev/projects/capo\tses_job\t\tjob\n" + // delegate job
     "Capo\t3\tcto\t0\t/home/dev/projects/capo\tses_cto\t\tcto\n" + // reserved cto
-    "Capo\t4\tweird\t0\t/home/dev/projects/capo\t\t\tgarbage";     // unrecognized -> user
+    "Capo\t4\tweird\t0\t/home/dev/projects/capo\t\t\tgarbage\n" +   // unrecognized -> user
+    "Capo\t5\tviewer\t0\t/home/dev/projects/capo\tses_view\t\tview";    // opened only to look
   const out = parseSessions(sess, wins);
   const cap = out.find((p) => p.tmuxSession === "Capo");
   assert.equal(cap.windows.find((w) => w.index === 1).owner, "user");
   assert.equal(cap.windows.find((w) => w.index === 2).owner, "job");
   assert.equal(cap.windows.find((w) => w.index === 3).owner, "cto");
   assert.equal(cap.windows.find((w) => w.index === 4).owner, "user");
+  assert.equal(cap.windows.find((w) => w.index === 5).owner, "view");
 });
 
 test("resolveOwner defaults to user for absent, empty and unrecognized values", () => {
@@ -840,6 +843,8 @@ test("resolveOwner defaults to user for absent, empty and unrecognized values", 
   assert.equal(resolveOwner("User"), "user"); // case-sensitive
   assert.equal(resolveOwner("user"), "user");
   assert.equal(resolveOwner("job"), "job");
+  assert.equal(resolveOwner("view"), "view");
+  assert.equal(resolveOwner("View"), "user");
   assert.equal(resolveOwner("cto"), "cto");
 });
 
@@ -1060,13 +1065,14 @@ test("stampOwner issues the single set-window-option command for @manta-owner", 
   });
   try {
     await stampOwner("proj", 3, "job");
+    await stampOwner("proj", 4, "view");
   } finally {
     _setRun(null);
   }
-  const cmd = cmds.find((c) => c.args.includes("set-window-option"));
-  assert.ok(cmd, "set-window-option issued");
-  assert.deepEqual(cmd.args, [
-    "set-window-option", "-t", "proj:3", "@manta-owner", "job",
+  const sets = cmds.filter((c) => c.args.includes("set-window-option"));
+  assert.deepEqual(sets.map((c) => c.args), [
+    ["set-window-option", "-t", "proj:3", "@manta-owner", "job"],
+    ["set-window-option", "-t", "proj:4", "@manta-owner", "view"],
   ]);
 });
 
@@ -1242,4 +1248,27 @@ test("maybeCreateChatSession: a hung opencode times out (so it cannot hold the a
   // The fast path is untouched, and a non-chat create makes nothing.
   assert.equal(await maybeCreateChatSession({ createSession: async () => ({ id: "ses_ok" }) }, true, "/x", ""), "ses_ok");
   assert.equal(await maybeCreateChatSession(oc, false, "/x", ""), null);
+});
+
+test("parseSessions reads @manta-view-armed as viewArmed, present only when armed", () => {
+  const wins =
+    "Capo\t1\tviewer\t0\t/p\tses_a\t\tview\t1\n" +   // armed viewer
+    "Capo\t2\tviewer2\t0\t/p\tses_b\t\tview\t\n" +   // unarmed viewer
+    "Capo\t3\told\t0\t/p\tses_c\t\tview\n" +          // no 9th column at all
+    "Capo\t4\tjunk\t0\t/p\tses_d\t\tview\t0";          // anything but 1 is unarmed
+  const cap = parseSessions("Capo\t1", wins).find((p) => p.tmuxSession === "Capo");
+  const byIndex = (i) => cap.windows.find((w) => w.index === i);
+  assert.equal(byIndex(1).viewArmed, true);
+  for (const i of [2, 3, 4]) assert.equal("viewArmed" in byIndex(i), false, `window ${i}`);
+});
+
+test("stampViewArmed sets @manta-view-armed to 1 on the window", async () => {
+  const cmds = [];
+  _setRun(async (cmd, args) => { cmds.push({ cmd, args }); return { stdout: "", stderr: "" }; });
+  try {
+    await stampViewArmed("proj", 5);
+  } finally {
+    _setRun(null);
+  }
+  assert.deepEqual(cmds.find((c) => c.args.includes("set-window-option")).args, ["set-window-option", "-t", "proj:5", "@manta-view-armed", "1"]);
 });

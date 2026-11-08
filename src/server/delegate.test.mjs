@@ -479,6 +479,36 @@ test("sweep does not prune a terminal dirty-kept job (cleanedUp false)", async (
   assert.ok(!ids.includes("clean"), "cleaned-up record is pruned normally");
 });
 
+test("retention: superseded records don't count toward the 50-record cap", async () => {
+  const now = 1_700_000_000_000;
+  const jobs = [];
+  for (let i = 0; i < 50; i++) jobs.push(terminalJob({ worktree: null, windowIndex: null, cleanedUp: true, id: `live-${i}`, childSessionID: `ses_c${i}`, status: "done", finishedAt: now - 1000 - i }));
+  // One long-lived session with many resumed turns, all newer than every live record.
+  for (let i = 0; i < 40; i++) jobs.push(terminalJob({ worktree: null, windowIndex: null, cleanedUp: true, id: `old-${i}`, childSessionID: "ses_long", status: "done", finishedAt: now - 500 + i, supersededBy: `old-${i + 1}` }));
+  const h = harness(jobs, now);
+  await sweepDelegateJobs(h.deps);
+  const ids = new Set(h.jobs.map((j) => j.id));
+  for (let i = 0; i < 50; i++) assert.ok(ids.has(`live-${i}`), `live-${i} kept: the 40 superseded records are not part of the cap`);
+  const superseded = h.jobs.filter((j) => j.childSessionID === "ses_long").map((j) => j.id).sort();
+  assert.deepEqual(superseded, ["old-35", "old-36", "old-37", "old-38", "old-39"], "only the 5 newest superseded records of the session stay");
+});
+
+test("retention: superseded records of one session are kept per child, and never prune a pending delivery", async () => {
+  const now = 1_700_000_000_000;
+  const jobs = [];
+  for (let i = 0; i < 7; i++) jobs.push(terminalJob({ worktree: null, windowIndex: null, cleanedUp: true, id: `a-${i}`, childSessionID: "ses_a", status: "done", finishedAt: now - 100 + i, supersededBy: "x" }));
+  for (let i = 0; i < 3; i++) jobs.push(terminalJob({ worktree: null, windowIndex: null, cleanedUp: true, id: `b-${i}`, childSessionID: "ses_b", status: "done", finishedAt: now - 100 + i, supersededBy: "x" }));
+  jobs.push(terminalJob({ worktree: null, windowIndex: null, cleanedUp: true, id: "a-pending", childSessionID: "ses_a", status: "done", finishedAt: now - 5000, supersededBy: "x", completionDelivery: "pending", completionMessageId: "msg_pending" }));
+  const h = harness(jobs, now);
+  h.deps.postSynthetic = async () => { throw new Error("parent unreachable"); };
+  await sweepDelegateJobs(h.deps);
+  const ids = h.jobs.map((j) => j.id).sort();
+  assert.deepEqual(ids, ["a-2", "a-3", "a-4", "a-5", "a-6", "a-pending", "b-0", "b-1", "b-2"]);
+  assert.ok(!ids.includes("a-0") && !ids.includes("a-1"), "older superseded records of ses_a are pruned");
+  assert.ok(ids.includes("a-pending"), "a record whose result is not delivered yet is never pruned");
+  assert.ok(["b-0", "b-1", "b-2"].every((id) => ids.includes(id)), "another session's history is untouched");
+});
+
 // ----------------------------------------------------------------------------
 // Parent-gone detection in the sweeper (BET-418 §B)
 // ----------------------------------------------------------------------------

@@ -30,6 +30,17 @@ export function createWorld({ mode = "auto" } = {}) {
     created: [],
     deleted: [],
     interrupted: [],
+    cancelled: [], // [sid, inboxId] of every cancelInboxItem
+    timelines: new Map(), // sid -> raw timeline records (chronological)
+    timelineReads: [],
+    beforeInbox: null, // async (sid) => void, run before every inbox read answers
+    emit: null, // (rawEvent) => void: where the fake opencode publishes its raw events (a test points it at engine.observeRaw)
+    onCancel: null, // async (sid, inboxId) => void: replaces the fake cancel
+    beforeTimeline: null, // async (sid, opts, nthRead) => void, run before every raw timeline read answers
+    jobs: [], // the delegate job records the engine's loadJobs dep returns
+    failReads: new Set(), // sessions whose inbox / message / timeline reads fail (the destination can't be asked)
+    unreadable: new Set(), // sessions whose read answers "unknown" (opencode unreachable for them)
+    beforeRead: null, // async (sid) => void, run at the start of every readSession
     statuses: new Map(), // session -> job status, for the engines that are given jobStatusOf by the world
     repointed: [],
     cleared: [],
@@ -71,7 +82,11 @@ export function createWorld({ mode = "auto" } = {}) {
   const failureFor = (queue) => (w.failures[queue].length ? w.failures[queue].shift() : null);
 
   const oc = {
-    readSession: async (id) => (w.sessions.has(id) ? { state: "found", session: { ...w.sessions.get(id), location: { directory: w.sessions.get(id).directory } } } : { state: "missing" }),
+    readSession: async (id) => {
+      await w.beforeRead?.(id);
+      if (w.unreadable.has(id)) return { state: "unknown" };
+      return w.sessions.has(id) ? { state: "found", session: { ...w.sessions.get(id), location: { directory: w.sessions.get(id).directory } } } : { state: "missing" };
+    },
     createSession: async (input) => {
       const f = failureFor("create");
       if (f) {
@@ -115,7 +130,29 @@ export function createWorld({ mode = "auto" } = {}) {
       }
       accept(target, body.id, body.text, body);
     },
-    listInbox: async (id) => w.inbox.get(id) ?? [],
+    listInbox: async (id) => {
+      await w.beforeInbox?.(id);
+      if (w.failReads.has(id)) throw new Error("opencode unreachable");
+      return w.inbox.get(id) ?? [];
+    },
+    readMessage: async (sid, mid) => {
+      if (w.failReads.has(sid)) return { state: "unknown" };
+      return { state: msgs(sid).has(mid) ? "found" : "missing" };
+    },
+    cancelInboxItem: async (sid, inboxId) => {
+      w.cancelled.push([sid, inboxId]);
+      if (w.onCancel) return w.onCancel(sid, inboxId); // a test's own race (the item was delivered meanwhile, …)
+      w.inbox.set(sid, (w.inbox.get(sid) ?? []).filter((i) => i.id !== inboxId));
+      w.emit?.({ type: "session.inbox.cancelled", data: { sessionID: sid, inboxID: inboxId } }); // opencode's evidence for a real cancel
+    },
+    listRawTimeline: async (sid, opts = {}) => {
+      w.timelineReads.push([sid, opts]);
+      if (w.failReads.has(sid)) throw new Error("opencode unreachable");
+      await w.beforeTimeline?.(sid, opts, w.timelineReads.length);
+      if (w.failures.timeline) throw new Error("timeline unreadable");
+      const all = w.timelines.get(sid) ?? [];
+      return opts.type ? all.filter((r) => r.type === opts.type) : all;
+    },
     getMessage: async (sid, mid) => msgs(sid).get(mid) ?? null,
     listActive: async () => [...w.active],
     interrupt: async (id) => {
@@ -155,6 +192,7 @@ export function createWorld({ mode = "auto" } = {}) {
       tmux,
       ownership: { repoint: async (pred, succ) => void w.repointed.push([pred, succ]) },
       jobStatusOf: async (sid) => w.statuses.get(sid) ?? null,
+      loadJobs: async () => w.jobs,
       onPendingSendCleared: (sid) => w.cleared.push(sid),
       onHeldFailure: (f) => w.heldFailures.push(f),
       gather: {

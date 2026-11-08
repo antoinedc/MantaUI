@@ -64,6 +64,7 @@ export function previewClose({ project, windowIndex, projects, cleanOnClose, isR
 const failedMessage = (path) => `Couldn't remove the worktree at ${path} — it was left in place.`;
 export const METADATA_WARNING = "The project was closed, but its saved folder setting couldn't be cleared.";
 export const CLOSE_FAILED = "Couldn't close it — the server couldn't stop it.";
+export const NO_WINDOW_NAMED = "No window was named.";
 export const SESSION_CHANGED = "That session changed — refresh and try again.";
 export const CONVERSATION_WARNING = "The session was closed, but its conversation couldn't be deleted.";
 
@@ -112,7 +113,11 @@ function keptNotice(kept, { chose }) {
  */
 export async function closeSession(input, d) {
   const warn = d.warn ?? ((m, e) => console.warn(m, e?.message ?? e ?? ""));
-  const { project, windowIndex, dirtyWorktree, deleteConversation, expect } = input;
+  const { project, windowIndex, dirtyWorktree, deleteConversation, expect } = input ?? {};
+  // Nothing named (or something that can't be a window) is a refusal the caller can show, never a silent success.
+  if (typeof project !== "string" || !project || (windowIndex != null && !Number.isInteger(windowIndex))) {
+    return { ok: false, reason: "invalid", message: NO_WINDOW_NAMED, error: NO_WINDOW_NAMED };
+  }
   const single = windowIndex != null;
   const clean = await d.cleanOnClose().catch(() => false);
   const projects = await d.listProjects().catch(() => []);

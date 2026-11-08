@@ -3,7 +3,8 @@
 // approach as errorBodyContract.test.mjs).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createProductionHandoff } from "./wiring.mjs";
@@ -220,4 +221,78 @@ test("the handoff state lives under the sandboxed state home, never a literal $H
   for (const f of ["handoff/engine.mjs", "handoff/state.mjs", "handoff/wiring.mjs", "handoffRoute.mjs"]) {
     assert.ok(!/homedir\(\)|process\.env\.HOME|\.manta\//.test(readFileSync(join(SERVER, f), "utf8").replace(/\/\/.*$/gm, "")), `${f} must not resolve state paths itself`);
   }
+});
+
+test("index.mjs: the raw event pump feeds the relay, the delegate engine gets the relay seams, the repair runs at boot", () => {
+  const index = readFileSync(join(SERVER, "index.mjs"), "utf8");
+  assert.match(index, /handoffEngine\.observeRaw\(raw\)/);
+  assert.match(index, /relayBackgroundResult: \(a\) => handoffEngine\.relayBackgroundResult\(a\)/);
+  assert.match(index, /handoffEngine\.repairTaskChildLinks\(\)/);
+  assert.match(index, /startPoller\(\(\) => handoffEngine\.maintain\(\), \{ intervalMs: 60_000, label: "handoff", immediate: false \}\)\.stop/);
+  // the maintenance poller is in the upgrade's pause/resume list, and pausing also pauses the engine
+  assert.match(index, /upgradePausable = \{[^}]*handoff: pauseHandoffMaintenance/);
+  assert.match(index, /handoffEngine\.setPaused\(true\)/);
+  assert.match(index, /resumeHandoffMaintenance\(\);\s*upgradePausable\.handoff = pauseHandoffMaintenance;/);
+});
+
+test("the production assembly gives the engine the STRICT message read (404 vs failure)", async () => {
+  const f = fakes();
+  const seen = [];
+  f.p.oc.readMessageStrict = async (sid, mid) => (seen.push([sid, mid]), { state: "missing" });
+  f.p.oc.listRawTimeline = async () => [];
+  f.disk.json = JSON.stringify({ version: 1, records: {}, links: { ses_old: linkOf(null, "ses_new"), ses_new: linkOf("ses_old", null) } });
+  const engine = createProductionHandoff(f.p);
+  engine.observeRaw({ type: "session.inbox.enqueued", data: { sessionID: "ses_old", inboxID: "msg_r", item: { type: "synthetic", payload: { text: "t", metadata: { source: "subagent", childID: "c" } } } } });
+  await settle(10);
+  assert.ok(seen.length >= 1 && seen[0][0] === "ses_new", "the destination was asked with the strict read before the post");
+  assert.equal(f.calls.filter((c) => c[0] === "postSynthetic").length, 1, "absent: one post");
+});
+
+// ---- the repair reads the job store STRICTLY (through the production assembly) --------------------------
+
+const linkOf = (replaces, replacedBy) => ({ ...(replaces ? { replaces } : {}), ...(replacedBy ? { replacedBy } : {}), branches: [] });
+const T0 = 10_000_000;
+
+/** A box whose subagent X (driven 2 min after the handoff) was replaced by X1; the delegate engine's own (lenient) read says "no jobs". */
+function repairBox({ storeText }) {
+  const dir = mkdtempSync(join(tmpdir(), "handoff-jobstore-"));
+  const jobStorePath = join(dir, "delegate-jobs.json");
+  if (storeText !== undefined) writeFileSync(jobStorePath, storeText);
+  const f = fakes();
+  f.sessions.set("X", { id: "X", parentID: "ses_root", directory: "/proj", time: { created: 1 } });
+  f.p.oc.listRawTimeline = async (sid, o) => (sid === "X" && o?.type === "user" ? [{ id: "msg_u", type: "user", time: { created: T0 + 120_000 } }] : []); // the parent resumed X
+  f.sessions.set("X1", { id: "X1", directory: "/proj", time: { created: T0 } });
+  f.disk.json = JSON.stringify({ version: 1, records: {}, links: { X: linkOf(null, "X1"), X1: linkOf("X", null) } });
+  const lenientReads = [];
+  const baseDelegate = f.p.delegate;
+  f.p.delegate = () => ({ ...baseDelegate(), loadRecords: async () => (lenientReads.push(1), []) });
+  const engine = createProductionHandoff({ ...f.p, jobStorePath, loadState: f.p.loadState });
+  return { engine, f, lenientReads };
+}
+
+test("repair via the wiring: a malformed job store is no evidence — nothing is cut, no marker (the lenient read would have said 'no jobs')", async () => {
+  const { engine, f } = repairBox({ storeText: '{"jobs": [ {"childSessionID": "X1", "completionOwner": "manta"' }); // truncated
+  const out = await engine.repairTaskChildLinks();
+  assert.equal(out.split, 0);
+  assert.ok(out.failed >= 1);
+  assert.deepEqual(engine._state.links.X, linkOf(null, "X1"));
+  assert.equal(engine._state.repairs["taskChildLinks@2"], undefined);
+  assert.equal(f.disk.json && JSON.parse(f.disk.json).repairs?.["taskChildLinks@2"], undefined);
+});
+
+test("repair via the wiring: a store that isn't a { jobs: [] } document is no evidence either", async () => {
+  const { engine } = repairBox({ storeText: "{}" });
+  assert.ok((await engine.repairTaskChildLinks()).failed >= 1);
+  assert.deepEqual(engine._state.links.X, linkOf(null, "X1"));
+});
+
+test("repair via the wiring: a readable store naming the chain keeps the link; an absent store is genuinely empty and the evidence decides", async () => {
+  const named = repairBox({ storeText: JSON.stringify({ jobs: [{ childSessionID: "X1", completionOwner: "manta" }] }) });
+  assert.deepEqual(await named.engine.repairTaskChildLinks(), { split: 0, failed: 0 });
+  assert.deepEqual(named.engine._state.links.X, linkOf(null, "X1"));
+
+  const absent = repairBox({});
+  assert.deepEqual(await absent.engine.repairTaskChildLinks(), { split: 1, failed: 0 });
+  assert.equal(absent.engine._state.links.X, undefined);
+  assert.ok(absent.engine._state.repairs["taskChildLinks@2"]);
 });

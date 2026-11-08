@@ -48,6 +48,7 @@ import {
 } from "./peers.mjs";
 import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
+import { backgroundResultText } from "../shared/opencodeV2.mjs";
 import { chooseModel, describeDecision } from "../shared/modelRouter.mjs";
 import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
@@ -114,6 +115,7 @@ const PAUSE_KEEP_MS = 7 * 24 * 60 * 60_000;
 // explicit delete.
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const MAX_TERMINAL_JOBS = 50;
+const MAX_SUPERSEDED_PER_SESSION = 5;
 // Activity-summary poller cadence (updates `activity` for running jobs only).
 const ACTIVITY_INTERVAL_MS = 10_000;
 // Sweeper cadence (matches capabilities.mjs SWEEP_INTERVAL_MS).
@@ -1747,7 +1749,21 @@ function applyRetention(jobs, nowMs) {
     if (isTerm(j) && j.finishedAt != null && j.finishedAt < cutoff && !keeps(j)) pruned.add(j.id);
   }
   let out = jobs.filter((j) => !pruned.has(j.id));
-  const terminal = out.filter(isTerm);
+  // Every resumed turn of a long-lived session is a new record; the superseded ones are history of ONE session,
+  // so they neither count toward the cap nor survive past the newest few per session.
+  const supersededBySession = new Map();
+  for (const j of out) {
+    if (!isTerm(j) || !j.supersededBy) continue;
+    const list = supersededBySession.get(j.childSessionID) ?? [];
+    list.push(j);
+    supersededBySession.set(j.childSessionID, list);
+  }
+  for (const list of supersededBySession.values()) {
+    list.sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+    for (const j of list.slice(MAX_SUPERSEDED_PER_SESSION)) if (!keeps(j)) pruned.add(j.id);
+  }
+  out = out.filter((j) => !pruned.has(j.id));
+  const terminal = out.filter((j) => isTerm(j) && !j.supersededBy);
   if (terminal.length > MAX_TERMINAL_JOBS) {
     const sorted = [...terminal].sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
     const dropped = new Set(
@@ -2615,7 +2631,7 @@ async function dropResumeRestore(job, deps = {}, { heldSession = null } = {}) {
  * (a launch / recovery that finishes its own record): the cleanup then runs its lock-held
  * variant instead of waiting on a lock it would never get.
  */
-export async function finishV2Job(job, status, error, deps = {}, { interrupted = false, resourcesHeld = false } = {}) {
+export async function finishV2Job(job, status, error, deps = {}, { interrupted = false, resourcesHeld = false, resultFallback = null } = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
@@ -2638,6 +2654,13 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       console.warn("[delegate] listMessages failed:", e?.message ?? e);
     }
     if (job.worktree && deps.gitRun) filesChanged = await countFilesChanged(job, deps);
+    if (!result && typeof resultFallback === "function") {
+      try {
+        result = (await resultFallback()) || null;
+      } catch (e) {
+        console.warn("[delegate] result fallback failed:", e?.message ?? e);
+      }
+    }
   }
 
   let paused = null;
@@ -3036,6 +3059,96 @@ async function judgeLostRun(job, session, active, deps, { confirmed }) {
   return { settled: true, status: res?.status ?? "failed", lost: true };
 }
 
+/** A child created this close before the record's `runStartedAt` was created FOR this run. */
+export const BORN_SLACK_MS = 60_000;
+const BACKGROUND_ERROR_MAX_CHARS = 500;
+const BACKGROUND_RESULT_MAX_CHARS = 2_000;
+
+/**
+ * Did opencode run this child exactly once so far? The child's OWN raw timeline answers, not Manta's records (an
+ * inline `task` run leaves no job record): at most one `idle` record (one execution ended) and no `user` input at or
+ * after that first end (a resume). Unreadable or unprovable ⇒ false.
+ */
+async function singleExecutionProven(childSessionID, deps) {
+  if (typeof deps.listRawTimeline !== "function") return false;
+  try {
+    const rows = await deps.listRawTimeline(childSessionID);
+    if (!Array.isArray(rows)) return false;
+    const idles = rows.filter((r) => r?.type === "idle");
+    if (idles.length > 1) return false;
+    if (idles.length === 0) return true;
+    const endedAt = idles[0]?.time?.created;
+    if (!Number.isFinite(endedAt)) return false;
+    return !rows.some((r) => r?.type === "user" && !(Number.isFinite(r?.time?.created) && r.time.created < endedAt));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The instant the run this opencode-owned record describes began. Manta first sees a run some time after it
+ * started, so a child created for it (within BORN_SLACK_MS of that sighting) began at its own creation — an
+ * outcome from before the sighting is then still THIS run's. That holds only for a PROVABLE first run: attempt 1,
+ * continuing nothing, no other record of the child in the store, AND opencode's own timeline of the child showing
+ * a single execution (a session resumed from an inline `task` run has no record at all, yet its earlier outcome must
+ * never finish the new run). Anything unprovable keeps the sighting time.
+ */
+async function effectiveRunStart(job, session, manta, deps) {
+  if (manta || job.runStartedAt == null) return job.runStartedAt ?? null;
+  const created = session?.time?.created;
+  if (!(Number.isFinite(created) && created >= job.runStartedAt - BORN_SLACK_MS)) return job.runStartedAt;
+  if ((job.attempt ?? 1) !== 1 || job.continues != null) return job.runStartedAt;
+  try {
+    const records = (await (deps.load ?? loadJobs)()) ?? [];
+    if (records.some((j) => j.childSessionID === job.childSessionID && j.id !== job.id)) return job.runStartedAt;
+  } catch {
+    return job.runStartedAt;
+  }
+  if (!(await singleExecutionProven(job.childSessionID, deps))) return job.runStartedAt;
+  return Math.min(job.runStartedAt, created);
+}
+
+/** The text opencode posted to the parent for this child's run (the newest synthetic since `sinceMs`), or null. */
+async function readParentResultText(job, deps, { sinceMs = null } = {}) {
+  const parent = job.sessionParentID ?? job.parentSessionID;
+  if (!parent || !job.childSessionID || typeof deps.listRawTimeline !== "function") return null;
+  try {
+    let best = null;
+    for (const r of (await deps.listRawTimeline(parent, { type: "synthetic" })) ?? []) {
+      if (r?.metadata?.childID !== job.childSessionID) continue;
+      const created = r?.time?.created ?? 0;
+      if (sinceMs != null && created < sinceMs) continue;
+      if (!best || created >= (best.time?.created ?? 0)) best = r;
+    }
+    if (!best) return null;
+    const text = backgroundResultText(best.text, {
+      childID: job.childSessionID,
+      state: typeof best.metadata.state === "string" ? best.metadata.state : undefined,
+      description: typeof best.description === "string" ? best.description : undefined,
+    }).trim();
+    return text || null;
+  } catch (e) {
+    console.warn(`[delegate] could not read the result opencode posted for ${job.id}:`, e?.message ?? e);
+    return null;
+  }
+}
+
+// opencode posts a background result to the session that launched it; when that session has since been handed
+// off — or its handoff is in flight (fenced) — the result belongs to its live successor. The handoff engine decides which
+// of live / fenced / replaced the parent is (and answers a live, unfenced one before doing any I/O), so there is no guard
+// here: a guard on "already replaced" is exactly what kept a fenced parent from ever reaching it.
+// Fire-and-forget: this is a reconcile, not a user action.
+function relayResultFromRetiredParent(job, deps) {
+  const parent = job.sessionParentID;
+  if (!parent || typeof deps.relayBackgroundResult !== "function") return;
+  try {
+    Promise.resolve(deps.relayBackgroundResult({ sessionId: parent, childSessionId: job.childSessionID })).catch((e) =>
+      console.warn(`[delegate] relaying the result of ${job.id} off a retired session failed:`, e?.message ?? e));
+  } catch (e) {
+    console.warn(`[delegate] relaying the result of ${job.id} off a retired session failed:`, e?.message ?? e);
+  }
+}
+
 /**
  * Decide, from authoritative reads only, what state a V2 job is in — the ONE
  * evaluator behind the live pump, reconnect, boot and the sweeper. Never guesses:
@@ -3097,9 +3210,10 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   // Which run does this outcome belong to? A Manta job: one at/after its submission. A session
   // opencode runs: one at/after the moment THIS run was first seen — a resumed session's
   // previous outcome must not finish its new record.
+  const runStart = await effectiveRunStart(job, session, manta, deps);
   const fresh =
-    !manta && job.runStartedAt != null
-      ? idleAt != null && idleAt >= job.runStartedAt
+    !manta && runStart != null
+      ? idleAt != null && idleAt >= runStart
       : job.submittedAt == null || (idleAt != null && idleAt >= job.submittedAt);
 
   if (job.launchState === "uncertain") {
@@ -3135,6 +3249,15 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   }
   const t = outcomeToTerminal(outcome, { error: hint?.error });
   if (!t) return { settled: false, reason: "no-outcome" };
+  // A session opencode runs reports its own result to its parent: the real error / result text lives there. Read
+  // only when needed: a failed run with no raw error now, a done run only if the child yields no text of its own.
+  let resultFallback = null;
+  if (!manta && outcome === "failed" && !hint?.error) {
+    const body = await readParentResultText(job, deps, { sinceMs: runStart });
+    if (body) t.error = body.slice(0, BACKGROUND_ERROR_MAX_CHARS);
+  } else if (!manta && t.status === "done") {
+    resultFallback = async () => (await readParentResultText(job, deps, { sinceMs: runStart }))?.slice(0, BACKGROUND_RESULT_MAX_CHARS) ?? null;
+  }
   // A delegate job has run only once the child holds the user message its opening
   // prompt became: an outcome without one belongs to something else (a move-applying
   // execution that finished late). Unreadable proves nothing, so it stays unsettled —
@@ -3154,7 +3277,8 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   if (job.launchState !== "running") {
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
   }
-  await finishV2Job(job, t.status, t.error, deps, { interrupted: outcome === "interrupted" });
+  await finishV2Job(job, t.status, t.error, deps, { interrupted: outcome === "interrupted", resultFallback });
+  if (!manta) relayResultFromRetiredParent(job, deps);
   return { settled: true, status: t.status };
 }
 

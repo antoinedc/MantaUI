@@ -567,6 +567,33 @@ export async function getMessage(sessionId, messageId, opts = {}) {
   }
 }
 
+/**
+ * Does a message exist? A STRICT read for decisions that must tell "not there" from "couldn't ask" (`getMessage` answers null
+ * for both): `GET /api/session/{id}/message/{messageID}` — 2xx `found`, 404 `missing`, anything else (another status, a
+ * network failure, a timeout) `unknown`. The record itself is not mapped or returned.
+ * @param {string} sessionId
+ * @param {string} messageId
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<{ state: "found" | "missing" | "unknown" }>}
+ */
+export async function readMessageStrict(sessionId, messageId, { signal } = {}) {
+  if (!sessionId || !messageId) return { state: "unknown" };
+  try {
+    /** @type {{ state: "missing" | "unknown" } | undefined} */
+    let refused;
+    await ocCall("readMessageStrict", (c, o) => c.session.message.get({ sessionID: sessionId, messageID: messageId }, o), {
+      signal,
+      ignoreBody: true, // a 2xx is `found` even when the record can't be decoded
+      onHttpError: (f) => {
+        refused = f.status === 404 ? { state: "missing" } : { state: "unknown" };
+      },
+    });
+    return refused ?? { state: "found" };
+  } catch {
+    return { state: "unknown" };
+  }
+}
+
 // BET-1270 6c: transport-level refusals (a non-2xx on the prompt POST itself)
 // carry the provider's Retry-After, but surface to the box as a THROWN error
 // rather than a `session.error` stream event — so the Retry-After never
@@ -1053,13 +1080,14 @@ export async function listChildSessions(parentId, { signal } = {}) {
  * `subagent` tool blocks that the message mapper hides or reshapes. `type`
  * narrows server-side ("synthetic", "assistant", "user", …). Throws on failure.
  * @param {string} sessionId
- * @param {{ type?: string, signal?: AbortSignal }} [opts]
+ * @param {{ type?: string, signal?: AbortSignal, maxPages?: number }} [opts] `maxPages` bounds the read to the NEWEST
+ *   `maxPages` pages (a page is `TIMELINE_PAGE` records); the result is still chronological
  * @returns {Promise<any[]>}
  */
-export async function listRawTimeline(sessionId, { type, signal } = {}) {
+export async function listRawTimeline(sessionId, { type, signal, maxPages = TIMELINE_MAX_PAGES } = {}) {
   const desc = [];
   let cursor = null;
-  for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
+  for (let page = 0; page < Math.min(TIMELINE_MAX_PAGES, Math.max(1, maxPages)); page++) {
     const body = await ocCall(
       "listRawTimeline",
       (c, o) =>

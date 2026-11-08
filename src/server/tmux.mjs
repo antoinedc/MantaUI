@@ -272,7 +272,7 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
   // Phase 2: join windows into their session. Skip orphan window lines.
   for (const line of winStdout.split("\n").filter(Boolean)) {
     const parts = line.split(FS);
-    const [session, index, wname, active, pane, sidRaw, wtRaw, ownerRaw] = parts;
+    const [session, index, wname, active, pane, sidRaw, wtRaw, ownerRaw, viewArmedRaw] = parts;
     if (!sessions.has(session)) continue; // defensive: orphan
     sessions.get(session).windows.push({
       index: Number(index), name: wname,
@@ -282,10 +282,15 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
       // absolute path is stamped on `@manta-worktree-path`. Empty/null = not
       // a worktree window — clean-on-close must skip it.
       worktreePath: wtRaw ? wtRaw : null,
-      // @manta-owner — who owns this window: "user", "cto" or "job". Absent
-      // (nothing stamped it) or unrecognized ⇒ "user"; never backfilled. Only
-      // delegate.mjs stamps "job" today; nothing stamps "cto" yet.
+      // @manta-owner — who owns this window: "user", "cto", "job" or "view" (a
+      // window opened only to look at a session; the box closes it once the
+      // session finishes, until the user types into it). Absent (nothing stamped
+      // it) or unrecognized ⇒ "user"; never backfilled. Only delegate.mjs stamps
+      // "job" and only sessions:materialize stamps "view"; nothing stamps "cto" yet.
       owner: resolveOwner(ownerRaw),
+      // @manta-view-armed — a viewer window (owner "view") has been seen with work in its session; only an armed
+      // window is ever closed by the box. Survives a restart because it lives on the window.
+      ...((viewArmedRaw ?? "").trim() === "1" ? { viewArmed: true } : {}),
     });
   }
   return Array.from(sessions.values()).map((s) => ({
@@ -301,7 +306,7 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
 // for tests.
 export function resolveOwner(raw) {
   const v = typeof raw === "string" ? raw.trim() : "";
-  return v === "cto" || v === "job" ? v : "user";
+  return v === "cto" || v === "job" || v === "view" ? v : "user";
 }
 
 // True iff a tmux invocation failed because there is genuinely no tmux server
@@ -390,7 +395,7 @@ export class DuplicateSessionNameError extends Error {
 
 export async function listProjects(installHome = INSTALL_HOME) {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}${FS}#{@manta-owner}`;
+  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}${FS}#{@manta-owner}${FS}#{@manta-view-armed}`;
   const sess = await tmuxListOutput(["list-sessions", "-F", sessFmt]);
   const wins = await tmuxListOutput(["list-windows", "-a", "-F", winFmt]);
   // BET-348: build the owned set from the cache (hydrated on first call),
@@ -844,7 +849,7 @@ export async function stampWorktreePath(sessionName, windowIndex, path) {
 
 /**
  * Stamp (or update) the @manta-owner user-option on a tmux window — which
- * actor owns the window: "user", "cto" or "job". Mirrors the
+ * actor owns the window: "user", "cto", "job" or "view". Mirrors the
  * restampSessionId pattern with its own option name so the stamps never
  * collide. Absent option ⇒ "user" (see resolveOwner); nothing backfills it.
  * delegate.mjs stamps "job" on the windows it creates; nothing stamps "cto"
@@ -852,10 +857,15 @@ export async function stampWorktreePath(sessionName, windowIndex, path) {
  *
  * @param {string} sessionName
  * @param {number} windowIndex
- * @param {"user"|"cto"|"job"} owner
+ * @param {"user"|"cto"|"job"|"view"} owner
  */
 export async function stampOwner(sessionName, windowIndex, owner) {
   await setWindowOption(sessionName, windowIndex, "@manta-owner", owner);
+}
+
+/** Arm a viewer window (`@manta-owner=view`): its session was seen with work, so the box may close it once that is done. */
+export async function stampViewArmed(sessionName, windowIndex) {
+  await setWindowOption(sessionName, windowIndex, "@manta-view-armed", "1");
 }
 
 /** Re-root a retained chat holder after its job's worktree was removed. */

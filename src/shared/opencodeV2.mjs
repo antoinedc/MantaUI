@@ -328,7 +328,7 @@ function mapUser(m, { sessionID }) {
  * back raw), so the envelope is peeled by exact prefix/suffix, never by
  * parsing. A missing or unrecognised envelope yields the raw text.
  */
-function backgroundResultText(raw, { childID, state, description }) {
+export function backgroundResultText(raw, { childID, state, description }) {
   const text = typeof raw === "string" ? raw : "";
   if (!text.startsWith("<subagent")) return text;
   const attrs = (d) => `<subagent sessionID="${childID}" state="${state}"${d === undefined ? "" : ` description="${d}"`}>`;
