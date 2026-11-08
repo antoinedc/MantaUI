@@ -429,6 +429,26 @@ describe("a menu opened from inside a modal", () => {
   });
 });
 
+/** Mount the routine page with spy callbacks; the caller owns (and unmounts) the returned harness. */
+async function mountDetailPage(routineId: string, summary: RoutinesSummary, runId?: string) {
+  const props = {
+    routineId,
+    summary,
+    runId,
+    onBack: vi.fn(),
+    onSelectRun: vi.fn(),
+    onOpenTranscript: vi.fn(),
+    onClosePane: vi.fn(),
+    onEdit: vi.fn(),
+    onMoveToChat: vi.fn(),
+    onChanged: vi.fn(),
+  };
+  const h = mount(<RoutineDetail {...props} />);
+  await h.flush();
+  await h.flush();
+  return { props, h };
+}
+
 describe("the routine page — the run inbox", () => {
   let h: Harness | null = null;
   afterEach(() => {
@@ -447,21 +467,9 @@ describe("the routine page — the run inbox", () => {
     const tmuxSelectWindow = vi.fn(() => Promise.resolve());
     const routinesRunNow = vi.fn((id: string) => store.runNow(id));
     installMockApi({ routinesGet, routinesRunGet: store.runGet, routinesMarkRead, routinesKeepInSidebar, tmuxSelectWindow, routinesRunNow, ...over.api });
-    const props = {
-      routineId: over.routineId ?? DIGEST,
-      summary: await store.summary(),
-      runId: over.runId,
-      onBack: vi.fn(),
-      onSelectRun: vi.fn(),
-      onOpenTranscript: vi.fn(),
-      onClosePane: vi.fn(),
-      onEdit: vi.fn(),
-      onMoveToChat: vi.fn(),
-      onChanged: vi.fn(),
-    };
-    h = mount(<RoutineDetail {...props} />);
-    await h.flush();
-    await h.flush();
+    const page = await mountDetailPage(over.routineId ?? DIGEST, await store.summary(), over.runId);
+    h = page.h;
+    const props = page.props;
     return { props, store, routinesGet, routinesMarkRead, routinesKeepInSidebar, tmuxSelectWindow, routinesRunNow };
   }
   const reading = () => h!.container.querySelector(".manta-routines-reading") as HTMLElement;
@@ -629,22 +637,9 @@ describe("rolling updates on the routine page", () => {
     const store = createRoutinesStore();
     const routinesGet = (id: string, opts?: { beforeSeq?: number; findingsOnly?: boolean }) => store.get(id, opts).then((d) => (over.map ? over.map(d) : d));
     installMockApi({ routinesGet, routinesRunGet: store.runGet, routinesMarkRead: store.markRead });
-    const props = {
-      routineId: DEP,
-      summary: await store.summary(),
-      runId: over.runId,
-      onBack: vi.fn(),
-      onSelectRun: vi.fn(),
-      onOpenTranscript: vi.fn(),
-      onClosePane: vi.fn(),
-      onEdit: vi.fn(),
-      onMoveToChat: vi.fn(),
-      onChanged: vi.fn(),
-    };
-    h = mount(<RoutineDetail {...props} />);
-    await h.flush();
-    await h.flush();
-    return props;
+    const page = await mountDetailPage(DEP, await store.summary(), over.runId);
+    h = page.h;
+    return page.props;
   }
   const reading = () => h!.container.querySelector(".manta-routines-reading") as HTMLElement;
   const options = () => [...h!.container.querySelectorAll('.manta-routines-runlist [role="option"]')] as HTMLElement[];

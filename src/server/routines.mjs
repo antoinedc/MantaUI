@@ -891,13 +891,19 @@ export function createRoutinesEngine(deps) {
     };
   }
 
+  /** A run and its routine, or a 404 RoutineError naming whichever is gone. */
+  function findRun(store, runId) {
+    const run = store.runs.find((r) => r.id === runId);
+    if (!run) throw bad("That run no longer exists.", 404);
+    const routine = store.routines.find((r) => r.id === run.routineId);
+    if (!routine) throw bad("That routine no longer exists.", 404);
+    return { run, routine };
+  }
+
   async function runGet(runId) {
     const projs = await projects();
     return txn(async (store, touch) => {
-      const run = store.runs.find((r) => r.id === runId);
-      if (!run) throw bad("That run no longer exists.", 404);
-      const routine = store.routines.find((r) => r.id === run.routineId);
-      if (!routine) throw bad("That routine no longer exists.", 404);
+      const { run, routine } = findRun(store, runId);
       // Opening a finished run reads it (spec §6.4).
       if (isTerminal(run) && run.readAt === null) {
         run.readAt = now();
@@ -1728,11 +1734,7 @@ export function createRoutinesEngine(deps) {
   }
 
   async function keepInSidebar(runId) {
-    const store = await readStore();
-    const run = store.runs.find((r) => r.id === runId);
-    if (!run) throw bad("That run no longer exists.", 404);
-    const routine = store.routines.find((r) => r.id === run.routineId);
-    if (!routine) throw bad("That routine no longer exists.", 404);
+    const { run, routine } = findRun(await readStore(), runId);
     if (!run.sessionID) throw bad("This run has no session to keep.", 409);
     // Marked first so a retention sweep can't delete the session while its window is being made.
     await patchRun(runId, { keptInSidebar: true }, { onlyLive: false });
