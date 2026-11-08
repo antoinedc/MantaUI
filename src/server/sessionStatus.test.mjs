@@ -1477,3 +1477,14 @@ test("view windows: nothing is armed or closed before the first hydration", asyn
   assert.deepEqual(cold.closed, [], "before hydration the running set is unknown");
   assert.deepEqual(cold.arms, []);
 });
+
+test("view windows: an arm the box refuses (the window is no longer that viewer) arms nothing, so nothing closes", async () => {
+  const h = viewHarness({ active: ["V"], armViewWindow: async (a) => { h.arms.push(a); return { armed: false, reason: "changed" }; } });
+  await h.boot();
+  h.state.active = [];
+  h.st.observe(stream("turnComplete", "V", { running: false }));
+  await h.settle();
+  await h.tick(10 * LINGER_MS);
+  assert.ok(h.arms.length >= 1);
+  assert.deepEqual(h.closed, [], "never armed → stays");
+});

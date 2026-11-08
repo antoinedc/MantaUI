@@ -15,27 +15,26 @@ const passThrough = (_sid, fn) => fn();
  * The user typed into a session: a viewer window showing it becomes the user's own (the box never closes it).
  * Awaited before the send is forwarded; a failure is logged and never blocks the send.
  *
- * Ordered like `sessions:materialize` and the viewer-window closer: the handoff chain exclusion outer, the session
- * resource lock inner, the canonical identity resolved inside the exclusion (after a fresh session list), and the
- * window stamps read LIVE immediately before any restamp. `peekProjects` is only the cheap "is there anything to do at
- * all" check (the sync snapshot): with no viewer window in it, no exclusion or lock is taken.
+ * The decision is never taken from a cached list: the window stamps are read LIVE first (cheap, and no lock), and only
+ * a live viewer window of the session's chain takes the exclusions. Those are ordered like `sessions:materialize` and
+ * the viewer-window closer — the handoff chain exclusion outer, the session resource lock inner, the canonical identity
+ * resolved inside the exclusion after a fresh session list — and the stamps are read live AGAIN right before any restamp.
  */
 export async function promoteViewWindows(sessionId, {
-  peekProjects, listProjects, stampOwner, chainOf = () => [], canonicalSessionOf = (sid) => sid,
+  listProjects, stampOwner, chainOf = () => [], canonicalSessionOf = (sid) => sid,
   withChainExclusive = passThrough, sessionLock = withSessionLock, refresh, warn = console.warn,
 }) {
   if (typeof sessionId !== "string" || !sessionId) return 0;
-  const targets = () => new Set([sessionId, ...(chainOf(sessionId) ?? [])].filter((s) => typeof s === "string" && s));
-  const viewWindows = async (read) => {
-    const ids = targets();
+  const viewWindows = async () => {
+    const ids = new Set([sessionId, ...(chainOf(sessionId) ?? [])].filter((s) => typeof s === "string" && s));
     const found = [];
-    for (const p of (await read()) ?? []) {
+    for (const p of (await listProjects()) ?? []) {
       for (const w of p.windows ?? []) if (w.owner === "view" && ids.has(w.opencodeSessionId)) found.push({ project: p.tmuxSession, index: w.index });
     }
     return found;
   };
   try {
-    if (!(await viewWindows(peekProjects ?? listProjects)).length) return 0;
+    if (!(await viewWindows()).length) return 0;
     return await withChainExclusive(sessionId, async () => {
       try {
         await refresh?.();
@@ -44,7 +43,7 @@ export async function promoteViewWindows(sessionId, {
       }
       return sessionLock(canonicalSessionOf(sessionId), async () => {
         let promoted = 0;
-        for (const w of await viewWindows(listProjects)) {
+        for (const w of await viewWindows()) {
           try {
             await stampOwner(w.project, w.index, "user");
             promoted += 1;
@@ -59,6 +58,35 @@ export async function promoteViewWindows(sessionId, {
     warn("[sessions] could not look for viewer windows before a send:", e?.message ?? e);
     return 0;
   }
+}
+
+/**
+ * The armer behind sessionStatus's `armViewWindow`: a viewer window is armed (stamped `@manta-view-armed`) only if,
+ * under the same ordering as the closer (chain exclusion, then the session lock, canonical identity resolved inside),
+ * a LIVE read shows that window index is still a viewer window stamped with that session or a member of its chain. A
+ * tmux window index can be reused by another window between the decision and the stamp.
+ */
+export function createViewWindowArmer({
+  listProjects, stampViewArmed, refresh,
+  chainOf = (sid) => [sid], canonicalSessionOf = (sid) => sid,
+  withChainExclusive = passThrough, sessionLock = withSessionLock, warn = console.warn,
+}) {
+  return async function armViewWindow({ project, windowIndex, sessionId }) {
+    return withChainExclusive(sessionId, async () => {
+      try {
+        await refresh?.();
+      } catch (e) {
+        warn("[sessions] refresh before arming a viewer window failed:", e?.message ?? e);
+      }
+      return sessionLock(canonicalSessionOf(sessionId), async () => {
+        const w = ((await listProjects()) ?? []).find((p) => p.tmuxSession === project)?.windows?.find((x) => x.index === windowIndex);
+        if (!w || w.owner !== "view") return { armed: false, reason: "changed" };
+        if (w.opencodeSessionId !== sessionId && !(chainOf(sessionId) ?? []).includes(w.opencodeSessionId)) return { armed: false, reason: "changed" };
+        await stampViewArmed(project, windowIndex);
+        return { armed: true };
+      });
+    });
+  };
 }
 
 /**

@@ -1095,7 +1095,9 @@ export function createSessionStatus(d) {
     viewArming.add(key);
     Promise.resolve()
       .then(() => d.armViewWindow({ project: v.project, windowIndex: v.index, sessionId: v.sid }))
-      .then(() => viewArmedSeen.add(key))
+      .then((res) => {
+        if (res?.armed !== false) viewArmedSeen.add(key); // a refusal (the window is no longer that viewer) arms nothing
+      })
       .catch((e) => console.warn(`[sessions] could not arm the viewer window ${v.project}:${v.index}:`, e?.message ?? e))
       .finally(() => viewArming.delete(key));
   }
