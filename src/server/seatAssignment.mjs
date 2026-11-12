@@ -1024,14 +1024,17 @@ export function createSeatAssigner({
   }
 
   /** The per-seat readings every decision uses: the poller's, with the load that
-   *  forced moves are about to bring added (pacing, spec §3.7) and any seat
+   *  forced moves are about to bring added (pacing, spec §3.7) — to every seat
+   *  EXCEPT `exceptSeatId`, the seat the deciding conversation already sits on: the
+   *  projection is about where newcomers should go, and must never make the
+   *  conversations already there look overloaded and move off — and any seat
    *  currently marked limited forced to exhausted (a reading can lag the limit
    *  by a whole poll interval). A marked seat with no reading is synthesized. */
-  function snapshotsFor(provider) {
+  function snapshotsFor(provider, { exceptSeatId = null } = {}) {
     const t = now();
     let snaps = listSeatSnapshots().filter((x) => x?.provider === provider);
     const bumps = pacingBumps(provider, t);
-    if (bumps.size > 0) snaps = snaps.map((x) => (bumps.has(x.seatId) ? paceSnapshot(x, bumps.get(x.seatId)) : x));
+    if (bumps.size > 0) snaps = snaps.map((x) => (x.seatId !== exceptSeatId && bumps.has(x.seatId) ? paceSnapshot(x, bumps.get(x.seatId)) : x));
     const marked = markedIds(limitedUntil, provider, t);
     if (marked.length === 0) return snaps;
     const out = snaps.map((x) => (marked.includes(x.seatId) ? { ...x, exhausted: true } : x));
@@ -1140,7 +1143,7 @@ export function createSeatAssigner({
       mode: states.mode,
       activeSeatId: states.activeSeatId,
       seats: states.seats,
-      seatSnapshots: snapshotsFor(provider),
+      seatSnapshots: snapshotsFor(provider, { exceptSeatId: existing?.seatId ?? null }),
       nowMs: t,
       model,
       kFor: kFor(provider),
@@ -1405,7 +1408,7 @@ export function createSeatAssigner({
   function conversationSeatFull(provider, sessionId) {
     const at = assignmentOf(provider, sessionId);
     if (!at) return null;
-    return isSeatFull(snapshotsFor(provider).find((x) => x?.seatId === at.seatId), { model: at.model ?? null });
+    return isSeatFull(snapshotsFor(provider, { exceptSeatId: at.seatId }).find((x) => x?.seatId === at.seatId), { model: at.model ?? null });
   }
 
   /**

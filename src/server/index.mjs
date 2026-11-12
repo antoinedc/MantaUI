@@ -142,6 +142,7 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
+import { installShutdownFlush } from "./shutdownFlush.mjs";
 import { createUsageCalibration } from "./usageCalibration.mjs";
 import { createSeatAttribution } from "./seatAttribution.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
@@ -942,25 +943,8 @@ const seatAssigner = createSeatAssigner({
 accountsService.onRefreshOutcome(({ provider, seatId, outcome }) => seatAssigner.noteRefreshOutcome(provider, seatId, outcome));
 seatAssigner.start();
 // Pins are saved write-behind (a few seconds after a change): flush on shutdown so a
-// restart does not forget the last placements. Nothing else in this server handles
-// these signals, so default behaviour is restored and the signal re-raised once the
-// flush is done (capped, so a stuck disk cannot hold a shutdown up).
-for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.once(signal, () => {
-    const done = () => process.kill(process.pid, signal);
-    const cap = setTimeout(done, 3_000);
-    seatAssigner.flush().then(
-      () => {
-        clearTimeout(cap);
-        done();
-      },
-      () => {
-        clearTimeout(cap);
-        done();
-      },
-    );
-  });
-}
+// restart does not forget the last placements, then exit (shutdownFlush.mjs).
+installShutdownFlush(seatAssigner);
 // Multi-account phase 3: the `accounts:*` RPC surface (list, mode, active seat,
 // rename, remove, add-a-seat sign-in). The sign-in flows are the EXISTING ones —
 // the claude-login launcher (pointed at the seat's own directory) and opencode's

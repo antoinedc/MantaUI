@@ -703,6 +703,43 @@ test("pacing: optional moves add nothing, and the projection is gone after 10 mi
   assert.deepEqual(await forcedPair(MOVE_PACING_WINDOW_MS), ["seat-2", "seat-2"], "after 10 minutes the projection is gone: seat-2 is the least loaded again");
 });
 
+test("pacing: never pushes a conversation OFF the seat it is on — the bump only applies to a seat evaluated as a target", async () => {
+  // seats 1 and 2 are org A, seat 3 is org B and nearly empty.
+  const snaps = [snap(1, 0), snap(2, 50), snap(3, 60)];
+  const r = rig({ initial: states([seat(1), seat(2), orgB(3)]), snaps });
+  await r.ready();
+  for (const c of ["f1", "f2", "f3", "f4"]) assert.equal((await r.svc.resolve("claude", c)).seatId, "seat-1");
+  snaps.splice(0, 3, snap(1, 90), snap(2, 10), snap(3, 60));
+  assert.equal((await r.svc.resolve("claude", "old")).seatId, "seat-2", "a long-standing conversation on seat-2");
+  // seat-1 dies; seat-2 now reads 80 and seat-3 (other org) 10.
+  snaps.splice(0, 3, snap(1, 0), snap(2, 80), snap(3, 10));
+  r.acc.state = states([seat(1, { usable: false, credential: null }), seat(2), orgB(3)]);
+  await r.ready();
+  for (const c of ["f1", "f2", "f3", "f4"]) assert.equal((await r.svc.resolve("claude", c)).seatId, "seat-2", "forced moves go to the same org first");
+  // 4 forced moves onto seat-2 project +20 on it (80 → 99): for a NEWCOMER seat-2 looks full…
+  const asTarget = r.svc.assignments("claude");
+  assert.equal(asTarget.old.seatId, "seat-2");
+  // …but the conversation already on it is not moved by that projection.
+  const old = await r.svc.resolve("claude", "old");
+  assert.equal(old.seatId, "seat-2", "kept: its own seat's reading is the real one (80), not the projected one");
+  assert.equal(r.svc.assignments("claude").old.movedFrom, undefined);
+  assert.equal(r.svc.conversationSeatFull("claude", "old"), false);
+  // The same holds for the conversations that were just forced there.
+  assert.equal((await r.svc.resolve("claude", "f1")).seatId, "seat-2");
+  assert.equal(r.svc.assignments("claude").f1.movedFrom, "seat-1", "still the one move it made, no second move");
+});
+
+test("pacing: a NEW placement still sees the bump on every seat", async () => {
+  const snaps = [snap(1, 0), snap(2, 20), snap(3, 22)];
+  const r = rig({ initial: states([seat(1), seat(2), seat(3)]), snaps });
+  await r.ready();
+  await r.svc.resolve("claude", "c1");
+  r.acc.state = states([seat(1, { usable: false, credential: null }), seat(2), seat(3)]);
+  await r.ready();
+  assert.equal((await r.svc.resolve("claude", "c1")).seatId, "seat-2", "forced move onto the emptier seat-2 (reads 20)");
+  assert.equal((await r.svc.resolve("claude", "newcomer")).seatId, "seat-3", "seat-2 now projects 25: the newcomer takes seat-3 (22)");
+});
+
 // ---------------------------------------------------------------------------
 // credential recovery's view of the assigner
 // ---------------------------------------------------------------------------
@@ -750,4 +787,22 @@ test("forgetSeat is synchronous, rebuilds the table, and its pins are saved writ
   await r.timers.fire();
   assert.equal(r.saves.length, 1, "the placement and the forget went out as one write");
   assert.deepEqual(r.saves[0].providers.claude, {});
+});
+
+test("/api/accounts/resolve on the warm path never touches accounts.seatStates (50 resolves, spy sees zero calls)", async () => {
+  const r = rig({ initial: states([seat(1), seat(2), seat(3)]), snaps: [snap(1, 10), snap(2, 20), snap(3, 30)] });
+  await r.ready();
+  let spied = 0;
+  r.acc.seatStates = async () => {
+    spied++;
+    return r.acc.state;
+  };
+  const sent = [];
+  const handle = createAccountsRouteHandler({ seatAssigner: r.svc, readJson: async () => null, respondJson: (_res, status, body) => sent.push([status, body]) });
+  for (let i = 0; i < 50; i++) {
+    await handle({ method: "GET", socket: { remoteAddress: "127.0.0.1" }, headers: {} }, {}, new URL(`/api/accounts/resolve?provider=claude&sessionID=ses_${i}${i % 3 ? "&parentSessionID=ses_0" : ""}`, "http://x"));
+  }
+  assert.equal(sent.length, 50);
+  assert.ok(sent.every(([status, body]) => status === 200 && body.seatId && body.live === false));
+  assert.equal(spied, 0, "no seatStates call on the warm resolve path");
 });
