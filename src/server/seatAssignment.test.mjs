@@ -8,8 +8,8 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ASSIGNMENT_TTL_MS,
-  TOUCH_INTERVAL_MS,
+  PIN_IDLE_TTL_MS,
+  TOUCH_SAVE_MS,
   chooseSeat,
   createSeatAssigner,
   decideSeat,
@@ -174,12 +174,12 @@ test("normalizeAssignments: garbage in, a well-formed store out", () => {
   assert.deepEqual(out.children, { k: { root: "c1", at: 3 } });
 });
 
-test("pruneAssignments: drops what nobody touched for 30 days, keeps the rest; same object when nothing to drop", () => {
+test("pruneAssignments: drops what nobody used for 6 hours, keeps the rest; same object when nothing to drop", () => {
   const now = 100 * 24 * 3600_000;
   const store = emptyAssignments();
-  store.providers.claude.old = { seatId: "seat-1", assignedAt: 0, lastUsedAt: now - ASSIGNMENT_TTL_MS - 1 };
+  store.providers.claude.old = { seatId: "seat-1", assignedAt: 0, lastUsedAt: now - PIN_IDLE_TTL_MS - 1 };
   store.providers.claude.fresh = { seatId: "seat-1", assignedAt: 0, lastUsedAt: now - 1000 };
-  store.children.oldkid = { root: "old", at: now - ASSIGNMENT_TTL_MS - 1 };
+  store.children.oldkid = { root: "old", at: now - PIN_IDLE_TTL_MS - 1 };
   store.children.kid = { root: "fresh", at: now };
   const out = pruneAssignments(store, now);
   assert.deepEqual(Object.keys(out.providers.claude), ["fresh"]);
@@ -202,7 +202,17 @@ function assigner(accounts, over = {}) {
   let saved = null;
   const saves = [];
   let t = over.now0 ?? 1_000_000;
-  const svc = createSeatAssigner({
+  // Fake timers: the debounce / max-wait timers sit in `pending` until `fire()` ("time passes").
+  const pending = new Set();
+  const fakeTimers = { set: (fn) => { const h = { fn }; pending.add(h); return h; }, clear: (h) => void pending.delete(h) };
+  const fire = async () => {
+    const due = [...pending];
+    pending.clear();
+    for (const h of due) await h.fn();
+    await new Promise((r) => setImmediate(r));
+  };
+  const raw = createSeatAssigner({
+    timers: fakeTimers,
     accounts,
     listSeatSnapshots: () => over.snaps ?? [],
     refreshSeatCredentials: over.refresh ?? (async () => ({ ok: true })),
@@ -218,15 +228,29 @@ function assigner(accounts, over = {}) {
     onMoved: over.onMoved ?? null,
     log: quiet,
   });
-  return { svc, saves, tick: (ms) => (t += ms), get saved() { return saved; } };
+  // Saves are write-behind and the seat table is built in the background. For these tests
+  // every call that can change a pin ends with `flush()` ("the moment the debounce fires"),
+  // so `saved` / `saves` read like they did when every write was synchronous; the debounce
+  // itself is covered by the write-behind tests below. `rebuild()` is "the next background
+  // rebuild" — a test that changes what the accounts service answers calls it before the
+  // next request.
+  const flushed = (fn) => async (...args) => {
+    try {
+      return await fn(...args);
+    } finally {
+      await fire();
+    }
+  };
+  const svc = { ...raw, resolve: flushed(raw.resolve), reconsider: flushed(raw.reconsider), forgetSeat: flushed(async (...a) => raw.forgetSeat(...a)) };
+  return { svc, saves, tick: (ms) => (t += ms), flush: () => svc.flush(), rebuild: () => svc.refreshSeatTable(), get saved() { return saved; } };
 }
 const two = (over = {}) => ({ mode: "auto", activeSeatId: "seat-1", seats: [seat(1, { live: true, dir: null, credential: null }), seat(2)], ...over });
 
-test("no seats / unknown provider state → live pass-through with no seat; one seat → that seat, live", async () => {
+test("no seats → live pass-through with reason no-seats; one seat → that seat answering as itself", async () => {
   const none = assigner(fakeAccounts(null));
-  assert.deepEqual(await none.svc.resolve("claude", "s1"), { seatId: null, live: true });
+  assert.deepEqual(await none.svc.resolve("claude", "s1"), { seatId: null, live: true, reason: "no-seats" });
   const one = assigner(fakeAccounts({ mode: "auto", activeSeatId: "seat-1", seats: [seat(1)] }));
-  assert.deepEqual(await one.svc.resolve("claude", "s1"), { seatId: "seat-1", live: true });
+  assert.deepEqual(await one.svc.resolve("claude", "s1"), { seatId: "seat-1", live: false, provider: "claude", credentialFile: "/d/1/.credentials.json", expiresAt: 5_000_000 }, "one seat answers as itself (its own file), not as the live login");
   assert.equal(one.saves.length, 0, "a single seat records nothing");
 });
 
@@ -272,25 +296,30 @@ test("manual mode → the active seat for a new conversation", async () => {
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2");
 });
 
-test("a seat that goes signed-out releases its conversations to a usable seat; none usable → pass-through", async () => {
+test("a seat that goes signed-out releases its conversations to a usable seat; none usable → reason no-usable-seat", async () => {
   const acc = fakeAccounts(two());
   const a = assigner(acc, { snaps: [snap(1, 90), snap(2, 10)] });
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2");
   acc.state.claude = two({ seats: [seat(1, { live: true, dir: null, credential: null }), seat(2, { usable: false, credential: null })] });
+  await a.rebuild(); // the background rebuild that follows an accounts change
   assert.deepEqual(await a.svc.resolve("claude", "c"), { seatId: "seat-1", live: true });
   acc.state.claude = two({ seats: [seat(1, { usable: false, live: false, credential: null }), seat(2, { usable: false, credential: null })] });
-  assert.deepEqual(await a.svc.resolve("claude", "other"), { seatId: null, live: true });
+  await a.rebuild();
+  assert.deepEqual(await a.svc.resolve("claude", "other"), { seatId: null, live: true, reason: "no-usable-seat" });
 });
 
-test("assignments persist and survive a restart; lastUsedAt is touched at most hourly", async () => {
+test("assignments persist and survive a restart; a lastUsedAt-only touch is saved at most every 10 minutes", async () => {
   const a = assigner(fakeAccounts(two()), { snaps: [snap(1, 80), snap(2, 10)] });
   await a.svc.resolve("claude", "c");
   assert.equal(a.saves.length, 1);
   await a.svc.resolve("claude", "c");
   assert.equal(a.saves.length, 1, "no write on an ordinary repeat");
-  a.tick(TOUCH_INTERVAL_MS);
+  a.tick(TOUCH_SAVE_MS - 1);
   await a.svc.resolve("claude", "c");
-  assert.equal(a.saves.length, 2, "an hourly touch");
+  assert.equal(a.saves.length, 1, "a touch inside the window is not written");
+  a.tick(1);
+  await a.svc.resolve("claude", "c");
+  assert.equal(a.saves.length, 2, "a touch past it is");
 
   // "Restart": a new assigner over the saved file keeps the seat even though loads now say otherwise.
   const again = assigner(fakeAccounts(two()), { snaps: [snap(1, 1), snap(2, 85)], load: a.saved });
@@ -718,6 +747,7 @@ test("the service: a manual switch is recorded as a move but NOT announced; a fu
   assert.equal(again.seatId, first.seatId);
   assert.equal(a.saved.providers.claude.c.movedFrom, undefined);
   acc.state.claude = { ...acc.state.claude, mode: "manual", activeSeatId: "seat-2" };
+  await a.rebuild();
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2");
   assert.equal(a.saved.providers.claude.c.reason, "manual");
   assert.equal(events.length, 0);
@@ -998,6 +1028,7 @@ test("the service: a sub-agent on another model decides with its own model but n
     assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-1");
     snaps.splice(0, 2, at(1, 5, 4 * HOUR), at(2, 50, 30 * MIN));
     assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-2");
+    await svc.flush();
     assert.equal(saved.providers.claude.conv.reason, "reset-soon");
     assert.equal(moved.length, 1);
     assert.equal(moved[0].reason, "reset-soon");
@@ -1025,6 +1056,7 @@ test("the service: a sub-agent on another model decides with its own model but n
       log: quiet,
     });
     assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-2");
+    await svc.flush();
     const rec = saved.providers.claude.conv;
     assert.equal(rec.reason, "reset-soon");
     assert.deepEqual(rec.left, { "seat-3": NOW - HOUR }, "the unexpired entry survives, the expired one is dropped, seat-1 is not added");

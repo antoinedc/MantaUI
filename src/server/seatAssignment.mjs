@@ -85,12 +85,26 @@
 // `x-opencode-parent-session-id` one level only, so a deeper chain is followed
 // through the child → root map recorded on the way in.
 //
+// THE REQUEST PATH IS A MEMORY READ (docs/superpowers/specs/2026-11-12-claude-seat-routing.md).
+//   • Seat states come from the SEAT TABLE (seatTable.mjs), rebuilt in the background
+//     only; `resolve` never calls `accounts.seatStates`. Only the very first request
+//     after a start waits for the first build (≤ 3 s, else "warming" → HTTP 503).
+//   • No lock: a decision and the pin write that follows it are one synchronous turn,
+//     so a parent and its sub-agent arriving together still land on one seat.
+//   • Saves are write-behind (2 s debounce, 10 s max wait, single flight, `flush()` on
+//     shutdown); a request that only touched `lastUsedAt` is saved at most every 10 min.
+//   • A pin idle for 6 h is dropped (the longest thing a pin must remember is 5 h), and
+//     the store is capped (5,000 pins per provider, 10,000 child links, LRU first).
+//   • No seat → the answer says why (`reason`: "no-seats" / "no-usable-seat").
+//   • A seat whose credentials a request proved dead (`markAuthFailed`) is unusable for
+//     5 min; a forced move onto a seat projects +5 points on its readings for 10 min.
+//
 // STATE (~/.manta/seat-assignments.json, 0600, atomic) — sibling to accounts.json
 // on purpose: the accounts store rewrites its whole file from memory, so a shared
 // file would let either writer clobber the other. No credential is stored here,
 // only session id → seat id.
 
-import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { statePath } from "../shared/paths.mjs";
 import {
   leastLoadedSeat,
@@ -107,13 +121,24 @@ import {
 } from "../shared/seatChoice.mjs";
 import { ACCOUNT_PROVIDERS, notePluginSeen } from "./accounts.mjs";
 import { createSeatAttribution } from "./seatAttribution.mjs";
+import { createSeatTable, realTimers, SEAT_TABLE_FIRST_BUILD_WAIT_MS } from "./seatTable.mjs";
 
-const DAY_MS = 24 * 60 * 60_000;
-/** An assignment (or child link) nobody has touched for this long is dropped. */
-export const ASSIGNMENT_TTL_MS = 30 * DAY_MS;
-/** `lastUsedAt` is refreshed at most this often, so a busy conversation does not
- *  rewrite the file on every request. */
-export const TOUCH_INTERVAL_MS = 60 * 60_000;
+/** A pin (or child link) nobody has used for this long is dropped. Six hours is
+ *  longer than every window a pin still has to remember (the 5 h no-move-back,
+ *  the 5 h cross-org cap), so no rule loses information, and a conversation idle
+ *  that long has lost its prompt cache anyway. */
+export const PIN_IDLE_TTL_MS = 6 * 60 * 60_000;
+/** Size caps: beyond these the least recently used entries go first. */
+export const MAX_PINS_PER_PROVIDER = 5_000;
+export const MAX_CHILD_LINKS = 10_000;
+/** Saves are write-behind: this long after the last change… */
+export const SAVE_DEBOUNCE_MS = 2_000;
+/** …and at the latest this long after the first unsaved one. */
+export const SAVE_MAX_WAIT_MS = 10_000;
+/** A change that only touched `lastUsedAt` (or a child link's `at`) is saved at most this often. */
+export const TOUCH_SAVE_MS = 10 * 60_000;
+/** Pruning also runs on this cadence (and on load and on every scheduled save). */
+export const PRUNE_EVERY_MS = 10 * 60_000;
 /** A conversation does not go back to a seat it left this recently (no flip-flop). */
 export const MOVE_BACK_BLOCK_MS = 5 * 60 * 60_000;
 /** A cross-org move (a full history re-send) happens at most once per conversation per this long. */
@@ -127,6 +152,16 @@ export const RESET_SOON_MS = 60 * 60_000;
 /** A seat a failed turn reported as limited is treated as full for this long,
  *  even when the usage reading (up to a poll interval old) still says otherwise. */
 export const LIMITED_MARK_MS = 5 * 60_000;
+/** A seat whose credentials a request proved dead (401 after a refresh) is treated
+ *  as not usable for this long, or until a refresh of that seat succeeds. */
+export const AUTH_FAILED_MARK_MS = 5 * 60_000;
+/** Pacing of forced moves: every conversation forced onto a seat in the last
+ *  MOVE_PACING_WINDOW_MS adds MOVE_PACING_PCT points (capped) to that seat's
+ *  readings, because usage readings lag and every conversation leaving a dead or
+ *  full seat would otherwise pick the same least-loaded target. */
+export const MOVE_PACING_WINDOW_MS = 10 * 60_000;
+export const MOVE_PACING_PCT = 5;
+export const MOVE_PACING_CAP_PCT = 30;
 /** Weekly-deadline placement: a same-org rebalance needs a target whose weekly resets this much earlier. */
 export const SAME_ORG_REBALANCE_MS = 6 * 60 * 60_000;
 /** …and at most one such optional move per conversation per this long. */
@@ -198,22 +233,37 @@ export function resolveRoot({ sessionID, parentSessionID = null, children }) {
   return { root: children[sessionID]?.root ?? sessionID, link: null };
 }
 
-/** Drop assignments and child links older than the TTL. Returns a new store, or
- *  the same object when nothing was old enough. */
-export function pruneAssignments(store, nowMs, ttlMs = ASSIGNMENT_TTL_MS) {
+/** Keep the `max` most recently used entries of `entries` (`[id, record]`), by `stamp`. */
+function keepNewest(entries, max, stamp) {
+  if (entries.length <= max) return entries;
+  return [...entries].sort((a, b) => stamp(b[1]) - stamp(a[1])).slice(0, max);
+}
+
+/**
+ * Drop pins and child links nobody used for the idle TTL, then enforce the size
+ * caps (least recently used go first). Returns a new store, or the same object
+ * when nothing had to go.
+ * @param {ReturnType<typeof emptyAssignments>} store
+ * @param {number} nowMs
+ * @param {number} [ttlMs]
+ * @param {{maxPins?: number, maxChildren?: number}} [caps]
+ */
+export function pruneAssignments(store, nowMs, ttlMs = PIN_IDLE_TTL_MS, { maxPins = MAX_PINS_PER_PROVIDER, maxChildren = MAX_CHILD_LINKS } = {}) {
   const cutoff = nowMs - ttlMs;
   let changed = false;
   const next = emptyAssignments();
   for (const provider of ACCOUNT_PROVIDERS) {
-    for (const [conv, a] of Object.entries(store.providers[provider] ?? {})) {
-      if (a.lastUsedAt >= cutoff) next.providers[provider][conv] = a;
-      else changed = true;
-    }
+    const all = Object.entries(store.providers[provider] ?? {});
+    const alive = all.filter(([, a]) => a.lastUsedAt >= cutoff);
+    const kept = keepNewest(alive, maxPins, (a) => a.lastUsedAt);
+    if (kept.length !== all.length) changed = true;
+    next.providers[provider] = Object.fromEntries(kept);
   }
-  for (const [child, c] of Object.entries(store.children)) {
-    if (c.at >= cutoff) next.children[child] = c;
-    else changed = true;
-  }
+  const children = Object.entries(store.children);
+  const aliveChildren = children.filter(([, c]) => c.at >= cutoff);
+  const keptChildren = keepNewest(aliveChildren, maxChildren, (c) => c.at);
+  if (keptChildren.length !== children.length) changed = true;
+  next.children = Object.fromEntries(keptChildren);
   return changed ? next : store;
 }
 
@@ -711,7 +761,34 @@ export function seatResult(provider, seat) {
 // The service
 // ---------------------------------------------------------------------------
 
+/** The error `resolve` rejects with when the seat table has not finished its first
+ *  build in time. The route answers it as `503 {"error":"warming"}`. */
+export const SEAT_TABLE_WARMING_CODE = "SEAT_TABLE_WARMING";
+
+function warmingError() {
+  const e = new Error("warming");
+  /** @type {any} */ (e).code = SEAT_TABLE_WARMING_CODE;
+  return e;
+}
+
+const isPacedKind = (kind) => kind === "session" || kind === "weekly" || (typeof kind === "string" && kind.startsWith("weekly_scoped:"));
+
+/** A copy of a seat reading with `pts` points added to its 5h and weekly windows
+ *  (never past 99: a projection must not pretend a seat is full). */
+function paceSnapshot(snap, pts) {
+  if (!Array.isArray(snap?.windows)) return snap;
+  return {
+    ...snap,
+    windows: snap.windows.map((w) => (isPacedKind(w?.kind) && Number.isFinite(w.pct) && w.pct < 100 ? { ...w, pct: Math.min(99, w.pct + pts) } : w)),
+  };
+}
+
 /**
+ * Which seat a conversation's requests use. Every decision is a synchronous read
+ * of the in-memory seat table plus a synchronous write of the pin, so nothing
+ * awaits between the two and JavaScript's single thread makes each one atomic
+ * (no lock: spec §3.2). Pins are persisted write-behind (spec §3.3).
+ *
  * @param {object} deps
  * @param {{seatStates: Function}} deps.accounts  the accounts service
  * @param {() => Array<object>} [deps.listSeatSnapshots]  the usage poller's per-seat readings
@@ -739,12 +816,28 @@ export function createSeatAssigner({
   kFor = () => noK,
   attribution = null,
   log = console,
-} = {}) {
+  // The seat table (spec §3.1). Injectable; by default one is built over
+  // `accounts.seatStates`, watching the accounts' seats directory when it names one.
+  seatTable = null,
+  timers = realTimers,
+  firstBuildWaitMs = SEAT_TABLE_FIRST_BUILD_WAIT_MS,
+} = /** @type {any} */ ({})) {
   /** @type {ReturnType<typeof emptyAssignments>|null} */
   let store = null;
-  const mutex = createMutex();
   const refreshing = new Map();
   let defaultAttribution = null;
+
+  const table =
+    seatTable ??
+    createSeatTable({
+      readStates: (provider) => accounts.seatStates(provider),
+      watchRoot: accounts.seatsRoot?.() ?? null,
+      timers,
+      log,
+    });
+  // A store change (a seat added / removed / re-signed / its status changed)
+  // means the table is stale: rebuild in the background.
+  const stopAccountsListener = accounts?.onChange?.(() => table.invalidate("accounts-change")) ?? null;
 
   /** Record which seat/model served a request — after the decision, never able to fail it. */
   function attribute(provider, session, root, seat, model, reason) {
@@ -759,6 +852,15 @@ export function createSeatAssigner({
     });
   }
 
+  let lastSavedAt = 0;
+  const ensure = () => {
+    if (!store) {
+      store = pruneAssignments(normalizeAssignments(load()), now());
+      lastSavedAt = now();
+    }
+    return store;
+  };
+
   /** The conversation root for the paths that never reach `place` (no store write). */
   function rootOf(sessionID, parentSessionID) {
     try {
@@ -768,39 +870,173 @@ export function createSeatAssigner({
     }
   }
 
-  const ensure = () => (store ??= pruneAssignments(normalizeAssignments(load()), now()));
+  // -------------------------------------------------------------------------
+  // Write-behind persistence (spec §3.3)
+  // -------------------------------------------------------------------------
+
+  let dirty = false; // a structural change: a pin placed / moved / forgotten
+  let touchDirty = false; // only `lastUsedAt` / a child link's `at` moved
+  let debounceTimer = null;
+  let maxWaitTimer = null;
+  let saving = null;
+  let maintenanceTimer = null;
+
+  function clearSaveTimers() {
+    if (debounceTimer) timers.clear(debounceTimer);
+    if (maxWaitTimer) timers.clear(maxWaitTimer);
+    debounceTimer = maxWaitTimer = null;
+  }
+
+  function scheduleSave() {
+    if (debounceTimer) timers.clear(debounceTimer);
+    debounceTimer = timers.set(() => void runSave(), SAVE_DEBOUNCE_MS);
+    if (!maxWaitTimer) maxWaitTimer = timers.set(() => void runSave(), SAVE_MAX_WAIT_MS);
+  }
+
+  function markDirty() {
+    dirty = true;
+    scheduleSave();
+  }
+
+  /** A touch-only change: saved at most every TOUCH_SAVE_MS, and free to ride along on any other save. */
+  function markTouched() {
+    touchDirty = true;
+    if (!dirty && !debounceTimer && now() - lastSavedAt >= TOUCH_SAVE_MS) scheduleSave();
+  }
+
+  /** Single-flight, atomic (the `save` dependency). A failed save is retried by the next schedule. */
+  function runSave() {
+    clearSaveTimers();
+    if (saving) return saving;
+    if (!dirty && !touchDirty) return Promise.resolve();
+    store = pruneAssignments(ensure(), now());
+    const snapshot = store;
+    dirty = touchDirty = false;
+    saving = (async () => {
+      let failed = false;
+      try {
+        await save(snapshot);
+        lastSavedAt = now();
+      } catch (e) {
+        // Losing a write only means a conversation may be re-placed after a
+        // restart; it must never fail a model request. The next change (or the
+        // 10-minute maintenance) retries — not a tight loop on a full disk.
+        failed = true;
+        dirty = true;
+        log.warn?.("[accounts] saving seat assignments failed:", e?.message ?? e);
+      } finally {
+        saving = null;
+      }
+      // Changes that landed while this save was running still need theirs.
+      if (!failed && dirty) scheduleSave();
+    })();
+    return saving;
+  }
+
+  /** Save everything unsaved right now (shutdown, tests). Never rejects. */
+  async function flush() {
+    clearSaveTimers();
+    if (saving) await saving;
+    if (dirty || touchDirty) await runSave();
+  }
+
+  /** Every PRUNE_EVERY_MS: drop what idled out, and retry a failed save / flush old touches. */
+  function maintain() {
+    try {
+      const s = ensure();
+      const pruned = pruneAssignments(s, now());
+      if (pruned !== s) {
+        store = pruned;
+        dirty = true;
+      }
+      if (dirty || (touchDirty && now() - lastSavedAt >= TOUCH_SAVE_MS)) void runSave();
+    } catch (e) {
+      log.warn?.("[accounts] seat assignment maintenance failed:", e?.message ?? e);
+    }
+  }
+
+  function armMaintenance() {
+    maintenanceTimer = timers.set(() => {
+      maintenanceTimer = null;
+      maintain();
+      if (started) armMaintenance();
+    }, PRUNE_EVERY_MS);
+  }
+
+  let started = false;
+  /** Begin the background life: seat table builds + watcher, the prune timer. */
+  function start() {
+    if (started) return;
+    started = true;
+    table.start();
+    armMaintenance();
+  }
+  function stop() {
+    started = false;
+    table.stop();
+    if (maintenanceTimer) timers.clear(maintenanceTimer);
+    maintenanceTimer = null;
+    stopAccountsListener?.();
+  }
+
+  // -------------------------------------------------------------------------
+  // Marks and pacing
+  // -------------------------------------------------------------------------
 
   // Seats a failed turn reported as limited: `${provider}:${seatId}` → expiry.
   const limitedUntil = new Map();
+  // Seats whose credentials a request proved dead (401 after a refresh).
+  const authFailedUntil = new Map();
+  // Forced moves onto a seat: `${provider}:${seatId}` → [timestamps].
+  const forcedInto = new Map();
 
-  /** The per-seat readings every decision uses: the poller's, with any seat
+  /** The seat ids of one provider with a live (unexpired) mark in `map`. */
+  function markedIds(map, provider, t) {
+    const out = [];
+    for (const [key, until] of map) {
+      if (until <= t) {
+        map.delete(key);
+        continue;
+      }
+      if (key.startsWith(`${provider}:`)) out.push(key.slice(provider.length + 1));
+    }
+    return out;
+  }
+
+  function clearMarks(provider, seatId) {
+    limitedUntil.delete(`${provider}:${seatId}`);
+    authFailedUntil.delete(`${provider}:${seatId}`);
+  }
+
+  /** seatId → points to add for the forced moves onto it in the last pacing window. */
+  function pacingBumps(provider, t) {
+    const out = new Map();
+    for (const [key, stamps] of forcedInto) {
+      const recent = stamps.filter((at) => t - at < MOVE_PACING_WINDOW_MS);
+      if (recent.length === 0) {
+        forcedInto.delete(key);
+        continue;
+      }
+      if (recent.length !== stamps.length) forcedInto.set(key, recent);
+      if (key.startsWith(`${provider}:`)) out.set(key.slice(provider.length + 1), Math.min(MOVE_PACING_CAP_PCT, recent.length * MOVE_PACING_PCT));
+    }
+    return out;
+  }
+
+  /** The per-seat readings every decision uses: the poller's, with the load that
+   *  forced moves are about to bring added (pacing, spec §3.7) and any seat
    *  currently marked limited forced to exhausted (a reading can lag the limit
    *  by a whole poll interval). A marked seat with no reading is synthesized. */
   function snapshotsFor(provider) {
     const t = now();
-    const snaps = listSeatSnapshots().filter((x) => x?.provider === provider);
-    const marked = [];
-    for (const [key, until] of limitedUntil) {
-      if (until <= t) {
-        limitedUntil.delete(key);
-        continue;
-      }
-      if (key.startsWith(`${provider}:`)) marked.push(key.slice(provider.length + 1));
-    }
+    let snaps = listSeatSnapshots().filter((x) => x?.provider === provider);
+    const bumps = pacingBumps(provider, t);
+    if (bumps.size > 0) snaps = snaps.map((x) => (bumps.has(x.seatId) ? paceSnapshot(x, bumps.get(x.seatId)) : x));
+    const marked = markedIds(limitedUntil, provider, t);
     if (marked.length === 0) return snaps;
     const out = snaps.map((x) => (marked.includes(x.seatId) ? { ...x, exhausted: true } : x));
     for (const seatId of marked) if (!out.some((x) => x.seatId === seatId)) out.push({ provider, seatId, exhausted: true });
     return out;
-  }
-
-  async function persist() {
-    try {
-      await save(store);
-    } catch (e) {
-      // Losing a write only means a conversation may be re-placed after a
-      // restart; it must never fail a model request.
-      log.warn?.("[accounts] saving seat assignments failed:", e?.message ?? e);
-    }
   }
 
   function tell(fn) {
@@ -811,58 +1047,85 @@ export function createSeatAssigner({
     }
   }
 
-  async function stateOf(provider) {
-    const states = await accounts.seatStates(provider);
-    if (!states || states.seats.length === 0) return null;
-    return states;
+  /**
+   * The seat table's states for a provider with the auth-failed marks applied
+   * (a marked seat is `usable: false` in every decision), or `null` when the
+   * provider has no seats. Synchronous.
+   */
+  function statesFor(provider) {
+    const raw = table.get(provider);
+    if (!raw || !Array.isArray(raw.seats) || raw.seats.length === 0) return null;
+    const bad = markedIds(authFailedUntil, provider, now());
+    if (bad.length === 0) return raw;
+    return { ...raw, seats: raw.seats.map((s) => (bad.includes(s.seatId) ? { ...s, usable: false } : s)) };
   }
+
+  const tableReady = async (provider) => table.has(provider) || (await table.ready(provider, firstBuildWaitMs));
+
+  // -------------------------------------------------------------------------
+  // The decisions
+  // -------------------------------------------------------------------------
 
   /**
    * `model` (optional) is the request's model id: it decides which model-scoped
    * windows count for this decision and is recorded as the conversation's model.
    * A malformed one is treated as unknown.
+   *
+   * The answer carries `reason` when there is no seat: "no-seats" (this provider
+   * has none: today's single-credential behaviour) or "no-usable-seat" (seats
+   * exist but none can serve).
    * @param {{model?: string|null}} [opts]
-   * @returns {Promise<{seatId: string|null, live: boolean, provider?: string, credentialFile?: string, expiresAt?: number}>}
+   * @returns {Promise<{seatId: string|null, live: boolean, provider?: string, credentialFile?: string, expiresAt?: number, reason?: "no-seats"|"no-usable-seat"}>}
    */
-  function resolve(provider, sessionID, parentSessionID = null, { model = null } = {}) {
+  async function resolve(provider, sessionID, parentSessionID = null, { model = null } = {}) {
     // Seeing a call at all is what proves the plugin is in the request path.
     markPluginSeen(now());
-    if (!ACCOUNT_PROVIDERS.includes(provider)) return Promise.reject(new Error("unknown provider"));
-    if (!isId(sessionID)) return Promise.reject(new Error("invalid sessionID"));
-    if (parentSessionID != null && !isId(parentSessionID)) return Promise.reject(new Error("invalid parentSessionID"));
+    if (!ACCOUNT_PROVIDERS.includes(provider)) throw new Error("unknown provider");
+    if (!isId(sessionID)) throw new Error("invalid sessionID");
+    if (parentSessionID != null && !isId(parentSessionID)) throw new Error("invalid parentSessionID");
+    // Only the very first request after a start waits (≤ firstBuildWaitMs); after
+    // that the table is always there. NOTHING below awaits: the decision and the
+    // pin write are one synchronous turn.
+    if (!table.has(provider) && !(await tableReady(provider))) throw warmingError();
+    return resolveNow(provider, sessionID, parentSessionID, isId(model) ? model : null);
+  }
 
-    // Serialized: two concurrent first requests of one conversation (a parent
-    // and its sub-agent) must land on the SAME seat, not race to two.
-    return mutex.runExclusive(async () => {
-      const states = await stateOf(provider);
-      const requestModel = isId(model) ? model : null;
-      // No seats → today's single-credential behaviour. ONE seat → nothing to
-      // choose between, and whatever login is live keeps serving.
-      if (!states) {
-        attribute(provider, sessionID, rootOf(sessionID, parentSessionID), null, requestModel, "none");
-        return { seatId: null, live: true };
-      }
-      if (states.seats.length === 1) {
-        attribute(provider, sessionID, rootOf(sessionID, parentSessionID), states.seats[0].seatId, requestModel, "single");
-        return { seatId: states.seats[0].seatId, live: true };
-      }
-      return (await place(provider, states, sessionID, parentSessionID, { model: requestModel })).result;
-    });
+  function resolveNow(provider, sessionID, parentSessionID, requestModel) {
+    const states = statesFor(provider);
+    // No seats → today's single-credential behaviour.
+    if (!states) {
+      attribute(provider, sessionID, rootOf(sessionID, parentSessionID), null, requestModel, "none");
+      return { seatId: null, live: true, reason: "no-seats" };
+    }
+    if (!states.seats.some((s) => s.usable)) {
+      attribute(provider, sessionID, rootOf(sessionID, parentSessionID), null, requestModel, "none");
+      return { seatId: null, live: true, reason: "no-usable-seat" };
+    }
+    // ONE seat → nothing to choose between; it answers as itself (its own file
+    // when it has a directory, live only when it IS the live login).
+    if (states.seats.length === 1) {
+      attribute(provider, sessionID, rootOf(sessionID, parentSessionID), states.seats[0].seatId, requestModel, "single");
+      return seatResult(provider, states.seats[0]);
+    }
+    return place(provider, states, sessionID, parentSessionID, { model: requestModel }).result;
   }
 
   /**
    * The placement core shared by `resolve` (a request) and `reconsider` (a limit
-   * signal). Runs inside the mutex, with `states` of a multi-seat provider. With
-   * `onlyMove`, a conversation that is not assigned, or whose decision is
-   * anything but an automatic move, is left completely untouched. `model` is the
-   * request's model; without one the conversation's stored model is used.
-   * @returns {Promise<{result: object, decision: object|null}>}
+   * signal), with `states` of a multi-seat provider. Synchronous end to end (see
+   * the class comment). With `onlyMove`, a conversation that is not assigned, or
+   * whose decision is anything but an automatic move, is left completely
+   * untouched. `model` is the request's model; without one the conversation's
+   * stored model is used.
+   * @returns {{result: object, decision: object|null}}
    */
-  async function place(provider, states, sessionID, parentSessionID, { onlyMove = false, model: requestModel = null } = {}) {
+  function place(provider, states, sessionID, parentSessionID, { onlyMove = false, model: requestModel = null } = {}) {
     const s = ensure();
     const t = now();
     const { root, link } = resolveRoot({ sessionID, parentSessionID, children: s.children });
-    const existing = s.providers[provider][root] ?? null;
+    let existing = s.providers[provider][root] ?? null;
+    // A pin idle past its TTL is as good as gone (the prune only runs every so often).
+    if (existing && t - existing.lastUsedAt > PIN_IDLE_TTL_MS) existing = null;
     const untouched = { result: { seatId: null, live: true }, decision: null };
     if (onlyMove && (!existing || states.mode !== "auto")) return untouched;
     const model = requestModel ?? existing?.model ?? null;
@@ -883,21 +1146,33 @@ export function createSeatAssigner({
       kFor: kFor(provider),
     });
     if (onlyMove && decision.reason !== "moved") return untouched;
-    let dirty = false;
+    let changed = false;
+    let touched = false;
     if (link) {
       s.children[link.child] = { root: link.root, at: t };
-      dirty = true;
+      changed = true;
+    } else {
+      // A link that is used stays alive: its `at` moves with every request that follows it.
+      for (const id of [sessionID, parentSessionID]) {
+        const c = id ? s.children[id] : null;
+        if (c && c.at !== t) {
+          c.at = t;
+          touched = true;
+        }
+      }
     }
     if (!decision.seatId) {
       attribute(provider, sessionID, root, null, model, "none");
-      return { result: { seatId: null, live: true }, decision };
+      if (changed) markDirty();
+      else if (touched) markTouched();
+      return { result: { seatId: null, live: true, reason: "no-usable-seat" }, decision };
     }
 
     let assignmentsChanged = false;
     let movedEvent = null;
     if (decision.reason === "assigned") {
       s.providers[provider][root] = { seatId: decision.seatId, assignedAt: t, lastUsedAt: t, ...(storedModel ? { model: storedModel } : {}) };
-      dirty = true;
+      changed = true;
       assignmentsChanged = true;
     } else if (decision.reason === "moved") {
       // Remember where it came from (the move notice shows it) and every seat it
@@ -926,8 +1201,17 @@ export function createSeatAssigner({
       if (why !== "manual" && decision.crossOrg) rec.crossOrgMovedAt = t;
       else if (typeof existing.crossOrgMovedAt === "number" && t - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS) rec.crossOrgMovedAt = existing.crossOrgMovedAt;
       s.providers[provider][root] = rec;
-      dirty = true;
+      changed = true;
       assignmentsChanged = true;
+      // A FORCED move (the seat was full, dead or marked) will bring load that
+      // no reading shows yet: the next forced move away from the same trouble
+      // must not pick this seat just because it still reads low (spec §3.7).
+      if (why === "exhausted" || why === "unusable") {
+        const key = `${provider}:${decision.seatId}`;
+        const stamps = forcedInto.get(key) ?? [];
+        stamps.push(t);
+        forcedInto.set(key, stamps);
+      }
       if (why !== "manual") {
         const label = (id) => states.seats.find((x) => x.seatId === id)?.label ?? id;
         movedEvent = {
@@ -945,21 +1229,20 @@ export function createSeatAssigner({
         };
       }
     } else if (existing) {
-      // Kept: refresh lastUsedAt at most hourly, but record a CHANGED model at once
-      // (a re-decision after a limit signal must see the model it is on now).
-      if (t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
+      // Kept: `lastUsedAt` is touched in memory on every request (persisted at
+      // most every TOUCH_SAVE_MS); a CHANGED model is recorded at once (a
+      // re-decision after a limit signal must see the model it is on now).
+      if (existing.lastUsedAt !== t) {
         existing.lastUsedAt = t;
-        dirty = true;
+        touched = true;
       }
       if (isRootRequest && requestModel && existing.model !== requestModel) {
         existing.model = requestModel;
-        dirty = true;
+        changed = true;
       }
     }
-    if (dirty) {
-      store = pruneAssignments(s, t);
-      await persist();
-    }
+    if (changed) markDirty();
+    else if (touched) markTouched();
     const outcome = onlyMove ? "reconsider" : decision.reason === "moved" ? `moved:${decision.why ?? "exhausted"}` : decision.reason;
     attribute(provider, sessionID, root, decision.seatId, model, outcome);
     // After the write, and never allowed to fail the request.
@@ -971,26 +1254,30 @@ export function createSeatAssigner({
   /**
    * Refresh one seat's credentials and return its resolve-shaped state.
    * Single-flight per seat. A live seat is never refreshed here (opencode / the
-   * CLI own it) — it is simply reported live. `null` = no such seat.
+   * CLI own it) — it is simply reported live. `null` = no such seat. The state
+   * answered is read through a FORCED rebuild of the seat table, so the answer
+   * and the table agree.
    */
   async function refreshSeat(provider, seatId) {
     const key = `${provider}:${seatId}`;
     let run = refreshing.get(key);
     if (!run) {
       run = (async () => {
-        const states = await accounts.seatStates(provider);
-        const seat = states?.seats.find((x) => x.seatId === seatId);
+        if (!table.has(provider)) await table.rebuild();
+        const seat = table.get(provider)?.seats.find((x) => x.seatId === seatId);
         if (!seat) return null;
         if (!seat.live && (seat.dir || seat.file)) {
           try {
-            await refreshSeatCredentials(provider, { seatId, dir: seat.dir, file: seat.file });
+            const outcome = await refreshSeatCredentials(provider, { seatId, dir: seat.dir, file: seat.file });
+            // A seat that refreshed is no longer "dead" or "full by report".
+            if (outcome?.ok === true) clearMarks(provider, seatId);
           } catch (e) {
             log.warn?.(`[accounts] refresh of ${provider} ${seatId} failed:`, e?.message ?? e);
           }
         }
         // Re-read: the refresh rewrote the file.
-        const after = await accounts.seatStates(provider);
-        return seatResult(provider, after?.seats.find((x) => x.seatId === seatId));
+        await table.rebuild();
+        return seatResult(provider, table.get(provider)?.seats.find((x) => x.seatId === seatId));
       })().finally(() => refreshing.delete(key));
       refreshing.set(key, run);
     }
@@ -1020,23 +1307,23 @@ export function createSeatAssigner({
   }
 
   /** A seat was removed: its conversations lose the assignment (the next request
-   *  places them again, rule 1). Serialized with `resolve`. */
+   *  places them again, rule 1). Synchronous. */
   function forgetSeat(provider, seatId) {
-    return mutex.runExclusive(async () => {
-      const s = ensure();
-      let changed = false;
-      for (const [conv, a] of Object.entries(s.providers[provider] ?? {})) {
-        if (a.seatId === seatId) {
-          delete s.providers[provider][conv];
-          changed = true;
-        }
+    const s = ensure();
+    let changed = false;
+    for (const [conv, a] of Object.entries(s.providers[provider] ?? {})) {
+      if (a.seatId === seatId) {
+        delete s.providers[provider][conv];
+        changed = true;
       }
-      if (changed) {
-        await persist();
-        tell(() => onChange?.(provider));
-      }
-      return changed;
-    });
+    }
+    clearMarks(provider, seatId);
+    table.invalidate("forget-seat");
+    if (changed) {
+      markDirty();
+      tell(() => onChange?.(provider));
+    }
+    return changed;
   }
 
   /** The stored assignment of the conversation this session belongs to, or null (unknown provider / bad id / none). */
@@ -1062,6 +1349,54 @@ export function createSeatAssigner({
   }
 
   /**
+   * A request on this conversation's seat answered 401 even after a refresh: the
+   * seat's credentials are dead. Mark it NOT USABLE for AUTH_FAILED_MARK_MS (the
+   * same mechanism as `markLimited`, but `usable: false` instead of `exhausted`),
+   * rebuild the seat table and try one more refresh of that seat in the
+   * background; a refresh that succeeds clears the mark early. A conversation
+   * with no stored assignment on a single-seat provider marks that one seat.
+   * Synchronous. @returns {string|null} the seat marked, or null (unknown seat)
+   */
+  function markAuthFailed(provider, sessionId) {
+    const at = assignmentOf(provider, sessionId);
+    let seatId = at?.seatId ?? null;
+    if (!seatId) {
+      const seats = table.get(provider)?.seats ?? [];
+      if (seats.length === 1) seatId = seats[0].seatId;
+    }
+    if (!seatId) return null;
+    authFailedUntil.set(`${provider}:${seatId}`, now() + AUTH_FAILED_MARK_MS);
+    table.invalidate("auth-failed");
+    refreshSeat(provider, seatId).catch((e) => log.warn?.("[accounts] background refresh after an auth failure failed:", e?.message ?? e));
+    return seatId;
+  }
+
+  /**
+   * A seat refresh finished somewhere (the sweep, a usage 401 recovery, the
+   * plugin's /refresh): the file or the status changed, so rebuild the table;
+   * and a refresh that worked clears that seat's marks.
+   */
+  function noteRefreshOutcome(provider, seatId, outcome) {
+    if (outcome?.ok === true) clearMarks(provider, seatId);
+    table.invalidate("refresh-outcome");
+  }
+
+  /**
+   * Is the request path of this session served by the LIVE login (so a failing
+   * live login is worth refreshing)? True when the provider has no seats, or the
+   * session's conversation sits on a seat read from the live file. False when it
+   * is on a directory seat — or on none while several exist. Synchronous; an
+   * unbuilt table answers true (today's behaviour).
+   */
+  function isLiveServed(provider, sessionId) {
+    const states = table.get(provider);
+    if (!states || !Array.isArray(states.seats) || states.seats.length === 0) return true;
+    const at = assignmentOf(provider, sessionId);
+    const seat = at ? states.seats.find((x) => x.seatId === at.seatId) : states.seats.length === 1 ? states.seats[0] : null;
+    return seat ? seat.live === true : false;
+  }
+
+  /**
    * Is the seat this session's conversation is assigned to full right now — for
    * the conversation's stored model? Uses the same readings every decision uses
    * (`snapshotsFor`), so a seat a failed turn marked limited counts as full. Synchronous, read-only.
@@ -1083,15 +1418,33 @@ export function createSeatAssigner({
    * @param {{model?: string|null}} [opts]
    * @returns {Promise<{moved: boolean, from?: string, to?: string, reason?: string}>}
    */
-  function reconsider(provider, sessionId, { model = null } = {}) {
-    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return Promise.resolve({ moved: false });
-    return mutex.runExclusive(async () => {
-      const states = await stateOf(provider);
-      if (!states || states.seats.length < 2) return { moved: false };
-      const { decision } = await place(provider, states, sessionId, null, { onlyMove: true, model: isId(model) ? model : null });
-      return decision ? { moved: true, from: decision.from, to: decision.seatId, reason: decision.why } : { moved: false };
-    });
+  async function reconsider(provider, sessionId, { model = null } = {}) {
+    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return { moved: false };
+    if (!(await tableReady(provider))) return { moved: false };
+    const states = statesFor(provider);
+    if (!states || states.seats.length < 2) return { moved: false };
+    const { decision } = place(provider, states, sessionId, null, { onlyMove: true, model: isId(model) ? model : null });
+    return decision ? { moved: true, from: decision.from, to: decision.seatId, reason: decision.why } : { moved: false };
   }
 
-  return { resolve, refreshSeat, markLimited, reconsider, conversationSeatFull, assignments, sessionAssignment, forgetSeat, _store: () => ensure() };
+  return {
+    resolve,
+    refreshSeat,
+    markLimited,
+    markAuthFailed,
+    reconsider,
+    conversationSeatFull,
+    assignments,
+    sessionAssignment,
+    forgetSeat,
+    noteRefreshOutcome,
+    isLiveServed,
+    /** Rebuild the seat table now and wait for it (a forced rebuild; the table never does this on a request). */
+    refreshSeatTable: () => table.rebuild(),
+    seatTable: table,
+    start,
+    stop,
+    flush,
+    _store: () => ensure(),
+  };
 }
