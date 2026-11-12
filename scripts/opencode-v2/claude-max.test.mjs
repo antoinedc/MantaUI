@@ -10,9 +10,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { transpileTree } from "./ts-loader.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const LIB = join(HERE, "..", "..", "docs", "opencode-plugins-v2", "manta-claude-max", "lib");
-const tree = await transpileTree(LIB);
-const load = (n) => import(pathToFileURL(join(tree.dir, `${n}.mjs`)).href);
+const PLUGIN = join(HERE, "..", "..", "docs", "opencode-plugins-v2", "manta-claude-max");
+// The whole plugin (entry + lib), with the opencode package swapped for a stub so index.ts loads under Node.
+const tree = await transpileTree(PLUGIN, {
+  rewrite: (code) => code.replace(/from\s+["']@opencode\/plugin["']/, `from "${pathToFileURL(join(HERE, "v2-plugin-stub.mjs")).href}"`),
+});
+const load = (n) => import(pathToFileURL(join(tree.dir, "lib", `${n}.mjs`)).href);
+const pluginEntry = (await import(pathToFileURL(join(tree.dir, "index.mjs")).href)).default;
 const body = await load("body");
 const config = await load("config");
 const sse = await load("sse");
@@ -366,7 +370,8 @@ describe("seat resolver", () => {
     const f = fakeFetch(() => jres({ seatId: "seat-2", live: false, credentialFile: "/x/.manta-secrets/accounts/claude/seat-2/.credentials.json" }));
     const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", token: () => "TOK", now: () => t });
     const a = await r.seatFor("claude", ids);
-    assert.equal(a.seatId, "seat-2");
+    assert.equal(a.ok, true);
+    assert.equal(a.result.seatId, "seat-2");
     assert.equal(f.calls[0].path, "/api/accounts/resolve");
     assert.deepEqual(f.calls[0].query, { provider: "claude", sessionID: "s1", model: "claude-haiku-5-5" });
     assert.equal(f.calls[0].headers.authorization, "Bearer TOK");
@@ -406,7 +411,7 @@ describe("seat resolver", () => {
     assert.equal(f.calls.length, 1);
   });
 
-  test("FAIL-SAFE: error / non-200 / bad JSON → last answer for the conversation, else null (= live login)", async () => {
+  test("FAIL-SAFE: error / non-200 / bad JSON → last answer for the conversation, else a typed failure", async () => {
     let t = 0;
     let mode = "ok";
     const f = fakeFetch(() => {
@@ -417,31 +422,77 @@ describe("seat resolver", () => {
     });
     const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", now: () => t });
     mode = "500";
-    assert.equal(await r.seatFor("claude", ids), null, "no prior answer → null");
+    assert.deepEqual(await r.seatFor("claude", ids), { ok: false, why: "unreachable" }, "no prior answer → says why");
     mode = "ok";
-    assert.equal((await r.seatFor("claude", ids)).seatId, "seat-9");
+    assert.equal((await r.seatFor("claude", ids)).result.seatId, "seat-9");
     for (const m of ["500", "junk", "throw"]) {
       t += 31_000;
       mode = m;
-      assert.equal((await r.seatFor("claude", ids)).seatId, "seat-9", `stale answer reused on ${m}`);
+      const out = await r.seatFor("claude", ids);
+      assert.equal(out.ok, true, `stale answer reused on ${m}`);
+      assert.equal(out.result.seatId, "seat-9");
     }
   });
 
-  test("1.5 s timeout: a hung server aborts the call and fails open", async () => {
+  test("a 503 {error:warming} is reported as 'warming'; the optional reason field is parsed", async () => {
+    let mode = "warming";
+    const f = fakeFetch(() => (mode === "warming" ? jres({ error: "warming" }, 503) : jres({ seatId: null, live: true, reason: "no-usable-seat" })));
+    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x" });
+    assert.deepEqual(await r.seatFor("claude", ids), { ok: false, why: "warming" });
+    mode = "answer";
+    const out = await r.seatFor("claude", ids);
+    assert.deepEqual(out, { ok: true, result: { seatId: null, live: true, reason: "no-usable-seat" } });
+    await r.seatFor("claude", ids);
+    assert.equal(f.calls.length, 3, '"no usable seat" is not cached: the next request asks again');
+    assert.deepEqual(seats.parseResolved({ seatId: null, live: true, reason: "no-seats" }), { seatId: null, live: true, reason: "no-seats" });
+    assert.deepEqual(seats.parseResolved({ seatId: null, live: true, reason: "bogus" }), { seatId: null, live: true });
+  });
+
+  test("UNCACHED conversation: ONE request with the full 10 s budget — answering in 4 s is a single call, not a retry storm", async () => {
     const f = fakeFetch(
       (call) =>
-        new Promise((_res, rej) => {
-          call.signal.addEventListener("abort", () => rej(new Error("aborted")));
+        new Promise((res, rej) => {
+          const timer = setTimeout(() => res(jres({ seatId: "seat-slow", live: false, credentialFile: "/f" })), 4_000);
+          call.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            rej(new Error("aborted"));
+          });
         }),
     );
     const r = seats.createSeatResolver({ fetch: f, base: () => "http://x" });
-    const t0 = Date.now();
-    assert.equal(await r.seatFor("claude", ids), null);
-    const took = Date.now() - t0;
-    assert.ok(took >= 1400 && took < 3000, `took ${took}ms`);
+    const out = await r.seatFor("claude", ids);
+    assert.equal(out.ok, true);
+    assert.equal(out.result.seatId, "seat-slow");
+    assert.equal(f.calls.length, 1, "exactly one call");
+    assert.equal(seats.RESOLVE_BUDGET_MS, 10_000);
     assert.equal(seats.RESOLVE_TIMEOUT_MS, 1500);
+    assert.equal(seats.LATE_RESOLVE_BUDGET_MS, 3_000);
     assert.equal(seats.REFRESH_TIMEOUT_MS, 30_000);
     assert.equal(seats.LIMIT_TIMEOUT_MS, 10_000);
+  });
+
+  test("a CACHED conversation refreshes under 1.5 s and keeps the last answer; a custom budget reports 'timeout'", async () => {
+    let t = 0;
+    let hang = false;
+    const hung = (call) =>
+      new Promise((_res, rej) => {
+        call.signal.addEventListener("abort", () => rej(new Error("aborted")));
+      });
+    const f = fakeFetch((call) => (hang ? hung(call) : jres({ seatId: "seat-9", live: false, credentialFile: "/f" })));
+    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", now: () => t });
+    await r.seatFor("claude", ids);
+    hang = true;
+    t += 31_000;
+    const t0 = Date.now();
+    const out = await r.seatFor("claude", ids);
+    const took = Date.now() - t0;
+    assert.ok(took >= 1400 && took < 3000, `took ${took}ms`);
+    assert.equal(out.ok, true);
+    assert.equal(out.result.seatId, "seat-9", "the stale answer is used");
+    // no cached answer + a short budget → the failure says it was a timeout
+    const t1 = Date.now();
+    assert.deepEqual(await r.seatFor("claude", { sessionID: "fresh", parentSessionID: null }, { budgetMs: 200 }), { ok: false, why: "timeout" });
+    assert.ok(Date.now() - t1 < 1_000);
   });
 
   test("cache is capped at 500 entries (oldest evicted)", async () => {
@@ -470,7 +521,9 @@ describe("seat resolver", () => {
     assert.deepEqual(f.calls[0].body, { provider: "claude", seatId: "seat-2" });
     const l = await r.limit("claude", { sessionID: "s", parentSessionID: "p", model: "m" });
     assert.equal(l.moved, true);
-    assert.deepEqual(f.calls.at(-1).body, { provider: "claude", sessionID: "s", parentSessionID: "p", model: "m" });
+    assert.deepEqual(f.calls.at(-1).body, { provider: "claude", sessionID: "s", parentSessionID: "p", model: "m", reason: "limit" });
+    await r.limit("claude", { sessionID: "s", parentSessionID: null, model: null }, "auth");
+    assert.deepEqual(f.calls.at(-1).body, { provider: "claude", sessionID: "s", reason: "auth" });
   });
 
   test("parseResolved: a non-live answer without a credentialFile degrades to live; loopback-only env override", () => {
@@ -496,16 +549,20 @@ describe("exchange (request + response hooks)", () => {
   const liveFile = join(scratch, "ex-live.json");
   writeFileSync(liveFile, JSON.stringify({ claudeAiOauth: { accessToken: "LIVE-TOKEN", expiresAt: Date.now() + 3_600_000 } }));
 
+  // `seatFor` overrides may return the bare answer (or null = unreachable); adapt it to the resolver's typed lookup.
+  const lookup = (r) => (r && typeof r === "object" && "ok" in r ? r : r ? { ok: true, result: r } : { ok: false, why: "unreachable" });
   const fakeResolver = (over = {}) => {
     const calls = [];
+    const seatFor = over.seatFor ?? (async () => ({ seatId: null, live: true }));
     return {
       calls,
-      seatFor: async () => ({ seatId: null, live: true }),
+      seatFor: async (...a) => lookup(await seatFor(...a)),
       refresh: async (...a) => (calls.push(["refresh", ...a]), null),
       limit: async (...a) => (calls.push(["limit", ...a]), null),
       forget: (...a) => calls.push(["forget", ...a]),
       remember: (...a) => calls.push(["remember", ...a]),
       ...over,
+      seatFor: async (...a) => lookup(await seatFor(...a)),
     };
   };
   const make = (resolver, send = async () => new Response("{}"), extra = {}) =>
@@ -593,7 +650,7 @@ describe("exchange (request + response hooks)", () => {
     assert.equal(bearerOf(event.request), "Bearer NEW-TOKEN");
   });
 
-  test("FAIL OPEN: no credentials anywhere / unrelated host / no session → request left exactly as OpenCode built it", async () => {
+  test("FAIL OPEN (no seats on the box): no credentials anywhere / unrelated host / no session → request left exactly as OpenCode built it", async () => {
     const noCreds = exchange.createExchange({
       resolver: fakeResolver(),
       credentials: creds.createCredentialReader({ rootDir: () => stateRoot, liveFile: () => join(scratch, "does-not-exist.json") }),
@@ -615,11 +672,12 @@ describe("exchange (request + response hooks)", () => {
     await ex.onRequest(e3);
     assert.equal(e3.request, o3);
 
-    const throwing = make(fakeResolver({ seatFor: async () => { throw new Error("boom"); } }));
+    const noSeatsReader = creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats-at-all"), liveFile: () => liveFile });
+    const throwing = make(fakeResolver({ seatFor: async () => { throw new Error("boom"); } }), undefined, { credentials: noSeatsReader });
     const e4 = { request: anthropicRequest(), sessionID: "s" };
     const o4 = e4.request;
     await throwing.onRequest(e4);
-    assert.equal(e4.request, o4, "a throwing resolver never breaks the request");
+    assert.equal(e4.request, o4, "a throwing resolver never breaks the request (no seats on the box: fail open)");
   });
 
   test("response hook: success is un-prefixed using the request's own name map", async () => {
@@ -924,7 +982,7 @@ describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key au
     });
   const noCreds = () =>
     exchange.createExchange({
-      resolver: { seatFor: async () => null, refresh: async () => null, limit: async () => null, forget() {}, remember() {} },
+      resolver: { seatFor: async () => ({ ok: false, why: "unreachable" }), refresh: async () => null, limit: async () => null, forget() {}, remember() {} },
       credentials: creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats"), liveFile: () => join(scratch, "no-live.json") }),
       parentOf: async () => null,
       send: async () => new Response("{}"),
@@ -972,7 +1030,7 @@ describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key au
     const liveFile = join(scratch, "cache-live.json");
     writeFileSync(liveFile, JSON.stringify({ claudeAiOauth: { accessToken: "LIVE", expiresAt: Date.now() + 3_600_000 } }));
     const ex = exchange.createExchange({
-      resolver: { seatFor: async () => ({ seatId: null, live: true }), refresh: async () => null, limit: async () => null, forget() {}, remember() {} },
+      resolver: { seatFor: async () => ({ ok: true, result: { seatId: null, live: true } }), refresh: async () => null, limit: async () => null, forget() {}, remember() {} },
       credentials: creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats"), liveFile: () => liveFile }),
       parentOf: async () => null,
       send: async () => new Response("{}"),
@@ -986,5 +1044,373 @@ describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key au
     const all = [...sent.system, ...sent.tools, ...sent.messages.flatMap((m) => m.content)].map((b) => b.cache_control).filter(Boolean);
     assert.ok(all.length >= 1 && all.length <= 4);
     assert.ok(all.every((c) => c.ttl === "1h"));
+  });
+});
+
+// ------------------------------------------------ seat routing: fail closed
+
+describe("credentials: seats-exist scan", () => {
+  test("a seat is a <root>/claude/<seat>/.credentials.json; cached for 30 s", () => {
+    const root = join(scratch, "scan", ".manta-secrets", "accounts");
+    let t = 1_000;
+    const r = creds.createCredentialReader({ rootDir: () => root, liveFile: () => join(scratch, "scan-live.json"), now: () => t });
+    assert.equal(r.hasSeats("claude"), false, "no directory at all");
+    mkdirSync(join(root, "claude", "seat-1"), { recursive: true });
+    assert.equal(r.hasSeats("claude"), false, "cached");
+    t += 30_001;
+    assert.equal(r.hasSeats("claude"), false, "a seat directory with no credentials file is not a seat");
+    writeFileSync(join(root, "claude", "seat-1", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "", expiresAt: 0 } }));
+    assert.equal(r.hasSeats("claude"), false, "cached again");
+    t += 30_001;
+    assert.equal(r.hasSeats("claude"), true, "a signed-out seat is still a seat");
+    assert.equal(r.hasSeats("codex"), false);
+  });
+
+  test("an empty token counts as no login", () => {
+    const f = join(scratch, "blank-live.json");
+    writeFileSync(f, JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } }));
+    assert.equal(creds.createCredentialReader({ liveFile: () => f }).readLive(), null);
+  });
+});
+
+describe("exchange: never signed by OpenCode's own key when the box has seats", () => {
+  let n = 0;
+  /** A throwaway box: seat files under <root>/.manta-secrets/accounts/claude, and a live login file. */
+  function makeBox({ seats = [], live = null } = {}) {
+    const dir = join(scratch, `fc-${n++}`);
+    const root = join(dir, ".manta-secrets", "accounts");
+    const seatFile = (name, token, expiresAt = Date.now() + 3_600_000) => {
+      const f = join(root, "claude", name, ".credentials.json");
+      mkdirSync(dirname(f), { recursive: true });
+      writeFileSync(f, JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt } }));
+      return f;
+    };
+    const liveFile = join(dir, "live.json");
+    const setLive = (token, expiresAt = Date.now() + 3_600_000) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(liveFile, JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt } }));
+    };
+    mkdirSync(dir, { recursive: true });
+    const files = {};
+    for (const [name, token] of seats) files[name] = seatFile(name, token);
+    if (live) setLive(live.token, live.expiresAt);
+    return { dir, root, seatFile, files, setLive, liveFile, reader: () => creds.createCredentialReader({ rootDir: () => root, liveFile: () => liveFile }) };
+  }
+
+  const request = () =>
+    new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "OPENCODE-OWN-KEY", authorization: "Bearer OPENCODE-OWN-BEARER", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-5-5",
+        system: [{ type: "text", text: "sys" }],
+        tools: [{ name: "shell" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    });
+  const bearer = (req) => req.headers.get("authorization");
+
+  /** A resolver whose answers are scripted; records every call. */
+  function resolverOf(script = {}) {
+    const calls = [];
+    const lookup = (r) => (r && typeof r === "object" && "ok" in r ? r : r ? { ok: true, result: r } : { ok: false, why: "unreachable" });
+    const next = (fnOrVal, args) => (typeof fnOrVal === "function" ? fnOrVal(...args) : fnOrVal);
+    return {
+      calls,
+      seatFor: async (...a) => (calls.push(["seatFor", a[1].sessionID, a[2]?.budgetMs]), lookup(await next(script.seatFor ?? { seatId: null, live: true }, a))),
+      refresh: async (...a) => (calls.push(["refresh", ...a]), (await next(script.refresh ?? null, a)) ?? null),
+      limit: async (...a) => (calls.push(["limit", a[0], a[2]]), (await next(script.limit ?? null, a)) ?? null),
+      forget: (...a) => calls.push(["forget", a[0]]),
+      remember: (...a) => calls.push(["remember", a[0]]),
+    };
+  }
+  const make = (box, resolver, send, extra = {}) =>
+    exchange.createExchange({
+      resolver,
+      credentials: box.reader(),
+      parentOf: async () => null,
+      send: send ?? (async () => assert.fail("nothing may be sent")),
+      sleep: async () => {},
+      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+      ...extra,
+    });
+  const run = async (ex, status = 401, headers = {}) => {
+    const event = { request: request(), sessionID: "s1", kind: "primary", model: { id: "claude-haiku-5-5" } };
+    await ex.onRequest(event);
+    const out = { request: event.request, response: new Response('{"type":"error","error":{"type":"authentication_error"}}', { status, headers }) };
+    await ex.onResponse(out);
+    return { event, out };
+  };
+
+  test("seats exist, server unreachable → credentials stripped, then a synthetic retryable 529 with the fixed message", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]], live: { token: "LIVE" } });
+    const resolver = resolverOf({ seatFor: { ok: false, why: "timeout" } });
+    const { event, out } = await run(make(box, resolver));
+    assert.equal(event.request.headers.get("x-api-key"), null, "OpenCode's stored key never leaves");
+    assert.equal(event.request.headers.get("authorization"), null);
+    assert.equal(event.request.url, "https://api.anthropic.com/v1/messages", "nothing rewritten for a refused request");
+    assert.equal(out.response.status, 529);
+    assert.equal(out.response.headers.get("retry-after"), "3");
+    const j = await out.response.json();
+    assert.equal(j.type, "error");
+    assert.equal(j.error.type, "overloaded_error");
+    assert.equal(j.error.message, "Manta could not reach its seat service to pick a Claude seat for this conversation; retrying.");
+    assert.deepEqual(resolver.calls.map((c) => c.slice(0, 3)), [["seatFor", "s1", undefined], ["seatFor", "s1", 3_000]], "one more lookup, with a 3 s budget");
+  });
+
+  test("a throwing resolver on a box with seats fails closed too (nothing leaks on an unexpected error)", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]] });
+    const { event, out } = await run(make(box, resolverOf({ seatFor: () => { throw new Error("boom"); } })));
+    assert.equal(event.request.headers.get("x-api-key"), null);
+    assert.equal(out.response.status, 529);
+  });
+
+  test("'no usable seat' → stripped, then a synthetic NON-retryable 401, even though a live login exists", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]], live: { token: "LIVE" } });
+    const resolver = resolverOf({ seatFor: { seatId: null, live: true, reason: "no-usable-seat" } });
+    const { event, out } = await run(make(box, resolver));
+    assert.equal(event.request.headers.get("x-api-key"), null);
+    assert.equal(event.request.headers.get("authorization"), null);
+    assert.equal(out.response.status, 401);
+    assert.equal(out.response.headers.get("retry-after"), null);
+    const j = await out.response.json();
+    assert.equal(j.error.type, "authentication_error");
+    assert.equal(j.error.message, "Manta has no usable Claude seat right now (all seats are signed out or failing). Open Settings → Accounts.");
+  });
+
+  test("the unsigned request keeps the cache_control fix on its (stripped) body", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]] });
+    const eph = (ttl) => (ttl === undefined ? { type: "ephemeral" } : { type: "ephemeral", ttl });
+    const req = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "K", "content-length": "9999" },
+      body: JSON.stringify({ cache_control: eph("1h"), system: [{ type: "text", text: "s", cache_control: eph() }], messages: [] }),
+    });
+    const event = { request: req, sessionID: "s1" };
+    await make(box, resolverOf({ seatFor: { ok: false, why: "unreachable" } })).onRequest(event);
+    assert.equal(event.request.headers.get("x-api-key"), null);
+    assert.equal(event.request.headers.get("content-length"), null);
+    const sent = JSON.parse(await event.request.text());
+    assert.equal(sent.cache_control, undefined);
+    assert.deepEqual(sent.system[0].cache_control, eph("1h"));
+  });
+
+  test("the second lookup (3 s, in onResponse) finds a seat → the request is resent SIGNED and the result is used", async () => {
+    const box = makeBox({ seats: [["seat-late", "LATE-TOKEN"]] });
+    const resolver = resolverOf({
+      seatFor: (() => {
+        let k = 0;
+        return () => (k++ === 0 ? { ok: false, why: "timeout" } : { seatId: "seat-late", live: false, credentialFile: box.files["seat-late"] });
+      })(),
+    });
+    const sent = [];
+    const ex = make(box, resolver, async (req) => (sent.push(req), new Response('data: {"type":"content_block_start","content_block":{"name":"mcp_Shell"}}\n\n', { status: 200 })));
+    const { event, out } = await run(ex);
+    assert.equal(event.request.headers.get("authorization"), null, "the first attempt carried no credential");
+    assert.equal(sent.length, 1);
+    assert.equal(bearer(sent[0]), "Bearer LATE-TOKEN");
+    assert.equal(sent[0].headers.get("x-api-key"), null);
+    assert.equal(JSON.parse(await sent[0].text()).tools[0].name, "mcp_Shell", "the resend carries the Claude Code rewrite");
+    assert.equal(out.response.status, 200);
+    assert.match(await out.response.text(), /"name":"shell"/, "un-prefixed like any signed response");
+    assert.equal(resolver.calls.filter((c) => c[0] === "seatFor").at(-1)[2], 3_000);
+  });
+
+  test("a seat that is unusable when the box has seats and the live login is the answer → still no OpenCode key", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]] }); // no live file at all
+    const { event, out } = await run(make(box, resolverOf({ seatFor: { seatId: null, live: true } })));
+    assert.equal(event.request.headers.get("x-api-key"), null, "an older server (no reason) + a seat directory ⇒ seats exist");
+    assert.equal(out.response.status, 529);
+  });
+
+  test("single-login box: a live token that expires SOON is still used (no refusal; the PR #1685 regression)", async () => {
+    const box = makeBox({ live: { token: "SOON", expiresAt: Date.now() + 30_000 } });
+    const resolver = resolverOf({ seatFor: { seatId: null, live: true, reason: "no-seats" } });
+    const event = { request: request(), sessionID: "s1" };
+    await make(box, resolver).onRequest(event);
+    assert.equal(bearer(event.request), "Bearer SOON");
+    assert.equal(event.request.headers.get("x-api-key"), null);
+    assert.deepEqual(resolver.calls.filter((c) => c[0] === "refresh"), [], "no seat named → nothing to refresh");
+  });
+
+  test("a soon-to-expire live token whose seat is named is refreshed server-side, re-read, and the NEW token is used", async () => {
+    const box = makeBox({ live: { token: "OLD-LIVE", expiresAt: Date.now() + 30_000 } });
+    const resolver = resolverOf({
+      seatFor: { seatId: "solo", live: true },
+      refresh: () => {
+        box.setLive("NEW-LIVE-TOKEN"); // the claude CLI rewrote its file
+        return { seatId: "solo", live: true };
+      },
+    });
+    const event = { request: request(), sessionID: "s1" };
+    await make(box, resolver).onRequest(event);
+    assert.deepEqual(resolver.calls.filter((c) => c[0] === "refresh"), [["refresh", "claude", "solo"]]);
+    assert.equal(bearer(event.request), "Bearer NEW-LIVE-TOKEN");
+
+    // …and when the refresh changed nothing, the still-valid token is used rather than refused
+    const box2 = makeBox({ live: { token: "STILL-VALID", expiresAt: Date.now() + 30_000 } });
+    const e2 = { request: request(), sessionID: "s1" };
+    await make(box2, resolverOf({ seatFor: { seatId: "solo", live: true } })).onRequest(e2);
+    assert.equal(bearer(e2.request), "Bearer STILL-VALID");
+  });
+
+  test("an EXPIRED live token is refused: with seats → no identity; without seats → OpenCode's own credential, untouched", async () => {
+    const withSeats = makeBox({ seats: [["seat-1", "S1"]], live: { token: "EXPIRED", expiresAt: Date.now() - 1_000 } });
+    const a = await run(make(withSeats, resolverOf({ seatFor: { seatId: null, live: true, reason: "no-usable-seat" } })));
+    assert.equal(a.out.response.status, 401);
+    const viaDir = await run(make(withSeats, resolverOf({ seatFor: { seatId: null, live: true } })));
+    assert.equal(viaDir.event.request.headers.get("authorization"), null);
+    assert.equal(viaDir.out.response.status, 529);
+
+    const noSeats = makeBox({ live: { token: "EXPIRED", expiresAt: Date.now() - 1_000 } });
+    const original = request();
+    const event = { request: original, sessionID: "s1" };
+    await make(noSeats, resolverOf({ seatFor: { seatId: null, live: true, reason: "no-seats" } })).onRequest(event);
+    assert.equal(event.request, original, "API-key / own-credential boxes are unchanged");
+    assert.equal(original.headers.get("x-api-key"), "OPENCODE-OWN-KEY");
+  });
+
+  test("a live token that got a 401 is never used again while the file is unchanged; a new token is picked up", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]], live: { token: "REVOKED-1" } });
+    const resolver = resolverOf({ seatFor: { seatId: null, live: true } });
+    const ex = make(box, resolver);
+    // first request: signed with the live login → the server says 401; nothing cures it (no refresh, no seat)
+    const first = { request: request(), sessionID: "s1" };
+    await ex.onRequest(first);
+    assert.equal(bearer(first.request), "Bearer REVOKED-1");
+    const out = { request: first.request, response: new Response("{}", { status: 401 }) };
+    await ex.onResponse(out);
+    assert.equal(out.response.status, 401);
+    // second request, same file → refused (seats exist ⇒ unsigned)
+    const second = { request: request(), sessionID: "s2" };
+    await ex.onRequest(second);
+    assert.equal(second.request.headers.get("authorization"), null);
+    assert.equal(second.request.headers.get("x-api-key"), null);
+    // the file now holds another token → used again
+    box.setLive("A-DIFFERENT-TOKEN");
+    const third = { request: request(), sessionID: "s3" };
+    await ex.onRequest(third);
+    assert.equal(bearer(third.request), "Bearer A-DIFFERENT-TOKEN");
+
+    // no seats: same memory, but the box falls back to OpenCode's own credential
+    const solo = makeBox({ live: { token: "REVOKED-2" } });
+    const ex2 = make(solo, resolverOf({ seatFor: { seatId: null, live: true, reason: "no-seats" } }));
+    const s1 = { request: request(), sessionID: "s1" };
+    await ex2.onRequest(s1);
+    await ex2.onResponse({ request: s1.request, response: new Response("{}", { status: 401 }) });
+    const original = request();
+    const s2 = { request: original, sessionID: "s2" };
+    await ex2.onRequest(s2);
+    assert.equal(s2.request, original);
+  });
+
+  test("no seats and no live login: OpenCode's own credential is untouched (API-key boxes unchanged)", async () => {
+    const box = makeBox();
+    const original = request();
+    const event = { request: original, sessionID: "s1" };
+    await make(box, resolverOf({ seatFor: { seatId: null, live: true, reason: "no-seats" } })).onRequest(event);
+    assert.equal(event.request, original);
+    assert.equal(original.headers.get("x-api-key"), "OPENCODE-OWN-KEY");
+    // server unreachable + no seats directory either: same
+    const down = { request: original, sessionID: "s1" };
+    await make(box, resolverOf({ seatFor: { ok: false, why: "unreachable" } })).onRequest(down);
+    assert.equal(down.request, original);
+  });
+
+  test("a cached answer is used when the server is slow (it is the conversation's seat, not 'unreachable')", async () => {
+    const box = makeBox({ seats: [["seat-1", "TOK-1"]] });
+    const resolver = resolverOf({ seatFor: { seatId: "seat-1", live: false, credentialFile: box.files["seat-1"] } });
+    const event = { request: request(), sessionID: "s1" };
+    await make(box, resolver).onRequest(event);
+    assert.equal(bearer(event.request), "Bearer TOK-1");
+  });
+
+  test("401 on a seat: refresh fails → /limit {reason:auth} moves the conversation → resent ONCE on the new seat; no second resend", async () => {
+    const box = makeBox({ seats: [["seat-old", "OLD"], ["seat-new", "NEW"], ["seat-third", "THIRD"]] });
+    const answers = [
+      { seatId: "seat-new", live: false, credentialFile: box.files["seat-new"], moved: true },
+      { seatId: "seat-third", live: false, credentialFile: box.files["seat-third"], moved: true },
+    ];
+    const resolver = resolverOf({
+      seatFor: { seatId: "seat-old", live: false, credentialFile: box.files["seat-old"] },
+      refresh: null,
+      limit: () => answers.shift() ?? null,
+    });
+    const sent = [];
+    const ex = make(box, resolver, async (req) => (sent.push(req), new Response('{"error":"revoked"}', { status: 401 })));
+    const { out } = await run(ex);
+    assert.deepEqual(resolver.calls.filter((c) => c[0] === "limit"), [["limit", "claude", "auth"]], "one /limit, reason auth");
+    assert.equal(sent.length, 1, "resent once");
+    assert.equal(bearer(sent[0]), "Bearer NEW");
+    assert.equal(out.response.status, 401, "the second 401 is final: no third seat is tried");
+    assert.ok(resolver.calls.some((c) => c[0] === "remember"));
+  });
+
+  test("401 retried after a refresh and still 401 → /limit auth → one resend; a later 429 cannot switch seats again", async () => {
+    const box = makeBox({ seats: [["seat-old", "STALE"], ["seat-new", "NEW"]] });
+    const resolver = resolverOf({
+      seatFor: { seatId: "seat-old", live: false, credentialFile: box.files["seat-old"] },
+      refresh: () => {
+        box.seatFile("seat-old", "REFRESHED-BUT-STILL-REJECTED");
+        return { seatId: "seat-old", live: false, credentialFile: box.files["seat-old"] };
+      },
+      limit: { seatId: "seat-new", live: false, credentialFile: box.files["seat-new"], moved: true },
+    });
+    const sent = [];
+    const replies = [new Response("{}", { status: 401 }), new Response("{}", { status: 429, headers: { "retry-after": "9999" } })];
+    const ex = make(box, resolver, async (req) => (sent.push(req), replies.shift() ?? new Response("{}", { status: 500 })));
+    const { out } = await run(ex);
+    assert.deepEqual(sent.map(bearer), ["Bearer REFRESHED-BUT-STILL-REJECTED", "Bearer NEW"]);
+    assert.equal(resolver.calls.filter((c) => c[0] === "limit").length, 1, "the 429 on the new seat does not ask /limit again");
+    assert.equal(out.response.status, 429);
+  });
+
+  test("401 on the live login with seats on the box: forgotten, re-resolved, resent ONCE on a seat", async () => {
+    const box = makeBox({ seats: [["seat-1", "SEAT-TOKEN"]], live: { token: "LIVE-DEAD" } });
+    let asked = 0;
+    let liveAnswer = false;
+    const resolver = resolverOf({
+      seatFor: () => (asked++ === 0 || liveAnswer ? { seatId: null, live: true } : { seatId: "seat-1", live: false, credentialFile: box.files["seat-1"] }),
+    });
+    const sent = [];
+    const ex = make(box, resolver, async (req) => (sent.push(req), new Response("{}", { status: 200 })));
+    const event = { request: request(), sessionID: "s1" };
+    await ex.onRequest(event);
+    assert.equal(bearer(event.request), "Bearer LIVE-DEAD");
+    const out = { request: event.request, response: new Response("{}", { status: 401 }) };
+    await ex.onResponse(out);
+    assert.deepEqual(sent.map(bearer), ["Bearer SEAT-TOKEN"]);
+    assert.equal(out.response.status, 200);
+    assert.ok(resolver.calls.some((c) => c[0] === "forget"));
+    // and the dead live token is not used for the next conversation
+    const next = { request: request(), sessionID: "s2" };
+    await make(box, resolverOf({ seatFor: { seatId: null, live: true } }), undefined).onRequest(next);
+    assert.equal(bearer(next.request), "Bearer LIVE-DEAD", "a fresh plugin instance knows nothing — memory is per instance");
+    liveAnswer = true;
+    const again = { request: request(), sessionID: "s3" };
+    await ex.onRequest(again);
+    assert.equal(again.request.headers.get("authorization"), null, "this instance remembers the dead token");
+  });
+
+  test("codex is unchanged: an unreachable server leaves a Codex request alone even when Claude seats exist", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]] });
+    const original = new Request("https://chatgpt.com/backend-api/codex/responses", { method: "POST", headers: { authorization: "Bearer opencode-own" }, body: '{"model":"gpt-x"}' });
+    const event = { request: original, sessionID: "s1" };
+    await make(box, resolverOf({ seatFor: { ok: false, why: "unreachable" } })).onRequest(event);
+    assert.equal(event.request, original);
+  });
+});
+
+describe("plugin entry", () => {
+  test("setup registers the http.request / http.response hooks FIRST, before the provider transform and the identity hooks", async () => {
+    const order = [];
+    const ctx = {
+      provider: { transform: async () => order.push("provider.transform") },
+      session: { hook: async (kind, _fn, opts) => order.push(`${kind}:${opts?.providerID}`), get: async () => ({}) },
+    };
+    await pluginEntry.setup(ctx);
+    assert.deepEqual(order.slice(0, 4), ["http.request:anthropic", "http.response:anthropic", "http.request:openai", "http.response:openai"]);
+    assert.equal(order[4], "provider.transform");
+    assert.ok(order.includes("context:anthropic") && order.includes("title:anthropic"));
   });
 });
