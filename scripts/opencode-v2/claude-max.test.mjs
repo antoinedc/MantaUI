@@ -406,7 +406,7 @@ describe("seat resolver", () => {
     assert.equal(f.calls.length, 1);
   });
 
-  test("FAIL-SAFE: error / non-200 / bad JSON → last answer for the conversation, else null (= live login)", async () => {
+  test("FAIL-SAFE: error / non-200 / bad JSON → last answer for the conversation, else null", async () => {
     let t = 0;
     let mode = "ok";
     const f = fakeFetch(() => {
@@ -415,7 +415,7 @@ describe("seat resolver", () => {
       if (mode === "junk") return new Response("not json", { status: 200 });
       throw new Error("connection refused");
     });
-    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", now: () => t });
+    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", now: () => t, resolveBudgetMs: 10 });
     mode = "500";
     assert.equal(await r.seatFor("claude", ids), null, "no prior answer → null");
     mode = "ok";
@@ -427,19 +427,31 @@ describe("seat resolver", () => {
     }
   });
 
-  test("1.5 s timeout: a hung server aborts the call and fails open", async () => {
+  test("slow first resolve retries within a bounded budget and uses the seat", async () => {
+    const f = fakeFetch((call) => f.calls.length === 1
+      ? new Promise((_res, reject) => call.signal.addEventListener("abort", () => reject(new Error("timeout"))))
+      : jres({ seatId: "seat-slow", live: false, credentialFile: "/seat" }));
+    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", resolveBudgetMs: 4_000 });
+    const simultaneous = await Promise.all([r.seatFor("claude", ids), r.seatFor("claude", ids)]);
+    assert.equal(simultaneous[0].seatId, "seat-slow");
+    assert.equal(simultaneous[1].seatId, "seat-slow");
+    assert.equal(f.calls.length, 2, "single-flight across both attempts");
+  });
+
+  test("a hung server aborts and eventually exhausts the resolve budget", async () => {
     const f = fakeFetch(
       (call) =>
         new Promise((_res, rej) => {
           call.signal.addEventListener("abort", () => rej(new Error("aborted")));
         }),
     );
-    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x" });
+    const r = seats.createSeatResolver({ fetch: f, base: () => "http://x", resolveBudgetMs: 1_550 });
     const t0 = Date.now();
     assert.equal(await r.seatFor("claude", ids), null);
     const took = Date.now() - t0;
-    assert.ok(took >= 1400 && took < 3000, `took ${took}ms`);
+    assert.ok(took >= 1500 && took < 3000, `took ${took}ms`);
     assert.equal(seats.RESOLVE_TIMEOUT_MS, 1500);
+    assert.equal(seats.RESOLVE_BUDGET_MS, 15_000);
     assert.equal(seats.REFRESH_TIMEOUT_MS, 30_000);
     assert.equal(seats.LIMIT_TIMEOUT_MS, 10_000);
   });
@@ -551,6 +563,30 @@ describe("exchange (request + response hooks)", () => {
     assert.equal(bearerOf(event.request), "Bearer SEAT-2-TOKEN");
   });
 
+  test("slow resolve uses the eventual seat rather than a usable live login", async () => {
+    const file = writeSeat("seat-slow", "SLOW-SEAT-TOKEN");
+    let attempts = 0;
+    const f = fakeFetch((call) => ++attempts === 1
+      ? new Promise((_res, reject) => call.signal.addEventListener("abort", () => reject(new Error("timeout"))))
+      : jres({ seatId: "seat-slow", live: false, credentialFile: file }));
+    const resolver = seats.createSeatResolver({ fetch: f, base: () => "http://x", resolveBudgetMs: 4_000 });
+    const event = { request: anthropicRequest(), sessionID: "slow" };
+    await make(resolver).onRequest(event);
+    assert.equal(bearerOf(event.request), "Bearer SLOW-SEAT-TOKEN");
+    assert.equal(attempts, 2);
+  });
+
+  test("resolve failure with expired live credentials reports no usable identity, never signs live", async () => {
+    writeFileSync(liveFile, JSON.stringify({ claudeAiOauth: { accessToken: "EXPIRED", expiresAt: Date.now() - 1000 } }));
+    const ex = make(fakeResolver({ seatFor: async () => null }));
+    const event = { request: anthropicRequest(), sessionID: "unplaced" };
+    event.request.headers.delete("x-api-key");
+    event.request.headers.set("authorization", "Bearer EXPIRED");
+    await assert.rejects(ex.onRequest(event), /No usable Claude identity/);
+    assert.equal(bearerOf(event.request), "Bearer EXPIRED", "no replacement with an expired live credential");
+    writeFileSync(liveFile, JSON.stringify({ claudeAiOauth: { accessToken: "LIVE-TOKEN", expiresAt: Date.now() + 3_600_000 } }));
+  });
+
   test("two sessions → two seats", async () => {
     const f1 = writeSeat("seat-a", "TOKEN-A");
     const f2 = writeSeat("seat-b", "TOKEN-B");
@@ -652,6 +688,27 @@ describe("exchange (request + response hooks)", () => {
     assert.equal(bearerOf(sentRequests[0]), "Bearer FRESH");
     assert.equal(sentRequests[0].url, "https://api.anthropic.com/v1/messages?beta=true");
     assert.equal(JSON.parse(await sentRequests[0].text()).tools[0].name, "mcp_Shell", "the replayed body keeps the rewrite");
+  });
+
+  test("401 on live re-resolves uncached and retries once on its assigned seat", async () => {
+    const file = writeSeat("seat-late", "SEAT-LATE");
+    let calls = 0;
+    const resolver = fakeResolver({
+      seatFor: async () => ++calls === 1 ? null : { seatId: "seat-late", live: false, credentialFile: file },
+    });
+    const replays = [];
+    const ex = make(resolver, async (req) => (replays.push(req), new Response("{}", { status: 200 })));
+    const event = { request: anthropicRequest(), sessionID: "late" };
+    await ex.onRequest(event);
+    assert.equal(bearerOf(event.request), "Bearer LIVE-TOKEN");
+    const response = { request: event.request, response: new Response("revoked", { status: 401 }) };
+    await ex.onResponse(response);
+    assert.equal(response.response.status, 200);
+    assert.equal(bearerOf(replays[0]), "Bearer SEAT-LATE");
+    assert.equal(replays.length, 1);
+    assert.equal(calls, 2);
+    assert.ok(resolver.calls.some(([action]) => action === "forget"));
+    assert.ok(!resolver.calls.some(([action]) => action === "refresh"));
   });
 
   test("401 with a refresh that fails (the fake server's error) → the original 401 comes back, nothing rotated", async () => {
@@ -955,7 +1012,7 @@ describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key au
   });
 
   test("an API-key request with nothing to fix is left as the very same Request", async () => {
-    const plain = new Request("https://api.anthropic.com/v1/messages", { method: "POST", body: JSON.stringify({ messages: [] }) });
+    const plain = new Request("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": "sk-ant-keep-me" }, body: JSON.stringify({ messages: [] }) });
     const event = { request: plain, sessionID: "s" };
     await noCreds().onRequest(event);
     assert.equal(event.request, plain);

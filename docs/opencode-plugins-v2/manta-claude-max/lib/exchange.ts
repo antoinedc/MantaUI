@@ -132,6 +132,7 @@ export function createExchange(deps: ExchangeDeps) {
   // Keyed by the Request OpenCode hands the response hook (verified identical to
   // the one this plugin set on the request event).
   const sent = new WeakMap<Request, Sent>();
+  const deadLiveTokens = new Set<string>();
 
   // ---- identity ----------------------------------------------------------
 
@@ -156,12 +157,9 @@ export function createExchange(deps: ExchangeDeps) {
   async function liveIdentity(provider: Provider, seatId: string | null): Promise<Identity | null> {
     if (provider === "codex") return { kind: "live", seatId, creds: null };
     let creds = credentials.readLive();
-    if (creds && expiresSoon(creds.expiresAt, now()) && seatId) {
-      // The server never refreshes the live login (the `claude` CLI owns it); asking
-      // keeps the contract uniform and the re-read picks up a CLI-side refresh.
-      await resolver.refresh(provider, seatId);
-      creds = credentials.readLive() ?? creds;
-    }
+    // The server cannot refresh a live CLI login. Never sign with a token whose
+    // expiry is known to have passed (or whose 401 we already observed).
+    if (creds && (expiresSoon(creds.expiresAt, now()) || deadLiveTokens.has(sha12(creds.accessToken)))) return null;
     return creds ? { kind: "live", seatId, creds } : null;
   }
 
@@ -252,7 +250,13 @@ export function createExchange(deps: ExchangeDeps) {
         model: model || null,
       };
       const identity = await pickIdentity(provider, ids);
-      if (!identity) return cacheOnly(); // fail open: send what OpenCode built (cache fix aside)
+      if (!identity) {
+        // A real API-key request is not ours to reject; only the unavailable
+        // subscription path needs an explicit error instead of a revoked token.
+        if (req.headers.get("x-api-key") && !req.headers.get("authorization")) return cacheOnly();
+        if (provider === "claude") throw new Error("No usable Claude identity: seat resolution unavailable and live login expired or unreadable");
+        return cacheOnly();
+      }
       if (provider === "codex" && !identity.creds) return; // live Codex login: untouched
 
       const s: Sent = {
@@ -282,6 +286,7 @@ export function createExchange(deps: ExchangeDeps) {
         rewritten: provider === "claude" && body !== text,
       });
     } catch (e) {
+      if ((e as any)?.message?.startsWith("No usable Claude identity:")) throw e;
       log("http_request_error", { msg: String((e as any)?.message ?? e) });
     }
   }
@@ -302,9 +307,21 @@ export function createExchange(deps: ExchangeDeps) {
       return creds && creds.accessToken !== before ? { kind: "seat", seatId: cur.seatId, file, creds } : null;
     }
     if (cur.kind === "live" && s.provider === "claude") {
-      if (cur.seatId) await resolver.refresh(s.provider, cur.seatId);
+      if (before) {
+        deadLiveTokens.add(sha12(before));
+        if (deadLiveTokens.size > MAX_PARENT_CACHE) deadLiveTokens.delete(deadLiveTokens.values().next().value as string);
+      }
+      // A live 401 may be the result of a late placement. Ignore the cached
+      // answer and ask for the conversation's seat again before touching live.
+      resolver.forget(s.provider, s.ids);
+      const answer = await resolver.seatFor(s.provider, s.ids);
+      if (answer && !answer.live && answer.seatId) {
+        const identity = await seatIdentity(s.provider, answer);
+        if (identity) return identity;
+      }
       const creds = credentials.readLive();
-      return creds && creds.accessToken !== before ? { kind: "live", seatId: cur.seatId, creds } : null;
+      return creds && !expiresSoon(creds.expiresAt, now()) && !deadLiveTokens.has(sha12(creds.accessToken))
+        ? { kind: "live", seatId: cur.seatId, creds } : null;
     }
     return null;
   }

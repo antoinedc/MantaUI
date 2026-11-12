@@ -1,5 +1,5 @@
 // Seat resolution against manta-server — behaviour identical to V1
-// `manta-accounts.ts`: `GET /api/accounts/resolve` (1.5 s), a 30 s cache per
+// `manta-accounts.ts`: `GET /api/accounts/resolve` (1.5 s initially), a 30 s cache per
 // conversation (500 entries), single-flight lookups, and FAIL-SAFE answers (the
 // last result for the conversation, else "no seat" = the single live login).
 // `POST /api/accounts/refresh` (30 s) and `/limit` (10 s) are single-purpose
@@ -13,6 +13,7 @@ import type { Provider } from "./creds.ts";
 export const DEFAULT_SERVER = "http://127.0.0.1:8787";
 export const RESOLVE_CACHE_MS = 30_000;
 export const RESOLVE_TIMEOUT_MS = 1_500;
+export const RESOLVE_BUDGET_MS = 15_000;
 export const REFRESH_TIMEOUT_MS = 30_000;
 export const LIMIT_TIMEOUT_MS = 10_000;
 export const MAX_CACHE_ENTRIES = 500;
@@ -80,6 +81,8 @@ export interface SeatResolverDeps {
   base: () => string;
   token?: () => string | null;
   now?: () => number;
+  /** Test seam for the uncached resolve deadline. */
+  resolveBudgetMs?: number;
 }
 
 export interface SeatResolver {
@@ -101,6 +104,7 @@ export function createSeatResolver(deps: SeatResolverDeps): SeatResolver {
   const byConversation = new Map<string, { result: Resolved; at: number }>();
   const resolving = new Map<string, Promise<Resolved | null>>();
   const refreshing = new Map<string, Promise<Resolved | null>>();
+  const resolveBudgetMs = deps.resolveBudgetMs ?? RESOLVE_BUDGET_MS;
 
   const put = <V>(map: Map<string, V>, key: string, value: V) => {
     map.delete(key);
@@ -144,7 +148,22 @@ export function createSeatResolver(deps: SeatResolverDeps): SeatResolver {
         const q = new URLSearchParams({ provider, sessionID: ids.sessionID });
         if (ids.parentSessionID) q.set("parentSessionID", ids.parentSessionID);
         if (ids.model) q.set("model", ids.model);
-        run = call(`/api/accounts/resolve?${q}`, { method: "GET", timeoutMs: RESOLVE_TIMEOUT_MS })
+        run = (async () => {
+          // An uncached placement may wait behind the server's mutex. Give it
+          // several chances without letting a hung server block indefinitely.
+          const deadline = Date.now() + (cached ? RESOLVE_TIMEOUT_MS : resolveBudgetMs);
+          for (let attempt = 0; ; attempt++) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) return null;
+            const answer = await call(`/api/accounts/resolve?${q}`, {
+              method: "GET", timeoutMs: Math.min(remaining, RESOLVE_TIMEOUT_MS * 3 ** attempt),
+            });
+            if (answer) return answer;
+            if (cached) return null; // stale placement is the fail-safe; don't delay it
+            const delay = Math.min(200 * 2 ** attempt, 800, deadline - Date.now());
+            if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+        })()
           .catch(() => null)
           .finally(() => resolving.delete(key));
         resolving.set(key, run);
