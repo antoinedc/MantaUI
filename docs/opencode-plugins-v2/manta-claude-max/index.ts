@@ -13,6 +13,10 @@
 // $XDG_CONFIG_HOME/opencode/plugins/manta-claude-max/. Refresh is NEVER done
 // here: manta-server refreshes seats (`POST /api/accounts/refresh`) and the
 // `claude` CLI owns the live login; this plugin only re-reads the files.
+//
+// On a box with Claude seats a request is NEVER signed by OpenCode's own stored
+// Anthropic key: with no usable seat the plugin strips the credentials and answers
+// with a clear Manta error (see lib/exchange.ts). A box with no seats is unchanged.
 
 import { Plugin } from "@opencode/plugin";
 import { existsSync, readdirSync } from "node:fs";
@@ -45,9 +49,25 @@ export default Plugin.define({
     };
     log("setup", { cliVersion: cliVersion() });
 
+    // The http hooks go FIRST. A reload that re-registers this plugin's hooks leaves a
+    // window in which OpenCode sees none and signs with its own stored key; the
+    // earlier they are registered, the smaller that window is.
+    const exchange = createExchange({
+      resolver: createSeatResolver({ fetch: (...args) => fetch(...args), base: () => serverBase() }),
+      credentials: createCredentialReader(),
+      parentOf: createParentLookup((sessionID) => ctx.session.get({ sessionID })),
+      send: (request) => fetch(request),
+      log,
+    });
+
+    for (const providerID of ["anthropic", "openai"]) {
+      await ctx.session.hook("http.request", (event: any) => exchange.onRequest(event), { providerID });
+      await ctx.session.hook("http.response", (event: any) => exchange.onResponse(event), { providerID });
+    }
+
     // M1/R4 — the Anthropic provider is `activation: "auto"` (active only with an
     // API key / connection). Forcing it enabled makes its models selectable with
-    // no key at all (no `apiKey:""` sentinel in config); the http hooks below supply
+    // no key at all (no `apiKey:""` sentinel in config); the http hooks above supply
     // the subscription Bearer. The callback is synchronous and REPLAYED on every
     // registry rebuild, so the (cheap, sync) credentials check re-runs each time:
     // a login that appears after startup is picked up without a restart.
@@ -77,17 +97,5 @@ export default Plugin.define({
       );
     }
 
-    const exchange = createExchange({
-      resolver: createSeatResolver({ fetch: (...args) => fetch(...args), base: () => serverBase() }),
-      credentials: createCredentialReader(),
-      parentOf: createParentLookup((sessionID) => ctx.session.get({ sessionID })),
-      send: (request) => fetch(request),
-      log,
-    });
-
-    for (const providerID of ["anthropic", "openai"]) {
-      await ctx.session.hook("http.request", (event: any) => exchange.onRequest(event), { providerID });
-      await ctx.session.hook("http.response", (event: any) => exchange.onResponse(event), { providerID });
-    }
   },
 });
