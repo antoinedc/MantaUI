@@ -1220,7 +1220,30 @@ describe("exchange: never signed by OpenCode's own key when the box has seats", 
     const box = makeBox({ seats: [["seat-1", "S1"]] }); // no live file at all
     const { event, out } = await run(make(box, resolverOf({ seatFor: { seatId: null, live: true } })));
     assert.equal(event.request.headers.get("x-api-key"), null, "an older server (no reason) + a seat directory ⇒ seats exist");
-    assert.equal(out.response.status, 529);
+    assert.equal(out.response.status, 401, "the server answered: this will not heal by retrying, so it is final");
+    assert.equal((await out.response.json()).error.type, "authentication_error");
+  });
+
+  test("the server ANSWERED a live-served seat but the live token is empty / dead / expired → 401 authentication_error, never the retryable 529", async () => {
+    for (const [label, live] of [["empty", { token: "" }], ["expired", { token: "EXP", expiresAt: Date.now() - 1_000 }], ["absent", null]]) {
+      const box = makeBox({ seats: [["seat-1", "S1"]], live });
+      const { event, out } = await run(make(box, resolverOf({ seatFor: { seatId: "seat-1", live: true } })));
+      assert.equal(event.request.headers.get("x-api-key"), null, label);
+      assert.equal(out.response.status, 401, label);
+      assert.equal(out.response.headers.get("retry-after"), null, label);
+      assert.equal((await out.response.json()).error.type, "authentication_error", label);
+    }
+    // a seat answered with a file the plugin cannot read (outside the seats dir) and no usable live login
+    const box = makeBox({ seats: [["seat-1", "S1"]] });
+    const outside = join(box.dir, "outside.json");
+    writeFileSync(outside, JSON.stringify({ claudeAiOauth: { accessToken: "EVIL", expiresAt: Date.now() + 9e6 } }));
+    const r = await run(make(box, resolverOf({ seatFor: { seatId: "seat-1", live: false, credentialFile: outside } })));
+    assert.equal(r.out.response.status, 401);
+    // and the late re-decision follows the same rule: unreachable first, then "answered, unusable"
+    const box2 = makeBox({ seats: [["seat-1", "S1"]], live: { token: "" } });
+    let k = 0;
+    const r2 = await run(make(box2, resolverOf({ seatFor: () => (k++ === 0 ? { ok: false, why: "timeout" } : { seatId: "seat-1", live: true }) })));
+    assert.equal(r2.out.response.status, 401, "the 3 s lookup answered, so the kind is now final");
   });
 
   test("single-login box: a live token that expires SOON is still used (no refusal; the PR #1685 regression)", async () => {
@@ -1260,7 +1283,7 @@ describe("exchange: never signed by OpenCode's own key when the box has seats", 
     assert.equal(a.out.response.status, 401);
     const viaDir = await run(make(withSeats, resolverOf({ seatFor: { seatId: null, live: true } })));
     assert.equal(viaDir.event.request.headers.get("authorization"), null);
-    assert.equal(viaDir.out.response.status, 529);
+    assert.equal(viaDir.out.response.status, 401);
 
     const noSeats = makeBox({ live: { token: "EXPIRED", expiresAt: Date.now() - 1_000 } });
     const original = request();
@@ -1390,6 +1413,31 @@ describe("exchange: never signed by OpenCode's own key when the box has seats", 
     const again = { request: request(), sessionID: "s3" };
     await ex.onRequest(again);
     assert.equal(again.request.headers.get("authorization"), null, "this instance remembers the dead token");
+  });
+
+  test("an unexpected throw BEFORE the decision (parent lookup) on a box with seats still strips the stored key; no seats → untouched", async () => {
+    const box = makeBox({ seats: [["seat-1", "S1"]] });
+    const boom = async () => {
+      throw new Error("parent lookup exploded");
+    };
+    const event = { request: request(), sessionID: "s1" };
+    await make(box, resolverOf(), undefined, { parentOf: boom }).onRequest(event);
+    assert.equal(event.request.headers.get("x-api-key"), null, "OpenCode's stored key must not leave");
+    assert.equal(event.request.headers.get("authorization"), null);
+    assert.equal(JSON.parse(await event.request.text()).model, "claude-haiku-5-5", "the body is left as it was");
+
+    const solo = makeBox();
+    const original = request();
+    const e2 = { request: original, sessionID: "s1" };
+    await make(solo, resolverOf(), undefined, { parentOf: boom }).onRequest(e2);
+    assert.equal(e2.request, original);
+    assert.equal(original.headers.get("x-api-key"), "OPENCODE-OWN-KEY", "a box with no seats is unchanged");
+
+    // a request that is not a Claude target is never touched
+    const other = new Request("https://example.com/x", { method: "POST", headers: { "x-api-key": "K" }, body: "{}" });
+    const e3 = { request: other, sessionID: "s1" };
+    await make(box, resolverOf(), undefined, { parentOf: boom }).onRequest(e3);
+    assert.equal(e3.request.headers.get("x-api-key"), "K");
   });
 
   test("codex is unchanged: an unreachable server leaves a Codex request alone even when Claude seats exist", async () => {

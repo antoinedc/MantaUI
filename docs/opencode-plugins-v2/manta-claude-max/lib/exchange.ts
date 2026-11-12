@@ -277,7 +277,8 @@ export function createExchange(deps: ExchangeDeps) {
     }
     const live = await liveIdentity(provider, answer.seatId);
     if (live) return { identity: live, seatsExist };
-    return seatsExist ? { identity: null, closed: "seat-service-unavailable", seatsExist } : { identity: null, seatsExist };
+    // The server DID answer, so this is not "unreachable": a seat that cannot sign will not heal by retrying.
+    return seatsExist ? { identity: null, closed: "no-usable-seat", seatsExist } : { identity: null, seatsExist };
   }
 
   /** The identity for a seat answer (limit / refresh), or null when unusable. */
@@ -428,6 +429,33 @@ export function createExchange(deps: ExchangeDeps) {
       });
     } catch (e) {
       log("http_request_error", { msg: String((e as any)?.message ?? e) });
+      stripStoredCredentials(event);
+    }
+  }
+
+  /**
+   * Last resort after an unexpected throw in `onRequest`: on a box with Claude seats,
+   * OpenCode's own `authorization` / `x-api-key` must not go out. Best effort, never
+   * throws, and the body is left alone. Not registered as unsigned (there may be too
+   * little state to resend), so Anthropic's own 401 is what passes through.
+   */
+  function stripStoredCredentials(event: any): void {
+    try {
+      const req: Request | undefined = event?.request;
+      if (!req || sent.has(req) || unsigned.has(req)) return; // already ours
+      if (matchTarget(req.url, req.method) !== "claude" || !credentials.hasSeats("claude")) return;
+      try {
+        req.headers.delete("authorization");
+        req.headers.delete("x-api-key");
+      } catch {
+        const headers = new Headers(req.headers);
+        headers.delete("authorization");
+        headers.delete("x-api-key");
+        event.request = new Request(req, { headers });
+      }
+      log("unsigned_after_error", { sessionID: typeof event.sessionID === "string" ? event.sessionID : null });
+    } catch {
+      /* nothing more can be done without throwing */
     }
   }
 
