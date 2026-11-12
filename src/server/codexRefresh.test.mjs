@@ -150,7 +150,7 @@ test("sweep: a non-live Codex seat inside the 5-minute margin is refreshed; one 
 
 test("sweep: with no Codex targets (the default) behaves exactly as before", async () => {
   let live = 0;
-  const sweep = createCredentialRefreshSweep({ readCreds: () => ({ expiresAt: 1 }), shouldRefresh: () => true, refresh: async () => live++ });
+  const sweep = createCredentialRefreshSweep({ readCreds: () => ({ accessToken: "live-tok", expiresAt: 1 }), shouldRefresh: () => true, refresh: async () => live++ });
   await sweep.sweep();
   assert.equal(live, 1);
 });

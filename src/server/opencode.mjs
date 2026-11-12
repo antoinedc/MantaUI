@@ -14,6 +14,7 @@
 import { spawn as cpSpawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
@@ -2684,13 +2685,62 @@ export async function refreshClaudeCredentials() {
   return _refreshInFlight;
 }
 
+// ---------------------------------------------------------------------------
+// Recovery gating (docs/superpowers/specs/2026-11-12-claude-seat-routing.md §3.5)
+//
+// Every 401 a seat request gets is reported by opencode as a session error, and
+// the reactive recovery below used to treat each one as a LIVE-login problem: it
+// ran `claude` against the live file (44 times on 11-12, all "refresh-token-
+// expired") for failures that had nothing to do with it. The live login is only
+// worth refreshing when it can matter and can work:
+//   (a) the box has no Claude seats, or the failing session's conversation is
+//       served by the live login (`isLiveServed`, injected by index.mjs);
+//   (b) the live file holds a token;
+//   (c) the live refresh has not already said "refresh-token-expired" for the
+//       CURRENT content of the file (remembered until the file changes).
+// ---------------------------------------------------------------------------
+
+/** Content key of the live file when its refresh last answered "refresh-token-expired". */
+let _liveRefreshDeadFor = null;
+
+const contentKey = (raw) => (typeof raw === "string" ? createHash("sha256").update(raw).digest("hex").slice(0, 16) : null);
+
+function readLiveRaw() {
+  try {
+    return readFileSync(CREDENTIALS_PATH, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** Remember (or forget) what the live refresh just found out about the file's current content. */
+export function rememberLiveRefreshOutcome(result, readRaw = readLiveRaw) {
+  if (result?.ok === true) _liveRefreshDeadFor = null;
+  else if (result?.reason === "refresh-token-expired") _liveRefreshDeadFor = contentKey(readRaw());
+}
+
+/** Test-only: forget which live-file content was found dead. */
+export function _resetLiveRefreshMemory() {
+  _liveRefreshDeadFor = null;
+}
+
+/** Gates (b) and (c): does the live file hold a token, and is its refresh not known to be dead? */
+export function liveRefreshWorthTrying({ creds = undefined, readRaw = readLiveRaw } = {}) {
+  const raw = readRaw();
+  const parsed = creds !== undefined ? creds : raw == null ? null : parseCredentials(raw);
+  if (!parsed || (!parsed.accessToken && !parsed.refreshToken)) return false;
+  if (_liveRefreshDeadFor && contentKey(raw) === _liveRefreshDeadFor) return false;
+  return true;
+}
+
 /**
  * Server-side trigger for the Claude credential auto-refresh (BET-280).
  * Called from the opencode event pump on every `session.error`; only fires
  * a refresh when the error matches our message-shape predicate (catches the
  * UnknownError wrapper the plugin throws today AND the legacy error-name
- * compatibility branch in `isClaudeCredentialError`) AND the cooldown gate
- * is open (catches the burst).
+ * compatibility branch in `isClaudeCredentialError`), the live login is worth
+ * refreshing (gates (a)–(c) above) AND the cooldown gate is open (catches the
+ * burst). Skipped events do not consume the cooldown.
  *
  * Runs without a client attached — that's the BET-280 whole point. The
  * renderer used to drive this via an IPC channel + an SSE callback, which
@@ -2702,17 +2752,20 @@ export async function refreshClaudeCredentials() {
  * result anyway).
  *
  * @param {any} evt  opencode event from `subscribeEvents`
+ * @param {{isLiveServed?: (sessionID: string|undefined) => boolean, readRaw?: () => string|null, refresh?: () => Promise<unknown>, now?: () => number}} [deps]
  */
-export async function maybeRecoverCredentials(evt) {
+export async function maybeRecoverCredentials(evt, { isLiveServed = undefined, readRaw = readLiveRaw, refresh = refreshClaudeCredentials, now = Date.now } = {}) {
   try {
     if (evt?.type !== "session.error") return;
     if (!isClaudeCredentialError(evt.properties?.error)) return;
-    if (!shouldAttemptRecovery(_lastRecoveryAt, Date.now())) return;
-    _lastRecoveryAt = Date.now();
+    if (isLiveServed && !isLiveServed(evt.properties?.sessionID)) return;
+    if (!liveRefreshWorthTrying({ readRaw })) return;
+    if (!shouldAttemptRecovery(_lastRecoveryAt, now())) return;
+    _lastRecoveryAt = now();
     // The refresh function logs its own outcome; we don't await it because
     // the pump must never block. A failure is benign (next event within the
     // cooldown won't retry; one past the cooldown will).
-    void refreshClaudeCredentials();
+    void Promise.resolve(refresh()).catch(() => {});
   } catch (e) {
     // Defensive: a thrown predicate or unexpected shape must never escape
     // into the pump. Log so the operator can see it happened.
@@ -2798,6 +2851,7 @@ async function runClaudeRefresh({
 
 async function doRefresh() {
   const r = await runClaudeRefresh();
+  rememberLiveRefreshOutcome(r);
   if (r.ok) _lastRecoverySuccessAt = Math.floor(r.at / 1000);
   return logAndReturn(r.ok ? { ok: true, expiresAt: r.expiresAt } : { ok: false, reason: r.reason });
 }
@@ -2930,6 +2984,10 @@ export function createCredentialRefreshSweep({
   // poll 401s forever; this refreshes it ahead of expiry. The callback decides
   // for itself whether a refresh is due (it re-reads the entry). Null → nothing.
   refreshLiveCodex = null,
+  // Seat-routing spec §3.5 (b)+(c): the live login is only refreshed while its
+  // file holds a token and its refresh has not already said "refresh-token-
+  // expired" for this very content. Seat refreshes are never gated by it.
+  liveRefreshWorthIt = (creds) => liveRefreshWorthTrying({ creds }),
 } = {}) {
   let inFlight = false;
 
@@ -2938,7 +2996,7 @@ export function createCredentialRefreshSweep({
     inFlight = true;
     try {
       const creds = readCreds();
-      if (shouldRefresh(creds, now())) {
+      if (liveRefreshWorthIt(creds) && shouldRefresh(creds, now())) {
         try {
           await refresh();
         } catch {

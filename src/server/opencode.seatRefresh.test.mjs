@@ -134,7 +134,7 @@ test("sweep: live refresh is unchanged, and expiring seats are refreshed while c
     const seatRefreshes = [];
     const { sweep } = createCredentialRefreshSweep({
       now: () => NOW,
-      readCreds: () => ({ expiresAt: NOW + 5 * 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
+      readCreds: () => ({ accessToken: "live-tok", expiresAt: NOW + 5 * 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
       refresh: async () => liveRefreshes.push("live"),
       listSeatTargets: async () => [{ seatId: "seat-1", dir: soon.dir }, { seatId: "seat-2", dir: later.dir }],
       refreshSeat: async (t) => seatRefreshes.push(t.seatId),
@@ -155,7 +155,7 @@ test("sweep: one seat throwing does not stop the next; a broken seat store does 
     const refreshed = [];
     const { sweep } = createCredentialRefreshSweep({
       now: () => NOW,
-      readCreds: () => ({ expiresAt: NOW + 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
+      readCreds: () => ({ accessToken: "live-tok", expiresAt: NOW + 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
       refresh: async () => refreshed.push("live"),
       listSeatTargets: async () => [{ seatId: "seat-1", dir: a.dir }, { seatId: "seat-2", dir: b.dir }],
       refreshSeat: async (t) => {
@@ -169,7 +169,7 @@ test("sweep: one seat throwing does not stop the next; a broken seat store does 
     const refreshed2 = [];
     const { sweep: sweep2 } = createCredentialRefreshSweep({
       now: () => NOW,
-      readCreds: () => ({ expiresAt: NOW + 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
+      readCreds: () => ({ accessToken: "live-tok", expiresAt: NOW + 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
       refresh: async () => refreshed2.push("live"),
       listSeatTargets: async () => {
         throw new Error("store down");
@@ -187,7 +187,7 @@ test("sweep: with no seat options it behaves exactly as before (live only)", asy
   const refreshed = [];
   const { sweep } = createCredentialRefreshSweep({
     now: () => NOW,
-    readCreds: () => ({ expiresAt: NOW + 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
+    readCreds: () => ({ accessToken: "live-tok", expiresAt: NOW + 60_000, refreshTokenExpiresAt: NOW + 1e9 }),
     refresh: async () => refreshed.push("live"),
   });
   await sweep();
