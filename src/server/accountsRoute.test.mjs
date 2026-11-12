@@ -238,3 +238,55 @@ test("limit: the model reaches both the re-decision and the follow-up resolve; a
   }
   assert.ok(log.every(([, m]) => m === null), "every malformed model became unknown");
 });
+
+// ---- seat routing spec §3.6: warming, reason ----------------------------------
+
+test("resolve: a seat table still warming answers 503 {error:'warming'}; any other failure still propagates", async () => {
+  const warming = Object.assign(new Error("warming"), { code: "SEAT_TABLE_WARMING" });
+  const { call } = harness({ ...assigner, resolve: async () => { throw warming; } });
+  assert.deepEqual((await call("GET", "/api/accounts/resolve?provider=claude&sessionID=s")).out, [503, { error: "warming" }]);
+});
+
+test("resolve: the answer is passed through untouched, `reason` included", async () => {
+  for (const answer of [{ seatId: null, live: true, reason: "no-seats" }, { seatId: null, live: true, reason: "no-usable-seat" }]) {
+    const { call } = harness({ ...assigner, resolve: async () => answer });
+    assert.deepEqual((await call("GET", "/api/accounts/resolve?provider=claude&sessionID=s")).out, [200, answer]);
+  }
+});
+
+test("limit: reason defaults to limit; 'auth' marks the seat auth-failed instead; anything else is a 400", async () => {
+  const calls = [];
+  const usage = [];
+  const seatAssigner = {
+    ...assigner,
+    markLimited: (...a) => calls.push(["limited", ...a]),
+    markAuthFailed: (...a) => calls.push(["auth", ...a]),
+    reconsider: async () => ({ moved: false }),
+    _store: () => ({ children: {} }),
+  };
+  const { call } = harness(seatAssigner, { refreshUsageInBackground: (p) => usage.push(p) });
+  const body = (extra) => ({ provider: "claude", sessionID: "c", ...extra });
+  assert.equal((await call("POST", "/api/accounts/limit", { body: body({}) })).out[0], 200);
+  assert.equal((await call("POST", "/api/accounts/limit", { body: body({ reason: "limit" }) })).out[0], 200);
+  assert.deepEqual(calls, [["limited", "claude", "c"], ["limited", "claude", "c"]]);
+  assert.deepEqual(usage, ["claude", "claude"]);
+  calls.length = 0;
+  usage.length = 0;
+  const auth = await call("POST", "/api/accounts/limit", { body: body({ reason: "auth" }) });
+  assert.equal(auth.out[0], 200);
+  assert.deepEqual(calls, [["auth", "claude", "c"]], "the auth path never marks the seat limited");
+  assert.deepEqual(usage, [], "and is not a usage signal");
+  for (const reason of ["bogus", "", 3, false]) {
+    assert.deepEqual((await call("POST", "/api/accounts/limit", { body: body({ reason }) })).out, [400, { error: "invalid" }]);
+  }
+});
+
+test("limit: a sub-agent's auth failure marks its ROOT conversation", async () => {
+  const marked = [];
+  const { call } = harness(
+    { ...assigner, markAuthFailed: (...a) => marked.push(a), reconsider: async () => ({ moved: false }), _store: () => ({ children: { kid: { root: "root" } } }) },
+    {},
+  );
+  await call("POST", "/api/accounts/limit", { body: { provider: "claude", sessionID: "kid", reason: "auth" } });
+  assert.deepEqual(marked, [["claude", "root"]]);
+});

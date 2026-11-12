@@ -1,9 +1,14 @@
-// Seat resolution against manta-server — behaviour identical to V1
-// `manta-accounts.ts`: `GET /api/accounts/resolve` (1.5 s), a 30 s cache per
-// conversation (500 entries), single-flight lookups, and FAIL-SAFE answers (the
-// last result for the conversation, else "no seat" = the single live login).
-// `POST /api/accounts/refresh` (30 s) and `/limit` (10 s) are single-purpose
-// round trips; refresh is also single-flight per seat.
+// Seat resolution against manta-server: `GET /api/accounts/resolve`, a 30 s
+// cache per conversation (500 entries) and single-flight lookups.
+//
+// A conversation we have never seen is ONE request with the full budget
+// (RESOLVE_BUDGET_MS, 10 s) — never abort-and-retry, which only queues more work
+// on the server. A conversation with a cached answer refreshes it under the short
+// RESOLVE_TIMEOUT_MS and keeps the last answer when that fails. `seatFor` says WHY
+// it has no answer (`unreachable` | `timeout` | `warming`) so the exchange can
+// choose the right error instead of guessing. `POST /api/accounts/refresh` (30 s)
+// and `/limit` (10 s) are single-purpose round trips; refresh is also
+// single-flight per seat.
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -12,7 +17,12 @@ import type { Provider } from "./creds.ts";
 
 export const DEFAULT_SERVER = "http://127.0.0.1:8787";
 export const RESOLVE_CACHE_MS = 30_000;
+/** A cached conversation's refresh: short, because the last answer is the fallback. */
 export const RESOLVE_TIMEOUT_MS = 1_500;
+/** A conversation with no cached answer: ONE request, no retry. */
+export const RESOLVE_BUDGET_MS = 10_000;
+/** The one more lookup made for an unsigned request, once its response is back. */
+export const LATE_RESOLVE_BUDGET_MS = 3_000;
 export const REFRESH_TIMEOUT_MS = 30_000;
 export const LIMIT_TIMEOUT_MS = 10_000;
 export const MAX_CACHE_ENTRIES = 500;
@@ -30,7 +40,14 @@ export interface Resolved {
   live: boolean;
   credentialFile?: string;
   moved?: boolean;
+  /** Why there is no seat (only sent with `seatId: null`; older servers omit it). */
+  reason?: NoSeatReason;
 }
+
+export type NoSeatReason = "no-seats" | "no-usable-seat";
+export type LimitReason = "limit" | "auth";
+export type SeatLookupFailure = "unreachable" | "timeout" | "warming";
+export type SeatLookup = { ok: true; result: Resolved } | { ok: false; why: SeatLookupFailure };
 
 /** The conversation key: a sub-agent shares its parent's seat. */
 export const rootKey = (provider: Provider, ids: { sessionID: string; parentSessionID: string | null }): string =>
@@ -41,10 +58,12 @@ export function parseResolved(json: any): Resolved | null {
   if (!json || typeof json !== "object") return null;
   const seatId = typeof json.seatId === "string" ? json.seatId : null;
   const moved = typeof json.moved === "boolean" ? json.moved : undefined;
+  const reason = json.reason === "no-seats" || json.reason === "no-usable-seat" ? (json.reason as NoSeatReason) : undefined;
+  const extra = { ...(moved === undefined ? {} : { moved }), ...(reason === undefined ? {} : { reason }) };
   if (json.live === false && typeof json.credentialFile === "string" && json.credentialFile) {
-    return { seatId, live: false, credentialFile: json.credentialFile, ...(moved === undefined ? {} : { moved }) };
+    return { seatId, live: false, credentialFile: json.credentialFile, ...extra };
   }
-  return { seatId, live: true, ...(moved === undefined ? {} : { moved }) };
+  return { seatId, live: true, ...extra };
 }
 
 /** Only a loopback http(s) URL is ever accepted from the environment. */
@@ -83,23 +102,31 @@ export interface SeatResolverDeps {
 }
 
 export interface SeatResolver {
-  /** Which seat serves this conversation (cached 30 s). null = no answer. */
-  seatFor(provider: Provider, ids: RequestIds): Promise<Resolved | null>;
+  /**
+   * Which seat serves this conversation (cached 30 s). `budgetMs` overrides the
+   * default timeout (10 s uncached, 1.5 s refreshing a cached answer).
+   */
+  seatFor(provider: Provider, ids: RequestIds, opts?: { budgetMs?: number }): Promise<SeatLookup>;
   /** Refresh a seat server-side (single-flight). null = refused/unreachable. */
   refresh(provider: Provider, seatId: string): Promise<Resolved | null>;
-  /** A 429 happened: re-place the conversation and answer where it goes now. */
-  limit(provider: Provider, ids: RequestIds): Promise<Resolved | null>;
+  /**
+   * The seat hit a usage limit (default) or rejected its credentials (`"auth"`):
+   * re-place the conversation and answer where it goes now.
+   */
+  limit(provider: Provider, ids: RequestIds, reason?: LimitReason): Promise<Resolved | null>;
   /** Drop the cached placement (the next seatFor asks again). */
   forget(provider: Provider, ids: RequestIds): void;
   /** Remember a placement we learned from a /limit answer. */
   remember(provider: Provider, ids: RequestIds, result: Resolved): void;
 }
 
+type Raw = { ok: true; json: unknown } | { ok: false; why: SeatLookupFailure };
+
 export function createSeatResolver(deps: SeatResolverDeps): SeatResolver {
   const now = deps.now ?? (() => Date.now());
   const token = deps.token ?? (() => boxToken());
   const byConversation = new Map<string, { result: Resolved; at: number }>();
-  const resolving = new Map<string, Promise<Resolved | null>>();
+  const resolving = new Map<string, Promise<SeatLookup>>();
   const refreshing = new Map<string, Promise<Resolved | null>>();
 
   const put = <V>(map: Map<string, V>, key: string, value: V) => {
@@ -108,16 +135,20 @@ export function createSeatResolver(deps: SeatResolverDeps): SeatResolver {
     if (map.size > MAX_CACHE_ENTRIES) map.delete(map.keys().next().value as string);
   };
 
-  async function call(
+  async function request(
     pathAndQuery: string,
     opts: { method: "GET" | "POST"; body?: unknown; timeoutMs: number },
-  ): Promise<Resolved | null> {
+  ): Promise<Raw> {
     const headers: Record<string, string> = {};
     const tok = token();
     if (tok) headers["authorization"] = `Bearer ${tok}`;
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), opts.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctl.abort();
+    }, opts.timeoutMs);
     try {
       const res = await deps.fetch(`${deps.base()}${pathAndQuery}`, {
         method: opts.method,
@@ -125,37 +156,61 @@ export function createSeatResolver(deps: SeatResolverDeps): SeatResolver {
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
         signal: ctl.signal,
       });
-      if (!res.ok) return null;
-      return parseResolved(await res.json());
+      if (!res.ok) {
+        if (res.status === 503) {
+          // the server is up but its seat table has not finished its first build
+          const j: any = await res.json().catch(() => null);
+          if (j?.error === "warming") return { ok: false, why: "warming" };
+        }
+        return { ok: false, why: "unreachable" };
+      }
+      return { ok: true, json: await res.json() };
     } catch {
-      return null;
+      return { ok: false, why: timedOut ? "timeout" : "unreachable" };
     } finally {
       clearTimeout(timer);
     }
   }
 
+  async function call(
+    pathAndQuery: string,
+    opts: { method: "GET" | "POST"; body?: unknown; timeoutMs: number },
+  ): Promise<Resolved | null> {
+    const raw = await request(pathAndQuery, opts);
+    return raw.ok ? parseResolved(raw.json) : null;
+  }
+
   return {
-    async seatFor(provider, ids) {
+    async seatFor(provider, ids, opts = {}) {
       const key = rootKey(provider, ids);
       const cached = byConversation.get(key);
-      if (cached && now() - cached.at < RESOLVE_CACHE_MS) return cached.result;
+      if (cached && now() - cached.at < RESOLVE_CACHE_MS) return { ok: true, result: cached.result };
       let run = resolving.get(key);
       if (!run) {
         const q = new URLSearchParams({ provider, sessionID: ids.sessionID });
         if (ids.parentSessionID) q.set("parentSessionID", ids.parentSessionID);
         if (ids.model) q.set("model", ids.model);
-        run = call(`/api/accounts/resolve?${q}`, { method: "GET", timeoutMs: RESOLVE_TIMEOUT_MS })
-          .catch(() => null)
+        const timeoutMs = opts.budgetMs ?? (cached ? RESOLVE_TIMEOUT_MS : RESOLVE_BUDGET_MS);
+        run = request(`/api/accounts/resolve?${q}`, { method: "GET", timeoutMs })
+          .then((raw): SeatLookup => {
+            if (!raw.ok) return raw;
+            const result = parseResolved(raw.json);
+            return result ? { ok: true, result } : { ok: false, why: "unreachable" };
+          })
+          .catch((): SeatLookup => ({ ok: false, why: "unreachable" }))
           .finally(() => resolving.delete(key));
         resolving.set(key, run);
       }
-      const fresh = await run;
-      if (fresh) {
-        put(byConversation, key, { result: fresh, at: now() });
-        return fresh;
+      const out = await run;
+      if (out.ok) {
+        // "No usable seat" is a state to re-ask about on the next request, not to cache.
+        if (out.result.reason === "no-usable-seat") byConversation.delete(key);
+        else put(byConversation, key, { result: out.result, at: now() });
+        return out;
       }
-      // FAIL-SAFE: the last answer for this conversation, however old; else none.
-      return cached?.result ?? null;
+      // FAIL-SAFE: the last answer for this conversation, however old.
+      if (cached) return { ok: true, result: cached.result };
+      return out;
     },
 
     refresh(provider, seatId) {
@@ -174,10 +229,11 @@ export function createSeatResolver(deps: SeatResolverDeps): SeatResolver {
       return run;
     },
 
-    async limit(provider, ids) {
+    async limit(provider, ids, reason = "limit") {
       const body: Record<string, string> = { provider, sessionID: ids.sessionID };
       if (ids.parentSessionID) body.parentSessionID = ids.parentSessionID;
       if (ids.model) body.model = ids.model;
+      body.reason = reason;
       return call("/api/accounts/limit", { method: "POST", body, timeoutMs: LIMIT_TIMEOUT_MS }).catch(() => null);
     },
 

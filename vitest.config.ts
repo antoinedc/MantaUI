@@ -1,6 +1,8 @@
 import { defineConfig, configDefaults } from "vitest/config";
 // @ts-expect-error — plain .mjs helper, no types; see scripts/testSandbox.mjs.
-import { sandboxStateHome } from "./scripts/testSandbox.mjs";
+import { sandboxStateHome, sandboxClaudeConfigDir } from "./scripts/testSandbox.mjs";
+
+const sandboxHome: string = sandboxStateHome();
 
 export default defineConfig({
   test: {
@@ -10,7 +12,9 @@ export default defineConfig({
     // module — which, unsandboxed, would read and WRITE the live box's stores
     // (credentials, secrets, schedules). See scripts/testSandbox.mjs for the
     // incident that motivated this.
-    env: { MANTA_STATE_HOME: sandboxStateHome() },
+    // CLAUDE_CONFIG_DIR does the same for the box's live Claude login
+    // (`CREDENTIALS_PATH` honours it), so no test can read or copy the real one.
+    env: { MANTA_STATE_HOME: sandboxHome, CLAUDE_CONFIG_DIR: sandboxClaudeConfigDir(sandboxHome) },
     // src/server/**, src/gateway/** and scripts/** use node:test (run via
     // `node --test`), not vitest. .claude/** holds Claude Code worktrees —
     // nested copies of this repo (incl. their own *.test.mjs) that vitest

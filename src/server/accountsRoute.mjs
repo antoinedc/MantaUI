@@ -5,8 +5,14 @@
 // The ONLY consumer is the manta-accounts opencode plugin. Both routes answer
 // `{seatId, live:true}` or `{seatId, live:false, provider, credentialFile,
 // expiresAt?}` — NEVER a token: the plugin reads the seat's credential file
-// itself (same OS user). `/limit` answers the resolve shape plus `moved`. 400 on bad input, 404 on an unknown seat, 405 on a
-// wrong method. Resolve and limit take an optional `model` (the request's model id)
+// itself (same OS user). With no seat the answer also carries `reason`:
+// "no-seats" (the provider has none) or "no-usable-seat" (seats exist, none can
+// serve). `/limit` answers the resolve shape plus `moved`, and takes an optional
+// `reason: "limit" | "auth"` (default "limit"; anything else is a 400): "auth"
+// means the seat's credentials were rejected even after a refresh. `/resolve`
+// answers `503 {"error":"warming"}` while the seat table has not finished its
+// first build (the plugin treats it as "server unreachable"). 400 on bad input,
+// 404 on an unknown seat, 405 on a wrong method. Resolve and limit take an optional `model` (the request's model id)
 // that scopes model-limited usage windows; a malformed one is ignored, never a 400.
 // A thrown error is the caller's to turn into a 500 (index.mjs owns that, with its
 // class-2 marker).
@@ -17,7 +23,7 @@
 // proxied public traffic always carries at least one forwarding header, which a
 // local plugin never does. Anything else is a 403, before any work is done.
 
-import { resolveRoot } from "./seatAssignment.mjs";
+import { resolveRoot, SEAT_TABLE_WARMING_CODE } from "./seatAssignment.mjs";
 
 const PROVIDERS = ["claude", "codex"];
 const MAX_ID = 200;
@@ -29,6 +35,9 @@ const MODEL_RE = /^[A-Za-z0-9._:/-]+$/;
 export function validModel(v) {
   return typeof v === "string" && v.length > 0 && v.length <= MAX_ID && MODEL_RE.test(v) ? v : null;
 }
+
+/** The `/limit` reasons: a usage limit, or credentials the seat's own refresh could not save. */
+const LIMIT_REASONS = ["limit", "auth"];
 
 export const ACCOUNTS_ROUTE_PATHS = ["/api/accounts/resolve", "/api/accounts/refresh", "/api/accounts/limit"];
 
@@ -49,7 +58,7 @@ export function isDirectLoopbackRequest(req) {
 }
 
 /**
- * @param {{ seatAssigner: {resolve: Function, refreshSeat: Function, markLimited?: Function, reconsider?: Function, _store?: Function},
+ * @param {{ seatAssigner: {resolve: Function, refreshSeat: Function, markLimited?: Function, markAuthFailed?: Function, reconsider?: Function, _store?: Function},
  *           readJson: (req: any) => Promise<any>,
  *           respondJson: (res: any, status: number, body: object) => void,
  *           refreshUsageInBackground?: (provider: string) => void }} deps
@@ -62,14 +71,20 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
   // conversation NOW, and answer where its requests go from here. The
   // conversation is the ROOT: a sub-agent's id (or, for a child not linked yet,
   // its parent's) resolves to it, because assignments are per conversation.
-  async function handleLimit(provider, sessionID, parentSessionID, model) {
+  async function handleLimit(provider, sessionID, parentSessionID, model, reason = "limit") {
     const children = seatAssigner._store?.()?.children ?? {};
     const { root } = resolveRoot({ sessionID, parentSessionID, children });
-    seatAssigner.markLimited(provider, root);
-    try {
-      refreshUsageInBackground(provider);
-    } catch {
-      /* a refresh that cannot start must not fail the switch */
+    if (reason === "auth") {
+      // Dead credentials, not a full seat: the seat is unusable for a few minutes
+      // (the assigner also rebuilds the table and retries a refresh of it itself).
+      seatAssigner.markAuthFailed(provider, root);
+    } else {
+      seatAssigner.markLimited(provider, root);
+      try {
+        refreshUsageInBackground(provider);
+      } catch {
+        /* a refresh that cannot start must not fail the switch */
+      }
     }
     const reconsidered = await seatAssigner.reconsider(provider, root, { model });
     const resolved = await seatAssigner.resolve(provider, sessionID, parentSessionID, { model });
@@ -98,7 +113,12 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
         respondJson(res, 400, { error: "invalid" });
         return true;
       }
-      respondJson(res, 200, await seatAssigner.resolve(provider, sessionID, parentSessionID, { model: validModel(url.searchParams.get("model")) }));
+      try {
+        respondJson(res, 200, await seatAssigner.resolve(provider, sessionID, parentSessionID, { model: validModel(url.searchParams.get("model")) }));
+      } catch (e) {
+        if (e?.code !== SEAT_TABLE_WARMING_CODE) throw e;
+        respondJson(res, 503, { error: "warming" });
+      }
       return true;
     }
     const body = await readJson(req).catch(() => null);
@@ -114,7 +134,17 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
         respondJson(res, 400, { error: "invalid" });
         return true;
       }
-      respondJson(res, 200, await handleLimit(body.provider, sessionID, parentSessionID, validModel(body?.model)));
+      const reason = body?.reason ?? "limit";
+      if (!LIMIT_REASONS.includes(reason)) {
+        respondJson(res, 400, { error: "invalid" });
+        return true;
+      }
+      try {
+        respondJson(res, 200, await handleLimit(body.provider, sessionID, parentSessionID, validModel(body?.model), reason));
+      } catch (e) {
+        if (e?.code !== SEAT_TABLE_WARMING_CODE) throw e;
+        respondJson(res, 503, { error: "warming" });
+      }
       return true;
     }
     const provider = body?.provider;

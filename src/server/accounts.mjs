@@ -73,8 +73,12 @@ const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 // file) is noticed immediately; the TTL only bounds how long an unchanged login
 // goes unverified.
 const LIVE_IDENTITY_TTL_MS = 60 * 60_000;
-// A failed identity lookup is retried soon, not cached for an hour.
-const LIVE_IDENTITY_FAIL_TTL_MS = 30_000;
+// A lookup that failed on the NETWORK (not a refusal) is retried after this long.
+// A login Anthropic REFUSED (401/403) is remembered as dead until the live file's
+// token changes — there is no TTL, and no point asking again about the same token.
+const LIVE_IDENTITY_ERROR_RETRY_MS = 60_000;
+// The profile call must never hang a discovery run (and so the seat table).
+const PROFILE_TIMEOUT_MS = 10_000;
 // Discovery re-runs from the poller no more often than this.
 const REDISCOVER_MS = 60_000;
 
@@ -671,17 +675,45 @@ async function readSeatCredential(provider, file) {
 
 const shortHash = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
 
-/** GET the Anthropic profile for an access token. Never throws, never logs the
- *  token; `null` on any failure. */
-export async function fetchClaudeProfile(accessToken, fetchImpl = fetch) {
+/** The identity-cache key of a live login: both tokens, so ANY change of the file's token is noticed. */
+const liveKey = (creds) => shortHash(`${creds.accessToken}\0${creds.refreshToken ?? ""}`);
+
+/**
+ * GET the Anthropic profile for an access token, with a timeout (an AbortController
+ * AND a race: a fetch that ignores its signal still cannot hang the caller).
+ * Never throws, never logs the token.
+ *   {identity}   Anthropic answered with an identifiable account;
+ *   {dead: true} Anthropic refused the token (401 / 403) — it will not work again;
+ *   {error: true} anything else (network, timeout, 5xx, an odd payload) — try later.
+ * @returns {Promise<{identity: NonNullable<ReturnType<typeof identityFromProfile>>}|{dead: true}|{error: true}>}
+ */
+export async function fetchClaudeProfile(accessToken, fetchImpl = fetch, { timeoutMs = PROFILE_TIMEOUT_MS } = {}) {
+  const controller = new AbortController();
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ error: true });
+    }, timeoutMs);
+  });
+  const ask = (async () => {
+    try {
+      const res = await fetchImpl(PROFILE_URL, {
+        headers: { Authorization: `Bearer ${accessToken}`, "anthropic-beta": "oauth-2025-04-20" },
+        signal: controller.signal,
+      });
+      if (res?.status === 401 || res?.status === 403) return { dead: true };
+      if (!res?.ok) return { error: true };
+      const identity = identityFromProfile(await res.json());
+      return identity ? { identity } : { error: true };
+    } catch {
+      return { error: true };
+    }
+  })();
   try {
-    const res = await fetchImpl(PROFILE_URL, {
-      headers: { Authorization: `Bearer ${accessToken}`, "anthropic-beta": "oauth-2025-04-20" },
-    });
-    if (!res?.ok) return null;
-    return identityFromProfile(await res.json());
-  } catch {
-    return null;
+    return await Promise.race([ask, timedOut]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -726,13 +758,14 @@ export function createAccountsService({
   const writeLock = createMutex();
   let storeVersion = 0;
   const listeners = new Set();
+  const refreshListeners = new Set();
   // Seat ids a sign-in flow is holding (provider → Set). Discovery must not
   // adopt their directories: the flow decides whether the new login is a
   // duplicate / a different org BEFORE it becomes a seat.
   const reserved = { claude: new Set(), codex: new Set() };
   let discovering = null;
   let lastDiscoveryAt = 0;
-  let liveCache = { key: null, at: 0, identity: null };
+  let liveCache = { key: null, at: 0, status: null, identity: null };
 
   async function loadStore() {
     store = normalizeStore(await readJsonFile(storePath));
@@ -756,21 +789,30 @@ export function createAccountsService({
     }
   }
 
-  /** The live Claude login's identity, cached per live token (see top of file). */
+  /**
+   * The live Claude login's identity, cached per live token (see top of file):
+   *   identified → trusted for `liveIdentityTtlMs`;
+   *   dead (Anthropic refused it) → remembered until the file's token changes;
+   *   network error → asked again after LIVE_IDENTITY_ERROR_RETRY_MS;
+   *   empty token → "absent", no call at all.
+   */
   async function claudeLiveIdentity() {
     const creds = await readClaudeCredentialsFile(claudeLivePath);
     if (!creds?.accessToken) {
-      liveCache = { key: null, at: 0, identity: null };
+      liveCache = { key: null, at: 0, status: null, identity: null };
       return { present: false, identity: null };
     }
-    const key = shortHash(creds.refreshToken ?? creds.accessToken);
+    const key = liveKey(creds);
     const age = now() - liveCache.at;
-    if (liveCache.key === key && age < (liveCache.identity ? liveIdentityTtlMs : LIVE_IDENTITY_FAIL_TTL_MS)) {
-      return { present: true, identity: liveCache.identity };
+    if (liveCache.key === key) {
+      if (liveCache.status === "dead") return { present: true, identity: null };
+      if (liveCache.status === "identified" && age < liveIdentityTtlMs) return { present: true, identity: liveCache.identity };
+      if (liveCache.status === "error" && age < LIVE_IDENTITY_ERROR_RETRY_MS) return { present: true, identity: null };
     }
-    const identity = await fetchClaudeProfile(creds.accessToken, fetchImpl);
-    liveCache = { key, at: now(), identity };
-    return { present: true, identity };
+    const found = await fetchClaudeProfile(creds.accessToken, fetchImpl);
+    const status = found.identity ? "identified" : found.dead ? "dead" : "error";
+    liveCache = { key, at: now(), status, identity: found.identity ?? null };
+    return { present: true, identity: liveCache.identity };
   }
 
   /** The live Codex login's account id (no network: it is in the entry). */
@@ -800,7 +842,7 @@ export function createAccountsService({
       // is just as identified.
       const known = findSeat(prov, (s) => s.id === id || s.credentialDir === dir)?.seat;
       if ((known?.status === "ok" || known?.status === "expired" || known?.status === "signed-out") && known.accountUuid && known.credentialDir) continue; // identified: no call
-      dirs.push({ id, dir, identity: await fetchClaudeProfile(creds.accessToken, fetchImpl) });
+      dirs.push({ id, dir, identity: (await fetchClaudeProfile(creds.accessToken, fetchImpl)).identity ?? null });
     }
     const live = await claudeLiveIdentity();
     // A new seat must not take the id of a directory that exists but is not a
@@ -835,7 +877,7 @@ export function createAccountsService({
     try {
       const raw = await readFile(claudeLivePath, "utf-8");
       const creds = parseCredentials(raw);
-      if (!creds?.accessToken || shortHash(creds.refreshToken ?? creds.accessToken) !== liveCache.key) return prov;
+      if (!creds?.accessToken || liveKey(creds) !== liveCache.key) return prov;
       const next = structuredClone(prov);
       for (const seat of allSeats(next).filter((s) => !s.credentialDir && s.accountUuid === uuid)) {
         const dir = join(seatsRoot, "claude", seat.id);
@@ -954,7 +996,7 @@ export function createAccountsService({
         const raw = await readFile(claudeLivePath, "utf-8");
         const creds = parseCredentials(raw);
         if (!creds?.accessToken) return false;
-        if (shortHash(creds.refreshToken ?? creds.accessToken) !== liveCache.key) return false;
+        if (liveKey(creds) !== liveCache.key) return false;
         want = raw;
       } else {
         const entry = await readLiveCodex();
@@ -1028,6 +1070,19 @@ export function createAccountsService({
       } catch (e) {
         log.warn?.(`[accounts] mirroring the live ${provider} login failed:`, e?.message ?? e);
       }
+    },
+
+    /** Be told when a seat refresh finished (whether or not its status changed):
+     *  `fn({provider, seatId, outcome})`. Returns the unsubscribe function. The
+     *  seat table uses it: a refresh rewrote the seat's file. */
+    onRefreshOutcome(fn) {
+      refreshListeners.add(fn);
+      return () => refreshListeners.delete(fn);
+    },
+
+    /** The directory that holds every seat directory (`<root>/<provider>/<seat>`). */
+    seatsRoot() {
+      return seatsRoot;
     },
 
     /** Where seats of a provider keep their credentials. */
@@ -1120,7 +1175,7 @@ export function createAccountsService({
             return { ok: false };
           }
         }
-        liveCache = { key: null, at: 0, identity: null };
+        liveCache = { key: null, at: 0, status: null, identity: null };
         return { ok: true };
       } catch (e) {
         log.warn?.(`[accounts] making ${seatId} the live ${provider} login failed:`, e?.message ?? e);
@@ -1289,7 +1344,7 @@ export function createAccountsService({
     async noteRefreshOutcome(provider, seatId, outcome) {
       try {
         if (!ACCOUNT_PROVIDERS.includes(provider)) return false;
-        return await writeLock.runExclusive(async () => {
+        const changed = await writeLock.runExclusive(async () => {
           const current = store ?? (await loadStore());
           const next = applyRefreshOutcome(current, provider, seatId, outcome);
           if (next === current) return false;
@@ -1297,6 +1352,16 @@ export function createAccountsService({
           await saveStore(next);
           return true;
         });
+        // After the store is settled: the refresh rewrote the seat's file, so
+        // whoever caches seat state must look again.
+        for (const fn of [...refreshListeners]) {
+          try {
+            fn({ provider, seatId, outcome });
+          } catch {
+            // a listener must never break the bookkeeping
+          }
+        }
+        return changed;
       } catch (e) {
         log.warn?.("[accounts] recording a refresh outcome failed:", e?.message ?? e);
         return false;

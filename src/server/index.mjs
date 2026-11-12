@@ -142,6 +142,7 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
+import { installShutdownFlush } from "./shutdownFlush.mjs";
 import { createUsageCalibration } from "./usageCalibration.mjs";
 import { createSeatAttribution } from "./seatAttribution.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
@@ -935,6 +936,15 @@ const seatAssigner = createSeatAssigner({
       ? oc.refreshClaudeSeatAndNote(accountsService, { seatId: t.seatId, dir: t.dir })
       : oc.refreshCodexSeatAndNote(accountsService, { seatId: t.seatId, file: t.file }),
 });
+// The seat table (the in-memory seat states every placement reads) is rebuilt in
+// the background: now, every 10 s, on an accounts store change, on a seat directory
+// change and after any seat refresh outcome (seatTable.mjs). A refresh rewrote the
+// seat's file — and a refresh that worked also clears the seat's limit / auth marks.
+accountsService.onRefreshOutcome(({ provider, seatId, outcome }) => seatAssigner.noteRefreshOutcome(provider, seatId, outcome));
+seatAssigner.start();
+// Pins are saved write-behind (a few seconds after a change): flush on shutdown so a
+// restart does not forget the last placements, then exit (shutdownFlush.mjs).
+installShutdownFlush(seatAssigner);
 // Multi-account phase 3: the `accounts:*` RPC surface (list, mode, active seat,
 // rename, remove, add-a-seat sign-in). The sign-in flows are the EXISTING ones —
 // the claude-login launcher (pointed at the seat's own directory) and opencode's
@@ -3708,7 +3718,8 @@ function observeLifecycleEvent(evt, raw) {
     console.warn("[usage-resume] observeEvent failed:", e?.message ?? e);
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
-  oc.maybeRecoverCredentials(evt).catch(() => {});
+  // Only when the live login is what serves the failing session (or the box has no seats) — seat 401s are not its business.
+  oc.maybeRecoverCredentials(evt, { isLiveServed: (sid) => seatAssigner.isLiveServed("claude", sid) }).catch(() => {});
   if (evt.type === "permission.asked") {
     // Trust mode answers the ask itself; the stream interpreter (and the raw
     // publish) see it only when the user really has to act — the same event.

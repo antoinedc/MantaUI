@@ -6,7 +6,7 @@
 // the path is untrusted until it is absolute and — after resolving every
 // symlink — inside `<state>/.manta-secrets/accounts/`.
 
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
@@ -19,6 +19,8 @@ export interface SeatCredentials {
 }
 
 export const EXPIRY_MARGIN_MS = 60_000;
+/** How long a directory scan for Claude seats is trusted. */
+export const SEATS_SCAN_CACHE_MS = 30_000;
 const MAX_CACHE_ENTRIES = 500;
 
 /** The one directory seat credentials may be read from. */
@@ -78,12 +80,20 @@ export interface CredentialReader {
   readLive(): SeatCredentials | null;
   /** Forget a file's cached contents (after a refresh rewrote it). */
   invalidate(file: string | undefined): void;
+  /**
+   * Does the box have at least one Claude seat? Looks for
+   * `<seatsRoot>/claude/<seat>/.credentials.json` (existence only: a seat whose
+   * token is dead is still a seat). Cached for 30 s. Used when manta-server cannot say.
+   */
+  hasSeats(provider: Provider): boolean;
 }
 
 /** Reads credential files, cached per file and keyed by mtime + size. */
 export function createCredentialReader(
-  opts: { rootDir?: () => string; liveFile?: () => string } = {},
+  opts: { rootDir?: () => string; liveFile?: () => string; now?: () => number } = {},
 ): CredentialReader {
+  const clock = opts.now ?? (() => Date.now());
+  let seatsScan: { at: number; root: string; found: boolean } | null = null;
   const rootDir = opts.rootDir ?? (() => seatsRootDir());
   const liveFile = opts.liveFile ?? (() => liveClaudeCredentialsFile());
   const cache = new Map<string, { sig: string; creds: SeatCredentials | null }>();
@@ -111,6 +121,21 @@ export function createCredentialReader(
     },
     readLive() {
       return readReal("claude", liveFile());
+    },
+    hasSeats(provider) {
+      if (provider !== "claude") return false;
+      const root = rootDir();
+      const t = clock();
+      if (seatsScan && seatsScan.root === root && t - seatsScan.at < SEATS_SCAN_CACHE_MS) return seatsScan.found;
+      let found = false;
+      try {
+        const dir = join(root, "claude");
+        found = readdirSync(dir).some((name) => existsSync(join(dir, name, ".credentials.json")));
+      } catch {
+        found = false;
+      }
+      seatsScan = { at: t, root, found };
+      return found;
     },
     invalidate(file) {
       if (typeof file !== "string") return;

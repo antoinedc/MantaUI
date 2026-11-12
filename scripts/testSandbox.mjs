@@ -51,6 +51,20 @@ import { join } from "node:path";
 
 const HOME_VAR = "MANTA_STATE_HOME";
 const OWNER_VAR = "MANTA_STATE_HOME_OWNER";
+const CLAUDE_DIR_VAR = "CLAUDE_CONFIG_DIR";
+
+/**
+ * Where the sandboxed Claude login lives: `<sandbox>/.claude`. `CREDENTIALS_PATH`
+ * (src/server/claudeAuth.mjs) honours CLAUDE_CONFIG_DIR like the CLI and the
+ * plugin do, so pointing it here keeps every test off the box's real
+ * `~/.claude/.credentials.json` — `rpc.test.mjs` starts the Claude connect flow,
+ * which copies that file, and used to leave thousands of backups of the live
+ * login behind. Always overridden (even when the developer's shell has its own
+ * CLAUDE_CONFIG_DIR): a test must never touch a real login.
+ */
+export function sandboxClaudeConfigDir(home) {
+  return join(home, ".claude");
+}
 
 /**
  * Resolve the sandbox directory for this process, creating it on first call.
@@ -68,7 +82,10 @@ export function sandboxStateHome() {
   if (typeof existing === "string" && existing.trim() !== "") {
     const inheritedFromOther =
       typeof owner === "string" && owner.trim() !== "" && owner !== String(process.pid);
-    if (!inheritedFromOther) return existing;
+    if (!inheritedFromOther) {
+      process.env[CLAUDE_DIR_VAR] = sandboxClaudeConfigDir(existing);
+      return existing;
+    }
 
     // Inherited from a parent sandbox process (the node:test coordinator) —
     // carve out this process's own slice so concurrent test files never share
@@ -77,12 +94,14 @@ export function sandboxStateHome() {
     mkdirSync(dir, { recursive: true });
     process.env[HOME_VAR] = dir;
     process.env[OWNER_VAR] = String(process.pid);
+    process.env[CLAUDE_DIR_VAR] = sandboxClaudeConfigDir(dir);
     return dir;
   }
 
   const dir = mkdtempSync(join(tmpdir(), "manta-test-home-"));
   process.env[HOME_VAR] = dir;
   process.env[OWNER_VAR] = String(process.pid);
+  process.env[CLAUDE_DIR_VAR] = sandboxClaudeConfigDir(dir);
   return dir;
 }
 

@@ -127,7 +127,7 @@ export function createAccountsManager({
   kFor = () => () => null,
   claudeLogin,
   codex,
-  fetchProfile = fetchClaudeProfile,
+  fetchProfile = async (token) => (await fetchClaudeProfile(token)).identity ?? null,
   readClaudeCreds = readClaudeCredentialsFile,
   readCodexEntry = readCodexEntryFile,
   fsOps = { mkdir, chmod, writeFile },

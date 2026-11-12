@@ -29,6 +29,7 @@ test("createCredentialRefreshSweep: calls refresh when shouldRefreshAhead says s
   let refreshCalls = 0;
   const sweep = createCredentialRefreshSweep({
     readCreds: () => ({
+      accessToken: "live-tok",
       // expiresAt is in the past; shouldRefreshAhead → true
       expiresAt: 1,
       refreshTokenExpiresAt: 9_999_999_999_999,
@@ -52,7 +53,7 @@ test("createCredentialRefreshSweep: calls refresh when shouldRefreshAhead says s
 test("createCredentialRefreshSweep: does NOT call refresh when the token is comfortably in the future", async () => {
   let refreshCalls = 0;
   const sweep = createCredentialRefreshSweep({
-    readCreds: () => ({ expiresAt: 9_999_999_999_999, refreshTokenExpiresAt: 9_999_999_999_999 }),
+    readCreds: () => ({ accessToken: "live-tok", expiresAt: 9_999_999_999_999, refreshTokenExpiresAt: 9_999_999_999_999 }),
     refresh: async () => {
       refreshCalls++;
       return { ok: true };
@@ -70,7 +71,7 @@ test("createCredentialRefreshSweep: a thrown refresh never kills the sweep (sing
   // synchronously, the sweep must still complete (next tick recovers).
   let calls = 0;
   const sweep = createCredentialRefreshSweep({
-    readCreds: () => ({ expiresAt: 1, refreshTokenExpiresAt: 9_999_999_999_999 }),
+    readCreds: () => ({ accessToken: "live-tok", expiresAt: 1, refreshTokenExpiresAt: 9_999_999_999_999 }),
     refresh: async () => {
       calls++;
       throw new Error("simulated refresh failure");

@@ -197,6 +197,7 @@ test("forgetSeat: drops every assignment on that seat (and only those), persists
   const left = h.svc.assignments("claude");
   for (const k of onTwo) assert.equal(left[k], undefined);
   assert.equal(left.c.seatId, "seat-3", "other seats' conversations are untouched");
+  await h.svc.flush(); // saves are write-behind
   assert.equal(h.saved.providers.claude.c.seatId, "seat-3", "persisted");
   assert.deepEqual(h.changes, ["claude"]);
 });
