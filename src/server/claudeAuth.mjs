@@ -32,9 +32,12 @@ import path from "node:path";
 import { stat as fsStat, copyFile as fsCopyFile, readFile as fsReadFile } from "node:fs/promises";
 
 /** Where the opencode-claude-auth plugin (and the `claude` CLI) persist OAuth
- *  tokens. Expanded via homedir() so it works regardless of $HOME overrides
- *  in the spawned child's env. */
-export const CREDENTIALS_PATH = path.join(homedir(), ".claude", ".credentials.json");
+ *  tokens: `$CLAUDE_CONFIG_DIR/.credentials.json` when that is set — exactly as
+ *  the CLI and the plugin resolve it — else `~/.claude/.credentials.json`,
+ *  expanded via homedir() so it works regardless of $HOME overrides in the
+ *  spawned child's env. The test sandbox sets CLAUDE_CONFIG_DIR, so the suite
+ *  never reads or copies the real login (scripts/testSandbox.mjs). */
+export const CREDENTIALS_PATH = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), ".credentials.json");
 
 /** Default validator for the freshly-written credentials file: any non-null
  *  parseCredentials result means the new file is well-formed JSON containing

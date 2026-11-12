@@ -24,6 +24,7 @@ import { STORE_PATH as AUTH_STORE_PATH } from "./auth.mjs";
 import { STORE_PATH as USAGE_STOP_STORE_PATH } from "./stoppedStore.mjs";
 import { STORE_PATH as MODEL_PREFS_STORE_PATH } from "./modelPrefs.mjs";
 import { cardsStore, ledgerStore } from "./ctoStores.mjs";
+import { CREDENTIALS_PATH } from "./claudeAuth.mjs";
 
 test("the test run has a sandboxed state home", () => {
   const sandbox = process.env.MANTA_STATE_HOME;
@@ -75,4 +76,20 @@ test("store paths resolve inside the sandbox, not the live box", () => {
     );
     assert.ok(!path.startsWith(homedir() + sep + ".manta"));
   }
+});
+
+// The box's LIVE Claude login (`~/.claude/.credentials.json`) is not under the
+// state home: `CREDENTIALS_PATH` is built from CLAUDE_CONFIG_DIR / homedir(). The Claude
+// connect flow (`startClaudeLogin`, started by rpc.test.mjs) COPIES that file, so an
+// unsandboxed suite left thousands of `.credentials.json.bak.<epoch>` copies of the real
+// login on the box. The sandbox points CLAUDE_CONFIG_DIR inside itself.
+test("the live Claude login path resolves inside the sandbox, never at ~/.claude", () => {
+  const sandbox = process.env.MANTA_STATE_HOME;
+  assert.ok(process.env.CLAUDE_CONFIG_DIR, "CLAUDE_CONFIG_DIR is unset — scripts/testSandbox.mjs must set it");
+  assert.ok(
+    CREDENTIALS_PATH.startsWith(sandbox + sep),
+    `CREDENTIALS_PATH resolved to ${CREDENTIALS_PATH}, outside the sandbox ${sandbox}`,
+  );
+  assert.ok(CREDENTIALS_PATH.endsWith(`${sep}.credentials.json`));
+  assert.ok(!CREDENTIALS_PATH.startsWith(homedir() + sep + ".claude"), "the real login must not be reachable from a test");
 });
