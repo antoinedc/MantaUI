@@ -223,7 +223,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
             {headline || "\u00a0"}
           </div>
           <div
-            className={"mt-1.5 h-0.5 overflow-hidden rounded-full bg-border" + (content.bar == null ? " invisible" : "")}
+            className={"mt-1 h-0.5 overflow-hidden rounded-full bg-border" + (content.bar == null ? " invisible" : "")}
             {...(content.bar == null
               ? { "aria-hidden": true as const }
               : {
@@ -268,7 +268,7 @@ function JobDetails({ id, view, box }: { id: string; view: JobView; box: number 
         </div>
       )}
       {m.items.length > 0 && (
-        <ul className="m-0 max-h-40 list-none space-y-0.5 overflow-y-auto p-0" data-testid="background-checklist">
+        <ul className="m-0 max-h-40 list-none space-y-1 overflow-y-auto p-0" data-testid="background-checklist">
           {m.items.map((i, n) => (
             <li
               key={n}
@@ -290,7 +290,7 @@ function JobDetails({ id, view, box }: { id: string; view: JobView; box: number 
       {m.milestones.length > 0 && (
         <div data-testid="background-milestones">
           <div className="text-text-faint">Milestones</div>
-          <ul className="m-0 list-none space-y-0.5 p-0">
+          <ul className="m-0 list-none space-y-1 p-0">
             {m.milestones.map((x, n) => (
               <li key={n} className="flex items-baseline gap-2 min-w-0">
                 <span className="truncate min-w-0 text-text" title={x.text}>
@@ -303,7 +303,7 @@ function JobDetails({ id, view, box }: { id: string; view: JobView; box: number 
         </div>
       )}
       {stats.length > 0 && (
-        <ul className="m-0 list-none space-y-0.5 p-0 text-text-muted">
+        <ul className="m-0 list-none space-y-1 p-0 text-text-muted">
           {stats.map(([k, v]) => (
             <li key={k} className="truncate" title={v} data-testid={`background-stat-${k}`}>
               {v}
