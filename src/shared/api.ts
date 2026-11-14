@@ -1820,7 +1820,8 @@ export interface Api {
   // preload bridge (used only pre-pairing, when no jobs exist) and on demoApi
   // (Proxy fallback returns a no-op unsubscribe).
   onDelegateUpdated(
-    cb: (payload: { id: string; status: string; activity?: string }) => void,
+    // `view`: the job's progress view (DelegateJobProgressView) on a box that computes one; validated by the client.
+    cb: (payload: { id: string; status: string; activity?: string; view?: unknown }) => void,
   ): () => void;
 
   // APNs native-push registration (BET-181). The native iOS app calls this on

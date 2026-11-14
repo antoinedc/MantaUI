@@ -41,7 +41,6 @@ import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchem
 import { Onboarding } from "./Onboarding";
 import { NewSessionScreen } from "./NewSessionScreen";
 import { useStore, flatSessions, resolveSessionOwner } from "./store";
-import type { DelegateUpdatedPayload } from "./jobProgress";
 import { resolveTransportMode } from "../shared/transport.mjs";
 import { getMantaPreload } from "./preloadAccess";
 import { describe as describeConnection } from "../shared/net/state.js";
@@ -718,11 +717,10 @@ function Shell() {
     // progress `view` is patched into the store in place under the rev rule
     // (spec 2026-11-14 §B4); the list is refetched only for an unknown id, a
     // status change (nesting may change) or an event without a view (older box).
-    // The shared Api payload type predates `view`, hence the widening cast.
     let off: (() => void) | null = null;
     if (window.api.onDelegateUpdated) {
       off = window.api.onDelegateUpdated((payload) => {
-        if (useStore.getState().applyJobUpdate(payload as DelegateUpdatedPayload)) tick();
+        if (useStore.getState().applyJobUpdate(payload)) tick();
       });
     }
     return () => {
