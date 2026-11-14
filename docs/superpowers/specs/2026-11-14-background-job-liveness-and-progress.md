@@ -1,6 +1,6 @@
 # Background jobs: stay alive while working, and show their progress
 
-Status: revision 5 (after review round 4), 2026-11-14. Scope: background jobs
+Status: approved for implementation (revision 6, 5 review rounds), 2026-11-14. Scope: background jobs
 started with `delegate` (Manta-owned, `completionOwner:"manta"`). Jobs opencode
 owns (adopted subagents, native background commands) keep their lifecycle and
 get no new limits; they get the progress `view` where the data exists.
@@ -428,6 +428,8 @@ while running:
 **Headline** (plain text, ≤ 120 chars, first line only), first non-empty of:
 
 1. the model label, if reported within the last 30 min (`jobProgress.labelAt`);
+   the 60 s sweep detects a label crossing 30 min, bumps `view.rev.n` and
+   publishes, so clients get the fallback headline;
 2. the current checklist item;
 3. the running tool (`<name>: <target>`);
 4. the existing activity line.
@@ -725,8 +727,8 @@ B4.
   and input; `step` carries `evt.id`; `child` from the subagent fixture.
 - Reconstruction merge: a tool ended by the tap during an in-flight read is not
   resurrected (tombstone); a result from an older generation is discarded;
-  `startedAt` comes from `part.state.time.start`; a no-timeout shell found
-  running gets 60 min from reconstruction.
+  `startedAt` comes from `part.state.time.start`; reconstructed tools are
+  `observed:false`.
 - `child` records register a descendant before routing (a `session.created`
   for a new child is not dropped); duplicates are idempotent.
 - `onRootChanged` on launch, resume, continuation and handoff repoint drops
