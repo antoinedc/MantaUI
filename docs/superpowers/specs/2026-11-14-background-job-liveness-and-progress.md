@@ -155,8 +155,6 @@ that tool's `lastOutputAt`.
 
 **Reconstruction** (60 s sweep, outside the jobs lock, ≤ 2 jobs concurrently,
 5 s budget each), for every running job whose `live` is unreconstructed:
-1. Note `startSeq` = the job's tool-mutation sequence number (incremented on
-   every `toolStarted`/`toolEnded` routed to the job).
 1. Walk the tree with the existing `listDescendants(rootId, deps)` (returns
    `{id, parent}[]` without the root; add the root yourself). Add every id to
    `sessions` and the index.
