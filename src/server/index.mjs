@@ -14,7 +14,7 @@ import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat, mkdir, rm, readdir } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, basename } from "node:path";
 import { homedir, hostname } from "node:os";
@@ -98,10 +98,11 @@ import { createStreamInterpreter } from "./streamInterp.mjs";
 import { createContextModelResolver } from "./sessionContext.mjs";
 import { loadModelPrefs } from "./modelPrefs.mjs";
 import { createCommandCorrelator, createOriginStore } from "./commandOrigins.mjs";
-import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
+import { createLifecycleAdapter, isQuestionForm } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
+import { createLivenessLog } from "./delegateLivenessLog.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
 import { createViewWindowArmer, createViewWindowCloser } from "./sessionMaterialize.mjs";
 import { createSessionLinks, createSessionLinkActions } from "./sessionLinks.mjs";
@@ -1395,7 +1396,15 @@ const delegateEngine = createDelegateEngine({
   // no second store/event.
   readProgress: (sid) => readProgressRecord(sid),
   clearProgress: (sid) => clearProgress(sid),
+  // Liveness (spec 2026-11-14): the tail of a session's transcript (what is running NOW) for the sweep's reconstruction,
+  // the pump backstop's rejections, and the evidence log the follow-up routine reads.
+  listTailMessages: (sid) => oc.listMessages(sid, { limit: 3 }),
+  rejectPermission: (a) => oc.replyPermission({ ...a, reply: "reject" }),
+  rejectQuestion: (a) => oc.rejectQuestion(a),
+  livenessLog: createLivenessLog(),
 });
+// The interpreter's activity tap feeds the engine's per-job liveness (the stall rule, the progress view).
+streamInterp.onActivity(delegateEngine.observeActivity);
 // WS02 (SF-4): the box's reading of background-job records for the chat screen.
 const delegateView = createDelegateView({
   // The RAW record list: assertWritable runs on every guarded request, so it must not
@@ -1840,6 +1849,20 @@ const SERVER_VERSION = await readServerVersion(PROJECT_ROOT);
 // (never a `opencode --version` shell-out — the binary is not on the service's
 // PATH, which made this read "0.0.0" on a healthy V2 box).
 const OPENCODE_VERSION = opencodeInfo().version;
+// The liveness evidence log notes the first boot of a box with the feature (spec 2026-11-14 §8): the follow-up routine
+// starts its week from this line.
+try {
+  let gitSha = null;
+  try {
+    const stamp = JSON.parse(readFileSync(join(PROJECT_ROOT, "RELEASE.json"), "utf-8"));
+    gitSha = typeof stamp?.git_sha === "string" ? stamp.git_sha : null;
+  } catch {
+    /* no release stamp (a source checkout): the line still records the version */
+  }
+  void delegateEngine.recordDeployed({ version: SERVER_VERSION, gitSha });
+} catch (e) {
+  console.warn("[delegate] recording the liveness deployment failed:", e?.message ?? e);
+}
 
 // BET-1335: the observe-mode masking counterfactual store. Reads/writes
 // `optimizer-counterfactual.json` through the shared jsonStore atomic writer
@@ -3727,6 +3750,9 @@ function observeLifecycleEvent(evt, raw) {
       evt,
       getConfig: () => local.configGet(),
       reply: (a) => oc.replyPermission(a),
+      // A background job cannot wait on a person: an ask in one of its sessions is rejected before trust mode sees it.
+      ownsSession: (sid) => delegateEngine.ownsSession(sid),
+      onRejectFailed: (a) => delegateEngine.queueRejection(a),
       interpret: () => interpretEvent(raw),
       publish: () => bus.publish({ kind: "opencode", payload: raw }),
       push: (e) => push.firePush(e),
@@ -3784,6 +3810,14 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
       console.warn("[command-origins] observeEnqueued failed:", e?.message ?? e);
     }
   }
+  // A background job cannot wait on a person (spec 2026-11-14 A5): a question form raised in one of its sessions is
+  // rejected here and never interpreted, published or pushed. (The model learns why from its opening prompt.)
+  if (raw?.type === "form.created" && isQuestionForm(raw.data?.form) && delegateEngine.ownsSession(raw.data.form.sessionID)) {
+    void delegateEngine
+      .rejectAsk({ kind: "question", requestId: raw.data.form.id, sessionId: raw.data.form.sessionID })
+      .catch((e) => console.warn("[delegate] rejecting a background job's question failed:", e?.message ?? e));
+    return;
+  }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
   // A background result opencode posts to a RETIRED (handed-off) session is relayed to the live end.
   handoffEngine.observeRaw(raw);
@@ -3817,6 +3851,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     // opencode may have restarted outside Manta: its provider catalogue is no longer trustworthy.
     if (reconnect) oc.invalidateProvidersCache({ restarted: true });
     if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+    // Events may have been missed: every job's live picture (tools, descendants) is rebuilt from reads by the next sweep.
+    if (reconnect) void delegateEngine.onStreamReconnect().catch((e) => console.warn("[delegate] liveness reset failed:", e?.message ?? e));
     // The running set and the parent edges are rebuilt from opencode's own reads (no replay on V2).
     void sessionStatus.hydrate().catch((e) => console.warn("[session-status] hydration failed:", e?.message ?? e));
     // Events may have been missed while disconnected (or before the first
@@ -4705,6 +4741,8 @@ const handleRequest = async (req, res) => {
   //                               → 200 {ok, job} (400 refused: cap/nesting/bad input; 202 pending approval)
   // GET    /api/delegate?sessionID= → {jobs:[...]} (jobs for that parent session)
   // POST   /api/delegate/:id/stop  → 200 {ok} (409 not running / 404 not found)
+  // POST   /api/delegate/:id/extend body {minutes, reason, sessionID} → 200 {ok, job:{id,name,ceilingMs,startedAt}}
+  //                               (4xx {ok:false, error}: not yours / not running / minutes or reason out of range / over 12 h)
   // POST   /api/delegate/:id/send  body {prompt, sessionID} → 200 {ok, job: <the NEW record>}
   //                               (404 gone / 400 no prompt / 403 not yours or CTO-managed /
   //                                409 not continuable now / 500 couldn't send — {error} is the
@@ -4723,9 +4761,9 @@ const handleRequest = async (req, res) => {
     path === "/api/delegate/approvals" ||
     /^\/api\/delegate\/approve\/([0-9a-f]{8})$/.test(path) ||
     /^\/api\/delegate\/decline\/([0-9a-f]{8})$/.test(path) ||
-    /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop|send))?$/.test(path)
+    /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop|send|extend))?$/.test(path)
   ) {
-    const detailRe = /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop|send))?$/;
+    const detailRe = /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop|send|extend))?$/;
     const detailMatch = path.match(detailRe);
     const approveMatch = path.match(/^\/api\/delegate\/approve\/([0-9a-f]{8})$/);
     const declineMatch = path.match(/^\/api\/delegate\/decline\/([0-9a-f]{8})$/);
@@ -4777,6 +4815,22 @@ const handleRequest = async (req, res) => {
           respondJson(res, 200, { ok: true, job: result.job });
           return;
         }
+        if (action === "extend") {
+          // More time for a running job: the caller must be its parent (or in its handoff chain). Every refusal is a
+          // 4xx whose `error` is the text the AI tool hands back to the model.
+          if (req.method !== "POST") {
+            respondJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          const body = await readJsonBody(req);
+          const result = await delegateEngine.extendJob(id, { minutes: body?.minutes, reason: body?.reason, sessionID: body?.sessionID });
+          if (!result.ok) {
+            respondJson(res, result.status ?? 400, { ok: false, error: result.error });
+            return;
+          }
+          respondJson(res, 200, { ok: true, job: result.job });
+          return;
+        }
         if (action === "stop") {
           if (req.method !== "POST") {
             respondJson(res, 405, { error: "method not allowed" });
@@ -4817,6 +4871,7 @@ const handleRequest = async (req, res) => {
           parentSessionID: body?.sessionID,
           parentDirectory: body?.directory,
           tools: body?.tools,
+          maxDurationMinutes: body?.maxDurationMinutes,
           trustMode,
         });
         if (!result.ok) {
@@ -5409,6 +5464,12 @@ const handleRequest = async (req, res) => {
         if (!result.ok) {
           respondJson(res, 400, { error: result.error });
           return;
+        }
+        // A job's own report also lands on the job record (its label, plan steps, milestones). Never fails the report.
+        try {
+          await delegateEngine.reportJobProgress({ sessionID: body.sessionID, input: body, record: result.record });
+        } catch (e) {
+          console.warn("[progress] recording a job's report failed:", e?.message ?? e);
         }
         respondJson(res, 200, { ok: true, record: result.record });
         return;

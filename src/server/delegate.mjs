@@ -2874,7 +2874,7 @@ export function buildResultSynthetic(job) {
       childID: job.childSessionID,
       agent: job.agent ?? null,
       state: STATE_FOR_STATUS[job.status] ?? job.status,
-      manta: { jobId: job.id, name: job.name },
+      manta: { jobId: job.id, name: job.name, ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}) },
     },
     delivery: "queue",
     resume: true,
