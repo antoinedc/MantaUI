@@ -1,371 +1,695 @@
 # Background jobs: stay alive while working, and show their progress
 
-Status: draft for review, 2026-11-14. Scope: background jobs started with
-`delegate` (Manta-owned). Jobs opencode owns (adopted subagents, native
-background commands) keep their current lifecycle; they get the progress
-display, not the new limits.
+Status: revision 2 (after review round 1), 2026-11-14. Scope: background jobs
+started with `delegate` (Manta-owned, `completionOwner:"manta"`). Jobs opencode
+owns (adopted subagents, native background commands) keep their lifecycle and
+get no new limits; they get the progress `view` where the data exists.
+
+Agreed with the user: 15-minute stall window; extension is a parent-agent tool
+(no button); iOS ships in the same release.
 
 ## 1. Problem
 
 ### 1.1 Good work is killed at 30 minutes
 
-Every Manta-owned job is failed "timed out after 30 minutes" by the sweeper,
-whatever it is doing. The limit came with the first engine (BET-378, July),
-copied from the plugin-job sweeper with no stated reason. It used to be the only
-defence against dead runs, runaway agents, real hangs and a stuck job holding one
-of the 5 slots. Dead runs are now caught separately in ~2 minutes (lost-run
-detection, 2026-11-02).
+Every Manta-owned job is failed "timed out after 30 minutes" by the sweeper
+(`RUNNING_TIMEOUT_MS`, `sweepDelegateJobs`), whatever it is doing. The limit came
+with the first engine (BET-378) and was copied from the plugin-job sweeper with
+no stated reason. It used to be the only defence against dead runs, runaway
+agents, real hangs and a stuck job holding one of the 5 slots. Dead runs are now
+caught separately in ~2 minutes (lost-run detection, spec 2026-11-02).
 
 Measured on the dev box (`~/.manta/delegate-jobs.json` × opencode's DB):
 
 - 20 of ~230 Manta-launched jobs ended "timed out after 30 minutes" (9%), all in
-  the 6 days before this spec.
+  the last 6 days.
 - 17 of the 20 had written a message within ~2.5 minutes of the kill.
-- 3 were inside one long shell command (a wait loop with its own 20-minute
-  timeout, an analysis script with no timeout, a test-speed run).
-- 0 were hung.
-- One session was killed 5 times in a row and re-sent by hand each time
-  (~2.5 h of work in 30-minute slices, each kill landing mid-step).
-- opencode-owned subagents have no limit; they ran up to 153 minutes and
-  finished normally.
+- 3 were inside one long shell command; 0 were hung.
+- One session was killed 5 times in a row and re-sent by hand each time.
+- opencode-owned subagents (no limit) ran up to 153 minutes and finished
+  normally.
 
 ### 1.2 The parent can't see how a job is going
 
-- The parent's job card says only "Running in background: <name>".
-- A progress channel exists (`progress_report`: label, step/total, state,
-  detail), but no job has ever used it (0 of 49 Manta-launched job sessions).
-  Voluntary reporting doesn't happen.
-- The agents DO keep a checklist: 29 of 49 job sessions (59%) used the todo
-  list. That is real, measured progress nobody shows to the parent.
-- The parent AGENT sees only a one-line "activity" guess in `delegate_list`.
+- The parent's job card (desktop `BackgroundCards.tsx` `RunCard`) says only
+  "Running in background: <name>". On iOS, the jobs sheet
+  (`BackgroundJobsSheet.swift`) shows status and a one-line activity guess.
+- `progress_report` exists, but 0 of 49 Manta-launched job sessions called it.
+- 29 of 49 (59%) kept a todo list (`todo_write`). That is real, measured
+  progress, and it isn't shown to the parent.
 
 ## 2. Research summary
 
 Liveness:
 
-- **Temporal** (activities): a short *heartbeat timeout* ("no proof of progress
-  for N") plus a long *start-to-close* limit. Their docs: set the overall limit
-  longer than the longest legitimate run, and use heartbeats to fail fast on a
-  stuck one. A heartbeat can carry progress details.
-- **AWS Step Functions**: `HeartbeatSeconds` < `TimeoutSeconds`, same split.
-  A heartbeat "indicates the task is still running and needs more time".
-- **Celery**: soft limit (the task gets a chance to clean up) before the hard
-  limit; limits settable per task.
-- **Agent harnesses**: loops are caught by repetition detectors and spending
-  budgets, not by a clock. opencode V2 accepts the `doom_loop` permission but
-  nothing raises it (upstream issue #59339, PR #61328); a community plugin
-  restores it.
+- **Temporal**: a short heartbeat timeout plus a long start-to-close limit set
+  above the longest legitimate run.
+- **AWS Step Functions**: `HeartbeatSeconds` < `TimeoutSeconds`.
+- **Celery**: a soft limit, so the task can clean up, before the hard one;
+  limits are per task.
+- **Agent harnesses**: catch loops with repetition detectors and spending
+  budgets, not a clock. opencode V2 accepts `doom_loop` but nothing raises it
+  (opencode #59339 / PR #61328).
 
-Progress display:
+Progress:
 
-- **NN/g / Nielsen**: anything over 10 s needs a percent-done or a list of
-  completed and remaining steps. When an accurate percentage is impossible, show
-  steps. Show the current step without drowning the user in system detail. Users
-  returning after a long wait need to re-orient.
-- **Microsoft progress-bar guidelines**: never go backwards or restart; never
-  show 100% before it's done; show a time estimate only if it is accurate.
-- **MCP progress** (`progress`, optional `total`, `message`; progress must
-  increase) and **LSP WorkDoneProgress** (`title`, `message`, `percentage`,
-  begin/report/end): one title, one short changing message, an optional number.
-  Rate-limit updates.
-- **A2A** task states separate `working` from `input-required` (waiting on a
-  person) and from terminal states. Status messages are for progress; results go
-  in artifacts.
-- **What users ask for** (Codex issues #10685/#35930, FeedbackBench interface
-  criteria, Cursor/Devin/Claude Code "fleet views"):
+- **NN/g**: anything over 10 s needs percent-done or completed/remaining steps.
+  Prefer steps when a percentage can't be accurate. Show the current step.
+  Users need to re-orient after long waits.
+- **Microsoft progress-bar guidelines**: never back up or restart; no 100% before
+  done; an ETA only if accurate.
+- **MCP progress / LSP WorkDoneProgress**: a title, a short message, an optional
+  monotonic number; rate-limited.
+- **A2A**: separate states for working, input-required and terminal.
+- **User asks** (Codex #10685/#35930, FeedbackBench, Cursor/Devin/Claude Code):
   - current step and elapsed time;
-  - a stable, monotonic completion figure based on an explicit checklist, not a
-    model's guess, clearly marked when it is an estimate;
-  - "waiting on you" as its own state, distinct from "busy" (the most common
-    complaint);
-  - a tail of what it is running now, and the files it is changing;
-  - what it has found or decided so far, so they can redirect early;
-  - cost / context so far.
-  The Codex maintainers' point stands: a model cannot reliably estimate the
-  percentage of open-ended work, so counts of declared steps beat percentages.
+  - a completion figure from a declared checklist, not a model's guess;
+  - what it is running now;
+  - findings so far;
+  - files touched;
+  - spend so far.
 
 ## 3. Part A — liveness
 
-### A1. Stall timeout replaces the fixed 30 minutes
+### A0. Definitions (pinned)
 
-A Manta-owned running job records `lastProgressAt`. Any of these moves it
-forward:
+- **Run segment**: the span from a launch to the job's next terminal or paused
+  state.
+  - A new job, a resume (`attempt`++ on the same record, fresh child) and a
+    continuation (`delegate_send`, a new record) each start a new segment.
+  - A child handoff (the record's `childSessionID` is repointed to the
+    successor) does NOT start a new segment.
+- **Segment clock**: wall time since `segmentStartedAt` (= today's `startedAt`,
+  which every launch path already resets).
+  - Paused time is not in any segment.
+  - No time is subtracted for "waiting", because jobs cannot wait on a person
+    (see A5).
+- **Job sessions**: the record's current `childSessionID` plus every session
+  whose opencode `parentID` chain reaches it (its subagents). The engine already
+  learns descendants from `session.created` events.
 
-- model output (text/reasoning deltas, a finished step);
-- a tool starting or finishing;
-- live shell output growing;
-- a `progress_report` call or a todo-list change;
-- an active descendant (subagent) of the child.
+### A1. Liveness signal (pinned collection contract)
 
-Rules, evaluated by the existing 60 s sweep:
-
-- **Waiting on a person** (a pending permission or question on the child):
-  never stalls; the time does not count toward any limit.
-- **A tool is running**: allowed `tool timeout + 5 min` when the tool declares a
-  timeout (shell `timeout`, in ms), else **60 min** since the last output from
-  that tool.
-- **Otherwise**: stalled after **15 min** without progress.
-
-A stalled job ends `failed` with
-`stalled — no progress for 15 minutes (last: <activity>)` (or the tool variant:
-`stalled — "<command>" produced no output for 60 minutes`). The child is
-interrupted, exactly as the timeout path does today.
-
-`lastProgressAt` is kept in memory and persisted at most once a minute. After a
-manta-server restart a job restarts its stall window from boot (never judged on
-a stale value).
-
-### A2. Hard ceiling, much higher, set per job
-
-- Default **4 h** of active time (time waiting on a person is added back).
-- `delegate` gains `maxDurationMinutes` (10–720). Omitted → 240.
-- The overnight CTO path keeps working: its `sweepAllowanceMs` becomes the
-  job's ceiling.
-- Reaching it: `failed`, `reached its time limit of <N>` (`<N>` formatted, e.g.
-  "4 hours").
-
-### A3. Warning before the ceiling
-
-At ceiling − 10 min, once per job: a steered message into the child.
-> "Background job notice: about 10 minutes left before this job is stopped.
-> Commit your work, record where you got to with progress_report, and finish with
-> your summary."
-
-Not sent for stalls (a stalled job is not reading).
-
-### A4. Parent can extend: `delegate_extend`
-
-New tool for the parent (no UI button).
-
-- `delegate_extend({ id, minutes, reason })` adds `minutes` (15–480) to the
-  ceiling, capped at 12 h total from start.
-- Caller-scoped: only the session that started the job (or its handoff chain)
-  may extend it.
-- Refused for terminal and opencode-owned jobs. A refusal is a readable string
-  returned to the model, not a throw.
-- Recorded on the job (`extensions[]: {at, minutes, reason}`).
-- If an extension lands after the warning, the warning is re-armed for the new
-  ceiling.
-
-### A5. Runaway protection by behaviour (stage 2, measured first)
-
-- **Loops**: the job's permission ruleset sets `doom_loop: deny` so an
-  unattended job is stopped rather than left asking. Interactive sessions keep
-  `ask`. Something must raise `doom_loop` on V2:
-  - Candidate: trial the `opencode-doom-loop-detector` plugin on the dev box.
-  - Fallback if it misfires: a small detector of our own (same repeated
-    call + identical output signal), tested on recorded job transcripts.
-  - Outcome: `failed`, `stopped: repeated the same action (<tool>)`.
-- **Spending**: per-job token/cost totals are recorded from day one (shadow).
-  A default budget is set from the measured distribution after a week (routine,
-  §8). Enforcement: warn at 80% (steered message), stop at 100% with
-  `stopped: spending limit reached`. `delegate` will take `maxCostUsd` once the
-  default is set.
-
-### A6. Outcomes
-
-All new outcomes stay resumable with `delegate_send`. The completion text to the
-parent names the reason and the last progress headline, so the parent can resume
-with the right instruction.
-
-The existing 5-job cap is unchanged. Lost-run detection is unchanged and still
-runs first.
-
-## 4. Part B — standardized progress
-
-### B1. What is shown (and where it comes from)
-
-| Item | Source | Why |
-|---|---|---|
-| State: working / waiting on you / blocked / done / failed | server (pending ask → waiting); model (`blocked`) | "waiting on you" ≠ "busy" is the #1 ask |
-| Headline: one line, what it is doing now | model (`progress_report.label`); fallback: current todo item; else server activity | the current step in its own words |
-| Steps: `done / total` + current item | todo list (measured, preferred); else `progress_report.step/total` | counts of declared steps, not guesses |
-| Bar | derived from steps only | never a model-invented % |
-| Live action | server: running tool + its short target (`shell: npm test`, `patch: src/x.ts`) and its age | "is it stuck?" at a glance |
-| Quiet for | server: now − `lastProgressAt`, shown after 3 min | ties the display to the stall rule |
-| Milestones: notable results so far (≤ 8, newest first) | model (`progress_report.milestone`) | re-orient; redirect early |
-| Elapsed; time left before limit (only when < 30 min) | server | no ETA: it can't be accurate |
-| Files changed, branch, PR link | server (git on the worktree, existing) | what it is touching |
-| Tokens / cost so far, model | server (existing ledger/pricing) | spend visibility |
-
-Display rules:
-
-- The bar never goes backwards on its own. If the plan grows (total rises), the
-  counts show the truth ("4/9") with a "plan grew" hint for one update.
-- The bar is capped at 95% until the job is terminal.
-- With no steps, show no bar: an indeterminate spinner plus the headline.
-
-### B2. Getting the agent to report
-
-- The opening job prompt (`buildJobPrompt`) gains a short paragraph:
-  > Keep your todo list current: it is shown to the user as your progress. Call
-  > progress_report at each plan step with a one-line label, and add a milestone
-  > when you find or finish something the user would want to know. If you need a
-  > human decision, set state "blocked" and say what you need.
-- `progress_report` gains an optional `milestone` (≤ 160 chars), appended to a
-  bounded list (8, oldest dropped). Every other field keeps the
-  replace-not-append rule.
-- Server-side throttle: reports less than 15 s apart are coalesced (the last one
-  wins, milestones are kept).
-- The tool description keeps its anti-narration wording.
-
-### B3. Surfaces
-
-- **Desktop parent card** (running job), one line plus an optional second:
-  - **Line 1**: status dot (accent / warn for waiting / danger for stalled
-    warning) · name · `3/7` · elapsed · Open session.
-  - **Line 2**: headline, or "Waiting on you: <question/permission title>" in
-    warn tone.
-  - A 2 px bar under line 2 when steps are known.
-  - **Click to expand**: checklist (done ✓, current ▸, remaining), milestones,
-    live action, quiet-for, files/branch/PR, tokens/cost.
-  - The card's height is fixed per state (expansion is explicit).
-- **Sidebar job row**: `3/7` chip and a warn dot when waiting; the tooltip keeps
-  the activity line.
-- **Parent agent**:
-  - `delegate_list` returns, per job: state, headline, steps, the last 3
-    milestones, quiet-for, elapsed, limit remaining.
-  - The completion text gains a "Milestones" section only when there are some.
-- **Push**: unchanged. A child's permission/question already notifies on the
-  blocking tier. A model `blocked` state now also notifies once, on the blocking
-  tier.
-- **iOS**: same wire data and the same card content as desktop (collapsed line,
-  second line, bar, tap to expand), in the same release. The native card already
-  renders `progress.detail`; it switches to `view`. Verified per
-  `mobile/native/AGENTS.md` (no Swift toolchain on the Linux box).
-
-## 5. Contracts (pinned)
-
-### 5.1 Job record (server, `delegate-jobs.json`) — new fields
+The delegate engine already receives every raw opencode event (`observeEvent` /
+`observeRaw` in the opencode pump, `index.mjs`). It keeps, in memory, per
+running Manta-owned job (keyed by job id + `attempt` + `childSessionID`):
 
 ```
-maxDurationMs: number            // ceiling of active time; default 4h
-extensions: [{ at: number, minutes: number, reason: string }]
-waitingMs: number                // accumulated time waiting on a person
-ceilingWarnedAt: number | null
-endReason: "stalled" | "time-limit" | "loop" | "budget" | null   // with status failed
-usage: { tokens: number, costUsd: number | null }                // shadow, updated by the activity poller
-```
-
-`lastProgressAt` is in-memory, persisted at most once a minute as
-`lastProgressAt`.
-
-### 5.2 Progress record (`progress.json`, per child session)
-
-```
-{ sessionID, label, step, total, state, detail, updatedAt,
-  milestones: [{ at: number, text: string }]   // NEW, ≤ 8, newest last
+live = {
+  lastProgressAt: number,          // epoch ms
+  tools: Map<callID, { name, target, startedAt, timeoutMs | null, lastOutputAt }>,
+  reconstructedAt: number | null   // set when the tool map was rebuilt from opencode after boot/reconnect
 }
 ```
 
-`state` stays `working|blocked|done|failed`; "waiting on you" is derived, never
-stored.
+**What advances `lastProgressAt`** — raw events whose session is one of the
+job's sessions:
 
-### 5.3 Wire: a job as returned by `delegate:list` / `delegate_list`
+- `session.text.delta`
+- `session.reasoning.delta`
+- `session.step.ended`
+- `session.tool.progress`
+- `session.tool.success`
+- `session.tool.failed`
+- `session.execution.*`
+- `session.created` (a new descendant)
 
-New `view` object, computed on the server (one source for desktop, iOS and the
-tool):
+Plus a new hook from the stream interpreter: `onShellOutput(sessionId, callID,
+bytes)`. It is called each time the shell poll (`streamInterp.mjs`, 250 ms) gets
+NEW bytes, BEFORE the 20 000-character display truncation. It also sets that
+tool's `lastOutputAt`.
+
+**Not a signal**: polling or reading an unchanged transcript; `progress_report`
+calls; todo-list writes. A model calling a reporting tool in a loop must not keep
+a dead job alive. Todo writes are tool events and already count once as such.
+
+**Tool tracking**:
+
+- `session.tool.progress` / start registers a tool:
+  - `target` (≤ 80 chars): the shell command's first line, or the file path for
+    patch/read/edit/write, or empty.
+  - `timeoutMs`: the shell input `timeout` when it is a finite number > 0, else
+    null (0, missing, invalid → null).
+- `session.tool.success` / `.failed` removes it.
+
+**Boot / reconnect**:
+
+- On manta-server boot and on every opencode stream reconnect, each running
+  job's `lastProgressAt` is set to now and `reconstructedAt` to null.
+- The 60 s sweep then rebuilds the tool map from opencode outside the jobs lock.
+  It reads the child's newest assistant message and keeps the parts with a
+  running tool state. At most 2 jobs are read concurrently, with a 5 s timeout
+  each.
+- A failed or timed-out read leaves `reconstructedAt` null and is retried on the
+  next sweep.
+- **A job with `reconstructedAt === null` is never judged stalled** (fail-open).
+
+### A2. Stall rule (evaluated by the 60 s sweep)
+
+A running, Manta-owned, launch-confirmed job (not `creating`/`uncertain`, not
+handoff-deferred, `reconstructedAt` set) is **stalled** when ALL hold:
+
+- `now − lastProgressAt > 15 min`;
+- no tracked tool is still within its allowance. A tool's allowance:
+  - `timeoutMs` set → alive until `startedAt + timeoutMs + 5 min`;
+  - `timeoutMs` null → alive until `lastOutputAt (or startedAt) + 60 min`.
+
+With several tools running, the job is alive if any one of them is. Lost-run
+detection runs first and keeps its own outcome.
+
+Outcome:
+
+- `failed`, `endReason:"stalled"`.
+- Error with no tool: `stalled — no progress for 15 minutes (last: <headline>)`.
+- Error with a tool: `stalled — "<target>" ran with no output for 60 minutes` or
+  `stalled — "<target>" ran past its own timeout`.
+- The child is interrupted as the current timeout path does.
+
+### A3. Ceiling
+
+- `ceilingMs` per segment.
+  - Default 4 h.
+  - `delegate.maxDurationMinutes` (integer 10–720) sets it at launch.
+  - The CTO's `sweepAllowanceMs`, when present, is the initial `ceilingMs`.
+- **Resume**: the segment restarts with the job's base ceiling (launch value);
+  extensions from the previous segment are dropped.
+- **Continuation**: the new record starts with the base ceiling of the record it
+  continues.
+- Reached (`segment clock > ceilingMs`) → `failed`, `endReason:"time-limit"`,
+  `reached its time limit of <N>` where `<N>` is e.g. "4 hours" or "2 hours 30
+  minutes".
+
+### A4. Warning before the ceiling
+
+- **When**: once remaining time ≤ `min(10 min, ceilingMs / 2)`, if
+  `ceilingWarnedFor !== ceilingMs` and the job isn't stalled.
+- **How**:
+  - Under the jobs lock, set `ceilingWarnedFor = ceilingMs` and persist.
+  - Then, outside the lock, send a steered prompt (`delivery:"steer"`) with
+    message id `msg_ceil_<jobId>_<ceilingMs>` (idempotent at opencode).
+  - V2 injects a steered message at the child's next step. A warning landing
+    mid-tool is read after that tool ends.
+  - A failed send is logged and not retried (best-effort; the ceiling still
+    applies).
+- **Text**: "Background job notice: about <m> minutes left before this job is
+  stopped. Commit your work, record where you got to with progress_report, and
+  finish with your summary."
+- An extension changes `ceilingMs`, so a later warning is re-armed
+  automatically.
+
+### A5. Jobs cannot wait on a person
+
+Jobs run with a catch-all-deny permission ruleset, so a permission is denied,
+never asked (`buildPermissionRuleset`). This spec adds `question` to that
+ruleset as an explicit trailing deny, so a granted `"*"` can't re-enable it.
+
+A job that needs a decision:
+
+1. calls `progress_report({ state:"blocked", label:"<what it needs>" })`;
+2. ends its turn with the question in its final message.
+
+The job ends `done` and its result reaches the parent as today. The result card
+and completion text say **"Needs a decision"** when the job's final progress
+state was `blocked` (`endedBlocked:true`). The parent answers with
+`delegate_send`.
+
+No "waiting on you" state exists for Manta jobs. The read-only guard on job
+sessions (`delegateView.assertWritable`) is unchanged.
+
+### A6. Atomic terminal transition (no race with extend)
+
+The sweep picks candidates from a snapshot. Immediately before ending a job for
+`stalled` / `time-limit`, the engine re-reads the LIVE record under the jobs lock
+and re-checks all of:
+
+- same `id`, `attempt` and `childSessionID`;
+- `status === "running"`;
+- for time-limit: `ceilingMs` unchanged since the snapshot, and still exceeded;
+- for stall: `live.lastProgressAt` unchanged since the snapshot, and the rule
+  still holds.
+
+Any mismatch → skip; the next sweep re-evaluates. `delegate_extend` takes the
+same lock, so an accepted extension and a time-limit end can't both happen.
+
+### A7. `delegate_extend` (parent tool)
+
+- **Tool**: `delegate_extend({ id, minutes, reason })`.
+- **Route**: `POST /api/delegate/:id/extend` with body
+  `{ minutes, reason, sessionID }`. `sessionID` is the tool's
+  `context.sessionID`; it is never taken from model-written arguments.
+- **Checks**, under the jobs lock, against the live record. Each failure is
+  refused as `{ ok:false, error }`, which the tool returns verbatim as text:
+  - the record exists, is Manta-owned and `running`;
+  - the caller is the job's `parentSessionID` or a session in its handoff chain
+    (the same chain `listJobs({ sessionIDs })` uses);
+  - `minutes` is an integer in 15–480;
+  - `reason` is 1–200 chars;
+  - the new `ceilingMs` is ≤ 12 h.
+- **On success**:
+  - `ceilingMs += minutes`;
+  - append `extensions: [{ at, minutes, reason }]` (bounded to 20);
+  - publish `delegate.updated`;
+  - return `{ ok:true, job:{ id, name, ceilingMs, segmentStartedAt } }`.
+- **Tool text**:
+  `Extended "<name>" by <m> min — it can now run until <HH:MM> (box time).`
+
+### A8. Runaway protection by behaviour (stage 2)
+
+- **Loops**:
+  - Add `doom_loop: deny` to the job ruleset.
+  - Trial `opencode-doom-loop-detector` on the dev box against recorded job
+    transcripts (replay). Adopt only if it never fires on the 208 finished-done
+    jobs.
+  - Fallback: our own detector (same normalized call + identical output, 6 in a
+    row per signature).
+  - Outcome: `failed`, `endReason:"loop"`,
+    `stopped: repeated the same action (<tool>)`.
+- **Spending**: see B1 `usage`, recorded from stage 1.
+  - A default budget is proposed by the follow-up routine (§8).
+  - Enforcement (stage 2): warn at 80% (steered, same idempotency as A4); stop at
+    100% with `endReason:"budget"`, `stopped: spending limit reached`.
+
+### A9. Outcomes and continuity
+
+- Every new outcome is resumable with `delegate_send`.
+- The completion text gains a `Reason:` line for `stalled` / `time-limit` /
+  `loop` / `budget`, plus the final headline.
+- The 5-job cap and lost-run detection are unchanged.
+
+## 4. Part B — standardized progress
+
+### B1. Sources and storage
+
+Progress the parent sees is stored **on the job record** (`job.progress`), not
+only per session. It therefore survives handoff (same record), resume (same
+record, new child), and the `clearProgress(childSessionID)` that `finishV2Job`
+already runs.
+
+Two inputs feed it:
+
+1. **Model reports** — `progress_report` from a job session.
+   - `/api/progress` keeps writing the per-session record (the child's own
+     working indicator uses it).
+   - When the session is a running Manta-owned job's current child, it ALSO
+     merges into `job.progress`.
+   - Merges are serialized per job (keyed mutex) and per session (the existing
+     store gets the same keyed mutex; today's read-modify-write is unlocked).
+   - Every accepted report is stored. Only the bus publish is throttled (B4).
+2. **Checklist** — the latest `todo_write` input seen on the child's raw tool
+   events (`session.tool.success` with tool name `todowrite`/`todo_write`).
+   - Parsed with the same rule as `summarizeTranscript` (`peers.mjs`).
+   - Kept in `job.progress.checklist`, so a resumed or handed-off child with no
+     todo list yet still shows the last known one.
+
+Server-only facts are computed from engine state, never from a fresh transcript
+or DB read:
+
+- live tool (A1);
+- `usage` (from `session.step.ended` events);
+- files changed (B3).
+
+### B2. Computation rules (pinned)
+
+**Checklist steps**:
+
+- Items with status `cancelled` are excluded from both counts.
+- `total` = the remaining items; `done` = the items with status `completed`.
+- `current` = the first `in_progress` item, else null.
+
+**Reported steps**: `progress_report.step` is the CURRENT 1-based step, so
+`done = step − 1` and `total = total`. Usable only when `total` is set.
+
+**Source**:
+
+- `checklist` when it has ≥ 2 items after excluding cancelled;
+- else `reported` when usable;
+- else no steps.
+
+**Plan revision**:
+
+- `planRevision` increments whenever the chosen source or `total` changes.
+- `grewAt` = the time of the last revision where `total` increased, else null.
+
+**Bar** (`bar`, 0..1, server-owned, persisted):
+
+- Within one revision: `bar = max(previous bar, done/total)`.
+- On a new revision: `done/total` (it may drop; clients show "plan grew" while
+  `now − grewAt < 120 s`).
+- Clamped to ≤ 0.95 while not terminal.
+- Set to 1 only when the job ends `done`. Failed / stopped / paused keep the
+  last value.
+
+**State precedence**: the job lifecycle always wins. Model states only matter
+while running:
+
+- `blocked` shows as "Needs a decision" (amber);
+- a model `done` or `failed` while still running is ignored for state; its label
+  is used as the headline.
+
+**Headline** (plain text, ≤ 120 chars, first line only), first non-empty of:
+
+1. the model label, if reported within the last 30 min (`headlineAt`);
+2. the current checklist item;
+3. the running tool (`<name>: <target>`);
+4. the existing activity line.
+
+**Milestones**:
+
+- `progress_report.milestone` (plain text, ≤ 160 chars, trimmed, empty ignored).
+- Appended with `at`; an exact duplicate of the newest is dropped.
+- Bounded to 8 (oldest dropped). Stored newest-last.
+
+**Usage**:
+
+- For every `session.step.ended` of a job session, dedupe on
+  `(sessionID, messageID, stepIndex)`. The dedupe set is in memory and bounded
+  to 2 000 per job.
+- `tokens += input + output + reasoning + cache.read + cache.write`.
+- `costUsd += cost` when the event carries a finite `cost`.
+- `costUsd` stays null until a cost is seen. `costPartial: true` when any step
+  lacked a cost after one had one.
+- Persisted at most once a minute. After a restart, up to a minute of usage may
+  be missed: `usage` is documented as approximate. No DB backfill.
+- Scope:
+  - resume and handoff accumulate on the same record;
+  - a continuation record starts at 0;
+  - descendants are included.
+
+### B3. Files changed
+
+- Computed by the 60 s sweep for running Manta-owned jobs with a `worktree` and
+  `baseSha`.
+  - Outside the jobs lock, at most 2 concurrently, 5 s timeout each.
+- Value: the number of UNIQUE paths in
+  `git diff --name-only <baseSha>` (working tree vs base: covers committed and
+  uncommitted) plus untracked files from `git status --porcelain`.
+- The result goes to `job.progress.files = { changed: number | null, at }`.
+  `null` means unknown (git failed); it is never 0 by mistake.
+- The final count is taken by the existing completion path before worktree
+  cleanup. That path switches to the same unique-path rule (fixes today's
+  committed + uncommitted double count).
+- No PR link (no source exists today).
+
+### B4. Wire, bus and client refresh
+
+- `listJobs` adds `view` (§5.3), computed from the record plus in-memory `live`
+  only: no I/O.
+- `delegate.updated` payload gains `view`.
+  - Per job it is published at most every 5 s, trailing (the last state is
+    always sent).
+  - Terminal transitions publish immediately.
+  - The trigger is any change to `view` except `elapsedMs`/`quietMs` (clients
+    tick those locally from `asOf`).
+- **Desktop**: on `delegate.updated` carrying `view`, patch that job in the
+  store instead of refetching the whole list (`App.tsx` today refetches on every
+  event). Refetch only when the id is unknown or the status changes (nesting may
+  change).
+- **iOS**: the same patch-in-place in its job store; the existing 10 s poll
+  stays as the healer.
+
+### B5. Reporting prompt
+
+`buildJobPrompt` adds this paragraph (exact text):
+
+> Progress: keep your todo list current — it is shown to the user as your
+> progress. At each plan step call progress_report with a one-line label; when
+> you find or finish something the user would want to know, add it as a
+> milestone. You cannot ask the user questions from here: if you need a decision,
+> call progress_report with state "blocked" and a label saying what you need, then
+> end your turn with the question.
+
+`progress_report` gains `milestone?: string`. Its description keeps the
+anti-narration wording and adds: "In a background job, `milestone` records a
+notable finding (≤160 chars)." It still says it does not notify. No push is added
+by this spec.
+
+### B6. Surfaces
+
+All model text is rendered as plain text (no Markdown, no HTML, no links),
+single-line with ellipsis truncation. The full text is in a title/tooltip
+(desktop) or the expanded view.
+
+**Desktop parent card** (`RunCard`, running/settling only):
+
+- **Row 1**: spinner · "Running in background:" · name · steps chip `3/7`
+  (when steps) · elapsed · Open session.
+- **Row 2**: headline. In amber, prefixed "Needs a decision:", when the model
+  state is `blocked`.
+- **Row 3**: a 2 px bar (when steps).
+- Fixed height per state: rows 2–3 reserve their space with `visibility:hidden`
+  when empty.
+- **Disclosure** — a separate button "Details" (keyboard-focusable, not wrapping
+  Open session). Shows:
+  - checklist (✓ done, ▸ current, ○ pending; cancelled hidden);
+  - milestones (newest first, with relative time);
+  - live tool + its age;
+  - "Quiet for N min" when `quietMs ≥ 3 min`;
+  - files changed;
+  - tokens / cost;
+  - "time left Hh Mm" when `limitRemainingMs` is set;
+  - "plan grew" for 120 s after `grewAt`.
+- Open-session errors keep showing under the card.
+
+**Finished result card**: unchanged, except:
+
+- "Needs a decision" state when `endedBlocked`;
+- the new reasons from A2/A3/A8 shown as the failure text.
+
+**Sidebar job row**: the `3/7` chip; tooltip = headline.
+
+**iOS** (`BackgroundJobsSheet.swift` rows; model `DelegateJob` in
+`SessionModels.swift`):
+
+- Add a lenient optional `view` (unknown or invalid → nil; an older box sends
+  none).
+- Row: line 1 name + `3/7`; line 2 headline (instead of `activity` when `view`
+  exists); a thin bar.
+- Tap the row's info button → a detail sheet with the same content as the desktop
+  disclosure. Tapping the row still opens the session.
+- The generic blocked card (`ChatCardViews.swift`) is untouched.
+- Decoding tests: full, partial, invalid-typed and absent `view`.
+
+**Parent agent** (`delegate_list` text) gains per job: `state`, headline,
+`steps 3/7`, the last 3 milestones, `quiet Nm` (when ≥ 3 min), elapsed,
+`time left` (when set).
+
+**Completion text**: gains `Milestones:` (only when non-empty) and `Reason:`
+(A9). It is built from the job record, so it can't be lost to `clearProgress`.
+
+## 5. Contracts (pinned)
+
+### 5.1 Job record — new / changed fields
+
+```
+segmentStartedAt: number          // = startedAt (alias, existing field kept)
+ceilingMs: number                 // current segment ceiling
+baseCeilingMs: number             // launch value, restored on resume
+extensions: [{ at, minutes, reason }]   // ≤ 20, current segment only
+ceilingWarnedFor: number | null   // the ceilingMs a warning was sent for
+endReason: "stalled" | "time-limit" | "loop" | "budget" | null
+endedBlocked: boolean             // final model state was "blocked"
+lastProgressAt: number | null     // display only; never used to judge after a restart
+progress: {
+  label: string, labelAt: number | null,
+  modelState: "working" | "blocked" | "done" | "failed" | null,
+  checklist: [{ text: string, status: "pending" | "in_progress" | "completed" | "cancelled" }] | null,
+  reported: { step: number, total: number } | null,
+  planRevision: number, grewAt: number | null, bar: number | null,
+  milestones: [{ at: number, text: string }],
+  files: { changed: number | null, at: number } | null,
+  usage: { tokens: number, costUsd: number | null, costPartial: boolean }
+}
+```
+
+**Defaults**: legacy running records with none of these fields get them at first
+touch:
+
+- `ceilingMs = baseCeilingMs = sweepAllowanceMs ?? 4 h`;
+- empty `progress`, `extensions: []`, `ceilingWarnedFor: null`;
+- `endReason: null`, `endedBlocked: false`.
+
+**Reset rules** (continuation spreads the old record today — these must be reset
+explicitly there):
+
+- **Continuation** resets `extensions`, `ceilingWarnedFor`, `endReason`,
+  `endedBlocked`, `lastProgressAt` and `progress` (all fields), and sets
+  `ceilingMs = baseCeilingMs`.
+- **Resume** resets `extensions`, `ceilingWarnedFor` and `endReason`, sets
+  `ceilingMs = baseCeilingMs`, and keeps `progress`.
+
+### 5.2 Per-session progress record (`progress.json`)
+
+Unchanged shape. `milestone` is accepted by `/api/progress` and routed only to
+`job.progress`. Writes become serialized per session.
+
+### 5.3 `view` (wire, computed; identical for desktop, iOS, tool)
 
 ```
 view: {
-  state: "working" | "waiting" | "blocked" | "done" | "failed" | "stopped" | "paused",
-  headline: string,
-  headlineSource: "model" | "checklist" | "activity",
-  steps: { done: number, total: number, current: string | null,
-           items: [{ text: string, status: "done" | "current" | "pending" | "cancelled" }],
-           source: "checklist" | "reported", grew: boolean } | null,
-  live: { tool: string, target: string, sinceMs: number } | null,
-  quietMs: number | null,          // null when < 3 min or not running
-  waitingOn: { kind: "permission" | "question", title: string } | null,
-  milestones: [{ at: number, text: string }],
-  elapsedMs: number,
-  limitRemainingMs: number | null, // null unless < 30 min
-  files: { changed: number, branch: string | null, prUrl: string | null },
-  usage: { tokens: number, costUsd: number | null },
+  asOf: number,                   // epoch ms the view was computed
+  state: "working" | "needs-decision" | "done" | "failed" | "stopped" | "paused" | "settling",
+  headline: string,               // ≤120, plain text, may be ""
+  headlineSource: "model" | "checklist" | "tool" | "activity" | "none",
+  steps: {
+    done: number, total: number, current: string | null,    // current ≤120
+    items: [{ text: string, status: "done" | "current" | "pending" }],  // ≤ 30, text ≤ 120
+    source: "checklist" | "reported", planRevision: number, grewAt: number | null
+  } | null,
+  bar: number | null,             // 0..1 per B2
+  live: { tool: string, target: string, startedAt: number } | null,  // longest-running tracked tool
+  lastProgressAt: number | null,  // client derives "quiet for"; show only when running and ≥ 3 min
+  milestones: [{ at: number, text: string }],   // newest first, ≤ 8
+  segmentStartedAt: number | null,
+  ceilingAt: number | null,       // segmentStartedAt + ceilingMs; null for opencode-owned
+  files: { changed: number | null } | null,
+  usage: { tokens: number, costUsd: number | null, costPartial: boolean } | null,
   model: string | null
 }
 ```
 
-The existing `progress` and `activity` fields stay for one release (older
-clients), then are removed.
+**Clients**:
 
-### 5.4 Tools
+- elapsed = `now − segmentStartedAt` (wall, current segment);
+- "time left" is shown only while running and `ceilingAt − now < 30 min`;
+- quiet = `now − lastProgressAt`.
 
-- `delegate` + `maxDurationMinutes?: number` (10–720).
-- `delegate_extend({ id: string, minutes: number, reason: string })`. Returns
-  `Extended "<name>" by <m> min — new limit <h:mm> after start.` or the refusal
-  text.
+**State mapping**:
+
+- `running` + modelState `blocked` → `needs-decision`;
+- `running` → `working`;
+- `done` + `endedBlocked` → `needs-decision`;
+- otherwise the job status (`settling` is the existing card kind).
+
+**opencode-owned jobs**: `ceilingAt` null; `usage`/`files` null; steps and
+headline as available.
+
+`progress` (per-session) and `activity` stay on the wire for one release, then
+are removed.
+
+### 5.4 Tools (V1 `docs/opencode-tools/*.ts` and V2 `docs/opencode-plugins-v2/manta/tools/*.ts` stay twins; pack test updated)
+
+- `delegate` + `maxDurationMinutes?: integer 10–720`; invalid → refused with a
+  message, the job isn't started.
+- `delegate_extend({ id: string, minutes: integer 15–480, reason: string 1–200 })`
+  → `POST /api/delegate/:id/extend` (A7).
 - `progress_report` + `milestone?: string`.
-
-V1 tool files (`docs/opencode-tools/`) and V2 plugin tools stay in sync (the
-existing pack test).
+- `delegate_list` output adds the fields in B6.
 
 ### 5.5 Bus
 
-`delegate.updated` payload gains `view` (same shape). It is published at most
-every 5 s per job.
+`delegate.updated` `{ id, status, activity, view }`, with the publish rules of
+B4.
 
 ## 6. Libraries considered
 
 | Need | Chosen | Considered / why not |
 |---|---|---|
-| Heartbeat + timeout engine | existing job sweeper (60 s) + in-memory `lastProgressAt` | Temporal (`@temporalio/client` 1.25.0, MIT, 6.7M/wk), BullMQ (6.7.6, MIT, 13.6M/wk; `lockDuration` + stalled-job checker), pg-boss (12.38.2, MIT, 4.9M/wk): all adopt the same heartbeat model, but the work runs inside opencode, not a worker these libraries drive. The "heartbeat" is opencode's event stream, which only we observe. Adding one means a new service (Temporal server / Redis / Postgres) for a single timer the engine already runs. We adopt their design (heartbeat + start-to-close + soft limit), not the infrastructure. |
-| Loop detection | trial `opencode-doom-loop-detector` (0.2.0, published 2026-11-13, MIT, 0 deps, 309/wk) | Upstream PR anomalyco/opencode#61328 (same code, unmerged). Too young to adopt blind, hence a trial plus a stated fallback. Hand-rolled only if the trial misfires on recorded transcripts. |
-| Progress schema | own 10-field `view`, semantics from MCP progress / LSP WorkDoneProgress / A2A TaskStatus | Those are protocols, not libraries; no package stores a status record. A2A SDK (`@a2a-js/sdk`) would add a protocol we don't speak. |
-| Checklist source | opencode's todo list (already parsed by `summarizeTranscript`) | — |
-| UI | existing card primitives, no new dependency | — |
+| Heartbeat + timeout engine | Existing 60 s job sweeper + in-memory liveness map fed by the existing opencode event pump. | **Temporal** (`@temporalio/client` 1.25.0, 2026-10-27, MIT, 5 deps, 6.7M/wk; sdk-typescript 950★, pushed 2026-11-13). **BullMQ** (6.7.6, 2026-11-12, MIT, 5 deps, 13.6M/wk; 9.6k★, pushed 2026-11-14; its `lockDuration` + stalled-job checker is the same idea). **pg-boss** (12.38.2, 2026-11-10, MIT, 4 deps, 4.9M/wk; 4.1k★, pushed 2026-11-13). All are healthy, but each drives work in workers it runs. Our work runs inside opencode, and the heartbeat is opencode's event stream, which only our pump sees. Each would add a server (Temporal / Redis / Postgres) to own one timer the engine already runs. We adopt their design (heartbeat + start-to-close + soft warning), not the infrastructure. |
+| Loop detection (stage 2) | Trial `opencode-doom-loop-detector` (0.2.0, 2026-11-13, MIT, 0 deps, 309/wk, repo metal-huang/opencode-doom-loop-detector). | Upstream PR anomalyco/opencode#61328 (same design, unmerged). Too new to adopt blind, hence a replay trial with a pass bar (A8). Our own detector only if the trial fails it. |
+| Throttle / coalesce publishes | Small per-job trailing timer in the engine. | lodash.throttle etc.: trivial, and the coalescer must also key on job id and flush on terminal; same pattern as `streamInterp`'s existing coalescing. |
+| Per-key serialization | Existing `createKeyedMutex` (already used by delegate). | — |
+| Usage / pricing | `cost` and token fields already on `session.step.ended` events (opencode prices them). | Optimizer price table: not needed when opencode supplies `cost`; a gap is flagged `costPartial`. |
+| Persistence | Existing `jsonStore` atomic writes of the job store. | — |
+| Progress schema | Own `view`; semantics from MCP progress / LSP WorkDoneProgress / A2A TaskStatus. | Those are protocols, not packages. `@a2a-js/sdk` would add a protocol we don't speak. |
+| UI | Existing card primitives (desktop), SwiftUI (iOS). | — |
 
-## 7. Tests (injected fakes; no live opencode/tmux)
+## 7. Tests (injected fakes; no live opencode/tmux; nothing heavy on this box)
 
-Liveness:
+### Liveness
 
-- a job producing output every 2 min for 3 h → never stalled, ends at 4 h;
-- 16 min silent → stalled;
-- a shell with `timeout: 1200000` silent for 24 min → alive, at 26 min → stalled;
-- a shell with no timeout and no output for 61 min → stalled;
-- pending question → never stalled and the ceiling shifts by the wait;
-- the warning is sent once, and re-armed after an extension;
-- `delegate_extend` happy path, cap at 12 h, refused for terminal / opencode-owned
-  / another session's job;
-- manta-server restart → window restarts from boot;
-- CTO overnight allowance maps onto the ceiling;
-- lost-run detection still wins over stall.
+- Output every 2 min for 3 h → alive; ends at 4 h with `time-limit`.
+- 16 min with no events → stalled.
+- `progress_report` calls only (no other events) for 20 min → stalled.
+- Shell with `timeout: 1200000`, silent: alive at 24 min, stalled at 26 min
+  (anchored to start).
+- Shell with `timeout: 0` and no output: alive at 59 min, stalled at 61 min.
+- Shell output bytes beyond the 20 000-char display cap still advance liveness.
+- Two tools, one within allowance → alive.
+- A descendant's events advance the parent job; a silent descendant that is
+  merely active does not.
+- After boot, `reconstructedAt === null` → never stalled. A failed
+  reconstruction is retried; a successful one restores a running shell with its
+  start time.
+- Handoff-deferred, `creating` or `uncertain` → never judged.
+- Lost-run detection wins.
 
-Progress:
+### Ceiling and extension
 
-- `view` from: todo list only; progress_report only; both (checklist wins steps,
-  model wins headline); neither (activity);
-- plan grows → `grew:true` once;
-- bar capped at 95%;
-- milestone bound 8;
-- throttle coalescing keeps milestones;
-- waiting derived from a pending permission;
-- `buildJobPrompt` contains the reporting paragraph.
+- Warning sent once at the threshold. A 10-minute ceiling warns at 5 min left.
+- An extension re-arms the warning (new `ceilingMs`).
+- Snapshot-then-extend race → no timeout (A6).
+- Extend checks:
+  - foreign session refused;
+  - handoff-chain session accepted;
+  - terminal / opencode-owned refused;
+  - minutes outside 15–480 refused;
+  - exceeding 12 h refused;
+  - the refusal text is returned by the tool.
+- CTO `sweepAllowanceMs` becomes the ceiling.
+- Resume restores `baseCeilingMs` and drops extensions.
+- Continuation resets every field in §5.1.
+- A legacy running record gets the defaults.
 
-UI:
+### Progress
 
-- card states rendered in the visual gate (working with steps, without steps,
-  waiting, quiet warning, expanded).
+- `view` from: checklist only; reported only; both (checklist wins steps, model
+  wins headline); neither.
+- Cancelled items are excluded.
+- Reported step 3 of 5 → done 2.
+- The bar is monotonic within a revision, drops on a new one, sets `grewAt`,
+  caps at 0.95, and is 1 only on `done`.
+- A model `done` while running doesn't change the state.
+- `blocked` → `needs-decision`; an end while blocked → `endedBlocked`.
+- Milestones: bound 8, duplicate dropped, survive `clearProgress`, appear in the
+  completion text.
+- Concurrent reports don't lose milestones (keyed mutex).
+- Usage dedupe; `costPartial`; reset on continuation; accumulates across
+  handoff.
+- Files: unique paths, `null` on git failure, no double count at completion.
+- Publish throttle: ≤ 1 per 5 s per job, the trailing one is delivered, terminal
+  is immediate.
+- `buildJobPrompt` contains B5 verbatim.
+- The job ruleset ends with a `question` deny.
+
+### Clients
+
+- Desktop store patch-in-place on `view`; refetch on an unknown id or a status
+  change.
+- RunCard visual-gate states: working with steps, without steps,
+  needs-decision, quiet ≥ 3 min, details open, plan grew.
+- Model text with `<b>` / markdown renders literally.
+- iOS decoding tests: full, partial, invalid and absent `view`. iOS build per
+  `mobile/native/AGENTS.md`.
+
+### Upgrade
+
+- An existing box needs no manual step: the plugin/tool twins ship through the
+  normal update path (`upgradeV2Prepare`), and legacy records get defaults (§5.1).
 
 ## 8. Rollout and follow-up
 
-- **Stage 1**: A1–A4, A6 + B1–B3 (desktop card, iOS card, sidebar chip, tool
-  output), shadow usage recording.
-- **Stage 2**: A5 (loop trial, budget enforcement).
-- **At merge**, create a routine for 7 days after deploy. It checks:
-  - jobs ended by each new reason, each replayed against the old 30-minute rule;
-  - stalls that were false (activity seen in the 5 min before);
-  - jobs that reached 4 h;
-  - the share of jobs with steps (checklist or reported) and with milestones;
-  - the per-job token/cost distribution, used to propose the default budget.
-  Thresholds:
-  - false stalls > 2 → raise 15 min;
-  - more than 1 in 10 jobs hits 4 h → raise the default;
-  - steps shown on < 50% of jobs → strengthen the prompt.
+- **Stage 1** (one release): A1–A7, A9, B1–B6 incl. iOS; usage recorded
+  (shadow).
+- **Stage 2**: A8 (loop trial → enforcement; budget default + enforcement).
+- **Follow-up routine**: created when this spec is approved for implementation
+  (rule: at the moment we commit to observing).
+  - It first checks whether the box's running release contains this feature (the
+    job store has records with `ceilingMs`) and reports "not deployed yet" until
+    it does.
+  - From deploy + 7 days it reports, read-only from `~/.manta/delegate-jobs.json`
+    and opencode's DB (via the worker-offloaded readers):
+    - counts by `endReason`;
+    - for each `stalled`, whether events/messages occurred in its last 15 min
+      (a false stall);
+    - jobs that reached 4 h;
+    - the share of jobs with steps / milestones;
+    - the per-job tokens/cost distribution (p50/p90/max).
+  - Thresholds:
+    - more than 2 false stalls → propose raising 15 min;
+    - more than 10% of jobs hitting 4 h → propose raising the default;
+    - steps on < 50% → strengthen B5;
+    - propose the stage-2 budget as p99 × 1.5.
 
 ## 9. Open questions
 
-1. 15 min idle is agreed (2026-11-14). Active jobs showed silent gaps of up to
-   ~2.5 min; the routine raises it if it sees false stalls.
-2. Extension is a parent-agent tool only; no user button (agreed 2026-11-14).
-   iOS ships in the same release (agreed 2026-11-14).
+None blocking.
