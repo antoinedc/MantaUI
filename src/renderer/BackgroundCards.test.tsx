@@ -10,7 +10,6 @@ import { act } from "react";
 import type { DelegateJob, DelegateJobProgressView } from "../shared/types";
 import { BackgroundResultCard, BackgroundRunCards } from "./BackgroundCards";
 import type { BackgroundCard, BackgroundResultPart } from "./backgroundRun";
-import { useStore } from "./store";
 import { mount, resetStore, type Harness } from "./testHarness";
 
 const T0 = 1_800_000_000_000;
