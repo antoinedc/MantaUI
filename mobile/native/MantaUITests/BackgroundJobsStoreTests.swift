@@ -179,4 +179,67 @@ final class BackgroundJobsStoreTests: XCTestCase {
         store.stopAutoRefresh()
         XCTAssertFalse(store.isAutoRefreshing)
     }
+
+    // MARK: - Progress view (spec 2026-11-14 B4)
+
+    private func viewJSON(n: Int, headline: String, epoch: Int = 1000, asOf: Int = 5_000_000) -> String {
+        #"{"rev":{"epoch":\#(epoch),"n":\#(n)},"asOf":\#(asOf),"state":"working","headline":"\#(headline)","steps":{"done":1,"total":4}}"#
+    }
+
+    private func jobsWithView(_ view: String) -> String {
+        #"{"result":[{"id":"run1","name":"Job","status":"running","childSessionID":"c_run","parentSessionID":"ses_p","startedAt":2000,"view":\#(view)}]}"#
+    }
+
+    func testRefreshTakesTheViewAndClockSkewFromAsOf() async {
+        StubChannelURLProtocol.responses = ["delegate:list": jobsWithView(viewJSON(n: 1, headline: "first")), "tmux:list": projectsJSON]
+        let store = makeStore()
+        let before = Date().timeIntervalSince1970 * 1000
+
+        await store.refresh()
+
+        XCTAssertEqual(store.jobs.first?.view?.headline, "first")
+        let clock = store.clock(for: "run1")
+        XCTAssertNotNil(clock)
+        // asOf (5 000 s since 1970) is far behind this device's clock, so the skew is that gap.
+        XCTAssertEqual(clock?.skewMs ?? 0, 5_000_000 - before, accuracy: 60_000)
+    }
+
+    func testApplyPatchesTheViewInPlaceAndKeepsTheOlderRevOut() async {
+        StubChannelURLProtocol.responses = ["delegate:list": jobsWithView(viewJSON(n: 1, headline: "first")), "tmux:list": projectsJSON]
+        let store = makeStore()
+        await store.refresh()
+
+        let newer = BackgroundJobUpdate(payload: try? JSONDecoder().decode(JSONValue.self, from: Data(
+            #"{"id":"run1","status":"running","activity":"editing","view":\#(viewJSON(n: 2, headline: "second"))}"#.utf8)))
+        XCTAssertFalse(store.apply(newer), "a newer view for a known job with an unchanged status needs no refetch")
+        XCTAssertEqual(store.jobs.first?.view?.headline, "second")
+        XCTAssertEqual(store.jobs.first?.activity, "editing")
+
+        let older = BackgroundJobUpdate(payload: try? JSONDecoder().decode(JSONValue.self, from: Data(
+            #"{"id":"run1","status":"running","view":\#(viewJSON(n: 1, headline: "stale"))}"#.utf8)))
+        XCTAssertFalse(store.apply(older))
+        XCTAssertEqual(store.jobs.first?.view?.headline, "second", "a late or replayed view is ignored")
+    }
+
+    func testAnOlderListResponseDoesNotRollBackAPatchedView() async {
+        StubChannelURLProtocol.responses = ["delegate:list": jobsWithView(viewJSON(n: 1, headline: "first")), "tmux:list": projectsJSON]
+        let store = makeStore()
+        await store.refresh()
+        store.apply(BackgroundJobUpdate(payload: try? JSONDecoder().decode(JSONValue.self, from: Data(
+            #"{"id":"run1","status":"running","view":\#(viewJSON(n: 5, headline: "patched"))}"#.utf8))))
+
+        await store.refresh()   // the poll answers with the n = 1 view it computed earlier
+
+        XCTAssertEqual(store.jobs.first?.view?.headline, "patched")
+    }
+
+    func testApplyAsksForARefetchWhenTheJobIsUnknownOrTheBoxSendsNoView() async {
+        StubChannelURLProtocol.responses = ["delegate:list": jobsWithView(viewJSON(n: 1, headline: "first")), "tmux:list": projectsJSON]
+        let store = makeStore()
+        await store.refresh()
+
+        XCTAssertTrue(store.apply(BackgroundJobUpdate(id: "other", status: "running")))
+        XCTAssertTrue(store.apply(BackgroundJobUpdate(id: "run1", status: "running")), "an older box: refetch like before")
+        XCTAssertTrue(store.apply(BackgroundJobUpdate(id: "run1", status: "done")), "a status change may re-nest the job")
+    }
 }
