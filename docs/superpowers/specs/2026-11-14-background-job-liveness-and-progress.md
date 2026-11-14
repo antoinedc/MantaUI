@@ -79,7 +79,7 @@ Progress:
     continuation (`delegate_send`, a new record) each start a new segment.
   - A child handoff (the record's `childSessionID` is repointed to the
     successor) does NOT start a new segment.
-- **Segment clock**: wall time since `segmentStartedAt` (= today's `startedAt`,
+- **Segment clock**: wall time since the record's `startedAt` (
   which every launch path already resets).
   - Paused time is not in any segment.
   - No time is subtracted for "waiting", because jobs cannot wait on a person
@@ -293,7 +293,7 @@ same lock, so an accepted extension and a time-limit end can't both happen.
   - `ceilingMs += minutes * 60_000`;
   - append `extensions: [{ at, minutes, reason }]` (bounded to 20);
   - publish `delegate.updated`;
-  - return `{ ok:true, job:{ id, name, ceilingMs, segmentStartedAt } }`.
+  - return `{ ok:true, job:{ id, name, ceilingMs, startedAt } }`.
 - **Tool text**:
   `Extended "<name>" by <m> min — it can now run until <HH:MM> (box time).`
 
@@ -401,7 +401,7 @@ while running:
 
 **Headline** (plain text, ≤ 120 chars, first line only), first non-empty of:
 
-1. the model label, if reported within the last 30 min (`headlineAt`);
+1. the model label, if reported within the last 30 min (`jobProgress.labelAt`);
 2. the current checklist item;
 3. the running tool (`<name>: <target>`);
 4. the existing activity line.
