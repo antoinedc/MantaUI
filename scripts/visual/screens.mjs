@@ -1192,7 +1192,7 @@ export const SCREENS = [
     region: bgCard("bg-steps"),
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "background-card-plain",
@@ -1203,7 +1203,7 @@ export const SCREENS = [
     region: bgCard("bg-plain"),
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "background-card-needs-decision",
@@ -1214,7 +1214,7 @@ export const SCREENS = [
     region: bgCard("bg-blocked"),
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "background-card-quiet",
@@ -1228,7 +1228,7 @@ export const SCREENS = [
     },
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "background-card-details",
@@ -1242,7 +1242,7 @@ export const SCREENS = [
     },
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "background-card-plan-grew",
@@ -1256,7 +1256,7 @@ export const SCREENS = [
     },
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
-    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
 ];
 
