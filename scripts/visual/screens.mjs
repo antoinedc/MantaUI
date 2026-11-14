@@ -107,6 +107,17 @@ async function exMockupTheme(page) {
   });
 }
 
+/** Background-job card rows: the `background` demo state (six running jobs, one per card state). */
+const BACKGROUND_URL = "/app/index.html?demo&desktop&state=background";
+const bgCard = (jobId) => `[data-testid="background-card"][data-job-id="${jobId}"]`;
+
+/** Open a job card's Details disclosure with a real click, then park the pointer. */
+async function bgOpenDetails(page, jobId) {
+  await page.locator(`${bgCard(jobId)} [data-testid="background-details-toggle"]`).click();
+  await page.locator(`${bgCard(jobId)} [data-testid="background-details"]`).waitFor();
+  await page.mouse.move(0, 0);
+}
+
 /** @type {Screen[]} */
 export const SCREENS = [
   {
@@ -1171,6 +1182,81 @@ export const SCREENS = [
     mockupRegion: ".mk-quickopen .list",
     viewport: DESKTOP_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn","manta-model-picker-btn","manta-session-menu-trigger"],
+  },
+  {
+    id: "background-card-steps",
+    title: "Background job card — working, with steps (chip, headline, bar)",
+    url: BACKGROUND_URL,
+    ready: '[data-screen="session"]',
+    final: bgCard("bg-steps"),
+    region: bgCard("bg-steps"),
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "background-card-plain",
+    title: "Background job card — working, no steps (bar row reserved)",
+    url: BACKGROUND_URL,
+    ready: '[data-screen="session"]',
+    final: bgCard("bg-plain"),
+    region: bgCard("bg-plain"),
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "background-card-needs-decision",
+    title: "Background job card — needs a decision (amber headline)",
+    url: BACKGROUND_URL,
+    ready: '[data-screen="session"]',
+    final: bgCard("bg-blocked"),
+    region: bgCard("bg-blocked"),
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "background-card-quiet",
+    title: "Background job card — quiet for 6 min (Details open)",
+    url: BACKGROUND_URL,
+    ready: '[data-screen="session"]',
+    final: bgCard("bg-quiet"),
+    region: bgCard("bg-quiet"),
+    actions: async (page) => {
+      await bgOpenDetails(page, "bg-quiet");
+    },
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "background-card-details",
+    title: "Background job card — Details open (checklist, milestones, tool, files, spend, time left)",
+    url: BACKGROUND_URL,
+    ready: '[data-screen="session"]',
+    final: bgCard("bg-details"),
+    region: bgCard("bg-details"),
+    actions: async (page) => {
+      await bgOpenDetails(page, "bg-details");
+    },
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "background-card-plan-grew",
+    title: "Background job card — plan grew (Details open)",
+    url: BACKGROUND_URL,
+    ready: '[data-screen="session"]',
+    final: bgCard("bg-grew"),
+    region: bgCard("bg-grew"),
+    actions: async (page) => {
+      await bgOpenDetails(page, "bg-grew");
+    },
+    mockup: null,
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
 ];
 

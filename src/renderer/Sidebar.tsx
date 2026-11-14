@@ -30,6 +30,7 @@ import {
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { SIDEBAR_WIDTH_PX } from "./explorer/layout";
+import { jobRowHint, stepsChip } from "./jobProgress";
 import { SessionRow as RailSessionRow, ROW_SELECTED, type SessionStatus } from "./SessionRow";
 import { StatusDot } from "./StatusDot";
 import { SidebarToggleButton } from "./SidebarToggle";
@@ -713,10 +714,16 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     const parts = ["Double-click to rename"];
     if (isJobRow(jobs, w.opencodeSessionId)) {
       const job = w.opencodeSessionId ? jobs[w.opencodeSessionId] : undefined;
-      if (job?.activity) parts.push(job.activity);
+      // The box's progress headline when it sent one (spec 2026-11-14 B6), else the legacy activity line.
+      const hint = job ? jobRowHint(job) : null;
+      if (hint) parts.push(hint);
     }
     return parts.join(" · ");
   };
+
+  // The `3/7` steps chip of a job row (plain text; absent without steps or on an older box).
+  const jobChip = (sessionId: string | null | undefined): string | null =>
+    sessionId && isJobRow(jobs, sessionId) ? stepsChip(jobs[sessionId].view) : null;
 
   return (
     <aside
@@ -920,6 +927,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   commitRename={commitRename}
                   cancelRename={() => setRenameTarget(null)}
                   title={rowTitle(r.window)}
+                  chip={jobChip(r.window.opencodeSessionId)}
                 />
               ))}
             </div>
@@ -953,6 +961,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   opening={opening.has(navKey)}
                   focused={focusedKey === navKey}
                   onOpen={() => void openVirtual(p, node)}
+                  chip={jobChip(node.sessionId)}
+                  hint={node.sessionId && isJobRow(jobs, node.sessionId) ? jobRowHint(jobs[node.sessionId]) : null}
                 />
               );
             }
@@ -977,6 +987,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   })
                 }
                 title={rowTitle(childWin)}
+                chip={jobChip(childWin.opencodeSessionId)}
               />
             );
           };
@@ -1034,6 +1045,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 commitRename={commitRename}
                 cancelRename={() => setRenameTarget(null)}
                 title={rowTitle(w)}
+                chip={jobChip(w.opencodeSessionId)}
               />
             );
           };
@@ -1372,6 +1384,7 @@ function WindowRow({
   commitRename,
   cancelRename,
   title,
+  chip,
 }: {
   project: Project;
   window: TmuxWindow;
@@ -1396,6 +1409,8 @@ function WindowRow({
   commitRename: () => void;
   cancelRename: () => void;
   title: string;
+  /** A job window's `3/7` steps chip, when the box reports steps. */
+  chip?: string | null;
 }) {
   const isRenaming =
     renameTarget?.kind === "window" &&
@@ -1436,7 +1451,12 @@ function WindowRow({
           marquee={!isRenaming}
           age={age.text}
           ageStale={age.stale}
-          trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
+          trailing={
+            <>
+              {chip && <JobStepsChip text={chip} />}
+              <PinSlot pinned={pinned} onToggle={onTogglePin} />
+            </>
+          }
           title={title}
           tabIndex={focused ? 0 : -1}
           ariaSelected={isActive}
@@ -1460,6 +1480,7 @@ function JobChildRow({
   onActivate,
   onClose,
   title,
+  chip,
 }: {
   window: TmuxWindow;
   isActive: boolean;
@@ -1469,6 +1490,8 @@ function JobChildRow({
   onActivate: () => void;
   onClose: () => void;
   title: string;
+  /** The job's `3/7` steps chip, when the box reports steps. */
+  chip?: string | null;
 }) {
   const dot = dotFor(status);
   const age = useAge(status);
@@ -1485,6 +1508,7 @@ function JobChildRow({
           marquee
           age={age.text}
           ageStale={age.stale}
+          trailing={chip ? <JobStepsChip text={chip} /> : undefined}
           title={title}
           ariaLevel={2}
           tabIndex={focused ? 0 : -1}
@@ -1494,6 +1518,19 @@ function JobChildRow({
       }
       onRequestDelete={onClose}
     />
+  );
+}
+
+// A job row's `3/7` steps chip (spec 2026-11-14 B6): plain mono text in the trailing slot, never shrinks.
+function JobStepsChip({ text }: { text: string }) {
+  return (
+    <span
+      className="shrink-0 font-mono text-[11px] leading-none tabular-nums text-text-quiet"
+      title="Steps done / total"
+      data-testid="job-steps-chip"
+    >
+      {text}
+    </span>
   );
 }
 
@@ -1509,6 +1546,8 @@ function VirtualRow({
   opening,
   focused,
   onOpen,
+  chip,
+  hint,
 }: {
   node: SessionTreeNode;
   child: boolean;
@@ -1519,6 +1558,10 @@ function VirtualRow({
   opening: boolean;
   focused: boolean;
   onOpen: () => void;
+  /** A job row's `3/7` steps chip. */
+  chip?: string | null;
+  /** A job row's progress headline (tooltip). */
+  hint?: string | null;
 }) {
   const dot = dotFor(status);
   const showHalted = shouldShowStoppedMarker(halted, dot.variant === "att");
@@ -1532,19 +1575,28 @@ function VirtualRow({
         name={node.title.trim() || "Untitled session"}
         marquee
         trailing={
-          node.outside ? (
-            <span
-              className="shrink-0 inline-flex items-center text-text-quiet"
-              title={OUTSIDE_TITLE}
-              aria-label={OUTSIDE_LABEL}
-              role="img"
-              data-testid="session-outside-mark"
-            >
-              <Radar size={12} aria-hidden="true" />
-            </span>
+          node.outside || chip ? (
+            <>
+              {chip && <JobStepsChip text={chip} />}
+              {node.outside && (
+                <span
+                  className="shrink-0 inline-flex items-center text-text-quiet"
+                  title={OUTSIDE_TITLE}
+                  aria-label={OUTSIDE_LABEL}
+                  role="img"
+                  data-testid="session-outside-mark"
+                >
+                  <Radar size={12} aria-hidden="true" />
+                </span>
+              )}
+            </>
           ) : undefined
         }
-        title={opening ? "Opening…" : `Not open in a window — click to open${node.outside ? ` · ${OUTSIDE_TITLE}` : ""}`}
+        title={
+          opening
+            ? "Opening…"
+            : `Not open in a window — click to open${hint ? ` · ${hint}` : ""}${node.outside ? ` · ${OUTSIDE_TITLE}` : ""}`
+        }
         ariaLevel={child ? 2 : undefined}
         ariaDisabled={opening}
         tabIndex={focused ? 0 : -1}
