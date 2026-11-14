@@ -1,0 +1,14 @@
+- text: "/Running in background: docs-site-migration 3\\/7 [\\d,.]+[bkmBKM]+ ·/"
+- button "Details" [expanded]
+- button "Open session"
+- text: Porting the API reference pages
+- progressbar "Plan progress"
+- text: Plan grew
+- list:
+  - listitem: "done: Inventory the old docs pages"
+  - listitem: "done: Set up the new site scaffold"
+  - listitem: "done: Port the guides"
+  - listitem: "current: Port the API reference"
+  - listitem: "pending: Port the changelog"
+  - listitem: "pending: Redirect the old URLs"
+  - listitem: "pending: Verify every link"
