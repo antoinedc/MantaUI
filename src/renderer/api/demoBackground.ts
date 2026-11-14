@@ -23,15 +23,31 @@ const STEP_TEXTS = [
   "Update the OpenAPI schema",
   "Run the full suite",
   "Open the pull request",
+];
+
+const DOCS_STEP_TEXTS = [
+  "Inventory the old docs pages",
+  "Set up the new site scaffold",
+  "Port the guides",
   "Port the API reference",
+  "Port the changelog",
   "Redirect the old URLs",
+  "Verify every link",
+];
+
+const MIGRATION_STEP_TEXTS = [
+  "Read the migration plan",
+  "Back up the invoice table",
+  "Choose the column policy",
+  "Apply the migration",
+  "Verify the row counts",
 ];
 
 type Steps = NonNullable<DelegateJobProgressView["steps"]>;
 
 /** A checklist of `total` items: the first `done` finished, the next current, the rest pending. */
-const checklistOf = (done: number, total: number): Steps["items"] =>
-  STEP_TEXTS.slice(0, total).map((text, i) => ({ text, status: i < done ? "done" : i === done ? "current" : "pending" }));
+const checklistOf = (done: number, total: number, texts: string[]): Steps["items"] =>
+  texts.slice(0, total).map((text, i) => ({ text, status: i < done ? "done" : i === done ? "current" : "pending" }));
 
 const base: DelegateJobProgressView = {
   rev: { epoch: 1, n: 1 },
@@ -52,11 +68,11 @@ const base: DelegateJobProgressView = {
   model: null,
 };
 
-const stepsOf = (done: number, total: number, over: Partial<Steps> = {}): Steps => ({
+const stepsOf = (done: number, total: number, over: Partial<Steps> = {}, texts: string[] = STEP_TEXTS): Steps => ({
   done,
   total,
-  current: STEP_TEXTS[done] ?? null,
-  items: checklistOf(done, total),
+  current: texts[done] ?? null,
+  items: checklistOf(done, total, texts),
   source: "checklist",
   planRevision: 1,
   grewAt: null,
@@ -109,7 +125,7 @@ export const demoBackgroundJobs: DelegateJob[] = [
       state: "needs-decision",
       headline: "Drop the legacy column or keep it nullable?",
       headlineSource: "model",
-      steps: stepsOf(2, 5),
+      steps: stepsOf(2, 5, {}, MIGRATION_STEP_TEXTS),
       bar: 2 / 5,
     },
     3,
@@ -157,8 +173,8 @@ export const demoBackgroundJobs: DelegateJob[] = [
       ...base,
       headline: "Porting the API reference pages",
       headlineSource: "model",
-      steps: stepsOf(3, 9, { planRevision: 2, grewAt: DEMO_T0 - 30_000 }),
-      bar: 3 / 9,
+      steps: stepsOf(3, 7, { planRevision: 2, grewAt: DEMO_T0 - 30_000 }, DOCS_STEP_TEXTS),
+      bar: 3 / 7,
     },
     6,
   ),
