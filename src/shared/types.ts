@@ -2923,6 +2923,40 @@ export type DelegateJob = {
   // word ("unknown" when empty) and the terminal summary line ("<branch> · N files changed").
   statusLabel?: string;
   summary?: string;
+  // Liveness + progress (spec 2026-11-14-background-job-liveness-and-progress §5.3).
+  // Absent on an older box.
+  view?: DelegateJobProgressView;
+};
+
+// The job's progress as the box computes it (spec 2026-11-14 §5.3). Every time
+// is a box-epoch ANCHOR; clients derive ages with `skew = asOf - localNow`.
+// Accept a view only when `rev.epoch` is greater, or equal with a greater `rev.n`.
+export type DelegateJobProgressState = "working" | "needs-decision" | "done" | "failed" | "stopped" | "paused";
+export type DelegateJobProgressView = {
+  rev: { epoch: number; n: number };
+  asOf: number;
+  state: DelegateJobProgressState;
+  headline: string; // ≤120, plain text, may be ""
+  headlineSource: "model" | "checklist" | "tool" | "activity" | "none";
+  steps: {
+    done: number;
+    total: number;
+    current: string | null;
+    items: Array<{ text: string; status: "done" | "current" | "pending" }>; // ≤30; [] for "reported"
+    source: "checklist" | "reported";
+    planRevision: number;
+    grewAt: number | null;
+  } | null;
+  bar: number | null; // 0..1
+  live: { tool: string; target: string; startedAt: number } | null;
+  startedAt: number | null;
+  endedAt: number | null;
+  lastProgressAt: number | null; // quantized to 30 s; null unless running
+  ceilingAt: number | null; // null unless running and Manta-owned
+  milestones: Array<{ at: number; text: string }>; // newest first, ≤8
+  files: { changed: number | null } | null;
+  usage: { tokens: number; costUsd: number | null; costPartial: boolean } | null;
+  model: string | null;
 };
 
 // delegate:job-for-session — the box decides whether a session is a read-only
@@ -3152,6 +3186,9 @@ export type OpencodeBackgroundResultPart = {
   name?: string;
   agent?: string;
   text: string;
+  // The job ended while its model state was "blocked" (spec 2026-11-14 A5):
+  // shown as "Needs a decision". Absent → false.
+  endedBlocked?: boolean;
 };
 
 /** A truncation as the BOX words it (canonical `view.truncation` and the live `truncation` frame carry the same). */

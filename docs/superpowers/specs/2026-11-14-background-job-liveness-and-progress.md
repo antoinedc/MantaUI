@@ -627,6 +627,10 @@ Unchanged shape. `milestone` is accepted by `/api/progress` and routed only to
 
 ### 5.3 `view` (wire, computed; identical for desktop, iOS, tool)
 
+TypeScript: `DelegateJobProgressView` on `DelegateJob.view`, and
+`OpencodeBackgroundResultPart.endedBlocked`, in `src/shared/types.ts` (already
+written; implementers import them, don't redefine).
+
 All times are box epoch ms ANCHORS (never pre-computed ages), so a view changes
 only when something happened.
 
