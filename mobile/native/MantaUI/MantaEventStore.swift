@@ -501,6 +501,12 @@ final class MantaEventStore: ObservableObject {
     /// unsubscribe. The frame still reaches the raw handlers too.
     let delegateUpdates = PassthroughSubject<Void, Never>()
 
+    /// The same `delegate.updated` frames, with their payload (`id`, `status`,
+    /// `activity`, and the box's progress `view`), so the Background jobs store
+    /// can patch one job in place instead of re-reading the whole list. Sent for
+    /// every frame — an older box's payload simply carries no view.
+    let delegateJobUpdates = PassthroughSubject<BackgroundJobUpdate, Never>()
+
     /// Fires for every `inbox` stream frame (the session's pending messages,
     /// K3). A `Subject`, not part of `sessionStates`: the pending list carries
     /// its own `(epoch, rev)` and is accepted or dropped by the observing
@@ -649,7 +655,10 @@ final class MantaEventStore: ObservableObject {
         } else if frame.kind == "stream" {
             routeStream(frame)
         } else {
-            if frame.kind == "delegate.updated" { delegateUpdates.send() }
+            if frame.kind == "delegate.updated" {
+                delegateUpdates.send()
+                delegateJobUpdates.send(BackgroundJobUpdate(payload: frame.payload))
+            }
             if frame.kind == "progress.updated",
                let sid = ChatJSON.string(ChatJSON.object(frame.payload)?["sessionID"]), !sid.isEmpty {
                 progressUpdates.send(sid)

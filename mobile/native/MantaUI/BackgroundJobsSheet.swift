@@ -45,6 +45,9 @@ final class BackgroundJobsStore: ObservableObject {
     /// True once the window lookup has succeeded at least once. Until then an
     /// unopenable row cannot honestly say "window closed" — it does not know.
     @Published private(set) var windowsKnown = false
+    /// Per job: the clock skew taken when its current `view` was received (§5.3),
+    /// so the detail sheet can tick elapsed / quiet / time-left locally.
+    @Published private(set) var viewClocks: [String: JobViewClock] = [:]
 
     let sessionId: String
     private let api: MantaAPIClient
@@ -100,8 +103,10 @@ final class BackgroundJobsStore: ObservableObject {
     private func fetchOnce() async {
         do {
             let fetched = try await api.delegateList(sessionId: sessionId)
-            let list = BackgroundJobFormat.sorted(fetched)
+            let merged = BackgroundJobViewMerge.merge(existing: jobs, fetched: fetched)
+            let list = BackgroundJobFormat.sorted(merged.jobs)
             if list != jobs { jobs = list }
+            rebaseClocks(applied: merged.applied, now: Date())
             loadError = nil
         } catch {
             // Keep the jobs already on screen: a failed refresh must not blank
@@ -110,6 +115,30 @@ final class BackgroundJobsStore: ObservableObject {
         }
         loaded = true
         await refreshWindows()
+    }
+
+    /// The clock for a job's current view, if it has one.
+    func clock(for jobId: String) -> JobViewClock? { viewClocks[jobId] }
+
+    /// Re-base the skew of every job whose view was just taken, and drop the
+    /// clocks of jobs that no longer have a view.
+    private func rebaseClocks(applied: Set<String>, now: Date) {
+        var next = viewClocks.filter { id, _ in jobs.contains { $0.id == id && $0.view != nil } }
+        for job in jobs where applied.contains(job.id) {
+            if let view = job.view { next[job.id] = JobViewClock(asOf: view.asOf, localNow: now) }
+        }
+        if next != viewClocks { viewClocks = next }
+    }
+
+    /// Patch one job from a `delegate.updated` frame (the rev rule). Returns
+    /// true when the list must be re-read as well: the job is unknown, its
+    /// status changed (nesting may change), or the box sent no view.
+    @discardableResult
+    func apply(_ update: BackgroundJobUpdate, now: Date = Date()) -> Bool {
+        let patched = BackgroundJobViewMerge.patch(jobs, with: update)
+        if patched.jobs != jobs { jobs = patched.jobs }
+        if let id = patched.appliedID { rebaseClocks(applied: [id], now: now) }
+        return patched.needsRefetch
     }
 
     private func refreshWindows() async {
@@ -145,10 +174,13 @@ final class BackgroundJobsStore: ObservableObject {
     func startAutoRefresh() {
         autoRefreshHolders += 1
         guard autoRefreshHolders == 1 else { return }
-        updatesSubscription = eventStore?.delegateUpdates
+        updatesSubscription = eventStore?.delegateJobUpdates
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in
-                Task { @MainActor in await self?.refresh() }
+            .sink { [weak self] update in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if self.apply(update) { await self.refresh() }
+                }
             }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -198,6 +230,11 @@ struct BackgroundJobsSheet: View {
     @State private var stopTarget: DelegateJob?
     @State private var stopping: Set<String> = []
     @State private var banner: Banner?
+    @State private var detailTarget: DetailTarget?
+
+    private struct DetailTarget: Identifiable {
+        let id: String
+    }
 
     private struct Banner: Equatable {
         let id = UUID()
@@ -235,6 +272,9 @@ struct BackgroundJobsSheet: View {
                 Task { await stop(job) }
             }
         )
+        .sheet(item: $detailTarget) { target in
+            BackgroundJobDetailView(store: store, jobID: target.id)
+        }
         .onAppear { store.startAutoRefresh() }
         .onDisappear { store.stopAutoRefresh() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { now = $0 }
@@ -288,12 +328,23 @@ struct BackgroundJobsSheet: View {
     @ViewBuilder
     private func row(_ job: DelegateJob) -> some View {
         let openable = isOpenable(job)
-        Group {
+        HStack(alignment: .top, spacing: 4) {
             if openable {
                 Button { open(job) } label: { rowBody(job, openable: true) }
                     .buttonStyle(.plain)
             } else {
                 rowBody(job, openable: false)
+            }
+            if job.view != nil {
+                Button { detailTarget = DetailTarget(id: job.id) } label: {
+                    Image(systemName: "info.circle")
+                        .font(.body)
+                        .foregroundStyle(tokens.tx3)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Job details")
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -333,16 +384,35 @@ struct BackgroundJobsSheet: View {
                             .padding(.vertical, 1)
                             .background(tokens.fill, in: Capsule())
                     }
+                    if let steps = job.view?.steps {
+                        Spacer(minLength: 4)
+                        Text(verbatim: BackgroundJobProgressFormat.chip(steps))
+                            .font(.caption2.weight(.medium).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(tokens.fill, in: Capsule())
+                            .accessibilityLabel("Step \(steps.done) of \(steps.total)")
+                    }
                 }
                 Text(detailLine(job))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if let activity = job.activity, !activity.isEmpty {
-                    Text(activity)
+                if let line = job.view.flatMap(BackgroundJobProgressFormat.headlineLine) {
+                    Text(verbatim: line.text)
+                        .font(.caption)
+                        .foregroundStyle(line.needsDecision ? tokens.warn : Color.secondary)
+                        .lineLimit(1)
+                } else if let activity = job.activity, !activity.isEmpty {
+                    Text(verbatim: activity)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+                if let view = job.view, let fraction = BackgroundJobProgressFormat.barFraction(view) {
+                    JobProgressBar(fraction: fraction, tint: tokens.accent, track: tokens.fill)
+                        .padding(.top, 2)
                 }
                 if let note = unavailableNote(job, openable: openable) {
                     Text(note)
@@ -457,6 +527,207 @@ struct BackgroundJobsSheet: View {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 withAnimation { if self.banner?.id == banner.id { self.banner = nil } }
             }
+        }
+    }
+}
+
+// MARK: - Progress bar
+
+/// A thin determinate bar. Drawn by hand: `ProgressView(value:)` has no slim style.
+struct JobProgressBar: View {
+    let fraction: Double
+    let tint: Color
+    let track: Color
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(track)
+                Capsule()
+                    .fill(tint)
+                    .frame(width: geometry.size.width * min(1, max(0, fraction)))
+            }
+        }
+        .frame(height: 3)
+        .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Detail sheet
+
+/// Everything the box knows about one job's progress (spec B6, the same content
+/// as the desktop's Details disclosure): the checklist, milestones newest first,
+/// the tool running now, quiet time, files, usage, time left. It reads the job
+/// from the store, so a patched view shows at once; elapsed / quiet / time left
+/// tick locally once a second from the clock skew taken when the view arrived.
+/// All model text is shown verbatim — no Markdown, no links.
+struct BackgroundJobDetailView: View {
+    @ObservedObject var store: BackgroundJobsStore
+    let jobID: String
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    var body: some View {
+        NavigationStack {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                content(now: context.date)
+            }
+            .navigationTitle("Job details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    @ViewBuilder
+    private func content(now: Date) -> some View {
+        if let job = store.jobs.first(where: { $0.id == jobID }), let view = job.view {
+            let clock = store.clock(for: jobID) ?? JobViewClock(skewMs: 0)
+            let detail = BackgroundJobProgressDetail(view: view, clock: clock, now: now)
+            List {
+                summarySection(job: job, view: view)
+                if let steps = view.steps { stepsSection(steps: steps, detail: detail) }
+                nowSection(detail: detail)
+                if !detail.milestones.isEmpty { milestonesSection(detail.milestones) }
+                statsSection(view: view, detail: detail)
+            }
+            .listStyle(.insetGrouped)
+        } else {
+            ContentUnavailableView("No details", systemImage: "info.circle", description: Text("This job is no longer listed."))
+        }
+    }
+
+    private func summarySection(job: DelegateJob, view: DelegateJobProgressView) -> some View {
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(verbatim: displayName(job))
+                    .font(.headline)
+                Text(verbatim: BackgroundJobProgressFormat.stateLabel(view.state))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(view.needsDecision ? tokens.warn : Color.secondary)
+                if !view.headline.isEmpty {
+                    Text(verbatim: view.headline)
+                        .font(.subheadline)
+                }
+                if let fraction = BackgroundJobProgressFormat.barFraction(view) {
+                    JobProgressBar(fraction: fraction, tint: tokens.accent, track: tokens.fill)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func stepsSection(steps: DelegateJobProgressView.Steps, detail: BackgroundJobProgressDetail) -> some View {
+        Section {
+            if steps.items.isEmpty {
+                Text(verbatim: steps.current ?? "Step \(min(steps.done + 1, steps.total)) of \(steps.total)")
+                    .font(.subheadline)
+            } else {
+                ForEach(Array(steps.items.enumerated()), id: \.offset) { entry in
+                    let item = entry.element
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: icon(item.status))
+                            .foregroundStyle(color(item.status))
+                            .frame(width: 20)
+                        Text(verbatim: item.text)
+                            .font(.subheadline)
+                            .foregroundStyle(item.status == .pending ? Color.secondary : Color.primary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            if detail.planGrew {
+                Label("Plan grew", systemImage: "plus.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text(verbatim: "Steps \(BackgroundJobProgressFormat.chip(steps))")
+        }
+    }
+
+    @ViewBuilder
+    private func nowSection(detail: BackgroundJobProgressDetail) -> some View {
+        if detail.tool != nil || detail.quiet != nil {
+            Section("Now") {
+                if let tool = detail.tool {
+                    Text(verbatim: tool)
+                        .font(.subheadline.monospaced())
+                        .lineLimit(2)
+                }
+                if let quiet = detail.quiet {
+                    Text(verbatim: quiet)
+                        .font(.subheadline)
+                        .foregroundStyle(tokens.warn)
+                }
+            }
+        }
+    }
+
+    private func milestonesSection(_ lines: [BackgroundJobProgressDetail.MilestoneLine]) -> some View {
+        Section("Milestones") {
+            ForEach(Array(lines.enumerated()), id: \.offset) { entry in
+                let line = entry.element
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: line.text)
+                        .font(.subheadline)
+                    Text(verbatim: line.ago)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statsSection(view: DelegateJobProgressView, detail: BackgroundJobProgressDetail) -> some View {
+        let rows: [(label: String, value: String)] = {
+            var out: [(label: String, value: String)] = []
+            if let elapsed = detail.elapsed { out.append(("Elapsed", elapsed)) }
+            if let left = detail.timeLeft { out.append(("Time left", left)) }
+            if let files = detail.files { out.append(("Files", files)) }
+            if let usage = detail.usage { out.append(("Usage", usage)) }
+            if let model = view.model { out.append(("Model", model)) }
+            return out
+        }()
+        if !rows.isEmpty {
+            Section("Stats") {
+                ForEach(rows, id: \.label) { row in
+                    LabeledContent(row.label) { Text(verbatim: row.value) }
+                        .font(.subheadline)
+                }
+            }
+        }
+    }
+
+    private func displayName(_ job: DelegateJob) -> String {
+        let name = (job.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "Background job" : name
+    }
+
+    private func icon(_ status: DelegateJobProgressView.StepItem.Status) -> String {
+        switch status {
+        case .done: return "checkmark.circle.fill"
+        case .current: return "arrow.right.circle.fill"
+        case .pending: return "circle"
+        }
+    }
+
+    private func color(_ status: DelegateJobProgressView.StepItem.Status) -> Color {
+        switch status {
+        case .done: return tokens.ok
+        case .current: return tokens.accent
+        case .pending: return tokens.tx3
         }
     }
 }
