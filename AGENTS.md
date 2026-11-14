@@ -1237,10 +1237,34 @@ and worktree all belong to it.
   model) and can be resumed on the V2 path; finished ones are inert history.
 - **Cap of five concurrent `running` jobs** box-wide (`MAX_RUNNING_JOBS`);
   a sixth is refused with a clear error (do not retry). No `queued` state —
-  a job either starts immediately or is refused. Running jobs older than 30
-  min become `failed "timed out after 30 minutes"` (sweeper). Terminal jobs
-  retained 7 days or 50 records, whichever bites first; the window +
-  worktree are NEVER removed by the sweeper — only by an explicit delete.
+  a job either starts immediately or is refused. There is no fixed 30-minute
+  timeout any more (spec `docs/superpowers/specs/2026-11-14-background-job-liveness-and-progress.md`):
+  a Manta-owned job runs while it works. The 60 s sweep ends it `failed` when it
+  passes its per-segment `ceilingMs` (default 4 h, `delegate.maxDurationMinutes`
+  10–720, the CTO's `sweepAllowanceMs`; `delegate_extend` adds 15–480 min, 12 h
+  at most; `endReason:"time-limit"`) or has made no progress for 15 minutes
+  (`endReason:"stalled"`). Progress is the stream interpreter's activity tap
+  (`streamInterp.onActivity` → `jobLiveness.mjs`, in memory): any text / reasoning
+  / tool record of the job's sessions or its subagents, with a running shell
+  alive until its own timeout + 5 min (or 60 min of silence when it has none).
+  After a restart a job is never judged until the sweep has rebuilt its live
+  picture from opencode (fail open). The end re-checks the LIVE record under
+  `jobsLock` (`finishV2Job`'s `onlyIf`), so an extension can't be overtaken.
+  Terminal jobs retained 7 days or 50 records, whichever bites first; the
+  window + worktree are NEVER removed by the sweeper — only by an explicit delete.
+- **Jobs can't wait on a person.** Every Manta-owned `delegate` child is
+  created with a trailing `question` deny (`normalizeJobRuleset`), and the pump
+  rejects any question / permission raised in such a session or below it
+  (`ownsSession`, before trust mode; failures queue for the sweep). A job that
+  needs a decision reports `progress_report` state `blocked` and ends its turn:
+  the result says "needs a decision" (`endedBlocked`).
+- **Progress on the record.** `job.jobProgress` (label, checklist from the
+  job's `todo_write`, reported steps, plan revision + bar, milestones, files,
+  usage) is persisted under `jobsLock`; `listJobs` / `delegate.updated` carry
+  the computed wire `view` (`jobViews.mjs`, `jobProgressView.mjs`; `rev.n`
+  bumps on semantic change, publishes coalesced to 5 s per job). The evidence
+  log `~/.manta/delegate-liveness.jsonl` records every Manta-owned terminal
+  segment for the follow-up routine.
 - **Lost runs.** V2 records no outcome for a turn killed by an opencode restart/crash and never resumes it — the child just leaves the active set, so a job (opencode-owned ones have no timeout) would stay `running` forever. `settleV2Job` (driven by the 60 s sweep and the reconnect reconcile) judges a run lost only when the child was seen not-active with no fresh outcome on ≥ 2 checks spanning `LOST_RUN_GRACE_MS` (90 s), `time.updated` unchanged, no active descendant and no pending permission/question; it then ends through `finishV2Job` (stopRequested → stopped, Manta-owned pauseRequested → paused, else `failed` "the run was cut off — opencode stopped before it finished"). The absence record is in memory (a restart only restarts the grace); a failed read leaves it unchanged; unconfirmed launches and handoff-pending jobs are never judged. Tests: `delegateLostRuns.test.mjs`.
 - **No `peers`-style status/inspect tool here** — background jobs are
   ordinary sibling sessions, so `peers_inspect` already covers "what is that
