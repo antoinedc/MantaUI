@@ -22,6 +22,7 @@ import { applyTheme, type ThemePref } from "./theme";
 import { refreshModelCatalog } from "./modelCatalog";
 import { windowsInRailOrder } from "./sessionTree";
 import type { ToastItem } from "./Toast";
+import { mergeJobList, patchJobFromEvent, type DelegateUpdatedPayload, type JobSkews } from "./jobProgress";
 import {
   type Attachment,
   type ModelSelection,
@@ -474,6 +475,9 @@ type State = {
   // sidebar's per-row activity second line (desktop + mobile). Fed by the
   // single app-level 10s poll — see JobRow comment above.
   jobs: Record<string, DelegateJob>;
+  // Per job id: `view.asOf - localNow`, taken when that job's progress `view`
+  // was accepted (spec 2026-11-14 §5.3 client clock). Client-only.
+  jobSkew: JobSkews;
   // Every opencode session currently running a turn, keyed by session id —
   // INCLUDING sessions with no sidebar window of their own (an inline or
   // backgrounded `task` subagent). `status[...]` can only hold sessions that
@@ -701,6 +705,11 @@ type State = {
   // DelegateJob[] from delegateList() and keys the full objects by
   // childSessionID (ChatPanel + the sidebar both read the full job).
   setJobs: (jobs: DelegateJob[]) => void;
+  // Apply one `delegate.updated` event in place (spec 2026-11-14 §B4): patches
+  // the job's `view` / activity under the rev rule. Returns true when the
+  // caller must refetch the list (unknown id, a status change, or an event with
+  // no usable view — an older box).
+  applyJobUpdate: (payload: DelegateUpdatedPayload) => boolean;
   // Replace the usage slice (BET-738) from window.api.usageList() or the
   // `usage.updated` bus payload. Both hand over the full current array —
   // this is a straight replace, not a merge (the poller's contract is "the
@@ -887,6 +896,7 @@ export const useStore = create<State>((set, get) => ({
   status: {},
   sessionCost: {},
   jobs: {},
+  jobSkew: {},
   liveRunning: {},
   windowStatusBySession: {},
   usage: [],
@@ -1316,15 +1326,20 @@ export const useStore = create<State>((set, get) => ({
       return { status: next };
     }),
 
+  // A late list answer must not roll a job's progress `view` back (rev rule).
   setJobs: (jobs) =>
-    set(() => {
-      const next: Record<string, DelegateJob> = {};
-      for (const j of jobs) {
-        if (!j.childSessionID || j.supersededBy) continue;
-        next[j.childSessionID] = j;
-      }
-      return { jobs: next };
+    set((prev) => {
+      const merged = mergeJobList({ jobs: prev.jobs, skews: prev.jobSkew }, jobs, prev.videoRenderNow ?? Date.now());
+      return { jobs: merged.jobs, jobSkew: merged.skews };
     }),
+
+  applyJobUpdate: (payload) => {
+    const st = get();
+    const r = patchJobFromEvent({ jobs: st.jobs, skews: st.jobSkew }, payload, st.videoRenderNow ?? Date.now());
+    if (r.kind === "refetch") return true;
+    if (r.kind === "patched") set({ jobs: r.state.jobs, jobSkew: r.state.skews });
+    return false;
+  },
 
   setUsage: (usage) => set({ usage }),
   setAccounts: (accounts) => set({ accounts: Array.isArray(accounts) ? accounts : [] }),

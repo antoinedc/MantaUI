@@ -57,6 +57,7 @@ import {
   explorerStatus,
   explorerTranscript,
 } from "./demoExplorer.js";
+import { demoBackgroundJobs } from "./demoBackground.js";
 import {
   ROUTINES_ACTIVE_SESSION,
   analyticsChatMessages,
@@ -87,6 +88,10 @@ const routinesStore = createRoutinesStore();
 // (every demo state — the explorer reads files in any of them).
 const IS_EXPLORER = DEMO_STATE === "explorer";
 setPeekFetch(demoPeekFetch);
+
+// The background-job card fixture state (spec 2026-11-14): the default conversation plus six running
+// background jobs, each carrying a progress `view`. Only this state answers delegateList.
+const IS_BACKGROUND = DEMO_STATE === "background";
 
 // "reconnecting" — the real transport (httpApi) reports the events-WebSocket
 // connection state into the store via `setConnectionState`; demo mode has no
@@ -733,6 +738,7 @@ export const explicitMethods = {
   onRoutinesUpdated: () => () => {},
   // Only the Routines states serve a chat's follow-ups; every other state keeps the Proxy fallback.
   ...(IS_ROUTINES ? { scheduleList: routinesStore.scheduleList } : {}),
+  ...(IS_BACKGROUND ? { delegateList: () => Promise.resolve(demoBackgroundJobs) } : {}),
 } as const;
 
 // ===========================================================================

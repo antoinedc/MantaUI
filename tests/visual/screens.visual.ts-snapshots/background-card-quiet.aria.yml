@@ -1,0 +1,16 @@
+- text: "/Running in background: rotate-service-keys 5\\/7 [\\d,.]+[bkmBKM]+ ·/"
+- button "Details" [expanded]
+- button "Open session"
+- text: Running the full integration suite
+- progressbar "Plan progress"
+- list:
+  - listitem: "done: Read the billing service layout"
+  - listitem: "done: Add the CSV serializer"
+  - listitem: "done: Wire the /export route"
+  - listitem: "done: Write the export tests"
+  - listitem: "done: Update the OpenAPI schema"
+  - listitem: "current: Run the full suite"
+  - listitem: "pending: Open the pull request"
+- list:
+  - 'listitem /bash: npm run test:integration · running [\d,.]+[bkmBKM]+/'
+  - listitem "Quiet for 6 min"

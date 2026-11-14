@@ -28,6 +28,8 @@ export type BackgroundResultPart = OpencodePart & {
   name?: string;
   agent?: string;
   text: string;
+  /** The job ended while its model state was "blocked": shown as "Needs a decision" (spec 2026-11-14 A5). */
+  endedBlocked?: boolean;
 };
 
 /** P4: the job-record fields the cards read (all optional — absent on old records). */
@@ -271,15 +273,20 @@ export function sameBackgroundCards(a: ReadonlyArray<BackgroundCard>, b: Readonl
 
 // ===== Finished card copy =====
 
-export type ResultTone = "ok" | "danger" | "neutral";
+export type ResultTone = "ok" | "danger" | "neutral" | "warn";
 
-export function resultTone(state: string): ResultTone {
+export const NEEDS_DECISION_LABEL = "Needs a decision";
+
+/** `endedBlocked` keeps the execution state (`completed`) but is not green: it is waiting on the parent (A5). */
+export function resultTone(state: string, endedBlocked?: boolean): ResultTone {
+  if (endedBlocked) return "warn";
   if (state === "completed" || state === "done") return "ok";
   if (state === "failed") return "danger";
   return "neutral";
 }
 
-export function resultStateLabel(state: string): string {
+export function resultStateLabel(state: string, endedBlocked?: boolean): string {
+  if (endedBlocked) return NEEDS_DECISION_LABEL;
   if (state === "completed") return "done";
   return state || "finished";
 }
