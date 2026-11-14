@@ -4471,7 +4471,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     extensions: [],
     ceilingWarnedFor: null,
     endReason: null,
-    jobProgress: prior.jobProgress,
+    jobProgress: { ...prior.jobProgress, modelState: null },
     status: "running",
     tmuxSession,
     childSessionID: mintSessionId(),
@@ -4504,6 +4504,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
         extensions: prior.extensions,
         ceilingWarnedFor: prior.ceilingWarnedFor,
         endReason: prior.endReason,
+        jobProgress: prior.jobProgress,
         launch: job.launch ? { ...job.launch, restore: undefined } : null,
       },
     },
@@ -4902,8 +4903,10 @@ async function reconstructLiveness(job, deps) {
     return { nodes, running, asks };
   }, RECONSTRUCT_BUDGET_MS);
   if (!read) return;
-  for (const ask of read.asks) await rejectAsk(ask, deps);
-  deps.liveness.applyReconstruction(job.id, gen, { nodes: read.nodes, running: read.running });
+  // Applied first so the descendants are indexed: `ownsSession` is the same test the live backstop uses (a
+  // slash-command job shares its parent's permissions, so its asks are never rejected).
+  if (!deps.liveness.applyReconstruction(job.id, gen, { nodes: read.nodes, running: read.running })) return;
+  for (const ask of read.asks) if (deps.liveness.ownsSession(ask.sessionId)) await rejectAsk(ask, deps);
 }
 
 function stallMessage(verdict, headline) {

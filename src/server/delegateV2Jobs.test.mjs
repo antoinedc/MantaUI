@@ -1880,6 +1880,28 @@ test("resume: a new segment gets the launch ceiling back, extensions dropped, pr
   assert.equal(w.job(id).jobProgress.milestones[0].text, "kept", "progress survives a resume");
 });
 
+test("resume: a job that reported 'blocked' resumes with no model state (progress otherwise kept); a refused resume restores the original progress exactly", async () => {
+  const w = liveWorld();
+  const id = await pausedJob(w);
+  const rec = w.jobs.find((j) => j.id === id);
+  rec.jobProgress.label = "waiting on a decision";
+  rec.jobProgress.modelState = "blocked";
+  rec.jobProgress.milestones.push({ at: T0, text: "kept" });
+  rec.jobProgress.usage = { tokens: 42, costUsd: 0.5, costPartial: false };
+  const original = structuredClone(rec.jobProgress);
+  w.fail.create = httpErr(400);
+  assert.equal((await resumeJob(id, w.deps)).ok, false);
+  assert.deepEqual(w.job(id).jobProgress, original, "a refused resume restores jobProgress exactly");
+  w.fail.create = null;
+  assert.equal((await resumeJob(id, w.deps)).ok, true);
+  const jp = w.job(id).jobProgress;
+  assert.equal(jp.modelState, null);
+  assert.equal(jp.label, original.label);
+  assert.deepEqual(jp.checklist, original.checklist);
+  assert.deepEqual(jp.milestones, original.milestones);
+  assert.deepEqual(jp.usage, original.usage);
+});
+
 test("continuation: a new round resets every liveness / progress field of the record it spreads", async () => {
   const w = liveWorld();
   const id = await start(w);
@@ -2089,6 +2111,24 @@ test("reconstruction rejects the asks it finds pending in the job's sessions (pe
   w.state.now = T0 + MIN;
   await sweepDelegateJobs(w.deps);
   assert.deepEqual(rejected, [["permission", "per_9", child], ["question", "frm_9", child]]);
+});
+
+test("reconstruction leaves a background slash-command job's pending asks alone (it shares its parent's permissions), unlike a delegate job's", async () => {
+  const w = liveWorld({
+    jobs: [{ id: "cmd00001", status: "running", engine: "v2", origin: "command", completionOwner: "manta", childSessionID: "ses_cmd", parentSessionID: PARENT, launchState: "running", startedAt: T0 }],
+  });
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.deps.liveness.resetAll(w.jobs);
+  w.deps.listPermissions = async (sid) => [{ id: `per_${sid}` }];
+  w.deps.listQuestions = async () => [];
+  const rejected = [];
+  w.deps.rejectPermission = async (a) => rejected.push(a.sessionId);
+  w.deps.rejectQuestion = async () => {};
+  w.state.now = T0 + MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.ok(w.deps.liveness.get("cmd00001").reconstructedAt != null, "the command job was reconstructed");
+  assert.deepEqual(rejected, [child], "only the delegate job's ask is rejected");
 });
 
 test("normalizeJobRuleset: a trailing question deny, idempotent, grants untouched; buildJobPrompt carries the budget text for a worktree-less job too", () => {
