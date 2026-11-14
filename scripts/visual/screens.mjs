@@ -109,6 +109,9 @@ async function exMockupTheme(page) {
 
 /** Background-job card rows: the `background` demo state (six running jobs, one per card state). */
 const BACKGROUND_URL = "/app/index.html?demo&desktop&state=background";
+// Taller than the desktop default: six cards plus an open Details panel must sit in view without the
+// capture scrolling the transcript, or a header overlay lands on the card depending on scroll timing.
+const BACKGROUND_VIEWPORT = { width: DESKTOP_VIEWPORT.width, height: 1600 };
 const bgCard = (jobId) => `[data-testid="background-card"][data-job-id="${jobId}"]`;
 
 /** Open a job card's Details disclosure with a real click, then park the pointer. */
@@ -1191,7 +1194,7 @@ export const SCREENS = [
     final: bgCard("job-steps"),
     region: bgCard("job-steps"),
     mockup: null,
-    viewport: DESKTOP_VIEWPORT,
+    viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
@@ -1202,7 +1205,7 @@ export const SCREENS = [
     final: bgCard("job-plain"),
     region: bgCard("job-plain"),
     mockup: null,
-    viewport: DESKTOP_VIEWPORT,
+    viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
@@ -1213,7 +1216,7 @@ export const SCREENS = [
     final: bgCard("job-blocked"),
     region: bgCard("job-blocked"),
     mockup: null,
-    viewport: DESKTOP_VIEWPORT,
+    viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
@@ -1227,7 +1230,7 @@ export const SCREENS = [
       await bgOpenDetails(page, "job-quiet");
     },
     mockup: null,
-    viewport: DESKTOP_VIEWPORT,
+    viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
@@ -1241,7 +1244,7 @@ export const SCREENS = [
       await bgOpenDetails(page, "job-details");
     },
     mockup: null,
-    viewport: DESKTOP_VIEWPORT,
+    viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
@@ -1255,7 +1258,7 @@ export const SCREENS = [
       await bgOpenDetails(page, "job-grew");
     },
     mockup: null,
-    viewport: DESKTOP_VIEWPORT,
+    viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
 ];
