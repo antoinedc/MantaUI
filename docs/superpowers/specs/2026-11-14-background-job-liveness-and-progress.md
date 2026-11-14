@@ -229,8 +229,10 @@ Display rules:
 - **Push**: unchanged. A child's permission/question already notifies on the
   blocking tier. A model `blocked` state now also notifies once, on the blocking
   tier.
-- **iOS**: same wire data; the card ships as stage 3 (the native card already
-  renders `progress.detail`).
+- **iOS**: same wire data and the same card content as desktop (collapsed line,
+  second line, bar, tap to expand), in the same release. The native card already
+  renders `progress.detail`; it switches to `view`. Verified per
+  `mobile/native/AGENTS.md` (no Swift toolchain on the Linux box).
 
 ## 5. Contracts (pinned)
 
@@ -347,10 +349,9 @@ UI:
 
 ## 8. Rollout and follow-up
 
-- **Stage 1**: A1–A4, A6 + B1–B3 (desktop card, sidebar chip, tool output),
-  shadow usage recording.
+- **Stage 1**: A1–A4, A6 + B1–B3 (desktop card, iOS card, sidebar chip, tool
+  output), shadow usage recording.
 - **Stage 2**: A5 (loop trial, budget enforcement).
-- **Stage 3**: iOS card.
 - **At merge**, create a routine for 7 days after deploy. It checks:
   - jobs ended by each new reason, each replayed against the old 30-minute rule;
   - stalls that were false (activity seen in the 5 min before);
@@ -364,8 +365,7 @@ UI:
 
 ## 9. Open questions
 
-1. Is 15 min idle right for models that think silently for a long time? The data
-   shows gaps of up to ~2.5 min in active jobs. Raise it if the routine sees
-   false stalls.
-2. Should the user (not just the parent agent) be able to extend? Decision for
-   now: parent tool only, per review.
+1. 15 min idle is agreed (2026-11-14). Active jobs showed silent gaps of up to
+   ~2.5 min; the routine raises it if it sees false stalls.
+2. Extension is a parent-agent tool only; no user button (agreed 2026-11-14).
+   iOS ships in the same release (agreed 2026-11-14).
