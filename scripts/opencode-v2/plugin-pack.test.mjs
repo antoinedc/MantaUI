@@ -67,10 +67,10 @@ after(async () => {
 const V2_ONLY = ["handoff", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "session_link", "session_unlink", "todo_write"];
 
 describe("tool inventory", () => {
-  test("V1 inventory is the 45 tools the spec names", async () => {
+  test("V1 inventory is the 46 tools the spec names", async () => {
     const inv = await parseV1Inventory();
-    assert.equal(inv.length, 45);
-    assert.equal(new Set(inv.map((i) => i.name)).size, 45, "V1 names are unique");
+    assert.equal(inv.length, 46);
+    assert.equal(new Set(inv.map((i) => i.name)).size, 46, "V1 names are unique");
   });
 
   test("V1 name derivation: <file>_<export> unless the export is already the full name", () => {
@@ -96,7 +96,7 @@ describe("tool inventory", () => {
       V2_ONLY,
       "V2 adds exactly todo_write, handoff and the routines tools",
     );
-    assert.equal(v2.allTools.length, 45 + V2_ONLY.length);
+    assert.equal(v2.allTools.length, 46 + V2_ONLY.length);
     assert.ok(!v2Names.has("todowrite"), "todowrite is reserved by V2");
   });
 
@@ -222,6 +222,17 @@ const SCENARIOS = [
   ["delegate_list", {}, only("GET /api/delegate", { status: 200, body: { jobs: [] } })],
   ["delegate_send", { id: "abc12345", prompt: "fix the review findings" }],
   ["delegate_send", { id: "busy0000", prompt: "again" }],
+  ["delegate", { prompt: "long job", maxDurationMinutes: 60 }],
+  ["delegate_list", {}, only("GET /api/delegate", { status: 200, body: { jobs: [
+    { id: "abc12345", name: "bg-job", status: "running", branch: "delegate/x", worktree: "/w", view: {
+      state: "working", headline: "running the tests", steps: { done: 3, total: 7 }, startedAt: 1_000_000, endedAt: null,
+      asOf: 1_000_000 + 12 * 60_000, lastProgressAt: 1_000_000 + 5 * 60_000, ceilingAt: 1_000_000 + 4 * 3_600_000,
+      milestones: [{ at: 1, text: "parser fixed" }, { at: 2, text: "tests green" }],
+    } },
+    { id: "def67890", name: "quiet-job", status: "done", view: { state: "done", headline: "", steps: null, startedAt: 10, endedAt: 70_000, asOf: 99, lastProgressAt: null, ceilingAt: null, milestones: [] } },
+  ] } })],
+  ["delegate_extend", { id: "abc12345", minutes: 60, reason: "almost done" }],
+  ["delegate_extend", { id: "nope0000", minutes: 60, reason: "almost done" }],
   ["delegate_stop", { id: "abc12345" }],
   ["delegate_stop", { id: "boom0000" }],
   ["peers_list", {}],
@@ -233,6 +244,7 @@ const SCENARIOS = [
   ["media_show", { path: "/home/u/x.png", handle: "mh_1", title: "t" }],
   ["plan_render", { file: "plan.html" }],
   ["progress_report", { label: "step 1 of 3", step: 1, total: 3, state: "working" }],
+  ["progress_report", { label: "step 2 of 3", milestone: "parser fixed" }],
   ["progress_report", {}, only("POST /api/progress", { status: 200, body: { ok: false } })],
   ["send_file", { path: "/tmp/export.csv", notify: true, ttlHours: 2 }],
   ["send_file", { path: "/tmp/export.csv" }, only("POST /api/outbox/push", { status: 200, body: { row: {} } })],

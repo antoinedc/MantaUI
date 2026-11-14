@@ -1364,7 +1364,7 @@ export const httpApi: Api = {
   // under their parent within ~1s (vs. the 30s poll). The payload is the raw
   // bus event ({id,status,activity?}); subscribers refetch delegateList().
   onDelegateUpdated: (cb) =>
-    on<{ id: string; status: string; activity?: string }>("delegate.updated", cb),
+    on<{ id: string; status: string; activity?: string; view?: unknown }>("delegate.updated", cb),
 
   // BET-738: the box's usage poller (src/server/usage.mjs) publishes
   // `usage.updated` on the bus whenever the serialized snapshot set actually

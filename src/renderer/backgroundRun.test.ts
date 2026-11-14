@@ -280,6 +280,12 @@ describe("finished-card copy", () => {
     expect(resultStateLabel("failed")).toBe("failed");
     expect(resultStateLabel("")).toBe("finished");
   });
+  it("endedBlocked reads 'Needs a decision' in the warn tone, whatever the execution state", () => {
+    expect(resultTone("completed", true)).toBe("warn");
+    expect(resultStateLabel("completed", true)).toBe("Needs a decision");
+    expect(resultTone("completed", false)).toBe("ok");
+    expect(resultStateLabel("completed", false)).toBe("done");
+  });
   it("names the card after the command, else the agent, else plainly", () => {
     expect(resultTitle({ name: "/review HEAD~1", agent: "general" })).toBe("/review HEAD~1");
     expect(resultTitle({ agent: "general" })).toBe("general subagent");

@@ -54,6 +54,10 @@
 // "explorer"      — the file explorer's fixture (docs/screens/explorer/mockup.html): a
 //                  "manta" workspace whose transcripts carry file paths, over a pretend
 //                  /home/dev filesystem the Explorer lists and reads.
+// "background"    — the default conversation plus six running background jobs, one per
+//                  state of the parent's job card with the box's progress `view`
+//                  (spec 2026-11-14): steps, no steps, needs a decision, quiet, rich
+//                  details, plan grew.
 export const DEMO_STATES = [
   "full",
   "empty",
@@ -68,6 +72,7 @@ export const DEMO_STATES = [
   "routines",
   "routines-chat",
   "explorer",
+  "background",
 ] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 

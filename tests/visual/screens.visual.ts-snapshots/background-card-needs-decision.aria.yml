@@ -1,0 +1,5 @@
+- text: "/Running in background: migrate-invoice-table 2\\/5 [\\d,.]+[bkmBKM]+ ·/"
+- button "Details"
+- button "Open session"
+- text: "Needs a decision: Drop the legacy column or keep it nullable?"
+- progressbar "Plan progress"

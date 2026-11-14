@@ -20,9 +20,15 @@ import {
   sweepDelegateJobs,
   buildCompletionText,
   createDelegateEngine,
+  extendJob,
+  continueJob,
+  normalizeJobRuleset,
+  buildJobPrompt,
   MAX_RUNNING_JOBS,
   CAP_ERROR,
 } from "./delegate.mjs";
+import { createJobLiveness } from "./jobLiveness.mjs";
+import { createJobViews } from "./jobViews.mjs";
 
 const T0 = 1_700_000_000_000;
 const PARENT = "ses_parent";
@@ -226,7 +232,7 @@ test("C1 startJob: registers FIRST, then create → move → window → send in 
   assert.equal(c.title, job.name);
   assert.equal(c.directory, REPO, "created at the parent's location");
   assert.equal(c.agent, "build");
-  assert.deepEqual(c.permission, job.permission, "today's preflight ruleset, catch-all deny first");
+  assert.deepEqual(c.permission, [...job.permission, { permission: "question", pattern: "*", action: "deny" }], "the preflight ruleset, catch-all deny first, a question deny last (a job cannot wait on a person)");
   assert.equal(c.permission[0].action, "deny");
 
   assert.deepEqual(w.calls.move, [{ sid: job.childSessionID, directory: WT }], "moved into the worktree");
@@ -976,7 +982,8 @@ test("C1 exactly one result — timed out (the child is interrupted, a late outc
   w.state.now = T0 + 2 * 60_000;
   await sweepDelegateJobs(w.deps);
   assert.equal(w.job(id).status, "failed");
-  assert.equal(w.job(id).error, "timed out after 1 minutes");
+  assert.equal(w.job(id).error, "reached its time limit of 1 minute");
+  assert.equal(w.job(id).endReason, "time-limit");
   assert.deepEqual(w.calls.abort, [child], "the timeout interrupts the child");
   oneResult(w, id, "failed");
   // the child's own late outcome, and further sweeps
@@ -986,15 +993,15 @@ test("C1 exactly one result — timed out (the child is interrupted, a late outc
   oneResult(w, id, "failed");
 });
 
-test("C1 exactly one result — the default allowance is 30 minutes", async () => {
+test("C1 exactly one result — the default ceiling is 4 hours", async () => {
   const w = world();
   const id = await start(w);
-  w.state.now = T0 + 29 * 60_000;
-  await sweepDelegateJobs(w.deps);
-  assert.equal(w.job(id).status, "running");
   w.state.now = T0 + 31 * 60_000;
   await sweepDelegateJobs(w.deps);
-  assert.equal(w.job(id).error, "timed out after 30 minutes");
+  assert.equal(w.job(id).status, "running", "the old 30-minute timeout is gone");
+  w.state.now = T0 + 4 * 60 * 60_000 + 60_000;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).error, "reached its time limit of 4 hours");
   oneResult(w, id, "failed");
 });
 
@@ -1297,7 +1304,7 @@ test("C2 startJob: a CTO job is a V2 child, with everything the CTO relies on pe
   assert.equal(job.launchState, "running");
 
   assert.equal(w.calls.create[0].parentID, CTO);
-  assert.deepEqual(w.calls.create[0].permission, job.permission);
+  assert.deepEqual(w.calls.create[0].permission, [...job.permission, { permission: "question", pattern: "*", action: "deny" }]);
   assert.deepEqual(w.calls.move, [{ sid: job.childSessionID, directory: WT }], "moved from the CTO's directory into the worktree");
   assert.equal(w.calls.window[0].sessionName, "proj");
   assert.equal(w.calls.window[0].existingSessionId, job.childSessionID);
@@ -1388,11 +1395,11 @@ test("C2 exactly one result — timed out on the job's OWN allowance (the overni
   const child = w.job(id).childSessionID;
   w.state.now = T0 + 89 * 60_000;
   await sweepDelegateJobs(w.deps);
-  assert.equal(w.job(id).status, "running", "the 30-minute default does not apply");
+  assert.equal(w.job(id).status, "running", "the default ceiling does not apply");
   w.state.now = T0 + 91 * 60_000;
   await sweepDelegateJobs(w.deps);
   assert.equal(w.job(id).status, "failed");
-  assert.equal(w.job(id).error, "timed out after 90 minutes");
+  assert.equal(w.job(id).error, "reached its time limit of 1 hour 30 minutes");
   assert.deepEqual(w.calls.abort, [child]);
   w.finish(child, "interrupted", T0 + 92 * 60_000);
   await createDelegateEngine(w.deps).observeRaw(raw("session.execution.interrupted", child));
@@ -1421,7 +1428,7 @@ test("C2 exactly one result — paused → resumed → done: the pause and the r
   const child2 = w.job(id).childSessionID;
   assert.notEqual(child2, child);
   assert.equal(w.calls.create[1].parentID, CTO);
-  assert.deepEqual(w.calls.create[1].permission, ctoInput().permission, "the resumed child is scoped exactly like the first");
+  assert.deepEqual(w.calls.create[1].permission, [...ctoInput().permission, { permission: "question", pattern: "*", action: "deny" }], "the resumed child is scoped exactly like the first");
   w.say(child2, "finished on attempt two");
   w.finish(child2, "succeeded", T0 + 9);
   await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child2));
@@ -1621,4 +1628,524 @@ test("C2 boot: finished legacy records and V2 records are left exactly as they a
   assert.deepEqual(await reconcileJobsOnBoot(w.deps), { ok: true, reconciled: 0 });
   assert.deepEqual(w.jobs, before);
   assert.deepEqual(w.calls.abort, []);
+});
+
+// ---------------------------------------------------------------------------
+// Liveness, ceiling, progress (spec 2026-11-14)
+// ---------------------------------------------------------------------------
+
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+
+/** A world whose engine state (liveness + views) the module-level sweep reads. `engine.observeActivity` feeds it. */
+function liveWorld(opts) {
+  const w = world(opts);
+  w.published = [];
+  w.deps.publish = (e) => w.published.push(e);
+  w.deps.liveness = createJobLiveness({ now: () => w.state.now });
+  w.deps.jobViews = createJobViews({ now: () => w.state.now, epoch: 5, liveness: w.deps.liveness, publish: (e) => w.published.push(e), load: w.deps.load });
+  w.deps.listTailMessages = async () => [];
+  // (created on first use, so a test's own dep overrides are in the engine's copy of the deps)
+  let engine = null;
+  Object.defineProperty(w, "engine", { get: () => (engine ??= createDelegateEngine(w.deps)) });
+  w.tap = (type, minutesAfterStart, extra = {}) => {
+    const job = w.jobs.find((j) => j.status === "running");
+    w.engine.observeActivity({ type, sessionId: job.childSessionID, at: T0 + minutesAfterStart * MIN, ...extra });
+  };
+  w.rebuilt = (id) => w.deps.liveness.applyReconstruction(id, w.deps.liveness.get(id).generation, {});
+  return w;
+}
+
+test("liveness: a launched job is born with the ceiling, extension and progress fields; its child can never ask a question", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const j = w.job(id);
+  assert.equal(j.ceilingMs, 4 * HOUR);
+  assert.equal(j.baseCeilingMs, 4 * HOUR);
+  assert.deepEqual(j.extensions, []);
+  assert.equal(j.endReason, null);
+  assert.equal(j.endedBlocked, false);
+  assert.equal(j.jobProgress.planRevision, 0);
+  assert.deepEqual(j.jobProgress.usage, { tokens: 0, costUsd: null, costPartial: false });
+  assert.deepEqual(w.calls.create[0].permission.at(-1), { permission: "question", pattern: "*", action: "deny" });
+  assert.match(j.launch.text, /Time: this job is stopped after 4 hours of work \(and earlier if it makes no\nprogress for 15 minutes\)\. Commit your work as you go so nothing is lost if it\nis stopped\./);
+  assert.ok(j.launch.text.includes('call progress_report with state "blocked" and a label saying what you need, then\nend your turn with the question.'));
+  assert.ok(w.deps.liveness.ownsSession(j.childSessionID), "the backstop knows the job's session from the start");
+});
+
+test("liveness: maxDurationMinutes sets the ceiling (and the prompt's wording); an invalid one refuses the job; the CTO's allowance is a ceiling too", async () => {
+  const w = liveWorld();
+  const id = await start(w, { maxDurationMinutes: 150 });
+  assert.equal(w.job(id).ceilingMs, 150 * MIN);
+  assert.match(w.job(id).launch.text, /stopped after 2 hours 30 minutes of work/);
+  for (const bad of [9, 721, 30.5]) {
+    const res = await startJob(input({ maxDurationMinutes: bad }), w.deps);
+    assert.deepEqual(res, { ok: false, error: "maxDurationMinutes must be an integer between 10 and 720" });
+  }
+  assert.equal(w.jobs.length, 1, "nothing was started for the invalid ones");
+  const w2 = liveWorld();
+  const id2 = await start(w2, { sweepAllowanceMs: 90 * MIN });
+  assert.equal(w2.job(id2).ceilingMs, 90 * MIN);
+});
+
+test("stall: 16 minutes of silence ends a launched job — failed / stalled with the last headline, ONE result, the child interrupted", async () => {
+  const w = liveWorld();
+  const id = await start(w, { name: "fix the bug" });
+  const child = w.job(id).childSessionID;
+  w.rebuilt(id);
+  w.tap("content", 1);
+  w.state.now = T0 + 16 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running", "15 minutes after the last record is not yet stalled");
+  w.state.now = T0 + 17 * MIN;
+  await sweepDelegateJobs(w.deps);
+  const j = w.job(id);
+  assert.equal(j.status, "failed");
+  assert.equal(j.endReason, "stalled");
+  assert.equal(j.error, "stalled — no progress for 15 minutes");
+  assert.deepEqual(w.calls.abort, [child]);
+  oneResult(w, id, "failed");
+  assert.match(w.calls.synth[0].body.text, /^Reason: stalled — no progress for 15 minutes$/m);
+  assert.equal(w.deps.liveness.get(id), null, "the live picture is gone with the run");
+});
+
+test("stall: a job that keeps producing records stays alive; a model label becomes the stall's `last:` text", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  w.rebuilt(id);
+  for (let m = 5; m <= 60; m += 5) w.tap("content", m);
+  w.state.now = T0 + 70 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running");
+  await w.engine.reportJobProgress({ sessionID: w.job(id).childSessionID, input: { label: "running the parser tests" }, record: { state: "working" } });
+  w.state.now = T0 + 90 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).error, "stalled — no progress for 15 minutes (last: running the parser tests)");
+});
+
+test("stall: after a restart (live state not rebuilt) a job is never judged; the sweep rebuilds it from reads, then the rules apply", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.deps.liveness.resetAll(w.jobs); // a boot / reconnect
+  w.state.now = T0 + 40 * MIN;
+  let reads = 0;
+  w.deps.listTailMessages = async (sid) => {
+    reads++;
+    return [{ info: { role: "assistant" }, parts: [{ type: "tool", tool: "bash", callID: "toolu_1", state: { status: "running", input: { command: "make all\nmore", timeout: 3_600_000 }, time: { start: T0 + 30 * MIN } } }] }];
+  };
+  w.state.now = T0 + 41 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.ok(reads >= 1);
+  const live = w.deps.liveness.get(id);
+  assert.ok(live.reconstructedAt != null);
+  assert.equal(live.tools.get("toolu_1").target, "make all");
+  assert.equal(live.tools.get("toolu_1").startedAt, T0 + 30 * MIN, "the transcript's start time");
+  assert.equal(w.job(id).status, "running", "its shell is within its own timeout");
+  w.state.now = T0 + 30 * MIN + 66 * MIN; // past start + timeout + 5 min
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "failed");
+  assert.equal(w.job(id).error, 'stalled — "make all" ran past its own timeout');
+  assert.deepEqual(w.calls.abort, [child]);
+});
+
+test("stall: a failed reconstruction read is retried next sweep and never ends the job meanwhile", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  w.state.now = T0 + 100 * MIN;
+  w.deps.liveness.resetAll(w.jobs); // a reconnect: the stall clock starts from here
+  w.deps.listTailMessages = async () => {
+    throw netErr();
+  };
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running");
+  assert.equal(w.deps.liveness.get(id).reconstructedAt, null);
+  w.deps.listTailMessages = async () => [];
+  w.state.now = T0 + 101 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.ok(w.deps.liveness.get(id).reconstructedAt != null);
+  assert.equal(w.job(id).status, "running");
+});
+
+test("stall: a job with a handoff pending is not judged under it; once the handoff is gone it is", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  w.rebuilt(id);
+  w.state.now = T0 + 40 * MIN;
+  w.deps.deferSettlement = () => true;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running", "handoff pending");
+  w.deps.deferSettlement = () => false;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "failed");
+});
+
+test("ceiling: a job that keeps working runs for hours and is ended at its 4 hour ceiling with time-limit", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  w.rebuilt(id);
+  for (let m = 2; m <= 180; m += 2) w.tap("content", m);
+  w.state.now = T0 + 3 * HOUR;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running");
+  w.tap("content", 241);
+  w.state.now = T0 + 4 * HOUR + MIN;
+  await sweepDelegateJobs(w.deps);
+  const j = w.job(id);
+  assert.equal(j.status, "failed");
+  assert.equal(j.endReason, "time-limit");
+  assert.equal(j.error, "reached its time limit of 4 hours");
+  oneResult(w, id, "failed");
+});
+
+test("ceiling: the guard re-checks the LIVE record under the lock — a snapshot taken before an extension can't end the job", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const snapshot = structuredClone(w.job(id));
+  const ceiling = snapshot.ceilingMs;
+  w.state.now = T0 + 4 * HOUR + MIN;
+  w.tap("content", 4 * 60); // (still working: only the ceiling is in question)
+  const ext = await extendJob(id, { minutes: 30, reason: "almost there", sessionID: PARENT }, w.deps);
+  assert.equal(ext.ok, true);
+  const res = await finishV2Job(snapshot, "failed", "reached its time limit of 4 hours", w.deps, {
+    endReason: "time-limit",
+    onlyIf: (live) => live.status === "running" && live.ceilingMs === ceiling && w.state.now - live.startedAt > live.ceilingMs,
+  });
+  assert.deepEqual(res, { ok: true, skipped: "guard" });
+  assert.equal(w.job(id).status, "running");
+  assert.equal(results(w).records, 0);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running", "the extended ceiling now covers it");
+});
+
+test("extend: the A7 checks, in order, and the success shape (30 minutes is +1 800 000 ms)", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  w.deps.replacementChain = (sid) => (sid === PARENT ? [PARENT, "ses_successor"] : [sid]);
+  const ask = (over = {}) => extendJob(id, { minutes: 30, reason: "needs more", sessionID: PARENT, ...over }, w.deps);
+  assert.equal((await extendJob("nope0000", { minutes: 30, reason: "x", sessionID: PARENT }, w.deps)).status, 404);
+  assert.deepEqual(await ask({ sessionID: "ses_stranger" }), { ok: false, status: 403, error: "that job belongs to another session" });
+  assert.equal((await ask({ minutes: 14 })).status, 400);
+  assert.equal((await ask({ minutes: 481 })).status, 400);
+  assert.equal((await ask({ minutes: 20.5 })).status, 400);
+  assert.equal((await ask({ reason: "   " })).status, 400);
+  assert.equal((await ask({ reason: "x".repeat(201) })).status, 400);
+  const ok = await ask();
+  assert.deepEqual(ok, { ok: true, job: { id, name: w.job(id).name, ceilingMs: 4 * HOUR + 1_800_000, startedAt: T0 } });
+  assert.equal(w.job(id).extensions.length, 1);
+  assert.equal(w.job(id).extensions[0].reason, "needs more");
+  assert.equal(w.published.at(-1).payload.view.ceilingAt, T0 + 4 * HOUR + 1_800_000, "published with the new ceiling");
+  assert.equal((await ask({ sessionID: "ses_successor" })).ok, true, "a session of the handoff chain may extend");
+  for (let i = 0; i < 3; i++) await ask({ minutes: 480 }).then((r) => assert.ok(r.ok === true || r.status === 409));
+  assert.equal((await ask({ minutes: 480 })).status, 409, "12 hours at most");
+  assert.ok(w.job(id).ceilingMs <= 12 * HOUR);
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  assert.equal((await ask()).status, 409, "a finished job can't be extended");
+  const oc = liveWorld({ jobs: [{ id: "aaaa1111", status: "running", childSessionID: "ses_oc", parentSessionID: PARENT, origin: "subagent", completionOwner: "opencode", startedAt: T0 }] });
+  assert.equal((await extendJob("aaaa1111", { minutes: 30, reason: "x", sessionID: PARENT }, oc.deps)).status, 409, "opencode-owned jobs have no limit to extend");
+});
+
+test("extend: the engine's own tool route returns the same refusals", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  assert.equal((await w.engine.extendJob(id, { minutes: 30, reason: "r", sessionID: "ses_other" })).status, 403);
+  assert.equal((await w.engine.extendJob(id, { minutes: 30, reason: "r", sessionID: PARENT })).ok, true);
+});
+
+test("resume: a new segment gets the launch ceiling back, extensions dropped, progress kept; a refused resume restores every field", async () => {
+  const w = liveWorld();
+  const id = await pausedJob(w);
+  w.jobs.find((j) => j.id === id).jobProgress.milestones.push({ at: T0, text: "kept" });
+  await extendJob(id, { minutes: 15, reason: "x", sessionID: PARENT }, { ...w.deps, load: w.deps.load }).catch(() => {});
+  const paused = w.job(id);
+  assert.equal(paused.status, "paused");
+  // refused resume: the pre-resume fields come back
+  const before = { ceilingMs: paused.ceilingMs, extensions: structuredClone(paused.extensions), endReason: paused.endReason };
+  w.fail.create = httpErr(400);
+  const refused = await resumeJob(id, w.deps);
+  assert.equal(refused.ok, false);
+  assert.equal(w.job(id).status, "paused");
+  assert.deepEqual({ ceilingMs: w.job(id).ceilingMs, extensions: w.job(id).extensions, endReason: w.job(id).endReason }, before);
+  w.fail.create = null;
+  // simulate an extension having happened in the previous segment
+  const rec = w.jobs.find((j) => j.id === id);
+  rec.ceilingMs = rec.baseCeilingMs + 45 * MIN;
+  rec.extensions = [{ at: T0, minutes: 45, reason: "earlier" }];
+  const resumed = await resumeJob(id, w.deps);
+  assert.equal(resumed.ok, true);
+  assert.equal(w.job(id).ceilingMs, w.job(id).baseCeilingMs, "extensions of the previous segment are dropped");
+  assert.deepEqual(w.job(id).extensions, []);
+  assert.equal(w.job(id).startedAt, w.state.now, "the segment clock restarts");
+  assert.equal(w.job(id).jobProgress.milestones[0].text, "kept", "progress survives a resume");
+});
+
+test("resume: a job that reported 'blocked' resumes with no model state (progress otherwise kept); a refused resume restores the original progress exactly", async () => {
+  const w = liveWorld();
+  const id = await pausedJob(w);
+  const rec = w.jobs.find((j) => j.id === id);
+  rec.jobProgress.label = "waiting on a decision";
+  rec.jobProgress.modelState = "blocked";
+  rec.jobProgress.milestones.push({ at: T0, text: "kept" });
+  rec.jobProgress.usage = { tokens: 42, costUsd: 0.5, costPartial: false };
+  const original = structuredClone(rec.jobProgress);
+  w.fail.create = httpErr(400);
+  assert.equal((await resumeJob(id, w.deps)).ok, false);
+  assert.deepEqual(w.job(id).jobProgress, original, "a refused resume restores jobProgress exactly");
+  w.fail.create = null;
+  assert.equal((await resumeJob(id, w.deps)).ok, true);
+  const jp = w.job(id).jobProgress;
+  assert.equal(jp.modelState, null);
+  assert.equal(jp.label, original.label);
+  assert.deepEqual(jp.checklist, original.checklist);
+  assert.deepEqual(jp.milestones, original.milestones);
+  assert.deepEqual(jp.usage, original.usage);
+});
+
+test("continuation: a new round resets every liveness / progress field of the record it spreads", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  const rec = w.jobs.find((j) => j.id === id);
+  rec.extensions = [{ at: T0, minutes: 30, reason: "x" }];
+  rec.ceilingMs = rec.baseCeilingMs + 30 * MIN;
+  rec.jobProgress.milestones.push({ at: T0, text: "old" });
+  rec.jobProgress.usage = { tokens: 99, costUsd: 1, costPartial: false };
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  const res = await continueJob(id, { prompt: "next round", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const next = res.job;
+  assert.notEqual(next.id, id);
+  assert.equal(next.ceilingMs, next.baseCeilingMs);
+  assert.deepEqual(next.extensions, []);
+  assert.equal(next.endReason, null);
+  assert.equal(next.endedBlocked, false);
+  assert.equal(next.lastProgressAt, null);
+  assert.deepEqual(next.jobProgress.milestones, []);
+  assert.deepEqual(next.jobProgress.usage, { tokens: 0, costUsd: null, costPartial: false });
+});
+
+test("a legacy running record (none of the new fields) is given them at first touch and keeps the CTO allowance as its ceiling", async () => {
+  const w = liveWorld({ jobs: [{
+    id: "aaaa1111", name: "old", status: "running", engine: "v2", completionOwner: "manta", childSessionID: "ses_child", parentSessionID: PARENT,
+    startedAt: T0, launchState: "running", submittedAt: T0, sweepAllowanceMs: 90 * MIN, origin: "delegate", launch: { text: "x" },
+  }] });
+  w.sessions.set("ses_child", { id: "ses_child", parentID: PARENT, time: {} });
+  w.active.add("ses_child");
+  w.state.now = T0 + 10 * MIN;
+  await sweepDelegateJobs(w.deps);
+  const j = w.job("aaaa1111");
+  assert.equal(j.ceilingMs, 90 * MIN);
+  assert.equal(j.baseCeilingMs, 90 * MIN);
+  assert.deepEqual(j.extensions, []);
+  assert.ok(j.jobProgress);
+  assert.equal(j.status, "running");
+});
+
+test("progress: the tap's todo list becomes the job's checklist; a model report adds label, milestones and a decision state; every report is stored", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  const todos = [{ content: "read", status: "completed" }, { content: "write", status: "in_progress" }, { content: "test", status: "pending" }];
+  w.engine.observeActivity({ type: "todos", sessionId: child, items: todos, at: T0 + MIN });
+  await new Promise((r) => setTimeout(r, 5));
+  let j = w.job(id);
+  assert.equal(j.jobProgress.checklist.length, 3);
+  assert.equal(j.jobProgress.planRevision, 1);
+  assert.equal(j.jobProgress.bar, 1 / 3);
+  // a subagent's todo list is not the job's plan
+  w.engine.observeActivity({ type: "child", sessionId: child, childSessionId: "ses_kid", parentSessionId: child, at: T0 });
+  w.engine.observeActivity({ type: "todos", sessionId: "ses_kid", items: [{ content: "x", status: "pending" }, { content: "y", status: "pending" }], at: T0 });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(w.job(id).jobProgress.checklist.length, 3);
+
+  await w.engine.reportJobProgress({ sessionID: child, input: { label: "writing the fix", milestone: "found the cause" }, record: { state: "working", step: 2, total: 3 } });
+  await w.engine.reportJobProgress({ sessionID: child, input: { milestone: "found the cause" }, record: { state: "blocked", step: 2, total: 3 } });
+  j = w.job(id);
+  assert.equal(j.jobProgress.label, "writing the fix");
+  assert.equal(j.jobProgress.modelState, "blocked");
+  assert.equal(j.jobProgress.milestones.length, 1, "an exact duplicate of the newest is dropped");
+  const listed = await w.engine.listJobs({ sessionID: PARENT });
+  assert.equal(listed[0].view.state, "needs-decision");
+  assert.equal(listed[0].view.headline, "writing the fix");
+  assert.equal(listed[0].view.steps.source, "checklist", "the checklist wins the steps");
+  // a report from a session that is not a running job's root is not applied
+  assert.deepEqual(await w.engine.reportJobProgress({ sessionID: "ses_kid", input: { label: "x" }, record: { state: "working" } }), { applied: false });
+});
+
+test("progress: ending while blocked is `needs a decision` (not done), carries endedBlocked into the result, keeps the bar below 1, and milestones survive clearProgress", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.engine.observeActivity({ type: "todos", sessionId: child, items: [{ content: "a", status: "completed" }, { content: "b", status: "pending" }], at: T0 });
+  await new Promise((r) => setTimeout(r, 5));
+  await w.engine.reportJobProgress({ sessionID: child, input: { label: "need a call on the schema", milestone: "schema drafted" }, record: { state: "blocked" } });
+  w.say(child, "Which schema do you want: A or B?");
+  w.finish(child, "succeeded", T0 + 9);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const j = w.job(id);
+  assert.equal(j.status, "done");
+  assert.equal(j.endedBlocked, true);
+  assert.ok(j.jobProgress.bar < 1);
+  const body = w.calls.synth[0].body;
+  assert.equal(body.metadata.manta.endedBlocked, true);
+  assert.equal(body.metadata.state, "completed", "the execution state stays completed");
+  assert.match(body.text, /^\[background job "[^"]+" needs a decision\]/);
+  assert.match(body.text, /Milestones:\n- schema drafted/);
+  assert.match(body.text, /Which schema do you want/);
+});
+
+test("progress: a plain done job's bar is 1 and its result says done; usage is folded in at the end and flushed by the sweep", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.engine.observeActivity({ type: "todos", sessionId: child, items: [{ content: "a", status: "completed" }, { content: "b", status: "completed" }], at: T0 });
+  await new Promise((r) => setTimeout(r, 5));
+  w.engine.observeActivity({ type: "step", sessionId: child, eventId: "e1", tokens: { input: 10, output: 5, reasoning: 0, cacheRead: 100, cacheWrite: 0 }, cost: 0.5, at: T0 + 1 });
+  w.state.now = T0 + 2 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.deepEqual(w.job(id).jobProgress.usage, { tokens: 115, costUsd: 0.5, costPartial: false }, "flushed by the sweep");
+  w.engine.observeActivity({ type: "step", sessionId: child, eventId: "e2", tokens: { input: 1, output: 1 }, cost: null, at: T0 + 3 * MIN });
+  w.say(child, "all done");
+  w.finish(child, "succeeded", T0 + 4 * MIN);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const j = w.job(id);
+  assert.equal(j.jobProgress.bar, 1);
+  assert.deepEqual(j.jobProgress.usage, { tokens: 117, costUsd: 0.5, costPartial: true }, "folded in at the terminal transition");
+  assert.match(w.calls.synth[0].body.text, /^\[background job "[^"]+" done\]/);
+  assert.ok(w.published.some((e) => e.payload.view?.state === "done" && e.payload.status === "done"), "the terminal publish carries the view");
+});
+
+test("evidence log: one line per Manta-owned terminal segment with what the engine knew at the decision", async () => {
+  const w = liveWorld();
+  const lines = [];
+  w.deps.livenessLog = { appendSegment: async (e) => lines.push(e), recordDeployed: async () => true };
+  const id = await start(w);
+  w.rebuilt(id);
+  w.tap("toolStarted", 1, { callID: "c1", name: "bash", target: "sleep 99", timeoutMs: 20 * MIN });
+  w.state.now = T0 + 17 * MIN; // the tool is still within its allowance (until minute 26): alive
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running");
+  w.state.now = T0 + 20 * MIN;
+  w.tap("toolEnded", 2, { callID: "c1", name: "bash", input: {} });
+  w.state.now = T0 + 40 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).endReason, "stalled");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].jobId, id);
+  assert.equal(lines[0].status, "failed");
+  assert.equal(lines[0].endReason, "stalled");
+  assert.equal(lines[0].segmentMs, 40 * MIN);
+  assert.equal(lines[0].ceilingMs, 4 * HOUR);
+  assert.equal(typeof lines[0].contentRecordsLast15m, "number");
+  assert.deepEqual(lines[0].toolsAtEnd, []);
+});
+
+test("the final file count is the number of UNIQUE changed paths (base diff + untracked), and a git failure leaves it unknown", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.deps.gitRun = async (args) => {
+    if (args.includes("diff")) return { stdout: "a.ts\nb.ts\n" };
+    if (args.includes("status")) return { stdout: " M a.ts\n?? c.ts\n?? a.ts\n" };
+    return { stdout: "abc123\n" };
+  };
+  w.say(child, "ok");
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).filesChanged, 3, "a.ts counted once");
+  assert.deepEqual(w.job(id).jobProgress.files.changed, 3);
+  const w2 = liveWorld();
+  const id2 = await start(w2);
+  w2.deps.gitRun = async () => {
+    throw new Error("git is gone");
+  };
+  w2.state.now = T0 + 2 * MIN;
+  await sweepDelegateJobs(w2.deps);
+  assert.equal(w2.job(id2).jobProgress.files.changed, null, "unknown, never 0 by mistake");
+});
+
+test("the A5 backstop queue: a rejection that failed is retried by the next sweep (after reconstruction) and dropped on success, not-found or lost ownership", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.rebuilt(id);
+  const tries = [];
+  let failing = true;
+  w.deps.rejectQuestion = async (a) => {
+    tries.push(a);
+    if (failing) throw netErr();
+  };
+  w.deps.rejectPermission = async (a) => {
+    tries.push(a);
+    throw httpErr(404, "gone");
+  };
+  assert.equal(await w.engine.rejectAsk({ kind: "question", requestId: "frm_1", sessionId: child }), false);
+  assert.equal(await w.engine.rejectAsk({ kind: "permission", requestId: "per_1", sessionId: child }), true, "a 404 means the request is gone");
+  assert.deepEqual(w.deps.liveness.pendingRejections().map((r) => r.requestId), ["frm_1"]);
+  w.state.now = T0 + MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(tries.filter((t) => t.requestId === "frm_1").length, 2, "retried by the sweep");
+  failing = false;
+  w.state.now = T0 + 2 * MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.deepEqual(w.deps.liveness.pendingRejections(), []);
+  w.deps.liveness.queueRejection({ kind: "question", requestId: "frm_2", sessionId: "ses_not_owned" });
+  await sweepDelegateJobs(w.deps);
+  assert.deepEqual(w.deps.liveness.pendingRejections(), [], "no longer owned: dropped without a call");
+  assert.equal(tries.some((t) => t.requestId === "frm_2"), false);
+});
+
+test("reconstruction rejects the asks it finds pending in the job's sessions (permission and question)", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.deps.liveness.resetAll(w.jobs);
+  w.deps.listPermissions = async () => [{ id: "per_9" }];
+  w.deps.listQuestions = async () => [{ id: "frm_9" }];
+  const rejected = [];
+  w.deps.rejectPermission = async (a) => rejected.push(["permission", a.requestId, a.sessionId]);
+  w.deps.rejectQuestion = async (a) => rejected.push(["question", a.requestId, a.sessionId]);
+  w.state.now = T0 + MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.deepEqual(rejected, [["permission", "per_9", child], ["question", "frm_9", child]]);
+});
+
+test("reconstruction leaves a background slash-command job's pending asks alone (it shares its parent's permissions), unlike a delegate job's", async () => {
+  const w = liveWorld({
+    jobs: [{ id: "cmd00001", status: "running", engine: "v2", origin: "command", completionOwner: "manta", childSessionID: "ses_cmd", parentSessionID: PARENT, launchState: "running", startedAt: T0 }],
+  });
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.deps.liveness.resetAll(w.jobs);
+  w.deps.listPermissions = async (sid) => [{ id: `per_${sid}` }];
+  w.deps.listQuestions = async () => [];
+  const rejected = [];
+  w.deps.rejectPermission = async (a) => rejected.push(a.sessionId);
+  w.deps.rejectQuestion = async () => {};
+  w.state.now = T0 + MIN;
+  await sweepDelegateJobs(w.deps);
+  assert.ok(w.deps.liveness.get("cmd00001").reconstructedAt != null, "the command job was reconstructed");
+  assert.deepEqual(rejected, [child], "only the delegate job's ask is rejected");
+});
+
+test("normalizeJobRuleset: a trailing question deny, idempotent, grants untouched; buildJobPrompt carries the budget text for a worktree-less job too", () => {
+  const grants = [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }];
+  const once = normalizeJobRuleset(grants);
+  assert.deepEqual(once, [...grants, { permission: "question", pattern: "*", action: "deny" }]);
+  assert.deepEqual(normalizeJobRuleset(once), once);
+  assert.deepEqual(normalizeJobRuleset(null), [{ permission: "question", pattern: "*", action: "deny" }]);
+  const bare = buildJobPrompt({ prompt: "do it", worktree: null, branch: null, ceilingMs: 90 * MIN });
+  assert.ok(bare.includes("Time: this job is stopped after 1 hour 30 minutes of work"));
+  assert.ok(bare.includes("Progress: keep your todo list current"));
+});
+
+test("completion text: Reason (+ last status) for an ended job, milestones, and no change for an ordinary one", () => {
+  const base = { name: "n", status: "failed", worktree: null, error: "stalled — no progress for 15 minutes", endReason: "stalled", jobProgress: { label: "building", milestones: [{ at: 1, text: "m1" }, { at: 2, text: "m2" }] } };
+  const t = buildCompletionText(base);
+  assert.equal(t, '[background job "n" failed]\nReason: stalled — no progress for 15 minutes\nLast status: building\nMilestones:\n- m1\n- m2\n\nError: stalled — no progress for 15 minutes');
+  assert.equal(buildCompletionText({ name: "n", status: "done", result: "ok" }), '[background job "n" done]\n\nok');
+  assert.ok(!buildCompletionText({ ...base, error: "stalled — no progress for 15 minutes (last: building)" }).includes("Last status:"), "already in the reason");
 });

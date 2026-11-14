@@ -177,3 +177,43 @@ test("round-trip through an injected store: report, read, clear", async () => {
   const again = await clearProgress("s9", { load: store.load, save: store.save });
   assert.deepEqual(again, { ok: true, deleted: false });
 });
+
+// ---------------------------------------------------------------------------
+// Spec 2026-11-14 B1: one store-wide mutex, and `milestone`
+// ---------------------------------------------------------------------------
+
+test("concurrent reports from DIFFERENT sessions both survive (the whole file is one read-modify-write)", async () => {
+  const m = memStore();
+  // a slow load/save, so an unserialized pair would read the same snapshot and lose one update
+  const slow = (fn) => async (...a) => {
+    await new Promise((r) => setTimeout(r, 5));
+    return fn(...a);
+  };
+  const opts = { load: slow(m.load), save: slow(m.save), now: clock };
+  await Promise.all([
+    reportProgress({ sessionID: "a", label: "A" }, opts),
+    reportProgress({ sessionID: "b", label: "B" }, opts),
+    reportProgress({ sessionID: "c", label: "C" }, opts),
+  ]);
+  assert.deepEqual(Object.keys(m.records).sort(), ["a", "b", "c"]);
+});
+
+test("a report racing a clear ends in some serial order — never a half-written store", async () => {
+  const m = memStore();
+  const opts = { load: m.load, save: m.save, now: clock };
+  await reportProgress({ sessionID: "a", label: "first" }, opts);
+  await Promise.all([clearProgress("a", opts), reportProgress({ sessionID: "b", label: "other" }, opts), sweepProgress(opts)]);
+  assert.equal(m.records.a, undefined, "the cleared record stays cleared");
+  assert.equal(m.records.b.label, "other");
+});
+
+test("milestone is accepted, validated, and never stored on the per-session record", async () => {
+  const m = memStore();
+  const opts = { load: m.load, save: m.save, now: clock };
+  const ok = await reportProgress({ sessionID: "a", label: "x", milestone: "found it" }, opts);
+  assert.equal(ok.ok, true);
+  assert.equal("milestone" in ok.record, false);
+  assert.equal("milestone" in m.records.a, false);
+  const bad = await reportProgress({ sessionID: "a", milestone: 42 }, opts);
+  assert.deepEqual(bad, { ok: false, error: "milestone must be a string" });
+});

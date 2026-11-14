@@ -17,6 +17,7 @@ export const tools: ToolDef[] = [
       "once a minute. This does NOT notify the user; use `notify` for that. Set",
       '`state:"blocked"` only when you have genuinely stopped and need a human',
       "decision.",
+      "In a background job, `milestone` records a notable finding (≤160 chars).",
     ].join(" "),
     input: input(
       {
@@ -32,12 +33,15 @@ export const tools: ToolDef[] = [
           "working = in progress; blocked = you have stopped and need a human decision; done/failed = finished.",
         ),
         detail: str("Optional free-form detail (obstacle, what's next, etc.)."),
+        milestone: str(
+          "A notable finding or completed piece of work, in one plain sentence (≤160 chars). Background jobs only; it is shown to the user and reported with the result.",
+        ),
         sinks: arr(
           oneOf(["ui"]),
           'Where to send the progress signal. Only "ui" is implemented; unknown sinks are ignored.',
         ),
       },
-      ["label", "step", "total", "state", "detail", "sinks"],
+      ["label", "step", "total", "state", "detail", "milestone", "sinks"],
     ),
     async execute(args, context) {
       const body: Record<string, unknown> = { sessionID: context.sessionID };
@@ -46,6 +50,7 @@ export const tools: ToolDef[] = [
       if (args.total !== undefined) body.total = args.total;
       if (args.state !== undefined) body.state = args.state;
       if (args.detail !== undefined) body.detail = args.detail;
+      if (args.milestone !== undefined) body.milestone = args.milestone;
       if (args.sinks !== undefined) body.sinks = args.sinks;
       const result = await call("POST", "/api/progress", body);
       return result?.ok ? "Progress recorded." : "Progress failed to record.";

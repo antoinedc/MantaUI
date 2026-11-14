@@ -54,7 +54,9 @@ export function createAutoAnswerLedger(cap = 500) {
  * @param {{
  *   evt: any,
  *   getConfig: () => Promise<{ chatAutoAllow?: boolean }>,
- *   reply: (a: { requestId: string, reply: "always", sessionId?: string }) => Promise<unknown>,
+ *   reply: (a: { requestId: string, reply: "always"|"reject", sessionId?: string }) => Promise<unknown>,
+ *   ownsSession?: (sessionId: string) => boolean,
+ *   onRejectFailed?: (a: { kind: "permission", requestId: string, sessionId: string, error: unknown }) => void,
  *   interpret: (evt: any) => void,
  *   publish: (evt: any) => void,
  *   push: (evt: any) => void,
@@ -65,6 +67,23 @@ export function createAutoAnswerLedger(cap = 500) {
 export async function handlePermissionAsk(d) {
   const { evt, getConfig, reply, interpret, publish, push, ledger } = d;
   const warn = d.warn ?? (() => {});
+  // A background job cannot wait on a person (spec 2026-11-14 A5): an ask in a job's own session or one below it is
+  // rejected HERE, before trust mode would approve it. Nothing is interpreted, published or pushed.
+  const askSession = evt.properties?.sessionID;
+  if (typeof askSession === "string" && d.ownsSession?.(askSession)) {
+    const requestId = evt.properties?.id;
+    if (typeof requestId === "string" && requestId) {
+      if (ledger.has(requestId)) return;
+      ledger.add(requestId);
+      try {
+        await reply({ requestId, reply: "reject", sessionId: askSession });
+      } catch (e) {
+        warn("[opencode-pump] rejecting a background job's permission ask failed:", e?.message ?? e);
+        d.onRejectFailed?.({ kind: "permission", requestId, sessionId: askSession, error: e });
+      }
+    }
+    return;
+  }
   let autoAllow = false;
   let replied = false;
   let replyFailed = false;

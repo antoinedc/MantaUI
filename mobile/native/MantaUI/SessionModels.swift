@@ -144,12 +144,16 @@ struct DelegateJob: Codable, Equatable, Sendable, Identifiable {
     var statusLabel: String? = nil
     /// The box's one-line outcome for a finished job (`delegate:list` `summary`).
     var summary: String? = nil
+    /// The box's progress for the job (spec 2026-11-14 §5.3). nil on an older
+    /// box, and when the box's view is malformed or of a kind this build does
+    /// not know — rows then look as they did before.
+    var view: DelegateJobProgressView? = nil
 
     fileprivate enum CodingKeys: String, CodingKey {
         case id, parentSessionID, childSessionID, status
         case name, origin, branch, activity
         case createdAt, startedAt, finishedAt
-        case statusLabel, summary
+        case statusLabel, summary, view
     }
 
     /// Whether the job is still live. `done`/`failed`/`stopped` are terminal;
@@ -182,6 +186,7 @@ extension DelegateJob {
         finishedAt = Self.lenientMillis(c, .finishedAt)
         statusLabel = Self.lenientString(c, .statusLabel)
         summary = Self.lenientString(c, .summary)
+        view = DelegateJobProgressView(json: (try? c.decodeIfPresent(JSONValue.self, forKey: .view)) ?? nil)
     }
 
     private static func lenientString(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> String? {

@@ -4,6 +4,7 @@
 
 export type StreamInterpreter = {
   interpret(evt: unknown): void;
+  onActivity(fn: (record: Record<string, unknown>) => void): () => void;
   flushPending(): void;
   dispose(): void;
   snapshotState(): Array<Record<string, unknown>>;

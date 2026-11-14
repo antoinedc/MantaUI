@@ -162,7 +162,7 @@ test("the sweeper does not time out a job that has a send handoff pending — an
     await sweepDelegateJobs({
       load: s.load,
       save: s.save,
-      now: () => started + 31 * 60_000,
+      now: () => started + 4 * 60 * 60_000 + 60_000,
       publish: () => {},
       postSynthetic: async () => {},
       deferSettlement: (sid) => pending && sid === "ses_child",

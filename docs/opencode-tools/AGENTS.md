@@ -267,7 +267,7 @@ see your current step — e.g. "step 3 of 5: wiring the REST handler", or
 `state:"blocked"` when you've genuinely stopped and need a human decision. It
 shows up as a live label on the job card instead of an opaque "Ruminating…".
 
-- `progress_report(label?, step?, total?, state?, detail?, sinks?)` ->
+- `progress_report(label?, step?, total?, state?, detail?, milestone?, sinks?)` ->
   recorded ("Progress recorded."). Replaces the previous record — this is a
   status, not a log.
 
@@ -415,11 +415,16 @@ ask the task for status, or duplicate this task's work." `delegate_list` is
 for answering "what's running?", not for waiting. To see what a running
 `delegate` job is actually doing, use `peers_inspect` on that session.
 
-- `delegate({ prompt: string, model?: string })` → starts an isolated job
-  in its own session, git worktree and branch. Returns immediately with
-  the job's name + id and a reminder that the result is NOT available yet.
+- `delegate({ prompt: string, model?: string, maxDurationMinutes?: number })`
+  → starts an isolated job in its own session, git worktree and branch.
+  Returns immediately with the job's name + id and a reminder that the
+  result is NOT available yet.
 - `delegate_list({})` → lists this session's background jobs (id, name,
-  status, branch, worktree, activity, timestamps).
+  status, branch, worktree, activity, timestamps). A running job also shows
+  its progress: state, headline, plan steps (`steps 3/7`), the last
+  milestones, how long it has been quiet, and the time left.
+- `delegate_extend({ id, minutes, reason })` → gives one of YOUR running
+  jobs 15–480 more minutes before its time limit (12 hours at most).
 - `delegate_send({ id, prompt })` → starts another round in one of YOUR
   jobs that has finished and whose result has reached you. Returns
   immediately with the id of the new round (a new job record on the same
@@ -431,6 +436,17 @@ for answering "what's running?", not for waiting. To see what a running
 **Split independent pieces into parallel jobs (up to five at once); each one
 is a full model session, so don't start jobs whose result you won't use — and
 a background job cannot start background jobs of its own.**
+
+**A job runs for as long as it keeps working.** It is stopped after 4 hours
+of work (`maxDurationMinutes` sets another limit, 10–720; `delegate_extend`
+adds time to a running job) or after 15 minutes with no progress at all (a
+long shell command counts as progress for as long as it is within its own
+timeout, or for 60 minutes of silence when it has none). Either way the job
+fails with the reason in its result, and you can continue it with
+`delegate_send`. A background job **cannot ask the user questions**: if it
+needs a decision it reports `progress_report` state `blocked` and ends its
+turn with the question; its result then says "needs a decision" and you
+answer it with `delegate_send`.
 
 **Cap of five concurrent `delegate` jobs** box-wide. A sixth is refused
 with a clear error — do not retry; either wait for one to finish or do the

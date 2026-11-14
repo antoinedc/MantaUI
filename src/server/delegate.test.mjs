@@ -149,7 +149,7 @@ test("buildJobPrompt omits the git paragraph when there is no worktree", () => {
   assert.match(out, /^Summarize the docs\n\n---\n/);
   assert.ok(out.includes("You are running as a background job."));
   assert.ok(!out.includes("git worktree"));
-  assert.ok(!out.includes("Commit your work"));
+  assert.ok(!out.includes("Commit your work to that branch"));
   assert.ok(out.includes("When you are done, end with a short summary"));
 });
 
@@ -1814,26 +1814,35 @@ test("finishV2Job does not report a job opencode owns (an adopted subagent), but
 // 9. Sweeper marks a 31-minute-old running job failed, leaves worktree intact
 // ----------------------------------------------------------------------------
 
-test("sweeper marks a 31-minute-old running job failed with the timeout error", async () => {
+test("sweeper leaves a 31-minute-old running job running: the old fixed 30-minute timeout is gone", async () => {
+  const started = 1_700_000_000_000;
+  const h = harness([{ ...runningObserverJob(), id: "old", startedAt: started }], started + 31 * 60_000);
+  await sweepDelegateJobs(h.deps);
+  assert.equal(h.jobs[0].status, "running");
+  assert.equal(h.delivered.length, 0);
+});
+
+test("sweeper ends a running job past its 4 hour default ceiling: failed, endReason time-limit, one result", async () => {
   const started = 1_700_000_000_000;
   const h = harness([{
     ...runningObserverJob(),
     id: "old", startedAt: started, worktree: "/repo/wt-old", branch: "old",
     baseSha: "abc",
-  }], started + 31 * 60_000); // 31 minutes later
+  }], started + 4 * 60 * 60_000 + 1000);
   h.deps.gitRun = async () => ({ stdout: "" });
   await sweepDelegateJobs(h.deps);
   assert.equal(h.jobs[0].status, "failed");
-  assert.equal(h.jobs[0].error, "timed out after 30 minutes");
+  assert.equal(h.jobs[0].error, "reached its time limit of 4 hours");
+  assert.equal(h.jobs[0].endReason, "time-limit");
   // worktree field left intact (sweeper NEVER removes the worktree)
   assert.equal(h.jobs[0].worktree, "/repo/wt-old");
   assert.equal(h.jobs[0].branch, "old");
   // completion delivered to parent
   assert.equal(h.delivered.length, 1);
-  assert.match(h.delivered[0].text, /timed out after 30 minutes/);
+  assert.match(h.delivered[0].text, /Reason: reached its time limit of 4 hours/);
 });
 
-test("sweeper leaves a job younger than 30 minutes running", async () => {
+test("sweeper leaves a job younger than its ceiling running", async () => {
   const started = 1_700_000_000_000;
   const h = harness([{
     ...runningObserverJob(), id: "young", startedAt: started,
@@ -1939,7 +1948,7 @@ test("startJob happy path (non-git cwd) persists a running job and delivers the 
 // finishV2Job filesChanged counts committed + uncommitted (with a worktree)
 // ----------------------------------------------------------------------------
 
-test("finishV2Job counts committed + uncommitted files when a worktree exists", async () => {
+test("finishV2Job counts the unique changed paths (base diff + untracked) when a worktree exists", async () => {
   const job = {
     ...runningObserverJob(), id: "fc", worktree: "/repo/wt", branch: "b", baseSha: "sha1",
   };
@@ -1955,7 +1964,8 @@ test("finishV2Job counts committed + uncommitted files when a worktree exists", 
   await finishV2Job(job, "done", null, h.deps);
   assert.equal(h.jobs[0].status, "done");
   assert.equal(h.jobs[0].result, "done");
-  assert.equal(h.jobs[0].filesChanged, 4);
+  // unique paths against the base: the committed a.ts, b.ts and the untracked d.ts (the tracked c.ts edit is part of the base diff)
+  assert.equal(h.jobs[0].filesChanged, 3);
 });
 
 test("finishV2Job is idempotent for an already-terminal job", async () => {
@@ -2239,7 +2249,8 @@ test("startJobWithApproval starts the job on approve and forwards the ruleset", 
   const perm = h.createCalls[0]?.permission;
   assert.ok(Array.isArray(perm));
   assert.deepEqual(perm[0], { permission: "*", pattern: "**", action: "deny" });
-  assert.deepEqual(perm.at(-1), { permission: "bash", pattern: "pytest * -x", action: "allow" }, "the EDITED grant is forwarded");
+  assert.deepEqual(perm.at(-2), { permission: "bash", pattern: "pytest * -x", action: "allow" }, "the EDITED grant is forwarded");
+  assert.deepEqual(perm.at(-1), { permission: "question", pattern: "*", action: "deny" }, "a job can never wait on a person");
 });
 
 // ----------------------------------------------------------------------------
@@ -2538,7 +2549,7 @@ test("sweeper fails a job past its sweepAllowanceMs with an allowance-accurate m
   h.deps.gitRun = async () => ({ stdout: "" });
   await sweepDelegateJobs(h.deps);
   assert.equal(h.jobs[0].status, "failed");
-  assert.equal(h.jobs[0].error, "timed out after 5 minutes");
+  assert.equal(h.jobs[0].error, "reached its time limit of 5 minutes");
 });
 
 test("sweeper stops a paused job older than 7 days", async () => {

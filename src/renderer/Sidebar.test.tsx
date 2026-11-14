@@ -663,7 +663,7 @@ describe("Sidebar — nested background job rows (observed, superseded)", () => 
     ],
   ): Harness {
     installMockApi();
-    resetStore({ projects: [proj({ tmuxSession: "proj", windows })] });
+    resetStore({ projects: [proj({ tmuxSession: "proj", windows })], jobs: {}, jobSkew: {} });
     useStore.getState().setJobs(jobs as never);
     h = mount(
       <Sidebar
@@ -695,6 +695,46 @@ describe("Sidebar — nested background job rows (observed, superseded)", () => 
     ]);
     expect(h!.container.querySelector('[aria-label="started outside Manta"]')).toBeNull();
     expect(h!.container.textContent).toContain("child");
+  });
+
+  const view = (over: Record<string, unknown> = {}) => ({
+    rev: { epoch: 1, n: 1 },
+    asOf: 1,
+    state: "working",
+    headline: "Reading <b>the</b> config loader",
+    headlineSource: "model",
+    steps: { done: 3, total: 7, current: null, items: [], source: "checklist", planRevision: 1, grewAt: null },
+    bar: null,
+    live: null,
+    startedAt: 1,
+    endedAt: null,
+    lastProgressAt: null,
+    ceilingAt: null,
+    milestones: [],
+    files: null,
+    usage: null,
+    model: null,
+    ...over,
+  });
+
+  it("a job row shows its 3/7 steps chip and the progress headline as its tooltip (plain text)", () => {
+    mountWith([job({ activity: "editing", view: view() })]);
+    const chip = h!.container.querySelector('[data-testid="job-steps-chip"]');
+    expect(chip?.textContent).toBe("3/7");
+    const row = chip!.closest('[role="treeitem"]') as HTMLElement;
+    expect(row.getAttribute("title")).toContain("Reading <b>the</b> config loader");
+    expect(row.getAttribute("title")).not.toContain("editing");
+    expect(row.querySelector("b")).toBeNull();
+  });
+
+  it("without steps there is no chip; without a view the tooltip is the activity line, as before", () => {
+    mountWith([job({ activity: "editing", view: view({ steps: null }) })]);
+    expect(h!.container.querySelector('[data-testid="job-steps-chip"]')).toBeNull();
+    h!.unmount();
+    mountWith([job({ activity: "editing" })]);
+    expect(h!.container.querySelector('[data-testid="job-steps-chip"]')).toBeNull();
+    const row = [...h!.container.querySelectorAll('[role="treeitem"]')].find((el) => el.textContent?.includes("child")) as HTMLElement;
+    expect(row.getAttribute("title")).toContain("editing");
   });
 
   it("a superseded record is not rendered as a nested job; its successor is", () => {

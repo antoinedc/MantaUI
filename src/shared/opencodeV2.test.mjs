@@ -404,6 +404,20 @@ test("mapTimeline: background-result name — metadata.manta.name, else a '/…'
   assert.equal(part(rec({ description: "/review HEAD~1" })).text, "boom");
 });
 
+test("mapTimeline: endedBlocked rides the result's manta metadata onto the part (only when true), and the 'needs a decision' header is stripped", () => {
+  const part = (manta, text = '[background job "fix-it" needs a decision]\n\nWhich one?') =>
+    mapTimeline(
+      [{ id: "msg_b", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", manta }, text }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  const blocked = part({ jobId: "job1", name: "fix-it", endedBlocked: true });
+  assert.equal(blocked.endedBlocked, true);
+  assert.equal(blocked.state, "completed", "the execution state stays completed");
+  assert.equal(blocked.text, "Which one?");
+  assert.equal("endedBlocked" in part({ jobId: "job1", name: "fix-it" }), false, "absent means false");
+  assert.equal("endedBlocked" in part({ jobId: "job1", endedBlocked: false }), false);
+});
+
 test("mapTimeline: a Manta-posted result's card text drops the '[background job …]' header + its blank line only", () => {
   const part = (text, manta = { jobId: "job1" }) =>
     mapTimeline(

@@ -62,6 +62,7 @@ import {
   toolTitle,
 } from "../shared/opencodeV2.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { activityTarget, activityTimeoutMs } from "./jobLiveness.mjs";
 import { createRunLedger } from "./runLedger.mjs";
 import { isDelegateTool, isHandoffToolPart } from "./transcriptRuns.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
@@ -229,6 +230,20 @@ export function createStreamInterpreter({
 }) {
   const sessions = new Map();
   const childParent = new Map(); // child session id -> parent session id
+  // The activity tap (spec 2026-11-14 §A1): normalized, synchronous records for the job liveness engine.
+  const activitySubscribers = new Set();
+  let activeEvt = null; // the event `interpret` is handling right now (its `created` stamps the records)
+  function emitActivity(rec) {
+    if (activitySubscribers.size === 0) return;
+    const out = { ...rec, at: typeof activeEvt?.created === "number" ? activeEvt.created : now() };
+    for (const fn of activitySubscribers) {
+      try {
+        fn(out);
+      } catch (e) {
+        console.warn("[stream-interp] activity subscriber failed:", e?.message ?? e);
+      }
+    }
+  }
   // `messageChanged` coalescing state, keyed by session + message.
   const changed = new Map(); // key -> { sid, messageID, lastAt, timer }
   // Reconnects can re-deliver an event; events carry a unique id, so remember a
@@ -512,6 +527,8 @@ export function createStreamInterpreter({
         const r = await fetchShellOutput({ shellID, cursor, directory });
         if (!stopped && r && typeof r.output === "string" && r.output.length > 0) {
           cursor = Number.isFinite(r.cursor) ? r.cursor : cursor + Buffer.byteLength(r.output);
+          // liveness sees every new byte, whatever the display cap does with it
+          emitActivity({ type: "toolOutput", sessionId: sid, callID: tool.callID, bytes: Buffer.byteLength(r.output) });
           emitToolText(sid, tool, r.output);
         }
       } catch {
@@ -554,6 +571,7 @@ export function createStreamInterpreter({
   function emitTodos(sid, st, list) {
     st.todos = Array.isArray(list) ? list : null;
     const active = selectActiveTodos(st.todos, null, false);
+    emitActivity({ type: "todos", sessionId: sid, items: active ?? [] });
     emit(sid, "todos", {
       active,
       visible: active ? selectVisibleTodos(active) : null,
@@ -581,6 +599,7 @@ export function createStreamInterpreter({
     }
     tool.status = ok ? "completed" : "error";
     tool.ended = true;
+    emitActivity({ type: "toolEnded", sessionId: sid, callID: tool.callID, name: tool.name, input: tool.input });
     if (ok && isDelegateTool(tool.name)) {
       const out = toolOutputText(tool.v2Name, d.content);
       if (out) tool.output = out.length > LEDGER_OUTPUT_MAX ? out.slice(0, LEDGER_OUTPUT_MAX) : out;
@@ -791,6 +810,16 @@ export function createStreamInterpreter({
   }
 
   function interpret(evt) {
+    const prev = activeEvt;
+    activeEvt = evt;
+    try {
+      interpretOne(evt);
+    } finally {
+      activeEvt = prev;
+    }
+  }
+
+  function interpretOne(evt) {
     if (!evt || typeof evt !== "object" || typeof evt.type !== "string") return;
     const d = evt.data && typeof evt.data === "object" ? evt.data : {};
     // V2 stamps `data.sessionID` on every session-scoped event; a form carries
@@ -902,6 +931,7 @@ export function createStreamInterpreter({
       case "session.text.delta":
       case "session.reasoning.delta": {
         const reasoning = evt.type === "session.reasoning.delta";
+        emitActivity({ type: "content", sessionId: sid });
         const messageID = d.assistantMessageID;
         const chunk = textOf(d.delta);
         if (!messageID || !chunk) return;
@@ -933,6 +963,14 @@ export function createStreamInterpreter({
           tool.hint = hint;
           announceTool(sid, tool, "running");
         }
+        emitActivity({
+          type: "toolStarted",
+          sessionId: sid,
+          callID: tool.callID,
+          name: tool.name,
+          target: activityTarget(tool.name, tool.input),
+          timeoutMs: activityTimeoutMs(tool.name, tool.input),
+        });
         if (tool.name === "todo_write" || tool.name === "todowrite") emitTodos(sid, st, tool.input.todos);
         ledgerTool(sid, tool);
         noteMessageChanged(sid, d.assistantMessageID);
@@ -941,6 +979,7 @@ export function createStreamInterpreter({
       case "session.tool.progress": {
         const tool = ensureTool(sid, st, d);
         if (!tool) return;
+        emitActivity({ type: "toolProgress", sessionId: sid, callID: tool.callID });
         const md = d.metadata ?? {};
         if (typeof md.shellID === "string") {
           tool.shellID = md.shellID;
@@ -949,6 +988,7 @@ export function createStreamInterpreter({
         if (typeof md.sessionID === "string") {
           // A subagent: the parent learns its child's session id here.
           tool.childSessionId = md.sessionID;
+          emitActivity({ type: "child", sessionId: sid, childSessionId: md.sessionID, parentSessionId: sid });
           st.childSessionIds.add(md.sessionID);
           if (!st.liveChildStatus.has(md.sessionID)) st.liveChildStatus.set(md.sessionID, "running");
           subagentFrame(sid, st, tool, "running", null);
@@ -968,6 +1008,20 @@ export function createStreamInterpreter({
       case "session.step.ended": {
         const tokens = d.tokens ?? {};
         const mid = String(d.assistantMessageID ?? "");
+        emitActivity({ type: "content", sessionId: sid });
+        emitActivity({
+          type: "step",
+          sessionId: sid,
+          eventId: typeof evt.id === "string" ? evt.id : null,
+          tokens: {
+            input: Number(tokens.input) || 0,
+            output: Number(tokens.output) || 0,
+            reasoning: Number(tokens.reasoning) || 0,
+            cacheRead: Number(tokens.cache?.read) || 0,
+            cacheWrite: Number(tokens.cache?.write) || 0,
+          },
+          cost: typeof d.cost === "number" && Number.isFinite(d.cost) ? d.cost : null,
+        });
         st.lastCompleted = typeof evt.created === "number" ? evt.created : now();
         emit(sid, "stepEnded", {
           messageID: mid,
@@ -1007,6 +1061,7 @@ export function createStreamInterpreter({
         const parentId = d.parentID;
         if (typeof parentId === "string" && parentId.length > 0) {
           childParent.set(sid, parentId);
+          emitActivity({ type: "child", sessionId: sid, childSessionId: sid, parentSessionId: parentId });
           state(parentId).childSessionIds.add(sid);
           emit(parentId, "childSession", { childSessionId: sid, parentSessionId: parentId });
         }
@@ -1129,6 +1184,12 @@ export function createStreamInterpreter({
 
   return {
     interpret,
+    /** Subscribe to the activity tap (spec 2026-11-14 §A1): `fn(record)` is called synchronously. Returns the unsubscribe. */
+    onActivity(fn) {
+      if (typeof fn !== "function") return () => {};
+      activitySubscribers.add(fn);
+      return () => activitySubscribers.delete(fn);
+    },
     resync,
     flushPending,
     dispose,

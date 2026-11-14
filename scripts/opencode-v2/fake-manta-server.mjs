@@ -68,6 +68,14 @@ export function cannedResponse(req) {
     }
   }
   {
+    const m = /^\/api\/delegate\/([^/]+)\/extend$/.exec(p);
+    if (method === "POST" && m) {
+      return decodeURIComponent(m[1]) === "nope0000"
+        ? json({ ok: false, error: "that job is not running (done)" }, 409)
+        : json({ ok: true, job: { id: decodeURIComponent(m[1]), name: "bg-job", ceilingMs: 5 * 3_600_000, startedAt: 1_700_000_000_000 } });
+    }
+  }
+  {
     const m = /^\/api\/delegate\/([^/]+)\/stop$/.exec(p);
     if (method === "POST" && m) {
       return decodeURIComponent(m[1]) === "boom0000"

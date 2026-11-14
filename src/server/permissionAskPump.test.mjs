@@ -109,3 +109,49 @@ test("integration with the real interpreter: an auto-answered ask publishes NO p
   assert.deepEqual(frames.map((f) => f.sub), ["attention", "permissions"]);
   assert.deepEqual(frames[0].payload, { kind: "permission" });
 });
+
+// A background job cannot wait on a person (spec 2026-11-14 A5): the ask is rejected BEFORE trust mode could approve it.
+test("a job's ask is rejected first — even with trust mode on — and is never interpreted, published or pushed", async () => {
+  const log = [];
+  await handlePermissionAsk({
+    evt: ask("per_job"),
+    ownsSession: (sid) => sid === "ses_a",
+    getConfig: async () => {
+      log.push(["config"]);
+      return { chatAutoAllow: true };
+    },
+    reply: async (a) => log.push(["reply", a]),
+    interpret: () => log.push(["interpret"]),
+    publish: () => log.push(["publish"]),
+    push: () => log.push(["push"]),
+    ledger: createAutoAnswerLedger(),
+  });
+  assert.deepEqual(log, [["reply", { requestId: "per_job", reply: "reject", sessionId: "ses_a" }]]);
+});
+
+test("a job's ask whose rejection fails is handed to the retry queue; a duplicate delivery is ignored; ordinary sessions are untouched", async () => {
+  const failed = [];
+  const ledger = createAutoAnswerLedger();
+  const run = (evt, ownsSession) =>
+    handlePermissionAsk({
+      evt,
+      ownsSession,
+      onRejectFailed: (a) => failed.push(a),
+      getConfig: async () => ({ chatAutoAllow: false }),
+      reply: async () => {
+        throw new Error("down");
+      },
+      interpret: () => failed.push("interpret"),
+      publish: () => failed.push("publish"),
+      push: () => failed.push("push"),
+      ledger,
+      warn: () => {},
+    });
+  await run(ask("per_x"), () => true);
+  await run(ask("per_x"), () => true);
+  assert.equal(failed.length, 1);
+  assert.deepEqual({ kind: failed[0].kind, requestId: failed[0].requestId, sessionId: failed[0].sessionId }, { kind: "permission", requestId: "per_x", sessionId: "ses_a" });
+  failed.length = 0;
+  await run(ask("per_y"), () => false);
+  assert.deepEqual(failed, ["interpret", "publish", "push"], "not a job's session: the ask behaves exactly as before");
+});

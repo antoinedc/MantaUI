@@ -1,0 +1,23 @@
+- text: "Running in background: billing-ledger-split 4/7 3h38m ·"
+- button "Details" [expanded]
+- button "Open session"
+- text: Splitting the ledger writer
+- progressbar "Plan progress"
+- list:
+  - listitem: "done: Read the billing service layout"
+  - listitem: "done: Add the CSV serializer"
+  - listitem: "done: Wire the /export route"
+  - listitem: "done: Write the export tests"
+  - listitem: "current: Update the OpenAPI schema"
+  - listitem: "pending: Run the full suite"
+  - listitem: "pending: Open the pull request"
+- text: Milestones
+- list:
+  - listitem: /Found the double-write in the ledger path \d+[hmsp]+ ago/
+  - listitem: /Reproduced the rounding drift with a failing test [\d,.]+[bkmBKM]+ ago/
+  - listitem: /Mapped every caller of the old writer \d+[hmsp]+ ago/
+- list:
+  - 'listitem /edit: src\/ledger\/writer\.ts · running \d+[hmsp]+/'
+  - listitem "9 files changed"
+  - listitem /[\d,.]+[bkmBKM]+ tokens · \$\d+\.\d+/
+  - listitem /time left [\d,.]+[bkmBKM]+/

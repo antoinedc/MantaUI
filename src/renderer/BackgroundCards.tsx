@@ -15,11 +15,21 @@
 // the window is selected on success, and a refusal / failure leaves a visible
 // error under the card (AGENTS.md: never stub a control).
 
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useId, useState } from "react";
 import { useStore } from "./store";
 import { ClampedMarkdown } from "./ClampedMarkdown";
+import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
+import {
+  boxNow,
+  detailsModel,
+  findJobById,
+  isRunningView,
+  runCardView,
+  type JobView,
+} from "./jobProgress";
 import {
   backgroundApi,
+  NEEDS_DECISION_LABEL,
   openJobSession,
   resultStateLabel,
   resultTitle,
@@ -90,6 +100,7 @@ const TONE_DOT: Record<ResultTone, string> = {
   ok: "bg-ok",
   danger: "bg-danger",
   neutral: "bg-text-faint",
+  warn: "bg-warn",
 };
 
 function Spinner() {
@@ -101,8 +112,26 @@ function Spinner() {
   );
 }
 
+/**
+ * The box's progress `view` for a card's job, with the client clock (spec
+ * 2026-11-14 §5.3): `box` is the box's "now" as of this render, ticking once a
+ * second while the job runs. Only a running / paused / settling card carries
+ * content; an uncertain or failed-to-start card never does. No `view` (an older
+ * box) → `view` is undefined and the card renders exactly as it always did.
+ */
+function useJobView(card: BackgroundCard): { view: JobView | undefined; box: number } {
+  const job = useStore((s) => findJobById(s.jobs, card.jobId));
+  const skew = useStore((s) => s.jobSkew[card.jobId]);
+  const view = card.kind === "running" || card.kind === "settling" ? job?.view : undefined;
+  useClockTick(view && isRunningView(view) ? WORKING_TICK_MS : AGE_TICK_MS);
+  return { view, box: boxNow(nowMs(), skew) };
+}
+
 const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
   const { open, busy, error } = useOpenSession(card.jobId);
+  const { view, box } = useJobView(card);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
   const failed = card.kind === "failed";
   const text =
     card.kind === "uncertain"
@@ -114,6 +143,14 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
           : card.paused
             ? "Paused in background"
             : "Running in background";
+  const content = view ? runCardView(view, box) : null;
+  const headline = content
+    ? content.needsDecision
+      ? content.headline
+        ? `${NEEDS_DECISION_LABEL}: ${content.headline}`
+        : NEEDS_DECISION_LABEL
+      : content.headline
+    : "";
   return (
     <div
       className={
@@ -122,6 +159,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
       }
       data-testid="background-card"
       data-kind={card.kind}
+      data-job-id={card.jobId}
     >
       <div className="flex items-center gap-2 min-w-0">
         {card.kind === "running" && !card.paused ? (
@@ -141,12 +179,67 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
             {card.name}
           </span>
         )}
-        {card.kind === "settling" && (
+        {card.kind === "settling" && !content && (
           <span className="text-text-faint truncate min-w-0">— the result arrives when this turn ends</span>
         )}
+        {content?.chip && (
+          <span
+            className="shrink-0 font-mono tabular-nums text-text-muted"
+            title={content.chipTitle}
+            data-testid="background-steps"
+          >
+            {content.chip}
+          </span>
+        )}
+        {content?.elapsed && (
+          <span className="shrink-0 font-mono tabular-nums text-text-faint" data-testid="background-elapsed">
+            {content.elapsed}
+          </span>
+        )}
         <span className="text-text-faint shrink-0">·</span>
+        {view && (
+          <button
+            type="button"
+            onClick={() => setDetailsOpen((o) => !o)}
+            aria-expanded={detailsOpen}
+            aria-controls={detailsOpen ? detailsId : undefined}
+            className="shrink-0 whitespace-nowrap text-text-muted hover:text-text hover:underline"
+            data-testid="background-details-toggle"
+          >
+            Details
+          </button>
+        )}
         <OpenSessionButton onOpen={() => void open()} busy={busy} />
       </div>
+      {content && (
+        <>
+          <div
+            className={
+              "mt-1 truncate " + (content.needsDecision ? "text-warn" : "text-text") + (headline ? "" : " invisible")
+            }
+            title={headline}
+            data-testid="background-headline"
+          >
+            {headline || "\u00a0"}
+          </div>
+          <div
+            className={"mt-1 h-0.5 overflow-hidden rounded-full bg-border" + (content.bar == null ? " invisible" : "")}
+            {...(content.bar == null
+              ? { "aria-hidden": true as const }
+              : {
+                  role: "progressbar",
+                  "aria-label": "Plan progress",
+                  "aria-valuemin": 0,
+                  "aria-valuemax": 100,
+                  "aria-valuenow": Math.round(content.bar * 100),
+                })}
+            data-testid="background-bar"
+          >
+            <div className="h-full bg-accent" style={{ width: `${Math.round((content.bar ?? 0) * 100)}%` }} />
+          </div>
+        </>
+      )}
+      {view && detailsOpen && <JobDetails id={detailsId} view={view} box={box} />}
       {card.kind === "failed" && (
         <div className="mt-1 text-danger break-words" data-testid="background-failure">
           {card.error}
@@ -156,6 +249,71 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
     </div>
   );
 });
+
+// The "Details" disclosure: checklist, milestones, live tool, quiet time, files, spend, time left. Every
+// model-written string is a plain single line (jobProgress.plainLine) in a text node — never markup.
+function JobDetails({ id, view, box }: { id: string; view: JobView; box: number }) {
+  const m = detailsModel(view, box);
+  const stats: Array<[string, string]> = [];
+  if (m.tool) stats.push(["tool", `${m.tool.label} · running ${m.tool.age}`]);
+  if (m.quiet) stats.push(["quiet", m.quiet]);
+  if (m.files) stats.push(["files", m.files]);
+  if (m.usage) stats.push(["usage", m.usage]);
+  if (m.timeLeft) stats.push(["time-left", m.timeLeft]);
+  return (
+    <div id={id} className="mt-2 border-t border-border-subtle pt-2 space-y-2" data-testid="background-details">
+      {m.planGrew && (
+        <div className="text-warn" data-testid="background-plan-grew">
+          Plan grew
+        </div>
+      )}
+      {m.items.length > 0 && (
+        <ul className="m-0 max-h-40 list-none space-y-1 overflow-y-auto p-0" data-testid="background-checklist">
+          {m.items.map((i, n) => (
+            <li
+              key={n}
+              data-status={i.status}
+              className={"flex items-baseline gap-2 min-w-0 " + (i.status === "pending" ? "text-text-faint" : "text-text")}
+            >
+              <span aria-hidden="true" className="shrink-0 w-3 text-center">
+                {i.mark}
+              </span>
+              <span className="sr-only">{i.status}: </span>
+              <span className="truncate min-w-0" title={i.text}>
+                {i.text}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {m.reportedLine && <div className="text-text-muted">{m.reportedLine}</div>}
+      {m.milestones.length > 0 && (
+        <div data-testid="background-milestones">
+          <div className="text-text-faint">Milestones</div>
+          <ul className="m-0 list-none space-y-1 p-0">
+            {m.milestones.map((x, n) => (
+              <li key={n} className="flex items-baseline gap-2 min-w-0">
+                <span className="truncate min-w-0 text-text" title={x.text}>
+                  {x.text}
+                </span>
+                <span className="shrink-0 text-text-faint">{x.ago}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {stats.length > 0 && (
+        <ul className="m-0 list-none space-y-1 p-0 text-text-muted">
+          {stats.map(([k, v]) => (
+            <li key={k} className="truncate" title={v} data-testid={`background-stat-${k}`}>
+              {v}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 /** The cards under the transcript (N5). Rendered in the transcript tail. */
 export const BackgroundRunCards = memo(function BackgroundRunCards({
@@ -182,13 +340,15 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   // `task` subagents) are still tracked as job rows, keyed by their child id.
   const jobId = useStore((s) => part.jobId || s.jobs[part.childSessionId]?.id || null);
   const { open, busy, error } = useOpenSession(jobId);
-  const tone = resultTone(part.state);
+  const blocked = part.endedBlocked === true;
+  const tone = resultTone(part.state, blocked);
   const text = (part.text ?? "").trim();
   return (
     <div
       className="rounded-lg border border-border bg-bg-soft px-3 py-2"
       data-testid="background-result-card"
       data-state={part.state}
+      data-blocked={blocked || undefined}
     >
       <div className="flex items-center gap-2 text-meta text-text-muted min-w-0">
         <span aria-hidden="true" className={`w-2 h-2 shrink-0 rounded-full ${TONE_DOT[tone]}`} />
@@ -196,7 +356,9 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         <span className="font-mono text-accent-tx truncate min-w-0" title={resultTitle(part)}>
           {resultTitle(part)}
         </span>
-        <span className="shrink-0">· {resultStateLabel(part.state)}</span>
+        <span className={"shrink-0" + (blocked ? " text-warn" : "")} data-testid="background-result-state">
+          · {resultStateLabel(part.state, blocked)}
+        </span>
         {jobId && <OpenSessionButton onOpen={() => void open()} busy={busy} arrow className="ml-auto" />}
       </div>
       {text && <ClampedResultText text={text} />}

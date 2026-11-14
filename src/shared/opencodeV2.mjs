@@ -404,6 +404,8 @@ function mapBackgroundResult(m, { sessionID }) {
         state,
         name,
         agent: typeof md.agent === "string" && md.agent ? md.agent : undefined,
+        // the job ended while waiting on a decision (spec 2026-11-14 A5); absent means false
+        endedBlocked: manta.endedBlocked === true ? true : undefined,
         text,
       }),
     ],

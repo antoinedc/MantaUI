@@ -11,7 +11,7 @@
 //   3. installs docs/opencode-plugins-v2/manta as a global plugin
 //   4. drives live Haiku turns that call schedule_list, notify, todo_write,
 //      secrets_list / schedule_create (directory-dependent), and a failing tool
-//   5. asserts the plugin loaded, all 45 tools registered, and that the right
+//   5. asserts the plugin loaded, all 47 tools registered, and that the right
 //      sessionID / directory reached the fake server for sessions created in
 //      different directories (this is the directory-resolution proof).
 //
@@ -236,12 +236,12 @@ try {
   // ---- registration: plugin loaded, all tools present in every location
   console.log("\n[registration]");
   const expected = [...(await parseV1Inventory()).map((i) => i.name), "todo_write"].sort();
-  check("expected tool set is 45 V1 + todo_write = 46", expected.length === 46);
+  check("expected tool set is 46 V1 + todo_write = 47", expected.length === 47);
   const probes = readFileSync(probeFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   for (const dir of [dirA, dirB, sub]) {
     const p = probes.find((x) => x.directory === dir);
     const missing = p ? expected.filter((n) => !p.tools.includes(n)) : expected;
-    check(`all 46 manta tools registered in location ${dir.replace(sb.root, "…")}`, p && missing.length === 0, `missing: ${j(missing)}`);
+    check(`all 47 manta tools registered in location ${dir.replace(sb.root, "…")}`, p && missing.length === 0, `missing: ${j(missing)}`);
   }
   const pluginList = await api("GET", `/api/plugin?location[directory]=${encodeURIComponent(dirA)}`);
   const mantaPlugin = (pluginList.data ?? []).find((x) => x.id === "manta");
