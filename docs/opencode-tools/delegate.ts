@@ -57,6 +57,35 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
   return json;
 }
 
+function humanMs(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 60_000));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+}
+
+// One job as a line, plus (when the box sent a progress `view`) a status line and the last milestones.
+function describeJob(j: any): string {
+  const parts = [`${j?.id ?? ""}`, `"${j?.name ?? ""}"`, j?.status ?? "?"];
+  if (j?.branch) parts.push(`branch=${j.branch}`);
+  if (j?.worktree) parts.push(`worktree`);
+  if (Number(j?.attempt) > 1) parts.push(`round ${j.attempt}`);
+  const lines = [parts.join(" ")];
+  const v = j?.view;
+  if (v && typeof v === "object") {
+    const bits = [String(v.state ?? "")];
+    if (v.headline) bits.push(`"${v.headline}"`);
+    if (v.steps) bits.push(`steps ${v.steps.done}/${v.steps.total}`);
+    if (v.startedAt != null) bits.push(`elapsed ${humanMs((v.endedAt ?? v.asOf) - v.startedAt)}`);
+    if (v.lastProgressAt != null && v.asOf - v.lastProgressAt >= 3 * 60_000) bits.push(`quiet ${humanMs(v.asOf - v.lastProgressAt)}`);
+    if (v.ceilingAt != null) bits.push(`time left ${humanMs(v.ceilingAt - v.asOf)}`);
+    lines.push(`  ${bits.filter(Boolean).join(" · ")}`);
+    const ms = Array.isArray(v.milestones) ? v.milestones.slice(0, 3) : [];
+    if (ms.length > 0) lines.push(`  milestones: ${ms.map((m: any) => m.text).join(" | ")}`);
+  }
+  return lines.join("\n");
+}
+
 export const delegate = tool({
   description: [
     "Run a piece of work in the background — in its own session, git worktree and",
@@ -80,7 +109,9 @@ export const delegate = tool({
     "with its id — it keeps the job's context, worktree and branch. This call",
     "returns IMMEDIATELY and you do NOT have the result yet — it arrives on its",
     "own; do not report or guess it before then, and do not poll. A background job",
-    "cannot start background jobs of its own.",
+    "cannot start background jobs of its own. A job is stopped after 4 hours of work",
+    "(`maxDurationMinutes` sets another limit, 10 to 720) or after 15 minutes with no",
+    "progress; give a job you started more time with `delegate_extend`.",
   ].join(" "),
   args: {
     prompt: z
@@ -141,6 +172,17 @@ export const delegate = tool({
           "the minimum set: a job lacking a tool it needs FAILS its first " +
           "command instead of hanging. Omit when the job needs no tool access.",
       ),
+    maxDurationMinutes: z
+      .number()
+      .int()
+      .min(10)
+      .max(720)
+      .optional()
+      .describe(
+        "Optional hard limit for the job, in minutes (an integer, 10 to 720). Default 4 hours " +
+          "of work; the job is also stopped after 15 minutes with no progress. You can add " +
+          "time to a running job later with `delegate_extend`.",
+      ),
   },
   async execute(args, context) {
     const res = await call("POST", "/api/delegate", {
@@ -148,6 +190,7 @@ export const delegate = tool({
       model: args.model,
       subagent_type: args.subagent_type,
       tools: args.tools,
+      maxDurationMinutes: args.maxDurationMinutes,
       sessionID: context.sessionID,
       directory: context.directory,
     });
@@ -174,8 +217,9 @@ export const delegate_list = tool({
     "background jobs did I start?\" question — NOT to wait for a job to finish.",
     "Completion arrives on its own as a separate later message, so do not call this",
     "in a poll loop. Each entry has id, name, status (running/done/failed/stopped),",
-    "branch, worktree, activity, and timestamps. To see what a running job is",
-    "actually doing, use `peers_inspect` on that session.",
+    "branch, worktree, activity, and timestamps; a running job also shows its",
+    "progress (state, headline, steps, milestones, time left). To see what a running",
+    "job is actually doing, use `peers_inspect` on that session.",
   ].join(" "),
   args: {},
   async execute(_args, context) {
@@ -185,13 +229,7 @@ export const delegate_list = tool({
     );
     const jobs = (Array.isArray(res?.jobs) ? res.jobs : []).filter((j: any) => !j?.supersededBy);
     if (jobs.length === 0) return "No background jobs for this session.";
-    const lines = jobs.map((j: any) => {
-      const parts = [`${j?.id ?? ""}`, `"${j?.name ?? ""}"`, j?.status ?? "?"];
-      if (j?.branch) parts.push(`branch=${j.branch}`);
-      if (j?.worktree) parts.push(`worktree`);
-      if (Number(j?.attempt) > 1) parts.push(`round ${j.attempt}`);
-      return parts.join(" ");
-    });
+    const lines = jobs.map(describeJob);
     return `Background jobs (${jobs.length}):\n` + lines.join("\n");
   },
 });
@@ -252,5 +290,47 @@ export const delegate_stop = tool({
   async execute(args) {
     await call("POST", `/api/delegate/${encodeURIComponent(args.id)}/stop`);
     return `Stopped background job "${args.id}".`;
+  },
+});
+
+export const delegate_extend = tool({
+  description: [
+    "Give one of YOUR running background jobs more time. A job is stopped when it",
+    "reaches its time limit (`delegate_list` shows the time left). Use this when a",
+    "job is making real progress but will not finish before then: add 15 to 480",
+    "minutes with a short reason (a job can have 12 hours at most). It does nothing",
+    "for a job that is stalled or finished, and you cannot extend another session's",
+    "job.",
+  ].join(" "),
+  args: {
+    id: z.string().describe("The id of the running background job to extend, from `delegate_list`."),
+    minutes: z
+      .number()
+      .int()
+      .min(15)
+      .max(480)
+      .describe("How many minutes to add to the job's time limit (an integer, 15 to 480)."),
+    reason: z
+      .string()
+      .min(1)
+      .max(200)
+      .describe("Why the job needs more time, in a short sentence (1 to 200 characters)."),
+  },
+  async execute(args, context) {
+    let res: any;
+    try {
+      res = await call("POST", `/api/delegate/${encodeURIComponent(args.id)}/extend`, {
+        minutes: args.minutes,
+        reason: args.reason,
+        sessionID: context.sessionID,
+      });
+    } catch (e: any) {
+      return String(e?.message ?? e);
+    }
+      const job = res?.job ?? {};
+      const until = new Date(Number(job.startedAt) + Number(job.ceilingMs));
+      const hh = String(until.getHours()).padStart(2, "0");
+      const mm = String(until.getMinutes()).padStart(2, "0");
+      return `Extended "${job.name ?? args.id}" by ${args.minutes} min — it can now run until ${hh}:${mm} (box time).`;
   },
 });
