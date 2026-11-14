@@ -1,6 +1,6 @@
 # Background jobs: stay alive while working, and show their progress
 
-Status: revision 2 (after review round 1), 2026-11-14. Scope: background jobs
+Status: revision 3 (after review round 2), 2026-11-14. Scope: background jobs
 started with `delegate` (Manta-owned, `completionOwner:"manta"`). Jobs opencode
 owns (adopted subagents, native background commands) keep their lifecycle and
 get no new limits; they get the progress `view` where the data exists.
@@ -90,59 +90,71 @@ Progress:
 
 ### A1. Liveness signal (pinned collection contract)
 
-The delegate engine already receives every raw opencode event (`observeEvent` /
-`observeRaw` in the opencode pump, `index.mjs`). It keeps, in memory, per
-running Manta-owned job (keyed by job id + `attempt` + `childSessionID`):
+**One activity tap, owned by the stream interpreter.** `streamInterp.mjs` already
+correlates V2's tool events, runs the shell-output polls and parses todo lists.
+It gains one export, `onActivity(fn)`: a list of subscribers called
+synchronously with normalized records. The delegate engine is a subscriber and
+does no event correlation of its own. Records (all carry `sessionId` and `at` =
+`evt.created` or now):
+
+| record | emitted on | fields |
+|---|---|---|
+| `content` | `session.text.delta`, `session.reasoning.delta`, `session.step.ended` | — |
+| `toolStarted` | `session.tool.called` (input complete; NOT `.input.started`, NOT `.progress`) | `callID` (= `data.id`), `name`, `target` (≤80: shell command first line / file path for patch·read·edit·write / ""), `timeoutMs` (shell `input.timeout` if finite > 0, else null) |
+| `toolProgress` | `session.tool.progress` | `callID`; does NOT change the tool's start time |
+| `toolOutput` | the shell poll receiving NEW bytes, before the 20 000-char display cap | `callID`, `bytes` |
+| `toolEnded` | `session.tool.success` / `.failed` | `callID`, `name` (from the interpreter's cached tool), `input` (cached input; used for todo lists) |
+| `todos` | the interpreter's existing `emitTodos` point | `items` (as parsed for the `todos` frame) |
+| `step` | `session.step.ended` | `eventId` (= `evt.id`), `tokens` {input, output, reasoning, cacheRead, cacheWrite}, `cost` (finite number or null) |
+| `child` | `session.tool.progress` metadata `sessionID` (subagent) and `session.created` with `parentID` | `childSessionId`, `parentSessionId` |
+
+The engine keeps an in-memory map per running job (keyed by job id; it holds
+`attempt` and the root `childSessionID` it was built for and is discarded when
+they change):
 
 ```
 live = {
+  sessions: Set<sessionId>,        // root + descendants (from `child` records + reconstruction)
   lastProgressAt: number,          // epoch ms
-  tools: Map<callID, { name, target, startedAt, timeoutMs | null, lastOutputAt }>,
-  reconstructedAt: number | null   // set when the tool map was rebuilt from opencode after boot/reconnect
+  tools: Map<callID, { sessionId, name, target, startedAt, timeoutMs | null, lastOutputAt }>,
+  reconstructedAt: number | null
 }
 ```
 
-**What advances `lastProgressAt`** — raw events whose session is one of the
-job's sessions:
+Every record whose `sessionId` is in `live.sessions` advances `lastProgressAt`.
+This deliberately includes any tool call, `progress_report` and `todo_write`
+included: a job looping on a reporting tool is a loop, handled by A8, not by the
+stall rule. `toolStarted` / `toolEnded` maintain `tools`. `toolOutput` also sets
+that tool's `lastOutputAt`.
 
-- `session.text.delta`
-- `session.reasoning.delta`
-- `session.step.ended`
-- `session.tool.progress`
-- `session.tool.success`
-- `session.tool.failed`
-- `session.execution.*`
-- `session.created` (a new descendant)
+**Initialization.**
+- Fresh launch, resume, continuation, and a handoff successor (the record's
+  `childSessionID` repointed): when the launch is confirmed / the repoint
+  persists, `live` is created with `sessions = {root}`, `lastProgressAt = now`,
+  empty `tools`, `reconstructedAt = now` (nothing to reconstruct: the session is
+  new or the engine saw its whole life).
+- Boot and every opencode stream reconnect: every running job's `live` is reset
+  to `lastProgressAt = now`, `reconstructedAt = null`.
 
-Plus a new hook from the stream interpreter: `onShellOutput(sessionId, callID,
-bytes)`. It is called each time the shell poll (`streamInterp.mjs`, 250 ms) gets
-NEW bytes, BEFORE the 20 000-character display truncation. It also sets that
-tool's `lastOutputAt`.
+**Reconstruction** (60 s sweep, outside the jobs lock, ≤ 2 jobs concurrently,
+5 s budget each):
+1. Walk the job's descendant tree with the existing bounded walk used by
+   lost-run detection (`descendantTree`); this fills `sessions`.
+2. For each session, read its newest assistant message and register every tool
+   part whose state is running: `startedAt` from the part's `time.start`,
+   `timeoutMs` from its input, `lastOutputAt = reconstruction time` (fail-open:
+   the output history before a restart is unknown).
+3. For a running shell part that carries a shell id in its metadata, call the
+   interpreter's new `resumeShellPoll(sessionId, callID, shellID, directory)` so
+   output tracking resumes; without a shell id, the part keeps its fail-open
+   `lastOutputAt`.
+4. Merge, never overwrite: tools that the tap registered or ended while the read
+   was in flight win (the map carries a `generation` bumped on each reset; a
+   reconstruction result from an older generation is discarded).
+5. Set `reconstructedAt`. Any read failure or timeout leaves it null; retried on
+   the next sweep.
 
-**Not a signal**: polling or reading an unchanged transcript; `progress_report`
-calls; todo-list writes. A model calling a reporting tool in a loop must not keep
-a dead job alive. Todo writes are tool events and already count once as such.
-
-**Tool tracking**:
-
-- `session.tool.progress` / start registers a tool:
-  - `target` (≤ 80 chars): the shell command's first line, or the file path for
-    patch/read/edit/write, or empty.
-  - `timeoutMs`: the shell input `timeout` when it is a finite number > 0, else
-    null (0, missing, invalid → null).
-- `session.tool.success` / `.failed` removes it.
-
-**Boot / reconnect**:
-
-- On manta-server boot and on every opencode stream reconnect, each running
-  job's `lastProgressAt` is set to now and `reconstructedAt` to null.
-- The 60 s sweep then rebuilds the tool map from opencode outside the jobs lock.
-  It reads the child's newest assistant message and keeps the parts with a
-  running tool state. At most 2 jobs are read concurrently, with a 5 s timeout
-  each.
-- A failed or timed-out read leaves `reconstructedAt` null and is retried on the
-  next sweep.
-- **A job with `reconstructedAt === null` is never judged stalled** (fail-open).
+**A job with `reconstructedAt === null` is never judged stalled** (fail-open).
 
 ### A2. Stall rule (evaluated by the 60 s sweep)
 
@@ -184,9 +196,17 @@ Outcome:
 - **When**: once remaining time ≤ `min(10 min, ceilingMs / 2)`, if
   `ceilingWarnedFor !== ceilingMs` and the job isn't stalled.
 - **How**:
-  - Under the jobs lock, set `ceilingWarnedFor = ceilingMs` and persist.
-  - Then, outside the lock, send a steered prompt (`delivery:"steer"`) with
-    message id `msg_ceil_<jobId>_<ceilingMs>` (idempotent at opencode).
+  - Under the session-resources lock for the job's child (the lock pause,
+    resume and handoff already take), then the jobs lock: re-read the live record
+    and re-check `status === "running"`, same `attempt` and `childSessionID`,
+    not `pauseRequested`/`stopRequested`, not handoff-deferred, and the
+    threshold still met for the current `ceilingMs`. Set
+    `ceilingWarnedFor = ceilingMs` and persist. Release the jobs lock only.
+  - Still under the session-resources lock, send a steered prompt
+    (`delivery:"steer"`) with message id
+    `msg_ceil_<jobId>_<attempt>_<childSessionID-suffix>_<ceilingMs>`
+    (idempotent at opencode). A lifecycle change can't interleave, because those
+    paths take the same session lock.
   - V2 injects a steered message at the child's next step. A warning landing
     mid-tool is read after that tool ends.
   - A failed send is logged and not retried (best-effort; the ceiling still
@@ -200,8 +220,22 @@ Outcome:
 ### A5. Jobs cannot wait on a person
 
 Jobs run with a catch-all-deny permission ruleset, so a permission is denied,
-never asked (`buildPermissionRuleset`). This spec adds `question` to that
-ruleset as an explicit trailing deny, so a granted `"*"` can't re-enable it.
+never asked (`buildPermissionRuleset`). Two layers make "can't ask" hold:
+
+1. **Ruleset.** One normalizer, `normalizeJobRuleset(rules)`, appends a trailing
+   `{ permission: "question", pattern: "*", action: "deny" }` (and in stage 2
+   `doom_loop` deny). Every Manta-owned path that creates a child session calls
+   it: start, resume (fresh child), handoff successor. A continuation reuses its
+   existing child and so keeps the child's ruleset (pre-upgrade children
+   included); layer 2 covers it.
+2. **Engine backstop.** A question or permission request observed (raw
+   `form.*` / permission-asked events) on any session in a running Manta-owned
+   job's `live.sessions`, or found pending during reconstruction, is rejected
+   immediately through the existing reject API with the text "Background jobs
+   can't ask questions. Record what you need with progress_report (state
+   \"blocked\") and end your turn with the question." This covers descendants,
+   legacy children and anything a ruleset misses. opencode-owned jobs are
+   excluded (their lifecycle is opencode's).
 
 A job that needs a decision:
 
@@ -212,6 +246,16 @@ The job ends `done` and its result reaches the parent as today. The result card
 and completion text say **"Needs a decision"** when the job's final progress
 state was `blocked` (`endedBlocked:true`). The parent answers with
 `delegate_send`.
+
+**Transport of `endedBlocked`** (it must survive the job record's retention):
+`buildResultSynthetic` adds `manta.endedBlocked: true` (only when true) to the
+synthetic's metadata; the V2 mapper (`opencodeV2.mjs`, the `background-result`
+part) copies it to the part as `endedBlocked: boolean` (absent → false); the
+shared `BackgroundResultPart` type and the iOS part decoder gain the optional
+field. Display: execution state stays `completed` (green semantics are not
+reused); the card's state label becomes "Needs a decision" in amber. The
+completion text starts `[background job "<name>" needs a decision]` instead of
+`… done]`.
 
 No "waiting on you" state exists for Manta jobs. The read-only guard on job
 sessions (`delegateView.assertWritable`) is unchanged.
@@ -246,7 +290,7 @@ same lock, so an accepted extension and a time-limit end can't both happen.
   - `reason` is 1–200 chars;
   - the new `ceilingMs` is ≤ 12 h.
 - **On success**:
-  - `ceilingMs += minutes`;
+  - `ceilingMs += minutes * 60_000`;
   - append `extensions: [{ at, minutes, reason }]` (bounded to 20);
   - publish `delegate.updated`;
   - return `{ ok:true, job:{ id, name, ceilingMs, segmentStartedAt } }`.
@@ -280,8 +324,8 @@ same lock, so an accepted extension and a time-limit end can't both happen.
 
 ### B1. Sources and storage
 
-Progress the parent sees is stored **on the job record** (`job.progress`), not
-only per session. It therefore survives handoff (same record), resume (same
+Progress the parent sees is stored **on the job record** (`job.jobProgress`,
+named apart from the existing wire field `progress`), not only per session. It therefore survives handoff (same record), resume (same
 record, new child), and the `clearProgress(childSessionID)` that `finishV2Job`
 already runs.
 
@@ -290,34 +334,43 @@ Two inputs feed it:
 1. **Model reports** — `progress_report` from a job session.
    - `/api/progress` keeps writing the per-session record (the child's own
      working indicator uses it).
-   - When the session is a running Manta-owned job's current child, it ALSO
-     merges into `job.progress`.
-   - Merges are serialized per job (keyed mutex) and per session (the existing
-     store gets the same keyed mutex; today's read-modify-write is unlocked).
+   - When the session is in a running job's `live.sessions` root (the current
+     `childSessionID`), it ALSO merges into that job's `jobProgress`.
+   - Locking: every read-modify-write of `progress.json` (report, clear, sweep)
+     runs under ONE store-wide mutex in `progress.mjs` (the file holds every
+     session, so per-key locks are not enough). Every `jobProgress` mutation
+     runs under the existing `jobsLock`, never as a separate write of the job
+     store.
    - Every accepted report is stored. Only the bus publish is throttled (B4).
-2. **Checklist** — the latest `todo_write` input seen on the child's raw tool
-   events (`session.tool.success` with tool name `todowrite`/`todo_write`).
-   - Parsed with the same rule as `summarizeTranscript` (`peers.mjs`).
-   - Kept in `job.progress.checklist`, so a resumed or handed-off child with no
+2. **Checklist** — the latest `todos` record from the activity tap for the
+   job's root session (A1).
+   - Kept in `jobProgress.checklist`, so a resumed or handed-off child with no
      todo list yet still shows the last known one.
 
 Server-only facts are computed from engine state, never from a fresh transcript
 or DB read:
 
 - live tool (A1);
-- `usage` (from `session.step.ended` events);
+- `usage` (from `step` records);
 - files changed (B3).
+
+**opencode-owned jobs** (adopted subagents, native background commands): the
+tap is session-generic, so the engine keeps the same `checklist`, model
+reports, live tool and `lastProgressAt` for them. `ceiling`, `usage` and `files`
+stay null; no stall or ceiling rule applies.
 
 ### B2. Computation rules (pinned)
 
 **Checklist steps**:
 
 - Items with status `cancelled` are excluded from both counts.
-- `total` = the remaining items; `done` = the items with status `completed`.
+- `total` = all non-cancelled items; `done` = the items with status
+  `completed`.
 - `current` = the first `in_progress` item, else null.
 
-**Reported steps**: `progress_report.step` is the CURRENT 1-based step, so
-`done = step − 1` and `total = total`. Usable only when `total` is set.
+**Reported steps**: `progress_report.step` is the CURRENT 1-based step.
+Usable only when `step` is an integer ≥ 1 and `total` an integer ≥ 1; then
+`done = clamp(step − 1, 0, total)` and `items = []`.
 
 **Source**:
 
@@ -336,8 +389,8 @@ or DB read:
 - On a new revision: `done/total` (it may drop; clients show "plan grew" while
   `now − grewAt < 120 s`).
 - Clamped to ≤ 0.95 while not terminal.
-- Set to 1 only when the job ends `done`. Failed / stopped / paused keep the
-  last value.
+- Set to 1 only when the job ends `done` and `endedBlocked` is false. Failed,
+  stopped, paused and needs-decision keep the last value.
 
 **State precedence**: the job lifecycle always wins. Model states only matter
 while running:
@@ -361,15 +414,16 @@ while running:
 
 **Usage**:
 
-- For every `session.step.ended` of a job session, dedupe on
-  `(sessionID, messageID, stepIndex)`. The dedupe set is in memory and bounded
-  to 2 000 per job.
-- `tokens += input + output + reasoning + cache.read + cache.write`.
-- `costUsd += cost` when the event carries a finite `cost`.
-- `costUsd` stays null until a cost is seen. `costPartial: true` when any step
-  lacked a cost after one had one.
-- Persisted at most once a minute. After a restart, up to a minute of usage may
-  be missed: `usage` is documented as approximate. No DB backfill.
+- For every `step` record of a job session, dedupe on `eventId` (`evt.id`). The
+  dedupe set is in memory and bounded to 2 000 per job (oldest evicted).
+- `tokens += input + output + reasoning + cacheRead + cacheWrite`.
+- `costUsd += cost` when `cost` is non-null.
+- `costUsd` stays null until a cost is seen. `costPartial` becomes true when
+  ANY included step had no cost, regardless of order.
+- Persisted at most once a minute, and always on pause and on any terminal
+  transition. Events missed while manta-server was down or the stream was
+  disconnected are not counted: `usage` is a lower bound, documented as
+  approximate. No DB backfill.
 - Scope:
   - resume and handoff accumulate on the same record;
   - a continuation record starts at 0;
@@ -383,7 +437,7 @@ while running:
 - Value: the number of UNIQUE paths in
   `git diff --name-only <baseSha>` (working tree vs base: covers committed and
   uncommitted) plus untracked files from `git status --porcelain`.
-- The result goes to `job.progress.files = { changed: number | null, at }`.
+- The result goes to `jobProgress.files = { changed: number | null, at }`.
   `null` means unknown (git failed); it is never 0 by mistake.
 - The final count is taken by the existing completion path before worktree
   cleanup. That path switches to the same unique-path rule (fixes today's
@@ -393,19 +447,22 @@ while running:
 ### B4. Wire, bus and client refresh
 
 - `listJobs` adds `view` (§5.3), computed from the record plus in-memory `live`
-  only: no I/O.
+  only: no I/O. The legacy `progress` wire field (per-session record) and
+  `activity` are attached as today, unchanged.
+- `view.rev`: a per-job counter persisted on the record (`viewRev`), bumped
+  under `jobsLock` whenever the view content changes (any field except the
+  clock fields). A client keeps, per job id, the highest `rev` it applied and
+  ignores any `view` (event or list response) with a lower or equal `rev`.
 - `delegate.updated` payload gains `view`.
   - Per job it is published at most every 5 s, trailing (the last state is
     always sent).
   - Terminal transitions publish immediately.
-  - The trigger is any change to `view` except `elapsedMs`/`quietMs` (clients
-    tick those locally from `asOf`).
 - **Desktop**: on `delegate.updated` carrying `view`, patch that job in the
-  store instead of refetching the whole list (`App.tsx` today refetches on every
-  event). Refetch only when the id is unknown or the status changes (nesting may
-  change).
-- **iOS**: the same patch-in-place in its job store; the existing 10 s poll
-  stays as the healer.
+  store (rev rule) instead of refetching the whole list (`App.tsx` today
+  refetches on every event). Refetch only when the id is unknown or the job
+  `status` changes (nesting may change).
+- **iOS**: the same patch-in-place in its job store (rev rule); the existing
+  10 s poll stays as the healer.
 
 ### B5. Reporting prompt
 
@@ -433,8 +490,11 @@ single-line with ellipsis truncation. The full text is in a title/tooltip
 
 - **Row 1**: spinner · "Running in background:" · name · steps chip `3/7`
   (when steps) · elapsed · Open session.
-- **Row 2**: headline. In amber, prefixed "Needs a decision:", when the model
-  state is `blocked`.
+- **Row 2**: headline. In amber, prefixed "Needs a decision:", when
+  `view.state === "needs-decision"`.
+- The card KIND (running / settling / uncertain / failed-to-start, from
+  `backgroundRun.ts`) keeps deciding which card shows and its first-row text;
+  `view` only supplies content.
 - **Row 3**: a 2 px bar (when steps).
 - Fixed height per state: rows 2–3 reserve their space with `visibility:hidden`
   when empty.
@@ -443,10 +503,10 @@ single-line with ellipsis truncation. The full text is in a title/tooltip
   - checklist (✓ done, ▸ current, ○ pending; cancelled hidden);
   - milestones (newest first, with relative time);
   - live tool + its age;
-  - "Quiet for N min" when `quietMs ≥ 3 min`;
+  - "Quiet for N min" when the live quiet time ≥ 3 min (§5.3 clocks);
   - files changed;
   - tokens / cost;
-  - "time left Hh Mm" when `limitRemainingMs` is set;
+  - "time left Hh Mm" when the live remaining time < 30 min;
   - "plan grew" for 120 s after `grewAt`.
 - Open-session errors keep showing under the card.
 
@@ -481,7 +541,7 @@ single-line with ellipsis truncation. The full text is in a title/tooltip
 ### 5.1 Job record — new / changed fields
 
 ```
-segmentStartedAt: number          // = startedAt (alias, existing field kept)
+// segment start = the existing `startedAt` (every launch path already resets it); no new field
 ceilingMs: number                 // current segment ceiling
 baseCeilingMs: number             // launch value, restored on resume
 extensions: [{ at, minutes, reason }]   // ≤ 20, current segment only
@@ -489,7 +549,8 @@ ceilingWarnedFor: number | null   // the ceilingMs a warning was sent for
 endReason: "stalled" | "time-limit" | "loop" | "budget" | null
 endedBlocked: boolean             // final model state was "blocked"
 lastProgressAt: number | null     // display only; never used to judge after a restart
-progress: {
+viewRev: number                   // B4
+jobProgress: {
   label: string, labelAt: number | null,
   modelState: "working" | "blocked" | "done" | "failed" | null,
   checklist: [{ text: string, status: "pending" | "in_progress" | "completed" | "cancelled" }] | null,
@@ -512,59 +573,64 @@ touch:
 explicitly there):
 
 - **Continuation** resets `extensions`, `ceilingWarnedFor`, `endReason`,
-  `endedBlocked`, `lastProgressAt` and `progress` (all fields), and sets
-  `ceilingMs = baseCeilingMs`.
+  `endedBlocked`, `lastProgressAt` and `jobProgress` (all fields), sets
+  `ceilingMs = baseCeilingMs`, and keeps `viewRev` counting up (never reset: the
+  rev rule is per job id, and a continuation has a new id, so it starts at 0).
 - **Resume** resets `extensions`, `ceilingWarnedFor` and `endReason`, sets
-  `ceilingMs = baseCeilingMs`, and keeps `progress`.
+  `ceilingMs = baseCeilingMs`, and keeps `jobProgress`.
+- **Resume rollback** (a refused/failed resume launch) restores every field
+  above to its pre-resume value along with the fields it restores today.
 
 ### 5.2 Per-session progress record (`progress.json`)
 
 Unchanged shape. `milestone` is accepted by `/api/progress` and routed only to
-`job.progress`. Writes become serialized per session.
+`jobProgress`. All writes are serialized by one store-wide mutex (B1).
 
 ### 5.3 `view` (wire, computed; identical for desktop, iOS, tool)
 
 ```
 view: {
-  asOf: number,                   // epoch ms the view was computed
-  state: "working" | "needs-decision" | "done" | "failed" | "stopped" | "paused" | "settling",
+  rev: number,                    // B4
+  asOf: number,                   // box epoch ms when computed (diagnostic only)
+  state: "working" | "needs-decision" | "done" | "failed" | "stopped" | "paused",
   headline: string,               // ≤120, plain text, may be ""
   headlineSource: "model" | "checklist" | "tool" | "activity" | "none",
   steps: {
     done: number, total: number, current: string | null,    // current ≤120
-    items: [{ text: string, status: "done" | "current" | "pending" }],  // ≤ 30, text ≤ 120
-    source: "checklist" | "reported", planRevision: number, grewAt: number | null
+    items: [{ text: string, status: "done" | "current" | "pending" }],  // ≤ 30, text ≤ 120; [] for reported
+    source: "checklist" | "reported", planRevision: number,
+    grewAgoMs: number | null      // ms since the plan grew, as of asOf; null if never
   } | null,
   bar: number | null,             // 0..1 per B2
-  live: { tool: string, target: string, startedAt: number } | null,  // longest-running tracked tool
-  lastProgressAt: number | null,  // client derives "quiet for"; show only when running and ≥ 3 min
-  milestones: [{ at: number, text: string }],   // newest first, ≤ 8
-  segmentStartedAt: number | null,
-  ceilingAt: number | null,       // segmentStartedAt + ceilingMs; null for opencode-owned
+  live: { tool: string, target: string, runningForMs: number } | null,  // longest-running tracked tool, as of asOf
+  clocks: {                       // all "as of asOf"; ticking is the client's job (below)
+    elapsedMs: number | null,     // current segment; frozen at pause/terminal (from finishedAt/pausedAt)
+    quietMs: number | null,       // now − lastProgressAt; null unless running
+    remainingMs: number | null,   // ceiling − elapsed; null unless running and Manta-owned
+    ticking: boolean              // true only while running
+  },
+  milestones: [{ agoMs: number, text: string }],   // newest first, ≤ 8; agoMs as of asOf
   files: { changed: number | null } | null,
   usage: { tokens: number, costUsd: number | null, costPartial: boolean } | null,
   model: string | null
 }
 ```
 
-**Clients**:
+**Clocks**: every duration is relative to `asOf`, so client/box clock skew does
+not matter. A client stores the local receive time `t0`; while
+`clocks.ticking`, it displays `value + (localNow − t0)` (and the same for
+`live.runningForMs`, `grewAgoMs`, `agoMs`); otherwise the value as sent. "Quiet
+for" shows when ≥ 3 min; "time left" when `remainingMs` < 30 min.
 
-- elapsed = `now − segmentStartedAt` (wall, current segment);
-- "time left" is shown only while running and `ceilingAt − now < 30 min`;
-- quiet = `now − lastProgressAt`.
+**State mapping** (server): `running` + model state `blocked` →
+`needs-decision`; `running` → `working`; `done` + `endedBlocked` →
+`needs-decision`; otherwise the job status. Launch states (`creating`,
+`uncertain`) and the client's `settling` card kind are NOT in `view.state`; the
+client's existing card-kind derivation decides those cards, and `view` only
+supplies content.
 
-**State mapping**:
-
-- `running` + modelState `blocked` → `needs-decision`;
-- `running` → `working`;
-- `done` + `endedBlocked` → `needs-decision`;
-- otherwise the job status (`settling` is the existing card kind).
-
-**opencode-owned jobs**: `ceilingAt` null; `usage`/`files` null; steps and
-headline as available.
-
-`progress` (per-session) and `activity` stay on the wire for one release, then
-are removed.
+**opencode-owned jobs**: `clocks.remainingMs`, `usage`, `files` null; the rest
+as available (B1).
 
 ### 5.4 Tools (V1 `docs/opencode-tools/*.ts` and V2 `docs/opencode-plugins-v2/manta/tools/*.ts` stay twins; pack test updated)
 
@@ -599,7 +665,8 @@ B4.
 
 - Output every 2 min for 3 h → alive; ends at 4 h with `time-limit`.
 - 16 min with no events → stalled.
-- `progress_report` calls only (no other events) for 20 min → stalled.
+- Tool calls only (e.g. repeated `progress_report`) keep the job alive — by
+  design; covered by A8.
 - Shell with `timeout: 1200000`, silent: alive at 24 min, stalled at 26 min
   (anchored to start).
 - Shell with `timeout: 0` and no output: alive at 59 min, stalled at 61 min.
@@ -612,10 +679,22 @@ B4.
   start time.
 - Handoff-deferred, `creating` or `uncertain` → never judged.
 - Lost-run detection wins.
+- Tap mapping replayed from the recorded fixtures
+  (`src/server/fixtures/opencodeV2Events/02-slow-bash`, `03-edit-todo`,
+  `04-task-subagent`, `05-question`): `toolStarted` only at `.called` with input;
+  progress events don't reset start time; `toolEnded` carries the cached name
+  and input; `step` carries `evt.id`; `child` from the subagent fixture.
+- Reconstruction merge: a tool ended by the tap during an in-flight read is not
+  resurrected (generation fence); a shell part with a shell id resumes polling.
+- A question asked in a job session or a descendant (fixture `05-question`) is
+  rejected by the engine; opencode-owned jobs are untouched.
+- `normalizeJobRuleset` applied on start, resume and handoff successor.
 
 ### Ceiling and extension
 
 - Warning sent once at the threshold. A 10-minute ceiling warns at 5 min left.
+- Warning not sent when the job paused, finished or was handed off between the
+  sweep snapshot and the send; the message id includes attempt and child.
 - An extension re-arms the warning (new `ceilingMs`).
 - Snapshot-then-extend race → no timeout (A6).
 - Extend checks:
@@ -626,7 +705,9 @@ B4.
   - exceeding 12 h refused;
   - the refusal text is returned by the tool.
 - CTO `sweepAllowanceMs` becomes the ceiling.
-- Resume restores `baseCeilingMs` and drops extensions.
+- Resume restores `baseCeilingMs` and drops extensions; a refused resume rolls
+  every new field back.
+- `ceilingMs` arithmetic in milliseconds (extend 30 → +1 800 000).
 - Continuation resets every field in §5.1.
 - A legacy running record gets the defaults.
 
@@ -635,16 +716,23 @@ B4.
 - `view` from: checklist only; reported only; both (checklist wins steps, model
   wins headline); neither.
 - Cancelled items are excluded.
-- Reported step 3 of 5 → done 2.
+- Reported step 3 of 5 → done 2; step 0, missing step, step > total are
+  unusable or clamped per B2.
 - The bar is monotonic within a revision, drops on a new one, sets `grewAt`,
   caps at 0.95, and is 1 only on `done`.
 - A model `done` while running doesn't change the state.
 - `blocked` → `needs-decision`; an end while blocked → `endedBlocked`.
 - Milestones: bound 8, duplicate dropped, survive `clearProgress`, appear in the
   completion text.
-- Concurrent reports don't lose milestones (keyed mutex).
-- Usage dedupe; `costPartial`; reset on continuation; accumulates across
-  handoff.
+- Concurrent reports from DIFFERENT sessions/jobs don't lose each other's
+  updates (store-wide mutex); a report racing a terminal transition doesn't
+  resurrect cleared progress.
+- Usage dedupe on `evt.id`; `costPartial` when an unpriced step comes before or
+  after a priced one; flushed on pause/terminal; reset on continuation;
+  accumulates across handoff.
+- `endedBlocked` survives into the `background-result` part and renders
+  "Needs a decision" after the job record has been removed from the store; the
+  bar is not set to 1.
 - Files: unique paths, `null` on git failure, no double count at completion.
 - Publish throttle: ≤ 1 per 5 s per job, the trailing one is delivered, terminal
   is immediate.
@@ -653,8 +741,9 @@ B4.
 
 ### Clients
 
-- Desktop store patch-in-place on `view`; refetch on an unknown id or a status
-  change.
+- Desktop store patch-in-place on `view`; a lower/equal `rev` (event or late
+  list response) is ignored; refetch on an unknown id or a status change.
+- Clocks tick only while `ticking`; frozen values on terminal.
 - RunCard visual-gate states: working with steps, without steps,
   needs-decision, quiet ≥ 3 min, details open, plan grew.
 - Model text with `<b>` / markdown renders literally.
@@ -671,16 +760,23 @@ B4.
 - **Stage 1** (one release): A1–A7, A9, B1–B6 incl. iOS; usage recorded
   (shadow).
 - **Stage 2**: A8 (loop trial → enforcement; budget default + enforcement).
+- **Evidence log (stage 1, for the routine)**: the engine appends one line per
+  Manta-owned terminal segment to `~/.manta/delegate-liveness.jsonl`
+  (`statePath`; rotated at 5 MB, 90-day retention): `{at, jobId, attempt,
+  status, endReason, segmentMs, ceilingMs, extensions, lastProgressAt,
+  contentRecordsLast15m, toolsAtEnd: [{name, runningForMs, timeoutMs}],
+  stepsSource, milestoneCount, usage}`. On its first boot with the feature the
+  engine writes a `{"type":"deployed","at","version","gitSha"}` line. The
+  stall-validation counts are taken from the tap at the moment of the decision,
+  so nothing depends on the DB keeping raw events.
 - **Follow-up routine**: created when this spec is approved for implementation
-  (rule: at the moment we commit to observing).
-  - It first checks whether the box's running release contains this feature (the
-    job store has records with `ceilingMs`) and reports "not deployed yet" until
-    it does.
-  - From deploy + 7 days it reports, read-only from `~/.manta/delegate-jobs.json`
-    and opencode's DB (via the worker-offloaded readers):
+  (rule: at the moment we commit to observing). Daily, read-only.
+  - Until the log has a `deployed` line it reports "not deployed yet".
+  - Each run reads the log (not the retention-limited job store) and keeps its
+    running sample in its memory; at deploy + 7 days it reports:
     - counts by `endReason`;
-    - for each `stalled`, whether events/messages occurred in its last 15 min
-      (a false stall);
+    - for each `stalled`, `contentRecordsLast15m` and tools at end (a non-zero
+      count or a tool within its allowance = a false stall, i.e. a bug);
     - jobs that reached 4 h;
     - the share of jobs with steps / milestones;
     - the per-job tokens/cost distribution (p50/p90/max).
@@ -688,7 +784,7 @@ B4.
     - more than 2 false stalls → propose raising 15 min;
     - more than 10% of jobs hitting 4 h → propose raising the default;
     - steps on < 50% → strengthen B5;
-    - propose the stage-2 budget as p99 × 1.5.
+    - propose the stage-2 budget as p99 × 1.5 of the accumulated sample.
 
 ## 9. Open questions
 
