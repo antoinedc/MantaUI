@@ -1,6 +1,6 @@
 # Background jobs: stay alive while working, and show their progress
 
-Status: revision 4 (after review round 3), 2026-11-14. Scope: background jobs
+Status: revision 5 (after review round 4), 2026-11-14. Scope: background jobs
 started with `delegate` (Manta-owned, `completionOwner:"manta"`). Jobs opencode
 owns (adopted subagents, native background commands) keep their lifecycle and
 get no new limits; they get the progress `view` where the data exists.
@@ -116,7 +116,8 @@ they change):
 live = {
   sessions: Set<sessionId>,        // root + descendants (from `child` records + reconstruction)
   lastProgressAt: number,          // epoch ms
-  tools: Map<callID, { sessionId, name, target, startedAt, timeoutMs | null, lastOutputAt }>,
+  tools: Map<callID, { sessionId, name, target, startedAt, timeoutMs | null,
+                       lastOutputAt, observed: boolean }>,   // observed=false: reconstructed, output not watched
   ended: Set<callID>,              // tombstones, bounded to 500
   generation: number,              // bumped each time live is (re)created
   reconstructedAt: number | null
@@ -160,23 +161,25 @@ that tool's `lastOutputAt`.
    `sessions` and the index.
 2. For each session, read its newest assistant message and collect every tool
    part whose `state.status` is running: `startedAt = part.state.time.start`,
-   `timeoutMs` from `part.state.input` (A1 rule), `lastOutputAt = now`
-   (fail-open: output before the restart is unknown, so a silent no-timeout
-   shell gets a fresh 60 min).
+   `timeoutMs` from `part.state.input` (A1 rule), `observed: false` (its output
+   is not being watched).
 3. Apply a collected part only if its `callID` is not already in `tools` and is
    not in the job's `ended` set (callIDs the tap saw end; bounded to 500). This
    is the tombstone rule: the tap always wins over the snapshot, whatever
    happened while the read was in flight. If the job's `live` was dropped and
    recreated during the read (its `generation` changed), discard the whole
    result.
-4. Pending asks found on any session are handled by A5's backstop.
+4. Pending asks found on any session go to A5's backstop (rejected now, or
+   queued for retry).
 5. Set `reconstructedAt = now`. Any read failure or timeout leaves it null and
    is retried on the next sweep.
 
 Shell output tracking is NOT restored after a restart (the interpreter's shell
-poll only starts from live progress events). A reconstructed shell is judged by
-its timeout, or by the fail-open 60 min from reconstruction; live output
-tracking resumes only for tools started after the restart.
+poll only starts from live progress events). A reconstructed tool therefore has
+`observed: false`: it is judged only by its own timeout (A2) when it has one;
+without one it is never ended by the silence rule — only the ceiling and
+lost-run detection apply. Live output tracking resumes for tools started after
+the restart (`observed: true`).
 
 **A job with `reconstructedAt === null` is never judged stalled** (fail-open).
 
@@ -188,7 +191,9 @@ handoff-deferred, `reconstructedAt` set) is **stalled** when ALL hold:
 - `now − lastProgressAt > 15 min`;
 - no tracked tool is still within its allowance. A tool's allowance:
   - `timeoutMs` set → alive until `startedAt + timeoutMs + 5 min`;
-  - `timeoutMs` null → alive until `lastOutputAt (or startedAt) + 60 min`.
+  - `timeoutMs` null and `observed` → alive until `lastOutputAt (or startedAt) + 60 min`;
+  - `timeoutMs` null and not `observed` (reconstructed after a restart) →
+    always alive (only the ceiling and lost-run detection end it).
 
 With several tools running, the job is alive if any one of them is. Lost-run
 detection runs first and keeps its own outcome.
@@ -215,31 +220,18 @@ Outcome:
   `reached its time limit of <N>` where `<N>` is e.g. "4 hours" or "2 hours 30
   minutes".
 
-### A4. Warning before the ceiling
+### A4. Warning before the ceiling — moved to stage 2
 
-- **When**: once remaining time ≤ `min(10 min, ceilingMs / 2)`, if
-  `ceilingWarnedFor !== ceilingMs` and the job isn't stalled.
-- **How** (no session lock; a compensating interrupt closes the race):
-  1. Under `jobsLock`: re-read the live record and re-check `status ===
-     "running"`, same `attempt` and `childSessionID`, not `pauseRequested` /
-     `stopRequested`, not handoff-deferred, threshold still met for the current
-     `ceilingMs`. Set `ceilingWarnedFor = ceilingMs`, persist, release.
-  2. Send a steered prompt (`delivery:"steer"`) to the child with message id
-     `msg_ceil_<jobId>_<attempt>_<ceilingMs>` (idempotent at opencode). V2
-     injects it at the child's next step; mid-tool it is read after that tool.
-  3. Under `jobsLock` again: if the record is no longer running with the same
-     `attempt` and `childSessionID` (it finished, paused, stopped or was handed
-     off while the send was in flight), interrupt THAT child session
-     (`abortSession`, best-effort, logged). The record is already terminal or
-     paused, so the interrupt's outcome changes nothing (the same property the
-     timeout path relies on today); it only stops a turn the warning may have
-     started.
-  - A failed send is logged and not retried (the ceiling still applies).
-- **Text**: "Background job notice: about <m> minutes left before this job is
-  stopped. Commit your work, record where you got to with progress_report, and
-  finish with your summary."
-- An extension changes `ceilingMs`, so a later warning is re-armed
-  automatically.
+A steered message into a job's child can't be fenced safely today: a steer to
+an idle session starts a new turn (V2), finish / pause / stop don't take the
+session-resources lock, and a continuation reuses the same child session, so
+neither a lock nor a compensating interrupt can guarantee the warning lands
+only in the run it was meant for (review rounds 3–4). Stage 1 instead tells the
+job its budget up front (B5: the limit, and "commit your work as you go"), and
+the parent can extend (A7). Stage 2 adds the warning once every lifecycle
+transition (finish, pause, stop, resume, continuation, handoff) runs under the
+child's session-resources lock, so the warning can be admitted under that lock
+with a check that the same record still owns a running child.
 
 ### A5. Jobs cannot wait on a person
 
@@ -264,8 +256,11 @@ never asked (`buildPermissionRuleset`). Two layers make "can't ask" hold:
      published.
    - The APIs take no message; the model learns why from the B5 prompt ("You
      cannot ask the user questions from here").
-   - A failed reject is logged; reconstruction (A1) re-finds pending asks and
-     retries once per sweep.
+   - A failed reject goes into a bounded pending-rejection queue (≤ 100,
+     keyed by request id, holding `sessionId` and kind). Every 60 s sweep retries
+     each entry while `ownsSession(sessionId)` is still true; an entry is dropped
+     on a confirmed reject, a 404 / not-found answer (the request is gone), or
+     when the session is no longer owned (job ended, root changed).
    - opencode-owned jobs are excluded (their lifecycle is opencode's).
 
 A job that needs a decision:
@@ -341,7 +336,7 @@ same lock, so an accepted extension and a time-limit end can't both happen.
     `stopped: repeated the same action (<tool>)`.
 - **Spending**: see B1 `usage`, recorded from stage 1.
   - A default budget is proposed by the follow-up routine (§8).
-  - Enforcement (stage 2): warn at 80% (steered, same idempotency as A4); stop at
+  - Enforcement (stage 2): warn at 80% (steered, admitted the same way as the A4 warning); stop at
     100% with `endReason:"budget"`, `stopped: spending limit reached`.
 
 ### A9. Outcomes and continuity
@@ -502,8 +497,13 @@ while running:
 
 ### B5. Reporting prompt
 
-`buildJobPrompt` adds this paragraph (exact text):
+`buildJobPrompt` adds these paragraphs (exact text; `<N>` is the job's base
+ceiling formatted as in A3, e.g. "4 hours"):
 
+> Time: this job is stopped after <N> of work (and earlier if it makes no
+> progress for 15 minutes). Commit your work as you go so nothing is lost if it
+> is stopped.
+>
 > Progress: keep your todo list current — it is shown to the user as your
 > progress. At each plan step call progress_report with a one-line label; when
 > you find or finish something the user would want to know, add it as a
@@ -581,7 +581,7 @@ single-line with ellipsis truncation. The full text is in a title/tooltip
 ceilingMs: number                 // current segment ceiling
 baseCeilingMs: number             // launch value, restored on resume
 extensions: [{ at, minutes, reason }]   // ≤ 20, current segment only
-ceilingWarnedFor: number | null   // the ceilingMs a warning was sent for
+ceilingWarnedFor: number | null   // stage 2 (A4); stage 1 only initializes/resets it
 endReason: "stalled" | "time-limit" | "loop" | "budget" | null
 endedBlocked: boolean             // final model state was "blocked"
 lastProgressAt: number | null     // display only; never used to judge after a restart
@@ -736,14 +736,13 @@ B4.
   `reject` BEFORE trust-mode auto-allow, and is not published or pushed;
   opencode-owned jobs and ordinary sessions are untouched.
 - `normalizeJobRuleset` applied on start, resume and handoff successor.
+- A failed reject is queued and retried on the next sweep after reconstruction
+  has completed; dropped on success, not-found, or loss of ownership.
+- A reconstructed no-timeout shell is never stalled; a reconstructed shell with
+  a timeout stalls past `startedAt + timeout + 5 min`.
 
 ### Ceiling and extension
 
-- Warning sent once at the threshold. A 10-minute ceiling warns at 5 min left.
-- Warning not sent when the job paused, finished or was handed off before step 1;
-  when that happens DURING the send, the child is interrupted (step 3) and no
-  second result is produced.
-- An extension re-arms the warning (new `ceilingMs`).
 - Snapshot-then-extend race → no timeout (A6).
 - Extend checks:
   - foreign session refused;
@@ -809,9 +808,10 @@ B4.
 
 ## 8. Rollout and follow-up
 
-- **Stage 1** (one release): A1–A7, A9, B1–B6 incl. iOS; usage recorded
+- **Stage 1** (one release): A1–A3, A5–A7, A9, B1–B6 incl. iOS; usage recorded
   (shadow).
-- **Stage 2**: A8 (loop trial → enforcement; budget default + enforcement).
+- **Stage 2**: A4 (warning, after the lifecycle-lock change it depends on), A8
+  (loop trial → enforcement; budget default + enforcement).
 - **Evidence log (stage 1, for the routine)**: the engine appends one line per
   Manta-owned terminal segment to `~/.manta/delegate-liveness.jsonl`
   (`statePath`; rotated at 5 MB, 90-day retention): `{at, jobId, attempt,
