@@ -15,6 +15,27 @@ export const REJECTIONS_MAX = 100;
 const CONTENT_WINDOW_MIN = 15;
 const QUANTUM_MS = 30_000;
 
+const ACTIVITY_TARGET_MAX = 80;
+
+/** What a tool call is about, for the liveness view: a shell command's first line, a file tool's path, else "". */
+export function activityTarget(name, input) {
+  if (!input || typeof input !== "object") return "";
+  let t = "";
+  if (name === "bash") t = typeof input.command === "string" ? (input.command.split(/\r?\n/, 1)[0] ?? "") : "";
+  else if (name === "read" || name === "edit" || name === "write" || name === "patch" || name === "apply_patch") {
+    t = typeof input.filePath === "string" ? input.filePath : typeof input.path === "string" ? input.path : "";
+  }
+  t = t.trim();
+  return t.length > ACTIVITY_TARGET_MAX ? t.slice(0, ACTIVITY_TARGET_MAX) : t;
+}
+
+/** A shell's own `timeout` (ms) when it is a finite positive number, else null. */
+export function activityTimeoutMs(name, input) {
+  if (name !== "bash") return null;
+  const t = input?.timeout;
+  return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : null;
+}
+
 const bound = (set, cap) => {
   while (set.size > cap) set.delete(set.values().next().value);
 };

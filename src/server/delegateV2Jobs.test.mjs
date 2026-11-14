@@ -226,7 +226,7 @@ test("C1 startJob: registers FIRST, then create → move → window → send in 
   assert.equal(c.title, job.name);
   assert.equal(c.directory, REPO, "created at the parent's location");
   assert.equal(c.agent, "build");
-  assert.deepEqual(c.permission, job.permission, "today's preflight ruleset, catch-all deny first");
+  assert.deepEqual(c.permission, [...job.permission, { permission: "question", pattern: "*", action: "deny" }], "the preflight ruleset, catch-all deny first, a question deny last (a job cannot wait on a person)");
   assert.equal(c.permission[0].action, "deny");
 
   assert.deepEqual(w.calls.move, [{ sid: job.childSessionID, directory: WT }], "moved into the worktree");
@@ -976,7 +976,8 @@ test("C1 exactly one result — timed out (the child is interrupted, a late outc
   w.state.now = T0 + 2 * 60_000;
   await sweepDelegateJobs(w.deps);
   assert.equal(w.job(id).status, "failed");
-  assert.equal(w.job(id).error, "timed out after 1 minutes");
+  assert.equal(w.job(id).error, "reached its time limit of 1 minute");
+  assert.equal(w.job(id).endReason, "time-limit");
   assert.deepEqual(w.calls.abort, [child], "the timeout interrupts the child");
   oneResult(w, id, "failed");
   // the child's own late outcome, and further sweeps
@@ -986,15 +987,15 @@ test("C1 exactly one result — timed out (the child is interrupted, a late outc
   oneResult(w, id, "failed");
 });
 
-test("C1 exactly one result — the default allowance is 30 minutes", async () => {
+test("C1 exactly one result — the default ceiling is 4 hours", async () => {
   const w = world();
   const id = await start(w);
-  w.state.now = T0 + 29 * 60_000;
-  await sweepDelegateJobs(w.deps);
-  assert.equal(w.job(id).status, "running");
   w.state.now = T0 + 31 * 60_000;
   await sweepDelegateJobs(w.deps);
-  assert.equal(w.job(id).error, "timed out after 30 minutes");
+  assert.equal(w.job(id).status, "running", "the old 30-minute timeout is gone");
+  w.state.now = T0 + 4 * 60 * 60_000 + 60_000;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).error, "reached its time limit of 4 hours");
   oneResult(w, id, "failed");
 });
 
@@ -1297,7 +1298,7 @@ test("C2 startJob: a CTO job is a V2 child, with everything the CTO relies on pe
   assert.equal(job.launchState, "running");
 
   assert.equal(w.calls.create[0].parentID, CTO);
-  assert.deepEqual(w.calls.create[0].permission, job.permission);
+  assert.deepEqual(w.calls.create[0].permission, [...job.permission, { permission: "question", pattern: "*", action: "deny" }]);
   assert.deepEqual(w.calls.move, [{ sid: job.childSessionID, directory: WT }], "moved from the CTO's directory into the worktree");
   assert.equal(w.calls.window[0].sessionName, "proj");
   assert.equal(w.calls.window[0].existingSessionId, job.childSessionID);
@@ -1388,11 +1389,11 @@ test("C2 exactly one result — timed out on the job's OWN allowance (the overni
   const child = w.job(id).childSessionID;
   w.state.now = T0 + 89 * 60_000;
   await sweepDelegateJobs(w.deps);
-  assert.equal(w.job(id).status, "running", "the 30-minute default does not apply");
+  assert.equal(w.job(id).status, "running", "the default ceiling does not apply");
   w.state.now = T0 + 91 * 60_000;
   await sweepDelegateJobs(w.deps);
   assert.equal(w.job(id).status, "failed");
-  assert.equal(w.job(id).error, "timed out after 90 minutes");
+  assert.equal(w.job(id).error, "reached its time limit of 1 hour 30 minutes");
   assert.deepEqual(w.calls.abort, [child]);
   w.finish(child, "interrupted", T0 + 92 * 60_000);
   await createDelegateEngine(w.deps).observeRaw(raw("session.execution.interrupted", child));
@@ -1421,7 +1422,7 @@ test("C2 exactly one result — paused → resumed → done: the pause and the r
   const child2 = w.job(id).childSessionID;
   assert.notEqual(child2, child);
   assert.equal(w.calls.create[1].parentID, CTO);
-  assert.deepEqual(w.calls.create[1].permission, ctoInput().permission, "the resumed child is scoped exactly like the first");
+  assert.deepEqual(w.calls.create[1].permission, [...ctoInput().permission, { permission: "question", pattern: "*", action: "deny" }], "the resumed child is scoped exactly like the first");
   w.say(child2, "finished on attempt two");
   w.finish(child2, "succeeded", T0 + 9);
   await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child2));

@@ -53,6 +53,24 @@ import { chooseModel, describeDecision } from "../shared/modelRouter.mjs";
 import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
+import { createJobLiveness, activityTarget, activityTimeoutMs } from "./jobLiveness.mjs";
+import {
+  DEFAULT_CEILING_MS,
+  addMilestone,
+  applyChecklist,
+  applyModelReport,
+  defaultJobProgress,
+  finalHeadline,
+  formatDuration,
+  headlineOf,
+  initialCeilingMs,
+  lacksLivenessDefaults,
+  mergeUsage,
+  recomputeSteps,
+  validateMaxDurationMinutes,
+  withLivenessDefaults,
+} from "./jobProgressView.mjs";
+import { createJobViews } from "./jobViews.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -104,8 +122,14 @@ export const MAX_RUNNING_JOBS = 5;
 // delegate.test.mjs.
 export const CAP_ERROR =
   "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
-// `running` jobs older than this → `failed "timed out after 30 minutes"`.
-const RUNNING_TIMEOUT_MS = 30 * 60_000;
+// A Manta-owned segment that runs past its `ceilingMs` (default 4 h, spec 2026-11-14 A3) → `failed`, endReason
+// "time-limit". A job that makes no progress for 15 minutes is ended as stalled (jobLiveness.judgeStall).
+const EXTEND_MAX_CEILING_MS = 12 * 60 * 60_000;
+const FILES_REFRESH_BUDGET_MS = 5_000;
+const RECONSTRUCT_BUDGET_MS = 5_000;
+const SWEEP_IO_CONCURRENCY = 2;
+// How often a running job's usage / last-progress time is folded into its record.
+const PROGRESS_FLUSH_MS = 60_000;
 // `paused` jobs are kept this long before the sweeper stops them (spec §11.6
 // "[sweep] paused > 7 days → stopped"). A paused job's worktree persists, so
 // the pause window is generous.
@@ -163,18 +187,30 @@ function genId() {
  * omitted entirely when `worktree` is null (parent cwd was not a repo). Do not
  * add anything else and do not make it configurable.
  */
-export function buildJobPrompt({ prompt, worktree, branch, facts }) {
+export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs }) {
   const head = String(prompt ?? "").trim();
   const factsSection =
     facts && String(facts).trim().length > 0
       ? "\n\n---\nRelevant project context (from the CTO blackboard):\n" + String(facts).trim() + "\n"
       : "";
+  const limit = formatDuration(Number.isFinite(ceilingMs) && ceilingMs > 0 ? ceilingMs : DEFAULT_CEILING_MS);
+  const budget =
+    `Time: this job is stopped after ${limit} of work (and earlier if it makes no\n` +
+    "progress for 15 minutes). Commit your work as you go so nothing is lost if it\n" +
+    "is stopped.\n\n" +
+    "Progress: keep your todo list current — it is shown to the user as your\n" +
+    "progress. At each plan step call progress_report with a one-line label; when\n" +
+    "you find or finish something the user would want to know, add it as a\n" +
+    "milestone. You cannot ask the user questions from here: if you need a decision,\n" +
+    'call progress_report with state "blocked" and a label saying what you need, then\n' +
+    "end your turn with the question.\n\n";
   if (!worktree) {
     return (
       head +
       "\n\n---\n" +
       "You are running as a background job. The user is not watching this session and\n" +
       "cannot see your intermediate output — only your final message is reported back.\n\n" +
+      budget +
       "When you are done, end with a short summary of what you changed and why." +
       factsSection
     );
@@ -188,6 +224,7 @@ export function buildJobPrompt({ prompt, worktree, branch, facts }) {
     "Commit your work to that branch before you finish. You may open a draft pull\n" +
     "request for it (never a non-draft one without a human confirming), but you may\n" +
     "never merge, never force-push, and never touch any other checkout.\n\n" +
+    budget +
     "When you are done, end with a short summary of what you changed and why." +
     factsSection
   );
@@ -196,17 +233,30 @@ export function buildJobPrompt({ prompt, worktree, branch, facts }) {
 /**
  * The completion message delivered to the parent session. The Branch/Worktree
  * lines are omitted when there is no worktree. On failure `<result>` is
- * replaced by `Error: <error>`. On timeout the status word is `failed` and the
- * error is `timed out after 30 minutes`.
+ * replaced by `Error: <error>`. A job that ended `done` while its model state was
+ * `blocked` says "needs a decision" instead of "done"; a job ended by the engine
+ * (stalled / time limit) carries a `Reason:` line; milestones the job reported
+ * are listed. Built from the record alone, so a retry (or `clearProgress`) can't change it.
  */
 export function buildCompletionText(job) {
   const name = job?.name ?? "";
   const status = job?.status ?? "done";
-  const lines = [`[background job "${name}" ${status}]`];
+  const word = status === "done" && job?.endedBlocked === true ? "needs a decision" : status;
+  const lines = [`[background job "${name}" ${word}]`];
   if (job?.worktree) {
     const changed = job?.filesChanged == null ? "0" : String(job.filesChanged);
     lines.push(`Branch: ${job.branch ?? ""} (${changed} files changed)`);
     lines.push(`Worktree: ${job.worktree}`);
+  }
+  if (job?.endReason) {
+    lines.push(`Reason: ${job?.error ?? ""}`);
+    const last = finalHeadline(job);
+    if (last && !String(job?.error ?? "").includes(last)) lines.push(`Last status: ${last}`);
+  }
+  const milestones = Array.isArray(job?.jobProgress?.milestones) ? job.jobProgress.milestones : [];
+  if (milestones.length > 0) {
+    lines.push("Milestones:");
+    for (const m of milestones) lines.push(`- ${m.text}`);
   }
   lines.push("");
   if (status === "failed" || status === "stopped") {
@@ -349,6 +399,17 @@ export function buildPermissionRuleset(tools, { home = homedir() } = {}) {
   return [{ permission: "*", pattern: "**", action: "deny" }, ...deduped];
 }
 
+/**
+ * The ruleset EVERY Manta-owned job child is created with (spec 2026-11-14 A5): a job cannot wait on a person, so a
+ * trailing `question` deny is always present (last-match-wins keeps it above any grant). Idempotent.
+ */
+export function normalizeJobRuleset(rules) {
+  const list = (Array.isArray(rules) ? rules : []).filter(
+    (r) => !(r?.permission === "question" && r?.pattern === "*" && r?.action === "deny"),
+  );
+  return [...list, { permission: "question", pattern: "*", action: "deny" }];
+}
+
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
 // renderer's resolveSessionOwner (src/renderer/store.ts) — the server-side
 // equivalent the spec calls for. Returns { tmuxSession, windowIndex, cwd } or
@@ -409,7 +470,7 @@ function toWireRecord({ displayParentID: _retired, ...rest }) {
   return rest;
 }
 
-export async function listJobs({ sessionID, sessionIDs } = {}, { load = loadJobs, readProgress = defaultReadProgress } = {}) {
+export async function listJobs({ sessionID, sessionIDs } = {}, { load = loadJobs, readProgress = defaultReadProgress, jobViews = null } = {}) {
   const jobs = await load();
   // `sessionIDs` (auto-handoff §6.3): the whole replacement chain of the asked-for session.
   const wanted = Array.isArray(sessionIDs) ? new Set(sessionIDs) : null;
@@ -426,17 +487,19 @@ export async function listJobs({ sessionID, sessionIDs } = {}, { load = loadJobs
     scoped.map(async (j) => ({
       ...toWireRecord(j),
       progress: j.childSessionID ? await readProgress(j.childSessionID) : null,
+      ...(jobViews ? { view: jobViews.viewFor(j) } : {}),
     })),
   );
 }
 
-export async function getJob(id, { load = loadJobs, readProgress = defaultReadProgress } = {}) {
+export async function getJob(id, { load = loadJobs, readProgress = defaultReadProgress, jobViews = null } = {}) {
   const jobs = await load();
   const job = jobs.find((j) => j.id === id);
   if (!job) return null;
   return {
     ...toWireRecord(job),
     progress: job.childSessionID ? await readProgress(job.childSessionID) : null,
+    ...(jobViews ? { view: jobViews.viewFor(job) } : {}),
   };
 }
 
@@ -686,9 +749,14 @@ export async function adoptExistingSession(input, deps = {}) {
         submittedAt: null,
         completionMessageId: null,
         completionDelivery: null,
+        extensions: [],
+        endReason: null,
+        endedBlocked: false,
+        jobProgress: defaultJobProgress(),
       };
       const next = prev ? jobs.map((j) => (j.id === prev.id ? { ...j, supersededBy: job.id } : j)) : jobs;
       await save([...next, job]);
+      deps.liveness?.rootChanged(job);
       if (prev) publish?.({ kind: "delegate.updated", payload: { id: prev.id, status: prev.status } });
       publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "running" } });
       return { ok: true, job };
@@ -1042,6 +1110,8 @@ export async function startJob(input, deps = {}) {
 
   if (!parentSessionID) return { ok: false, error: "parentSessionID is required" };
   if (!parentDirectory) return { ok: false, error: "parentDirectory is required" };
+  const durationError = validateMaxDurationMinutes(input?.maxDurationMinutes);
+  if (durationError) return { ok: false, error: durationError };
 
   // Gather the routing inputs ONCE, up front. They serve BOTH the named-model
   // path (11b — a named model is validated against the Sub-ticked catalogue,
@@ -1399,26 +1469,22 @@ async function lastAssistantText(messages) {
   return "";
 }
 
+// The number of UNIQUE paths the job changed against its base: the working tree vs `baseSha` (committed and uncommitted,
+// tracked) plus untracked files. null when git can't say (never 0 by mistake).
 async function countFilesChanged(job, deps) {
   if (!job.worktree || !job.baseSha) return null;
   const { gitRun } = deps;
-  let committed = 0;
+  if (typeof gitRun !== "function") return null;
   try {
-    const { stdout } = await gitRun([
-      "-C", job.worktree, "diff", "--name-only", `${job.baseSha}..HEAD`,
-    ]);
-    committed = (String(stdout ?? "").split("\n").filter((l) => l.length > 0)).length;
+    const paths = new Set();
+    const diff = await gitRun(["-C", job.worktree, "diff", "--name-only", job.baseSha]);
+    for (const l of String(diff?.stdout ?? "").split("\n")) if (l.length > 0) paths.add(l);
+    const status = await gitRun(["-C", job.worktree, "status", "--porcelain"]);
+    for (const f of parseGitStatus(status?.stdout).files) if (f.status === "??") paths.add(f.path);
+    return paths.size;
   } catch {
-    committed = 0;
+    return null;
   }
-  let uncommitted = 0;
-  try {
-    const { stdout } = await gitRun(["-C", job.worktree, "status", "--porcelain"]);
-    uncommitted = parseGitStatus(stdout).count;
-  } catch {
-    uncommitted = 0;
-  }
-  return committed + uncommitted;
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,7 +1589,7 @@ export function effectiveModelFromMessages(messages) {
 }
 
 export async function tickActivity(deps) {
-  const { load = loadJobs, save = saveJobs, publish, listMessages, now = () => Date.now() } = deps;
+  const { load = loadJobs, save = saveJobs, listMessages, now = () => Date.now() } = deps;
   // Under the jobs-store lock: the read-compare-write of `activity` is atomic,
   // so a stale poller write can never overwrite a terminal transition a
   // concurrent writer just persisted, or resurrect a completed job to running.
@@ -1557,10 +1623,7 @@ export async function tickActivity(deps) {
         }
         if (activityChanged || modelChanged) {
           changed = true;
-          publish?.({
-            kind: "delegate.updated",
-            payload: { id: job.id, status: job.status, activity },
-          });
+          emitUpdate(deps, job, {});
         }
       }),
     );
@@ -1631,29 +1694,6 @@ export async function sweepDelegateJobs(deps = {}) {
       }
     }
 
-    const transitioned = [];
-    for (const job of jobs) {
-      // An uncertain launch is never failed on a clock: nothing proves the run
-      // did not start, so it stays (and is re-checked every sweep) until there
-      // is evidence either way.
-      // A V2 child opencode owns (an adopted subagent, a native background
-      // command) has no running timeout: opencode runs its lifecycle and
-      // settleV2Job finishes it from the real outcome.
-      if (completionOwnerOf(job) === "opencode") continue;
-      // A job with a handoff pending is not timed out under it: the limit is re-evaluated once the
-      // handoff commits (the job keeps its start time) or fails.
-      if (job.status === "running" && deps.deferSettlement?.(job.childSessionID)) continue;
-      if (job.status === "running" && job.startedAt != null && job.launchState !== "uncertain") {
-        // Per-job running-sweep allowance: default 30 min, or the caller's
-        // sweepAllowanceMs (spec §11.6-4 — CTO overnight jobs pass
-        // overnightWindowRemainingMs). User-started jobs keep the 30-min rule.
-        const allowance = job.sweepAllowanceMs ?? RUNNING_TIMEOUT_MS;
-        if (nowMs - job.startedAt > allowance) {
-          transitioned.push({ job, allowance });
-        }
-      }
-    }
-
     // spec §11.6: `paused` jobs older than 7 days → `stopped` (terminal, with
     // the same keep-on-dirty cleanup). Silent: the job has been idle for a week
     // and the parent session is likely long gone, so no completion is
@@ -1665,41 +1705,21 @@ export async function sweepDelegateJobs(deps = {}) {
       }
     }
 
-    if (transitioned.length === 0 && orphaned.length === 0 && pausedExpired.length === 0) {
-      await persistRetention({ load, save, deps }, nowMs);
-      return;
-    }
-
     // Orphaned jobs → stopped (parent gone). stopJob aborts + marks stopped +
-    // runs the same terminal cleanup. Runs BEFORE the timeout pass so a job
-    // that is both orphaned and timed-out is recorded as "stopped" (parent
-    // gone is the more precise reason); finishV2Job is a no-op on the
-    // already-terminal record.
+    // runs the same terminal cleanup. Runs BEFORE the liveness pass so a job
+    // that is both orphaned and over its limit is recorded as "stopped" (parent
+    // gone is the more precise reason).
     for (const job of orphaned) {
       await stopJob(job.id, deps);
-    }
-    // Timed-out jobs → failed. Pass the FULL deps so the terminal cleanup
-    // (killWindow + gitRemoveWorktree) actually runs. The error reflects the
-    // job's own allowance, so the default path stays "timed out after 30 minutes".
-    for (const { job, allowance } of transitioned) {
-      const mins = Math.round(allowance / 60_000);
-      const res = await finishV2Job(job, "failed", `timed out after ${mins} minutes`, deps);
-      // A child Manta started keeps running (and spending) after its result said
-      // "failed" unless it is interrupted. The record is already terminal here, so
-      // the interrupt's own outcome event finds nothing left to do.
-      if (!res?.alreadyTerminal && abortSession && job.childSessionID) {
-        try {
-          await abortSession(job.childSessionID);
-        } catch (e) {
-          console.warn(`[delegate] interrupting the timed-out child of ${job.id} failed:`, e?.message ?? e);
-        }
-      }
     }
     // Paused-expired jobs → stopped. A job still owes its parent its one result,
     // even a stopped one, so this goes through stopJob.
     for (const job of pausedExpired) {
       await stopJob(job.id, deps, { error: "paused for over 7 days, stopped" });
     }
+    // Liveness: rebuild what a restart lost, then end a job that is stalled or past its ceiling, and fold
+    // usage / files into the records of the rest. (Lost runs were settled by reconcileV2Jobs above.)
+    await sweepLiveness(new Set(orphaned.map((j) => j.id)), deps);
     await persistRetention({ load, save, deps }, nowMs);
   } catch (e) {
     console.warn("[delegate] sweep failed:", e?.message ?? e);
@@ -1969,6 +1989,7 @@ async function deleteJobLocked(id, lockedChild, deps, opts) {
     // 3. Remove the record.
     const next = jobs.filter((j) => j.id !== id);
     await save(next);
+    deps.liveness?.drop(id);
     publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
     return { ok: true };
   });
@@ -2183,7 +2204,7 @@ function parseModelString(value) {
 // resume / reconcile read), without changing what the record already says.
 function upgradeLegacyRecord(job) {
   const manta = completionOwnerOf(job) === "manta";
-  return {
+  return withLivenessDefaults({
     ...job,
     engine: "v2",
     completionOwner: completionOwnerOf(job),
@@ -2200,7 +2221,7 @@ function upgradeLegacyRecord(job) {
       model: parseModelString(job.model ?? job.requestedModel),
       messageId: mintMessageId(),
     },
-  };
+  });
 }
 
 /**
@@ -2513,6 +2534,8 @@ async function repointJobSessionsLocked({ fromSessionId, toSessionId, parent, ch
     });
     if (changed > 0) {
       await save(next);
+      // a job whose own session moved gets a fresh liveness picture of the new root
+      for (const j of next) if (child && j.status === "running" && j.childSessionID === toSessionId) deps.liveness?.rootChanged(j);
       for (const j of next) if (j.parentSessionID === toSessionId || j.childSessionID === toSessionId) publish?.({ kind: "delegate.updated", payload: { id: j.id, status: j.status, launchState: j.launchState, activity: j.activity } });
     }
     return changed;
@@ -2525,6 +2548,7 @@ async function removeJobRecord(id, deps = {}) {
     const jobs = await load();
     if (!jobs.some((j) => j.id === id)) return;
     await save(jobs.filter((j) => j.id !== id));
+    deps.liveness?.drop(id);
     publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
   });
 }
@@ -2610,6 +2634,52 @@ async function dropResumeRestore(job, deps = {}, { heldSession = null } = {}) {
 
 // ---- terminal transition --------------------------------------------------
 
+// A bus update for a job: with the engine's views wired it carries the job's `view` and is not throttled (a
+// terminal / paused / extended transition); without it the payload is the one every consumer already knew.
+function emitUpdate(deps, job, base = {}) {
+  if (deps.jobViews) {
+    deps.jobViews.publishNow(job, base);
+    return;
+  }
+  deps.publish?.({ kind: "delegate.updated", payload: { id: job.id, status: job.status, activity: job.activity, ...base } });
+}
+
+// At a segment boundary (paused / terminal) the engine's in-memory picture is folded into the record: usage since the
+// last flush, the last time the job made progress, the final file count, the plan state (the bar is 1 only for a done
+// job that was not waiting on a decision). Runs under the jobs lock; reads memory only.
+function foldAtBoundary(live, deps, nowMs, { terminal = null, filesChanged } = {}) {
+  const base = withLivenessDefaults(live);
+  const manta = completionOwnerOf(live) === "manta";
+  let jp = base.jobProgress;
+  const delta = manta ? deps.liveness?.takeUsageDelta(live.id) : null;
+  if (delta) jp = { ...jp, usage: mergeUsage(jp.usage, delta) };
+  if (manta && filesChanged != null) jp = { ...jp, files: { changed: filesChanged, at: nowMs } };
+  if (terminal) jp = recomputeSteps(jp, { now: nowMs, terminal });
+  const snap = deps.liveness?.snapshot(live.id);
+  return { jobProgress: jp, lastProgressAt: snap?.lastProgressAt ?? live.lastProgressAt ?? null };
+}
+
+// The evidence-log line for a finished Manta-owned segment, read from the engine's memory at the moment of the decision.
+function segmentEvidence(live, next, deps, nowMs) {
+  const ev = deps.liveness?.evidence(live.id, nowMs);
+  const base = withLivenessDefaults(live);
+  return {
+    jobId: next.id,
+    attempt: next.attempt ?? 1,
+    status: next.status,
+    endReason: next.endReason ?? null,
+    segmentMs: next.startedAt != null ? Math.max(0, nowMs - next.startedAt) : null,
+    ceilingMs: base.ceilingMs,
+    extensions: base.extensions.map((e) => ({ at: e.at, minutes: e.minutes })),
+    lastProgressAt: ev?.lastProgressAt ?? next.lastProgressAt ?? null,
+    contentRecordsLast15m: ev?.contentRecordsLast15m ?? null,
+    toolsAtEnd: ev?.toolsAtEnd ?? [],
+    stepsSource: next.jobProgress?.stepsSource ?? null,
+    milestoneCount: next.jobProgress?.milestones?.length ?? 0,
+    usage: next.jobProgress?.usage ?? null,
+  };
+}
+
 /**
  * Make a V2 job terminal. ONE write holds the status, the result and — for a job
  * whose result Manta posts — the minted `completionMessageId` with
@@ -2631,11 +2701,10 @@ async function dropResumeRestore(job, deps = {}, { heldSession = null } = {}) {
  * (a launch / recovery that finishes its own record): the cleanup then runs its lock-held
  * variant instead of waiting on a lock it would never get.
  */
-export async function finishV2Job(job, status, error, deps = {}, { interrupted = false, resourcesHeld = false, resultFallback = null } = {}) {
+export async function finishV2Job(job, status, error, deps = {}, { interrupted = false, resourcesHeld = false, resultFallback = null, endReason = null, onlyIf = null } = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
-    publish,
     listMessages,
     clearProgress = defaultClearProgress,
     now = () => Date.now(),
@@ -2664,18 +2733,28 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   }
 
   let paused = null;
+  let guardSkipped = false;
+  let segment = null;
   const updated = await jobsLock.runExclusive(async () => {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === job.id);
     if (idx === -1) return null;
     const live = jobs[idx];
     if (live.status !== "running") return null;
+    // A caller deciding from a snapshot (the sweep ending a stalled / over-limit job) re-checks the LIVE record here,
+    // atomically with the write, so an extension that landed meanwhile can never be overtaken.
+    if (onlyIf && !onlyIf(live)) {
+      guardSkipped = true;
+      return null;
+    }
+    const endedAt = now();
 
     if (interrupted && live.pauseRequested && completionOwnerOf(live) === "manta") {
-      const parked = { ...live, status: "paused", pauseRequested: false, pausedAt: now() };
+      const parked = { ...live, ...foldAtBoundary(live, deps, endedAt), status: "paused", pauseRequested: false, pausedAt: endedAt };
       jobs[idx] = parked;
       await save(jobs);
-      publish?.({ kind: "delegate.updated", payload: { id: parked.id, status: "paused" } });
+      deps.liveness?.drop(parked.id);
+      emitUpdate(deps, parked, { status: "paused" });
       paused = parked;
       return null;
     }
@@ -2683,31 +2762,40 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
     if (interrupted) outcome = live.stopRequested ? { status: "stopped", error: "stopped by user" } : { status: "failed", error: error || "interrupted" };
 
     const manta = completionOwnerOf(live) === "manta";
+    const endedBlocked = outcome.status === "done" && live.jobProgress?.modelState === "blocked";
+    const fold = foldAtBoundary(live, deps, endedAt, {
+      terminal: { status: outcome.status, endedBlocked },
+      filesChanged: outcome.status === "done" ? filesChanged : undefined,
+    });
     const next = {
       ...live,
+      ...fold,
       status: outcome.status,
       error: outcome.status === "done" ? null : (outcome.error ?? null),
       result: outcome.status === "done" ? result : null,
       filesChanged: outcome.status === "done" ? filesChanged : null,
-      finishedAt: now(),
+      finishedAt: endedAt,
       pauseRequested: false,
+      endedBlocked,
+      endReason: outcome.status === "failed" ? endReason : null,
       completionMessageId: manta ? (live.completionMessageId ?? mintMessageId()) : (live.completionMessageId ?? null),
       completionDelivery: manta ? "pending" : null,
     };
     jobs[idx] = next;
     await save(jobs);
-    publish?.({
-      kind: "delegate.updated",
-      payload: { id: next.id, status: next.status, launchState: next.launchState, activity: next.activity },
-    });
+    if (manta && deps.livenessLog) segment = segmentEvidence(live, next, deps, endedAt);
+    emitUpdate(deps, next, { launchState: next.launchState });
+    deps.liveness?.drop(next.id);
     return next;
   });
+  if (guardSkipped) return { ok: true, skipped: "guard" };
   if (paused) {
     pauseInterrupts.delete(paused.id);
     return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };
   const endedAs = updated.status;
+  if (segment) void deps.livenessLog.appendSegment(segment);
 
   if (typeof deps.onJobTerminal === "function") {
     try {
@@ -3483,7 +3571,10 @@ async function submitCommand(job, deps, { reconciled = false, undo = {} } = {}) 
     const kept = (await patchJob(job.id, { launchState: "uncertain" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
     return { ok: true, job: kept, uncertain: true };
   }
-  const running = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) && j.launchState !== "running" })) ?? job;
+  const confirmed = await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) && j.launchState !== "running" });
+  const running = confirmed ?? job;
+  // the launch is confirmed: the stall clock and the tool picture start from here
+  if (confirmed) deps.liveness?.rootChanged(confirmed);
   if (delegate) await dropResumeRestore(running, deps);
   return { ok: true, job: running };
 }
@@ -3542,6 +3633,7 @@ async function rollbackContinuation(job, deps, { createdWindow = null, worktreeR
         return rest;
       });
     await save(next);
+    deps.liveness?.drop(job.id);
     publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "deleted" } });
     if (job.continues) publish?.({ kind: "delegate.updated", payload: { id: job.continues } });
   });
@@ -3654,8 +3746,10 @@ export async function continueJob(id, input, deps = {}) {
       const old = recheck.job;
       const t = now();
       const { supersededBy: _s, cleanupReason: _c, ...inherited } = old;
+      const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
       const job = {
         ...inherited,
+        ...livenessFieldsAtLaunch(baseCeiling),
         id: genId(),
         attempt: (old.attempt ?? 1) + 1,
         continues: old.id,
@@ -3683,6 +3777,7 @@ export async function continueJob(id, input, deps = {}) {
       inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
       try {
         await save([...jobs.map((j) => (j.id === old.id ? { ...j, supersededBy: job.id } : j)), job]);
+        deps.liveness?.rootChanged(job);
       } catch (e) {
         inLaunch.delete(job.id);
         throw e;
@@ -3922,11 +4017,13 @@ export async function startCommandJob(input, deps = {}) {
       completionDelivery: null,
       agent,
       commandRun: { command, arguments: args, model, agent, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+      ...livenessFieldsAtLaunch(DEFAULT_CEILING_MS),
     };
     jobs.push(job);
     inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
     try {
       await save(jobs);
+      deps.liveness?.rootChanged(job);
     } catch (e) {
       inLaunch.delete(job.id);
       throw e;
@@ -3996,6 +4093,20 @@ async function launchRegistered(job, { owner, parentSessionID, parentDirectory, 
   return submitCommand(job, deps);
 }
 
+// The liveness / progress fields a Manta-owned record is born with (spec 2026-11-14 §5.1).
+function livenessFieldsAtLaunch(ceilingMs) {
+  return {
+    ceilingMs,
+    baseCeilingMs: ceilingMs,
+    extensions: [],
+    ceilingWarnedFor: null,
+    endReason: null,
+    endedBlocked: false,
+    lastProgressAt: null,
+    jobProgress: defaultJobProgress(),
+  };
+}
+
 // ---- delegate jobs on V2 (Stage C1) ---------------------------------------
 //
 // Every job — the CTO's workers included — is a real V2
@@ -4047,6 +4158,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
 
     const t = now();
     const launchModel = toDeliverModel(effectiveModel);
+    const ceilingMs = initialCeilingMs({ sweepAllowanceMs: input?.sweepAllowanceMs, maxDurationMinutes: input?.maxDurationMinutes });
     const job = {
       id: genId(),
       name,
@@ -4088,14 +4200,16 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       // what the launch sends, persisted so a reconcile can finish a launch this
       // process never got to (and a resume reuses the first attempt's model)
       launch: {
-        text: buildJobPrompt({ prompt, worktree, branch }),
+        text: buildJobPrompt({ prompt, worktree, branch, ceilingMs }),
         model: launchModel,
         messageId: mintMessageId(),
       },
+      ...livenessFieldsAtLaunch(ceilingMs),
     };
     inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
     try {
       await save([...jobs, job]);
+      deps.liveness?.rootChanged(job);
     } catch (e) {
       inLaunch.delete(job.id);
       if (worktree && gitRemoveWorktree) {
@@ -4168,7 +4282,8 @@ async function launchDelegate(job, deps) {
       title: job.name,
       agent: job.agent,
       model: job.launch.model ?? undefined,
-      permission: Array.isArray(job.permission) && job.permission.length > 0 ? job.permission : undefined,
+      // a job can never wait on a person: its ruleset always ends with a `question` deny
+      permission: normalizeJobRuleset(job.permission),
     });
   } catch (e) {
     if (isDefiniteRefusal(e)) {
@@ -4347,8 +4462,16 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     if (!owner) return { ok: false, error: `could not resolve the tmux session owning ${job.parentSessionID}` };
     tmuxSession = owner.tmuxSession;
   }
+  const prior = withLivenessDefaults(job);
   const updated = {
     ...job,
+    // a new segment: the launch ceiling again (extensions dropped), no end reason; the progress the job made is kept
+    ceilingMs: prior.baseCeilingMs,
+    baseCeilingMs: prior.baseCeilingMs,
+    extensions: [],
+    ceilingWarnedFor: null,
+    endReason: null,
+    jobProgress: prior.jobProgress,
     status: "running",
     tmuxSession,
     childSessionID: mintSessionId(),
@@ -4377,6 +4500,10 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
         startedAt: job.startedAt ?? null,
         submittedAt: job.submittedAt ?? null,
         launchState: job.launchState ?? "running",
+        ceilingMs: prior.ceilingMs,
+        extensions: prior.extensions,
+        ceilingWarnedFor: prior.ceilingWarnedFor,
+        endReason: prior.endReason,
         launch: job.launch ? { ...job.launch, restore: undefined } : null,
       },
     },
@@ -4385,6 +4512,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
   inLaunch.add(updated.id);
   try {
     await save(jobs);
+    deps.liveness?.rootChanged(updated);
   } catch (e) {
     inLaunch.delete(updated.id);
     throw e;
@@ -4651,6 +4779,284 @@ export function createActiveSessionReconciler(deps = {}) {
   return { reconcile, seenCount: () => seen.size };
 }
 
+
+// ---------------------------------------------------------------------------
+// Liveness sweep (spec 2026-11-14 §A1–A3, A5, A6, B3)
+// ---------------------------------------------------------------------------
+
+/** Run `fn` over `items`, at most `n` at a time. Never throws. */
+async function pool(items, n, fn) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(n, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const item = queue.shift();
+      try {
+        await fn(item);
+      } catch (e) {
+        console.warn("[delegate] liveness sweep step failed:", e?.message ?? e);
+      }
+    }
+  });
+  await Promise.all(workers);
+}
+
+/** `fn()`'s answer, or `undefined` when it threw or took longer than `ms` (a read that couldn't finish proves nothing). */
+async function withBudget(fn, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(fn),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A guarded patch of a RUNNING record's progress fields under the jobs lock; publishes (throttled) when it wrote. */
+async function mutateJobProgress(id, deps, fn) {
+  const { load = loadJobs, save = saveJobs } = deps;
+  const out = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1 || jobs[idx].status !== "running") return null;
+    const job = withLivenessDefaults(jobs[idx]);
+    const patch = fn(job);
+    if (!patch && !lacksLivenessDefaults(jobs[idx])) return null;
+    jobs[idx] = { ...job, ...(patch ?? {}) };
+    await save(jobs);
+    return jobs[idx];
+  });
+  if (out) deps.jobViews?.notify(out.id);
+  return out;
+}
+
+const isNotFound = (e) => e?.status === 404 || /not.?found|no pending/i.test(String(e?.message ?? ""));
+
+/** Reject one pending question / permission of a job's session. A failure is queued for the sweep to retry. */
+async function rejectAsk(ask, deps) {
+  const reject = ask.kind === "permission" ? deps.rejectPermission : deps.rejectQuestion;
+  if (typeof reject !== "function") return false;
+  try {
+    await reject({ requestId: ask.requestId, sessionId: ask.sessionId });
+    deps.liveness?.dropRejection(ask.requestId);
+    return true;
+  } catch (e) {
+    if (isNotFound(e)) {
+      deps.liveness?.dropRejection(ask.requestId);
+      return true;
+    }
+    deps.liveness?.queueRejection(ask);
+    return false;
+  }
+}
+
+async function retryRejections(deps) {
+  for (const ask of deps.liveness?.pendingRejections() ?? []) {
+    if (!deps.liveness.ownsSession(ask.sessionId)) {
+      deps.liveness.dropRejection(ask.requestId);
+      continue;
+    }
+    await rejectAsk(ask, deps);
+  }
+}
+
+/**
+ * Rebuild a running job's liveness picture after a restart (spec A1 "Reconstruction"): the descendant tree, the tools
+ * each session is running right now, and any ask still pending (rejected by the backstop). Bounded; a failure
+ * leaves the job unreconstructed, so it is retried next sweep and never judged stalled meanwhile.
+ */
+async function reconstructLiveness(job, deps) {
+  const live = deps.liveness?.get(job.id);
+  if (!live || live.reconstructedAt != null) return;
+  const gen = live.generation;
+  const readTail = deps.listTailMessages ?? deps.listMessages;
+  const read = await withBudget(async () => {
+    const nodes = typeof deps.listChildSessions === "function" ? await listDescendants(job.childSessionID, deps) : [];
+    const running = [];
+    const asks = [];
+    for (const sid of [job.childSessionID, ...nodes.map((n) => n.id)]) {
+      const messages = typeof readTail === "function" ? ((await readTail(sid)) ?? []) : [];
+      const newest = [...messages].reverse().find((m) => m?.info?.role === "assistant");
+      for (const p of newest?.parts ?? []) {
+        if (p?.type !== "tool" || p.state?.status !== "running" || !p.callID) continue;
+        running.push({
+          callID: p.callID,
+          sessionId: sid,
+          name: p.tool,
+          target: activityTarget(p.tool, p.state?.input),
+          timeoutMs: activityTimeoutMs(p.tool, p.state?.input),
+          startedAt: Number(p.state?.time?.start),
+        });
+      }
+      for (const [kind, readAsks] of [["permission", deps.listPermissions], ["question", deps.listQuestions]]) {
+        if (typeof readAsks !== "function") continue;
+        for (const a of (await readAsks(sid)) ?? []) if (a?.id) asks.push({ kind, requestId: a.id, sessionId: sid });
+      }
+    }
+    return { nodes, running, asks };
+  }, RECONSTRUCT_BUDGET_MS);
+  if (!read) return;
+  for (const ask of read.asks) await rejectAsk(ask, deps);
+  deps.liveness.applyReconstruction(job.id, gen, { nodes: read.nodes, running: read.running });
+}
+
+function stallMessage(verdict, headline) {
+  if (verdict.tool) {
+    const label = verdict.tool.target || verdict.tool.name;
+    return verdict.tool.ranPastTimeout
+      ? `stalled — "${label}" ran past its own timeout`
+      : `stalled — "${label}" ran with no output for 60 minutes`;
+  }
+  return headline ? `stalled — no progress for 15 minutes (last: ${headline})` : "stalled — no progress for 15 minutes";
+}
+
+/**
+ * Ceiling, then stall, for one running Manta-owned job. Each end re-checks the LIVE record under the jobs lock
+ * (finishV2Job's `onlyIf`), atomically with the write, so an extension (`extendJob`) and a time-limit end can't both happen.
+ */
+async function judgeLiveness(job, deps) {
+  const { liveness } = deps;
+  const clock = deps.now ?? (() => Date.now());
+  const ceiling = withLivenessDefaults(job).ceilingMs;
+  const sameRun = (live) =>
+    live.status === "running" &&
+    live.childSessionID === job.childSessionID &&
+    (live.attempt ?? 1) === (job.attempt ?? 1) &&
+    live.startedAt === job.startedAt;
+  const endChild = async (res) => {
+    // A child Manta started keeps running (and spending) after its result said "failed" unless it is interrupted.
+    // The record is already terminal here, so the interrupt's own outcome event finds nothing left to do.
+    if (res?.alreadyTerminal || res?.skipped || !deps.abortSession || !job.childSessionID) return;
+    try {
+      await deps.abortSession(job.childSessionID);
+    } catch (e) {
+      console.warn(`[delegate] interrupting the stopped child of ${job.id} failed:`, e?.message ?? e);
+    }
+  };
+
+  if (job.startedAt != null && clock() - job.startedAt > ceiling) {
+    const res = await finishV2Job(job, "failed", `reached its time limit of ${formatDuration(ceiling)}`, deps, {
+      endReason: "time-limit",
+      onlyIf: (live) => sameRun(live) && withLivenessDefaults(live).ceilingMs === ceiling && clock() - live.startedAt > ceiling,
+    });
+    await endChild(res);
+    return;
+  }
+
+  if (job.launchState !== "running" || !liveness) return;
+  const verdict = liveness.judgeStall(job.id, clock());
+  if (!verdict.stalled) return;
+  const message = stallMessage(verdict, deps.jobViews?.headlineFor(job) ?? "");
+  const res = await finishV2Job(job, "failed", message, deps, {
+    endReason: "stalled",
+    onlyIf: (live) =>
+      sameRun(live) && liveness.get(job.id)?.lastProgressAt === verdict.lastProgressAt && liveness.judgeStall(job.id, clock()).stalled,
+  });
+  await endChild(res);
+}
+
+/** Fold usage / the last-progress time / the file count into a running job's record (once a sweep, at most one write). */
+async function refreshJobProgress(job, deps) {
+  const clock = deps.now ?? (() => Date.now());
+  let files;
+  if (job.worktree && job.baseSha && typeof deps.gitRun === "function") {
+    const n = await withBudget(() => countFilesChanged(job, deps), FILES_REFRESH_BUDGET_MS);
+    files = n === undefined ? null : n; // (a read that failed or ran out of budget is "unknown", never 0)
+  }
+  await mutateJobProgress(job.id, deps, (cur) => {
+    let jp = cur.jobProgress;
+    const delta = deps.liveness?.takeUsageDelta(cur.id);
+    if (delta) jp = { ...jp, usage: mergeUsage(jp.usage, delta) };
+    if (files !== undefined && (jp.files?.changed ?? undefined) !== files) jp = { ...jp, files: { changed: files, at: clock() } };
+    const last = deps.liveness?.snapshot(cur.id)?.lastProgressAt ?? null;
+    const lastChanged = last != null && last !== cur.lastProgressAt;
+    if (jp === cur.jobProgress && !lastChanged) return null;
+    return { jobProgress: jp, ...(lastChanged ? { lastProgressAt: last } : {}) };
+  });
+}
+
+async function sweepLiveness(skipIds, deps) {
+  const { load = loadJobs } = deps;
+  const { liveness } = deps;
+  let jobs = (await load()) ?? [];
+  liveness?.syncRoots(jobs);
+  deps.jobViews?.prune(jobs.map((j) => j.id));
+  const manta = (j) => j.status === "running" && !skipIds.has(j.id) && !!j.childSessionID && completionOwnerOf(j) === "manta";
+  // a legacy running record gets the new fields at first touch
+  for (const j of jobs.filter(manta)) if (lacksLivenessDefaults(j)) await mutateJobProgress(j.id, deps, () => null);
+
+  if (liveness) {
+    const eligible = (j) => j.launchState === "running" && !deps.deferSettlement?.(j.childSessionID);
+    const todo = jobs.filter((j) => manta(j) && eligible(j) && liveness.get(j.id)?.reconstructedAt == null);
+    await pool(todo, SWEEP_IO_CONCURRENCY, (j) => reconstructLiveness(j, deps));
+    await retryRejections(deps);
+  }
+
+  // The store may have moved while those reads ran: judge from the current records (each end re-checks under the lock).
+  jobs = (await load()) ?? [];
+  for (const j of jobs.filter(manta)) {
+    // An uncertain launch is never ended on a clock: nothing proves the run did not start. A job with a handoff
+    // pending is not judged under it either: the limit is re-evaluated once the handoff commits or fails.
+    if (j.startedAt == null || j.launchState === "uncertain" || deps.deferSettlement?.(j.childSessionID)) continue;
+    try {
+      await judgeLiveness(j, deps);
+    } catch (e) {
+      console.warn(`[delegate] judging ${j.id} failed:`, e?.message ?? e);
+    }
+  }
+
+  jobs = (await load()) ?? [];
+  await pool(jobs.filter((j) => manta(j) && j.launchState === "running"), SWEEP_IO_CONCURRENCY, (j) => refreshJobProgress(j, deps));
+  // time moves the view even when nothing happened (a model label ages out, the quiet quantum): re-publish what changed
+  for (const j of jobs) if (j.status === "running") deps.jobViews?.notify(j.id);
+}
+
+/**
+ * `delegate_extend`: give a running Manta-owned job more time (spec A7). Under the jobs lock, so an accepted extension and a
+ * time-limit end can't both happen. Every refusal is `{ok:false, status, error}`; the error is text for the model.
+ * @param {string} id
+ * @param {{ minutes: number, reason: string, sessionID: string }} input `sessionID` is the caller's own session
+ */
+export async function extendJob(id, input, deps = {}) {
+  const { load = loadJobs, save = saveJobs, now = () => Date.now() } = deps;
+  const minutes = input?.minutes;
+  const reason = typeof input?.reason === "string" ? input.reason.trim() : "";
+  return jobsLock.runExclusive(async () => {
+    const jobs = (await load()) ?? [];
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, status: 404, error: "that background job no longer exists" };
+    const job = jobs[idx];
+    if (job.origin === "observed" || completionOwnerOf(job) !== "manta") {
+      return { ok: false, status: 409, error: "only jobs started with delegate can be extended" };
+    }
+    if (job.status !== "running") return { ok: false, status: 409, error: `that job is not running (${job.status})` };
+    const sessionID = input?.sessionID;
+    const chain = typeof deps.replacementChain === "function" ? deps.replacementChain(job.parentSessionID) : null;
+    const mine = typeof sessionID === "string" && !!sessionID && (sessionID === job.parentSessionID || (Array.isArray(chain) && chain.includes(sessionID)));
+    if (!mine) return { ok: false, status: 403, error: "that job belongs to another session" };
+    if (!Number.isInteger(minutes) || minutes < 15 || minutes > 480) {
+      return { ok: false, status: 400, error: "minutes must be a whole number between 15 and 480" };
+    }
+    if (!reason || reason.length > 200) return { ok: false, status: 400, error: "reason is required (1 to 200 characters)" };
+    const base = withLivenessDefaults(job);
+    const ceilingMs = base.ceilingMs + minutes * 60_000;
+    if (ceilingMs > EXTEND_MAX_CEILING_MS) {
+      return { ok: false, status: 409, error: "that would let the job run past 12 hours, which is the most it can have" };
+    }
+    const next = { ...base, ceilingMs, extensions: [...base.extensions, { at: now(), minutes, reason }].slice(-20) };
+    jobs[idx] = next;
+    await save(jobs);
+    emitUpdate(deps, next, {});
+    return { ok: true, job: { id: next.id, name: next.name, ceilingMs: next.ceilingMs, startedAt: next.startedAt } };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Engine factory — wires the runtime deps once (in src/server/index.mjs) and
 // returns bound methods the REST/RPC handlers + the pump call. Mirrors the
@@ -4690,6 +5096,19 @@ export function createDelegateEngine(baseDeps) {
   const claims = new Map(); // child session id -> { background, at }
   const setTimer = baseDeps.setTimer ?? ((fn, ms) => { const h = setTimeout(fn, ms); h.unref?.(); return h; });
   const clearTimer = baseDeps.clearTimer ?? ((h) => clearTimeout(h));
+  // Liveness (spec 2026-11-14): the in-memory picture the activity tap feeds, the wire `view` of each job, the evidence log.
+  const liveness = baseDeps.liveness ?? createJobLiveness({ now: nowFn });
+  const jobViews =
+    baseDeps.jobViews ??
+    createJobViews({
+      now: nowFn,
+      epoch: baseDeps.epoch,
+      liveness,
+      publish: (evt) => baseDeps.publish?.(evt),
+      load: async () => (await (baseDeps.load ?? loadJobs)()) ?? [],
+      setTimer,
+      clearTimer,
+    });
   const boundMap = (m, cap) => { while (m.size > cap) m.delete(m.keys().next().value); };
 
   // A `task` tool part named this child: foreground → inline only (never a row),
@@ -4706,7 +5125,11 @@ export function createDelegateEngine(baseDeps) {
       candidates.delete(childId);
     }
   }
-  const deps = { ...baseDeps, lifecycleGet: (sid) => lifecycle.get(sid), onSubagentClaim: noteClaim };
+  const deps = { ...baseDeps, liveness, jobViews, livenessLog: baseDeps.livenessLog ?? null, lifecycleGet: (sid) => lifecycle.get(sid), onSubagentClaim: noteClaim };
+  // Every running job is known to the index before the first event can arrive for it.
+  Promise.resolve()
+    .then(async () => liveness.syncRoots((await (deps.load ?? loadJobs)()) ?? []))
+    .catch(() => {});
   const activeReconciler = createActiveSessionReconciler(deps);
 
   async function adoptCandidate(childId) {
@@ -4802,6 +5225,9 @@ export function createDelegateEngine(baseDeps) {
   // declared, and only then starts the job. Returns the startJob result OR
   // {ok:false, error:"declined"}.
   const startJobWithApproval = async (input) => {
+    // (refused BEFORE the approval card: a job that can't start must not ask the user to approve it)
+    const durationError = validateMaxDurationMinutes(input?.maxDurationMinutes);
+    if (durationError) return { ok: false, error: durationError };
     const tools = Array.isArray(input?.tools) ? input.tools : [];
     const trustMode = !!input?.trustMode;
     // Skip the card entirely when trust mode is on (nothing to approve) or
@@ -4874,6 +5300,43 @@ export function createDelegateEngine(baseDeps) {
     jobStatusOf: (sessionId) => jobStatusOf(sessionId, deps),
     isRunningJobSession: async (sessionId) => (await runningJobOwner(sessionId, deps)) !== null,
     getJob: (id) => getJob(id, deps),
+    // ---- liveness + progress (spec 2026-11-14) ----
+    /** The activity tap's subscriber: `streamInterp.onActivity(engine.observeActivity)`. Synchronous; persistence is queued. */
+    observeActivity: (rec) => {
+      const eff = liveness.observe(rec);
+      if (!eff) return;
+      if (eff.todos) {
+        void serialize(`progress:${eff.jobId}`, () =>
+          mutateJobProgress(eff.jobId, deps, (job) => {
+            const jp = applyChecklist(job.jobProgress, eff.todos, nowFn());
+            return jp === job.jobProgress ? null : { jobProgress: jp };
+          }),
+        );
+      } else if (eff.notify) jobViews.notify(eff.jobId);
+    },
+    /** A model's `progress_report` from a job's own session onto the job record (every accepted report is stored). */
+    reportJobProgress: async ({ sessionID, input, record }) => {
+      const jobId = liveness.jobIdOf(sessionID);
+      if (!jobId || liveness.get(jobId)?.root !== sessionID) return { applied: false };
+      const at = nowFn();
+      const job = await serialize(`progress:${jobId}`, () =>
+        mutateJobProgress(jobId, deps, (cur) => ({ jobProgress: applyModelReport(cur.jobProgress, { input, record, now: at }) })),
+      );
+      return { applied: !!job };
+    },
+    /** A running, Manta-owned `delegate` job's own session or one below it: no question or permission can wait there (A5). */
+    ownsSession: (sessionId) => liveness.ownsSession(sessionId),
+    /** The pump's backstop: answer a question / permission ask in an owned session with a rejection (queued for a retry on failure). */
+    rejectAsk: (ask) => rejectAsk(ask, deps),
+    queueRejection: (ask) => liveness.queueRejection(ask),
+    extendJob: (id, input) => extendJob(id, input, deps),
+    /** The opencode stream reconnected: events may have been missed, so every job's live picture is rebuilt from reads. */
+    onStreamReconnect: async () => {
+      liveness.resetAll((await (deps.load ?? loadJobs)()) ?? []);
+    },
+    recordDeployed: (info) => deps.livenessLog?.recordDeployed(info),
+    liveness,
+    jobViews,
     /** The raw job records (no progress reads) — the cheap read behind the read-only-job guard. */
     loadRecords: async () => (await (deps.load ?? loadJobs)()) ?? [],
     startSweeper: (opts) => startSweeper(deps, opts),

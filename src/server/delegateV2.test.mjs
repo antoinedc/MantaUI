@@ -607,16 +607,16 @@ test("outcomes: succeeded → done, failed → failed with the error, interrupte
   assert.equal(w.calls.synth[0].body.metadata.state, "failed");
 });
 
-test("the sweeper's 30-minute timeout runs through the V2 path: failed + ONE pending result", async () => {
+test("the sweeper's ceiling runs through the V2 path: failed + ONE pending result", async () => {
   const w = world({ jobs: [v2Job({ startedAt: T0 })] });
   w.sessions.set("ses_child", { id: "ses_child", parentID: PARENT, time: {} });
   w.active.add("ses_child");
-  w.setNow(T0 + 31 * 60_000);
+  w.setNow(T0 + 4 * 60 * 60_000 + 60_000);
   w.deps.sessionExists = async () => true;
   await sweepDelegateJobs(w.deps);
   const j = w.job("aaaa1111");
   assert.equal(j.status, "failed");
-  assert.match(j.error, /timed out after 30 minutes/);
+  assert.match(j.error, /reached its time limit of 4 hours/);
   assert.equal(w.calls.synth.length, 1);
   assert.equal(w.calls.synth[0].body.metadata.state, "failed");
 });
@@ -1345,20 +1345,20 @@ test("timeout: a Manta-owned V2 job's child is interrupted; the job fails with t
     w.finish(sid, "interrupted", w.state.now + 1);
   };
   w.deps.sessionExists = async () => true;
-  w.setNow(T0 + 31 * 60_000);
+  w.setNow(T0 + 4 * 60 * 60_000 + 60_000);
   await sweepDelegateJobs(w.deps);
 
   assert.deepEqual(aborted, ["ses_child"]);
   const j = w.job("aaaa1111");
   assert.equal(j.status, "failed");
-  assert.equal(j.error, "timed out after 30 minutes");
+  assert.equal(j.error, "reached its time limit of 4 hours");
   assert.equal(w.calls.synth.length, 1);
 
   // the interrupt's raw outcome reaches the settler afterwards: the job is already terminal
   const res = await settleV2Job(w.job("aaaa1111"), w.deps, { hint: { outcome: "interrupted", at: w.state.now + 1 } });
   assert.equal(res.settled, false);
   await sweepDelegateJobs(w.deps);
-  assert.equal(w.job("aaaa1111").error, "timed out after 30 minutes");
+  assert.equal(w.job("aaaa1111").error, "reached its time limit of 4 hours");
   assert.equal(w.calls.synth.length, 1, "still exactly one result");
   assert.deepEqual(aborted, ["ses_child"], "interrupted once");
 });
@@ -1371,7 +1371,7 @@ test("timeout: a failing interrupt is logged, not thrown — the job still fails
     throw netErr();
   };
   w.deps.sessionExists = async () => true;
-  w.setNow(T0 + 31 * 60_000);
+  w.setNow(T0 + 4 * 60 * 60_000 + 60_000);
   await sweepDelegateJobs(w.deps);
   assert.equal(w.job("aaaa1111").status, "failed");
   assert.equal(w.calls.synth.length, 1);
@@ -1386,7 +1386,7 @@ test("timeout: opencode-owned V2 jobs (adopted subagents / native background com
   const aborted = [];
   w.deps.abortSession = async (sid) => aborted.push(sid);
   w.deps.sessionExists = async () => true;
-  w.setNow(T0 + 3 * 60 * 60_000);
+  w.setNow(T0 + 5 * 60 * 60_000);
   await sweepDelegateJobs(w.deps);
   assert.equal(w.job("oc000001").status, "running");
   assert.equal(aborted.length, 0);

@@ -32,7 +32,7 @@
 // this issue is the server half + the progress_report opencode tool.
 
 import { statePath } from "../shared/paths.mjs";
-import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { startPoller } from "./startPoller.mjs";
 
 export const PROGRESS_STATES = ["working", "blocked", "done", "failed"];
@@ -41,6 +41,11 @@ const VALID_STATES = new Set(PROGRESS_STATES);
 export const PROGRESS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60_000;
 const STORE_PATH = statePath("progress.json");
+// progress.json holds EVERY session's record in one file, so every read-modify-write of it (report, clear,
+// retention sweep) runs under this one store-wide mutex — a per-session lock would still lose updates.
+const storeLock = createMutex();
+// `milestone` (a notable finding, spec 2026-11-14 B5) is routed only to the job record: never stored per session.
+export const MILESTONE_MAX = 160;
 
 // ---------------------------------------------------------------------------
 // Pure merge rule — the whole design
@@ -146,12 +151,19 @@ export async function reportProgress(
   if (typeof sessionID !== "string" || !sessionID) {
     return { ok: false, error: "sessionID is required" };
   }
-  const records = await load();
-  const prev = records[sessionID];
-  const merged = applyReport(prev, { ...input, sessionID }, now);
+  if (input.milestone !== undefined && input.milestone !== null && typeof input.milestone !== "string") {
+    return { ok: false, error: "milestone must be a string" };
+  }
+  const merged = await storeLock.runExclusive(async () => {
+    const records = await load();
+    const prev = records[sessionID];
+    const m = applyReport(prev, { ...input, sessionID }, now);
+    if (!m.ok) return m;
+    records[sessionID] = m.record;
+    await save(records);
+    return m;
+  });
   if (!merged.ok) return merged;
-  records[sessionID] = merged.record;
-  await save(records);
   publish?.({ kind: "progress.updated", payload: { sessionID } });
   if (Array.isArray(input.sinks)) {
     for (const s of input.sinks) {
@@ -191,10 +203,14 @@ export async function clearProgress(
   if (typeof sessionID !== "string" || !sessionID) {
     return { ok: false, error: "sessionID is required" };
   }
-  const records = await load();
-  if (!records[sessionID]) return { ok: true, deleted: false };
-  delete records[sessionID];
-  await save(records);
+  const deleted = await storeLock.runExclusive(async () => {
+    const records = await load();
+    if (!records[sessionID]) return false;
+    delete records[sessionID];
+    await save(records);
+    return true;
+  });
+  if (!deleted) return { ok: true, deleted: false };
   publish?.({ kind: "progress.updated", payload: { sessionID } });
   return { ok: true, deleted: true };
 }
@@ -229,9 +245,11 @@ export async function sweepProgress({
   save = saveRecords,
   now = () => Date.now(),
 } = {}) {
-  const records = await load();
-  const { records: retained, changed } = pruneRecords(records, now());
-  if (changed) await save(retained);
+  await storeLock.runExclusive(async () => {
+    const records = await load();
+    const { records: retained, changed } = pruneRecords(records, now());
+    if (changed) await save(retained);
+  });
 }
 
 export function startProgressSweeper({ publish } = {}, { intervalMs = SWEEP_INTERVAL_MS, storePath } = {}) {
