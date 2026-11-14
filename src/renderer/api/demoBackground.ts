@@ -95,14 +95,14 @@ const job = (id: string, name: string, view: DelegateJobProgressView, n: number)
 
 export const demoBackgroundJobs: DelegateJob[] = [
   job(
-    "bg-steps",
+    "job-steps",
     "csv-export-endpoint",
     { ...base, headline: "Writing the export tests", headlineSource: "model", steps: stepsOf(3, 7), bar: 3 / 7 },
     1,
   ),
-  job("bg-plain", "audit-retry-config", { ...base, headline: "Reading the retry config loader", headlineSource: "model" }, 2),
+  job("job-plain", "audit-retry-config", { ...base, headline: "Reading the retry config loader", headlineSource: "model" }, 2),
   job(
-    "bg-blocked",
+    "job-blocked",
     "migrate-invoice-table",
     {
       ...base,
@@ -115,7 +115,7 @@ export const demoBackgroundJobs: DelegateJob[] = [
     3,
   ),
   job(
-    "bg-quiet",
+    "job-quiet",
     "rotate-service-keys",
     {
       ...base,
@@ -129,7 +129,7 @@ export const demoBackgroundJobs: DelegateJob[] = [
     4,
   ),
   job(
-    "bg-details",
+    "job-details",
     "billing-ledger-split",
     {
       ...base,
@@ -151,7 +151,7 @@ export const demoBackgroundJobs: DelegateJob[] = [
     5,
   ),
   job(
-    "bg-grew",
+    "job-grew",
     "docs-site-migration",
     {
       ...base,

@@ -1188,8 +1188,8 @@ export const SCREENS = [
     title: "Background job card — working, with steps (chip, headline, bar)",
     url: BACKGROUND_URL,
     ready: '[data-screen="session"]',
-    final: bgCard("bg-steps"),
-    region: bgCard("bg-steps"),
+    final: bgCard("job-steps"),
+    region: bgCard("job-steps"),
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
@@ -1199,8 +1199,8 @@ export const SCREENS = [
     title: "Background job card — working, no steps (bar row reserved)",
     url: BACKGROUND_URL,
     ready: '[data-screen="session"]',
-    final: bgCard("bg-plain"),
-    region: bgCard("bg-plain"),
+    final: bgCard("job-plain"),
+    region: bgCard("job-plain"),
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
@@ -1210,8 +1210,8 @@ export const SCREENS = [
     title: "Background job card — needs a decision (amber headline)",
     url: BACKGROUND_URL,
     ready: '[data-screen="session"]',
-    final: bgCard("bg-blocked"),
-    region: bgCard("bg-blocked"),
+    final: bgCard("job-blocked"),
+    region: bgCard("job-blocked"),
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
@@ -1221,10 +1221,10 @@ export const SCREENS = [
     title: "Background job card — quiet for 6 min (Details open)",
     url: BACKGROUND_URL,
     ready: '[data-screen="session"]',
-    final: bgCard("bg-quiet"),
-    region: bgCard("bg-quiet"),
+    final: bgCard("job-quiet"),
+    region: bgCard("job-quiet"),
     actions: async (page) => {
-      await bgOpenDetails(page, "bg-quiet");
+      await bgOpenDetails(page, "job-quiet");
     },
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
@@ -1235,10 +1235,10 @@ export const SCREENS = [
     title: "Background job card — Details open (checklist, milestones, tool, files, spend, time left)",
     url: BACKGROUND_URL,
     ready: '[data-screen="session"]',
-    final: bgCard("bg-details"),
-    region: bgCard("bg-details"),
+    final: bgCard("job-details"),
+    region: bgCard("job-details"),
     actions: async (page) => {
-      await bgOpenDetails(page, "bg-details");
+      await bgOpenDetails(page, "job-details");
     },
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
@@ -1249,10 +1249,10 @@ export const SCREENS = [
     title: "Background job card — plan grew (Details open)",
     url: BACKGROUND_URL,
     ready: '[data-screen="session"]',
-    final: bgCard("bg-grew"),
-    region: bgCard("bg-grew"),
+    final: bgCard("job-grew"),
+    region: bgCard("job-grew"),
     actions: async (page) => {
-      await bgOpenDetails(page, "bg-grew");
+      await bgOpenDetails(page, "job-grew");
     },
     mockup: null,
     viewport: DESKTOP_VIEWPORT,
