@@ -1,6 +1,6 @@
 # Shared knowledge: stop re-explaining things across sessions and projects
 
-Status: draft for review (revision 1), 2026-11-16. Scope: the box server, the
+Status: draft for review (revision 2), 2026-11-16. Scope: the box server, the
 V2 `manta` opencode plugin, Settings (desktop). iOS: out of scope for v1.
 
 Agreed with the user:
@@ -15,6 +15,11 @@ Agreed with the user:
 - Two choices are **user settings**, not design decisions: how rule changes
   reach a repository's `AGENTS.md`, and whether a project shares its knowledge
   with other projects.
+- Nothing is tailored to one user's projects: no project names, patterns or
+  per-project defaults are hard-coded. Every box starts from the same global
+  defaults and the user changes them.
+- The curator's models are picked by Manta's existing model router from what
+  the box has available, never hard-coded (§6.2.1).
 
 ## 1. Problem
 
@@ -217,8 +222,7 @@ Runs inside manta-server (CTO engine sweep), one project at a time, with the
 gatekeeper's per-project single-writer pattern. Triggers: ≥ 5 queued notes for a
 project, or 30 minutes after the last note; plus the weekly tidy-up (a routine).
 
-For each batch the curator (CTO model tier `curator`, routed through the model
-catalog like the gatekeeper) reads the queue, the affected pages and the fact
+For each batch the curator (model chosen per §6.2.1) reads the queue, the affected pages and the fact
 index, and returns a list of decisions:
 
 | Decision | Effect |
@@ -238,6 +242,40 @@ Bars it must meet (checked in code after the model answers, not just prompted):
 - **Placement.** General vs project is decided by the curator, then filtered by
   the project's `sharing` setting.
 - **Budgets.** Briefing page ≤ 60 lines; managed blocks per §4.1.
+
+#### 6.2.1 Model selection
+
+Reuses the CTO's existing per-task routing (`TASK_CLASSES` + `defaultResolveModel`
+in `ctoSessions.mjs` → `chooseSubagentModel` in the shared model router). That
+path already:
+
+- picks only from models connected and usable on this box, honouring the
+  user's deactivated models and routing policy;
+- ranks by measured quality (`modelQuality.mjs` scores, tier floor), then plan
+  quota headroom and pacing, then cost;
+- skips unhealthy endpoints and fails over to another endpoint once
+  (`runEphemeral`), with spend metered by the CTO budget.
+
+New task classes (a literal table, never a model id):
+
+| Task class | Work | Tier → router band | Context budget |
+|---|---|---|---|
+| `curator-notes` | notes → page edits, fact proposals, drops | `mid` → `balanced` | 12k |
+| `curator-rules` | rule add/change/remove, conflict calls, commons rewrites | `deep` → `deep` | 24k |
+| `curator-skills` | skill draft and trial grading | `deep` → `deep` | 24k |
+
+- Add `deep: "deep"` to `TIER_TO_ROUTER_TIER`. The `nano` → `mid` escalation
+  on invalid output stays as it is; `deep` classes never escalate (there is
+  nothing above).
+- If the router has no model meeting the band (typed `no-healthy-endpoint`),
+  the batch stays queued and is retried on the next trigger; after 24 h of
+  failures the digest says which work is waiting and why. It never falls back
+  to a weaker band for `curator-rules` / `curator-skills` (a weak model writing
+  standing rules is the failure we most want to avoid).
+- The skill trial job (§6.5 step 3) is an ordinary `delegate` job with no
+  `model` argument, so Auto routing picks it the same way.
+- The capture step (§5.2) adds no model call; it rides the segment summary's
+  existing class.
 
 Every applied batch is **one commit** in the knowledge store: message =
 one-line summary, body = each decision with its reason and refs, trailer
@@ -349,8 +387,8 @@ knowledge_read({ ref: string })   // a page path, or a session/message ref from 
    rule needs user-authored evidence (a user message).
 3. **Knowledge never grants authority.** No page, rule or skill can change
    permissions, trust mode, budgets or autonomy settings.
-4. **Bounty / client isolation** is the `sharing` setting; projects whose
-   canonical id is unknown default to `read-only` until the user chooses.
+4. **Isolation between projects** is the `sharing` setting only; there is no
+   built-in list of sensitive projects.
 5. The curator's repo writes use the box user's existing git credentials only;
    it never stores new ones.
 
@@ -405,11 +443,10 @@ knowledge_read({ ref: string })   // a page path, or a session/message ref from 
 
 ## 13. Rollout and follow-up
 
-1. Ship with `enabled: true`, `repoRules: "pull-request"`,
-   `sharing: "share-and-read"` defaults, and every existing project whose id
-   looks like a bounty/audit repo (`cantina*`, `*immunefi*`, `*-hunt`, `bounty`,
-   `certik*`) pre-set to `private`, listed in the first digest for the user to
-   confirm.
+1. Ship with the global defaults `enabled: true`, `repoRules: "pull-request"`,
+   `sharing: "share-and-read"`, identical on every box, with no per-project
+   presets. The first digest lists every detected project with its effective
+   settings so the user can change any of them in one place.
 2. **Baseline first**: before the curator writes anything, record a week of
    "re-explanations" — improvemyagent's correction count per 100 user turns,
    plus user messages that restate a fact already in the store (FTS match).
@@ -426,9 +463,6 @@ knowledge_read({ ref: string })   // a page path, or a session/message ref from 
 
 ## 14. Open questions
 
-1. Defaults: `pull-request` and `share-and-read` with bounty-looking projects
-   pre-set to `private` — confirm.
-2. Curator model tier: route like the gatekeeper (cheap tier) or a stronger
-   tier for page and rule writing? Proposed: stronger tier for `rule.*` and
-   `skill.*`, cheap tier for notes → page edits.
-3. Should the user wiki also be shown (read-only) in the iOS app in v1?
+1. Should the user wiki also be shown (read-only) in the iOS app in v1?
+
+Resolved: defaults are generic (§13.1); curator models per §6.2.1.
