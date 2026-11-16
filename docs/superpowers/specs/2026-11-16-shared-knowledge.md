@@ -1,6 +1,6 @@
 # Shared knowledge: stop re-explaining things across sessions and projects
 
-Status: draft for review (revision 2), 2026-11-16. Scope: the box server, the
+Status: draft for review (revision 3), 2026-11-16. Scope: the box server, the
 V2 `manta` opencode plugin, Settings (desktop). iOS: out of scope for v1.
 
 Agreed with the user:
@@ -463,6 +463,5 @@ knowledge_read({ ref: string })   // a page path, or a session/message ref from 
 
 ## 14. Open questions
 
-1. Should the user wiki also be shown (read-only) in the iOS app in v1?
-
-Resolved: defaults are generic (§13.1); curator models per §6.2.1.
+None. Resolved: defaults are generic (§13.1); curator models per §6.2.1; no
+iOS surface in v1.
