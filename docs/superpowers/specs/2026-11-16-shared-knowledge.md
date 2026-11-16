@@ -306,7 +306,7 @@ Reuses the CTO's task-class runner (`runEphemeral` / `defaultResolveModel` in
 router): picks among models connected and usable on the box, honouring the
 user's deactivated models and routing policy; ranks by measured quality, quota
 headroom and pacing, then cost; skips unhealthy endpoints and fails over once.
-This runner works with the CTO engine off; only the budget hook differs (§6.6).
+This runner works with the CTO engine off; only the budget hook differs (§6.7).
 
 | Task class | Work | Tier → band | Context budget | Strict |
 |---|---|---|---|---|
