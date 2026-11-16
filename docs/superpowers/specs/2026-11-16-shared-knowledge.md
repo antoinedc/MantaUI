@@ -1,6 +1,6 @@
 # Shared knowledge: stop re-explaining things across sessions and projects
 
-Status: approved with fixes after review round 2; revision 5 folds those fixes in, 2026-11-16.
+Status: approved — review round 3 verdict "implementable"; revision 6 folds its clarifications in, 2026-11-16.
 Scope: the box server, the V2 `manta` opencode plugin, desktop Settings. No iOS
 surface in v1.
 
@@ -121,6 +121,8 @@ Measured on the dev box, 2026-11-16:
   predate the upgrade are mapped from their recorded directory when it still
   resolves, otherwise through opencode's own `project_id` joined to a session of
   the same project that did resolve. The rest stay unmapped.
+- A `task` subagent child (prompted by opencode itself, never by manta-server)
+  inherits its parent's mapping on `session.created{parentID}`.
 - A session with no mapping is treated as `private` for every sharing decision
   (fail closed).
 
@@ -155,7 +157,7 @@ global defaults and a per-project list.
 ```jsonc
 "knowledge": {
   "enabled": true,              // master switch: capture, curator, briefing, tools
-  "dailyCapUsd": 1.00,          // curator model spend per local day (§6.6)
+  "dailyCapUsd": 1.00,          // curator model spend per local day (§6.7)
   "repoRules": "box-only",      // default: "box-only" | "pull-request" | "direct"
   "sharing": "share-and-read",  // default: "share-and-read" | "read-only" | "private"
   "observeOnly": false,         // hidden, not in the UI: capture + detection only (§13.3)
@@ -190,7 +192,10 @@ global defaults and a per-project list.
   runs `git push origin HEAD:<default>`. `pull-request` commits on branch
   `manta/knowledge` and pushes it; the PR is created once with the forge
   module's `createPullRequest`, and later changes are pushed to the same branch
-  with the body refreshed by the new adapter call `updatePullRequest`.
+  with the body refreshed by the new adapter call `updatePullRequest`; the open
+  PR is found with `listPullRequests` filtered by head branch. Pushes use the
+  box's plain git credentials; a rejected push in `pull-request` mode makes the
+  project behave as `box-only` until fixed, shown on the card.
 - **What it writes**: only a managed block between
   `<!-- manta:knowledge:start -->` and `<!-- manta:knowledge:end -->`, created
   at the end of `AGENTS.md` (file created if missing; a symlinked `AGENTS.md`
@@ -410,10 +415,18 @@ original source, so the rest of a page keeps its exact formatting.
    runbook only. The model's judgement is not enough.
 4. **Draft** a `SKILL.md` named `learned-<slug>`.
 5. **Trial**, best effort: a headless internal session the knowledge engine
-   creates the way routines create runs (`withInternalMarker`, its own
-   worktree via `local.gitAddWorktree`, never-ask ruleset), not a delegate job,
-   so nothing is posted back as a chat turn. Model: `mid` band via the runner.
-   Ruleset: a leading catch-all deny, then allows for `read`, `glob`, `grep`,
+   creates itself from the same primitives routines use inline
+   (`oc.createSession({id, directory, model, permission, metadata})`,
+   `local.gitAddWorktree`, `oc.sendPrompt`, `oc.abortSession`;
+   `routines.mjs:1244-1296`), not a delegate job, so nothing is posted back as
+   a chat turn. Metadata: `withInternalMarker({manta:{knowledgeTrial:<id>}})`,
+   and auto-handoff skips sessions carrying `manta.knowledgeTrial` (as it does
+   `manta.routineId`). Worktree: added from the project's most recently used
+   clone (from the session map); the trial is skipped when none still exists,
+   and the worktree is removed when the trial ends. Model: `mid` band through
+   `defaultResolveModel` (not `runEphemeral`, which is tool-less). Ruleset: its
+   own deny-first builder (routines' builder is allow-first): a leading
+   catch-all deny, then allows for `read`, `glob`, `grep`,
    `list`, `edit` inside its worktree, and bash only for `ls *`, `cat *`,
    `head *`, `tail *`, `wc *`, `git status*`, `git log*`, `git diff*`,
    `git show*`, `which *`. The session walks through the skill on the most
@@ -449,7 +462,8 @@ immediately (a user action).
 
 ### 7.1 Briefing
 
-- **Precomputed per project** on every store commit
+- **Precomputed per project** on every store commit and after every fetch of
+  the curator's clone (a merged PR changes the rules part)
   (`.briefings/project-<slug>.txt`), so serving it is a file read.
 - **Delivery**: the `manta` plugin prefetches the briefing when a session
   starts (session-created event if §0.2 confirms one, else asynchronously on
@@ -463,8 +477,8 @@ immediately (a user action).
   session with at most one assistant message (the request carries
   `assistantMessages`); otherwise the server stores and returns `""`, so it is
   never inserted mid-conversation. The plugin's `compaction` hook calls
-  `POST /api/knowledge/briefing/reset {sessionID}`, after which the next request
-  may get a fresh briefing. Sessions that predate the upgrade therefore start
+  `POST /api/knowledge/briefing/reset {sessionID}`, which permits exactly one
+  fresh start on the next request regardless of `assistantMessages`. Sessions that predate the upgrade therefore start
   receiving it at their next compaction.
 - **Empty** for internal sessions, the CTO conversation, routine runs, curator
   sessions, and when `enabled` is off or `observeOnly` is on.
@@ -515,7 +529,7 @@ immediately (a user action).
   - store: `git revert` of its commit; a conflict with a later commit fails
     with an error naming that later change (nothing half-applied);
   - managed block or skill: re-rendered from the store after the revert;
-  - `direct` repo change: a revert commit pushed via the curator worktree;
+  - `direct` repo change: a revert commit pushed from the curator's clone;
   - unmerged PR: the change is removed from the PR branch; merged PR: a revert
     PR is opened;
   - always: a tombstone (`tombstones.json`: decision key = `sha256(kind +
@@ -535,8 +549,13 @@ immediately (a user action).
    prompt manta-server sends already passes through one function that mints its
    message id (`opencode.mjs:650-651`; a test forbids other `/prompt` sites,
    `commandOrigins.mjs:14-17`). That function gains an `origin` argument,
-   default `unknown`; only the client send paths (`opencode:prompt` /
-   `opencode:run-command` RPC handlers used by desktop and iOS) pass `user`.
+   default `unknown`. `origin` is a server-set field on the prompt input: only
+   the `opencode:prompt` RPC handler (desktop and iOS sends) sets `user`, and it
+   is carried through `ctoConversation.admitDirect` and `handoff.admitPrompt`
+   (`rpc.mjs:1658-1665`) and persisted with held or redirected prompts; the
+   other callers of `admitPrompt` (`index.mjs:649, 1269`) never set it. Slash
+   command messages (`opencode:run-command`, posted as commands, text = the
+   expanded template) are not user-authored.
    Origins are stored in `state.sqlite` (`prompt_origin`, kept 90 days). A
    message with any other origin, no record, or from before the upgrade is not
    user-authored.
@@ -642,7 +661,7 @@ knowledge_read({ ref: string }) → page body, or the message neighborhood for a
 - Sharing matrix (§4.2) across search, briefing, preferences, commons, skills;
   downgrade cleanup.
 - `repoRules`: outward modes disabled without login/push/non-fork; first-action
-  notification; worktree never the user's checkout; block create/edit/budget;
+  notification; the curator's clone is independent of any user clone; block create/edit/budget;
   hand-edit baseline with an open PR; push rejected → PR; PR closed → undo;
   repo-facing text has no refs or quotes.
 - Curator: lock + base-commit re-ask; dirty store committed as user; bars
