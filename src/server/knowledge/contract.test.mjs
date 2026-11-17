@@ -18,7 +18,7 @@ import { transpileTree } from "../../../scripts/opencode-v2/ts-loader.mjs";
 import { isExemptPath } from "../auth.mjs";
 import { createKnowledgeEngine } from "./engine.mjs";
 import { buildKnowledgeChannels, handleKnowledgeRoute, toSettingsWire } from "./routes.mjs";
-import { createBandOf, createForgeAdapters, createIsUserAuthoredRef } from "./integration.mjs";
+import { createBandOf, createForgeAdapters, createIsUserAuthored, createIsUserAuthoredRef, createKnowledgeRunner } from "./integration.mjs";
 import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
 
 let sqlite = true;
@@ -337,8 +337,8 @@ describe("engine wiring (index.mjs adapters)", { skip }, () => {
 
   test("a session pinned from its first prompt event is the only mapping path; notes then reach the queue as derived/user per the origin record", async () => {
     const origins = new Map();
-    const promptOrigins = { isUserAuthored: (mid) => origins.get(mid) === "user" };
-    const { engine } = await rig({ over: { isUserAuthoredRef: createIsUserAuthoredRef(promptOrigins) } });
+    const promptOrigins = { getRecord: (mid) => (origins.has(mid) ? { origin: origins.get(mid), sessionID: "ses_one" } : null) };
+    const { engine } = await rig({ over: { isUserAuthoredRef: createIsUserAuthoredRef(promptOrigins, { readRole: async () => "user" }) } });
     await engine.observeRaw(started("ses_one"));
     const slug = engine.sessionMap.get("ses_one").slug;
     origins.set("msg_user1", "user");
@@ -349,15 +349,35 @@ describe("engine wiring (index.mjs adapters)", { skip }, () => {
     assert.deepEqual(q.map((n) => [n.text, n.derived]), [["Use pnpm", false], ["Run pnpm test", true]]);
   });
 
-  test("createIsUserAuthoredRef: msg and part refs resolve to the message; anything else is not user-authored", () => {
-    const calls = [];
-    const f = createIsUserAuthoredRef({ isUserAuthored: (m) => (calls.push(m), m === "msg_ok") });
-    assert.equal(f("msg:ses_a/msg_ok"), true);
-    assert.equal(f("msg:ses_a/msg_other"), false);
-    assert.equal(f("commit:abcdef1"), false);
-    assert.equal(f("file:/etc/passwd"), false);
-    assert.equal(f(undefined), false);
-    assert.equal(createIsUserAuthoredRef({ isUserAuthored: () => { throw new Error("x"); } })("msg:ses_a/msg_ok"), false);
+  test("createIsUserAuthoredRef: msg/part refs resolve to the message; the record must be a user origin in the ref's own session on a message opencode stores as role user", async () => {
+    const recs = {
+      msg_ok: { origin: "user", sessionID: "ses_a" },
+      msg_asst: { origin: "user", sessionID: "ses_a" }, // a re-posted assistant id that got recorded anyway
+      msg_other_session: { origin: "user", sessionID: "ses_b" },
+      msg_sched: { origin: "schedule", sessionID: "ses_a" },
+    };
+    const roles = { "ses_a/msg_ok": "user", "ses_a/msg_asst": "assistant", "ses_a/msg_other_session": "user", "ses_a/msg_sched": "user" };
+    const f = createIsUserAuthoredRef({ getRecord: (m) => recs[m] ?? null }, { readRole: async (s, m) => roles[`${s}/${m}`] ?? null });
+    assert.equal(await f("msg:ses_a/msg_ok"), true);
+    assert.equal(await f("msg:ses_a/msg_asst"), false, "reused assistant id stays not user-authored");
+    assert.equal(await f("msg:ses_a/msg_other_session"), false, "record belongs to another session: refused");
+    assert.equal(await f("msg:ses_b/msg_other_session"), false, "role lookup finds no such message there");
+    assert.equal(await f("msg:ses_a/msg_sched"), false);
+    assert.equal(await f("msg:ses_a/msg_other"), false);
+    assert.equal(await f("commit:abcdef1"), false);
+    assert.equal(await f("file:/etc/passwd"), false);
+    assert.equal(await f(undefined), false);
+    assert.equal(await createIsUserAuthoredRef({ getRecord: () => { throw new Error("x"); } })("msg:ses_a/msg_ok"), false);
+    assert.equal(await createIsUserAuthoredRef({ getRecord: () => recs.msg_ok }, { readRole: async () => { throw new Error("down"); } })("msg:ses_a/msg_ok"), false, "an unreadable role fails closed");
+  });
+
+  test("createIsUserAuthored: user origin, and the record's session must match when the caller names one", () => {
+    const f = createIsUserAuthored({ getRecord: (m) => ({ msg_1: { origin: "user", sessionID: "ses_a" }, msg_2: { origin: "unknown", sessionID: "ses_a" } })[m] ?? null });
+    assert.equal(f("msg_1"), true);
+    assert.equal(f("msg_1", { sessionID: "ses_a" }), true);
+    assert.equal(f("msg_1", { sessionID: "ses_b" }), false);
+    assert.equal(f("msg_2"), false);
+    assert.equal(f("msg_3"), false);
   });
 
   test("createForgeAdapters: access maps ok → {canPush,isFork,defaultBranch}, every failure → null; login resolves per host", async () => {
@@ -373,6 +393,20 @@ describe("engine wiring (index.mjs adapters)", { skip }, () => {
     assert.equal(await a.hasForgeLogin("gitlab", "gitlab.example.com"), false);
     assert.equal(await a.hasForgeLogin("github"), true);
     assert.deepEqual(seen, ["github.com/acme/w", "gitlab.example.com/acme/w"]);
+  });
+
+  test("createKnowledgeRunner hands knowledge callers the real per-kind usage as `tokens` (+ usd), the estimate number otherwise", async () => {
+    const seen = [];
+    const inner = async ({ deps }) => {
+      await deps.reportCost({ taskClass: "curator-notes", tokens: 5550, usage: { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 }, usd: 0.07, estimated: false });
+      await deps.reportCost({ taskClass: "curator-notes", tokens: 400, estimated: true });
+      return { text: "ok" };
+    };
+    const run = createKnowledgeRunner({ runEphemeral: inner, oc: {}, configGet: async () => ({}) });
+    await run({ taskClass: "curator-notes", deps: { reportCost: async (c) => seen.push(c) } });
+    assert.deepEqual(seen[0].tokens, { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 });
+    assert.equal(seen[0].usd, 0.07);
+    assert.equal(seen[1].tokens, 400);
   });
 
   test("createBandOf: the family's router band, else null", () => {

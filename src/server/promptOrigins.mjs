@@ -78,7 +78,7 @@ export function createPromptOrigins(deps = {}) {
         at INTEGER NOT NULL)`);
       d.exec("CREATE INDEX IF NOT EXISTS prompt_origin_at ON prompt_origin (at)");
       stmts.insert = d.prepare("INSERT OR IGNORE INTO prompt_origin (message_id, session_id, origin, at) VALUES (?, ?, ?, ?)");
-      stmts.get = d.prepare("SELECT origin FROM prompt_origin WHERE message_id = ?");
+      stmts.get = d.prepare("SELECT origin, session_id FROM prompt_origin WHERE message_id = ?");
       stmts.prune = d.prepare("DELETE FROM prompt_origin WHERE at < ?");
       db = d;
       return db;
@@ -109,6 +109,8 @@ export function createPromptOrigins(deps = {}) {
      * Record the origin of a prompt message. First write wins: V2 treats a
      * re-posted message id as the same message, so a later call can neither
      * upgrade nor downgrade it. Never throws; returns whether a row was added.
+     * The caller (opencode.mjs postPrompt) records only AFTER opencode accepted
+     * the message and never for an id that already existed in that session.
      */
     record({ messageID, sessionID, origin } = {}) {
       if (typeof messageID !== "string" || !messageID || typeof sessionID !== "string" || !sessionID) return false;
@@ -134,6 +136,20 @@ export function createPromptOrigins(deps = {}) {
         return stmts.get.get(messageID)?.origin ?? null;
       } catch (e) {
         warn("[promptOrigins] get failed:", e?.message ?? e);
+        return null;
+      }
+    },
+
+    /** The recorded `{origin, sessionID}`, or null when there is no record. */
+    getRecord(messageID) {
+      if (typeof messageID !== "string" || !messageID) return null;
+      const d = open();
+      if (!d) return null;
+      try {
+        const r = stmts.get.get(messageID);
+        return r ? { origin: r.origin, sessionID: r.session_id } : null;
+      } catch (e) {
+        warn("[promptOrigins] getRecord failed:", e?.message ?? e);
         return null;
       }
     },

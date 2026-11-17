@@ -51,3 +51,69 @@ test("an unwired box answers 503 on every knowledge channel", async () => {
     await assert.rejects(dispatch(handlers, ch, [{}]), (e) => e.rpcStatus === 503, ch);
   }
 });
+
+// ---- opencode:prompt: origin lowering (§9.2) and the project pin at the first prompt (§3.1) ----
+
+function promptRig({ session = { state: "found", session: { directory: "/work/wt" } }, cached = null } = {}) {
+  const sends = [];
+  const pins = [];
+  const oc = {
+    sendPrompt: async (a) => void sends.push(a),
+    readSession: async () => session,
+    cachedSessionDirectory: () => cached,
+  };
+  const knowledge = { pinSession: async (a) => void pins.push(a) };
+  const handlers = buildHandlers({
+    tmux: { listProjects: async () => [] },
+    pty: {},
+    bus: {},
+    syncState: { refreshNow: async () => {}, applyConfig: () => {}, snapshot: () => ({ projects: [] }), payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }), everSucceeded: () => true },
+    local: { configGet: async () => ({ projects: [] }), configUpdate: async (p) => p },
+    push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
+    oc,
+    knowledge,
+  });
+  return { handlers, sends, pins };
+}
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+test("opencode:prompt stamps `user`; a client-sent origin is ignored; `appGenerated: true` lowers it to unknown and never travels on", async () => {
+  const { handlers, sends } = promptRig();
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "hi" }]);
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "forged", origin: "user" }]);
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "claims", origin: "schedule" }]);
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "the plan", appGenerated: true, origin: "user" }]);
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "not a boolean", appGenerated: "yes" }]);
+  assert.deepEqual(sends.map((s) => [s.text, s.origin]), [["hi", "user"], ["forged", "user"], ["claims", "user"], ["the plan", "unknown"], ["not a boolean", "user"]]);
+  assert.ok(sends.every((s) => !("appGenerated" in s)), "the flag is consumed here");
+});
+
+test("opencode:prompt pins the session to its CURRENT directory with force, without blocking or failing the send", async () => {
+  const { handlers, sends, pins } = promptRig();
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "hi" }]);
+  await tick();
+  assert.deepEqual(pins, [{ sessionID: "ses_a", directory: "/work/wt", force: true }]);
+  assert.equal(sends.length, 1);
+
+  // the cached directory is the fallback when the session can't be read
+  const c = promptRig({ session: { state: "unknown" }, cached: "/cached/dir" });
+  await dispatch(c.handlers, "opencode:prompt", [{ sessionId: "ses_b", text: "hi" }]);
+  await tick();
+  assert.deepEqual(c.pins, [{ sessionID: "ses_b", directory: "/cached/dir", force: true }]);
+
+  // no known directory → no pin; a failing pin never fails the send
+  const n = promptRig({ session: { state: "missing" } });
+  await dispatch(n.handlers, "opencode:prompt", [{ sessionId: "ses_c", text: "hi" }]);
+  await tick();
+  assert.deepEqual(n.pins, []);
+  assert.equal(n.sends.length, 1);
+  const real = console.warn;
+  console.warn = () => {};
+  try {
+    const h2 = buildHandlers({ ...{ tmux: { listProjects: async () => [] }, pty: {}, bus: {}, syncState: {}, local: { configGet: async () => ({}) }, push: {} }, oc: { sendPrompt: async () => {}, readSession: async () => ({ state: "found", session: { directory: "/d" } }) }, knowledge: { pinSession: async () => { throw new Error("boom"); } } });
+    await dispatch(h2, "opencode:prompt", [{ sessionId: "ses_d", text: "hi" }]);
+    await tick();
+  } finally {
+    console.warn = real;
+  }
+});

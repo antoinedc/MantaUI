@@ -721,6 +721,23 @@ export function buildHandlers({
     const { delivery: _dropped, ...rest } = input;
     return rest;
   }
+  // Shared knowledge §3.1/§9.2: pin the session to the project of the directory it has NOW. Fire-and-forget (the
+  // caller never awaits it); `force` lets this authoritative pin win over a parent-/move-sourced mapping.
+  function pinForKnowledge(sessionId) {
+    if (!knowledge?.pinSession || typeof sessionId !== "string" || !sessionId) return;
+    void (async () => {
+      let directory = null;
+      try {
+        const r = await oc.readSession?.(sessionId);
+        directory = r?.state === "found" ? (r.session?.directory ?? null) : null;
+      } catch {
+        directory = null;
+      }
+      directory ??= oc.cachedSessionDirectory?.(sessionId) ?? null;
+      if (!directory) return;
+      await knowledge.pinSession({ sessionID: sessionId, directory, force: true });
+    })().catch((e) => console.warn("[knowledge] pin at the first prompt failed:", e?.message ?? e));
+  }
   // The user's own send into a session: a viewer window showing it (any member of its handoff chain) becomes
   // the user's, so the box never closes it. Awaited before the send goes out; never blocks it. Ordered like
   // sessions:materialize (chain exclusion, then the session lock, live window stamps).
@@ -1670,8 +1687,16 @@ export function buildHandlers({
       // Prompt origin (shared-knowledge §9.2): this handler is the ONLY place a
       // prompt is stamped `user`. The field is set here, after the spread, so a
       // client-supplied `origin` can never survive; every other caller of the
-      // prompt path leaves it unset (recorded as "unknown").
-      const userInput = input && { ...input, origin: "user" };
+      // prompt path leaves it unset (recorded as "unknown"). A client may only
+      // LOWER the origin: `appGenerated: true` (text the app composed, e.g.
+      // "Build here" re-sending the plan agent's plan) records "unknown".
+      // The flag itself never travels on.
+      const { appGenerated, ...clientInput } = input ?? {};
+      const userInput = input && { ...clientInput, origin: appGenerated === true ? "unknown" : "user" };
+      // Shared knowledge §3.1: a session is pinned to its project at its first user prompt, from the
+      // directory it has NOW (a background job was created under its parent and moved into its worktree).
+      // Fire-and-forget: it can never delay or fail the send.
+      if (userInput) pinForKnowledge(userInput.sessionId);
       // Auto-handoff §6.1: the admission resolver runs before anything else — a
       // replaced conversation's message goes to its successor, a fenced one is
       // held. The result carries `deliveredTo`.

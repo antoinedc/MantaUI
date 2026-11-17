@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { createKnowledgeEngine } from "./engine.mjs";
 import { createKnowledgeParts } from "./wiring.mjs";
 import { handleKnowledgeRoute, buildKnowledgeChannels, toSettingsWire } from "./routes.mjs";
-import { createIsUserAuthoredRef } from "./integration.mjs";
+import { createIsUserAuthored, createIsUserAuthoredRef } from "./integration.mjs";
 import { createMessageReader } from "./search.mjs";
 import { createShellCommandReader } from "./readers.mjs";
 import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
@@ -27,12 +27,12 @@ const msg = (id, role, text, at, tools = []) => ({
 
 const UEV = {
   ses_one: [msg("msg_1", "user", "no, use pnpm for installing packages here, not npm", 1), msg("msg_2", "user", "I told you before: pnpm is what installs packages in this repo", 2)],
-  ses_two: [msg("msg_1", "user", "again: always use pnpm for installing packages please", 1)],
+  ses_two: [msg("msg_3", "user", "again: always use pnpm for installing packages please", 1)],
 };
-const USER_MESSAGES = new Set(["msg_1", "msg_2"]);
-const threeQuotes = [["msg:ses_one/msg_1", "use pnpm for installing packages"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]];
+const USER_MESSAGES = new Set(["msg_1", "msg_2", "msg_3"]);
+const threeQuotes = [["msg:ses_one/msg_1", "use pnpm for installing packages"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_3", "use pnpm for installing packages"]];
 const ruleDecision = (content = "Use pnpm for installing packages, never npm") => ({ type: "rule.add", target: { area: "project" }, content, reason: "The same correction three times", evidence: threeQuotes.map(([ref, quote]) => ({ ref, quote })) });
-const refs3 = ["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_1"];
+const refs3 = ["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_3"];
 const decide = (decisions) => ({ text: JSON.stringify({ decisions }) });
 
 /** A bare "remote" with a README on main, for the repository writer. */
@@ -76,7 +76,9 @@ async function e2eRig({ stored, transcripts = {}, runner, sessions = { ses_one: 
     abortSession: async () => {},
     deleteSessionRaw: async () => {},
   };
-  const promptOrigins = { isUserAuthored: (mid) => userMessages.has(mid) };
+  const sessionOf = (mid) => Object.keys(transcripts).find((s) => (transcripts[s] ?? []).some((m) => (m.info?.id ?? m.id) === mid)) ?? null;
+  const roleOf = async (sid, mid) => (transcripts[sid] ?? []).find((m) => (m.info?.id ?? m.id) === mid)?.info?.role ?? null;
+  const promptOrigins = { getRecord: (mid) => (userMessages.has(mid) ? { origin: "user", sessionID: sessionOf(mid) } : null) };
   const listMessages = (sid) => oc.listMessages(sid);
   const modelRunner = async (args) => {
     calls.push({ taskClass: args.taskClass, operation: args.operation, text: args.context.map((b) => b.text).join("\n\n") });
@@ -104,7 +106,7 @@ async function e2eRig({ stored, transcripts = {}, runner, sessions = { ses_one: 
     now: () => clock.t,
     getRepoAccess: async () => ({ canPush: true, isFork: false, defaultBranch: "main" }),
     hasForgeLogin: async () => true,
-    isUserAuthoredRef: createIsUserAuthoredRef(promptOrigins),
+    isUserAuthoredRef: createIsUserAuthoredRef(promptOrigins, { readRole: roleOf }),
     readMessages: createMessageReader({ listMessages }),
     readShellCommands: createShellCommandReader({ listMessages }),
     runEphemeral: modelRunner,
@@ -126,7 +128,7 @@ async function e2eRig({ stored, transcripts = {}, runner, sessions = { ses_one: 
         },
         runDbTask: async (task) => (task === "sessionsInRange" ? [] : { rows: [], complete: true }),
         listTmuxProjects: async () => [{ tmuxSession: "widget-session", windows: [{ paneCurrentPath: repos.widget }] }],
-        isUserAuthored: (mid) => promptOrigins.isUserAuthored(mid),
+        isUserAuthored: createIsUserAuthored(promptOrigins),
         getSession: async (id) => ({ directory: repos[sessions[id]] ?? repos[Object.keys(repos)[0]] }),
         isCtoSession: async () => false,
         forge: {

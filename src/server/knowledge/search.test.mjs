@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createMessageReader, createPageIndex, createSearch } from "./search.mjs";
+import { createMessageReader, createPageIndex, createSearch, significantTerms } from "./search.mjs";
 import { createSettings } from "./settings.mjs";
 import { memState, tmpDir } from "./testHelpers.mjs";
 
@@ -19,7 +19,10 @@ const PAGES = {
   [`projects/${D}/runbooks/release.md`]: fm("Release delta", "Delta read-only release: tag the release."),
 };
 
-async function rig({ stored, mappedSessions = {}, transcripts, messages } = {}) {
+// A scanner that masks `sk-…` tokens, standing in for the engine's secretlint-backed one.
+const fakeScanner = { redact: async (t) => ({ text: String(t).replace(/sk-[A-Za-z0-9]{6,}/g, "[REDACTED]"), unavailable: false }) };
+
+async function rig({ stored, mappedSessions = {}, transcripts, messages, scanner = fakeScanner } = {}) {
   const state = await memState();
   const dir = await tmpDir("knowledge-search-");
   const store = { dir, read: async (p) => PAGES[p] ?? null, listPages: async () => Object.keys(PAGES).sort() };
@@ -41,6 +44,7 @@ async function rig({ stored, mappedSessions = {}, transcripts, messages } = {}) 
     settings,
     searchTranscripts: transcripts ? async (a) => (calls.push(a), transcripts(a)) : undefined,
     readMessages: messages,
+    scanner,
   });
   await createPageIndex({ state, store }).rebuild();
   return { search, calls, state, sessions };
@@ -176,4 +180,60 @@ test("createMessageReader: ±radius around the message, text parts only", async 
   assert.equal(r[5].text, "t10");
   assert.equal(r[5].role, "user");
   assert.equal(await read({ sessionID: "s", messageIDs: ["msg_99"] }), null);
+});
+
+// ---- transcript text that leaves a project is secret-redacted (review finding 3) ----
+
+const SECRET_HIT = (id) => ({ sessionID: id, messageID: "msg_1", partID: "prt_1", snippet: "export TOKEN=sk-abcdef123456 then deploy", at: 5 });
+
+test("search snippets from ANOTHER project are redacted; the caller's own project's are shown as is", async () => {
+  const { search } = await rig({ transcripts: async () => ({ hits: [SECRET_HIT("ses_b"), SECRET_HIT("ses_a")], truncated: false }) });
+  const r = await search.search({ sessionID: "ses_a", query: "deploy", scope: "all", sources: ["sessions"] });
+  const byProject = Object.fromEntries(r.hits.map((h) => [h.project, h.snippet]));
+  assert.equal(byProject[B], "export TOKEN=[REDACTED] then deploy");
+  assert.equal(byProject[A], "export TOKEN=sk-abcdef123456 then deploy");
+});
+
+test("scanner unavailable (or absent): other projects' snippets are omitted, never shown raw; the caller's own still show", async () => {
+  for (const scanner of [{ redact: async () => ({ text: "x", unavailable: true }) }, { redact: async () => { throw new Error("down"); } }, null]) {
+    const { search } = await rig({ scanner, transcripts: async () => ({ hits: [SECRET_HIT("ses_b"), SECRET_HIT("ses_a")], truncated: false }) });
+    const r = await search.search({ sessionID: "ses_a", query: "deploy", scope: "all", sources: ["sessions"] });
+    const byProject = Object.fromEntries(r.hits.map((h) => [h.project, h.snippet]));
+    assert.equal(byProject[B], "");
+    assert.match(byProject[A], /sk-abcdef123456/);
+  }
+});
+
+test("the page() message neighbourhood of another project's session is redacted; own session and own project are not; unavailable scanner omits", async () => {
+  const messages = async ({ sessionID }) => [{ id: "msg_1", role: "user", text: `key sk-abcdef123456 in ${sessionID}`, at: 1 }];
+  const { search } = await rig({ messages });
+  const other = await search.page({ sessionID: "ses_a", ref: "msg:ses_b/msg_1" });
+  assert.equal(other.messages[0].text, "key [REDACTED] in ses_b");
+  const own = await search.page({ sessionID: "ses_a", ref: "msg:ses_a/msg_1" });
+  assert.equal(own.messages[0].text, "key sk-abcdef123456 in ses_a");
+  const sameProject = await rig({ messages, mappedSessions: { ses_a2: { slug: A, directory: "/a" } } });
+  assert.match((await sameProject.search.page({ sessionID: "ses_a", ref: "msg:ses_a2/msg_1" })).messages[0].text, /sk-abcdef123456/);
+  const down = await rig({ messages, scanner: { redact: async () => ({ text: "", unavailable: true }) } });
+  const omitted = await down.search.page({ sessionID: "ses_a", ref: "msg:ses_b/msg_1" });
+  assert.equal(omitted.messages[0].text, "");
+  assert.equal(omitted.messages[0].id, "msg_1");
+});
+
+// ---- any-term queries drop short words and stop words ----
+
+
+test("significantTerms drops terms under 3 characters and common stop words, but never empties a query", () => {
+  assert.deepEqual(significantTerms(["how", "do", "we", "deploy", "the", "widget", "to", "k8s"]), ["deploy", "widget", "k8s"]);
+  assert.deepEqual(significantTerms(["Is", "the", "a"]), ["Is", "the", "a"], "only filler: keep what was asked");
+  assert.deepEqual(significantTerms(["(pnpm)", "and", "release."]), ["(pnpm)", "release."]);
+});
+
+test("the transcript query handed to the index has the filler removed; the wiki OR fallback ranks on the same terms", async () => {
+  const { search, calls } = await rig({ transcripts: async () => ({ hits: [], truncated: false }) });
+  await search.search({ sessionID: "ses_a", query: "how do we tag the release in pnpm", sources: ["sessions"] });
+  assert.equal(calls[0].query, "tag release pnpm");
+  assert.equal(calls[0].anyTerms, true);
+  // wiki: no page has every word ("zzz" matches nothing), so the OR fallback runs on the significant terms only
+  const r = await search.search({ sessionID: "ses_a", query: "the of zzzqq release", sources: ["wiki"] });
+  assert.ok(refs(r).includes(`page:projects/${A}/runbooks/release.md`));
 });

@@ -140,3 +140,12 @@ test("a second connection to the same file sees the records (shared knowledge st
     }
   });
 });
+
+test("getRecord returns the origin AND the session it was recorded for", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable");
+  await withStore((store) => {
+    store.record({ messageID: "msg_1", sessionID: "ses_a", origin: "user" });
+    assert.deepEqual(store.getRecord("msg_1"), { origin: "user", sessionID: "ses_a" });
+    assert.equal(store.getRecord("msg_none"), null);
+  });
+});

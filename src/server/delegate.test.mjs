@@ -605,6 +605,33 @@ test("startJob stamps the new window's owner as job (BET-1377)", async () => {
   assert.deepEqual(stamps, [{ sessionName: "s", windowIndex: 4, owner: "job" }]);
 });
 
+test("startJob pins the child to its WORKTREE (forced) after the move and before the opening prompt; a failing pin never fails the launch (shared-knowledge §3.1)", async () => {
+  const h = startHarness("child_pin", 3);
+  h.deps.gitAddWorktree = async ({ name }) => ({ path: `/repo/wt-${name}`, branch: name });
+  const order = [];
+  const pins = [];
+  const move = h.deps.moveSession;
+  h.deps.moveSession = async (sid, directory) => { order.push(`move:${directory}`); return move(sid, directory); };
+  const send = h.deps.sendChildPrompt;
+  h.deps.sendChildPrompt = async (a) => { order.push("prompt"); return send(a); };
+  h.deps.pinKnowledgeSession = async (a) => { order.push("pin"); pins.push(a); };
+  const res = await startJob({ prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" }, h.deps);
+  assert.equal(res.ok, true);
+  assert.equal(pins.length, 1);
+  assert.equal(pins[0].sessionID, res.job.childSessionID);
+  assert.equal(pins[0].force, true);
+  assert.match(pins[0].directory, /^\/repo\/wt-/, "the worktree the child was moved into, not the parent's directory");
+  assert.deepEqual(order.map((x) => x.split(":")[0]), ["move", "pin", "prompt"]);
+
+  const bad = startHarness("child_pin_bad", 3);
+  bad.deps.pinKnowledgeSession = async () => { throw new Error("knowledge exploded"); };
+  const r2 = await startJob({ prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" }, bad.deps);
+  assert.equal(r2.ok, true);
+  const sync = startHarness("child_pin_sync", 3);
+  sync.deps.pinKnowledgeSession = () => { throw new Error("sync throw"); };
+  assert.equal((await startJob({ prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" }, sync.deps)).ok, true);
+});
+
 test("startJob still succeeds when the owner stamp fails (best-effort)", async () => {
   const h = startHarness("child_owner_fail", 2);
   h.deps.stampOwner = async () => { throw new Error("tmux exploded"); };

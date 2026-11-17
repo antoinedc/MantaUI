@@ -752,3 +752,40 @@ test("resolveModelForClass: model, null (non-strict default), and typed verdicts
   await assert.rejects(() => resolveModelForClass("knowledge-trial", { resolveModel: async () => { throw new Error("crash"); } }), /crash/);
   await assert.rejects(() => resolveModelForClass("nope"), /unknown task class/);
 });
+
+test("runEphemeral reports the session's REAL usage (tokens by kind + recorded cost) and falls back to the estimate without it", async () => {
+  const es = fakeEngineState();
+  const run = async (result) => {
+    const reported = [];
+    const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-u"); return { sid: "sid-u", text: "an answer", ...result }; } };
+    await runEphemeral({ taskClass: "curator-notes", context: [{ priority: 1, text: "some input" }], deps: { oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } });
+    return reported;
+  };
+  const real = await run({ usage: { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300, usd: 0.07 } });
+  assert.equal(real.length, 1);
+  assert.equal(real[0].tokens, 5550, "one number (what the CTO budget reads): the real total");
+  assert.deepEqual(real[0].usage, { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 });
+  assert.equal(real[0].usd, 0.07);
+  assert.equal(real[0].estimated, false);
+  // a subscription model records no cost: tokens only, no usd
+  const free = await run({ usage: { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 } });
+  assert.equal("usd" in free[0], false);
+  assert.equal(free[0].tokens, 15);
+  // no recorded usage: the estimate, flagged
+  const est = await run({});
+  assert.equal(est[0].estimated, true);
+  assert.ok(est[0].tokens > 0);
+  assert.equal("usage" in est[0], false);
+});
+
+test("a run that THROWS still reports the instruction estimate, and the error still propagates", async () => {
+  const reported = [];
+  const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-t"); throw new Error("boom"); } };
+  await assert.rejects(
+    runEphemeral({ taskClass: "knowledge-capture", context: [{ priority: 1, text: "a long enough instruction to estimate" }], deps: { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } }),
+    /boom/,
+  );
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0].estimated, true);
+  assert.ok(reported[0].tokens > 0);
+});

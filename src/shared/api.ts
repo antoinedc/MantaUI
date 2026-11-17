@@ -1100,7 +1100,8 @@ export interface KnowledgeChangesPage {
 }
 
 export type KnowledgeUndoResult =
-  | { ok: true }
+  /** `warning`: the undo happened but something around it didn't (e.g. a managed file couldn't be re-rendered). */
+  | { ok: true; warning?: string }
   | { ok: false; reason: string; /** The later change that blocks the undo, as one readable phrase. */ conflictWith?: string };
 
 export interface HandoffLinks {
@@ -1477,7 +1478,9 @@ export interface Api {
     // model/agent alone. Omit for an ordinary idle send.
     // `messageID` (`msg_…`): the id the message will have, minted by the caller
     // so it can recognise its own message in the pending list.
-    opts?: { delivery?: OpencodeDelivery; messageID?: string },
+    // `appGenerated`: the text was composed by the app/agent, not typed by the user (e.g. "Build here"
+    // re-sending the plan). The box then never records it as user-authored; a client can only lower this.
+    opts?: { delivery?: OpencodeDelivery; messageID?: string; appGenerated?: boolean },
   ): Promise<void>;
   // The user's Stop: ends the turn; pending steered input then runs (K5).
   opencodeAbort(sessionId: string): Promise<void>;

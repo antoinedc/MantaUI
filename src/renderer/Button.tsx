@@ -79,6 +79,7 @@ export function Button({
   loading = false,
   ariaPressed,
   ariaLabel,
+  ariaDisabled = false,
 }: {
   /** The visual tone. REQUIRED — the bare base is abstract (C4), so there is no safe default. */
   tone: keyof typeof BUTTON_TONE;
@@ -112,18 +113,25 @@ export function Button({
   ariaPressed?: boolean;
   /** Accessible name when the visible content is not text (e.g. an icon-only confirmation). */
   ariaLabel?: string;
+  /**
+   * Unavailable right now, but STAYS in the focus order (`aria-disabled`, dimmed, click ignored) — for an action
+   * that goes inert while the user's focus is on it (e.g. Apply during its own save). Prefer `disabled` otherwise.
+   */
+  ariaDisabled?: boolean;
 }) {
   const inert = disabled || loading;
   const className =
     `${hook ? `${hook} ` : ""}${BUTTON_BASE} ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]}` +
-    (block ? ` ${BUTTON_BLOCK}` : "");
+    (block ? ` ${BUTTON_BLOCK}` : "") +
+    (ariaDisabled ? " opacity-50 cursor-not-allowed" : "");
   return (
     <button
       type={type}
       disabled={inert}
-      onClick={onClick}
+      onClick={ariaDisabled ? undefined : onClick}
       title={title}
       aria-busy={loading || undefined}
+      aria-disabled={ariaDisabled || undefined}
       aria-pressed={ariaPressed || undefined}
       aria-label={ariaLabel}
       className={className}

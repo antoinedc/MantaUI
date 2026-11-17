@@ -42,6 +42,7 @@ function v2Timeline(messages) {
     time: m.info.time,
     model: m.info.providerID ? { providerID: m.info.providerID, id: m.info.modelID } : undefined,
     finish: m.info.finish,
+    ...(m.info.tokens ? { tokens: m.info.tokens, cost: m.info.cost } : {}),
     content: (m.parts ?? []).map((p) => ({ type: "text", text: p.text })),
     ...(m.info.error
       ? { error: { type: "provider.internal", message: m.info.error.message ?? "x", status: m.info.error.data?.statusCode } }
@@ -119,6 +120,20 @@ test("a successful run writes exactly one operation record, terminal ok/model, a
   assert.equal(attempt.accountKey, "anthropic");
   assert.equal(p.endpoints["anthropic/claude-x"].lastSuccessAt > 0, true);
   assert.equal(p.endpoints["anthropic/claude-x"].failureStreak, 0);
+});
+
+test("the result carries the session's recorded usage (the session is deleted, so this is the only place to read it)", async () => {
+  const { rec } = makeRecorder();
+  const t = happyTransport({ messages: [{
+    info: { role: "assistant", time: { created: 1, completed: 2 }, finish: "stop", providerID: "anthropic", modelID: "claude-x",
+      tokens: { input: 120, output: 30, reasoning: 4, cache: { read: 900, write: 60 } }, cost: 0.02 },
+    parts: [{ type: "text", text: "done" }],
+  }] });
+  const result = await run({ transport: t, recorder: rec, model: PINNED });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.usage, { input: 120, output: 30, reasoning: 4, cacheRead: 900, cacheWrite: 60, usd: 0.02 });
+  const plain = await run({ transport: happyTransport(), recorder: makeRecorder().rec, model: PINNED });
+  assert.equal("usage" in plain, false);
 });
 
 test("every taxonomy code produces exactly one operation record with the right terminal stage", async () => {

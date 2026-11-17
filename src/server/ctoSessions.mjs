@@ -389,42 +389,59 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
   const instruction = assembleContext(context, { taskClass });
 
   let sid = null;
-  try {
-    const res = await oc.runEphemeralSession({
-      directory,
-      title: `${meta.titlePrefix ?? CTO_TITLE_PREFIX}${taskClass}`,
-      // Per-class wait (only classes that declare one; the others keep the
-      // primitive's own default).
-      ...(meta.timeoutMs
-        ? {
-          timeoutMs: meta.timeoutMs,
-          pollIntervalMs: EPHEMERAL_POLL_INTERVAL_MS,
-          maxAttempts: Math.ceil(meta.timeoutMs / EPHEMERAL_POLL_INTERVAL_MS),
-        }
-        : {}),
-      // §4.1: the operation record's label must match the ledger's `operation`
-      // (the task class or the explicit op), not the title tag.
-      operation: operation ?? taskClass,
-      instruction,
-      model,
-      onCreated: async (s) => {
-        sid = s;
-        await activeAdd(s, { engineState });
-      },
-    });
-    // BET-1388 (§12.1): every ambient model call reports its token cost into
-    // budget.json. Best-effort — a metering failure must never mask the run.
-    // The engine wires this to the budget's record(); the default is a no-op.
+  // Metering (BET-1388 §12.1; shared-knowledge §6.7): every run reports its cost, best-effort — a metering
+  // failure must never mask the run. `tokens` stays ONE number (what the CTO's budget reads): the run's real
+  // total when the ephemeral session recorded usage, else the estimate. `usage` ({input, output, reasoning,
+  // cacheRead, cacheWrite}) and `usd` (the session's recorded cost) travel beside it for callers that price
+  // per component; `estimated` says which one this is. A run that throws still reports the instruction estimate.
+  const report = async (res) => {
+    const u = res?.usage;
+    const real = u && typeof u === "object";
+    const total = real ? u.input + u.output + u.reasoning + u.cacheRead + u.cacheWrite : 0;
     try {
       await reportCost({
         taskClass,
         tier,
         model,
-        tokens: estimateTokens(instruction) + estimateTokens(res?.text ?? ""),
+        tokens: real && total > 0 ? total : estimateTokens(instruction) + estimateTokens(res?.text ?? ""),
+        estimated: !(real && total > 0),
+        ...(real && total > 0 ? { usage: { input: u.input, output: u.output, reasoning: u.reasoning, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite } } : {}),
+        ...(real && typeof u.usd === "number" && u.usd > 0 ? { usd: u.usd } : {}),
       });
     } catch {
       /* metering is best-effort */
     }
+  };
+  try {
+    let res;
+    try {
+      res = await oc.runEphemeralSession({
+        directory,
+        title: `${meta.titlePrefix ?? CTO_TITLE_PREFIX}${taskClass}`,
+        // Per-class wait (only classes that declare one; the others keep the
+        // primitive's own default).
+        ...(meta.timeoutMs
+          ? {
+            timeoutMs: meta.timeoutMs,
+            pollIntervalMs: EPHEMERAL_POLL_INTERVAL_MS,
+            maxAttempts: Math.ceil(meta.timeoutMs / EPHEMERAL_POLL_INTERVAL_MS),
+          }
+          : {}),
+        // §4.1: the operation record's label must match the ledger's `operation`
+        // (the task class or the explicit op), not the title tag.
+        operation: operation ?? taskClass,
+        instruction,
+        model,
+        onCreated: async (s) => {
+          sid = s;
+          await activeAdd(s, { engineState });
+        },
+      });
+    } catch (e) {
+      await report(null); // the prompt was (probably) sent: charge the instruction estimate
+      throw e;
+    }
+    await report(res);
     return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid,
       // W6: the run's resolved model + whether it was pinned — runEphemeral
       // builds the exclusion set and classifies §4.1a refusals from these.

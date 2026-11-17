@@ -151,19 +151,24 @@ describe("KnowledgeCard", () => {
     expect(q('[data-testid="knowledge-notice"]')!.getAttribute("role")).toBe("alert");
   });
 
-  it("controls are disabled while a save is in flight", async () => {
+  it("while a save is in flight the groups are aria-busy and ignore picks, but stay focusable (not disabled)", async () => {
     let release!: (s: KnowledgeSettings) => void;
     await open({ knowledgeSettingsSet: () => new Promise<KnowledgeSettings>((r) => (release = r)) });
     await act(async () => {
       q<HTMLButtonElement>('[role="switch"]')!.click();
     });
     expect(q<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(true);
-    expect(radio("knowledge-default-sharing", "private")!.disabled).toBe(true);
+    const sharing = radio("knowledge-default-sharing", "private")!;
+    expect(sharing.disabled).toBe(false);
+    expect(sharing.closest("fieldset")!.getAttribute("aria-busy")).toBe("true");
+    await click(sharing); // ignored while busy
+    expect(api.calls.knowledgeSettingsSet).toHaveLength(1);
     await act(async () => {
       release(settings({ enabled: false }));
     });
     await h!.flush();
     expect(q<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(false);
+    expect(sharing.closest("fieldset")!.getAttribute("aria-busy")).toBeNull();
   });
 
   it("changing a default sends only that key", async () => {
@@ -196,6 +201,116 @@ describe("KnowledgeCard", () => {
     await click(q('[role="switch"]'));
     expect(gets).toBe(2);
     expect(q('[role="switch"]')!.getAttribute("aria-checked")).toBe("false");
+  });
+
+  describe("Repo rules (pending selection + Apply)", () => {
+    const slug = "manta-0123456789";
+    const applyBtn = (group: string) =>
+      q(`fieldset:has(input[name="${group}"])`)!.querySelector("button.manta-knowledge-apply") as HTMLButtonElement;
+    const arrowDown = async (el: HTMLElement) => {
+      // A native radio group moves the selection and fires `change` on an arrow key.
+      await act(async () => {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      });
+    };
+
+    it("picking an option (what ArrowDown does) saves NOTHING until Apply", async () => {
+      await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ repoRules: "box-only" })) });
+      const group = "knowledge-default-repoRules";
+      expect(applyBtn(group).getAttribute("aria-disabled")).toBe("true");
+      await arrowDown(radio(group, "box-only")!);
+      await click(radio(group, "pull-request"));
+      expect(radio(group, "pull-request")!.checked).toBe(true);
+      expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+      expect(applyBtn(group).getAttribute("aria-disabled")).toBeNull();
+    });
+
+    it("Apply on Pull request / Direct asks to confirm first; Cancel keeps the pending pick and saves nothing; Confirm saves", async () => {
+      await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ repoRules: "pull-request" })) });
+      const group = "knowledge-default-repoRules";
+      await click(radio(group, "pull-request"));
+      await click(applyBtn(group));
+      expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+      const confirm = q(`[data-testid="${group}-confirm"]`)!;
+      expect(confirm.textContent).toContain("open one pull request");
+      await click(Array.from(confirm.querySelectorAll("button")).find((b) => b.textContent === "Cancel"));
+      expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
+      expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+      expect(radio(group, "pull-request")!.checked).toBe(true);
+      await click(applyBtn(group));
+      await click(Array.from(q(`[data-testid="${group}-confirm"]`)!.querySelectorAll("button")).find((b) => b.textContent === "Confirm"));
+      expect(api.calls.knowledgeSettingsSet).toEqual([[{ patch: { repoRules: "pull-request" } }]]);
+      expect(notice()).toBe("Default repo rules set to Pull request.");
+      expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
+    });
+
+    it("Direct says it commits to the default branch", async () => {
+      await open();
+      const group = "knowledge-default-repoRules";
+      await click(radio(group, "direct"));
+      await click(applyBtn(group));
+      expect(q(`[data-testid="${group}-confirm"]`)!.textContent).toContain("default branch");
+    });
+
+    it("Box only needs no confirmation; Apply saves it straight away", async () => {
+      await open({
+        knowledgeSettingsGet: () => Promise.resolve(settings({ repoRules: "pull-request" })),
+        knowledgeSettingsSet: () => Promise.resolve(settings({ repoRules: "box-only" })),
+      });
+      const group = "knowledge-default-repoRules";
+      await click(radio(group, "box-only"));
+      await click(applyBtn(group));
+      expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
+      expect(api.calls.knowledgeSettingsSet).toEqual([[{ patch: { repoRules: "box-only" } }]]);
+    });
+
+    it("a project's group works the same way and 'Use default' sends null without a confirm", async () => {
+      await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ projects: [row({ repoRules: "pull-request", repoRulesOverride: true })] })) });
+      const group = `knowledge-${slug}-repoRules`;
+      await click(radio(group, "pull-request"));
+      expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+      await click(applyBtn(group));
+      expect(q(`[data-testid="${group}-confirm"]`)!.textContent).toContain("for manta");
+      await click(Array.from(q(`[data-testid="${group}-confirm"]`)!.querySelectorAll("button")).find((b) => b.textContent === "Confirm"));
+      expect(api.calls.knowledgeSettingsSet![0]).toEqual([{ patch: { projects: { [slug]: { repoRules: "pull-request" } } } }]);
+      // the box now reports the override; going back to the default needs no confirm
+      await click(radio(group, "default"));
+      await click(applyBtn(group));
+      expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
+      expect(api.calls.knowledgeSettingsSet![1]).toEqual([{ patch: { projects: { [slug]: { repoRules: null } } } }]);
+    });
+
+    it("Apply keeps keyboard focus through its own save (aria-disabled, never disabled)", async () => {
+      let release!: (s: KnowledgeSettings) => void;
+      await open({ knowledgeSettingsSet: () => new Promise<KnowledgeSettings>((r) => (release = r)) });
+      const group = "knowledge-default-repoRules";
+      await click(radio(group, "box-only")); // no-op pick of the saved value
+      await click(radio(group, "pull-request"));
+      await click(applyBtn(group));
+      const confirmBtn = Array.from(q(`[data-testid="${group}-confirm"]`)!.querySelectorAll("button")).find((b) => b.textContent === "Confirm") as HTMLButtonElement;
+      await click(confirmBtn);
+      const apply = applyBtn(group);
+      expect(apply.disabled).toBe(false);
+      expect(apply.getAttribute("aria-disabled")).toBe("true");
+      expect(apply.textContent).toBe("Applying…");
+      expect(radio(group, "direct")!.closest("fieldset")!.getAttribute("aria-busy")).toBe("true");
+      await act(async () => {
+        release(settings({ repoRules: "pull-request" }));
+      });
+      await h!.flush();
+      expect(applyBtn(group).textContent).toBe("Apply");
+      expect(applyBtn(group).getAttribute("aria-disabled")).toBe("true"); // nothing pending any more
+    });
+
+    it("a rejected save keeps the pending pick and reports the error", async () => {
+      await open({ knowledgeSettingsSet: () => Promise.reject(new Error("invalid-setting")) });
+      const group = "knowledge-default-repoRules";
+      await click(radio(group, "direct"));
+      await click(applyBtn(group));
+      await click(Array.from(q(`[data-testid="${group}-confirm"]`)!.querySelectorAll("button")).find((b) => b.textContent === "Confirm"));
+      expect(notice()).toBe("Couldn't save: The box rejected that value.");
+      expect(radio(group, "direct")!.checked).toBe(true);
+    });
   });
 
   it("outward options are disabled with the reason as visible text", async () => {
@@ -435,6 +550,21 @@ describe("KnowledgeCard", () => {
       expect(api.calls.knowledgeUndo).toEqual([[{ id: "d_1" }]]);
       expect(q('[data-testid="knowledge-undone-d_1"]')!.textContent).toBe("Undone");
       expect(button("Undo")).toBeUndefined();
+    });
+
+    it("an undo that succeeded WITH a warning shows it; one without shows none", async () => {
+      await open({
+        knowledgeChanges: () => Promise.resolve({ items: [change(), change({ id: "d_2" })], nextCursor: null }),
+        knowledgeUndo: (input: { id: string }) =>
+          Promise.resolve(input.id === "d_1" ? { ok: true, warning: "the global AGENTS.md block could not be re-written" } : { ok: true }),
+      });
+      const undoIn = (id: string) => Array.from(q(`[data-testid="knowledge-change-${id}"]`)!.querySelectorAll("button")).find((b) => b.textContent === "Undo");
+      await click(undoIn("d_1"));
+      await click(undoIn("d_2"));
+      expect(q('[data-testid="knowledge-undone-d_1"]')).toBeTruthy();
+      expect(q('[data-testid="knowledge-undo-warning-d_1"]')!.textContent).toBe("Undone, but: the global AGENTS.md block could not be re-written");
+      expect(q('[data-testid="knowledge-undone-d_2"]')).toBeTruthy();
+      expect(q('[data-testid="knowledge-undo-warning-d_2"]')).toBeNull();
     });
 
     it("an undo conflict names the later change and keeps Undo available", async () => {
