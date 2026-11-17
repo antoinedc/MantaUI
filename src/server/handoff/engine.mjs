@@ -173,13 +173,16 @@ export function createHandoffEngine(deps = {}) {
 
   const isJobSession = deps.isJobSession ?? (async (sid) => (await runningJobOwner(sid)) !== null);
   // A routine run's session carries `manta.routineId`: it is headless and reported on, so it must
-  // never hand off into a successor session (routines spec §6.6). Unreadable = not a routine.
+  // never hand off into a successor session (routines spec §6.6). The same holds for the knowledge
+  // system's own headless sessions (`manta.knowledgeTrial` / `manta.knowledgeCurator`, shared-knowledge
+  // spec §6.6). Unreadable = not one of them.
   const isRoutineSession =
     deps.isRoutineSession ??
     (async (sid) => {
       try {
         const rs = await oc.readSession?.(sid);
-        return typeof rs?.session?.metadata?.manta?.routineId === "string";
+        const manta = rs?.session?.metadata?.manta;
+        return typeof manta?.routineId === "string" || Boolean(manta?.knowledgeTrial) || Boolean(manta?.knowledgeCurator);
       } catch {
         return false;
       }

@@ -246,15 +246,13 @@ test("repository sync: a hand edit of the block is adopted (user commit, reasons
   await r.engine.stop();
 });
 
-test("the weekly notification is sent once, only when something changed", async () => {
+test("the tidy-up sends no notification of its own (the weekly notice is weeklyNotice.mjs's)", async () => {
   const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([{ type: "page.edit", target: { area: "project", path: `projects/${rig.slug}/gotchas.md` }, content: "- a gotcha\n", reason: "r", evidence: [{ ref: "msg:ses_one/msg_1" }] }]) });
   r.slug = await r.slugOf("ses_one");
   await r.note(r.slug, "ses_one", "gotcha", "a gotcha");
   await r.engine.runCurator(r.slug, { force: true });
   await r.engine.layer.tidy.run();
-  const sent = r.notes.filter((n) => n.tag === "knowledge-weekly");
-  assert.equal(sent.length, 1);
-  assert.match(sent[0].message, /1 change applied/);
+  assert.equal(r.notes.filter((n) => n.tag === "knowledge-weekly").length, 0);
   await r.engine.stop();
 });
 

@@ -82,6 +82,8 @@ const disabled = (reason = "Shared knowledge is off.") => new KnowledgeError("di
  *   globalAgentsPath                         the global opencode AGENTS.md (absent → no global block)
  *   refResolves(ref) → boolean|null          tidy re-verification override (default: messages, pages and files)
  *   curatorMs                                curator poll interval (default 60 s)
+ *   createParts(foundation) → parts          wiring.mjs `createKnowledgeParts` bound to its collaborators: capture,
+ *                                            corrections, repoWriter, skills + trial, blackboard import, weekly notice
  */
 export function createKnowledgeEngine(deps = {}) {
   const { config } = deps;
@@ -202,8 +204,13 @@ export function createKnowledgeEngine(deps = {}) {
       const pageIndex = createPageIndex({ state, store, now });
       const search = createSearch({ state, store, registry, sessionMap, settings, searchTranscripts: deps.searchTranscripts, readMessages: deps.readMessages });
       const briefingsDir = join(dir, ".briefings");
+      // The parts on top of the foundation (capture, corrections, repository writes, skills, blackboard import,
+      // the weekly notice): built by the composition root's factory from the handles that exist only now.
+      const parts =
+        deps.createParts?.({ state, store, registry, sessionMap, queue, budget, changes, scanner, settings, git, dir, now, log, isKnowledgeRunActive: () => c?.layer?.curator.isBusy() === true }) ?? null;
       const layerDeps = {
         ...deps,
+        ...(parts?.layerDeps ?? {}),
         sessionBriefingText:
           deps.sessionBriefingText ??
           (async (sid) => {
@@ -216,7 +223,7 @@ export function createKnowledgeEngine(deps = {}) {
           }),
       };
       const layer = createCuratorLayer({ store, state, queue, settings, budget, changes, registry, sessionMap, briefings, rules, git, dir, deps: layerDeps, now, log, estimateTokens });
-      c = { state, scanner, store, registry, resolver, changes, sessionMap, queue, budget, briefings, pageIndex, search, layer };
+      c = { state, scanner, store, registry, resolver, changes, sessionMap, queue, budget, briefings, pageIndex, search, layer, parts };
       store.onCommit(() => void scheduleDerived());
       await scheduleDerived();
       await maybeNotifyUpgrade();
@@ -257,6 +264,7 @@ export function createKnowledgeEngine(deps = {}) {
       if (err?.code !== "no_db") log("[knowledge] backfill step failed:", err?.message ?? err);
     }
     await c.briefings.sweep();
+    await c.parts?.maintain();
     if (now() - lastPrune > DAY_MS) {
       lastPrune = now();
       c.budget.prune();
@@ -312,9 +320,14 @@ export function createKnowledgeEngine(deps = {}) {
   /** Feed raw V2 events and/or lifecycle events from the opencode pump. Never throws. */
   async function observeRaw(ev) {
     try {
-      if (!c || !OBSERVE_TYPES.has(ev?.type)) return;
+      if (!c) return;
+      const type = ev?.type;
+      const wanted = OBSERVE_TYPES.has(type) || (typeof type === "string" && type.startsWith("session.") && c.parts);
+      if (!wanted) return;
       if (!(await enabledState()).enabled) return;
-      await c.sessionMap.observe(ev);
+      if (OBSERVE_TYPES.has(type)) await c.sessionMap.observe(ev);
+      // after the session map has seen it: capture's activity tracking and the trial's completion
+      c.parts?.observeRaw(ev);
     } catch (e) {
       log("[knowledge] observe failed:", e?.message ?? e);
     }
@@ -394,7 +407,7 @@ export function createKnowledgeEngine(deps = {}) {
       queued,
       briefings: { startedThisWeek: wk.served, missedThisWeek: wk.missed },
       backfillDone: c.sessionMap.backfillDone(),
-      parts: c.layer.capabilities(),
+      parts: { ...c.layer.capabilities(), ...(c.parts?.capabilities() ?? {}) },
       curatorBusy: c.layer.curator.isBusy(),
       lastTidy: Number(c.state.kvGet("tidy.lastRun") ?? 0) || null,
     };
@@ -475,6 +488,15 @@ export function createKnowledgeEngine(deps = {}) {
     refreshDerived: scheduleDerived,
     settings,
     deps,
+    /** The live `cto_fact` mirror (§5.4): enqueue the proposal as a note. Never throws. */
+    mirrorCtoFact: async (fact) => {
+      try {
+        await ready();
+        return c?.parts ? await c.parts.mirrorCtoFact(fact) : { enqueued: false, reason: "off" };
+      } catch {
+        return { enqueued: false, reason: "failed" };
+      }
+    },
     /** Run one curator batch for a project now (the same path the timer takes). */
     async runCurator(slug, opts) {
       const ctx = await requireOn();
@@ -515,6 +537,10 @@ export function createKnowledgeEngine(deps = {}) {
     },
     get pageIndex() {
       return c?.pageIndex ?? null;
+    },
+    /** The wired parts (capture, trial, skills, …) — see wiring.mjs. */
+    get parts() {
+      return c?.parts ?? null;
     },
     /** The curator layer: curator, tidy, tombstones, rules, globalBlock, validator, undo, downgrade. */
     get layer() {

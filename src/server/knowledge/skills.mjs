@@ -237,6 +237,14 @@ export function createSkills({
     }
   };
   const skillRow = (name) => db.prepare("SELECT * FROM learned_skills WHERE name = ?").get(name);
+  const parseSessions = (row) => {
+    try {
+      const v = JSON.parse(row?.sessions ?? "[]");
+      return Array.isArray(v) ? v : [];
+    } catch {
+      return [];
+    }
+  };
   const parseProjects = (row) => {
     try {
       return JSON.parse(row?.projects ?? "[]");
@@ -570,7 +578,7 @@ export function createSkills({
           const changeId = note("applied", `Installed skill ${row.name}`, "Repeated work, tested read-only against the project before installing.", {
             slug: projects[0] ?? null,
             undoable: true,
-            data: { skill: row.name, action: "install", projects },
+            data: { skill: row.name, skillSlug: row.name, action: "install", projects, sessions: parseSessions(row) },
           });
           db.prepare("UPDATE learned_skills SET status = 'installed', pending_op = NULL, installed_at = ?, change_id = ? WHERE name = ?").run(now(), changeId, row.name);
           out.installed.push(row.name);
@@ -635,7 +643,7 @@ export function createSkills({
       db.prepare("INSERT OR IGNORE INTO learned_skill_corrections (name, correction_id) VALUES (?, ?)").run(name, correctionId);
       return db.prepare("SELECT COUNT(*) AS n FROM learned_skill_corrections WHERE name = ?").get(name).n;
     },
-    list: () => db.prepare("SELECT name, status, pending_op AS pendingOp, projects, installed_at AS installedAt FROM learned_skills ORDER BY name").all().map((r) => ({ ...r, projects: parseProjects(r) })),
+    list: () => db.prepare("SELECT name, status, pending_op AS pendingOp, projects, installed_at AS installedAt FROM learned_skills ORDER BY name").all().map((r) => ({ ...r, slug: r.name, skillSlug: r.name, projects: parseProjects(r) })),
     /** Learned skills present on disk but unknown to the table (hand-copied), for diagnostics only. */
     async untracked() {
       try {

@@ -176,7 +176,7 @@ test("a derived note (no user-authored evidence) can never become a rule", async
 
 const directDeps = { getRepoAccess: async () => ({ canPush: true, isFork: false, defaultBranch: "main" }), hasForgeLogin: async () => true };
 
-test("outward mode: rules go to the repo writer as repo-safe strings (no quotes, refs or ids), one outward change, one first-action notification", async () => {
+test("outward mode: rules go to the repo writer as repo-safe strings (no quotes, refs or ids), one outward change, and no notification of its own (the repo writer sends the one first-write notice)", async () => {
   const applied = [];
   const repoWriter = { applyRules: async (slug, list) => (applied.push([slug, list]), { ok: true, mode: "direct", sha: "abc1234" }), sync: async () => ({ handEdit: null, prState: "none" }), revert: async () => ({ ok: true }) };
   const r = await ruleRig({ stored: { repoRules: "direct" }, repoWriter, over: directDeps, runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes, { reason: 'User said "use pnpm" in msg:ses_one/msg_1 and ses_two1234' })]) });
@@ -189,10 +189,10 @@ test("outward mode: rules go to the repo writer as repo-safe strings (no quotes,
   const outward = (await changesOf(r.engine)).filter((i) => i.kind === "outward");
   assert.equal(outward.length, 1);
   assert.equal(outward[0].undoable, true);
-  assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 1);
+  assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 0);
   await r.note(r.slug, "ses_one", "preference", "Another preference entirely", ["msg:ses_one/msg_1"]);
   await r.engine.runCurator(r.slug, { force: true });
-  assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 1);
+  assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 0);
   await r.engine.stop();
 });
 

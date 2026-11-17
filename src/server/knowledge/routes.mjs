@@ -91,7 +91,7 @@ export function waitingForCapableModel(engine, now = Date.now()) {
   try {
     const row = db
       .prepare(
-        `SELECT MIN(at) AS t FROM changes
+        `SELECT MIN(COALESCE(json_extract(data, '$.since'), at)) AS t FROM changes
          WHERE kind = 'waiting' AND data LIKE '%"no-qualifying-model"%'
            AND at > COALESCE((SELECT MAX(at) FROM changes WHERE kind IN ('applied', 'skipped')), 0)`,
       )

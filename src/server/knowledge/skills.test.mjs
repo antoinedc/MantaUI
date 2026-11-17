@@ -128,7 +128,7 @@ test("happy path: evidence passes, trial passes, queued for the daily batch, ins
   assert.ok(md.includes("npm run build") && md.includes("npm run e2e"));
   const ch = t.changes.find((c) => c.kind === "applied");
   assert.equal(ch.undoable, true);
-  assert.deepEqual(ch.data, { skill: "learned-run-the-e2e-suite", action: "install", projects: ["proj-a-0123456789", "proj-b-0123456789"] });
+  assert.deepEqual(ch.data, { skill: "learned-run-the-e2e-suite", skillSlug: "learned-run-the-e2e-suite", action: "install", projects: ["proj-a-0123456789", "proj-b-0123456789"], sessions: ["ses_aaaa1111", "ses_bbbb2222"] });
   assert.deepEqual(t.skills.pendingWrites(), []);
   // the same procedure isn't proposed twice
   assert.equal(await t.skills.detect(), 0);

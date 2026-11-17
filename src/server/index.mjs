@@ -135,7 +135,10 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { createKnowledgeEngine } from "./knowledge/engine.mjs";
 import { handleKnowledgeRoute } from "./knowledge/routes.mjs";
-import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef } from "./knowledge/integration.mjs";
+import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef, createKnowledgeRunner, knowledgePaths } from "./knowledge/integration.mjs";
+import { createKnowledgeParts } from "./knowledge/wiring.mjs";
+import { createShellCommandReader as createKnowledgeShellReader } from "./knowledge/readers.mjs";
+import { runDbTask as knowledgeRunDbTask } from "./dbOffload.mjs";
 import { createListPrices as createKnowledgeListPrices } from "./knowledge/pricing.mjs";
 import { createMessageReader as createKnowledgeMessageReader } from "./knowledge/search.mjs";
 import { createPromptOrigins } from "./promptOrigins.mjs";
@@ -221,7 +224,7 @@ import { endpointAttempts, setOnProviderAttempt, attemptFromAssistantError } fro
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
-import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders, resolveCtoTurnModel, usableModelsNow } from "./ctoSessions.mjs";
+import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders, resolveCtoTurnModel, usableModelsNow, resolveModelForClass, KNOWLEDGE_TITLE_PREFIX } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import { createCtoSuggest } from "./ctoSuggest.mjs";
 // BET-1519: the per-class act executors are retired — ctoAct.mjs is now the
@@ -284,7 +287,7 @@ import {
 } from "./forge/poller.mjs";
 import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
-import { getAdapter, forgeRepoAccess } from "./forge/index.mjs";
+import { getAdapter, forgeRepoAccess, forgeFindOpenPullRequest, forgeCreatePullRequest, forgeUpdatePullRequest } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
 import { detectForgeWithHosts } from "./forge/selfhost.mjs";
 import { startForgeHealthCheck, healthCheckRepoHook } from "./forge/webhook.mjs";
@@ -2032,8 +2035,11 @@ const optimizerPrices = createOptimizerPrices({
 // the box's cross-session memory. Independent of the CTO engine (it starts below whatever `ctoEnabled`
 // says); its own budget and pollers. The opencode pump feeds it session events (observeRaw below);
 // /api/knowledge/* serves the AI tools and the `knowledge:*` rpc channels the desktop Knowledge card.
-// Not wired here yet (each degrades to "feature absent", never to an error): the task-class runner, the
-// curator, capture and the curator's undo — they plug in through the engine's deps/getters.
+// Every part is wired: the task-class runner (`knowledgeRunner`, curator + capture + corrections + skills), the
+// curator layer (inside the engine), and — through `createParts` — capture, the correction detector, repository
+// writes, the skill trial + learned skills, the blackboard import and the weekly notice (knowledge/wiring.mjs).
+// Their transcript reads go through opencode's HTTP API or the db worker thread, never opencode's database on
+// the event loop.
 //
 // Transcript search runs in worker threads (transcriptIndex.mjs): the index sync, whose size-cap
 // eviction ends in a 20-60 s/GB FTS5 optimize, must never block this process's event loop.
@@ -2045,8 +2051,38 @@ const knowledgeTranscripts = createTranscriptIndex({
     return s.enabled && !s.observeOnly;
   },
 });
+const knowledgeRunner = createKnowledgeRunner({
+  runEphemeral,
+  oc: { runEphemeralSession: oc.runSynchronousSession },
+  configGet: () => local.configGet(),
+});
+const knowledgePathsOnBox = knowledgePaths();
 const knowledgeEngine = createKnowledgeEngine({
   config: { get: () => local.configGet(), update: (patch) => local.configUpdate(patch) },
+  runEphemeral: knowledgeRunner,
+  resolveModelForClass,
+  readShellCommands: createKnowledgeShellReader({ listMessages: (sessionID) => oc.listMessages(sessionID) }),
+  globalAgentsPath: knowledgePathsOnBox.globalAgentsPath,
+  createParts: (foundation) =>
+    createKnowledgeParts(foundation, {
+      runEphemeral: knowledgeRunner,
+      resolveModelForClass,
+      configGet: () => local.configGet(),
+      oc: { listMessages: (sessionID) => oc.listMessages(sessionID), createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
+      local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
+      runDbTask: knowledgeRunDbTask,
+      listTmuxProjects: () => tmux.listProjects(),
+      isUserAuthored: (messageID) => promptOrigins.isUserAuthored(messageID),
+      getSession: async (sessionID) => {
+        const r = await oc.readSession(sessionID);
+        return r.state === "found" ? r.session : null;
+      },
+      isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
+      forge: { findOpenPullRequest: forgeFindOpenPullRequest, createPullRequest: forgeCreatePullRequest, updatePullRequest: forgeUpdatePullRequest, repoAccess: forgeRepoAccess },
+      resolveToken: forgeResolveToken,
+      fireNotify: (args) => push.fireNotify(args),
+      skillsDir: knowledgePathsOnBox.skillsDir,
+    }),
   getSession: async (sessionID) => {
     const r = await oc.readSession(sessionID);
     return r.state === "found" ? r.session : null;
@@ -2071,6 +2107,14 @@ knowledgeEngine
   .start()
   .catch((e) => console.warn("[knowledge] start failed:", e?.message ?? e))
   .finally(() => knowledgeTranscripts.start());
+// Orphaned `knowledge:` sessions (a crash between create and delete) are swept on their own poller, so it runs
+// whether or not the CTO engine is on (the CTO's reaper only owns `cto:` titles).
+const knowledgeReaper = createEphemeralReaper({
+  oc: { listSessions: oc.listSessions, deleteSession: oc.deleteSessionRaw },
+  prefix: KNOWLEDGE_TITLE_PREFIX,
+});
+const stopKnowledgeReaper = knowledgeReaper.start().stop;
+void stopKnowledgeReaper;
 
 // ---------------------------------------------------------------------------
 // Optimizer P2.4 (BET-1346) — background compaction scheduler + constraint
@@ -3893,6 +3937,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
       boxTimeZone.poke(); // a timezone restart may be owed; this is the moment to re-check
     }
     if (evt.type === "session.deleted" && evt.properties?.sessionID) commandCorrelator.forgetSession(evt.properties.sessionID);
+    // Shared knowledge: a deleted session's capture tracking is dropped (the adapted lifecycle event is the reliable signal).
+    if (evt.type === "session.deleted") knowledgeEngine.observeRaw(evt);
     try {
       observeLifecycleEvent(evt, raw);
     } catch (e) {
@@ -6303,6 +6349,13 @@ const handleRequest = async (req, res) => {
           proposalId: body?.proposalId,
           sessionID: body?.sessionID,
         });
+        // Shared knowledge §5.4: an accepted proposal is ALSO a note for the project its key resolves to.
+        // Fire-and-forget: it never delays or fails the response.
+        if (result?.ok) {
+          void knowledgeEngine
+            .mirrorCtoFact({ project: body?.project, kind: body?.kind, statement: body?.statement, refs: body?.refs, sessionID: body?.sessionID })
+            .catch((e) => console.warn("[knowledge] cto mirror failed:", e?.message ?? e));
+        }
         respondJson(res, result.ok ? 200 : 400, result);
         return;
       }

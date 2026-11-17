@@ -12,7 +12,7 @@
 //   7. skills              `skills.detect()` then `skills.retire()`;
 //   8. repositories        `repoWriter.sync(slug)` per outward project: hand edits adopted, a merged PR is done, a
 //                          closed one counts as an undo of its decisions.
-// Then one informational notification when something changed this week. User edits are never reverted: a line
+// The weekly notification is NOT sent from here (weeklyNotice.mjs owns it). User edits are never reverted: a line
 // the user wrote (git blame) is never removed or rewritten by any step here.
 //
 // The downgrade cleanup runs from `onSettingsChanged`: when a project stops sharing, whatever only it contributed
@@ -33,7 +33,6 @@ export const TIDY_EVERY_MS = 7 * 24 * 3600 * 1000;
 export const REVERIFY_AFTER_MS = 90 * 24 * 3600 * 1000;
 export const NEAR_DUPLICATE = 0.9;
 const MSG_RE = /^(?:msg|part):([^/]+)\/(.+)$/;
-const DAY_MS = 24 * 3600 * 1000;
 
 const wordsOf = (s) => normText(s).replace(/[^\p{L}\p{N}\s]/gu, "").split(" ").filter(Boolean);
 function shingleSet(text, n = 3) {
@@ -391,24 +390,10 @@ export function createTidy(kc) {
         await step("skills retire", async () => (report.skillsRetired = (await deps.skills.retire()) ?? 0));
       }
       await step("repositories", () => syncRepos(report));
-      await step("notification", () => notifyWeekly());
     } finally {
       running = false;
     }
     return { status: "ran", batchId, ...report, force };
-  }
-
-  /** One informational notification when something changed this week (spec §8). */
-  async function notifyWeekly() {
-    if (!deps.fireNotify) return;
-    const counts = changes.countsSince(now() - 7 * DAY_MS);
-    const applied = counts.applied ?? 0;
-    if (applied + (counts.skipped ?? 0) + (counts.outward ?? 0) === 0) return;
-    await deps.fireNotify({
-      title: "Shared knowledge: this week",
-      message: `${applied} change${applied === 1 ? "" : "s"} applied${counts.skipped ? `, ${counts.skipped} skipped` : ""}${counts.undo ? `, ${counts.undo} undone` : ""}. Open Settings → Knowledge to review or undo them.`,
-      tag: "knowledge-weekly",
-    });
   }
 
   async function tickWeekly() {
@@ -525,7 +510,7 @@ export function createDowngradeCleanup(kc) {
   }
 
   function installedSkills() {
-    if (deps.skills?.list) return Promise.resolve(deps.skills.list()).then((l) => (l ?? []).map((x) => (typeof x === "string" ? x : x.slug ?? x.skillSlug)).filter(Boolean));
+    if (deps.skills?.list) return Promise.resolve(deps.skills.list()).then((l) => (l ?? []).filter((x) => typeof x === "string" || x.status !== "removed").map((x) => (typeof x === "string" ? x : x.slug ?? x.skillSlug ?? x.name)).filter(Boolean));
     const out = new Set();
     for (const r of state.db.prepare("SELECT data FROM changes WHERE undone_at IS NULL AND data LIKE '%skillSlug%'").all()) {
       try {

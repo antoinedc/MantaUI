@@ -14,7 +14,7 @@
 import { newBatchId } from "./ids.mjs";
 import { isKnowledgeError } from "./errors.mjs";
 import { localDay } from "./budget.mjs";
-import { PREFERENCES_PATH, createGlobalBlock } from "./globalBlock.mjs";
+import { BATCH_HOUR, PREFERENCES_PATH, createGlobalBlock } from "./globalBlock.mjs";
 import { createBlame, createDecisionValidator, buildPageEdit, checkBudgets, defaultTitle, isBriefingEcho, normText, parseDecisionOutput, removedUserLines, sessionsOf } from "./decisions.mjs";
 import { applyBulletOp, createRulesStore, parseBullets } from "./rules.mjs";
 import { effectiveFor } from "./settings.mjs";
@@ -138,7 +138,7 @@ export function createCurator(kc) {
     const notedKey = `curator.waitNoted:${taskClass}`;
     if (now() - since >= WAITING_AFTER_MS && now() - Number(state.kvGet(notedKey) ?? 0) >= WAITING_AFTER_MS) {
       state.kvSet(notedKey, String(now()));
-      changes.add({ kind: "waiting", summary: "Waiting for a capable model", reason: `No model on this box is capable enough for ${taskClass.replace("curator-", "").replace("-", " ")} work yet; notes stay queued and are retried.`, area: null });
+      changes.add({ kind: "waiting", summary: "Waiting for a capable model", reason: `No model on this box is capable enough for ${taskClass.replace("curator-", "").replace("-", " ")} work yet; notes stay queued and are retried.`, area: null, data: { code: "no-qualifying-model", taskClass, since } });
     }
   }
   const clearWaiting = (taskClass) => {
@@ -473,14 +473,6 @@ export function createCurator(kc) {
         undoable: res.mode !== "box-only",
         data: { outward: { slug, mode: res.mode, ...(res.sha ? { sha: res.sha } : {}), ...(res.pr ? { pr: res.pr } : {}) }, linkedChangeIds: linked },
       });
-      if (res.mode !== "box-only" && state.kvGet(`outward.notified:${slug}`) !== "1") {
-        state.kvSet(`outward.notified:${slug}`, "1");
-        try {
-          await deps.fireNotify?.({ title: "Manta is writing rules to your repository", message: `The first change to ${name}'s AGENTS.md (${how}). You can review or undo it in Settings → Knowledge.`, tag: `knowledge-outward-${slug}` });
-        } catch (e) {
-          log("[knowledge] outward notification failed:", e?.message ?? e);
-        }
-      }
       void kc.briefings.precompute(slug).catch(() => {});
       return { ...res, changeId: cid };
     }
@@ -694,6 +686,26 @@ export function createCurator(kc) {
     return s.count >= TRIGGER_NOTES || now() - s.lastAt >= TRIGGER_IDLE_MS;
   };
 
+  /**
+   * The daily 04:00 batch also applies queued skill installs and removals (spec §6.6/§6.8: opencode tells
+   * running sessions through a system-update message per skills-folder write, so they are batched like
+   * the global block). Once per local day, after the batch hour, and only when something is queued.
+   */
+  async function flushSkillsDaily() {
+    if (!deps.skills?.flush) return null;
+    try {
+      if (new Date(now()).getHours() < BATCH_HOUR) return null;
+      const day = localDay(now());
+      if (state.kvGet("skills.batchDay") === day) return null;
+      if (deps.skills.pendingWrites && deps.skills.pendingWrites().length === 0) return null;
+      state.kvSet("skills.batchDay", day);
+      return await deps.skills.flush();
+    } catch (e) {
+      log("[knowledge] daily skills batch failed:", e?.message ?? e);
+      return null;
+    }
+  }
+
   /** The curator's poll: global daily batch, then every project whose queue is due. */
   async function tick() {
     const s = await settings.get();
@@ -704,6 +716,7 @@ export function createCurator(kc) {
     } catch (e) {
       log("[knowledge] daily global block failed:", e?.message ?? e);
     }
+    await flushSkillsDaily();
     // rule changes that were applied but not yet handed to the repository (a restart in between) are not forgotten
     for (const p of await registry.list()) {
       if (rules.getJson("pending", p.slug, []).length > 0 && !inflight.has(p.slug)) await finalizeRules(p.slug).catch((e) => log("[knowledge] pushing pending rules failed:", e?.message ?? e));
@@ -720,7 +733,7 @@ export function createCurator(kc) {
     return { ran };
   }
 
-  return { prompts: { NOTES: NOTES_INSTRUCTION, RULES: RULES_INSTRUCTION, CLUSTERS: CLUSTERS_INSTRUCTION, REWRITE: REWRITE_INSTRUCTION, COMMONS: COMMONS_INSTRUCTION, REASK: REASK_INSTRUCTION }, runBatch, tick, callModel, processDecisions, pushRules, finalizeRules, vctxFor, loadPages, clustersPass, currentBullets, recordRefused, describeDecision, inflight, isBusy: () => inflight.size > 0 };
+  return { flushSkillsDaily, prompts: { NOTES: NOTES_INSTRUCTION, RULES: RULES_INSTRUCTION, CLUSTERS: CLUSTERS_INSTRUCTION, REWRITE: REWRITE_INSTRUCTION, COMMONS: COMMONS_INSTRUCTION, REASK: REASK_INSTRUCTION }, runBatch, tick, callModel, processDecisions, pushRules, finalizeRules, vctxFor, loadPages, clustersPass, currentBullets, recordRefused, describeDecision, inflight, isBusy: () => inflight.size > 0 };
 }
 
 /**

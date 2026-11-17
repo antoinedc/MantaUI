@@ -2,6 +2,8 @@
 // rest of manta-server (spec §4.1, §6.7, §9.2). Pure functions over injected collaborators,
 // so each is testable without a live box; index.mjs supplies the real ones.
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parsePartId } from "../opencodeDb.mjs";
 
 const MSG_REF = /^(msg|part):([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/;
@@ -58,3 +60,27 @@ export function createForgeAdapters({ forgeRepoAccess, resolveToken }) {
 
 /** `bandOf(providerID, modelID)` for pricing an unpriced model: the family's router band, else null. */
 export const createBandOf = (describeModel) => (providerID, modelID) => describeModel(providerID, modelID)?.tier ?? null;
+
+/** opencode's config folder: `OPENCODE_CONFIG_DIR` when set, else `~/.config/opencode`. */
+export function knowledgeConfigDir({ env = process.env, home } = {}) {
+  const dir = typeof env.OPENCODE_CONFIG_DIR === "string" ? env.OPENCODE_CONFIG_DIR.trim() : "";
+  return dir || join(home ?? homedir(), ".config", "opencode");
+}
+
+/** The two files the knowledge system manages in that folder: the global `AGENTS.md` block and learned skills. */
+export function knowledgePaths(opts) {
+  const dir = knowledgeConfigDir(opts);
+  return { globalAgentsPath: join(dir, "AGENTS.md"), skillsDir: join(dir, "skills") };
+}
+
+/**
+ * The model runner every knowledge caller (curator, capture, corrections, skills) takes as `runEphemeral`.
+ * They pass `{taskClass, operation, context, directory, deps: {reportCost, validate?}}`; this merges in the
+ * runner's own collaborators (`oc`, `configGet`) UNDER the caller's, so the caller's hooks win and nothing else
+ * has to know how the runner is built.
+ *
+ * @param {{ runEphemeral: Function, oc: object, configGet: Function }} o
+ */
+export function createKnowledgeRunner({ runEphemeral, oc, configGet }) {
+  return (args = {}) => runEphemeral({ ...args, deps: { oc, configGet, ...(args.deps ?? {}) } });
+}
