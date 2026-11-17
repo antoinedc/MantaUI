@@ -145,7 +145,7 @@ export function createKnowledgeParts(ctx, d = {}) {
   const { state, store, registry, sessionMap, queue, budget, changes, scanner, settings, git, dir, now = Date.now, log = console.warn } = ctx;
   const layerDeps = {};
   const caps = {};
-  const listMessages = d.oc?.listMessages ? (sessionID) => d.oc.listMessages(sessionID) : null;
+  const listMessages = d.oc?.listMessages ? (sessionID, opts) => d.oc.listMessages(sessionID, opts) : null;
   const isUserAuthored = d.isUserAuthored ?? (() => false);
   const runEphemeral = d.runEphemeral;
   const off = (why) => `off: ${why}`;
@@ -161,7 +161,8 @@ export function createKnowledgeParts(ctx, d = {}) {
       budget,
       settings,
       runEphemeral,
-      readMessages: createCaptureMessageSource({ listMessages }),
+      readSince: createCaptureMessageSource({ listMessages }),
+      scanner,
       isUserAuthored,
       getSession: d.getSession,
       isCtoSession: d.isCtoSession,

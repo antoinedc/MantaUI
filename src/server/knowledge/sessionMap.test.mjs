@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSessionMap, normalizeSessionEvent, sessionExclusion } from "./sessionMap.mjs";
+import { classifyChildId, createSessionMap, normalizeSessionEvent, sessionExclusion } from "./sessionMap.mjs";
 import { memState } from "./testHelpers.mjs";
 
 // A registry fake: directory → project by a lookup table.
@@ -31,6 +31,10 @@ function fakes({ sessions = {}, dirs = {}, cto = new Set(), pages = [] } = {}) {
   const advance = () => (t += 120_000); // past the re-pin throttle
   return { registry, identified, map, advance };
 }
+
+// opencode-minted (task child) and Manta-minted (background job) session ids
+const TASK_ID = "ses_a1b2c3d4e5f6AbCdEfGhIjKlMn";
+const JOB_ID = `ses_${"0123456789abcdef".repeat(2)}`;
 
 const A = { slug: "alpha-0000000001", id: "github.com/o/alpha" };
 const B = { slug: "beta-0000000002", id: "github.com/o/beta" };
@@ -86,11 +90,11 @@ test("a task subagent child inherits its parent's mapping on session.created{par
   const f = fakes({ sessions: { ses_p: { directory: "/repo/a" } }, dirs: { "/repo/a": A } });
   const m = f.map(state);
   await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
-  await m.observe({ type: "session.created", data: { sessionID: "ses_c", parentID: "ses_p" } });
-  assert.equal(m.get("ses_c").slug, A.slug);
-  assert.equal(m.get("ses_c").source, "parent");
-  await m.observe({ type: "session.created", data: { sessionID: "ses_orphan", parentID: "ses_unmapped" } });
-  assert.equal(m.get("ses_orphan"), null);
+  await m.observe({ type: "session.created", data: { sessionID: TASK_ID, parentID: "ses_p" } });
+  assert.equal(m.get(TASK_ID).slug, A.slug);
+  assert.equal(m.get(TASK_ID).source, "parent");
+  await m.observe({ type: "session.created", data: { sessionID: "ses_f26f6b37affeORgXJ6eZKkLUjL", parentID: "ses_unmapped" } });
+  assert.equal(m.get("ses_f26f6b37affeORgXJ6eZKkLUjL"), null);
 });
 
 test("sessions Manta created for itself are never mapped (internal, CTO conversation, routine, curator)", async () => {
@@ -190,4 +194,89 @@ test("backfill never overwrites a live mapping", async () => {
   await m.pin({ sessionID: "s1" });
   while (!m.backfillDone()) await m.backfillStep({ budgetMs: 50 });
   assert.equal(m.get("s1").slug, A.slug);
+});
+
+test("only opencode `task` children inherit; Manta-minted job sessions and unclassifiable ids never do", async () => {
+  const state = await memState();
+  const f = fakes({ sessions: { ses_p: { directory: "/repo/a" } }, dirs: { "/repo/a": A } });
+  const m = f.map(state);
+  await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  for (const id of [JOB_ID, "ses_short", "weird"]) {
+    await m.observe({ type: "session.created", data: { sessionID: id, parentID: "ses_p" } });
+    assert.equal(m.get(id), null, id);
+  }
+  assert.deepEqual([JOB_ID, TASK_ID, "x"].map(classifyChildId), ["managed", "task", "unknown"]);
+  // an injected delegate lookup can veto an opencode-looking id
+  const m2 = createSessionMap({ state: await memState(), registry: f.registry, getSession: async () => ({ directory: "/repo/a" }), isManagedSession: async (id) => id === TASK_ID, now: () => 1, log: () => {} });
+  await m2.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  await m2.observe({ type: "session.created", data: { sessionID: TASK_ID, parentID: "ses_p" } });
+  assert.equal(m2.get(TASK_ID), null);
+});
+
+test("job lifecycle race: create → move execution with the OLD dir → dir change → first prompt <1 s → the worktree's project", async () => {
+  const state = await memState();
+  const sessions = { ses_p: { directory: "/cto" }, [JOB_ID]: { directory: "/cto" } };
+  const f = fakes({ sessions, dirs: { "/cto": B, "/worktree/a": A } });
+  const m = f.map(state);
+  await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  assert.equal(m.get("ses_p").slug, B.slug);
+  await m.observe({ type: "session.created", data: { sessionID: JOB_ID, parentID: "ses_p" } });
+  assert.equal(m.get(JOB_ID), null); // not inherited
+  // the move's own execution reports the OLD directory
+  await m.observe({ type: "session.execution.started", data: { sessionID: JOB_ID, location: { directory: "/cto" } } });
+  assert.equal(m.get(JOB_ID).slug, B.slug);
+  // < 1 s later (inside the 60 s throttle) the chokepoint pins with the worktree and force
+  const got = await m.pin({ sessionID: JOB_ID, directory: "/worktree/a", force: true });
+  assert.equal(got.slug, A.slug);
+  assert.equal(got.source, "first-prompt");
+  // a late event still carrying the old dir cannot undo it
+  await m.pin({ sessionID: JOB_ID, directory: "/cto", source: "prompt" });
+  assert.equal(m.get(JOB_ID).slug, A.slug);
+  // …but a forced pin with another directory still can, while nothing is captured
+  assert.equal((await m.pin({ sessionID: JOB_ID, directory: "/cto", force: true })).slug, B.slug);
+  m.markCaptured(JOB_ID);
+  assert.equal((await m.pin({ sessionID: JOB_ID, directory: "/worktree/a", force: true })).slug, B.slug);
+});
+
+test("a forced pin overrides a parent-inherited mapping; the throttle does not block a changed directory", async () => {
+  const state = await memState();
+  const f = fakes({ sessions: { ses_p: { directory: "/repo/b" }, [TASK_ID]: { directory: "/repo/b" } }, dirs: { "/repo/b": B, "/repo/a": A } });
+  const m = f.map(state);
+  await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  await m.observe({ type: "session.created", data: { sessionID: TASK_ID, parentID: "ses_p" } });
+  assert.equal(m.get(TASK_ID).source, "parent");
+  assert.equal((await m.pin({ sessionID: TASK_ID, directory: "/repo/a", force: true })).slug, A.slug);
+  // same directory forced: confirms an inherited mapping without re-identifying
+  const g = fakes({ sessions: { ses_p: { directory: "/repo/b" } }, dirs: { "/repo/b": B } });
+  const m3 = g.map(await memState());
+  await m3.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  await m3.observe({ type: "session.created", data: { sessionID: TASK_ID, parentID: "ses_p" } });
+  await m3.pin({ sessionID: TASK_ID, directory: "/repo/b", force: true });
+  assert.equal(m3.get(TASK_ID).source, "first-prompt");
+  // throttle: an unforced pin with the same dir is skipped, with a new dir it runs
+  const h = fakes({ sessions: { s1: { directory: "/repo/b" } }, dirs: { "/repo/b": B, "/repo/a": A } });
+  const m4 = h.map(await memState());
+  await m4.pin({ sessionID: "s1" });
+  assert.equal((await m4.pin({ sessionID: "s1", directory: "/repo/a" })).slug, A.slug);
+});
+
+test("backfill: skips sessions created at/after the first-start boundary, internal ids, and metadata/title exclusions", async () => {
+  const state = await memState();
+  const pages = [
+    { id: "s01", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 100, metadata: null },
+    { id: "s02", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 100, metadata: { manta: { internal: true } } },
+    { id: "s03", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 100, metadata: { manta: { routineId: "r" } } },
+    { id: "s04", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 100, metadata: { manta: { knowledgeTrial: "t" } } },
+    { id: "s05", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 100, title: "knowledge:curator-notes" },
+    { id: "s06", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 100, internal: true },
+    { id: "s07", directory: "/repo/a", projectId: "P1", agent: "build", createdAt: 2_000_000 }, // after the boundary
+  ];
+  const f = fakes({ dirs: { "/repo/a": A }, pages });
+  const seen = [];
+  const m = createSessionMap({ state, registry: f.registry, getSession: async () => null, isCtoSession: async () => false, listSessionsPage: async (a) => (seen.push(a.createdBefore), pages.filter((p) => p.id > a.afterId).slice(0, a.limit)), now: () => 1_000_000, log: () => {} });
+  while (!m.backfillDone()) await m.backfillStep({ budgetMs: 50 });
+  assert.equal(m.get("s01").slug, A.slug);
+  for (const id of ["s02", "s03", "s04", "s05", "s06", "s07"]) assert.equal(m.get(id), null, id);
+  assert.equal(state.kvGet("backfill.boundary"), "1000000");
+  assert.ok(seen.every((b) => b === 1_000_000));
 });

@@ -92,3 +92,16 @@ test("the class → band table matches spec §6.2 and localDay is box-local", ()
   assert.deepEqual(CLASS_BANDS, { "knowledge-capture": "fast", "knowledge-corrections": "fast", "knowledge-trial": "balanced", "curator-notes": "balanced", "curator-rules": "deep", "curator-skills": "deep" });
   assert.equal(localDay(new Date(2026, 0, 5, 23, 59).getTime()), "2026-01-05");
 });
+
+test("record prices every component of reported usage; usd wins; a bare total splits 90/10", async () => {
+  const { b } = await rig({ cap: 100 });
+  const model = { providerID: "a", modelID: "mid" }; // $3 in / $15 out per Mtok
+  const full = await b.record({ taskClass: "knowledge-capture", model, tokens: { input: 1_000_000, output: 1_000_000, reasoning: 1_000_000, cacheRead: 1_000_000, cacheWrite: 1_000_000 } });
+  assert.ok(Math.abs(full.usd - (3 + 15 + 15 + 0.3 + 3)) < 1e-9);
+  const usd = await b.record({ taskClass: "knowledge-capture", model, usd: 0.5, tokens: { input: 9_999_999 } });
+  assert.equal(usd.usd, 0.5);
+  const total = await b.record({ taskClass: "knowledge-capture", model, tokens: 1_000_000 });
+  assert.ok(Math.abs(total.usd - (0.9 * 3 + 0.1 * 15)) < 1e-9);
+  const none = await b.record({ taskClass: "knowledge-capture", model });
+  assert.equal(none.usd, 0);
+});

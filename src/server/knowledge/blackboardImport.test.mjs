@@ -157,3 +157,36 @@ test("resolver: identify runs once per directory, cached listing, session-name m
   assert.equal((await createKeyResolver({ listTmuxProjects: async () => { throw new Error("tmux down"); }, registry: {} }).resolve("x")).ok, false);
   assert.equal(r.identifyCalls.length, 0);
 });
+
+test("R3-S8: windows outside any repository (`box`) don't make a session ambiguous when a real project is also there", async () => {
+  const tmux = [
+    { tmuxSession: "withshell", windows: [{ paneCurrentPath: "/repos/alpha" }, { paneCurrentPath: "/home/dev" }, { paneCurrentPath: "/tmp" }] },
+    { tmuxSession: "onlyshell", windows: [{ paneCurrentPath: "/home/dev" }] },
+    { tmuxSession: "twoprojects", windows: [{ paneCurrentPath: "/repos/alpha" }, { paneCurrentPath: "/repos/bravo" }, { paneCurrentPath: "/home/dev" }] },
+  ];
+  const registry = { identify: async (d) => (d === "/home/dev" || d === "/tmp" ? { slug: "box-0000000000", canonicalId: "box" } : DIRS[d] ? { slug: DIRS[d], canonicalId: `x/${d}` } : null) };
+  const resolver = createKeyResolver({ listTmuxProjects: async () => tmux, registry, now: () => T });
+  assert.deepEqual(await resolver.resolve("withshell"), { ok: true, slug: "alpha-0000000001" });
+  const only = await resolver.resolve("onlyshell");
+  assert.equal(only.ok, false);
+  assert.match(only.reason, /outside any repository/);
+  assert.match((await resolver.resolve("twoprojects")).reason, /span 2 projects/);
+});
+
+test("R3-S8: a key whose tmux session no longer exists resolves through the session map of the facts' own authors; disagreement or no mapping stays skipped and is reported", async () => {
+  const sessions = { ses_a: { slug: "alpha-0000000001" }, ses_a2: { slug: "alpha-0000000001" }, ses_b: { slug: "bravo-0000000002" } };
+  const files = {
+    "old-name": [fact("f1", "status", "from a past session", { sender: { sessionID: "ses_a" } }), fact("f2", "status", "another", { sender: { sessionID: "ses_a2" } })],
+    "mixed-old": [fact("f3", "status", "x", { sender: { sessionID: "ses_a" } }), fact("f4", "status", "y", { sender: { sessionID: "ses_b" } })],
+    "no-map": [fact("f5", "status", "z", { sender: { sessionID: "ses_unknown" } })],
+  };
+  const r = await rig({ files });
+  const resolver = createKeyResolver({ listTmuxProjects: async () => TMUX, registry: { identify: async () => null }, sessionMap: { get: (id) => sessions[id] ?? null }, now: () => T });
+  const imp = createBlackboardImport({ state: r.state, queue: r.queue, changesLog: r.changes, resolver, factsDir: r.factsDir, now: () => T, log: () => {} });
+  assert.equal((await imp.run()).done, true);
+  assert.equal((await r.queue.list("alpha-0000000001")).length, 2);
+  assert.equal((await r.queue.slugs()).length, 1);
+  const change = r.changes.get(r.changes.list().items[0].id);
+  assert.deepEqual(change.data.skipped.map((s) => s.key).sort(), ["mixed-old", "no-map"]);
+  assert.match(change.reason, /mixed-old \(no tmux session with that name\)/);
+});

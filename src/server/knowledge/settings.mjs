@@ -17,6 +17,7 @@
 import { repoKeyParts } from "../../shared/forge.mjs";
 import { KnowledgeError } from "./errors.mjs";
 import { SLUG_RE } from "./identity.mjs";
+import { createMutex } from "../jsonStore.mjs";
 
 export const REPO_RULES = Object.freeze(["box-only", "pull-request", "direct"]);
 export const SHARING = Object.freeze(["share-and-read", "read-only", "private"]);
@@ -144,6 +145,7 @@ export function effectiveFor(settings, slug) {
  */
 export function createSettings({ config, registry, getRepoAccess, hasForgeLogin, now = Date.now } = {}) {
   const accessCache = new Map(); // canonicalId → {at, value}
+  const setLock = createMutex();
 
   async function load() {
     return normalizeSettings((await config.get())?.knowledge);
@@ -196,14 +198,16 @@ export function createSettings({ config, registry, getRepoAccess, hasForgeLogin,
       return o.allowed ? { repoRules: e.repoRules, reason: null } : { repoRules: "box-only", reason: o.reason };
     },
     outward,
-    async set(patch) {
-      const current = await load();
-      const next = await applyPatch(current, patch, { isKnownSlug: async (s) => (await registry.get(s)) !== null, outwardCheck: outward });
-      const stored = { ...next };
-      if (!stored.observeOnly) delete stored.observeOnly;
-      await config.update({ knowledge: stored });
-      return next;
-    },
+    // Serialized: load → patch → write is a read-modify-write, so two concurrent patches must not lose an update.
+    set: (patch) =>
+      setLock.runExclusive(async () => {
+        const current = await load();
+        const next = await applyPatch(current, patch, { isKnownSlug: async (s) => (await registry.get(s)) !== null, outwardCheck: outward });
+        const stored = { ...next };
+        if (!stored.observeOnly) delete stored.observeOnly;
+        await config.update({ knowledge: stored });
+        return next;
+      }),
     /** The `knowledge:settings-get` answer: settings + one row per detected project. */
     async view() {
       const s = await load();

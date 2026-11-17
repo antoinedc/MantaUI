@@ -21,10 +21,13 @@
 import { isMarkedInternal } from "../internalSessionMarker.mjs";
 
 /** Why a session must never be mapped / briefed / captured; null when it may be. */
+const EXCLUDED_TITLE_PREFIXES = ["knowledge:", "cto:"];
+
 export function sessionExclusion(session, { isCto = false } = {}) {
   if (isCto) return "cto-conversation";
   if (!session || typeof session !== "object") return null;
   if (isMarkedInternal(session)) return "internal";
+  if (typeof session.title === "string" && EXCLUDED_TITLE_PREFIXES.some((p) => session.title.startsWith(p))) return "knowledge-session";
   const m = session.metadata?.manta;
   if (m && typeof m === "object") {
     if (m.routineId) return "routine";
@@ -47,7 +50,25 @@ export function normalizeSessionEvent(ev) {
 
 const REPIN_THROTTLE_MS = 60_000;
 
-export function createSessionMap({ state, registry, getSession, isCtoSession, listSessionsPage, now = Date.now, log = console.warn } = {}) {
+// Session ids. opencode mints `ses_<12 hex><14 base62>`; Manta mints `ses_<32 lowercase hex>` for the sessions it
+// creates itself (background jobs, delegate.mjs mintSessionId). A `task` subagent child is created by opencode
+// (positively a task child); a Manta-minted child is a job and carries no metadata of its own to tell it apart
+// (children inherit the parent's), so the id is the evidence. Anything else is unclassified → never inherits.
+const OPENCODE_ID_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+const MANTA_MINTED_ID_RE = /^ses_[0-9a-f]{32}$/;
+/** "task" | "managed" | "unknown" for a child session id. */
+export function classifyChildId(id) {
+  if (typeof id !== "string") return "unknown";
+  if (MANTA_MINTED_ID_RE.test(id)) return "managed";
+  if (OPENCODE_ID_RE.test(id)) return "task";
+  return "unknown";
+}
+// Mappings a pin may replace while nothing has been captured. A forced pin (the prompt chokepoint, which knows the
+// directory) records `first-prompt`; only another forced pin may replace that, so a stale event can't undo it.
+const REPINNABLE_SOURCES = new Set(["parent", "move", "prompt", "note"]);
+const FORCED_SOURCE = "first-prompt";
+
+export function createSessionMap({ state, registry, getSession, isCtoSession, isManagedSession, listSessionsPage, now = Date.now, log = console.warn } = {}) {
   const db = state.db;
   const get_ = db.prepare("SELECT * FROM session_project WHERE session_id = ?");
   const upsert = db.prepare(`INSERT INTO session_project (session_id, slug, canonical_id, directory, oc_project_id, parent_id, source, captured, pinned_at)
@@ -94,7 +115,10 @@ export function createSessionMap({ state, registry, getSession, isCtoSession, li
     return serial(sessionID, async () => {
       const existing = get_.get(sessionID);
       if (existing && (existing.captured === 1 || existing.source.startsWith("backfill"))) return wire(existing);
-      if (existing && !force && now() - (lastCheck.get(sessionID) ?? 0) < REPIN_THROTTLE_MS) return wire(existing);
+      // The throttle spares the session lookup on repeated events. It never blocks a forced pin (the prompt
+      // chokepoint knows the directory) nor a pin whose directory differs from the mapped one.
+      const sameDir = directory === undefined || directory === null || (existing && existing.directory === directory);
+      if (existing && !force && sameDir && now() - (lastCheck.get(sessionID) ?? 0) < REPIN_THROTTLE_MS) return wire(existing);
       lastCheck.set(sessionID, now());
       if (lastCheck.size > 5000) lastCheck.delete(lastCheck.keys().next().value);
 
@@ -109,17 +133,32 @@ export function createSessionMap({ state, registry, getSession, isCtoSession, li
       if (await excluded(sessionID, sess)) return null;
       const dir = directory ?? sess?.directory ?? null;
       if (!dir) return existing ? wire(existing) : null;
-      if (existing && existing.directory === dir) return wire(existing);
+      if (existing && existing.directory === dir) {
+        // Same place: a forced first prompt confirms an inherited mapping.
+        if (force && existing.source !== FORCED_SOURCE) upsert.run(sessionID, existing.slug, existing.canonical_id, dir, ocProjectId ?? existing.oc_project_id, existing.parent_id, FORCED_SOURCE, now());
+        return get(sessionID);
+      }
+      if (existing && !REPINNABLE_SOURCES.has(existing.source) && !(force && existing.source === FORCED_SOURCE)) return wire(existing);
       const id = await registry.identify(dir);
       if (!id) return existing ? wire(existing) : null;
-      upsert.run(sessionID, id.slug, id.canonicalId, dir, ocProjectId ?? sess?.projectID ?? sess?.projectId ?? null, parentId ?? sess?.parentID ?? null, existing ? "move" : source, now());
+      upsert.run(sessionID, id.slug, id.canonicalId, dir, ocProjectId ?? sess?.projectID ?? sess?.projectId ?? null, parentId ?? sess?.parentID ?? null, existing ? (force ? FORCED_SOURCE : "move") : force ? FORCED_SOURCE : source, now());
       return get(sessionID);
     });
   }
 
+  /** A `task` subagent child inherits its parent's mapping; a Manta-owned job (or anything unclassified) never does. */
   function inheritFromParent(childId, parentId) {
     return serial(childId, async () => {
       if (get_.get(childId)) return get(childId);
+      let kind = classifyChildId(childId);
+      if (kind === "task") {
+        try {
+          if ((await isManagedSession?.(childId)) === true) kind = "managed";
+        } catch {
+          kind = "unknown";
+        }
+      }
+      if (kind !== "task") return null; // left unmapped until its first prompt pins it from its own directory
       const parent = get_.get(parentId);
       if (!parent) return null;
       upsert.run(childId, parent.slug, parent.canonical_id, parent.directory, parent.oc_project_id, parentId, "parent", now());
@@ -159,6 +198,10 @@ export function createSessionMap({ state, registry, getSession, isCtoSession, li
 
   async function backfillStep({ budgetMs = 2000, pageSize = 200, maxPages = Infinity } = {}) {
     if (backfillDone() || !listSessionsPage) return { done: backfillDone(), mapped: 0, scanned: 0 };
+    // Only sessions that existed before the first start are backfilled: later ones are mapped live (at their first
+    // prompt), and a session whose directory was never seen at that moment must not be guessed at afterwards.
+    if (!state.kvGet("backfill.boundary")) state.kvSet("backfill.boundary", String(now()));
+    const boundary = Number(state.kvGet("backfill.boundary"));
     const deadline = now() + budgetMs;
     let mapped = 0;
     let scanned = 0;
@@ -167,7 +210,7 @@ export function createSessionMap({ state, registry, getSession, isCtoSession, li
       const pass = state.kvGet("backfill.pass", "1");
       const cursor = state.kvGet("backfill.cursor", "");
       if (pass === "1") {
-        const rows = await listSessionsPage({ afterId: cursor, limit: pageSize });
+        const rows = await listSessionsPage({ afterId: cursor, limit: pageSize, createdBefore: boundary });
         if (!rows || rows.length === 0) {
           state.kvSet("backfill.pass", "2");
           state.kvSet("backfill.cursor", "");
@@ -176,7 +219,10 @@ export function createSessionMap({ state, registry, getSession, isCtoSession, li
         for (const row of rows) {
           scanned++;
           if (get_.get(row.id)) continue;
-          if (isMarkedInternal({ agent: row.agent, metadata: row.metadata }) || (await excluded(row.id, { metadata: row.metadata }))) continue;
+          if (row.internal === true) continue; // a Manta/CTO inference session (the internal-session registry)
+          if (Number.isFinite(row.createdAt) && row.createdAt >= boundary) continue;
+          const sess = { agent: row.agent, metadata: row.metadata, title: row.title };
+          if (isMarkedInternal(sess) || (await excluded(row.id, sess))) continue;
           const id = row.directory ? await registry.identify(row.directory).catch(() => null) : null;
           if (id) {
             upsert.run(row.id, id.slug, id.canonicalId, row.directory, row.projectId ?? null, row.parentId ?? null, "backfill", now());

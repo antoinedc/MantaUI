@@ -23,6 +23,7 @@ async function rig({ messages = [], session = { title: "fix the build" }, userAu
   const costs = [];
   let budgetOk = true;
   const store = { messages, answer };
+  const seenPrompts = [];
   const cap = createCapture({
     state,
     queue,
@@ -33,17 +34,19 @@ async function rig({ messages = [], session = { title: "fix the build" }, userAu
     settings: { get: async () => store.settings ?? { enabled: true, observeOnly: false } },
     runEphemeral: async (args) => {
       runs.push(args);
+      seenPrompts.push(args.context[0].text);
       await args.deps.reportCost({ taskClass: args.taskClass, model: { providerID: "p", modelID: "m" }, tokens: 1000 });
       if (store.fail) return store.fail;
       return { text: typeof store.answer === "function" ? store.answer(args) : store.answer, model: { providerID: "p", modelID: "m" } };
     },
-    readMessages: async ({ after }) => store.messages.filter((m) => !after || m.at > after.at || (m.at === after.at && m.id > after.id)),
+    scanner: store.scanner ?? scanner,
+    readSince: async ({ after }) => store.messages.filter((m) => !after || m.at > after.at || (m.at === after.at && m.id > after.id)),
     isUserAuthored: (id) => userAuthored.includes(id),
     getSession: async () => session,
     isCtoSession: async (id) => id === "ses_cto",
     ...over,
   });
-  return { cap, state, queue, marked, runs, costs, store, mapped, advance: (ms) => (t += ms), setBudget: (v) => (budgetOk = v) };
+  return { cap, state, queue, marked, runs, costs, store, mapped, seenPrompts, advance: (ms) => (t += ms), setBudget: (v) => (budgetOk = v) };
 }
 const ev = (type, sessionID = "ses_1", extra = {}) => ({ type, data: { sessionID, ...extra } });
 const four = () => [
@@ -115,7 +118,7 @@ test("compaction start captures at once with ≥ 1 new user message", async () =
   const r = await rig({ messages: four().slice(0, 1), answer: ANSWER });
   r.cap.observeRaw(ev("session.execution.started"));
   r.cap.observeRaw(ev("session.compaction.started"));
-  await new Promise((res) => setTimeout(res, 20));
+  for (let i = 0; i < 200 && (r.marked.length === 0); i++) await new Promise((res) => setTimeout(res, 10));
   assert.equal(r.runs.length, 1);
   assert.equal((await r.queue.list(SLUG)).length >= 1, true);
 });
@@ -193,8 +196,15 @@ test("cost is reported through the runner's reportCost into the budget, tagged w
   assert.equal(r.costs[0].taskClass, "knowledge-capture");
   assert.deepEqual(r.costs[0].tokens, { input: 900, output: 100 });
   const c = [];
-  await makeReportCost({ record: async (x) => c.push(x) })({ taskClass: "k", tokens: { input: 5 } });
-  assert.deepEqual(c[0].tokens, { input: 5 });
+  const rc = makeReportCost({ record: async (x) => c.push(x) }, "s1");
+  await rc({ taskClass: "k", tokens: { input: 5, output: 2, reasoning: 3, cacheRead: 7, cacheWrite: 1 } });
+  assert.deepEqual(c[0].tokens, { input: 5, output: 2, reasoning: 3, cacheRead: 7, cacheWrite: 1 }); // real usage as given
+  await rc({ taskClass: "k", usd: 0.25, tokens: { input: 5 } });
+  assert.equal(c[1].usd, 0.25);
+  assert.equal(c[1].tokens, undefined);
+  await rc({ taskClass: "k", tokens: 100 }); // a bare total is split 90/10
+  assert.deepEqual(c[2].tokens, { input: 90, output: 10 });
+  assert.equal(c[2].slug, "s1");
 });
 
 test("restart resumes: dirty sessions are reloaded from state.sqlite", async () => {
@@ -210,7 +220,8 @@ test("restart resumes: dirty sessions are reloaded from state.sqlite", async () 
     budget: { canSpend: async () => ({ ok: true }), record: async () => {} },
     settings: { get: async () => ({ enabled: true }) },
     runEphemeral: async () => ({ text: ANSWER }),
-    readMessages: async () => four(),
+    readSince: async () => four(),
+    scanner,
     isUserAuthored: () => true,
     getSession: async () => ({}),
     ...over,
@@ -292,10 +303,55 @@ test("createCaptureMessageSource maps the box transcript shape and honours the c
     { info: { id: "msg_b", role: "assistant", time: { created: 2 } }, parts: [{ type: "reasoning", text: "x" }, { id: "msg_b:text:0", type: "text", text: "yo" }, { id: "t1", type: "tool", tool: "bash", state: { input: { command: "ls" }, output: "a b" } }, { type: "text", text: "syn", synthetic: true }] },
     { info: { id: "msg_c", role: "user", time: { created: 3 } }, parts: [{ type: "text", text: "next" }] },
   ];
-  const read = createCaptureMessageSource({ listMessages: async () => timeline });
+  const limits = [];
+  const read = createCaptureMessageSource({ listMessages: async (_id, opts) => (limits.push(opts?.limit), timeline) });
   const all = await read({ sessionID: "s" });
   assert.deepEqual(all.map((m) => [m.id, m.role, m.at, m.parts.length]), [["msg_a", "user", 1, 1], ["msg_b", "assistant", 2, 2], ["msg_c", "user", 3, 1]]);
   assert.equal(all[1].parts[1].command, "ls");
   assert.deepEqual((await read({ sessionID: "s", after: { at: 2, id: "msg_b" } })).map((m) => m.id), ["msg_c"]);
   assert.equal((await read({ sessionID: "s", limit: 1 })).length, 1);
+  assert.deepEqual(limits, [400, 400, 1]); // the transcript read is bounded
+});
+
+const STORE_SECRET = "sk-live-0123456789abcdef";
+test("R3-B3: the transcript is redacted before the runner sees it (a secrets-store value never reaches the model)", async () => {
+  const messages = four();
+  messages[0] = msg("msg_u1", "user", 1, `we always deploy with ${STORE_SECRET} as the token`);
+  const r = await rig({ messages, answer: ANSWER, over: { scanner: { redact: async (t) => ({ text: t.split(STORE_SECRET).join("[REDACTED]"), redacted: 1, unavailable: false }) } } });
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  assert.equal((await r.cap.tick()).captured, 1);
+  assert.equal(r.runs.length, 1);
+  assert.ok(!r.seenPrompts[0].includes(STORE_SECRET));
+  assert.match(r.seenPrompts[0], /\[REDACTED\] as the token/);
+});
+
+test("R3-B3: scanner unavailable (or throwing) → no model call, skipped:'scanner', the session stays pending", async () => {
+  for (const sc of [{ redact: async () => ({ text: "", redacted: 0, unavailable: true }) }, { redact: async () => { throw new Error("boom"); } }]) {
+    const r = await rig({ messages: four(), answer: ANSWER, over: { scanner: sc } });
+    r.cap.observeRaw(ev("session.execution.started"));
+    r.advance(11 * MIN);
+    const out = await r.cap.captureSession("ses_1", { reason: "idle" });
+    assert.equal(out.skipped, "scanner");
+    assert.equal(r.runs.length, 0);
+    assert.equal(r.marked.length, 0);
+  }
+});
+
+test("R3-S2: a failing session lookup skips this tick (fail closed) and keeps the session pending; it is retried", async () => {
+  let broken = true;
+  const r = await rig({ messages: four(), answer: ANSWER, over: { getSession: async () => { if (broken) throw new Error("opencode down"); return { title: "x" }; } } });
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  assert.equal((await r.cap.captureSession("ses_1")).skipped, "lookup-failed");
+  assert.equal(r.runs.length, 0);
+  assert.ok(r.cap._tracked("ses_1"));
+  broken = false;
+  assert.equal((await r.cap.tick()).captured, 1);
+  // isCtoSession failing is the same
+  const r2 = await rig({ messages: four(), answer: ANSWER, over: { isCtoSession: async () => { throw new Error("x"); } } });
+  r2.cap.observeRaw(ev("session.execution.started"));
+  r2.advance(11 * MIN);
+  assert.equal((await r2.cap.captureSession("ses_1")).skipped, "lookup-failed");
+  assert.equal(r2.runs.length, 0);
 });

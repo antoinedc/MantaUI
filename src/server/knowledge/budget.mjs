@@ -37,6 +37,12 @@ export function localDay(t) {
 const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
 
 /** PURE. $ for `tokens` at `rates` ($ per million tokens). */
+/** A bare total (the runner could only estimate prompt + answer) is split 90 % input / 10 % output. */
+export function normalizeTokens(tokens) {
+  if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) return { input: Math.round(tokens * 0.9), output: Math.round(tokens * 0.1) };
+  return tokens && typeof tokens === "object" ? tokens : undefined;
+}
+
 export function priceTokens(tokens, rates) {
   const input = num(rates.input);
   const output = num(rates.output);
@@ -97,7 +103,8 @@ export function createBudget({ state, settings, getPrices = async () => ({ model
      * Record one call. `tokens` {input, output, cacheRead, cacheWrite, reasoning} are priced; `usd` (a
      * trial session's recorded cost) is stored as-is. Returns `{usd, priced}`.
      */
-    async record({ taskClass, model, tokens, usd, slug = null, band } = {}) {
+    async record({ taskClass, model, tokens: rawTokens, usd, slug = null, band } = {}) {
+      const tokens = normalizeTokens(rawTokens); // real usage {input, output, reasoning, cacheRead, cacheWrite} is priced per component
       const b = band ?? CLASS_BANDS[taskClass] ?? null;
       let cost;
       let priced = true;
