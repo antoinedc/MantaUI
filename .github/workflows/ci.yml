@@ -70,8 +70,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Never --depth=1 here: on a full clone a shallow fetch grafts main's tip as a
+      # root commit, so gitleaks (full history) reads every file as added in that
+      # commit and re-reports already-allowlisted fixtures under a new commit id
+      # each time main moves.
       - name: Ensure origin/main is available (merge-base source)
-        run: git fetch --no-tags --depth=1 origin main 2>/dev/null || true
+        run: git fetch --no-tags origin main 2>/dev/null || true
 
       - uses: actions/setup-node@v4
         with:
