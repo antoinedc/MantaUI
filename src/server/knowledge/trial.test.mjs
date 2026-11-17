@@ -83,16 +83,16 @@ test("ruleset is deny-first with the read tools confined to the worktree", () =>
     assert.equal(decide(rules, p, `${WT}/../other/x`), "deny", p);
     assert.equal(decide(rules, p, `${WT}-evil/x`), "deny", p);
   }
-  assert.equal(decide(rules, "edit", `${WT}/notes.txt`), "allow");
-  assert.equal(decide(rules, "edit", "/tmp/x"), "deny");
-  assert.equal(decide(rules, "edit", `${WT}/../x`), "deny");
+  // the trial is read-only: no edit anywhere, not even inside the worktree (`.git/config` could name a program git would run)
+  for (const path of [`${WT}/notes.txt`, `${WT}/.git`, `${WT}/.git/config`, `${WT}/.gitdir`, "/tmp/x", `${WT}/../x`]) assert.equal(decide(rules, "edit", path), "deny", path);
+  assert.ok(!rules.some((r) => r.permission === "edit" && r.action === "allow"));
   for (const p of ["external_directory", "question", "skill", "webfetch", "task", "write"]) assert.equal(decide(rules, p, `${WT}/a`), "deny", p);
 });
 
 test("bash: reads inside the worktree pass; writes, outside paths and metacharacters are denied", () => {
   const rules = buildTrialRuleset(WT);
   const bash = (c) => decide(rules, "bash", c);
-  for (const c of ["cat README.md", "ls src", "ls", "head -n 5 package.json", "tail -20 log.txt", "wc -l src/a.js", "git status", "git status --porcelain", "which node", "cat ./src/a.js"]) {
+  for (const c of ["cat README.md", "ls src", "ls", "head -n 5 package.json", "tail -20 log.txt", "wc -l src/a.js", "which node", "cat ./src/a.js"]) {
     assert.equal(bash(c), "allow", c);
   }
   for (const c of [
@@ -121,6 +121,24 @@ test("bash: reads inside the worktree pass; writes, outside paths and metacharac
     "rm -rf x",
     "curl https://example.com",
     "git status > /tmp/y",
+    // git is not allowed at all (a worktree's own config can name a program git runs), read-only or not
+    "git status",
+    "git status --porcelain",
+    "git log",
+    "git config core.fsmonitor ./x",
+    // quoted paths used to slip past the path patterns
+    'cat "/etc/passwd"',
+    "cat '/home/dev/.manta/auth.json'",
+    'ls "/"',
+    'head -n1 "/home/dev/.ssh/id_rsa"',
+    'cat "README.md"',
+    "cat 'a b'",
+    "cat README.md\t/etc/passwd",
+    "cat README.md\n/bin/sh",
+    "cat `echo /etc/passwd`",
+    "cat $(echo /etc/passwd)",
+    'cat ""/etc/passwd',
+    "ls -la ./\"/\"",
   ]) {
     assert.equal(bash(c), "deny", c);
   }

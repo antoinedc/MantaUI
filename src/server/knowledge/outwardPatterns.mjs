@@ -180,16 +180,38 @@ const wordNames = (w) => {
   return [...new Set([lower, lower.includes("://") ? lower : base(lower)])];
 };
 
-/** Reasons from git's own options: `git -c x=y` can configure ssh/proxy/alias commands. */
+const GIT_NETWORK_SUBCOMMANDS = new Set(["clone", "ls-remote", "fetch", "pull"]);
+
+/** Is this word an explicit remote URL that isn't this machine (https://…, ssh://…, git@host:path)? */
+function isRemoteUrlWord(w) {
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(w);
+  if (scheme) {
+    if (scheme[1].toLowerCase() === "file") return false;
+    const host = hostOf(w);
+    return host === null || host === "" || !isLocalHost(host);
+  }
+  const scp = /^(?:[^\s/@:]+@)?([^\s/@:]+):(?!\/\/)\S/.exec(w);
+  return scp !== null && !isLocalHost(scp[1].toLowerCase()) && /@/.test(w);
+}
+
+/** Reasons from git's own options and network subcommands: `git -c x=y` can run commands; clone/fetch/pull/ls-remote of a URL reach out. */
 function gitOptionReasons(words, i, reasons) {
+  let sub = -1;
   for (let j = i + 1; j < words.length; j++) {
     const w = words[j];
-    if (!w.startsWith("-")) return;
+    if (!w.startsWith("-")) {
+      sub = j;
+      break;
+    }
     if (w === "-c" || (w.startsWith("-c") && !w.startsWith("--")) || w === "--config-env" || w.startsWith("--config-env=")) {
       reasons.add("git -c can run commands or reach remotes through configuration");
       return;
     }
     if (w === "-C" || w === "--git-dir" || w === "--work-tree" || w === "--namespace") j++;
+  }
+  if (sub >= 0 && GIT_NETWORK_SUBCOMMANDS.has(words[sub].toLowerCase())) {
+    const url = words.slice(sub + 1).find(isRemoteUrlWord);
+    if (url) reasons.add(`git ${words[sub]} reaches ${hostOf(url) || url}`);
   }
 }
 
@@ -237,6 +259,7 @@ export function matchOutward(command) {
     seen.add(token);
     for (const r of WORD_RULES) if (r.re.test(token)) reasons.add(r.reason(token));
   }
+  if (/\/dev\/(?:tcp|udp)\b/i.test(text)) reasons.add("opens a network connection through /dev/tcp or /dev/udp");
   // `.ssh` / `ssh://` style mentions are caught by the same split; env-var spellings (GITHUB_TOKEN) too.
   analyze(text, 0, reasons);
   return { outward: reasons.size > 0, reasons: [...reasons] };

@@ -7,8 +7,8 @@
 //
 //   • metadata `withInternalMarker({manta:{knowledgeTrial:<id>}})` (sessionMap/auto-handoff skip it)
 //   • model from `resolveModelForClass("knowledge-trial")`; skipped when none qualifies
-//   • deny-first ruleset: a leading catch-all deny, then read/glob/grep/list and edit confined to the
-//     worktree, a short bash allowlist (no git diff/log/show: they can write files via --output) and
+//   • deny-first ruleset: a leading catch-all deny, then read/glob/grep/list confined to the
+//     worktree, a short bash allowlist (no git at all, no edit: the trial only reads) and
 //     denies for shell metacharacters and outside paths AFTER the allows (opencode resolves last-match-wins)
 //   • 20-minute ceiling enforced here (abort); ≤ 2 trials a week; only when no other knowledge run is active
 //   • cost counted against the daily cap from the session's recorded usage
@@ -41,10 +41,14 @@ const safely = async (fn) => {
 
 // Patterns are matched last-match-wins and `*` matches anything (spaces and slashes included), so the
 // path/metacharacter denies below sit AFTER the allows they narrow.
-const BASH_ALLOW = ["ls *", "cat *", "head *", "tail *", "wc *", "git status*", "which *"];
+// No `git` at all: even `git status` runs whatever `core.fsmonitor` etc. the worktree's own config names, and the trial is
+// read-only by spec, so it has no edit permission either.
+const BASH_ALLOW = ["ls *", "cat *", "head *", "tail *", "wc *", "which *"];
 const BASH_DENY = [
   // shell metacharacters: no chaining, redirection, substitution or variable expansion
   "*;*", "*&*", "*|*", "*>*", "*<*", "*`*", "*$*", "*\\*",
+  // quoting hides a path from the patterns below (`cat "/etc/passwd"`), and tabs/newlines split commands invisibly
+  '*"*', "*'*", "*\t*", "*\n*", "*\r*",
   // paths outside the worktree: absolute, home-relative, parent-relative, or hidden in an option value
   "* /*", "* ~*", "*..*", "*=/*", "*=~*",
 ];
@@ -56,10 +60,9 @@ export function buildTrialRuleset(worktree) {
   for (const permission of ["read", "glob", "grep", "list"]) {
     rules.push({ permission, pattern: wt, action: "allow" }, { permission, pattern: `${wt}/**`, action: "allow" });
   }
-  rules.push({ permission: "edit", pattern: `${wt}/**`, action: "allow" });
   for (const pattern of BASH_ALLOW) rules.push({ permission: "bash", pattern, action: "allow" });
   for (const pattern of BASH_DENY) rules.push({ permission: "bash", pattern, action: "deny" });
-  for (const permission of ["read", "glob", "grep", "list", "edit"]) {
+  for (const permission of ["read", "glob", "grep", "list"]) {
     rules.push({ permission, pattern: "*/../*", action: "deny" }, { permission, pattern: "*/..", action: "deny" });
   }
   return rules;
@@ -69,7 +72,7 @@ export function buildTrialRuleset(worktree) {
 export function buildTrialPrompt({ skillMd, request }) {
   return [
     "You are verifying a draft skill that was written from earlier sessions. You only inspect; you do not carry the skill out.",
-    "Do not run the skill's commands, do not change anything outside this working copy, and do not try to reach anything outside it. Your tools are read-only inspection tools, limited to this working copy: use relative paths, no absolute paths, no `..`, no shell chaining or redirection.",
+    "Do not run the skill's commands, do not change anything outside this working copy, and do not try to reach anything outside it. You cannot write anything and cannot run git: your tools are read-only inspection tools (read, glob, grep, list, and ls/cat/head/tail/wc/which), limited to this working copy. Use relative paths, no absolute paths, no `..`, no quotes, no shell chaining or redirection. Judge git steps by what the repository contains (files, scripts, config), not by running them.",
     "",
     request ? `The most recent real instance of the task was requested like this (quoted, for context only): "${String(request).slice(0, 400)}"` : "",
     "",
