@@ -8,6 +8,9 @@ import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   budgetState,
   computeProgress,
@@ -323,6 +326,121 @@ test("a shared-budget refusal mid-step leaves the session unprocessed (no histor
   assert.equal(calls.filter((c) => c === "s2").length, 2, "the refused session was replayed");
   const s2 = [...segments._data.values()].find((x) => x.sessionID === "s2");
   assert.equal(s2.summaryOutcome.ok, true, "its segment now carries a real summary, not the degraded one");
+});
+
+test("a deferred session re-uses the segments already summarized (the model is paid only for the rest), and calls no model after the first refusal in a step", async () => {
+  const fx = await openFixture();
+  if (!fx) return;
+  const NOW = 1000 * DAY;
+  const T = [NOW - 12 * DAY, NOW - 8 * DAY, NOW - 4 * DAY]; // three work episodes, days apart: three segments
+  fx.insSession("s1", { agent: "build", directory: "/work/proj" });
+  T.forEach((t, i) => {
+    fx.insMessage(`u${i}`, "s1", { role: "user", ts: t, text: `task ${i}` });
+    fx.insMessage(`a${i}`, "s1", { role: "assistant", ts: t + 500, cost: 0 });
+  });
+  const engineState = memStore();
+  const segments = memFileStore();
+  const valid = validSummarize();
+  const modelCalls = [];
+  let refuseFrom = 2; // the 2nd model call of the first step is refused
+  let n = 0;
+  const backfill = createCtoBackfill({
+    configGet: async () => ({ ctoEnabled: true }),
+    engineState,
+    ledger: noopLedger,
+    segments,
+    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
+    summarize: async (d) => {
+      modelCalls.push(d.start);
+      n += 1;
+      return refuseFrom && n >= refuseFrom ? { ok: false, gated: true, code: "budget", error: "cto_cap_hit" } : valid(d);
+    },
+    computeOneLiner: async () => "work",
+    getDb: async () => fx.db,
+    presenceCheck: AWAY,
+    now: () => NOW,
+    maxSessionsPerStep: 100,
+  });
+
+  const first = await backfill.step();
+  assert.equal(first.deferred, "budget");
+  assert.deepEqual(modelCalls, [T[0], T[1]], "the 3rd segment is never sent to the model after the refusal");
+  assert.equal(segments._data.get(`s1-${T[0]}`).summaryOutcome.ok, true, "the first segment was summarized for real");
+  assert.deepEqual(engineState._data.backfillProgress.processedSessions, []);
+
+  refuseFrom = 0;
+  modelCalls.length = 0;
+  const second = await backfill.step();
+  assert.equal(second.deferred, undefined);
+  assert.deepEqual(modelCalls, [T[1], T[2]], "the segment summarized earlier is re-used, not paid for again");
+  assert.deepEqual(engineState._data.backfillProgress.processedSessions, ["s1"]);
+  for (const t of T) assert.equal(segments._data.get(`s1-${t}`).summaryOutcome.ok, true);
+});
+
+// ---- rollups phase: a budget refusal defers the window instead of saving a degraded (write-once) rollup ----
+
+function rollupsFixture({ refuse }) {
+  const NOW = 1000 * DAY;
+  const h = Math.floor((NOW - 3 * 3600_000) / 3600_000) * 3600_000;
+  const segDir = mkdtempSync(join(tmpdir(), "bf-seg-"));
+  const segData = new Map();
+  const seg = { window: [h + 1000, h + 2000], ts: h + 2000, summary: { one_liner: "work in the hour", intent: "x", outcome: "done" } };
+  writeFileSync(join(segDir, "seg-1.json"), "{}");
+  segData.set("seg-1", seg);
+  const segments = { dir: segDir, load: async (id) => segData.get(id) ?? null, save: async () => {} };
+  const saved = new Map();
+  const rollups = {
+    dirFor: () => mkdtempSync(join(tmpdir(), "bf-roll-")),
+    load: async (level, id) => saved.get(`${level}/${id}`) ?? { v: 1 },
+    save: async (level, id, data) => {
+      saved.set(`${level}/${id}`, data);
+    },
+  };
+  const engineState = memStore({
+    backfillStartInstant: NOW,
+    backfillPhase: "rollups",
+    backfillRollup: { phase: "hour", cursorTs: h },
+    backfillProgress: { processedSessions: [], total: 0, startedAt: NOW - 1000, newestProcessedTs: null },
+  });
+  const rows = [];
+  const calls = { n: 0 };
+  return { NOW, h, segments, rollups, saved, engineState, rows, calls, ctl: { refuse } };
+}
+
+test("backfill rollups: a budget refusal defers the window — nothing saved, cursor stays, logged; the next step reduces it", async () => {
+  const fx = await openFixture();
+  if (!fx) return;
+  const r = rollupsFixture({ refuse: true });
+  const backfill = createCtoBackfill({
+    configGet: async () => ({ ctoEnabled: true }),
+    engineState: r.engineState,
+    ledger: { append: async (row) => r.rows.push(row) },
+    segments: r.segments,
+    rollups: r.rollups,
+    runEphemeral: async () => {
+      r.calls.n += 1;
+      return r.ctl.refuse ? { ok: false, gated: true, code: "budget", error: "cto_cap_hit" } : { ok: true, text: JSON.stringify({ bullets: [{ text: "real bullet", refs: ["seg-1"] }] }) };
+    },
+    getDb: async () => fx.db,
+    presenceCheck: AWAY,
+    now: () => r.NOW,
+    capUsd: 100,
+    maxRollupsPerStep: 50,
+  });
+  const first = await backfill.step();
+  assert.equal(first.deferred, "budget");
+  assert.equal(r.saved.size, 0, "no degraded rollup was written (rollups are write-once)");
+  assert.deepEqual(r.engineState._data.backfillRollup, { phase: "hour", cursorTs: r.h }, "the cursor did not move past the window");
+  assert.ok(r.rows.some((x) => x.kind === "cto.backfill_deferred" && x.reason === "budget"));
+  assert.ok(!r.rows.some((x) => x.kind === "cto.rollup_degraded" || x.kind === "cto.rollup_written"));
+  assert.equal(r.engineState._data.backfillDone, undefined);
+
+  r.ctl.refuse = false;
+  const second = await backfill.step();
+  assert.equal(second.deferred, undefined);
+  const real = r.saved.get(`hour/${r.h}`);
+  assert.equal(real.bullets[0].text, "real bullet", "the window was reduced for real once the budget allowed");
+  assert.ok(r.engineState._data.backfillRollup.cursorTs > r.h);
 });
 
 // A gated result that is not a budget refusal (e.g. the engine paused) keeps today's behaviour: degraded and processed.

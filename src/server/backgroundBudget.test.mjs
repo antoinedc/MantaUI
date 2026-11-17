@@ -611,6 +611,20 @@ test("record before the first tick created the window state is kept (state creat
   assert.equal(win(r).bgPct, 1, "dPct 2 × 800/1600: the early spend is attributed");
 });
 
+test("record from a stale reading (before the first tick) creates no window state — no spurious window-close when the new window appears", async () => {
+  const r = rig({ snaps: [claude([week({ pct: 90, resetsAt: T0 - HOUR })])] }); // the window ended an hour ago; not flagged
+  await r.b.record({ workType: "cto-ambient", model: OPUS, usage: { input: 500 }, inLedger: true });
+  assert.equal(r.store.data.windows["claude:weekly"], undefined);
+  r.world.snaps = [claude([week({ pct: 2, resetsAt: T0 + 7 * DAY })])];
+  await r.b.tick();
+  assert.equal(r.logs.some((l) => l.type === "window-close"), false, "the first tick is a first sighting, not a reset");
+  assert.equal(win(r).bgPct, 0);
+
+  const flagged = rig({ snaps: [claude([week({ pct: 90, stale: true })])] });
+  await flagged.b.record({ workType: "cto-ambient", model: OPUS, usage: { input: 500 } });
+  assert.equal(flagged.store.data.windows["claude:weekly"], undefined, "a flagged-stale reading too");
+});
+
 test("tick: absent resetsAt — no reset detection, resumesAt null; a reset instant appearing later is a first sighting", async () => {
   const none = rig({ snaps: [claude([week({ pct: 10, resetsAt: undefined })])], store: seeded({ "claude:weekly": winState({ resetsAt: null, bgPct: 5 }) }) });
   await none.b.tick();

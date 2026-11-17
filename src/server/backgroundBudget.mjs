@@ -666,7 +666,13 @@ export function createBackgroundBudget({
           day.plan.usd += cost;
           for (const { key: k, w: live } of planWindows) {
             // Spend before the first tick saw the window still counts: the state is created from the live reading.
-            const ws = (st.windows[k] ??= newWindowState(live, ts));
+            // (not from a stale reading: it describes a window that has ended, and a state made from it would
+            // close spuriously when the new window appears)
+            let ws = st.windows[k];
+            if (!ws) {
+              if (isStaleWindow(live, ts)) continue;
+              ws = st.windows[k] = newWindowState(live, ts);
+            }
             ws.bgTokensSinceTick += sent;
             if (batch) ws.batchTokensSinceTick += sent;
             if (inLedger === false) ws.bgNotInLedgerSinceTick += sent;

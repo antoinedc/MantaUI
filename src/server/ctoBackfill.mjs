@@ -196,6 +196,8 @@ export function createCtoBackfill(deps = {}) {
       exists: existsFn,
       presenceCheck,
       now,
+      // History is reduced once and a rollup is write-once: a budget refusal leaves the window for a later step.
+      deferOnBudget: true,
     });
     return rollupRunner;
   }
@@ -236,12 +238,32 @@ export function createCtoBackfill(deps = {}) {
   // only once — so the caller must NOT mark the session processed and replays it again later.
   async function replaySession(db, session, endTs) {
     let budgetRefused = false;
+    // A segment a previous (deferred) pass already summarized for real is reused, never paid for again.
+    const savedSuccess = async (data) => {
+      if (data?.start == null) return null;
+      try {
+        const rec = await segments.load(`${data.sessionID}-${data.start}`);
+        return rec?.summaryOutcome?.ok === true && rec.summary ? rec : null;
+      } catch {
+        return null;
+      }
+    };
     const guardedSummarize = async (data) => {
+      const saved = await savedSuccess(data);
+      if (saved) return { ok: true, summary: structuredClone(saved.summary) };
+      // After the first refusal in this pass no further model call is made (each would be refused, logged and saved degraded).
+      if (budgetRefused) return { ok: false, gated: true, code: "budget" };
       const res = await summarize(data);
       if (res?.code === "budget") budgetRefused = true;
       return res;
     };
-    const seg = createSegmenter({ segments, engineState, summarize: guardedSummarize, computeOneLiner, now });
+    const guardedOneLiner = async (data) => {
+      const saved = await savedSuccess(data);
+      if (typeof saved?.summary?.one_liner === "string" && saved.summary.one_liner) return saved.summary.one_liner;
+      if (budgetRefused) return null;
+      return computeOneLiner(data);
+    };
+    const seg = createSegmenter({ segments, engineState, summarize: guardedSummarize, computeOneLiner: guardedOneLiner, now });
     const rows = db
       .prepare(
         "SELECT id, time_created, type, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant') AND time_created < ? ORDER BY time_created ASC, id ASC",
@@ -393,6 +415,7 @@ export function createCtoBackfill(deps = {}) {
   // checked between windows. Hour → day → week (each level's inputs come from
   // the level below). `st.backfillRollup` = { phase: hour|day|week, cursorTs }.
   async function rollupsStep(db, win, st, startInstant, cap) {
+    if (!existsFn) existsFn = defaultExists({ rollups }); // (getRunner builds it lazily, after the first window is checked)
     const roll = st?.backfillRollup || {};
     let phase = roll.phase ?? "hour";
     let cursorTs = roll.cursorTs ?? startOfHour(win.start);
@@ -400,6 +423,7 @@ export function createCtoBackfill(deps = {}) {
     const spent = await measureSpend(db, startInstant);
     let lastSpent = spent;
     let reduced = 0;
+    let deferred = false;
     let newestTs = st?.backfillProgress?.newestProcessedTs ?? null;
 
     for (; reduced < maxRollupsPerStep; ) {
@@ -422,7 +446,12 @@ export function createCtoBackfill(deps = {}) {
       // Sail past windows already rolled up (write-once — never rewrite/throw).
       if (!(await existsFn({ level: phase, id }))) {
         try {
-          await getRunner(db).reduceWindow(phase, window);
+          const out = await getRunner(db).reduceWindow(phase, window);
+          if (out?.deferred) {
+            // The shared budget refused: leave this window (and the cursor) where they are for a later step.
+            deferred = true;
+            break;
+          }
           reduced += 1;
           lastSpent = await measureSpend(db, startInstant);
         } catch {
@@ -439,6 +468,11 @@ export function createCtoBackfill(deps = {}) {
       const reachedAt = depthDaysAt({ newestProcessedTs: newestTs, now: now(), depthDays: resolveDepth() });
       await ledgerLog({ kind: "cto.backfill_stopped", reason: "budget", stoppedAtDepthDays: reachedAt, spentUsd: lastSpent });
       return { kind: "budget", spentUsd: lastSpent, reachedAt };
+    }
+
+    if (deferred) {
+      await ledgerLog({ kind: "cto.backfill_deferred", reason: "budget", phase, cursorTs });
+      return { kind: "deferred", deferred: "budget", progress: progressFrom(await readState()), spentUsd: lastSpent };
     }
 
     const done = phase === "week" && cursorTs >= win.end;
