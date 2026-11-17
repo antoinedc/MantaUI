@@ -22,9 +22,12 @@ function rig({ stored, access = { canPush: true, isFork: false, defaultBranch: "
   return { settings, updates, accessCalls };
 }
 
-test("defaults: enabled, $1.00, box-only, share-and-read, no overrides", () => {
+test("defaults: enabled, box-only, share-and-read, no overrides; the daily cap is not a knowledge setting any more", () => {
   assert.deepEqual(normalizeSettings(undefined), { ...DEFAULT_SETTINGS, projects: {} });
-  assert.equal(normalizeSettings({ dailyCapUsd: -3, repoRules: "nope", sharing: 7 }).dailyCapUsd, 1);
+  assert.ok(!("dailyCapUsd" in DEFAULT_SETTINGS));
+  const n = normalizeSettings({ dailyCapUsd: 3, repoRules: "nope", sharing: 7 });
+  assert.ok(!("dailyCapUsd" in n), "a stored legacy cap is ignored");
+  assert.equal(n.repoRules, "box-only");
 });
 
 test("effective: project override beats the default", () => {
@@ -44,10 +47,10 @@ test("set validates: unknown keys/values → invalid-setting (400)", async () =>
 
 test("set persists through config.update under `knowledge` and returns the complete settings", async () => {
   const { settings, updates } = rig();
-  const next = await settings.set({ dailyCapUsd: 2.5, sharing: "read-only", projects: { [A]: { sharing: "private" } } });
-  assert.equal(next.dailyCapUsd, 2.5);
+  const next = await settings.set({ sharing: "read-only", projects: { [A]: { sharing: "private" } } });
+  assert.equal(next.sharing, "read-only");
   assert.equal(updates.length, 1);
-  assert.deepEqual(Object.keys(updates[0]), ["knowledge"]);
+  assert.deepEqual(Object.keys(updates[0]), ["knowledge"]); // no cap in the patch → the shared setting is not written
   assert.equal(updates[0].knowledge.projects[A].sharing, "private");
   assert.ok(!("observeOnly" in updates[0].knowledge)); // hidden unless true
   const again = await settings.set({ projects: { [A]: { sharing: null } } });
@@ -123,7 +126,39 @@ test("concurrent set() calls are serialized: neither patch is lost", async () =>
   });
   await Promise.all([settings.set({ dailyCapUsd: 2 }), settings.set({ sharing: "read-only" }), settings.set({ enabled: false })]);
   const s = await settings.get();
-  assert.equal(s.dailyCapUsd, 2);
+  assert.equal((await settings.view()).dailyCapUsd, 2);
   assert.equal(s.sharing, "read-only");
   assert.equal(s.enabled, false);
+});
+
+test("the legacy dailyCapUsd key writes the shared backgroundWork setting (merged, validated) and the view mirrors it", async () => {
+  let cfg = { backgroundWork: { level: "light", dailyCapUsd: 5 }, knowledge: { sharing: "read-only" } };
+  const updates = [];
+  const settings = createSettings({
+    config: { get: async () => cfg, update: async (p) => (updates.push(p), (cfg = { ...cfg, ...p })) },
+    registry: { list: async () => [], get: async () => null },
+    hasForgeLogin: async () => false,
+  });
+  assert.equal((await settings.view()).dailyCapUsd, 5);
+  const next = await settings.set({ dailyCapUsd: 7.456 });
+  assert.ok(!("dailyCapUsd" in next));
+  assert.equal(updates.length, 1, "one write for both");
+  assert.deepEqual(updates[0].backgroundWork, { level: "light", dailyCapUsd: 7.46 }); // merged: the stored level survives
+  assert.ok(!("dailyCapUsd" in updates[0].knowledge));
+  assert.equal(updates[0].knowledge.sharing, "read-only");
+  assert.equal((await settings.view()).dailyCapUsd, 7.46);
+  // 0 is a real value (no background work on API keys); an invalid one writes nothing at all, even beside a valid key
+  await settings.set({ dailyCapUsd: 0 });
+  assert.equal((await settings.view()).dailyCapUsd, 0);
+  const before = updates.length;
+  for (const bad of [{ dailyCapUsd: -1 }, { dailyCapUsd: 101 }, { dailyCapUsd: "5" }, { dailyCapUsd: NaN }, { sharing: "private", dailyCapUsd: 1e6 }]) {
+    await assert.rejects(settings.set(bad), (e) => e.code === "invalid-setting" && e.status === 400, JSON.stringify(bad));
+  }
+  assert.equal(updates.length, before);
+  assert.equal(cfg.knowledge.sharing, "read-only");
+});
+
+test("the settings view mirrors the default cap when nothing is stored", async () => {
+  const settings = createSettings({ config: { get: async () => ({}), update: async () => {} }, registry: { list: async () => [], get: async () => null }, hasForgeLogin: async () => false });
+  assert.equal((await settings.view()).dailyCapUsd, 5);
 });

@@ -193,6 +193,18 @@ test("weeklyStats reports user messages, corrections and the classifier model pe
   assert.equal(r.det.weeklyStats(T0 - DAY).userMessages, 3);
 });
 
+test("a runner refusal (code budget) stops the pass at once — not counted as a failure, nothing classified, the week still due; gates ask for the corrections work type", async () => {
+  const asked = [];
+  const msgs = Array.from({ length: 95 }, (_, i) => um(`use pnpm ${i}`, `ses_${i % 7}`, 2));
+  const r = await rig({ messages: msgs, table: { pnpm: PNPM }, over: { budget: { canSpend: async (a) => (asked.push(a), { ok: true }), record: async () => {} } } });
+  r.runEphemeral.fail = { ok: false, code: "budget", reason: "level-cap" };
+  await r.det.runWeekly();
+  assert.equal(r.runEphemeral.calls.length, 1, "it did not try the second batch (nor retry the first)");
+  assert.equal(r.state.db.prepare("SELECT COUNT(*) AS n FROM corr_msg").get().n, 0);
+  assert.equal(r.det.shouldRun(T0), true);
+  assert.deepEqual(asked, [{ workType: "knowledge-corrections" }]);
+});
+
 test("budget cap and a missing capable model stop the pass without losing or mis-classifying anything", async () => {
   const msgs = [um("use pnpm", "ses_a", 1), um("use pnpm", "ses_b", 1)];
   const r = await rig({ messages: msgs, table: { pnpm: PNPM } });

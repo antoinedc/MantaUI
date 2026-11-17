@@ -335,6 +335,7 @@ export function createSkills({
       ],
       deps: reportCost ? { reportCost } : undefined,
     });
+    if (res?.ok === false && res.code === "budget") return { pass: false, retry: true, reason: "cap-reached" }; // the budget said wait: the candidate stays pending
     if (res?.ok === false) return { pass: false, retry: true, reason: `The grader wasn't available (${res.code}).` };
     const j = extractJson(res?.text);
     if (j?.verdict === "pass") return { pass: true, reason: oneLine(j.reason, 200) };
@@ -385,7 +386,7 @@ export function createSkills({
       saveCand(key, { name: c.name, status: "pending-trial", reason: "no-trial", candidate: JSON.stringify(c), skillMd });
       return { status: "pending-trial", reason: "no-trial" };
     }
-    const t = await trial.run({ skillName: name, skillMd, slugs: ev.projects, request: ev.request });
+    const t = await trial.run({ skillName: name, skillMd, slugs: ev.projects, request: ev.request, dueSince: prior?.created_at ?? now() });
     if (t.status === "skipped") {
       saveCand(key, { name: c.name, status: "pending-trial", reason: t.reason, candidate: JSON.stringify(c), skillMd });
       return { status: "pending-trial", reason: t.reason };
@@ -416,7 +417,7 @@ export function createSkills({
   // ---- detect ---------------------------------------------------------------------------------------
   async function detectLocked() {
     if (!(await active())) return 0;
-    if (budget && !(await budget.canSpend()).ok) return 0;
+    if (budget && !(await budget.canSpend({ workType: "curator-skills" })).ok) return 0;
     let queued = 0;
 
     // Candidates whose trial couldn't run yet go first: no model call needed.
@@ -436,7 +437,7 @@ export function createSkills({
       const r = await processCandidate(c);
       handled++;
       if (r.status === "queued" && !r.repeated) queued++;
-      if (r.status === "pending-trial" && /^(weekly-limit|cap-reached|busy|knowledge-run-active)$/.test(r.reason ?? "")) return queued;
+      if (r.status === "pending-trial" && /^(weekly-limit|cap-reached|busy|knowledge-run-active|waiting-for-quiet)$/.test(r.reason ?? "")) return queued;
     }
     if (handled >= MAX_CANDIDATES_PER_DETECT || !loadEvidence) return queued;
 

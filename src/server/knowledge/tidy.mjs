@@ -32,6 +32,9 @@ import { parsePage, renderPage, summarizeBody, pageTitle, updateFrontMatter } fr
 import { isKnowledgeError } from "./errors.mjs";
 
 export const TIDY_EVERY_MS = 7 * 24 * 3600 * 1000;
+// The shared background budget's work type for the weekly tidy-up: its model calls run as "curator-rules" (the model
+// they need) but are BATCH work (spec 2026-11-17-background-work-budget §5.1).
+export const TIDY_WORK_TYPE = "knowledge-tidy";
 export const REVERIFY_AFTER_MS = 90 * 24 * 3600 * 1000;
 export const NEAR_DUPLICATE = 0.9;
 const MSG_RE = /^(?:msg|part):([^/]+)\/(.+)$/;
@@ -79,7 +82,7 @@ export function replaceBullets(source, list) {
 
 /** kc + curator + undo. */
 export function createTidy(kc) {
-  const { store, state, settings, changes, registry, sessionMap, rules, curator, undo, blame, deps, now, log } = kc;
+  const { store, state, settings, budget, changes, registry, sessionMap, rules, curator, undo, blame, deps, now, log } = kc;
   let running = false;
 
   // One cache of message reads per run (a page's refs are read per session, in one call), with a bound.
@@ -226,7 +229,7 @@ export function createTidy(kc) {
       const vctx = await curator.vctxFor(slug, { clusters: new Map(byId) });
       if (row.rewrites >= 1) {
         const d = { id: newDecisionId(now()), type: "rule.remove", target: { area: "project", slug }, content: row.text, reason: "The same mistake kept happening after the rule was rewritten, so the rule was removed.", evidence: [], clusterId: row.cluster_id };
-        const out = await curator.processDecisions([d], vctx, { batchId, slug, taskClass: "curator-rules", trusted: true });
+        const out = await curator.processDecisions([d], vctx, { batchId, slug, taskClass: "curator-rules", workType: TIDY_WORK_TYPE, trusted: true });
         report.rulesRemoved += out.applied;
         if (out.applied > 0) rules.retireCluster(row.cluster_id);
       } else {
@@ -235,12 +238,12 @@ export function createTidy(kc) {
           { priority: 100, text: curator.prompts.REWRITE },
           { priority: 90, text: `rule:\n${row.text}\n\nwhy_it_was_written:\n${row.reason ?? ""}\n\nclusterId: ${row.cluster_id}\nrecurrences_since: ${n}${cl ? `\nlesson: ${cl.lesson}\nquotes:\n${cl.evidence.slice(0, 5).map((e) => `- ${e.quote}`).join("\n")}` : ""}` },
         ];
-        const call = await curator.callModel({ taskClass: "curator-rules", slug, blocks });
+        const call = await curator.callModel({ taskClass: "curator-rules", workType: TIDY_WORK_TYPE, slug, blocks });
         if (call.status !== "ok") continue;
         const pick = call.decisions.find((x) => x?.type === "rule.change" && typeof x.content === "string" && normText(x.replaces) === normText(row.text));
         if (!pick) continue;
         const d = { id: newDecisionId(now()), type: "rule.change", target: { area: "project", slug }, content: pick.content, replaces: row.text, reason: String(pick.reason ?? "Rewritten because the mistake recurred.").slice(0, 300), evidence: [], clusterId: row.cluster_id, rewrite: true };
-        const out = await curator.processDecisions([d], vctx, { batchId, slug, taskClass: "curator-rules", trusted: true });
+        const out = await curator.processDecisions([d], vctx, { batchId, slug, taskClass: "curator-rules", workType: TIDY_WORK_TYPE, trusted: true });
         report.rulesRewritten += out.applied;
       }
     }
@@ -317,6 +320,7 @@ export function createTidy(kc) {
     }
     const call = await curator.callModel({
       taskClass: "curator-rules",
+      workType: TIDY_WORK_TYPE,
       slug: null,
       blocks: [
         { priority: 100, text: curator.prompts.COMMONS },
@@ -327,7 +331,7 @@ export function createTidy(kc) {
     });
     if (call.status !== "ok") return;
     const vctx = { ...(await curator.vctxFor(null, { allowedRefs: new Set(entries.map((e) => e.ref)), bases })), sharing: "share-and-read", commonsPass: true };
-    const out = await curator.processDecisions(call.decisions, vctx, { batchId, slug: null, taskClass: "curator-rules" });
+    const out = await curator.processDecisions(call.decisions, vctx, { batchId, slug: null, taskClass: "curator-rules", workType: TIDY_WORK_TYPE });
     report.commons += out.applied;
   }
 
@@ -438,7 +442,15 @@ export function createTidy(kc) {
     if (running) return null;
     const s = await settings.get();
     if (!s.enabled || s.observeOnly) return null;
-    if (now() - Number(state.kvGet("tidy.lastRun") ?? 0) < TIDY_EVERY_MS) return null;
+    // Due on its own interval — on a plan, held until 24 h before the weekly quota window resets (§17.17).
+    const intervalDueAt = Number(state.kvGet("tidy.lastRun") ?? 0) + TIDY_EVERY_MS;
+    if (now() < intervalDueAt) return null;
+    const gate = { workType: TIDY_WORK_TYPE, modelClass: "curator-rules" };
+    const dueSince = (await budget?.dueAt?.({ ...gate, intervalDueAt })) ?? intervalDueAt;
+    if (now() < dueSince) return null;
+    // A refused job stays due; this poller asks again on its next tick. The good-moment answer is taken ONCE per start.
+    if (budget?.canSpend && !(await budget.canSpend(gate)).ok) return null;
+    if (budget?.goodMomentForBatch && !(await budget.goodMomentForBatch({ ...gate, dueSince })).ok) return null;
     return run();
   }
 

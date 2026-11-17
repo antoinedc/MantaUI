@@ -37,6 +37,7 @@ import { createQueue, NoteRejected, validateNote } from "./queue.mjs";
 import { createBriefings } from "./briefing.mjs";
 import { createPageIndex, createSearch } from "./search.mjs";
 import { createBudget } from "./budget.mjs";
+import { readBackgroundWork } from "../backgroundBudget.mjs";
 import { createChangeLog } from "./changes.mjs";
 import { createCuratorLayer } from "./curator.mjs";
 import { createRulesStore } from "./rules.mjs";
@@ -44,6 +45,7 @@ import { listSessionsPage as defaultListSessionsPage } from "./backfillSource.mj
 import { statePath } from "../../shared/paths.mjs";
 
 const ENABLED_MEMO_MS = 5000;
+const PAUSE_MEMO_MS = 60_000;
 const DAY_MS = 24 * 3600 * 1000;
 const OBSERVE_TYPES = new Set(["session.created", "session.execution.started", "session.status"]);
 
@@ -62,7 +64,9 @@ const disabled = (reason = "Shared knowledge is off.") => new KnowledgeError("di
  *   isUserAuthoredRef(ref, {sessionID}) → boolean                                   [INTEGRATION: prompt origins]
  *   getRepoAccess({kind, host, owner, repo}) → {canPush, isFork, defaultBranch}     [INTEGRATION: forge]
  *   hasForgeLogin(kind) → boolean                                                   [INTEGRATION: forge]
- *   getPrices() / bandOf(providerID, modelID)  budget pricing (optimizer prices, router band)
+ *   backgroundBudget                         the shared background-work budget (src/server/backgroundBudget.mjs): every model call
+ *                                            is gated and booked through it; absent → knowledge's model work is refused (fail closed)
+ *   getPrices() / bandOf(providerID, modelID)  ledger pricing (optimizer prices, router band)
  *   projectRules(slug, {repoRules}) → string[] briefing part 1 override
  *   undo(change, ctx) → {ok:true} | {ok:false, reason, conflictWith?}                [curator layer]
  *   onSettingsChanged({prev, next})          downgrade cleanup hook                  [curator layer]
@@ -183,7 +187,15 @@ export function createKnowledgeEngine(deps = {}) {
         isUserAuthoredRef: deps.isUserAuthoredRef,
         onDrop: (slug, n) => changes.add({ kind: "dropped", summary: `Dropped ${n} queued note${n === 1 ? "" : "s"}`, reason: "The note queue for this project was full (500).", area: "project", slug }),
       });
-      const budget = createBudget({ state, settings, getPrices: deps.getPrices, bandOf: deps.bandOf, now });
+      const budget = createBudget({
+        state,
+        backgroundBudget: deps.backgroundBudget,
+        // The model a class will run on, so a gate asks the shared budget about the right provider (plan vs API key).
+        resolveModel: deps.resolveModelForClass ? (taskClass) => deps.resolveModelForClass(taskClass, { configGet: () => config.get() }) : null,
+        getPrices: deps.getPrices,
+        bandOf: deps.bandOf,
+        now,
+      });
       const rules = createRulesStore({ store, state, now });
       const briefings = createBriefings({
         state,
@@ -243,9 +255,10 @@ export function createKnowledgeEngine(deps = {}) {
     if (!s.enabled || s.observeOnly) return;
     c.state.kvSet("upgrade.notified", "1");
     try {
+      const cap = readBackgroundWork((await config.get())?.backgroundWork).dailyCapUsd;
       await deps.fireNotify({
         title: "Shared knowledge is on",
-        message: `Manta now keeps short notes from your sessions and shares what it learns between them. It spends up to $${s.dailyCapUsd.toFixed(2)} a day on models Manta picks. Open Settings → Knowledge to review it or turn it off.`,
+        message: `Manta now keeps short notes from your sessions and shares what it learns between them. It works in the background on spare plan quota, and spends up to $${cap.toFixed(2)} a day on API keys, on models Manta picks. Open Settings → Knowledge to review it or turn it off, or Settings → Models to change the limits.`,
         tag: "knowledge-upgrade",
       });
     } catch (e) {
@@ -381,6 +394,22 @@ export function createKnowledgeEngine(deps = {}) {
   };
 
   // ---- desktop operations (RPC) ---------------------------------------------------
+  // Is continuous knowledge work (capture, curation) paused by the shared budget right now? `{reason, resumesAt}` or null.
+  // Asked of `check` (the same answer a real call gets), at most once a minute: every `check` refusal lands in the budget's
+  // evidence log, which a card polling every 30 s must not inflate.
+  let pauseMemo = { at: -Infinity, value: null };
+  async function currentPause() {
+    const t = now();
+    if (t - pauseMemo.at < PAUSE_MEMO_MS) return pauseMemo.value;
+    let value = null;
+    if (c) {
+      const d = await c.budget.canSpend({ workType: "knowledge-capture" });
+      if (!d.ok) value = { reason: d.reason ?? "unavailable", resumesAt: d.resumesAt ?? null };
+    }
+    pauseMemo = { at: t, value };
+    return value;
+  }
+
   async function status() {
     await ready();
     const s = await settings.get();
@@ -392,7 +421,11 @@ export function createKnowledgeEngine(deps = {}) {
         reason: unsupported ? "Shared knowledge needs the Node 24 runtime (node:sqlite), so it is off on this box." : `Shared knowledge couldn't start: ${String(initError?.message ?? "unknown error").slice(0, 200)}`,
       };
     }
-    const spent = c.budget.spentToday();
+    // Spend is the shared budget's pay-per-token figure (list-price dollars on a plan are not spend), the cap its one daily
+    // cap; `capReached` now means "background work is paused right now", whatever the reason (a plan's share, a busy window…).
+    const spent = deps.backgroundBudget?.usdToday ? deps.backgroundBudget.usdToday({ mode: "payg" }) : 0;
+    const cap = readBackgroundWork((await config.get())?.backgroundWork).dailyCapUsd;
+    const budgetPaused = await currentPause();
     const queued = {};
     for (const slug of await c.queue.slugs()) {
       const n = await c.queue.count(slug);
@@ -404,8 +437,9 @@ export function createKnowledgeEngine(deps = {}) {
       enabled: s.enabled,
       ...(s.observeOnly ? { observeOnly: true } : {}),
       spentUsd: spent,
-      capUsd: s.dailyCapUsd,
-      capReached: spent >= s.dailyCapUsd,
+      capUsd: cap,
+      capReached: budgetPaused !== null,
+      budgetPaused,
       queued,
       briefings: { startedThisWeek: wk.served, missedThisWeek: wk.missed },
       backfillDone: c.sessionMap.backfillDone(),
@@ -425,6 +459,7 @@ export function createKnowledgeEngine(deps = {}) {
     const prev = await settings.get();
     const next = await settings.set(patch);
     invalidateEnabled();
+    pauseMemo.at = -Infinity; // a changed cap changes the answer: the status read just below must not use a stale one
     if (c) {
       if (!prev.enabled && next.enabled) c.state.kvDelete("backfill.done");
       void c.briefings.precomputeAll().catch((e) => log("[knowledge] briefing refresh failed:", e?.message ?? e));

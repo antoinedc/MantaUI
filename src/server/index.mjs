@@ -2140,10 +2140,21 @@ const knowledgeRunner = createKnowledgeRunner({
   runEphemeral,
   oc: { runEphemeralSession: oc.runSynchronousSession },
   configGet: () => local.configGet(),
+  backgroundBudget,
 });
 const knowledgePathsOnBox = knowledgePaths();
 const knowledgeEngine = createKnowledgeEngine({
-  config: { get: () => local.configGet(), update: (patch) => local.configUpdate(patch) },
+  config: {
+    get: () => local.configGet(),
+    // Also pushed into syncState like every other config write: the knowledge settings write the shared
+    // `backgroundWork` cap too (a legacy `dailyCapUsd` patch), and every client mirrors it.
+    update: async (patch) => {
+      const next = await local.configUpdate(patch);
+      syncState.applyConfig(next);
+      return next;
+    },
+  },
+  backgroundBudget,
   runEphemeral: knowledgeRunner,
   resolveModelForClass,
   readShellCommands: createKnowledgeShellReader({ listMessages: forwardKnowledgeListMessages(oc) }),
