@@ -9,6 +9,8 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, _resetEndpointSummaryCache, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
+import { _setWorkerFactory, _shutdownOffload } from "./dbOffload.mjs";
+import { Worker } from "node:worker_threads";
 
 // ---- V2 store helpers -----------------------------------------------------
 // The suite's message data was written in V1's flat shape ({role, providerID,
@@ -1160,6 +1162,24 @@ test("endpointSummary: stale-while-revalidate — a caller never waits past its 
   await withLedgerDb(t, async ({ addTurn }) => {
     addTurn("m1");
     const since = Date.now() - 60 * 60_000;
+    // Every scan takes at least SCAN_DELAY_MS: a warm worker answers a tiny database in about a millisecond,
+    // which races a zero-wait caller's timer. Delaying the request makes "the scan is still running" certain.
+    const SCAN_DELAY_MS = 150;
+    await _shutdownOffload();
+    _setWorkerFactory(() => {
+      const real = new Worker(new URL("./dbWorker.mjs", import.meta.url));
+      return {
+        on: (...a) => real.on(...a),
+        unref: () => real.unref(),
+        ref: () => real.ref(),
+        terminate: () => real.terminate(),
+        postMessage: (m) => setTimeout(() => real.postMessage(m), SCAN_DELAY_MS),
+      };
+    });
+    t.after(async () => {
+      await _shutdownOffload();
+      _setWorkerFactory(null);
+    });
     // No reading yet and the caller will not wait: degraded NOW, the scan keeps going and fills the memo.
     const none = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
     assert.deepEqual(none, { supported: false });
@@ -1172,8 +1192,12 @@ test("endpointSummary: stale-while-revalidate — a caller never waits past its 
       addTurn("m2");
       const stale = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
       assert.equal(stale, first, "the stale reading is returned without waiting");
-      await new Promise((r) => setTimeout(r, 400)); // let the single background refresh land
-      const refreshed = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
+      // Wait for the single background refresh to land (poll, don't guess a delay: a loaded box takes longer).
+      let refreshed = stale;
+      for (let i = 0; i < 400 && refreshed === first; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        refreshed = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
+      }
       assert.notEqual(refreshed, first, "the background refresh replaced the reading");
     } finally {
       Date.now = realNow;

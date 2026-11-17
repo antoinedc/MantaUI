@@ -9,7 +9,7 @@
 import { describe, test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, existsSync, realpathSync, rmSync, readFileSync, openSync, closeSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, existsSync, realpathSync, renameSync, rmSync, readFileSync, openSync, closeSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import {
@@ -571,8 +571,12 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
     const a = await makeBox(fx, { io: { fs: guardedFs(fx, { failUnlink: (p) => p === fx.v1shm }) }, store });
     await a.engine.reclaim(); // v1 + v1wal gone, v1shm and bin remain, manifest persisted
     // Between the runs the shm file is deleted and a brand-new file takes its name.
-    rmSync(fx.v1shm);
-    fx.put(fx.v1shm, 99);
+    // Create the impostor BEFORE the original goes away and rename it over it: deleting first and then
+    // creating lets the filesystem hand the freed inode straight back, and the "different file" would
+    // then be indistinguishable from the original.
+    const impostor = join(fx.data, "impostor.tmp");
+    fx.put(impostor, 99);
+    renameSync(impostor, fx.v1shm);
     const fs2 = guardedFs(fx);
     const b = await makeBox(fx, { io: { fs: fs2 }, store });
     const r = await b.engine.reclaim();

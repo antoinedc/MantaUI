@@ -475,12 +475,30 @@ describe("history freshness", () => {
     assert.deepEqual(merged, [...new Set(merged)].sort());
   });
 
-  test("regenerating over the committed file removes nothing (full clones only)", (t) => {
-    const shallow = spawnSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: REPO, encoding: "utf8" });
-    if (shallow.status !== 0 || shallow.stdout.trim() !== "false") return t.skip("needs full git history");
-    const r = generate({ root: REPO, write: false });
-    const committed = readFileSync(join(REPO, "docs/opencode-tools/AGENTS.history"), "utf8").split("\n").filter(Boolean);
-    for (const l of committed) assert.ok(r.merged.includes(l), `regeneration dropped: ${l}`);
+  test("regenerating over a committed history removes nothing and picks up every committed version", () => {
+    // A throwaway repo, so this holds on a checkout with no .git (a VM tarball) or a shallow one.
+    const root = tmp("manta-guidance-git-");
+    const git = (...args) => {
+      const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: root, encoding: "utf8" });
+      assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    };
+    const dir = join(root, "docs", "opencode-tools");
+    mkdirSync(dir, { recursive: true });
+    git("init", "-q");
+    const V1 = sec("## A", "first");
+    const V2 = join2(sec("## A", "second"), sec("## B", "new section"));
+    writeFileSync(join(dir, "AGENTS.md"), V1);
+    git("add", "-A");
+    git("commit", "-q", "-m", "v1");
+    writeFileSync(join(dir, "AGENTS.md"), V2);
+    git("add", "-A");
+    git("commit", "-q", "-m", "v2");
+    const gone = "## Gone\t" + "a".repeat(64); // in the committed history, in no committed version
+    writeFileSync(join(dir, "AGENTS.history"), gone + "\n");
+    const r = generate({ root, write: false });
+    assert.equal(r.versions, 2);
+    assert.ok(r.merged.includes(gone), "an existing history line is never dropped");
+    for (const l of [...historyLines(V1), ...historyLines(V2)]) assert.ok(r.merged.includes(l), `missing: ${l}`);
   });
 
   test("every heading that disappeared from history is either aliased or deliberately removed", () => {
