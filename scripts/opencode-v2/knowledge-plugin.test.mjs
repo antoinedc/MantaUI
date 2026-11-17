@@ -177,7 +177,47 @@ describe("briefing delivery", () => {
     assert.equal(calls[0].query.assistantMessages, "3");
   });
 
-  test("compaction posts reset, forgets the text, and the next request starts fresh", async () => {
+  test("a compaction resets only once it COMPLETED (compaction.ended); the hook alone resets nothing", async () => {
+    let n = 0;
+    const { b, calls } = briefingWith({
+      "GET /api/knowledge/briefing": () => ({ status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }),
+      "POST /api/knowledge/briefing/ack": ok({ ok: true }),
+      "POST /api/knowledge/briefing/reset": ok({ ok: true }),
+    });
+    b.setEventsLive(true);
+    await b.onContext(ev([IDENTITY]));
+    await b.flush();
+    await b.onCompaction({ sessionID: "ses_a", system: [] });
+    assert.equal(count(calls, "POST /api/knowledge/briefing/reset"), 0, "the compaction began: nothing is reset yet");
+    await b.onCompactionEnded("ses_a");
+    assert.equal(count(calls, "POST /api/knowledge/briefing/reset"), 1);
+    const system = [IDENTITY];
+    await b.onContext(ev(system));
+    await b.flush();
+    assert.equal(system[1].text, `${BRIEF} v2`, "after compaction.ended the next request starts fresh");
+    assert.deepEqual(calls.filter((c) => c.path.endsWith("/reset")).map((c) => c.body), [{ sessionID: "ses_a" }]);
+    assert.deepEqual(calls.filter((c) => c.path.endsWith("/ack")).map((c) => c.body.token), ["tok1", "tok2"]);
+  });
+
+  test("a compaction that FAILED never resets, and the briefing stays byte-identical", async () => {
+    const { b, calls } = briefingWith({
+      "GET /api/knowledge/briefing": ok({ text: BRIEF, token: "tok1" }),
+      "POST /api/knowledge/briefing/ack": ok({ ok: true }),
+      "POST /api/knowledge/briefing/reset": ok({ ok: true }),
+    });
+    b.setEventsLive(true);
+    await b.onContext(ev([IDENTITY]));
+    await b.flush();
+    await b.onCompaction({ sessionID: "ses_a" });
+    b.onCompactionFailed("ses_a");
+    const system = [IDENTITY];
+    await b.onContext(ev(system, { messages: [{ role: "assistant" }, { role: "assistant" }, { role: "assistant" }] }));
+    assert.equal(system[1].text, BRIEF);
+    assert.equal(count(calls, "POST /api/knowledge/briefing/reset"), 0);
+    assert.equal(count(calls, "GET /api/knowledge/briefing"), 1);
+  });
+
+  test("without the event stream the first request after a compaction event is the reset point (documented fallback)", async () => {
     let n = 0;
     const { b, calls } = briefingWith({
       "GET /api/knowledge/briefing": () => ({ status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }),
@@ -187,15 +227,15 @@ describe("briefing delivery", () => {
     await b.onContext(ev([IDENTITY]));
     await b.flush();
     await b.onCompaction({ sessionID: "ses_a", system: [] });
-    assert.deepEqual(calls.find((c) => c.path.endsWith("/reset")).body, { sessionID: "ses_a" });
+    assert.equal(count(calls, "POST /api/knowledge/briefing/reset"), 0);
     const system = [IDENTITY];
     await b.onContext(ev(system));
     await b.flush();
+    assert.equal(count(calls, "POST /api/knowledge/briefing/reset"), 1);
     assert.equal(system[1].text, `${BRIEF} v2`);
-    assert.deepEqual(calls.filter((c) => c.path.endsWith("/ack")).map((c) => c.body.token), ["tok1", "tok2"]);
   });
 
-  test("compaction also clears an abandoned start", async () => {
+  test("compaction.ended also clears an abandoned start", async () => {
     let slow = true;
     const { b } = briefingWith({
       "GET /api/knowledge/briefing": async () => {
@@ -207,10 +247,38 @@ describe("briefing delivery", () => {
     });
     await b.onContext(ev([IDENTITY]));
     slow = false;
-    await b.onCompaction({ sessionID: "ses_a" });
+    await b.onCompactionEnded("ses_a");
     const system = [IDENTITY];
     await b.onContext(ev(system));
     assert.equal(system.length, 2);
+  });
+
+  test("the empty / abandoned memories are bounded (LRU): a long-lived server does not grow them forever", async () => {
+    const { b, calls } = briefingWith({ "GET /api/knowledge/briefing": ok({ text: "", token: null }) });
+    for (let i = 0; i < 600; i++) await b.onContext({ sessionID: `ses_${i}`, system: [IDENTITY], messages: [] });
+    assert.equal(calls.length, 600);
+    await b.onContext({ sessionID: "ses_599", system: [IDENTITY], messages: [] });
+    assert.equal(calls.length, 600, "a recent session is still remembered");
+    await b.onContext({ sessionID: "ses_0", system: [IDENTITY], messages: [] });
+    assert.equal(calls.length, 601, "the oldest was forgotten (asked again, not leaked)");
+  });
+
+  test("a deliberate empty (2xx, text '' — even with no token) is cached: ONE fetch over three requests; a transport/HTTP failure is retried", async () => {
+    const { b, calls } = briefingWith({
+      "GET /api/knowledge/briefing": ok({ text: "", token: null }),
+    });
+    const system = [IDENTITY];
+    for (let i = 0; i < 3; i++) await b.onContext(ev(system));
+    assert.deepEqual(system, [IDENTITY]);
+    assert.equal(count(calls, "GET /api/knowledge/briefing"), 1);
+    assert.equal(count(calls, "POST /api/knowledge/briefing/ack"), 0);
+
+    let status = 500;
+    const f = briefingWith({ "GET /api/knowledge/briefing": () => ({ status, body: {} }) });
+    await f.b.onContext(ev([IDENTITY]));
+    await f.b.onContext(ev([IDENTITY]));
+    assert.equal(count(f.calls, "GET /api/knowledge/briefing"), 2, "an HTTP failure is not a verdict");
+    status = 200;
   });
 
   test("session.created prefetch is used by the first context call (no second GET)", async () => {
@@ -321,8 +389,25 @@ describe("installBriefing / plugin entry wiring", () => {
     assert.deepEqual(system.map((b) => b.text), [IDENTITY.text, "prompt", BRIEF]);
     assert.equal(count(srv.calls, "GET /api/knowledge/briefing"), 1);
     await ctx.hooks.compaction.fn({ sessionID: "ses_a", system: [] });
-    assert.equal(count(srv.calls, "POST /api/knowledge/briefing/reset"), 1);
-    assert.equal(srv.calls.at(-1).headers.authorization, `Bearer ${TOKEN}`);
+    assert.equal(count(srv.calls, "POST /api/knowledge/briefing/reset"), 0, "the hook alone does not reset");
+  });
+
+  test("session.compaction.ended from the event stream posts the reset", async () => {
+    const srv = fakeServer({
+      "GET /api/knowledge/briefing": ok({ text: BRIEF, token: "tok1" }),
+      "POST /api/knowledge/briefing/ack": ok({ ok: true }),
+      "POST /api/knowledge/briefing/reset": ok({ ok: true }),
+    });
+    globalThis.fetch = srv.fetchFn;
+    const ctx = pluginCtx([
+      { type: "session.compaction.failed", data: { sessionID: "ses_f" } },
+      { type: "session.compaction.ended", data: { sessionID: "ses_a" } },
+    ]);
+    await installBriefing(ctx);
+    await sleep(20);
+    const resets = srv.calls.filter((c) => c.path.endsWith("/reset"));
+    assert.deepEqual(resets.map((c) => c.body), [{ sessionID: "ses_a" }]);
+    assert.equal(resets[0].headers.authorization, `Bearer ${TOKEN}`);
   });
 });
 
