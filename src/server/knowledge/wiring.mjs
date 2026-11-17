@@ -20,6 +20,7 @@ import { createCorrectionDetector, createUserMessageReader } from "./corrections
 import { createBlackboardImport, createKeyResolver } from "./blackboardImport.mjs";
 import { createCtoMirror } from "./ctoMirror.mjs";
 import { createWeeklyNotice } from "./weeklyNotice.mjs";
+import { forgeFindOpenPullRequest, forgeGetPullRequest } from "../forge/index.mjs";
 import { createRepoWriter } from "./repoWriter.mjs";
 import { createTrial } from "./trial.mjs";
 import { createSkills } from "./skills.mjs";
@@ -44,9 +45,10 @@ const hostOfUrl = (url) => {
 };
 
 /**
- * A git runner for the repository writer's independent clones: network commands get the forge credential as a
- * one-shot `-c http.extraheader=…` (the same way `local.gitClone` authenticates) so no token is ever written into
- * the clone's `.git/config` or its remote URL. Everything else passes through untouched.
+ * A git runner for the repository writer's independent clones: network commands get the forge credential for that
+ * one command through git's environment config (`GIT_CONFIG_COUNT/KEY_0/VALUE_0` → `http.extraheader`), so no token
+ * is ever on a command line (visible in /proc), in the clone's `.git/config` or in its remote URL. Everything else
+ * passes through untouched.
  *
  * @param {{ run(args: string[], o?: object): Promise<string> }} git
  * @param {(host: string) => Promise<{token: string} | string | null>} resolveToken
@@ -64,16 +66,24 @@ export function createAuthedGit(git, resolveToken) {
   return {
     async run(args, opts = {}) {
       if (!resolveToken || !NETWORK_VERBS.has(args[0])) return git.run(args, opts);
-      let header = null;
+      let env = opts.env;
       try {
         const host = await hostFor(args, opts);
         const t = host ? await resolveToken(host) : null;
         const token = typeof t === "string" ? t : t?.token;
-        if (token) header = `http.extraheader=Authorization: Basic ${forgeBasicAuth(host, token)}`;
+        if (token) {
+          const n = Number.parseInt(env?.GIT_CONFIG_COUNT ?? "0", 10) || 0;
+          env = {
+            ...(env ?? {}),
+            GIT_CONFIG_COUNT: String(n + 1),
+            [`GIT_CONFIG_KEY_${n}`]: "http.extraheader",
+            [`GIT_CONFIG_VALUE_${n}`]: `Authorization: Basic ${forgeBasicAuth(host, token)}`,
+          };
+        }
       } catch {
-        header = null; // no credential: the command runs as-is and git reports what it can't reach
+        env = opts.env; // no credential: the command runs as-is and git reports what it can't reach
       }
-      return git.run(header ? ["-c", header, ...args] : args, opts);
+      return git.run(args, env === opts.env ? opts : { ...opts, env });
     },
   };
 }
@@ -196,9 +206,12 @@ export function createKnowledgeParts(ctx, d = {}) {
       settings,
       state,
       scanner,
-      forge: d.forge,
+      // The real forge in use → ask it how a PR ended (the repo-writer's git-based guess is only the fallback).
+      forge: d.forge.getPullRequest || d.forge.findOpenPullRequest !== forgeFindOpenPullRequest ? d.forge : { ...d.forge, getPullRequest: forgeGetPullRequest },
       fireNotify: d.fireNotify,
       remoteUrlFor: d.remoteUrlFor,
+      recentDirectories: (slug) =>
+        state.db.prepare("SELECT directory FROM session_project WHERE slug = ? AND directory IS NOT NULL GROUP BY directory ORDER BY MAX(pinned_at) DESC LIMIT 10").all(slug).map((r) => r.directory),
       now,
       log,
     });

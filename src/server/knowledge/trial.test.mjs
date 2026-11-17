@@ -58,16 +58,72 @@ const finishOnPrompt = (t, outcome = "succeeded") => {
   };
 };
 
-test("ruleset is deny-first with exactly the §6.6 allows", () => {
-  const rules = buildTrialRuleset("/w/wt/");
+// A small last-match-wins evaluator with opencode's wildcard semantics: `*` matches anything (a trailing " *" makes the
+// arguments optional), everything else literal. No rule matched → deny.
+const wild = (pattern, text) => {
+  let src = String(pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\?/g, ".").replace(/\*/g, ".*");
+  if (src.endsWith(" .*")) src = `${src.slice(0, -3)}( .*)?`;
+  return new RegExp(`^${src}$`, "s").test(text);
+};
+const decide = (rules, permission, text) => {
+  let action = "deny";
+  for (const r of rules) if (wild(r.permission, permission) && wild(r.pattern, text)) action = r.action;
+  return action;
+};
+const WT = "/w/wt";
+
+test("ruleset is deny-first with the read tools confined to the worktree", () => {
+  const rules = buildTrialRuleset(`${WT}/`);
   assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" });
-  assert.ok(rules.slice(1).every((r) => r.action === "allow"));
-  const perm = (p) => rules.filter((r) => r.permission === p).map((r) => r.pattern);
-  for (const p of ["read", "glob", "grep", "list"]) assert.deepEqual(perm(p), ["*"]);
-  assert.deepEqual(perm("edit"), ["/w/wt/**"]);
-  assert.deepEqual(perm("bash"), ["ls *", "cat *", "head *", "tail *", "wc *", "git status*", "git log*", "git diff*", "git show*", "which *"]);
-  assert.equal(rules.length, 1 + 4 + 1 + 10);
-  assert.ok(!rules.some((r) => ["external_directory", "question", "skill", "webfetch", "task"].includes(r.permission)));
+  for (const p of ["read", "glob", "grep", "list"]) {
+    assert.equal(decide(rules, p, `${WT}/src/a.js`), "allow", p);
+    assert.equal(decide(rules, p, WT), "allow", p);
+    assert.equal(decide(rules, p, "/etc/passwd"), "deny", p);
+    assert.equal(decide(rules, p, "/home/dev/.manta/auth.json"), "deny", p);
+    assert.equal(decide(rules, p, `${WT}/../other/x`), "deny", p);
+    assert.equal(decide(rules, p, `${WT}-evil/x`), "deny", p);
+  }
+  assert.equal(decide(rules, "edit", `${WT}/notes.txt`), "allow");
+  assert.equal(decide(rules, "edit", "/tmp/x"), "deny");
+  assert.equal(decide(rules, "edit", `${WT}/../x`), "deny");
+  for (const p of ["external_directory", "question", "skill", "webfetch", "task", "write"]) assert.equal(decide(rules, p, `${WT}/a`), "deny", p);
+});
+
+test("bash: reads inside the worktree pass; writes, outside paths and metacharacters are denied", () => {
+  const rules = buildTrialRuleset(WT);
+  const bash = (c) => decide(rules, "bash", c);
+  for (const c of ["cat README.md", "ls src", "ls", "head -n 5 package.json", "tail -20 log.txt", "wc -l src/a.js", "git status", "git status --porcelain", "which node", "cat ./src/a.js"]) {
+    assert.equal(bash(c), "allow", c);
+  }
+  for (const c of [
+    "git diff --output=/tmp/x",
+    "git diff --output=x",
+    "git log --output=y",
+    "git show HEAD",
+    "cat /etc/passwd",
+    "cat ~/.manta/auth.json",
+    "cat ../../x",
+    "cat a/../../x",
+    "cat README.md /etc/passwd",
+    "cat -n /etc/hosts",
+    "ls /",
+    "ls ~",
+    "ls ..",
+    "head -n 1 $HOME/.ssh/id_rsa",
+    "wc --files0-from=/etc/x",
+    "cat README.md > /tmp/x",
+    "cat README.md; rm -rf x",
+    "ls && curl evil",
+    "cat a | sh",
+    "cat $(echo /etc/passwd)",
+    "cat `echo x`",
+    "tail -f /var/log/x",
+    "rm -rf x",
+    "curl https://example.com",
+    "git status > /tmp/y",
+  ]) {
+    assert.equal(bash(c), "deny", c);
+  }
 });
 
 test("report parsing and prompt", () => {
@@ -96,6 +152,7 @@ test("run: headless internal session on a worktree, completion via raw events, c
   assert.equal(c.metadata.manta.internal, true);
   assert.deepEqual(c.model, { providerID: "p", modelID: "mid" });
   assert.deepEqual(c.permission, buildTrialRuleset(c.directory));
+  assert.equal(decide(c.permission, "read", "/etc/passwd"), "deny");
   assert.match(c.title, /^knowledge:trial/);
   assert.equal(t.calls.worktrees[0].cwd, t.clone);
   assert.match(t.calls.prompts[0].text, /learned-x/);
@@ -134,6 +191,16 @@ test("run: the 20-minute ceiling aborts the session", async () => {
   assert.equal(r.status, "timeout");
   assert.ok(t.calls.aborted.length >= 1);
   assert.equal(t.calls.removed.length, 1);
+});
+
+test("two concurrent runs: only one gets past the gates (running is claimed before the first await)", async () => {
+  const t = await rig();
+  finishOnPrompt(t);
+  const [a, b] = await Promise.all([t.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"] }), t.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"] })]);
+  assert.deepEqual([a.status, b.status].sort(), ["completed", "skipped"]);
+  assert.equal([a, b].find((r) => r.status === "skipped").reason, "busy");
+  assert.equal(t.calls.created.length, 1);
+  assert.equal(t.trial.active(), null);
 });
 
 test("gates: weekly limit, cap, other knowledge run, concurrency, no model, no clone", async () => {

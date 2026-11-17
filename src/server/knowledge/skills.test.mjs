@@ -28,8 +28,8 @@ const candidate = (over = {}) => ({
   ],
   sessions: [S1, S2],
   requests: [
-    { sessionID: S1, messageID: "msg_user1", quote: "please run the e2e suite" },
-    { sessionID: S2, messageID: "msg_user2", quote: "run the e2e suite again" },
+    { sessionID: S1, messageID: "msg_user1", quote: "please run the e2e suite locally and build first" },
+    { sessionID: S2, messageID: "msg_user2", quote: "run the e2e suite locally again, build included" },
   ],
   ...over,
 });
@@ -40,12 +40,12 @@ async function rig(over = {}) {
   await mkdir(skillsDir, { recursive: true });
   const cfg = { enabled: true, observeOnly: false, sharing: { "proj-a-0123456789": "share-and-read", "proj-b-0123456789": "share-and-read" }, capOk: true, ...(over.cfg ?? {}) };
   const toolCalls = over.toolCalls ?? {
-    [S1]: [{ tool: "bash", command: "cd app && npm run build" }, { tool: "bash", command: "npm run e2e" }, { tool: "read", command: "ignored" }],
+    [S1]: [{ tool: "bash", command: "npm run build" }, { tool: "bash", command: "npm run e2e" }, { tool: "read", command: "ignored" }],
     [S2]: [{ tool: "bash", command: "npm  run   build" }],
   };
   const messages = over.messages ?? {
-    [`${S1}/msg_user1`]: { role: "user", text: "ok please run the e2e suite now" },
-    [`${S2}/msg_user2`]: { role: "user", text: "can you run the e2e suite again" },
+    [`${S1}/msg_user1`]: { role: "user", text: "ok please run the e2e suite locally and build first, now" },
+    [`${S2}/msg_user2`]: { role: "user", text: "can you run the e2e suite locally again, build included" },
   };
   const userAuthored = over.userAuthored ?? new Set(["msg_user1", "msg_user2"]);
   const mapping = over.mapping ?? { [S1]: "proj-a-0123456789", [S2]: "proj-b-0123456789" };
@@ -94,7 +94,9 @@ test("pure helpers: slug, executed-command match, detection parsing, SKILL.md sh
   assert.equal(slugifySkill("learned-foo-bar"), "foo-bar");
   assert.equal(slugifySkill("a"), null);
   assert.equal(slugifySkill("../../etc"), "etc");
-  assert.equal(commandWasExecuted("npm run build", ["cd app && npm run build"]), true);
+  assert.equal(commandWasExecuted("npm run build", ["cd app && npm run build"]), false); // would lose the cd context
+  assert.equal(commandWasExecuted("cd app && npm run build", ["cd  app && npm run build"]), true);
+  assert.equal(commandWasExecuted("npm run e2e", ["npm run build && npm run e2e"]), false);
   assert.equal(commandWasExecuted("npm run build", ["npm  run   build"]), true);
   assert.equal(commandWasExecuted("npm run build", ["npm run build:prod"]), false);
   assert.equal(commandWasExecuted("rm", ["rm -rf /"]), false);
@@ -152,7 +154,7 @@ test("evidence bar: needs ≥ 2 sessions with a user-authored, exactly-quoted re
   let t = await rig({ candidates: [candidate({ requests: [candidate().requests[0]] })] });
   assert.equal(await t.skills.detect(), 0);
   // quote not an exact substring
-  t = await rig({ candidates: [candidate({ requests: [candidate().requests[0], { ...candidate().requests[1], quote: "run the e2e suite AGAIN" }] })] });
+  t = await rig({ candidates: [candidate({ requests: [candidate().requests[0], { ...candidate().requests[1], quote: "run the e2e suite locally AGAIN, build included" }] })] });
   assert.equal(await t.skills.detect(), 0);
   // message not user-authored (no origin record)
   t = await rig({ userAuthored: new Set(["msg_user1"]) });
@@ -167,6 +169,35 @@ test("evidence bar: needs ≥ 2 sessions with a user-authored, exactly-quoted re
   t = await rig({ mapping: { [S1]: "proj-a-0123456789" } });
   assert.equal(await t.skills.detect(), 0);
   assert.equal(t.counts.trial, 0);
+});
+
+test("a generic or short quote can't vouch for the task (shared helper: ≥20 chars, ≥2 shared content words)", async () => {
+  const generic = { [`${S1}/msg_user1`]: { role: "user", text: "ok sounds good, thanks a lot for everything" }, [`${S2}/msg_user2`]: { role: "user", text: "yes please go ahead with that one now" } };
+  let t = await rig({
+    messages: generic,
+    candidates: [candidate({ requests: [{ sessionID: S1, messageID: "msg_user1", quote: "ok sounds good, thanks a lot for everything" }, { sessionID: S2, messageID: "msg_user2", quote: "yes please go ahead with that one now" }] })],
+  });
+  assert.equal(await t.skills.detect(), 0);
+  assert.equal(t.counts.trial, 0);
+  // only one shared word ("suite")
+  t = await rig({
+    messages: { [`${S1}/msg_user1`]: { role: "user", text: "please run the suite for me today" }, [`${S2}/msg_user2`]: { role: "user", text: "run the e2e suite locally again, build included" } },
+    candidates: [candidate({ requests: [{ sessionID: S1, messageID: "msg_user1", quote: "please run the suite for me today" }, candidate().requests[1]] })],
+  });
+  assert.equal(await t.skills.detect(), 0);
+  // below 20 characters
+  t = await rig({ candidates: [candidate({ requests: [{ ...candidate().requests[0], quote: "e2e suite locally" }, candidate().requests[1]] })] });
+  assert.equal(await t.skills.detect(), 0);
+});
+
+test("prose (title, description, step purpose) that reaches outside keeps it a runbook", async () => {
+  for (const over of [{ description: "Run the e2e suite locally, then deploy to production" }, { title: "Publish the e2e suite locally" }, { steps: [{ command: "npm run build", purpose: "Push the result to the registry" }, { command: "npm run e2e", purpose: "Run it" }] }]) {
+    const t = await rig({ candidates: [candidate(over)] });
+    assert.equal(await t.skills.detect(), 0);
+    assert.equal(t.counts.trial, 0);
+    assert.equal(t.skills.pendingWrites().length, 0);
+    assert.match(t.changes[0].reason, /reaches outside the box/);
+  }
 });
 
 test("outward steps keep the procedure a runbook: no trial, no install, one changes entry", async () => {
@@ -239,7 +270,7 @@ test("a trial execution failure is retried, then given up on", async () => {
 });
 
 test("a secret in the draft drops it", async () => {
-  const t = await rig({ secret: "AKIAFAKE", candidates: [candidate({ description: "Use AKIAFAKE1234 to run it" })] });
+  const t = await rig({ secret: "AKIAFAKE", candidates: [candidate({ description: "Run the e2e suite locally using AKIAFAKE1234" })] });
   assert.equal(await t.skills.detect(), 0);
   assert.equal(t.counts.trial, 0);
   assert.equal(t.changes[0].kind, "skipped");
