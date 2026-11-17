@@ -264,6 +264,14 @@ sent an agent chasing a gesture that had already been deleted. Treat any new
     (`URLSessionWebSocketTask`) — the `WKWebView` deliberately never opens a
     connection of its own, so a reconnect keeps the terminal text alive in
     native code.
+- **The `/events` subscription is derived from who listens.** `addRawFrameHandler(kinds:)` declares the
+  envelope kinds a consumer reads; the socket asks the box for the union (plus `MantaEventKinds.storeOwned`),
+  so a handler for a kind nobody registered never fires. A chat screen focuses its session
+  (`setFocus`) before fetching its transcript, which is what makes the box send that session's streamed
+  text; the session list clears all focus. `sessionStates` is not `@Published`: react to
+  `sessionChanges` / `rowStatusChanges`.
+- **OS kills are reported through MetricKit**, not Crashlytics: `DiagnosticsReporter` forwards each
+  diagnostic to the box (`POST /api/diagnostics/ios`) and logs a Crashlytics non-fatal.
 - **The honest state of error handling:**
   - Catch blocks are consistently handled: **34 catch blocks, zero empty**
     (no `catch {}`, no `catch { _ in }`).
