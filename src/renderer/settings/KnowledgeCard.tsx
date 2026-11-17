@@ -145,8 +145,6 @@ function RadioGroup<V extends string>({
   );
 }
 
-const isOutwardValue = (v: string): v is "pull-request" | "direct" => v === "pull-request" || v === "direct";
-
 const repoRulesConfirmText = (v: string, what: string): string | null =>
   v === "pull-request"
     ? `Manta will open one pull request with its learned rules in the repository for ${what}. It never merges it.`
