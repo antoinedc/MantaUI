@@ -9,9 +9,14 @@
 //                     merged PR: a revert PR), then the stored rules that produced it are reverted too.
 //   skill             `skills.remove(skillSlug)`.
 //   always            a tombstone (`tombstones.json`), so the curator never re-proposes it.
-// Every path returns `{ok:true}` or `{ok:false, reason, conflictWith?}`; it never throws.
+//   user edit         a Recent-changes entry for a commit of the user's own (hand) edits: `git revert`.
+//   downgrade         refused while the project that stopped sharing is still not sharing (the cleanup would
+//                     just be undone into a leak).
+// Every path returns `{ok:true, warning?}` or `{ok:false, reason, conflictWith?}`; it never throws. A `warning`
+// means the undo happened but something around it didn't (the global file, the tombstone).
 
 import { PREFERENCES_PATH } from "./globalBlock.mjs";
+import { feedsShared } from "./sharing.mjs";
 
 const REVERT_REASONS = {
   "nothing-to-revert": "A later edit already took this change out.",
@@ -20,7 +25,8 @@ const REVERT_REASONS = {
 
 /** kc: store, changes, tombstones, rules, globalBlock, curator, deps {repoWriter, skills}, state, log. */
 export function createUndo(kc) {
-  const { store, changes, tombstones, rules, globalBlock, curator, deps, state, log } = kc;
+  const { store, changes, tombstones, rules, globalBlock, curator, deps, state, settings, log } = kc;
+  const joinWarnings = (list) => (list.length ? { warning: list.join(" ") } : {});
 
   function revertFailure(r) {
     if (r.reason === "conflict") {
@@ -52,6 +58,7 @@ export function createUndo(kc) {
   async function undoStore(change, { tombstone = true, skipRepo = false } = {}) {
     const data = change.data ?? {};
     if (!change.commitSha) return { ok: false, reason: "That change has no recorded commit to revert." };
+    const warnings = [];
     const r = await store.withLock(async (tx) => {
       const out = await tx.revert(change.commitSha, { trailers: { "Manta-Undo": change.id } });
       if (!out.ok) return out;
@@ -60,6 +67,7 @@ export function createUndo(kc) {
           await tombstones.add(tx, { kind: data.tombstoneKind, target: data.tombstoneTarget ?? "", claim: data.claim, clusterId: data.clusterId ?? null, decisionId: change.decisionId, summary: change.summary });
         } catch (e) {
           log("[knowledge] writing the tombstone failed:", e?.message ?? e);
+          warnings.push("It was undone, but Manta couldn't remember that, so it may propose the same thing again.");
         }
       }
       return out;
@@ -70,10 +78,10 @@ export function createUndo(kc) {
       if (data.text) rules.dropBullet(data.path, data.text);
       if (data.path === PREFERENCES_PATH) {
         const g = await globalBlock.apply({ reason: "an undo" });
-        if (g.ok === false && !g.off) return { ok: true, warning: `Undone in the store, but the global file couldn't be updated: ${g.error ?? "unknown error"}` };
+        if (g.ok === false && !g.off) warnings.push(`Undone in the store, but the global file couldn't be updated (${g.error ?? "unknown error"}); it will be retried.`);
       }
     }
-    return { ok: true };
+    return { ok: true, ...joinWarnings(warnings) };
   }
 
   async function undoOutward(change) {
@@ -88,19 +96,24 @@ export function createUndo(kc) {
     }
     if (!r?.ok) return { ok: false, reason: String(r?.reason ?? "The repository change couldn't be reverted."), ...(r?.conflictWith ? { conflictWith: r.conflictWith } : {}) };
     const left = [];
+    const warnings = [];
     for (const id of change.data?.linkedChangeIds ?? []) {
       const linked = changes.get(id);
       if (!linked || linked.undoneAt || !linked.undoable) continue;
       const s = await undoStore(linked, { skipRepo: true });
-      if (s.ok) changes.markUndone(id);
-      else left.push(s.reason);
+      if (s.ok) {
+        changes.markUndone(id);
+        if (s.warning) warnings.push(s.warning);
+      } else left.push(s.reason);
     }
     if (out.slug) {
       state.kvDelete(`pr.open:${out.slug}`);
       rules.setJson("prChanges", out.slug, []);
+      // a rule that stays in the store but is gone from the repository must keep reaching sessions
+      if (left.length) rules.setViaBriefing(out.slug, true);
     }
-    if (left.length) changes.add({ kind: "notice", summary: "Repository change undone; some stored rules were kept", reason: left.join(" ").slice(0, 400), area: "repo-block", slug: change.slug ?? null });
-    return { ok: true };
+    if (left.length) changes.add({ kind: "notice", summary: "Repository change undone; some stored rules were kept", reason: `${left.join(" ").slice(0, 380)} They are delivered through the briefing.`, area: "repo-block", slug: change.slug ?? null });
+    return { ok: true, ...joinWarnings(warnings) };
   }
 
   async function undoSkill(change) {
@@ -117,8 +130,26 @@ export function createUndo(kc) {
       await store.withLock((tx) => tombstones.add(tx, { kind: "skill", target: `skill:${data.skillSlug}`, claim: data.skillSlug, sources: data.sessions ?? data.sources ?? null, decisionId: change.decisionId, summary: change.summary }));
     } catch (e) {
       log("[knowledge] writing the skill tombstone failed:", e?.message ?? e);
+      return { ok: true, warning: "The skill was removed, but Manta couldn't remember that, so it may learn it again." };
     }
     return { ok: true };
+  }
+
+  /** A downgrade cleanup can't be undone while a project it concerns still doesn't share. */
+  async function downgradeBlocked(change) {
+    for (const slug of change.data?.slugs ?? []) {
+      let eff;
+      try {
+        eff = await settings.effective(slug);
+      } catch {
+        return `Couldn't check whether ${slug} shares its knowledge, so the cleanup was left as it is.`;
+      }
+      if (!feedsShared(eff.sharing)) {
+        const p = await kc.registry?.get(slug);
+        return `${p?.displayName ?? slug} still doesn't share its knowledge, so this can't be restored. Turn sharing back on first.`;
+      }
+    }
+    return null;
   }
 
   /** The engine hook: `undo(change, ctx)`. Never throws. */
@@ -126,7 +157,12 @@ export function createUndo(kc) {
     try {
       if (change.kind === "outward") return await undoOutward(change);
       if (change.data?.skillSlug) return await undoSkill(change);
-      if (change.kind !== "applied") return { ok: false, reason: "That change can't be undone." };
+      const userEdit = change.kind === "notice" && change.data?.kind === "user-edit";
+      if (change.kind !== "applied" && !userEdit) return { ok: false, reason: "That change can't be undone." };
+      if (change.data?.kind === "downgrade") {
+        const blocked = await downgradeBlocked(change);
+        if (blocked) return { ok: false, reason: blocked };
+      }
       return await undoStore(change, opts);
     } catch (e) {
       log("[knowledge] undo failed:", e?.message ?? e);
@@ -141,6 +177,7 @@ export function createUndo(kc) {
   async function undoClosedPr(slug) {
     const ids = rules.getJson("prChanges", slug, []);
     let n = 0;
+    let failed = 0;
     for (const id of ids) {
       const c = changes.get(id);
       if (!c || c.undoneAt || !c.undoable) continue;
@@ -148,11 +185,15 @@ export function createUndo(kc) {
       if (r.ok) {
         changes.markUndone(id);
         n++;
-      } else changes.setError(id, r.reason);
+      } else {
+        failed++;
+        changes.setError(id, r.reason);
+      }
     }
     rules.setJson("prChanges", slug, []);
     state.kvDelete(`pr.open:${slug}`);
-    rules.setViaBriefing(slug, false);
+    // a rule that couldn't be taken back stays in the store but is not in the repository: keep delivering it
+    rules.setViaBriefing(slug, failed > 0);
     if (ids.length) changes.add({ kind: "undo", summary: `A pull request was closed; ${n} rule change${n === 1 ? "" : "s"} undone`, reason: "Closing the pull request without merging counts as undoing its changes.", area: "repo-block", slug });
     return n;
   }

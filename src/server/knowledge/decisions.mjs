@@ -5,8 +5,10 @@
 //   • user-authored evidence — each rule/preference decision cites user messages with a quoted span; the
 //     message must have a recorded `user` origin (`isUserAuthoredRef`) and contain the quote (substring);
 //   • grounding — ≥ 3 corrections, or the same correction in ≥ 2 sessions;
-//   • executed commands — a command line in a fenced block that is new on a page must match (whitespace
-//     normalized) a shell tool call actually run in a cited session;
+//   • support — the rule/preference TEXT must be backed by the words quoted (support.mjs: a ≥ 20 character quote
+//     sharing ≥ 2 content words with it); with a detector cluster, the text must also overlap the cluster's lesson;
+//   • executed commands — a command line in a fenced block that is new on a page must equal (whitespace
+//     normalized) a shell tool call actually run in a cited session, or one whole `&&`/`;`/newline segment of it;
 //   • user-written lines — a decision never removes or changes a line the user wrote (git blame: any
 //     author but the curator); the conflict is shown in Recent changes, not applied;
 //   • tombstones — a decision matching an undone one is dropped;
@@ -26,6 +28,7 @@ import { isValidRef } from "./queue.mjs";
 import { feedsShared } from "./sharing.mjs";
 import { CURATOR } from "./store.mjs";
 import { kindOf, targetKey } from "./tombstones.mjs";
+import { claimSupported, contentWords } from "./support.mjs";
 import { GLOBAL_BUDGET_LINES, RULES_BUDGET_LINES, cleanBulletText } from "./rules.mjs";
 
 export const DECISION_TYPES = Object.freeze(["page.edit", "rule.add", "rule.change", "rule.remove", "preference.set", "skill.propose", "drop"]);
@@ -35,6 +38,9 @@ export const MAX_EVIDENCE = 12;
 export const MIN_QUOTE_CHARS = 8;
 export const GROUNDING = Object.freeze({ corrections: 3, sessions: 2 });
 export const PROTECTED_PAGES = Object.freeze(["user/preferences.md", "user/global-block.md"]);
+// pages only their own decision types change: rules.md (rule.*), preferences and how-the-user-works-here.md (preference.set)
+export const PROTECTED_PAGE_RE = /^projects\/[^/]+\/(?:rules|how-the-user-works-here)\.md$/;
+export const LESSON_OVERLAP = 0.4;
 
 const norm = (s) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 export const normText = norm;
@@ -141,11 +147,53 @@ export function extractCommands(markdown) {
   return out;
 }
 
-/** Does `executed` (shell tool-call inputs) contain `line`, whitespace-normalized? */
+/** Split a shell command on `&&`, `||`, `;` and newlines that are OUTSIDE quotes. */
+export function splitShellSegments(command) {
+  const out = [];
+  let cur = "";
+  let quote = null;
+  const src = String(command ?? "");
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      cur += ch;
+      if (ch === "\\" && quote === '"' && i + 1 < src.length) cur += src[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < src.length) {
+      cur += ch + src[++i];
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === ";" || ch === "\n" || (ch === "&" && src[i + 1] === "&") || (ch === "|" && src[i + 1] === "|")) {
+      if (ch === "&" || ch === "|") i++;
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map(wsnorm).filter(Boolean);
+}
+
+/**
+ * Was `line` run? It must equal a whole executed command or one whole segment of one — never a substring
+ * (`echo "git push"` does not validate `git push`).
+ */
 export function commandExecuted(line, executed) {
   const needle = wsnorm(line);
   if (!needle) return true;
-  return (executed ?? []).some((c) => wsnorm(c).includes(needle));
+  for (const c of executed ?? []) {
+    if (wsnorm(c) === needle) return true;
+    if (splitShellSegments(c).includes(needle)) return true;
+  }
+  return false;
 }
 
 /** Command lines that are in `content` but not already on the page (`current`). */
@@ -243,11 +291,66 @@ export function buildPageEdit(current, d, { today, sources = [] } = {}) {
     const body = parsePage(d.content).body;
     scopeBefore = p.body;
     scopeAfter = body.endsWith("\n") ? body : `${body}\n`;
-    next = renderPage({ frontMatter: p.frontMatter, body: scopeAfter });
+    // unparsable front matter stays byte for byte where it is
+    next = p.invalid ? `${base.slice(0, p.bodyOffset)}${scopeAfter}` : renderPage({ frontMatter: p.frontMatter, body: scopeAfter });
   }
   const fm = parsePage(next).frontMatter ?? {};
   const out = updateFrontMatter(next, { title: fm.title ?? title, verified: today, sources: mergeSources(fm.sources, sources) });
   return { source: out, scopeBefore, scopeAfter };
+}
+
+// ---- per-run message cache -------------------------------------------------------------
+
+/**
+ * A per-run, per-session cache over `readMessages` with a bound on reads. `get(sessionID, messageID)` →
+ * the message, `null` when the session answered and it isn't there, `undefined` when it can't be told
+ * (read failed, or the run's read budget is spent). `prefetch(refs)` reads each session's messages in one call.
+ */
+export function createMessageCache({ readMessages, maxReads = 200, batch = 40 } = {}) {
+  const bySession = new Map();
+  let reads = 0;
+  const slot = (sid) => {
+    let m = bySession.get(sid);
+    if (!m) bySession.set(sid, (m = new Map()));
+    return m;
+  };
+  async function load(sid, ids) {
+    const m = slot(sid);
+    const want = [...new Set(ids)].filter((id) => !m.has(id));
+    for (let i = 0; i < want.length; i += batch) {
+      const part = want.slice(i, i + batch);
+      if (!readMessages || reads >= maxReads) {
+        for (const id of part) m.set(id, undefined);
+        continue;
+      }
+      reads++;
+      let msgs = null;
+      try {
+        msgs = await readMessages({ sessionID: sid, messageIDs: part, radius: 0 });
+      } catch {
+        msgs = null;
+      }
+      for (const id of part) m.set(id, Array.isArray(msgs) ? (msgs.find((x) => x.id === id) ?? null) : undefined);
+    }
+  }
+  return {
+    get reads() {
+      return reads;
+    },
+    async prefetch(refs) {
+      const groups = new Map();
+      for (const r of refs ?? []) {
+        const x = /^(?:msg|part):([^/]+)\/(.+)$/.exec(r ?? "");
+        if (x) groups.set(x[1], [...(groups.get(x[1]) ?? []), x[2]]);
+      }
+      for (const [sid, ids] of groups) await load(sid, ids);
+    },
+    async get(sessionID, messageID) {
+      const m = slot(sessionID);
+      if (!m.has(messageID)) await load(sessionID, [messageID]);
+      return m.get(messageID);
+    },
+  };
 }
 
 // ---- git blame: which lines did the user write? ---------------------------------------
@@ -314,7 +417,7 @@ export function createDecisionValidator({ store, tombstones, isUserAuthoredRef, 
   const normalize = (raw) => normalizeDecision(raw, { now, newId });
 
   /** Verify user-authored message evidence with quotes. Returns `{verified:[{ref, sessionID, messageID, quote}], failed:[{ref, why}]}`. */
-  async function verifyEvidence(evidence, { requireQuote = true } = {}) {
+  async function verifyEvidence(evidence, { requireQuote = true, messages = null } = {}) {
     const verified = [];
     const failed = [];
     const seen = new Set();
@@ -343,13 +446,16 @@ export function createDecisionValidator({ store, tombstones, isUserAuthoredRef, 
       }
       const ck = `${sessionID}/${messageID}`;
       if (!cache.has(ck)) {
-        let msgs = null;
-        try {
-          msgs = await readMessages?.({ sessionID, messageIDs: [messageID], radius: 0 });
-        } catch {
-          msgs = null;
+        if (messages) cache.set(ck, (await messages.get(sessionID, messageID)) ?? null);
+        else {
+          let msgs = null;
+          try {
+            msgs = await readMessages?.({ sessionID, messageIDs: [messageID], radius: 0 });
+          } catch {
+            msgs = null;
+          }
+          cache.set(ck, Array.isArray(msgs) ? (msgs.find((x) => x.id === messageID) ?? null) : null);
         }
-        cache.set(ck, Array.isArray(msgs) ? (msgs.find((x) => x.id === messageID) ?? null) : null);
       }
       const msg = cache.get(ck);
       if (!msg || msg.role !== "user") {
@@ -376,6 +482,7 @@ export function createDecisionValidator({ store, tombstones, isUserAuthoredRef, 
 
   /**
    * Stage 1 (no lock). `vctx`: {slug, sharing, allowedRefs: Set|null, clusters: Map(clusterId → cluster), refSharing(ref) → boolean}.
+   * `vctx.messages` (optional): a per-run `createMessageCache` shared by every check of the run.
    * `opts.internal`: a decision built in code (rule tracking) — `d` is already normalized and trusted.
    * Returns `{ok:true, decision, drop?}` or `{ok:false, kind:"skipped"|"dropped", reason}`.
    */
@@ -413,7 +520,7 @@ export function createDecisionValidator({ store, tombstones, isUserAuthoredRef, 
       const pa = pageArea(rel);
       if (!pa || (area && area !== pa.area)) return no("dropped", "The page path doesn't match its area.");
       if (pa.area === "project" && pa.slug !== slug) return no("dropped", "It tried to edit another project's page.");
-      if (PROTECTED_PAGES.includes(rel) || /^projects\/[^/]+\/rules\.md$/.test(rel)) return no("skipped", "Rules and preferences are changed through their own decisions, not by editing the page.");
+      if (PROTECTED_PAGES.includes(rel) || PROTECTED_PAGE_RE.test(rel)) return no("skipped", "Rules and preferences are changed through their own decisions, not by editing the page.");
       if ((pa.area === "user" || pa.area === "commons") && !feedsShared(sharing)) return no("skipped", "This project doesn't share its knowledge, so it can't feed shared pages.");
       if (typeof d.content !== "string" || d.content.trim() === "") return no("dropped", "The page change had no content.");
       d.target = { area: pa.area, ...(pa.slug ? { slug: pa.slug } : {}), path: rel, ...(d.target.section ? { section: d.target.section } : {}) };
@@ -462,15 +569,27 @@ export function createDecisionValidator({ store, tombstones, isUserAuthoredRef, 
 
     if (!internal) {
       if (d.type === "rule.remove") {
-        const v = await verifyEvidence(d.evidence);
+        const v = await verifyEvidence(d.evidence, { messages: vctx.messages });
         if (v.verified.length === 0) return no("skipped", "Removing a rule needs a message you wrote that says so; none could be verified.");
+        // the message must be about THIS rule: a real sentence that shares a content word with it
+        const about = contentWords(d.content);
+        if (!v.verified.some((x) => wsnorm(x.quote).length >= 20 && [...contentWords(x.quote)].some((w) => about.has(w)))) return no("skipped", "None of the messages you wrote is about that rule, so it wasn't removed.");
         d.evidence = v.verified.map((x) => ({ ref: x.ref, quote: x.quote }));
       } else {
-        const v = await verifyEvidence(d.evidence);
+        const v = await verifyEvidence(d.evidence, { messages: vctx.messages });
         const g = grounding(v.verified, cluster);
         if (!g.ok) {
           const why = v.verified.length === 0 ? `none of its evidence is a message you wrote with those exact words${v.failed[0] ? ` (${v.failed[0].why})` : ""}` : `it needs ${GROUNDING.corrections} corrections or the same one in ${GROUNDING.sessions} sessions, found ${g.corrections} in ${g.sessions}`;
           return no("skipped", `Not enough evidence for a ${isRule ? "rule" : "preference"}: ${why}.`);
+        }
+        // the TEXT must be backed by the words quoted — not just any real quotes
+        if (!claimSupported(d.content, v.verified.map((x) => x.quote))) return no("skipped", `The ${isRule ? "rule" : "preference"} isn't backed by what you wrote: none of the quoted messages says anything like it.`);
+        if (cluster) {
+          const a = contentWords(d.content);
+          const b = contentWords(cluster.lesson);
+          const inter = [...a].filter((w) => b.has(w)).length;
+          const overlap = a.size + b.size - inter === 0 ? 0 : inter / (a.size + b.size - inter);
+          if (overlap < LESSON_OVERLAP) return no("skipped", `The ${isRule ? "rule" : "preference"} doesn't match the repeated correction it was attached to.`);
         }
         d.evidence = v.verified.map((x) => ({ ref: x.ref, quote: x.quote }));
       }

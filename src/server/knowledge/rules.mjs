@@ -113,9 +113,19 @@ const DDL = `
   );
 `;
 
+const DDL2 = `
+  ALTER TABLE curator_rules ADD COLUMN source TEXT;
+  CREATE TABLE IF NOT EXISTS curator_contrib (
+    path TEXT NOT NULL, ref TEXT NOT NULL, slug TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL,
+    PRIMARY KEY (path, ref)
+  );
+  CREATE INDEX IF NOT EXISTS curator_contrib_path ON curator_contrib(path);
+`;
+
 /** deps: store, state, now. */
 export function createRulesStore({ store, state, now = Date.now } = {}) {
   state.migrate("curator-rules-1", DDL);
+  state.migrate("curator-rules-2", DDL2);
   const db = state.db;
   const path = (slug) => `projects/${slug}/rules.md`;
 
@@ -125,11 +135,13 @@ export function createRulesStore({ store, state, now = Date.now } = {}) {
   }
 
   // ---- tracking ----------------------------------------------------------------
-  function track({ slug, text, reason = "", clusterId = null, decisionId = null, rewrites = 0 }) {
+  // `source`: "curator" (the curator wrote it), "adopted" (taken over from a hand edit of the repository block),
+  // "undo" (restored by an undo). Only tracked rules are ever written to a repository.
+  function track({ slug, text, reason = "", clusterId = null, decisionId = null, rewrites = 0, source = "curator" }) {
     db.prepare(
-      `INSERT INTO curator_rules (slug, hash, text, reason, cluster_id, applied_at, rewrites, decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(slug, hash) DO UPDATE SET text = excluded.text, reason = excluded.reason, cluster_id = COALESCE(excluded.cluster_id, curator_rules.cluster_id), applied_at = excluded.applied_at, rewrites = excluded.rewrites, decision_id = excluded.decision_id`,
-    ).run(slug, bulletHash(text), text, String(reason).slice(0, 300), clusterId, now(), rewrites, decisionId);
+      `INSERT INTO curator_rules (slug, hash, text, reason, cluster_id, applied_at, rewrites, decision_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(slug, hash) DO UPDATE SET text = excluded.text, reason = excluded.reason, cluster_id = COALESCE(excluded.cluster_id, curator_rules.cluster_id), applied_at = excluded.applied_at, rewrites = excluded.rewrites, decision_id = excluded.decision_id, source = excluded.source`,
+    ).run(slug, bulletHash(text), text, String(reason).slice(0, 300), clusterId, now(), rewrites, decisionId, source);
   }
   const untrack = (slug, text) => db.prepare("DELETE FROM curator_rules WHERE slug = ? AND hash = ?").run(slug, bulletHash(text));
   const tracked = (slug) => db.prepare("SELECT * FROM curator_rules WHERE slug = ?").all(slug);
@@ -158,12 +170,47 @@ export function createRulesStore({ store, state, now = Date.now } = {}) {
   };
   const setJson = (k, slug, v) => (v === null || (Array.isArray(v) && v.length === 0) ? state.kvDelete(kvKey(k, slug)) : state.kvSet(kvKey(k, slug), JSON.stringify(v)));
 
+  // ---- who added a rule? ----------------------------------------------------------------
   /**
-   * What is handed to `repoWriter.applyRules`: each rule with its one-line reason, repo-safe. `[{rule, string}]`
-   * (the pairs are kept so a hand edit of the block can be mapped back to the rules that produced it).
+   * Rules in rules.md that nothing in Manta tracks: written by hand or by a process on the box. They are
+   * delivered through the briefing only and NEVER written to a repository (§4.1) — `[text]`.
+   */
+  async function heldBack(slug) {
+    return (await read(slug)).filter((r) => !trackedFor(slug, r));
+  }
+  /** Take a rule that came from a hand edit of the repository block as the user's own (it may travel outward again). */
+  const adopt = (slug, text) => {
+    if (!trackedFor(slug, text)) track({ slug, text, reason: "", source: "adopted" });
+  };
+  /** Stop tracking rules whose bullet is no longer in rules.md. Returns how many were dropped. */
+  async function pruneTracked(slug) {
+    const present = new Set((await read(slug)).map(bulletHash));
+    let n = 0;
+    for (const r of tracked(slug)) {
+      if (!present.has(r.hash)) {
+        db.prepare("DELETE FROM curator_rules WHERE slug = ? AND hash = ?").run(slug, r.hash);
+        n++;
+      }
+    }
+    return n;
+  }
+  const trackedSlugs = () => db.prepare("SELECT DISTINCT slug FROM curator_rules").all().map((r) => r.slug);
+
+  // ---- page contributors (downgrade cleanup): uncapped, unlike a page's `sources` ----------------
+  const noteContrib = ({ path: p, ref, slug = "" }) => db.prepare("INSERT OR REPLACE INTO curator_contrib (path, ref, slug, at) VALUES (?, ?, ?, ?)").run(p, ref, slug ?? "", now());
+  const contribs = (p) => db.prepare("SELECT ref, slug FROM curator_contrib WHERE path = ?").all(p);
+  const contribPaths = () => db.prepare("SELECT DISTINCT path FROM curator_contrib").all().map((r) => r.path);
+  const dropContribs = (p, slugs) => {
+    for (const slug of slugs) db.prepare("DELETE FROM curator_contrib WHERE path = ? AND slug = ?").run(p, slug);
+  };
+
+  /**
+   * What is handed to `repoWriter.applyRules`: each TRACKED rule with its one-line reason, repo-safe.
+   * `[{rule, string}]` (the pairs are kept so a hand edit of the block can be mapped back to the rules that
+   * produced it). Rules nothing tracks are held back (see `heldBack`).
    */
   async function repoPairs(slug) {
-    const list = await read(slug);
+    const list = (await read(slug)).filter((r) => trackedFor(slug, r));
     return list.map((r) => {
       const t = trackedFor(slug, r);
       const reason = repoSafeText(t?.reason ?? "");
@@ -173,10 +220,13 @@ export function createRulesStore({ store, state, now = Date.now } = {}) {
   }
   const repoStrings = async (slug) => (await repoPairs(slug)).map((p) => p.string);
 
-  /** Briefing part 1: the rules not delivered through the repository (box-only, or PR unmerged / write failed). */
+  /**
+   * Briefing part 1: the rules not delivered through the repository (box-only, or PR unmerged / write failed),
+   * plus the held-back rules, which can only ever travel this way.
+   */
   async function projectRulesForBriefing(slug, { repoRules } = {}) {
-    if (repoRules !== "box-only" && !viaBriefing(slug)) return [];
-    return read(slug);
+    if (repoRules === "box-only" || viaBriefing(slug)) return read(slug);
+    return heldBack(slug);
   }
 
   return {
@@ -187,6 +237,14 @@ export function createRulesStore({ store, state, now = Date.now } = {}) {
     tracked,
     trackedWithCluster,
     trackedFor,
+    trackedSlugs,
+    heldBack,
+    adopt,
+    pruneTracked,
+    noteContrib,
+    contribs,
+    contribPaths,
+    dropContribs,
     clusterTracked,
     retireCluster,
     noteBullet,

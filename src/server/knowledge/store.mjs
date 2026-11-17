@@ -15,12 +15,18 @@
 //   • `revert(sha)` — `git revert`, returning a conflict error that names the
 //     later commit that conflicts (nothing half-applied).
 //
+// The store folder is writable by every process of the box user (an agent's shell included), so a
+// "user edit" is NOT trusted blindly: each dirty path is secret-scanned before it is committed as the user's
+// (a hit, or an unavailable scanner, leaves that path uncommitted and reports it through `onDirtySkipped`),
+// and every user commit is reported through `onUserCommit` so it appears in Recent changes.
+//
 // All git goes through an injected runner (`run(args, {cwd, env})`, see
 // gitRunner.mjs; simple-git in production).
 
 import { mkdir, readFile, readdir, stat, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
 import { createMutex } from "../jsonStore.mjs";
 import { KnowledgeError } from "./errors.mjs";
 
@@ -79,6 +85,9 @@ const LOG_FORMAT = `--format=%H${SEP}%an${SEP}%at${SEP}%s${SEP}%b${REC}`;
 export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = console.warn } = {}) {
   const mutex = createMutex();
   const commitHooks = [];
+  const userCommitHooks = [];
+  const skippedHooks = [];
+  const reportedSkips = new Map(); // path → content hash already reported
 
   const inside = (rel) => {
     if (typeof rel !== "string" || rel === "" || rel.includes("\0")) throw new KnowledgeError("invalid-path", "Invalid store path.");
@@ -115,10 +124,23 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
 
   async function dirtyPaths() {
     const out = (await tryRun(["status", "--porcelain", "-z", "--untracked-files=all"])) ?? "";
-    return out
-      .split("\0")
-      .filter(Boolean)
-      .map((l) => l.slice(3));
+    const parts = out.split("\0").filter(Boolean);
+    const paths = [];
+    for (let i = 0; i < parts.length; i++) {
+      paths.push(parts[i].slice(3));
+      if (/^[RC]/.test(parts[i])) i++; // a rename/copy lists its origin as a second entry
+    }
+    return paths;
+  }
+
+  async function runHooks(list, evt) {
+    for (const cb of list) {
+      try {
+        await cb(evt);
+      } catch (e) {
+        log("[knowledge] store hook failed:", e?.message ?? e);
+      }
+    }
   }
 
   async function writeBaseline() {
@@ -182,16 +204,53 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
     async dirty() {
       return dirtyPaths();
     },
-    /** Commit uncommitted changes as the box user's own commit. Returns the sha or null. */
+    /**
+     * Commit uncommitted changes as the box user's own commit. Each path is secret-scanned first: a path
+     * with a secret (or that can't be scanned) is NOT committed and is reported once through `onDirtySkipped`.
+     * Returns the sha or null.
+     */
     async commitDirtyAsUser() {
       const paths = await dirtyPaths();
       if (paths.length === 0) return null;
-      await run(["add", "-A"]);
+      const clean = [];
+      for (const p of paths) {
+        let verdict = { clean: true };
+        if (scan) {
+          let text = null;
+          try {
+            text = await readFile(inside(p), "utf8");
+          } catch {
+            text = null; // deleted (or unreadable as text): nothing to leak
+          }
+          if (text !== null) {
+            try {
+              verdict = await scan(text);
+            } catch {
+              verdict = { clean: false, unavailable: true };
+            }
+          }
+        }
+        if (verdict.clean) {
+          clean.push(p);
+          reportedSkips.delete(p);
+        } else {
+          const why = verdict.unavailable ? "the secret scanner is unavailable" : "it contains what looks like a secret";
+          const key = `${why}:${createHash("sha256").update(await readFile(inside(p), "utf8").catch(() => "")).digest("hex")}`;
+          if (reportedSkips.get(p) !== key) {
+            reportedSkips.set(p, key);
+            await runHooks(skippedHooks, { path: p, reason: why, unavailable: verdict.unavailable === true });
+          }
+        }
+      }
+      if (clean.length === 0) return null;
+      await run(["add", "-A", "--", ...clean]);
+      if (!(await hasStaged())) return null;
       const who = await userIdentity();
-      const list = paths.slice(0, 5).join(", ") + (paths.length > 5 ? ` and ${paths.length - 5} more` : "");
+      const list = clean.slice(0, 5).join(", ") + (clean.length > 5 ? ` and ${clean.length - 5} more` : "");
       await run(["commit", "-m", formatMessage({ message: `User edits: ${list}`.slice(0, 118) })], envFor(who));
       const sha = await head();
-      notify({ sha, paths, by: "user" });
+      notify({ sha, paths: clean, by: "user" });
+      await runHooks(userCommitHooks, { sha, paths: clean });
       return sha;
     },
     /**
@@ -311,6 +370,25 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
   return {
     dir,
     withLock,
+    /**
+     * Awaited, under the store lock (so it must not take the lock): `({sha, paths})` after each commit of the
+     * user's dirty edits. The curator layer records it in Recent changes.
+     */
+    onUserCommit(cb) {
+      userCommitHooks.push(cb);
+      return () => {
+        const i = userCommitHooks.indexOf(cb);
+        if (i >= 0) userCommitHooks.splice(i, 1);
+      };
+    },
+    /** Awaited, under the store lock: `({path, reason, unavailable})` once per skipped dirty path (secret / no scanner). */
+    onDirtySkipped(cb) {
+      skippedHooks.push(cb);
+      return () => {
+        const i = skippedHooks.indexOf(cb);
+        if (i >= 0) skippedHooks.splice(i, 1);
+      };
+    },
     /** Register a callback run after every commit (user or curator): `({sha, paths, by})`. */
     onCommit(cb) {
       commitHooks.push(cb);

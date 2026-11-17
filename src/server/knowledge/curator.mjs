@@ -15,8 +15,8 @@ import { newBatchId } from "./ids.mjs";
 import { isKnowledgeError } from "./errors.mjs";
 import { localDay } from "./budget.mjs";
 import { BATCH_HOUR, PREFERENCES_PATH, createGlobalBlock } from "./globalBlock.mjs";
-import { createBlame, createDecisionValidator, buildPageEdit, checkBudgets, defaultTitle, isBriefingEcho, normText, parseDecisionOutput, removedUserLines, sessionsOf } from "./decisions.mjs";
-import { applyBulletOp, createRulesStore, parseBullets } from "./rules.mjs";
+import { createBlame, createDecisionValidator, createMessageCache, buildPageEdit, checkBudgets, defaultTitle, isBriefingEcho, normText, parseDecisionOutput, removedUserLines, sessionsOf } from "./decisions.mjs";
+import { applyBulletOp, bulletHash, createRulesStore, parseBullets } from "./rules.mjs";
 import { effectiveFor } from "./settings.mjs";
 import { feedsShared } from "./sharing.mjs";
 import { createTombstones } from "./tombstones.mjs";
@@ -91,6 +91,8 @@ Where a procedure appears in two or more projects, or is clearly generic, write 
 {"type":"page.edit","target":{"area":"commons","path":"commons/howto/<name>.md"},"content":"<Markdown body>","reason":"<one sentence>","evidence":[{"ref":"<a page: ref from the runbooks given>"}]}
 Cite only refs from the given runbooks. Do not copy names of people, accounts, hosts or secrets. Don't repeat a library page. Do not propose anything listed in "undone_before".`;
 
+export const CONFLICT_INSTRUCTION = `You check one new instruction against lines a person wrote by hand. Answer with exactly one word: YES if the new instruction contradicts, reverses, or cannot be followed together with ANY of the person's lines; otherwise NO. No other text.`;
+
 export const REASK_INSTRUCTION = `A page changed while you were working on it. Below are your earlier decisions and the pages as they are now. Answer again with ONLY a JSON object {"decisions":[ ... ]} containing each decision corrected against the current page (same format as before), or a drop if it no longer applies. Keep every other rule from your earlier instructions: evidence refs must be copied from the notes, no invented commands, never remove lines a person wrote.`;
 
 // ---- helpers --------------------------------------------------------------------------
@@ -152,10 +154,10 @@ export function createCurator(kc) {
   }
 
   /**
-   * One model call. `{status:"ok", decisions}` | `{status:"waiting"|"cap"|"failed"|"off", …}`.
+   * One model call returning the raw answer: `{status:"ok", text}` | `{status:"waiting"|"cap"|"failed"|"off", …}`.
    * `blocks` are `{priority, text}`; the first (highest priority) carries the instruction.
    */
-  async function callModel({ taskClass, slug, blocks }) {
+  async function runModel({ taskClass, slug, blocks, validate }) {
     if (!deps.runEphemeral) return { status: "off" };
     const can = await budget.canSpend();
     if (!can.ok) {
@@ -173,7 +175,7 @@ export function createCurator(kc) {
           reportCost: async (c) => {
             await budget.record({ taskClass, model: c?.model ?? null, tokens: tokenObject(c?.tokens), slug });
           },
-          validate: async (out) => out?.ok !== false && parseDecisionOutput(out?.text).ok,
+          validate: async (out) => out?.ok !== false && validate(out?.text),
         },
       });
     } catch (e) {
@@ -188,25 +190,61 @@ export function createCurator(kc) {
       return { status: "failed", code: res.code ?? "failed" };
     }
     clearWaiting(taskClass);
-    const parsed = parseDecisionOutput(res?.text);
+    return { status: "ok", text: res?.text };
+  }
+
+  /** `{status:"ok", decisions}` | `{status:"waiting"|"cap"|"failed"|"off", …}`. */
+  async function callModel(args) {
+    const r = await runModel({ ...args, validate: (t) => parseDecisionOutput(t).ok });
+    if (r.status !== "ok") return r;
+    const parsed = parseDecisionOutput(r.text);
     if (!parsed.ok) return { status: "failed", code: "bad-output" };
     return { status: "ok", decisions: parsed.decisions };
   }
 
+  const strictYesNo = (t) => /^\s*(YES|NO)\s*[.!]?\s*$/i.exec(String(t ?? ""))?.[1]?.toUpperCase() ?? null;
+
+  /**
+   * Does `claim` contradict any of the user-written `lines`? A strict one-word answer; ANYTHING else — no
+   * model, cap reached, a failed call, an answer that isn't exactly YES/NO — counts as a conflict (fail closed).
+   * Returns `{conflict:boolean, why?}`.
+   */
+  async function conflictsWithUserLines({ slug, claim, lines }) {
+    const r = await runModel({
+      taskClass: "curator-rules",
+      slug,
+      blocks: [{ priority: 100, text: CONFLICT_INSTRUCTION }, block(90, "new_instruction", claim), block(80, "person_lines", lines)],
+      validate: (t) => strictYesNo(t) !== null,
+    });
+    if (r.status !== "ok") return { conflict: true, why: "it couldn't be checked against the lines you wrote" };
+    const a = strictYesNo(r.text);
+    if (a === "NO") return { conflict: false };
+    return { conflict: true, why: a === "YES" ? "it contradicts a line you wrote" : "it couldn't be checked against the lines you wrote" };
+  }
+
   // ---- validation context ----------------------------------------------------------
-  async function vctxFor(slug, { allowedRefs = null, clusters = new Map(), bases = new Map() } = {}) {
+  /** `ref → boolean|true` over the CURRENT settings: may this ref's project feed shared pages? */
+  const refSharingFor = (s) => (ref) => {
+    const m = /^(?:msg|part):([^/]+)\//.exec(ref);
+    if (m) {
+      const map = sessionMap.get(m[1]);
+      return !!map && feedsShared(effectiveFor(s, map.slug).sharing);
+    }
+    const p = /^page:projects\/([^/]+)\//.exec(ref);
+    if (p) return feedsShared(effectiveFor(s, p[1]).sharing);
+    return true;
+  };
+  /** The project a ref belongs to, or null when it can't be told. */
+  const attribute = (ref) => {
+    const m = /^(?:msg|part):([^/]+)\//.exec(ref);
+    if (m) return sessionMap.get(m[1])?.slug ?? null;
+    const p = /^page:projects\/([^/]+)\//.exec(ref);
+    return p ? p[1] : null;
+  };
+
+  async function vctxFor(slug, { allowedRefs = null, clusters = new Map(), bases = new Map(), messages = null } = {}) {
     const s = await settings.get();
-    const refSharing = (ref) => {
-      const m = /^(?:msg|part):([^/]+)\//.exec(ref);
-      if (m) {
-        const map = sessionMap.get(m[1]);
-        return !!map && feedsShared(effectiveFor(s, map.slug).sharing);
-      }
-      const p = /^page:projects\/([^/]+)\//.exec(ref);
-      if (p) return feedsShared(effectiveFor(s, p[1]).sharing);
-      return true;
-    };
-    return { slug, sharing: slug ? effectiveFor(s, slug).sharing : "private", allowedRefs, clusters, bases, refSharing };
+    return { slug, sharing: slug ? effectiveFor(s, slug).sharing : "private", allowedRefs, clusters, bases, refSharing: refSharingFor(s), messages: messages ?? createMessageCache({ readMessages: deps.readMessages }) };
   }
 
   // ---- applying (under the lock) ------------------------------------------------------
@@ -295,7 +333,15 @@ export function createCurator(kc) {
     return store.withLock(async (tx) => {
       const eff = await settings.effective(vctx.slug ?? undefined);
       if (!eff.enabled || eff.observeOnly) return { status: "aborted" };
-      if (!vctx.commonsPass && (d.target.area === "user" || d.target.area === "commons") && !feedsShared(eff.sharing)) return { status: "dropped", reason: "The project stopped sharing while this was being worked out." };
+      if (vctx.commonsPass) {
+        // a shared-pages pass (commons, or the downgrade rewrite): only its allowed areas, and the sources
+        // are re-checked against the settings as they are NOW
+        if (d.type !== "page.edit" || !(vctx.allowAreas ?? ["commons"]).includes(d.target.area)) return { status: "dropped", reason: "That pass may only write shared pages." };
+        const share = refSharingFor(await settings.get());
+        const keep = d.evidence.filter((e) => share(e.ref) !== false);
+        if (keep.length === 0) return { status: "dropped", reason: "Every project behind it stopped sharing while this was being worked out." };
+        d.evidence = keep;
+      } else if ((d.target.area === "user" || d.target.area === "commons") && !feedsShared(eff.sharing)) return { status: "dropped", reason: "The project stopped sharing while this was being worked out." };
       await tx.commitDirtyAsUser();
       return d.type === "page.edit" ? applyPage(tx, d, vctx, batchId, touched) : applyBullet(tx, d, vctx, batchId, eff);
     });
@@ -327,8 +373,13 @@ export function createCurator(kc) {
         path: res.rel,
         ...(isBullet ? { text: d.content, ...(d.replaces ? { replaces: d.replaces } : {}) } : {}),
         ...(d.target.section ? { section: d.target.section } : {}),
+        ...(vctx.dataExtra ?? {}),
       },
     });
+    if (d.type === "page.edit") {
+      // who contributed to the page, uncapped (a page's `sources` keeps only the last 24): the downgrade cleanup needs it
+      for (const e of d.evidence) rules.noteContrib({ path: res.rel, ref: e.ref, slug: attribute(e.ref) ?? vctx.slug ?? "" });
+    }
     if (d.type.startsWith("rule.")) {
       if (d.type === "rule.add") rules.track({ slug, text: d.content, reason: d.reason, clusterId: d.clusterId ?? null, decisionId: d.id });
       else if (d.type === "rule.change") {
@@ -349,6 +400,19 @@ export function createCurator(kc) {
     const what = d ? describeDecision(d) : "A proposed change";
     changes.add({ kind, summary: `${kind === "skipped" ? "Skipped" : "Dropped"}: ${what}`.slice(0, 280), reason, area: d?.target?.area ?? null, slug: d?.target?.slug ?? null, decisionId: d?.id ?? null, data: extra.data ?? null });
   };
+
+  /** A reason string when a new rule/preference conflicts with (or can't be checked against) the user's own lines in its file; else null. */
+  async function checkUserLineConflict(d, vctx) {
+    const eff = await settings.effective(vctx.slug ?? undefined);
+    const rel = bulletPathFor(d, vctx.slug, eff.sharing);
+    if ((await store.read(rel)) === null) return null;
+    const userSet = await blame.userLines(rel);
+    if (userSet === null) return "it couldn't be told which lines you wrote";
+    const lines = [...userSet].map((l) => /^[-*]\s+(.+)$/.exec(l)?.[1]).filter(Boolean);
+    if (lines.length === 0) return null;
+    const r = await conflictsWithUserLines({ slug: vctx.slug, claim: d.content, lines: lines.slice(0, 60) });
+    return r.conflict ? r.why : null;
+  }
 
   /**
    * Validate and apply a list of raw decisions. A decision whose base changed is collected, re-asked once
@@ -377,6 +441,14 @@ export function createCurator(kc) {
         continue;
       }
       const dd = v.decision;
+      if (dd.type === "rule.add" || dd.type === "rule.change" || dd.type === "preference.set") {
+        const c = await checkUserLineConflict(dd, vctx);
+        if (c) {
+          recordRefused(dd, "skipped", `It wasn't applied: ${c}.`, { data: { conflict: true } });
+          out.skipped++;
+          continue;
+        }
+      }
       const res = await applyOne(dd, vctx, batchId, touched);
       if (res.status === "aborted") {
         out.aborted = true;
@@ -514,8 +586,9 @@ export function createCurator(kc) {
     return { pages, bases, commons: all.filter((p) => p.startsWith("commons/")) };
   }
 
-  async function userMessageCandidates(notes) {
+  async function userMessageCandidates(notes, messages) {
     const refs = [...new Set(notes.flatMap((n) => n.refs).filter((r) => r.startsWith("msg:")))].slice(0, 30);
+    await messages.prefetch(refs);
     const out = [];
     for (const ref of refs) {
       const m = /^msg:([^/]+)\/(.+)$/.exec(ref);
@@ -527,13 +600,7 @@ export function createCurator(kc) {
         ua = false;
       }
       if (!ua) continue;
-      let msgs = null;
-      try {
-        msgs = await deps.readMessages?.({ sessionID: m[1], messageIDs: [m[2]], radius: 0 });
-      } catch {
-        msgs = null;
-      }
-      const msg = Array.isArray(msgs) ? msgs.find((x) => x.id === m[2]) : null;
+      const msg = await messages.get(m[1], m[2]);
       if (msg?.role === "user") out.push({ ref, sessionID: m[1], text: clip(msg.text, 600) });
     }
     return out;
@@ -565,7 +632,8 @@ export function createCurator(kc) {
   }
 
   async function rulesPass(slug, notes, batchId, eff) {
-    const candidates = await userMessageCandidates(notes);
+    const messages = createMessageCache({ readMessages: deps.readMessages });
+    const candidates = await userMessageCandidates(notes, messages);
     const cur = await currentBullets(slug, eff.sharing);
     const allowed = new Set(candidates.map((c) => c.ref));
     const blocks = [
@@ -577,7 +645,7 @@ export function createCurator(kc) {
     ];
     const call = await callModel({ taskClass: "curator-rules", slug, blocks });
     if (call.status !== "ok") return { call };
-    const vctx = await vctxFor(slug, { allowedRefs: allowed });
+    const vctx = await vctxFor(slug, { allowedRefs: allowed, messages });
     return { call, result: await processDecisions(call.decisions, vctx, { batchId, slug, taskClass: "curator-rules" }) };
   }
 
@@ -733,21 +801,66 @@ export function createCurator(kc) {
     return { ran };
   }
 
-  return { flushSkillsDaily, prompts: { NOTES: NOTES_INSTRUCTION, RULES: RULES_INSTRUCTION, CLUSTERS: CLUSTERS_INSTRUCTION, REWRITE: REWRITE_INSTRUCTION, COMMONS: COMMONS_INSTRUCTION, REASK: REASK_INSTRUCTION }, runBatch, tick, callModel, processDecisions, pushRules, finalizeRules, vctxFor, loadPages, clustersPass, currentBullets, recordRefused, describeDecision, inflight, isBusy: () => inflight.size > 0 };
+  return { attribute, refSharingFor, conflictsWithUserLines, runModel, flushSkillsDaily, prompts: { CONFLICT: CONFLICT_INSTRUCTION, NOTES: NOTES_INSTRUCTION, RULES: RULES_INSTRUCTION, CLUSTERS: CLUSTERS_INSTRUCTION, REWRITE: REWRITE_INSTRUCTION, COMMONS: COMMONS_INSTRUCTION, REASK: REASK_INSTRUCTION }, runBatch, tick, callModel, processDecisions, pushRules, finalizeRules, vctxFor, loadPages, clustersPass, currentBullets, recordRefused, describeDecision, inflight, isBusy: () => inflight.size > 0 };
+}
+
+const RULES_PATH_RE = /^projects\/([^/]+)\/rules\.md$/;
+
+/**
+ * The store folder is writable by every process of the box user, so what the store commits "as the user" is
+ * made visible: every user commit is a Recent-changes entry (paths, undoable), a path that was left uncommitted
+ * because it holds a secret is reported, and a rule that appeared in rules.md without Manta tracking it is
+ * listed as "added outside Manta" — such rules are delivered through the briefing only, never written to a repository.
+ */
+function registerUserEditHooks(kc) {
+  const { store, state, changes, rules, registry, log } = kc;
+  store.onDirtySkipped(({ path, reason }) => {
+    changes.add({ kind: "skipped", summary: `Didn't keep your edit of ${path}`, reason: `${reason === "the secret scanner is unavailable" ? "The secret scanner is unavailable" : "It looks like it contains a secret"}, so it was left uncommitted. Nothing was deleted; remove the secret, or fix the scanner, and it will be picked up.`, area: path.split("/")[0] === "projects" ? "project" : path.split("/")[0], slug: path.split("/")[0] === "projects" ? (path.split("/")[1] ?? null) : null });
+  });
+  store.onUserCommit(async ({ sha, paths }) => {
+    const strays = [];
+    for (const p of paths) {
+      const slug = RULES_PATH_RE.exec(p)?.[1];
+      if (!slug) continue;
+      for (const text of await rules.heldBack(slug)) {
+        const key = `rules.stray:${slug}:${bulletHash(text)}`;
+        if (state.kvGet(key) === "1") continue;
+        state.kvSet(key, "1");
+        strays.push({ slug, text });
+      }
+    }
+    const list = paths.slice(0, 5).join(", ") + (paths.length > 5 ? ` and ${paths.length - 5} more` : "");
+    let name = null;
+    if (strays.length) name = (await registry.get(strays[0].slug).catch(() => null))?.displayName ?? strays[0].slug;
+    changes.add({
+      kind: "notice",
+      summary: strays.length ? `Rule${strays.length === 1 ? "" : "s"} added outside Manta${name ? ` in ${name}` : ""}: ${strays.map((x) => x.text).join("; ")}`.slice(0, 280) : `Your edits were saved: ${list}`.slice(0, 280),
+      reason: strays.length
+        ? "Something changed the rules file directly. Those rules reach sessions through the briefing but are never written to your repository. Undo takes them out."
+        : "Changes made to the knowledge folder by hand (or by another program) are kept as your own commit. Undo reverts it.",
+      area: "project",
+      slug: strays[0]?.slug ?? (RULES_PATH_RE.exec(paths[0])?.[1] || (paths[0]?.startsWith("projects/") ? paths[0].split("/")[1] : null)) ?? null,
+      undoable: true,
+      commitSha: sha,
+      data: { kind: "user-edit", noTombstone: true, paths, ...(strays.length ? { strays } : {}) },
+    });
+  });
+  void log;
 }
 
 /**
  * Compose the whole curator layer on top of the foundation handles.
- * parts: store, state, queue, settings, budget, changes, registry, sessionMap, briefings, scanner?, git, dir, deps, now, log.
+ * parts: store, state, queue, settings, budget, changes, registry, sessionMap, briefings, scanner (secret scanner), git, dir, deps, now, log.
  */
 export function createCuratorLayer(parts) {
   const { store, state, deps, now, log } = parts;
   const tombstones = createTombstones({ store, now, log });
   const rules = parts.rules ?? createRulesStore({ store, state, now });
-  const globalBlock = createGlobalBlock({ path: deps.globalAgentsPath, store, state, now, log });
+  const globalBlock = createGlobalBlock({ path: deps.globalAgentsPath, store, state, now, log, scan: parts.scanner ? (t) => parts.scanner.scan(t) : undefined, report: (e) => parts.changes.add(e) });
   const validator = createDecisionValidator({ store, tombstones, isUserAuthoredRef: deps.isUserAuthoredRef, readMessages: deps.readMessages, readShellCommands: deps.readShellCommands, now });
   const blame = createBlame({ git: parts.git, dir: parts.dir });
   const kc = { ...parts, tombstones, rules, globalBlock, validator, blame };
+  registerUserEditHooks(kc);
   const curator = createCurator(kc);
   const undo = createUndo({ ...kc, curator });
   const tidy = createTidy({ ...kc, curator, undo });
@@ -779,6 +892,7 @@ export function createCuratorLayer(parts) {
     tick: async () => {
       const r = await curator.tick();
       try {
+        await downgrade.retryPending();
         await tidy.tickWeekly();
       } catch (e) {
         log("[knowledge] weekly tidy failed:", e?.message ?? e);
