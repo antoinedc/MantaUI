@@ -12,9 +12,6 @@ import type {
 /** The store folder the "View knowledge" button opens (the box expands `~`). */
 export const KNOWLEDGE_DIR = "~/.manta/knowledge";
 
-/** The most a daily cap can be set to; a typo guard, not a policy. */
-export const DAILY_CAP_MAX_USD = 1000;
-
 export const REPO_RULES_OPTIONS: ReadonlyArray<{
   value: KnowledgeRepoRules;
   label: string;
@@ -49,24 +46,6 @@ export function sharingConfirmText(saved: KnowledgeSharing, pending: KnowledgeSh
 export const repoRulesLabel = (v: KnowledgeRepoRules): string => REPO_RULES_OPTIONS.find((o) => o.value === v)?.label ?? v;
 export const sharingLabel = (v: KnowledgeSharing): string => SHARING_OPTIONS.find((o) => o.value === v)?.label ?? v;
 
-export type CapParse = { ok: true; value: number } | { ok: false; error: string };
-
-/** Dollars, whole cents, 0 (nothing spent: curator waits) up to DAILY_CAP_MAX_USD. */
-export function parseDailyCap(text: string): CapParse {
-  const t = text.trim().replace(/^\$/, "");
-  if (t === "") return { ok: false, error: "Enter a daily cap in dollars, for example 1.00." };
-  if (!/^\d+(\.\d{1,2})?$/.test(t)) return { ok: false, error: "Use a dollar amount with up to two decimals, for example 1.00." };
-  const value = Number(t);
-  if (!Number.isFinite(value)) return { ok: false, error: "Use a dollar amount with up to two decimals, for example 1.00." };
-  if (value > DAILY_CAP_MAX_USD) return { ok: false, error: `The cap can't be more than $${DAILY_CAP_MAX_USD}.` };
-  return { ok: true, value };
-}
-
-export const formatUsd = (n: number): string => `$${(Math.round(n * 100) / 100).toFixed(2)}`;
-
-/** The text a cap input shows for a stored value. */
-export const capInputText = (n: number): string => (Math.round(n * 100) / 100).toFixed(2);
-
 /** Whether a project's value is set on the project (vs inherited from the default). */
 export function isOverride(row: KnowledgeProjectRow, key: "repoRules" | "sharing", defaults: Pick<KnowledgeSettings, "repoRules" | "sharing">): boolean {
   const flag = key === "repoRules" ? row.repoRulesOverride : row.sharingOverride;
@@ -79,20 +58,13 @@ export const outwardLost = (row: KnowledgeProjectRow): boolean =>
 
 export type StatusLine = { id: string; tone: "info" | "warn"; text: string };
 
-/** Status lines from whatever the settings payload carries; a missing field renders nothing. */
+/**
+ * Status lines from whatever the settings payload carries; a missing field renders nothing. Spend is not here:
+ * the budget (plan share or API-key dollars) is described by the one-line background-work status.
+ */
 export function statusLines(s: KnowledgeSettings): StatusLine[] {
   const out: StatusLine[] = [];
   if (s.unavailableReason) out.push({ id: "unavailable", tone: "warn", text: `Knowledge is off on this box: ${s.unavailableReason}` });
-  if (typeof s.spentTodayUsd === "number") {
-    const capped = s.dailyCapUsd > 0 ? s.spentTodayUsd >= s.dailyCapUsd : true;
-    out.push({
-      id: "spend",
-      tone: capped ? "warn" : "info",
-      text: capped
-        ? `Spent ${formatUsd(s.spentTodayUsd)} of the ${formatUsd(s.dailyCapUsd)} daily cap. Knowledge work waits until tomorrow; briefings and search keep working.`
-        : `Spent ${formatUsd(s.spentTodayUsd)} of the ${formatUsd(s.dailyCapUsd)} daily cap today.`,
-    });
-  }
   if (s.waitingForCapableModel) {
     out.push({ id: "waiting", tone: "warn", text: "Waiting for a capable model. Rule and skill work is on hold until one is available." });
   }

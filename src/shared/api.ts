@@ -1056,13 +1056,14 @@ export interface KnowledgeProjectRow {
 
 export interface KnowledgeSettings {
   enabled: boolean;
-  dailyCapUsd: number;
+  /** Legacy mirror of `backgroundWork.dailyCapUsd`, still sent for older desktops. The renderer no longer reads it. */
+  dailyCapUsd?: number;
   repoRules: KnowledgeRepoRules;
   sharing: KnowledgeSharing;
   projects: KnowledgeProjectRow[];
   /** Why the subsystem is off (e.g. no Node 24). Absent when it can run. */
   unavailableReason?: string;
-  /** Curator model spend for the local day, dollars. */
+  /** Legacy: pay-per-token background spend for the local day, dollars. The renderer no longer reads it. */
   spentTodayUsd?: number;
   /** Rule/skill work has waited more than 24 h for a capable model (§6.2). */
   waitingForCapableModel?: boolean;
@@ -1073,7 +1074,6 @@ export interface KnowledgeSettings {
 /** `null` for a per-project key means "use the default". */
 export interface KnowledgeSettingsPatch {
   enabled?: boolean;
-  dailyCapUsd?: number;
   repoRules?: KnowledgeRepoRules;
   sharing?: KnowledgeSharing;
   projects?: Record<string, { repoRules?: KnowledgeRepoRules | null; sharing?: KnowledgeSharing | null }>;
@@ -1103,6 +1103,75 @@ export type KnowledgeUndoResult =
   /** `warning`: the undo happened but something around it didn't (e.g. a managed file couldn't be re-rendered). */
   | { ok: true; warning?: string }
   | { ok: false; reason: string; /** The later change that blocks the undo, as one readable phrase. */ conflictWith?: string };
+
+// ----- Background work budget (spec 2026-11-17-background-work-budget.md §10, §17.20) -----
+
+/** The one user level for background work on subscription plans. */
+export type BackgroundWorkLevel = "off" | "light" | "normal";
+
+/** Why background work is refusing. */
+export type BudgetReason =
+  | "off"
+  | "level-cap"
+  | "window-busy"
+  | "projected-high"
+  | "exhausted"
+  | "usd-cap"
+  | "unavailable";
+
+/** One quota window of a plan. `pct`, `bgPct`, `cap` and `projectedPct` are percent of the window (0–100). */
+export interface BudgetWindow {
+  /** "<adapter>:<kind>" */
+  key: string;
+  /** "weekly" / "weekly_scoped:*" are weekly-kind; every other kind is a short window ("session" = 5-hour). */
+  kind: string;
+  label: string;
+  /** Percent of the window used by everything. */
+  pct: number;
+  /** Percent of the window used by background work. */
+  bgPct: number;
+  /** The level's cap for this window kind, percent. */
+  cap: number;
+  projectedPct: number | null;
+  resetsAt: number | null;
+}
+
+/** A refusal. `value` is the figure the copy quotes: percent used (window-busy), projected percent (projected-high),
+ *  the cap percent (level-cap), or the batch share used; the window row in the same status is the fallback. */
+export interface BudgetPaused {
+  reason: BudgetReason;
+  windowKey?: string;
+  value?: number;
+  resumesAt: number | null;
+}
+
+export interface BudgetPlanStatus {
+  adapter: string;
+  planLabel?: string;
+  /** The plan's usage couldn't be read: the dollar cap governs instead. */
+  fallback: boolean;
+  windows: BudgetWindow[];
+  /** Continuous work (capture, curation, CTO ambient), box default model. */
+  paused: BudgetPaused | null;
+  /** Larger jobs (weekly passes, trials, overnight, backfill). */
+  batchPaused?: BudgetPaused | null;
+}
+
+export interface BudgetStatus {
+  level: BackgroundWorkLevel;
+  dailyCapUsd: number;
+  payg: {
+    providers: string[];
+    usdToday: number;
+    usdMonth: number;
+    paused?: BudgetPaused | null;
+    batchPaused?: BudgetPaused | null;
+  };
+  plans: BudgetPlanStatus[];
+  waitingBatch: { workType: string; dueSince: number }[];
+  /** Today's totals per work type. */
+  byWork: { workType: string; calls: number; usd: number; tokens: number }[];
+}
 
 export interface HandoffLinks {
   /** Set on a predecessor that was replaced (clear). */
@@ -1823,6 +1892,12 @@ export interface Api {
   knowledgeSettingsSet(input: { patch: KnowledgeSettingsPatch }): Promise<KnowledgeSettings>;
   knowledgeChanges(input?: { cursor?: string }): Promise<KnowledgeChangesPage>;
   knowledgeUndo(input: { id: string }): Promise<KnowledgeUndoResult>;
+
+  // Background work budget (`background:status` RPC): what background work (shared
+  // knowledge + the background CTO) has used and why it is paused, if it is. The
+  // settings it reads/writes go through configGet / configUpdate (`backgroundWork`).
+  // Rejects with "unknown rpc channel" on an older box.
+  backgroundStatus(): Promise<BudgetStatus>;
 
   // Inline media (BET-1148). The box publishes ONE `media` bus kind with an
   // `action` discriminator (begin / show / fail); the desktop subscribes once

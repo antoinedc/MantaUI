@@ -56,6 +56,7 @@ export const DEMO_UNIMPLEMENTED = [
   "autoUpdateCheck",
   "autoUpdateDownload",
   "autoUpdateInstall",
+  "backgroundStatus",
   "clipboardReadImage",
   "clipboardWriteText",
   "configUpdate",

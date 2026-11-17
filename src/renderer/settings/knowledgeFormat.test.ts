@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { KnowledgeProjectRow, KnowledgeSettings } from "../../shared/api";
 import {
-  DAILY_CAP_MAX_USD,
-  capInputText,
   changeWhere,
   describeSaveError,
   describeUndoFailure,
   formatChangeTime,
-  formatUsd,
   isOverride,
   kindLabel,
   outwardLost,
-  parseDailyCap,
   statusLines,
 } from "./knowledgeFormat";
 
@@ -27,39 +23,10 @@ const row = (over: Partial<KnowledgeProjectRow> = {}): KnowledgeProjectRow => ({
 
 const settings = (over: Partial<KnowledgeSettings> = {}): KnowledgeSettings => ({
   enabled: true,
-  dailyCapUsd: 1,
   repoRules: "box-only",
   sharing: "share-and-read",
   projects: [],
   ...over,
-});
-
-describe("parseDailyCap", () => {
-  it("accepts whole dollars, cents, a leading $ and zero", () => {
-    expect(parseDailyCap("1")).toEqual({ ok: true, value: 1 });
-    expect(parseDailyCap(" 2.50 ")).toEqual({ ok: true, value: 2.5 });
-    expect(parseDailyCap("$0.05")).toEqual({ ok: true, value: 0.05 });
-    expect(parseDailyCap("0")).toEqual({ ok: true, value: 0 });
-    expect(parseDailyCap(String(DAILY_CAP_MAX_USD))).toEqual({ ok: true, value: DAILY_CAP_MAX_USD });
-  });
-  it.each(["", "  ", "abc", "-1", "1.234", "1,5", "1e3", ".5", "Infinity"])("rejects %j with a sentence", (t) => {
-    const r = parseDailyCap(t);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.length).toBeGreaterThan(10);
-  });
-  it("rejects above the maximum", () => {
-    const r = parseDailyCap(String(DAILY_CAP_MAX_USD + 1));
-    expect(r).toEqual({ ok: false, error: `The cap can't be more than $${DAILY_CAP_MAX_USD}.` });
-  });
-});
-
-describe("money formatting", () => {
-  it("formats dollars to cents", () => {
-    expect(formatUsd(0.3)).toBe("$0.30");
-    expect(formatUsd(1)).toBe("$1.00");
-    expect(capInputText(0.1 + 0.2)).toBe("0.30");
-    expect(capInputText(2)).toBe("2.00");
-  });
 });
 
 describe("isOverride / outwardLost", () => {
@@ -83,15 +50,9 @@ describe("statusLines", () => {
   it("renders nothing for fields the payload doesn't carry", () => {
     expect(statusLines(settings())).toEqual([]);
   });
-  it("spend under the cap is informational, at or over it is a warning", () => {
-    const under = statusLines(settings({ spentTodayUsd: 0.31 }));
-    expect(under).toEqual([{ id: "spend", tone: "info", text: "Spent $0.31 of the $1.00 daily cap today." }]);
-    const over = statusLines(settings({ spentTodayUsd: 1 }));
-    expect(over[0].tone).toBe("warn");
-    expect(over[0].text).toContain("waits until tomorrow");
-  });
-  it("a zero cap is always capped", () => {
-    expect(statusLines(settings({ dailyCapUsd: 0, spentTodayUsd: 0 }))[0].tone).toBe("warn");
+  it("carries no spend line: the budget is the one-line background-work status", () => {
+    expect(statusLines(settings({ spentTodayUsd: 0.31 }))).toEqual([]);
+    expect(statusLines(settings({ spentTodayUsd: 9, dailyCapUsd: 1 }))).toEqual([]);
   });
   it("waiting for a capable model, briefing misses and the unavailable reason", () => {
     const lines = statusLines(

@@ -80,7 +80,6 @@ describe("SettingsView τ round-trip (BET-1521)", () => {
     const m = await mountSettings({
       ctoEnabled: true,
       ctoTier: "medium",
-      ctoAmbientCap: 2.5,
       ctoAutonomyThreshold: 0.7,
     });
     h = m.h;
@@ -90,7 +89,7 @@ describe("SettingsView τ round-trip (BET-1521)", () => {
   });
 
   it("load: empty input when the box has no τ configured yet", async () => {
-    const m = await mountSettings({ ctoEnabled: true, ctoTier: "low", ctoAmbientCap: 2.5 });
+    const m = await mountSettings({ ctoEnabled: true, ctoTier: "low" });
     h = m.h;
     expect(tauInput(h)!.value).toBe("");
   });
