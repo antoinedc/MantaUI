@@ -29,6 +29,11 @@ import {
   forgeCloneStatus,
   ForgeRateLimitedError,
   classifyForgeError,
+  resolveRepoTarget,
+  forgeRepoAccess,
+  forgeFindOpenPullRequest,
+  forgeCreatePullRequest,
+  forgeUpdatePullRequest,
 } from "./index.mjs";
 import { createCloneStore } from "./clone.mjs";
 import { getDraft, putComment } from "./draft.mjs";
@@ -1941,4 +1946,209 @@ test("forgeCloneStatus: a failed job carries errorKind + message; raw stderr sta
   assert.equal(out.errorKind, "permission");
   assert.equal(out.error, "fatal: could not read Username");
   assert.equal(forgeCloneStatus("x", { store: { status: () => null } }), null);
+});
+
+// ---- Repo-addressed operations (shared knowledge) ---------------------------
+//
+// Driven through the real request layer with an injected fetch, so the typed
+// failures and the revalidation (`ttl: 0`) are the production path.
+
+function routedFetch(routes) {
+  const calls = [];
+  const f = async (url, init = {}) => {
+    calls.push({ url, method: init.method ?? "GET", headers: init.headers, body: init.body });
+    const key = `${init.method ?? "GET"} ${url}`;
+    const r = routes[key] ?? routes[url];
+    if (!r) return json({ message: "not routed" }, 404);
+    return typeof r === "function" ? r() : json(r.body, r.status ?? 200, r.headers ?? {});
+  };
+  f.calls = calls;
+  return f;
+}
+
+function repoDeps(fetchFn, extra = {}) {
+  const runtime = createForgeRuntime({ fetch: fetchFn });
+  return {
+    resolveToken: async () => ({ token: "tok", source: "cli" }),
+    getAdapter: runtime.getAdapter,
+    getConfig: async () => ({ forgeHosts: [] }),
+    ...extra,
+  };
+}
+
+const GH = "https://api.github.com/repos/acme/widget";
+const GL = `https://gitlab.com/api/v4/projects/${encodeURIComponent("acme/widget")}`;
+
+test("forgeRepoAccess (GitHub): pushable non-fork with the default branch; uses the box login", async () => {
+  const f = routedFetch({
+    [GH]: { body: { permissions: { push: true }, fork: false, default_branch: "main" } },
+  });
+  for (const target of [
+    "https://github.com/acme/widget.git",
+    "git@github.com:acme/widget.git",
+    "github.com/acme/widget",
+    { repoKey: "github.com/acme/widget" },
+    { remoteUrl: "https://github.com/acme/widget" },
+  ]) {
+    const r = await forgeRepoAccess(target, repoDeps(f));
+    assert.deepEqual(
+      { ok: r.ok, canPush: r.canPush, isFork: r.isFork, defaultBranch: r.defaultBranch, kind: r.kind, repoKey: r.repoKey },
+      { ok: true, canPush: true, isFork: false, defaultBranch: "main", kind: "github", repoKey: "github.com/acme/widget" },
+      JSON.stringify(target),
+    );
+  }
+  assert.equal(f.calls[0].headers.authorization, "Bearer tok");
+});
+
+test("forgeRepoAccess (GitHub): read-only and fork", async () => {
+  const ro = routedFetch({ [GH]: { body: { permissions: { push: false }, default_branch: "main" } } });
+  assert.equal((await forgeRepoAccess("github.com/acme/widget", repoDeps(ro))).canPush, false);
+  const fork = routedFetch({ [GH]: { body: { permissions: { push: true }, fork: true, default_branch: "dev" } } });
+  const r = await forgeRepoAccess("github.com/acme/widget", repoDeps(fork));
+  assert.equal(r.isFork, true);
+  assert.equal(r.defaultBranch, "dev");
+});
+
+test("forgeRepoAccess (GitLab, incl. subgroup and self-hosted)", async () => {
+  const f = routedFetch({
+    [GL]: { body: { default_branch: "main", permissions: { project_access: { access_level: 40 } } } },
+    [`https://git.example.com/api/v4/projects/${encodeURIComponent("team/sub/app")}`]: {
+      body: { default_branch: "dev", forked_from_project: { id: 1 }, permissions: { group_access: { access_level: 30 } } },
+    },
+  });
+  const a = await forgeRepoAccess("https://gitlab.com/acme/widget.git", repoDeps(f));
+  assert.deepEqual([a.ok, a.canPush, a.isFork, a.defaultBranch, a.kind], [true, true, false, "main", "gitlab"]);
+
+  const deps = repoDeps(f, { getConfig: async () => ({ forgeHosts: [{ host: "git.example.com", kind: "gitlab" }] }) });
+  const b = await forgeRepoAccess("git@git.example.com:team/sub/app.git", deps);
+  assert.deepEqual([b.ok, b.canPush, b.isFork, b.defaultBranch, b.repoKey], [true, true, true, "dev", "git.example.com/team/sub/app"]);
+  assert.equal(f.calls.at(-1).headers["PRIVATE-TOKEN"], "tok");
+});
+
+test("forgeRepoAccess: a 404, an auth failure and an unknown host are typed results, never throws", async () => {
+  const notFound = routedFetch({ [GH]: { status: 404, body: { message: "Not Found" } } });
+  const nf = await forgeRepoAccess("github.com/acme/widget", repoDeps(notFound));
+  assert.equal(nf.ok, false);
+  assert.equal(nf.error, "not_found");
+  assert.ok(nf.message);
+
+  const rejected = routedFetch({ [GH]: { status: 401, body: {} } });
+  assert.equal((await forgeRepoAccess("github.com/acme/widget", repoDeps(rejected))).error, "rejected");
+
+  const forbidden = routedFetch({ [GH]: { status: 403, body: {} } });
+  assert.equal((await forgeRepoAccess("github.com/acme/widget", repoDeps(forbidden))).error, "forbidden");
+
+  const offline = async () => { throw new Error("ECONNRESET"); };
+  assert.equal((await forgeRepoAccess("github.com/acme/widget", repoDeps(offline))).error, "network");
+
+  const f = routedFetch({});
+  assert.equal((await forgeRepoAccess("https://example.org/a/b.git", repoDeps(f))).error, "no_forge");
+  assert.equal((await forgeRepoAccess("", repoDeps(f))).error, "no_forge");
+  assert.equal(f.calls.length, 0);
+
+  const noLogin = await forgeRepoAccess("github.com/acme/widget", repoDeps(f, { resolveToken: async () => null }));
+  assert.equal(noLogin.error, "not_connected");
+  assert.equal(f.calls.length, 0);
+});
+
+test("forgeRepoAccess revalidates every call (no 30s memory window), via a conditional GET", async () => {
+  const f = routedFetch({ [GH]: { body: { permissions: { push: true }, default_branch: "main" }, headers: { etag: '"e1"' } } });
+  const deps = repoDeps(f);
+  await forgeRepoAccess("github.com/acme/widget", deps);
+  await forgeRepoAccess("github.com/acme/widget", deps);
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[1].headers["if-none-match"], '"e1"');
+});
+
+test("forgeFindOpenPullRequest finds the open PR by head branch on both forges, or null", async () => {
+  const gh = routedFetch({
+    [`${GH}/pulls?state=open&head=acme%3Amanta%2Fknowledge`]: {
+      body: [{ number: 5, title: "k", html_url: "u", state: "open", head: { ref: "manta/knowledge" }, base: { ref: "main" }, user: { login: "x" } }],
+    },
+    [`${GH}/pulls?state=open&head=acme%3Aother`]: { body: [] },
+  });
+  const hit = await forgeFindOpenPullRequest("github.com/acme/widget", "manta/knowledge", repoDeps(gh));
+  assert.equal(hit.ok, true);
+  assert.equal(hit.pr.number, 5);
+  assert.equal(hit.pr.headRef, "manta/knowledge");
+  assert.equal((await forgeFindOpenPullRequest("github.com/acme/widget", "other", repoDeps(gh))).pr, null);
+
+  const gl = routedFetch({
+    [`${GL}/merge_requests?state=opened&source_branch=manta%2Fknowledge`]: {
+      body: [{ iid: 9, title: "k", state: "opened", source_branch: "manta/knowledge", target_branch: "main", web_url: "u" }],
+    },
+  });
+  const g = await forgeFindOpenPullRequest("gitlab.com/acme/widget", "manta/knowledge", repoDeps(gl));
+  assert.equal(g.pr.number, 9);
+});
+
+test("forgeFindOpenPullRequest sees a PR created moments ago (not served from the memory window)", async () => {
+  let list = [];
+  const url = `${GH}/pulls?state=open&head=acme%3Amanta%2Fknowledge`;
+  const f = routedFetch({ [url]: () => json(list) });
+  const deps = repoDeps(f);
+  assert.equal((await forgeFindOpenPullRequest("github.com/acme/widget", "manta/knowledge", deps)).pr, null);
+  list = [{ number: 6, title: "k", state: "open", head: { ref: "manta/knowledge" }, base: { ref: "main" } }];
+  assert.equal((await forgeFindOpenPullRequest("github.com/acme/widget", "manta/knowledge", deps)).pr.number, 6);
+});
+
+test("forgeFindOpenPullRequest validates input and reports forge failures", async () => {
+  const f = routedFetch({});
+  assert.equal((await forgeFindOpenPullRequest("github.com/acme/widget", "", repoDeps(f))).error, "bad_request");
+  assert.equal(f.calls.length, 0);
+  const nf = routedFetch({ [`${GH}/pulls?state=open&head=acme%3Ab`]: { status: 404, body: {} } });
+  assert.equal((await forgeFindOpenPullRequest("github.com/acme/widget", "b", repoDeps(nf))).error, "not_found");
+});
+
+test("forgeUpdatePullRequest updates title/body on GitHub (PATCH) and GitLab (PUT)", async () => {
+  const gh = routedFetch({
+    [`PATCH ${GH}/pulls/5`]: { body: { number: 5, title: "T2", body: "B2", state: "open", head: { ref: "h" }, base: { ref: "main" } } },
+  });
+  const r = await forgeUpdatePullRequest("github.com/acme/widget", { number: 5, title: "T2", body: "B2" }, repoDeps(gh));
+  assert.equal(r.ok, true);
+  assert.deepEqual([r.pr.number, r.pr.title, r.pr.body], [5, "T2", "B2"]);
+  assert.deepEqual(JSON.parse(gh.calls[0].body), { title: "T2", body: "B2" });
+
+  const gl = routedFetch({
+    [`PUT ${GL}/merge_requests/9`]: { body: { iid: 9, title: "T3", description: "B3", state: "opened", source_branch: "h", target_branch: "main" } },
+  });
+  const g = await forgeUpdatePullRequest("gitlab.com/acme/widget", { number: 9, body: "B3" }, repoDeps(gl));
+  assert.deepEqual([g.ok, g.pr.number, g.pr.body], [true, 9, "B3"]);
+  assert.deepEqual(JSON.parse(gl.calls[0].body), { description: "B3" });
+});
+
+test("forgeUpdatePullRequest: bad input is refused unsent; failures are typed", async () => {
+  const f = routedFetch({});
+  const deps = repoDeps(f);
+  for (const input of [{ number: 5 }, { title: "x" }, { number: 0, title: "x" }, { number: "abc", body: "x" }, {number: 1.5, body: "x"}]) {
+    assert.equal((await forgeUpdatePullRequest("github.com/acme/widget", input, deps)).error, "bad_request");
+  }
+  assert.equal(f.calls.length, 0);
+
+  const nf = routedFetch({ [`PATCH ${GH}/pulls/5`]: { status: 404, body: {} } });
+  assert.equal((await forgeUpdatePullRequest("github.com/acme/widget", { number: 5, title: "x" }, repoDeps(nf))).error, "not_found");
+  const auth = routedFetch({ [`PATCH ${GH}/pulls/5`]: { status: 401, body: {} } });
+  assert.equal((await forgeUpdatePullRequest("github.com/acme/widget", { number: 5, title: "x" }, repoDeps(auth))).error, "rejected");
+});
+
+test("forgeCreatePullRequest opens a PR by repo key; validates input", async () => {
+  const f = routedFetch({
+    [`POST ${GH}/pulls`]: { body: { number: 8, title: "T", html_url: "u", state: "open", head: { ref: "manta/knowledge" }, base: { ref: "main" } } },
+  });
+  const r = await forgeCreatePullRequest(
+    "github.com/acme/widget",
+    { title: "T", head: "manta/knowledge", base: "main", body: "B" },
+    repoDeps(f),
+  );
+  assert.deepEqual([r.ok, r.pr.number], [true, 8]);
+  assert.deepEqual(JSON.parse(f.calls[0].body), { title: "T", head: "manta/knowledge", base: "main", body: "B", draft: false });
+  assert.equal((await forgeCreatePullRequest("github.com/acme/widget", { title: "T", head: "h" }, repoDeps(f))).error, "bad_request");
+});
+
+test("resolveRepoTarget returns the forge identity without any network call", async () => {
+  const f = routedFetch({});
+  const ctx = await resolveRepoTarget("https://GitLab.com/Acme/Team/Widget.git", repoDeps(f));
+  assert.equal(ctx.repoKey, "gitlab.com/acme/team/widget");
+  assert.deepEqual(ctx.repo, { owner: "acme/team", repo: "widget" });
+  assert.equal(f.calls.length, 0);
 });

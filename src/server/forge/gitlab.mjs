@@ -47,6 +47,9 @@ import { GithubRequestError, MergeNotAllowedError, MergeShaMismatchError, MergeP
 
 const API = "https://gitlab.com/api/v4";
 
+// GitLab's Developer role — the lowest one that can push to a branch.
+const DEVELOPER_ACCESS = 30;
+
 // Map a merge PUT's failure status to its distinguished error kind, exactly as
 // the GitHub adapter does. GitLab: 405 = not mergeable, 409 = head sha no
 // longer matches, 403 = no permission; anything else stays generic.
@@ -319,7 +322,9 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
         state: stateFilter(filter.state ?? "opened"),
         source_branch: filter.head || undefined,
       })}`;
-      const { data, stale } = await request(url);
+      // `fresh` revalidates instead of serving the 30s memory window (a 304 is
+      // free) — for callers that just wrote and must see their own MR.
+      const { data, stale } = await request(url, filter.fresh ? { ttl: 0 } : undefined);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((m) => normalizeMr(m)), stale };
     },
@@ -519,6 +524,42 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
       const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes/${commentId}`;
       const { data } = await requestWrite(url, { method: "PUT", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
+    },
+
+    // GET /projects/{encoded id} — what the connected user may do with ONE
+    // project. `canPush` is Developer (30) or above through the project or its
+    // group (either access object may be null) and the project not archived;
+    // `isFork` is the presence of `forked_from_project`. Always revalidated
+    // (`ttl: 0`, a conditional GET) because the answer gates an outward write.
+    // A failed request throws the request layer's typed error — never a silent
+    // `canPush: false`.
+    async getRepoAccess(repo) {
+      const { data, stale } = await request(`${apiBase}${projectPath(repo)}`, { ttl: 0 });
+      const level = Math.max(
+        Number(data?.permissions?.project_access?.access_level) || 0,
+        Number(data?.permissions?.group_access?.access_level) || 0,
+      );
+      return {
+        data: {
+          canPush: level >= DEVELOPER_ACCESS && data?.archived !== true,
+          isFork: Boolean(data?.forked_from_project),
+          defaultBranch: typeof data?.default_branch === "string" ? data.default_branch : "",
+        },
+        stale,
+      };
+    },
+
+    // PUT /projects/{id}/merge_requests/{iid} — change an MR's title and/or
+    // description (the shared `body`). Only the fields given are sent.
+    async updatePullRequest(repo, number, { title, body } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const put = {};
+      if (typeof title === "string") put.title = title;
+      if (typeof body === "string") put.description = body;
+      if (Object.keys(put).length === 0) throw new Error("nothing to update");
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}`;
+      const { data } = await requestWrite(url, { method: "PUT", body: put });
+      return { data: normalizeMr(data), stale: false };
     },
 
     // GET /projects/{encoded id} — the repo's default branch (the PR base).
