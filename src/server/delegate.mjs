@@ -949,7 +949,12 @@ export function chooseSubagentModel({
   nowMs = Date.now(),
   contextTokens = SUBAGENT_INITIAL_CONTEXT_TOKENS,
   services,
+  withTrace = false,
 } = {}) {
+  // `withTrace: true` returns `{ model, trace }` (trace = the router's decision
+  // trace, null when routing threw or was off); every other caller still gets
+  // the bare model.
+  const out = (model, trace) => (withTrace ? { model, trace: trace ?? null } : model);
   // The ORIGINAL structured incumbent is preserved and returned on the off-path;
   // its {providerID, id} projection is passed to chooseModel so the `changed`
   // comparison / modelKey() treat a requested model and a catalog entry of the
@@ -972,7 +977,7 @@ export function chooseSubagentModel({
   } catch (e) {
     // Routing must never break a spawn — fall back to the incumbent model.
     console.warn("[router] subagent routing failed, using incumbent:", e?.message ?? e);
-    return incumbent;
+    return out(incumbent, null);
   }
   console.log(describeDecision(decision, { surface: "sub", agent }));
   // BET-1535 (S3): a no-healthy-endpoint verdict is a typed failure, not a
@@ -1001,7 +1006,7 @@ export function chooseSubagentModel({
     decision?.model === catalogIncumbentOf(incumbent)
       ? incumbent
       : toDeliverModel(decision?.model ?? incumbent);
-  return model;
+  return out(model, decision?.trace);
 }
 
 // The two refusals every launch checks before it creates anything: nesting (no

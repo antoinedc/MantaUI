@@ -1032,6 +1032,47 @@ test("chooseSubagentModel still returns the incumbent on a routing exception (ne
   assert.deepEqual(chosen, { providerID: "anthropic", modelID: "claude-sonnet-4" });
 });
 
+test("chooseSubagentModel withTrace returns { model, trace }; without it the bare model (shared knowledge §6.2)", () => {
+  const catalog = [normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" }))];
+  const args = {
+    incumbent: null,
+    catalog,
+    policy: { perAgent: { "cto:t": "deep" } },
+    agent: "cto:t",
+    nowMs: 1_700_000_000_000,
+    services: routingServicesFor(catalog),
+  };
+  const bare = chooseSubagentModel(args);
+  assert.deepEqual(bare, { providerID: "anthropic", modelID: "claude-opus-4" });
+  const traced = chooseSubagentModel({ ...args, withTrace: true });
+  assert.deepEqual(traced.model, bare);
+  assert.equal(traced.trace.target.tier, "deep");
+  assert.equal(traced.trace.target.widened, false);
+  assert.equal(traced.trace.winner.quality.known, true);
+});
+
+test("chooseSubagentModel withTrace: an empty target band widens and says so; a routing exception yields a null trace", () => {
+  const catalog = [normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" }))];
+  const widened = chooseSubagentModel({
+    incumbent: null,
+    catalog,
+    policy: { perAgent: { "cto:t": "deep" } },
+    agent: "cto:t",
+    nowMs: 1_700_000_000_000,
+    services: routingServicesFor(catalog),
+    withTrace: true,
+  });
+  assert.equal(widened.model.modelID, "claude-haiku-4");
+  assert.equal(widened.trace.target.widened, true);
+
+  const services = routingServicesFor(catalog);
+  Object.defineProperty(services, "health", { get() { throw new Error("health reader down"); } });
+  const broke = chooseSubagentModel({
+    incumbent: null, catalog, policy: { preset: "balanced" }, agent: "general", nowMs: 1_700_000_000_000, services, withTrace: true,
+  });
+  assert.deepEqual(broke, { model: null, trace: null });
+});
+
 // BET-1535 (S3): a no-healthy-endpoint verdict FAILS the spawn with the typed
 // reason — before any window, worktree, or job record exists (a rejection must
 // orphan nothing) — instead of delivering the opening prompt on a model the
