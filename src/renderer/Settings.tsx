@@ -1067,7 +1067,7 @@ export function Settings({
       // Search hit for the Background work section (a `custom` entry): jump to it.
       return (
         <SettingsRow name={entry.label} help={entry.help}>
-          <Button tone="default" onClick={() => { setQuery(""); openBackgroundWorkSettings(); }}>Open Background work</Button>
+          <Button tone="default" onClick={() => { setQuery(""); setActiveTab("background"); openBackgroundWorkSettings(); }}>Open Background work</Button>
         </SettingsRow>
       );
     }

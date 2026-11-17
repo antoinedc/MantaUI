@@ -598,19 +598,20 @@ export function createCapture(deps = {}) {
   /**
    * Capture one window of one session now. `reason`: "idle" (needs ≥ minUserMessages new user messages) or "compaction"
    * (≥ 1); a session already in backlog skips that gate (§5.6.1). `backlogStep` marks the tick's backlog pass: a budget
-   * refusal is then `budget-backlog`. Returns `{captured:boolean, notes:number, skipped?:string}`; never throws for ordinary failures.
+   * refusal is then `budget-backlog`. `heldBack` = the budget already refused this tick: don't ask again, just mark the
+   * session (when it has unread content) as held back. Returns `{captured:boolean, notes:number, skipped?:string}`; never throws for ordinary failures.
    */
-  async function captureSession(sessionID, { reason = "idle", backlogStep = false } = {}) {
+  async function captureSession(sessionID, { reason = "idle", backlogStep = false, heldBack = false } = {}) {
     if (inflight.has(sessionID)) return { captured: false, notes: 0, skipped: "in-flight" };
     inflight.add(sessionID);
     try {
-      return await captureOnce(sessionID, reason, { backlogStep });
+      return await captureOnce(sessionID, reason, { backlogStep, heldBack });
     } finally {
       inflight.delete(sessionID);
     }
   }
 
-  async function captureOnce(sessionID, reason, { backlogStep = false } = {}) {
+  async function captureOnce(sessionID, reason, { backlogStep = false, heldBack = false } = {}) {
     const t = now();
     let st = tracked.get(sessionID);
     if (!st) tracked.set(sessionID, (st = { lastEventAt: t, dirty: !backlogStep, compact: reason === "compaction", retryAt: 0 }));
@@ -664,7 +665,7 @@ export function createCapture(deps = {}) {
       };
     }
 
-    const spend = await budget.canSpend({ workType: TASK_CLASS });
+    const spend = heldBack ? { ok: false } : await budget.canSpend({ workType: TASK_CLASS });
     if (!spend.ok) {
       // A capture the budget held back, with content waiting, is what puts a session into catch-up (and only that).
       if (!inBacklog && (st.dirty || st.compact)) {
@@ -680,7 +681,7 @@ export function createCapture(deps = {}) {
     // A scanner that can't run means no model call: find out before reading a long span.
     if (inBacklog) {
       try {
-        if ((await scanner.redact("")).unavailable) return { captured: false, notes: 0, skipped: "scanner" };
+        if ((await scanner.redact("x")).unavailable) return { captured: false, notes: 0, skipped: "scanner" };
       } catch {
         return { captured: false, notes: 0, skipped: "scanner" };
       }
@@ -720,8 +721,16 @@ export function createCapture(deps = {}) {
     const store = (advanceTo, { notes = 0, captured = false, finished }) => {
       if (!row) upsertActivity.run(sessionID, st.lastEventAt, 0);
       // A bookmark never moves backwards.
+      const behind = (x) => x && row && (x.at < row.cursor_at || (x.at === row.cursor_at && x.id < row.cursor_id));
       let at = advanceTo ?? plan.endAdvance;
-      if (at && row && (at.at < row.cursor_at || (at.at === row.cursor_at && at.id < row.cursor_id))) at = null;
+      if (behind(at)) {
+        // This window's end is behind the bookmark: pass it over so the same window is not captured again. Prefer the end of
+        // the read span; when that is behind too, nothing newer exists to read, so the catch-up is over.
+        const skipTo = at !== plan.endAdvance && !behind(plan.endAdvance) ? plan.endAdvance : null;
+        log(`[knowledge] capture catch-up: a window of ${sessionID} ends behind its bookmark; ${skipTo ? "moving on to the end of the span read" : "ending the catch-up"}`);
+        at = skipTo;
+        finished = skipTo ? !hasMore : true;
+      }
       const count = inBacklog && captured ? (row.backlog_day === today ? (row.backlog_windows ?? 0) : 0) + 1 : (row?.backlog_windows ?? 0);
       setCursor.run(
         at?.at ?? row?.cursor_at ?? 0,
@@ -826,15 +835,16 @@ export function createCapture(deps = {}) {
       let checked = 0;
       let budgetStop = false;
       const done = new Set();
-      for (const [id, reason] of due.slice(0, MAX_PER_TICK)) {
+      // After a budget refusal nothing else runs this tick, but EVERY remaining due session is still marked as held back
+      // (no model call, no further budget question) so each one is caught up once the budget allows.
+      for (let i = 0; i < due.length; i++) {
+        if (!budgetStop && i >= MAX_PER_TICK) break;
+        const [id, reason] = due[i];
         checked++;
         done.add(id);
-        const r = await captureSession(id, { reason });
+        const r = await captureSession(id, { reason, heldBack: budgetStop });
         if (r.captured) captured++;
-        if (r.skipped === "budget") {
-          budgetStop = true;
-          break; // nothing else can run today
-        }
+        if (r.skipped === "budget") budgetStop = true;
       }
       if (!budgetStop) {
         let ids = [];

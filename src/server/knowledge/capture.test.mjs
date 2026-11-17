@@ -902,3 +902,57 @@ test("a session that used its 8 windows waits for midnight for new activity too 
   await r.cap.tick();
   assert.equal(r.runs.length, runs + 1);
 });
+
+test("tick: a budget refusal marks EVERY due session with unread content as held back; once the budget allows, catch-up goes on one window per tick", async () => {
+  const ids = ["ses_1", "ses_2", "ses_3"];
+  const bySession = Object.fromEntries(ids.map((id, i) => [id, longSpan(30, 2_500, String(i))]));
+  const r = await rig({ messages: [], answer: JSON.stringify({ notes: [] }), over: { readSince: forward({ bySession }) } });
+  for (const id of ids) r.mapped[id] = { slug: SLUG };
+  for (const id of ids) r.cap.observeRaw(ev("session.execution.started", id));
+  r.advance(11 * MIN);
+  r.setBudget(false);
+  for (let i = 0; i < 2; i++) {
+    const out = await r.cap.tick();
+    assert.equal(out.captured, 0);
+    for (const id of ids) assert.ok(cursorOf(r, id)?.backlog_since > 0, `${id} is in catch-up after refusal ${i + 1}`);
+    r.advance(MIN);
+  }
+  assert.equal(r.runs.length, 0, "no model call while the budget refuses");
+  r.setBudget(true);
+  await r.cap.tick();
+  assert.equal(r.runs.length, 3, "each held-back session gets its first window");
+  for (const id of ids) assert.equal(cursorOf(r, id).backlog_windows, 1);
+  await r.cap.tick();
+  assert.equal(r.runs.length, 4, "from then on one backlog window per tick");
+});
+
+test("a window ending behind the bookmark is passed over, not captured again: it moves to the end of the span read, or ends the catch-up when that is behind too", async () => {
+  // the reader ignores the bookmark and returns messages at 1..60; the bookmark is set up in backlog at `cursorAt`
+  const run = async (cursorAt) => {
+    const r = await rig({ messages: [], answer: JSON.stringify({ notes: [] }), over: { readSince: async () => longSpan(30, 2_500) } });
+    r.state.db.prepare("INSERT INTO capture_session (session_id, last_event_at, dirty, cursor_at, cursor_id, backlog_since) VALUES ('ses_1', 1, 0, ?, '', 1)").run(cursorAt);
+    const out = await r.cap.captureSession("ses_1", { backlogStep: true });
+    return { r, out, row: cursorOf(r) };
+  };
+  // the first window's end is behind a bookmark at 59: the bookmark moves to the end of the span read (60)
+  const a = await run(59);
+  assert.equal(a.out.captured, true);
+  assert.deepEqual([a.row.cursor_at, a.row.backlog_since], [60, null], "nothing is left behind it");
+  // a bookmark ahead of every message: nothing newer exists, the catch-up ends and the bookmark stays
+  const b = await run(500);
+  assert.equal(b.out.captured, true);
+  assert.deepEqual([b.row.cursor_at, b.row.backlog_since], [500, null]);
+  const runs = b.r.runs.length;
+  await b.r.cap.tick();
+  assert.equal(b.r.runs.length, runs, "the same window is not captured again");
+});
+
+test("the scanner probe sends a non-empty text", async () => {
+  const seen = [];
+  const probing = { redact: async (t) => (seen.push(t), { text: t, redacted: 0, unavailable: false }) };
+  const r = await rig({ messages: [], answer: ANSWER, over: { scanner: probing, readSince: async () => longSpan(30, 2_500) } });
+  await holdBack(r);
+  seen.length = 0;
+  await r.cap.captureSession("ses_1", { backlogStep: true });
+  assert.equal(seen[0], "x");
+});
