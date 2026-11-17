@@ -923,11 +923,14 @@ export function createBackgroundBudget({
       : {
           reason: r.d.reason,
           ...(r.d.window?.key ? { windowKey: r.d.window.key } : {}),
+          // A batch-ceiling refusal quotes the share larger jobs may use (60 % of the cap), not the whole cap.
           value:
             r.d.reason === "usd-cap"
-              ? cfg.dailyCapUsd
+              ? round2(r.ceiling ? BATCH_SHARE * cfg.dailyCapUsd : cfg.dailyCapUsd)
               : r.d.reason === "level-cap"
-                ? r.d.window?.cap ?? null
+                ? r.d.window?.cap != null
+                  ? round2(r.ceiling ? BATCH_SHARE * r.d.window.cap : r.d.window.cap)
+                  : null
                 : r.d.reason === "projected-high"
                   ? r.d.window?.projectedPct ?? r.d.window?.pct ?? null
                   : r.d.window?.pct ?? null,

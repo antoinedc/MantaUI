@@ -767,7 +767,7 @@ test("status: plan rows with windows, projection and structured pause reasons fo
   assert.deepEqual(p.windows.map((w) => w.key), ["claude:weekly", "claude:session"]);
   assert.deepEqual(p.windows[0], { key: "claude:weekly", kind: "weekly", label: "7d", pct: 40, bgPct: 3.2, cap: 5, projectedPct: 70, resetsAt: T0 + 3 * DAY });
   assert.equal(p.windows[1].projectedPct, null);
-  assert.deepEqual(p.batchPaused, { reason: "level-cap", windowKey: "claude:weekly", value: 5, resumesAt: T0 + 3 * DAY });
+  assert.deepEqual(p.batchPaused, { reason: "level-cap", windowKey: "claude:weekly", value: 3, resumesAt: T0 + 3 * DAY });
 });
 
 test("status: paused reasons carry the value the copy needs", async () => {
