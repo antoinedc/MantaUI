@@ -69,19 +69,30 @@ Applies to the WebSocket `/events` path (`attachEventsWs`). The SSE path takes o
   snapshot replay is filtered the same way. When absent, everything is delivered (desktop unchanged).
   Unknown kinds are ignored. Max 64 entries; longer lists → the parameter is ignored (deliver all) and
   the server logs a warning.
+- **Client → server WS text message** `{"type":"kinds","kinds":[…]}` replaces the connection's
+  kinds set at runtime (same limits; an empty or missing list = deliver all). Used by iOS to add
+  `pty` only while a Claude sign-in / CLI-install flow is running (`AccountsStore` consumes `pty`
+  frames for it) and remove it afterwards.
 - **Client → server WS text message** `{"type":"focus","sessions":["ses_…", …]}` (max 32 ids; extra
   ids are dropped). Sets the connection's *focus set*. `kind:"stream"` envelopes whose `sub` is a
   **heavy sub** are delivered only when the envelope's `sessionId` is in the focus set.
-  - Heavy subs: `flush`, `toolOutput`. (Exported constant `HEAVY_STREAM_SUBS` in `events.mjs`.)
+  - Heavy subs: `flush`, `toolOutput`, `messageChanged`. (Exported constant `HEAVY_STREAM_SUBS` in
+    `events.mjs`.) The desktop never sends focus, so it is unaffected.
   - Before any focus message, heavy subs are delivered for all sessions (back-compat).
   - `{"type":"focus","sessions":[]}` = no heavy subs at all.
   - Every other `stream` sub (`running`, `questions`, `permissions`, `attention`, `turnComplete`,
     `transcriptStale`, `todos`, `subagent*`, …) is always delivered for every session.
+  - A `stream` envelope with no `sessionId` is always delivered.
+  - The focus filter applies whether or not `kinds` was given.
   - Malformed messages are ignored (never close the socket).
-- When the client adds a session to its focus set, it already holds or will fetch that session's
-  transcript (it does today on open); missed `flush` frames for it are covered by that fetch.
+- `heartbeat` is sent by `attachEventsWs` outside the bus; the filter sits in the bus subscriber
+  callback only, so heartbeats are never filtered.
+- **Ordering rule (client):** when a session is added to the focus set, the client sends the focus
+  message FIRST and only then fetches that session's transcript, so no `flush` frame can fall
+  between the fetch and the focus taking effect. Overlap duplicates are absorbed by B3's dedupe.
+  After every reconnect the client re-sends its kinds and focus messages before relying on frames.
 - The pure decision lives in `events.mjs` as an exported, unit-tested
-  `createEventFilter({ kinds })` returning `{ accepts(evt), setFocus(ids) }`.
+  `createEventFilter({ kinds })` returning `{ accepts(evt), setKinds(list), setFocus(ids) }`.
 
 ### C2. Row status: attention below (box → desktop + iOS)
 
@@ -90,6 +101,14 @@ The per-row status object (`sessionStatus.mjs`, `DEFAULT_STATUS`) gains
 permission) among the row's descendants at any depth (subagents, background jobs), excluding the
 row's own `attention`. Clients show the row as **waiting on you** when `attention ?? attentionBelow`
 is non-null, with the same badge they use for `attention` today. Old clients ignore the new field.
+
+### C4. Replay boundary (box → clients, existing behaviour, now relied on)
+
+The connect-time snapshot replay always starts with the `runningSet` frame
+(`streamInterp.mjs` ~1237), followed by `attention` / `questions` / `permissions` frames only for
+sessions that still ask. Clients treat a received `runningSet` as "replay starts": clear every
+session's ask-derived attention, then let the following frames repopulate it. The box keeps
+`runningSet` first in the replay (add a test pinning it).
 
 ### C3. iOS diagnostics upload (iOS → box)
 
@@ -117,13 +136,17 @@ Each item says who owns it: **[S]** = server + desktop renderer worker,
   thread receives on main before touching the store (`.receive(on: DispatchQueue.main)` on the
   `.mantaBoxUpgrading` publisher and on `$connectionState`). Also post `.mantaBoxUpgrading` from the
   main actor at both post sites. Audit every other `NotificationCenter.default.publisher(for:)` +
-  `.sink` inside a `@MainActor` type in the app and apply the same fix where the poster can be off
-  main. Unit test: posting the notification from a background queue no longer traps and updates the
-  store.
+  `.sink` inside a `@MainActor` type: fix `TranscriptDisplayOptions.swift` (A-owned) if needed; for
+  the sites in B-owned files (`ChatSessionStore.swift`, `MantaAppRoot.swift`) B applies the same
+  `.receive(on: DispatchQueue.main)` fix. Unit test: posting the notification from a background
+  queue no longer traps and updates the store.
 - **A2 [A] MetricKit forwarding.** New `DiagnosticsReporter.swift` (`@MainActor final class`, started
   once from `MantaUIApp.init()` right after `FirebaseApp.configure()`):
   - subscribes with `MXMetricManager.shared.add(_:)` and handles `didReceive(_ payloads: [MXDiagnosticPayload])`
-    (crash, hang, CPU, disk-write, app-launch diagnostics);
+    (crash, hang, CPU, disk-write, app-launch diagnostics). MetricKit calls this on a background
+    queue: implement it `nonisolated`, extract the JSON there, and hop to the main actor with plain
+    `Sendable` values (same bug class as A1). Unit test: calling it from a background queue doesn't
+    trap;
   - on iOS 27+ (guarded `#if compiler(>=6.4)` + `#available(iOS 27, *)`) also consumes
     `MetricManager().diagnosticReports` and forwards **only** memory exceptions from it (the
     others already arrive through the legacy path; no duplicates);
@@ -165,13 +188,22 @@ Each item says who owns it: **[S]** = server + desktop renderer worker,
   - approvals: 3 s, only while a turn runs and the chat is visible;
   - session-list age labels: 10 s, list visible only;
   - artifacts sheet: 3 s → 5 s, only while open;
-  - usage / accounts: 60 s, foreground only.
+  - usage / accounts: 60 s, foreground only — gated by B at the call sites (start/stop on
+    `scenePhase`); B does not edit `UsageStore.swift`.
   **[A]** fixes the `UsageStore` loop so it exits when its owner is gone (no spin without a sleep).
-- **B6 [B] Event subscription.** The app opens `/events` with `kinds=` listing exactly the envelope
-  kinds it handles (derive the list from the code; include `stream`, `runningSet`, `heartbeat`,
-  `delegate.updated`, `delegate.approval.requested`, `progress.updated`, `upgrade`, and any other kind
-  a raw-frame handler consumes). It sends a C1 focus message with the open chat session plus any
-  expanded subagent child sessions, re-sent whenever that set changes and after every reconnect.
+- **B6 [B] Event subscription.** The kinds list is DERIVED FROM REGISTRATIONS, never hand-kept:
+  every raw-frame handler registration declares the envelope kinds it consumes
+  (`addRawFrameHandler(kinds: Set<String>, …)`), and the event store builds the `kinds=` query
+  from the union of registrations (plus the kinds the store itself consumes). A registration made
+  after connect sends a C1 `kinds` update. As of base the set is: `heartbeat, runningSet, stream,
+  status, delegate.updated, delegate.approval.requested, progress.updated, upgrade, handoff,
+  accounts.updated, accounts.moved, model-prefs.updated, models.updated, widget, media, usage.alert,
+  usage-stopped.updated, sessions.nesting, agentFile` — verify against the code; the derived set wins.
+  `pty` is NOT in the default set: `AccountsStore`'s sign-in / CLI-install flow registers it while the
+  flow runs and unregisters afterwards (C1 `kinds` update both ways). A unit test pins that every
+  `addRawFrameHandler` call declares kinds. The app sends a C1 focus message with the open chat
+  session plus any expanded subagent child sessions, re-sent whenever that set changes and after
+  every reconnect, following the C1 ordering rule.
 - **B7 [B] Background / foreground.** On entering the background, close the `/events` socket after a
   5 s grace (cancel if the app returns). On returning to the foreground after ≥ 5 s away, always
   reconnect (fresh snapshot replay) instead of trusting the old socket. While the app is in the
@@ -179,15 +211,22 @@ Each item says who owns it: **[S]** = server + desktop renderer worker,
   give-up applies only in the background. The 45 s liveness watchdog also runs while disconnected so
   nothing can stay silently dead.
 - **B8 [B] Waiting badge from below.** Session rows show "waiting on you" from
-  `attention ?? attentionBelow` (C2).
+  `attention ?? attentionBelow` (C2). On a `runningSet` frame, apply the C4 replay rule (clear
+  ask-derived state, then repopulate).
 - **B9 [B] Animations.** The running loader and pulsing row dot stop animating when not visible
   (off-screen / background).
+- **B10 [B] Notification sinks.** Apply A1's `.receive(on: DispatchQueue.main)` fix to the
+  `NotificationCenter` publisher sinks in `ChatSessionStore.swift` and `MantaAppRoot.swift` where the
+  poster can be off the main thread.
 
 ### Status freshness (box — fixes all clients)
 
-- **S1 [S] First-connect hydrate.** The box re-reads running sessions and pending
-  questions/permissions on its FIRST connection to opencode too, not only on reconnects
-  (`index.mjs` ~3966). Same code path as the reconnect resync.
+- **S1 [S] First-connect hydrate.** On EVERY connection to opencode (first and reconnect), the box
+  enumerates sessions FROM OPENCODE — `oc.listActiveSessionIds()` plus the sessions it already knows
+  — reads each one's running state and pending questions/permissions, and seeds the interpreter
+  with them, then publishes through the normal path. `resyncAfterReconnect` today iterates only
+  `streamInterp.knownSessionIds()` (`index.mjs` ~3891), which is empty after a restart, so reusing
+  it unchanged would fix nothing. S1 and S2 share one reconcile function.
 - **S2 [S] Periodic reconcile.** Every 45 s (`unref`'d interval, in-flight guarded) the box re-reads
   opencode's active sessions and the pending asks of every session that is active or has a pending
   ask on record, compares with what it holds, and corrects only the differences through the same
@@ -197,13 +236,19 @@ Each item says who owns it: **[S]** = server + desktop renderer worker,
   byte (including `: heartbeat` comments). If nothing arrives for 90 s (or 3× the observed heartbeat
   interval, whichever is larger — measure V2's interval against the pinned binary in the sandbox or
   by reading its source in `/mnt/HC_Volume_105783934/dev-cache/opencode-src-2.0.30`), abort the
-  request; the existing reconnect + resync then runs. Log one line per stall.
+  request; the existing reconnect + resync then runs. Log one line per stall. Arm the timer only
+  after at least one heartbeat has been seen on the current connection, so a box whose opencode
+  sends no heartbeat while idle never reconnect-loops.
+- **S8 [S] Quiet `status` batches.** `status.mjs` publishes its 2 s `status` batch only when it
+  differs from the previous one (signature compare), plus once on each new `/events` subscriber
+  through the snapshot. Benefits every client; iOS must keep `status` in its kinds for terminal rows.
 - **S4 [S] Stale asks at turn end.** When a session's turn ends (succeeded / failed / interrupted),
   the box re-reads that session's pending asks from opencode once and drops any it holds that
   opencode no longer reports.
 - **S5 [S] attentionBelow** per C2 in `sessionStatus.mjs`, published with the row status.
-- **D1 [S] Desktop badges.** On the reconnect replay the desktop clears ?/! badges for sessions the
-  replay no longer reports as asking (`src/renderer/store.ts` ~1457). The desktop sidebar shows the
+- **D1 [S] Desktop badges.** The desktop applies the C4 replay rule: on a `runningSet` frame it
+  clears every chat session's ?/! attention, then the replay's following frames repopulate it
+  (`src/renderer/store.ts` ~1457). The desktop sidebar shows the
   waiting badge from `attention ?? attentionBelow` (C2).
 - **S7 [S] Box event filter** per C1, wired into `attachEventsWs` and `handleEventsRequest`.
 
@@ -212,8 +257,8 @@ Each item says who owns it: **[S]** = server + desktop renderer worker,
 | Worker | Owns | Must not touch |
 |---|---|---|
 | S | `src/server/**`, `src/renderer/**`, `src/shared/**`, `docs/superpowers/specs/**` (notes only) | `mobile/**` |
-| A | `mobile/native/MantaUI/UpgradeStore.swift`, `MantaAPIClient.swift` and `BoxRESTClient.swift` (only the two notification post sites), `KeychainCredentialStore.swift`, `UsageStore.swift`, new `DiagnosticsReporter.swift` (+ any new pure helper file), `MantaUIApp.swift` (startup wiring only), `MantaUITests/` new test files for these, other files only for the A1 notification-sink audit (one-line `.receive(on:)` edits) | everything B owns; `project.yml` unless a new framework must be linked (MetricKit is a system framework; implicit linking should suffice) |
-| B | `MantaEventStore.swift`, `MantaStreamModels.swift`, `MantaReconnectController.swift`, `ChatSessionStore.swift`, `ChatScreen.swift`, `SessionListStore.swift`, `SessionListView.swift`, `MantaAppRoot.swift`, `TranscriptMediaStore.swift`, `GitForgeStore.swift`, `ChatCardApprovalStore.swift`, `SessionResourceCards.swift`, `RunningIndicator.swift`, `MantaLoader.swift`, `AccountsStore.swift`, related existing tests, new test files | A's files (coordinate through this spec only) |
+| A | `mobile/native/MantaUI/UpgradeStore.swift`, `MantaAPIClient.swift` and `BoxRESTClient.swift` (only the two notification post sites), `TranscriptDisplayOptions.swift`, `KeychainCredentialStore.swift`, `UsageStore.swift`, new `DiagnosticsReporter.swift` (+ any new pure helper file), `MantaUIApp.swift` (startup wiring only), new `MantaUITests/` test files for these | everything B owns (report needed changes there instead); `project.yml` (MetricKit is a system framework; implicit linking suffices) |
+| B | `MantaEventStore.swift`, `MantaStreamModels.swift`, `MantaReconnectController.swift`, `ChatSessionStore.swift`, `ChatScreen.swift`, `SessionListStore.swift`, `SessionListView.swift`, `MantaAppRoot.swift`, `TranscriptMediaStore.swift`, `GitForgeStore.swift`, `ChatCardApprovalStore.swift`, `SessionResourceCards.swift`, `RunningIndicator.swift`, `MantaLoader.swift`, `AccountsStore.swift`, every file that calls `addRawFrameHandler` (signature change for B6), related existing tests, new test files | A's files (coordinate through this spec only) |
 
 ## Verification
 
