@@ -100,13 +100,6 @@ export function formatResumes(ms: number | null | undefined, now: number = Date.
   return `${at.weekday} ${date} ${at.hh}:${at.mm}`;
 }
 
-/** "resumes X" / "Resumes X" (a sentence start), or "" when the instant is unknown. */
-const resumesPhrase = (ms: number | null | undefined, now: number, fmt: TimeFormat, capital = false): string => {
-  const t = formatResumes(ms, now, fmt);
-  if (!t) return "";
-  return `${capital ? "Resumes" : "resumes"} ${t}`;
-};
-
 // ---- windows and plans -------------------------------------------------------------------------
 
 const HOUR_MS = 3_600_000;
