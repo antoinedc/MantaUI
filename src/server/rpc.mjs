@@ -1658,11 +1658,16 @@ export function buildHandlers({
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(withoutDelivery(input));
       }
+      // Prompt origin (shared-knowledge §9.2): this handler is the ONLY place a
+      // prompt is stamped `user`. The field is set here, after the spread, so a
+      // client-supplied `origin` can never survive; every other caller of the
+      // prompt path leaves it unset (recorded as "unknown").
+      const userInput = input && { ...input, origin: "user" };
       // Auto-handoff §6.1: the admission resolver runs before anything else — a
       // replaced conversation's message goes to its successor, a fenced one is
       // held. The result carries `deliveredTo`.
-      if (handoff && input) return handoff.admitPrompt(input);
-      return oc.sendPrompt(input);
+      if (handoff && userInput) return handoff.admitPrompt(userInput);
+      return oc.sendPrompt(userInput);
     },
 
     // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)

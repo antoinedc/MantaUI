@@ -65,14 +65,24 @@ test("without an engine the channels answer an actionable error and sends take t
   const handlers = buildHandlers({ oc: { sendPrompt: async (i) => log.push(i), runCommand: async (i) => log.push(i) }, ...stubDeps() });
   await assert.rejects(dispatch(handlers, "handoff:list", [{ sessionId: "s" }]), /isn't available/);
   await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "x" }]);
-  assert.deepEqual(log, [{ sessionId: "ses_a", text: "x" }]);
+  assert.deepEqual(log, [{ sessionId: "ses_a", text: "x", origin: "user" }]);
 });
 
 test("opencode:prompt goes through the admission seam and returns where it landed", async () => {
   const { handlers, log } = rig();
   const res = await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_old", text: "hi", messageID: "msg_1" }]);
   assert.deepEqual(res, { deliveredTo: "ses_live" });
-  assert.deepEqual(log, [["admit", { sessionId: "ses_old", text: "hi", messageID: "msg_1" }]]);
+  assert.deepEqual(log, [["admit", { sessionId: "ses_old", text: "hi", messageID: "msg_1", origin: "user" }]]);
+});
+
+test("opencode:prompt stamps origin user server-side: a client-supplied origin is overwritten, on both routes", async () => {
+  const { handlers, log } = rig();
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_old", text: "hi", origin: "schedule" }]);
+  assert.equal(log[0][1].origin, "user");
+  const raw = [];
+  const noEngine = buildHandlers({ oc: { sendPrompt: async (i) => raw.push(i) }, ...stubDeps() });
+  await dispatch(noEngine, "opencode:prompt", [{ sessionId: "ses_a", text: "x", origin: "plugin" }]);
+  assert.equal(raw[0].origin, "user");
 });
 
 test("opencode:run-command is resolved to the live session, or refused while a handoff owns it", async () => {

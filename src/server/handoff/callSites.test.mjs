@@ -92,9 +92,27 @@ test("promptDelivery resolves before the redirect/busy check, and again at drain
 
 test("the client send and command rpc handlers run the resolver before anything else", () => {
   const rpc = read("rpc.mjs");
-  assert.match(rpc, /if \(handoff && input\) return handoff\.admitPrompt\(input\);\s*return oc\.sendPrompt\(input\);/);
+  assert.match(rpc, /if \(handoff && userInput\) return handoff\.admitPrompt\(userInput\);\s*return oc\.sendPrompt\(userInput\);/);
+  assert.match(rpc, /const userInput = input && \{ \.\.\.input, origin: "user" \};/, "the user origin is set server-side, after the client's fields");
   assert.match(rpc, /if \(handoff && input\) input = \{ \.\.\.input, sessionId: handoff\.guardCommand\(input\.sessionId\)\.target \};/);
   const cmd = rpc.slice(rpc.indexOf('"opencode:run-command"'));
   assert.ok(cmd.indexOf("handoff.guardCommand(") < cmd.indexOf("runBackgroundCommand(input)"), "the guard precedes the background-run branch");
   assert.ok(cmd.indexOf("handoff.guardCommand(") < cmd.indexOf("oc.runCommand("), "…and the direct run");
+});
+
+test("only the opencode:prompt rpc handler stamps a prompt origin of user (shared-knowledge §9.2)", () => {
+  const offenders = [];
+  for (const file of walk(SERVER_DIR)) {
+    const rel = relative(SERVER_DIR, file);
+    if (/\.test\.mjs$/.test(rel) || rel === "rpc.mjs" || rel === "promptOrigins.mjs") continue;
+    const text = readFileSync(file, "utf8");
+    if (!/sendPrompt|admitPrompt/.test(text)) continue; // unrelated `origin` fields (e.g. artifact links)
+    text.split("\n").forEach((line, i) => {
+      const code = line.trim();
+      if (code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) return;
+      if (/\borigin:\s*["']user["']/.test(code)) offenders.push(`${rel}:${i + 1}`);
+    });
+  }
+  assert.deepEqual(offenders, []);
+  assert.equal((read("rpc.mjs").match(/origin:\s*["']user["']/g) ?? []).length, 1, "exactly one stamping site in rpc.mjs");
 });

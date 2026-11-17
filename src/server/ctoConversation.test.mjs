@@ -383,6 +383,17 @@ test("cto:conversation-submit: stable id, durable queue projection, server-owned
 // Seams: direct sends / slash commands at the conversation session
 // ---------------------------------------------------------------------------
 
+test("a client-supplied prompt origin never reaches the CTO conversation's send (admitDirect forwards no origin)", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  await dispatch(t.handlers, "opencode:prompt", [
+    { sessionId: open.sessionId, text: "status please", messageID: "m_origin_1", origin: "user" },
+  ]);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 1));
+  assert.notEqual(t.oc.sends[0].origin, "user");
+  assert.equal("origin" in t.oc.sends[0], false);
+});
+
 test("CTO admits text and attachments but rejects inline @agent tasks with an actionable error", async () => {
   const t = compose();
   const open = await dispatch(t.handlers, "cto:conversation-open", []);
@@ -514,7 +525,7 @@ test("a box with no planAgentName wired drops every agent value (safe default, i
   }
 });
 
-test("ordinary project traffic is byte-identical: direct sends, slash commands, and background deliveries", async () => {
+test("ordinary project traffic is unchanged apart from the server-set prompt origin: direct sends, slash commands, and background deliveries", async () => {
   const t = compose();
   // A direct send at an ordinary session passes through raw, SAME object,
   // including the caller's own agent choice.
@@ -526,7 +537,9 @@ test("ordinary project traffic is byte-identical: direct sends, slash commands, 
   };
   await dispatch(t.handlers, "opencode:prompt", [input]);
   assert.equal(t.oc.sends.length, 1);
-  assert.equal(t.oc.sends[0], input);
+  // The only addition is the server-set prompt origin (shared-knowledge §9.2); the caller's object is untouched.
+  assert.deepEqual(t.oc.sends[0], { ...input, origin: "user" });
+  assert.equal("origin" in input, false);
 
   // A slash command at an ordinary session runs the raw route.
   const cmd = { sessionId: "ses_project", command: "compact" };
