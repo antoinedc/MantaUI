@@ -314,9 +314,9 @@ describe("desktop card ↔ server (§11.6)", { skip }, () => {
     assert.equal(row.outwardAllowed, false);
     assert.match(row.outwardReason, /No GitHub login/);
     const lines = card.statusLines(s);
-    assert.deepEqual(lines.map((l) => l.id), ["spend", "briefing"]);
-    assert.match(lines[0].text, /Spent \$0\.25 of the \$5\.00 daily cap today/);
-    assert.match(lines[1].text, /Every session this week started with a briefing/);
+    // Spend is shown by the shared Background work status line now, not by the card's own status lines.
+    assert.deepEqual(lines.map((l) => l.id), ["briefing"]);
+    assert.match(lines[0].text, /Every session this week started with a briefing/);
 
     const id = engine.changesLog.add({ kind: "applied", summary: "Added how to release", reason: "r", undoable: true });
     const [item] = (await ch["knowledge:changes"]({})).items;
