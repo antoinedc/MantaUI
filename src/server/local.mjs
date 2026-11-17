@@ -180,9 +180,11 @@ export async function configGet() {
 // nested config (`cto.*`) land where the server reads them. Flat keys merge as
 // before. Deep objects are merged one level (enough for the cto block).
 // preload: ipcRenderer.invoke(IPC.configUpdate, patch) → args[0] = patch
-export async function configUpdate(patch) {
+export async function configUpdate(patch, { remove = [] } = {}) {
   const current = await getConfig();
   const next = { ...current };
+  // `remove`: stored keys to drop (retired settings); applied before the patch, so a patch may still set one.
+  for (const key of Array.isArray(remove) ? remove : []) delete next[key];
   for (const [key, value] of Object.entries(patch ?? {})) {
     if (typeof key === "string" && key.includes(".")) {
       const [head, ...rest] = key.split(".");

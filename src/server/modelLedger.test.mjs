@@ -294,9 +294,9 @@ test("aggregateDailySeries tokensSent formula: input=1,cacheRead=2,cacheWrite=3,
   assert.equal(out[0].tokensSent, 10);
 });
 
-test("tokensSent (exported for the background budget): all input buckets + output, plus reasoning when the row carries it", () => {
+test("tokensSent (exported for the background budget): all input buckets + output; reasoning is not counted (the ledger's own series must not change)", () => {
   assert.equal(tokensSent({ input: 1, cacheRead: 2, cacheWrite: 3, output: 4 }), 10);
-  assert.equal(tokensSent({ input: 1, cacheRead: 2, cacheWrite: 3, output: 4, reasoning: 5 }), 15);
+  assert.equal(tokensSent({ input: 1, cacheRead: 2, cacheWrite: 3, output: 4, reasoning: 5 }), 10);
   assert.equal(tokensSent({ input: null, output: "x", reasoning: undefined }), 0);
   assert.equal(tokensSent(null), 0);
 });

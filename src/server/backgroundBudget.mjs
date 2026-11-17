@@ -275,6 +275,12 @@ function newWindowState(w, t) {
   };
 }
 
+/**
+ * A reading whose window has already ended: the poller flagged it (`stale`), or its `resetsAt` has passed since it was
+ * read (the last reading is reused until the next successful poll). It describes the window that just ended.
+ */
+const isStaleWindow = (w, t) => w.stale === true || (finite(w.resetsAt) && w.resetsAt <= t);
+
 const zeroCounters = (ws) => {
   ws.bgTokensSinceTick = 0;
   ws.batchTokensSinceTick = 0;
@@ -339,10 +345,11 @@ export function createBackgroundBudget({
   function emit(row) {
     try {
       const p = log?.append?.({ ts: now(), ...row });
-      if (p && typeof p.catch === "function") p.catch(() => {});
+      if (p && typeof p.catch === "function") return p.catch(() => {});
     } catch {
       /* evidence is best-effort */
     }
+    return undefined;
   }
 
   const hourOf = (t) => Math.floor(t / 3_600_000);
@@ -368,14 +375,16 @@ export function createBackgroundBudget({
     flushRefusals(false);
   }
 
-  /** Write the coalesced `refused` rows of hours that have ended (or all of them). */
+  /** Write the coalesced `refused` rows of hours that have ended (or all of them). Resolves once they are written. */
   function flushRefusals(all) {
     const h = hourOf(now());
+    const writes = [];
     for (const [k, b] of refusedBuckets) {
       if (!all && b.hour >= h) continue;
       refusedBuckets.delete(k);
-      emit({ ...b.row, ts: b.hour * 3_600_000, count: b.count });
+      writes.push(emit({ ...b.row, ts: b.hour * 3_600_000, count: b.count }));
     }
+    return Promise.all(writes).then(() => undefined);
   }
 
   // ---- state access ----
@@ -485,7 +494,7 @@ export function createBackgroundBudget({
 
   async function windowView({ snapshot, w, level, ts }) {
     const key = windowKey(snapshot, w);
-    const stale = w.stale === true;
+    const stale = isStaleWindow(w, ts);
     const ws = stale ? null : state.windows[key];
     const cap = levelCap(level, w.kind);
     const tpp = ws ? (finite(ws.tokensPerPct) && ws.tokensPerPct > 0 ? ws.tokensPerPct : ws.bgTokensSinceTick > 0 ? await pacingTokensPerPct(key) : null) : null;
@@ -633,7 +642,8 @@ export function createBackgroundBudget({
       const cls = WORK_CLASS[workType] ?? CLASS.CONTINUOUS;
       const batch = cls === CLASS.BATCH;
       const ts = now();
-      const keys = bm.mode === "plan" ? bm.windows.map((w) => windowKey(bm.snapshot, w)) : [];
+      const planWindows = bm.mode === "plan" ? bm.windows.map((w) => ({ key: windowKey(bm.snapshot, w), w })) : [];
+      const keys = planWindows.map((x) => x.key);
       await mutate((st) => {
         const day = (st.days[localDay(ts)] ??= newDay());
         const w = (day.byWork[workType] ??= { calls: 0, tokens: 0, usd: 0, paygUsd: 0, planUsd: 0 });
@@ -654,9 +664,9 @@ export function createBackgroundBudget({
         } else {
           w.planUsd += cost;
           day.plan.usd += cost;
-          for (const k of keys) {
-            const ws = st.windows[k];
-            if (!ws) continue;
+          for (const { key: k, w: live } of planWindows) {
+            // Spend before the first tick saw the window still counts: the state is created from the live reading.
+            const ws = (st.windows[k] ??= newWindowState(live, ts));
             ws.bgTokensSinceTick += sent;
             if (batch) ws.batchTokensSinceTick += sent;
             if (inLedger === false) ws.bgNotInLedgerSinceTick += sent;
@@ -698,7 +708,7 @@ export function createBackgroundBudget({
     if (bm.mode !== "plan") return { mode: bm.mode, resetsAt: null };
     let resetsAt = null;
     for (const w of bm.windows) {
-      if (!isWeeklyKind(w.kind) || w.stale === true || !finite(w.resetsAt)) continue;
+      if (!isWeeklyKind(w.kind) || isStaleWindow(w, now()) || !finite(w.resetsAt)) continue;
       if (resetsAt === null || w.resetsAt < resetsAt) resetsAt = w.resetsAt;
     }
     return { mode: "plan", resetsAt };
@@ -820,14 +830,18 @@ export function createBackgroundBudget({
             ws.batchTokensSinceTick += pending.batch;
             ws.bgNotInLedgerSinceTick += pending.notInLedger;
           }
-          if (w.stale === true) continue; // the provider has not published the new window yet
+          // The provider has not published the new window yet — or this reading is the last one reused after its window
+          // ended. Either way it carries no news: no reset is detected from it, and it is not attributed.
+          if (isStaleWindow(w, t)) continue;
           const storedReset = ws.resetsAt;
           const newReset = w.resetsAt;
           if (!finite(storedReset) && finite(newReset)) {
             st.windows[key] = newWindowState(w, t); // first sighting of a reset instant
             continue;
           }
-          if (finite(storedReset) && finite(newReset) && (t >= storedReset || newReset - storedReset > RESET_JUMP_MS)) {
+          // A reset is a NEW window: its reset instant is later than the stored one (it passed and the provider moved
+          // on, or it jumped by more than the drift codex shows).
+          if (finite(storedReset) && finite(newReset) && newReset > storedReset && (t >= storedReset || newReset - storedReset > RESET_JUMP_MS)) {
             emit({
               type: "window-close",
               key,

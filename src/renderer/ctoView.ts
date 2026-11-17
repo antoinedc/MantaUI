@@ -36,6 +36,9 @@ export type BackfillState = {
 export type CtoState = {
   enabled: boolean;
   dot: CtoDot;
+  // Why the CTO is thrifty: "cap_hit" = the background work budget refused a call; "watchdog" = the spend-rate
+  // watchdog. Absent on an older box.
+  thriftyReason?: "cap_hit" | "watchdog" | null;
   pausedAt: number | null;
   needsYouCount: number;
   generationInFlight: boolean;

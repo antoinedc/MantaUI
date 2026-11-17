@@ -78,7 +78,7 @@ import {
 import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask, CtoFactsRender, CtoFactRow, CtoToolsRender, CtoToolRegistryRow } from "../shared/api.js";
 import { formatAge } from "./chatUtils";
 import { BackgroundStatusLine, ChangeBudgetLink } from "./BackgroundStatusLine";
-import { thriftyReasonText } from "./backgroundWorkFormat";
+import { thriftyBannerText, CTO_WORK_TYPES } from "./backgroundWorkFormat";
 import { useBackgroundStatus, type BackgroundStatusState } from "./useBackgroundStatus";
 import { Toggle } from "./Toggle";
 import { WorkSection } from "./ctoWorkCardsView";
@@ -811,8 +811,7 @@ export function CtoPanel({
           >
             <span className="font-medium text-text">Thrifty mode</span>
             <span className="text-text-muted">
-              {(thriftyBudget.state.kind === "ok" ? thriftyReasonText(thriftyBudget.state.status) : null) ??
-                "The CTO is limiting background work to stay inside its budget."}
+              {thriftyBannerText(state?.thriftyReason, thriftyBudget.state.kind === "ok" ? thriftyBudget.state.status : null)}
             </span>
             <ChangeBudgetLink />
           </div>
@@ -1222,7 +1221,7 @@ export function SettingsView({
               <BackgroundStatusLine
                 state={bgBudget.state}
                 onRetry={() => void bgBudget.refresh()}
-                share={{ prefix: "cto-", noun: "CTO work" }}
+                share={{ workTypes: CTO_WORK_TYPES, noun: "CTO work" }}
                 testId="cto-budget-status"
               />
             </div>

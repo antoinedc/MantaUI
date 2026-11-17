@@ -231,8 +231,17 @@ export function createCtoBackfill(deps = {}) {
   // Replay ONE historical session's messages (ts < watermark) through a fresh
   // segmenter, oldest-first, and flush the persisted close chains so the
   // segment summaries are on disk before the session is marked processed.
+  // Returns {budgetRefused}: the shared background budget refused (code "budget") a summary during the replay. The
+  // segmenter persists a degraded segment for a gated call — fine for live work, a loss for history that is replayed
+  // only once — so the caller must NOT mark the session processed and replays it again later.
   async function replaySession(db, session, endTs) {
-    const seg = createSegmenter({ segments, engineState, summarize, computeOneLiner, now });
+    let budgetRefused = false;
+    const guardedSummarize = async (data) => {
+      const res = await summarize(data);
+      if (res?.code === "budget") budgetRefused = true;
+      return res;
+    };
+    const seg = createSegmenter({ segments, engineState, summarize: guardedSummarize, computeOneLiner, now });
     const rows = db
       .prepare(
         "SELECT id, time_created, type, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant') AND time_created < ? ORDER BY time_created ASC, id ASC",
@@ -284,6 +293,7 @@ export function createCtoBackfill(deps = {}) {
       if (st.turnChain) await st.turnChain.catch(() => {});
       if (st.closeChain) await st.closeChain.catch(() => {});
     }
+    return { budgetRefused };
   }
 
   // Enumerate candidate sessions in [historyStart, watermark) that we have not
@@ -328,6 +338,7 @@ export function createCtoBackfill(deps = {}) {
     let doneThisStep = 0;
     let newestTs = p.newestProcessedTs ?? null;
     const newly = [];
+    let budgetDeferred = false;
     for (const sess of remaining) {
       if (doneThisStep >= maxSessionsPerStep) break;
       if (await presenceCheck().catch(() => false)) break; // yield between calls
@@ -336,7 +347,11 @@ export function createCtoBackfill(deps = {}) {
         return { kind: "budget", spentUsd: spent, doneThisStep, newestTs, newly, total };
       }
       try {
-        await replaySession(db, sess, win.end);
+        if ((await replaySession(db, sess, win.end)).budgetRefused) {
+          // Transient (the shared budget resumes): stop the step, leave this session unprocessed, retry next time.
+          budgetDeferred = true;
+          break;
+        }
       } catch {
         /* a single bad session never aborts the backfill — skip + record */
         await ledgerLog({ kind: "cto.backfill_session_failed", sessionID: sess.id });
@@ -356,6 +371,10 @@ export function createCtoBackfill(deps = {}) {
     };
     await saveState({ backfillProgress: nextProgress });
     await ledgerLog({ kind: "cto.backfill_segments", done: processed.size, total });
+    if (budgetDeferred) {
+      await ledgerLog({ kind: "cto.backfill_deferred", reason: "budget", done: processed.size, total });
+      return { kind: "deferred", progress: nextProgress };
+    }
 
     const allSegmentsDone = remaining.length === 0 || processed.size === total;
     if (allSegmentsDone && doneThisStep === 0 && remaining.length === 0) {
@@ -505,7 +524,7 @@ export function createCtoBackfill(deps = {}) {
         await ledgerLog({ kind: "cto.backfill_stopped", reason: "budget", stoppedAtDepthDays: reachedAt, spentUsd: res.spentUsd });
         return { ok: false, stopped: true, reason: "budget", progress: progressFrom(st2), budget: budgetState({ spentUsd: res.spentUsd, capUsd: cap }) };
       }
-      return { ok: true, progress: progressFrom(await readState()) };
+      return { ok: true, ...(res.kind === "deferred" ? { deferred: "budget" } : {}), progress: progressFrom(await readState()) };
     }
     if (phase === "rollups") {
       return rollupsStep(db, win, await readState(), startInstant, cap);

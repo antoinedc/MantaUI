@@ -2754,7 +2754,7 @@ test("overnight budget: the terminal transition books the rest once; a second fi
   assert.equal(booked.length, 1);
 });
 
-test("overnight budget: a partial cost is not booked as usd (the budget prices the tokens); a job without a budget work type is never booked", async () => {
+test("overnight budget: a partial cost is not booked as usd (the budget prices the tokens, cache-read weighted); a job without a budget work type is never booked", async () => {
   const partial = budgetedJob({ id: "jp", childSessionID: "child-p" });
   const plain = { ...runningObserverJob(), id: "jn", childSessionID: "child-n", startedAt: BUDGET_T0 - 1000 };
   const h = harness([partial, plain]);
@@ -2765,8 +2765,69 @@ test("overnight budget: a partial cost is not booked as usd (the budget prices t
   const deps = { ...h.deps, liveness, recordBackgroundUsage: async (c) => { booked.push(c); } };
   await sweepDelegateJobs(deps);
   assert.equal(booked.length, 1);
-  assert.equal(booked[0].usage, 900);
   assert.equal(booked[0].usd, undefined);
+  const kinds = booked[0].usage;
+  assert.equal(kinds.input + kinds.output + kinds.cacheRead + kinds.cacheWrite, 900, "the window side still counts every token");
+  assert.ok(kinds.cacheRead > 0.8 * 900, "cache reads dominate the estimated split — not a bare 90/10 input/output");
+  assert.deepEqual(h.jobs[0].budgetRecorded, { tokens: 900, usd: 0 }, "the usd cursor does not move for an unknown cost");
+  assert.equal(h.jobs[1].budgetRecorded ?? null, null);
+});
+
+test("overnight budget: a known complete cost is booked as usd once; tokens never re-price it (no double count, cost 0 included)", async () => {
+  const job = budgetedJob();
+  const h = harness([job]);
+  const booked = [];
+  const liveness = budgetLiveness(h);
+  const deps = { ...h.deps, liveness, recordBackgroundUsage: async (c) => { booked.push(c); } };
+  liveness.step("child-b", { input: 500, cacheRead: 5000 }, 0); // a free step: cost 0, tokens still count against windows
+  await sweepDelegateJobs(deps);
+  assert.equal(booked.length, 1);
+  assert.deepEqual([booked[0].usd, booked[0].usage], [0, 5500]);
+  liveness.step("child-b", { input: 100 }, 0.3);
+  await sweepDelegateJobs(deps);
+  assert.equal(booked.length, 2);
+  assert.ok(Math.abs(booked[1].usd - 0.3) < 1e-9, "only the new cost, not the whole first cost again");
+  assert.equal(booked[1].usage, 100);
+  assert.deepEqual(h.jobs[0].budgetRecorded.tokens, 5600);
+});
+
+test("overnight budget: the cursor advances only AFTER the record; a record that never lands leaves the delta for the next sweep", async () => {
+  const job = budgetedJob();
+  const h = harness([job]);
+  const liveness = budgetLiveness(h);
+  let seenCursorDuringRecord = "unset";
+  const recordBackgroundUsage = async () => { seenCursorDuringRecord = h.jobs[0].budgetRecorded ?? null; };
+  const deps = { ...h.deps, liveness, recordBackgroundUsage };
+  liveness.step("child-b", { input: 70 }, 0.1);
+  await sweepDelegateJobs(deps);
+  assert.equal(seenCursorDuringRecord, null, "not advanced while the record is being made");
+  assert.deepEqual(h.jobs[0].budgetRecorded, { tokens: 70, usd: 0.1 });
+
+  liveness.step("child-b", { input: 30 }, 0.05);
+  await sweepDelegateJobs({ ...deps, recordBackgroundUsage: async () => { throw new Error("budget not ready"); } });
+  assert.deepEqual(h.jobs[0].budgetRecorded, { tokens: 70, usd: 0.1 }, "a failed record does not consume the delta");
+  const booked = [];
+  await sweepDelegateJobs({ ...deps, recordBackgroundUsage: async (c) => { booked.push(c); } });
+  assert.equal(booked.length, 1);
+  assert.equal(booked[0].usage, 30);
+});
+
+test("overnight budget: a job with no budget work type never touches the jobs store for booking", async () => {
+  const plain = { ...runningObserverJob(), id: "jn2", childSessionID: "child-n2", startedAt: BUDGET_T0 - 1000 };
+  const h = harness([plain]);
+  const liveness = budgetLiveness(h);
+  liveness.step("child-n2", { input: 5 }, 1);
+  let loads = 0;
+  const load = async () => { loads += 1; return h.deps.load(); };
+  await sweepDelegateJobs({ ...h.deps, load, liveness, recordBackgroundUsage: async () => { throw new Error("must not be called"); } });
+  const loadsWith = loads;
+  loads = 0;
+  const h2 = harness([{ ...plain, budgetWorkType: "cto-overnight" }]);
+  const lv2 = budgetLiveness(h2);
+  lv2.step("child-n2", { input: 5 }, 1);
+  const load2 = async () => { loads += 1; return h2.deps.load(); };
+  await sweepDelegateJobs({ ...h2.deps, load: load2, liveness: lv2, recordBackgroundUsage: async () => {} });
+  assert.ok(loadsWith < loads, `an unbudgeted job loads the store less (${loadsWith} vs ${loads})`);
 });
 
 test("overnight budget: a failing record never breaks the sweep, and startJob stamps budgetWorkType + an empty cursor", async () => {

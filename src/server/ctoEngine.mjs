@@ -594,6 +594,7 @@ export function createCtoEngine(deps = {}) {
   let disposed = false;
   let thrifty = false;
   let thriftyAtDay = null; // local-day key thrifty was set on (BET-1388 auto-clear)
+  let thriftySource = null; // "cap" (a budget refusal) | other (the watchdog…) while thrifty; a cap hit is sticky
   let selfPaused = false;
   let selfPausedAt = null; // when the rate-limit self-pause began (BET-1508 cool-down)
   let enabled = false;
@@ -770,6 +771,7 @@ export function createCtoEngine(deps = {}) {
     return {
       enabled: enabledNow,
       dot: computeDot({ enabled: enabledNow, paused, thrifty }),
+      thriftyReason: thrifty ? (thriftySource === "cap" ? "cap_hit" : "watchdog") : null,
       pausedAt: paused ? pausedAt : null,
       needsYouCount: counts.needsYouCount ?? 0,
       generationInFlight: !!counts.generationInFlight,
@@ -1039,6 +1041,7 @@ export function createCtoEngine(deps = {}) {
     const next = !!value;
     const changed = next !== thrifty;
     thrifty = next;
+    thriftySource = next ? (thriftySource === "cap" ? "cap" : source) : null;
     thriftyAtDay = next ? budgetDayKey(now()) : thriftyAtDay;
     if (changed) {
       await ledgerLog({

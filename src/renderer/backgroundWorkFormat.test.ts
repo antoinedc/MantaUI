@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { BudgetPaused, BudgetPlanStatus, BudgetStatus, BudgetWindow } from "../shared/api";
 import {
@@ -20,6 +21,9 @@ import {
   statusRows,
   summaryLine,
   thriftyReasonText,
+  thriftyBannerText,
+  KNOWLEDGE_WORK_TYPES,
+  CTO_WORK_TYPES,
   waitingBatchText,
 } from "./backgroundWorkFormat";
 
@@ -314,6 +318,32 @@ describe("thriftyReasonText", () => {
   });
 });
 
+describe("thriftyBannerText", () => {
+  const refusing = () => status({ payg: { providers: ["openrouter"], usdToday: 5, usdMonth: 5, paused: { reason: "usd-cap", resumesAt: new Date(2026, 10, 18, 0, 0, 0).getTime() } } });
+  const GENERIC = "The CTO is limiting background work to stay inside its budget.";
+  it("quotes the budget only for a cap-hit thrifty whose refusal still stands", () => {
+    expect(thriftyBannerText("cap_hit", refusing(), NOW, FMT)).toBe(thriftyReasonText(refusing(), NOW, FMT));
+    expect(thriftyBannerText("cap_hit", status(), NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText("cap_hit", null, NOW, FMT)).toBe(GENERIC);
+  });
+  it("is generic for the watchdog, for no reason and for an older box", () => {
+    expect(thriftyBannerText("watchdog", refusing(), NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText(null, refusing(), NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText(undefined, refusing(), NOW, FMT)).toBe(GENERIC);
+  });
+});
+
+describe("work type lists", () => {
+  it("cover exactly the server's work types, each in one subsystem (the list drifts when a type is added there)", () => {
+    const src = readFileSync(new URL("../server/backgroundBudget.mjs", import.meta.url), "utf8");
+    const block = src.slice(src.indexOf("export const WORK_CLASS"), src.indexOf("export const WORK_TYPES"));
+    const serverTypes = [...block.matchAll(/"([a-z-]+)":\s*CLASS\./g)].map((m) => m[1]).sort();
+    expect(serverTypes.length).toBeGreaterThan(5);
+    expect([...KNOWLEDGE_WORK_TYPES, ...CTO_WORK_TYPES].sort()).toEqual(serverTypes);
+    expect(KNOWLEDGE_WORK_TYPES.filter((t) => CTO_WORK_TYPES.includes(t))).toEqual([]);
+  });
+});
+
 describe("shareLine", () => {
   const s = status({
     byWork: [
@@ -323,12 +353,24 @@ describe("shareLine", () => {
     ],
   });
   it("sums one subsystem's work types", () => {
-    expect(shareLine(s, "knowledge-", "Knowledge work")).toBe("Knowledge work today: 11 calls · 200k tokens");
-    expect(shareLine(s, "cto-", "CTO work")).toBe("CTO work today: 99 calls · 9000k tokens");
+    expect(shareLine(s, KNOWLEDGE_WORK_TYPES, "Knowledge work")).toBe("Knowledge work today: 11 calls · 200k tokens");
+    expect(shareLine(s, CTO_WORK_TYPES, "CTO work")).toBe("CTO work today: 99 calls · 9000k tokens");
+  });
+  it("counts the curator and skills work types, which do not carry the knowledge- prefix", () => {
+    const k = status({
+      byWork: [
+        { workType: "curator-notes", calls: 3, usd: 0, tokens: 3000 },
+        { workType: "curator-rules", calls: 2, usd: 0, tokens: 2000 },
+        { workType: "curator-skills", calls: 1, usd: 0, tokens: 1000 },
+        { workType: "knowledge-capture", calls: 4, usd: 0, tokens: 4000 },
+      ],
+    });
+    expect(shareLine(k, KNOWLEDGE_WORK_TYPES, "Knowledge work")).toBe("Knowledge work today: 10 calls · 10k tokens");
+    expect(shareLine(k, CTO_WORK_TYPES, "CTO work")).toBeNull();
   });
   it("singular call, and nothing when the subsystem did nothing", () => {
-    expect(shareLine(status({ byWork: [{ workType: "cto-ambient", calls: 1, usd: 0, tokens: 500 }] }), "cto-", "CTO work")).toBe("CTO work today: 1 call · 500 tokens");
-    expect(shareLine(status(), "cto-", "CTO work")).toBeNull();
+    expect(shareLine(status({ byWork: [{ workType: "cto-ambient", calls: 1, usd: 0, tokens: 500 }] }), CTO_WORK_TYPES, "CTO work")).toBe("CTO work today: 1 call · 500 tokens");
+    expect(shareLine(status(), CTO_WORK_TYPES, "CTO work")).toBeNull();
   });
 });
 

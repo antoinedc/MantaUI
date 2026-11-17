@@ -392,6 +392,9 @@ export type CtoState = {
   enabled: boolean;
   // State-machine dot (§10.6): active / disabled / thrifty / paused.
   dot: "active" | "disabled" | "thrifty" | "paused";
+  // Why the CTO is thrifty (null/absent when it is not): "cap_hit" = the background work budget refused a call (the
+  // budget status then holds the words); "watchdog" = the spend-rate watchdog. Absent on an older box.
+  thriftyReason?: "cap_hit" | "watchdog" | null;
   // Epoch-ms the kill switch was thrown (§10.6-5 paused banner "paused at"
   // line); null when not paused.
   pausedAt: number | null;

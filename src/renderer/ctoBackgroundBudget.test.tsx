@@ -127,7 +127,7 @@ describe("CTO thrifty banner", () => {
     clearBackgroundWorkFocus();
   });
 
-  async function openDashboard(dot: "active" | "thrifty", backgroundStatus: () => Promise<unknown>) {
+  async function openDashboard(dot: "active" | "thrifty", backgroundStatus: () => Promise<unknown>, thriftyReason: "cap_hit" | "watchdog" | null = dot === "thrifty" ? "cap_hit" : null) {
     installMockApi({
       ctoConversationOpen: () => Promise.resolve({ sessionId: "ses_cto", generation: 1 }),
       ctoConversationState: () =>
@@ -143,7 +143,7 @@ describe("CTO thrifty banner", () => {
       backgroundStatus,
     });
     resetStore();
-    const state = { enabled: true, dot, pausedAt: null, needsYouCount: 0, generationInFlight: false, tonightCount: 0, tier: "low" };
+    const state = { enabled: true, dot, thriftyReason, pausedAt: null, needsYouCount: 0, generationInFlight: false, tonightCount: 0, tier: "low" };
     h = mount(<CtoPanel state={state} onOpenSession={() => {}} />);
     await h.flush();
     const dash = Array.from(h.container.querySelectorAll("button")).find((b) => b.textContent?.includes("Dashboard"))!;
@@ -163,6 +163,21 @@ describe("CTO thrifty banner", () => {
     expect(banner()!.textContent).toContain("Thrifty mode");
     expect(banner()!.textContent).toContain("Reached today's $5.00 API-key cap — resumes at midnight");
     expect(Array.from(banner()!.querySelectorAll("button")).map((b) => b.textContent)).toEqual(["Change"]);
+  });
+
+  it("a watchdog thrifty is not blamed on a budget refusal that happens to stand", async () => {
+    await openDashboard(
+      "thrifty",
+      () => Promise.resolve(status({ payg: { providers: ["openrouter"], usdToday: 5, usdMonth: 5, paused: { reason: "usd-cap", resumesAt: new Date(2026, 10, 18, 0, 0, 0).getTime() } } })),
+      "watchdog",
+    );
+    expect(banner()!.textContent).toContain("limiting background work to stay inside its budget");
+    expect(banner()!.textContent).not.toContain("API-key cap");
+  });
+
+  it("a cap-hit thrifty whose refusal has cleared falls back to the generic line", async () => {
+    await openDashboard("thrifty", () => Promise.resolve(status()));
+    expect(banner()!.textContent).toContain("limiting background work to stay inside its budget");
   });
 
   it("still explains itself when the reason can't be read", async () => {

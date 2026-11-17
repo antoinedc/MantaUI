@@ -75,6 +75,33 @@ test("the weekly tidy starts only when due, the budget allows it AND it is a goo
   await r.engine.stop();
 });
 
+test("the first due instant is kept until the tidy runs: a window reset that slides dueAt a week later does not postpone it (the 48 h overdue rule counts from the first one)", async () => {
+  const bb = fakeBackgroundBudget();
+  const r = await rigWith({ over: { backgroundBudget: bb } });
+  await r.slugOf("ses_one");
+  const tidy = r.engine.layer.tidy;
+  assert.equal((await tidy.tickWeekly()).status, "ran");
+  const HOUR = 3600_000;
+  r.clock.t += 8 * 24 * HOUR;
+  const firstDue = r.clock.t + HOUR; // on a plan: 24 h before this week's reset
+  bb.dueAtFn = () => firstDue;
+  bb.good = false;
+  assert.equal(await tidy.tickWeekly(), null, "not due yet");
+  r.clock.t = firstDue + HOUR; // due; the quota window has since reset, so dueAt now reads a week later
+  bb.dueAtFn = () => r.clock.t + 7 * 24 * HOUR;
+  assert.equal(await tidy.tickWeekly(), null, "no good moment");
+  assert.equal(bb.calls.goodMoment.at(-1).dueSince, firstDue, "still due, from the FIRST instant");
+  r.clock.t += 50 * HOUR;
+  assert.equal(await tidy.tickWeekly(), null);
+  assert.equal(bb.calls.goodMoment.at(-1).dueSince, firstDue, "the overdue clock keeps running from it");
+  bb.good = true;
+  assert.equal((await tidy.tickWeekly()).status, "ran");
+  r.clock.t += 8 * 24 * HOUR;
+  bb.dueAtFn = () => r.clock.t + 3 * HOUR;
+  assert.equal(await tidy.tickWeekly(), null, "a new cycle starts from the new computed instant: the stored one was cleared by the run");
+  await r.engine.stop();
+});
+
 test("the tidy's own model calls run as the batch work type knowledge-tidy (but the rules task class); the downgrade cleanup does not", async () => {
   const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
   await r.slugOf("ses_one");

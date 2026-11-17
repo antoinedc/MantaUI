@@ -32,6 +32,7 @@ import { parsePage, renderPage, summarizeBody, pageTitle, updateFrontMatter } fr
 import { isKnowledgeError } from "./errors.mjs";
 
 export const TIDY_EVERY_MS = 7 * 24 * 3600 * 1000;
+const TIDY_DUE_SINCE_KEY = "tidy.dueSince";
 // The shared background budget's work type for the weekly tidy-up: its model calls run as "curator-rules" (the model
 // they need) but are BATCH work (spec 2026-11-17-background-work-budget §5.1).
 export const TIDY_WORK_TYPE = "knowledge-tidy";
@@ -401,6 +402,7 @@ export function createTidy(kc) {
     runMessages = null; // one message cache per run
     const startedAt = now();
     state.kvSet("tidy.lastRun", String(startedAt));
+    state.kvDelete(TIDY_DUE_SINCE_KEY);
     const batchId = newBatchId(now());
     await store.commitDirtyAsUser();
     const report = { duplicates: 0, reverified: 0, removed: 0, rulesRewritten: 0, rulesRemoved: 0, clustersApplied: 0, commons: 0, skillsDetected: 0, skillsRetired: 0, synced: 0, errors: [] };
@@ -446,7 +448,12 @@ export function createTidy(kc) {
     const intervalDueAt = Number(state.kvGet("tidy.lastRun") ?? 0) + TIDY_EVERY_MS;
     if (now() < intervalDueAt) return null;
     const gate = { workType: TIDY_WORK_TYPE, modelClass: "curator-rules" };
-    const dueSince = (await budget?.dueAt?.({ ...gate, intervalDueAt })) ?? intervalDueAt;
+    const computedDueAt = (await budget?.dueAt?.({ ...gate, intervalDueAt })) ?? intervalDueAt;
+    // The FIRST due instant of this cycle is kept until the tidy runs: the near-reset instant recomputed from the
+    // current window would slide a week later each time the window resets, and the 48 h overdue rule would never fire.
+    const storedDueSince = Number(state.kvGet(TIDY_DUE_SINCE_KEY) ?? 0);
+    const dueSince = Number.isFinite(storedDueSince) && storedDueSince > 0 ? Math.min(storedDueSince, computedDueAt) : computedDueAt;
+    if (dueSince !== storedDueSince) state.kvSet(TIDY_DUE_SINCE_KEY, String(dueSince));
     if (now() < dueSince) return null;
     // A refused job stays due; this poller asks again on its next tick. The good-moment answer is taken ONCE per start.
     if (budget?.canSpend && !(await budget.canSpend(gate)).ok) return null;

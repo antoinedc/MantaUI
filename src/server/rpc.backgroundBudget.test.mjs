@@ -8,13 +8,14 @@ import { dispatch, buildHandlers } from "./rpc.mjs";
 function rig({ stored, backgroundBudget } = {}) {
   const updates = [];
   const applied = [];
+  const removals = [];
   const deps = stubRpcDeps({
-    local: { configGet: async () => ({ projects: [], ...(stored ? { backgroundWork: stored } : {}) }), configUpdate: async (p) => (updates.push(p), { ...p }) },
+    local: { configGet: async () => ({ projects: [], ...(stored ? { backgroundWork: stored } : {}) }), configUpdate: async (p, opts) => (updates.push(p), removals.push(opts?.remove ?? []), { ...p }) },
     oc: {},
     syncState: { applyConfig: (c) => applied.push(c), refreshNow: async () => {}, snapshot: () => ({ projects: [] }), everSucceeded: () => true },
     ...(backgroundBudget ? { backgroundBudget } : {}),
   });
-  return { handlers: buildHandlers(deps), updates, applied };
+  return { handlers: buildHandlers(deps), updates, applied, removals };
 }
 
 test("config:update merges a partial backgroundWork into the stored one (level alone keeps the cap) and syncs the result", async () => {
@@ -48,6 +49,14 @@ test("config:update ignores the retired caps (an older desktop's save still succ
   assert.deepEqual(updates, [{ handoffMode: "off" }]);
   await dispatch(handlers, "config:update", [{ ctoNightCapUsd: 1 }]);
   assert.deepEqual(updates.at(-1), {});
+});
+
+test("config:update also strips the retired caps from the STORED config on any write (spec §9)", async () => {
+  const { handlers, removals } = rig();
+  await dispatch(handlers, "config:update", [{ handoffMode: "off" }]);
+  assert.deepEqual(removals.at(-1), ["ctoAmbientCap", "ctoAmbientCapUsd", "ctoNightCapUsd"]);
+  await dispatch(handlers, "config:update", [{ ctoNightCapUsd: 1 }]);
+  assert.deepEqual(removals.at(-1), ["ctoAmbientCap", "ctoAmbientCapUsd", "ctoNightCapUsd"], "even a write that carried only a retired key");
 });
 
 test("background:status reaches the budget; an unwired box answers 503", async () => {

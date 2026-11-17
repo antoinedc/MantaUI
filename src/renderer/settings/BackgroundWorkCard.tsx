@@ -121,18 +121,30 @@ export function BackgroundWorkCard() {
     setSaving(true);
     setNotice(null);
     try {
-      await window.api.configUpdate({ backgroundWork: patch });
-      // The status is what the box has now; say that, not what was asked for.
-      const fresh = await window.api.backgroundStatus();
+      try {
+        await window.api.configUpdate({ backgroundWork: patch });
+      } catch (e) {
+        if (alive.current) setNotice({ tone: "error", text: `Couldn't save: ${errText(e)}` });
+        return false;
+      }
+      // Saved. The status read that follows is its own step: a failure there is not a failed save.
+      let fresh: BudgetStatus | null = null;
+      try {
+        fresh = await window.api.backgroundStatus();
+      } catch {
+        if (alive.current) {
+          setNotice({ tone: "ok", text: "Saved, but couldn't refresh the status. It will update shortly." });
+          void refresh();
+        }
+        return true;
+      }
       if (!alive.current) return true;
       if (fresh && Array.isArray(fresh.plans)) adopt(fresh);
       else void refresh();
+      // The status is what the box has now; say that, not what was asked for.
       const problem = fresh ? check(fresh) : null;
       setNotice(problem ? { tone: "error", text: problem } : { tone: "ok", text: okText(patch, fresh) });
       return !problem;
-    } catch (e) {
-      if (alive.current) setNotice({ tone: "error", text: `Couldn't save: ${errText(e)}` });
-      return false;
     } finally {
       savingRef.current = false;
       if (alive.current) {

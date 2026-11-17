@@ -30,8 +30,8 @@ export function BackgroundStatusLine({
   label?: string;
   state: BackgroundStatusState;
   onRetry?: () => void;
-  /** Also show this subsystem's own use today, e.g. { prefix: "knowledge-", noun: "Knowledge work" }. */
-  share?: { prefix: string; noun: string };
+  /** Also show this subsystem's own use today, e.g. { workTypes: KNOWLEDGE_WORK_TYPES, noun: "Knowledge work" }. */
+  share?: { workTypes: readonly string[]; noun: string };
   testId?: string;
 }) {
   if (state.kind === "unsupported") return null; // an older box has no budget to describe
@@ -62,7 +62,7 @@ export function BackgroundStatusLine({
     );
   }
   const line = summaryLine(state.status);
-  const mine = share ? shareLine(state.status, share.prefix, share.noun) : null;
+  const mine = share ? shareLine(state.status, share.workTypes, share.noun) : null;
   // Nothing connected → nothing to describe or change. With an account but no figures yet, still offer the link.
   const hasAccounts = state.status.plans.length > 0 || state.status.payg.providers.length > 0;
   if (!line && !mine && !hasAccounts) return null;

@@ -200,6 +200,26 @@ describe("BackgroundWorkCard", () => {
       expect(levelPressed()).toEqual(["Normal"]);
     });
 
+    it("a save that worked is not reported as failed when the follow-up status read fails; the status is read again", async () => {
+      let reads = 0;
+      let level = "normal";
+      await open({
+        backgroundStatus: () => (++reads === 2 ? Promise.reject(new Error("offline")) : Promise.resolve(status({ level: level as never }))),
+        configUpdate: (patch: { backgroundWork: { level: string } }) => {
+          level = patch.backgroundWork.level;
+          return Promise.resolve({});
+        },
+      });
+      await click(button("Light"));
+      await h!.flush();
+      expect(api.calls.configUpdate).toEqual([[{ backgroundWork: { level: "light" } }]]);
+      expect(notice()).toBe("Saved, but couldn't refresh the status. It will update shortly.");
+      expect(notice()).not.toContain("Couldn't save");
+      expect(q('[data-testid="background-work-notice"]')!.getAttribute("role")).toBe("status");
+      expect(reads).toBeGreaterThanOrEqual(3);
+      expect(levelPressed()).toEqual(["Light"]);
+    });
+
     it("tells the user when the box kept a different level", async () => {
       await open({ configUpdate: () => Promise.resolve({}) }); // the status keeps saying Normal
       await click(button("Light"));

@@ -335,6 +335,20 @@ test("batch ceiling: batch work stops at 60 % of the cap while continuous work m
   assert.equal((await lifted.b.check({ workType: "knowledge-tidy", model: OPUS })).ok, true, "within 24 h of the reset the ceiling lifts to the full cap");
 });
 
+test("flushEvidence writes the current hour's coalesced refusal rows and resolves once they are written (the shutdown hook awaits it)", async () => {
+  const r = rig({ bw: { level: "off" } });
+  await r.b.check({ workType: "cto-overnight", model: OPUS });
+  await r.b.check({ workType: "cto-overnight", model: OPUS });
+  assert.equal(r.logs.filter((l) => l.type === "refused").length, 0, "the current hour is still coalescing in memory");
+  const done = r.b.flushEvidence();
+  assert.equal(typeof done.then, "function");
+  await done;
+  const rows = r.logs.filter((l) => l.type === "refused");
+  assert.deepEqual(rows.map((x) => [x.workType, x.count]), [["cto-overnight", 2]]);
+  await r.b.flushEvidence();
+  assert.equal(r.logs.filter((l) => l.type === "refused").length, 1, "nothing is written twice");
+});
+
 test("every refusal carries the work class; unknown work types are refused as unavailable", async () => {
   const r = rig({ bw: { level: "off" } });
   await r.b.check({ workType: "cto-overnight", model: OPUS });
@@ -549,6 +563,52 @@ test("tick: windows stay unattributed while stale (the provider has not publishe
   r.world.snaps = [claude([week({ pct: 1, resetsAt: T0 + 7 * DAY })])];
   await r.b.tick();
   assert.equal(win(r).bgPct, 0);
+});
+
+test("tick: a reading whose resetsAt has passed is reused until the poller refreshes it — one window-close, no false window-busy, bgPct kept", async () => {
+  const stale = week({ pct: 90, resetsAt: T0 + HOUR }); // the poller's last reading: not flagged, its window ended an hour ago
+  const r = rig({ snaps: [claude([stale])], store: seeded({ "claude:weekly": winState({ resetsAt: T0 + HOUR, bgPct: 3, batchPct: 2, lastTick: { at: T0, pct: 88 } }) }) });
+  r.clock.t = T0 + 2 * HOUR;
+  for (let i = 0; i < 4; i += 1) {
+    await r.b.tick();
+    r.clock.t += 10 * 60_000;
+  }
+  assert.equal(r.logs.filter((l) => l.type === "window-close").length, 0, "an unchanged reading is not news: no reset is invented from it");
+  assert.equal(win(r).bgPct, 3);
+  const d = await r.b.check({ workType: "cto-ambient", model: OPUS });
+  assert.equal(d.ok, true, "the old window's 90 % is not read as live");
+  assert.equal(d.window.bgPct, 0, "…and its share reads 0 — the window that held it has ended");
+
+  // the poller catches up: ONE close, then more unchanged ticks close nothing more
+  r.world.snaps = [claude([week({ pct: 2, resetsAt: T0 + 2 * HOUR + 7 * DAY })])];
+  for (let i = 0; i < 3; i += 1) {
+    await r.b.tick();
+    r.clock.t += 10 * 60_000;
+  }
+  assert.equal(r.logs.filter((l) => l.type === "window-close").length, 1);
+  assert.deepEqual([win(r).bgPct, win(r).resetsAt], [0, T0 + 2 * HOUR + 7 * DAY]);
+});
+
+test("tick: a failing adapter keeps its last reading; ticks after its resetsAt never repeat the reset", async () => {
+  const r = rig({ snaps: [claude([week({ pct: 50, resetsAt: T0 + HOUR })])], store: seeded({ "claude:weekly": winState({ resetsAt: T0 + HOUR, bgPct: 2, bgTokensSinceTick: 40 }) }) });
+  r.clock.t = T0 + 3 * HOUR;
+  await r.b.tick();
+  await r.b.tick();
+  assert.deepEqual([win(r).bgPct, win(r).bgTokensSinceTick, win(r).resetsAt], [2, 40, T0 + HOUR]);
+  assert.equal(r.logs.some((l) => l.type === "window-close"), false);
+});
+
+test("record before the first tick created the window state is kept (state created from the live reading)", async () => {
+  const r = rig({ snaps: [claude([week({ pct: 10 }), five({ pct: 5 })])] });
+  await r.b.record({ workType: "knowledge-tidy", model: OPUS, usage: { input: 800 }, inLedger: true });
+  assert.deepEqual([win(r).bgTokensSinceTick, win(r).batchTokensSinceTick], [800, 800]);
+  assert.deepEqual([win(r).lastTick.pct, win(r).resetsAt], [10, T0 + 3 * DAY]);
+  assert.equal(win(r, "claude:session").bgTokensSinceTick, 800);
+  r.world.snaps = [claude([week({ pct: 12 }), five({ pct: 5 })])];
+  r.world.totals = { byProvider: { anthropic: 1600 } };
+  r.clock.t += 600_000;
+  await r.b.tick();
+  assert.equal(win(r).bgPct, 1, "dPct 2 × 800/1600: the early spend is attributed");
 });
 
 test("tick: absent resetsAt — no reset detection, resumesAt null; a reset instant appearing later is a first sighting", async () => {

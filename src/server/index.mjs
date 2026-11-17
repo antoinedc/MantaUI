@@ -979,7 +979,11 @@ accountsService.onRefreshOutcome(({ provider, seatId, outcome }) => seatAssigner
 seatAssigner.start();
 // Pins are saved write-behind (a few seconds after a change): flush on shutdown so a
 // restart does not forget the last placements, then exit (shutdownFlush.mjs).
-installShutdownFlush(seatAssigner);
+// The background budget's current-hour refusal rows are coalesced in memory: write them too (it is created further down,
+// so a signal this early finds nothing to flush — the settled-promise wrapper swallows that).
+installShutdownFlush({
+  flush: () => Promise.allSettled([(async () => seatAssigner.flush())(), (async () => backgroundBudget.flushEvidence())()]),
+});
 // Multi-account phase 3: the `accounts:*` RPC surface (list, mode, active seat,
 // rename, remove, add-a-seat sign-in). The sign-in flows are the EXISTING ones —
 // the claude-login launcher (pointed at the seat's own directory) and opencode's
@@ -1319,6 +1323,45 @@ const webhookEngine = createWebhookEngine({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Background work budget (src/server/backgroundBudget.mjs, spec docs/superpowers/specs/2026-11-17-background-work-budget.md):
+// ONE budget for shared knowledge and the background CTO — a share of the plan's quota windows on a subscription, a
+// dollar cap per day on a pay-per-token key. Created ONCE here, BEFORE the delegate engine (its sweeper books overnight usage into it, and
+// runs during the top-level awaits below), the knowledge engine and the CTO engines that are handed it (a const referenced
+// earlier is a TDZ crash on boot, and tests never load this file). Its dependencies are all defined above this point.
+// ---------------------------------------------------------------------------
+const backgroundPrices = createKnowledgeListPrices({
+  listProviders: oc.getProviders,
+  readConfig: readOpencodeConfig,
+  loadCatalog: () => readJsonSync(PRICES_PATH, null),
+});
+const backgroundBudgetLog = createLivenessLog({
+  path: statePath("background-budget.jsonl"),
+  markerPath: statePath("background-budget.deployed"),
+  retentionMs: BACKGROUND_BUDGET_RETENTION_DAYS * 24 * 60 * 60_000,
+});
+const backgroundBudget = createBackgroundBudget({
+  store: createBackgroundBudgetStore(),
+  log: { append: (row) => backgroundBudgetLog.appendSegment(row) },
+  configGet: () => local.configGet(),
+  listSnapshots,
+  providerTokenTotals,
+  getPrices: backgroundPrices.get,
+  bandOf: createKnowledgeBandOf(describeModel),
+  adapterForProviderID,
+  resolveDefaultModel: async () => {
+    const dm = (await local.configGet())?.defaultModel;
+    return dm?.providerID && dm?.modelID ? { providerID: dm.providerID, modelID: dm.modelID } : null;
+  },
+  desktopState: () => push.desktopState(push.getDesktopPresence(), Date.now()),
+  lastUserPromptAt: () => lastUserPromptAt,
+  pacingWindows: () => optimizerPacing.pressureWindows(),
+  listConnectedProviders: async () => {
+    const { connected } = await oc.getProviders();
+    return Array.isArray(connected) ? connected : [];
+  },
+});
+
 // Background-job engine (BET-378): durable jobs that run as a V2 child session
 // in their own worktree + chat-mode window — the CTO's workers included — and
 // report ONE result back to the parent session (a V2 synthetic, or through
@@ -1439,7 +1482,7 @@ const delegateEngine = createDelegateEngine({
   rejectQuestion: (a) => oc.rejectQuestion(a),
   livenessLog: createLivenessLog(),
   // Background work budget (spec 2026-11-17 §17.14): an overnight job's usage is booked INCREMENTALLY against the shared
-  // budget (the module is created further down; this only runs once a job has usage to book).
+  // budget (created above, before this engine: the sweeper can run during the top-level awaits below).
   recordBackgroundUsage: (a) => backgroundBudget.record(a),
 });
 // The interpreter's activity tap feeds the engine's per-job liveness (the stall rule, the progress view).
@@ -2054,43 +2097,6 @@ const optimizerPrices = createOptimizerPrices({
   loadCatalog: () => readJsonSync(PRICES_PATH, null),
 });
 
-// ---------------------------------------------------------------------------
-// Background work budget (src/server/backgroundBudget.mjs, spec docs/superpowers/specs/2026-11-17-background-work-budget.md):
-// ONE budget for shared knowledge and the background CTO — a share of the plan's quota windows on a subscription, a
-// dollar cap per day on a pay-per-token key. Created ONCE here, BEFORE the knowledge engine and the CTO engines that
-// are handed it (a const referenced earlier is a TDZ crash on boot, and tests never load this file).
-// ---------------------------------------------------------------------------
-const backgroundPrices = createKnowledgeListPrices({
-  listProviders: oc.getProviders,
-  readConfig: readOpencodeConfig,
-  loadCatalog: () => readJsonSync(PRICES_PATH, null),
-});
-const backgroundBudgetLog = createLivenessLog({
-  path: statePath("background-budget.jsonl"),
-  markerPath: statePath("background-budget.deployed"),
-  retentionMs: BACKGROUND_BUDGET_RETENTION_DAYS * 24 * 60 * 60_000,
-});
-const backgroundBudget = createBackgroundBudget({
-  store: createBackgroundBudgetStore(),
-  log: { append: (row) => backgroundBudgetLog.appendSegment(row) },
-  configGet: () => local.configGet(),
-  listSnapshots,
-  providerTokenTotals,
-  getPrices: backgroundPrices.get,
-  bandOf: createKnowledgeBandOf(describeModel),
-  adapterForProviderID,
-  resolveDefaultModel: async () => {
-    const dm = (await local.configGet())?.defaultModel;
-    return dm?.providerID && dm?.modelID ? { providerID: dm.providerID, modelID: dm.modelID } : null;
-  },
-  desktopState: () => push.desktopState(push.getDesktopPresence(), Date.now()),
-  lastUserPromptAt: () => lastUserPromptAt,
-  pacingWindows: () => optimizerPacing.pressureWindows(),
-  listConnectedProviders: async () => {
-    const { connected } = await oc.getProviders();
-    return Array.isArray(connected) ? connected : [];
-  },
-});
 // A user-started turn in a session that is not background work (a delegate job, the CTO conversation, an ephemeral or
 // routine session) says the user is here. If a session cannot be classified it counts: batch work then waits.
 noteUserPrompt = (sessionID) => {
@@ -2916,7 +2922,7 @@ async function segmentSummarize(data = {}, run = ctoRunner) {
       deps: { validate },
     });
     const summary = parseSegmentSummaryText(res?.text);
-    if (res?.ok === false) return res.gated === true ? { ok: false, gated: true, error: res.error } : { ok: false, gated: false, code: res.code };
+    if (res?.ok === false) return res.gated === true ? { ok: false, gated: true, error: res.error, ...(res.code === "budget" ? { code: "budget" } : {}) } : { ok: false, gated: false, code: res.code };
     if (!validateSegmentSummary(summary)) return { ok: false, gated: false, code: "schema-invalid" };
     return { ok: true, summary };
   } catch {
@@ -3017,8 +3023,12 @@ const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
   ledger: ledgerStore,
   budget: async () => {
     try {
-      const cfg = await local.configGet().catch(() => ({}));
-      const dm = cfg?.defaultModel?.providerID && cfg?.defaultModel?.modelID ? { providerID: cfg.defaultModel.providerID, modelID: cfg.defaultModel.modelID } : null;
+      // The model jobs are pinned to at dispatch (the same resolution): the box default when subagent-ticked, which
+      // wins over any job's hint. With no pinnable default every job is pinned by its own hint, so there is no single
+      // model to ask about here — the per-dispatch gate decides, and nothing is refused (or logged) for a model that
+      // would never be dispatched.
+      const dm = await resolveOvernightModel(null).catch(() => null);
+      if (!dm) return { spendableFrac: null };
       const decision = await backgroundBudget.check({ workType: "cto-overnight", model: dm });
       try {
         await feedOvernightForecast(dm, decision.mode);

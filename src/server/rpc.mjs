@@ -1109,7 +1109,8 @@ export function buildHandlers({
         if (!applied.ok) throw new Error(applied.error);
       }
       const prev = await local.configGet();
-      const next = await local.configUpdate(patch);
+      // The retired budget caps are also dropped from the stored config here (spec §9): the next write of any kind cleans them.
+      const next = await local.configUpdate(patch, { remove: RETIRED_BUDGET_KEYS });
       // WS11 D2: a changed cache TTL / default model re-measures live sessions
       // without a restart.
       if (patch?.cacheTtl === "5m" || patch?.cacheTtl === "1h") streamInterp?.setCacheTtlLabel(patch.cacheTtl);

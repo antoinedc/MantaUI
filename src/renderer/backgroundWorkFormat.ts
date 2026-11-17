@@ -313,9 +313,33 @@ export function thriftyReasonText(status: BudgetStatus | null, now: number = Dat
   return pick ? pausedCopy(pick.p, { plan: pick.plan, dailyCapUsd: cap, now, fmt }) : null;
 }
 
-/** "Knowledge work today: 14 calls · 1.2M tokens" for the work types starting with `prefix` ("knowledge-" / "cto-"). */
-export function shareLine(status: BudgetStatus, prefix: string, noun: string): string | null {
-  const mine = status.byWork.filter((w) => w.workType.startsWith(prefix));
+const THRIFTY_GENERIC = "The CTO is limiting background work to stay inside its budget.";
+
+/**
+ * The thrifty banner's sentence. The budget's own words only when the CTO went thrifty because the budget refused a call
+ * (`cap_hit`) AND that refusal still stands; a watchdog thrifty, an older box (no reason), an unreadable budget or a
+ * cause that has cleared all get the generic line — a refusal that is not the cause must not be shown as the cause.
+ */
+export function thriftyBannerText(thriftyReason: string | null | undefined, status: BudgetStatus | null, now: number = Date.now(), fmt: TimeFormat = {}): string {
+  if (thriftyReason !== "cap_hit") return THRIFTY_GENERIC;
+  return thriftyReasonText(status, now, fmt) ?? THRIFTY_GENERIC;
+}
+
+/** The work types of each subsystem (the server's WORK_CLASS keys, partitioned): not every one shares a name prefix. */
+export const KNOWLEDGE_WORK_TYPES: readonly string[] = [
+  "knowledge-capture",
+  "curator-notes",
+  "curator-rules",
+  "curator-skills",
+  "knowledge-corrections",
+  "knowledge-tidy",
+  "knowledge-trial",
+];
+export const CTO_WORK_TYPES: readonly string[] = ["cto-ambient", "cto-overnight", "cto-backfill"];
+
+/** "Knowledge work today: 14 calls · 1.2M tokens" for the given work types (KNOWLEDGE_WORK_TYPES / CTO_WORK_TYPES). */
+export function shareLine(status: BudgetStatus, workTypes: readonly string[], noun: string): string | null {
+  const mine = status.byWork.filter((w) => workTypes.includes(w.workType));
   const calls = mine.reduce((n, w) => n + (Number(w.calls) || 0), 0);
   const tokens = mine.reduce((n, w) => n + (Number(w.tokens) || 0), 0);
   if (calls === 0 && tokens === 0) return null;

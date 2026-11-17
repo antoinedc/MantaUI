@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone, scanRepos, createScratchProject } from "./local.mjs";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone, scanRepos, createScratchProject, configGet, configUpdate } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -473,4 +473,17 @@ test("createScratchProject: unslugged input 'My App' creates 'my-app'", async ()
 test("createScratchProject: empty root and empty name each reject with the stated message", async () => {
   await assert.rejects(createScratchProject({ root: "   ", name: "foo" }), /root is required/);
   await assert.rejects(createScratchProject({ root: "/tmp", name: "   " }), /name is required/);
+});
+
+test("configUpdate({remove}) drops the named stored keys, and a patch in the same call can still set them", async () => {
+  await configUpdate({ ctoNightCapUsd: 3, ctoAmbientCap: 2, keepMe: "x" });
+  assert.equal((await configGet()).ctoNightCapUsd, 3);
+  await configUpdate({ keepMe: "y" }, { remove: ["ctoNightCapUsd", "ctoAmbientCap", "ctoAmbientCapUsd"] });
+  const cfg = await configGet();
+  assert.equal("ctoNightCapUsd" in cfg, false);
+  assert.equal("ctoAmbientCap" in cfg, false);
+  assert.equal(cfg.keepMe, "y");
+  await configUpdate({ ctoNightCapUsd: 5 }, { remove: ["ctoNightCapUsd"] });
+  assert.equal((await configGet()).ctoNightCapUsd, 5, "removal happens before the patch");
+  await configUpdate({}, { remove: ["ctoNightCapUsd", "keepMe"] });
 });

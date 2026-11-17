@@ -278,6 +278,78 @@ test("segments phase replays a session into a persisted segment and advances pro
   assert.ok(seg.summary, "segment carries a summary");
 });
 
+test("a shared-budget refusal mid-step leaves the session unprocessed (no history lost); the next step replays it", async () => {
+  const fx = await openFixture();
+  if (!fx) return;
+  const NOW = 1000 * DAY;
+  for (const [sid, base] of [["s1", NOW - 9000], ["s2", NOW - 5000]]) {
+    fx.insSession(sid, { agent: "build", directory: "/work/proj" });
+    fx.insMessage(`u-${sid}`, sid, { role: "user", ts: base, text: `work ${sid}` });
+    fx.insMessage(`a-${sid}`, sid, { role: "assistant", ts: base + 500, cost: 0 });
+  }
+  const engineState = memStore();
+  const segments = memFileStore();
+  let refuse = true;
+  const calls = [];
+  const valid = validSummarize();
+  const backfill = createCtoBackfill({
+    configGet: async () => ({ ctoEnabled: true }),
+    engineState,
+    ledger: noopLedger,
+    segments,
+    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
+    summarize: async (d) => {
+      calls.push(d.sessionID);
+      return refuse && d.sessionID === "s2" ? { ok: false, gated: true, code: "budget", error: "cto_cap_hit" } : valid(d);
+    },
+    computeOneLiner: async () => "work",
+    getDb: async () => fx.db,
+    presenceCheck: AWAY,
+    now: () => NOW,
+    maxSessionsPerStep: 100,
+  });
+
+  const first = await backfill.step();
+  assert.equal(first.ok, true);
+  assert.equal(first.deferred, "budget");
+  assert.deepEqual(engineState._data.backfillProgress.processedSessions, ["s1"], "the refused session is NOT marked processed");
+  assert.equal(engineState._data.backfillDone, undefined, "and the backfill is not stopped for good — the shared budget resumes");
+  assert.equal(engineState._data.backfillPhase, "segments", "still in the segments phase");
+
+  refuse = false;
+  const second = await backfill.step();
+  assert.equal(second.deferred, undefined);
+  assert.deepEqual(engineState._data.backfillProgress.processedSessions, ["s1", "s2"]);
+  assert.equal(calls.filter((c) => c === "s2").length, 2, "the refused session was replayed");
+  const s2 = [...segments._data.values()].find((x) => x.sessionID === "s2");
+  assert.equal(s2.summaryOutcome.ok, true, "its segment now carries a real summary, not the degraded one");
+});
+
+// A gated result that is not a budget refusal (e.g. the engine paused) keeps today's behaviour: degraded and processed.
+test("a gated summary that is not a budget refusal still counts as processed (unchanged)", async () => {
+  const fx = await openFixture();
+  if (!fx) return;
+  const NOW = 1000 * DAY;
+  fx.insSession("s1", { agent: "build", directory: "/work/proj" });
+  fx.insMessage("u1", "s1", { role: "user", ts: NOW - 2000, text: "work" });
+  const engineState = memStore();
+  const bf = createCtoBackfill({
+    configGet: async () => ({ ctoEnabled: true }),
+    engineState,
+    ledger: noopLedger,
+    segments: memFileStore(),
+    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
+    summarize: async () => ({ ok: false, gated: true, error: "paused" }),
+    computeOneLiner: async () => "work",
+    getDb: async () => fx.db,
+    presenceCheck: AWAY,
+    now: () => NOW,
+  });
+  const res = await bf.step();
+  assert.equal(res.deferred, undefined);
+  assert.deepEqual(engineState._data.backfillProgress.processedSessions, ["s1"]);
+});
+
 test("watermark enforced during replay: a message at/after the watermark is NOT re-segmented", async () => {
   const fx = await openFixture();
   if (!fx) return;

@@ -461,6 +461,23 @@ test("ambientPreflight: thrifty flips ONLY on usd-cap and a WEEKLY-kind level-ca
   }
 });
 
+test("the state says WHY the CTO is thrifty: a budget refusal is cap_hit (sticky over a later watchdog call), the watchdog is watchdog, and it clears with thrifty", async () => {
+  const cap = makeHarness({ ctoEnabled: true });
+  assert.equal((await cap.engine.getState()).thriftyReason, null);
+  cap.budgetCfg.decision = { ok: false, reason: "usd-cap" };
+  await cap.engine.ambientPreflight({ taskClass: "gatekeeper", tier: "nano", model: null });
+  assert.equal((await cap.engine.getState()).thriftyReason, "cap_hit");
+  await cap.engine.setThrifty(true, { reason: "ambient spend", source: "watchdog" });
+  assert.equal((await cap.engine.getState()).thriftyReason, "cap_hit", "a cap hit stays the stated cause");
+  await cap.engine.setThrifty(false, { reason: "daily_reset", source: "engine" });
+  assert.equal((await cap.engine.getState()).thriftyReason, null);
+
+  const dog = makeHarness({ ctoEnabled: true });
+  await makeWatchdog(dog, { spend: 3, expected: 1 }).tick();
+  const st = await dog.engine.getState();
+  assert.deepEqual([st.dot, st.thriftyReason], [DOT.THRIFTY, "watchdog"]);
+});
+
 test("ambientPreflight: fails closed without a shared budget", async () => {
   const bare = createCtoEngine({ configGet: async () => ({ ctoEnabled: true }), ledger: { append: async () => {} }, now: () => 1, killSwitch: { isPaused: async () => false } });
   assert.deepEqual(await bare.ambientPreflight({ taskClass: "gatekeeper", tier: "nano", model: null }), { ok: false, reason: "unavailable" });

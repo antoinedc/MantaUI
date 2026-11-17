@@ -29,6 +29,7 @@ import type {
   KnowledgeSharing,
 } from "../../shared/api";
 import { BackgroundStatusLine } from "../BackgroundStatusLine";
+import { KNOWLEDGE_WORK_TYPES } from "../backgroundWorkFormat";
 import { Button } from "../Button";
 import { LABEL_CLS } from "../Field";
 import { SettingsRow } from "../SettingsRow";
@@ -526,7 +527,7 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
             label="Background work budget"
             state={budget.state}
             onRetry={() => void budget.refresh()}
-            share={{ prefix: "knowledge-", noun: "Knowledge work" }}
+            share={{ workTypes: KNOWLEDGE_WORK_TYPES, noun: "Knowledge work" }}
             testId="knowledge-budget-status"
           />
         </div>
