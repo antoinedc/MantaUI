@@ -11,13 +11,14 @@
 // placement — the whole point is that the two meters can never be confused.
 // Never share code, colours, or thresholds between them.
 
-import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { ProviderView, SeatProviderId, SeatView, UsageWindow } from "../shared/types";
 import {
   combinedSeatWindows,
   cssVar,
   findSeat,
   formatLastMove,
+  formatResetHeadline,
   formatUpdatedAgo,
   formatWindowReset,
   hasSeatChoice,
@@ -27,7 +28,6 @@ import {
   orderOtherSeats,
   seatBarWindows,
   seatDialSnapshot,
-  seatResetHint,
   seatStateText,
   selectConversationSeat,
   selectProviderView,
@@ -35,11 +35,15 @@ import {
   usageDialState,
   usageStale,
   usageWindowBlocker,
+  windowNoun,
+  windowProgress,
+  windowResetState,
   type UsageDialTone,
 } from "./chatUtils";
 import { useStore } from "./store";
 import { Popover } from "./Popover";
 import { Pill } from "./Pill";
+import { ResetTimer } from "./ResetTimer";
 import { openAccountsSettings, refreshAccounts, refreshSessionSeat } from "./accountsData";
 import { CROSS_ORG_CONFIRM_COPY, useSeatSwitch } from "./hooks/useSeatSwitch";
 
@@ -336,8 +340,6 @@ function UsagePopoverBody({
 }) {
   const switcher = useSeatSwitch(view);
   const lastMove = formatLastMove(sessionSeat?.lastMove, nowMs);
-  const groups = multi ? orderOtherSeats(view, current?.seat.id ?? null) : [];
-  const otherCount = groups.reduce((n, g) => n + g.seats.length, 0);
   const nextId = view && view.mode === "auto" ? nextSeatHint(view, current?.seat.id ?? null, nowMs) : null;
   // No assignment yet (a brand-new conversation): the windows above are the
   // aggregate — the seat a new conversation would start on. Say so.
@@ -346,6 +348,7 @@ function UsagePopoverBody({
 
   // The seat the header names: this conversation's, or where a new one starts.
   const headerSeat = current ?? startsOn;
+  const groups = multi ? orderOtherSeats(view, headerSeat?.seat.id ?? null) : [];
 
   const seatName = (c: { seat: SeatView; account: { label: string; seats: SeatView[] } }) =>
     c.account.seats.length > 1 ? `${c.account.label} · ${c.seat.label}` : c.account.label;
@@ -407,16 +410,7 @@ function UsagePopoverBody({
         </div>
       )}
 
-      <div className="flex flex-col gap-3">
-        {snapshot.windows.map((w) => (
-          <UsageWindowRow
-            key={w.kind}
-            usageWindow={w}
-            nowMs={nowMs}
-            blockedBy={usageWindowBlocker(snapshot.windows, w)}
-          />
-        ))}
-      </div>
+      <ResetCards windows={snapshot.windows} nowMs={nowMs} />
       {snapshot.windows.some((w) => w.tone == null) && (
         <div className="mt-2 w-0 min-w-full break-words text-meta text-text-faint">Update your box to see usage colours.</div>
       )}
@@ -439,37 +433,29 @@ function UsagePopoverBody({
         </div>
       )}
 
-      {otherCount > 0 && view && (
-        <div className="mt-3 pt-3 border-t border-border-subtle" data-testid="usage-other-seats">
-          <div className="mb-1 text-label font-medium text-text-faint">Other seats</div>
-          {/* Every seat is listed in full — the popover grows to fit rather
-              than scrolling a nested list. */}
-          <div className="manta-seat-list flex flex-col gap-2">
-            {groups.map((g) => (
-              <div key={g.accountId} className="flex flex-col gap-2">
-                {g.showHeading && (
-                  <div className="text-label text-text-faint truncate">{g.label}</div>
-                )}
-                {g.seats.map((seat) => (
-                  <OtherSeatRow
-                    key={seat.id}
-                    seat={seat}
-                    view={view}
-                    isNext={nextId === seat.id}
-                    nowMs={nowMs}
-                    switcher={switcher}
-                    onResign={() => {
-                      const t = resignTarget(seat, g.label);
-                      if (t) onResign(t);
-                    }}
-                  />
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
+      {multi && view && (
+        <SeatTable
+          view={view}
+          columns={seatBarWindows(snapshot.windows)}
+          first={
+            headerSeat
+              ? {
+                  seat: headerSeat.seat,
+                  name: seatName(headerSeat),
+                  sub: current ? "this conversation" : "new conversations start here",
+                }
+              : null
+          }
+          groups={groups}
+          nextId={nextId}
+          nowMs={nowMs}
+          switcher={switcher}
+          onResign={(seat, accountLabel) => {
+            const t = resignTarget(seat, accountLabel);
+            if (t) onResign(t);
+          }}
+        />
       )}
-
 
       <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between gap-2">
         {multi ? (
@@ -516,128 +502,366 @@ function LoggedOutBadge({ seat, onClick }: { seat: SeatView; onClick: () => void
 
 type UsageSnapshotLike = NonNullable<ReturnType<typeof selectUsageSnapshot>>;
 
-// One compact "Other seats" row: label (+ the "next" tag in automatic mode),
-// a second line of facts, two thin bars, and — in manual mode — the Use button.
-function OtherSeatRow({
-  seat,
+const clampPct = (n: number) => Math.max(0, Math.min(100, n));
+
+// A usage bar: the coloured fill is how much of the quota is used, the small
+// white dot is how far through its window "now" is (fill ahead of the dot =
+// burning faster than the window). No dot when the position isn't known.
+export function WindowBar({ w, nowMs, small = false }: { w: UsageWindow; nowMs: number; small?: boolean }) {
+  const empty = w.active === false || windowResetState(w, nowMs) === "resetting";
+  const progress = windowProgress(w, nowMs);
+  const dot = small ? 3 : 4;
+  return (
+    <span
+      className={`relative block w-full rounded-full bg-fill-active ${small ? "h-[5px]" : "h-[6px]"}`}
+      title={progress != null ? `${Math.round(progress * 100)}% of the way through this window` : undefined}
+    >
+      <span
+        className="absolute inset-y-0 left-0 rounded-full"
+        style={{
+          width: `${empty ? 0 : clampPct(w.pct)}%`,
+          backgroundColor: toneRingColor(empty ? "under" : w.tone),
+        }}
+      />
+      {progress != null && (
+        <span
+          data-window-dot="true"
+          className="absolute top-1/2 rounded-full"
+          style={{
+            left: `${Math.max(4, Math.min(96, progress * 100))}%`,
+            width: dot,
+            height: dot,
+            transform: "translate(-50%, -50%)",
+            backgroundColor: "var(--usage-dot)",
+            boxShadow: "0 0 0 1px var(--usage-dot-ring)",
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+// The conversation's seat: one card per bar window (5-hour + weekly) with the
+// absolute reset as the headline, then a faint line for every other window.
+function ResetCards({ windows, nowMs }: { windows: UsageWindow[]; nowMs: number }) {
+  const cards = seatBarWindows(windows);
+  if (cards.length === 0) return null;
+  const extras = windows.filter((w) => !cards.includes(w));
+  return (
+    <>
+      <div
+        className={`grid gap-2 mb-[10px] ${cards.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
+        data-testid="usage-reset-cards"
+      >
+        {cards.map((w) => (
+          <ResetCard key={w.kind} w={w} blockedBy={usageWindowBlocker(windows, w)} nowMs={nowMs} />
+        ))}
+      </div>
+      {extras.length > 0 ? (
+        <div className="mb-3 flex flex-col gap-1 text-meta text-text-faint" data-testid="usage-extra-windows">
+          {extras.map((w) => (
+            <ExtraWindowLine key={w.kind} w={w} cards={cards} nowMs={nowMs} />
+          ))}
+        </div>
+      ) : (
+        <div className="mb-1" />
+      )}
+    </>
+  );
+}
+
+function ResetCard({ w, blockedBy, nowMs }: { w: UsageWindow; blockedBy: UsageWindow | null; nowMs: number }) {
+  const state = windowResetState(w, nowMs);
+  const headline =
+    state === "resetting"
+      ? "Resetting…"
+      : state === "not-started"
+        ? "Not started"
+        : state === "no-reset"
+          ? "—"
+          : formatResetHeadline(w.resetsAt, nowMs);
+  return (
+    <div
+      data-testid="usage-reset-card"
+      data-window-kind={w.kind}
+      data-blocked={blockedBy ? "true" : undefined}
+      className={
+        "rounded-md border border-border-subtle bg-inset px-[10px] pt-[9px] pb-[10px]" + (blockedBy ? " opacity-50" : "")
+      }
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-micro uppercase text-text-faint">{windowNoun(w)} · resets</span>
+        <span className="font-mono text-meta tabular-nums text-text-muted">
+          {state === "resetting" ? "—" : `${Math.round(clampPct(w.pct))}%`}
+        </span>
+      </div>
+      <div className="mt-[3px] text-prose font-semibold text-text">{headline}</div>
+      <div className="text-meta text-text-faint">
+        {blockedBy ? (
+          `not usable until the ${blockedBy.label} limit resets`
+        ) : state === "scheduled" ? (
+          <ResetTimer resetsAt={w.resetsAt as number} startedAt={w.startedAt} nowMs={nowMs} className="text-text-muted" />
+        ) : state === "not-started" ? (
+          "starts on first use"
+        ) : null}
+      </div>
+      <div className="mt-2">
+        <WindowBar w={w} nowMs={nowMs} />
+      </div>
+    </div>
+  );
+}
+
+function ExtraWindowLine({ w, cards, nowMs }: { w: UsageWindow; cards: UsageWindow[]; nowMs: number }) {
+  if (w.active === false) return <div>{w.label} · not active</div>;
+  const state = windowResetState(w, nowMs);
+  if (state === "resetting") return <div>{w.label} · resetting…</div>;
+  const head = `${w.label} ${Math.round(clampPct(w.pct))}%`;
+  const shared = state === "scheduled" ? cards.find((c) => c.resetsAt === w.resetsAt) : undefined;
+  if (shared) return <div>{`${head} · resets with the ${windowNoun(shared).toLowerCase()} window`}</div>;
+  if (state === "scheduled") {
+    return (
+      <div>
+        {head} · <ResetTimer resetsAt={w.resetsAt as number} startedAt={w.startedAt} nowMs={nowMs} className="text-text-muted" />
+      </div>
+    );
+  }
+  return <div>{head}</div>;
+}
+
+type SeatTableFirst = { seat: SeatView; name: string; sub: string };
+
+// Every seat of the provider, one row each, with its 5-hour and weekly window as
+// a figure + countdown + bar. The conversation's seat (or the one a new
+// conversation starts on) leads, highlighted; the rest follow in the box's order.
+function SeatTable({
   view,
-  isNext,
+  columns,
+  first,
+  groups,
+  nextId,
   nowMs,
   switcher,
   onResign,
 }: {
-  seat: SeatView;
   view: ProviderView;
-  isNext: boolean;
+  columns: UsageWindow[];
+  first: SeatTableFirst | null;
+  groups: ReturnType<typeof orderOtherSeats>;
+  nextId: string | null;
   nowMs: number;
   switcher: ReturnType<typeof useSeatSwitch>;
-  onResign: () => void;
+  onResign: (seat: SeatView, accountLabel: string) => void;
 }) {
+  const span = columns.length + 1;
+  return (
+    <div className="mt-3 pt-3 border-t border-border-subtle" data-testid="usage-seat-table">
+      <table className="manta-seat-list w-full table-fixed border-collapse text-label">
+        <colgroup>
+          <col />
+          {columns.map((c) => (
+            <col key={c.kind} style={{ width: 118 }} />
+          ))}
+        </colgroup>
+        <thead>
+          <tr>
+            <th className="pb-[6px] pl-2 text-left text-micro font-medium uppercase text-text-faint">Seat</th>
+            {columns.map((c) => (
+              <th key={c.kind} className="pb-[6px] pl-[14px] text-left text-micro font-medium uppercase text-text-faint">
+                {windowNoun(c)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {first && (
+            <SeatRow
+              seat={first.seat}
+              name={first.name}
+              sub={first.sub}
+              highlighted
+              isNext={false}
+              columns={columns}
+              view={view}
+              nowMs={nowMs}
+              switcher={switcher}
+              onResign={null}
+              span={span}
+            />
+          )}
+          {groups.map((g) => (
+            <Fragment key={g.accountId}>
+              {g.showHeading && (
+                <tr>
+                  <td colSpan={span} className="truncate pl-2 pt-2 text-meta text-text-faint">
+                    {g.label}
+                  </td>
+                </tr>
+              )}
+              {g.seats.map((seat) => (
+                <SeatRow
+                  key={seat.id}
+                  seat={seat}
+                  name={seat.label}
+                  sub={null}
+                  highlighted={false}
+                  isNext={nextId === seat.id}
+                  columns={columns}
+                  view={view}
+                  nowMs={nowMs}
+                  switcher={switcher}
+                  onResign={() => onResign(seat, g.label)}
+                  span={span}
+                />
+              ))}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SeatRow({
+  seat,
+  name,
+  sub,
+  highlighted,
+  isNext,
+  columns,
+  view,
+  nowMs,
+  switcher,
+  onResign,
+  span,
+}: {
+  seat: SeatView;
+  name: string;
+  sub: string | null;
+  highlighted: boolean;
+  isNext: boolean;
+  columns: UsageWindow[];
+  view: ProviderView;
+  nowMs: number;
+  switcher: ReturnType<typeof useSeatSwitch>;
+  onResign: (() => void) | null;
+  span: number;
+}) {
+  // The leading row has no onResign: its Logged out badge is in the seat line above.
   const broken = seatStateText(seat.status);
-  const facts = [
-    seatResetHint(seat, nowMs),
-  ].filter(Boolean) as string[];
   const confirming = switcher.confirmId === seat.id;
   const busy = switcher.busyId === seat.id;
   const crossOrg = !isSameOrgMove(view, view.activeSeatId, seat.id);
+  const cell = "border-t border-border-subtle pt-2 pb-[9px] align-top" + (highlighted ? " bg-accent-bg" : "");
   return (
-    <div data-seat-id={seat.id} className="flex flex-col gap-1">
-      <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1 text-meta text-text min-w-0">
-            <span className="truncate">{seat.label}</span>
-            {broken && <LoggedOutBadge seat={seat} onClick={onResign} />}
+    <>
+      <tr data-seat-id={seat.id} data-current={highlighted ? "true" : undefined}>
+        <td
+          className={`${cell} pl-2 break-words`}
+          style={highlighted ? { boxShadow: "inset 2px 0 0 var(--accent)" } : undefined}
+        >
+          <div className="flex flex-wrap items-center gap-x-1 text-text">
+            <span className="min-w-0 break-words">{name}</span>
+            {broken && onResign && <LoggedOutBadge seat={seat} onClick={onResign} />}
             {isNext && (
               <span
-                className="manta-seat-next shrink-0 rounded-xs px-1 text-label bg-accent-bg text-accent"
+                className="manta-seat-next shrink-0 rounded-xs px-1 text-meta bg-accent-bg text-accent"
                 title="Where a move would go"
               >
                 next
               </span>
             )}
           </div>
-          {facts.length > 0 && <div className="text-label text-text-faint truncate">{facts.join(" · ")}</div>}
-        </div>
-        <SeatMiniBars seat={seat} nowMs={nowMs} />
-        {view.mode === "manual" && (
-          <button
-            type="button"
-            onClick={() => switcher.request(seat)}
-            disabled={switcher.busyId !== null || broken !== null}
-            title={broken ? `${seat.label} is ${broken} — sign it back in first` : `Use ${seat.label} for every conversation`}
-            className="shrink-0 px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
-          >
-            {busy ? "…" : "Use"}
-          </button>
-        )}
-      </div>
+          {sub && <div className="text-meta text-text-faint">{sub}</div>}
+          {!highlighted && view.mode === "manual" && (
+            <button
+              type="button"
+              onClick={() => switcher.request(seat)}
+              disabled={switcher.busyId !== null || broken !== null}
+              title={broken ? `${seat.label} is ${broken} — sign it back in first` : `Use ${seat.label} for every conversation`}
+              className="text-meta text-text-muted underline decoration-dotted hover:text-text disabled:opacity-40"
+            >
+              {busy ? "…" : "Use this seat"}
+            </button>
+          )}
+        </td>
+        {columns.map((c, i) => (
+          <td key={c.kind} className={`${cell} whitespace-nowrap pl-[14px] ${i === columns.length - 1 ? "pr-2" : ""}`}>
+            <SeatWindowCell seat={seat} reference={c} index={i} nowMs={nowMs} />
+          </td>
+        ))}
+      </tr>
       {confirming && (
-        <div role="alert" className="w-0 min-w-full break-words rounded-xs border border-border bg-bg px-2 py-1 text-label text-text-muted">
-          <div>{crossOrg ? CROSS_ORG_CONFIRM_COPY : ""} Switch every conversation to {seat.label}?</div>
-          <div className="mt-1 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void switcher.apply(seat)}
-              disabled={busy}
-              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text hover:text-text disabled:opacity-40"
-            >
-              {busy ? "…" : "Switch"}
-            </button>
-            <button
-              type="button"
-              onClick={switcher.cancel}
-              disabled={busy}
-              className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <tr>
+          <td colSpan={span} className="pb-2 pl-2 pr-2">
+            <div role="alert" className="w-0 min-w-full break-words rounded-xs border border-border bg-bg px-2 py-1 text-label text-text-muted">
+              <div>{crossOrg ? CROSS_ORG_CONFIRM_COPY : ""} Switch every conversation to {seat.label}?</div>
+              <div className="mt-1 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void switcher.apply(seat)}
+                  disabled={busy}
+                  className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text hover:text-text disabled:opacity-40"
+                >
+                  {busy ? "…" : "Switch"}
+                </button>
+                <button
+                  type="button"
+                  onClick={switcher.cancel}
+                  disabled={busy}
+                  className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   );
 }
 
-// The compact seat meter: the 5h and weekly windows as two thin bars with
-// their percentages. Shares the popover's colour ladder (toneRingColor) so a
-// seat can never read green here and red in the ring.
-export function SeatMiniBars({ seat, nowMs: _nowMs }: { seat: SeatView; nowMs: number }) {
-  const windows = seatBarWindows(seat.windows);
-  if (windows.length === 0) {
-    return <span className="shrink-0 w-[104px] text-label text-text-faint text-right">no reading yet</span>;
-  }
+// One seat's reading for one column: the figure, the countdown only (never a
+// date — the card above and the tooltip carry that), and the bar. Shares the
+// popover's colour ladder (toneRingColor) so a seat can never read green here
+// and red in the ring.
+function SeatWindowCell({ seat, reference, index, nowMs }: { seat: SeatView; reference: UsageWindow; index: number; nowMs: number }) {
+  const bars = seatBarWindows(seat.windows);
+  if (bars.length === 0) return <span className="text-meta text-text-faint">no reading</span>;
+  const w = bars.find((b) => b.kind === reference.kind) ?? bars[index];
+  if (!w) return <span className="text-meta text-text-faint">—</span>;
+  const state = windowResetState(w, nowMs);
+  const blockedBy = usageWindowBlocker(seat.windows, w);
+  const hot = state !== "resetting" && (w.tone === "warn" || w.tone === "danger" || w.tone === "over");
   return (
-    <div className="shrink-0 w-[104px] flex flex-col gap-[3px]" data-testid="seat-mini-bars">
-      {windows.map((w) => {
-        const awaiting = w.stale === true;
-        const pct = awaiting ? 0 : Math.max(0, Math.min(100, w.pct));
-        const blockedBy = usageWindowBlocker(seat.windows, w);
-        return (
-          <div
-            key={w.kind}
-            className={"flex items-center gap-1" + (blockedBy ? " opacity-40" : "")}
-            data-window-kind={w.kind}
-            data-blocked={blockedBy ? "true" : undefined}
-            title={blockedBy ? `Not usable until the ${blockedBy.label} limit resets` : undefined}
-          >
-            <span className="w-5 truncate text-label text-text-faint">{w.label}</span>
-            <span className="flex-1 h-[3px] rounded-xs bg-fill-active overflow-hidden">
-              <span
-                className="block h-full"
-                style={{ width: `${pct}%`, backgroundColor: toneRingColor(awaiting ? "under" : w.tone) }}
-              />
-            </span>
-            <span className="w-7 text-right font-mono text-label tabular-nums text-text-muted">
-              {awaiting ? "—" : `${Math.round(w.pct)}%`}
-            </span>
-          </div>
-        );
-      })}
+    <div
+      data-window-kind={w.kind}
+      data-blocked={blockedBy ? "true" : undefined}
+      className={blockedBy ? "opacity-40" : undefined}
+      title={blockedBy ? `Not usable until the ${blockedBy.label} limit resets` : undefined}
+    >
+      <div className="mb-[5px] flex items-baseline justify-between gap-2">
+        <span
+          className={"font-mono font-medium tabular-nums" + (hot ? "" : " text-text")}
+          style={hot ? { color: toneRingColor(w.tone) } : undefined}
+        >
+          {state === "resetting" ? "—" : `${Math.round(clampPct(w.pct))}%`}
+        </span>
+        {state === "scheduled" ? (
+          <ResetTimer resetsAt={w.resetsAt as number} startedAt={w.startedAt} nowMs={nowMs} className="text-meta text-text-muted" />
+        ) : state === "resetting" ? (
+          <span className="text-meta text-text-faint">resetting…</span>
+        ) : state === "not-started" ? (
+          <span className="text-meta text-text-faint">not started</span>
+        ) : null}
+      </div>
+      <WindowBar w={w} nowMs={nowMs} small />
     </div>
   );
 }
 
-// One window's row in the popover: label, right-aligned value, a 7px track
+// One window's row (Settings → Accounts): label, right-aligned value, a 7px track
 // + fill, and a reset line. The component iterates `snapshot.windows` — it
 // never hardcodes "session"/"weekly" so a provider with a third window (or a
 // daily one) renders with zero changes here.

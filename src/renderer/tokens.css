@@ -276,6 +276,10 @@
   --fill: rgba(255, 255, 255, .04);
   --fill-hover: rgba(255, 255, 255, .07);
   --fill-active: rgba(255, 255, 255, .10);
+  /* "Where we are in the window" dot on the usage bars: white with a thin dark
+     ring so it reads on both the track and the coloured fill. */
+  --usage-dot: #FFFFFF;
+  --usage-dot-ring: rgb(0 0 0 / 0.45);
   --diff-add: #12351f;
   --diff-del: #3a1720;
 
@@ -354,6 +358,8 @@
   --fill: rgba(26, 24, 21, .035);
   --fill-hover: rgba(26, 24, 21, .06);
   --fill-active: rgba(26, 24, 21, .09);
+  --usage-dot: #FFFFFF;
+  --usage-dot-ring: rgb(26 24 21 / 0.55);
   --diff-add: #E4F4E9;
   --diff-del: #FCEAEC;
 

@@ -28,7 +28,43 @@ export const POPOVER_SURFACE =
   "manta-menu-in rounded-lg border border-border bg-bg-soft shadow-lg";
 
 export type PopoverPlacement = "below" | "above";
-export type PopoverAlign = "start" | "end";
+export type PopoverAlign = "start" | "end" | "center";
+
+type PlaceRect = { top: number; bottom: number; left: number; right: number };
+
+/**
+ * The ONE placement computation behind Popover and the reset tooltip
+ * (ResetTimer): prefer `placement`, flip to the other side only when the
+ * preferred one cannot fit the surface and the other has more room, then clamp
+ * into the viewport with an 8px margin. Pure — rects and sizes in, top/left out.
+ */
+export function placeFloating(
+  anchor: PlaceRect,
+  size: { width: number; height: number },
+  viewport: { width: number; height: number },
+  placement: PopoverPlacement,
+  align: PopoverAlign,
+  gap = 4,
+): { top: number; left: number; side: PopoverPlacement } {
+  const w = size.width || 0;
+  const h = size.height || 0;
+  const roomAbove = anchor.top - 8;
+  const roomBelow = viewport.height - anchor.bottom - 8;
+  const side: PopoverPlacement =
+    placement === "above" && h + gap > roomAbove && roomBelow > roomAbove
+      ? "below"
+      : placement === "below" && h + gap > roomBelow && roomAbove > roomBelow
+        ? "above"
+        : placement;
+  const top = side === "below" ? anchor.bottom + gap : anchor.top - h - gap;
+  const left =
+    align === "end" ? anchor.right - w : align === "center" ? (anchor.left + anchor.right) / 2 - w / 2 : anchor.left;
+  return {
+    top: Math.max(8, Math.min(top, viewport.height - h - 8)),
+    left: Math.max(8, Math.min(left, viewport.width - w - 8)),
+    side,
+  };
+}
 
 export function Popover({
   open,
@@ -80,26 +116,15 @@ export function Popover({
     const panel = resolvedPanel.current;
     if (!anchor || !panel) return;
     const compute = () => {
-      const r = anchor.getBoundingClientRect();
       const p = panel.getBoundingClientRect();
-      const w = p.width || 0;
-      const h = p.height || 0;
-      // Flip to the side with room when the preferred side can't fit the surface
-      // (a tall menu opened "above" a control in the middle of a modal).
-      const roomAbove = r.top - 8;
-      const roomBelow = window.innerHeight - r.bottom - 8;
-      const side =
-        placement === "above" && h + 4 > roomAbove && roomBelow > roomAbove
-          ? "below"
-          : placement === "below" && h + 4 > roomBelow && roomAbove > roomBelow
-            ? "above"
-            : placement;
-      const top = side === "below" ? r.bottom + 4 : r.top - h - 4;
-      const left = align === "end" ? r.right - w : r.left;
-      setPos({
-        top: Math.max(8, Math.min(top, window.innerHeight - h - 8)),
-        left: Math.max(8, Math.min(left, window.innerWidth - w - 8)),
-      });
+      const { top, left } = placeFloating(
+        anchor.getBoundingClientRect(),
+        { width: p.width, height: p.height },
+        { width: window.innerWidth, height: window.innerHeight },
+        placement,
+        align,
+      );
+      setPos({ top, left });
     };
     compute();
     window.addEventListener("resize", compute);
