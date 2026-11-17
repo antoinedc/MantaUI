@@ -303,7 +303,7 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         // stay reachable instead of being clipped off-screen.
         surfaceClassName="w-max min-w-[420px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden p-4"
         // A third window column needs room: 110px more for each one past two.
-        surfaceStyle={columns.length > 2 ? { minWidth: usagePopoverMinWidth(columns.length) } : undefined}
+        surfaceStyle={columns.length > 2 ? { minWidth: `min(${usagePopoverMinWidth(columns.length)}px, calc(100vw - 16px))` } : undefined}
       >
         <UsagePopoverBody
           snapshot={snapshot}

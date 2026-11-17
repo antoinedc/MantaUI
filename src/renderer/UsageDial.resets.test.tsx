@@ -186,7 +186,7 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     expect(p.textContent).not.toContain("resets with the");
     expect(p.textContent).not.toContain("Sonnet");
     expect(p.textContent).not.toContain("not active");
-    expect(p.style.minWidth).toBe("530px"); // 420 + 110 for the third column
+    expect(p.getAttribute("style") ?? "").toContain("530px"); // 420 + 110 for the third column
   });
 
   it("two window columns keep the 420px minimum", async () => {
@@ -296,7 +296,7 @@ describe("seat table", () => {
     expect(third("s3").textContent).toBe("—");
     expect(third("s2").textContent).toContain("100%");
     expect(third("s2").querySelector("[data-window-kind]")!.getAttribute("data-window-kind")).toBe("weekly_scoped:fable");
-    expect(p.style.minWidth).toBe("530px");
+    expect(p.getAttribute("style") ?? "").toContain("530px");
   });
 
   it("the conversation's seat has the window, the others don't: they show a dash", async () => {
