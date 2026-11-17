@@ -325,3 +325,44 @@ test("dead ctoBackfillCapUsd/ctoBackfillDays config lookups are gone; overrides 
   assert.ok(src.includes("capUsd ?? DEFAULT_BACKFILL_CAP_USD"), "explicit override, else the fallback constant");
   assert.ok(src.includes("depthDays ?? DEFAULT_BACKFILL_DAYS"), "explicit override, else the fallback constant");
 });
+
+// ---------------------------------------------------------------------------
+// Background work budget (spec 2026-11-17 §8): batch work starts only when the shared budget says so
+// ---------------------------------------------------------------------------
+
+test("startGate: a refused step does no work and stays due (since when is remembered); a passing gate lets it run", async () => {
+  const NOW = 1000 * DAY;
+  let dbCalls = 0;
+  const gates = [];
+  let verdict = { ok: false, reason: "usd-cap" };
+  const engineState = memStore();
+  const backfill = createCtoBackfill({
+    configGet: async () => ({ ctoEnabled: true }),
+    engineState,
+    ledger: noopLedger,
+    getDb: async () => {
+      dbCalls += 1;
+      return null;
+    },
+    startGate: async (a) => {
+      gates.push(a);
+      return verdict;
+    },
+    presenceCheck: AWAY,
+    now: () => NOW,
+  });
+  const refused = await backfill.step();
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "budget");
+  assert.equal(refused.detail, "usd-cap");
+  assert.equal(dbCalls, 0, "no work when the budget refuses");
+  assert.equal(engineState._data.backfillStartInstant, undefined, "the watermark is not recorded until it may start");
+  assert.equal(engineState._data.backfillDueSince, NOW);
+
+  await backfill.step();
+  assert.equal(gates[1].dueSince, NOW, "the due-since instant is kept across retries (the 48 h overdue rule)");
+
+  verdict = { ok: true };
+  await backfill.step();
+  assert.equal(dbCalls, 1, "a passing gate lets the step proceed");
+});

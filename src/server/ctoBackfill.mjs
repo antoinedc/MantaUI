@@ -17,6 +17,10 @@
 //   - Batch-priority: reduce calls (summaries/rollups) run only while presence
 //     is not "present" (away/gone/unknown-with-no-recent-activity), yielding
 //     between calls via the injected presenceCheck.
+//   - Background budget (spec 2026-11-17): the backfill is BATCH work (`cto-backfill`). Its model calls are
+//     gated + metered by the shared budget through the runner it is handed (the preflight / reportCost the
+//     composition root injects); `startGate` is the §8 "good moment" test for starting a step. The lifetime
+//     bound above stays on top.
 //   - Once per box: guarded by an `engine-state.json` marker (backfillDone);
 //     a re-enable of the CTO does not re-run it.
 //
@@ -138,6 +142,9 @@ export function createCtoBackfill(deps = {}) {
     getDb = null, // async () => read-only opencode db | null (index.mjs supplies the real handle)
     presenceCheck = async () => false, // true when present → stop/yield (batch-priority)
     now = () => Date.now(),
+    // async ({dueSince}) => {ok, reason?} — the shared budget's start test for batch work (check + a quiet moment);
+    // absent → no extra gate (the runner's own preflight still refuses every call it must).
+    startGate = null,
     capUsd = null, // explicit override; else DEFAULT_BACKFILL_CAP_USD
     depthDays = null, // explicit override; else DEFAULT_BACKFILL_DAYS
     maxSessionsPerStep = MAX_SESSIONS_PER_STEP,
@@ -432,6 +439,20 @@ export function createCtoBackfill(deps = {}) {
     if (cfg?.ctoEnabled !== true) return { ok: false, reason: "disabled", progress: progressFrom(st) };
     // Batch-priority: yield while present.
     if (await presenceCheck().catch(() => false)) return { ok: false, reason: "present", progress: progressFrom(st) };
+
+    // Background budget (§8): a due batch job starts only when the budget passes and it is a good moment. A refused
+    // step stays due — the engine tick retries it — and remembers since when (the 48 h "must not starve" rule).
+    if (typeof startGate === "function") {
+      const dueSince = st?.backfillDueSince ?? at;
+      if (!st?.backfillDueSince) await saveState({ backfillDueSince: dueSince });
+      let gate = null;
+      try {
+        gate = await startGate({ dueSince });
+      } catch {
+        gate = { ok: false, reason: "unavailable" };
+      }
+      if (!gate?.ok) return { ok: false, reason: "budget", detail: gate?.reason ?? "unavailable", progress: progressFrom(st) };
+    }
 
     // Kick-off: record the watermark once. Live ingestion owns ts ≥ it forever
     // as far as the backfill is concerned.

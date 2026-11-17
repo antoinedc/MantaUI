@@ -28,6 +28,16 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
   const pausedJobs = [];
   const listedJobs = [];
   const vetoCards = [];
+  // The shared background budget, faked: `decision` answers `check`, `moment` answers `goodMomentForBatch`,
+  // `pin` is what the overnight model resolver returns (null → no ticked model, spec 2026-11-17 §17.13).
+  const budgetCtl = {
+    decision: { ok: true },
+    moment: { ok: true, rule: "away", reason: null },
+    pin: { providerID: "anthropic", modelID: "claude-opus-4" },
+    checks: [],
+    moments: [],
+    pinCandidates: [],
+  };
 
   // Raw engine-state writer (the shared shape of the production writers).
   // BET-1403 (cycle 4): a `trust` key in the payload is IGNORED — the trust
@@ -94,7 +104,22 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
     },
     publish: (evt) => published.push(evt),
     getCounts: async () => ({ needsYouCount: 0, generationInFlight: false, tonightCount: 0 }),
-    budget: { isCapHit: async () => false, record: async () => ({ usd: 0, dayKey: "0" }) },
+    budget: { record: async () => ({ usd: 0, dayKey: "0" }) },
+    backgroundBudget: {
+      check: async (a) => {
+        budgetCtl.checks.push(a);
+        return budgetCtl.decision;
+      },
+      goodMomentForBatch: async (a) => {
+        budgetCtl.moments.push(a);
+        return budgetCtl.moment;
+      },
+      usdToday: () => 0,
+    },
+    resolveOvernightModel: async (cand) => {
+      budgetCtl.pinCandidates.push(cand);
+      return budgetCtl.pin;
+    },
     cards: {
       onAskStart: async () => {},
       onAskResolved: async () => ({ changed: false }),
@@ -137,6 +162,7 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
 
   return {
     engine,
+    budgetCtl,
     clock,
     now,
     overnight,
@@ -746,4 +772,84 @@ test("overnight: canceling mid-run pauses the job and vetoes the rest of the tro
   await h.engine.tick();
   assert.notEqual(h.overnightStoreObj.window?.state, "open", "no re-open after a mid-run cancel");
   assert.equal(h.startedJobs.length, 1, "no further dispatch on a vetoed trough");
+});
+
+// ---------------------------------------------------------------------------
+// Background work budget (spec 2026-11-17 §7.3, §17.12–14): per-dispatch gate, pinned model
+// ---------------------------------------------------------------------------
+
+test("budget: a dispatch is pinned to the checked model and marked as overnight budget work", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW] });
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 1);
+  assert.deepEqual(h.startedJobs[0].model, { providerID: "anthropic", modelID: "claude-opus-4" });
+  assert.equal(h.startedJobs[0].budgetWorkType, "cto-overnight");
+  // the budget was asked about exactly that model, and a good moment for batch work was required
+  assert.deepEqual(h.budgetCtl.checks[0], { workType: "cto-overnight", model: h.startedJobs[0].model });
+  assert.equal(h.budgetCtl.moments[0].workType, "cto-overnight");
+  assert.deepEqual(h.budgetCtl.moments[0].model, h.startedJobs[0].model);
+  assert.equal(h.budgetCtl.moments[0].dueSince, QUEUE_TASK.addedMs, "the 48 h overdue rule counts from when the task was queued");
+});
+
+test("budget: a default-cost candidate IS selected and started when the budget seam allows (spendableFrac null) — and nothing when it refuses (0)", async () => {
+  const allowed = makeHarness({ trough: TROUGH, queue: [{ ...QUEUE_TASK, predictedCost: undefined }], projects: [PROJECT_ROW], budgetPlan: { spendableFrac: null } });
+  await allowed.engine.tick();
+  assert.equal(allowed.startedJobs.length, 1);
+
+  const refused = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW], budgetPlan: { spendableFrac: 0 } });
+  await refused.engine.tick();
+  assert.equal(refused.startedJobs.length, 0, "a refusing seam selects nothing");
+  assert.deepEqual(refused.engineStateObj.tonightQueue, [QUEUE_TASK], "the row stays queued");
+});
+
+test("budget: nothing is dispatched after a usd-cap refusal; one budget_refused row per reason per night; the retry starts it when the budget allows", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW] });
+  h.budgetCtl.decision = { ok: false, reason: "usd-cap" };
+  await h.engine.tick();
+  h.advance(60_000);
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
+  assert.equal(h.budgetCtl.moments.length, 0, "no good-moment test once the budget has refused");
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "cto.overnight.budget_refused" && r.reason === "usd-cap").length, 1);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "cto.overnight.night_cap_hit").length, 0, "the old night-cap row is gone");
+  assert.deepEqual(h.engineStateObj.tonightQueue, [QUEUE_TASK]);
+
+  // a different reason ledgers once of its own
+  h.budgetCtl.decision = { ok: false, reason: "window-busy" };
+  h.advance(60_000);
+  await h.engine.tick();
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "cto.overnight.budget_refused").length, 2);
+
+  // a later tick passes: the same night's window starts the job
+  h.budgetCtl.decision = { ok: true };
+  h.advance(60_000);
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 1);
+});
+
+test("budget: no ticked model → no dispatch and a budget_refused no-model row; a refusal never pauses a running job", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW] });
+  h.budgetCtl.pin = null;
+  h.listedJobs.push({ id: "r1", actor: "cto", status: "running" });
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
+  assert.equal(h.budgetCtl.checks.length, 0, "no model → nothing to check");
+  assert.ok(h.ledgerRows.some((r) => r.kind === "cto.overnight.budget_refused" && r.reason === "no-model"));
+  assert.deepEqual(h.pausedJobs, [], "caps bound NEW dispatches only: a running job is never interrupted");
+});
+
+test("budget: a batch job waits for a quiet moment (goodMomentForBatch) and the refusal is ledgered once", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW] });
+  h.budgetCtl.moment = { ok: false, rule: null, reason: "waiting-for-quiet" };
+  await h.engine.tick();
+  h.advance(60_000);
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "cto.overnight.budget_refused" && r.reason === "waiting-for-quiet").length, 1);
+});
+
+test("budget: a candidate's modelHint reaches the pin resolver (queue rows carry it)", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [{ ...QUEUE_TASK, modelHint: "openai/gpt-6-sol" }], projects: [PROJECT_ROW] });
+  await h.engine.tick();
+  assert.equal(h.budgetCtl.pinCandidates[0].modelHint, "openai/gpt-6-sol");
 });

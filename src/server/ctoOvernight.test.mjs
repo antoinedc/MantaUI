@@ -26,6 +26,7 @@ import {
   gitOnlyJobRule,
   lambdaFromSpendable,
   normalizeWindow,
+  pickOvernightModel,
   preemptOnReturn,
   reconcileOnRestart,
   routeRequestShaped,
@@ -731,4 +732,44 @@ test("dataAnalysisCandidatesFromTools consumes a REAL listTools projection: gran
   // And a key that names a DIFFERENT tool grants nothing here either.
   const other = dataAnalysisCandidatesFromTools(await registryFor(["STRIPE_API_KEY"]).listTools());
   assert.equal(other.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Background work budget (spec 2026-11-17 §7.3, §17.12–13)
+// ---------------------------------------------------------------------------
+
+test("a default-cost candidate IS selected when the budget seam allows (spendableFrac null → budgetFrac 1 vs predictedCost 1)", async () => {
+  const store = { v: 1, window: null };
+  const sched = createOvernightScheduler({
+    store: { load: async () => ({ ...store }), save: async (p) => { store.window = p.window; } },
+    now: () => T0,
+    budget: async () => ({ spendableFrac: null }),
+  });
+  const out = await sched.tick({
+    presence: "gone", hasDesktop: true, runNow: true,
+    candidates: [{ id: "c1", name: "x", category: "queue-tonight", value: 1, confidence: 0.8 }],
+  });
+  assert.equal(out.window.state, "open");
+  assert.deepEqual(out.plan.selected.map((c) => c.id), ["c1"]);
+  assert.equal(out.plan.selected[0].predictedCost, DEFAULT_PREDICTED_COST);
+
+  const refusing = createOvernightScheduler({
+    store: { load: async () => ({ v: 1, window: null }), save: async () => {} },
+    now: () => T0,
+    budget: async () => ({ spendableFrac: 0 }),
+  });
+  const none = await refusing.tick({ presence: "gone", hasDesktop: true, runNow: true, candidates: [{ id: "c1", category: "queue-tonight", value: 1, confidence: 0.8 }] });
+  assert.deepEqual(none.plan.selected, [], "spendableFrac 0 selects nothing");
+});
+
+test("pickOvernightModel: the box default when ticked, else the hint when ticked, else null (no dispatch)", () => {
+  const routable = [{ providerID: "anthropic", id: "opus" }, { providerID: "openai", id: "gpt-6-sol" }];
+  const DEFAULT = { providerID: "anthropic", modelID: "opus" };
+  assert.deepEqual(pickOvernightModel({ defaultModel: DEFAULT, modelHint: "openai/gpt-6-sol", routable }), DEFAULT, "the default wins");
+  assert.deepEqual(pickOvernightModel({ defaultModel: { providerID: "anthropic", modelID: "unticked" }, modelHint: "openai/gpt-6-sol", routable }), { providerID: "openai", modelID: "gpt-6-sol" });
+  assert.deepEqual(pickOvernightModel({ defaultModel: null, modelHint: { providerID: "openai", modelID: "gpt-6-sol" }, routable }), { providerID: "openai", modelID: "gpt-6-sol" });
+  assert.equal(pickOvernightModel({ defaultModel: { providerID: "x", modelID: "y" }, modelHint: "a/b", routable }), null);
+  assert.equal(pickOvernightModel({ defaultModel: DEFAULT, routable: [] }), null, "an empty ticked set approves nothing");
+  assert.equal(pickOvernightModel({}), null);
+  assert.equal(pickOvernightModel({ defaultModel: "nonsense", routable }), null);
 });

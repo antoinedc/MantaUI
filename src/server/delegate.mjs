@@ -2796,9 +2796,11 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   if (guardSkipped) return { ok: true, skipped: "guard" };
   if (paused) {
     pauseInterrupts.delete(paused.id);
+    await recordBudgetSpend(paused.id, deps); // outside the jobs lock (§17.14)
     return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };
+  await recordBudgetSpend(updated.id, deps); // the final record catches the rest (§5.4)
   const endedAs = updated.status;
   if (segment) void deps.livenessLog.appendSegment(segment);
 
@@ -3771,6 +3773,7 @@ export async function continueJob(id, input, deps = {}) {
       const job = {
         ...inherited,
         ...livenessFieldsAtLaunch(baseCeiling),
+        budgetRecorded: null, // the successor's usage restarts at 0: so does its cursor
         id: genId(),
         attempt: (old.attempt ?? 1) + 1,
         continues: old.id,
@@ -4200,6 +4203,10 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       correlation: input?.correlation ?? null,
       sweepAllowanceMs: input?.sweepAllowanceMs ?? null,
       permission: input?.permission ?? null,
+      // Background work budget (spec 2026-11-17 §17.14): set for overnight dispatches (`actor:"cto"` alone does not
+      // identify them). The cursor is what has already been booked against the shared budget.
+      budgetWorkType: typeof input?.budgetWorkType === "string" && input.budgetWorkType ? input.budgetWorkType : null,
+      budgetRecorded: null,
       status: "running",
       activity: null,
       createdAt: t,
@@ -4985,6 +4992,47 @@ async function judgeLiveness(job, deps) {
   await endChild(res);
 }
 
+/**
+ * Book a job's spend against the shared background budget (spec 2026-11-17 §5.4, §17.14), INCREMENTALLY: the delta of
+ * `jobProgress.usage` past the persisted cursor `budgetRecorded {tokens, usd}`. Only jobs started as budgeted work
+ * (`budgetWorkType`, the overnight dispatches) are booked. The cursor is advanced under the jobs lock BEFORE the
+ * record is made (at most once: a crash in between loses a delta, it never counts one twice — restart-safe), and the
+ * record itself is made OUTSIDE the lock. The usage is tokens (reasoning included, an approximation of what was sent)
+ * and the session's own cost when it is complete; a partial cost is priced from the tokens by the budget instead.
+ * `inLedger: true`: the job's session persists, so the model ledger counts it. Never throws.
+ */
+async function recordBudgetSpend(jobId, deps) {
+  const { load = loadJobs, save = saveJobs } = deps;
+  if (typeof deps.recordBackgroundUsage !== "function") return;
+  try {
+    const claim = await jobsLock.runExclusive(async () => {
+      const jobs = (await load()) ?? [];
+      const idx = jobs.findIndex((j) => j.id === jobId);
+      const job = idx === -1 ? null : jobs[idx];
+      if (!job || !job.budgetWorkType) return null;
+      const usage = job.jobProgress?.usage ?? {};
+      const cursor = job.budgetRecorded ?? {};
+      const tokens = Math.max(0, Math.round(Number(usage.tokens) || 0));
+      const cost = typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) ? usage.costUsd : null;
+      const dTokens = tokens - Math.max(0, Number(cursor.tokens) || 0);
+      const dUsd = cost !== null && !usage.costPartial ? cost - Math.max(0, Number(cursor.usd) || 0) : 0;
+      if (dTokens <= 0 && !(dUsd > 0)) return null;
+      jobs[idx] = { ...job, budgetRecorded: { tokens: Math.max(tokens, Number(cursor.tokens) || 0), usd: cost ?? (Number(cursor.usd) || 0) } };
+      await save(jobs);
+      return {
+        workType: job.budgetWorkType,
+        model: job.launch?.model ?? job.requestedModel ?? job.model ?? null,
+        usage: Math.max(0, dTokens),
+        usd: dUsd > 0 ? dUsd : undefined,
+        inLedger: true,
+      };
+    });
+    if (claim) await deps.recordBackgroundUsage(claim);
+  } catch (e) {
+    console.warn(`[delegate] booking ${jobId} against the background budget failed:`, e?.message ?? e);
+  }
+}
+
 /** Fold usage / the last-progress time / the file count into a running job's record (once a sweep, at most one write). */
 async function refreshJobProgress(job, deps) {
   const clock = deps.now ?? (() => Date.now());
@@ -5003,6 +5051,7 @@ async function refreshJobProgress(job, deps) {
     if (jp === cur.jobProgress && !lastChanged) return null;
     return { jobProgress: jp, ...(lastChanged ? { lastProgressAt: last } : {}) };
   });
+  await recordBudgetSpend(job.id, deps); // outside the jobs lock (§17.14)
 }
 
 async function sweepLiveness(skipIds, deps) {
