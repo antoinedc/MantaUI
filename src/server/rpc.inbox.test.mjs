@@ -58,7 +58,7 @@ function rig({ withInterp = true } = {}) {
 test("opencode:prompt forwards a valid delivery on an ordinary session and refuses an invalid one", async () => {
   const { handlers, log } = rig();
   await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "x", delivery: "steer" }]);
-  assert.deepEqual(log[0], ["sendPrompt", { sessionId: "ses_a", text: "x", delivery: "steer" }]);
+  assert.deepEqual(log[0], ["sendPrompt", { sessionId: "ses_a", text: "x", delivery: "steer", origin: "user" }]);
   await assert.rejects(dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "x", delivery: "now" }]), /invalid delivery/);
   await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "x" }]);
   assert.equal(log.length, 2, "an absent delivery is an ordinary idle send");

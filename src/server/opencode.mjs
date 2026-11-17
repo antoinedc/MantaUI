@@ -634,6 +634,16 @@ export function getCommandCorrelator() {
   return commandCorrelator;
 }
 
+// Prompt-origin record (promptOrigins.mjs, shared-knowledge §9.2). Null until
+// index.mjs installs the durable store, so a bare import never touches state;
+// with no store nothing is recorded, which reads as "not user-authored".
+let promptOrigins = null;
+
+/** Install the durable prompt-origin store (or null). index.mjs, at boot. */
+export function setPromptOrigins(store) {
+  promptOrigins = store ?? null;
+}
+
 /**
  * THE one place manta-server POSTs `/api/session/{id}/prompt`. It always sends a
  * message id (the caller's, else a freshly minted `msg_…`) and records it in
@@ -641,14 +651,24 @@ export function getCommandCorrelator() {
  * correlator tell a command's user message from ours. A definitive 4xx drops
  * the id again (it never reached the inbox). commandOrigins.test.mjs fails if a
  * session-prompt call appears anywhere else in src/server.
+ *
+ * `origin` (default "unknown") is recorded with the message id before the
+ * request, so a message can later be told apart as user-authored (§9.2). It is
+ * a server-set input: only callers inside manta-server pass it, never a client.
  * @param {string} sessionId
  * @param {{ text: string, id?: string, files?: any[], agents?: any[], skills?: any[], delivery?: "steer"|"queue" }} body
- * @param {{ signal?: AbortSignal }} [opts]
+ * @param {{ signal?: AbortSignal, origin?: string }} [opts]
  * @returns {Promise<import("./opencodeClient.mjs").HttpFailure|null>} null once accepted; the refusal (a non-2xx) otherwise
  */
-async function postPrompt(sessionId, body, { signal } = {}) {
+async function postPrompt(sessionId, body, { signal, origin = "unknown" } = {}) {
   const id = typeof body.id === "string" && body.id ? body.id : mintPromptId();
   commandCorrelator.registerPromptId(sessionId, id);
+  try {
+    promptOrigins?.record({ messageID: id, sessionID: sessionId, origin });
+  } catch (e) {
+    // Recording is evidence bookkeeping: a failure must never stop the user's message.
+    console.warn("[opencode] could not record the prompt origin:", e?.message ?? e);
+  }
   // (A transport failure / abort throws past here with the id still registered:
   // the server may have accepted it after all.)
   /** @type {import("./opencodeClient.mjs").HttpFailure|null} */
@@ -727,9 +747,12 @@ function fileInputs(attachments) {
  * steered message can never switch the session's model or agent mid-turn
  * (unset = an ordinary idle send, which syncs them as before).
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", signal?: AbortSignal }} opts
+ * `origin` (default "unknown", see promptOrigins.mjs) is who authored the
+ * message; only the `opencode:prompt` RPC handler passes "user".
+ *
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", origin?: string, signal?: AbortSignal }} opts
  */
-export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, signal }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, origin, signal }) {
   if (!delivery) await syncSessionControls(sessionId, { model, agent, signal });
   const body = { text };
   const files = fileInputs(attachments);
@@ -746,7 +769,7 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
   if (messageID) body.id = messageID;
   if (delivery) body.delivery = delivery;
 
-  const refused = await postPrompt(sessionId, body, { signal });
+  const refused = await postPrompt(sessionId, body, { signal, origin });
   if (refused) {
     const err = /** @type {Error & { status?: number, retryAfterMs?: number }} */ (new Error(`opencode sendPrompt ${refused.status}: ${refused.text}`));
     // Mirror the usage-meter HTTP error shape (usageAdapters/httpError.mjs):

@@ -37,6 +37,7 @@ import {
   _defaultSearchIndexPath,
   _setSyncFault,
 } from "./ctoSearchIndex.mjs";
+import { ftsAnyTermExpression, ftsMatchExpression, FTS_ANY_TERM_MAX } from "./ftsQuery.mjs";
 import {
   createFixtureDb,
   sqliteAvailable,
@@ -267,21 +268,22 @@ test("same-timestamp edit and late low-timestamp insert are both reflected by th
 
 test("internal part indexed BEFORE its session mirror row exists is still excluded (authoritative registry filter, not mirror)", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  // Adversarial ordering: the internal session's part sorts into an EARLIER
-  // sweep batch than the internal session itself (part ts 150 < ordinary
-  // part ts 200 < internal session ts 300). After one limit-1 batch the
-  // internal part is indexed while its session mirror row is absent.
+  // Adversarial ordering (the sweep is newest-first): the internal session's part
+  // sorts into an EARLIER sweep batch than the internal session itself (part ts
+  // 250 > ordinary part ts 200; ordinary session ts 300 > internal session ts
+  // 100). After one limit-1 batch the internal part is indexed while its session
+  // mirror row is absent.
   const seed = {
     sessions: [
-      { id: "s1", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 100, timeUpdated: 100 },
-      { id: "sInt", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 300, timeUpdated: 300 },
+      { id: "s1", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 300, timeUpdated: 300 },
+      { id: "sInt", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 100, timeUpdated: 100 },
     ],
     messages: [
-      { id: "mInt", sessionId: "sInt", timeCreated: 150, timeUpdated: 150, data: { role: "assistant" } },
+      { id: "mInt", sessionId: "sInt", timeCreated: 250, timeUpdated: 250, data: { role: "assistant" } },
       { id: "mO", sessionId: "s1", timeCreated: 200, timeUpdated: 200, data: { role: "assistant" } },
     ],
     parts: [
-      { id: "pInt", messageId: "mInt", sessionId: "sInt", timeCreated: 150, timeUpdated: 150, data: { type: "text", text: "internal secret staging" } },
+      { id: "pInt", messageId: "mInt", sessionId: "sInt", timeCreated: 250, timeUpdated: 250, data: { type: "text", text: "internal secret staging" } },
       { id: "pOther", messageId: "mO", sessionId: "s1", timeCreated: 200, timeUpdated: 200, data: { type: "text", text: "ordinary public staging" } },
     ],
   };
@@ -831,4 +833,193 @@ test("unsupported needs no fixture DB: injected null module (and a failing sourc
     _resetDbHandle();
     cleanupIndexPath(path);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Shared-knowledge §7.2: recent-first sync, directory sets, any-term ranking,
+// the size cap.
+// ---------------------------------------------------------------------------
+
+// One session, one message per part: message ts == part ts (V2 parts carry their message's time).
+function newestFirstSeed(n) {
+  const seed = {
+    sessions: [{ id: "s1", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 1, timeUpdated: 1 }],
+    messages: [{ id: "mNew", sessionId: "s1", timeCreated: 700, timeUpdated: 700, data: { role: "assistant" } }],
+    parts: [],
+  };
+  for (let i = 1; i <= n; i++) {
+    seed.messages.push({ id: `m${i}`, sessionId: "s1", timeCreated: i * 100, timeUpdated: i * 100, data: { role: "assistant" } });
+    seed.parts.push({ id: `p${i}`, messageId: `m${i}`, sessionId: "s1", timeCreated: i * 100, timeUpdated: i * 100, data: { type: "text", text: `term${i} common` } });
+  }
+  return seed;
+}
+
+const found = async (idx, q) => (await idx.search({ query: q })).hits.length;
+
+test("sync is recent-first: the newest rows are indexed before older ones, and new activity is read next sync via the head pass", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  await withIndexSource(newestFirstSeed(6), async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 2, provenanceFilter: NO_FILTER })).status, "ok");
+    assert.equal(await found(idx, "term6"), 1, "the newest part is indexed first");
+    assert.equal(await found(idx, "term5"), 1);
+    assert.equal(await found(idx, "term4"), 0, "older parts wait for a later batch");
+    assert.equal(await found(idx, "term1"), 0);
+
+    // Fresh activity after the first batch: newer than anything seen so far.
+    const db = editSource(fixture);
+    try {
+      addPart(db, { id: "pNew", messageId: "mNew", data: { type: "text", text: "brandnewterm" } });
+    } finally {
+      db.close();
+    }
+    assert.equal((await idx.sync({ limit: 2, provenanceFilter: NO_FILTER })).status, "ok");
+    assert.equal(await found(idx, "brandnewterm"), 1, "read by the head pass, not a whole cycle later");
+    assert.equal(await found(idx, "term4"), 1, "the cycle keeps moving down in the same batch");
+    assert.equal(await found(idx, "term3"), 1);
+    assert.equal(await found(idx, "term1"), 0, "the oldest part is still not reached");
+
+    assert.equal((await idx.sync({ limit: 2, provenanceFilter: NO_FILTER })).status, "ok");
+    assert.equal(await found(idx, "term1"), 1);
+    assert.equal(await found(idx, "term2"), 1);
+    const done = await idx.sync({ limit: 2, provenanceFilter: NO_FILTER });
+    assert.equal(done.sweep.cycle.part.t, Number.MAX_SAFE_INTEGER, "a finished cycle starts again from the newest");
+    assert.equal(done.coverage.indexedParts, 7);
+  });
+});
+
+test("search takes a SET of directories; an empty set matches nothing; hits carry directory and at", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  await withIndexSource(BASE_SEED, async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).status, "ok");
+    const dirs = async (directories) => {
+      const r = await idx.search({ query: "leasebot", directories });
+      assert.equal(r.status, "ok");
+      return r.hits.map((h) => `${h.directory}`).sort();
+    };
+    assert.deepEqual(await dirs(["/repo-b"]), ["/repo-b"]);
+    assert.deepEqual(await dirs(["/repo-a"]), ["/repo-a", "/repo-a"]);
+    assert.deepEqual(await dirs(["/repo-a", "/repo-b", "/elsewhere"]), ["/repo-a", "/repo-a", "/repo-b"]);
+    assert.deepEqual(await dirs(["/elsewhere"]), []);
+    assert.deepEqual(await dirs([]), [], "an empty set is no access, not no filter");
+    assert.equal((await idx.search({ query: "leasebot" })).hits.length, 3, "undefined = no directory filter");
+    // The hit shape.
+    const hit = (await idx.search({ query: "retro", directories: ["/repo-b"] })).hits[0];
+    assert.equal(hit.sessionId, "sArch");
+    assert.equal(hit.directory, "/repo-b");
+    assert.equal(hit.at, hit.timeUpdated);
+    assert.ok(hit.at > 0);
+    // Anything but an array is rejected, and an injection-shaped path is just a literal.
+    assert.equal((await idx.search({ query: "leasebot", directories: "/repo-a" })).status, "invalid_input");
+    assert.deepEqual(await dirs(['/repo-a" OR 1=1 --']), []);
+    assert.deepEqual(await dirs(["/repo-b", 7, null, ""]), ["/repo-b"], "non-string entries are ignored");
+  });
+});
+
+test("any-term queries rank rows by how many (and how rare) terms match; the default still needs every term", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const texts = ["alpha beta gamma", "alpha only here", "delta zeta", "!!! ??? ..."];
+  const seed = {
+    sessions: [{ id: "s1", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 1, timeUpdated: 1 }],
+    messages: texts.map((_, i) => ({ id: `m${i}`, sessionId: "s1", timeCreated: 100 + i, timeUpdated: 100 + i, data: { role: "assistant" } })),
+    parts: texts.map((text, i) => ({ id: `p${i}`, messageId: `m${i}`, sessionId: "s1", timeCreated: 100 + i, timeUpdated: 100 + i, data: { type: "text", text } })),
+  };
+  await withIndexSource(seed, async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).status, "ok");
+    const ids = (r) => r.hits.map((h) => h.partId);
+
+    const any = await idx.search({ query: "alpha beta nothere", anyTerms: true });
+    assert.equal(any.status, "ok");
+    assert.deepEqual(ids(any), [pid("p0"), pid("p1")], "two matching terms outrank one");
+
+    assert.equal((await idx.search({ query: "alpha beta nothere" })).hits.length, 0, "the all-terms default is unchanged");
+    assert.equal((await idx.search({ query: "alpha beta nothere", anyTerms: false })).hits.length, 0);
+
+    // A term with no tokens inside the OR matches nothing and breaks nothing; metacharacters stay literal.
+    assert.deepEqual(ids(await idx.search({ query: "!!! alpha", anyTerms: true })).sort(), [pid("p0"), pid("p1")].sort());
+    assert.equal((await idx.search({ query: "alpha* OR (beta", anyTerms: true })).status, "ok");
+    assert.equal((await idx.search({ query: '"', anyTerms: true })).hits.length, 0);
+    assert.equal((await idx.search({ query: "   ", anyTerms: true })).status, "invalid_input");
+    assert.equal((await idx.search({ query: 7, anyTerms: true })).status, "invalid_input");
+
+    // Together with a directory set.
+    assert.equal((await idx.search({ query: "alpha delta", anyTerms: true, directories: ["/repo-a"] })).hits.length, 3);
+    assert.equal((await idx.search({ query: "alpha delta", anyTerms: true, directories: ["/other"] })).hits.length, 0);
+  });
+});
+
+test("ftsAnyTermExpression: quoted literals joined with OR, duplicates folded, term count capped", () => {
+  const a = ftsAnyTermExpression('Alpha beta "gamma" alpha ALPHA');
+  assert.deepEqual(a, { ok: true, expr: '"Alpha" OR "beta" OR """gamma"""', terms: ["Alpha", "beta", '"gamma"'], droppedTerms: 0 });
+  const many = ftsAnyTermExpression(Array.from({ length: 40 }, (_, i) => `t${i}`).join(" "));
+  assert.equal(many.terms.length, FTS_ANY_TERM_MAX);
+  assert.equal(many.droppedTerms, 40 - FTS_ANY_TERM_MAX);
+  assert.equal(ftsAnyTermExpression("a b c", { maxTerms: 2 }).expr, '"a" OR "b"');
+  assert.equal(ftsAnyTermExpression("").ok, false);
+  assert.equal(ftsAnyTermExpression(undefined).ok, false);
+  assert.equal(ftsMatchExpression("a b").expr, '"a" AND "b"', "the all-terms builder is unchanged");
+});
+
+// A deterministic pseudo-random corpus: `n` sessions (one message / part each), the oldest has the smallest index.
+function corpusSeed(n, wordsPerPart = 400) {
+  let x = 12345;
+  const rnd = () => ((x = (x * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const word = () => Array.from({ length: 4 + Math.floor(rnd() * 6) }, () => String.fromCharCode(97 + Math.floor(rnd() * 26))).join("");
+  const seed = { sessions: [], messages: [], parts: [] };
+  for (let i = 0; i < n; i++) {
+    const ts = 1000 + i * 10;
+    seed.sessions.push({ id: `s${i}`, parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: ts, timeUpdated: ts });
+    seed.messages.push({ id: `m${i}`, sessionId: `s${i}`, timeCreated: ts, timeUpdated: ts, data: { role: "assistant" } });
+    seed.parts.push({
+      id: `p${i}`, messageId: `m${i}`, sessionId: `s${i}`, timeCreated: ts, timeUpdated: ts,
+      data: { type: "text", text: `marker${i}x ${Array.from({ length: wordsPerPart }, word).join(" ")}` },
+    });
+  }
+  return seed;
+}
+
+test("size cap: over the cap the OLDEST sessions are evicted, the index ends under the cap, and evicted history is not read back in", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const N = 40;
+  const seed = corpusSeed(N);
+  // Pass 1: no cap — how big is the full index?
+  let full = 0;
+  await withIndexSource(seed, async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).status, "ok");
+    const st = await idx.status();
+    assert.equal(st.counts.sessions, N);
+    full = st.size.liveBytes;
+    assert.equal(st.size.evictionFloor, 0);
+  }, { maxBytes: Infinity });
+  assert.ok(full > 50_000, `fixture is big enough to measure (${full})`);
+
+  // Pass 2: a cap well under it.
+  const cap = Math.floor(full * 0.6);
+  await withIndexSource(seed, async (fixture, idx) => {
+    const sync = await idx.sync({ limit: 500, provenanceFilter: NO_FILTER });
+    assert.equal(sync.status, "ok");
+    assert.ok(sync.size.evicted.sessions > 0 && sync.size.evicted.parts > 0, "an eviction round ran");
+    assert.ok(sync.size.liveBytes <= cap, `back under the cap: ${sync.size.liveBytes} <= ${cap}`);
+    assert.ok(sync.size.evictionFloor > 0);
+
+    const present = [];
+    for (let i = 0; i < N; i++) if ((await found(idx, `marker${i}x`)) > 0) present.push(i);
+    assert.ok(present.length > 0 && present.length < N);
+    assert.deepEqual(present, Array.from({ length: present.length }, (_, k) => N - present.length + k), "what survives is the NEWEST contiguous run");
+    assert.ok(present.includes(N - 1) && !present.includes(0));
+    const st = await idx.status();
+    assert.equal(st.counts.sessions, present.length, "session rows went with their parts");
+    assert.equal(st.counts.parts, present.length);
+    assert.equal(st.counts.messages, present.length);
+
+    // The sweep does not bring evicted history back, nor keep evicting once under the cap.
+    for (let k = 0; k < 4; k++) {
+      const again = await idx.sync({ limit: 500, provenanceFilter: NO_FILTER });
+      assert.equal(again.status, "ok");
+      assert.deepEqual(again.size.evicted, { sessions: 0, parts: 0 });
+    }
+    const after = await idx.status();
+    assert.equal(after.counts.parts, present.length);
+    assert.equal(await found(idx, "marker0x"), 0);
+    assert.ok(after.size.liveBytes <= cap);
+  }, { maxBytes: cap });
 });

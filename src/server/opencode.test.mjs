@@ -12,6 +12,7 @@ import {
   createSseFramer,
   createSession,
   sendPrompt,
+  setPromptOrigins,
   getAndClearSessionRefusal,
   getSessionAgent,
   getSessionDirectory,
@@ -745,6 +746,77 @@ test("runCommand on a skill sends `/<skill> <args>` as a prompt with the skill a
     text: "/impeccable init",
     skills: [{ id: "impeccable", mention: { start: 0, end: 11, text: "/impeccable" } }],
   });
+});
+
+// ---- prompt origins (shared-knowledge §9.2): recorded at the one chokepoint ----
+
+function originRecorder() {
+  const rows = [];
+  return { rows, record: (r) => { rows.push(r); return true; } };
+}
+
+test("sendPrompt records the origin with the message id BEFORE the POST; the default is unknown", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    let recordedBeforePost = null;
+    const calls = await withV2(
+      {
+        "GET /api/session/ses_a": { data: SESSION() },
+        "POST /api/session/ses_a/prompt": () => {
+          recordedBeforePost ??= store.rows.length;
+          return { data: {} };
+        },
+      },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user", messageID: "msg_mine" });
+        await sendPrompt({ sessionId: "ses_a", text: "bg" });
+      },
+    );
+    assert.equal(recordedBeforePost, 1, "the origin was written before the request went out");
+    const bodies = only(calls, "POST", "/api/session/ses_a/prompt").map((c) => c.body);
+    assert.deepEqual(store.rows[0], { messageID: "msg_mine", sessionID: "ses_a", origin: "user" });
+    assert.equal(store.rows[1].messageID, bodies[1].id, "a minted id is what gets recorded");
+    assert.equal(store.rows[1].origin, "unknown");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a slash command that runs as a skill prompt is not user-authored", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    await withV2(
+      {
+        "GET /api/skill": { data: [{ id: "impeccable", name: "impeccable", path: "/s", content: "c" }] },
+        "GET /api/session/ses_a": { data: SESSION() },
+        "POST /api/session/ses_a/prompt": null,
+      },
+      async () => {
+        await runCommand({ sessionId: "ses_a", command: "impeccable", arguments: "init", origin: "user" });
+      },
+    );
+    assert.equal(store.rows.length, 1);
+    assert.equal(store.rows[0].origin, "unknown");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a failing origin store never stops a prompt from being sent", async () => {
+  setPromptOrigins({ record: () => { throw new Error("disk full"); } });
+  try {
+    const calls = await withV2(
+      { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/prompt": { data: {} } },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user" });
+      },
+    );
+    assert.equal(only(calls, "POST", "/api/session/ses_a/prompt").length, 1);
+  } finally {
+    setPromptOrigins(null);
+  }
 });
 
 test("listCommands appends skills, and a skill hides a same-named command wrapper", async () => {
