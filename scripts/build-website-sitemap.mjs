@@ -11,10 +11,10 @@
 // Usage:
 //   node scripts/build-website-sitemap.mjs
 //
-// Idempotent: re-running with the same schema and the same git history
-// produces byte-identical output.
+// Idempotent: re-running with the same schema and the same git history (or,
+// with no git, the same file mtimes) produces byte-identical output.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -30,17 +30,26 @@ function lastmodIsoFor(relFile) {
   // timezone offset, which varies across machines and dirties sitemap.xml on
   // every test run; `%ct` is a timezone-independent unix epoch we normalize
   // to an ISO-8601 UTC string (`...Z`).
+  // No usable git history (a source tarball, a path git does not track): fall back to the file's own
+  // mtime — stable across re-runs, unlike "now", so the output stays idempotent.
+  const fileMtimeIso = () => {
+    try {
+      return statSync(join(ROOT, relFile)).mtime.toISOString();
+    } catch {
+      return new Date(0).toISOString();
+    }
+  };
   try {
     const unix = execFileSync(
       "git",
       ["log", "-1", "--format=%ct", "--", relFile],
-      { cwd: ROOT, encoding: "utf8" },
+      { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     ).trim();
     const sec = Number(unix);
-    if (!Number.isFinite(sec) || sec <= 0) return new Date().toISOString();
+    if (!Number.isFinite(sec) || sec <= 0) return fileMtimeIso();
     return new Date(sec * 1000).toISOString();
   } catch {
-    return new Date().toISOString();
+    return fileMtimeIso();
   }
 }
 

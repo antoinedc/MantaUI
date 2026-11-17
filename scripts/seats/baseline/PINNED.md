@@ -15,6 +15,6 @@ code** of that commit as its "before" policy. Two files are vendored here:
 file is the full closure of the decision.
 
 `src/server/seatReplayBaseline.test.mjs` rebuilds the expected text of both files
-from `git show f95bfe2b:…` and fails if the vendored copy differs. **Never edit
+from `git show f95bfe2b:…` and fails if the vendored copy differs (skipped where git or the commit is unavailable). The same test also pins each vendored file's sha256, which holds on a checkout with no git history; when re-pinning, update those digests too. **Never edit
 these two files**: if the baseline needs to move, pin a new commit, re-vendor,
 and say so here.

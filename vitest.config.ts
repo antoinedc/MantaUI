@@ -14,6 +14,8 @@ export default defineConfig({
     // incident that motivated this.
     // CLAUDE_CONFIG_DIR does the same for the box's live Claude login
     // (`CREDENTIALS_PATH` honours it), so no test can read or copy the real one.
+    // Re-point localStorage/sessionStorage at jsdom's (Node 25+ shadows them) — see the file.
+    setupFiles: ["./vitest.setup.mjs"],
     env: { MANTA_STATE_HOME: sandboxHome, CLAUDE_CONFIG_DIR: sandboxClaudeConfigDir(sandboxHome) },
     // src/server/**, src/gateway/** and scripts/** use node:test (run via
     // `node --test`), not vitest. .claude/** holds Claude Code worktrees —

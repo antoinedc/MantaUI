@@ -16,7 +16,7 @@ import { savePages } from "./servePage.mjs";
 import { snapshotFrom, saveTopology, planRestore, TOPOLOGY_PATH } from "./topology.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
   computeContextBreakdown,
@@ -364,9 +364,9 @@ test("tmux:new-session persists the EXPANDED absolute cwd via projectMetaUpsert"
   assert.equal(calls.projectMetaUpsert.length, 1, "one projectMetaUpsert call");
   const upserted = calls.projectMetaUpsert[0];
   assert.equal(upserted.tmuxSession, "newproj");
-  assert.match(
+  assert.equal(
     upserted.defaultCwd,
-    /^\/home\/[^/]+\/projects\/newproj$/,
+    join(homedir(), "projects", "newproj"),
     `expanded absolute cwd, got ${upserted.defaultCwd}`,
   );
   assert.ok(!upserted.defaultCwd.startsWith("~"), "no leading tilde in persisted cwd");

@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -20,12 +21,22 @@ function pinned(path) {
   }
 }
 
-// The proof needs git and the pinned commit. Locally a box without them skips; in CI that would be a
-// silent loss of the guard, so there it fails.
-const unavailable = (t) => {
-  if (process.env.CI) assert.fail("git or the pinned commit is unavailable, and CI must not skip the vendored-baseline proof");
-  return t.skip("git or the pinned commit is unavailable");
+// Provenance (vendored == git history) needs git and the pinned commit, which a source tarball or a shallow clone
+// does not have. The digests below are the always-on guard that the vendored files are unmodified; the git
+// comparison proves where they came from whenever the commit is reachable, and is skipped when it is not.
+const unavailable = (t) => t.skip("git or the pinned commit is unavailable (the digest test below still guards the files)");
+
+// sha256 of the vendored files as pinned. They change only by re-pinning (see PINNED.md): update these with them.
+const VENDORED_SHA256 = {
+  "seatChoice.mjs": "46bdc3fdde32d131ce3fcdf7513a8545eae0597011555755ff16b69f0895397e",
+  "seatAssignment.mjs": "8679ec6383f5b88827cde56a38657c7f40537b72aaf53a5c71b012cae4fc9054",
 };
+
+test("the vendored baseline files are unmodified (digest)", () => {
+  for (const [name, digest] of Object.entries(VENDORED_SHA256)) {
+    assert.equal(createHash("sha256").update(readFileSync(join(root, "scripts/seats/baseline", name))).digest("hex"), digest, `${name} was edited — see scripts/seats/baseline/PINNED.md`);
+  }
+});
 
 const SERVICE_BANNER = "// ---------------------------------------------------------------------------\n// The service\n";
 const SERVICE_IMPORTS = [

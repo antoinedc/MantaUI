@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       # node_modules keyed on the lockfile: `npm ci` only runs when the lockfile
@@ -86,7 +86,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: node_modules
-          key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
+          key: ${{ runner.os }}-node24-nm-${{ hashFiles('package-lock.json') }}
 
       # postinstall is `node scripts/postinstall.mjs` — cross-platform and
       # incapable of failing an install (its only job is a macOS dev-bundle
@@ -306,12 +306,12 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - name: Restore node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
-          key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
+          key: ${{ runner.os }}-node24-nm-${{ hashFiles('package-lock.json') }}
       - name: Strict duplication gate
         run: bash scripts/check-duplication-gate.sh "origin/${{ github.base_ref }}"

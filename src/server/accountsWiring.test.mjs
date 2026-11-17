@@ -3,7 +3,7 @@
 // claude-status poll, opencode's auth write, and the "a login landed" signal.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildHandlers, startClaudeLogin, cancelClaudeLogin, onProviderOauthLanded, _getClaudeLoginSessions, _resetClaudeLoginSessions, _resetOauthCallbacks } from "./rpc.mjs";
@@ -126,7 +126,12 @@ test("claude-status for a seat sign-in reads the SEAT's credentials file and nev
     const handlers = buildHandlers(d);
     const none = await handlers["opencode:provider-auth"]({ action: "claude-status", sessionKey, startedAt });
     assert.deepEqual(none.progress, { state: "no-file" });
-    await writeFile(join(dir, ".credentials.json"), "{}");
+    const file = join(dir, ".credentials.json");
+    await writeFile(file, "{}");
+    // Stamp the file clearly AFTER the sign-in started: the kernel's coarse file clock can lag Date.now()
+    // by a few ms, which would otherwise read a same-instant write as "pre-existing".
+    const later = new Date(startedAt + 5_000);
+    await utimes(file, later, later);
     const done = await handlers["opencode:provider-auth"]({ action: "claude-status", sessionKey, startedAt });
     assert.equal(done.ok, true);
     assert.equal(done.progress.state, "completed");

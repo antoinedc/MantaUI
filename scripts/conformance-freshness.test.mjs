@@ -34,6 +34,21 @@ const isShallowRepo = () => {
 };
 
 /**
+ * True when REPO_ROOT is inside a git work tree at all. A source tarball (a CI/VM checkout shipped
+ * without .git) has no history, so freshness cannot be judged there — that is a missing precondition,
+ * not a stale record, and the tests below skip with that reason.
+ */
+const isGitCheckout = () => {
+  try {
+    execFileSync("git", ["rev-parse", "--git-dir"], { cwd: REPO_ROOT, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+};
+const NO_GIT_SKIP = isGitCheckout() ? false : "not a git checkout: conformance freshness needs git history";
+
+/**
  * Freshness of conformance records (BET-564). A conformance record is
  * judgement — no test can arbitrate what it says. But whether a record has
  * been LOOKED AT since its screen's baseline moved is mechanical, and that
@@ -91,7 +106,7 @@ for (const screen of SCREENS) {
     continue;
   }
 
-  test(`conformance record for "${recordScreen}" is fresh (baseline ${screen.id})`, () => {
+  test(`conformance record for "${recordScreen}" is fresh (baseline ${screen.id})`, { skip: NO_GIT_SKIP }, () => {
     let record;
     try {
       record = readFileSync(join(REPO_ROOT, recordPath), "utf8");
