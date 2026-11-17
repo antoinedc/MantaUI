@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { BudgetPaused, BudgetPlanStatus, BudgetStatus, BudgetWindow } from "../shared/api";
 import {
+  runWhenBusyHelp,
   batchPausedCopy,
   fallbackText,
   formatElapsed,
@@ -508,5 +509,12 @@ describe("isBudgetStatus", () => {
     expect(isBudgetStatus(undefined)).toBe(false);
     expect(isBudgetStatus({})).toBe(false);
     expect(isBudgetStatus({ plans: [], payg: {} })).toBe(false);
+  });
+});
+
+describe("runWhenBusyHelp", () => {
+  it("quotes the level's own shares", () => {
+    expect(runWhenBusyHelp("light")).toContain("(2% of a week and 5% of a 5-hour window on Light)");
+    expect(runWhenBusyHelp("normal")).toContain("(5% of a week and 10% of a 5-hour window on Normal)");
   });
 });

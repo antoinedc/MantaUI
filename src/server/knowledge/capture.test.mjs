@@ -384,9 +384,19 @@ const cursorOf = (r, id = "ses_1") => {
   const row = r.state.db.prepare("SELECT * FROM capture_session WHERE session_id = ?").get(id);
   return row;
 };
+/** A capture the budget refuses while content waits — the only way a session enters catch-up. */
+async function holdBack(r, id = "ses_1", setOk = (v) => r.setBudget(v)) {
+  r.cap.observeRaw(ev("session.execution.started", id));
+  r.advance(11 * MIN);
+  setOk(false);
+  const out = await r.cap.captureSession(id);
+  setOk(true);
+  assert.equal(out.skipped, "budget");
+  assert.ok(cursorOf(r, id).backlog_since > 0, `${id} is in catch-up`);
+}
 const forward = (store) => async ({ sessionID, after }) => (store.bySession?.[sessionID] ?? store.messages).filter((m) => !after || m.at > after.at || (m.at === after.at && m.id > after.id));
 
-test("createCaptureMessageSource: with a bookmark and a forward reader it reads the OLDEST max after it; without a bookmark it keeps the newest-N path", async () => {
+test("createCaptureMessageSource: with a bookmark and a forward reader it reads the OLDEST max after it when asked to read forward; otherwise it keeps the newest-N path", async () => {
   const calls = [];
   const timeline = [
     { info: { id: "msg_c", role: "assistant", time: { created: 9 }, summary: true }, parts: [{ id: "x", type: "text", text: "the summary" }] },
@@ -396,7 +406,7 @@ test("createCaptureMessageSource: with a bookmark and a forward reader it reads 
     listMessages: async () => [],
     listMessagesSince: async (sid, opts) => (calls.push([sid, opts]), { messages: timeline, hasMore: true, olderNotRead: false }),
   });
-  const out = await read({ sessionID: "s", after: { at: 5, id: "msg_a" }, limit: 2000 });
+  const out = await read({ sessionID: "s", after: { at: 5, id: "msg_a" }, limit: 2000, forward: true });
   assert.deepEqual(calls, [["s", { after: { at: 5, id: "msg_a" }, max: 2000 }]]);
   assert.equal(out.hasMore, true);
   assert.equal(out.messages[0].summary, true, "a completed compaction keeps its flag");
@@ -404,6 +414,9 @@ test("createCaptureMessageSource: with a bookmark and a forward reader it reads 
   const legacy = await read({ sessionID: "s", after: null, limit: 400 });
   assert.ok(Array.isArray(legacy));
   assert.equal(calls.length, 1, "no bookmark: the forward reader is not used");
+  const ordinary = await read({ sessionID: "s", after: { at: 5, id: "msg_a" }, limit: 400 });
+  assert.ok(Array.isArray(ordinary));
+  assert.equal(calls.length, 1, "not in catch-up (forward not asked for): the newest-N path even with a bookmark");
 });
 
 test("buildCaptureInput: a summary message is one block with its own larger clip and a summary role; note parts render as DID lines; a cite overrides the ref", () => {
@@ -504,8 +517,7 @@ test("planCatchup: a span with more messages behind it (hasMore) is always backl
 test("catch-up: a long span is captured window by window, oldest first, the bookmark advancing per window; the last one clears the backlog", async () => {
   const messages = longSpan(30, 2_500); // ≈ 300k chars → many windows
   const r = await rig({ messages, answer: JSON.stringify({ notes: [] }), userAuthored: [] });
-  r.cap.observeRaw(ev("session.execution.started"));
-  r.advance(11 * MIN);
+  await holdBack(r);
   const first = await r.cap.captureSession("ses_1");
   assert.equal(first.captured, true);
   assert.equal(first.backlog, true);
@@ -544,9 +556,8 @@ test("catch-up: the user-message gate is judged once on the whole span; a window
     ...Array.from({ length: 12 }, (_, n) => msg(`msg_a${String(n).padStart(2, "0")}`, "assistant", 10 + n, "", failing(n))),
   ];
   const r = await rig({ messages, answer: JSON.stringify({ notes: [] }) });
-  r.cap.observeRaw(ev("session.execution.started"));
-  r.advance(11 * MIN);
-  assert.equal((await r.cap.captureSession("ses_1")).captured, true, "whole-span gate passed on the first window");
+  await holdBack(r);
+  assert.equal((await r.cap.captureSession("ses_1")).captured, true, "the gate was passed when the session was held back");
   assert.match(r.seenPrompts[0], /USER:/);
   const out = await r.cap.captureSession("ses_1", { reason: "idle", backlogStep: true });
   assert.equal(out.captured, true, "the next window has no user message at all and still runs");
@@ -566,8 +577,7 @@ test("catch-up: a session below the gate is NOT caught up (too-few-messages), wh
 test("catch-up resumes after a refusal or failure: what was captured is kept, the next try starts at the bookmark", async () => {
   const messages = longSpan(30, 2_500);
   const r = await rig({ messages, answer: JSON.stringify({ notes: [] }) });
-  r.cap.observeRaw(ev("session.execution.started"));
-  r.advance(11 * MIN);
+  await holdBack(r);
   await r.cap.captureSession("ses_1");
   const bookmark = cursorOf(r).cursor_at;
   r.setBudget(false);
@@ -586,8 +596,7 @@ test("catch-up resumes after a refusal or failure: what was captured is kept, th
 test("catch-up: at most 8 windows per session per local day; the rest waits for tomorrow", async () => {
   const messages = longSpan(120, 2_500); // far more than 8 windows
   const r = await rig({ messages, answer: JSON.stringify({ notes: [] }) });
-  r.cap.observeRaw(ev("session.execution.started"));
-  r.advance(11 * MIN);
+  await holdBack(r);
   await r.cap.captureSession("ses_1");
   for (let i = 1; i < MAX_BACKLOG_WINDOWS_PER_DAY; i++) assert.equal((await r.cap.captureSession("ses_1", { backlogStep: true })).captured, true, `window ${i + 1}`);
   assert.equal(cursorOf(r).backlog_windows, MAX_BACKLOG_WINDOWS_PER_DAY);
@@ -604,8 +613,7 @@ test("catch-up: a handoff summary is used only when the span doesn't fit; citati
   const handoff = { asPredecessor: [{ recordId: "h1", createdAt: 30, text: "HANDOFF SUMMARY: pnpm only", successorId: "ses_next", disposition: "send", messageId: "msg_sent01" }], asSuccessor: null };
   const answer = JSON.stringify({ notes: [{ kind: "howto", text: "Use pnpm only.", refs: ["m1"] }] });
   const r = await rig({ messages, answer, userAuthored: ["msg_u000"], over: { summariesFor: () => handoff } });
-  r.cap.observeRaw(ev("session.execution.started"));
-  r.advance(11 * MIN);
+  await holdBack(r);
   assert.equal((await r.cap.captureSession("ses_1")).captured, true);
   assert.match(r.seenPrompts[0], /\[m1\] SUMMARY OF EARLIER WORK:\nHANDOFF SUMMARY: pnpm only/);
   assert.doesNotMatch(r.seenPrompts[0], /user 0 /, "the replaced span is not read raw");
@@ -625,8 +633,7 @@ test("catch-up: a handoff summary is used only when the span doesn't fit; citati
 test("catch-up: a compaction summary replaces the raw span before it; a failing summariesFor changes nothing but the summaries", async () => {
   const messages = [...longSpan(10, 2_500, "x"), { ...msg("msg_comp", "assistant", 50, "COMPACTED: we built the importer"), summary: true }, ...longSpan(3, 200, "y").map((m) => ({ ...m, at: m.at + 100 }))];
   const r = await rig({ messages, answer: JSON.stringify({ notes: [{ kind: "status", text: "Importer built.", refs: ["m1"] }] }), over: { summariesFor: () => { throw new Error("down"); } } });
-  r.cap.observeRaw(ev("session.execution.started"));
-  r.advance(11 * MIN);
+  await holdBack(r);
   assert.equal((await r.cap.captureSession("ses_1")).captured, true);
   assert.match(r.seenPrompts[0], /COMPACTED: we built the importer/);
   assert.doesNotMatch(r.seenPrompts[0], /user x0 /);
@@ -672,14 +679,12 @@ test("tick: ordinary due captures run first, then ONE backlog window of the most
   const r = await rig({ messages: [], answer: JSON.stringify({ notes: [] }), over: { readSince: forward({ bySession }) } });
   r.mapped.ses_2 = { slug: SLUG };
   r.mapped.ses_3 = { slug: SLUG };
-  // two sessions become backlog (ses_1 first, ses_2 later)
+  // two sessions are held back by the budget (ses_1 first, ses_2 later), then each runs one window
   for (const id of ["ses_1", "ses_2"]) {
-    r.cap.observeRaw(ev("session.execution.started", id));
-    r.advance(11 * MIN);
+    await holdBack(r, id);
     await r.cap.captureSession(id);
     r.advance(MIN);
   }
-  assert.ok(cursorOf(r, "ses_1").backlog_since > 0 && cursorOf(r, "ses_2").backlog_since > 0);
   const base = r.runs.length;
   // new activity on ses_3 (ordinary, idle for 10 minutes) and on ses_1 (recent, not idle)
   r.cap.observeRaw(ev("session.execution.started", "ses_3"));
@@ -701,10 +706,8 @@ test("tick: a backlog budget refusal ends only the backlog pass; the next tick's
     over: { readSince: forward({ bySession }), budget: { canSpend: async () => ({ ok: spendOk }), record: async () => {} } },
   });
   r.mapped.ses_3 = { slug: SLUG };
-  r.cap.observeRaw(ev("session.execution.started", "ses_1"));
-  r.advance(11 * MIN);
+  await holdBack(r, "ses_1", (v) => (spendOk = v));
   await r.cap.captureSession("ses_1");
-  assert.ok(cursorOf(r).backlog_since > 0);
   spendOk = false;
   const t1 = await r.cap.tick();
   assert.equal(t1.captured, 0);
@@ -723,8 +726,7 @@ test("tick: an ordinary budget refusal still stops the whole tick (no backlog wi
   let asked = 0;
   const r = await rig({ messages: [], answer: JSON.stringify({ notes: [] }), over: { readSince: forward({ bySession }), budget: { canSpend: async () => (asked++, { ok: spendOk }), record: async () => {} } } });
   r.mapped.ses_3 = { slug: SLUG };
-  r.cap.observeRaw(ev("session.execution.started", "ses_1"));
-  r.advance(11 * MIN);
+  await holdBack(r, "ses_1", (v) => (spendOk = v));
   await r.cap.captureSession("ses_1");
   r.cap.observeRaw(ev("session.execution.started", "ses_3"));
   r.advance(11 * MIN);
@@ -747,4 +749,156 @@ test("capture-2 migration: a capture table from before the catch-up gains the ba
   await mk(); // the second engine on the same state: the migration is applied once
   const row = state.db.prepare("SELECT * FROM capture_session WHERE session_id = 'ses_old'").get();
   assert.deepEqual({ ...row }, { session_id: "ses_old", last_event_at: 5, dirty: 1, cursor_at: 7, cursor_id: "msg_7", captured_at: null, notes: 2, backlog_since: null, backlog_day: null, backlog_windows: 0 });
+});
+
+// ---- who gets caught up (only sessions the budget held back) ---------------------------------------------
+
+test("an ordinary capture the budget never refused keeps the single-input behaviour: one call, newest content trimmed to one input, no catch-up state", async () => {
+  const messages = longSpan(30, 2_500);
+  const r = await rig({ messages, answer: ANSWER });
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  const out = await r.cap.captureSession("ses_1");
+  assert.deepEqual([out.captured, out.backlog], [true, undefined]);
+  assert.equal(r.runs.length, 1);
+  assert.ok(r.seenPrompts[0].length < MAX_INPUT_CHARS + 4_000, "one input");
+  assert.doesNotMatch(r.seenPrompts[0], /condensed|SUMMARY OF EARLIER WORK|DID:/);
+  assert.match(r.seenPrompts[0], /user 29 /, "user messages first, the newest win");
+  const row = cursorOf(r);
+  assert.deepEqual([row.backlog_since, row.backlog_windows, row.cursor_at], [null, 0, 60], "the bookmark moved to the end; nothing waits");
+  // …also with a bookmark, and compaction-triggered
+  r.store.messages = [...messages, ...longSpan(30, 2_500, "n").map((m) => ({ ...m, at: m.at + 100 }))];
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  assert.equal((await r.cap.captureSession("ses_1")).captured, true);
+  assert.equal(r.runs.length, 2);
+  assert.equal(cursorOf(r).backlog_since, null);
+});
+
+test("a capture the budget refused while content waited marks the session for catch-up (idle or runner refusal); too little content or nothing waiting does not", async () => {
+  // the early gate refuses
+  const a = await rig({ messages: four(), answer: ANSWER });
+  await holdBack(a);
+  // the runner refuses after the span was read
+  const b = await rig({ messages: four(), answer: ANSWER });
+  b.cap.observeRaw(ev("session.execution.started"));
+  b.advance(11 * MIN);
+  b.store.fail = { ok: false, code: "budget", reason: "window-busy" };
+  assert.equal((await b.cap.captureSession("ses_1")).skipped, "budget");
+  assert.ok(cursorOf(b).backlog_since > 0);
+  // refused with fewer user messages than the gate needs: nothing to catch up, no mark, no repeated retries
+  const c = await rig({ messages: four().slice(0, 3), answer: ANSWER });
+  c.cap.observeRaw(ev("session.execution.started"));
+  c.advance(11 * MIN);
+  c.setBudget(false);
+  assert.equal((await c.cap.captureSession("ses_1")).skipped, "budget");
+  assert.equal(cursorOf(c)?.backlog_since ?? null, null);
+  assert.equal(c.cap._tracked("ses_1").dirty, false);
+  // a refusal for a session with no activity waiting
+  const d = await rig({ messages: four(), answer: ANSWER });
+  d.cap.observeRaw(ev("session.execution.started"));
+  d.advance(11 * MIN);
+  await d.cap.captureSession("ses_1");
+  d.setBudget(false);
+  assert.equal((await d.cap.captureSession("ses_1", { backlogStep: true })).skipped, "budget-backlog");
+  assert.equal(cursorOf(d).backlog_since ?? null, null, "a backlog-pass call for a session that is not behind marks nothing");
+});
+
+test("once caught up (the last window done) a held-back session is ordinary again", async () => {
+  const r = await rig({ messages: longSpan(20, 2_500), answer: JSON.stringify({ notes: [] }) });
+  await holdBack(r);
+  let guard = 0;
+  while (cursorOf(r).backlog_since != null && guard++ < 10) await r.cap.captureSession("ses_1", { backlogStep: true });
+  assert.equal(cursorOf(r).backlog_since, null);
+  const before = r.runs.length;
+  r.store.messages = [...r.store.messages, ...four().map((m, i) => ({ ...m, id: `${m.id}z`, at: 1_000 + i }))];
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  const out = await r.cap.captureSession("ses_1");
+  assert.deepEqual([out.captured, out.backlog, r.runs.length], [true, undefined, before + 1]);
+  assert.doesNotMatch(r.seenPrompts.at(-1), /condensed/);
+});
+
+test("tick: a failed backlog run is the tick's one model attempt — the next backlog session is not tried", async () => {
+  const bySession = { ses_1: longSpan(30, 2_500, "a"), ses_2: longSpan(30, 2_500, "b") };
+  const r = await rig({ messages: [], answer: JSON.stringify({ notes: [] }), over: { readSince: forward({ bySession }) } });
+  r.mapped.ses_2 = { slug: SLUG };
+  await holdBack(r, "ses_1");
+  await holdBack(r, "ses_2");
+  r.cap._tracked("ses_1").dirty = false;
+  r.cap._tracked("ses_2").dirty = false;
+  r.store.fail = { ok: false, code: "no-qualifying-model" };
+  const out = await r.cap.tick();
+  assert.equal(r.runs.length, 1, "exactly one runner call");
+  assert.equal(out.captured, 0);
+  // before a model call the loop does move on: a session that is not mapped any more is skipped for the next one
+  r.store.fail = null;
+  r.advance(31 * MIN);
+  r.mapped.ses_2 = undefined;
+  r.mapped.ses_1 = undefined;
+  await r.cap.tick();
+  assert.equal(r.runs.length, 1, "unmapped sessions are dropped without a call");
+});
+
+test("tick: a backlog session that cannot run before a model call (in backoff) does not use up the tick's attempt", async () => {
+  const bySession = { ses_1: longSpan(30, 2_500, "a"), ses_2: longSpan(30, 2_500, "b") };
+  const r = await rig({ messages: [], answer: JSON.stringify({ notes: [] }), over: { readSince: forward({ bySession }) } });
+  r.mapped.ses_2 = { slug: SLUG };
+  await holdBack(r, "ses_2");
+  await holdBack(r, "ses_1"); // the most recently active
+  r.cap._tracked("ses_1").dirty = false; // only the backlog pass is in play
+  r.cap._tracked("ses_2").dirty = false;
+  r.store.fail = { ok: false, code: "no-qualifying-model" };
+  await r.cap.tick(); // ses_1 fails and backs off for 30 minutes
+  assert.equal(r.runs.length, 1);
+  r.store.fail = null;
+  r.advance(MIN);
+  const out = await r.cap.tick();
+  assert.equal(r.runs.length, 2, "ses_1 is in backoff (no model call), so ses_2 gets the attempt");
+  assert.equal(out.captured, 1);
+  assert.equal(cursorOf(r, "ses_2").backlog_windows, 1);
+});
+
+test("the scanner is checked BEFORE a backlog session's long span is read", async () => {
+  const reads = [];
+  const down = { redact: async () => ({ text: "", redacted: 0, unavailable: true }) };
+  const r = await rig({ messages: [], answer: ANSWER, over: { readSince: async (a) => (reads.push(a), longSpan(30, 2_500)) } });
+  await holdBack(r);
+  const readsAfterMark = reads.length;
+  // swap the scanner: the engine reads `deps.scanner` at construction, so build a second engine on the same state
+  const r2 = await rig({ messages: [], answer: ANSWER, over: { state: r.state, scanner: down, readSince: async (a) => (reads.push(a), longSpan(30, 2_500)) } });
+  const out = await r2.cap.captureSession("ses_1", { backlogStep: true });
+  assert.equal(out.skipped, "scanner");
+  assert.equal(reads.length, readsAfterMark, "nothing was read");
+  assert.equal(r2.runs.length, 0);
+});
+
+test("a bookmark never moves backwards", async () => {
+  const r = await rig({ messages: four(), answer: ANSWER });
+  r.state.db.prepare("INSERT INTO capture_session (session_id, last_event_at, dirty, cursor_at, cursor_id) VALUES ('ses_1', 1, 1, 50, 'msg_zzz')").run();
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  // a reader that returns messages older than the stored bookmark
+  const stale = await rig({ messages: four(), answer: ANSWER, over: { state: r.state, readSince: async () => four() } });
+  const out = await stale.cap.captureSession("ses_1");
+  assert.equal(out.captured, true);
+  const row = cursorOf(r);
+  assert.deepEqual([row.cursor_at, row.cursor_id], [50, "msg_zzz"]);
+});
+
+test("a session that used its 8 windows waits for midnight for new activity too (no retry every minute); tomorrow it goes on", async () => {
+  const r = await rig({ messages: longSpan(120, 2_500), answer: JSON.stringify({ notes: [] }) });
+  await holdBack(r);
+  await r.cap.captureSession("ses_1");
+  for (let i = 1; i < MAX_BACKLOG_WINDOWS_PER_DAY; i++) await r.cap.captureSession("ses_1", { backlogStep: true });
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  assert.equal((await r.cap.captureSession("ses_1")).skipped, "backlog-daily-cap");
+  const runs = r.runs.length;
+  r.advance(30 * MIN);
+  await r.cap.tick();
+  assert.equal(r.runs.length, runs, "the tick does not retry before midnight");
+  r.advance(DAY);
+  await r.cap.tick();
+  assert.equal(r.runs.length, runs + 1);
 });

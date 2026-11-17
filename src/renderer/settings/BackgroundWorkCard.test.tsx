@@ -244,9 +244,16 @@ describe("BackgroundWorkCard", () => {
       expect(h!.text()).toContain("Keep running when my plan is busy");
       const help = document.getElementById(box.getAttribute("aria-describedby")!);
       expect(help?.textContent).toBe(
-        "Background work still stays within its share (5% of a week on Normal), but no longer waits when your own usage is high.",
+        "Background work still stays within its share (5% of a week and 10% of a 5-hour window on Normal), but no longer waits when your own usage is high.",
       );
       expect(box.labels?.[0]?.textContent).toBe("Keep running when my plan is busy");
+    });
+
+    it("quotes the current level's shares: Light is 2% / 5%, Normal 5% / 10%", async () => {
+      await open({ backgroundStatus: () => Promise.resolve(busyStatus(false, "light")) });
+      const help = document.getElementById(checkbox()!.getAttribute("aria-describedby")!);
+      expect(help?.textContent).toContain("2% of a week and 5% of a 5-hour window on Light");
+      expect(help?.textContent).not.toContain("10%");
     });
 
     it("is hidden while the level is Off, and comes back with the level", async () => {

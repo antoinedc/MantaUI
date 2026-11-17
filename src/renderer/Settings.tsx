@@ -31,6 +31,7 @@ import { OptimizerCard } from "./OptimizerCard";
 import { SummaryModelCard } from "./SummaryModelCard";
 import { KnowledgeCard } from "./settings/KnowledgeCard";
 import { BackgroundWorkCard } from "./settings/BackgroundWorkCard";
+import { openBackgroundWorkSettings } from "./useBackgroundStatus";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
@@ -1066,7 +1067,7 @@ export function Settings({
       // Search hit for the Background work section (a `custom` entry): jump to it.
       return (
         <SettingsRow name={entry.label} help={entry.help}>
-          <Button tone="default" onClick={() => { setQuery(""); setActiveTab("background"); }}>Open Background work</Button>
+          <Button tone="default" onClick={() => { setQuery(""); openBackgroundWorkSettings(); }}>Open Background work</Button>
         </SettingsRow>
       );
     }

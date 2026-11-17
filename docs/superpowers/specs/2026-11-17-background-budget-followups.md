@@ -118,15 +118,16 @@ summary are marked `derived: true`.
 
 ### 5.4 Catch-up in ordinary windows, oldest first
 
-What doesn't fit one input after 5.1–5.3 is captured as successive ordinary captures over ≤ 24k-char
-windows, oldest first, each advancing the bookmark to its last message. Resumable: a refusal or failure
+This applies ONLY to a session in backlog (§5.5, §5.6.9). What doesn't fit one input after 5.1–5.3 is captured
+as successive ordinary captures over ≤ 24k-char windows, oldest first, each advancing the bookmark to its last message. Resumable: a refusal or failure
 mid-way loses nothing already captured. No new task class or model; same redaction, aliases and
 validation per window. At most 8 windows per session per day (the rest waits for the next day, logged).
 
 ### 5.5 Pacing (no budget change)
 
-- A session is in **backlog** when its bookmark is more than one window behind (persisted per session as
-  `backlog_since` in the capture table; schema migration `capture-2`).
+- A session is in **backlog** when the budget held back one of its captures while it had unread content (§5.6.9),
+  persisted per session as `backlog_since` in the capture table (schema migration `capture-2`). A session
+  that was never refused is not in backlog, however far behind its bookmark is.
 - Each capture tick first runs ordinary due captures (unchanged), then at most ONE backlog window, most
   recently active session first.
 - A budget refusal of a backlog window returns skip code `budget-backlog`, which does NOT stop ordinary
@@ -157,6 +158,20 @@ validation per window. At most 8 windows per session per day (the rest waits for
    citing them `derived`.
 8. **Settings search label** for the `custom` entry: "Background work — plans and API-key limit". If the
    visual gate enumerates Settings sections, add the new section's row.
+9. **Catch-up is only for sessions the budget held back (user decision).** `backlog_since` is set only when a
+   capture of the session was refused by the budget (skip `budget` or `budget-backlog`, or a runner refusal
+   with code `budget`) while it had unread content — `dirty`/compaction pending and at least the capture gate's
+   user messages since the bookmark. Every other capture (idle or compaction, with or without a bookmark,
+   never budget-refused) keeps the previous single-input behaviour: the newest 400 messages after the bookmark,
+   trimmed to one input with user messages first; no forward read, no condensing, no summaries, no windows.
+   Once in backlog the windows of §5.3–5.5 run until the bookmark reaches the end, then `backlog_since` is
+   cleared and the session is ordinary again. (The delivered-preamble skip of §5.6.6 applies to every capture.)
+10. **One model attempt per tick.** The backlog pass stops after ANY model attempt (success or failure); it
+    moves on to the next session only after outcomes that happen before a model call (backoff, unmapped,
+    nothing to read, scanner unavailable). A scanner that cannot run is detected before a backlog span is read.
+11. **Daily cap and new activity.** A session that used its 8 windows for the day also waits until local
+    midnight for new activity: its ordinary captures answer `backlog-daily-cap` and are not retried before then.
+12. **The bookmark never moves backwards**, whatever a window's computed end is.
 
 ## 6. Window length and the ChatGPT fix
 

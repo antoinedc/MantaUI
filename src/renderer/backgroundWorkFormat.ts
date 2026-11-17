@@ -31,8 +31,14 @@ export const LEVEL_LIMITS_HELP =
   "A window already in use when Manta first sees it starts counting from zero.";
 export const CAP_HELP = "0 turns background work off on API keys.";
 export const RUN_WHEN_BUSY_LABEL = "Keep running when my plan is busy";
-export const RUN_WHEN_BUSY_HELP =
-  "Background work still stays within its share (5% of a week on Normal), but no longer waits when your own usage is high.";
+/** The share of a weekly / short window background work may use at each level (mirrors the box's `LEVEL_CAPS`). */
+export const LEVEL_SHARES: Readonly<Record<"light" | "normal", { weekly: number; short: number }>> = {
+  light: { weekly: 2, short: 5 },
+  normal: { weekly: 5, short: 10 },
+};
+/** Help under the override, quoting the CURRENT level's shares. */
+export const runWhenBusyHelp = (level: "light" | "normal"): string =>
+  `Background work still stays within its share (${LEVEL_SHARES[level].weekly}% of a week and ${LEVEL_SHARES[level].short}% of a 5-hour window on ${levelLabel(level)}), but no longer waits when your own usage is high.`;
 /** What the Knowledge card, the CTO pane and the Settings card call themselves in a paused sentence. */
 export const DEFAULT_SUBJECT = "Background work";
 

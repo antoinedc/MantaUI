@@ -23,7 +23,7 @@ import {
   LEVEL_HELP,
   LEVEL_LIMITS_HELP,
   LEVEL_OPTIONS,
-  RUN_WHEN_BUSY_HELP,
+  runWhenBusyHelp,
   RUN_WHEN_BUSY_LABEL,
   capInputText,
   formatUsd,
@@ -239,7 +239,7 @@ export function BackgroundWorkCard() {
             <div className="space-y-1 pt-1">
               <Checkbox id={busyId} checked={runWhenBusy} onChange={pickRunWhenBusy} disabled={saving} label={RUN_WHEN_BUSY_LABEL} describedBy={busyHelpId} />
               <div id={busyHelpId} className="text-meta text-text-faint max-w-[62ch]">
-                {RUN_WHEN_BUSY_HELP}
+                {runWhenBusyHelp(level === "light" ? "light" : "normal")}
               </div>
             </div>
           )}

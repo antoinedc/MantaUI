@@ -11,11 +11,11 @@
 //
 // The input is the session's messages since its last capture, bounded to 24k chars:
 // user messages whole first (newest win when even they overflow), then the assistant
-// text and tool calls nearest them. A span that does not fit is caught up window by window
-// (spec 2026-11-17-background-budget-followups §5): condensed without a model (condense.mjs),
+// text and tool calls nearest them. A session the budget held back (a refused capture with content waiting)
+// is caught up window by window instead (spec 2026-11-17-background-budget-followups §5, §5.6.9): condensed without a model (condense.mjs),
 // replaced by a Manta handoff summary or an OpenCode compaction summary where one covers the
 // start of it, then captured as successive ≤ 24k-char windows, oldest first, each advancing the
-// bookmark (cursor). One window per call; a session still behind is `backlog_since` in the capture
+// bookmark (cursor). One window per call; a held-back session is `backlog_since` in the capture
 // table and gets one more window per tick after the ordinary captures, at most 8 windows a day. Messages carry short aliases (`m3`, `m3.2`) in the
 // prompt; the model cites aliases and this module turns them into §11.4 refs
 // (`msg:<sessionID>/<messageID>`, `part:<sessionID>/<partID>`) and DROPS every ref that
@@ -118,18 +118,18 @@ export const modelLabel = (m) => (m && typeof m === "object" && m.providerID && 
  * `[{id, role, at, summary?, parts:[{id, type:"text"|"tool", text?, tool?, command?, output?, status?, exit?}]}]`, oldest first,
  * only messages after the cursor, at most `limit` (the NEWEST ones when over). `summary` marks a completed compaction.
  *
- * With a bookmark AND `listMessagesSince(sessionID, {after, max}) → {messages, hasMore, olderNotRead}` (`oc.listMessagesSince`)
- * it reads FORWARD instead: the OLDEST `limit` messages after the bookmark, as `{messages, hasMore, olderNotRead}`.
+ * With `forward: true`, a bookmark AND `listMessagesSince(sessionID, {after, max}) → {messages, hasMore, olderNotRead}`
+ * (`oc.listMessagesSince`) it reads FORWARD instead: the OLDEST `limit` messages after the bookmark, as `{messages, hasMore, olderNotRead}`.
  *
  * Part ids from this reader contain `:` and so can never be §11.4 `part:` refs — messages are cited
  * instead. A source over the SQLite store (`part_…x0000` ids) may return citable part ids.
  */
 export function createCaptureMessageSource({ listMessages, listMessagesSince = null }) {
   const after = (m, c) => !c || m.at > c.at || (m.at === c.at && m.id > c.id);
-  return async function readSince({ sessionID, after: cursor = null, limit = READ_LIMIT } = {}) {
-    // With a bookmark (and a forward reader): the OLDEST `limit` messages after it, `{messages, hasMore, olderNotRead}`.
-    // Without one the newest `limit` messages as a plain array (a first capture never reads a whole old history).
-    if (cursor && listMessagesSince) {
+  return async function readSince({ sessionID, after: cursor = null, limit = READ_LIMIT, forward = false } = {}) {
+    // Forward (a session in catch-up, with a bookmark): the OLDEST `limit` messages after it, `{messages, hasMore, olderNotRead}`.
+    // Otherwise the newest `limit` messages as a plain array (an ordinary capture never reads a whole old history).
+    if (forward && cursor && listMessagesSince) {
       const r = (await listMessagesSince(sessionID, { after: cursor, max: limit })) ?? {};
       const mapped = normalize(r.messages ?? [], cursor);
       return { messages: mapped, hasMore: r.hasMore === true, olderNotRead: r.olderNotRead === true };
@@ -294,12 +294,12 @@ export function dropDeliveredPreamble(messages, delivered) {
 }
 
 /** PURE. Split messages into consecutive windows of at most `maxChars` of prompt (one over-long message gets its own). */
-export function splitWindows(messages, maxChars = MAX_INPUT_CHARS) {
+export function splitWindows(messages, maxChars = MAX_INPUT_CHARS, sizeOf = messageSize) {
   const windows = [];
   let cur = [];
   let used = 0;
   for (const m of messages) {
-    const size = messageSize(m);
+    const size = sizeOf(m);
     if (cur.length && used + size > maxChars) {
       windows.push(cur);
       cur = [];
@@ -337,7 +337,14 @@ export function planCatchup(span, { sessionID, bookmark = null, predecessors = [
   const numbered = span.map((m, i) => ({ ...m, srcIndex: i }));
   const raw = numbered.filter((m) => !m.summary);
   const single = (messages, condensed) => ({ windows: messages.length ? [{ messages, advanceTo: endAdvance }] : [], endAdvance, backlog: false, condensed, summary: null });
-  const sizeOf = (list) => list.reduce((n, m) => n + messageSize(m), 0);
+  // A message's size is worked out once per plan (the same messages are measured for the fit checks and the split).
+  const sizes = new Map();
+  const sizeOne = (m) => {
+    let n = sizes.get(m);
+    if (n === undefined) sizes.set(m, (n = messageSize(m)));
+    return n;
+  };
+  const sizeOf = (list) => list.reduce((n, m) => n + sizeOne(m), 0);
 
   if (!hasMore && sizeOf(raw) <= maxChars) return single(raw, false);
   const condensed = condenseForCapture(raw);
@@ -365,7 +372,7 @@ export function planCatchup(span, { sessionID, bookmark = null, predecessors = [
     list = [stand, ...condenseForCapture(raw.filter((m) => m.srcIndex > pick.cutoff))];
   }
 
-  const groups = splitWindows(list, maxChars);
+  const groups = splitWindows(list, maxChars, sizeOne);
   const windows = groups.map((messages, k) => ({ messages, advanceTo: k === groups.length - 1 ? endAdvance : at(groups[k + 1][0].srcIndex - 1) }));
   return { windows, endAdvance, backlog: windows.length > 1 || hasMore, condensed: true, summary: pick?.kind ?? null };
 }
@@ -484,6 +491,7 @@ export function createCapture(deps = {}) {
   const setCursor = db.prepare(
     "UPDATE capture_session SET cursor_at = ?, cursor_id = ?, captured_at = ?, notes = notes + ?, dirty = 0, backlog_since = ?, backlog_day = ?, backlog_windows = ? WHERE session_id = ?",
   );
+  const setBacklogSince = db.prepare("UPDATE capture_session SET backlog_since = ? WHERE session_id = ? AND backlog_since IS NULL");
   const selBacklog = db.prepare(
     "SELECT session_id FROM capture_session WHERE backlog_since IS NOT NULL AND NOT (COALESCE(backlog_day, '') = ? AND backlog_windows >= ?) ORDER BY last_event_at DESC LIMIT ?",
   );
@@ -630,36 +638,65 @@ export function createCapture(deps = {}) {
       return { captured: false, notes: 0, skipped: "backlog-daily-cap" };
     }
     const overBudget = { captured: false, notes: 0, skipped: backlogStep ? "budget-backlog" : "budget" };
-    const spend = await budget.canSpend({ workType: TASK_CLASS });
-    if (!spend.ok) return overBudget;
-
     const cursor = row && (row.cursor_at > 0 || row.cursor_id) ? { at: row.cursor_at, id: row.cursor_id } : null;
-    let read;
-    try {
-      read = (await readSince({ sessionID, after: cursor, limit: cursor ? MAX_CATCHUP_MESSAGES : READ_LIMIT })) ?? [];
-    } catch (e) {
-      st.retryAt = t + RETRY_MS;
-      log("[knowledge] capture read failed:", e?.message ?? e);
-      return { captured: false, notes: 0, skipped: "read-failed" };
-    }
-    const hasMore = !Array.isArray(read) && read.hasMore === true;
-    const olderNotRead = !Array.isArray(read) && read.olderNotRead === true;
-    let summaries = null;
-    try {
-      summaries = (await deps.summariesFor?.(sessionID)) ?? null;
-    } catch (e) {
-      log("[knowledge] capture: handoff summaries unavailable:", e?.message ?? e);
-    }
-    const messages = dropDeliveredPreamble((Array.isArray(read) ? read : read.messages) ?? [], summaries?.asSuccessor ?? null);
     const stopTracking = () => {
       st.dirty = false;
       st.compact = false;
       if (selRow.get(sessionID)) clearDirty.run(sessionID);
     };
-    // The user-message gate is judged ONCE on the whole span, before summaries and windowing (§5.6.1).
-    const userCount = messages.filter((m) => m.role === "user" && m.parts.some((p) => p.type === "text" && p.text?.trim())).length;
     const need = reason === "compaction" ? 1 : minUser;
-    if (!inBacklog && userCount < need) {
+    const countUsers = (list) => list.filter((m) => m.role === "user" && m.parts.some((p) => p.type === "text" && p.text?.trim())).length;
+    /** Read the span since the bookmark. Only a session in backlog is read forward (the oldest first); every other capture takes the newest `READ_LIMIT`. */
+    async function loadSpan(forward) {
+      const read = (await readSince({ sessionID, after: cursor, limit: forward && cursor ? MAX_CATCHUP_MESSAGES : READ_LIMIT, forward })) ?? [];
+      let summaries = null;
+      try {
+        summaries = (await deps.summariesFor?.(sessionID)) ?? null;
+      } catch (e) {
+        log("[knowledge] capture: handoff summaries unavailable:", e?.message ?? e);
+      }
+      return {
+        hasMore: forward && !Array.isArray(read) && read.hasMore === true,
+        olderNotRead: forward && !Array.isArray(read) && read.olderNotRead === true,
+        summaries,
+        // The delivered preamble of a successor is not the user's own words, in any mode (§5.6.6).
+        messages: dropDeliveredPreamble((Array.isArray(read) ? read : read.messages) ?? [], summaries?.asSuccessor ?? null),
+      };
+    }
+
+    const spend = await budget.canSpend({ workType: TASK_CLASS });
+    if (!spend.ok) {
+      // A capture the budget held back, with content waiting, is what puts a session into catch-up (and only that).
+      if (!inBacklog && (st.dirty || st.compact)) {
+        try {
+          if (countUsers((await loadSpan(false)).messages) >= need) markBacklog(sessionID, st, t);
+          else stopTracking();
+        } catch (e) {
+          log("[knowledge] capture read failed:", e?.message ?? e);
+        }
+      }
+      return overBudget;
+    }
+    // A scanner that can't run means no model call: find out before reading a long span.
+    if (inBacklog) {
+      try {
+        if ((await scanner.redact("")).unavailable) return { captured: false, notes: 0, skipped: "scanner" };
+      } catch {
+        return { captured: false, notes: 0, skipped: "scanner" };
+      }
+    }
+
+    let span;
+    try {
+      span = await loadSpan(inBacklog);
+    } catch (e) {
+      st.retryAt = t + RETRY_MS;
+      log("[knowledge] capture read failed:", e?.message ?? e);
+      return { captured: false, notes: 0, skipped: "read-failed" };
+    }
+    const { hasMore, olderNotRead, summaries, messages } = span;
+    // The user-message gate is judged ONCE on the whole span, before summaries and windowing (§5.6.1).
+    if (!inBacklog && countUsers(messages) < need) {
       stopTracking();
       return { captured: false, notes: 0, skipped: "too-few-messages" };
     }
@@ -670,25 +707,29 @@ export function createCapture(deps = {}) {
       return { captured: false, notes: 0, skipped: "nothing-new" };
     }
 
-    const plan = planCatchup(messages, { sessionID, bookmark: cursor, predecessors: summaries?.asPredecessor ?? [], hasMore });
+    // Outside backlog: the previous behaviour — the newest content, trimmed to ONE input (user messages first).
+    const plan = inBacklog
+      ? planCatchup(messages, { sessionID, bookmark: cursor, predecessors: summaries?.asPredecessor ?? [], hasMore })
+      : { windows: [{ messages, advanceTo: null }], endAdvance: { at: messages[messages.length - 1].at, id: messages[messages.length - 1].id }, condensed: false };
     // Windows with nothing in them are passed over without a model call; the first one with something is captured.
     let win = null;
     for (let k = 0; k < plan.windows.length && !win; k++) {
       const input = buildCaptureInput(plan.windows[k].messages, { sessionID });
       if (input.included > 0) win = { k, w: plan.windows[k], input };
     }
-    const backlogRun = plan.backlog || inBacklog;
     const store = (advanceTo, { notes = 0, captured = false, finished }) => {
       if (!row) upsertActivity.run(sessionID, st.lastEventAt, 0);
-      const at = advanceTo ?? plan.endAdvance;
-      const count = backlogRun && captured ? (row?.backlog_day === today ? (row.backlog_windows ?? 0) : 0) + 1 : (row?.backlog_windows ?? 0);
+      // A bookmark never moves backwards.
+      let at = advanceTo ?? plan.endAdvance;
+      if (at && row && (at.at < row.cursor_at || (at.at === row.cursor_at && at.id < row.cursor_id))) at = null;
+      const count = inBacklog && captured ? (row.backlog_day === today ? (row.backlog_windows ?? 0) : 0) + 1 : (row?.backlog_windows ?? 0);
       setCursor.run(
         at?.at ?? row?.cursor_at ?? 0,
         at?.id ?? row?.cursor_id ?? "",
         captured ? t : (row?.captured_at ?? null),
         notes,
-        finished ? null : (row?.backlog_since ?? t),
-        backlogRun && captured ? today : (row?.backlog_day ?? null),
+        finished ? null : (row?.backlog_since ?? null),
+        inBacklog && captured ? today : (row?.backlog_day ?? null),
         count,
         sessionID,
       );
@@ -721,12 +762,16 @@ export function createCapture(deps = {}) {
     } catch (e) {
       st.retryAt = t + RETRY_MS;
       log("[knowledge] capture run failed:", e?.message ?? e);
-      return { captured: false, notes: 0, skipped: "run-failed" };
+      return { captured: false, notes: 0, skipped: "run-failed", calledModel: true };
     }
-    if (res?.ok === false && res.code === "budget") return overBudget; // the budget said wait: no backoff, the next tick asks again
+    if (res?.ok === false && res.code === "budget") {
+      // The budget said wait: no backoff, the next tick asks again — and the session is now one that was held back.
+      if (!inBacklog) markBacklog(sessionID, st, t);
+      return { ...overBudget, calledModel: true };
+    }
     if (!res || res.ok === false) {
       st.retryAt = t + RETRY_MS;
-      return { captured: false, notes: 0, skipped: String(res?.code ?? "run-failed") };
+      return { captured: false, notes: 0, skipped: String(res?.code ?? "run-failed"), calledModel: true };
     }
 
     const notes = await parseCaptureNotes(res.text, win.input.aliases, { sessionID, isUserAuthored });
@@ -741,12 +786,23 @@ export function createCapture(deps = {}) {
     }
     // The bookmark moves to the end of this window; behind the last window of a fully read span the catch-up is over.
     const last = win.k === plan.windows.length - 1;
-    store(last ? plan.endAdvance : win.w.advanceTo, { notes: enqueued, captured: true, finished: last && !hasMore });
+    const finished = last && !hasMore;
+    store(last ? plan.endAdvance : win.w.advanceTo, { notes: enqueued, captured: true, finished });
     sessionMap.markCaptured(sessionID);
     st.dirty = false;
     st.compact = false;
     st.retryAt = 0;
-    return { captured: true, notes: enqueued, ...(plan.backlog || !(last && !hasMore) ? { backlog: true } : {}) };
+    return { captured: true, notes: enqueued, calledModel: true, ...(inBacklog && !finished ? { backlog: true } : {}) };
+  }
+
+  /** Put a session into catch-up: its captures were held back by the budget while content waited. Idempotent. */
+  function markBacklog(sessionID, st, t) {
+    try {
+      if (!selRow.get(sessionID)) upsertActivity.run(sessionID, st.lastEventAt, st.dirty ? 1 : 0);
+      setBacklogSince.run(t, sessionID);
+    } catch (e) {
+      log("[knowledge] capture: marking the session for catch-up failed:", e?.message ?? e);
+    }
   }
 
   /**
@@ -791,12 +847,9 @@ export function createCapture(deps = {}) {
           if (done.has(id)) continue;
           checked++;
           const r = await captureSession(id, { reason: "idle", backlogStep: true });
-          if (r.skipped === "budget-backlog") break;
-          if (r.captured) {
-            captured++;
-            break;
-          }
-          if (r.skipped === "nothing-capturable") break; // the bookmark moved: that was this tick's window
+          if (r.captured) captured++;
+          // One model attempt per tick, whatever came of it; only outcomes before a model call move on to the next session.
+          if (r.calledModel || r.skipped === "budget-backlog") break;
         }
       }
       return { checked, captured };

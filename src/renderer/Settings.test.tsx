@@ -637,6 +637,7 @@ describe("Settings — background work budget card", () => {
     await h.flush();
     expect(tab("background")!.getAttribute("aria-selected")).toBe("true");
     expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeTruthy();
+    expect(document.activeElement?.textContent, "the card's heading is focused, like the other links to it").toBe("Background work");
   });
 
   it("Knowledge's Background work settings link switches the open Settings to its section, at the card", async () => {
