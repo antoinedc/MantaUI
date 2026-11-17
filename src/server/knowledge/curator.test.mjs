@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { curatorRig } from "./curatorRig.mjs";
+import { fakeBackgroundBudget } from "./testHelpers.mjs";
 
 const page = (slug, file, content, extra = {}) => ({ type: "page.edit", target: { area: "project", path: `projects/${slug}/${file}`, ...(extra.section ? { section: extra.section } : {}) }, content, reason: extra.reason ?? "Seen in the notes", evidence: extra.evidence ?? [{ ref: "msg:ses_one/msg_1" }] });
 const changesOf = async (engine) => (await engine.changes({ limit: 100 })).items;
@@ -226,7 +227,7 @@ test("no qualifying model: notes stay queued and are retried; after 24 hours one
 });
 
 test("budget cap stops curation (one 'waiting' entry) but not the briefing or the tools", async () => {
-  const r = await rigWith({ stored: { dailyCapUsd: 0 }, runner: (_a, _c, rig) => rig.decide([]) });
+  const r = await rigWith({ over: { backgroundBudget: fakeBackgroundBudget({ refuse: "usd-cap" }) }, runner: (_a, _c, rig) => rig.decide([]) });
   const slug = await r.slugOf("ses_one");
   await r.note(slug, "ses_one", "howto", "a fact");
   assert.equal((await r.engine.runCurator(slug, { force: true })).status, "cap");
@@ -234,8 +235,23 @@ test("budget cap stops curation (one 'waiting' entry) but not the briefing or th
   assert.equal(r.calls.length, 0);
   assert.equal((await changesOf(r.engine)).filter((i) => i.kind === "waiting").length, 1);
   assert.equal((await r.engine.status()).capReached, true);
+  assert.match((await changesOf(r.engine)).find((i) => i.kind === "waiting").summary, /Daily spend cap reached/);
   assert.deepEqual(await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 }), { text: "", token: null });
   assert.equal((await r.engine.search({ sessionID: "ses_one", query: "fact", sources: ["wiki"] })).hits.length, 0);
+  await r.engine.stop();
+});
+
+test("a runner refusal (code budget) after the early gate passed is the same cap path: status cap, one plain-words 'waiting' entry, never a failure", async () => {
+  const r = await rigWith({ runner: () => ({ ok: false, code: "budget", reason: "window-busy" }) });
+  const slug = await r.slugOf("ses_one");
+  await r.note(slug, "ses_one", "howto", "a fact");
+  const out = await r.engine.runCurator(slug, { force: true });
+  assert.equal(out.status, "waiting"); // the batch reports 'waiting' (not 'failed') and keeps the note queued
+  assert.equal((await r.engine.queue.list(slug)).length, 1);
+  assert.equal(r.engine.state.kvGet?.("curator.fail:" + slug) ?? null, null, "no failed-batch count");
+  const waiting = (await changesOf(r.engine)).filter((i) => i.kind === "waiting");
+  assert.equal(waiting.length, 1);
+  assert.match(waiting[0].summary, /Paused while your plan is busy/);
   await r.engine.stop();
 });
 
@@ -463,7 +479,10 @@ test("contradiction with the user's own lines is checked in code: a strict YES/N
 });
 
 test("a no-model day keeps the check honest too: with the budget exhausted nothing contradicting-prone is applied", async () => {
-  const r = await ruleRig({ stored: { dailyCapUsd: 0.0001 }, runner: (a, _c, rig) => (/contradicts, reverses/.test(a.context[0].text) ? { text: "NO" } : rig.decide([ruleDecision(threeQuotes)])) });
+  // the first rules call is allowed; the budget is spent by the time the yes/no check asks
+  let rulesCalls = 0;
+  const backgroundBudget = fakeBackgroundBudget({ refuse: (a) => (a.workType === "curator-rules" && ++rulesCalls > 1 ? "usd-cap" : null) });
+  const r = await ruleRig({ over: { backgroundBudget }, runner: (a, _c, rig) => (/contradicts, reverses/.test(a.context[0].text) ? { text: "NO" } : rig.decide([ruleDecision(threeQuotes)])) });
   await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Never use pnpm workspaces\n");
   const out = await r.engine.runCurator(r.slug, { force: true });
   // the rules call spends the whole cap, so the yes/no check cannot run → fail closed

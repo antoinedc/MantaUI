@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, _resetEndpointSummaryCache, fetchLedgerRows } from "./modelLedger.mjs";
+import { tokensSent, aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, _resetEndpointSummaryCache, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
 import { _setWorkerFactory, _shutdownOffload } from "./dbOffload.mjs";
 import { Worker } from "node:worker_threads";
@@ -292,6 +292,13 @@ test("aggregateDailySeries tokensSent formula: input=1,cacheRead=2,cacheWrite=3,
   );
   assert.equal(out.length, 1);
   assert.equal(out[0].tokensSent, 10);
+});
+
+test("tokensSent (exported for the background budget): all input buckets + output; reasoning is not counted (the ledger's own series must not change)", () => {
+  assert.equal(tokensSent({ input: 1, cacheRead: 2, cacheWrite: 3, output: 4 }), 10);
+  assert.equal(tokensSent({ input: 1, cacheRead: 2, cacheWrite: 3, output: 4, reasoning: 5 }), 10);
+  assert.equal(tokensSent({ input: null, output: "x", reasoning: undefined }), 0);
+  assert.equal(tokensSent(null), 0);
 });
 
 // ---- aggregateHourlySeries (BET-1369) ----

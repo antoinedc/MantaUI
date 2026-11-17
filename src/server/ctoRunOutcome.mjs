@@ -18,6 +18,9 @@ const CODES = new Set([
   // own exclusion set provably cannot yield a DIFFERENT endpoint (identical,
   // or an unpinned default). The run stops here instead of repeating itself.
   "no-alternate-endpoint",
+  // Background work budget (spec 2026-11-17 §17.2): the preflight refused the call before any model was
+  // spent. A local verdict — never evidence against a provider, so no failover and no escalation.
+  "budget",
 ]);
 
 // §4.5 status buckets → the W3 code. Unclassifiable statuses (none/400 etc.)

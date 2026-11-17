@@ -5,6 +5,7 @@ import { createAuthedGit, forgeBasicAuth } from "./wiring.mjs";
 import { createIsManagedSession, createKnowledgeRunner, forwardListMessages, knowledgeConfigDir, knowledgePaths } from "./integration.mjs";
 import { createCaptureMessageSource } from "./capture.mjs";
 import { curatorRig } from "./curatorRig.mjs";
+import { fakeBackgroundBudget } from "./testHelpers.mjs";
 import { readFile } from "node:fs/promises";
 import { createShellCommandReader, createSkillLoadReader, createToolCallReader, createTrialResultReader, createUserRequestLister, createSingleMessageReader } from "./readers.mjs";
 
@@ -57,14 +58,62 @@ test("authed git: the real git runner passes the env config through to git (cred
 
 test("the runner wrapper merges its own collaborators under the caller's deps", async () => {
   let got;
-  const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: { runEphemeralSession: 1 }, configGet: () => 2 });
+  const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: { runEphemeralSession: 1 }, configGet: () => 2, backgroundBudget: fakeBackgroundBudget() });
   const validate = () => true;
-  await run({ taskClass: "curator-notes", deps: { reportCost: 3, validate } });
-  assert.deepEqual(Object.keys(got.deps).sort(), ["configGet", "oc", "reportCost", "validate"]);
+  await run({ taskClass: "curator-notes", deps: { reportCost: async () => {}, validate } });
+  assert.deepEqual(Object.keys(got.deps).sort(), ["configGet", "oc", "preflight", "reportCost", "validate"]);
   await run({ taskClass: "x" });
-  assert.deepEqual(Object.keys(got.deps).sort(), ["configGet", "oc"]);
+  assert.deepEqual(Object.keys(got.deps).sort(), ["configGet", "oc", "preflight", "reportCost"]); // the budget hooks are always there
   await run({ taskClass: "x", deps: { configGet: "mine" } });
   assert.equal(got.deps.configGet, "mine");
+});
+
+test("runner wrapper: the preflight asks the shared budget with the work type and the model the runner resolved; a caller cannot replace it", async () => {
+  const bb = fakeBackgroundBudget();
+  let got;
+  const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: () => ({}), backgroundBudget: bb });
+  await run({ taskClass: "knowledge-capture", deps: { preflight: async () => ({ ok: true }) } });
+  const model = { providerID: "p", modelID: "m" };
+  assert.deepEqual(await got.deps.preflight({ taskClass: "knowledge-capture", tier: "nano", model }), { ok: true });
+  assert.deepEqual(bb.calls.check, [{ workType: "knowledge-capture", model }], "the caller's own preflight did not win");
+  // a null model (the box default) goes through as null; a refusal carries its reason
+  bb.refuse = "window-busy";
+  assert.deepEqual(await got.deps.preflight({ taskClass: "knowledge-capture", tier: "nano", model: null }), { ok: false, reason: "window-busy" });
+  assert.equal(bb.calls.check[1].model, null);
+  // `workType` is the budget's work type for a call that runs as another task class (the weekly tidy-up) and is not forwarded
+  await run({ taskClass: "curator-rules", workType: "knowledge-tidy" });
+  assert.ok(!("workType" in got));
+  bb.refuse = null;
+  await got.deps.preflight({ model });
+  assert.equal(bb.calls.check.at(-1).workType, "knowledge-tidy");
+});
+
+test("runner wrapper: without a shared budget every run is refused (fail closed)", async () => {
+  let got;
+  const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: () => ({}) });
+  await run({ taskClass: "knowledge-capture" });
+  assert.deepEqual(await got.deps.preflight({ model: null }), { ok: false, reason: "unavailable" });
+  await got.deps.reportCost({ taskClass: "knowledge-capture", tokens: 10 }); // and a cost report with nothing to book on does not throw
+});
+
+test("runner wrapper: real usage is booked on the shared budget (inLedger:false), an estimate is booked as its estimate, then the caller's own hook runs", async () => {
+  const bb = fakeBackgroundBudget();
+  const order = [];
+  const real = bb.record;
+  bb.record = async (a) => (order.push("shared"), real(a));
+  let got;
+  const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: () => ({}), backgroundBudget: bb });
+  const model = { providerID: "p", modelID: "m" };
+  const seen = [];
+  await run({ taskClass: "curator-rules", workType: "knowledge-tidy", deps: { reportCost: async (c) => (order.push("caller"), seen.push(c)) } });
+  const usage = { input: 100, output: 20, reasoning: 0, cacheRead: 5, cacheWrite: 1 };
+  await got.deps.reportCost({ taskClass: "curator-rules", tier: "deep", model, tokens: 999, estimated: false, usage, usd: 0.01 });
+  assert.deepEqual(order, ["shared", "caller"]);
+  assert.deepEqual(bb.calls.record[0], { workType: "knowledge-tidy", model, usage, usd: 0.01, inLedger: false });
+  assert.deepEqual(seen[0].tokens, usage, "the caller prices per component from the usage object");
+  await got.deps.reportCost({ taskClass: "curator-rules", tier: "deep", model, tokens: 1234, estimated: true });
+  assert.deepEqual(bb.calls.record[1], { workType: "knowledge-tidy", model, usage: 1234, inLedger: false }, "no real usage: the size estimate is what gets booked");
+  assert.equal(seen[1].tokens, 1234);
 });
 
 test("config paths: OPENCODE_CONFIG_DIR wins, else ~/.config/opencode; AGENTS.md and skills live in it", () => {
@@ -157,6 +206,49 @@ test("seam: capture's {limit} reaches opencode through the box wrapper (forwardL
   assert.match(block, /isManagedSession: createKnowledgeIsManagedSession\(/);
 });
 
+test("seam: every knowledge work type is one the shared budget knows; the knowledge runner over the REAL budget refuses at the pay-per-token cap and books what ran", async () => {
+  const { createBackgroundBudget, WORK_CLASS } = await import("../backgroundBudget.mjs");
+  for (const w of ["knowledge-capture", "knowledge-corrections", "knowledge-tidy", "knowledge-trial", "curator-notes", "curator-rules", "curator-skills"]) assert.ok(WORK_CLASS[w], w);
+  // a $1/day pay-per-token budget over model p/m at $10 per million input tokens
+  const budgetOver = (store) =>
+    createBackgroundBudget({
+      store,
+      configGet: async () => ({ backgroundWork: { level: "normal", dailyCapUsd: 1 } }),
+      getPrices: async () => ({ models: { "p/m": { input: 10, output: 50 } } }),
+      resolveDefaultModel: async () => ({ providerID: "p", modelID: "m" }),
+    });
+  let saved = null;
+  const bb = budgetOver({ load: async () => saved, save: async (d) => (saved = structuredClone(d)) });
+  let got;
+  const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: async () => ({}), backgroundBudget: bb });
+  await run({ taskClass: "curator-notes" });
+  assert.deepEqual(await got.deps.preflight({ model: { providerID: "p", modelID: "m" } }), { ok: true });
+  // 100k input at $10/Mtok = $1: the day's cap is spent
+  await got.deps.reportCost({ taskClass: "curator-notes", model: { providerID: "p", modelID: "m" }, tokens: 1, usage: { input: 100_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }, estimated: false });
+  assert.equal(bb.usdToday({ mode: "payg" }), 1);
+  assert.deepEqual(await got.deps.preflight({ model: null }), { ok: false, reason: "usd-cap" }); // a null model is the box default
+  // batch work stops earlier: tidy-up calls hit the 60 % batch ceiling first
+  const bb2 = budgetOver({ load: async () => null, save: async () => {} });
+  const run2 = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: async () => ({}), backgroundBudget: bb2 });
+  await run2({ taskClass: "curator-rules", workType: "knowledge-tidy" });
+  await got.deps.reportCost({ taskClass: "curator-rules", model: { providerID: "p", modelID: "m" }, tokens: 1, usage: { input: 70_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } });
+  assert.equal((await got.deps.preflight({ model: null })).ok, false, "tidy (batch) is over its 60 % ceiling…");
+  await run2({ taskClass: "curator-rules" });
+  assert.equal((await got.deps.preflight({ model: null })).ok, true, "…while continuous curation still has the last 40 %");
+});
+
+test("seam: index.mjs hands the ONE shared background budget to the knowledge runner and engine, after it is created, and writes the shared cap through the synced config path", async () => {
+  const src = await readFile(new URL("../index.mjs", import.meta.url), "utf8");
+  const created = src.indexOf("const backgroundBudget = createBackgroundBudget(");
+  const runner = src.indexOf("const knowledgeRunner = createKnowledgeRunner(");
+  const engine = src.indexOf("const knowledgeEngine = createKnowledgeEngine(");
+  assert.ok(created > 0 && created < runner && runner < engine, "created before it is referenced (a const used earlier is a boot-time TDZ crash)");
+  assert.match(src.slice(runner, engine), /backgroundBudget,/);
+  const block = src.slice(engine, src.indexOf("const knowledgeReaper"));
+  assert.match(block, /\n  backgroundBudget,/);
+  assert.match(block, /syncState\.applyConfig\(next\)/);
+});
+
 test("seam: createIsManagedSession — a Manta-owned job's child session is managed; an opencode-owned subagent, an observed session or an unknown id is not; a store failure throws", async () => {
   const completionOwnerOf = (j) => j?.completionOwner ?? (j?.origin === "subagent" ? "opencode" : "manta");
   const jobs = [
@@ -199,7 +291,7 @@ const RUNNER_SHAPES = [
 async function ledgerBudget() {
   const { memState } = await import("./testHelpers.mjs");
   const { createBudget } = await import("./budget.mjs");
-  return createBudget({ state: await memState(), settings: { get: async () => ({ dailyCapUsd: 100 }) }, getPrices: async () => PRICES, bandOf: () => null });
+  return createBudget({ state: await memState(), getPrices: async () => PRICES, bandOf: () => null });
 }
 
 test("seam: capture / corrections / skills (makeReportCost behind createKnowledgeRunner) price every runner cost shape", async () => {

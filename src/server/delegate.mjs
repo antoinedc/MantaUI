@@ -2796,9 +2796,11 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   if (guardSkipped) return { ok: true, skipped: "guard" };
   if (paused) {
     pauseInterrupts.delete(paused.id);
+    await recordBudgetSpend(paused, deps); // outside the jobs lock (§17.14)
     return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };
+  await recordBudgetSpend(updated, deps); // the final record catches the rest (§5.4)
   const endedAs = updated.status;
   if (segment) void deps.livenessLog.appendSegment(segment);
 
@@ -3771,6 +3773,7 @@ export async function continueJob(id, input, deps = {}) {
       const job = {
         ...inherited,
         ...livenessFieldsAtLaunch(baseCeiling),
+        budgetRecorded: null, // the successor's usage restarts at 0: so does its cursor
         id: genId(),
         attempt: (old.attempt ?? 1) + 1,
         continues: old.id,
@@ -4200,6 +4203,10 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       correlation: input?.correlation ?? null,
       sweepAllowanceMs: input?.sweepAllowanceMs ?? null,
       permission: input?.permission ?? null,
+      // Background work budget (spec 2026-11-17 §17.14): set for overnight dispatches (`actor:"cto"` alone does not
+      // identify them). The cursor is what has already been booked against the shared budget.
+      budgetWorkType: typeof input?.budgetWorkType === "string" && input.budgetWorkType ? input.budgetWorkType : null,
+      budgetRecorded: null,
       status: "running",
       activity: null,
       createdAt: t,
@@ -4985,6 +4992,95 @@ async function judgeLiveness(job, deps) {
   await endChild(res);
 }
 
+/**
+ * How a job's tokens split when its cost is unknown or partial (so the budget cannot price them from the session's own
+ * cost and the real per-kind split is not kept on the job). A tool-using agent session is dominated by cache reads
+ * (the same context re-sent every step), which are billed at a tenth of the input rate: pricing a bare total 90/10
+ * input/output (the budget's default for a size-only estimate) would charge several times what such a job costs.
+ * The mix is an approximation, deliberately on the high side for output. Fractions sum to 1.
+ */
+const BUDGET_PARTIAL_MIX = Object.freeze({ cacheRead: 0.9, cacheWrite: 0.05, output: 0.03, input: 0.02 });
+
+function estimateTokenKinds(total) {
+  const t = Math.max(0, Math.round(total));
+  const cacheRead = Math.round(t * BUDGET_PARTIAL_MIX.cacheRead);
+  const cacheWrite = Math.round(t * BUDGET_PARTIAL_MIX.cacheWrite);
+  const output = Math.round(t * BUDGET_PARTIAL_MIX.output);
+  return { input: Math.max(0, t - cacheRead - cacheWrite - output), output, cacheRead, cacheWrite };
+}
+
+const budgetBooking = new Map(); // jobId → the booking in flight (bookings of one job run one after another)
+
+/**
+ * Book a job's spend against the shared background budget (spec 2026-11-17 §5.4, §17.14), INCREMENTALLY: the delta of
+ * `jobProgress.usage` past the persisted cursor `budgetRecorded {tokens, usd}`. Only jobs started as budgeted work
+ * (`budgetWorkType`, the overnight dispatches) are booked; any other job returns before the jobs lock is touched.
+ * The delta is computed under the jobs lock, RECORDED outside it (record never throws), and the cursor is advanced
+ * only AFTER the record — a crash in between re-books one delta on the next sweep rather than losing it. Bookings of
+ * one job are serialised so a sweep and the terminal transition never read the same cursor.
+ *   - Cost known and complete: the session's own cost is the money (`usd`, never negative); the tokens then only count
+ *     against the plan windows, and the usd cursor moves to the new total.
+ *   - Cost unknown or partial: no usd is booked and the usd cursor stays put; the tokens are priced by the budget from
+ *     an estimated per-kind split (`BUDGET_PARTIAL_MIX`, cache-read weighted).
+ * `inLedger: true`: the job's session persists, so the model ledger counts it. Never throws.
+ */
+function recordBudgetSpend(job, deps) {
+  if (!job?.budgetWorkType || typeof deps.recordBackgroundUsage !== "function") return Promise.resolve();
+  const prev = budgetBooking.get(job.id) ?? Promise.resolve();
+  const run = prev.then(() => bookBudgetSpend(job.id, deps));
+  const tail = run.finally(() => {
+    if (budgetBooking.get(job.id) === tail) budgetBooking.delete(job.id);
+  });
+  budgetBooking.set(job.id, tail);
+  return run;
+}
+
+async function bookBudgetSpend(jobId, deps) {
+  const { load = loadJobs, save = saveJobs } = deps;
+  try {
+    const claim = await jobsLock.runExclusive(async () => {
+      const jobs = (await load()) ?? [];
+      const job = jobs.find((j) => j.id === jobId);
+      if (!job || !job.budgetWorkType) return null;
+      const usage = job.jobProgress?.usage ?? {};
+      const cursor = job.budgetRecorded ?? {};
+      const cursorTokens = Math.max(0, Number(cursor.tokens) || 0);
+      const cursorUsd = Math.max(0, Number(cursor.usd) || 0);
+      const tokens = Math.max(0, Math.round(Number(usage.tokens) || 0));
+      const cost = typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) ? usage.costUsd : null;
+      const complete = cost !== null && !usage.costPartial;
+      const dTokens = tokens - cursorTokens;
+      const dUsd = complete ? Math.max(0, cost - cursorUsd) : 0;
+      if (dTokens <= 0 && !(dUsd > 0)) return null;
+      return {
+        next: { tokens: Math.max(tokens, cursorTokens), usd: complete ? Math.max(cost, cursorUsd) : cursorUsd },
+        booking: {
+          workType: job.budgetWorkType,
+          model: job.launch?.model ?? job.requestedModel ?? job.model ?? null,
+          usage: complete ? Math.max(0, dTokens) : estimateTokenKinds(dTokens),
+          ...(complete ? { usd: dUsd } : {}),
+          inLedger: true,
+        },
+      };
+    });
+    if (!claim) return;
+    await deps.recordBackgroundUsage(claim.booking);
+    await jobsLock.runExclusive(async () => {
+      const jobs = (await load()) ?? [];
+      const idx = jobs.findIndex((j) => j.id === jobId);
+      if (idx === -1) return;
+      const cur = jobs[idx].budgetRecorded ?? {};
+      jobs[idx] = {
+        ...jobs[idx],
+        budgetRecorded: { tokens: Math.max(claim.next.tokens, Number(cur.tokens) || 0), usd: Math.max(claim.next.usd, Number(cur.usd) || 0) },
+      };
+      await save(jobs);
+    });
+  } catch (e) {
+    console.warn(`[delegate] booking ${jobId} against the background budget failed:`, e?.message ?? e);
+  }
+}
+
 /** Fold usage / the last-progress time / the file count into a running job's record (once a sweep, at most one write). */
 async function refreshJobProgress(job, deps) {
   const clock = deps.now ?? (() => Date.now());
@@ -5003,6 +5099,7 @@ async function refreshJobProgress(job, deps) {
     if (jp === cur.jobProgress && !lastChanged) return null;
     return { jobProgress: jp, ...(lastChanged ? { lastProgressAt: last } : {}) };
   });
+  await recordBudgetSpend(job, deps); // outside the jobs lock (§17.14)
 }
 
 async function sweepLiveness(skipIds, deps) {

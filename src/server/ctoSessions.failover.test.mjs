@@ -8,21 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runEphemeral } from "./ctoSessions.mjs";
 import { runFailureClass, canFailover } from "./ctoRunOutcome.mjs";
-
-function fakeEngineState(initial = {}) {
-  let payload = { ...initial };
-  return {
-    async load() {
-      return payload;
-    },
-    async save(p) {
-      payload = p;
-    },
-    peek() {
-      return payload;
-    },
-  };
-}
+import { allow, fakeEngineState } from "./ctoSessionsFixtures.mjs";
 
 function fakeLedger() {
   const rows = [];
@@ -117,7 +103,7 @@ test("a pinned-model 429 with an alternate endpoint reroutes and succeeds", asyn
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel, validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel, validate: async () => true },
   });
   assert.equal(oc.calls.length, 2, "failover spent exactly the second call");
   assert.equal(out.text, "second-try");
@@ -138,7 +124,7 @@ test("an identical re-resolution stops with no-alternate-endpoint (raises Part A
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel, validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel, validate: async () => true },
   });
   assert.equal(oc.calls.length, 1, "no model call on a provable repeat");
   assert.equal(out.ok, false);
@@ -154,7 +140,7 @@ test("an unpinned prior attempt does not failover (nothing to exclude)", async (
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: async () => (resolverCalls++, null), validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: async () => (resolverCalls++, null), validate: async () => true },
   });
   assert.equal(resolverCalls, 1, "no re-resolution when the box default cannot be excluded");
   assert.equal(oc.calls.length, 1);
@@ -169,7 +155,7 @@ test("an authoritative 402 does not spend the second call", async () => {
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: async () => (resolverCalls++, aThenB({})), validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: async () => (resolverCalls++, aThenB({})), validate: async () => true },
   });
   assert.equal(resolverCalls, 1, "retrying a 402 is guaranteed waste");
   assert.equal(oc.calls.length, 1);
@@ -183,7 +169,7 @@ test("a local lifecycle failure does not trigger endpoint failover", async () =>
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: aThenB, validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: aThenB, validate: async () => true },
   });
   assert.equal(oc.calls.length, 1, "a local failure is not evidence against the provider");
   assert.equal(out.ok, false);
@@ -198,7 +184,7 @@ test("a pinned prompt-http 402 is provider evidence but AUTHORITATIVE — no fai
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: aThenB, validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: aThenB, validate: async () => true },
   });
   assert.equal(oc.calls.length, 1, "retrying a 402 is guaranteed waste (§4.5)");
   assert.equal(out.code, "prompt-http");
@@ -212,7 +198,7 @@ test("a pinned prompt-http 429 IS provider evidence and fails over (§4.1a)", as
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: aThenB, validate: async () => true },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: aThenB, validate: async () => true },
   });
   assert.equal(oc.calls.length, 2);
   assert.equal(oc.calls[1]?.modelID, "b");
@@ -230,7 +216,7 @@ test("the shared budget: a failover whose second call quality-fails returns with
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: aThenB, validate: async () => false },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: aThenB, validate: async () => false },
   });
   assert.equal(oc.calls.length, 2, "one budget, two model calls total");
   assert.equal(out.ok, false);
@@ -247,9 +233,35 @@ test("the shared budget: an escalation whose second call provider-fails does not
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, ledger, resolveModel: aThenB, validate: async () => false },
+    deps: { preflight: allow, oc, engineState, ledger, resolveModel: aThenB, validate: async () => false },
   });
   assert.equal(oc.calls.length, 2);
   assert.equal(out.ok, false);
   assert.equal(out.code, "model-error-429");
+});
+
+// ---------------------------------------------------------------------------
+// Background work budget (spec 2026-11-17 §7.1): the preflight runs before the failover attempt too
+// ---------------------------------------------------------------------------
+
+test("the failover attempt is preflighted against the ALTERNATE model; a refusal there stops it before any call", async () => {
+  const engineState = fakeEngineState();
+  const oc = fakeOc([fail429, { ok: true, text: "never" }]);
+  const seen = [];
+  const out = await runEphemeral({
+    taskClass: "ambient-summarize",
+    context: [],
+    deps: {
+      oc, engineState, ledger: fakeLedger(), resolveModel: aThenB, validate: async () => true,
+      preflight: async (a) => { seen.push(`${a.model.providerID}/${a.model.modelID}`); return seen.length === 1 ? { ok: true } : { ok: false, reason: "usd-cap" }; },
+    },
+  });
+  assert.deepEqual(seen, ["p/a", "p/b"]);
+  assert.equal(oc.calls.length, 1, "only the first endpoint was ever called");
+  assert.equal(out.code, "budget");
+  assert.equal(out.reason, "usd-cap");
+});
+
+test("runFailureClass: a budget refusal is local", () => {
+  assert.equal(runFailureClass({ ok: false, code: "budget", reason: "usd-cap" }), "local");
 });

@@ -19,7 +19,7 @@ import { isExemptPath } from "../auth.mjs";
 import { createKnowledgeEngine } from "./engine.mjs";
 import { buildKnowledgeChannels, handleKnowledgeRoute, toSettingsWire } from "./routes.mjs";
 import { createBandOf, createForgeAdapters, createIsUserAuthored, createIsUserAuthoredRef, createKnowledgeRunner } from "./integration.mjs";
-import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
+import { execGitRunner, makeRepo, tmpDir, fakeBackgroundBudget } from "./testHelpers.mjs";
 
 let sqlite = true;
 try {
@@ -57,7 +57,9 @@ async function rig({ sessions = {}, over = {}, repoRemote = "https://github.com/
   let cfg = { knowledge: undefined };
   const notes = [];
   const clock = { t: Date.now() };
+  const backgroundBudget = fakeBackgroundBudget();
   const engine = createKnowledgeEngine({
+    backgroundBudget,
     dir,
     git: execGitRunner(dir),
     config: { get: async () => cfg, update: async (p) => (cfg = { ...cfg, ...p }) },
@@ -74,7 +76,7 @@ async function rig({ sessions = {}, over = {}, repoRemote = "https://github.com/
   });
   engines.push(engine);
   await engine.start();
-  return { engine, dir, repo, notes, clock };
+  return { engine, dir, repo, notes, clock, backgroundBudget };
 }
 afterEach(async () => {
   while (engines.length) await engines.pop().stop();
@@ -211,7 +213,7 @@ describe("desktop card ↔ server (§11.6)", { skip }, () => {
     const slug = engine.sessionMap.get("ses_one").slug;
     const s = await ch["knowledge:settings-get"]();
     assert.equal(s.enabled, true);
-    assert.equal(s.dailyCapUsd, 1);
+    assert.equal(s.dailyCapUsd, 5); // the shared background-work cap (default $5/day), mirrored for the card
     assert.equal(s.repoRules, "box-only");
     assert.equal(s.sharing, "share-and-read");
     assert.ok(!("status" in s));
@@ -246,9 +248,9 @@ describe("desktop card ↔ server (§11.6)", { skip }, () => {
   });
 
   test("status fields come from the engine: spend, briefings missed, unavailable (no node:sqlite), waiting for a capable model", async () => {
-    const { engine, clock } = await rig();
+    const { engine, clock, backgroundBudget } = await rig();
     const ch = buildKnowledgeChannels(engine);
-    await engine.budget.record({ taskClass: "knowledge-capture", model: { providerID: "p", modelID: "m" }, usd: 0.25 });
+    backgroundBudget.payg = 0.25; // spend mirrors the shared budget's pay-per-token figure
     engine.briefings.noteMissed();
     engine.briefings.noteMissed();
     let s = await ch["knowledge:settings-get"]();
@@ -298,10 +300,10 @@ describe("desktop card ↔ server (§11.6)", { skip }, () => {
   });
 
   test("the card's own logic reads the box's answers: override flags, status lines, outward note, change location, undo refusal", async () => {
-    const { engine } = await rig({ over: { hasForgeLogin: async () => false, getRepoAccess: async () => null, undo: async () => ({ ok: false, reason: "A later change touched the same page.", conflictWith: { sha: "0123456789abcdef", subject: "Rewrote the release runbook" } }) } });
+    const { engine, backgroundBudget } = await rig({ over: { hasForgeLogin: async () => false, getRepoAccess: async () => null, undo: async () => ({ ok: false, reason: "A later change touched the same page.", conflictWith: { sha: "0123456789abcdef", subject: "Rewrote the release runbook" } }) } });
     const ch = buildKnowledgeChannels(engine);
     await engine.observeRaw(started("ses_one"));
-    await engine.budget.record({ taskClass: "knowledge-capture", model: { providerID: "p", modelID: "m" }, usd: 0.25 });
+    backgroundBudget.payg = 0.25;
     const slug = engine.sessionMap.get("ses_one").slug;
     await ch["knowledge:settings-set"]({ patch: { projects: { [slug]: { sharing: "private" } } } });
     const s = await ch["knowledge:settings-get"]();
@@ -312,9 +314,9 @@ describe("desktop card ↔ server (§11.6)", { skip }, () => {
     assert.equal(row.outwardAllowed, false);
     assert.match(row.outwardReason, /No GitHub login/);
     const lines = card.statusLines(s);
-    assert.deepEqual(lines.map((l) => l.id), ["spend", "briefing"]);
-    assert.match(lines[0].text, /Spent \$0\.25 of the \$1\.00 daily cap today/);
-    assert.match(lines[1].text, /Every session this week started with a briefing/);
+    // Spend is shown by the shared Background work status line now, not by the card's own status lines.
+    assert.deepEqual(lines.map((l) => l.id), ["briefing"]);
+    assert.match(lines[0].text, /Every session this week started with a briefing/);
 
     const id = engine.changesLog.add({ kind: "applied", summary: "Added how to release", reason: "r", undoable: true });
     const [item] = (await ch["knowledge:changes"]({})).items;

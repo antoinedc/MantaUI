@@ -36,7 +36,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
 
-function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCards = false, engineStateInit = {}, ledger: ledgerDep } = {}) {
+function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCards = false, engineStateInit = {}, ledger: ledgerDep, runEphemeralFake } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -47,7 +47,8 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCard
   let currentConfig = { ctoEnabled };
   const cardCalls = [];
   const state = { v: 1, pendingBlockers: [], ...(engineStateInit ?? {}) };
-  const budgetCfg = { budgetIsHit: false, tier: "low" };
+  // `decision` is what the shared background budget answers `check` with; `recorded` / `budgetJson` are its books.
+  const budgetCfg = { tier: "low", decision: { ok: true }, recorded: [], budgetJson: [], usdTodayPayg: 0 };
   const memStores = makeMemoryStores();
   memStores.ledger.append = async (row) => ledgerRows.push(row);
   // BET-1407: with `realCards` the engine builds its REAL cards manager over
@@ -116,12 +117,27 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCard
       ...counts,
     }),
     // BET-1388: hermetic budget for all engine tests (never touches the real
-    // budget.json). Cap tests override `budgetCfg.budget`.
+    // budget.json). Since spec 2026-11-17 the cap is the shared background budget, faked here.
     budget: {
-      isCapHit: async () => budgetCfg.budgetIsHit,
-      record: async () => ({ usd: 0, dayKey: "0" }),
+      record: async (a) => {
+        budgetCfg.budgetJson.push(a);
+        return { usd: a?.usd ?? 0, dayKey: "0" };
+      },
+    },
+    backgroundBudget: {
+      check: async (a) => {
+        budgetCfg.checked = a;
+        return budgetCfg.decision;
+      },
+      record: async (a) => {
+        budgetCfg.recorded.push(a);
+        return { usd: 0.25, priced: true, mode: budgetCfg.mode ?? "payg" };
+      },
+      usdToday: () => budgetCfg.usdTodayPayg,
+      goodMomentForBatch: async () => ({ ok: true, rule: "away", reason: null }),
     },
     tierGet: async () => budgetCfg.tier,
+    ...(runEphemeralFake ? { runEphemeral: runEphemeralFake } : {}),
     ...(rollups ? { rollups } : {}),
     ...(facts ? { facts } : {}),
     ...(ledgerDep ? { ledger: ledgerDep } : {}),
@@ -408,25 +424,89 @@ test("computeDot maps the four states", () => {
   assert.equal(computeDot({ enabled: true, paused: false, thrifty: true }), "thrifty");
 });
 
-test("BET-1388: hard cap blocks beginEphemeral (cap hit → cto_cap_hit + thrifty)", async () => {
+test("beginEphemeral keeps its rate limits but no longer tests the budget (the runner's preflight does, spec 2026-11-17 §17.3)", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  assert.equal((await h.engine.beginEphemeral()).ok, true);
-  h.budgetCfg.budgetIsHit = true;
+  h.budgetCfg.decision = { ok: false, reason: "usd-cap" };
   const gate = await h.engine.beginEphemeral();
-  assert.equal(gate.ok, false);
-  assert.equal(gate.error, "cto_cap_hit");
-  // cap-hit flips thrifty (§10.6-6)
-  assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
-  assert.ok(h.ledgerRows.find((r) => r.kind === "cto.thrifty_on" && r.source === "cap"));
+  assert.equal(gate.ok, true);
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE, "no thrifty from the early gate");
 });
 
-test("BET-1388: reportAmbientSpend records spend and flips thrifty on cap", async () => {
+test("ambientPreflight: asks the shared budget as cto-ambient with the billed model; ok passes", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  await h.engine.reportAmbientSpend({ model: {}, tokens: 1000 });
-  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
-  h.budgetCfg.budgetIsHit = true;
-  await h.engine.reportAmbientSpend({ model: {}, tokens: 1000 });
-  assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
+  const model = { providerID: "anthropic", modelID: "m" };
+  assert.deepEqual(await h.engine.ambientPreflight({ taskClass: "gatekeeper", tier: "nano", model }), { ok: true });
+  assert.deepEqual(h.budgetCfg.checked, { workType: "cto-ambient", model });
+});
+
+test("ambientPreflight: thrifty flips ONLY on usd-cap and a WEEKLY-kind level-cap", async () => {
+  const flips = [
+    [{ ok: false, reason: "usd-cap" }, true],
+    [{ ok: false, reason: "level-cap", window: { key: "claude:weekly" } }, true],
+    [{ ok: false, reason: "level-cap", window: { key: "claude:weekly_scoped:opus" } }, true],
+    [{ ok: false, reason: "level-cap", window: { key: "claude:session" } }, false],
+    [{ ok: false, reason: "window-busy", window: { key: "claude:session" } }, false],
+    [{ ok: false, reason: "projected-high", window: { key: "claude:weekly" } }, false],
+    [{ ok: false, reason: "exhausted", window: { key: "claude:weekly" } }, false],
+    [{ ok: false, reason: "unavailable" }, false],
+    [{ ok: false, reason: "off" }, false],
+  ];
+  for (const [decision, thrifty] of flips) {
+    const h = makeHarness({ ctoEnabled: true });
+    h.budgetCfg.decision = decision;
+    const out = await h.engine.ambientPreflight({ taskClass: "gatekeeper", tier: "nano", model: null });
+    assert.deepEqual(out, { ok: false, reason: decision.reason });
+    assert.equal((await h.engine.getState()).dot === DOT.THRIFTY, thrifty, `${decision.reason} ${decision.window?.key ?? ""}`);
+    if (thrifty) assert.ok(h.ledgerRows.find((r) => r.kind === "cto.thrifty_on" && r.source === "cap"));
+  }
+});
+
+test("the state says WHY the CTO is thrifty: a budget refusal is cap_hit (sticky over a later watchdog call), the watchdog is watchdog, and it clears with thrifty", async () => {
+  const cap = makeHarness({ ctoEnabled: true });
+  assert.equal((await cap.engine.getState()).thriftyReason, null);
+  cap.budgetCfg.decision = { ok: false, reason: "usd-cap" };
+  await cap.engine.ambientPreflight({ taskClass: "gatekeeper", tier: "nano", model: null });
+  assert.equal((await cap.engine.getState()).thriftyReason, "cap_hit");
+  await cap.engine.setThrifty(true, { reason: "ambient spend", source: "watchdog" });
+  assert.equal((await cap.engine.getState()).thriftyReason, "cap_hit", "a cap hit stays the stated cause");
+  await cap.engine.setThrifty(false, { reason: "daily_reset", source: "engine" });
+  assert.equal((await cap.engine.getState()).thriftyReason, null);
+
+  const dog = makeHarness({ ctoEnabled: true });
+  await makeWatchdog(dog, { spend: 3, expected: 1 }).tick();
+  const st = await dog.engine.getState();
+  assert.deepEqual([st.dot, st.thriftyReason], [DOT.THRIFTY, "watchdog"]);
+});
+
+test("ambientPreflight: fails closed without a shared budget", async () => {
+  const bare = createCtoEngine({ configGet: async () => ({ ctoEnabled: true }), ledger: { append: async () => {} }, now: () => 1, killSwitch: { isPaused: async () => false } });
+  assert.deepEqual(await bare.ambientPreflight({ taskClass: "gatekeeper", tier: "nano", model: null }), { ok: false, reason: "unavailable" });
+});
+
+test("reportAmbientSpend books REAL usage (else the size estimate) as cto-ambient, not in the ledger; budget.json gets the usd it returns", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  const model = { providerID: "anthropic", modelID: "m" };
+  const usage = { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, reasoning: 0 };
+  await h.engine.reportAmbientSpend({ model, tokens: 999, usage, usd: 0.5 });
+  await h.engine.reportAmbientSpend({ model, tokens: 1000 });
+  assert.deepEqual(h.budgetCfg.recorded[0], { workType: "cto-ambient", model, usage, usd: 0.5, inLedger: false });
+  assert.equal(h.budgetCfg.recorded[1].usage, 1000, "an estimated run records its size estimate (§17.4)");
+  assert.equal(h.budgetCfg.recorded[1].inLedger, false);
+  assert.deepEqual(h.budgetCfg.budgetJson.map((r) => [r.usd, r.ambientPaygUsd]), [[0.25, 0.25], [0.25, 0.25]]);
+  // plan mode: dollars are list-price fiction — kept out of the watchdog's payg baseline
+  h.budgetCfg.mode = "plan";
+  await h.engine.reportAmbientSpend({ model, tokens: 1000 });
+  assert.deepEqual([h.budgetCfg.budgetJson[2].usd, h.budgetCfg.budgetJson[2].ambientPaygUsd], [0.25, 0]);
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE, "recording never flips thrifty — the next refused call does");
+});
+
+test("a rollup / facts model call goes through the engine's gate with the preflight AND the metering injected", async () => {
+  const seen = [];
+  const h = makeHarness({ ctoEnabled: true, runEphemeralFake: async (data) => { seen.push(data); return { ok: true, text: "x" }; } });
+  const out = await h.engine.gatedRunEphemeral({ taskClass: "ambient-summarize", context: [] });
+  assert.equal(out.ok, true);
+  assert.equal(typeof seen[0].deps.preflight, "function");
+  assert.equal(typeof seen[0].deps.reportCost, "function");
 });
 
 test("BET-1388: thrifty auto-clears at the daily reset", async () => {

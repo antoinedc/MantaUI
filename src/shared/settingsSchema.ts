@@ -349,14 +349,14 @@ export const SETTINGS: SettingEntry[] = [
   },
 
   // ----- knowledge (shared knowledge, docs/superpowers/specs/2026-11-16-shared-knowledge.md §4) -----
-  // One custom anchor: KnowledgeCard draws the real controls (switch, daily cap,
+  // One custom anchor: KnowledgeCard draws the real controls (switch, background budget status,
   // repo rules, sharing, per-project list, recent changes with undo). It exists
   // so settings search lists the section by what is in it.
   {
     id: "knowledgeCard",
     section: "knowledge",
     label: "Shared knowledge",
-    help: "Notes Manta keeps from your sessions and shares between them and between projects: the on/off switch, daily spend cap, repo rules (box only, pull request, direct), sharing (share and read, read only, private), the per-project list, and recent changes you can undo.",
+    help: "Notes Manta keeps from your sessions and shares between them and between projects: the on/off switch, background budget status, repo rules (box only, pull request, direct), sharing (share and read, read only, private), the per-project list, and recent changes you can undo.",
     control: "custom",
     configKey: null,
     platform: "desktop",

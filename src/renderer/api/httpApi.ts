@@ -1428,6 +1428,7 @@ export const httpApi: Api = {
   knowledgeSettingsSet: (input) => rpc("knowledge:settings-set", input),
   knowledgeChanges: (input) => rpc("knowledge:changes", input ?? {}),
   knowledgeUndo: (input) => rpc("knowledge:undo", input),
+  backgroundStatus: () => rpc("background:status", {}),
 
   // BET-1148: the box publishes ONE `media` bus kind with an `action`
   // discriminator (begin / show / fail) whenever the media tools land a

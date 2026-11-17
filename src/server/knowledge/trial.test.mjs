@@ -13,7 +13,7 @@ async function rig(over = {}) {
   const clone = join(root, "clone");
   await mkdir(clone);
   state.db.prepare("INSERT INTO session_project (session_id, slug, canonical_id, directory, source, pinned_at) VALUES ('s1', 'proj-0123456789', 'x', ?, 'prompt', 1)").run(clone);
-  const calls = { created: [], prompts: [], aborted: [], deleted: [], worktrees: [], removed: [], budget: [] };
+  const calls = { created: [], prompts: [], aborted: [], deleted: [], worktrees: [], removed: [], budget: [], canSpend: [], good: [], book: [] };
   let n = 0;
   const trial = createTrial({
     state,
@@ -31,7 +31,9 @@ async function rig(over = {}) {
       gitRemoveWorktree: async (a) => calls.removed.push(a),
     },
     budget: {
-      canSpend: async () => ({ ok: over.capOk ?? true }),
+      canSpend: async (a) => (calls.canSpend.push(a), { ok: over.capOk ?? true }),
+      ...(over.noGoodMoment ? {} : { goodMomentForBatch: async (a) => (calls.good.push(a), over.good === false ? { ok: false, rule: null, reason: "waiting-for-quiet" } : { ok: true, rule: "away", reason: null }) }),
+      book: async (a) => calls.book.push(a),
       record: async (r) => {
         calls.budget.push(r);
         return { usd: 0.05 };
@@ -279,6 +281,41 @@ test("gates: weekly limit, cap, other knowledge run, concurrency, no model, no c
   assert.equal((await c.trial.canStart()).reason, "busy");
   c.trial.observeRaw({ type: "session.execution.succeeded", data: { sessionID: c.calls.created[0].id } });
   assert.equal((await first).status, "completed");
+});
+
+test("budget: the gate is asked for the trial's work type with the model it resolved, after the model; a trial is batch work that starts only at a good moment", async () => {
+  const t = await rig();
+  finishOnPrompt(t);
+  const r = await t.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"], dueSince: 123 });
+  assert.equal(r.status, "completed");
+  assert.deepEqual(t.calls.canSpend, [{ workType: "knowledge-trial", modelClass: "knowledge-trial", model: { providerID: "p", modelID: "mid" } }]);
+  assert.deepEqual(t.calls.good, [{ workType: "knowledge-trial", modelClass: "knowledge-trial", model: { providerID: "p", modelID: "mid" }, dueSince: 123 }]);
+
+  // no model → the budget is not even asked (the model verdict comes first)
+  const nm = await rig({ model: { ok: false, code: "no-qualifying-model" } });
+  assert.match((await nm.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"] })).reason, /no-model/);
+  assert.equal(nm.calls.canSpend.length, 0);
+
+  // a budget refusal: cap-reached, and the good-moment question (which logs a start) is not asked
+  const capped = await rig({ capOk: false });
+  assert.equal((await capped.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"] })).reason, "cap-reached");
+  assert.equal(capped.calls.good.length, 0);
+
+  // not a good moment: skipped, no session, no worktree, the trial is not counted — the candidate stays pending upstream
+  const quiet = await rig({ good: false });
+  assert.deepEqual(await quiet.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"] }), { status: "skipped", reason: "waiting-for-quiet" });
+  assert.equal(quiet.calls.created.length, 0);
+  assert.equal(quiet.calls.worktrees.length, 0);
+  assert.equal(quiet.trial.weeklyCount(), 0);
+  // a missing dueSince counts from now
+  assert.equal(typeof quiet.calls.good[0].dueSince, "number");
+});
+
+test("budget: the trial's real usage is booked on the shared budget (its session is deleted, so the ledger never sees it)", async () => {
+  const t = await rig();
+  finishOnPrompt(t);
+  await t.trial.run({ skillName: "s", skillMd: "x", slugs: ["proj-0123456789"] });
+  assert.deepEqual(t.calls.book, [{ workType: "knowledge-trial", model: { providerID: "p", modelID: "mid" }, usage: { input: 100, output: 50 }, usd: undefined, inLedger: false }]);
 });
 
 test("a worktree failure skips without counting a trial; a missing recent clone directory is skipped over", async () => {

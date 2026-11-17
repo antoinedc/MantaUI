@@ -6,7 +6,7 @@
 // POST /api/cto/digest dep is merged), and the resting-state gate (§10.6-1).
 // BET-1386 (this diff) replaced the ⚙ settings placeholder with the real
 // Settings & health pane (§10.5): the Behavior card (Enabled · Effort dial ·
-// Hard daily cap · Push digest · Pause/Resume kill switch), the Health card
+// background-budget status · Push digest · Pause/Resume kill switch), the Health card
 // (P1 stats with min-sample `collecting (n/k)`), the A12 Activity-ledger
 // drill-down (reverse-chron, filterable by actor/type), and the §10.6-5
 // paused banner (kill switch active → the header gives way to a paused-at
@@ -47,11 +47,9 @@ import {
   tonightVisible,
   executeSuggestionOption,
   tonightBudgetMode,
-  nightGauge,
   providerWindowNotes,
   forecastAccuracyRows,
   bindingReserveFrac,
-  budgetTodayUsd,
   digestEvidenceAction,
   evidenceExpansion,
   calibrationTableDisplay,
@@ -79,6 +77,9 @@ import {
 } from "./ctoSections";
 import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask, CtoFactsRender, CtoFactRow, CtoToolsRender, CtoToolRegistryRow } from "../shared/api.js";
 import { formatAge } from "./chatUtils";
+import { BackgroundStatusLine, ChangeBudgetLink } from "./BackgroundStatusLine";
+import { thriftyBannerText, CTO_WORK_TYPES } from "./backgroundWorkFormat";
+import { useBackgroundStatus, type BackgroundStatusState } from "./useBackgroundStatus";
 import { Toggle } from "./Toggle";
 import { WorkSection } from "./ctoWorkCardsView";
 import { useCtoWorkCards } from "./ctoWorkCards";
@@ -148,13 +149,11 @@ function formatTime(ts: number | null | undefined): string {
 type CtoSettingsConfig = {
   ctoEnabled?: boolean;
   ctoTier?: "low" | "medium" | "high";
-  ctoAmbientCap?: number;
   ctoDigestPush?: boolean;
-  // BET-1405: the Overnight switch + night pool live in the Behavior card
-  // (shipped with the §11 overnight wiring). The Tonight's-budget card reads
-  // both — the full render is gated on High + Overnight on (§10.5 card 3).
+  // BET-1405: the Overnight switch lives in the Behavior card (shipped with
+  // the §11 overnight wiring). The Tonight's-budget card reads it — the full
+  // render is gated on High + Overnight on (§10.5 card 3).
   ctoOvernight?: boolean;
-  ctoNightCapUsd?: number;
   // BET-1521 (§9.3/§9.4): the autonomy threshold τ (0..1, default 0.7) — the
   // Settings τ control writes it; the gate + calibration read it.
   ctoAutonomyThreshold?: number;
@@ -169,10 +168,6 @@ type CtoSettingsConfig = {
   // doctrine restart is queued — the change applies when the box is idle.
   ctoDoctrineRestartPending?: boolean;
 };
-
-// §11.2 defaults — the same constants ctoBudget.mjs enforces server-side.
-const DEFAULT_AMBIENT_CAP_USD = 2.5;
-const DEFAULT_NIGHT_CAP_USD = 5;
 
 export function CtoPanel({
   state,
@@ -248,6 +243,9 @@ export function CtoPanel({
   // §10.6-5: the kill switch being active drives the banner via the pure
   // state→banner selector (tested in ctoView.test.ts).
   const paused = showPausedBanner(state);
+  // Thrifty mode's reason in words (the background work budget's own copy). Read only while thrifty.
+  const thrifty = state?.dot === "thrifty";
+  const thriftyBudget = useBackgroundStatus(thrifty);
 
   const resumeCto = useCallback(async () => {
     try {
@@ -805,6 +803,20 @@ export function CtoPanel({
           </div>
         )}
 
+        {thrifty && !paused && (
+          <div
+            role="status"
+            className="mb-4 flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-lg border border-warn bg-warn-bg p-3 text-sm"
+            data-testid="cto-thrifty-banner"
+          >
+            <span className="font-medium text-text">Thrifty mode</span>
+            <span className="text-text-muted">
+              {thriftyBannerText(state?.thriftyReason, thriftyBudget.state.kind === "ok" ? thriftyBudget.state.status : null)}
+            </span>
+            <ChangeBudgetLink />
+          </div>
+        )}
+
         <div className="space-y-8">
           {/* Learning card (§10.6-4): cold-start backfill progress (BET-1387).
               Informational — never counts into the sidebar badge. */}
@@ -991,12 +1003,10 @@ export function SettingsView({
   // Local mirror of the adaptive-CTO config cluster, loaded on open so the
   // controls reflect the box; edits write through configUpdate (instant-apply).
   const [config, setConfig] = useState<CtoSettingsConfig | null>(null);
-  const [capText, setCapText] = useState("");
-  const [nightCapText, setNightCapText] = useState("");
+  const bgBudget = useBackgroundStatus(true);
   const [tauText, setTauText] = useState("");
   // BET-1164 follow-up: house rules are free text, so they get their own
-  // local-text-state + onBlur-save pattern (matching capText/nightCapText/
-  // tauText above) rather than the instant-apply radios/toggles.
+  // local-text-state + onBlur-save pattern (matching tauText above) rather than the instant-apply radios/toggles.
   const [houseRulesText, setHouseRulesText] = useState("");
   const [health, setHealth] = useState<CtoHealthStat[]>([]);
   const [busyPause, setBusyPause] = useState(false);
@@ -1035,10 +1045,8 @@ export function SettingsView({
       setConfig({
         ctoEnabled: !!c?.ctoEnabled,
         ctoTier: c?.ctoTier,
-        ctoAmbientCap: c?.ctoAmbientCap,
         ctoDigestPush: !!c?.ctoDigestPush,
         ctoOvernight: !!c?.ctoOvernight,
-        ctoNightCapUsd: c?.ctoNightCapUsd,
         ctoAutonomyThreshold: c?.ctoAutonomyThreshold,
         ctoStyle: c?.ctoStyle,
         ctoHouseRules: c?.ctoHouseRules,
@@ -1048,8 +1056,6 @@ export function SettingsView({
         // state visible.
         ctoDoctrineRestartPending: c?.ctoDoctrineRestartPending === true,
       });
-      setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
-      setNightCapText(c?.ctoNightCapUsd != null ? String(c.ctoNightCapUsd) : "");
       setTauText(c?.ctoAutonomyThreshold != null ? String(c.ctoAutonomyThreshold) : "");
       setHouseRulesText(c?.ctoHouseRules ?? "");
     }).catch(reportSettingsLoadError("the CTO settings"));
@@ -1082,7 +1088,6 @@ export function SettingsView({
         setConfig((c) => ({
           ...c,
           ...patch,
-          ctoAmbientCap: next?.ctoAmbientCap,
           // The transient pending projection from the response (review fix):
           // true = a deferred doctrine restart is queued. Absent (older box)
           // reads as false — there was never a pending restart to show.
@@ -1115,31 +1120,6 @@ export function SettingsView({
     },
     [config, pushToast],
   );
-
-  const saveCap = useCallback(() => {
-    const n = Number(capText);
-    if (!Number.isFinite(n) || n < 0) {
-      pushToast({ id: `cap-${Date.now()}`, message: "Daily cap must be a non-negative dollar amount." });
-      return;
-    }
-    void applyConfig({ ctoAmbientCap: Math.round(n * 100) / 100 });
-  }, [capText, applyConfig, pushToast]);
-
-  // BET-1419 (§11.2): the windowless providers' absolute night budget. Empty
-  // clears the bound (windowless providers then get no overnight budget seam).
-  const saveNightCap = useCallback(() => {
-    const text = nightCapText.trim();
-    if (text === "") {
-      void applyConfig({ ctoNightCapUsd: undefined });
-      return;
-    }
-    const n = Number(text);
-    if (!Number.isFinite(n) || n < 0) {
-      pushToast({ id: `nightcap-${Date.now()}`, message: "Night cap must be a non-negative dollar amount (or empty)." });
-      return;
-    }
-    void applyConfig({ ctoNightCapUsd: Math.round(n * 100) / 100 });
-  }, [nightCapText, applyConfig, pushToast]);
 
   // BET-1521 (§9.3/§9.4): the autonomy threshold τ — a proportion, 0..1.
   // Two decimals is the meaningful precision (the gate compares against a
@@ -1234,10 +1214,17 @@ export function SettingsView({
           ) : (
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Behavior</h3>
-            <p className="mt-1 text-sm text-text-faint">
-              One hard daily cap (<span className="font-mono">${(config?.ctoAmbientCap ?? 2.5).toFixed(2)}</span>)
-              bounds all autonomous work, independent of the effort dial.
-            </p>
+            <div className="mt-1 text-sm text-text-faint">
+              Autonomous work spends the one background work budget, independent of the effort dial.
+            </div>
+            <div className="mt-1">
+              <BackgroundStatusLine
+                state={bgBudget.state}
+                onRetry={() => void bgBudget.refresh()}
+                share={{ workTypes: CTO_WORK_TYPES, noun: "CTO work" }}
+                testId="cto-budget-status"
+              />
+            </div>
 
             <div className="mt-4 space-y-4">
               {/* Enabled */}
@@ -1312,30 +1299,6 @@ export function SettingsView({
                 />
               </div>
 
-              {/* Ambient cap editor */}
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium text-text">Hard daily cap</div>
-                  <div className="text-sm text-text-muted">Dollar amount per day (default $2.50).</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-text-muted">$</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.25}
-                    value={capText}
-                    onChange={(e) => setCapText(e.target.value)}
-                    onBlur={saveCap}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") saveCap();
-                    }}
-                    className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
-                    aria-label="Hard daily ambient cap in dollars"
-                  />
-                </div>
-              </div>
-
               {/* Push digest to phone */}
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -1366,35 +1329,6 @@ export function SettingsView({
                     onChange={(v) => void applyConfig({ ctoOvernight: v })}
                     ariaLabel="Overnight work enabled"
                   />
-                </div>
-              ) : null}
-
-              {/* BET-1419 night cap (§11.2): the windowless providers' bound. */}
-              {(config?.ctoTier ?? "low") === "high" ? (
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-medium text-text">Overnight cap (no usage window)</div>
-                    <div className="text-sm text-text-muted">
-                      Absolute dollar bound for providers without a usage window (empty = no
-                      overnight budget for them).
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-text-muted">$</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step={0.25}
-                      value={nightCapText}
-                      onChange={(e) => setNightCapText(e.target.value)}
-                      onBlur={saveNightCap}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") saveNightCap();
-                      }}
-                      className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
-                      aria-label="Overnight cap for windowless providers in dollars"
-                    />
-                  </div>
                 </div>
               ) : null}
 
@@ -1640,8 +1574,8 @@ export function SettingsView({
             <TonightBudgetCard
               tier={config?.ctoTier ?? "low"}
               overnightOn={!!config?.ctoOvernight}
-              ambientCapUsd={config?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD}
-              nightCapUsd={config?.ctoNightCapUsd ?? DEFAULT_NIGHT_CAP_USD}
+              budgetState={bgBudget.state}
+              onRetryBudget={() => void bgBudget.refresh()}
               budget={budget}
               usageSnaps={usageSnaps}
             />
@@ -1732,8 +1666,8 @@ const HEALTH_ROW_ORDER = [
 type TonightBudgetProps = {
   tier: "low" | "medium" | "high";
   overnightOn: boolean;
-  ambientCapUsd: number;
-  nightCapUsd: number;
+  budgetState: BackgroundStatusState;
+  onRetryBudget: () => void;
   budget: { days?: Record<string, { usd?: number } | undefined>; quota?: Record<string, { provider?: string; mode?: string | null; reserve?: number | null; mape14?: number | null } | undefined> } | null;
   usageSnaps: { provider?: string; windows?: { kind?: string; label?: string; resetsAt?: number | null }[] | null }[];
 };
@@ -1748,90 +1682,47 @@ function formatResetNote(resetsAt: number | null): string {
   return `resets in ${hours}h`;
 }
 
-function TonightBudgetCard({ tier, overnightOn, ambientCapUsd, nightCapUsd, budget, usageSnaps }: TonightBudgetProps) {
+function TonightBudgetCard({ tier, overnightOn, budgetState, onRetryBudget, budget, usageSnaps }: TonightBudgetProps) {
   const mode = tonightBudgetMode({ tier, overnightOn });
-  const usedTodayUsd = budgetTodayUsd(budget ?? null);
   const notes = providerWindowNotes(usageSnaps);
   const accuracy = forecastAccuracyRows(budget?.quota ?? null);
+
+  // Overnight work spends the same background work budget as everything else: one status line, one place to change it.
+  const status = (
+    <div className="mt-3">
+      <BackgroundStatusLine state={budgetState} onRetry={onRetryBudget} testId="cto-tonight-budget-status" />
+    </div>
+  );
 
   if (mode === "ambient") {
     return (
       <section className="rounded-lg border border-border-subtle p-4">
         <h3 className="text-sm font-semibold text-text">Tonight&apos;s budget</h3>
-        <div className="mt-3 flex items-baseline justify-between gap-3">
-          <span className="text-sm text-text-muted">Ambient spend today</span>
-          <span className="font-mono text-sm text-text">
-            ${usedTodayUsd.toFixed(2)} of ${Number(ambientCapUsd).toFixed(2)} cap
-          </span>
-        </div>
+        {status}
         <p className="mt-2 text-xs text-text-faint">
-          Overnight work is {overnightOn ? "below the High tier" : "off"} — there is no night pool to gauge.
+          Overnight work is {overnightOn ? "below the High tier" : "off"} — nothing runs overnight.
         </p>
         <p className="mt-2 text-xs text-text-faint">Plan editing lives in the tonight drill-down.</p>
       </section>
     );
   }
 
-  // Full render (High + Overnight on): the night-pool gauge with used /
-  // planned segments + the reserve line, legend, window notes, accuracy.
-  const plannedTonightUsd: number | null = null; // §10.4 plan portfolio — wired when the tonight plan lands
+  // Full render (High + Overnight on): the shared budget status, the forecast reserve held back for the
+  // Health card, window notes and accuracy.
   const reserveFrac = bindingReserveFrac(budget?.quota ?? null);
-  const gauge = nightGauge({ nightCapUsd, usedTodayUsd, plannedTonightUsd, reserveFrac });
-  const usedPct = gauge.poolUsd > 0 ? (gauge.usedUsd / gauge.poolUsd) * 100 : 0;
-  const plannedPct = gauge.poolUsd > 0 ? (gauge.plannedUsd / gauge.poolUsd) * 100 : 0;
-  const reservePct = gauge.reserveLineUsd != null && gauge.poolUsd > 0 ? (gauge.reserveLineUsd / gauge.poolUsd) * 100 : null;
 
   return (
     <section className="rounded-lg border border-border-subtle p-4">
       <h3 className="text-sm font-semibold text-text">Tonight&apos;s budget</h3>
-
-      <div className="mt-3">
-        <div className="relative h-4 w-full overflow-hidden rounded-full bg-fill-active">
-          <div className="absolute inset-y-0 left-0 bg-accent/25" style={{ width: `${Math.min(100, usedPct)}%` }} />
-          <div
-            className="absolute inset-y-0 bg-accent/60"
-            style={{ left: `${Math.min(100, usedPct)}%`, width: `${Math.min(100 - Math.min(100, usedPct), plannedPct)}%` }}
-          />
-          {reservePct != null && (
-            <div
-              className="absolute inset-y-0 w-0.5 bg-warn"
-              style={{ left: `${Math.min(100, reservePct)}%` }}
-              aria-hidden="true"
-            />
-          )}
-        </div>
-        <div className="mt-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs text-text-muted">
-          <span>
-            Used today <span className="font-mono text-text">${gauge.usedUsd.toFixed(2)}</span>
-          </span>
-          <span>
-            Planned tonight{" "}
-            <span className="font-mono text-text">
-              {plannedTonightUsd != null ? `$${gauge.plannedUsd.toFixed(2)}` : "no plan queued"}
-            </span>
-          </span>
-          <span>
-            Night pool <span className="font-mono text-text">${gauge.poolUsd.toFixed(2)}</span>
-            {gauge.overflow ? " · over pool" : ""}
-          </span>
-        </div>
-      </div>
-
-      {/* Legend (§10.5 card 3) */}
-      <ul className="mt-3 space-y-1 text-xs text-text-faint">
-        <li>
-          <span className="mr-1 inline-block h-2 w-4 rounded-sm bg-accent/25 align-middle" /> used today — ambient +
-          overnight spend metered into the same daily buckets
-        </li>
-        <li>
-          <span className="mr-1 inline-block h-2 w-4 rounded-sm bg-accent/60 align-middle" /> planned tonight — the
-          queued plan&apos;s spend estimate
-        </li>
-        <li>
-          <span className="mr-1 inline-block h-2 w-0.5 bg-warn align-middle" /> reserve line — the pool share held
-          back at the active fractile{reserveFrac != null ? ` (P${Math.round(reserveFrac * 100)})` : " (no windowed reserve)"}
-        </li>
-      </ul>
+      {status}
+      <p className="mt-2 text-xs text-text-faint">
+        Each overnight job is checked against the budget before it starts; a job already running is never stopped
+        mid-way.
+      </p>
+      <p className="mt-2 text-xs text-text-faint">
+        Forecast reserve (Health only):{" "}
+        {reserveFrac != null ? `P${Math.round(reserveFrac * 100)} of the binding window held back` : "no windowed reserve"}
+      </p>
 
       {/* Provider window notes (§11.2 adapters, via the usage poller) */}
       {notes.length > 0 && (

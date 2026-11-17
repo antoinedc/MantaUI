@@ -4,13 +4,10 @@ import "./ctoTestGuard.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DEFAULT_AMBIENT_CAP_USD,
-  DEFAULT_NIGHT_CAP_USD,
   FRACTILE_INIT,
   THRIFTY_SHED_ORDER,
   THRIFTY_KEEP,
   createCtoBudget,
-  ambientCapUsd,
   dayKey,
   defaultBudgetPayload,
   defaultQuotaState,
@@ -18,16 +15,12 @@ import {
   expectedHourlyBurnUsd,
   foldQuotaState,
   hoursIntoLocalDay,
-  isAmbientCapHit,
   isWorkShedInThrifty,
-  nightCapUsd,
   notchFractile,
-  overnightSpendUsd,
   planReserve,
-  priceTokens,
   recordSpend,
   spendForDay,
-  spendPerHourNow,
+  burnPerHourUsd,
   tierAllows,
   todaySpend,
 } from "./ctoBudget.mjs";
@@ -58,20 +51,27 @@ function makeQuietBudget(payload, now) {
   });
 }
 
-test("cap defaults to $2.50 and honors ctoAmbientCap", () => {
-  assert.equal(ambientCapUsd({}), DEFAULT_AMBIENT_CAP_USD);
-  assert.equal(ambientCapUsd({ ctoAmbientCap: 1.25 }), 1.25);
-  assert.equal(ambientCapUsd({ ctoAmbientCap: 0 }), 0);
-  assert.equal(ambientCapUsd({ ctoAmbientCap: -3 }), DEFAULT_AMBIENT_CAP_USD);
-  assert.equal(ambientCapUsd({ ctoAmbientCap: "x" }), DEFAULT_AMBIENT_CAP_USD);
-  // Retired spelling kept as a one-release fallback for stale configs.
-  assert.equal(ambientCapUsd({ ctoAmbientCapUsd: 1.25 }), 1.25);
-  // Canonical key wins when both spellings are present.
-  assert.equal(ambientCapUsd({ ctoAmbientCap: 5, ctoAmbientCapUsd: 1.25 }), 5);
-  // Malformed canonical falls through to a well-formed legacy alias, then default.
-  assert.equal(ambientCapUsd({ ctoAmbientCap: "x", ctoAmbientCapUsd: 1.25 }), 1.25);
-  assert.equal(ambientCapUsd({ ctoAmbientCap: -3, ctoAmbientCapUsd: 1.25 }), 1.25);
-});
+// A budget over ONE pending ROI row whose job record is a dirty-worktree one (the store never sweeps it): `rig.live`
+// says whether the record is still in the snapshot, `rig.payload()` is the stored payload.
+function dirtyWorktreeRig({ months = {}, pendingRow, gitProbe, discoverJobPr }) {
+  const finishedAt = MIDNIGHT - ROI_PENDING_RETENTION_MS - 1;
+  let payload = defaultBudgetPayload();
+  payload.roi = { months, pending: [{ id: "old", branch: "cto/old", cwd: "/p", finishedAt, ...pendingRow }] };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const job = { id: "old", actor: "cto", status: "done", branch: "cto/old", cwd: "/p", finishedAt, cleanedUp: false };
+  const rig = { live: true, payload: () => payload };
+  rig.budget = createCtoBudget({
+    store,
+    jobsRead: async () => (rig.live ? [job] : []),
+    gitProbe,
+    ...(discoverJobPr ? { discoverJobPr } : {}),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  return rig;
+}
 
 test("day rolls at local midnight (spend lands in separate day buckets)", () => {
   const late = MIDNIGHT + 23 * 3_600_000 + 59_999; // 23:59:59.999
@@ -94,17 +94,6 @@ test("didDayRoll detects that a midnight passed since the last record", () => {
   assert.equal(didDayRoll(defaultBudgetPayload(), MIDNIGHT + 86_400_000), false);
 });
 
-test("hard cap trips once today's spend reaches the cap (boundary inclusive)", () => {
-  let p = defaultBudgetPayload();
-  assert.equal(isAmbientCapHit(p, NOON, 2.5), false);
-  p = recordSpend(p, { now: NOON, usd: 2.49 });
-  assert.equal(isAmbientCapHit(p, NOON, 2.5), false);
-  p = recordSpend(p, { now: NOON, usd: 0.01 });
-  assert.equal(isAmbientCapHit(p, NOON, 2.5), true);
-  // A new day resets the cap.
-  assert.equal(isAmbientCapHit(p, MIDNIGHT + 86_400_000, 2.5), false);
-});
-
 test("recordSpend accumulates usd and call count per bucket", () => {
   let p = defaultBudgetPayload();
   p = recordSpend(p, { now: NOON, usd: 1, calls: 1 });
@@ -114,36 +103,18 @@ test("recordSpend accumulates usd and call count per bucket", () => {
   assert.equal(b.calls, 4);
 });
 
-test("priceTokens prices via the model cost and a cache-heavy mix", () => {
-  const model = {
-    providerID: "anthropic",
-    id: "claude-3-5-sonnet",
-    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  };
-  // ~0.8 cacheRead * 0.3 + 0.08 input * 3 + 0.07 write * 3.75 + 0.05 output * 15
-  // = 0.24 + 0.24 + 0.2625 + 0.75 = 1.4925 $ / 1M tokens.
-  const usd = priceTokens({ model, tokens: 1_000_000 });
-  assert.ok(Math.abs(usd - 1.4925) < 1e-9);
-  // Proportional: 500k tokens ≈ half.
-  assert.ok(Math.abs(priceTokens({ model, tokens: 500_000 }) - usd / 2) < 1e-9);
-  // Free model → 0 regardless of tokens.
-  assert.equal(priceTokens({ model: { cost: { input: 0, output: 0 } }, tokens: 5_000_000 }), 0);
-  // Unknown cost → 0 (cannot price what we cannot measure).
-  assert.equal(priceTokens({ model: { providerID: "x", id: "y" }, tokens: 1_000_000 }), 0);
-});
-
 test("BET-1462: trailing spend pacing below the cap-equivalent pace floors at cap/24", () => {
   // Spend $16.80 over 7 days → 16.80 / 168h = $0.10/h — below the $2.50
   // cap-equivalent pace, so the new floor wins (BET-1462 defect 1).
   let p = defaultBudgetPayload();
   for (let i = 0; i < 7; i++) {
-    p = recordSpend(p, { now: MIDNIGHT + i * 86_400_000 + 1000, usd: 2.4 });
+    p = recordSpend(p, { now: MIDNIGHT + i * 86_400_000 + 1000, usd: 2.4, ambientPaygUsd: 2.4 });
   }
   const burn = expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 2000, capUsd: 2.5 });
   assert.ok(Math.abs(burn - 2.5 / 24) < 1e-9);
   // Old spend ages out of the 7-day window: one active day → 1.68/24h = $0.07,
   // again below the floor (BET-1462 defects 1+2).
-  const p2 = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 1.68 });
+  const p2 = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 1.68, ambientPaygUsd: 1.68 });
   const burn2 = expectedHourlyBurnUsd(p2, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
   assert.ok(Math.abs(burn2 - 2.5 / 24) < 1e-9);
 });
@@ -156,6 +127,7 @@ test("BET-1462: expected burn floors at the cap-equivalent pace (incident number
   const p = recordSpend(defaultBudgetPayload(), {
     now: MIDNIGHT + 6 * 86_400_000 + 1000,
     usd: 5.173744e-5,
+    ambientPaygUsd: 5.173744e-5,
   });
   const burn = expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
   assert.ok(Math.abs(burn - 2.5 / 24) < 1e-9);
@@ -165,7 +137,7 @@ test("BET-1462: a lone active day divides by 24h, not the blanket 168h", () => {
   // A single $5 call inside an otherwise-empty trailing window: the active-day
   // denominator (defect 2) measures $5/24 ≈ $0.2083 — above the $2.50 floor,
   // so the division itself is observable (not 5/168 ≈ $0.0298).
-  const p = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 5 });
+  const p = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 5, ambientPaygUsd: 5 });
   const burn = expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
   assert.ok(Math.abs(burn - 5 / 24) < 1e-9);
   assert.ok(Math.abs(burn - 5 / 168) > 1e-9);
@@ -176,20 +148,30 @@ test("empty history falls back to the cap-equivalent pace (never 0)", () => {
   assert.equal(burn, 2.5 / 24);
 });
 
-test("spendPerHourNow measures today's burn vs hours elapsed", () => {
-  const p = recordSpend(defaultBudgetPayload(), { now: NOON, usd: 1.2 }); // 12h into day
-  assert.ok(Math.abs(spendPerHourNow(p, NOON) - 0.1) < 1e-9);
-  assert.equal(spendPerHourNow(p, MIDNIGHT), 0); // 0 hours elapsed
+test("burnPerHourUsd measures today's burn vs hours elapsed", () => {
+  assert.ok(Math.abs(burnPerHourUsd(1.2, NOON) - 0.1) < 1e-9); // 12h into the day
+  assert.equal(burnPerHourUsd(1.2, MIDNIGHT), 0); // 0 hours elapsed
 });
 
-test("BET-1462: spendPerHourNow never divides by a fraction of an hour", () => {
+test("BET-1462: burnPerHourUsd never divides by a fraction of an hour", () => {
   // 30 seconds past local midnight with $0.01 spent: the divisor is floored at
   // 1 hour → $0.01/hr, not $0.01/0.0083h ≈ $1.20 (the 2026-08-31 trip shape).
   const early = MIDNIGHT + 30_000;
-  const p = recordSpend(defaultBudgetPayload(), { now: early, usd: 0.01 });
-  const perHour = spendPerHourNow(p, early);
+  const perHour = burnPerHourUsd(0.01, early);
   assert.ok(Math.abs(perHour - 0.01) < 1e-9);
   assert.ok(Math.abs(perHour - 1.2) > 1e-9);
+});
+
+test("the watchdog baseline reads ONLY pay-per-token ambient spend (plan-mode and overnight dollars share the bucket's usd)", () => {
+  // $50 of plan-mode / overnight list-price dollars, $0.24 of real API-key ambient spend.
+  let p = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 50 });
+  p = recordSpend(p, { now: MIDNIGHT + 6 * 86_400_000 + 2000, usd: 0.24, ambientPaygUsd: 0.24 });
+  assert.equal(p.days[dayKey(MIDNIGHT + 6 * 86_400_000)].usd, 50.24);
+  // 0.24 / 24h = $0.01/h is below the $5 / 24 floor: the plan dollars never inflated the baseline.
+  assert.ok(Math.abs(expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 5 }) - 5 / 24) < 1e-9);
+  // …and a real payg history above the floor IS the baseline.
+  const q = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 12, ambientPaygUsd: 12 });
+  assert.ok(Math.abs(expectedHourlyBurnUsd(q, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 5 }) - 12 / 24) < 1e-9);
 });
 
 test("thrifty shed ladder: ordered shed vs the kept-to-last-token set", () => {
@@ -226,7 +208,7 @@ test("tierAllows table (low ⊂ medium ⊂ high; default low)", () => {
   assert.equal(tierAllows("low", "whatever_new"), true);
 });
 
-test("createCtoBudget records into an injected store and reports todayUsd/cap", async () => {
+test("createCtoBudget records the usd the shared budget priced into an injected store", async () => {
   let saved = { v: 1, days: {} };
   const store = {
     load: async () => saved,
@@ -234,24 +216,18 @@ test("createCtoBudget records into an injected store and reports todayUsd/cap", 
       saved = p;
     },
   };
-  const price = ({ tokens }) => tokens / 1_000_000 * 5; // deterministic $5/1M
   const clock = { ms: NOON };
-  const budget = createCtoBudget({ store, price, now: () => clock.ms });
+  const budget = createCtoBudget({ store, now: () => clock.ms });
 
   assert.equal(await budget.todayUsd(), 0);
-  assert.equal(await budget.isCapHit(2.5), false);
 
-  await budget.record({ model: {}, tokens: 500_000 }); // $2.50
+  const r = await budget.record({ usd: 2.5, ambientPaygUsd: 2.5 });
+  assert.equal(r.usd, 2.5);
   assert.equal(await budget.todayUsd(), 2.5);
-  assert.equal(await budget.isCapHit(2.5), true);
-
-  // A spend that crosses the cap is still recorded (it already happened);
-  // the NEXT call gates. 
-  // Expected burn + spend-per-hour derive from the same store. $2.50 today
-  // only (one active day) → $2.50 / 24h, matching the cap-equivalent floor
-  // (BET-1462 defect 2 replaced the old blanket $2.50 / 168h).
+  // Expected burn derives from the same store: $2.50 today only (one active day) → $2.50 / 24h, the cap-equivalent
+  // floor of a $2.50 cap (BET-1462 defect 2).
   assert.equal(await budget.expectedHourlyBurnUsd({ capUsd: 2.5 }), 2.5 / 24);
-  assert.ok((await budget.spendPerHourUsd()) > 0);
+  assert.equal(saved.days[dayKey(NOON)].ambientPaygUsd, 2.5);
 });
 
 test("createCtoBudget degrades safely when the store is down", async () => {
@@ -265,21 +241,13 @@ test("createCtoBudget degrades safely when the store is down", async () => {
   };
   const budget = createCtoBudget({ store, now: () => NOON });
   assert.equal(await budget.todayUsd(), 0);
-  assert.equal(await budget.isCapHit(2.5), false);
-  await budget.record({ model: {}, tokens: 1000 }); // must not throw
+  await budget.record({ usd: 0.1 }); // must not throw
   assert.equal(await budget.expectedHourlyBurnUsd({ capUsd: 2.5 }), 2.5 / 24);
 });
 
 // ---------------------------------------------------------------------------
 // BET-1400 — reserve & spendable (§11.2, §11.3)
 // ---------------------------------------------------------------------------
-
-test("nightCapUsd defaults to $5 and honors ctoNightCapUsd", () => {
-  assert.equal(nightCapUsd({}), DEFAULT_NIGHT_CAP_USD);
-  assert.equal(nightCapUsd({ ctoNightCapUsd: 3 }), 3);
-  assert.equal(nightCapUsd({ ctoNightCapUsd: 0 }), 0);
-  assert.equal(nightCapUsd({ ctoNightCapUsd: -1 }), DEFAULT_NIGHT_CAP_USD);
-});
 
 test("notchFractile walks the [P90,P95,P99] ladder and clamps", () => {
   assert.equal(notchFractile(0.95, +1), 0.99);
@@ -363,12 +331,11 @@ test("planReserve: forecast that returns fallback still degrades to the fallback
   assert.equal(plan.reserve, 0.6);
 });
 
-test("computeSpendable: windowless/no-adapter routes to the $ bound (no reserve, no history → no MAPE)", async () => {
+test("computeSpendable: windowless/no-adapter has no reserve (no history → no MAPE)", async () => {
   let saved = null;
   const ledgerRows = [];
   const budget = createCtoBudget({
     store: { load: async () => ({}), save: async (p) => (saved = p) },
-    cfg: () => ({ ctoNightCapUsd: 3 }),
     ledger: { append: (r) => ledgerRows.push(r) },
   });
   const plan = await budget.computeSpendable({ provider: "someone", windowed: false });
@@ -376,7 +343,7 @@ test("computeSpendable: windowless/no-adapter routes to the $ bound (no reserve,
   assert.equal(plan.windowed, false);
   assert.equal(plan.spendableFrac, null);
   assert.equal(plan.reserve, 0);
-  assert.equal(plan.nightCapUsd, 3);
+  assert.equal(plan.nightCapUsd, undefined, "no night cap any more: the shared background budget decides per dispatch");
   // no usable history → the forecaster yields no MAPE, but the key set still
   // matches the windowed plan (uniform seam for C3)
   assert.equal(plan.mape14, null);
@@ -399,7 +366,6 @@ test("computeSpendable: windowless still computes the forecast for the health ca
     buildSeries: () => ({ series: Array(14).fill(0.1), historyDays: 14, maxObserved: 0.1 }),
     mapeFn: () => 7.5,
     ledger: { append: (r) => ledgerRows.push(r) },
-    cfg: () => ({ ctoNightCapUsd: 3 }),
   });
   const plan = await budget.computeSpendable({ provider: "kimi", windowed: false });
   assert.equal(plan.windowed, false);
@@ -409,7 +375,6 @@ test("computeSpendable: windowless still computes the forecast for the health ca
   assert.equal(plan.mape14, 7.5); // the forecaster ran — the health card is fed
   assert.equal(plan.historyDays, 14);
   assert.ok(Math.abs(plan.maxObserved - 0.1) < 1e-9);
-  assert.equal(plan.nightCapUsd, 3);
   // the persisted row carries the MAPE and no reserve
   assert.equal(saved.quota.kimi.mape14, 7.5);
   assert.equal(saved.quota.kimi.reserve, 0);
@@ -996,43 +961,21 @@ test("refreshRoi: a failed jobs read protects every counted fingerprint from the
 // fingerprint — dropping it would let step 1 re-sample the still-stored job
 // and re-count it into its month accumulator.
 test("refreshRoi: a counted row past the horizon survives while its dirty-worktree record is still in the store (BET-1497)", async () => {
-  let payload = defaultBudgetPayload();
-  payload.roi = {
+  const rig = dirtyWorktreeRig({
     months: { [AUG_KEY]: { merged: 1 } }, // the job was counted once, long ago
-    pending: [
-      { id: "old", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1, counted: true },
-    ],
-  };
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const job = {
-    id: "old",
-    actor: "cto",
-    status: "done",
-    branch: "cto/old",
-    cwd: "/p",
-    finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1,
-    cleanedUp: false, // dirty worktree → the store never sweeps this record
-  };
-  let recordLive = true;
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => (recordLive ? [job] : []),
+    pendingRow: { counted: true },
     gitProbe: async () => ({ exists: true, isAncestor: true }), // reads merged — a re-sample would re-count
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => MIDNIGHT,
   });
-  await budget.refreshRoi();
-  assert.equal(payload.roi.months[AUG_KEY].merged, 1, "no re-count while the record is live");
-  assert.deepEqual(payload.roi.pending.map((j) => j.id), ["old"], "the fingerprint survives the horizon");
+  await rig.budget.refreshRoi();
+  assert.equal(rig.payload().roi.months[AUG_KEY].merged, 1, "no re-count while the record is live");
+  assert.deepEqual(rig.payload().roi.pending.map((j) => j.id), ["old"], "the fingerprint survives the horizon");
   // The worktree is finally cleaned and the record is swept: absence from the
   // snapshot proves the fingerprint dead, and the row drops at the horizon —
   // with no re-sample and no second count.
-  recordLive = false;
-  await budget.refreshRoi();
-  assert.equal(payload.roi.months[AUG_KEY].merged, 1);
-  assert.equal(payload.roi.pending.length, 0);
+  rig.live = false;
+  await rig.budget.refreshRoi();
+  assert.equal(rig.payload().roi.months[AUG_KEY].merged, 1);
+  assert.equal(rig.payload().roi.pending.length, 0);
 });
 
 // BET-1503: the same churn, on the UNCOUNTED half — a never-merged job whose
@@ -1043,31 +986,12 @@ test("refreshRoi: a counted row past the horizon survives while its dirty-worktr
 // snapshot: no churn, no marker loss, and the drop still fires the moment
 // the snapshot proves the record gone.
 test("refreshRoi: an uncounted row past the horizon survives (with its pr markers) while its dirty-worktree record is still in the store (BET-1503)", async () => {
-  let payload = defaultBudgetPayload();
-  payload.roi = {
-    months: {},
-    pending: [
-      // Aged out long ago; the forge already answered "no PR" definitively.
-      // `seeded` is a churn canary: a re-sampled row is minted without it.
-      { id: "old", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1, counted: false, prTried: true, seeded: true },
-    ],
-  };
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const job = {
-    id: "old",
-    actor: "cto",
-    status: "done",
-    branch: "cto/old",
-    cwd: "/p",
-    finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1,
-    cleanedUp: false, // dirty worktree → the store never sweeps this record
-  };
-  let recordLive = true;
   const asked = [];
   const probed = [];
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => (recordLive ? [job] : []),
+  const rig = dirtyWorktreeRig({
+    // Aged out long ago; the forge already answered "no PR" definitively.
+    // `seeded` is a churn canary: a re-sampled row is minted without it.
+    pendingRow: { counted: false, prTried: true, seeded: true },
     gitProbe: async ({ branch }) => {
       probed.push(branch);
       return { exists: true, isAncestor: false }; // never merges — stays uncounted
@@ -1076,28 +1000,25 @@ test("refreshRoi: an uncounted row past the horizon survives (with its pr marker
       asked.push(branch);
       return null;
     },
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => MIDNIGHT,
   });
-  await budget.refreshRoi();
-  await budget.refreshRoi();
+  await rig.budget.refreshRoi();
+  await rig.budget.refreshRoi();
   // The row survives both refreshes — no re-sample (its id is still a
   // fingerprint), no age-out — and its prTried marker rides along, so the
   // forge is never re-asked a question it already answered definitively.
-  assert.deepEqual(payload.roi.pending.map((j) => j.id), ["old"]);
-  assert.equal(payload.roi.pending[0].prTried, true);
-  assert.equal(payload.roi.pending[0].seeded, true, "the row is never re-minted — no churn");
+  const pending = () => rig.payload().roi.pending;
+  assert.deepEqual(pending().map((j) => j.id), ["old"]);
+  assert.equal(pending()[0].prTried, true);
+  assert.equal(pending()[0].seeded, true, "the row is never re-minted — no churn");
   assert.equal(asked.length, 0, "a definitive no-PR is never re-asked while the row survives");
   // The per-refresh probe waste the issue scoped out remains by design: the
   // git probe is the only way to notice a late merge.
   assert.equal(probed.length, 2);
   // The record is finally swept: absence is final, the row drops, and with
   // it the churn risk — there is nothing left to re-sample.
-  recordLive = false;
-  await budget.refreshRoi();
-  assert.equal(payload.roi.pending.length, 0);
+  rig.live = false;
+  await rig.budget.refreshRoi();
+  assert.equal(pending().length, 0);
 });
 
 // BET-1466 item 4: budget.json is not covered by the store sweep — the spend
@@ -1171,53 +1092,3 @@ test("refreshRoi freezes the closed month at its real spend after a >7-day outag
   assert.ok(Math.abs(r.months["2026-09"].spendUsd - 0.25) < 1e-9, "the current month's spend reads its own buckets");
 });
 
-test("overnightSpendUsd prices today's job_started estTokens at the model cost (§11.2)", () => {
-  const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }; // 1.4925 $/Mtok blended
-  const rows = [
-    { kind: "cto.overnight.job_started", ts: NOON, estTokens: 1_000_000 },
-    { kind: "cto.overnight.job_started", ts: NOON + 60_000, estTokens: 500_000 },
-    { kind: "cto.overnight.job_started", ts: dayStart(-1), estTokens: 10_000_000 }, // yesterday — ignored
-    { kind: "cto.overnight.close", ts: NOON, estTokens: 99 }, // other kind — ignored
-    { kind: "cto.overnight.job_started", ts: NOON }, // no estTokens — ignored
-    { kind: "cto.overnight.job_started", ts: NOON, estTokens: -5 }, // junk — ignored
-  ];
-  // 1.5M priceable tokens → 1.5 × 1.4925 = 2.23875
-  assert.ok(Math.abs(overnightSpendUsd(rows, { now: NOON, modelCost: cost }) - 2.23875) < 1e-9);
-  // Unpriceable model → $0 (the cap cannot trip on an unknown model).
-  assert.equal(overnightSpendUsd(rows, { now: NOON, modelCost: null }), 0);
-  // Junk rows shape → 0, never throws.
-  assert.equal(overnightSpendUsd(null, { now: NOON, modelCost: cost }), 0);
-});
-
-test("computeSpendable windowless: the $ night cap flips spendableFrac to 0 when tonight's spend reaches it (§11.2)", async () => {
-  let saved = null;
-  const ledgerRows = [];
-  const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
-  // 2M priceable tokens × 1.4925 $/Mtok = 2.985 spent; cap 3 not yet reached.
-  const underCap = [
-    { kind: "cto.overnight.job_started", ts: NOON, estTokens: 2_000_000 },
-  ];
-  const overCap = [...underCap, { kind: "cto.overnight.job_started", ts: NOON + 1, estTokens: 100_000 }];
-  const budget = createCtoBudget({
-    store: { load: async () => ({}), save: async (p) => (saved = p) },
-    now: () => NOON,
-    cfg: () => ({ ctoNightCapUsd: 3 }),
-    ledger: { append: (r) => ledgerRows.push(r) },
-  });
-
-  const under = await budget.computeSpendable({
-    provider: "someone", windowed: false, overnightRows: underCap, overnightModelCost: cost,
-  });
-  assert.equal(under.spendableFrac, null, "under the cap → no fractional reserve (λ=0)");
-  assert.equal(under.overnightCapHit, false);
-  assert.ok(Math.abs(under.overnightSpentUsd - 2.985) < 1e-9);
-
-  const over = await budget.computeSpendable({
-    provider: "someone", windowed: false, overnightRows: overCap, overnightModelCost: cost,
-  });
-  assert.equal(over.spendableFrac, 0, "cap exhausted → the machine selects nothing further");
-  assert.equal(over.overnightCapHit, true);
-  assert.equal(over.nightCapUsd, 3);
-  // The caller ledgers the cap-hit; the budget itself only reports it.
-  assert.ok(!ledgerRows.some((r) => r.kind === "cto.overnight.night_cap_hit"));
-});
