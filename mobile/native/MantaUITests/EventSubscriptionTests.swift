@@ -275,7 +275,7 @@ final class MantaFrameParseTests: XCTestCase {
         XCTAssertEqual(MantaFrameScanner.string(top.sub, in: data), "s")
         XCTAssertNil(top.sessionId)
         let payload = try XCTUnwrap(top.payload)
-        XCTAssertEqual(String(decoding: data.subdata(in: payload), as: UTF8.self), #"{"a":[1,{"b":"}"}]}"#)
+        XCTAssertEqual(String(bytes: data.subdata(in: payload), encoding: .utf8), #"{"a":[1,{"b":"}"}]}"#)
     }
 
     func testWindowStatusCarriesAttentionBelow() throws {

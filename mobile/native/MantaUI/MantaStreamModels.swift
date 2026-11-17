@@ -350,7 +350,7 @@ enum MantaFrameScanner {
         let slice = data.subdata(in: range)
         // Fast path: no escapes → the bytes between the quotes ARE the string.
         if !slice.contains(backslash) {
-            return String(decoding: slice.dropFirst().dropLast(), as: UTF8.self)
+            return String(bytes: slice.dropFirst().dropLast(), encoding: .utf8)
         }
         return try? JSONDecoder().decode(String.self, from: slice)
     }

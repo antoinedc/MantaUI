@@ -57,7 +57,7 @@ struct DiagnosticContext: Sendable, Equatable {
         var uts = utsname()
         uname(&uts)
         let machine = withUnsafeBytes(of: &uts.machine) { raw in
-            String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+            String(bytes: raw.prefix(while: { $0 != 0 }), encoding: .utf8) ?? "unknown"
         }
         return DiagnosticContext(
             appVersion: info?["CFBundleShortVersionString"] as? String ?? "unknown",
