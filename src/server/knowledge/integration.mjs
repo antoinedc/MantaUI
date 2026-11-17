@@ -111,5 +111,12 @@ export function knowledgePaths(opts) {
  * @param {{ runEphemeral: Function, oc: object, configGet: Function }} o
  */
 export function createKnowledgeRunner({ runEphemeral, oc, configGet }) {
-  return (args = {}) => runEphemeral({ ...args, deps: { oc, configGet, ...(args.deps ?? {}) } });
+  return (args = {}) => {
+    const callerCost = args.deps?.reportCost;
+    // The runner reports ONE token number (`tokens`) plus, when the ephemeral session recorded its spend, the
+    // per-kind `usage` and `usd`. Knowledge callers price per component, so they get the usage object AS `tokens`
+    // (and `usd` beside it); with no recorded usage they keep the estimate number.
+    const reportCost = callerCost ? async (c) => callerCost(c?.usage ? { ...c, tokens: c.usage } : c) : undefined;
+    return runEphemeral({ ...args, deps: { oc, configGet, ...(args.deps ?? {}), ...(reportCost ? { reportCost } : {}) } });
+  };
 }

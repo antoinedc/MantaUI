@@ -18,7 +18,7 @@ import { transpileTree } from "../../../scripts/opencode-v2/ts-loader.mjs";
 import { isExemptPath } from "../auth.mjs";
 import { createKnowledgeEngine } from "./engine.mjs";
 import { buildKnowledgeChannels, handleKnowledgeRoute, toSettingsWire } from "./routes.mjs";
-import { createBandOf, createForgeAdapters, createIsUserAuthored, createIsUserAuthoredRef } from "./integration.mjs";
+import { createBandOf, createForgeAdapters, createIsUserAuthored, createIsUserAuthoredRef, createKnowledgeRunner } from "./integration.mjs";
 import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
 
 let sqlite = true;
@@ -393,6 +393,20 @@ describe("engine wiring (index.mjs adapters)", { skip }, () => {
     assert.equal(await a.hasForgeLogin("gitlab", "gitlab.example.com"), false);
     assert.equal(await a.hasForgeLogin("github"), true);
     assert.deepEqual(seen, ["github.com/acme/w", "gitlab.example.com/acme/w"]);
+  });
+
+  test("createKnowledgeRunner hands knowledge callers the real per-kind usage as `tokens` (+ usd), the estimate number otherwise", async () => {
+    const seen = [];
+    const inner = async ({ deps }) => {
+      await deps.reportCost({ taskClass: "curator-notes", tokens: 5550, usage: { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 }, usd: 0.07, estimated: false });
+      await deps.reportCost({ taskClass: "curator-notes", tokens: 400, estimated: true });
+      return { text: "ok" };
+    };
+    const run = createKnowledgeRunner({ runEphemeral: inner, oc: {}, configGet: async () => ({}) });
+    await run({ taskClass: "curator-notes", deps: { reportCost: async (c) => seen.push(c) } });
+    assert.deepEqual(seen[0].tokens, { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 });
+    assert.equal(seen[0].usd, 0.07);
+    assert.equal(seen[1].tokens, 400);
   });
 
   test("createBandOf: the family's router band, else null", () => {

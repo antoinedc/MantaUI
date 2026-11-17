@@ -2581,3 +2581,17 @@ test("runCommand with noSync leaves the session's agent and model alone (always-
   assert.equal(calls.filter((c) => /\/(agent|model)$/.test(c.path)).length, 0, "no agent/model POST");
   assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "bg", text: "x" });
 });
+
+test("sessionUsage sums what the assistant messages recorded (tokens by kind, opencode's cost); undefined without any", async () => {
+  const { sessionUsage } = await import("./opencode.mjs");
+  assert.equal(sessionUsage([]), undefined);
+  assert.equal(sessionUsage([{ info: { role: "user", tokens: { input: 5 } } }, { info: { role: "assistant" } }]), undefined);
+  assert.deepEqual(
+    sessionUsage([
+      { info: { role: "assistant", tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 1000, write: 50 } }, cost: 0.01 } },
+      { info: { role: "assistant", tokens: { input: 10, output: 2 }, cost: 0.002 } },
+    ]),
+    { input: 110, output: 22, reasoning: 5, cacheRead: 1000, cacheWrite: 50, usd: 0.012 },
+  );
+  assert.deepEqual(sessionUsage([{ info: { role: "assistant", tokens: { input: 1, output: 1 }, cost: 0 } }]), { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 });
+});

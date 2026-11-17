@@ -1538,7 +1538,7 @@ export async function runSynchronousSession({
           // only where no status is classifiable. Only structured cause fields
           // cross the boundary; never exception text.
           return finish({
-            text: "", sid, ok: false, code: classifyModelErrorCode(err),
+            text: "", sid, ok: false, code: classifyModelErrorCode(err), ...usageField(msgs),
             errorName: typeof err?.name === "string" ? err.name : null,
             httpStatus: typeof status === "number" ? status : null,
             retryable: typeof err?.data?.isRetryable === "boolean" ? err.data.isRetryable : null,
@@ -1554,9 +1554,9 @@ export async function runSynchronousSession({
         outcome: completion === "ok" ? "success" : "failure",
         errorName: null, httpStatus: null, retryable: null, finish: assistant?.info?.finish ?? null,
       });
-      if (completion !== "ok") return finish({ text: "", sid, ok: false, code: completion });
+      if (completion !== "ok") return finish({ text: "", sid, ok: false, code: completion, ...usageField(msgs) });
       const text = extractAssistantText([assistant]);
-      return finish(text ? { text, sid, ok: true } : { text: "", sid, ok: false, code: "empty-output" });
+      return finish(text ? { text, sid, ok: true, ...usageField(msgs) } : { text: "", sid, ok: false, code: "empty-output", ...usageField(msgs) });
     }
     return finish({ text: "", sid, ok: false, code: readFailed ? "read-http" : "timeout" });
   } catch {
@@ -1601,6 +1601,35 @@ export async function runSynchronousSession({
     } catch { /* guarded */ }
   }
 }
+
+/**
+ * What the session's assistant messages recorded as spent: tokens by kind and opencode's own cost. The session is
+ * deleted when the run ends, so a caller that wants the real figure has to take it from the result.
+ * `undefined` when no assistant message carries tokens.
+ * @returns {{ input: number, output: number, reasoning: number, cacheRead: number, cacheWrite: number, usd?: number } | undefined}
+ */
+export function sessionUsage(msgs) {
+  const n = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  const sum = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let usd = 0;
+  let seen = false;
+  for (const m of Array.isArray(msgs) ? msgs : []) {
+    if (m?.info?.role !== "assistant" || !m.info.tokens || typeof m.info.tokens !== "object") continue;
+    const t = m.info.tokens;
+    seen = true;
+    sum.input += n(t.input);
+    sum.output += n(t.output);
+    sum.reasoning += n(t.reasoning);
+    sum.cacheRead += n(t.cache?.read);
+    sum.cacheWrite += n(t.cache?.write);
+    usd += n(m.info.cost);
+  }
+  return seen ? { ...sum, ...(usd > 0 ? { usd } : {}) } : undefined;
+}
+const usageField = (msgs) => {
+  const usage = sessionUsage(msgs);
+  return usage ? { usage } : {};
+};
 
 function extractAssistantText(msgs) {
   const out = [];
