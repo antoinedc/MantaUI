@@ -105,6 +105,11 @@ const DEFAULT_CONFIG = {
   // issue). The Behavior-card editor + Health "ambient spend today / cap" row
   // read this.
   ctoAmbientCap: 2.5,
+  // Background work budget (spec 2026-11-17): ONE budget for shared knowledge and the background CTO.
+  // `level` (off | light | normal) is the share of a subscription plan's quota windows it may use;
+  // `dailyCapUsd` is the cap per local day on pay-per-token keys. Written only through
+  // `config:update`'s validate-and-merge (backgroundBudget.mjs); a partial stored value reads as its defaults.
+  backgroundWork: { level: "normal", dailyCapUsd: 5 },
   // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
   // notify). Off by default.
   ctoDigestPush: false,

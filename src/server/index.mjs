@@ -103,6 +103,7 @@ import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
 import { createLivenessLog } from "./delegateLivenessLog.mjs";
+import { createBackgroundBudget, createBackgroundBudgetStore, TICK_MS as BACKGROUND_BUDGET_TICK_MS, RETENTION_DAYS as BACKGROUND_BUDGET_RETENTION_DAYS } from "./backgroundBudget.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
 import { createViewWindowArmer, createViewWindowCloser } from "./sessionMaterialize.mjs";
 import { createSessionLinks, createSessionLinkActions } from "./sessionLinks.mjs";
@@ -659,7 +660,21 @@ const handoffEngine = createProductionHandoff({
 // anything can send one (the CTO admission tick below may dispatch at boot); the SAME instance is
 // the knowledge engine's evidence check (`isUserAuthoredRef`).
 const promptOrigins = createPromptOrigins();
-oc.setPromptOrigins(promptOrigins);
+// Background work budget (spec 2026-11-17 §8, §17.16): "has the user started a turn lately" rides the one chokepoint
+// every prompt passes through (a `user` origin is set only by a human's send — desktop or phone). Background sessions
+// are excluded by `noteUserPrompt`, assigned where the budget is created (it needs engines built further down). 0 after a restart.
+let lastUserPromptAt = 0;
+let noteUserPrompt = null;
+oc.setPromptOrigins({
+  record: (a) => {
+    try {
+      if (a?.origin === "user" && typeof a.sessionID === "string") noteUserPrompt?.(a.sessionID);
+    } catch {
+      /* presence bookkeeping never fails a prompt */
+    }
+    return promptOrigins.record(a);
+  },
+});
 const promptDelivery = createPromptDelivery({
   // The admission seam: resolves to the live session, parks behind a fence.
   sendPrompt: (args) => handoffEngine.admitPrompt(args),
@@ -2033,6 +2048,68 @@ const optimizerPrices = createOptimizerPrices({
   loadCatalog: () => readJsonSync(PRICES_PATH, null),
 });
 
+// ---------------------------------------------------------------------------
+// Background work budget (src/server/backgroundBudget.mjs, spec docs/superpowers/specs/2026-11-17-background-work-budget.md):
+// ONE budget for shared knowledge and the background CTO — a share of the plan's quota windows on a subscription, a
+// dollar cap per day on a pay-per-token key. Created ONCE here, BEFORE the knowledge engine and the CTO engines that
+// are handed it (a const referenced earlier is a TDZ crash on boot, and tests never load this file).
+// ---------------------------------------------------------------------------
+const backgroundPrices = createKnowledgeListPrices({
+  listProviders: oc.getProviders,
+  readConfig: readOpencodeConfig,
+  loadCatalog: () => readJsonSync(PRICES_PATH, null),
+});
+const backgroundBudgetLog = createLivenessLog({
+  path: statePath("background-budget.jsonl"),
+  markerPath: statePath("background-budget.deployed"),
+  retentionMs: BACKGROUND_BUDGET_RETENTION_DAYS * 24 * 60 * 60_000,
+});
+const backgroundBudget = createBackgroundBudget({
+  store: createBackgroundBudgetStore(),
+  log: { append: (row) => backgroundBudgetLog.appendSegment(row) },
+  configGet: () => local.configGet(),
+  listSnapshots,
+  providerTokenTotals,
+  getPrices: backgroundPrices.get,
+  bandOf: createKnowledgeBandOf(describeModel),
+  adapterForProviderID,
+  resolveDefaultModel: async () => {
+    const dm = (await local.configGet())?.defaultModel;
+    return dm?.providerID && dm?.modelID ? { providerID: dm.providerID, modelID: dm.modelID } : null;
+  },
+  desktopState: () => push.desktopState(push.getDesktopPresence(), Date.now()),
+  lastUserPromptAt: () => lastUserPromptAt,
+  pacingWindows: () => optimizerPacing.pressureWindows(),
+  listConnectedProviders: async () => {
+    const { connected } = await oc.getProviders();
+    return Array.isArray(connected) ? connected : [];
+  },
+});
+// A user-started turn in a session that is not background work (a delegate job, the CTO conversation, an ephemeral or
+// routine session) says the user is here. If a session cannot be classified it counts: batch work then waits.
+noteUserPrompt = (sessionID) => {
+  void (async () => {
+    try {
+      if (delegateEngine.ownsSession(sessionID)) return;
+      if (await ctoConversation.isConversationSession(sessionID)) return;
+      if (await isInternalSession(sessionID)) return;
+    } catch {
+      /* unknown → counts as the user being here */
+    }
+    lastUserPromptAt = Date.now();
+  })();
+};
+// Plan usage is attributed on its own 10-minute poller AND whenever the usage poller publishes a new reading.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopBackgroundBudgetTick } = startPoller(() => backgroundBudget.tick(), {
+  intervalMs: BACKGROUND_BUDGET_TICK_MS,
+  label: "background-budget",
+});
+// eslint-disable-next-line no-unused-vars
+const stopBackgroundBudgetUsageTick = bus.subscribe((evt) => {
+  if (evt?.kind === "usage.updated") void backgroundBudget.tick();
+});
+
 // Shared knowledge (src/server/knowledge/, spec docs/superpowers/specs/2026-11-16-shared-knowledge.md):
 // the box's cross-session memory. Independent of the CTO engine (it starts below whatever `ctoEnabled`
 // says); its own budget and pollers. The opencode pump feeds it session events (observeRaw below);
@@ -2105,11 +2182,7 @@ const knowledgeEngine = createKnowledgeEngine({
   getRepoAccess: knowledgeForge.getRepoAccess,
   hasForgeLogin: knowledgeForge.hasForgeLogin,
   bandOf: createKnowledgeBandOf(describeModel),
-  getPrices: createKnowledgeListPrices({
-    listProviders: oc.getProviders,
-    readConfig: readOpencodeConfig,
-    loadCatalog: () => readJsonSync(PRICES_PATH, null),
-  }).get,
+  getPrices: backgroundPrices.get,
   fireNotify: (args) => push.fireNotify(args),
 });
 // The index file lives inside the store's folder: start indexing only once the store has written its .gitignore.
@@ -2447,6 +2520,7 @@ rpcHandlers = buildHandlers({
   usageCalibration,
   routines: routinesEngine,
   knowledge: knowledgeEngine,
+  backgroundBudget,
   tmux,
   oc,
   pty,

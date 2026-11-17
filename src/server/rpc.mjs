@@ -95,6 +95,7 @@ import { clearStoredToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 import { resolveProjectCwd as sharedResolveProjectCwd } from "./projectCwd.mjs";
 import { createFiles } from "./files.mjs";
+import { validateAndMergeBackgroundWork } from "./backgroundBudget.mjs";
 
 // The number of rules (event entries) in a repo's rules YAML — shown in
 // Settings [G1] so a valid repo reads "3 rules".
@@ -528,6 +529,9 @@ async function knownOpencodeSessionIds(oc) {
 // File explorer channels (fs:resolve-paths / fs:list / fs:git-status); real fs + git.
 const explorerFiles = createFiles();
 
+// Retired by the single background budget (spec 2026-11-17 §9): a config write of these is ignored.
+const RETIRED_BUDGET_KEYS = ["ctoAmbientCap", "ctoAmbientCapUsd", "ctoNightCapUsd"];
+
 export function buildHandlers({
   tmux,
   oc,
@@ -646,6 +650,9 @@ export function buildHandlers({
   // TypeError, and the opencode:prompt / opencode:run-command seams fall
   // through byte-identically to the raw oc routes.
   ctoConversation = null,
+  // The background work budget (src/server/backgroundBudget.mjs). Null when not wired (tests) →
+  // `background:status` answers 503.
+  backgroundBudget = null,
   // The doctrine restart manager (providers.createCtoDoctrineRestarter, wired
   // in index.mjs with the shared busy view + a tick poller). A ctoStyle /
   // ctoHouseRules edit defers its opencode restart until the box is idle
@@ -1067,6 +1074,28 @@ export function buildHandlers({
       // writer): a generic config write can never set them. Dotted `knowledge.*` keys too.
       if (patch && typeof patch === "object" && Object.keys(patch).some((k) => k === "knowledge" || k.startsWith("knowledge."))) {
         patch = Object.fromEntries(Object.entries(patch).filter(([k]) => k !== "knowledge" && !k.startsWith("knowledge.")));
+      }
+      // The old per-subsystem caps are retired (one background budget now): a write from an older desktop is
+      // ignored, not an error — an error would fail that desktop's whole config save.
+      if (patch && typeof patch === "object" && RETIRED_BUDGET_KEYS.some((k) => k in patch)) {
+        patch = Object.fromEntries(Object.entries(patch).filter(([k]) => !RETIRED_BUDGET_KEYS.includes(k)));
+      }
+      // `backgroundWork` is validated and MERGED (a partial write — only `level`, or the dotted
+      // `backgroundWork.level` — must not drop the stored `dailyCapUsd`, which configUpdate's shallow replace would).
+      if (patch && typeof patch === "object" && Object.keys(patch).some((k) => k === "backgroundWork" || k.startsWith("backgroundWork."))) {
+        const part = {};
+        const rest = {};
+        let bad = null;
+        for (const [k, v] of Object.entries(patch)) {
+          if (k === "backgroundWork") {
+            if (v !== null && typeof v === "object" && !Array.isArray(v)) Object.assign(part, v);
+            else bad = "Background work settings must be an object.";
+          } else if (k.startsWith("backgroundWork.")) part[k.slice("backgroundWork.".length)] = v;
+          else rest[k] = v;
+        }
+        const merged = bad ? { ok: false, error: bad } : validateAndMergeBackgroundWork((await local.configGet())?.backgroundWork, part);
+        if (!merged.ok) throw Object.assign(new Error(merged.error), { rpcStatus: 400 });
+        patch = { ...rest, backgroundWork: merged.value };
       }
       if (patch?.handoffMode !== undefined && !["auto", "suggest", "off"].includes(patch.handoffMode)) {
         throw new Error('handoffMode must be "auto", "suggest" or "off"');
@@ -2819,6 +2848,14 @@ export function buildHandlers({
     "routines:convert-commit": (followupId, input) => needRoutines().convertCommit(followupId, input),
     "routines:move-to-chat": (id, target) => needRoutines().moveToChat(id, target),
     "routines:move-to-routines": (id) => needRoutines().moveBack(id),
+
+    // ---- background work budget (src/server/backgroundBudget.mjs; spec 2026-11-17) ----
+    // The Settings → Models card, the Knowledge card and the CTO pane read the same BudgetStatus. Settings are
+    // written through `config:update` (`backgroundWork`). Unwired box → 503, never a TypeError.
+    "background:status": () => {
+      if (!backgroundBudget) throw Object.assign(new Error("Background work isn't available on this box yet."), { rpcStatus: 503 });
+      return backgroundBudget.status();
+    },
 
     // ---- subscription plan usage (manta-server owned; BET-737) ----
     // Read-only: returns the current UsageSnapshot[] cache maintained by the

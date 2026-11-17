@@ -264,9 +264,10 @@ function aggregateSeriesByBucket(rows, bucket, count, now) {
   return out;
 }
 
-// tokensSent counts total context processed through the model (all input buckets + output), not billing-weighted cost — the dashboard graph shows weight, the Saved stat shows money.
-function tokensSent(row) {
-  return num(row.input) + num(row.cacheRead) + num(row.cacheWrite) + num(row.output);
+// tokensSent counts total context processed through the model (all input buckets + output + reasoning when the row carries it), not billing-weighted cost — the dashboard graph shows weight, the Saved stat shows money.
+// Exported: the background budget measures its own work with the SAME formula so both sides of its share ratio agree.
+export function tokensSent(row) {
+  return num(row?.input) + num(row?.cacheRead) + num(row?.cacheWrite) + num(row?.output) + num(row?.reasoning);
 }
 
 /**
@@ -1052,7 +1053,7 @@ export async function ledgerSummary({ sinceMs = 0 } = {}) {
 /**
  * I/O. The optimizer's MEASURED tokens-per-pct conversion (Optimizer P2.3,
  * BET-1345) needs a token total per opencode providerID. This sums
- * `tokensSent` (input + cacheRead + cacheWrite + output — all context that
+ * `tokensSent` (input + cacheRead + cacheWrite + output + reasoning — all context that
  * passed through the model) across ledger rows per providerID, over the same
  * rolling-window rows the rest of the ledger reads. The pacing state reads the
  * total for a window's providerIDs at its mark and again later, and derives
