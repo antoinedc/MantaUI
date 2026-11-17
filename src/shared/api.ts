@@ -1033,6 +1033,76 @@ export interface SummaryModelStatus {
 
 export type SummaryModelSetInput = { providerID: string; modelID: string } | { none: true };
 
+// ===== Shared knowledge (docs/superpowers/specs/2026-11-16-shared-knowledge.md §4, §11.6) =====
+
+export type KnowledgeRepoRules = "box-only" | "pull-request" | "direct";
+export type KnowledgeSharing = "share-and-read" | "read-only" | "private";
+
+/** One detected project with its effective settings (§13.1). */
+export interface KnowledgeProjectRow {
+  slug: string;
+  displayName: string;
+  canonicalId: string;
+  repoRules: KnowledgeRepoRules;
+  sharing: KnowledgeSharing;
+  /** False when the project can't use the outward repo rules (pull-request / direct). */
+  outwardAllowed: boolean;
+  /** Why outward rules are unavailable; shown as visible text. */
+  outwardReason?: string;
+  /** True when the value is set on the project; absent = inferred from the defaults. */
+  repoRulesOverride?: boolean;
+  sharingOverride?: boolean;
+}
+
+export interface KnowledgeSettings {
+  enabled: boolean;
+  dailyCapUsd: number;
+  repoRules: KnowledgeRepoRules;
+  sharing: KnowledgeSharing;
+  projects: KnowledgeProjectRow[];
+  /** Why the subsystem is off (e.g. no Node 24). Absent when it can run. */
+  unavailableReason?: string;
+  /** Curator model spend for the local day, dollars. */
+  spentTodayUsd?: number;
+  /** Rule/skill work has waited more than 24 h for a capable model (§6.2). */
+  waitingForCapableModel?: boolean;
+  /** Sessions that started without a briefing this week (§7.1). */
+  sessionsWithoutBriefingThisWeek?: number;
+}
+
+/** `null` for a per-project key means "use the default". */
+export interface KnowledgeSettingsPatch {
+  enabled?: boolean;
+  dailyCapUsd?: number;
+  repoRules?: KnowledgeRepoRules;
+  sharing?: KnowledgeSharing;
+  projects?: Record<string, { repoRules?: KnowledgeRepoRules | null; sharing?: KnowledgeSharing | null }>;
+}
+
+export interface KnowledgeChange {
+  id: string;
+  /** Epoch ms, or an ISO string. */
+  at: number | string;
+  /** What happened (applied, skipped, waiting, …). */
+  kind: string;
+  summary: string;
+  reason: string;
+  area: string;
+  slug?: string;
+  undoable: boolean;
+  undoneAt?: number | string;
+  error?: string;
+}
+
+export interface KnowledgeChangesPage {
+  items: KnowledgeChange[];
+  nextCursor: string | null;
+}
+
+export type KnowledgeUndoResult =
+  | { ok: true }
+  | { ok: false; reason: string; conflictWith?: string };
+
 export interface HandoffLinks {
   /** Set on a predecessor that was replaced (clear). */
   replacedBy?: string;
@@ -1742,6 +1812,14 @@ export interface Api {
   summaryModelStatus(): Promise<SummaryModelStatus>;
   summaryModelSearch(input: { query: string }): Promise<{ models: SummaryModelCandidate[] }>;
   summaryModelSet(input: SummaryModelSetInput): Promise<SummaryModelStatus>;
+
+  // Shared knowledge (spec §11.6). `knowledgeSettingsSet` rejects with the box's
+  // message for an invalid value; `knowledgeUndo` returns { ok:false, reason,
+  // conflictWith? } for an expected refusal.
+  knowledgeSettingsGet(): Promise<KnowledgeSettings>;
+  knowledgeSettingsSet(input: { patch: KnowledgeSettingsPatch }): Promise<KnowledgeSettings>;
+  knowledgeChanges(input?: { cursor?: string }): Promise<KnowledgeChangesPage>;
+  knowledgeUndo(input: { id: string }): Promise<KnowledgeUndoResult>;
 
   // Inline media (BET-1148). The box publishes ONE `media` bus kind with an
   // `action` discriminator (begin / show / fail); the desktop subscribes once
