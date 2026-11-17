@@ -209,11 +209,11 @@ test("changes + undo: the record is listed newest-first; undo calls the injected
   await engine.stop();
 });
 
-test("undo without a curator layer says so (never a silent no-op)", async () => {
+test("undo of a change that has no commit says so (never a silent no-op)", async () => {
   const { engine } = await rig();
   await engine.start();
   const id = engine.changesLog.add({ kind: "applied", summary: "x", undoable: true });
-  assert.match((await engine.undo({ id })).reason, /isn't available yet/);
+  assert.match((await engine.undo({ id })).reason, /no recorded commit/);
   await engine.stop();
 });
 
