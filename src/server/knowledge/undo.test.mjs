@@ -8,9 +8,9 @@ import { tmpDir } from "./testHelpers.mjs";
 const changesOf = async (engine) => (await engine.changes({ limit: 100 })).items;
 const exists = (p) => access(p).then(() => true, () => false);
 const page = (slug, file, content) => ({ type: "page.edit", target: { area: "project", path: `projects/${slug}/${file}` }, content, reason: "Seen", evidence: [{ ref: "msg:ses_one/msg_1" }] });
-const UEV = { ses_one: { msg_1: { role: "user", text: "no, use pnpm not npm" }, msg_2: { role: "user", text: "I told you before: use pnpm" } }, ses_two: { msg_1: { role: "user", text: "pnpm please, never npm" } } };
+const UEV = { ses_one: { msg_1: { role: "user", text: "no, use pnpm for installing packages here, not npm" }, msg_2: { role: "user", text: "I told you before: pnpm is what installs packages in this repo" } }, ses_two: { msg_1: { role: "user", text: "again: always use pnpm for installing packages please" } } };
 const USER = () => new Set(["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_1"]);
-const quotes = [["msg:ses_one/msg_1", "use pnpm not npm"], ["msg:ses_one/msg_2", "use pnpm"], ["msg:ses_two/msg_1", "pnpm please"]].map(([ref, quote]) => ({ ref, quote }));
+const quotes = [["msg:ses_one/msg_1", "use pnpm for installing packages"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]].map(([ref, quote]) => ({ ref, quote }));
 const access_ = { getRepoAccess: async () => ({ canPush: true, isFork: false, defaultBranch: "main" }), hasForgeLogin: async () => true };
 
 async function rigWith(over) {
@@ -59,7 +59,7 @@ test("a conflict with a later commit fails with an error naming it; nothing is h
   await r.engine.stop();
 });
 
-const ruleDecision = (extra = {}) => ({ type: "rule.add", target: { area: "project" }, content: "Use pnpm, never npm", reason: "Corrected three times", evidence: quotes, ...extra });
+const ruleDecision = (extra = {}) => ({ type: "rule.add", target: { area: "project" }, content: "Use pnpm for installing packages, never npm", reason: "Corrected three times", evidence: quotes, ...extra });
 
 test("undoing a rule removes it, stops tracking it, tombstones it, and the same rule is dropped next time", async () => {
   const r = await withNotes(await rigWith({ messages: UEV, userRefs: USER(), runner: (_a, _c, rig) => rig.decide([ruleDecision()]) }), ["preference"]);
@@ -114,16 +114,16 @@ test("undoing a repository change calls the repo writer, then reverts the stored
 test("undoing a preference re-renders the global file immediately (no waiting for 04:00)", async () => {
   const dir = await tmpDir("undo-global-");
   const globalPath = join(dir, "AGENTS.md");
-  const r = await withNotes(await rigWith({ globalPath, messages: UEV, userRefs: USER(), runner: (_a, _c, rig) => rig.decide([{ type: "preference.set", target: { area: "user" }, content: "Prefer pnpm over npm", reason: "Said so three times", evidence: quotes }]) }), ["preference"]);
+  const r = await withNotes(await rigWith({ globalPath, messages: UEV, userRefs: USER(), runner: (_a, _c, rig) => rig.decide([{ type: "preference.set", target: { area: "user" }, content: "Prefer pnpm for installing packages over npm", reason: "Said so three times", evidence: quotes }]) }), ["preference"]);
   await r.engine.runCurator(r.slug, { force: true });
-  assert.match(await r.engine.store.read("user/preferences.md"), /Prefer pnpm over npm/);
+  assert.match(await r.engine.store.read("user/preferences.md"), /Prefer pnpm for installing packages over npm/);
   assert.equal(r.engine.layer.globalBlock.isPending(), true);
   await assert.rejects(readFile(globalPath, "utf8")); // the curator's own write waits for the batch
   await r.engine.layer.globalBlock.apply({ reason: "batch" });
-  assert.match(await readFile(globalPath, "utf8"), /Prefer pnpm over npm/);
+  assert.match(await readFile(globalPath, "utf8"), /Prefer pnpm for installing packages over npm/);
   const ch = (await changesOf(r.engine)).find((i) => i.kind === "applied");
   assert.deepEqual(await r.engine.undo({ id: ch.id }), { ok: true });
-  assert.doesNotMatch(await readFile(globalPath, "utf8"), /Prefer pnpm over npm/);
+  assert.doesNotMatch(await readFile(globalPath, "utf8"), /Prefer pnpm for installing packages over npm/);
   await r.engine.stop();
 });
 
@@ -156,4 +156,53 @@ test("every failing path gives a specific reason: unknown commit, no commit, no 
   const c = r.engine.changesLog.add({ kind: "outward", summary: "x", undoable: true, data: { outward: { slug: "x", mode: "direct" } } });
   assert.match((await r.engine.undo({ id: c })).reason, /Repository writes aren't available/);
   await r.engine.stop();
+});
+
+test("a tombstone that couldn't be written is a warning handed to the caller (the undo itself stands)", async () => {
+  const r = await withNotes(await rigWith({ runner: (_a, _c, rig) => rig.decide([page(rig.slug, "gotchas.md", "- cache warm-up\n")]) }));
+  await r.engine.runCurator(r.slug, { force: true });
+  const ch = (await changesOf(r.engine)).find((i) => i.kind === "applied");
+  r.engine.layer.tombstones.add = async () => {
+    throw new Error("disk full");
+  };
+  const res = await r.engine.undo({ id: ch.id });
+  assert.equal(res.ok, true);
+  assert.match(res.warning, /couldn't remember that, so it may propose the same thing again/);
+  assert.equal(await exists(join(r.dir, `projects/${r.slug}/gotchas.md`)), false);
+  assert.ok((await changesOf(r.engine)).find((i) => i.id === ch.id).undoneAt);
+  await r.engine.stop();
+});
+
+test("pressing Undo twice on the same change: one wins, the other says so and records no error", async () => {
+  const r = await withNotes(await rigWith({ runner: (_a, _c, rig) => rig.decide([page(rig.slug, "gotchas.md", "- cache warm-up\n")]) }));
+  await r.engine.runCurator(r.slug, { force: true });
+  const ch = (await changesOf(r.engine)).find((i) => i.kind === "applied");
+  const [a, b] = await Promise.all([r.engine.undo({ id: ch.id }), r.engine.undo({ id: ch.id })]);
+  assert.deepEqual([a, b].filter((x) => x.ok).length, 1);
+  const loser = [a, b].find((x) => !x.ok);
+  assert.match(loser.reason, /already (being )?undone/);
+  assert.ok(!r.engine.changesLog.get(ch.id).error);
+  assert.equal((await r.engine.undo({ id: ch.id })).reason, "That change was already undone.");
+  await r.engine.stop();
+});
+
+test("a closed pull request whose rule couldn't be taken back keeps being delivered through the briefing; when every rule is undone, delivery goes back to the repository", async () => {
+  for (const breakIt of [true, false]) {
+    const repoWriter = { applyRules: async () => ({ ok: true, mode: "pull-request", pr: "#3" }), sync: async () => ({}), revert: async () => ({ ok: true }) };
+    const r = await withNotes(await rigWith({ stored: { repoRules: "pull-request" }, over: access_, repoWriter, messages: UEV, userRefs: USER(), runner: (_a, _c, rig) => rig.decide([ruleDecision()]) }), ["preference"]);
+    await r.engine.runCurator(r.slug, { force: true });
+    assert.equal(r.engine.layer.rules.viaBriefing(r.slug), true, "unmerged: via the briefing");
+    if (breakIt) {
+      const applied = (await changesOf(r.engine)).find((i) => i.kind === "applied");
+      r.engine.state.db.prepare("UPDATE changes SET commit_sha = 'deadbee' WHERE id = ?").run(applied.id);
+    }
+    const n = await r.engine.layer.undoClosedPr(r.slug);
+    assert.equal(n, breakIt ? 0 : 1);
+    assert.equal(r.engine.layer.rules.viaBriefing(r.slug), breakIt, breakIt ? "the rule is still in the store: keep delivering it" : "everything undone: nothing to deliver");
+    if (breakIt) {
+      await r.engine.refreshDerived();
+      assert.match((await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 })).text, /Use pnpm for installing packages/);
+    }
+    await r.engine.stop();
+  }
 });

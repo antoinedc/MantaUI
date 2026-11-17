@@ -222,7 +222,7 @@ export function createKnowledgeEngine(deps = {}) {
             }
           }),
       };
-      const layer = createCuratorLayer({ store, state, queue, settings, budget, changes, registry, sessionMap, briefings, rules, git, dir, deps: layerDeps, now, log, estimateTokens });
+      const layer = createCuratorLayer({ store, state, queue, settings, budget, changes, registry, sessionMap, briefings, rules, scanner, git, dir, deps: layerDeps, now, log, estimateTokens });
       c = { state, scanner, store, registry, resolver, changes, sessionMap, queue, budget, briefings, pageIndex, search, layer, parts };
       store.onCommit(() => void scheduleDerived());
       await scheduleDerived();
@@ -442,6 +442,7 @@ export function createKnowledgeEngine(deps = {}) {
     return c.changes.list({ cursor: args?.cursor, limit: args?.limit });
   }
 
+  const undoing = new Set();
   /** `knowledge:undo {id}` → `{ok:true}` | `{ok:false, reason, conflictWith?}`; every outcome is recorded on the change. */
   async function undo(args = {}) {
     await ready();
@@ -450,17 +451,26 @@ export function createKnowledgeEngine(deps = {}) {
     if (!change) return { ok: false, reason: "That change no longer exists." };
     if (change.undoneAt) return { ok: false, reason: "That change was already undone." };
     if (!change.undoable) return { ok: false, reason: "That change can't be undone." };
+    // two presses on the same change: the second waits for nothing and records nothing
+    if (undoing.has(change.id)) return { ok: false, reason: "That change is already being undone." };
+    undoing.add(change.id);
     const undoImpl = deps.undo ?? c.layer.undo;
     let res;
     try {
-      res = await undoImpl(change, { store: c.store, changes: c.changes, registry: c.registry });
-    } catch (e) {
-      res = { ok: false, reason: isKnowledgeError(e) ? e.message : `Undo failed: ${String(e?.message ?? e).slice(0, 200)}` };
+      try {
+        res = await undoImpl(change, { store: c.store, changes: c.changes, registry: c.registry });
+      } catch (e) {
+        res = { ok: false, reason: isKnowledgeError(e) ? e.message : `Undo failed: ${String(e?.message ?? e).slice(0, 200)}` };
+      }
+    } finally {
+      undoing.delete(change.id);
     }
     if (res?.ok) {
       c.changes.markUndone(change.id);
-      return { ok: true };
+      return { ok: true, ...(res.warning ? { warning: String(res.warning) } : {}) };
     }
+    // it was undone by someone else while this one ran (e.g. a closed pull request): not an error to record
+    if (c.changes.get(change.id)?.undoneAt) return { ok: false, reason: "That change was already undone." };
     const out = { ok: false, reason: String(res?.reason ?? "Undo failed."), ...(res?.conflictWith ? { conflictWith: res.conflictWith } : {}) };
     c.changes.setError(change.id, out.reason);
     return out;

@@ -27,13 +27,15 @@ export function parsePage(source) {
   if (!close) return { frontMatter: null, body: text, bodyOffset: 0, raw: null };
   const raw = rest.slice(0, close.index);
   let fm = null;
+  const bodyOffset = open[0].length + close.index + close[0].length;
   try {
     const parsed = YAML.parse(raw);
     fm = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
-    return { frontMatter: null, body: text, bodyOffset: 0, raw: null };
+    // Front matter that doesn't parse stays exactly where it is: the body starts after it, and edits never
+    // re-render (and so never duplicate) it.
+    return { frontMatter: null, body: text.slice(bodyOffset), bodyOffset, raw, invalid: true };
   }
-  const bodyOffset = open[0].length + close.index + close[0].length;
   return { frontMatter: fm, body: text.slice(bodyOffset), bodyOffset, raw };
 }
 
@@ -51,6 +53,7 @@ export function renderPage({ frontMatter, body }) {
 /** Update only the given front-matter keys, keeping the body byte-for-byte. */
 export function updateFrontMatter(source, patch) {
   const p = parsePage(source);
+  if (p.invalid) return source;
   return renderPage({ frontMatter: { ...(p.frontMatter ?? {}), ...patch }, body: p.body });
 }
 

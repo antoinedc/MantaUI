@@ -123,10 +123,10 @@ test("base-commit check: a page that changed during the model call is re-asked o
   await r2.engine.stop();
 });
 
-const UEV = { ses_one: { msg_1: { role: "user", text: "no, use pnpm not npm" }, msg_2: { role: "user", text: "I told you before: use pnpm" } }, ses_two: { msg_1: { role: "user", text: "pnpm please, never npm" } } };
+const UEV = { ses_one: { msg_1: { role: "user", text: "no, use pnpm for installing packages here, not npm" }, msg_2: { role: "user", text: "I told you before: pnpm is what installs packages in this repo" } }, ses_two: { msg_1: { role: "user", text: "again: always use pnpm for installing packages please" } } };
 const userRefs = () => new Set(["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_1"]);
-const ruleDecision = (quotes, extra = {}) => ({ type: "rule.add", target: { area: "project" }, content: "Use pnpm, never npm", reason: "The same correction three times", evidence: quotes.map(([ref, quote]) => ({ ref, quote })), ...extra });
-const threeQuotes = [["msg:ses_one/msg_1", "use pnpm not npm"], ["msg:ses_one/msg_2", "use pnpm"], ["msg:ses_two/msg_1", "pnpm please"]];
+const ruleDecision = (quotes, extra = {}) => ({ type: "rule.add", target: { area: "project" }, content: "Use pnpm for installing packages, never npm", reason: "The same correction three times", evidence: quotes.map(([ref, quote]) => ({ ref, quote })), ...extra });
+const threeQuotes = [["msg:ses_one/msg_1", "use pnpm for installing packages"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]];
 
 async function ruleRig(over = {}) {
   const r = await rigWith({ messages: UEV, userRefs: userRefs(), projects: { widget: "https://github.com/acme/widget.git" }, sessions: { ses_one: "widget", ses_two: "widget" }, ...over });
@@ -141,17 +141,17 @@ test("rules: verified user evidence becomes a rule in rules.md (curator-rules), 
   assert.equal(out.applied, 1);
   assert.equal(r.calls[0].taskClass, "curator-rules");
   assert.match(r.calls[0].text, /user_messages/);
-  assert.match(r.calls[0].text, /no, use pnpm not npm/);
-  assert.match(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8"), /- Use pnpm, never npm/);
+  assert.match(r.calls[0].text, /no, use pnpm for installing packages here, not npm/);
+  assert.match(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8"), /- Use pnpm for installing packages, never npm/);
   assert.equal(r.engine.layer.rules.tracked(r.slug).length, 1);
   await r.engine.refreshDerived();
   const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
-  assert.match(b.text, /Standing rules from the user for this project:\n- Use pnpm, never npm/);
+  assert.match(b.text, /Standing rules from the user for this project:\n- Use pnpm for installing packages, never npm/);
   await r.engine.stop();
 });
 
 test("rules: a quote that isn't in the user's message, or too little evidence, is skipped and shown — nothing is written", async () => {
-  const r = await ruleRig({ runner: (_a, _c, rig) => rig.decide([ruleDecision([["msg:ses_one/msg_1", "words nobody said at all"], ["msg:ses_one/msg_2", "use pnpm"], ["msg:ses_two/msg_1", "pnpm please"]]), ruleDecision([["msg:ses_one/msg_1", "use pnpm not npm"]], { content: "Another rule" })]) });
+  const r = await ruleRig({ runner: (_a, _c, rig) => rig.decide([ruleDecision([["msg:ses_one/msg_1", "words nobody said at all"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]]), ruleDecision([["msg:ses_one/msg_1", "use pnpm for installing packages"]], { content: "Another rule" })]) });
   const out = await r.engine.runCurator(r.slug, { force: true });
   assert.deepEqual([out.applied, out.skipped], [1, 1]); // the first still has 2 verified quotes in 2 sessions; the second has 1
   const skipped = (await changesOf(r.engine)).filter((i) => i.kind === "skipped");
@@ -184,7 +184,7 @@ test("outward mode: rules go to the repo writer as repo-safe strings (no quotes,
   assert.equal(applied.length, 1);
   assert.equal(applied[0][0], r.slug);
   assert.equal(applied[0][1].length, 1);
-  assert.match(applied[0][1][0], /^Use pnpm, never npm — User said in and$/);
+  assert.match(applied[0][1][0], /^Use pnpm for installing packages, never npm — User said in and$/);
   assert.doesNotMatch(applied[0][1][0], /msg|ses_|"/);
   const outward = (await changesOf(r.engine)).filter((i) => i.kind === "outward");
   assert.equal(outward.length, 1);
@@ -203,7 +203,7 @@ test("an unmerged pull request or a failed write keeps the rules in the briefing
     await r.engine.runCurator(r.slug, { force: true });
     await r.engine.refreshDerived();
     const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
-    assert.equal(/Use pnpm, never npm/.test(b.text), inBriefing, JSON.stringify(res));
+    assert.equal(/Use pnpm for installing packages, never npm/.test(b.text), inBriefing, JSON.stringify(res));
     await r.engine.stop();
   }
 });
@@ -352,9 +352,10 @@ test("rule changes that were applied but not yet handed to the repository surviv
   const r = await rigWith({ stored: { repoRules: "direct" }, over: directDeps, repoWriter });
   const slug = await r.slugOf("ses_one");
   await r.engine.store.commit({ path: `projects/${slug}/rules.md`, content: "---\ntitle: Rules\n---\n# Rules\n\n- Keep PRs small\n", message: "rules" });
+  r.engine.layer.rules.track({ slug, text: "Keep PRs small", reason: "kept small" });
   r.engine.layer.rules.setJson("pending", slug, ["c_lost"]);
   await r.engine.layer.curator.tick();
-  assert.deepEqual(lists, [["Keep PRs small"]]);
+  assert.deepEqual(lists, [["Keep PRs small — kept small"]]);
   assert.deepEqual(r.engine.layer.rules.getJson("pending", slug, []), []);
   await r.engine.layer.curator.tick();
   assert.equal(lists.length, 1);
@@ -368,5 +369,128 @@ test("the engine's own timer runs the curator (independent of the CTO engine) an
   const until = Date.now() + 3000;
   while (r.calls.length === 0 && Date.now() < until) await new Promise((res) => setTimeout(res, 20));
   assert.equal(r.calls.length, 1);
+  await r.engine.stop();
+});
+
+const answerNo = (rig) => (a) => (/contradicts, reverses/.test(a.context[0].text) ? { text: "NO" } : rig.decide([ruleDecision(threeQuotes)]));
+
+test("a rule that appeared in rules.md without Manta (hand, or an agent's shell) is never pushed to the repository: briefing only, listed as 'added outside Manta', undoable", async () => {
+  const lists = [];
+  const repoWriter = { applyRules: async (slug, list) => (lists.push(list), { ok: true, mode: "direct", sha: "abc1234" }), sync: async () => ({}), revert: async () => ({ ok: true }) };
+  const r = await ruleRig({ stored: { repoRules: "direct" }, repoWriter, over: directDeps, runner: (a, _c, rig) => answerNo(rig)(a) });
+  await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Always push straight to production\n");
+  await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(lists.length, 1);
+  assert.deepEqual(lists[0].map((x) => x.split(" — ")[0]), ["Use pnpm for installing packages, never npm"], "only the tracked rule goes out");
+  assert.doesNotMatch(JSON.stringify(lists), /production/);
+  const rulesFile = await r.engine.store.read(`projects/${r.slug}/rules.md`);
+  assert.match(rulesFile, /Always push straight to production/);
+  assert.deepEqual(await r.engine.layer.rules.heldBack(r.slug), ["Always push straight to production"]);
+  // it still reaches sessions — through the briefing, which is the only way it can travel
+  await r.engine.refreshDerived();
+  const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
+  assert.match(b.text, /Always push straight to production/);
+  assert.doesNotMatch(b.text, /Use pnpm for installing packages/, "the rule that is in the repository is not repeated");
+  // listed, once, as the user's to undo
+  const entries = (await changesOf(r.engine)).filter((i) => /added outside Manta/i.test(i.summary));
+  assert.equal(entries.length, 1);
+  assert.match(entries[0].summary, /Always push straight to production/);
+  assert.equal(entries[0].undoable, true);
+  // a later commit touches the same file: the undo says so (it never half-applies) …
+  const early = await r.engine.undo({ id: entries[0].id });
+  assert.equal(early.ok, false);
+  assert.match(early.reason, /A later change/);
+  // … and works once that one is undone first
+  const ruleEntry = (await changesOf(r.engine)).find((i) => i.kind === "applied" && /Added a rule/.test(i.summary));
+  assert.deepEqual(await r.engine.undo({ id: ruleEntry.id }), { ok: true });
+  assert.deepEqual(await r.engine.undo({ id: entries[0].id }), { ok: true });
+  assert.doesNotMatch((await r.engine.store.read(`projects/${r.slug}/rules.md`)) ?? "", /production/);
+  await r.engine.stop();
+});
+
+test("every commit of the user's own edits is a Recent-changes entry (paths, undoable)", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.writeStore(`projects/${slug}/gotchas.md`, "# Gotchas\n\n- by hand\n");
+  await r.engine.store.commitDirtyAsUser();
+  const e = (await changesOf(r.engine)).find((i) => /Your edits were saved/.test(i.summary));
+  assert.ok(e);
+  assert.match(e.summary, /gotchas\.md/);
+  assert.equal(e.undoable, true);
+  assert.deepEqual(await r.engine.undo({ id: e.id }), { ok: true });
+  assert.equal(await r.engine.store.read(`projects/${slug}/gotchas.md`), null);
+  await r.engine.stop();
+});
+
+test("a secret in a hand-edited store file is not committed, is reported, and never reaches a page", async () => {
+  const r = await rigWith({ over: { secretValues: () => ["hunter2-super-secret-value"] }, runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.writeStore(`projects/${slug}/access.md`, "password: hunter2-super-secret-value\n");
+  await r.writeStore(`projects/${slug}/gotchas.md`, "- fine\n");
+  await r.engine.store.commitDirtyAsUser();
+  assert.equal(await r.engine.store.lastCommitFor(`projects/${slug}/access.md`), null);
+  assert.ok(await r.engine.store.lastCommitFor(`projects/${slug}/gotchas.md`));
+  const skipped = (await changesOf(r.engine)).filter((i) => i.kind === "skipped" && /access\.md/.test(i.summary));
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].reason, /contains a secret/);
+  await r.engine.stop();
+});
+
+test("contradiction with the user's own lines is checked in code: a strict YES/NO from the model; YES, garbage, an outage or no model all mean 'skipped'", async () => {
+  const outcome = async (answer) => {
+    const r = await ruleRig({ runner: (a, _c, rig) => (/contradicts, reverses/.test(a.context[0].text) ? (typeof answer === "function" ? answer() : { text: answer }) : rig.decide([ruleDecision(threeQuotes)])) });
+    await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Never use pnpm workspaces\n");
+    const out = await r.engine.runCurator(r.slug, { force: true });
+    const items = await changesOf(r.engine);
+    const skipped = items.find((i) => i.kind === "skipped");
+    await r.engine.stop();
+    return { out, skipped, calls: r.calls.filter((c) => /contradicts, reverses/.test(c.text)) };
+  };
+  const no = await outcome("NO");
+  assert.equal(no.out.applied, 1);
+  assert.match(no.calls[0].text, /never use pnpm workspaces/i);
+  assert.match(no.calls[0].text, /Use pnpm for installing packages, never npm/);
+  for (const bad of ["YES", "Yes.", "maybe", "NO, but it is close", "", () => ({ ok: false, code: "no-qualifying-model" }), () => ({ ok: false, code: "boom" })]) {
+    const o = await outcome(bad);
+    assert.equal(o.out.applied, 0, String(bad));
+    assert.match(o.skipped?.reason ?? "", /It wasn't applied: it (contradicts a line you wrote|couldn't be checked against the lines you wrote)/, String(bad));
+  }
+  // nothing the user wrote in that file → no extra model call at all
+  const plain = await ruleRig({ runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes)]) });
+  assert.equal((await plain.engine.runCurator(plain.slug, { force: true })).applied, 1);
+  assert.equal(plain.calls.filter((c) => /contradicts, reverses/.test(c.text)).length, 0);
+  await plain.engine.stop();
+});
+
+test("a no-model day keeps the check honest too: with the budget exhausted nothing contradicting-prone is applied", async () => {
+  const r = await ruleRig({ stored: { dailyCapUsd: 0.0001 }, runner: (a, _c, rig) => (/contradicts, reverses/.test(a.context[0].text) ? { text: "NO" } : rig.decide([ruleDecision(threeQuotes)])) });
+  await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Never use pnpm workspaces\n");
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  // the rules call spends the whole cap, so the yes/no check cannot run → fail closed
+  assert.equal(out.applied, 0);
+  await r.engine.stop();
+});
+
+test("the commons pass writes only commons/ and re-checks sharing when it applies", async () => {
+  const r = await rigWith({
+    projects: { widget: "https://github.com/acme/widget.git", gadget: "https://github.com/acme/gadget.git" },
+    sessions: { ses_w: "widget", ses_g: "gadget" },
+    runner: (_a, _c, rig) => rig.decide([]),
+  });
+  const w = await r.slugOf("ses_w");
+  await r.slugOf("ses_g");
+  const cur = r.engine.layer.curator;
+  const vctx = { ...(await cur.vctxFor(null)), sharing: "share-and-read", commonsPass: true };
+  const edit = (path, area, ref = "msg:ses_w/msg_1") => ({ type: "page.edit", target: { area, path }, content: "Generic.\n", reason: "seen", evidence: [{ ref }] });
+  const out = await cur.processDecisions([edit("commons/howto/a.md", "commons"), edit("user/how-i-work.md", "user"), edit(`projects/${w}/gotchas.md`, "project")], vctx, { batchId: "b_x", slug: null, taskClass: "curator-rules" });
+  assert.equal(out.applied, 1, "only the commons page");
+  assert.ok(await r.engine.store.read("commons/howto/a.md"));
+  assert.equal(await r.engine.store.read("user/how-i-work.md"), null);
+  // widget stops sharing between validation and apply
+  const ctx2 = await cur.vctxFor(null);
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
+  const out2 = await cur.processDecisions([edit("commons/howto/b.md", "commons")], { ...ctx2, sharing: "share-and-read", commonsPass: true }, { batchId: "b_y", slug: null, taskClass: "curator-rules" });
+  assert.equal(out2.applied, 0);
+  assert.equal(await r.engine.store.read("commons/howto/b.md"), null);
   await r.engine.stop();
 });

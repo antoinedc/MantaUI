@@ -92,3 +92,16 @@ test("title and summary helpers", () => {
   assert.equal(summarizeBody("# H\n\n- first **thing** here\nsecond"), "first thing here");
   assert.equal(summarizeBody("a".repeat(200), 20).length, 20);
 });
+
+test("front matter that doesn't parse is never duplicated: edits leave it exactly where it is", () => {
+  const broken = "---\ntitle: [unclosed\nverified: 2026-01-01\n---\n# Page\n\n## Notes\n\nold\n";
+  const p = parsePage(broken);
+  assert.equal(p.invalid, true);
+  assert.equal(p.frontMatter, null);
+  assert.equal(p.body, "# Page\n\n## Notes\n\nold\n");
+  assert.equal(updateFrontMatter(broken, { verified: "2026-11-17" }), broken);
+  const edited = spliceSection(broken, "Notes", "new");
+  assert.equal(edited.match(/^---$/gm).length, 2, "one front matter block, not two");
+  assert.match(edited, /^---\ntitle: \[unclosed/);
+  assert.match(edited, /## Notes\n\nnew\n$/);
+});
