@@ -7,7 +7,7 @@
 // v2-next Stage A: ⌥Enter = After this turn (delivery:"queue"); the card has
 // Now / After this turn rows with Send now / Wait (N1) and the stopped footer.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { useStore } from "./store";
@@ -336,6 +336,19 @@ describe("ChatPanel busy send + inbox", () => {
       await type("go with a");
       await key("Enter", altEnter);
       expect(order).toEqual(["reject", "prompt"]);
+    });
+
+    it("the timer that drops a settled sending row is cleared with the panel (nothing fires into an unmounted tree)", async () => {
+      await open();
+      await setRunning(true);
+      await type("later");
+      await key("Enter");
+      expect(api.calls.opencodePrompt ?? []).toHaveLength(1);
+      const clear = vi.spyOn(globalThis, "clearTimeout");
+      h!.unmount();
+      h = null;
+      expect(clear).toHaveBeenCalled();
+      clear.mockRestore();
     });
 
     it("when idle it is an ordinary send: the same call as Enter, no delivery", async () => {

@@ -853,6 +853,15 @@ export function ChatPanel({
   //     card (no "pending" flash on an ordinary send).
   const [localPending, setLocalPending] = useState<Array<PendingCardItem & { settledAt?: number }>>([]);
   const [idleHiddenIds, setIdleHiddenIds] = useState<ReadonlySet<string>>(() => new Set());
+  // The timers that drop a settled "sending…" row; cleared with the panel so none fires into an unmounted tree.
+  const lingerTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  useEffect(() => {
+    const timers = lingerTimersRef.current;
+    return () => {
+      for (const id of timers) clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
   const idleSendWindowRef = useRef<{ known: Set<string>; until: number } | null>(null);
   const inboxItemsRef = useRef<OpencodeInboxItem[]>([]);
   const localPendingRef = useRef(localPending);
@@ -1688,7 +1697,12 @@ export function ChatPanel({
         // Accepted. The row stays (now settled) until the box's list shows the
         // message, or briefly if it was delivered before ever being listed.
         setLocalPending((prev) => prev.map((l) => (l.id === rowId ? { ...l, settledAt: Date.now() } : l)));
-        setTimeout(() => setLocalPending((prev) => prev.filter((l) => l.id !== rowId)), SENT_ROW_LINGER_MS);
+        const lingerTimers = lingerTimersRef.current;
+        const lingerId = setTimeout(() => {
+          lingerTimers.delete(lingerId);
+          setLocalPending((prev) => prev.filter((l) => l.id !== rowId));
+        }, SENT_ROW_LINGER_MS);
+        lingerTimers.add(lingerId);
         refreshInbox();
       } catch (e) {
         // Not sent: the row goes, and the message comes back into the composer
