@@ -998,7 +998,7 @@ final class MantaAPIClient: Sendable {
         // its body as before (the caller surfaces `error: "box upgrading"`).
         if let http = response as? HTTPURLResponse,
            UpgradeStatus.isUpgradeRefusal(statusCode: http.statusCode, body: data) {
-            NotificationCenter.default.post(name: .mantaBoxUpgrading, object: nil)
+            UpgradeRefusalNotice.post()
         }
         return data
     }

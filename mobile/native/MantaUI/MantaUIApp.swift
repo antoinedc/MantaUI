@@ -30,6 +30,9 @@ struct MantaUIApp: App {
         // crash is written to disk in the dying process and sent on the NEXT
         // launch by the SDK itself.
         FirebaseApp.configure()
+        // OS kills (hang, memory, CPU, disk) never reach Crashlytics; MetricKit
+        // reports them. Needs Firebase configured: it records a non-fatal per diagnostic.
+        DiagnosticsReporter.shared.start()
         let event = MantaEventStore()
         _store = StateObject(wrappedValue: event)
         _sessionStore = StateObject(wrappedValue: SessionListStore(eventStore: event))
