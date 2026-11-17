@@ -413,31 +413,24 @@ describe("aliases (renames)", () => {
     assert.match(r.stderr, /left in place/);
   });
 
+  // Two predecessors of ## NEW, aliased in either order; `dest` is the user's guidance file.
+  const twoPredecessors = (order, dest) => {
+    const pairs = [["## OLD1", "## NEW"], ["## OLD2", "## NEW"]];
+    if (order === "reversed") pairs.reverse();
+    return scenario({ src: NEW, dest, history: hist(["## OLD1", O1], ["## OLD2", O2]), aliases: aliasFile(...pairs) });
+  };
+
   for (const order of ["forward", "reversed"]) {
     test(`two pristine predecessors (${order} alias order): first in dest order replaced, other deleted`, () => {
       const dest = join2(PRE, O1, B, O2, C);
-      const pairs = [["## OLD1", "## NEW"], ["## OLD2", "## NEW"]];
-      if (order === "reversed") pairs.reverse();
-      const r = scenario({
-        src: NEW,
-        dest,
-        history: hist(["## OLD1", O1], ["## OLD2", O2]),
-        aliases: aliasFile(...pairs),
-      });
+      const r = twoPredecessors(order, dest);
       assert.equal(r.dest, join2(PRE, NEW, B, C));
     });
 
     test(`pristine + edited predecessor (${order} alias order): nothing changes`, () => {
       const edited = sec("## OLD2", "edited by the user");
       const dest = join2(PRE, O1, B, edited);
-      const pairs = [["## OLD1", "## NEW"], ["## OLD2", "## NEW"]];
-      if (order === "reversed") pairs.reverse();
-      const r = scenario({
-        src: NEW,
-        dest,
-        history: hist(["## OLD1", O1], ["## OLD2", O2]),
-        aliases: aliasFile(...pairs),
-      });
+      const r = twoPredecessors(order, dest);
       assert.equal(r.dest, dest);
       assert.match(r.stderr, /"## OLD2"/);
     });
