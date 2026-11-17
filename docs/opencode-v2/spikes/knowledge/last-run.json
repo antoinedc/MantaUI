@@ -1,0 +1,607 @@
+{
+  "binary": [],
+  "phase1": [
+    {
+      "systemBlocks": 1,
+      "tools": 0,
+      "msgs": 1,
+      "asyncMarker": [],
+      "agentsV1": [],
+      "agentsV2": [],
+      "skillAlpha": [],
+      "skillBeta": []
+    },
+    {
+      "systemBlocks": 5,
+      "tools": 12,
+      "msgs": 1,
+      "asyncMarker": [
+        "system"
+      ],
+      "agentsV1": [
+        "system"
+      ],
+      "agentsV2": [],
+      "skillAlpha": [
+        "system"
+      ],
+      "skillBeta": []
+    }
+  ],
+  "q1SystemTail": "sing `execute` to call `tools.opencode.session_move` and make the worktree the session's working directory.\nSPIKE_ASYNC_MARKER_7f3a (appended after await 200ms)",
+  "phase2_sameSession": [
+    {
+      "systemBlocks": 5,
+      "tools": 12,
+      "msgs": 3,
+      "asyncMarker": [
+        "system"
+      ],
+      "agentsV1": [
+        "system"
+      ],
+      "agentsV2": [],
+      "skillAlpha": [
+        "system"
+      ],
+      "skillBeta": []
+    }
+  ],
+  "phase2b_sameSession_after5s": [
+    {
+      "systemBlocks": 5,
+      "tools": 12,
+      "msgs": 6,
+      "asyncMarker": [
+        "system"
+      ],
+      "agentsV1": [
+        "system"
+      ],
+      "agentsV2": [
+        "messages"
+      ],
+      "skillAlpha": [
+        "system"
+      ],
+      "skillBeta": [
+        "messages"
+      ]
+    }
+  ],
+  "phase2c_sameSession_after_compact": [
+    {
+      "systemBlocks": 5,
+      "tools": 12,
+      "msgs": 8,
+      "asyncMarker": [
+        "system"
+      ],
+      "agentsV1": [
+        "system"
+      ],
+      "agentsV2": [
+        "messages"
+      ],
+      "skillAlpha": [
+        "system"
+      ],
+      "skillBeta": [
+        "messages"
+      ]
+    }
+  ],
+  "phase3_newSession": [
+    {
+      "systemBlocks": 1,
+      "tools": 0,
+      "msgs": 1,
+      "asyncMarker": [],
+      "agentsV1": [],
+      "agentsV2": [],
+      "skillAlpha": [],
+      "skillBeta": []
+    },
+    {
+      "systemBlocks": 5,
+      "tools": 12,
+      "msgs": 1,
+      "asyncMarker": [
+        "system"
+      ],
+      "agentsV1": [],
+      "agentsV2": [
+        "system"
+      ],
+      "skillAlpha": [
+        "system"
+      ],
+      "skillBeta": [
+        "system"
+      ]
+    }
+  ],
+  "childId": "ses_e17090727ffejPg4HTLZHjGKsj",
+  "phase4_timing": [
+    {
+      "sinceWriteMs": 984,
+      "sawV3": []
+    },
+    {
+      "sinceWriteMs": 2554,
+      "sawV3": [
+        "messages"
+      ]
+    }
+  ],
+  "phase4_v3_message_excerpt": "-c\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two-c\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly these words: timing\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"timing\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-update>\\nThe instructions changed:\\nInstructions from: /tmp/manta-v2-sandbox-1FmxxV/xdg/config/opencode/AGENTS.md\\nGLOBAL_AGENTS_V3_marker_cc33\\n\\n</system-update>\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly",
+  "probe": [
+    {
+      "t": 1794909850596,
+      "what": "setup",
+      "ctxKeys": [
+        "app",
+        "location",
+        "options",
+        "agent",
+        "aisdk",
+        "command",
+        "credential",
+        "event",
+        "experimental",
+        "generate",
+        "model",
+        "provider",
+        "integration",
+        "mcp",
+        "permission",
+        "plugin",
+        "reference",
+        "rpc",
+        "skill",
+        "storage",
+        "tool",
+        "vcs",
+        "websearch",
+        "worktree",
+        "session",
+        "shell"
+      ],
+      "sessionKeys": [
+        "hook",
+        "create",
+        "get",
+        "remove",
+        "switchAgent",
+        "switchModel",
+        "prompt",
+        "generate",
+        "command",
+        "compact",
+        "synthetic",
+        "interrupt",
+        "update",
+        "move",
+        "wait",
+        "context"
+      ],
+      "eventKeys": [
+        "subscribe"
+      ],
+      "eventSubscribeType": "function",
+      "directory": "/tmp/manta-v2-sandbox-1FmxxV/project"
+    },
+    {
+      "t": 1794909850597,
+      "what": "event.subscribe",
+      "available": true,
+      "returnKeys": [],
+      "isAsyncIterable": true,
+      "isPromise": false
+    },
+    {
+      "t": 1794909851340,
+      "what": "event",
+      "type": "session.instructions.updated",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "delta": {
+          "core/codemode": "e6428fd7742161f6c3a6c86e53cbbe2c6e4dcc462bbf1a1a07bc4fcbeb9e0b0b",
+          "core/skill-guidance": "992274e88076207f331512e97d6391821d5a84e0391f943c08b595f284811c34",
+          "core/instructions": "1a02b3ed8475f8a997fc282fb7bfdb42a367489317deb85e2fa22e8906924b3d",
+          "core/date": "3d17b206ff2634609acb962741ec4036e713d2bb93dbf400730be53db71ae2c3",
+          "core/environment": "75020e5971cc43b6e28f902e672f6a8fa59c7258d46129c55ed40b4c8c924ffc"
+        }
+      },
+      "keys": [
+        "id",
+        "created",
+        "metadata",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909851549,
+      "what": "context.enter",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909851750,
+      "what": "context.exit",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "tookMs": 201,
+      "systemLen": 5
+    },
+    {
+      "t": 1794909852658,
+      "what": "context.enter",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909852858,
+      "what": "context.exit",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "tookMs": 200,
+      "systemLen": 5
+    },
+    {
+      "t": 1794909858637,
+      "what": "context.enter",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909858638,
+      "what": "event",
+      "type": "session.instructions.updated",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "delta": {
+          "core/skill-guidance": "2eaacadeae80918f24ff3ff3bcc173a4877362a696a56081b000a0ae7545e644",
+          "core/instructions": "c43157d097400868aa63c208793af11a14a61d56f392a9a7aa1f36113f99f333"
+        },
+        "text": "New skills are available in addition to those previously listed:\n  <skill>\n    <id>beta-skill</id>\n    <name>beta-skill</name>\n    <description>SKILL_BETA_desc_bb22</description>\n  </skill>\n\nThe instructions changed:\nInstructions from: /tmp/manta-v2-sandbox-1FmxxV/xdg/config/opencode/AGENTS.md\nGLOBAL_AGENTS_V2_marker_bb22\n"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909858838,
+      "what": "context.exit",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "tookMs": 200,
+      "systemLen": 5
+    },
+    {
+      "t": 1794909859576,
+      "what": "event",
+      "type": "session.compaction.started",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "reason": "manual",
+        "recent": "",
+        "inputID": "msg_1e8f6ee72001XiR8P8LktxcuPV"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909859589,
+      "what": "event",
+      "type": "session.compaction.delta",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "text": "ok"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909859615,
+      "what": "event",
+      "type": "session.compaction.delta",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "text": "ok"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909859636,
+      "what": "event",
+      "type": "session.compaction.failed",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "reason": "manual",
+        "error": {
+          "type": "compaction.failed",
+          "message": "Compaction summary did not match the required template"
+        },
+        "inputID": "msg_1e8f6ee72001XiR8P8LktxcuPV",
+        "cost": 0.00013,
+        "tokens": {
+          "input": 50,
+          "output": 16,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        }
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909860276,
+      "what": "context.enter",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909860477,
+      "what": "context.exit",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "tookMs": 201,
+      "systemLen": 5
+    },
+    {
+      "t": 1794909861127,
+      "what": "event",
+      "type": "session.created",
+      "data": {
+        "sessionID": "ses_e17090b0effeqEmImahp07I45b",
+        "projectID": "103a7ef20a56324ac99c94f3cde06585536deb34",
+        "location": {
+          "directory": "/tmp/manta-v2-sandbox-1FmxxV/project"
+        },
+        "subpath": "",
+        "slug": "stellar-orchid",
+        "model": {
+          "id": "claude-haiku-4-5",
+          "providerID": "anthropic"
+        },
+        "version": "2.0.30"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909861296,
+      "what": "context.enter",
+      "sessionID": "ses_e17090b0effeqEmImahp07I45b",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909861308,
+      "what": "event",
+      "type": "session.instructions.updated",
+      "data": {
+        "sessionID": "ses_e17090b0effeqEmImahp07I45b",
+        "delta": {
+          "core/codemode": "e6428fd7742161f6c3a6c86e53cbbe2c6e4dcc462bbf1a1a07bc4fcbeb9e0b0b",
+          "core/skill-guidance": "2eaacadeae80918f24ff3ff3bcc173a4877362a696a56081b000a0ae7545e644",
+          "core/instructions": "c43157d097400868aa63c208793af11a14a61d56f392a9a7aa1f36113f99f333",
+          "core/date": "3d17b206ff2634609acb962741ec4036e713d2bb93dbf400730be53db71ae2c3",
+          "core/environment": "75020e5971cc43b6e28f902e672f6a8fa59c7258d46129c55ed40b4c8c924ffc"
+        }
+      },
+      "keys": [
+        "id",
+        "created",
+        "metadata",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909861499,
+      "what": "context.exit",
+      "sessionID": "ses_e17090b0effeqEmImahp07I45b",
+      "tookMs": 203,
+      "systemLen": 5
+    },
+    {
+      "t": 1794909862162,
+      "what": "event",
+      "type": "session.created",
+      "data": {
+        "sessionID": "ses_e17090727ffejPg4HTLZHjGKsj",
+        "projectID": "103a7ef20a56324ac99c94f3cde06585536deb34",
+        "location": {
+          "directory": "/tmp/manta-v2-sandbox-1FmxxV/project"
+        },
+        "subpath": "",
+        "parentID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "slug": "quiet-eagle",
+        "model": {
+          "id": "claude-haiku-4-5",
+          "providerID": "anthropic"
+        },
+        "version": "2.0.30"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909863154,
+      "what": "context.enter",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909863355,
+      "what": "context.exit",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "tookMs": 201,
+      "systemLen": 5
+    },
+    {
+      "t": 1794909864666,
+      "what": "context.enter",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "keys": [
+        "sessionID",
+        "model",
+        "system",
+        "messages",
+        "options",
+        "agent",
+        "tools"
+      ],
+      "systemLen": 4
+    },
+    {
+      "t": 1794909864667,
+      "what": "event",
+      "type": "session.instructions.updated",
+      "data": {
+        "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+        "delta": {
+          "core/instructions": "145ecc3df5a4f2b8c59779acd49afb1a3f574060654a882b439cc06f4fd2faea"
+        },
+        "text": "The instructions changed:\nInstructions from: /tmp/manta-v2-sandbox-1FmxxV/xdg/config/opencode/AGENTS.md\nGLOBAL_AGENTS_V3_marker_cc33\n"
+      },
+      "keys": [
+        "id",
+        "created",
+        "type",
+        "durable",
+        "location",
+        "data"
+      ]
+    },
+    {
+      "t": 1794909864867,
+      "what": "context.exit",
+      "sessionID": "ses_e17093d7affe27wL3u1AmULjSK",
+      "tookMs": 202,
+      "systemLen": 5
+    }
+  ],
+  "eventOtherTypes": [
+    "integration.updated",
+    "model.updated",
+    "provider.updated",
+    "agent.updated",
+    "command.updated",
+    "skill.updated",
+    "websearch.updated",
+    "reference.updated",
+    "plugin.updated",
+    "session.inbox.enqueued",
+    "session.execution.started",
+    "session.inbox.delivered",
+    "session.usage.updated",
+    "session.renamed",
+    "session.step.started",
+    "session.text.started",
+    "session.text.delta",
+    "session.text.ended",
+    "session.step.streamed",
+    "session.step.ended",
+    "session.execution.succeeded"
+  ]
+}
