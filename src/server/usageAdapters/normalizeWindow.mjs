@@ -54,6 +54,7 @@ function modelTokens(list) {
  * @param {number|string} [raw.remaining]  used when `used` is absent
  * @param {number|string} [raw.resetsAt]   epoch seconds, epoch ms, or an ISO string
  * @param {boolean} [raw.binding]
+ * @param {number|string} [raw.spanMs]     the window's length in ms, when the provider says it
  * @param {string} [raw.scope]   model display name a scoped window applies to
  * @param {string[]} [raw.models] model names the window applies to (wins over `scope`)
  * @param {boolean} [raw.active] `false` when the provider says the window is not in force
@@ -110,6 +111,9 @@ export function normalizeWindow(raw) {
     const parsed = Date.parse(rawStarted);
     if (Number.isFinite(parsed)) window.startedAt = parsed;
   }
+
+  const spanMs = toFiniteNumber(raw.spanMs);
+  if (spanMs !== undefined && spanMs > 0) window.spanMs = spanMs;
 
   if (raw.binding === true) window.binding = true;
   // Model-scoped windows (Team plans): which model, and whether it is in force.

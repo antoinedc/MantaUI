@@ -143,7 +143,7 @@ test("the legacy dailyCapUsd key writes the shared backgroundWork setting (merge
   const next = await settings.set({ dailyCapUsd: 7.456 });
   assert.ok(!("dailyCapUsd" in next));
   assert.equal(updates.length, 1, "one write for both");
-  assert.deepEqual(updates[0].backgroundWork, { level: "light", dailyCapUsd: 7.46 }); // merged: the stored level survives
+  assert.deepEqual(updates[0].backgroundWork, { level: "light", dailyCapUsd: 7.46, runWhenBusy: false }); // merged: the stored level survives
   assert.ok(!("dailyCapUsd" in updates[0].knowledge));
   assert.equal(updates[0].knowledge.sharing, "read-only");
   assert.equal((await settings.view()).dailyCapUsd, 7.46);

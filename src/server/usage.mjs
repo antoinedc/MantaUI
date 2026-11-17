@@ -37,6 +37,7 @@
  * @property {number} [startedAt] Epoch ms when this window opened. Absent when
  *   the provider does not report a window start — consumers must NOT guess a
  *   start from `resetsAt` minus an assumed window length.
+ * @property {number} [spanMs] The window's length in ms, when the provider reports it.
  * @property {boolean} [binding] The provider says this window bites first.
  * @property {string} [scope]   Model display name a model-scoped window applies
  *   to ("Fable"); absent for account-wide windows.

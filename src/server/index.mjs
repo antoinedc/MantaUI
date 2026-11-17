@@ -2179,7 +2179,7 @@ const knowledgeEngine = createKnowledgeEngine({
       runEphemeral: knowledgeRunner,
       resolveModelForClass,
       configGet: () => local.configGet(),
-      oc: { listMessages: forwardKnowledgeListMessages(oc), createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
+      oc: { listMessages: forwardKnowledgeListMessages(oc), listMessagesSince: oc.listMessagesSince, createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
       local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
       runDbTask: knowledgeRunDbTask,
       listTmuxProjects: () => tmux.listProjects(),
@@ -2189,6 +2189,7 @@ const knowledgeEngine = createKnowledgeEngine({
         return r.state === "found" ? r.session : null;
       },
       isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
+      summariesFor: (sessionID) => handoffEngine.summariesFor(sessionID),
       forge: { findOpenPullRequest: forgeFindOpenPullRequest, createPullRequest: forgeCreatePullRequest, updatePullRequest: forgeUpdatePullRequest, repoAccess: forgeRepoAccess },
       resolveToken: forgeResolveToken,
       fireNotify: (args) => push.fireNotify(args),

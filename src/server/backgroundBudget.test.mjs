@@ -11,6 +11,7 @@ import {
   resolveRates,
   levelCap,
   isWeeklyKind,
+  isWeeklyWindow,
   localDay,
   nextLocalMidnight,
   BATCH_SHARE,
@@ -117,25 +118,27 @@ test("isWeeklyKind / levelCap: weekly-kind windows (incl. scoped) use the weekly
 });
 
 test("validateAndMergeBackgroundWork: merges partials, rounds cents, rejects invalid and unknown", () => {
-  assert.deepEqual(validateAndMergeBackgroundWork(undefined, {}), { ok: true, value: { level: "normal", dailyCapUsd: 5 } });
-  assert.deepEqual(validateAndMergeBackgroundWork({ level: "light", dailyCapUsd: 7 }, { level: "off" }).value, { level: "off", dailyCapUsd: 7 });
-  assert.deepEqual(validateAndMergeBackgroundWork({ level: "light", dailyCapUsd: 7 }, { dailyCapUsd: 1.234 }).value, { level: "light", dailyCapUsd: 1.23 });
+  assert.deepEqual(validateAndMergeBackgroundWork(undefined, {}), { ok: true, value: { level: "normal", dailyCapUsd: 5, runWhenBusy: false } });
+  assert.deepEqual(validateAndMergeBackgroundWork({ level: "light", dailyCapUsd: 7 }, { level: "off" }).value, { level: "off", dailyCapUsd: 7, runWhenBusy: false });
+  assert.deepEqual(validateAndMergeBackgroundWork({ level: "light", dailyCapUsd: 7 }, { dailyCapUsd: 1.234 }).value, { level: "light", dailyCapUsd: 1.23, runWhenBusy: false });
   assert.equal(validateAndMergeBackgroundWork(null, { dailyCapUsd: 0 }).value.dailyCapUsd, 0);
   assert.equal(validateAndMergeBackgroundWork(null, { dailyCapUsd: MAX_DAILY_CAP_USD }).ok, true);
-  for (const bad of [{ level: "max" }, { level: 3 }, { dailyCapUsd: -1 }, { dailyCapUsd: 100.01 }, { dailyCapUsd: "5" }, { dailyCapUsd: NaN }, { dailyCapUsd: Infinity }, { color: "red" }]) {
+  for (const bad of [{ level: "max" }, { level: 3 }, { dailyCapUsd: -1 }, { dailyCapUsd: 100.01 }, { dailyCapUsd: "5" }, { dailyCapUsd: NaN }, { dailyCapUsd: Infinity }, { runWhenBusy: "yes" }, { runWhenBusy: 1 }, { color: "red" }]) {
     const r = validateAndMergeBackgroundWork(null, bad);
     assert.equal(r.ok, false, JSON.stringify(bad));
     assert.match(r.error, /\w/);
   }
+  assert.equal(validateAndMergeBackgroundWork({ level: "light", runWhenBusy: true }, { level: "off" }).value.runWhenBusy, true, "a partial write keeps the stored override");
+  assert.equal(validateAndMergeBackgroundWork({ runWhenBusy: true }, { runWhenBusy: false }).value.runWhenBusy, false);
   assert.equal(validateAndMergeBackgroundWork(null, "x").ok, false);
   assert.equal(validateAndMergeBackgroundWork(null, [1]).ok, false);
 });
 
 test("readBackgroundWork: invalid stored values read as defaults, valid parts survive", () => {
-  assert.deepEqual(readBackgroundWork(undefined), { level: "normal", dailyCapUsd: 5 });
-  assert.deepEqual(readBackgroundWork({ level: "bogus", dailyCapUsd: "x" }), { level: "normal", dailyCapUsd: 5 });
-  assert.deepEqual(readBackgroundWork({ level: "light", dailyCapUsd: 12.5 }), { level: "light", dailyCapUsd: 12.5 });
-  assert.deepEqual(readBackgroundWork({ level: "off", dailyCapUsd: 500 }), { level: "off", dailyCapUsd: 5 });
+  assert.deepEqual(readBackgroundWork(undefined), { level: "normal", dailyCapUsd: 5, runWhenBusy: false });
+  assert.deepEqual(readBackgroundWork({ level: "bogus", dailyCapUsd: "x", runWhenBusy: "yes" }), { level: "normal", dailyCapUsd: 5, runWhenBusy: false });
+  assert.deepEqual(readBackgroundWork({ level: "light", dailyCapUsd: 12.5, runWhenBusy: true }), { level: "light", dailyCapUsd: 12.5, runWhenBusy: true });
+  assert.deepEqual(readBackgroundWork({ level: "off", dailyCapUsd: 500 }), { level: "off", dailyCapUsd: 5, runWhenBusy: false });
 });
 
 test("weeklyDueAt: on a plan it waits for 24 h before the weekly reset; pay-per-token keeps its own schedule", () => {
@@ -839,7 +842,7 @@ test("status: plan rows with windows, projection and structured pause reasons fo
   const p = s.plans[0];
   assert.deepEqual([p.adapter, p.planLabel, p.fallback, p.paused], ["claude", "Max 20x", false, null]);
   assert.deepEqual(p.windows.map((w) => w.key), ["claude:weekly", "claude:session"]);
-  assert.deepEqual(p.windows[0], { key: "claude:weekly", kind: "weekly", label: "7d", pct: 40, bgPct: 3.2, cap: 5, projectedPct: 70, resetsAt: T0 + 3 * DAY });
+  assert.deepEqual(p.windows[0], { key: "claude:weekly", kind: "weekly", label: "7d", pct: 40, bgPct: 3.2, cap: 5, projectedPct: 70, resetsAt: T0 + 3 * DAY, windowStart: T0 - 4 * DAY, spanMs: null });
   assert.equal(p.windows[1].projectedPct, null);
   assert.deepEqual(p.batchPaused, { reason: "level-cap", windowKey: "claude:weekly", value: 3, resumesAt: T0 + 3 * DAY });
 });
@@ -880,4 +883,86 @@ test("status never throws on an empty box", async () => {
   const b = createBackgroundBudget({ store: memStore(), configGet: async () => ({}), now: () => T0 });
   const s = await b.status();
   assert.deepEqual([s.level, s.dailyCapUsd, s.plans, s.waitingBatch, s.byWork], ["normal", 5, [], [], []]);
+});
+
+// ---- follow-ups: runWhenBusy override, spanMs window classification ----
+
+test("runWhenBusy skips exactly the plan-busy rules (short window-busy, weekly projection, near-reset variant, weekly no-projection busy)", async () => {
+  const bw = { runWhenBusy: true };
+  const ask = (snaps, o = {}) => rig({ snaps, bw, ...o }).b.check({ workType: "cto-ambient", model: OPUS });
+  assert.equal((await ask([claude([week(), five({ pct: 74 })])])).ok, true, "short window busy: skipped");
+  assert.equal((await ask([claude([week({ pct: 50 })])])).ok, true, "projected-high: skipped");
+  assert.equal((await ask([claude([week({ pct: 92, resetsAt: T0 + 12 * HOUR })])])).ok, true, "near-reset variant: skipped");
+  assert.equal((await ask([claude([week({ pct: 75, resetsAt: T0 + 6.5 * DAY })])])).ok, true, "weekly with no projection and pct > 70: skipped");
+  // …and the same inputs refuse without the override.
+  const off = (snaps) => rig({ snaps }).b.check({ workType: "cto-ambient", model: OPUS });
+  assert.equal((await off([claude([week(), five({ pct: 74 })])])).reason, "window-busy");
+  assert.equal((await off([claude([week({ pct: 50 })])])).reason, "projected-high");
+  assert.equal((await off([claude([week({ pct: 92, resetsAt: T0 + 12 * HOUR })])])).reason, "projected-high");
+  assert.equal((await off([claude([week({ pct: 75, resetsAt: T0 + 6.5 * DAY })])])).reason, "window-busy");
+});
+
+test("runWhenBusy still enforces off, exhausted, level caps (incl. the batch ceiling) and the pay-per-token cap", async () => {
+  const bw = { runWhenBusy: true };
+  assert.equal((await rig({ bw: { ...bw, level: "off" } }).b.check({ workType: "cto-ambient", model: OPUS })).reason, "off");
+  assert.equal((await rig({ bw, snaps: [claude([week({ pct: 100 })])] }).b.check({ workType: "cto-ambient", model: OPUS })).reason, "exhausted");
+  assert.equal((await rig({ bw, snaps: [claude([week({ pct: 10 })])], store: seeded({ "claude:weekly": winState({ bgPct: 5 }) }) }).b.check({ workType: "cto-ambient", model: OPUS })).reason, "level-cap");
+  const ceil = await rig({ bw, snaps: [claude([week({ pct: 10 })])], store: seeded({ "claude:weekly": winState({ bgPct: 3, batchPct: 3 }) }) }).b.check({ workType: "knowledge-tidy", model: OPUS });
+  assert.deepEqual([ceil.ok, ceil.reason], [false, "level-cap"], "batch ceiling is 60 % of the 5 % cap");
+  const payg = rig({ bw: { ...bw, dailyCapUsd: 1 } });
+  await payg.b.record({ workType: "knowledge-capture", model: { providerID: "deepseek", modelID: "x" }, usd: 1 });
+  assert.equal((await payg.b.check({ workType: "knowledge-capture", model: { providerID: "deepseek", modelID: "x" } })).reason, "usd-cap");
+});
+
+test("status returns runWhenBusy; a plan paused for busyness reports no pause with the override on", async () => {
+  const on = await rig({ snaps: [claude([week({ pct: 50 })])], bw: { runWhenBusy: true } }).b.status();
+  assert.equal(on.runWhenBusy, true);
+  assert.equal(on.plans[0].paused, null);
+  const off = await rig({ snaps: [claude([week({ pct: 50 })])] }).b.status();
+  assert.equal(off.runWhenBusy, false);
+  assert.equal(off.plans[0].paused.reason, "projected-high");
+});
+
+test("isWeeklyWindow: weekly kind OR spanMs ≥ 2 days; levelCap takes a window (or a kind string)", () => {
+  assert.equal(isWeeklyWindow({ kind: "session" }), false);
+  assert.equal(isWeeklyWindow({ kind: "session", spanMs: 5 * HOUR }), false);
+  assert.equal(isWeeklyWindow({ kind: "session", spanMs: 7 * DAY }), true);
+  assert.equal(isWeeklyWindow({ kind: "session", spanMs: 2 * DAY }), true);
+  assert.equal(isWeeklyWindow({ kind: "session", spanMs: 2 * DAY - 1 }), false);
+  assert.equal(isWeeklyWindow({ kind: "weekly_scoped:fable" }), true);
+  assert.equal(levelCap("normal", { kind: "session", spanMs: 7 * DAY }), 5);
+  assert.equal(levelCap("normal", { kind: "session", spanMs: 5 * HOUR }), 10);
+});
+
+test("a codex-style 7-day primary window (kind session, spanMs 7 d) is weekly: 5 % cap, projection, window start = resetsAt − spanMs", async () => {
+  const codex = (w) => ({ provider: "codex", providerIDs: ["openai"], kind: "subscription", planLabel: "Pro", windows: [w], fetchedAt: T0 });
+  const gpt = { providerID: "openai", modelID: "gpt-6" };
+  // 3 of 7 days elapsed (resets in 4 days), 40 % used → 93.3 % projected.
+  const w = { kind: "session", label: "7d", pct: 40, spanMs: 7 * DAY, resetsAt: T0 + 4 * DAY };
+  const r = rig({ snaps: [codex(w)] });
+  const d = await r.b.check({ workType: "cto-ambient", model: gpt });
+  assert.deepEqual([d.ok, d.reason, d.window.cap, d.window.projectedPct], [false, "projected-high", 5, 93.33]);
+  const s = await r.b.status();
+  assert.deepEqual([s.plans[0].windows[0].windowStart, s.plans[0].windows[0].spanMs, s.plans[0].windows[0].cap], [T0 - 3 * DAY, 7 * DAY, 5]);
+  // A real 5-hour session window with a spanMs stays short: busy rule, 10 % cap, no projection.
+  const short = rig({ snaps: [codex({ kind: "session", label: "5h", pct: 74, spanMs: 5 * HOUR, resetsAt: T0 + 2 * HOUR })] });
+  const sd = await short.b.check({ workType: "cto-ambient", model: gpt });
+  assert.deepEqual([sd.reason, sd.window.cap, sd.window.projectedPct], ["window-busy", 10, undefined]);
+  const ss = (await short.b.status()).plans[0].windows[0];
+  assert.deepEqual([ss.windowStart, ss.spanMs], [T0 + 2 * HOUR - 5 * HOUR, 5 * HOUR]);
+});
+
+test("weekly batch timing follows the window, not the kind: a 7-day 'session' window makes a batch job near-reset and sets the governing reset", async () => {
+  const codex = { provider: "codex", providerIDs: ["openai"], kind: "subscription", windows: [{ kind: "session", label: "7d", pct: 10, spanMs: 7 * DAY, resetsAt: T0 + 12 * HOUR }], fetchedAt: T0 };
+  const gpt = { providerID: "openai", modelID: "gpt-6" };
+  const r = rig({ snaps: [codex], desktop: "present", lastPrompt: T0 });
+  assert.equal((await r.b.goodMomentForBatch({ workType: "knowledge-tidy", model: gpt, dueSince: T0 })).rule, "near-reset");
+  assert.equal(await r.b.dueAt({ model: gpt, intervalDueAt: T0 - DAY }), T0 - 12 * HOUR);
+});
+
+test("projectWeeklyPct: spanMs picks the weekly classification and the default window start", () => {
+  const base = { kind: "session", spanMs: 7 * DAY, pct: 50, resetsAt: T0 + 3 * DAY, now: T0 };
+  assert.equal(projectWeeklyPct(base), 87.5);
+  assert.equal(projectWeeklyPct({ ...base, spanMs: 5 * HOUR }), null);
+  assert.equal(projectWeeklyPct({ ...base, spanMs: 4 * DAY, resetsAt: T0 + 2 * DAY }), 100, "start = resetsAt − spanMs");
 });

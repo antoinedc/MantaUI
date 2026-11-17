@@ -1126,7 +1126,7 @@ export type BudgetReason =
 export interface BudgetWindow {
   /** "<adapter>:<kind>" */
   key: string;
-  /** "weekly" / "weekly_scoped:*" are weekly-kind; every other kind is a short window ("session" = 5-hour). */
+  /** "weekly" / "weekly_scoped:*" are weekly-kind; every other kind is short unless `spanMs` says it is ≥ 2 days. */
   kind: string;
   label: string;
   /** Percent of the window used by everything. */
@@ -1137,6 +1137,10 @@ export interface BudgetWindow {
   cap: number;
   projectedPct: number | null;
   resetsAt: number | null;
+  /** When this window opened (epoch ms): the provider's own start, else `resetsAt − spanMs`; null when unknown. */
+  windowStart: number | null;
+  /** The window's length in ms when known; weekly-classified when ≥ 2 days or the kind is weekly. */
+  spanMs: number | null;
 }
 
 /** A refusal. `value` is the figure the copy quotes: percent used (window-busy), projected percent (projected-high),
@@ -1163,6 +1167,8 @@ export interface BudgetPlanStatus {
 export interface BudgetStatus {
   level: BackgroundWorkLevel;
   dailyCapUsd: number;
+  /** "Keep running when my plan is busy": the window-busy and projected-high rules are skipped. */
+  runWhenBusy: boolean;
   payg: {
     providers: string[];
     usdToday: number;

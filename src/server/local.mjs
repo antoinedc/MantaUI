@@ -104,7 +104,7 @@ const DEFAULT_CONFIG = {
   // `level` (off | light | normal) is the share of a subscription plan's quota windows it may use;
   // `dailyCapUsd` is the cap per local day on pay-per-token keys. Written only through
   // `config:update`'s validate-and-merge (backgroundBudget.mjs); a partial stored value reads as its defaults.
-  backgroundWork: { level: "normal", dailyCapUsd: 5 },
+  backgroundWork: { level: "normal", dailyCapUsd: 5, runWhenBusy: false },
   // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
   // notify). Off by default.
   ctoDigestPush: false,

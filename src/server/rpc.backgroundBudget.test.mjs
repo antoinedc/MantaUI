@@ -21,23 +21,35 @@ function rig({ stored, backgroundBudget } = {}) {
 test("config:update merges a partial backgroundWork into the stored one (level alone keeps the cap) and syncs the result", async () => {
   const { handlers, updates, applied } = rig({ stored: { level: "light", dailyCapUsd: 8 } });
   await dispatch(handlers, "config:update", [{ backgroundWork: { level: "off" } }]);
-  assert.deepEqual(updates, [{ backgroundWork: { level: "off", dailyCapUsd: 8 } }]);
-  assert.deepEqual(applied.at(-1), { backgroundWork: { level: "off", dailyCapUsd: 8 } });
+  assert.deepEqual(updates, [{ backgroundWork: { level: "off", dailyCapUsd: 8, runWhenBusy: false } }]);
+  assert.deepEqual(applied.at(-1), { backgroundWork: { level: "off", dailyCapUsd: 8, runWhenBusy: false } });
   await dispatch(handlers, "config:update", [{ backgroundWork: { dailyCapUsd: 12.345 }, handoffMode: "off" }]);
-  assert.deepEqual(updates.at(-1), { handoffMode: "off", backgroundWork: { level: "light", dailyCapUsd: 12.35 } });
+  assert.deepEqual(updates.at(-1), { handoffMode: "off", backgroundWork: { level: "light", dailyCapUsd: 12.35, runWhenBusy: false } });
+});
+
+test("config:update stores runWhenBusy, merged with the stored level and cap (alone, dotted, or with others)", async () => {
+  const { handlers, updates, applied } = rig({ stored: { level: "light", dailyCapUsd: 8 } });
+  await dispatch(handlers, "config:update", [{ backgroundWork: { runWhenBusy: true } }]);
+  assert.deepEqual(updates.at(-1), { backgroundWork: { level: "light", dailyCapUsd: 8, runWhenBusy: true } });
+  assert.deepEqual(applied.at(-1), { backgroundWork: { level: "light", dailyCapUsd: 8, runWhenBusy: true } });
+  const again = rig({ stored: { level: "normal", dailyCapUsd: 5, runWhenBusy: true } });
+  await dispatch(again.handlers, "config:update", [{ "backgroundWork.level": "off" }]);
+  assert.deepEqual(again.updates.at(-1), { backgroundWork: { level: "off", dailyCapUsd: 5, runWhenBusy: true } }, "a level change keeps the override");
+  await dispatch(again.handlers, "config:update", [{ "backgroundWork.runWhenBusy": false }]);
+  assert.equal(again.updates.at(-1).backgroundWork.runWhenBusy, false);
 });
 
 test("config:update accepts dotted backgroundWork.* keys and defaults a missing stored value", async () => {
   const { handlers, updates } = rig();
   await dispatch(handlers, "config:update", [{ "backgroundWork.level": "off", "backgroundWork.dailyCapUsd": 2 }]);
-  assert.deepEqual(updates, [{ backgroundWork: { level: "off", dailyCapUsd: 2 } }]);
+  assert.deepEqual(updates, [{ backgroundWork: { level: "off", dailyCapUsd: 2, runWhenBusy: false } }]);
   await dispatch(handlers, "config:update", [{ "backgroundWork.level": "light" }]);
-  assert.deepEqual(updates.at(-1), { backgroundWork: { level: "light", dailyCapUsd: 5 } });
+  assert.deepEqual(updates.at(-1), { backgroundWork: { level: "light", dailyCapUsd: 5, runWhenBusy: false } });
 });
 
 test("config:update rejects an invalid backgroundWork with a 400 sentence and writes nothing", async () => {
   const { handlers, updates } = rig({ stored: { level: "normal", dailyCapUsd: 5 } });
-  for (const bad of [{ backgroundWork: { level: "max" } }, { backgroundWork: { dailyCapUsd: -1 } }, { backgroundWork: { dailyCapUsd: 101 } }, { backgroundWork: "x" }, { backgroundWork: null }, { "backgroundWork.dailyCapUsd": "5" }, { backgroundWork: { nope: 1 } }]) {
+  for (const bad of [{ backgroundWork: { level: "max" } }, { backgroundWork: { dailyCapUsd: -1 } }, { backgroundWork: { dailyCapUsd: 101 } }, { backgroundWork: "x" }, { backgroundWork: null }, { "backgroundWork.dailyCapUsd": "5" }, { backgroundWork: { nope: 1 } }, { backgroundWork: { runWhenBusy: "yes" } }, { "backgroundWork.runWhenBusy": 1 }]) {
     await assert.rejects(dispatch(handlers, "config:update", [{ ...bad, handoffMode: "off" }]), (e) => e.rpcStatus === 400 && /\w/.test(e.message), JSON.stringify(bad));
   }
   assert.deepEqual(updates, []);

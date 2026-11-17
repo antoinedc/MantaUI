@@ -815,3 +815,34 @@ test("a failed generation leaves a human sentence as the reason", async () => {
   assert.equal(r.state, "failed");
   assert.match(r.reason, /^The model couldn't write the handoff prompt\. Try again\.$/);
 });
+
+// ---- summariesFor (the knowledge capture's read of delivered handoff text) -------------------------
+
+test("summariesFor: committed records only, delivered text (the user's edit wins), predecessor and successor sides", async () => {
+  const w = standardWorld();
+  const r = await readyRecord(w);
+  assert.deepEqual(w.engine.summariesFor("ses_p"), { asPredecessor: [], asSuccessor: null }, "nothing is committed yet");
+  const out = await w.engine.start(r.id, { how: "clear", disposition: "send", text: "edited handoff text" });
+  const succ = out.successorId;
+  const pred = w.engine.summariesFor("ses_p");
+  assert.equal(pred.asSuccessor, null);
+  assert.equal(pred.asPredecessor.length, 1);
+  assert.deepEqual(
+    { ...pred.asPredecessor[0], createdAt: typeof pred.asPredecessor[0].createdAt },
+    { recordId: r.id, createdAt: "number", text: "edited handoff text", successorId: succ, disposition: "send", messageId: out.messageId },
+  );
+  const s = w.engine.summariesFor(succ);
+  assert.deepEqual(s.asPredecessor, []);
+  assert.deepEqual([s.asSuccessor.recordId, s.asSuccessor.fromSessionId, s.asSuccessor.text, s.asSuccessor.disposition, s.asSuccessor.messageId], [r.id, "ses_p", "edited handoff text", "send", out.messageId]);
+  assert.deepEqual(w.engine.summariesFor("ses_other"), { asPredecessor: [], asSuccessor: null });
+});
+
+test("summariesFor: without an edit the record's own text is the delivered text; a draft carries no message id", async () => {
+  const w = standardWorld();
+  const r = await readyRecord(w);
+  const out = await w.engine.start(r.id, { how: "new-session", disposition: "draft" });
+  const s = w.engine.summariesFor(out.successorId).asSuccessor;
+  assert.equal(s.text, w.engine.get(r.id).text);
+  assert.equal(s.disposition, "draft");
+  assert.equal(s.messageId, undefined);
+});

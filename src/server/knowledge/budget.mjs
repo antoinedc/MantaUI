@@ -44,7 +44,7 @@ export function pauseNotice(reason) {
     case "exhausted":
       return { summary: "Your plan's quota is used up", reason: "Curation resumes when it resets. Briefings and the search tools keep working." };
     case "off":
-      return { summary: "Background work is off", reason: "Turn it on in Settings → Models to resume curation. Briefings and the search tools keep working." };
+      return { summary: "Background work is off", reason: "Turn it on in Settings → Background work to resume curation. Briefings and the search tools keep working." };
     default:
       return { summary: "Waiting for the background budget", reason: "The budget couldn't be read just now; curation retries on its own. Briefings and the search tools keep working." };
   }
