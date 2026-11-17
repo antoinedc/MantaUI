@@ -1,3 +1,13 @@
 # Dummy credential value (not a secret) in an OpenCode V2 spike note, audited 2026-10-16; since replaced in the file.
 0a3ce85a33001357d72ba5424c4db8bff14b8fc1:docs/opencode-v2/spikes/round1-c.md:generic-api-key:93
 0a3ce85a33001357d72ba5424c4db8bff14b8fc1:docs/opencode-v2/spikes/round1-c.md:generic-api-key:94
+
+# Dummy test fixtures (fake sk-/AKIA values used to test Manta's secret redaction) and one prose false positive in the shared-knowledge spec, audited 2026-11-17.
+1e21cb15e8a66ca4a3c147b12f319e043ee6ce19:src/server/knowledge/capture.test.mjs:generic-api-key:316
+1e21cb15e8a66ca4a3c147b12f319e043ee6ce19:src/server/knowledge/corrections.test.mjs:generic-api-key:276
+3165204666b4517902e96954c5e23c6c28da6cc1:src/server/knowledge/search.test.mjs:generic-api-key:187
+3165204666b4517902e96954c5e23c6c28da6cc1:src/server/knowledge/search.test.mjs:generic-api-key:194
+46b8f1e779732897df2ca6696935a0409ec6acc6:docs/superpowers/specs/2026-11-16-shared-knowledge.md:generic-api-key:560
+d6037181d76826e38a387ce480979f0f1cc57978:src/server/knowledge/search.test.mjs:generic-api-key:242
+ec59fcb90deb3b76d4552f7550ea42a6cdf3ab61:src/server/knowledge/secretScan.test.mjs:aws-access-token:17
+ec59fcb90deb3b76d4552f7550ea42a6cdf3ab61:src/server/knowledge/secretScan.test.mjs:aws-access-token:25
