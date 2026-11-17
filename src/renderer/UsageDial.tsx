@@ -283,14 +283,14 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         role="dialog"
         ariaLabel="Plan usage"
         hook="manta-usage-popover"
-        // Sized to its content: at least 420px, wider when a row needs it (long
+        // Sized to its content: at least 440px, wider when a row needs it (long
         // seat/account names, credit lines), capped by the window. Free-flowing
         // prose below opts out of driving the width (`w-0 min-w-full`) so a
         // sentence wraps instead of stretching the card. It never scrolls while
         // it fits; the height cap + overflow-y is ONLY the last resort for a
         // card taller than the window, so the footer and a seat-switch confirm
         // stay reachable instead of being clipped off-screen.
-        surfaceClassName="w-max min-w-[420px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden p-4"
+        surfaceClassName="w-max min-w-[440px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden p-4"
       >
         <UsagePopoverBody
           snapshot={snapshot}
@@ -410,7 +410,9 @@ function UsagePopoverBody({
         </div>
       )}
 
-      <ResetCards windows={snapshot.windows} nowMs={nowMs} />
+      <div className="w-0 min-w-full">
+        <ResetCards windows={snapshot.windows} nowMs={nowMs} />
+      </div>
       {snapshot.windows.some((w) => w.tone == null) && (
         <div className="mt-2 w-0 min-w-full break-words text-meta text-text-faint">Update your box to see usage colours.</div>
       )}
@@ -510,7 +512,8 @@ const clampPct = (n: number) => Math.max(0, Math.min(100, n));
 export function WindowBar({ w, nowMs, small = false }: { w: UsageWindow; nowMs: number; small?: boolean }) {
   const empty = w.active === false || windowResetState(w, nowMs) === "resetting";
   const progress = windowProgress(w, nowMs);
-  const dot = small ? 3 : 4;
+  // Dot radius: 3 px across on the 5 px bar, 4 px on the 6 px one.
+  const r = small ? 1.5 : 2;
   return (
     <span
       className={`relative block w-full rounded-full bg-fill-active ${small ? "h-[5px]" : "h-[6px]"}`}
@@ -524,16 +527,15 @@ export function WindowBar({ w, nowMs, small = false }: { w: UsageWindow; nowMs: 
         }}
       />
       {progress != null && (
+        // Painted as a gradient on a full-size overlay rather than as a small
+        // positioned element: its centre is then exactly the bar's centre line at
+        // any row offset, instead of snapping to a different pixel than the bar.
         <span
           data-window-dot="true"
-          className="absolute top-1/2 rounded-full"
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 rounded-full"
           style={{
-            left: `${Math.max(4, Math.min(96, progress * 100))}%`,
-            width: dot,
-            height: dot,
-            transform: "translate(-50%, -50%)",
-            backgroundColor: "var(--usage-dot)",
-            boxShadow: "0 0 0 1px var(--usage-dot-ring)",
+            backgroundImage: `radial-gradient(circle at ${Math.max(4, Math.min(96, progress * 100))}% 50%, var(--usage-dot) ${r}px, var(--usage-dot-ring) ${r + 0.4}px ${r + 1}px, transparent ${r + 1.4}px)`,
           }}
         />
       )}
@@ -655,7 +657,7 @@ function SeatTable({
 }) {
   const span = columns.length + 1;
   return (
-    <div className="mt-3 pt-3 border-t border-border-subtle" data-testid="usage-seat-table">
+    <div className="mt-3 pt-3 w-0 min-w-full border-t border-border-subtle" data-testid="usage-seat-table">
       <table className="manta-seat-list w-full table-fixed border-collapse text-label">
         <colgroup>
           <col />
