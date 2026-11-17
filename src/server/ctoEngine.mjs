@@ -133,12 +133,14 @@ import {
 import { buildFactProposal, createFactsEngine, matchCheckable, VERIFY_CYCLE_MS, senderKey, senderReliability } from "./ctoFacts.mjs";
 import { formatFactsBlock, estimateTokens } from "./ctoSessions.mjs";
 import {
-  ambientCapUsd as budgetAmbientCapUsd,
+  burnPerHourUsd,
   createCtoBudget,
   dayKey as budgetDayKey,
   isWorkShedInThrifty,
   tierAllows as budgetTierAllows,
 } from "./ctoBudget.mjs";
+// ONE background-work budget for the CTO (ambient, overnight, backfill) and shared knowledge — spec 2026-11-17.
+import { isWeeklyKind, readBackgroundWork } from "./backgroundBudget.mjs";
 // BET-1398 standing-query watchers (§4.3/§13.4): the event-driven watcher
 // engine hosted by the adaptive engine. Supersedes the old cto.json poller.
 import {
@@ -503,6 +505,10 @@ export function createCtoEngine(deps = {}) {
     // seams directly and governs cost itself.
     getDb = null,
     backfillRunEphemeral = runEphemeral,
+    // The backfill's own summary producers (spec 2026-11-17 §17.1): gated + metered as `cto-backfill` batch work.
+    // Default: the segmenter's (ambient) seams.
+    backfillSummarize = null,
+    backfillComputeOneLiner = null,
     backfill = null, // optional pre-built backfill override (tests)
     // §8 profile (BET-1393): optional pre-built profile engine (else one is
     // constructed from the shared profileStore — deterministic, never throws).
@@ -534,12 +540,19 @@ export function createCtoEngine(deps = {}) {
     // the shared `verdicts.json` store). The verdict engine + facts sink are
     // constructed below from it.
     verdicts = bundle.verdicts,
-    // BET-1388 economics (§10.6-6/§12.1/§12.2/§13.3): the ambient-spend budget
-    // accessor (defaults to the real budget.json store via createCtoBudget).
-    // beginEphemeral consults it for the independent HARD CAP before every
-    // ambient model call; reportAmbientSpend records each run's spend and flips
-    // thrifty when the cap is crossed. `tier` is the A12 dial (default low).
+    // BET-1388 economics (§10.6-6/§12.1/§12.2/§13.3): the budget.json day buckets
+    // (the ROI roll + the watchdog's baseline; defaults to the real store via
+    // createCtoBudget). Since spec 2026-11-17 the CAP lives in the shared
+    // `backgroundBudget` below: `ambientPreflight` asks it before every ambient
+    // model call (and flips thrifty on a usd-cap / weekly level-cap refusal);
+    // `reportAmbientSpend` records each run's spend into it. `tier` is the A12 dial.
     budget = createCtoBudget({ store: bundle.budget }),
+    // The shared background-work budget (src/server/backgroundBudget.mjs). Absent → every gated call
+    // refuses (`unavailable`): the gate fails closed.
+    backgroundBudget = null,
+    // §17.13: the model an overnight job is pinned to — async (candidate) => {providerID, modelID} | null
+    // (the box default when it is subagent-approved, else the candidate's modelHint when approved, else null).
+    resolveOvernightModel = null,
     tierGet = async () => "low",
     // BET-1398 standing-query watchers (§4.3/§13.4): optional pre-built
     // watcher engine (else one is constructed below from watchersStore/ledger/
@@ -581,6 +594,7 @@ export function createCtoEngine(deps = {}) {
   let disposed = false;
   let thrifty = false;
   let thriftyAtDay = null; // local-day key thrifty was set on (BET-1388 auto-clear)
+  let thriftySource = null; // "cap" (a budget refusal) | other (the watchdog…) while thrifty; a cap hit is sticky
   let selfPaused = false;
   let selfPausedAt = null; // when the rate-limit self-pause began (BET-1508 cool-down)
   let enabled = false;
@@ -757,6 +771,7 @@ export function createCtoEngine(deps = {}) {
     return {
       enabled: enabledNow,
       dot: computeDot({ enabled: enabledNow, paused, thrifty }),
+      thriftyReason: thrifty ? (thriftySource === "cap" ? "cap_hit" : "watchdog") : null,
       pausedAt: paused ? pausedAt : null,
       needsYouCount: counts.needsYouCount ?? 0,
       generationInFlight: !!counts.generationInFlight,
@@ -1026,6 +1041,7 @@ export function createCtoEngine(deps = {}) {
     const next = !!value;
     const changed = next !== thrifty;
     thrifty = next;
+    thriftySource = next ? (thriftySource === "cap" ? "cap" : source) : null;
     thriftyAtDay = next ? budgetDayKey(now()) : thriftyAtDay;
     if (changed) {
       await ledgerLog({
@@ -1038,26 +1054,52 @@ export function createCtoEngine(deps = {}) {
     return { ok: true, changed };
   }
 
-  // BET-1388 (§10.6-6/§12.1): record an ambient model call's spend into budget
-  // (wired as runEphemeral's reportCost seam), and flip thrifty if the record
-  // crosses today's cap — shedding starts even if no further call is blocked.
-  // Metering is best-effort: a budget failure never breaks the run.
-  async function reportAmbientSpend({ model, tokens } = {}) {
+  // The shared budget's refusals that flip THRIFTY (§17.3): a dollar-cap refusal, and a level-cap refusal of a
+  // WEEKLY-kind window. Everything else (window-busy, projected-high, exhausted, unavailable, a short window's
+  // level-cap) clears within hours, while thrifty clears only at local midnight — it must not shed rollups all day.
+  function refusalFlipsThrifty(decision) {
+    if (decision?.reason === "usd-cap") return true;
+    if (decision?.reason !== "level-cap") return false;
+    const key = typeof decision?.window?.key === "string" ? decision.window.key : "";
+    return isWeeklyKind(key.slice(key.indexOf(":") + 1));
+  }
+
+  // The ambient gate (§7.2, §17.3) — runEphemeral's `preflight` for every CTO call: ask the shared budget about
+  // THIS call's billed model. Fails closed when no budget is wired.
+  async function ambientPreflight({ model } = {}) {
+    if (!backgroundBudget || typeof backgroundBudget.check !== "function") return { ok: false, reason: "unavailable" };
+    let decision;
     try {
-      await budget.record({ model, tokens, nowMs: now() });
+      decision = await backgroundBudget.check({ workType: "cto-ambient", model: model ?? null });
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+    if (decision?.ok) return { ok: true };
+    if (refusalFlipsThrifty(decision)) {
+      try {
+        await setThrifty(true, { reason: "cap_hit", source: "cap" });
+      } catch {
+        /* best-effort */
+      }
+    }
+    return { ok: false, reason: decision?.reason ?? "unavailable" };
+  }
+
+  // BET-1388 (§10.6-6/§12.1): record an ambient model call's spend (wired as runEphemeral's reportCost seam). The
+  // shared budget books REAL usage (the size estimate when the run reported none, §17.4) and prices it; the usd it
+  // returns goes into the budget.json day bucket (ROI, the watchdog's baseline). Metering is best-effort: a budget
+  // failure never breaks the run. Shedding starts at the next refused call (the preflight flips thrifty).
+  async function reportAmbientSpend({ model, tokens, usage, usd } = {}) {
+    let rec = { usd: 0, mode: "payg" };
+    try {
+      if (backgroundBudget && typeof backgroundBudget.record === "function") {
+        rec = (await backgroundBudget.record({ workType: "cto-ambient", model, usage: usage ?? tokens, usd, inLedger: false })) ?? rec;
+      }
     } catch {
       /* best-effort */
     }
-    let cap = budgetAmbientCapUsd({});
     try {
-      cap = budgetAmbientCapUsd((await configGet()) ?? {});
-    } catch {
-      /* keep default */
-    }
-    try {
-      if (await budget.isCapHit(cap)) {
-        await setThrifty(true, { reason: "cap_hit", source: "cap" });
-      }
+      await budget.record({ usd: rec.usd, ambientPaygUsd: rec.mode === "payg" ? rec.usd : 0, nowMs: now() });
     } catch {
       /* best-effort */
     }
@@ -1120,27 +1162,9 @@ export function createCtoEngine(deps = {}) {
     const { enabled: enabledNow, paused } = await gateContext();
     if (!enabledNow) return { ok: false, error: "cto_disabled" };
     if (paused) return { ok: false, error: "cto_paused" };
-    // BET-1388 (§12.1): the independent HARD CAP — checked before EVERY ambient
-    // model call, at every tier, regardless of the tier dial. Once today's
-    // ambient spend reaches the cap, no new ambient session is created (even
-    // the "kept to the last token" work stops at the cap). A cap hit also flips
-    // the engine thrifty (§10.6-6). A budget read failure never opens an
-    // unchecked writer — we default to the configured cap and treat a failed
-    // read as non-hit (the run proceeds; the meter stays best-effort).
-    let cap = budgetAmbientCapUsd({});
-    try {
-      cap = budgetAmbientCapUsd((await configGet()) ?? {});
-    } catch {
-      /* keep default */
-    }
-    try {
-      if (await budget.isCapHit(cap)) {
-        await setThrifty(true, { reason: "cap_hit", source: "cap" });
-        return { ok: false, error: "cto_cap_hit" };
-      }
-    } catch {
-      /* a failed cap read must not block ambient work */
-    }
+    // The budget is NOT tested here any more (spec 2026-11-17 §17.3): this gate has no task class or model, so
+    // the shared budget is asked per call by the runner's preflight (`ambientPreflight`), which does. Only the
+    // rate limits stay.
     if (track.ephemeral >= rateLimits.concurrentEphemeral) {
       await exceedRateLimit("concurrentEphemeral", { pause: false });
       return { ok: false, error: "rate_limit:concurrentEphemeral" };
@@ -1228,7 +1252,7 @@ export function createCtoEngine(deps = {}) {
       return runEphemeral
         ? await runEphemeral({
             ...data,
-            deps: { ...(data?.deps || {}), reportCost: reportAmbientSpend },
+            deps: { ...(data?.deps || {}), preflight: ambientPreflight, reportCost: reportAmbientSpend },
           })
         : { ok: false, gated: true };
     } finally {
@@ -1476,6 +1500,16 @@ export function createCtoEngine(deps = {}) {
   // today's ambient spend pace and the daily cap from the budget engine — the
   // same sources the §13.3 watchdog consults — so a `usage-burn` watcher fires
   // when the ambient burn is running hot relative to the cap fraction.
+  function ambientPaygToday() {
+    try {
+      return backgroundBudget && typeof backgroundBudget.usdToday === "function"
+        ? Number(backgroundBudget.usdToday({ workType: "cto-ambient", mode: "payg" })) || 0
+        : 0;
+    } catch {
+      return 0;
+    }
+  }
+
   function getWatchers() {
     if (watcherEngine) return watcherEngine;
     watcherEngine = watchers ?? createStandingQueryEngine({
@@ -1484,19 +1518,18 @@ export function createCtoEngine(deps = {}) {
       engineState,
       now,
       publish,
+      // The burn is the shared budget's pay-per-token `cto-ambient` spend today (spec 2026-11-17 §7.2): on a plan
+      // there is no payg spend and the watcher stays quiet — runaway protection there is the level cap.
       getSpendInWindow: async (windowMs) => {
-        const perHour =
-          budget && typeof budget.spendPerHourUsd === "function" ? await budget.spendPerHourUsd() : 0;
+        const perHour = burnPerHourUsd(ambientPaygToday(), now());
         return perHour * (windowMs / HOUR_MS);
       },
       getCapUsd: async () => {
-        let cap = budgetAmbientCapUsd({});
         try {
-          cap = budgetAmbientCapUsd((await configGet()) ?? {});
+          return readBackgroundWork((await configGet())?.backgroundWork).dailyCapUsd;
         } catch {
-          /* keep default */
+          return readBackgroundWork(null).dailyCapUsd;
         }
-        return cap;
       },
     });
     return watcherEngine;
@@ -1884,6 +1917,7 @@ export function createCtoEngine(deps = {}) {
         prompt: typeof t.prompt === "string" ? t.prompt : undefined,
         project: typeof t.project === "string" ? t.project : undefined,
         category: "queue-tonight",
+        ...(t.modelHint ? { modelHint: t.modelHint } : {}),
         value: Number.isFinite(t.value) ? t.value : 1,
         confidence: Number.isFinite(t.confidence) ? t.confidence : 0.8,
         predictedCost: Number.isFinite(t.predictedCost) ? t.predictedCost : 1,
@@ -1963,6 +1997,30 @@ export function createCtoEngine(deps = {}) {
       .catch(() => {});
   }
 
+  // The per-dispatch budget gate (spec 2026-11-17 §7.3, §17.12–13). Every overnight start re-asks the shared
+  // budget: the job's model is PINNED first (so the checked provider is the billed one), then `check`, then the
+  // §8 "good moment" for batch work. Fails closed when the budget or the pin resolver is not wired. A running job
+  // is never touched here — caps bound NEW dispatches only.
+  async function overnightBudgetGate(cand, task, windowOpenedMs) {
+    if (!backgroundBudget || typeof resolveOvernightModel !== "function") return { ok: false, reason: "unavailable" };
+    let model = null;
+    try {
+      model = await resolveOvernightModel({ ...cand, ...(task?.modelHint && !cand?.modelHint ? { modelHint: task.modelHint } : {}) });
+    } catch {
+      model = null;
+    }
+    if (!model) return { ok: false, reason: "no-model" };
+    const decision = await backgroundBudget.check({ workType: "cto-overnight", model });
+    if (!decision?.ok) return { ok: false, reason: decision?.reason ?? "unavailable" };
+    const moment = await backgroundBudget.goodMomentForBatch({
+      workType: "cto-overnight",
+      model,
+      dueSince: task?.addedMs ?? windowOpenedMs ?? undefined,
+    });
+    if (!moment?.ok) return { ok: false, reason: moment?.reason ?? "waiting-for-quiet" };
+    return { ok: true, model };
+  }
+
   // Dispatch the selected plan (§11.5 execution contract). The §3.3 concurrent
   // delegate sub-cap (RATE_LIMITS.concurrentDelegate = 2) is enforced HERE, by
   // counting still-running cto-actor jobs (the same rows preemption reads) +
@@ -1978,8 +2036,7 @@ export function createCtoEngine(deps = {}) {
   // this window re-runs silently (a freed cap or a newly opened project
   // session can still start it), it just stops re-writing the row. Each
   // job_started row carries `estTokens` (the prompt-size estimate, §12.1
-  // metering style) so the windowless night-cap bound can price tonight's
-  // spend from the ledger.
+  // metering style).
   async function dispatchPlan({ plan, trough, projects, ledgerRows, windowOpenedMs }) {
     let started = 0;
     const inWindow = (r) =>
@@ -1993,6 +2050,12 @@ export function createCtoEngine(deps = {}) {
       (Array.isArray(ledgerRows) ? ledgerRows : [])
         .filter((r) => r?.kind === "cto.overnight.skip" && inWindow(r))
         .map((r) => r.id),
+    );
+    // One `budget_refused` row per reason per night (the window): the refusal is retried every tick, the row is not.
+    const refusedSeen = new Set(
+      (Array.isArray(ledgerRows) ? ledgerRows : [])
+        .filter((r) => r?.kind === "cto.overnight.budget_refused" && inWindow(r))
+        .map((r) => r.reason),
     );
     const runningCto = (await runningCtoJobs()).length;
     let startedThisDispatch = 0;
@@ -2069,12 +2132,24 @@ export function createCtoEngine(deps = {}) {
           cand.prompt ??
           task?.prompt ??
           `${cand.name ?? "overnight"} — investigate and report a draft summary with refs.`;
+        const gate = await overnightBudgetGate(cand, task, windowOpenedMs);
+        if (!gate.ok) {
+          if (!refusedSeen.has(gate.reason)) {
+            refusedSeen.add(gate.reason);
+            await ledgerLog({ kind: "cto.overnight.budget_refused", reason: gate.reason, id: cand.id });
+          }
+          continue;
+        }
         const res = await startDelegateJob({
           name: cand.name ?? task?.name ?? `overnight:${cand.category}`,
           prompt,
           parentSessionID: parent.parentSessionID,
           parentDirectory: project,
           sweepAllowanceMs: trough ? Math.max(0, trough.endMs - now()) : undefined,
+          // §17.13: pinned to the model the budget checked (turns Auto routing off for this job); §17.14: the
+          // delegate engine records its usage incrementally against the shared budget as overnight work.
+          model: gate.model,
+          budgetWorkType: "cto-overnight",
         });
         if (res?.ok === false) {
           // BET-1428: same per-window dedupe — the refusal is retried on the
@@ -2527,9 +2602,20 @@ export function createCtoEngine(deps = {}) {
       ledger,
       segments: bundle.segments,
       rollups: bundle.rollups,
-      summarize, // raw seam — the backfill owns its own budget, no rate gate
-      computeOneLiner,
+      summarize: backfillSummarize ?? summarize, // raw seam — no §3.3 rate gate; the shared budget gates its runner
+      computeOneLiner: backfillComputeOneLiner ?? computeOneLiner,
       runEphemeral: backfillRunEphemeral,
+      // §8: batch work starts only when the budget passes AND it is a good moment (away / near a reset / overdue).
+      ...(backgroundBudget
+        ? {
+            startGate: async ({ dueSince } = {}) => {
+              const d = await backgroundBudget.check({ workType: "cto-backfill", model: null });
+              if (!d?.ok) return { ok: false, reason: d?.reason ?? "unavailable" };
+              const g = await backgroundBudget.goodMomentForBatch({ workType: "cto-backfill", model: null, dueSince });
+              return g?.ok ? { ok: true } : { ok: false, reason: g?.reason ?? "waiting-for-quiet" };
+            },
+          }
+        : {}),
       getDb: getDb ?? (async () => null),
       presenceCheck: () => engine.getPresence().state === "present",
       now,
@@ -3194,6 +3280,8 @@ export function createCtoEngine(deps = {}) {
     beginEphemeral,
     beginDelegateJob,
     reportAmbientSpend,
+    ambientPreflight,
+    gatedRunEphemeral,
     // BET-1388 tier gating (§3.3): pure consult; reads the A12 dial via the
     // injected tierGet (default low). Exposed so P2 features gate on it.
     tierAllowsFeature: async (feature) => budgetTierAllows(await tierGet(), feature),

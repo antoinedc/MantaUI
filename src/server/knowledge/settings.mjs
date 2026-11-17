@@ -4,7 +4,10 @@
 // (`knowledge:settings-set`); rpc.mjs strips the key from `config:update`.
 //
 //   enabled      master switch: capture, curator, briefing, tools
-//   dailyCapUsd  curator model spend per local day
+//   (dailyCapUsd is NOT a knowledge setting any more: the daily cap for pay-per-token keys is the one shared
+//   background-work setting `backgroundWork.dailyCapUsd`. A patch key `dailyCapUsd` is still accepted and writes
+//   that; the settings read mirrors it, so an older desktop's cap input keeps working — spec
+//   2026-11-17-background-work-budget §9, §17.18.)
 //   repoRules    default "box-only" | "pull-request" | "direct"
 //   sharing      default "share-and-read" | "read-only" | "private"
 //   observeOnly  hidden (not in the UI, only returned when true): capture + detection only
@@ -18,18 +21,17 @@ import { repoKeyParts } from "../../shared/forge.mjs";
 import { KnowledgeError } from "./errors.mjs";
 import { SLUG_RE } from "./identity.mjs";
 import { createMutex } from "../jsonStore.mjs";
+import { readBackgroundWork, validateAndMergeBackgroundWork } from "../backgroundBudget.mjs";
 
 export const REPO_RULES = Object.freeze(["box-only", "pull-request", "direct"]);
 export const SHARING = Object.freeze(["share-and-read", "read-only", "private"]);
 export const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
-  dailyCapUsd: 1.0,
   repoRules: "box-only",
   sharing: "share-and-read",
   observeOnly: false,
   projects: Object.freeze({}),
 });
-export const MAX_DAILY_CAP_USD = 100;
 const ACCESS_TTL_MS = 10 * 60_000;
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -50,7 +52,6 @@ export function normalizeSettings(raw) {
   }
   return {
     enabled: typeof r.enabled === "boolean" ? r.enabled : DEFAULT_SETTINGS.enabled,
-    dailyCapUsd: typeof r.dailyCapUsd === "number" && Number.isFinite(r.dailyCapUsd) && r.dailyCapUsd >= 0 ? Math.min(r.dailyCapUsd, MAX_DAILY_CAP_USD) : DEFAULT_SETTINGS.dailyCapUsd,
     repoRules: REPO_RULES.includes(r.repoRules) ? r.repoRules : DEFAULT_SETTINGS.repoRules,
     sharing: SHARING.includes(r.sharing) ? r.sharing : DEFAULT_SETTINGS.sharing,
     observeOnly: r.observeOnly === true,
@@ -64,8 +65,10 @@ const bad = (message) => new KnowledgeError("invalid-setting", message, { status
  * Validate a `knowledge:settings-set` patch against `current`; returns the next
  * complete settings. Unknown keys/values → 400 `invalid-setting`.
  * `isKnownSlug(slug)` and `outwardCheck(slug)` (→ {allowed, reason}) are injected.
+ * `dailyCapUsd` is the legacy cap key: it is validated against the stored `backgroundWork` (`backgroundWork`) and the
+ * merged value is handed back in `effects.backgroundWork` for the caller to write — it is not part of the result.
  */
-export async function applyPatch(current, patch, { isKnownSlug = () => true, outwardCheck = async () => ({ allowed: true }) } = {}) {
+export async function applyPatch(current, patch, { isKnownSlug = () => true, outwardCheck = async () => ({ allowed: true }), backgroundWork, effects = {} } = {}) {
   if (!isObj(patch)) throw bad("The settings patch must be an object.");
   const next = normalizeSettings(current);
   for (const [key, value] of Object.entries(patch)) {
@@ -76,8 +79,11 @@ export async function applyPatch(current, patch, { isKnownSlug = () => true, out
         next[key] = value;
         break;
       case "dailyCapUsd":
-        if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_DAILY_CAP_USD) throw bad(`dailyCapUsd must be a number from 0 to ${MAX_DAILY_CAP_USD}.`);
-        next.dailyCapUsd = Math.round(value * 100) / 100;
+        {
+          const merged = validateAndMergeBackgroundWork(backgroundWork, { dailyCapUsd: value });
+          if (!merged.ok) throw bad(merged.error);
+          effects.backgroundWork = merged.value;
+        }
         break;
       case "repoRules":
         if (!REPO_RULES.includes(value)) throw bad(`repoRules must be one of ${REPO_RULES.join(", ")}.`);
@@ -133,7 +139,6 @@ export function effectiveFor(settings, slug) {
   return {
     enabled: s.enabled,
     observeOnly: s.observeOnly,
-    dailyCapUsd: s.dailyCapUsd,
     repoRules: o.repoRules ?? s.repoRules,
     sharing: o.sharing ?? s.sharing,
   };
@@ -201,16 +206,20 @@ export function createSettings({ config, registry, getRepoAccess, hasForgeLogin,
     // Serialized: load → patch → write is a read-modify-write, so two concurrent patches must not lose an update.
     set: (patch) =>
       setLock.runExclusive(async () => {
-        const current = await load();
-        const next = await applyPatch(current, patch, { isKnownSlug: async (s) => (await registry.get(s)) !== null, outwardCheck: outward });
+        const cfg = await config.get();
+        const current = normalizeSettings(cfg?.knowledge);
+        const effects = {};
+        const next = await applyPatch(current, patch, { isKnownSlug: async (s) => (await registry.get(s)) !== null, outwardCheck: outward, backgroundWork: cfg?.backgroundWork, effects });
         const stored = { ...next };
         if (!stored.observeOnly) delete stored.observeOnly;
-        await config.update({ knowledge: stored });
+        // One write: the knowledge settings and, for the legacy cap key, the shared background-work setting.
+        await config.update({ knowledge: stored, ...(effects.backgroundWork ? { backgroundWork: effects.backgroundWork } : {}) });
         return next;
       }),
     /** The `knowledge:settings-get` answer: settings + one row per detected project. */
     async view() {
-      const s = await load();
+      const cfg = await config.get();
+      const s = normalizeSettings(cfg?.knowledge);
       const rows = [];
       const projects = await registry.list();
       const outs = new Map();
@@ -239,7 +248,8 @@ export function createSettings({ config, registry, getRepoAccess, hasForgeLogin,
         if (isOutward(e.repoRules) && !o.allowed) row.repoRulesEffective = "box-only";
         rows.push(row);
       }
-      const out = { enabled: s.enabled, dailyCapUsd: s.dailyCapUsd, repoRules: s.repoRules, sharing: s.sharing, projects: rows };
+      // `dailyCapUsd` mirrors the shared cap for pay-per-token keys, so an older desktop's card still renders and edits it.
+      const out = { enabled: s.enabled, dailyCapUsd: readBackgroundWork(cfg?.backgroundWork).dailyCapUsd, repoRules: s.repoRules, sharing: s.sharing, projects: rows };
       if (s.observeOnly) out.observeOnly = true;
       return out;
     },

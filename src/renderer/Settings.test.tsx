@@ -523,54 +523,44 @@ describe("Settings — Backup restore in-flight + ok:false (BET-1455)", () => {
     useStore.setState({ appToasts: [] });
   });
 
-  it("while the restore is in flight the button renders loading and disabled", async () => {
-    let resolveRestore: (v: unknown) => void = () => {};
+  async function openSettings(tmuxRestoreTopology: () => Promise<unknown>) {
     installMockApi({
       configGet: () => Promise.resolve({}),
       getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
       getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
       tmuxRestorePreview: () => Promise.resolve(preview),
-      tmuxRestoreTopology: () => new Promise((res) => { resolveRestore = res; }),
+      tmuxRestoreTopology,
     });
     h = mount(<Settings onClose={() => {}} />);
-    await h.flush();
-    await h.flush();
+    await h!.flush();
+    await h!.flush();
+  }
 
-    const btn = [...h.container.querySelectorAll("button")].find(
-      (b) => (b.textContent ?? "").trim() === "Restore windows",
-    ) as HTMLButtonElement;
-    act(() => btn.click());
-    await h.flush();
+  const restoreBtn = () =>
+    [...h!.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Restore windows") as HTMLButtonElement;
 
-    const inFlight = [...h.container.querySelectorAll("button")].find(
-      (b) => (b.textContent ?? "").trim() === "Restore windows",
-    ) as HTMLButtonElement;
+  it("while the restore is in flight the button renders loading and disabled", async () => {
+    let resolveRestore: (v: unknown) => void = () => {};
+    await openSettings(() => new Promise((res) => { resolveRestore = res; }));
+
+    act(() => restoreBtn().click());
+    await h!.flush();
+
+    const inFlight = restoreBtn();
     expect(inFlight.disabled, "disabled while in flight").toBe(true);
     expect(inFlight.getAttribute("aria-busy"), "the primitive's loading state").toBe("true");
 
     act(() => resolveRestore({ ok: true, created: 1, failed: 0, message: "Restored 1 window." }));
-    await h.flush();
-    await h.flush();
+    await h!.flush();
+    await h!.flush();
   });
 
   it("an ok:false result pushes the error disclosure with the server's error string", async () => {
-    installMockApi({
-      configGet: () => Promise.resolve({}),
-      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
-      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
-      tmuxRestorePreview: () => Promise.resolve(preview),
-      tmuxRestoreTopology: () => Promise.resolve({ ok: false, error: "No saved window layout to restore from.", created: 0, failed: 0 }),
-    });
-    h = mount(<Settings onClose={() => {}} />);
-    await h.flush();
-    await h.flush();
+    await openSettings(() => Promise.resolve({ ok: false, error: "No saved window layout to restore from.", created: 0, failed: 0 }));
 
-    const btn = [...h.container.querySelectorAll("button")].find(
-      (b) => (b.textContent ?? "").trim() === "Restore windows",
-    ) as HTMLButtonElement;
-    act(() => btn.click());
-    await h.flush();
-    await h.flush();
+    act(() => restoreBtn().click());
+    await h!.flush();
+    await h!.flush();
 
     const toast = useStore.getState().appToasts.find((t) => String(t.id).startsWith("err-restore-"));
     expect(toast, "error toast for ok:false").toBeTruthy();
@@ -579,5 +569,58 @@ describe("Settings — Backup restore in-flight + ok:false (BET-1455)", () => {
     );
     expect(disclosure).toContain("restore your windows.");
     expect(disclosure).toContain("No saved window layout to restore from.");
+  });
+});
+
+// Background work budget: the card lives in Models, and a "Change" link anywhere (here, Knowledge's) lands on it.
+describe("Settings — background work budget card", () => {
+  let h: Harness | null = null;
+
+  const stubApi = () =>
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      launchersList: () => Promise.resolve([]),
+      backgroundStatus: () =>
+        Promise.resolve({
+          level: "normal",
+          dailyCapUsd: 5,
+          payg: { providers: [], usdToday: 0, usdMonth: 0 },
+          plans: [{ adapter: "claude", fallback: false, windows: [], paused: null }],
+          waitingBatch: [],
+          byWork: [],
+        }),
+      knowledgeSettingsGet: () =>
+        Promise.resolve({ enabled: true, repoRules: "box-only", sharing: "share-and-read", projects: [] }),
+      knowledgeChanges: () => Promise.resolve({ items: [], nextCursor: null }),
+    });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("is mounted in the Models section", async () => {
+    stubApi();
+    h = mount(<Settings onClose={() => {}} initialSection="models" />);
+    await h.flush();
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeTruthy();
+  });
+
+  it("Knowledge's Change link switches the open Settings to Models, at the card", async () => {
+    stubApi();
+    h = mount(<Settings onClose={() => {}} initialSection="knowledge" />);
+    await h.flush();
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeNull();
+    const change = [...h.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Change") as HTMLButtonElement;
+    expect(change, "the Change link in the Knowledge card").toBeTruthy();
+    act(() => change.click());
+    await h.flush();
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("Background work");
   });
 });

@@ -1,8 +1,8 @@
 // ===== KnowledgeCard (shared-knowledge spec §4, §8, §11.6) =====
 //
-// Settings → Knowledge: the master switch, the daily spend cap, the
-// global defaults and a per-project list for repo rules and sharing, status lines
-// from the settings payload, "View knowledge" (opens the store in the Explorer)
+// Settings → Knowledge: the master switch, a one-line background-work budget status (the budget
+// itself is the Background work card in Models), the global defaults and a per-project list for
+// repo rules and sharing, status lines from the settings payload, "View knowledge" (opens the store in the Explorer)
 // and the Recent changes list with Undo.
 //
 // Every control reports its outcome (AGENTS.md "never stub a control"): a save
@@ -28,19 +28,21 @@ import type {
   KnowledgeSettingsPatch,
   KnowledgeSharing,
 } from "../../shared/api";
+import { BackgroundStatusLine } from "../BackgroundStatusLine";
+import { KNOWLEDGE_WORK_TYPES } from "../backgroundWorkFormat";
 import { Button } from "../Button";
-import { INPUT_BASE, LABEL_CLS } from "../Field";
+import { LABEL_CLS } from "../Field";
 import { SettingsRow } from "../SettingsRow";
 import { Tag } from "../Tag";
 import { Toggle } from "../Toggle";
 import { UpdateBoxNote } from "../components/UpdateBoxNote";
 import { dispatchOpenFile } from "../explorer/types";
 import { useStore } from "../store";
+import { useBackgroundStatus } from "../useBackgroundStatus";
 import {
   KNOWLEDGE_DIR,
   REPO_RULES_OPTIONS,
   SHARING_OPTIONS,
-  capInputText,
   changeWhere,
   describeSaveError,
   describeUndoFailure,
@@ -49,7 +51,6 @@ import {
   isOverride,
   kindLabel,
   outwardLost,
-  parseDailyCap,
   repoRulesLabel,
   sharingConfirmText,
   statusLines,
@@ -319,8 +320,6 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [capText, setCapText] = useState("");
-  const [capError, setCapError] = useState<string | null>(null);
   const [changes, setChanges] = useState<ChangesState>({ kind: "loading" });
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
@@ -328,11 +327,8 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
   const [undoneIds, setUndoneIds] = useState<Record<string, number>>({});
   const [viewBusy, setViewBusy] = useState(false);
   const [viewError, setViewError] = useState<string | null>(null);
-  const capRef = useRef<HTMLInputElement>(null);
   const alive = useRef(true);
-  const capId = useId();
-  const capHelpId = useId();
-  const capErrorId = useId();
+  const budget = useBackgroundStatus(true);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -366,7 +362,6 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
           return;
         }
         setLoad({ kind: "ok", settings });
-        setCapText(capInputText(settings.dailyCapUsd));
       })
       .catch((e) => {
         if (!alive.current) return;
@@ -425,7 +420,6 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
       if (!next || !Array.isArray(next.projects)) throw new Error("The box didn't return the settings.");
       if (!alive.current) return;
       setLoad({ kind: "ok", settings: next });
-      if (patch.dailyCapUsd !== undefined) setCapText(capInputText(next.dailyCapUsd));
       setNotice({ tone: "ok", text: okText });
     } catch (e) {
       if (alive.current) setNotice({ tone: "error", text: `Couldn't save: ${describeSaveError(e)}` });
@@ -496,19 +490,6 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
   const s = load.settings;
   // With the switch off only the availability line matters; spend and briefing counts are about a running subsystem.
   const shownLines = statusLines(s).filter((l) => s.enabled || l.id === "unavailable");
-  const capDirty = capText.trim() !== capInputText(s.dailyCapUsd);
-
-  const onCapSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const r = parseDailyCap(capText);
-    if (!r.ok) {
-      setCapError(r.error);
-      capRef.current?.focus();
-      return;
-    }
-    setCapError(null);
-    void save({ dailyCapUsd: r.value }, `Daily cap set to $${r.value.toFixed(2)}.`);
-  };
 
   const noteText = (c: KnowledgeChange) => formatChangeTime(c.at);
 
@@ -541,53 +522,15 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
             onChange={(v) => void save({ enabled: v }, v ? "Shared knowledge turned on." : "Shared knowledge turned off.")}
           />
         </SettingsRow>
-        <form onSubmit={onCapSubmit} noValidate className="py-3 space-y-1" aria-label="Daily spend cap">
-          <label htmlFor={capId} className={LABEL_CLS}>
-            Daily spend cap
-          </label>
-          <div className="flex items-center gap-2">
-            <span aria-hidden="true" className="text-body text-text-muted">
-              $
-            </span>
-            <div className="w-28">
-              <input
-                id={capId}
-                ref={capRef}
-                name="dailyCapUsd"
-                type="text"
-                inputMode="decimal"
-                autoComplete="off"
-                spellCheck={false}
-                value={capText}
-                disabled={busy}
-                aria-invalid={capError ? true : undefined}
-                aria-describedby={capError ? `${capHelpId} ${capErrorId}` : capHelpId}
-                onChange={(e) => {
-                  setCapText(e.target.value);
-                  setCapError(null);
-                }}
-                onBlur={() => {
-                  if (!capDirty) return;
-                  const r = parseDailyCap(capText);
-                  if (!r.ok) setCapError(r.error);
-                }}
-                className={`${INPUT_BASE} px-4 py-3 font-mono`}
-              />
-            </div>
-            <Button type="submit" tone="default" disabled={busy || !capDirty}>
-              Save cap
-            </Button>
-          </div>
-          <div id={capHelpId} className="text-meta text-text-faint max-w-[62ch]">
-            The most the background model calls may cost per day. When it's reached, knowledge work waits until tomorrow;
-            briefings and search keep working.
-          </div>
-          {capError && (
-            <div id={capErrorId} role="alert" className="text-meta text-danger break-words">
-              {capError}
-            </div>
-          )}
-        </form>
+        <div className="py-3 empty:hidden" data-testid="knowledge-budget">
+          <BackgroundStatusLine
+            label="Background work budget"
+            state={budget.state}
+            onRetry={() => void budget.refresh()}
+            share={{ workTypes: KNOWLEDGE_WORK_TYPES, noun: "Knowledge work" }}
+            testId="knowledge-budget-status"
+          />
+        </div>
       </div>
 
       {shownLines.length > 0 && (

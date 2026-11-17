@@ -90,11 +90,11 @@ test("windowFor partitions the day into contiguous hour windows", () => {
   assert.equal(new Date(w[0]).getUTCMinutes(), 0);
   const day = windowFor("day", d);
   assert.equal(day[1] - day[0], DAY_MS);
-  assert.equal(new Date(day[0]).getUTCHours(), 0);
+  assert.equal(new Date(day[0]).getHours(), 0);
   const week = windowFor("week", d);
   assert.equal(week[1] - week[0], WEEK_MS);
   // Jan 15 2026 is a Thursday → Monday is Jan 12.
-  assert.equal(new Date(week[0]).getUTCDay(), 1);
+  assert.equal(new Date(week[0]).getDay(), 1);
   assert.equal(windowId(w), String(w[0]));
 });
 
@@ -237,6 +237,46 @@ test("a gated/unavailable model persists a degraded rollup with correct refs", a
   const saved = store.map.get(`hour/${w[0]}`);
   assert.equal(validateRollup(saved), true);
   assert.deepEqual(saved.bullets.map((b) => b.refs), [["s1"], ["s2"]]);
+});
+
+test("a budget refusal: the live runner still persists a degraded rollup; a deferOnBudget runner (the backfill) saves and logs nothing and says deferred", async () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const mk = (extra) => {
+    const store = makeRollupsStore();
+    const rows = [];
+    const runner = createRollupRunner({
+      runEphemeral: async () => ({ ok: false, gated: true, code: "budget", error: "cto_cap_hit" }),
+      rollups: store,
+      loadInputs: async () => [seg("s1", w[0])],
+      loadPreceding: async () => null,
+      exists: fakeExists(store),
+      ledger: { append: async (r) => rows.push(r) },
+      ...extra,
+    });
+    return { runner, store, rows };
+  };
+  const live = mk({});
+  assert.equal((await live.runner.reduceWindow("hour", w)).saved, true);
+  assert.equal(live.store.map.size, 1, "live: degraded rollup written, as before");
+  assert.ok(live.rows.some((r) => r.kind === "cto.rollup_degraded"));
+
+  const back = mk({ deferOnBudget: true });
+  const out = await back.runner.reduceWindow("hour", w);
+  assert.deepEqual(out, { deferred: true, level: "hour", window: w, id: String(w[0]) });
+  assert.equal(back.store.map.size, 0);
+  assert.deepEqual(back.rows, []);
+  // a gated result that is NOT a budget refusal still degrades, even when deferOnBudget is set
+  const other = createRollupRunner({
+    runEphemeral: async () => ({ ok: false, gated: true }),
+    rollups: back.store,
+    loadInputs: async () => [seg("s1", w[0])],
+    loadPreceding: async () => null,
+    exists: fakeExists(back.store),
+    ledger: { append: async () => {} },
+    deferOnBudget: true,
+  });
+  assert.equal((await other.reduceWindow("hour", w)).saved, true);
 });
 
 test("day reduce from hour rollups: degraded keeps propagated leaf refs", async () => {

@@ -28,6 +28,8 @@ import { join, sep } from "node:path";
 import { withInternalMarker } from "../internalSessionMarker.mjs";
 
 export const TRIAL_TASK_CLASS = "knowledge-trial";
+// The shared background budget's work type (batch) — the same name as the task class its model comes from.
+const TRIAL_WORK_TYPE = "knowledge-trial";
 export const TRIAL_CEILING_MS = 20 * 60_000;
 export const MAX_TRIALS_PER_WEEK = 2;
 export const TRIAL_TITLE_PREFIX = "knowledge:trial";
@@ -207,14 +209,19 @@ export function createTrial({
   /** `{ok:true}` or `{ok:false, reason}` — the gates that don't need a model or a clone. */
   async function canStart() {
     if (running) return { ok: false, reason: "busy" };
-    return gates();
+    const g = quickGates();
+    if (!g.ok) return g;
+    return capGate();
   }
-  async function gates() {
+  function quickGates() {
     if (isKnowledgeRunActive()) return { ok: false, reason: "knowledge-run-active" };
     if (weeklyCount() >= MAX_TRIALS_PER_WEEK) return { ok: false, reason: "weekly-limit" };
-    const cap = await budget.canSpend();
-    if (!cap.ok) return { ok: false, reason: "cap-reached" };
     return { ok: true };
+  }
+  /** The shared budget's answer for the trial's model (resolved from its task class when `model` isn't known yet). */
+  async function capGate(model) {
+    const cap = await budget.canSpend({ workType: TRIAL_WORK_TYPE, modelClass: TRIAL_TASK_CLASS, ...(model ? { model } : {}) });
+    return cap.ok ? { ok: true } : { ok: false, reason: "cap-reached" };
   }
 
   /**
@@ -234,11 +241,20 @@ export function createTrial({
     }
   }
 
-  async function runClaimed(id, { skillName, skillMd, slugs = [], request = "" } = {}) {
-    const gate = await gates();
+  async function runClaimed(id, { skillName, skillMd, slugs = [], request = "", dueSince } = {}) {
+    const gate = quickGates();
     if (!gate.ok) return { status: "skipped", reason: gate.reason };
     const model = await resolveModelForClass(TRIAL_TASK_CLASS, { configGet });
     if (model && typeof model === "object" && model.ok === false) return { status: "skipped", reason: `no-model:${model.code ?? "unavailable"}` };
+    // The budget is asked about the model the trial will really run on. A trial is batch work: besides the budget it
+    // starts only at a good moment (user away, near a weekly reset, or overdue — §8); a refusal leaves the candidate
+    // pending and the skills pass asks again later.
+    const cap = await capGate(model ?? undefined);
+    if (!cap.ok) return { status: "skipped", reason: cap.reason };
+    if (budget.goodMomentForBatch) {
+      const gm = await budget.goodMomentForBatch({ workType: TRIAL_WORK_TYPE, modelClass: TRIAL_TASK_CLASS, ...(model ? { model } : {}), dueSince: Number.isFinite(dueSince) ? dueSince : now() });
+      if (!gm.ok) return { status: "skipped", reason: "waiting-for-quiet" };
+    }
 
     let dir = null;
     let slug = null;
@@ -303,6 +319,8 @@ export function createTrial({
       } catch (e) {
         log("[knowledge] trial cost not recorded:", e?.message ?? e);
       }
+      // The session is deleted below, so the model ledger never sees it: book its real usage on the shared budget.
+      await budget.book?.({ workType: TRIAL_WORK_TYPE, model: result.model ?? model ?? undefined, usage: result.tokens, usd: typeof result.usd === "number" ? result.usd : undefined, inLedger: false });
       const status = end.outcome === "succeeded" ? "completed" : end.outcome === "timeout" ? "timeout" : "failed";
       db.prepare("UPDATE skill_trials SET status = ?, usd = ? WHERE id = ?").run(status, usd, id);
       return { status, ...(status === "failed" && end.error ? { reason: String(end.error).slice(0, 200) } : {}), report: String(result.text ?? ""), parsed: parseTrialReport(result.text), usd, sessionID: id };

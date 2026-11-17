@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Settings → Sessions "Knowledge" (shared-knowledge spec §4, §8, §11.6): the
-// master switch, daily cap, defaults and per-project radio groups, status lines,
+// master switch, the one-line budget status, defaults and per-project radio groups, status lines,
 // View knowledge, and Recent changes with Undo. Every outcome is reported.
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,9 @@ import { act } from "react";
 import type { KnowledgeChange, KnowledgeProjectRow, KnowledgeSettings } from "../../shared/api";
 import { EXPLORER_OPEN_EVENT, type OpenFileRequest } from "../explorer/types";
 import { useStore } from "../store";
-import { installMockApi, mount, type Harness, type MockApi } from "../testHarness";
+import { clearBackgroundWorkFocus } from "../useBackgroundStatus";
+import { buttonByText, mountWithMockApi, type Harness, type MockApi } from "../testHarness";
+import { budgetStatus } from "../budgetStatusFixture";
 import { KnowledgeCard } from "./KnowledgeCard";
 
 const row = (over: Partial<KnowledgeProjectRow> = {}): KnowledgeProjectRow => ({
@@ -24,7 +26,6 @@ const row = (over: Partial<KnowledgeProjectRow> = {}): KnowledgeProjectRow => ({
 
 const settings = (over: Partial<KnowledgeSettings> = {}): KnowledgeSettings => ({
   enabled: true,
-  dailyCapUsd: 1,
   repoRules: "box-only",
   sharing: "share-and-read",
   projects: [row()],
@@ -55,18 +56,15 @@ describe("KnowledgeCard", () => {
   });
 
   async function open(overrides: Record<string, unknown> = {}, props: { onNavigated?: () => void } = {}) {
-    ({ api } = installMockApi({
+    ({ h, api } = await mountWithMockApi(<KnowledgeCard {...props} />, {
       knowledgeSettingsGet: () => Promise.resolve(settings()),
       knowledgeChanges: () => Promise.resolve({ items: [], nextCursor: null }),
       ...overrides,
     }));
-    h = mount(<KnowledgeCard {...props} />);
-    await h.flush();
     return h;
   }
   const q = <T extends HTMLElement>(sel: string) => h!.container.querySelector(sel) as T | null;
-  const button = (text: string) =>
-    Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
+  const button = (text: string) => buttonByText(h!, text) ?? undefined;
   const radio = (name: string, value: string) => q<HTMLInputElement>(`input[type="radio"][name="${name}"][value="${value}"]`);
   const applyBtn = (group: string) =>
     q(`input[name="${group}"]`)!.closest("fieldset")!.querySelector("button.manta-knowledge-apply") as HTMLButtonElement;
@@ -77,24 +75,6 @@ describe("KnowledgeCard", () => {
     expect(el, "expected the control to exist").toBeTruthy();
     await act(async () => {
       el!.click();
-    });
-    await h!.flush();
-  }
-  async function typeInto(el: HTMLInputElement, value: string) {
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-  }
-  async function blur(el: HTMLElement) {
-    await act(async () => {
-      el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-      el.blur();
-    });
-  }
-  async function submitCap() {
-    await act(async () => {
-      q<HTMLFormElement>("form")!.requestSubmit();
     });
     await h!.flush();
   }
@@ -118,10 +98,10 @@ describe("KnowledgeCard", () => {
     expect(q('[role="switch"]')).toBeTruthy();
   });
 
-  it("renders the switch, cap, defaults and the project's radio groups from the payload", async () => {
-    await open({ knowledgeSettingsGet: () => Promise.resolve(settings({ dailyCapUsd: 2.5, sharing: "read-only" })) });
+  it("renders the switch, defaults and the project's radio groups from the payload — and no cap input", async () => {
+    await open({ knowledgeSettingsGet: () => Promise.resolve(settings({ sharing: "read-only" })) });
     expect(q('[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
-    expect(q<HTMLInputElement>('input[name="dailyCapUsd"]')!.value).toBe("2.50");
+    expect(q('input[name="dailyCapUsd"]')).toBeNull();
     expect(radio("knowledge-default-repoRules", "box-only")!.checked).toBe(true);
     expect(radio("knowledge-default-sharing", "read-only")!.checked).toBe(true);
     const slug = "manta-0123456789";
@@ -390,46 +370,59 @@ describe("KnowledgeCard", () => {
     expect(h!.container.querySelector(`[id="${describedBy}"]`)!.textContent).toContain("No GitHub login");
   });
 
-  describe("daily cap", () => {
-    it("rejects an invalid amount without calling the box and marks the field", async () => {
-      await open();
-      const input = q<HTMLInputElement>('input[name="dailyCapUsd"]')!;
-      await typeInto(input, "abc");
-      await submitCap();
-      expect(api.calls.knowledgeSettingsSet).toBeUndefined();
-      expect(q('[role="alert"]')!.textContent).toContain("dollar amount");
-      expect(input.getAttribute("aria-invalid")).toBe("true");
-      await typeInto(input, "3");
-      expect(input.getAttribute("aria-invalid")).toBeNull();
+  describe("background work budget line", () => {
+    const status = (over: Record<string, unknown> = {}) =>
+      budgetStatus({
+        byWork: [
+          { workType: "knowledge-capture", calls: 10, usd: 0.1, tokens: 120_000 },
+          { workType: "knowledge-tidy", calls: 4, usd: 0.2, tokens: 80_000 },
+          { workType: "cto-ambient", calls: 99, usd: 1, tokens: 9_000_000 },
+        ],
+        ...over,
+      });
+
+    it("shows the status in plan terms, this subsystem's share, and no dollar-cap input", async () => {
+      await open({ backgroundStatus: () => Promise.resolve(status()) });
+      const line = q('[data-testid="knowledge-budget-status"]')!.textContent!;
+      expect(line).toContain("Background work used 2% of your Claude week");
+      expect(line).toContain("Knowledge work today: 14 calls · 200k tokens");
+      expect(q('input[name="dailyCapUsd"]')).toBeNull();
     });
 
-    it("shows the error on blur but not while typing", async () => {
-      await open();
-      const input = q<HTMLInputElement>('input[name="dailyCapUsd"]')!;
-      await typeInto(input, "1.234");
-      expect(q('[role="alert"]')).toBeNull();
-      await blur(input);
-      expect(q('[role="alert"]')!.textContent).toContain("two decimals");
+    it("says why work is paused, in words", async () => {
+      await open({
+        backgroundStatus: () =>
+          Promise.resolve(status({ plans: [{ adapter: "claude", fallback: false, windows: [], paused: { reason: "off", resumesAt: null } }] })),
+      });
+      expect(q('[data-testid="knowledge-budget-status"]')!.textContent).toContain("Off on plans");
     });
 
-    it("saves a valid cap and reports it; Save is disabled until the value changes", async () => {
-      await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ dailyCapUsd: 2 })) });
-      expect(button("Save cap")!.disabled).toBe(true);
-      await typeInto(q<HTMLInputElement>('input[name="dailyCapUsd"]')!, "2");
-      expect(button("Save cap")!.disabled).toBe(false);
-      await submitCap();
-      expect(api.calls.knowledgeSettingsSet).toEqual([[{ patch: { dailyCapUsd: 2 } }]]);
-      expect(notice()).toBe("Daily cap set to $2.00.");
-      expect(q<HTMLInputElement>('input[name="dailyCapUsd"]')!.value).toBe("2.00");
+    it("Change opens Settings at the Background work card", async () => {
+      await open({ backgroundStatus: () => Promise.resolve(status()) });
+      const seen: unknown[] = [];
+      const on = (e: Event) => seen.push((e as CustomEvent).detail);
+      window.addEventListener("manta-open-settings", on);
+      try {
+        await click(button("Change"));
+      } finally {
+        window.removeEventListener("manta-open-settings", on);
+        clearBackgroundWorkFocus();
+      }
+      expect(seen).toEqual([{ section: "models", backgroundWork: true }]);
     });
 
-    it("keeps a half-typed cap when another setting saves", async () => {
-      await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ sharing: "private" })) });
-      await typeInto(q<HTMLInputElement>('input[name="dailyCapUsd"]')!, "7");
-      await click(radio("knowledge-default-sharing", "private"));
-      await click(applyBtn("knowledge-default-sharing"));
-      expect(api.calls.knowledgeSettingsSet).toHaveLength(1);
-      expect(q<HTMLInputElement>('input[name="dailyCapUsd"]')!.value).toBe("7");
+    it("an older box (no budget channel) shows nothing", async () => {
+      await open({ backgroundStatus: () => Promise.reject(new Error("unknown rpc channel: background:status")) });
+      expect(q('[data-testid="knowledge-budget-status"]')).toBeNull();
+      expect(button("Change")).toBeUndefined();
+    });
+
+    it("a failed read says so and Retry reads again", async () => {
+      let calls = 0;
+      await open({ backgroundStatus: () => (++calls === 1 ? Promise.reject(new Error("offline")) : Promise.resolve(status())) });
+      expect(q('[data-testid="knowledge-budget-status"]')!.textContent).toContain("offline");
+      await click(button("Retry"));
+      expect(q('[data-testid="knowledge-budget-status"]')!.textContent).toContain("Background work used 2%");
     });
   });
 
@@ -439,14 +432,13 @@ describe("KnowledgeCard", () => {
       expect(q('[data-testid="knowledge-status"]')).toBeNull();
     });
 
-    it("renders spend, waiting for a capable model and missed briefings", async () => {
+    it("renders waiting for a capable model and missed briefings", async () => {
       await open({
         knowledgeSettingsGet: () =>
-          Promise.resolve(settings({ spentTodayUsd: 0.4, waitingForCapableModel: true, sessionsWithoutBriefingThisWeek: 2 })),
+          Promise.resolve(settings({ waitingForCapableModel: true, sessionsWithoutBriefingThisWeek: 2 })),
       });
-      const lines = Array.from(h!.container.querySelectorAll("[data-status]")).map((l) => l.textContent);
+      const lines = Array.from(h!.container.querySelectorAll('[data-testid="knowledge-status"] [data-status]')).map((l) => l.textContent);
       expect(lines).toEqual([
-        "Spent $0.40 of the $1.00 daily cap today.",
         "Waiting for a capable model. Rule and skill work is on hold until one is available.",
         "2 sessions started without a briefing this week.",
       ]);

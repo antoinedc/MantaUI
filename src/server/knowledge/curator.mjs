@@ -13,7 +13,7 @@
 
 import { newBatchId } from "./ids.mjs";
 import { isKnowledgeError } from "./errors.mjs";
-import { localDay } from "./budget.mjs";
+import { localDay, pauseNotice } from "./budget.mjs";
 import { BATCH_HOUR, PREFERENCES_PATH, createGlobalBlock } from "./globalBlock.mjs";
 import { createBlame, createDecisionValidator, createMessageCache, buildPageEdit, checkBudgets, defaultTitle, isBriefingEcho, normText, parseDecisionOutput, removedUserLines, sessionsOf } from "./decisions.mjs";
 import { applyBulletOp, bulletHash, createRulesStore, parseBullets } from "./rules.mjs";
@@ -147,27 +147,32 @@ export function createCurator(kc) {
     state.kvDelete(`curator.waitSince:${taskClass}`);
     state.kvDelete(`curator.waitNoted:${taskClass}`);
   };
-  function noteCapReached() {
+  // `why` is the shared budget's reason code (a refused gate's `reason`, or the `reason` of a runner `code:"budget"`).
+  function noteCapReached(why) {
     if (kvDay("curator.capNoted")) return;
     state.kvSet("curator.capNoted", localDay(now()));
-    changes.add({ kind: "waiting", summary: "Daily spend cap reached", reason: "Curation resumes tomorrow. Briefings and the search tools keep working.", area: null });
+    const n = pauseNotice(why);
+    changes.add({ kind: "waiting", summary: n.summary, reason: n.reason, area: null });
   }
 
   /**
    * One model call returning the raw answer: `{status:"ok", text}` | `{status:"waiting"|"cap"|"failed"|"off", …}`.
    * `blocks` are `{priority, text}`; the first (highest priority) carries the instruction.
+   * `workType` is the shared budget's work type when it is not the task class (the weekly tidy-up: "knowledge-tidy").
+   * A refused budget — the early gate or the runner's `code:"budget"` — is `{status:"cap"}`, never a failure.
    */
-  async function runModel({ taskClass, slug, blocks, validate }) {
+  async function runModel({ taskClass, workType = taskClass, slug, blocks, validate }) {
     if (!deps.runEphemeral) return { status: "off" };
-    const can = await budget.canSpend();
+    const can = await budget.canSpend({ workType, modelClass: taskClass });
     if (!can.ok) {
-      noteCapReached();
+      noteCapReached(can.reason);
       return { status: "cap" };
     }
     let res;
     try {
       res = await deps.runEphemeral({
         taskClass,
+        ...(workType !== taskClass ? { workType } : {}),
         operation: taskClass,
         context: blocks,
         directory: "~",
@@ -175,7 +180,7 @@ export function createCurator(kc) {
           reportCost: async (c) => {
             // The runner reports the session's recorded cost (`usd`) and/or usage (the usage object comes as `tokens`);
             // the dollars win, a plain number is a prompt-heavy estimate.
-            await budget.record({ taskClass, model: c?.model ?? null, tokens: tokenObject(c?.usage ?? c?.tokens), ...(typeof c?.usd === "number" && c.usd >= 0 ? { usd: c.usd } : {}), slug });
+            await budget.record({ taskClass: workType, model: c?.model ?? null, tokens: tokenObject(c?.usage ?? c?.tokens), ...(typeof c?.usd === "number" && c.usd >= 0 ? { usd: c.usd } : {}), slug });
           },
           validate: async (out) => out?.ok !== false && validate(out?.text),
         },
@@ -185,6 +190,10 @@ export function createCurator(kc) {
       return { status: "failed", code: "runner-error" };
     }
     if (res?.ok === false) {
+      if (res.code === "budget") {
+        noteCapReached(res.reason);
+        return { status: "cap" };
+      }
       if (res.code === "no-qualifying-model") {
         noteWaitingForModel(taskClass);
         return { status: "waiting" };
@@ -211,9 +220,10 @@ export function createCurator(kc) {
    * model, cap reached, a failed call, an answer that isn't exactly YES/NO — counts as a conflict (fail closed).
    * Returns `{conflict:boolean, why?}`.
    */
-  async function conflictsWithUserLines({ slug, claim, lines }) {
+  async function conflictsWithUserLines({ slug, claim, lines, workType }) {
     const r = await runModel({
       taskClass: "curator-rules",
+      ...(workType ? { workType } : {}),
       slug,
       blocks: [{ priority: 100, text: CONFLICT_INSTRUCTION }, block(90, "new_instruction", claim), block(80, "person_lines", lines)],
       validate: (t) => strictYesNo(t) !== null,
@@ -404,7 +414,7 @@ export function createCurator(kc) {
   };
 
   /** A reason string when a new rule/preference conflicts with (or can't be checked against) the user's own lines in its file; else null. */
-  async function checkUserLineConflict(d, vctx) {
+  async function checkUserLineConflict(d, vctx, workType) {
     const eff = await settings.effective(vctx.slug ?? undefined);
     const rel = bulletPathFor(d, vctx.slug, eff.sharing);
     if ((await store.read(rel)) === null) return null;
@@ -412,7 +422,7 @@ export function createCurator(kc) {
     if (userSet === null) return "it couldn't be told which lines you wrote";
     const lines = [...userSet].map((l) => /^[-*]\s+(.+)$/.exec(l)?.[1]).filter(Boolean);
     if (lines.length === 0) return null;
-    const r = await conflictsWithUserLines({ slug: vctx.slug, claim: d.content, lines: lines.slice(0, 60) });
+    const r = await conflictsWithUserLines({ slug: vctx.slug, claim: d.content, lines: lines.slice(0, 60), workType });
     return r.conflict ? r.why : null;
   }
 
@@ -420,7 +430,7 @@ export function createCurator(kc) {
    * Validate and apply a list of raw decisions. A decision whose base changed is collected, re-asked once
    * (`reask`) and then applied or dropped. Returns `{applied, skipped, dropped, aborted}`.
    */
-  async function processDecisions(raws, vctx, { batchId, slug, taskClass, reask = true, trusted = false }) {
+  async function processDecisions(raws, vctx, { batchId, slug, taskClass, workType, reask = true, trusted = false }) {
     const out = { applied: 0, skipped: 0, dropped: 0, aborted: false };
     const stale = [];
     const touched = new Map();
@@ -444,7 +454,7 @@ export function createCurator(kc) {
       }
       const dd = v.decision;
       if (dd.type === "rule.add" || dd.type === "rule.change" || dd.type === "preference.set") {
-        const c = await checkUserLineConflict(dd, vctx);
+        const c = await checkUserLineConflict(dd, vctx, workType);
         if (c) {
           recordRefused(dd, "skipped", `It wasn't applied: ${c}.`, { data: { conflict: true } });
           out.skipped++;
@@ -470,9 +480,9 @@ export function createCurator(kc) {
     }
     if (stale.length && !out.aborted) {
       if (reask) {
-        const again = await reaskStale(stale, vctx, { slug, taskClass });
+        const again = await reaskStale(stale, vctx, { slug, taskClass, workType });
         if (again.status === "ok") {
-          const sub = await processDecisions(again.decisions, vctx, { batchId, slug, taskClass, reask: false });
+          const sub = await processDecisions(again.decisions, vctx, { batchId, slug, taskClass, workType, reask: false });
           for (const k of ["applied", "skipped", "dropped"]) out[k] += sub[k];
           out.aborted = sub.aborted;
         } else {
@@ -491,7 +501,7 @@ export function createCurator(kc) {
     return out;
   }
 
-  async function reaskStale(stale, vctx, { slug, taskClass }) {
+  async function reaskStale(stale, vctx, { slug, taskClass, workType }) {
     const pages = [];
     for (const s of stale) {
       const content = await store.read(s.rel);
@@ -500,7 +510,7 @@ export function createCurator(kc) {
       pages.push({ path: s.rel, baseCommit: base, content: content === null ? null : clip(content, PAGE_CHARS) });
     }
     const earlier = stale.map((s) => ({ type: s.d.type, target: s.d.target, content: s.d.content, reason: s.d.reason, evidence: s.d.evidence }));
-    return callModel({ taskClass, slug, blocks: [{ priority: 100, text: REASK_INSTRUCTION }, block(90, "your_earlier_decisions", earlier), block(80, "pages_now", pages)] });
+    return callModel({ taskClass, ...(workType ? { workType } : {}), slug, blocks: [{ priority: 100, text: REASK_INSTRUCTION }, block(90, "your_earlier_decisions", earlier), block(80, "pages_now", pages)] });
   }
 
   // ---- repository writes --------------------------------------------------------------
@@ -682,8 +692,9 @@ export function createCurator(kc) {
       if (all.length === 0) return { status: "idle" };
       if (!force && now() < Number(state.kvGet(nextTryKey(slug)) ?? 0)) return { status: "backoff" };
       if (!budget.canBatch(slug)) return { status: "batch-limit" };
-      if (!(await budget.canSpend()).ok) {
-        noteCapReached();
+      const can = await budget.canSpend({ workType: "curator-notes" });
+      if (!can.ok) {
+        noteCapReached(can.reason);
         return { status: "cap" };
       }
       const notes = all.slice(0, MAX_NOTES_PER_BATCH);

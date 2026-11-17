@@ -27,7 +27,7 @@ test("ephemeral cascade retries output quality, never infrastructure or cleanup 
   for (const code of ["empty-output", "model-output-cap", "transport-error", "provenance-error"]) {
     let calls = 0;
     await runEphemeral({ taskClass: "ambient-summarize", deps: {
-      engineState: mem(), ledger, resolveModel: async () => null,
+      engineState: mem(), ledger, resolveModel: async () => null, preflight: async () => ({ ok: true }),
       oc: { runEphemeralSession: async () => ++calls === 1 ? { ok: false, code } : { text: "valid" } },
     } });
     assert.equal(calls, ["empty-output", "model-output-cap"].includes(code) ? 2 : 1);

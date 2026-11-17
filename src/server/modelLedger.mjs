@@ -265,8 +265,9 @@ function aggregateSeriesByBucket(rows, bucket, count, now) {
 }
 
 // tokensSent counts total context processed through the model (all input buckets + output), not billing-weighted cost — the dashboard graph shows weight, the Saved stat shows money.
-function tokensSent(row) {
-  return num(row.input) + num(row.cacheRead) + num(row.cacheWrite) + num(row.output);
+// Exported: the background budget measures its own work with the SAME formula so both sides of its share ratio agree.
+export function tokensSent(row) {
+  return num(row?.input) + num(row?.cacheRead) + num(row?.cacheWrite) + num(row?.output);
 }
 
 /**

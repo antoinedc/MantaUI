@@ -261,7 +261,7 @@ export function createCorrectionDetector(deps = {}) {
     const stats = { classified: 0, models: new Set(), stopped: null };
     let failures = 0;
     for (let off = 0; off < candidates.length; off += BATCH_SIZE) {
-      const spend = await budget.canSpend();
+      const spend = await budget.canSpend({ workType: TASK_CLASS });
       if (!spend.ok) {
         stats.stopped = "budget";
         break;
@@ -277,7 +277,7 @@ export function createCorrectionDetector(deps = {}) {
       }
       if (!r.ok) {
         stats.stopped = r.code;
-        if (r.code === "no-qualifying-model" || r.code === "no-healthy-endpoint" || r.code === "scanner") break;
+        if (r.code === "no-qualifying-model" || r.code === "no-healthy-endpoint" || r.code === "scanner" || r.code === "budget") break; // a refused budget is not a failure: stop for now
         if (++failures >= 2) break;
         continue;
       }
@@ -352,7 +352,7 @@ export function createCorrectionDetector(deps = {}) {
       let answers = new Map();
       const cands = existing.slice(0, MODEL_CLUSTER_CANDIDATES);
       if (cands.length > 0 || batch.length > 1) {
-        const spend = await budget.canSpend();
+        const spend = await budget.canSpend({ workType: TASK_CLASS });
         if (spend.ok) {
           const body = `EXISTING CLUSTERS:\n${cands.map((c, i) => `C${i + 1}: ${c.lesson}`).join("\n") || "(none)"}\n\nNEW LESSONS:\n${batch.map((b, i) => `[${i + 1}] ${b.lesson}`).join("\n")}`;
           try {

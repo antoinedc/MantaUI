@@ -243,9 +243,9 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
     throw new Error(`runEphemeral: task class "${taskClass}" only resolves a model (use resolveModelForClass)`);
   }
   const op = ["segment-summary", "segment-one-liner", "tool-classification"].includes(operation) ? operation : taskClass;
-  const record = async (kind, code) => {
+  const record = async (kind, code, reason) => {
     try {
-      await (deps.ledger ?? ledgerStore).append({ actor: "cto", ts: Date.now(), kind, operation: op, taskClass, code });
+      await (deps.ledger ?? ledgerStore).append({ actor: "cto", ts: Date.now(), kind, operation: op, taskClass, code, ...(reason ? { reason } : {}) });
     } catch { /* Diagnostics must not prevent cleanup or hide a result. */ }
   };
 
@@ -299,7 +299,7 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
         // Local lifecycle failure (or a resolution verdict): not evidence
         // against the provider — no failover, no escalation. A local failure
         // retried on the same endpoint would double the cost of a broken box.
-        await record("cto.operation_outcome", safeSummaryCode(out.code));
+        await record("cto.operation_outcome", safeSummaryCode(out.code), out.code === "budget" ? out.reason : undefined);
         return out;
       }
       // quality → fall through to the cascade below.
@@ -350,6 +350,61 @@ export async function resolveModelForClass(taskClass, { configGet, resolveModel 
   return resolveModelOrVerdict(resolveModel, { taskClass, tier: meta.tier, meta, configGet, excludeEndpointKeys: [] });
 }
 
+/**
+ * The budget preflight (§17.2). Returns null when the call may go ahead, else the refusal reason. Never throws: a
+ * missing preflight or one that cannot answer refuses with `unavailable` (the gate fails closed).
+ */
+async function runPreflight({ preflight, resolveDefaultModel, taskClass, tier, model }) {
+  if (typeof preflight !== "function") return "unavailable";
+  try {
+    let billed = model ?? null;
+    if (!billed && typeof resolveDefaultModel === "function") {
+      try {
+        billed = (await resolveDefaultModel()) ?? null;
+      } catch {
+        billed = null;
+      }
+    }
+    const verdict = await preflight({ taskClass, tier, model: billed });
+    if (verdict && verdict.ok === true) return null;
+    return typeof verdict?.reason === "string" && verdict.reason ? verdict.reason : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
+ * The CTO's runner (§17.1; the shape of the knowledge runner): every background CTO call site goes through this so the
+ * budget gate (`preflight`) and the metering (`reportCost`) are injected in ONE place. The runner's own collaborators sit
+ * UNDER the caller's `deps`, so a caller's `validate` (or a test's resolver) still wins. A budget refusal comes back
+ * as a GATED outcome (`gated: true`, error `cto_cap_hit` — the code callers already know, §7.2): an expected "not now",
+ * never a failure that burns a retry attempt.
+ *
+ * @param {object} o
+ * @param {Function} [o.runEphemeral]  default: this module's runEphemeral
+ * @param {object} o.oc  `{runEphemeralSession}`
+ * @param {Function} o.configGet
+ * @param {Function} [o.resolveDefaultModel]  async () => {providerID, modelID} | null — the box default
+ * @param {Function} o.preflight  async ({taskClass, tier, model}) => {ok:true} | {ok:false, reason}
+ * @param {Function} [o.reportCost]  async ({taskClass, tier, model, tokens, estimated, usage?, usd?}) => void
+ */
+export function createCtoRunner({ runEphemeral: run = runEphemeral, oc, configGet, resolveDefaultModel, preflight, reportCost } = {}) {
+  return async (args = {}) => {
+    const out = await run({
+      ...args,
+      deps: {
+        oc,
+        configGet,
+        ...(resolveDefaultModel ? { resolveDefaultModel } : {}),
+        ...(preflight ? { preflight } : {}),
+        ...(reportCost ? { reportCost } : {}),
+        ...(args.deps ?? {}),
+      },
+    });
+    return out && out.ok === false && out.code === "budget" ? { ...out, gated: true, error: out.error ?? "cto_cap_hit" } : out;
+  };
+}
+
 async function runOnce({ taskClass, meta, tier, context, directory, deps, operation,
   excludeEndpointKeys = [], requireDifferentEndpointKey = "" }) {
   const {
@@ -386,6 +441,11 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
       return { ok: false, code: "no-alternate-endpoint", taskClass, tier };
     }
   }
+  // Background work budget (spec 2026-11-17 §7.1, §17.2): after model resolution and before EVERY dispatch (the
+  // failover and the tier escalation included) the budget may refuse. A refusal is a typed outcome and spends no
+  // model call. A null model is the box default, resolved by the injected resolver so the preflight sees the billed one.
+  const refusal = await runPreflight({ preflight: deps.preflight, resolveDefaultModel: deps.resolveDefaultModel, taskClass, tier, model });
+  if (refusal) return { ok: false, code: "budget", reason: refusal, taskClass, tier };
   const instruction = assembleContext(context, { taskClass });
 
   let sid = null;

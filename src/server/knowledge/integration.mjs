@@ -130,15 +130,41 @@ export function knowledgePaths(opts) {
  * runner's own collaborators (`oc`, `configGet`) UNDER the caller's, so the caller's hooks win and nothing else
  * has to know how the runner is built.
  *
- * @param {{ runEphemeral: Function, oc: object, configGet: Function }} o
+ * It is also where the shared background budget (spec 2026-11-17-background-work-budget §7.1, §17) is wired:
+ *   • `preflight` — asked by `runEphemeral` after it resolved the model and before EVERY dispatch attempt; a refusal
+ *     ends the run `{ok:false, code:"budget", reason}` with no model call. It cannot be replaced by a caller.
+ *   • real usage — booked on the shared budget after every run (`inLedger:false`: an ephemeral session is deleted,
+ *     so the ledger never sees it). A run that could only estimate books its estimate (§17.4).
+ * A caller may pass `workType` when the call's work type is not its task class (the weekly tidy-up runs as
+ * "curator-rules" but is batch work "knowledge-tidy"); it is not forwarded to the runner.
+ *
+ * @param {{ runEphemeral: Function, oc: object, configGet: Function, backgroundBudget?: object }} o
+ *   `backgroundBudget` absent → every run is refused (`unavailable`): fail closed.
  */
-export function createKnowledgeRunner({ runEphemeral, oc, configGet }) {
+export function createKnowledgeRunner({ runEphemeral, oc, configGet, backgroundBudget = null }) {
   return (args = {}) => {
-    const callerCost = args.deps?.reportCost;
+    const { workType: workTypeArg, ...runArgs } = args;
+    const workType = typeof workTypeArg === "string" && workTypeArg ? workTypeArg : runArgs.taskClass;
+    const callerCost = runArgs.deps?.reportCost;
     // The runner reports ONE token number (`tokens`) plus, when the ephemeral session recorded its spend, the
     // per-kind `usage` and `usd`. Knowledge callers price per component, so they get the usage object AS `tokens`
     // (and `usd` beside it); with no recorded usage they keep the estimate number.
-    const reportCost = callerCost ? async (c) => callerCost(c?.usage ? { ...c, tokens: c.usage } : c) : undefined;
-    return runEphemeral({ ...args, deps: { oc, configGet, ...(args.deps ?? {}), ...(reportCost ? { reportCost } : {}) } });
+    const reportCost = async (c) => {
+      if (backgroundBudget) {
+        await backgroundBudget.record({
+          workType,
+          model: c?.model ?? null,
+          usage: c?.usage ?? c?.tokens,
+          ...(typeof c?.usd === "number" ? { usd: c.usd } : {}),
+          inLedger: false,
+        });
+      }
+      if (callerCost) await callerCost(c?.usage ? { ...c, tokens: c.usage } : c);
+    };
+    const preflight = async ({ model } = {}) => {
+      const d = backgroundBudget ? await backgroundBudget.check({ workType, model: model ?? null }) : { ok: false, reason: "unavailable" };
+      return d?.ok ? { ok: true } : { ok: false, reason: d?.reason ?? "unavailable" };
+    };
+    return runEphemeral({ ...runArgs, deps: { oc, configGet, ...(runArgs.deps ?? {}), reportCost, preflight } });
   };
 }

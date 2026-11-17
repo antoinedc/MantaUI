@@ -10,6 +10,7 @@
 
 import { effectsForVerdict, betaMean } from "./ctoVerdicts.mjs";
 import { todaySpend, roiMonthKey } from "./ctoBudget.mjs";
+import { DEFAULT_DAILY_CAP_USD } from "./backgroundBudget.mjs";
 
 const DAY_MS = 86_400_000;
 
@@ -85,7 +86,10 @@ function formatTimeOfDay(msIntoDay) {
  *   ledgerRead    — async () => rows[] (the A1 ledger; each row has `.kind`, `.ts`, `.actor`)
  *   budgetRead    — async () => the budget store payload (B1 economics; tolerant of null)
  *   listSegments  — async () => segments[] (each has `.window:[start,end]`, `.summarizedAt`)
- *   ctoAmbientCap — number — the hard daily ambient cap in $ (config, default 2.50)
+ *   backgroundStatus — async () => BudgetStatus | null — the shared background-work budget's status
+ *                  (backgroundBudget.status(), spec 2026-11-17 §10): the dollar cap on API keys and the
+ *                  share of each plan window background work has used. Null/absent → the dollar line
+ *                  falls back to the default cap.
  */
 export async function computeHealthStats({
   now = () => Date.now(),
@@ -93,7 +97,7 @@ export async function computeHealthStats({
   budgetRead = async () => null,
   listSegments = async () => [],
   verdictsRead = async () => [],
-  ctoAmbientCap = 2.5,
+  backgroundStatus = async () => null,
   // BET-1405 (§12.4): async () => { month, roll, collectingUntil } — the
   // monthly ROI roll; the endpoint refreshes it before this read.
   roiRead = async () => null,
@@ -121,27 +125,40 @@ export async function computeHealthStats({
     ? Math.min(1, Math.max(0, Number(ctoAutonomyThreshold)))
     : 0.7;
 
-  // 1. Ambient spend today / cap.
+  // 1. Background spend today (the one shared budget, spec 2026-11-17): the dollar line on API keys, and the share
+  //    of each plan window background work has used. The meter is live when the budget store holds any recorded
+  //    activity or the shared budget answered.
   let budget = null;
   try {
     budget = (await budgetRead()) ?? null;
   } catch {
     budget = null;
   }
-  // The meter is live when the budget store holds any recorded activity —
-  // a quiet today then honestly reads "$0.00 of $2.50 / day".
-  const todaySpent = budget ? todaySpend(budget, t) : 0;
+  let status = null;
+  try {
+    status = (await backgroundStatus()) ?? null;
+  } catch {
+    status = null;
+  }
+  const todaySpent = status?.payg ? Number(status.payg.usdToday) || 0 : budget ? todaySpend(budget, t) : 0;
+  const capUsd = Number.isFinite(Number(status?.dailyCapUsd)) ? Number(status.dailyCapUsd) : DEFAULT_DAILY_CAP_USD;
   const budgetLive =
-    budget != null &&
-    (budget.updatedMs != null || Object.keys(budget.days ?? {}).length > 0);
+    status != null ||
+    (budget != null && (budget.updatedMs != null || Object.keys(budget.days ?? {}).length > 0));
+  const planOnly = status != null && (status.payg?.providers?.length ?? 0) === 0 && (status.plans?.length ?? 0) > 0 && todaySpent === 0;
+  const parts = [];
+  if (!planOnly) parts.push(`$${todaySpent.toFixed(2)} of $${capUsd.toFixed(2)} / day`);
+  for (const p of Array.isArray(status?.plans) ? status.plans : []) {
+    if (p?.fallback) continue; // the dollar cap governs while its usage can't be read
+    const w = (Array.isArray(p?.windows) ? p.windows : []).find((x) => x?.kind === "weekly") ?? p?.windows?.[0];
+    if (w) parts.push(`${p.planLabel ?? p.adapter}: ${Math.round(Number(w.bgPct) || 0)}% of ${w.label ?? w.kind}`);
+  }
   stats.push({
     id: "ambientSpendToday",
     label: "Ambient spend today",
     min: HEALTH_STAT_MIN.ambientSpendToday,
     n: budgetLive ? 1 : 0,
-    value: budgetLive
-      ? `$${todaySpent.toFixed(2)} of $${Number(ctoAmbientCap).toFixed(2)} / day`
-      : null,
+    value: budgetLive ? parts.join(" · ") : null,
   });
 
   // 2. Digest opens (7d) + median open time (time of day, matching the digest

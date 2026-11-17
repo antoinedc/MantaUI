@@ -432,7 +432,7 @@ export function createCapture(deps = {}) {
       return { captured: false, notes: 0, skipped: "excluded" };
     }
     if (t < st.retryAt) return { captured: false, notes: 0, skipped: "backoff" };
-    const spend = await budget.canSpend();
+    const spend = await budget.canSpend({ workType: TASK_CLASS });
     if (!spend.ok) return { captured: false, notes: 0, skipped: "budget" };
 
     const row = selRow.get(sessionID);
@@ -473,6 +473,7 @@ export function createCapture(deps = {}) {
       log("[knowledge] capture run failed:", e?.message ?? e);
       return { captured: false, notes: 0, skipped: "run-failed" };
     }
+    if (res?.ok === false && res.code === "budget") return { captured: false, notes: 0, skipped: "budget" }; // the budget said wait: no backoff, the next tick asks again
     if (!res || res.ok === false) {
       st.retryAt = t + RETRY_MS;
       return { captured: false, notes: 0, skipped: String(res?.code ?? "run-failed") };

@@ -372,6 +372,14 @@ export type MountOptions = {
   strictMode?: boolean;
 };
 
+/** Install the mock `window.api`, mount `ui` and let its first reads settle: the open-a-component step most tests start with. */
+export async function mountWithMockApi(ui: React.ReactElement, overrides: Record<string, unknown> = {}): Promise<{ h: Harness; api: MockApi }> {
+  const { api } = installMockApi(overrides);
+  const h = mount(ui);
+  await h.flush();
+  return { h, api };
+}
+
 export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness {
   const container = document.createElement("div");
   document.body.appendChild(container);

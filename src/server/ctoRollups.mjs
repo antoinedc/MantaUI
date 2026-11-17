@@ -364,6 +364,9 @@ export async function submitFactsFromRollup(dayRollup, { resolveSegment, submitP
 //                    it for each attributable bullet (sender "cto").
 //   now            — () => epoch ms.
 //   ledger         — A1 ledger {append} (best-effort).
+//   deferOnBudget  — false (live): a budget-refused reduce persists a degraded rollup. true (the cold-start backfill):
+//                    the refusal returns {deferred:true, level, window, id} BEFORE anything is saved or logged, so the
+//                    caller leaves the window for a later step (a rollup is write-once: a degraded one is permanent).
 
 export async function defaultLoadPreceding({ level, window, rollups } = {}) {
   try {
@@ -500,6 +503,7 @@ export function createRollupRunner(deps = {}) {
     submitProposal,
     now = () => Date.now(),
     ledger = ledgerStore,
+    deferOnBudget = false,
   } = deps;
 
   const loadInputsFn = loadInputs ?? defaultLoadInputs({ fs, rollups, segments });
@@ -548,6 +552,7 @@ export function createRollupRunner(deps = {}) {
     let rollup = null;
     try {
       const res = await runEphemeral({ taskClass: "ambient-summarize", context });
+      if (deferOnBudget && res?.code === "budget") return { deferred: true, level, window, id };
       const parsed = parseRollupText(res?.text);
       if (res?.ok && parsed && validateRollup({ ...parsed, v: ROLLUP_VERSION, level, window })) {
         rollup = { ...parsed, v: ROLLUP_VERSION, level, window };

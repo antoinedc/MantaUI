@@ -100,11 +100,11 @@ const DEFAULT_CONFIG = {
   // High. Defaults to Low. Enforcement rides the engine in a later
   // effort-routing issue; the setting persists here.
   ctoTier: "low",
-  // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
-  // the effort dial; the B1 metering that enforces it ships in the economics
-  // issue). The Behavior-card editor + Health "ambient spend today / cap" row
-  // read this.
-  ctoAmbientCap: 2.5,
+  // Background work budget (spec 2026-11-17): ONE budget for shared knowledge and the background CTO.
+  // `level` (off | light | normal) is the share of a subscription plan's quota windows it may use;
+  // `dailyCapUsd` is the cap per local day on pay-per-token keys. Written only through
+  // `config:update`'s validate-and-merge (backgroundBudget.mjs); a partial stored value reads as its defaults.
+  backgroundWork: { level: "normal", dailyCapUsd: 5 },
   // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
   // notify). Off by default.
   ctoDigestPush: false,
@@ -180,9 +180,11 @@ export async function configGet() {
 // nested config (`cto.*`) land where the server reads them. Flat keys merge as
 // before. Deep objects are merged one level (enough for the cto block).
 // preload: ipcRenderer.invoke(IPC.configUpdate, patch) → args[0] = patch
-export async function configUpdate(patch) {
+export async function configUpdate(patch, { remove = [] } = {}) {
   const current = await getConfig();
   const next = { ...current };
+  // `remove`: stored keys to drop (retired settings); applied before the patch, so a patch may still set one.
+  for (const key of Array.isArray(remove) ? remove : []) delete next[key];
   for (const [key, value] of Object.entries(patch ?? {})) {
     if (typeof key === "string" && key.includes(".")) {
       const [head, ...rest] = key.split(".");

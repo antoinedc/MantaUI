@@ -23,21 +23,7 @@ import {
   createEphemeralReaper,
   runEphemeral,
 } from "./ctoSessions.mjs";
-
-function fakeEngineState(initial = {}) {
-  let payload = { ...initial };
-  return {
-    async load() {
-      return payload;
-    },
-    async save(p) {
-      payload = p;
-    },
-    peek() {
-      return payload;
-    },
-  };
-}
+import { allow, fakeEngineState } from "./ctoSessionsFixtures.mjs";
 
 // The resolveModel is injected in unit tests; modelID carries the ROUTER tier
 // so the cascade's escalation is observable without touching the real router.
@@ -183,7 +169,7 @@ test("runEphemeral records the session in the active set BEFORE prompting, then 
   const out = await runEphemeral({
     taskClass: "gatekeeper",
     context: [{ priority: 1, text: "hi" }],
-    deps: { oc, engineState, resolveModel: async () => null },
+    deps: { preflight: allow, oc, engineState, resolveModel: async () => null },
   });
   assert.equal(out.text, "reply");
   assert.deepEqual(activeDuringPrompt, ["sid-1"], "recorded BEFORE prompting");
@@ -207,7 +193,7 @@ test("runEphemeral removes the active-set entry on error (finally)", async () =>
       runEphemeral({
         taskClass: "worthiness",
         context: [],
-        deps: { oc, engineState, resolveModel: async () => null },
+        deps: { preflight: allow, oc, engineState, resolveModel: async () => null },
       }),
     /boom/,
   );
@@ -238,6 +224,7 @@ test("cascade fires ONCE and ONLY on validation failure, escalating nano→mid",
     taskClass: "ambient-summarize",
     context: [],
     deps: {
+      preflight: allow,
       oc,
       engineState,
       resolveModel: modelFor,
@@ -264,7 +251,7 @@ test("cascade does NOT fire a third attempt when validation keeps failing (at mo
   const out = await runEphemeral({
     taskClass: "ambient-summarize",
     context: [],
-    deps: { oc, engineState, resolveModel: async () => null, validate: async () => false },
+    deps: { preflight: allow, oc, engineState, resolveModel: async () => null, validate: async () => false },
   });
   assert.equal(calls.length, 2, "two attempts at most");
   assert.equal(out.text, "x", "returns the last (still low-confidence) result");
@@ -283,7 +270,7 @@ test("cascade does NOT fire when validation passes on the first attempt", async 
   const out = await runEphemeral({
     taskClass: "worthiness",
     context: [],
-    deps: { oc, engineState, resolveModel: async () => null, validate: async () => true },
+    deps: { preflight: allow, oc, engineState, resolveModel: async () => null, validate: async () => true },
   });
   assert.equal(calls.length, 1);
   assert.equal(out.text, "fresh");
@@ -303,7 +290,7 @@ test("cascade does NOT escalate a mid-tier class on validation failure", async (
   const out = await runEphemeral({
     taskClass: "digest-compose", // mid tier — no escalation allowed
     context: [],
-    deps: { oc, engineState, resolveModel: modelFor, validate: async () => false },
+    deps: { preflight: allow, oc, engineState, resolveModel: modelFor, validate: async () => false },
   });
   assert.equal(calls.length, 1, "mid tier never cascades");
   assert.equal(out.tier, "mid");
@@ -439,6 +426,7 @@ test("BET-1535: a CTO ephemeral run does not select an endpoint the router knows
     taskClass: "gatekeeper",
     context: [],
     deps: {
+      preflight: allow,
       oc,
       engineState: fakeEngineState(),
       resolveModel: routerResolver({
@@ -468,6 +456,7 @@ test("BET-1535: with every candidate excluded the run FAILS with code no-healthy
     taskClass: "gatekeeper",
     context: [],
     deps: {
+      preflight: allow,
       oc,
       engineState: fakeEngineState(),
       validate: async () => {
@@ -522,6 +511,7 @@ import {
   KNOWLEDGE_TITLE_PREFIX,
 } from "./ctoSessions.mjs";
 
+
 const OPUS = { providerID: "anthropic", modelID: "claude-opus-4" };
 const winnerTrace = (score, widened = false) => ({
   target: { tier: "deep", floorTier: "fast", widened },
@@ -566,7 +556,7 @@ test("runEphemeral on a deep class never cascades on validation failure", async 
   const oc = { async runEphemeralSession() { calls.push(1); return { text: "x", sid: "s" }; } };
   const out = await runEphemeral({
     taskClass: "curator-notes",
-    deps: { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, validate: async () => false },
+    deps: { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, validate: async () => false },
   });
   assert.equal(calls.length, 1);
   assert.equal(out.ok, false);
@@ -585,7 +575,7 @@ test("timeoutMs is passed through to the synchronous session (class with one); a
   const oc = {
     async runEphemeralSession(opts) { seen[opts.title] = opts; return { text: "ok", sid: "s" }; },
   };
-  const deps = { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS };
+  const deps = { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => OPUS };
   await runEphemeral({ taskClass: "curator-rules", deps });
   await runEphemeral({ taskClass: "knowledge-capture", deps });
   await runEphemeral({ taskClass: "gatekeeper", deps });
@@ -609,7 +599,7 @@ test("runEphemeral works with the CTO engine off and reports cost for every know
       taskClass,
       context: [{ priority: 1, text: "some input" }],
       // no CTO engine, no ledger/engine wiring beyond the injected state store
-      deps: { oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } },
+      deps: { preflight: allow, oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } },
     });
     assert.equal(out.text, "twelve chars", taskClass);
   }
@@ -730,6 +720,7 @@ test("runEphemeral maps no-qualifying-model to a run outcome (no throw, no sessi
   const out = await runEphemeral({
     taskClass: "curator-rules",
     deps: {
+      preflight: allow,
       oc,
       engineState: fakeEngineState(),
       resolveModel: (a) => resolveWith(fakeRoute({ model: null, trace: null }), "curator-rules"),
@@ -758,7 +749,7 @@ test("runEphemeral reports the session's REAL usage (tokens by kind + recorded c
   const run = async (result) => {
     const reported = [];
     const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-u"); return { sid: "sid-u", text: "an answer", ...result }; } };
-    await runEphemeral({ taskClass: "curator-notes", context: [{ priority: 1, text: "some input" }], deps: { oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } });
+    await runEphemeral({ taskClass: "curator-notes", context: [{ priority: 1, text: "some input" }], deps: { preflight: allow, oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } });
     return reported;
   };
   const real = await run({ usage: { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300, usd: 0.07 } });
@@ -782,7 +773,7 @@ test("a run that THROWS still reports the instruction estimate, and the error st
   const reported = [];
   const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-t"); throw new Error("boom"); } };
   await assert.rejects(
-    runEphemeral({ taskClass: "knowledge-capture", context: [{ priority: 1, text: "a long enough instruction to estimate" }], deps: { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } }),
+    runEphemeral({ taskClass: "knowledge-capture", context: [{ priority: 1, text: "a long enough instruction to estimate" }], deps: { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } }),
     /boom/,
   );
   assert.equal(reported.length, 1);
@@ -790,11 +781,10 @@ test("a run that THROWS still reports the instruction estimate, and the error st
   assert.ok(reported[0].tokens > 0);
 });
 
-test("a cache-heavy CTO run is priced exactly as before (the estimate at the blended rate) — never from its real cache totals", async () => {
-  const { priceTokens } = await import("./ctoBudget.mjs");
+test("a cache-heavy CTO run still reports the prompt+answer size estimate as `tokens` (real usage travels beside it)", async () => {
   const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
   const model = { ...OPUS, cost };
-  const priced = [];
+  const reports = [];
   const oc = { async runEphemeralSession({ onCreated }) {
     await onCreated("sid-c");
     return { sid: "sid-c", text: "an answer", usage: { input: 100, output: 50, reasoning: 0, cacheRead: 400_000, cacheWrite: 20_000, usd: 1.9 } };
@@ -803,12 +793,121 @@ test("a cache-heavy CTO run is priced exactly as before (the estimate at the ble
     await runEphemeral({
       taskClass,
       context: [{ priority: 1, text: "x".repeat(400) }],
-      deps: { oc, engineState: fakeEngineState(), resolveModel: async () => model, reportCost: async (r) => { priced.push({ taskClass, r, usd: priceTokens({ model: r.model, tokens: r.tokens }) }); } },
+      deps: { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => model, reportCost: async (r) => { reports.push({ taskClass, r }); } },
     });
   }
-  const listInputOutput = (100 * cost.input + 50 * cost.output) / 1e6;
-  for (const { taskClass, r, usd } of priced) {
+  for (const { taskClass, r } of reports) {
     assert.equal(r.tokens, 100 + 3, `${taskClass}: tokens = the instruction + answer estimate`);
-    assert.ok(usd <= listInputOutput, `${taskClass}: priced $${usd} ≤ input+output at list rates $${listInputOutput}`);
+    assert.equal(r.usage.cacheRead, 400_000, `${taskClass}: the real usage travels beside the estimate`);
+    assert.equal(r.usd, 1.9);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Background work budget (spec 2026-11-17 §7.1, §17.1–2): the preflight gate and the CTO runner
+// ---------------------------------------------------------------------------
+
+function countingOc(reply = { text: "ok", sid: "s" }) {
+  const oc = { calls: 0, async runEphemeralSession() { oc.calls += 1; return reply; } };
+  return oc;
+}
+
+test("preflight: a refusal returns code budget + reason with NO model call, and nothing is ledgered as an unknown error", async () => {
+  const oc = countingOc();
+  const rows = [];
+  const seen = [];
+  const out = await runEphemeral({
+    taskClass: "ambient-summarize",
+    deps: {
+      oc, engineState: fakeEngineState(), resolveModel: async () => OPUS,
+      ledger: { append: async (r) => rows.push(r) },
+      preflight: async (a) => { seen.push(a); return { ok: false, reason: "usd-cap" }; },
+    },
+  });
+  assert.deepEqual(out, { ok: false, code: "budget", reason: "usd-cap", taskClass: "ambient-summarize", tier: "nano" });
+  assert.equal(oc.calls, 0);
+  assert.deepEqual(seen, [{ taskClass: "ambient-summarize", tier: "nano", model: OPUS }]);
+  const outcome = rows.find((r) => r.kind === "cto.operation_outcome");
+  assert.equal(outcome.code, "budget");
+  assert.equal(outcome.reason, "usd-cap");
+});
+
+test("preflight: a refusal is a local failure — no escalation, no failover (exactly one preflight call)", async () => {
+  const oc = countingOc();
+  let pre = 0;
+  const out = await runEphemeral({
+    taskClass: "ambient-summarize",
+    deps: {
+      oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, validate: async () => false,
+      preflight: async () => { pre += 1; return { ok: false, reason: "level-cap" }; },
+    },
+  });
+  assert.equal(out.code, "budget");
+  assert.equal(pre, 1);
+  assert.equal(oc.calls, 0);
+});
+
+test("preflight: runs before EVERY attempt — the tier escalation is checked against the escalated model", async () => {
+  const oc = countingOc();
+  const seen = [];
+  const modelFor = tierModelResolver();
+  const out = await runEphemeral({
+    taskClass: "ambient-summarize",
+    deps: {
+      oc, engineState: fakeEngineState(), resolveModel: modelFor, validate: async () => false,
+      // the first attempt passes, the escalated one is refused: the second model is never called
+      preflight: async (a) => { seen.push(a.tier); return seen.length === 1 ? { ok: true } : { ok: false, reason: "window-busy" }; },
+    },
+  });
+  assert.deepEqual(seen, ["nano", "mid"]);
+  assert.equal(oc.calls, 1, "only the first attempt reached a model");
+  assert.equal(out.ok, false);
+  assert.equal(out.code, "budget");
+  assert.equal(out.reason, "window-busy");
+});
+
+test("preflight: a null model is passed as the box default from the injected resolver", async () => {
+  const oc = countingOc();
+  const seen = [];
+  const DEFAULT = { providerID: "anthropic", modelID: "box-default" };
+  await runEphemeral({
+    taskClass: "gatekeeper",
+    deps: {
+      oc, engineState: fakeEngineState(), resolveModel: async () => null,
+      resolveDefaultModel: async () => DEFAULT,
+      preflight: async (a) => { seen.push(a.model); return { ok: true }; },
+    },
+  });
+  assert.deepEqual(seen, [DEFAULT]);
+  assert.equal(oc.calls, 1);
+});
+
+test("preflight: absent → the run refuses with reason unavailable (the gate fails closed); a throwing preflight does too", async () => {
+  const oc = countingOc();
+  const none = await runEphemeral({ taskClass: "gatekeeper", deps: { oc, engineState: fakeEngineState(), resolveModel: async () => null } });
+  assert.deepEqual(none, { ok: false, code: "budget", reason: "unavailable", taskClass: "gatekeeper", tier: "nano" });
+  const boom = await runEphemeral({
+    taskClass: "gatekeeper",
+    deps: { oc, engineState: fakeEngineState(), resolveModel: async () => null, preflight: async () => { throw new Error("x"); } },
+  });
+  assert.equal(boom.reason, "unavailable");
+  assert.equal(oc.calls, 0);
+});
+
+test("createCtoRunner injects preflight + reportCost under the caller's deps (the caller's validate still wins)", async () => {
+  const oc = countingOc({ text: "ok", sid: "s" });
+  const reports = [];
+  let validated = 0;
+  const { createCtoRunner } = await import("./ctoSessions.mjs");
+  const run = createCtoRunner({
+    oc,
+    configGet: async () => ({}),
+    preflight: allow,
+    reportCost: async (c) => { reports.push(c); },
+  });
+  const out = await run({ taskClass: "gatekeeper", deps: { engineState: fakeEngineState(), resolveModel: async () => OPUS, validate: async () => { validated += 1; return true; } } });
+  assert.equal(out.text, "ok");
+  assert.equal(validated, 1);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].taskClass, "gatekeeper");
 });
