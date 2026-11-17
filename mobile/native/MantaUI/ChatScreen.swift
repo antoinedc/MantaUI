@@ -168,11 +168,15 @@ struct ChatScreen: View {
             eventStore: eventStore,
             capabilities: capabilities,
             path: $path,
+            // The old session is no longer on screen: drop its heavy-frame focus (the content's own release only
+            // runs when the screen is popped, and an id swap is not a pop).
             onCleared: { newId in
+                eventStore.clearFocus(owner: sid)
                 carryOver = nil
                 currentSessionId = newId
             },
             onHandedOff: { newId, carry in
+                eventStore.clearFocus(owner: sid)
                 carryOver = carry
                 currentSessionId = newId
             },
@@ -1088,7 +1092,7 @@ private struct ChatScreenContent: View {
 
     /// (Re)load the scheduled-task count backing the sheet's live badge.
     private func refreshScheduleCount() async {
-                if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
+        if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
             scheduleCount = jobs.count
         }
     }
@@ -1114,7 +1118,7 @@ private struct ChatScreenContent: View {
     /// `sessionWindow` is known, the branch stays current through `refreshBranch()`
     /// (the 5s poll `pollBranch` + a refresh on submit).
     private func resolveWindowAndBranch() async {
-                guard let projects = try? await api.projects(),
+        guard let projects = try? await api.projects(),
               let project = projects.first(where: { $0.tmuxSession == projectName }),
               let window = project.windows.first(where: { $0.opencodeSessionId == store.sessionId })
         else { return }

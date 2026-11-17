@@ -59,7 +59,7 @@ final class UpgradeStore: ObservableObject {
         guard !bound else { return }
         bound = true
 
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["upgrade"]) { [weak self] frame in
             guard let status = UpgradeStatus.from(frame: frame) else { return }
             Task { @MainActor in self?.apply(status) }
         }

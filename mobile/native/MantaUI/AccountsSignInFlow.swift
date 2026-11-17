@@ -605,6 +605,7 @@ final class AccountsSeatSignIn: ObservableObject {
     private func stopClaudeSession() {
         claudeSession?.stop()
         claudeSession = nil
+        accounts.endPtyListening()
     }
 
     /// The explicit Cancel: tell the box, report BOTH outcomes, close.
