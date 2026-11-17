@@ -32,7 +32,7 @@ fixes"): the session map is pinned at the first prompt, with a history
 backfill; outward repo writes use an independent clone and two new forge
 methods; skill evidence is defined; user authorship is a positive record at the
 prompt chokepoint; the briefing is prefetched and acknowledged, split into rules
-and reference notes; the trial is a headless internal session on an allowlist
+and reference notes; the trial is a headless read-only internal session
 inside the spend cap; global writes are batched daily; a spike (§0) proves three
 plugin behaviours first.
 
@@ -429,17 +429,30 @@ original source, so the rest of a page keeps its exact formatting.
    `manta.routineId`). Worktree: added from the project's most recently used
    clone (from the session map); the trial is skipped when none still exists,
    and the worktree is removed when the trial ends. Model: `mid` band through
-   `defaultResolveModel` (not `runEphemeral`, which is tool-less). Ruleset: its
-   own deny-first builder (routines' builder is allow-first): a leading
-   catch-all deny, then allows for `read`, `glob`, `grep`,
-   `list`, `edit` inside its worktree, and bash only for `ls *`, `cat *`,
-   `head *`, `tail *`, `wc *`, `git status*`, `git log*`, `git diff*`,
-   `git show*`, `which *`. The session walks through the skill on the most
-   recent real instance of the task and reports whether each step is valid
-   (files, commands and flags exist). 20-minute ceiling enforced by the engine
-   (abort). Its cost counts against `dailyCapUsd`; at most 2 trials per week;
-   started only when no other knowledge run is active. The curator grades the
-   report. Pass → install; fail → runbook only.
+   `defaultResolveModel` (not `runEphemeral`, which is tool-less). The session's
+   directory is its worktree. Ruleset: its own deny-first builder (routines'
+   builder is allow-first): a leading catch-all deny, then allows for `read`,
+   `grep` and `glob` only, then denies for any pattern containing `..` (and for
+   absolute `read`/`glob` patterns), and a final `external_directory` deny. There
+   is **no shell, no edit and no other tool** — verified against the pinned
+   opencode 2.0.30: rules are evaluated last-match-wins (no match asks, which a
+   headless session can't answer, hence the catch-all); `read` is checked against
+   the path relative to the session directory (absolute only outside it, which
+   needs `external_directory`); `grep`/`glob` are checked against their pattern,
+   with their `path` going through `external_directory`; there is no `list`
+   permission; a shell is checked per command after a split and `cd` is never
+   checked, so no shell allowlist can confine it. `read` also follows symlinks
+   without an external-directory check, which no ruleset can express, so a
+   worktree containing a symlink that resolves outside it is not trialled
+   (`skipped: symlink`, checked before the session is created). The session walks
+   through the skill by inspection only and reports whether each step is valid:
+   the files, scripts and configuration it names exist in the repository and the
+   command is defined there (a `package.json` script, a Makefile target, a file
+   under `bin/` or `scripts/`); it never claims to have run anything.
+   20-minute ceiling enforced by the engine (abort). Its cost counts against
+   `dailyCapUsd`; at most 2 trials per week; started only when no other
+   knowledge run is active. The curator grades the report. Pass → install; fail
+   → runbook only.
 6. **Install** to `~/.config/opencode/skills/learned-<slug>/` only under §4.2's
    rule; the `learned-` prefix marks what the curator owns.
 7. **Retire** after 30 days without a load, or after 2 corrections tied to it.
@@ -701,8 +714,9 @@ knowledge_read({ ref: string }) → page body, or the message neighborhood for a
 - Outward repo writes: independent clone (never a worktree of a user clone),
   `direct` push `HEAD:<default>`, PR created once then updated, `getRepoAccess`
   gating for both forges.
-- Skills: evidence bar, outward-pattern refusal, trial allowlist ruleset, trial
-  spend counted, weekly trial limit.
+- Skills: evidence bar, outward-pattern refusal, trial ruleset (read/grep/glob
+  only, evaluated with opencode's last-match-wins semantics), symlink refusal,
+  trial spend counted, weekly trial limit.
 - Detector classifies each message once; pre-upgrade messages never count.
 - Global block has its own heading and survives the guidance sync unchanged.
 - Daily batching of global writes; undo immediate.
