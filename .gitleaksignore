@@ -11,3 +11,13 @@
 d6037181d76826e38a387ce480979f0f1cc57978:src/server/knowledge/search.test.mjs:generic-api-key:242
 ec59fcb90deb3b76d4552f7550ea42a6cdf3ab61:src/server/knowledge/secretScan.test.mjs:aws-access-token:17
 ec59fcb90deb3b76d4552f7550ea42a6cdf3ab61:src/server/knowledge/secretScan.test.mjs:aws-access-token:25
+
+# The same dummy fixtures as above, at their line numbers in the squash commit of PR #1688 (squash-merging gave them a new commit id), audited 2026-11-17.
+75e9961f6c0ef53476319adb6eec24731f08e7f5:docs/superpowers/specs/2026-11-16-shared-knowledge.md:generic-api-key:727
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/capture.test.mjs:generic-api-key:316
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/corrections.test.mjs:generic-api-key:288
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/search.test.mjs:generic-api-key:187
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/search.test.mjs:generic-api-key:194
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/search.test.mjs:generic-api-key:242
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/secretScan.test.mjs:aws-access-token:17
+75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/secretScan.test.mjs:aws-access-token:25
