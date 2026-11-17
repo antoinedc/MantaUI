@@ -160,6 +160,71 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
     return changed;
   }
 
+  // ---- paths kept out of the store by the secret scan --------------------------------------
+  // A dirty path with a secret stays in the working tree, so a plain file read would serve it (briefings, search,
+  // page reads). Reads of such a path return the COMMITTED version (null if it never was committed). The set is
+  // refreshed lazily and exactly: whenever a file was modified after the last refresh, or a second has passed.
+  const skipped = new Set();
+  const verdicts = new Map(); // path → {sig, verdict}
+  let lastRefresh = 0;
+  let refreshing = null;
+
+  async function verdictFor(p) {
+    if (!scan) return { clean: true };
+    let st;
+    let text;
+    try {
+      st = await stat(inside(p));
+      text = await readFile(inside(p), "utf8");
+    } catch {
+      return { clean: true }; // deleted (or unreadable as text): nothing to leak
+    }
+    const sig = `${st.mtimeMs}:${st.size}`;
+    const hit = verdicts.get(p);
+    if (hit && hit.sig === sig) return hit.verdict;
+    let verdict;
+    try {
+      verdict = await scan(text);
+    } catch {
+      verdict = { clean: false, unavailable: true };
+    }
+    if (!verdict.unavailable) verdicts.set(p, { sig, verdict });
+    else verdicts.delete(p); // an unavailable scanner is retried, never remembered
+    return verdict;
+  }
+
+  async function refreshSkips() {
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
+      const startedAt = Date.now();
+      let out;
+      try {
+        out = await run(["status", "--porcelain", "-z", "--untracked-files=all"]);
+      } catch {
+        return; // can't tell: keep what we knew
+      }
+      const parts = String(out ?? "").split("\0").filter(Boolean);
+      const paths = [];
+      for (let i = 0; i < parts.length; i++) {
+        paths.push(parts[i].slice(3));
+        if (/^[RC]/.test(parts[i])) i++;
+      }
+      const next = new Set();
+      for (const p of paths) if (!(await verdictFor(p)).clean) next.add(p);
+      skipped.clear();
+      for (const p of next) skipped.add(p);
+      lastRefresh = startedAt;
+    })().finally(() => {
+      refreshing = null;
+    });
+    return refreshing;
+  }
+
+  async function committedVersion(rel) {
+    const out = await tryRun(["show", `HEAD:${rel}`]);
+    return out === null ? null : out;
+  }
+
   const tx = {
     dir,
     head,
@@ -180,8 +245,18 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
       return { head: await head() };
     },
     async read(rel) {
+      const abs = inside(rel);
+      let st;
       try {
-        return await readFile(inside(rel), "utf8");
+        st = await stat(abs);
+      } catch (e) {
+        if (e?.code === "ENOENT" || e?.code === "ENOTDIR") return null;
+        throw e;
+      }
+      if (scan && (st.mtimeMs >= lastRefresh - 5 || Date.now() - lastRefresh > 1000)) await refreshSkips();
+      if (skipped.has(rel)) return committedVersion(rel);
+      try {
+        return await readFile(abs, "utf8");
       } catch (e) {
         if (e?.code === "ENOENT" || e?.code === "EISDIR") return null;
         throw e;
@@ -214,22 +289,9 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
       if (paths.length === 0) return null;
       const clean = [];
       for (const p of paths) {
-        let verdict = { clean: true };
-        if (scan) {
-          let text = null;
-          try {
-            text = await readFile(inside(p), "utf8");
-          } catch {
-            text = null; // deleted (or unreadable as text): nothing to leak
-          }
-          if (text !== null) {
-            try {
-              verdict = await scan(text);
-            } catch {
-              verdict = { clean: false, unavailable: true };
-            }
-          }
-        }
+        const verdict = await verdictFor(p);
+        if (verdict.clean) skipped.delete(p);
+        else skipped.add(p);
         if (verdict.clean) {
           clean.push(p);
           reportedSkips.delete(p);

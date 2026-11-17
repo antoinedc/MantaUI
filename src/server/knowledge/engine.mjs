@@ -199,6 +199,7 @@ export function createKnowledgeEngine(deps = {}) {
           return e.enabled && !e.observeOnly;
         },
         projectRules: deps.projectRules ?? ((slug, o) => rules.projectRulesForBriefing(slug, o)),
+        heldRules: (slug) => rules.heldBack(slug),
         dir: join(dir, ".briefings"),
         now,
       });

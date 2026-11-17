@@ -184,8 +184,78 @@ test("a mixed page that couldn't be rewritten (no capable model) keeps its refer
   assert.ok((await changesOf(r.engine)).some((i) => i.kind === "waiting" && /is waiting/.test(i.summary)));
   assert.doesNotMatch(await r.engine.store.read("commons/howto/two.md"), /ses_w/);
   up = true;
+  assert.equal(await r.engine.layer.downgrade.retryPending(), 0, "backing off");
+  r.clock.t += 16 * 60_000;
   assert.equal(await r.engine.layer.downgrade.retryPending(), 1);
   assert.match(await r.engine.store.read("commons/howto/two.md"), /Only what the remaining projects support/);
   assert.equal(await r.engine.layer.downgrade.retryPending(), 0);
   await r.engine.stop();
+});
+
+async function mixedRig(over = {}) {
+  const h = { mode: "rewrite" };
+  const r = await curatorRig({
+    projects: { widget: "https://github.com/acme/widget.git", gadget: "https://github.com/acme/gadget.git" },
+    sessions: { ses_w: "widget", ses_g: "gadget" },
+    messages: { ses_g: { msg_1: { role: "user", text: "gadget fact, the key is hunter2-super-secret-value ok" } } },
+    runner: (a) => (h.mode === "none" ? r.decide([]) : h.mode === "down" ? { ok: false, code: "no-qualifying-model" } : h.runner(a)),
+    ...over,
+  });
+  h.runner = rewriteRunner(r);
+  const w = await r.slugOf("ses_w");
+  await r.slugOf("ses_g");
+  const cur = r.engine.layer.curator;
+  const vctx = await cur.vctxFor(w);
+  const two = (content, ref) => ({ type: "page.edit", target: { area: "commons", path: "commons/howto/two.md" }, content, reason: "seen", evidence: [{ ref }] });
+  assert.equal((await cur.processDecisions([two("Generic.\n", "msg:ses_w/msg_1"), two("Generic, extended.\n", "msg:ses_g/msg_1")], vctx, { batchId: "b_x", slug: w, taskClass: "curator-notes" })).applied, 2);
+  return { h, r, w };
+}
+
+test("N4: a downgrade rewrite counts as done only when a decision was APPLIED — an empty answer stays pending and is retried with a back-off, then given up", async () => {
+  const { h, r, w } = await mixedRig({ over: { secretValues: () => ["hunter2-super-secret-value"] } });
+  h.mode = "none";
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
+  assert.ok((await changesOf(r.engine)).some((i) => i.kind === "waiting" && /is waiting/.test(i.summary)), "reported as waiting, not as done");
+  const callsBefore = r.calls.length;
+  assert.equal(await r.engine.layer.downgrade.retryPending(), 0);
+  assert.equal(r.calls.length, callsBefore, "the failed attempt backs off: no model call on the very next tick");
+  r.clock.t += 16 * 60_000;
+  assert.equal(await r.engine.layer.downgrade.retryPending(), 0);
+  assert.equal(r.calls.length, callsBefore + 1);
+  h.mode = "rewrite";
+  r.clock.t += 31 * 60_000;
+  assert.equal(await r.engine.layer.downgrade.retryPending(), 1);
+  assert.match(await r.engine.store.read("commons/howto/two.md"), /Only what the remaining projects support/);
+  // …and a page that never rewrites is given up on after 8 tries
+  const g = await mixedRig();
+  g.h.mode = "none";
+  await g.r.engine.settingsSet({ projects: { [g.w]: { sharing: "private" } } });
+  for (let i = 0; i < 9; i++) {
+    g.r.clock.t += 25 * 3600_000;
+    await g.r.engine.layer.downgrade.retryPending();
+  }
+  assert.ok((await changesOf(g.r.engine)).some((i) => i.kind === "skipped" && /Gave up rewriting commons\/howto\/two\.md/.test(i.summary)));
+  assert.equal(await g.r.engine.layer.downgrade.retryPending(), 0);
+  await r.engine.stop();
+  await g.r.engine.stop();
+});
+
+test("N5: source text is secret-redacted before the rewrite call; if it can't be redacted there is no call and the page stays pending", async () => {
+  const { h, r, w } = await mixedRig({ over: { secretValues: () => ["hunter2-super-secret-value"] } });
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
+  const prompt = r.calls.map((c) => c.text).find((t) => /stopped sharing/.test(t));
+  assert.ok(prompt, "the rewrite was asked");
+  assert.doesNotMatch(prompt, /hunter2/);
+  assert.match(prompt, /gadget fact, the key is \[?REDACTED/i);
+  await r.engine.stop();
+
+  const b = await mixedRig({ over: { secretValues: () => ["hunter2-super-secret-value"] } });
+  b.r.engine.scanner.redact = async () => ({ text: "", redacted: 0, unavailable: true });
+  const before = b.r.calls.length;
+  await b.r.engine.settingsSet({ projects: { [b.w]: { sharing: "private" } } });
+  assert.equal(b.r.calls.filter((c) => /stopped sharing/.test(c.text)).length, 0, "no model call without redaction");
+  assert.equal(b.r.calls.length, before);
+  assert.ok((await changesOf(b.r.engine)).some((i) => i.kind === "waiting" && /is waiting/.test(i.summary)));
+  void h;
+  await b.r.engine.stop();
 });

@@ -146,7 +146,6 @@ export function createIdentityResolver({ git, realpath = fsRealpath, isDirectory
     } catch {
       /* keep as reported */
     }
-    const rootCommit = await rootCommitOf(dir);
     const names = await gitOut(dir, ["remote"]);
     if (names === TRANSIENT || names === NOT_A_REPO) return TRANSIENT;
     const remoteName = pickRemoteName(names.split("\n"));
@@ -154,9 +153,17 @@ export function createIdentityResolver({ git, realpath = fsRealpath, isDirectory
       const url = await gitOut(dir, ["remote", "get-url", remoteName]);
       if (url === TRANSIENT || url === NOT_A_REPO) return TRANSIENT;
       const parsed = normalizeRemote(url);
-      if (parsed) return { canonicalId: parsed.id, name: parsed.name, repoRoot: root, kind: "remote", pathId: `path:${root}`, rootCommit };
+      if (parsed) return withLazyRoot({ canonicalId: parsed.id, name: parsed.name, repoRoot: root, kind: "remote", pathId: `path:${root}` }, dir);
     }
-    return { canonicalId: `path:${root}`, name: basename(root), repoRoot: root, kind: "path", pathId: `path:${root}`, rootCommit };
+    return withLazyRoot({ canonicalId: `path:${root}`, name: basename(root), repoRoot: root, kind: "path", pathId: `path:${root}` }, dir);
+  }
+
+  // The root commit costs a `git rev-list`, and only two moments need it (registering a project, a path-match carry-over),
+  // so it is a lazy, memoised, non-enumerable `rootCommitOf()` on the identity rather than a field computed on every resolve.
+  function withLazyRoot(identity, dir) {
+    let memo = null;
+    Object.defineProperty(identity, "rootCommitOf", { value: () => (memo ??= rootCommitOf(dir)), enumerable: false });
+    return identity;
   }
 
   /** The repository's first root commit (sorted, so it is stable); null for an empty repository. */
@@ -248,6 +255,8 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
       if (!r) return null;
       const d = await ensure();
       let project = byId(d, r.canonicalId);
+      // resolvers (and tests) may hand a ready `rootCommit`; the real one gives a lazy `rootCommitOf()`
+      const rootOf = async () => ("rootCommit" in r ? (r.rootCommit ?? null) : r.rootCommitOf ? ((await r.rootCommitOf()) ?? null) : null);
       let changed = false;
       let created = false;
       let message = "";
@@ -264,10 +273,11 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
         // A path match carries a project over only when it is still the same repository: the root commit matches the
         // one recorded, or the project was identified by path in the first place (nothing else to compare). A different
         // repository cloned into a reused folder is a new project.
-        const sameRepo = (p) => p.canonicalId.startsWith("path:") || (!!p.rootCommit && !!r.rootCommit && p.rootCommit === r.rootCommit);
-        project =
-          Object.values(d.projects).find((p) => oldRoot && p.paths.includes(oldRoot) && sameRepo(p)) ??
-          candidates.map((id) => byId(d, id)).find(Boolean);
+        const pathMatches = Object.values(d.projects).filter((p) => oldRoot && p.paths.includes(oldRoot));
+        const needsRoot = pathMatches.some((p) => !p.canonicalId.startsWith("path:") && p.rootCommit);
+        const here = needsRoot ? await rootOf() : null;
+        const sameRepo = (p) => p.canonicalId.startsWith("path:") || (!!p.rootCommit && !!here && p.rootCommit === here);
+        project = pathMatches.find(sameRepo) ?? candidates.map((id) => byId(d, id)).find(Boolean);
         if (project && project.canonicalId !== r.canonicalId) {
           addUnique(project.aliases, project.canonicalId);
           project.canonicalId = r.canonicalId;
@@ -277,16 +287,20 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
       }
       if (!project) {
         const slug = slugFor(r.canonicalId, r.name);
-        project = { canonicalId: r.canonicalId, slug, displayName: r.name, aliases: [], paths: [], ...(r.rootCommit ? { rootCommit: r.rootCommit } : {}) };
+        const root = r.kind === "box" ? null : await rootOf();
+        project = { canonicalId: r.canonicalId, slug, displayName: r.name, aliases: [], paths: [], ...(root ? { rootCommit: root } : {}) };
         d.projects[slug] = project;
         created = true;
         changed = true;
         message = `Register project ${slug}`;
       }
-      if (r.rootCommit && !project.rootCommit && r.kind !== "box") {
-        project.rootCommit = r.rootCommit;
-        changed = true;
-        message ||= `Record root commit for ${project.slug}`;
+      if (!project.rootCommit && r.kind !== "box") {
+        const root = await rootOf();
+        if (root) {
+          project.rootCommit = root;
+          changed = true;
+          message ||= `Record root commit for ${project.slug}`;
+        }
       }
       if (r.repoRoot && !project.paths.includes(r.repoRoot)) {
         project.paths.push(r.repoRoot);

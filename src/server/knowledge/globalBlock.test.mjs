@@ -134,17 +134,19 @@ function standalone(r, globalPath, over = {}) {
 
 test("the global block is secret-scanned: a preference with a secret is left out of the file and reported; the rest is written", async () => {
   const { r, globalPath } = await prefRig({ over: { secretValues: () => ["hunter2-super-secret-value"] } });
-  // (written to the folder by hand, so the store's own commit scan hasn't seen it)
-  await r.writeStore(PREFERENCES_PATH, "---\ntitle: Preferences\n---\n# Preferences\n\n- Prefer tabs\n- Token is hunter2-super-secret-value\n- Never force-push\n");
-  const res = await r.engine.layer.globalBlock.apply({ reason: "test" });
+  await writePrefs(r, ["Prefer tabs"]);
+  // the store never serves a file holding a secret, so hand the block a store that does (defence in depth)
+  const leaky = { ...r.engine.store, read: async (p) => (p === PREFERENCES_PATH ? "# Preferences\n\n- Prefer tabs\n- Token is hunter2-super-secret-value\n- Never force-push\n" : r.engine.store.read(p)) };
+  const reports = [];
+  const gb = createGlobalBlock({ path: globalPath, store: leaky, state: r.engine.state, now: () => r.clock.t, log: () => {}, scan: (t) => r.engine.scanner.scan(t), report: (e) => reports.push(e) });
+  const res = await gb.apply({ reason: "test" });
   assert.equal(res.ok, true);
   const txt = await readFile(globalPath, "utf8");
   assert.match(txt, /Prefer tabs/);
   assert.match(txt, /Never force-push/);
   assert.doesNotMatch(txt, /hunter2/);
   assert.doesNotMatch(await r.engine.store.read(MIRROR_PATH), /hunter2/);
-  const items = (await r.engine.changes({ limit: 50 })).items;
-  assert.ok(items.some((i) => i.kind === "dropped" && /Left a preference out of the global instructions/.test(i.summary)));
+  assert.ok(reports.some((i) => i.kind === "dropped" && /Left a preference out of the global instructions/.test(i.summary)));
   await r.engine.stop();
 });
 

@@ -247,3 +247,23 @@ test("registry loader drops hand-edited entries with malformed slugs", async () 
   assert.deepEqual(list.map((p) => p.slug), [good]);
   assert.deepEqual(list[0].aliases, ["x"]);
 });
+
+test("N7: a plain resolve (and a repeat identify of a known project) never runs rev-list; registration does, once", async () => {
+  const root = await makeRepo({ remote: "https://github.com/acme/lazyroot.git" });
+  const calls = [];
+  const git = { run: (args, o) => (calls.push(args[0]), execGitRunner(root).run(args, o)) };
+  const resolver = createIdentityResolver({ git, cacheMs: 0 });
+  const r = await resolver.resolve(root);
+  assert.equal(r.kind, "remote");
+  assert.equal(calls.includes("rev-list"), false, "resolving costs no rev-list");
+  assert.equal(Object.keys(r).includes("rootCommitOf"), false);
+  let doc = emptyRegistry();
+  const reg = createProjectRegistry({ resolver, load: async () => doc, save: async (d) => { doc = d; } });
+  const first = await reg.identify(root);
+  assert.equal(calls.filter((c) => c === "rev-list").length, 1, "registering a new project computes it");
+  assert.match(doc.projects[first.slug].rootCommit, /^[0-9a-f]{40}$/);
+  calls.length = 0;
+  await reg.identify(root);
+  await reg.identify(root);
+  assert.equal(calls.includes("rev-list"), false, "a known project with a recorded root commit never recomputes it");
+});

@@ -223,12 +223,13 @@ export function createRulesStore({ store, state, now = Date.now } = {}) {
   const repoStrings = async (slug) => (await repoPairs(slug)).map((p) => p.string);
 
   /**
-   * Briefing part 1: the rules not delivered through the repository (box-only, or PR unmerged / write failed),
-   * plus the held-back rules, which can only ever travel this way.
+   * Briefing part 1: the TRACKED rules not delivered through the repository (box-only, or PR unmerged / write
+   * failed). Held-back rules (added outside Manta) are never standing rules: the briefing shows them separately,
+   * labelled as unconfirmed (`heldBack`).
    */
   async function projectRulesForBriefing(slug, { repoRules } = {}) {
-    if (repoRules === "box-only" || viaBriefing(slug)) return read(slug);
-    return heldBack(slug);
+    if (repoRules === "box-only" || viaBriefing(slug)) return (await read(slug)).filter((r) => trackedFor(slug, r));
+    return [];
   }
 
   return {
