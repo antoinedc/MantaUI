@@ -15,9 +15,24 @@ async function available() {
   }
 }
 
-test("a fake simple-git is driven with the baseDir, merged env and raw args", async () => {
+// The box user's own editor / ssh command are ambient; the runner must not pass them on explicitly.
+function ambientGuardedEnv(t) {
+  const before = { EDITOR: process.env.EDITOR, GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND };
+  process.env.EDITOR = "vim";
+  process.env.GIT_SSH_COMMAND = "ssh -v";
+  t.after(() => {
+    for (const [k, v] of Object.entries(before)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+}
+
+test("a fake simple-git is driven with the baseDir, merged env and raw args", async (t) => {
+  ambientGuardedEnv(t);
   const seen = [];
-  const factory = (opts) => ({
+  const optsSeen = [];
+  const factory = (opts) => (optsSeen.push(opts), {
     env(e) {
       seen.push(["env", e]);
       return this;
@@ -32,11 +47,14 @@ test("a fake simple-git is driven with the baseDir, merged env and raw args", as
   assert.equal(await g.run(["status"], { env: { GIT_AUTHOR_NAME: "A" } }), "out");
   assert.equal(seen[0][1].GIT_AUTHOR_NAME, "A");
   assert.equal(seen[0][1].GIT_TERMINAL_PROMPT, "0");
+  assert.ok(!("EDITOR" in seen[0][1]) && !("GIT_SSH_COMMAND" in seen[0][1])); // the box user's editor/ssh command never reach git
   assert.deepEqual(seen[1], ["raw", ["status"], "/x"]);
+  assert.deepEqual(optsSeen[0].allowEnvironment, ["GIT_TERMINAL_PROMPT", "GIT_AUTHOR_NAME"]);
   await assert.rejects(g.run(["boom"], { cwd: "/y" }), (e) => /nope/.test(e.stderr));
 });
 
 test("the store works end to end over the real simple-git runner", async (t) => {
+  ambientGuardedEnv(t);
   if (!(await available())) return t.skip("simple-git is not installed in this checkout");
   const dir = await tmpDir("knowledge-sg-");
   const store = createKnowledgeStore({ dir, git: createGitRunner({ defaultCwd: dir }) });

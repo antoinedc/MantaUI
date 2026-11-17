@@ -76,6 +76,17 @@ test("a session is pinned at its first prompt; knowledge_note then lands in that
   await engine.stop();
 });
 
+test("pinSession pins from an explicit directory (the prompt chokepoint hook); it is a no-op while the feature is off", async () => {
+  const { engine, repo } = await rig();
+  await engine.start();
+  const m = await engine.pinSession({ sessionID: "ses_explicit", directory: repo });
+  assert.match(m.slug, /^widget-/);
+  assert.equal(engine.sessionMap.get("ses_explicit").source, "prompt");
+  const off = await rig({ stored: { enabled: false } });
+  await off.engine.start();
+  assert.equal(await off.engine.pinSession({ sessionID: "ses_explicit", directory: off.repo }), null);
+});
+
 test("a note from a session that never started a turn is pinned lazily; from an unmappable session it is politely refused", async () => {
   const { engine } = await rig({ sessions: { ses_gone: { directory: "/nowhere/at/all" } } });
   await engine.start();

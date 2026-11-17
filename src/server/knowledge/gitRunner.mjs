@@ -6,7 +6,13 @@
 // loaded lazily so a missing package degrades the subsystem instead of
 // crashing the server at import time. Tests inject their own runner.
 
-const BASE_ENV = Object.freeze({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "echo", LC_ALL: "C" });
+// simple-git's environment guard (spec §10: simple-git 4.0.2) refuses EXPLICITLY passed `GIT_*`/editor/
+// pager/ssh-command variables unless listed in `allowEnvironment`, and passing the whole ambient
+// environment counts as explicit. So the child gets a whitelist of the ambient variables git
+// needs (never the box user's GIT_SSH_COMMAND/EDITOR/…), plus ours, and only OUR `GIT_*` names are
+// allow-listed.
+const AMBIENT_RE = /^(PATH|HOME|USER|LOGNAME|LANG|LC_[A-Z_]+|TMPDIR|TEMP|TMP|SYSTEMROOT|XDG_[A-Z_]+|SSH_AUTH_SOCK|HTTPS?_PROXY|NO_PROXY)$/i;
+const BASE_ENV = Object.freeze({ GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" });
 const BLOCK_TIMEOUT_MS = 120_000;
 
 export function createGitRunner({ simpleGitFactory, defaultCwd } = {}) {
@@ -19,7 +25,10 @@ export function createGitRunner({ simpleGitFactory, defaultCwd } = {}) {
   return {
     async run(args, { cwd = defaultCwd, env } = {}) {
       const simpleGit = await load();
-      const git = simpleGit({ baseDir: cwd, timeout: { block: BLOCK_TIMEOUT_MS } }).env({ ...process.env, ...BASE_ENV, ...(env ?? {}) });
+      const ambient = Object.fromEntries(Object.entries(process.env).filter(([k]) => AMBIENT_RE.test(k)));
+      const full = { ...ambient, ...BASE_ENV, ...(env ?? {}) };
+      const allowEnvironment = Object.keys({ ...BASE_ENV, ...(env ?? {}) }).filter((k) => /^git_/i.test(k));
+      const git = simpleGit({ baseDir: cwd, timeout: { block: BLOCK_TIMEOUT_MS }, allowEnvironment }).env(full);
       try {
         return await git.raw(args);
       } catch (e) {
