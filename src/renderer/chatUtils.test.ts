@@ -114,6 +114,9 @@ import {
   formatResetTooltip,
   windowProgress,
   windowNoun,
+  usageTableColumns,
+  usageColumnHeader,
+  usagePopoverMinWidth,
   windowResetState,
   formatTimerDuration,
   formatUpdatedAgo,
@@ -4693,6 +4696,66 @@ describe("usage reset helpers", () => {
       expect(windowResetState(win({ pct: 0 }), now)).toBe("not-started");
       expect(windowResetState(win({ pct: 12 }), now)).toBe("no-reset");
       expect(windowResetState(win({ pct: 12, resetsAt: now + H }), now)).toBe("scheduled");
+    });
+  });
+
+  describe("usageTableColumns", () => {
+    const session = win({ resetsAt: now + H });
+    const weekly = win({ kind: "weekly", label: "7d" });
+    const fable = win({ kind: "weekly_scoped:fable", label: "7d · Fable", scope: "Fable" });
+    const opus = win({ kind: "weekly_scoped:opus", label: "7d · Opus", scope: "Opus" });
+    const kinds = (c: UsageWindow[]) => c.map((w) => w.kind);
+
+    it("the bar windows first; no extra column when nothing else is active", () => {
+      expect(kinds(usageTableColumns([weekly, session]))).toEqual(["session", "weekly"]);
+      expect(kinds(usageTableColumns([session, weekly], [[session, weekly], [session]]))).toEqual(["session", "weekly"]);
+      expect(kinds(usageTableColumns([session]))).toEqual(["session"]);
+      expect(usageTableColumns(undefined, [undefined])).toEqual([]);
+    });
+
+    it("one extra column per other active kind, from the conversation's seat or any other row", () => {
+      expect(kinds(usageTableColumns([session, weekly, fable]))).toEqual(["session", "weekly", "weekly_scoped:fable"]);
+      expect(kinds(usageTableColumns([session, weekly], [[session], [weekly, opus]]))).toEqual(["session", "weekly", "weekly_scoped:opus"]);
+      // a kind seen on several rows is one column
+      expect(kinds(usageTableColumns([session, weekly, fable], [[fable], [fable]]))).toEqual(["session", "weekly", "weekly_scoped:fable"]);
+    });
+
+    it("skips inactive windows, even when another row has the kind active", () => {
+      expect(kinds(usageTableColumns([session, weekly, { ...fable, active: false }]))).toEqual(["session", "weekly"]);
+      expect(kinds(usageTableColumns([session, weekly, { ...fable, active: false }], [[fable]]))).toEqual(["session", "weekly", "weekly_scoped:fable"]);
+    });
+
+    it("orders extra columns by first appearance: the conversation's seat, then the other rows in order", () => {
+      expect(kinds(usageTableColumns([session, weekly, opus], [[fable], [opus, fable]]))).toEqual(["session", "weekly", "weekly_scoped:opus", "weekly_scoped:fable"]);
+      expect(kinds(usageTableColumns([session, weekly], [[fable], [opus]]))).toEqual(["session", "weekly", "weekly_scoped:fable", "weekly_scoped:opus"]);
+    });
+
+    it("any third window kind works, not only scoped ones", () => {
+      const daily = win({ kind: "daily", label: "24h" });
+      expect(kinds(usageTableColumns([session, weekly], [[daily]]))).toEqual(["session", "weekly", "daily"]);
+    });
+  });
+
+  describe("usageColumnHeader", () => {
+    it("a scoped window reads as its scope, with the full label and why in the title", () => {
+      expect(usageColumnHeader(win({ kind: "weekly_scoped:fable", label: "7d · Fable", scope: "Fable" }))).toEqual({
+        text: "Fable",
+        title: "7d · Fable — a weekly limit that applies only to this model",
+      });
+      expect(usageColumnHeader(win({ kind: "daily_scoped:x", label: "24h · X", scope: "X" })).title).toBe("24h · X — a limit that applies only to this model");
+    });
+    it("any other window reads as its noun, with no title", () => {
+      expect(usageColumnHeader(win())).toEqual({ text: "5-hour", title: undefined });
+      expect(usageColumnHeader(win({ kind: "daily", label: "24h" }))).toEqual({ text: "24h", title: undefined });
+    });
+  });
+
+  describe("usagePopoverMinWidth", () => {
+    it("420px for two columns, 110px more for each beyond", () => {
+      expect(usagePopoverMinWidth(1)).toBe(420);
+      expect(usagePopoverMinWidth(2)).toBe(420);
+      expect(usagePopoverMinWidth(3)).toBe(530);
+      expect(usagePopoverMinWidth(4)).toBe(640);
     });
   });
 

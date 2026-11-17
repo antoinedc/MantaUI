@@ -2893,6 +2893,44 @@ export function windowProgress(w: UsageWindow, nowMs: number): number | null {
   return Math.max(0, Math.min(1, p));
 }
 
+/**
+ * The usage table's window columns: the bar windows (5-hour + weekly) of the
+ * conversation's seat first, then one column for every other ACTIVE window kind
+ * that any row has (a model-scoped cap, a third window), by first appearance —
+ * `primary` first, then `others` in table order. Each entry is the first window
+ * seen of that kind, which names the column. Generic: no window kind is special.
+ */
+export function usageTableColumns(
+  primary: UsageWindow[] | null | undefined,
+  others: ReadonlyArray<UsageWindow[] | null | undefined> = [],
+): UsageWindow[] {
+  const columns = seatBarWindows(primary);
+  const seen = new Set(columns.map((w) => w.kind));
+  for (const list of [primary, ...others]) {
+    for (const w of list ?? []) {
+      if (!w || w.active === false || seen.has(w.kind)) continue;
+      seen.add(w.kind);
+      columns.push(w);
+    }
+  }
+  return columns;
+}
+
+/** A column heading: a model-scoped window reads as its model ("Fable"), any
+ *  other as its noun; `title` carries the full label and, for a scoped one, why
+ *  it is a separate column. */
+export function usageColumnHeader(w: UsageWindow): { text: string; title: string | undefined } {
+  if (!w.scope) return { text: windowNoun(w), title: undefined };
+  const kind = w.kind.startsWith("weekly") ? "a weekly limit" : "a limit";
+  return { text: w.scope, title: `${w.label} — ${kind} that applies only to this model` };
+}
+
+/** The popover's minimum width for `columns` window columns: 420px for the usual
+ *  two, 110px more for each one beyond. */
+export function usagePopoverMinWidth(columns: number): number {
+  return 420 + 110 * Math.max(0, columns - 2);
+}
+
 const FIVE_HOURS_MS = 5 * 3_600_000;
 const WEEK_MS = 7 * 86_400_000;
 

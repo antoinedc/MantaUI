@@ -24,7 +24,6 @@ import {
   isSameOrgMove,
   nextSeatHint,
   orderOtherSeats,
-  seatBarWindows,
   seatDialSnapshot,
   seatStateText,
   selectConversationSeat,
@@ -33,7 +32,9 @@ import {
   usageDialState,
   usageStale,
   usageWindowBlocker,
-  windowNoun,
+  usageColumnHeader,
+  usagePopoverMinWidth,
+  usageTableColumns,
   windowProgress,
   windowResetState,
   type UsageDialTone,
@@ -159,6 +160,18 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
 
   // (A sign-in in progress outlives the dial's own visibility.)
   if (!snapshot || !state.visible) return resignModal;
+
+  // No assignment yet (a brand-new conversation): the windows are the aggregate —
+  // the seat a new conversation would start on. The seat the table leads with is
+  // this conversation's, or where a new one starts.
+  const startsOn =
+    multi && !current && view ? findSeat(view, view.mode === "manual" ? view.activeSeatId : view.nextSeatId) : null;
+  const headerSeat = current ?? startsOn;
+  const groups = multi ? orderOtherSeats(view, headerSeat?.seat.id ?? null) : [];
+  const columns = usageTableColumns(snapshot.windows, [
+    headerSeat?.seat.windows,
+    ...groups.flatMap((g) => g.seats.map((s) => s.windows)),
+  ]);
 
   const ringColor = toneRingColor(state.tone);
   const trackColor = cssVar("--border-subtle");
@@ -289,6 +302,8 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         // card taller than the window, so the footer and a seat-switch confirm
         // stay reachable instead of being clipped off-screen.
         surfaceClassName="w-max min-w-[420px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden p-4"
+        // A third window column needs room: 110px more for each one past two.
+        surfaceStyle={columns.length > 2 ? { minWidth: usagePopoverMinWidth(columns.length) } : undefined}
       >
         <UsagePopoverBody
           snapshot={snapshot}
@@ -297,6 +312,9 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
           view={view}
           multi={multi}
           current={current}
+          headerSeat={headerSeat}
+          groups={groups}
+          columns={columns}
           nowMs={nowMs}
           onNavigate={() => setOpen(false)}
           onResign={(target) => {
@@ -319,6 +337,9 @@ function UsagePopoverBody({
   view,
   multi,
   current,
+  headerSeat,
+  groups,
+  columns,
   nowMs,
   onNavigate,
   onResign,
@@ -329,20 +350,15 @@ function UsagePopoverBody({
   view: ProviderView | null;
   multi: boolean;
   current: ReturnType<typeof selectConversationSeat>;
+  headerSeat: ReturnType<typeof selectConversationSeat>;
+  groups: ReturnType<typeof orderOtherSeats>;
+  columns: UsageWindow[];
   nowMs: number;
   onNavigate: () => void;
   onResign: (target: ResignTarget) => void;
 }) {
   const switcher = useSeatSwitch(view);
   const nextId = view && view.mode === "auto" ? nextSeatHint(view, current?.seat.id ?? null, nowMs) : null;
-  // No assignment yet (a brand-new conversation): the windows are the
-  // aggregate — the seat a new conversation would start on. Say so.
-  const startsOn =
-    multi && !current && view ? findSeat(view, view.mode === "manual" ? view.activeSeatId : view.nextSeatId) : null;
-
-  // The seat the header names: this conversation's, or where a new one starts.
-  const headerSeat = current ?? startsOn;
-  const groups = multi ? orderOtherSeats(view, headerSeat?.seat.id ?? null) : [];
 
   const seatName = (c: { seat: SeatView; account: { label: string; seats: SeatView[] } }) =>
     c.account.seats.length > 1 ? `${c.account.label} · ${c.seat.label}` : c.account.label;
@@ -350,7 +366,6 @@ function UsagePopoverBody({
   const resignTarget = (seat: SeatView, accountLabel: string): ResignTarget | null =>
     view ? { provider: view.provider, seat, accountLabel } : null;
 
-  const columns = seatBarWindows(snapshot.windows);
   // The leading, highlighted row: this conversation's seat (or where a new one
   // starts); with no seat choice, the subscription itself, from the snapshot.
   const firstRow: SeatTableFirst | null = headerSeat
@@ -423,7 +438,6 @@ function UsagePopoverBody({
           if (t) onResign(t);
         }}
       />
-      <ExtraWindows windows={snapshot.windows} columns={columns} nowMs={nowMs} />
       {snapshot.windows.some((w) => w.tone == null) && (
         <div className="mt-2 w-0 min-w-full break-words text-meta text-text-faint">Update your box to see usage colours.</div>
       )}
@@ -522,37 +536,6 @@ export function WindowBar({ w, nowMs }: { w: UsageWindow; nowMs: number }) {
   );
 }
 
-// Every other window of the conversation's seat (a model-scoped cap, a third
-// window), one faint line each, straight under the table. Windows the provider
-// says are not in force are left out.
-function ExtraWindows({ windows, columns, nowMs }: { windows: UsageWindow[]; columns: UsageWindow[]; nowMs: number }) {
-  const extras = windows.filter((w) => !columns.includes(w) && w.active !== false);
-  if (extras.length === 0) return null;
-  return (
-    <div className="mt-2 flex w-0 min-w-full flex-col gap-1 break-words text-meta text-text-faint" data-testid="usage-extra-windows">
-      {extras.map((w) => (
-        <ExtraWindowLine key={w.kind} w={w} columns={columns} nowMs={nowMs} />
-      ))}
-    </div>
-  );
-}
-
-function ExtraWindowLine({ w, columns, nowMs }: { w: UsageWindow; columns: UsageWindow[]; nowMs: number }) {
-  const state = windowResetState(w, nowMs);
-  if (state === "resetting") return <div>{w.label} · resetting…</div>;
-  const head = `${w.label} ${Math.round(clampPct(w.pct))}%`;
-  const shared = state === "scheduled" ? columns.find((c) => c.resetsAt === w.resetsAt) : undefined;
-  if (shared) return <div>{`${head} · resets with the ${windowNoun(shared).toLowerCase()} window`}</div>;
-  if (state === "scheduled") {
-    return (
-      <div>
-        {head} · <ResetTimer resetsAt={w.resetsAt as number} startedAt={w.startedAt} nowMs={nowMs} className="text-text-muted" />
-      </div>
-    );
-  }
-  return <div>{head}</div>;
-}
-
 type SeatTableFirst = {
   /** The seat behind the row; null for a subscription with no seat choice. */
   seat: SeatView | null;
@@ -599,11 +582,14 @@ function SeatTable({
         <thead>
           <tr>
             <th className="pb-[6px] pl-2 text-left text-micro font-medium uppercase text-text-faint">Seat</th>
-            {columns.map((c) => (
-              <th key={c.kind} className="pb-[6px] pl-[14px] text-left text-micro font-medium uppercase text-text-faint">
-                {windowNoun(c)}
-              </th>
-            ))}
+            {columns.map((c) => {
+              const head = usageColumnHeader(c);
+              return (
+                <th key={c.kind} title={head.title} className="pb-[6px] pl-[14px] text-left text-micro font-medium uppercase text-text-faint">
+                  {head.text}
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -762,10 +748,9 @@ function SeatRow({
 // date — the tooltip carries that), and the bar. Shares the popover's colour
 // ladder (toneRingColor) so a seat can never read green here and red in the ring.
 function SeatWindowCell({ windows, reference, nowMs }: { windows: UsageWindow[]; reference: UsageWindow; nowMs: number }) {
-  const bars = seatBarWindows(windows);
-  if (bars.length === 0) return <span className="text-meta text-text-faint">no reading</span>;
-  const w = bars.find((b) => b.kind === reference.kind);
-  if (!w) return <span className="text-meta text-text-faint">—</span>;
+  if (windows.length === 0) return <span className="text-meta text-text-faint">no reading</span>;
+  const w = windows.find((b) => b.kind === reference.kind);
+  if (!w || w.active === false) return <span className="text-meta text-text-faint">—</span>;
   const state = windowResetState(w, nowMs);
   const blockedBy = usageWindowBlocker(windows, w);
   const hot = state !== "resetting" && (w.tone === "warn" || w.tone === "danger" || w.tone === "over");
