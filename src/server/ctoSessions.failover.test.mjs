@@ -8,23 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runEphemeral } from "./ctoSessions.mjs";
 import { runFailureClass, canFailover } from "./ctoRunOutcome.mjs";
-
-const allow = async () => ({ ok: true });
-
-function fakeEngineState(initial = {}) {
-  let payload = { ...initial };
-  return {
-    async load() {
-      return payload;
-    },
-    async save(p) {
-      payload = p;
-    },
-    peek() {
-      return payload;
-    },
-  };
-}
+import { allow, fakeEngineState } from "./ctoSessionsFixtures.mjs";
 
 function fakeLedger() {
   const rows = [];

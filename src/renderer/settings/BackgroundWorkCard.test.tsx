@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import type { BudgetStatus } from "../../shared/api";
-import { installMockApi, mount, type Harness, type MockApi } from "../testHarness";
+import { buttonByText, mountWithMockApi, type Harness, type MockApi } from "../testHarness";
 import { clearBackgroundWorkFocus, openBackgroundWorkSettings } from "../useBackgroundStatus";
 import { BackgroundWorkCard } from "./BackgroundWorkCard";
 
@@ -43,14 +43,11 @@ describe("BackgroundWorkCard", () => {
   });
 
   async function open(overrides: Record<string, unknown> = {}) {
-    ({ api } = installMockApi({ backgroundStatus: () => Promise.resolve(status()), configUpdate: () => Promise.resolve({}), ...overrides }));
-    h = mount(<BackgroundWorkCard />);
-    await h.flush();
+    ({ h, api } = await mountWithMockApi(<BackgroundWorkCard />, { backgroundStatus: () => Promise.resolve(status()), configUpdate: () => Promise.resolve({}), ...overrides }));
     return h;
   }
   const q = <T extends HTMLElement>(sel: string) => h!.container.querySelector(sel) as T | null;
-  const button = (text: string) =>
-    Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
+  const button = (text: string) => buttonByText(h!, text) ?? undefined;
   const notice = () => q('[data-testid="background-work-notice"]')?.textContent ?? "";
   const rowTexts = () => Array.from(h!.container.querySelectorAll('[data-testid="background-work-status"] li')).map((l) => l.textContent);
   async function click(el: HTMLElement | null | undefined) {

@@ -10,7 +10,8 @@ import type { KnowledgeChange, KnowledgeProjectRow, KnowledgeSettings } from "..
 import { EXPLORER_OPEN_EVENT, type OpenFileRequest } from "../explorer/types";
 import { useStore } from "../store";
 import { clearBackgroundWorkFocus } from "../useBackgroundStatus";
-import { installMockApi, mount, type Harness, type MockApi } from "../testHarness";
+import { buttonByText, mountWithMockApi, type Harness, type MockApi } from "../testHarness";
+import { budgetStatus } from "../budgetStatusFixture";
 import { KnowledgeCard } from "./KnowledgeCard";
 
 const row = (over: Partial<KnowledgeProjectRow> = {}): KnowledgeProjectRow => ({
@@ -55,18 +56,15 @@ describe("KnowledgeCard", () => {
   });
 
   async function open(overrides: Record<string, unknown> = {}, props: { onNavigated?: () => void } = {}) {
-    ({ api } = installMockApi({
+    ({ h, api } = await mountWithMockApi(<KnowledgeCard {...props} />, {
       knowledgeSettingsGet: () => Promise.resolve(settings()),
       knowledgeChanges: () => Promise.resolve({ items: [], nextCursor: null }),
       ...overrides,
     }));
-    h = mount(<KnowledgeCard {...props} />);
-    await h.flush();
     return h;
   }
   const q = <T extends HTMLElement>(sel: string) => h!.container.querySelector(sel) as T | null;
-  const button = (text: string) =>
-    Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
+  const button = (text: string) => buttonByText(h!, text) ?? undefined;
   const radio = (name: string, value: string) => q<HTMLInputElement>(`input[type="radio"][name="${name}"][value="${value}"]`);
   const applyBtn = (group: string) =>
     q(`input[name="${group}"]`)!.closest("fieldset")!.querySelector("button.manta-knowledge-apply") as HTMLButtonElement;
@@ -373,26 +371,15 @@ describe("KnowledgeCard", () => {
   });
 
   describe("background work budget line", () => {
-    const status = (over: Record<string, unknown> = {}) => ({
-      level: "normal",
-      dailyCapUsd: 5,
-      payg: { providers: [], usdToday: 0, usdMonth: 0 },
-      plans: [
-        {
-          adapter: "claude",
-          fallback: false,
-          windows: [{ key: "claude:weekly", kind: "weekly", label: "Week", pct: 40, bgPct: 2, cap: 5, projectedPct: 60, resetsAt: null }],
-          paused: null,
-        },
-      ],
-      waitingBatch: [],
-      byWork: [
-        { workType: "knowledge-capture", calls: 10, usd: 0.1, tokens: 120_000 },
-        { workType: "knowledge-tidy", calls: 4, usd: 0.2, tokens: 80_000 },
-        { workType: "cto-ambient", calls: 99, usd: 1, tokens: 9_000_000 },
-      ],
-      ...over,
-    });
+    const status = (over: Record<string, unknown> = {}) =>
+      budgetStatus({
+        byWork: [
+          { workType: "knowledge-capture", calls: 10, usd: 0.1, tokens: 120_000 },
+          { workType: "knowledge-tidy", calls: 4, usd: 0.2, tokens: 80_000 },
+          { workType: "cto-ambient", calls: 99, usd: 1, tokens: 9_000_000 },
+        ],
+        ...over,
+      });
 
     it("shows the status in plan terms, this subsystem's share, and no dollar-cap input", async () => {
       await open({ backgroundStatus: () => Promise.resolve(status()) });

@@ -7,27 +7,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import type { BudgetStatus } from "../shared/api";
 import { installMockApi, mount, resetStore, type Harness } from "./testHarness";
+import { budgetStatus } from "./budgetStatusFixture";
 import { CtoPanel, SettingsView } from "./CtoPanel";
 import { clearBackgroundWorkFocus } from "./useBackgroundStatus";
 
 vi.mock("./Transcript", () => ({ Transcript: () => null }));
 
-const status = (over: Partial<BudgetStatus> = {}): BudgetStatus => ({
-  level: "normal",
-  dailyCapUsd: 5,
-  payg: { providers: [], usdToday: 0, usdMonth: 0 },
-  plans: [
-    {
-      adapter: "claude",
-      fallback: false,
-      windows: [{ key: "claude:weekly", kind: "weekly", label: "Week", pct: 40, bgPct: 2, cap: 5, projectedPct: 60, resetsAt: null }],
-      paused: null,
-    },
-  ],
-  waitingBatch: [],
-  byWork: [{ workType: "cto-ambient", calls: 3, usd: 0.4, tokens: 45_000 }],
-  ...over,
-});
+const status = (over: Partial<BudgetStatus> = {}): BudgetStatus =>
+  budgetStatus({ byWork: [{ workType: "cto-ambient", calls: 3, usd: 0.4, tokens: 45_000 }], ...over });
 
 const settingsApi = (over: Record<string, unknown> = {}) => ({
   configGet: () => Promise.resolve({ ctoEnabled: true, ctoTier: "high", ctoOvernight: true }),

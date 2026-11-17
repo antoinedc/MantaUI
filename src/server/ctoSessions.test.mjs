@@ -23,23 +23,7 @@ import {
   createEphemeralReaper,
   runEphemeral,
 } from "./ctoSessions.mjs";
-
-const allow = async () => ({ ok: true });
-
-function fakeEngineState(initial = {}) {
-  let payload = { ...initial };
-  return {
-    async load() {
-      return payload;
-    },
-    async save(p) {
-      payload = p;
-    },
-    peek() {
-      return payload;
-    },
-  };
-}
+import { allow, fakeEngineState } from "./ctoSessionsFixtures.mjs";
 
 // The resolveModel is injected in unit tests; modelID carries the ROUTER tier
 // so the cascade's escalation is observable without touching the real router.

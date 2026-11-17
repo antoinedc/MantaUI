@@ -209,13 +209,16 @@ test("seam: capture's {limit} reaches opencode through the box wrapper (forwardL
 test("seam: every knowledge work type is one the shared budget knows; the knowledge runner over the REAL budget refuses at the pay-per-token cap and books what ran", async () => {
   const { createBackgroundBudget, WORK_CLASS } = await import("../backgroundBudget.mjs");
   for (const w of ["knowledge-capture", "knowledge-corrections", "knowledge-tidy", "knowledge-trial", "curator-notes", "curator-rules", "curator-skills"]) assert.ok(WORK_CLASS[w], w);
+  // a $1/day pay-per-token budget over model p/m at $10 per million input tokens
+  const budgetOver = (store) =>
+    createBackgroundBudget({
+      store,
+      configGet: async () => ({ backgroundWork: { level: "normal", dailyCapUsd: 1 } }),
+      getPrices: async () => ({ models: { "p/m": { input: 10, output: 50 } } }),
+      resolveDefaultModel: async () => ({ providerID: "p", modelID: "m" }),
+    });
   let saved = null;
-  const bb = createBackgroundBudget({
-    store: { load: async () => saved, save: async (d) => (saved = structuredClone(d)) },
-    configGet: async () => ({ backgroundWork: { level: "normal", dailyCapUsd: 1 } }),
-    getPrices: async () => ({ models: { "p/m": { input: 10, output: 50 } } }),
-    resolveDefaultModel: async () => ({ providerID: "p", modelID: "m" }),
-  });
+  const bb = budgetOver({ load: async () => saved, save: async (d) => (saved = structuredClone(d)) });
   let got;
   const run = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: async () => ({}), backgroundBudget: bb });
   await run({ taskClass: "curator-notes" });
@@ -225,12 +228,7 @@ test("seam: every knowledge work type is one the shared budget knows; the knowle
   assert.equal(bb.usdToday({ mode: "payg" }), 1);
   assert.deepEqual(await got.deps.preflight({ model: null }), { ok: false, reason: "usd-cap" }); // a null model is the box default
   // batch work stops earlier: tidy-up calls hit the 60 % batch ceiling first
-  const bb2 = createBackgroundBudget({
-    store: { load: async () => null, save: async () => {} },
-    configGet: async () => ({ backgroundWork: { level: "normal", dailyCapUsd: 1 } }),
-    getPrices: async () => ({ models: { "p/m": { input: 10, output: 50 } } }),
-    resolveDefaultModel: async () => ({ providerID: "p", modelID: "m" }),
-  });
+  const bb2 = budgetOver({ load: async () => null, save: async () => {} });
   const run2 = createKnowledgeRunner({ runEphemeral: async (a) => (got = a), oc: {}, configGet: async () => ({}), backgroundBudget: bb2 });
   await run2({ taskClass: "curator-rules", workType: "knowledge-tidy" });
   await got.deps.reportCost({ taskClass: "curator-rules", model: { providerID: "p", modelID: "m" }, tokens: 1, usage: { input: 70_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } });

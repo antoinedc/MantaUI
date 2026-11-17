@@ -116,7 +116,7 @@ const AWAY = async () => false;
 // The standard replay backfill over the fixture db: cto enabled, quiet
 // ledger/rollups, away-presence, in-memory engine state + segment files,
 // `oneLiner` as the fake segmenter's one-liner.
-function makeReplayBackfill(fx, { NOW, oneLiner }) {
+function makeReplayBackfill(fx, { NOW, oneLiner = "work", summarize = validSummarize() }) {
   const engineState = memStore();
   const segments = memFileStore();
   const backfill = createCtoBackfill({
@@ -125,7 +125,7 @@ function makeReplayBackfill(fx, { NOW, oneLiner }) {
     ledger: noopLedger,
     segments,
     rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
-    summarize: validSummarize(),
+    summarize,
     computeOneLiner: async () => oneLiner,
     getDb: async () => fx.db,
     presenceCheck: AWAY,
@@ -290,26 +290,15 @@ test("a shared-budget refusal mid-step leaves the session unprocessed (no histor
     fx.insMessage(`u-${sid}`, sid, { role: "user", ts: base, text: `work ${sid}` });
     fx.insMessage(`a-${sid}`, sid, { role: "assistant", ts: base + 500, cost: 0 });
   }
-  const engineState = memStore();
-  const segments = memFileStore();
   let refuse = true;
   const calls = [];
   const valid = validSummarize();
-  const backfill = createCtoBackfill({
-    configGet: async () => ({ ctoEnabled: true }),
-    engineState,
-    ledger: noopLedger,
-    segments,
-    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
+  const { engineState, segments, backfill } = makeReplayBackfill(fx, {
+    NOW,
     summarize: async (d) => {
       calls.push(d.sessionID);
       return refuse && d.sessionID === "s2" ? { ok: false, gated: true, code: "budget", error: "cto_cap_hit" } : valid(d);
     },
-    computeOneLiner: async () => "work",
-    getDb: async () => fx.db,
-    presenceCheck: AWAY,
-    now: () => NOW,
-    maxSessionsPerStep: 100,
   });
 
   const first = await backfill.step();
@@ -338,28 +327,17 @@ test("a deferred session re-uses the segments already summarized (the model is p
     fx.insMessage(`u${i}`, "s1", { role: "user", ts: t, text: `task ${i}` });
     fx.insMessage(`a${i}`, "s1", { role: "assistant", ts: t + 500, cost: 0 });
   });
-  const engineState = memStore();
-  const segments = memFileStore();
   const valid = validSummarize();
   const modelCalls = [];
   let refuseFrom = 2; // the 2nd model call of the first step is refused
   let n = 0;
-  const backfill = createCtoBackfill({
-    configGet: async () => ({ ctoEnabled: true }),
-    engineState,
-    ledger: noopLedger,
-    segments,
-    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
+  const { engineState, segments, backfill } = makeReplayBackfill(fx, {
+    NOW,
     summarize: async (d) => {
       modelCalls.push(d.start);
       n += 1;
       return refuseFrom && n >= refuseFrom ? { ok: false, gated: true, code: "budget", error: "cto_cap_hit" } : valid(d);
     },
-    computeOneLiner: async () => "work",
-    getDb: async () => fx.db,
-    presenceCheck: AWAY,
-    now: () => NOW,
-    maxSessionsPerStep: 100,
   });
 
   const first = await backfill.step();
@@ -450,19 +428,7 @@ test("a gated summary that is not a budget refusal still counts as processed (un
   const NOW = 1000 * DAY;
   fx.insSession("s1", { agent: "build", directory: "/work/proj" });
   fx.insMessage("u1", "s1", { role: "user", ts: NOW - 2000, text: "work" });
-  const engineState = memStore();
-  const bf = createCtoBackfill({
-    configGet: async () => ({ ctoEnabled: true }),
-    engineState,
-    ledger: noopLedger,
-    segments: memFileStore(),
-    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
-    summarize: async () => ({ ok: false, gated: true, error: "paused" }),
-    computeOneLiner: async () => "work",
-    getDb: async () => fx.db,
-    presenceCheck: AWAY,
-    now: () => NOW,
-  });
+  const { engineState, backfill: bf } = makeReplayBackfill(fx, { NOW, summarize: async () => ({ ok: false, gated: true, error: "paused" }) });
   const res = await bf.step();
   assert.equal(res.deferred, undefined);
   assert.deepEqual(engineState._data.backfillProgress.processedSessions, ["s1"]);

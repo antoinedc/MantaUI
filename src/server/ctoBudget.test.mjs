@@ -51,6 +51,28 @@ function makeQuietBudget(payload, now) {
   });
 }
 
+// A budget over ONE pending ROI row whose job record is a dirty-worktree one (the store never sweeps it): `rig.live`
+// says whether the record is still in the snapshot, `rig.payload()` is the stored payload.
+function dirtyWorktreeRig({ months = {}, pendingRow, gitProbe, discoverJobPr }) {
+  const finishedAt = MIDNIGHT - ROI_PENDING_RETENTION_MS - 1;
+  let payload = defaultBudgetPayload();
+  payload.roi = { months, pending: [{ id: "old", branch: "cto/old", cwd: "/p", finishedAt, ...pendingRow }] };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const job = { id: "old", actor: "cto", status: "done", branch: "cto/old", cwd: "/p", finishedAt, cleanedUp: false };
+  const rig = { live: true, payload: () => payload };
+  rig.budget = createCtoBudget({
+    store,
+    jobsRead: async () => (rig.live ? [job] : []),
+    gitProbe,
+    ...(discoverJobPr ? { discoverJobPr } : {}),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  return rig;
+}
+
 test("day rolls at local midnight (spend lands in separate day buckets)", () => {
   const late = MIDNIGHT + 23 * 3_600_000 + 59_999; // 23:59:59.999
   const fresh = MIDNIGHT + 86_400_000; // next local midnight
@@ -939,43 +961,21 @@ test("refreshRoi: a failed jobs read protects every counted fingerprint from the
 // fingerprint — dropping it would let step 1 re-sample the still-stored job
 // and re-count it into its month accumulator.
 test("refreshRoi: a counted row past the horizon survives while its dirty-worktree record is still in the store (BET-1497)", async () => {
-  let payload = defaultBudgetPayload();
-  payload.roi = {
+  const rig = dirtyWorktreeRig({
     months: { [AUG_KEY]: { merged: 1 } }, // the job was counted once, long ago
-    pending: [
-      { id: "old", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1, counted: true },
-    ],
-  };
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const job = {
-    id: "old",
-    actor: "cto",
-    status: "done",
-    branch: "cto/old",
-    cwd: "/p",
-    finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1,
-    cleanedUp: false, // dirty worktree → the store never sweeps this record
-  };
-  let recordLive = true;
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => (recordLive ? [job] : []),
+    pendingRow: { counted: true },
     gitProbe: async () => ({ exists: true, isAncestor: true }), // reads merged — a re-sample would re-count
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => MIDNIGHT,
   });
-  await budget.refreshRoi();
-  assert.equal(payload.roi.months[AUG_KEY].merged, 1, "no re-count while the record is live");
-  assert.deepEqual(payload.roi.pending.map((j) => j.id), ["old"], "the fingerprint survives the horizon");
+  await rig.budget.refreshRoi();
+  assert.equal(rig.payload().roi.months[AUG_KEY].merged, 1, "no re-count while the record is live");
+  assert.deepEqual(rig.payload().roi.pending.map((j) => j.id), ["old"], "the fingerprint survives the horizon");
   // The worktree is finally cleaned and the record is swept: absence from the
   // snapshot proves the fingerprint dead, and the row drops at the horizon —
   // with no re-sample and no second count.
-  recordLive = false;
-  await budget.refreshRoi();
-  assert.equal(payload.roi.months[AUG_KEY].merged, 1);
-  assert.equal(payload.roi.pending.length, 0);
+  rig.live = false;
+  await rig.budget.refreshRoi();
+  assert.equal(rig.payload().roi.months[AUG_KEY].merged, 1);
+  assert.equal(rig.payload().roi.pending.length, 0);
 });
 
 // BET-1503: the same churn, on the UNCOUNTED half — a never-merged job whose
@@ -986,31 +986,12 @@ test("refreshRoi: a counted row past the horizon survives while its dirty-worktr
 // snapshot: no churn, no marker loss, and the drop still fires the moment
 // the snapshot proves the record gone.
 test("refreshRoi: an uncounted row past the horizon survives (with its pr markers) while its dirty-worktree record is still in the store (BET-1503)", async () => {
-  let payload = defaultBudgetPayload();
-  payload.roi = {
-    months: {},
-    pending: [
-      // Aged out long ago; the forge already answered "no PR" definitively.
-      // `seeded` is a churn canary: a re-sampled row is minted without it.
-      { id: "old", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1, counted: false, prTried: true, seeded: true },
-    ],
-  };
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const job = {
-    id: "old",
-    actor: "cto",
-    status: "done",
-    branch: "cto/old",
-    cwd: "/p",
-    finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1,
-    cleanedUp: false, // dirty worktree → the store never sweeps this record
-  };
-  let recordLive = true;
   const asked = [];
   const probed = [];
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => (recordLive ? [job] : []),
+  const rig = dirtyWorktreeRig({
+    // Aged out long ago; the forge already answered "no PR" definitively.
+    // `seeded` is a churn canary: a re-sampled row is minted without it.
+    pendingRow: { counted: false, prTried: true, seeded: true },
     gitProbe: async ({ branch }) => {
       probed.push(branch);
       return { exists: true, isAncestor: false }; // never merges — stays uncounted
@@ -1019,28 +1000,25 @@ test("refreshRoi: an uncounted row past the horizon survives (with its pr marker
       asked.push(branch);
       return null;
     },
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => MIDNIGHT,
   });
-  await budget.refreshRoi();
-  await budget.refreshRoi();
+  await rig.budget.refreshRoi();
+  await rig.budget.refreshRoi();
   // The row survives both refreshes — no re-sample (its id is still a
   // fingerprint), no age-out — and its prTried marker rides along, so the
   // forge is never re-asked a question it already answered definitively.
-  assert.deepEqual(payload.roi.pending.map((j) => j.id), ["old"]);
-  assert.equal(payload.roi.pending[0].prTried, true);
-  assert.equal(payload.roi.pending[0].seeded, true, "the row is never re-minted — no churn");
+  const pending = () => rig.payload().roi.pending;
+  assert.deepEqual(pending().map((j) => j.id), ["old"]);
+  assert.equal(pending()[0].prTried, true);
+  assert.equal(pending()[0].seeded, true, "the row is never re-minted — no churn");
   assert.equal(asked.length, 0, "a definitive no-PR is never re-asked while the row survives");
   // The per-refresh probe waste the issue scoped out remains by design: the
   // git probe is the only way to notice a late merge.
   assert.equal(probed.length, 2);
   // The record is finally swept: absence is final, the row drops, and with
   // it the churn risk — there is nothing left to re-sample.
-  recordLive = false;
-  await budget.refreshRoi();
-  assert.equal(payload.roi.pending.length, 0);
+  rig.live = false;
+  await rig.budget.refreshRoi();
+  assert.equal(pending().length, 0);
 });
 
 // BET-1466 item 4: budget.json is not covered by the store sweep — the spend
