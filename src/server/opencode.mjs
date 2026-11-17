@@ -634,6 +634,16 @@ export function getCommandCorrelator() {
   return commandCorrelator;
 }
 
+// Prompt-origin record (promptOrigins.mjs, shared-knowledge §9.2). Null until
+// index.mjs installs the durable store, so a bare import never touches state;
+// with no store nothing is recorded, which reads as "not user-authored".
+let promptOrigins = null;
+
+/** Install the durable prompt-origin store (or null). index.mjs, at boot. */
+export function setPromptOrigins(store) {
+  promptOrigins = store ?? null;
+}
+
 /**
  * THE one place manta-server POSTs `/api/session/{id}/prompt`. It always sends a
  * message id (the caller's, else a freshly minted `msg_…`) and records it in
@@ -641,13 +651,25 @@ export function getCommandCorrelator() {
  * correlator tell a command's user message from ours. A definitive 4xx drops
  * the id again (it never reached the inbox). commandOrigins.test.mjs fails if a
  * session-prompt call appears anywhere else in src/server.
+ *
+ * `origin` (default "unknown") is recorded with the message id (§9.2) — but only
+ * AFTER opencode answered 2xx, and never for a caller-chosen id that already
+ * exists in the session (an existing assistant message must not become
+ * "user-authored" by re-posting its id; an id we cannot check is not recorded
+ * either). It is a server-set input: only callers inside manta-server pass it.
  * @param {string} sessionId
  * @param {{ text: string, id?: string, files?: any[], agents?: any[], skills?: any[], delivery?: "steer"|"queue" }} body
- * @param {{ signal?: AbortSignal }} [opts]
+ * @param {{ signal?: AbortSignal, origin?: string, idCheck?: Promise<{ state: "found" | "missing" | "unknown" }> }} [opts]
  * @returns {Promise<import("./opencodeClient.mjs").HttpFailure|null>} null once accepted; the refusal (a non-2xx) otherwise
  */
-async function postPrompt(sessionId, body, { signal } = {}) {
-  const id = typeof body.id === "string" && body.id ? body.id : mintPromptId();
+async function postPrompt(sessionId, body, { signal, origin = "unknown", idCheck } = {}) {
+  const callerChoseId = typeof body.id === "string" && body.id !== "";
+  const id = callerChoseId ? body.id : mintPromptId();
+  // Only a `user` origin is evidence, so only it needs the check: can that id already exist? A minted id cannot; a
+  // caller's might. Checked BEFORE the send (afterwards it always exists) — `idCheck` lets the caller start it
+  // alongside other work (see sendPrompt); otherwise it runs here.
+  let mayRecord = true;
+  if (promptOrigins && callerChoseId && origin === "user") mayRecord = ((await (idCheck ?? readMessageStrict(sessionId, id, { signal }))).state === "missing");
   commandCorrelator.registerPromptId(sessionId, id);
   // (A transport failure / abort throws past here with the id still registered:
   // the server may have accepted it after all.)
@@ -661,6 +683,14 @@ async function postPrompt(sessionId, body, { signal } = {}) {
     },
   });
   if (refused && refused.status >= 400 && refused.status < 500) commandCorrelator.unregisterPromptId(sessionId, id);
+  if (!refused && mayRecord) {
+    try {
+      promptOrigins?.record({ messageID: id, sessionID: sessionId, origin });
+    } catch (e) {
+      // Recording is evidence bookkeeping: a failure must never fail the user's (already accepted) message.
+      console.warn("[opencode] could not record the prompt origin:", e?.message ?? e);
+    }
+  }
   return refused;
 }
 
@@ -727,9 +757,14 @@ function fileInputs(attachments) {
  * steered message can never switch the session's model or agent mid-turn
  * (unset = an ordinary idle send, which syncs them as before).
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", signal?: AbortSignal }} opts
+ * `origin` (default "unknown", see promptOrigins.mjs) is who authored the
+ * message; only the `opencode:prompt` RPC handler passes "user".
+ *
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", origin?: string, signal?: AbortSignal }} opts
  */
-export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, signal }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, origin, signal }) {
+  // The user-origin id check (see postPrompt) runs alongside the session-controls sync, not after it.
+  const idCheck = promptOrigins && messageID && origin === "user" ? readMessageStrict(sessionId, messageID, { signal }) : undefined;
   if (!delivery) await syncSessionControls(sessionId, { model, agent, signal });
   const body = { text };
   const files = fileInputs(attachments);
@@ -746,7 +781,7 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
   if (messageID) body.id = messageID;
   if (delivery) body.delivery = delivery;
 
-  const refused = await postPrompt(sessionId, body, { signal });
+  const refused = await postPrompt(sessionId, body, { signal, origin, idCheck });
   if (refused) {
     const err = /** @type {Error & { status?: number, retryAfterMs?: number }} */ (new Error(`opencode sendPrompt ${refused.status}: ${refused.text}`));
     // Mirror the usage-meter HTTP error shape (usageAdapters/httpError.mjs):
@@ -1507,7 +1542,7 @@ export async function runSynchronousSession({
           // only where no status is classifiable. Only structured cause fields
           // cross the boundary; never exception text.
           return finish({
-            text: "", sid, ok: false, code: classifyModelErrorCode(err),
+            text: "", sid, ok: false, code: classifyModelErrorCode(err), ...usageField(msgs),
             errorName: typeof err?.name === "string" ? err.name : null,
             httpStatus: typeof status === "number" ? status : null,
             retryable: typeof err?.data?.isRetryable === "boolean" ? err.data.isRetryable : null,
@@ -1523,9 +1558,9 @@ export async function runSynchronousSession({
         outcome: completion === "ok" ? "success" : "failure",
         errorName: null, httpStatus: null, retryable: null, finish: assistant?.info?.finish ?? null,
       });
-      if (completion !== "ok") return finish({ text: "", sid, ok: false, code: completion });
+      if (completion !== "ok") return finish({ text: "", sid, ok: false, code: completion, ...usageField(msgs) });
       const text = extractAssistantText([assistant]);
-      return finish(text ? { text, sid, ok: true } : { text: "", sid, ok: false, code: "empty-output" });
+      return finish(text ? { text, sid, ok: true, ...usageField(msgs) } : { text: "", sid, ok: false, code: "empty-output", ...usageField(msgs) });
     }
     return finish({ text: "", sid, ok: false, code: readFailed ? "read-http" : "timeout" });
   } catch {
@@ -1570,6 +1605,35 @@ export async function runSynchronousSession({
     } catch { /* guarded */ }
   }
 }
+
+/**
+ * What the session's assistant messages recorded as spent: tokens by kind and opencode's own cost. The session is
+ * deleted when the run ends, so a caller that wants the real figure has to take it from the result.
+ * `undefined` when no assistant message carries tokens.
+ * @returns {{ input: number, output: number, reasoning: number, cacheRead: number, cacheWrite: number, usd?: number } | undefined}
+ */
+export function sessionUsage(msgs) {
+  const n = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  const sum = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let usd = 0;
+  let seen = false;
+  for (const m of Array.isArray(msgs) ? msgs : []) {
+    if (m?.info?.role !== "assistant" || !m.info.tokens || typeof m.info.tokens !== "object") continue;
+    const t = m.info.tokens;
+    seen = true;
+    sum.input += n(t.input);
+    sum.output += n(t.output);
+    sum.reasoning += n(t.reasoning);
+    sum.cacheRead += n(t.cache?.read);
+    sum.cacheWrite += n(t.cache?.write);
+    usd += n(m.info.cost);
+  }
+  return seen ? { ...sum, ...(usd > 0 ? { usd } : {}) } : undefined;
+}
+const usageField = (msgs) => {
+  const usage = sessionUsage(msgs);
+  return usage ? { usage } : {};
+};
 
 function extractAssistantText(msgs) {
   const out = [];

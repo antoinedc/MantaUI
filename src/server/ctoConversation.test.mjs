@@ -17,6 +17,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
+import { stubRpcDeps } from "./fixtures/rpcStubDeps.mjs";
 import { dispatch, buildHandlers } from "./rpc.mjs";
 import { backgroundDeliveryId, createCtoConversationService } from "./ctoConversation.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
@@ -191,23 +192,6 @@ const waitFor = async (pred, rounds = 500) => {
   return false;
 };
 
-// Minimal tmux/local/syncState stubs — buildHandlers only closes over them;
-// the cto:conversation-* and opencode:prompt seam tests never touch them.
-const stubDeps = () => ({
-  tmux: { listProjects: async () => [] },
-  pty: {},
-  bus: {},
-  syncState: {
-    refreshNow: async () => {},
-    applyConfig: () => {},
-    snapshot: () => ({ projects: [] }),
-    payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }),
-    everSucceeded: () => true,
-  },
-  local: { configGet: async () => ({ projects: [] }) },
-  push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
-});
-
 // Compose the FULL production triangle (mirrors src/server/index.mjs): ONE
 // binding + ONE admission + the conversation service, the prompt-delivery
 // engine with its redirect, and the real channel map. Agent name is a stub
@@ -254,7 +238,7 @@ function compose({ stamp, bindingStore, admissionOptions, conversationOptions } 
     ...(stamp ? { stamp } : {}),
     ...conversationOptions,
   });
-  const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubDeps() });
+  const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubRpcDeps() });
   return { oc, binding, admission, svc, pd, handlers, bStore };
 }
 
@@ -315,7 +299,7 @@ test("cto:conversation-open creates exactly one role session under concurrency, 
 });
 
 test("cto:conversation-* channels answer an actionable error when the runtime is not wired", async () => {
-  const handlers = buildHandlers({ oc: {}, ...stubDeps() });
+  const handlers = buildHandlers({ oc: {}, ...stubRpcDeps() });
   await assert.rejects(
     () => dispatch(handlers, "cto:conversation-open", []),
     /cto conversation APIs are not wired on this box/,
@@ -382,6 +366,17 @@ test("cto:conversation-submit: stable id, durable queue projection, server-owned
 // ---------------------------------------------------------------------------
 // Seams: direct sends / slash commands at the conversation session
 // ---------------------------------------------------------------------------
+
+test("the CTO conversation's human send is stamped user-authored by admission, whatever origin the client claims (shared-knowledge §9.2)", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  await dispatch(t.handlers, "opencode:prompt", [
+    { sessionId: open.sessionId, text: "status please", messageID: "m_origin_1", origin: "schedule" },
+  ]);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 1));
+  // admitDirect forwards no client origin; the human admission record is what makes it "user".
+  assert.equal(t.oc.sends[0].origin, "user");
+});
 
 test("CTO admits text and attachments but rejects inline @agent tasks with an actionable error", async () => {
   const t = compose();
@@ -514,7 +509,7 @@ test("a box with no planAgentName wired drops every agent value (safe default, i
   }
 });
 
-test("ordinary project traffic is byte-identical: direct sends, slash commands, and background deliveries", async () => {
+test("ordinary project traffic is unchanged apart from the server-set prompt origin: direct sends, slash commands, and background deliveries", async () => {
   const t = compose();
   // A direct send at an ordinary session passes through raw, SAME object,
   // including the caller's own agent choice.
@@ -526,7 +521,9 @@ test("ordinary project traffic is byte-identical: direct sends, slash commands, 
   };
   await dispatch(t.handlers, "opencode:prompt", [input]);
   assert.equal(t.oc.sends.length, 1);
-  assert.equal(t.oc.sends[0], input);
+  // The only addition is the server-set prompt origin (shared-knowledge §9.2); the caller's object is untouched.
+  assert.deepEqual(t.oc.sends[0], { ...input, origin: "user" });
+  assert.equal("origin" in input, false);
 
   // A slash command at an ordinary session runs the raw route.
   const cmd = { sessionId: "ses_project", command: "compact" };

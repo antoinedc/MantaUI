@@ -308,15 +308,10 @@ test("resolveOwner finds the tmux session owning a session id", () => {
 
 function runningJob(i) {
   return {
-    id: `r${i}`, name: `job${i}`, prompt: "p", model: null,
-    parentSessionID: `parent${i}`, parentDirectory: "/repo",
-    childSessionID: `child${i}`, tmuxSession: "s", windowIndex: i,
-    worktree: null, branch: null, baseSha: null,
-    status: "running", activity: null,
-    createdAt: 1, startedAt: 1, finishedAt: null,
-    result: null, error: null, filesChanged: null,
-    engine: "v2", completionOwner: "manta", attempt: 1, launchState: "running", submittedAt: 1,
-    completionMessageId: "msg_fixture", completionDelivery: null,
+    ...runningObserverJob(),
+    id: `r${i}`, name: `job${i}`,
+    parentSessionID: `parent${i}`,
+    childSessionID: `child${i}`, windowIndex: i,
   };
 }
 
@@ -603,6 +598,33 @@ test("startJob stamps the new window's owner as job (BET-1377)", async () => {
   );
   assert.equal(res.ok, true);
   assert.deepEqual(stamps, [{ sessionName: "s", windowIndex: 4, owner: "job" }]);
+});
+
+test("startJob pins the child to its WORKTREE (forced) after the move and before the opening prompt; a failing pin never fails the launch (shared-knowledge §3.1)", async () => {
+  const h = startHarness("child_pin", 3);
+  h.deps.gitAddWorktree = async ({ name }) => ({ path: `/repo/wt-${name}`, branch: name });
+  const order = [];
+  const pins = [];
+  const move = h.deps.moveSession;
+  h.deps.moveSession = async (sid, directory) => { order.push(`move:${directory}`); return move(sid, directory); };
+  const send = h.deps.sendChildPrompt;
+  h.deps.sendChildPrompt = async (a) => { order.push("prompt"); return send(a); };
+  h.deps.pinKnowledgeSession = async (a) => { order.push("pin"); pins.push(a); };
+  const res = await startJob({ prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" }, h.deps);
+  assert.equal(res.ok, true);
+  assert.equal(pins.length, 1);
+  assert.equal(pins[0].sessionID, res.job.childSessionID);
+  assert.equal(pins[0].force, true);
+  assert.match(pins[0].directory, /^\/repo\/wt-/, "the worktree the child was moved into, not the parent's directory");
+  assert.deepEqual(order.map((x) => x.split(":")[0]), ["move", "pin", "prompt"]);
+
+  const bad = startHarness("child_pin_bad", 3);
+  bad.deps.pinKnowledgeSession = async () => { throw new Error("knowledge exploded"); };
+  const r2 = await startJob({ prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" }, bad.deps);
+  assert.equal(r2.ok, true);
+  const sync = startHarness("child_pin_sync", 3);
+  sync.deps.pinKnowledgeSession = () => { throw new Error("sync throw"); };
+  assert.equal((await startJob({ prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" }, sync.deps)).ok, true);
 });
 
 test("startJob still succeeds when the owner stamp fails (best-effort)", async () => {
@@ -1030,6 +1052,47 @@ test("chooseSubagentModel still returns the incumbent on a routing exception (ne
     services,
   });
   assert.deepEqual(chosen, { providerID: "anthropic", modelID: "claude-sonnet-4" });
+});
+
+test("chooseSubagentModel withTrace returns { model, trace }; without it the bare model (shared knowledge §6.2)", () => {
+  const catalog = [normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" }))];
+  const args = {
+    incumbent: null,
+    catalog,
+    policy: { perAgent: { "cto:t": "deep" } },
+    agent: "cto:t",
+    nowMs: 1_700_000_000_000,
+    services: routingServicesFor(catalog),
+  };
+  const bare = chooseSubagentModel(args);
+  assert.deepEqual(bare, { providerID: "anthropic", modelID: "claude-opus-4" });
+  const traced = chooseSubagentModel({ ...args, withTrace: true });
+  assert.deepEqual(traced.model, bare);
+  assert.equal(traced.trace.target.tier, "deep");
+  assert.equal(traced.trace.target.widened, false);
+  assert.equal(traced.trace.winner.quality.known, true);
+});
+
+test("chooseSubagentModel withTrace: an empty target band widens and says so; a routing exception yields a null trace", () => {
+  const catalog = [normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" }))];
+  const widened = chooseSubagentModel({
+    incumbent: null,
+    catalog,
+    policy: { perAgent: { "cto:t": "deep" } },
+    agent: "cto:t",
+    nowMs: 1_700_000_000_000,
+    services: routingServicesFor(catalog),
+    withTrace: true,
+  });
+  assert.equal(widened.model.modelID, "claude-haiku-4");
+  assert.equal(widened.trace.target.widened, true);
+
+  const services = routingServicesFor(catalog);
+  Object.defineProperty(services, "health", { get() { throw new Error("health reader down"); } });
+  const broke = chooseSubagentModel({
+    incumbent: null, catalog, policy: { preset: "balanced" }, agent: "general", nowMs: 1_700_000_000_000, services, withTrace: true,
+  });
+  assert.deepEqual(broke, { model: null, trace: null });
 });
 
 // BET-1535 (S3): a no-healthy-endpoint verdict FAILS the spawn with the typed

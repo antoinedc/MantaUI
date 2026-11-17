@@ -2,6 +2,7 @@
 // Mirrors Electron ipcMain.handle semantics.
 
 import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
+import { buildKnowledgeChannels } from "./knowledge/routes.mjs";
 import { describeInboxCancel, describeInboxSetDelivery } from "./inboxCopy.mjs";
 import { backgroundCommandNames as defaultBackgroundCommandNames } from "./commandBackground.mjs";
 import { dirname, join } from "node:path";
@@ -568,6 +569,9 @@ export function buildHandlers({
   // Routines engine (src/server/routines.mjs). Null when not wired (tests): every
   // `routines:*` channel then answers a plain sentence instead of throwing a TypeError.
   routines = null,
+  // Shared-knowledge engine (src/server/knowledge/engine.mjs). Null when not wired (tests): every
+  // `knowledge:*` channel then answers 503.
+  knowledge = null,
   // WS02 (SF-4): the box's reading of background-job records (read-only refusal,
   // job view, list labels, approve rule check). Null when not wired (tests).
   delegateView = null,
@@ -716,6 +720,31 @@ export function buildHandlers({
   function withoutDelivery(input) {
     const { delivery: _dropped, ...rest } = input;
     return rest;
+  }
+  // Shared knowledge §3.1/§9.2: pin the session to the project of the directory it has NOW. Fire-and-forget (the
+  // caller never awaits it); `force` lets this authoritative pin win over a parent-/move-sourced mapping. The session
+  // pinned is the one the message actually reached (`deliveredTo`, after handoff admission). A session that already
+  // holds a forced pin from here is not asked again (in-memory, bounded): the mapping only changes while nothing is
+  // captured, and every send would otherwise cost a session read.
+  const knowledgePinned = new Set();
+  function pinForKnowledge(sessionId) {
+    if (!knowledge?.pinSession || typeof sessionId !== "string" || !sessionId || knowledgePinned.has(sessionId)) return;
+    void (async () => {
+      let directory = null;
+      try {
+        const r = await oc.readSession?.(sessionId);
+        directory = r?.state === "found" ? (r.session?.directory ?? null) : null;
+      } catch {
+        directory = null;
+      }
+      directory ??= oc.cachedSessionDirectory?.(sessionId) ?? null;
+      if (!directory) return;
+      const mapped = await knowledge.pinSession({ sessionID: sessionId, directory, force: true });
+      if (mapped) {
+        knowledgePinned.add(sessionId);
+        if (knowledgePinned.size > 2000) knowledgePinned.delete(knowledgePinned.values().next().value);
+      }
+    })().catch((e) => console.warn("[knowledge] pin at the first prompt failed:", e?.message ?? e));
   }
   // The user's own send into a session: a viewer window showing it (any member of its handoff chain) becomes
   // the user's, so the box never closes it. Awaited before the send goes out; never blocks it. Ordered like
@@ -1033,6 +1062,11 @@ export function buildHandlers({
       if (patch && typeof patch === "object" && ("summaryModel" in patch || "summaryModelOptOut" in patch)) {
         const { summaryModel: _s, summaryModelOptOut: _o, ...rest } = patch;
         patch = rest;
+      }
+      // The Knowledge settings are written only by `knowledge:settings-set` (validated, sole
+      // writer): a generic config write can never set them. Dotted `knowledge.*` keys too.
+      if (patch && typeof patch === "object" && Object.keys(patch).some((k) => k === "knowledge" || k.startsWith("knowledge."))) {
+        patch = Object.fromEntries(Object.entries(patch).filter(([k]) => k !== "knowledge" && !k.startsWith("knowledge.")));
       }
       if (patch?.handoffMode !== undefined && !["auto", "suggest", "off"].includes(patch.handoffMode)) {
         throw new Error('handoffMode must be "auto", "suggest" or "off"');
@@ -1658,11 +1692,24 @@ export function buildHandlers({
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(withoutDelivery(input));
       }
+      // Prompt origin (shared-knowledge §9.2): this handler is the ONLY place a
+      // prompt is stamped `user`. The field is set here, after the spread, so a
+      // client-supplied `origin` can never survive; every other caller of the
+      // prompt path leaves it unset (recorded as "unknown"). A client may only
+      // LOWER the origin: `appGenerated: true` (text the app composed, e.g.
+      // "Build here" re-sending the plan agent's plan) records "unknown".
+      // The flag itself never travels on.
+      const { appGenerated, ...clientInput } = input ?? {};
+      const userInput = input && { ...clientInput, origin: appGenerated === true ? "unknown" : "user" };
       // Auto-handoff §6.1: the admission resolver runs before anything else — a
       // replaced conversation's message goes to its successor, a fenced one is
       // held. The result carries `deliveredTo`.
-      if (handoff && input) return handoff.admitPrompt(input);
-      return oc.sendPrompt(input);
+      const result = handoff && userInput ? await handoff.admitPrompt(userInput) : await oc.sendPrompt(userInput);
+      // Shared knowledge §3.1: a session is pinned to its project at its first user prompt, from the directory it
+      // has NOW (a background job was created under its parent and moved into its worktree), for the session the
+      // message reached. Fire-and-forget: it can never delay or fail the send.
+      if (userInput) pinForKnowledge(result?.deliveredTo ?? userInput.sessionId);
+      return result;
     },
 
     // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)
@@ -2751,6 +2798,9 @@ export function buildHandlers({
     // same poller, same ⏰ card. Returns { ok, job?, error? }.
     "schedule:create": (input) =>
       scheduleCreateJob(input || {}, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- shared knowledge (src/server/knowledge/; spec docs/superpowers/specs/2026-11-16-shared-knowledge.md §11.6) ----
+    ...buildKnowledgeChannels(knowledge),
 
     // ---- routines (manta-server owned; src/server/routines.mjs, spec §5.1) ----
     // Args/returns are the pinned wire contract in src/shared/routines.ts. A refusal is a

@@ -12,6 +12,7 @@ import {
   createSseFramer,
   createSession,
   sendPrompt,
+  setPromptOrigins,
   getAndClearSessionRefusal,
   getSessionAgent,
   getSessionDirectory,
@@ -745,6 +746,158 @@ test("runCommand on a skill sends `/<skill> <args>` as a prompt with the skill a
     text: "/impeccable init",
     skills: [{ id: "impeccable", mention: { start: 0, end: 11, text: "/impeccable" } }],
   });
+});
+
+// ---- prompt origins (shared-knowledge §9.2): recorded at the one chokepoint ----
+
+function originRecorder() {
+  const rows = [];
+  return { rows, record: (r) => { rows.push(r); return true; } };
+}
+
+test("sendPrompt records the origin only AFTER opencode accepted the message; the default is unknown", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    let rowsDuringPost = null;
+    const calls = await withV2(
+      {
+        "GET /api/session/ses_a": { data: SESSION() },
+        "GET /api/session/ses_a/message/msg_mine": new Response("nope", { status: 404 }),
+        "POST /api/session/ses_a/prompt": () => {
+          rowsDuringPost ??= store.rows.length;
+          return { data: {} };
+        },
+      },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user", messageID: "msg_mine" });
+        await sendPrompt({ sessionId: "ses_a", text: "bg" });
+      },
+    );
+    assert.equal(rowsDuringPost, 0, "nothing is written before the request is answered");
+    const bodies = only(calls, "POST", "/api/session/ses_a/prompt").map((c) => c.body);
+    assert.deepEqual(store.rows[0], { messageID: "msg_mine", sessionID: "ses_a", origin: "user" });
+    assert.equal(store.rows[1].messageID, bodies[1].id, "a minted id is what gets recorded");
+    assert.equal(store.rows[1].origin, "unknown");
+    assert.equal(only(calls, "GET", "/api/session/ses_a/message/msg_mine").length, 1, "a caller-chosen id is checked before the send");
+    assert.equal(calls.filter((c) => c.method === "GET" && c.path.includes("/message/")).length, 1, "a minted id is not looked up");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("the id check runs only for a user origin, and alongside the session-controls sync rather than after it", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    const events = [];
+    const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+    await withV2(
+      {
+        "GET /api/session/ses_a": async () => { events.push("session:start"); await sleepMs(40); events.push("session:end"); return { data: SESSION() }; },
+        "GET /api/session/ses_a/message/msg_mine": () => { events.push("check"); return new Response("nope", { status: 404 }); },
+        "POST /api/session/ses_a/prompt": () => { events.push("post"); return { data: {} }; },
+      },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user", messageID: "msg_mine" });
+      },
+    );
+    assert.ok(events.indexOf("check") < events.indexOf("session:end"), `the check started before the sync finished: ${events}`);
+    assert.ok(events.indexOf("check") < events.indexOf("post"));
+    assert.equal(store.rows.length, 1);
+
+    // a non-user origin with a caller-chosen id: no lookup at all
+    const calls = await withV2(
+      { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/prompt": { data: {} } },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "bg", origin: "schedule", messageID: "msg_sched" });
+      },
+    );
+    assert.equal(calls.filter((c) => c.path.includes("/message/")).length, 0);
+    assert.equal(store.rows.at(-1).messageID, "msg_sched");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a message id that already exists in the session never gets an origin (re-posting an assistant id cannot make it user-authored)", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    for (const lookup of [{ data: { id: "msg_asst", type: "assistant" } }, new Response("busy", { status: 500 })]) {
+      const calls = await withV2(
+        {
+          "GET /api/session/ses_a": { data: SESSION() },
+          "GET /api/session/ses_a/message/msg_asst": lookup,
+          "POST /api/session/ses_a/prompt": { data: {} },
+        },
+        async () => {
+          await sendPrompt({ sessionId: "ses_a", text: "forged", origin: "user", messageID: "msg_asst" });
+        },
+      );
+      assert.equal(only(calls, "POST", "/api/session/ses_a/prompt").length, 1, "the message itself is still sent");
+    }
+    assert.deepEqual(store.rows, [], "existing id (or one that could not be checked) → no origin recorded");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a refused prompt (4xx) leaves no origin row", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    await withV2(
+      {
+        "GET /api/session/ses_a": { data: SESSION() },
+        "GET /api/session/ses_a/message/msg_x": new Response("nope", { status: 404 }),
+        "POST /api/session/ses_a/prompt": new Response("bad", { status: 400 }),
+      },
+      async () => {
+        await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user", messageID: "msg_x" }));
+        await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user" }));
+      },
+    );
+    assert.deepEqual(store.rows, []);
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a slash command that runs as a skill prompt is not user-authored", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    await withV2(
+      {
+        "GET /api/skill": { data: [{ id: "impeccable", name: "impeccable", path: "/s", content: "c" }] },
+        "GET /api/session/ses_a": { data: SESSION() },
+        "POST /api/session/ses_a/prompt": null,
+      },
+      async () => {
+        await runCommand({ sessionId: "ses_a", command: "impeccable", arguments: "init", origin: "user" });
+      },
+    );
+    assert.equal(store.rows.length, 1);
+    assert.equal(store.rows[0].origin, "unknown");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a failing origin store never stops a prompt from being sent", async () => {
+  setPromptOrigins({ record: () => { throw new Error("disk full"); } });
+  try {
+    const calls = await withV2(
+      { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/prompt": { data: {} } },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user" });
+      },
+    );
+    assert.equal(only(calls, "POST", "/api/session/ses_a/prompt").length, 1);
+  } finally {
+    setPromptOrigins(null);
+  }
 });
 
 test("listCommands appends skills, and a skill hides a same-named command wrapper", async () => {
@@ -2461,4 +2614,18 @@ test("runCommand with noSync leaves the session's agent and model alone (always-
   assert.equal(calls.filter((c) => c.method === "GET" && c.path === "/api/session/ses_a").length, 0, "no session read");
   assert.equal(calls.filter((c) => /\/(agent|model)$/.test(c.path)).length, 0, "no agent/model POST");
   assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "bg", text: "x" });
+});
+
+test("sessionUsage sums what the assistant messages recorded (tokens by kind, opencode's cost); undefined without any", async () => {
+  const { sessionUsage } = await import("./opencode.mjs");
+  assert.equal(sessionUsage([]), undefined);
+  assert.equal(sessionUsage([{ info: { role: "user", tokens: { input: 5 } } }, { info: { role: "assistant" } }]), undefined);
+  assert.deepEqual(
+    sessionUsage([
+      { info: { role: "assistant", tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 1000, write: 50 } }, cost: 0.01 } },
+      { info: { role: "assistant", tokens: { input: 10, output: 2 }, cost: 0.002 } },
+    ]),
+    { input: 110, output: 22, reasoning: 5, cacheRead: 1000, cacheWrite: 50, usd: 0.012 },
+  );
+  assert.deepEqual(sessionUsage([{ info: { role: "assistant", tokens: { input: 1, output: 1 }, cost: 0 } }]), { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 });
 });

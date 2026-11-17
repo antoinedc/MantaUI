@@ -43,6 +43,21 @@ export type Attachment = {
   asPathRef?: boolean;
 };
 
+// The chips a send actually carries: every ready chip with a remote path
+// (`sent`, what the composer removes and restores) and, of those, the media
+// chips that become multimodal FileParts (`media`; path-ref chips were already
+// folded into the message text).
+export function splitSendableAttachments(attachments: Attachment[]): {
+  sent: Attachment[];
+  media: Array<{ remotePath: string; mime: string; filename: string }>;
+} {
+  const sent = attachments.filter((a) => a.status === "ready" && a.remotePath);
+  const media = sent
+    .filter((a) => !a.asPathRef)
+    .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+  return { sent, media };
+}
+
 // Agent mention emitted by @-mention typeahead. We track the inserted slice
 // of the textarea so we can compute {value, start, end} for the wire format
 // at submit time, after the user may have edited around it.

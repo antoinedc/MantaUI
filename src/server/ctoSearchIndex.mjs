@@ -71,7 +71,24 @@
 //     `invalid_input` are distinct. Empty results over a healthy index are
 //     `ok` WITH coverage counts — never a fabricated "nothing happened".
 //
-// Query policy: the user's query is LITERAL text — see ftsQuery.mjs.
+//   • RECENT-FIRST, THEN EVERYTHING (shared-knowledge §7.2). The cyclic sweep
+//     walks every stream NEWEST first, so a fresh index answers about recent work
+//     long before the whole history is read. A separate head pass reads, in order
+//     and without gaps, whatever is newer than the newest row already seen, so new
+//     activity is indexed on the next sync rather than a whole cycle later.
+//   • BOUNDED SIZE. The index is capped (default 1 GiB, `maxBytes`). Over the
+//     cap, `sync()` evicts the OLDEST sessions down to ~90 % of it in one round
+//     and records an eviction floor: the sweep never re-reads anything at or
+//     below the floor, so evicted history is not indexed again and evicted again.
+//     The cap is on LIVE bytes (pages in use); FTS5 deletes only free space after
+//     a compaction, so an eviction that does not get under the cap also runs an
+//     FTS5 `optimize` — a full rewrite of the index (seconds per 100 MB on the
+//     calling thread), paid once per round, i.e. once per ~10 % of the cap indexed.
+//
+// Query policy: the user's query is LITERAL text — see ftsQuery.mjs. `search()`
+// takes `anyTerms: true` for a ranked OR of the terms (otherwise every term must
+// match) and `directories: [...]` to restrict hits to a SET of session
+// directories (an empty set matches nothing).
 
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 // `join` is used by canonicalPath's symlinked-parent fallback. It was never
@@ -88,7 +105,7 @@ import { runOnHandle } from "./dbOffload.mjs";
 // Wall-clock budget of one sync batch's windowed source reads (db worker, off the event loop).
 const SYNC_READ_BUDGET_MS = 30_000;
 import { internalSessionIds } from "./internalSessions.mjs";
-import { ftsMatchExpression } from "./ftsQuery.mjs";
+import { ftsMatchExpression, ftsAnyTermExpression } from "./ftsQuery.mjs";
 
 export const CTO_SEARCH_INDEX_LIMITS = Object.freeze({
   // One sync re-reads AT MOST `limit` rows PER STREAM (clamped server-side).
@@ -114,9 +131,17 @@ export const CTO_SEARCH_INDEX_LIMITS = Object.freeze({
   sessionVerifyMax: 16,
   // FTS5 snippet bounds (tokens) — per-hit text bounded by construction.
   snippetTokens: 24,
+  // Size cap of the index file (live bytes) and where one eviction round stops.
+  maxIndexBytes: 1024 * 1024 * 1024,
+  evictTargetRatio: 0.9,
+  // Most directories one search may filter on.
+  searchDirectoriesMax: 20_000,
 });
 
 const SCHEMA_VERSION = "2";
+// Beyond any epoch ms: the top of the newest-first walk.
+const MAX_T = Number.MAX_SAFE_INTEGER;
+const MAX_EVICT_ROUNDS = 4;
 // Ownership marker in the file header ("MANT"): an existing database at the
 // index path without it is foreign and is never written.
 const APPLICATION_ID = 0x4d414e54;
@@ -138,6 +163,7 @@ const DDL = `
     part_id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT,
     source_time INTEGER, field_count INTEGER, truncated INTEGER,
     incomplete INTEGER, data_hash TEXT);
+  CREATE INDEX IF NOT EXISTS indexed_parts_session ON indexed_parts(session_id);
   CREATE VIRTUAL TABLE IF NOT EXISTS indexed_evidence USING fts5(
     text, field UNINDEXED, part_id UNINDEXED);
 `;
@@ -259,6 +285,13 @@ function extractEvidence(part, limits) {
  * @param {{ DatabaseSync: Function } | null} [deps.sqliteModule]  injectable
  *   node:sqlite module (tests count connections; `null` → `unsupported`).
  *   Default: lazy `import("node:sqlite")` on first use.
+ * @param {number} [deps.maxBytes]  size cap of the index (live bytes); default 1 GiB.
+ * @param {boolean} [deps.readOnly]  a SEARCH-ONLY instance over an index another instance (usually in
+ *   another thread) writes: it opens the existing, Manta-marked file read-only, never initializes,
+ *   never writes, and `sync()` refuses. An index that does not exist yet answers `index_error`.
+ * @param {boolean} [deps.wal]  put the index in WAL mode on open (writer side), so a reader never
+ *   waits for a writer — a long FTS5 `optimize` included. Default off (rollback journal, as before).
+ * @param {number} [deps.busyTimeoutMs]  SQLite busy timeout on the owned connection (0 = none).
  */
 export function createCtoSearchIndex(deps = {}) {
   const {
@@ -266,6 +299,10 @@ export function createCtoSearchIndex(deps = {}) {
     provenanceFilter = internalSessionIds,
     now = Date.now,
     sqliteModule,
+    maxBytes = CTO_SEARCH_INDEX_LIMITS.maxIndexBytes,
+    readOnly = false,
+    wal = false,
+    busyTimeoutMs = 0,
   } = deps;
 
   let db = null;
@@ -344,9 +381,12 @@ export function createCtoSearchIndex(deps = {}) {
       let ro = null;
       try {
         ro = new mod.DatabaseSync(path, { readOnly: true });
-        const check = ro.prepare("PRAGMA quick_check").get();
-        if (!check || check.quick_check !== "ok") {
-          return { status: "index_corrupt", detail: `index failed quick_check (${check?.quick_check ?? "unknown"}); file retained — explicit recovery required` };
+        // A search-only instance trusts the writer's own check (a quick_check reads the whole file).
+        if (!readOnly) {
+          const check = ro.prepare("PRAGMA quick_check").get();
+          if (!check || check.quick_check !== "ok") {
+            return { status: "index_corrupt", detail: `index failed quick_check (${check?.quick_check ?? "unknown"}); file retained — explicit recovery required` };
+          }
         }
         const appId = ro.prepare("PRAGMA application_id").get();
         if (!appId || appId.application_id !== APPLICATION_ID) {
@@ -371,6 +411,8 @@ export function createCtoSearchIndex(deps = {}) {
           }
         }
       }
+    } else if (readOnly) {
+      return { status: "index_error", detail: "the search index has not been built yet" };
     } else {
       try {
         mkdirSync(dirname(path), { recursive: true });
@@ -380,11 +422,27 @@ export function createCtoSearchIndex(deps = {}) {
     }
     let d;
     try {
-      d = new mod.DatabaseSync(path);
+      d = readOnly ? new mod.DatabaseSync(path, { readOnly: true }) : new mod.DatabaseSync(path);
     } catch (e) {
       return { status: classifyError(e), detail: `cannot open index: ${e?.message ?? e}` };
     }
+    if (busyTimeoutMs > 0) {
+      try {
+        d.exec(`PRAGMA busy_timeout = ${Math.trunc(busyTimeoutMs)}`);
+      } catch {
+        /* non-fatal */
+      }
+    }
+    if (readOnly) return { db: d };
     try {
+      // A brand-new file: let freed pages be handed back to the OS after an eviction.
+      // (auto_vacuum must be chosen BEFORE the journal mode or any table exists.)
+      if (d.prepare("PRAGMA page_count").get().page_count === 0) d.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      if (wal) {
+        d.exec("PRAGMA journal_mode = WAL");
+        // An eviction's optimize rewrites the whole index through the WAL: hand the file back afterwards.
+        d.exec("PRAGMA journal_size_limit = 67108864");
+      }
       d.exec("BEGIN IMMEDIATE");
       d.exec(DDL);
       const ver = d.prepare("SELECT value FROM index_meta WHERE key = 'schema_version'").get();
@@ -445,24 +503,44 @@ export function createCtoSearchIndex(deps = {}) {
     return initPromise;
   }
 
+  // Sweep state, one JSON value: `cycle` = where the NEWEST-FIRST walk of each
+  // stream resumes (descending keyset), `head` = the newest row already seen per
+  // stream (null until the first read), read upward gap-free by the head pass.
+  // `floor` (separate key) is the eviction floor. A state written by an older
+  // layout (no `v: 2`) is ignored: the walk simply starts again from the top.
+  const SWEEP_START = { t: MAX_T, i: "" };
+  const freshSweep = () => ({
+    cycle: { session: { ...SWEEP_START }, message: { ...SWEEP_START }, part: { ...SWEEP_START } },
+    head: { session: null, message: null, part: null },
+  });
   function sweepPosition(db) {
     const row = db.prepare("SELECT value FROM index_meta WHERE key = 'sweep'").get();
-    const start = { t: -1, i: "" };
-    if (!row) return { session: { ...start }, message: { ...start }, part: { ...start } };
-    try {
-      const parsed = JSON.parse(row.value);
-      return {
-        session: parsed?.session ?? { ...start },
-        message: parsed?.message ?? { ...start },
-        part: parsed?.part ?? { ...start },
-      };
-    } catch {
-      return { session: { ...start }, message: { ...start }, part: { ...start } };
+    const out = freshSweep();
+    if (row) {
+      try {
+        const parsed = JSON.parse(row.value);
+        if (parsed?.v === 2) {
+          for (const name of ["session", "message", "part"]) {
+            if (parsed.cycle?.[name]) out.cycle[name] = parsed.cycle[name];
+            if (parsed.head?.[name]) out.head[name] = parsed.head[name];
+          }
+        }
+      } catch {
+        /* defaults */
+      }
     }
+    return out;
   }
+  function evictionFloor(db) {
+    const row = db.prepare("SELECT value FROM index_meta WHERE key = 'evict_floor'").get();
+    const n = Number(row?.value);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  const setMeta = (db, key, value) =>
+    db.prepare("INSERT INTO index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 
-  // Cycling keyset sweeps — re-reads EVERY row each cycle: same-timestamp edits and
-  // late rows are reflected eventually (bounded, no watermark CDC). Column lists are
+  // Cycling keyset sweeps, NEWEST FIRST — re-reads EVERY row each cycle: same-timestamp edits
+  // and late rows are reflected eventually (bounded, no watermark CDC). Column lists are
   // code-owned constants; `session_v2` has no `data` column (verified V2 schema).
   //   • session: keyed (COALESCE(time_updated,0), id) — a few thousand rows, one query.
   //   • message / part: keyed (time_created, id). They read the V2 projections
@@ -472,28 +550,78 @@ export function createCtoSearchIndex(deps = {}) {
   //     walk it in WINDOWS (dbTasks.scanWindows) off the main thread. A part's
   //     time_updated is still its message's, so an edited message is re-indexed the
   //     next time the cycle passes its time_created.
-  const SESSION_SWEEP_SQL = `SELECT id, parent_id, project_id, workspace_id, directory, title, time_created, time_updated, time_archived, COALESCE(time_updated, 0) AS t
+  // The head pass is the same query mirrored (ascending, strictly after the head).
+  const SESSION_T = "COALESCE(time_updated, 0)";
+  const SESSION_COLS = "id, parent_id, project_id, workspace_id, directory, title, time_created, time_updated, time_archived";
+  const SESSION_CYCLE_SQL = `SELECT ${SESSION_COLS}, ${SESSION_T} AS t
             FROM session_v2
-            WHERE (COALESCE(time_updated, 0) > ?) OR (COALESCE(time_updated, 0) = ? AND id > ?)
-            ORDER BY COALESCE(time_updated, 0) ASC, id ASC
+            WHERE ((${SESSION_T} < ?) OR (${SESSION_T} = ? AND id < ?)) AND ${SESSION_T} > ?
+            ORDER BY ${SESSION_T} DESC, id DESC
             LIMIT ?`;
-  const timeSweepSql = (table, cols, withData) =>
+  const SESSION_HEAD_SQL = `SELECT ${SESSION_COLS}, ${SESSION_T} AS t
+            FROM session_v2
+            WHERE (${SESSION_T} > ?) OR (${SESSION_T} = ? AND id > ?)
+            ORDER BY ${SESSION_T} ASC, id ASC
+            LIMIT ?`;
+  const timeSweepSql = (table, cols, withData, dir) =>
     `SELECT id, ${cols} time_created AS t, time_updated${withData ? ", data" : ""}
             FROM ${table} p
-            WHERE (p.time_created > ? OR (p.time_created = ? AND p.id > ?)) /*RANGE*/
-            ORDER BY p.time_created ASC, p.id ASC`;
+            WHERE ${dir === "desc" ? "(p.time_created < ? OR (p.time_created = ? AND p.id < ?))" : "(p.time_created > ? OR (p.time_created = ? AND p.id > ?))"} /*RANGE*/
+            ORDER BY p.time_created ${dir === "desc" ? "DESC" : "ASC"}, p.id ${dir === "desc" ? "DESC" : "ASC"}`;
   const STREAMS = {
-    session: { sql: SESSION_SWEEP_SQL },
-    message: { sql: timeSweepSql(MESSAGE_SQL, "session_id, role,", false), windowed: true },
-    part: { sql: timeSweepSql(PART_SQL, "session_id, message_id,", true), windowed: true },
+    session: { cycleSql: SESSION_CYCLE_SQL, headSql: SESSION_HEAD_SQL },
+    message: {
+      windowed: true,
+      cycleSql: timeSweepSql(MESSAGE_SQL, "session_id, role,", false, "desc"),
+      headSql: timeSweepSql(MESSAGE_SQL, "session_id, role,", false, "asc"),
+    },
+    part: {
+      windowed: true,
+      cycleSql: timeSweepSql(PART_SQL, "session_id, message_id,", true, "desc"),
+      headSql: timeSweepSql(PART_SQL, "session_id, message_id,", true, "asc"),
+    },
   };
-  const SWEEP_START = { t: -1, i: "" };
+
+  // One stream's two reads: the head pass (rows after the head, oldest first) and the
+  // newest-first cycle batch (below the cycle position, above the eviction floor).
+  async function readStream(src, name, pos, floor, batch) {
+    const stream = STREAMS[name];
+    const cycle = pos.cycle[name];
+    const head = pos.head[name];
+    const out = { head: [], cycle: [], cycleAtEnd: false };
+    if (stream.windowed) {
+      const scan = (args) => runOnHandle(src, "windowedRows", { col: "p.time_created", limit: batch, windowMessages: 200, budgetMs: SYNC_READ_BUDGET_MS, ...args });
+      if (head) out.head = (await scan({ sql: stream.headSql, params: [head.t, head.t, head.i], dir: "asc", from: Math.max(0, head.t) })).rows;
+      // `atEnd`: the walk reached the floor — the cycle is complete. A scan that hit its
+      // budget (neither complete nor full) just resumes from the last row next batch.
+      const r = await scan({ sql: stream.cycleSql, params: [cycle.t, cycle.t, cycle.i], dir: "desc", from: cycle.t, ...(floor > 0 ? { to: floor + 1 } : {}) });
+      out.cycle = r.rows;
+      out.cycleAtEnd = r.complete;
+    } else {
+      if (head) out.head = src.prepare(stream.headSql).all(head.t, head.t, head.i, batch);
+      out.cycle = src.prepare(stream.cycleSql).all(cycle.t, cycle.t, cycle.i, floor, batch);
+      out.cycleAtEnd = out.cycle.length < batch;
+    }
+    return out;
+  }
 
   function advanceOrCycle(pos, rows, atEnd) {
     if (atEnd) return { ...SWEEP_START }; // cycle complete
     if (rows.length === 0) return pos; // budget ran out before any row: try again from here
     const last = rows[rows.length - 1];
     return { t: last.t, i: last.id };
+  }
+
+  // The head only ever moves up: to the newest row of an ascending head read, or — on the
+  // very first read — to the newest row of a cycle batch that started at the top.
+  function advanceHead(pos, name, read) {
+    if (read.head.length > 0) {
+      const last = read.head[read.head.length - 1];
+      return { t: last.t, i: last.id };
+    }
+    const atTop = pos.cycle[name].t === MAX_T;
+    if (pos.head[name] == null && atTop && read.cycle.length > 0) return { t: read.cycle[0].t, i: read.cycle[0].id };
+    return pos.head[name];
   }
 
   function upsertSession(row, excluded) {
@@ -622,6 +750,104 @@ export function createCtoSearchIndex(deps = {}) {
     return { removed, verified: pRows.length + sRows.length, verify: next };
   }
 
+  // Live size of the index: pages in use (freed pages are reused, so the file does not
+  // grow past the cap by more than one batch).
+  function liveBytes(d) {
+    const pages = d.prepare("PRAGMA page_count").get().page_count;
+    const free = d.prepare("PRAGMA freelist_count").get().freelist_count;
+    const size = d.prepare("PRAGMA page_size").get().page_size;
+    return (pages - free) * size;
+  }
+
+  // Over the cap → one eviction round: drop the OLDEST sessions (by last update) and
+  // everything indexed under them until about `evictTargetRatio` of the cap is left, then
+  // raise the eviction floor to the newest evicted session so the sweep never re-reads it.
+  // The amount to drop is estimated as a share of the indexed parts; the deletes are set
+  // based (one pass over the evidence table per round, not one per part). Parts whose
+  // session row was never indexed are swept up when they are not newer than the newest
+  // victim, or — with no session rows left at all — oldest first. Own transaction; a failure
+  // rolls back and leaves the index over the cap for the next sync to retry.
+  function enforceSizeCap(d) {
+    const total = { sessions: 0, parts: 0 };
+    if (!Number.isFinite(maxBytes) || maxBytes <= 0) return total;
+    // The share is estimated from the page count, which includes fixed overhead, so a
+    // round can fall short on a small index: repeat (bounded) until under the cap.
+    for (let round = 0; round < MAX_EVICT_ROUNDS && liveBytes(d) > maxBytes; round++) {
+      const r = evictRound(d);
+      total.sessions += r.sessions;
+      total.parts += r.parts;
+      if (r.parts === 0) break;
+    }
+    return total;
+  }
+
+  function evictRound(d) {
+    const none = { sessions: 0, parts: 0 };
+    const live = liveBytes(d);
+    try {
+      d.exec("BEGIN IMMEDIATE");
+      d.exec("CREATE TEMP TABLE IF NOT EXISTS evict_sessions (id TEXT PRIMARY KEY)");
+      d.exec("CREATE TEMP TABLE IF NOT EXISTS evict_parts (part_id TEXT PRIMARY KEY)");
+      d.exec("DELETE FROM temp.evict_sessions");
+      d.exec("DELETE FROM temp.evict_parts");
+      const totalParts = d.prepare("SELECT count(*) AS n FROM indexed_parts").get().n;
+      const share = Math.min(1, (live - maxBytes * CTO_SEARCH_INDEX_LIMITS.evictTargetRatio) / live);
+      const wantParts = Math.max(1, Math.ceil(totalParts * share));
+      let newest = 0;
+      let gathered = 0;
+      const sessions = d.prepare("SELECT id, COALESCE(time_updated, time_created, 0) AS t FROM indexed_sessions ORDER BY t ASC, id ASC").all();
+      const addSession = d.prepare("INSERT OR IGNORE INTO temp.evict_sessions (id) VALUES (?)");
+      const addParts = d.prepare("INSERT OR IGNORE INTO temp.evict_parts (part_id) SELECT part_id FROM indexed_parts WHERE session_id = ?");
+      for (const v of sessions) {
+        if (gathered >= wantParts) break;
+        addSession.run(v.id);
+        gathered += Number(addParts.run(v.id).changes ?? 0);
+        newest = Math.max(newest, v.t);
+      }
+      if (newest > 0) {
+        d.prepare(
+          `INSERT OR IGNORE INTO temp.evict_parts (part_id)
+           SELECT part_id FROM indexed_parts
+           WHERE source_time <= ? AND session_id NOT IN (SELECT id FROM indexed_sessions)`,
+        ).run(newest);
+      }
+      if (gathered < wantParts) {
+        // No session rows left to evict (or too few): fall back to the oldest parts.
+        d.prepare(
+          `INSERT OR IGNORE INTO temp.evict_parts (part_id)
+           SELECT part_id FROM indexed_parts ORDER BY source_time ASC, part_id ASC LIMIT ?`,
+        ).run(wantParts - gathered);
+      }
+      const parts = Number(d.prepare("SELECT count(*) AS n FROM temp.evict_parts").get().n);
+      const sessionCount = Number(d.prepare("SELECT count(*) AS n FROM temp.evict_sessions").get().n);
+      d.exec("DELETE FROM indexed_evidence WHERE part_id IN (SELECT part_id FROM temp.evict_parts)");
+      d.exec("DELETE FROM indexed_parts WHERE part_id IN (SELECT part_id FROM temp.evict_parts)");
+      d.exec("DELETE FROM indexed_messages WHERE session_id IN (SELECT id FROM temp.evict_sessions)");
+      d.exec("DELETE FROM indexed_sessions WHERE id IN (SELECT id FROM temp.evict_sessions)");
+      if (newest > evictionFloor(d)) setMeta(d, "evict_floor", String(newest));
+      d.exec("DELETE FROM temp.evict_sessions");
+      d.exec("DELETE FROM temp.evict_parts");
+      d.exec("COMMIT");
+      // FTS5 deletes leave the old postings in place until segments are merged, so the rows
+      // going away free the content table but not the index: compact it, and hand the freed
+      // pages back to the file (fresh index files are created with incremental auto-vacuum).
+      // Only when the delete alone did not get under the cap — a full rewrite is the cost.
+      if (liveBytes(d) > maxBytes) {
+        d.exec("INSERT INTO indexed_evidence(indexed_evidence) VALUES('optimize')");
+        d.exec("PRAGMA incremental_vacuum");
+      }
+      return { sessions: sessionCount, parts };
+    } catch (e) {
+      try {
+        d.exec("ROLLBACK");
+      } catch {
+        /* the owned connection stays; the next sync retries */
+      }
+      console.error("[ctoSearchIndex] size-cap eviction failed (nothing committed):", e?.message ?? e);
+      return none;
+    }
+  }
+
   function failEnvelope(status, detail) {
     return { ...baseEnvelope(), supported: operationSupported(status), status, detail, coverage: uncovered() };
   }
@@ -657,6 +883,7 @@ export function createCtoSearchIndex(deps = {}) {
     async sync({ limit, provenanceFilter: provenanceOverride } = {}) {
       if (closed) return closedEnvelope("sync");
       const base = baseEnvelope();
+      if (readOnly) return { ...failEnvelope("invalid_input", "this index instance is read-only; sync on the writer"), scanned: zeroCounts(), sweep: null };
       const batch = clampLimit(limit, CTO_SEARCH_INDEX_LIMITS.syncBatchDefault, CTO_SEARCH_INDEX_LIMITS.syncBatchMax);
       const resolveProvenance = provenanceOverride ?? provenanceFilter;
 
@@ -683,32 +910,16 @@ export function createCtoSearchIndex(deps = {}) {
         // Source reads FIRST (the windowed ones run in the db worker and are awaited);
         // the index write transaction then opens and closes synchronously.
         const sweep = sweepPosition(indexDb);
+        const floor = evictionFloor(indexDb);
         const read = {};
-        for (const [name, stream] of Object.entries(STREAMS)) {
-          if (stream.windowed) {
-            const scan = await runOnHandle(src, "windowedRows", {
-              sql: stream.sql,
-              params: [sweep[name].t, sweep[name].t, sweep[name].i],
-              dir: "asc",
-              from: Math.max(0, sweep[name].t),
-              col: "p.time_created",
-              limit: batch,
-              windowMessages: 200,
-              budgetMs: SYNC_READ_BUDGET_MS,
-            });
-            // `atEnd`: the walk reached the end of time — the cycle is complete. A scan that hit
-            // its budget (neither complete nor full) just resumes from the last row next batch.
-            read[name] = { rows: scan.rows, atEnd: scan.complete };
-          } else {
-            const rows = src.prepare(stream.sql).all(sweep[name].t, sweep[name].t, sweep[name].i, batch);
-            read[name] = { rows, atEnd: rows.length < batch };
-          }
-        }
+        for (const name of Object.keys(STREAMS)) read[name] = await readStream(src, name, sweep, floor, batch);
         indexDb.exec("BEGIN IMMEDIATE");
-        const next = {};
+        const next = { v: 2, cycle: {}, head: {} };
         for (const name of Object.keys(STREAMS)) {
           const countsKey = name === "session" ? "sessions" : name === "message" ? "messages" : "parts";
-          const { rows, atEnd } = read[name];
+          const { head, cycle, cycleAtEnd } = read[name];
+          // Newest-first cycle rows first, then the head rows (older duplicates are hash-gated / idempotent).
+          const rows = [...cycle, ...head];
           for (const row of rows) {
             if (name === "session") upsertSession(row, excluded);
             else if (name === "message") upsertMessage(row);
@@ -723,18 +934,16 @@ export function createCtoSearchIndex(deps = {}) {
           }
           counts[countsKey].scanned = rows.length;
           if (name !== "part") counts[countsKey].upserted = rows.length;
-          next[name] = advanceOrCycle(sweep[name], rows, atEnd);
+          next.cycle[name] = advanceOrCycle(sweep.cycle[name], cycle, cycleAtEnd);
+          next.head[name] = advanceHead(sweep, name, read[name]);
         }
         const rec = reconcileDeletions(src);
         counts.parts.removed = rec.removed;
         counts.verifiedParts = rec.verified;
-        indexDb
-          .prepare("INSERT INTO index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-          .run("sweep", JSON.stringify(next));
-        indexDb
-          .prepare("INSERT INTO index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-          .run("synced_at", JSON.stringify(new Date(now()).toISOString()));
+        setMeta(indexDb, "sweep", JSON.stringify(next));
+        setMeta(indexDb, "synced_at", JSON.stringify(new Date(now()).toISOString()));
         indexDb.exec("COMMIT");
+        const evicted = enforceSizeCap(indexDb);
         const totals = indexDb
           .prepare("SELECT count(*) AS total, sum(incomplete = 1 OR truncated = 1) AS incomplete FROM indexed_parts")
           .get();
@@ -744,6 +953,7 @@ export function createCtoSearchIndex(deps = {}) {
           coverage: { mode: "fts-index", indexedParts: totals.total, incompleteParts: totals.incomplete ?? 0, eventual: true },
           sweep: next,
           scanned: counts,
+          size: { liveBytes: liveBytes(indexDb), maxBytes, evictionFloor: evictionFloor(indexDb), evicted },
         };
       } catch (e) {
         try {
@@ -758,21 +968,33 @@ export function createCtoSearchIndex(deps = {}) {
     },
 
     /**
-     * FIRST-PAGE ranked search over the index only. No pagination (a
+     * FIRST-PAGE ranked search over the index only. `anyTerms: true` ranks rows
+     * matching ANY term (bm25), default requires every term; `directories` limits
+     * hits to sessions in that set of directories ([] → no hits). Each hit also
+     * carries `directory` and `at` (the source update time, ms). No pagination (a
      * `cursor` is rejected); `truncated`/`omittedCount` say when more
      * existed. Internal sessions are excluded from the authoritative
      * registry, independent of mirror progress.
      */
-    async search({ query, sessionId, projectId, directory, includeInternal = false, limit, cursor, provenanceFilter: provenanceOverride } = {}) {
+    async search({ query, sessionId, projectId, directory, directories, anyTerms = false, includeInternal = false, limit, cursor, provenanceFilter: provenanceOverride } = {}) {
       if (closed) return closedEnvelope("search");
       const base = baseEnvelope();
       const resolveProvenance = provenanceOverride ?? provenanceFilter;
       if (cursor != null) {
         return { ...base, status: "invalid_input", detail: "pagination is not supported by this PR (bounded first page only); cursor rejected", coverage: uncovered(), hits: [], truncated: false, omittedCount: 0 };
       }
-      const parsed = ftsMatchExpression(query);
+      const parsed = anyTerms === true ? ftsAnyTermExpression(query) : ftsMatchExpression(query);
       if (!parsed.ok) {
         return { ...base, status: "invalid_input", detail: parsed.reason, coverage: uncovered(), hits: [], truncated: false, omittedCount: 0 };
+      }
+      // A SET of directories: only hits from sessions in one of them. An empty set
+      // matches nothing (a caller that resolved "no allowed projects" must see no hits).
+      let dirSet = null;
+      if (directories != null) {
+        if (!Array.isArray(directories) || directories.length > CTO_SEARCH_INDEX_LIMITS.searchDirectoriesMax) {
+          return { ...base, status: "invalid_input", detail: `directories must be an array of at most ${CTO_SEARCH_INDEX_LIMITS.searchDirectoriesMax} paths`, coverage: uncovered(), hits: [], truncated: false, omittedCount: 0 };
+        }
+        dirSet = [...new Set(directories.filter((d) => typeof d === "string" && d !== ""))];
       }
       const cap = clampLimit(limit, CTO_SEARCH_INDEX_LIMITS.searchHitsDefault, CTO_SEARCH_INDEX_LIMITS.searchHitsMax);
 
@@ -792,11 +1014,15 @@ export function createCtoSearchIndex(deps = {}) {
       if (!opened.db) return failEnvelope(opened.status, opened.detail);
       const indexDb = opened.db;
 
+      if (dirSet !== null && dirSet.length === 0) {
+        return { ...base, status: "ok", coverage: { mode: "fts-index", indexedParts: null, eventual: true, retrieval: "bounded-first-page" }, hits: [], truncated: false, omittedCount: 0 };
+      }
       try {
         const filters = [
           [sessionId != null, "indexed_parts.session_id = ?", sessionId],
           [projectId != null, "indexed_sessions.project_id = ?", projectId],
           [directory != null, "indexed_sessions.directory = ?", directory],
+          [dirSet !== null, "indexed_sessions.directory IN (SELECT value FROM json_each(?))", dirSet === null ? null : JSON.stringify(dirSet)],
         ].filter(([has]) => has);
         const where = ["indexed_evidence MATCH ?", ...filters.map(([, f]) => f)];
         const params = [parsed.expr, ...filters.map(([, , v]) => v)];
@@ -807,7 +1033,8 @@ export function createCtoSearchIndex(deps = {}) {
                  indexed_parts.session_id AS session_id, indexed_parts.message_id AS message_id,
                  indexed_parts.source_time AS source_time,
                  indexed_messages.role AS role,
-                 indexed_sessions.provenance AS mirror_provenance
+                 indexed_sessions.provenance AS mirror_provenance,
+                 indexed_sessions.directory AS directory
           FROM indexed_evidence
           JOIN indexed_parts ON indexed_parts.part_id = indexed_evidence.part_id
           LEFT JOIN indexed_messages ON indexed_messages.id = indexed_parts.message_id
@@ -840,6 +1067,8 @@ export function createCtoSearchIndex(deps = {}) {
             role: row.role ?? null,
             provenance: isInternal ? "internal" : row.mirror_provenance ?? "unclassified",
             timeUpdated: row.source_time ?? null,
+            at: row.source_time ?? null,
+            directory: row.directory ?? null,
             snippet: row.snip ?? "",
           });
           if (hits.length >= cap) break;
@@ -881,6 +1110,7 @@ export function createCtoSearchIndex(deps = {}) {
           status: "ok",
           counts: { sessions: count("indexed_sessions"), messages: count("indexed_messages"), parts: count("indexed_parts"), evidence: count("indexed_evidence"), incompleteParts: incomplete },
           sweep: sweepPosition(indexDb),
+          size: { liveBytes: liveBytes(indexDb), maxBytes, evictionFloor: evictionFloor(indexDb) },
         };
       } catch (e) {
         return { ...base, status: "index_error", detail: `status failed: ${e?.message ?? e}` };

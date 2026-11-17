@@ -7,6 +7,7 @@
 // call resolves it through lib/context.ts (per-location plugin instance).
 
 import { Plugin } from "@opencode/plugin";
+import { installBriefing } from "./lib/briefing.ts";
 import { resolveToolContext, type ExecuteContextLike } from "./lib/context.ts";
 import { allTools } from "./tools/index.ts";
 
@@ -37,5 +38,13 @@ export default Plugin.define({
         });
       }
     });
+
+    // Shared-knowledge briefing (spec 2026-11-16-shared-knowledge §7.1): appended to
+    // the system prompt by the `context` hook. Fail-open — never blocks the tools.
+    try {
+      if (typeof ctx?.session?.hook === "function") await installBriefing(ctx);
+    } catch {
+      /* no briefing for this instance */
+    }
   },
 });

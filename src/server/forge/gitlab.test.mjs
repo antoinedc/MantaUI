@@ -12,7 +12,9 @@ import {
   createGitlabAdapter,
   buildPosition,
 } from "./gitlab.mjs";
+import { GithubRequestError } from "./github.mjs";
 import { rollupChecks } from "../../shared/forge.mjs";
+import { recordingRequest } from "./recordingRequest.mjs";
 import { verifyGitlabSignature, resolveSignature } from "../webhooks.mjs";
 import { rotateOauthPair, parseGlabToken } from "./auth.mjs";
 
@@ -215,13 +217,19 @@ test("position building: added / removed / unchanged line → right new_line/old
 
 // ---- submitReview (mismatch #5): N discussions + one approve --------------
 
-test("submitReview posts N discussions (each buffered comment) then ONE approve", async () => {
+// MR !42 whose `/versions` reports `headSha`, with a recording write transport.
+function reviewRig(headSha) {
   const base = `${projectBase(REPO)}/merge_requests/42`;
   const write = fakeWrite({});
   const adapter = createGitlabAdapter(
-    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: "abc123" }] }),
+    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: headSha }] }),
     write,
   );
+  return { base, write, adapter };
+}
+
+test("submitReview posts N discussions (each buffered comment) then ONE approve", async () => {
+  const { base, write, adapter } = reviewRig("abc123");
 
   const comments = [
     { path: "a.ts", line: 1, side: "new", body: "c1" },
@@ -249,12 +257,7 @@ test("submitReview posts N discussions (each buffered comment) then ONE approve"
 });
 
 test("submitReview changes_requested → discussions + unapprove, no approve", async () => {
-  const base = `${projectBase(REPO)}/merge_requests/42`;
-  const write = fakeWrite({});
-  const adapter = createGitlabAdapter(
-    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: "h" }] }),
-    write,
-  );
+  const { base, write, adapter } = reviewRig("h");
   await adapter.submitReview(REPO, 42, {
     verdict: "changes_requested",
     body: "",
@@ -268,12 +271,7 @@ test("submitReview changes_requested → discussions + unapprove, no approve", a
 });
 
 test("submitReview posts a non-empty review body as a general MR note", async () => {
-  const base = `${projectBase(REPO)}/merge_requests/42`;
-  const write = fakeWrite({});
-  const adapter = createGitlabAdapter(
-    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: "h" }] }),
-    write,
-  );
+  const { base, write, adapter } = reviewRig("h");
   await adapter.submitReview(REPO, 42, {
     verdict: "commented",
     body: "summary note",
@@ -527,4 +525,104 @@ test("getDefaultBranch returns null when the request fails", async () => {
   };
   const adapter = createGitlabAdapter(throwing);
   assert.equal(await adapter.getDefaultBranch(REPO), null);
+});
+
+// ---- Shared knowledge: getRepoAccess + updatePullRequest + fresh lookup -----
+
+test("getRepoAccess: Developer (30) via the project can push; always revalidates", async () => {
+  const request = recordingRequest({
+    [projectBase(REPO)]: {
+      default_branch: "develop",
+      permissions: { project_access: { access_level: 30 }, group_access: null },
+    },
+  });
+  const { data } = await createGitlabAdapter(request).getRepoAccess(REPO);
+  assert.deepEqual(data, { canPush: true, isFork: false, defaultBranch: "develop" });
+  assert.deepEqual(request.calls[0].opts, { ttl: 0 });
+});
+
+test("getRepoAccess: the higher of project and group access decides; Reporter cannot push", async () => {
+  const viaGroup = recordingRequest({
+    [projectBase(REPO)]: {
+      default_branch: "main",
+      permissions: { project_access: null, group_access: { access_level: 40 } },
+    },
+  });
+  assert.equal((await createGitlabAdapter(viaGroup).getRepoAccess(REPO)).data.canPush, true);
+
+  const reporter = recordingRequest({
+    [projectBase(REPO)]: {
+      default_branch: "main",
+      permissions: { project_access: { access_level: 20 }, group_access: { access_level: 10 } },
+    },
+  });
+  assert.equal((await createGitlabAdapter(reporter).getRepoAccess(REPO)).data.canPush, false);
+
+  const none = recordingRequest({ [projectBase(REPO)]: { default_branch: "main", permissions: {} } });
+  assert.equal((await createGitlabAdapter(none).getRepoAccess(REPO)).data.canPush, false);
+
+  const archived = recordingRequest({
+    [projectBase(REPO)]: { archived: true, default_branch: "main", permissions: { project_access: { access_level: 50 } } },
+  });
+  assert.equal((await createGitlabAdapter(archived).getRepoAccess(REPO)).data.canPush, false);
+});
+
+test("getRepoAccess reports a fork via forked_from_project, addressing a subgroup path whole", async () => {
+  const sub = { owner: "acme/team", repo: "widget" };
+  const request = recordingRequest({
+    [projectBase(sub)]: {
+      default_branch: "main",
+      forked_from_project: { id: 7 },
+      permissions: { project_access: { access_level: 30 } },
+    },
+  });
+  const { data } = await createGitlabAdapter(request).getRepoAccess(sub);
+  assert.equal(data.isFork, true);
+  assert.equal(request.calls[0].url, "https://gitlab.com/api/v4/projects/acme%2Fteam%2Fwidget");
+});
+
+test("getRepoAccess surfaces the typed request error for 404 and 401", async () => {
+  for (const status of [404, 401]) {
+    const url = projectBase(REPO);
+    const request = recordingRequest({ [url]: new GithubRequestError(status, url) });
+    await assert.rejects(
+      createGitlabAdapter(request).getRepoAccess(REPO),
+      (e) => e.name === "GithubRequestError" && e.status === status,
+    );
+  }
+});
+
+test("updatePullRequest PUTs title/description by iid and normalises the MR", async () => {
+  const url = `${projectBase(REPO)}/merge_requests/123`;
+  const write = fakeWrite({ [url]: { ...MR_FIXTURE, title: "New title", description: "New body" } });
+  const adapter = createGitlabAdapter(fakeRequest({}), write);
+
+  const { data: pr } = await adapter.updatePullRequest(REPO, 123, { title: "New title", body: "New body" });
+  assert.equal(write.calls[0].url, url);
+  assert.equal(write.calls[0].method, "PUT");
+  assert.deepEqual(write.calls[0].body, { title: "New title", description: "New body" });
+  assert.equal(pr.number, 123);
+  assert.equal(pr.title, "New title");
+  assert.equal(pr.body, "New body");
+
+  await adapter.updatePullRequest(REPO, 123, { title: "only title" });
+  assert.deepEqual(write.calls[1].body, { title: "only title" });
+});
+
+test("updatePullRequest refuses an empty update and a missing write transport", async () => {
+  const write = fakeWrite();
+  await assert.rejects(createGitlabAdapter(fakeRequest({}), write).updatePullRequest(REPO, 1, {}), /nothing to update/);
+  assert.equal(write.calls.length, 0);
+  await assert.rejects(createGitlabAdapter(fakeRequest({})).updatePullRequest(REPO, 1, { title: "x" }), /write transport/);
+});
+
+test("listPullRequests({fresh}) filters by source_branch and bypasses the freshness window", async () => {
+  const url = `${projectBase(REPO)}/merge_requests?state=opened&source_branch=manta%2Fknowledge`;
+  const request = recordingRequest({ [url]: [MR_FIXTURE] });
+  const adapter = createGitlabAdapter(request);
+  await adapter.listPullRequests(REPO, { head: "manta/knowledge" });
+  const { data } = await adapter.listPullRequests(REPO, { head: "manta/knowledge", fresh: true });
+  assert.equal(data.length, 1);
+  assert.equal(request.calls[0].opts, undefined);
+  assert.deepEqual(request.calls[1].opts, { ttl: 0 });
 });

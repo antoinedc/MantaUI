@@ -1,0 +1,535 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { access, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { curatorRig } from "./curatorRig.mjs";
+
+const page = (slug, file, content, extra = {}) => ({ type: "page.edit", target: { area: "project", path: `projects/${slug}/${file}`, ...(extra.section ? { section: extra.section } : {}) }, content, reason: extra.reason ?? "Seen in the notes", evidence: extra.evidence ?? [{ ref: "msg:ses_one/msg_1" }] });
+const changesOf = async (engine) => (await engine.changes({ limit: 100 })).items;
+const exists = (p) => access(p).then(() => true, () => false);
+
+async function rigWith(over = {}) {
+  const holder = {};
+  holder.rig = await curatorRig({ ...over, runner: over.runner ? (a, c) => over.runner(a, c, holder.rig) : undefined });
+  return holder.rig;
+}
+
+test("triggers: nothing under 5 fresh notes; 5 notes run at once; 30 minutes after the last note runs the rest", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  for (let i = 0; i < 4; i++) await r.note(slug, "ses_one", "howto", `fact number ${i}`, [`msg:ses_one/msg_${i + 1}`]);
+  await r.engine.layer.curator.tick();
+  assert.equal(r.calls.length, 0);
+  await r.note(slug, "ses_one", "howto", "fact number 4", ["msg:ses_one/msg_5"]);
+  const t1 = await r.engine.layer.curator.tick();
+  assert.equal(t1.ran[0].status, "ran");
+  assert.equal(r.calls.length, 1);
+  assert.equal((await r.engine.queue.list(slug)).length, 0);
+  await r.note(slug, "ses_one", "howto", "a lone fact", ["msg:ses_one/msg_6"]);
+  await r.engine.layer.curator.tick();
+  assert.equal(r.calls.length, 1);
+  r.clock.t += 31 * 60_000;
+  await r.engine.layer.curator.tick();
+  assert.equal(r.calls.length, 2);
+  await r.engine.stop();
+});
+
+test("a batch applies each page decision as its own commit with the decision/batch trailers, records changes, consumes notes and spends budget", async () => {
+  const r = await rigWith({
+    runner: (_a, _c, rig) => rig.decide([page(rig.slug, "gotchas.md", "- The cache needs a warm-up.\n"), page(rig.slug, "run-and-test.md", "Run `npm test`.\n"), { type: "drop", reason: "idle chatter", evidence: [] }]),
+  });
+  r.slug = await r.slugOf("ses_one");
+  await r.note(r.slug, "ses_one", "gotcha", "The cache needs a warm-up");
+  await r.note(r.slug, "ses_one", "howto", "Run npm test", ["msg:ses_one/msg_2"]);
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.deepEqual([out.status, out.applied, out.dropped], ["ran", 2, 1]);
+  assert.match(await readFile(join(r.dir, `projects/${r.slug}/gotchas.md`), "utf8"), /warm-up/);
+  assert.match(await readFile(join(r.dir, `projects/${r.slug}/gotchas.md`), "utf8"), /sources:\n {2}- msg:ses_one\/msg_1/);
+  const log = (await r.engine.store.log({ limit: 5 })).filter((c) => c.trailers["Manta-Decision"]);
+  assert.equal(log.length, 2);
+  assert.equal(new Set(log.map((c) => c.trailers["Manta-Batch"])).size, 1);
+  assert.equal(log[0].author, "Manta curator");
+  const items = await changesOf(r.engine);
+  assert.equal(items.filter((i) => i.kind === "applied" && i.undoable).length, 2);
+  assert.equal(items.filter((i) => i.kind === "dropped").length, 1);
+  assert.equal((await r.engine.queue.list(r.slug)).length, 0);
+  assert.ok(r.engine.budget.spentToday() > 0);
+  assert.equal(r.calls[0].taskClass, "curator-notes");
+  assert.match(r.calls[0].text, /untrusted data/);
+  assert.match(r.calls[0].text, /The cache needs a warm-up/);
+  await r.engine.stop();
+});
+
+test("the user's uncommitted hand edit is committed as theirs first; a decision that would drop one of their lines is skipped", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([page(rig.slug, "gotchas.md", "- Something else entirely.\n")]) });
+  r.slug = await r.slugOf("ses_one");
+  await r.writeStore(`projects/${r.slug}/gotchas.md`, "# Gotchas\n\n- never touch the lockfile\n");
+  await r.note(r.slug, "ses_one", "gotcha", "something else");
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(out.skipped, 1);
+  const log = await r.engine.store.log({ limit: 5 });
+  assert.ok(log.some((c) => /^User edits/.test(c.subject) && c.author !== "Manta curator"));
+  assert.match(await readFile(join(r.dir, `projects/${r.slug}/gotchas.md`), "utf8"), /never touch the lockfile/);
+  assert.match((await changesOf(r.engine)).find((i) => i.kind === "skipped").reason, /line you wrote/);
+  await r.engine.stop();
+});
+
+test("a new section on a hand-edited page keeps the user's lines", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([page(rig.slug, "gotchas.md", "- fresh cache gotcha\n", { section: "Cache" })]) });
+  r.slug = await r.slugOf("ses_one");
+  await r.writeStore(`projects/${r.slug}/gotchas.md`, "# Gotchas\n\n- user line\n");
+  await r.note(r.slug, "ses_one", "gotcha", "cache gotcha");
+  assert.equal((await r.engine.runCurator(r.slug, { force: true })).applied, 1);
+  const txt = await readFile(join(r.dir, `projects/${r.slug}/gotchas.md`), "utf8");
+  assert.match(txt, /- user line/);
+  assert.match(txt, /## Cache\n\n- fresh cache gotcha/);
+  // a section the user wrote may not be replaced
+  await r.writeStore(`projects/${r.slug}/gotchas.md`, `${txt}\n## Cache notes\n\n- hand-written\n`);
+  await r.engine.stop();
+});
+
+test("base-commit check: a page that changed during the model call is re-asked once with the new content, then dropped if it changes again", async () => {
+  let n = 0;
+  const r = await rigWith({
+    runner: async (_a, _c, rig) => {
+      n++;
+      if (n !== 2) await rig.engine.store.commit({ path: `projects/${rig.slug}/gotchas.md`, content: `# Gotchas\n\n- edited meanwhile ${n}\n`, message: "someone else" });
+      return rig.decide([page(rig.slug, "gotchas.md", `- from the curator, ask ${n}\n`, { section: "Cache" })]);
+    },
+  });
+  r.slug = await r.slugOf("ses_one");
+  await r.note(r.slug, "ses_one", "gotcha", "a gotcha");
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(r.calls.length, 2);
+  assert.match(r.calls[1].text, /A page changed while you were working/);
+  assert.match(r.calls[1].text, /edited meanwhile 1/);
+  assert.equal(out.applied, 1);
+
+  // second case: it changes again during the re-ask
+  n = 10;
+  const r2 = await rigWith({
+    runner: async (_a, _c, rig) => {
+      await rig.engine.store.commit({ path: `projects/${rig.slug}/gotchas.md`, content: `# Gotchas\n\n- edit ${Math.random()}\n`, message: "someone else" });
+      return rig.decide([page(rig.slug, "gotchas.md", "- from the curator\n", { section: "Cache" })]);
+    },
+  });
+  r2.slug = await r2.slugOf("ses_one");
+  await r2.note(r2.slug, "ses_one", "gotcha", "a gotcha");
+  const out2 = await r2.engine.runCurator(r2.slug, { force: true });
+  assert.equal(r2.calls.length, 2);
+  assert.deepEqual([out2.applied, out2.dropped], [0, 1]);
+  assert.match((await changesOf(r2.engine)).find((i) => i.kind === "dropped").reason, /changed again/);
+  await r.engine.stop();
+  await r2.engine.stop();
+});
+
+const UEV = { ses_one: { msg_1: { role: "user", text: "no, use pnpm for installing packages here, not npm" }, msg_2: { role: "user", text: "I told you before: pnpm is what installs packages in this repo" } }, ses_two: { msg_1: { role: "user", text: "again: always use pnpm for installing packages please" } } };
+const userRefs = () => new Set(["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_1"]);
+const ruleDecision = (quotes, extra = {}) => ({ type: "rule.add", target: { area: "project" }, content: "Use pnpm for installing packages, never npm", reason: "The same correction three times", evidence: quotes.map(([ref, quote]) => ({ ref, quote })), ...extra });
+const threeQuotes = [["msg:ses_one/msg_1", "use pnpm for installing packages"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]];
+
+async function ruleRig(over = {}) {
+  const r = await rigWith({ messages: UEV, userRefs: userRefs(), projects: { widget: "https://github.com/acme/widget.git" }, sessions: { ses_one: "widget", ses_two: "widget" }, ...over });
+  r.slug = await r.slugOf("ses_one");
+  await r.note(r.slug, "ses_one", "preference", "Use pnpm instead of npm", ["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_1"]);
+  return r;
+}
+
+test("rules: verified user evidence becomes a rule in rules.md (curator-rules), reaches the briefing, and is tracked", async () => {
+  const r = await ruleRig({ runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes)]) });
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(out.applied, 1);
+  assert.equal(r.calls[0].taskClass, "curator-rules");
+  assert.match(r.calls[0].text, /user_messages/);
+  assert.match(r.calls[0].text, /no, use pnpm for installing packages here, not npm/);
+  assert.match(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8"), /- Use pnpm for installing packages, never npm/);
+  assert.equal(r.engine.layer.rules.tracked(r.slug).length, 1);
+  await r.engine.refreshDerived();
+  const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
+  assert.match(b.text, /Standing rules from the user for this project:\n- Use pnpm for installing packages, never npm/);
+  await r.engine.stop();
+});
+
+test("rules: a quote that isn't in the user's message, or too little evidence, is skipped and shown — nothing is written", async () => {
+  const r = await ruleRig({ runner: (_a, _c, rig) => rig.decide([ruleDecision([["msg:ses_one/msg_1", "words nobody said at all"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]]), ruleDecision([["msg:ses_one/msg_1", "use pnpm for installing packages"]], { content: "Another rule" })]) });
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.deepEqual([out.applied, out.skipped], [1, 1]); // the first still has 2 verified quotes in 2 sessions; the second has 1
+  const skipped = (await changesOf(r.engine)).filter((i) => i.kind === "skipped");
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].reason, /Not enough evidence/);
+  await r.engine.stop();
+});
+
+test("a derived note (no user-authored evidence) can never become a rule", async () => {
+  const r = await rigWith({
+    messages: UEV,
+    userRefs: new Set(),
+    runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes)]),
+  });
+  r.slug = await r.slugOf("ses_one");
+  await r.note(r.slug, "ses_one", "preference", "Use pnpm instead of npm", ["msg:ses_one/msg_1", "msg:ses_one/msg_2"]);
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(out.applied, 0);
+  assert.equal(await exists(join(r.dir, `projects/${r.slug}/rules.md`)), false);
+  await r.engine.stop();
+});
+
+const directDeps = { getRepoAccess: async () => ({ canPush: true, isFork: false, defaultBranch: "main" }), hasForgeLogin: async () => true };
+
+test("outward mode: rules go to the repo writer as repo-safe strings (no quotes, refs or ids), one outward change, and no notification of its own (the repo writer sends the one first-write notice)", async () => {
+  const applied = [];
+  const repoWriter = { applyRules: async (slug, list) => (applied.push([slug, list]), { ok: true, mode: "direct", sha: "abc1234" }), sync: async () => ({ handEdit: null, prState: "none" }), revert: async () => ({ ok: true }) };
+  const r = await ruleRig({ stored: { repoRules: "direct" }, repoWriter, over: directDeps, runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes, { reason: 'User said "use pnpm" in msg:ses_one/msg_1 and ses_two1234' })]) });
+  await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0][0], r.slug);
+  assert.equal(applied[0][1].length, 1);
+  assert.match(applied[0][1][0], /^Use pnpm for installing packages, never npm — User said in and$/);
+  assert.doesNotMatch(applied[0][1][0], /msg|ses_|"/);
+  const outward = (await changesOf(r.engine)).filter((i) => i.kind === "outward");
+  assert.equal(outward.length, 1);
+  assert.equal(outward[0].undoable, true);
+  assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 0);
+  await r.note(r.slug, "ses_one", "preference", "Another preference entirely", ["msg:ses_one/msg_1"]);
+  await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 0);
+  await r.engine.stop();
+});
+
+test("an unmerged pull request or a failed write keeps the rules in the briefing; a direct write takes them out of it", async () => {
+  for (const [res, inBriefing] of [[{ ok: true, mode: "pull-request", pr: "#7" }, true], [{ ok: false, error: "boom" }, true], [{ ok: true, mode: "direct", sha: "abc1234" }, false]]) {
+    const repoWriter = { applyRules: async () => res, sync: async () => ({}), revert: async () => ({ ok: true }) };
+    const r = await ruleRig({ stored: { repoRules: "pull-request" }, repoWriter, over: directDeps, runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes)]) });
+    await r.engine.runCurator(r.slug, { force: true });
+    await r.engine.refreshDerived();
+    const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
+    assert.equal(/Use pnpm for installing packages, never npm/.test(b.text), inBriefing, JSON.stringify(res));
+    await r.engine.stop();
+  }
+});
+
+test("no qualifying model: notes stay queued and are retried; after 24 hours one 'waiting' entry appears (not one per retry)", async () => {
+  const r = await rigWith({ runner: async () => ({ ok: false, code: "no-qualifying-model" }) });
+  const slug = await r.slugOf("ses_one");
+  await r.note(slug, "ses_one", "howto", "a fact");
+  assert.equal((await r.engine.runCurator(slug, { force: true })).status, "waiting");
+  assert.equal((await r.engine.queue.list(slug)).length, 1);
+  r.clock.t += 25 * 3600_000;
+  await r.engine.runCurator(slug, { force: true });
+  await r.engine.runCurator(slug, { force: true });
+  const waiting = (await changesOf(r.engine)).filter((i) => i.kind === "waiting");
+  assert.equal(waiting.length, 1);
+  assert.match(waiting[0].summary, /capable model/);
+  assert.equal((await r.engine.queue.list(slug)).length, 1);
+  assert.match(JSON.stringify((await r.engine.status()).queued), /1/);
+  await r.engine.stop();
+});
+
+test("budget cap stops curation (one 'waiting' entry) but not the briefing or the tools", async () => {
+  const r = await rigWith({ stored: { dailyCapUsd: 0 }, runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.note(slug, "ses_one", "howto", "a fact");
+  assert.equal((await r.engine.runCurator(slug, { force: true })).status, "cap");
+  await r.engine.runCurator(slug, { force: true });
+  assert.equal(r.calls.length, 0);
+  assert.equal((await changesOf(r.engine)).filter((i) => i.kind === "waiting").length, 1);
+  assert.equal((await r.engine.status()).capReached, true);
+  assert.deepEqual(await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 }), { text: "", token: null });
+  assert.equal((await r.engine.search({ sessionID: "ses_one", query: "fact", sources: ["wiki"] })).hits.length, 0);
+  await r.engine.stop();
+});
+
+test("a note restating its own session's briefing never reaches the model and never refreshes a page", async () => {
+  const r = await rigWith({ briefingText: async () => "Reference notes: run the tests with npm test from the repo root.", runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.note(slug, "ses_one", "howto", "Run the tests with npm test from the repo root");
+  const out = await r.engine.runCurator(slug, { force: true });
+  assert.equal(r.calls.length, 0);
+  assert.equal(out.status, "ran");
+  assert.equal((await r.engine.queue.list(slug)).length, 0);
+  await r.engine.stop();
+});
+
+test("an undone decision is tombstoned: the same proposal is dropped next time and the model is told about it", async () => {
+  let content = "- The cache needs a warm-up.\n";
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([page(rig.slug, "gotchas.md", content)]) });
+  r.slug = await r.slugOf("ses_one");
+  await r.note(r.slug, "ses_one", "gotcha", "cache warm-up");
+  await r.engine.runCurator(r.slug, { force: true });
+  const applied = (await changesOf(r.engine)).find((i) => i.kind === "applied");
+  assert.deepEqual(await r.engine.undo({ id: applied.id }), { ok: true });
+  assert.equal(await exists(join(r.dir, `projects/${r.slug}/gotchas.md`)), false);
+  await r.note(r.slug, "ses_one", "gotcha", "cache warm-up again");
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(out.applied, 0);
+  assert.match(r.calls[1].text, /undone_before/);
+  assert.match(r.calls[1].text, /warm-up/);
+  assert.match((await changesOf(r.engine)).find((i) => i.kind === "dropped" && /undid this before/.test(i.reason)).reason, /won't be proposed again/);
+  content = "- A different claim.\n";
+  await r.note(r.slug, "ses_one", "gotcha", "another");
+  assert.equal((await r.engine.runCurator(r.slug, { force: true })).applied, 1);
+  await r.engine.stop();
+});
+
+test("a secret in a decision drops it (shown in Recent changes); nothing is written", async () => {
+  const r = await rigWith({ over: { secretValues: () => ["hunter2-super-secret-value"] }, runner: (_a, _c, rig) => rig.decide([page(rig.slug, "access.md", "The password is hunter2-super-secret-value\n")]) });
+  r.slug = await r.slugOf("ses_one");
+  await r.note(r.slug, "ses_one", "gotcha", "access");
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  assert.deepEqual([out.applied, out.dropped], [0, 1]);
+  assert.equal(await exists(join(r.dir, `projects/${r.slug}/access.md`)), false);
+  assert.match((await changesOf(r.engine)).find((i) => i.kind === "dropped").reason, /secret/);
+  await r.engine.stop();
+});
+
+test("observeOnly and a disabled feature write nothing and never call the model", async () => {
+  for (const stored of [{ observeOnly: true }, { enabled: false }]) {
+    const r = await rigWith({ stored, runner: (_a, _c, rig) => rig.decide([]) });
+    const slug = await r.slugOf("ses_one");
+    if (slug) await r.note(slug, "ses_one", "howto", "a fact").catch(() => {});
+    if (slug) assert.equal((await r.engine.layer.curator.runBatch(slug, { force: true })).status, "off");
+    await r.engine.layer.curator.tick();
+    assert.equal(r.calls.length, 0);
+    await r.engine.stop();
+  }
+});
+
+test("missing deps switch their part off, are reported in status, and never crash the loop", async () => {
+  const r = await curatorRig({ over: { isUserAuthoredRef: undefined, readMessages: undefined, readShellCommands: undefined } });
+  const slug = await r.slugOf("ses_one");
+  await r.note(slug, "ses_one", "howto", "a fact");
+  const parts = (await r.engine.status()).parts;
+  assert.match(parts.curator, /^off/);
+  assert.match(parts.userAuthorship, /^off/);
+  assert.match(parts.commandCheck, /^off/);
+  assert.match(parts.globalBlock, /^off/);
+  assert.equal(parts.corrections, "off");
+  assert.deepEqual((await r.engine.layer.curator.tick()).ran, []);
+  assert.equal((await r.engine.layer.tidy.run()).status, "ran");
+  await r.engine.stop();
+});
+
+test("commands on a page must have been run in a cited session", async () => {
+  const mk = (shell) => rigWith({ shell, runner: (_a, _c, rig) => rig.decide([page(rig.slug, "run-and-test.md", "```bash\nnpm run verify\n```\n")]) });
+  const bad = await mk({ ses_one: ["npm test"] });
+  bad.slug = await bad.slugOf("ses_one");
+  await bad.note(bad.slug, "ses_one", "howto", "how to test");
+  const o1 = await bad.engine.runCurator(bad.slug, { force: true });
+  assert.deepEqual([o1.applied, o1.skipped], [0, 1]);
+  const good = await mk({ ses_one: ["cd /w && npm run verify"] });
+  good.slug = await good.slugOf("ses_one");
+  await good.note(good.slug, "ses_one", "howto", "how to test");
+  assert.equal((await good.engine.runCurator(good.slug, { force: true })).applied, 1);
+  await bad.engine.stop();
+  await good.engine.stop();
+});
+
+test("a failing model answer is retried with backoff; after three bad answers the notes are dropped and the user is told", async () => {
+  const r = await rigWith({ runner: async () => ({ text: "I cannot do that" }) });
+  const slug = await r.slugOf("ses_one");
+  await r.note(slug, "ses_one", "howto", "a fact");
+  for (let i = 0; i < 3; i++) await r.engine.runCurator(slug, { force: true });
+  assert.equal((await r.engine.queue.list(slug)).length, 0);
+  assert.match((await changesOf(r.engine)).find((i) => i.kind === "dropped").summary, /couldn't process/);
+  await r.engine.stop();
+});
+
+test("pages are budgeted for the model: the ones that don't fit are listed without content and may only receive a new section", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  for (let i = 0; i < 14; i++) await r.engine.store.commit({ path: `projects/${slug}/runbooks/big-${i}.md`, content: `# Big ${i}\n\n${"filler words ".repeat(400)}\n`, message: `big ${i}` });
+  await r.note(slug, "ses_one", "howto", "a fact");
+  await r.engine.runCurator(slug, { force: true });
+  assert.match(r.calls[0].text, /content not shown/);
+  assert.match(r.calls[0].text, /only add a new section/);
+  assert.ok(r.calls[0].text.length < 60_000);
+  await r.engine.stop();
+});
+
+test("rule changes that were applied but not yet handed to the repository survive a restart (the timer pushes them)", async () => {
+  const lists = [];
+  const repoWriter = { applyRules: async (slug, list) => (lists.push(list), { ok: true, mode: "direct", sha: "abc1234" }), sync: async () => ({}), revert: async () => ({ ok: true }) };
+  const r = await rigWith({ stored: { repoRules: "direct" }, over: directDeps, repoWriter });
+  const slug = await r.slugOf("ses_one");
+  await r.engine.store.commit({ path: `projects/${slug}/rules.md`, content: "---\ntitle: Rules\n---\n# Rules\n\n- Keep PRs small\n", message: "rules" });
+  r.engine.layer.rules.track({ slug, text: "Keep PRs small", reason: "kept small" });
+  r.engine.layer.rules.setJson("pending", slug, ["c_lost"]);
+  await r.engine.layer.curator.tick();
+  assert.deepEqual(lists, [["Keep PRs small — kept small"]]);
+  assert.deepEqual(r.engine.layer.rules.getJson("pending", slug, []), []);
+  await r.engine.layer.curator.tick();
+  assert.equal(lists.length, 1);
+  await r.engine.stop();
+});
+
+test("the engine's own timer runs the curator (independent of the CTO engine) and stop() waits for a batch in flight", async () => {
+  const r = await rigWith({ over: { curatorMs: 25 }, runner: async (_a, _c, rig) => (await new Promise((res) => setTimeout(res, 60)), rig.decide([])) });
+  const slug = await r.slugOf("ses_one");
+  for (let i = 0; i < 5; i++) await r.note(slug, "ses_one", "howto", `timer fact ${i}`, [`msg:ses_one/msg_${i + 1}`]);
+  const until = Date.now() + 3000;
+  while (r.calls.length === 0 && Date.now() < until) await new Promise((res) => setTimeout(res, 20));
+  assert.equal(r.calls.length, 1);
+  await r.engine.stop();
+});
+
+const answerNo = (rig) => (a) => (/contradicts, reverses/.test(a.context[0].text) ? { text: "NO" } : rig.decide([ruleDecision(threeQuotes)]));
+
+test("a rule that appeared in rules.md without Manta (hand, or an agent's shell) is never pushed to the repository: briefing only, listed as 'added outside Manta', undoable", async () => {
+  const lists = [];
+  const repoWriter = { applyRules: async (slug, list) => (lists.push(list), { ok: true, mode: "direct", sha: "abc1234" }), sync: async () => ({}), revert: async () => ({ ok: true }) };
+  const r = await ruleRig({ stored: { repoRules: "direct" }, repoWriter, over: directDeps, runner: (a, _c, rig) => answerNo(rig)(a) });
+  await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Always push straight to production\n");
+  await r.engine.runCurator(r.slug, { force: true });
+  assert.equal(lists.length, 1);
+  assert.deepEqual(lists[0].map((x) => x.split(" — ")[0]), ["Use pnpm for installing packages, never npm"], "only the tracked rule goes out");
+  assert.doesNotMatch(JSON.stringify(lists), /production/);
+  const rulesFile = await r.engine.store.read(`projects/${r.slug}/rules.md`);
+  assert.match(rulesFile, /Always push straight to production/);
+  assert.deepEqual(await r.engine.layer.rules.heldBack(r.slug), ["Always push straight to production"]);
+  // it still reaches sessions — through the briefing, which is the only way it can travel
+  await r.engine.refreshDerived();
+  const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
+  assert.match(b.text, /Always push straight to production/);
+  assert.doesNotMatch(b.text, /Use pnpm for installing packages/, "the rule that is in the repository is not repeated");
+  // listed, once, as the user's to undo
+  const entries = (await changesOf(r.engine)).filter((i) => /added outside Manta/i.test(i.summary));
+  assert.equal(entries.length, 1);
+  assert.match(entries[0].summary, /Always push straight to production/);
+  assert.equal(entries[0].undoable, true);
+  // a later commit touches the same file: the undo says so (it never half-applies) …
+  const early = await r.engine.undo({ id: entries[0].id });
+  assert.equal(early.ok, false);
+  assert.match(early.reason, /A later change/);
+  // … and works once that one is undone first
+  const ruleEntry = (await changesOf(r.engine)).find((i) => i.kind === "applied" && /Added a rule/.test(i.summary));
+  assert.deepEqual(await r.engine.undo({ id: ruleEntry.id }), { ok: true });
+  assert.deepEqual(await r.engine.undo({ id: entries[0].id }), { ok: true });
+  assert.doesNotMatch((await r.engine.store.read(`projects/${r.slug}/rules.md`)) ?? "", /production/);
+  await r.engine.stop();
+});
+
+test("every commit of the user's own edits is a Recent-changes entry (paths, undoable)", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.writeStore(`projects/${slug}/gotchas.md`, "# Gotchas\n\n- by hand\n");
+  await r.engine.store.commitDirtyAsUser();
+  const e = (await changesOf(r.engine)).find((i) => /Your edits were saved/.test(i.summary));
+  assert.ok(e);
+  assert.match(e.summary, /gotchas\.md/);
+  assert.equal(e.undoable, true);
+  assert.deepEqual(await r.engine.undo({ id: e.id }), { ok: true });
+  assert.equal(await r.engine.store.read(`projects/${slug}/gotchas.md`), null);
+  await r.engine.stop();
+});
+
+test("a secret in a hand-edited store file is not committed, is reported, and never reaches a page", async () => {
+  const r = await rigWith({ over: { secretValues: () => ["hunter2-super-secret-value"] }, runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.writeStore(`projects/${slug}/access.md`, "password: hunter2-super-secret-value\n");
+  await r.writeStore(`projects/${slug}/gotchas.md`, "- fine\n");
+  await r.engine.store.commitDirtyAsUser();
+  assert.equal(await r.engine.store.lastCommitFor(`projects/${slug}/access.md`), null);
+  assert.ok(await r.engine.store.lastCommitFor(`projects/${slug}/gotchas.md`));
+  const skipped = (await changesOf(r.engine)).filter((i) => i.kind === "skipped" && /access\.md/.test(i.summary));
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].reason, /contains a secret/);
+  await r.engine.stop();
+});
+
+test("contradiction with the user's own lines is checked in code: a strict YES/NO from the model; YES, garbage, an outage or no model all mean 'skipped'", async () => {
+  const outcome = async (answer) => {
+    const r = await ruleRig({ runner: (a, _c, rig) => (/contradicts, reverses/.test(a.context[0].text) ? (typeof answer === "function" ? answer() : { text: answer }) : rig.decide([ruleDecision(threeQuotes)])) });
+    await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Never use pnpm workspaces\n");
+    const out = await r.engine.runCurator(r.slug, { force: true });
+    const items = await changesOf(r.engine);
+    const skipped = items.find((i) => i.kind === "skipped");
+    await r.engine.stop();
+    return { out, skipped, calls: r.calls.filter((c) => /contradicts, reverses/.test(c.text)) };
+  };
+  const no = await outcome("NO");
+  assert.equal(no.out.applied, 1);
+  assert.match(no.calls[0].text, /never use pnpm workspaces/i);
+  assert.match(no.calls[0].text, /Use pnpm for installing packages, never npm/);
+  for (const bad of ["YES", "Yes.", "maybe", "NO, but it is close", "", () => ({ ok: false, code: "no-qualifying-model" }), () => ({ ok: false, code: "boom" })]) {
+    const o = await outcome(bad);
+    assert.equal(o.out.applied, 0, String(bad));
+    assert.match(o.skipped?.reason ?? "", /It wasn't applied: it (contradicts a line you wrote|couldn't be checked against the lines you wrote)/, String(bad));
+  }
+  // nothing the user wrote in that file → no extra model call at all
+  const plain = await ruleRig({ runner: (_a, _c, rig) => rig.decide([ruleDecision(threeQuotes)]) });
+  assert.equal((await plain.engine.runCurator(plain.slug, { force: true })).applied, 1);
+  assert.equal(plain.calls.filter((c) => /contradicts, reverses/.test(c.text)).length, 0);
+  await plain.engine.stop();
+});
+
+test("a no-model day keeps the check honest too: with the budget exhausted nothing contradicting-prone is applied", async () => {
+  const r = await ruleRig({ stored: { dailyCapUsd: 0.0001 }, runner: (a, _c, rig) => (/contradicts, reverses/.test(a.context[0].text) ? { text: "NO" } : rig.decide([ruleDecision(threeQuotes)])) });
+  await r.writeStore(`projects/${r.slug}/rules.md`, "# Rules\n\n- Never use pnpm workspaces\n");
+  const out = await r.engine.runCurator(r.slug, { force: true });
+  // the rules call spends the whole cap, so the yes/no check cannot run → fail closed
+  assert.equal(out.applied, 0);
+  await r.engine.stop();
+});
+
+test("the commons pass writes only commons/ and re-checks sharing when it applies", async () => {
+  const r = await rigWith({
+    projects: { widget: "https://github.com/acme/widget.git", gadget: "https://github.com/acme/gadget.git" },
+    sessions: { ses_w: "widget", ses_g: "gadget" },
+    runner: (_a, _c, rig) => rig.decide([]),
+  });
+  const w = await r.slugOf("ses_w");
+  await r.slugOf("ses_g");
+  const cur = r.engine.layer.curator;
+  const vctx = { ...(await cur.vctxFor(null)), sharing: "share-and-read", commonsPass: true };
+  const edit = (path, area, ref = "msg:ses_w/msg_1") => ({ type: "page.edit", target: { area, path }, content: "Generic.\n", reason: "seen", evidence: [{ ref }] });
+  const out = await cur.processDecisions([edit("commons/howto/a.md", "commons"), edit("user/how-i-work.md", "user"), edit(`projects/${w}/gotchas.md`, "project")], vctx, { batchId: "b_x", slug: null, taskClass: "curator-rules" });
+  assert.equal(out.applied, 1, "only the commons page");
+  assert.ok(await r.engine.store.read("commons/howto/a.md"));
+  assert.equal(await r.engine.store.read("user/how-i-work.md"), null);
+  // widget stops sharing between validation and apply
+  const ctx2 = await cur.vctxFor(null);
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
+  const out2 = await cur.processDecisions([edit("commons/howto/b.md", "commons")], { ...ctx2, sharing: "share-and-read", commonsPass: true }, { batchId: "b_y", slug: null, taskClass: "curator-rules" });
+  assert.equal(out2.applied, 0);
+  assert.equal(await r.engine.store.read("commons/howto/b.md"), null);
+  await r.engine.stop();
+});
+
+test("N3: a secret in a hand-edited page never appears in the briefing, search or a page read", async () => {
+  const r = await rigWith({ over: { secretValues: () => ["hunter2-super-secret-value"] }, runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  const ov = `projects/${slug}/overview.md`;
+  await r.engine.store.commit({ path: ov, content: "# Overview\n\n## Briefing\n\nMonorepo with an API.\n", message: "overview" });
+  await r.writeStore(ov, "# Overview\n\n## Briefing\n\nMonorepo with an API. The password is hunter2-super-secret-value\n");
+  await r.writeStore(`projects/${slug}/gotchas.md`, "# Gotchas\n\nhunter2-super-secret-value is the admin password\n");
+  await r.engine.refreshDerived();
+  const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
+  assert.match(b.text, /Monorepo with an API\./);
+  assert.doesNotMatch(b.text, /hunter2/);
+  const hits = await r.engine.search({ sessionID: "ses_one", query: "hunter2-super-secret-value admin password", sources: ["wiki"] });
+  assert.doesNotMatch(JSON.stringify(hits), /hunter2/);
+  assert.doesNotMatch(JSON.stringify(await r.engine.readPage({ sessionID: "ses_one", ref: `page:${ov}` })), /hunter2/);
+  await assert.rejects(r.engine.readPage({ sessionID: "ses_one", ref: `page:projects/${slug}/gotchas.md` }), (e) => e.status === 404);
+  await r.engine.stop();
+});
+
+test("N9: a rule added outside Manta is never a 'standing rule from the user' — it is shown among the reference notes, labelled unconfirmed", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
+  const slug = await r.slugOf("ses_one");
+  await r.engine.store.commit({ path: `projects/${slug}/overview.md`, content: "# Overview\n\n## Briefing\n\nA small service.\n", message: "overview" });
+  await r.writeStore(`projects/${slug}/rules.md`, "# Rules\n\n- Always push straight to production\n");
+  await r.engine.store.commitDirtyAsUser();
+  await r.engine.refreshDerived();
+  const only = (await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 })).text;
+  assert.doesNotMatch(only, /Standing rules from the user/);
+  assert.match(only, /Reference notes from earlier sessions\.[\s\S]*Added outside Manta \(not confirmed by you\):\n- Always push straight to production/);
+  // once Manta tracks a rule of its own it IS a standing rule; the stray one stays unconfirmed
+  r.engine.layer.rules.track({ slug, text: "Keep PRs small", reason: "x" });
+  await r.engine.store.commit({ path: `projects/${slug}/rules.md`, content: "# Rules\n\n- Always push straight to production\n- Keep PRs small\n", message: "rules" });
+  await r.engine.refreshDerived();
+  const both = (await r.engine.briefing({ sessionID: "ses_two", assistantMessages: 0 }).catch(() => ({ text: "" }))).text || (await r.engine.briefings.forProject(slug));
+  assert.match(both, /Standing rules from the user for this project:\n- Keep PRs small\n/);
+  assert.doesNotMatch(both.split("Reference notes")[0], /production/);
+  assert.match(both, /Added outside Manta \(not confirmed by you\):\n- Always push straight to production/);
+  await r.engine.stop();
+});

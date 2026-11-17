@@ -508,3 +508,307 @@ test("readSnapshotsForRouting: a function-valued reader is called and yields the
   const services = await buildRoutingServices({}, { snapshots: await readSnapshotsForRouting(() => [snap]) });
   assert.equal(services.accounts?.p?.exhausted, true, "function-valued reader must yield account state");
 });
+
+// ---------------------------------------------------------------------------
+// Shared knowledge (spec 2026-11-16 §6.2): new task classes, strict routing,
+// per-class timeouts, resolveModelForClass. Pure/injected only.
+// ---------------------------------------------------------------------------
+
+import {
+  defaultResolveModel,
+  resolveModelForClass,
+  strictBandRefusal,
+  EPHEMERAL_POLL_INTERVAL_MS,
+  KNOWLEDGE_TITLE_PREFIX,
+} from "./ctoSessions.mjs";
+
+const OPUS = { providerID: "anthropic", modelID: "claude-opus-4" };
+const winnerTrace = (score, widened = false) => ({
+  target: { tier: "deep", floorTier: "fast", widened },
+  winner: { quality: { score, basis: "family", known: true } },
+});
+
+test("knowledge task classes: tiers, budgets, timeouts, strictness", () => {
+  const rows = {
+    "knowledge-capture": ["nano", 8000, 90_000, undefined],
+    "knowledge-corrections": ["nano", 8000, 90_000, undefined],
+    "curator-notes": ["mid", 12000, 180_000, undefined],
+    "curator-rules": ["deep", 24000, 300_000, true],
+    "curator-skills": ["deep", 24000, 300_000, true],
+  };
+  for (const [name, [tier, budget, timeoutMs, strict]] of Object.entries(rows)) {
+    const m = getTaskClass(name);
+    assert.equal(m.tier, tier, name);
+    assert.equal(m.contextBudget, budget, name);
+    assert.equal(m.timeoutMs, timeoutMs, name);
+    assert.equal(m.strict, strict, name);
+    assert.equal(m.titlePrefix, KNOWLEDGE_TITLE_PREFIX, name);
+  }
+  const trial = getTaskClass("knowledge-trial");
+  assert.equal(trial.tier, "mid");
+  assert.equal(trial.resolutionOnly, true);
+  assert.equal(trial.strict, undefined);
+  // existing classes are untouched
+  for (const name of ["ambient-summarize", "gatekeeper", "worthiness", "digest-compose", "suggest", "triage", "spawn"]) {
+    assert.equal(getTaskClass(name).timeoutMs, undefined, name);
+    assert.equal(getTaskClass(name).strict, undefined, name);
+    assert.equal(getTaskClass(name).titlePrefix, undefined, name);
+  }
+});
+
+test("deep maps to the deep router band and never escalates", () => {
+  assert.equal(TIER_TO_ROUTER_TIER.deep, "deep");
+  assert.equal(escalateTier("deep"), null);
+});
+
+test("runEphemeral on a deep class never cascades on validation failure", async () => {
+  const calls = [];
+  const oc = { async runEphemeralSession() { calls.push(1); return { text: "x", sid: "s" }; } };
+  const out = await runEphemeral({
+    taskClass: "curator-notes",
+    deps: { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, validate: async () => false },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(out.ok, false);
+  assert.equal(out.code, "schema-invalid");
+});
+
+test("runEphemeral refuses a resolution-only class", async () => {
+  await assert.rejects(
+    () => runEphemeral({ taskClass: "knowledge-trial", deps: { oc: { runEphemeralSession: async () => ({}) } } }),
+    /only resolves a model/,
+  );
+});
+
+test("timeoutMs is passed through to the synchronous session (class with one); absent for the others", async () => {
+  const seen = {};
+  const oc = {
+    async runEphemeralSession(opts) { seen[opts.title] = opts; return { text: "ok", sid: "s" }; },
+  };
+  const deps = { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS };
+  await runEphemeral({ taskClass: "curator-rules", deps });
+  await runEphemeral({ taskClass: "knowledge-capture", deps });
+  await runEphemeral({ taskClass: "gatekeeper", deps });
+  const rules = seen[`${KNOWLEDGE_TITLE_PREFIX}curator-rules`];
+  assert.equal(rules.timeoutMs, 300_000);
+  assert.equal(rules.pollIntervalMs, EPHEMERAL_POLL_INTERVAL_MS);
+  assert.equal(rules.maxAttempts, 300);
+  assert.equal(seen[`${KNOWLEDGE_TITLE_PREFIX}knowledge-capture`].maxAttempts, 90);
+  const gate = seen["cto:gatekeeper"];
+  assert.equal(gate.timeoutMs, undefined);
+  assert.equal(gate.maxAttempts, undefined, "existing classes keep the primitive's default wait");
+  assert.equal(gate.pollIntervalMs, undefined);
+});
+
+test("runEphemeral works with the CTO engine off and reports cost for every knowledge class", async () => {
+  const reported = [];
+  const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-k"); return { text: "twelve chars", sid: "sid-k" }; } };
+  const es = fakeEngineState();
+  for (const taskClass of ["knowledge-capture", "knowledge-corrections", "curator-notes", "curator-rules", "curator-skills"]) {
+    const out = await runEphemeral({
+      taskClass,
+      context: [{ priority: 1, text: "some input" }],
+      // no CTO engine, no ledger/engine wiring beyond the injected state store
+      deps: { oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } },
+    });
+    assert.equal(out.text, "twelve chars", taskClass);
+  }
+  assert.deepEqual(reported.map((r) => r.taskClass), [
+    "knowledge-capture", "knowledge-corrections", "curator-notes", "curator-rules", "curator-skills",
+  ]);
+  assert.deepEqual(reported.map((r) => r.tier), ["nano", "nano", "mid", "deep", "deep"]);
+  for (const r of reported) {
+    assert.deepEqual(r.model, OPUS);
+    assert.ok(r.tokens > 0);
+  }
+  assert.deepEqual(es.peek().activeEphemeral ?? [], []);
+});
+
+test("strictBandRefusal: null, widened, below-deep winner, deep winner", () => {
+  assert.match(strictBandRefusal({ model: null, trace: null }, "deep"), /no model/);
+  assert.match(strictBandRefusal({ model: OPUS, trace: winnerTrace(0.85, true) }, "deep"), /band is empty/);
+  assert.match(strictBandRefusal({ model: OPUS, trace: winnerTrace(0.55) }, "deep"), /below the band/);
+  assert.equal(strictBandRefusal({ model: OPUS, trace: winnerTrace(0.85) }, "deep"), null);
+  // a winner of unknown quality is not a deep winner
+  assert.match(strictBandRefusal({ model: OPUS, trace: { target: { widened: false }, winner: { quality: { score: 0, known: false } } } }, "deep"), /below the band/);
+});
+
+// A fake router that honours withTrace the way chooseSubagentModel does.
+function fakeRoute(result, seen = []) {
+  return (args) => {
+    seen.push(args);
+    return args.withTrace ? result : result.model;
+  };
+}
+const resolveWith = (route, taskClass, deps = {}) => defaultResolveModel(
+  { taskClass, tier: getTaskClass(taskClass).tier, meta: getTaskClass(taskClass), configGet: async () => ({}) },
+  { listModels: async () => [], route, ...deps },
+);
+
+test("strict resolution: null result → no-qualifying-model", async () => {
+  await assert.rejects(
+    () => resolveWith(fakeRoute({ model: null, trace: null }), "curator-rules"),
+    (e) => e.code === "no-qualifying-model" && e.taskClass === "curator-rules" && e.tier === "deep",
+  );
+});
+
+test("strict resolution: empty (widened) band → no-qualifying-model", async () => {
+  await assert.rejects(
+    () => resolveWith(fakeRoute({ model: OPUS, trace: winnerTrace(0.85, true) }), "curator-skills"),
+    (e) => e.code === "no-qualifying-model",
+  );
+});
+
+test("strict resolution: winner below the deep band → no-qualifying-model", async () => {
+  await assert.rejects(
+    () => resolveWith(fakeRoute({ model: { providerID: "p", modelID: "small" }, trace: winnerTrace(0.3) }), "curator-rules"),
+    (e) => e.code === "no-qualifying-model",
+  );
+});
+
+test("strict resolution: a routing failure fails closed (never the box default)", async () => {
+  const route = () => { throw new Error("router exploded"); };
+  await assert.rejects(() => resolveWith(route, "curator-rules"), (e) => e.code === "no-qualifying-model");
+});
+
+test("strict resolution: a deep winner is returned, priced, and the router is asked for a trace", async () => {
+  const seen = [];
+  const catalog = [{ providerID: "anthropic", id: "claude-opus-4", cost: { input: 5, output: 25 } }];
+  const got = await resolveWith(fakeRoute({ model: OPUS, trace: winnerTrace(0.85) }, seen), "curator-rules", { listModels: async () => catalog });
+  assert.deepEqual(got, { ...OPUS, cost: { input: 5, output: 25 } });
+  assert.equal(seen[0].withTrace, true);
+  assert.equal(seen[0].policy.perAgent["cto:curator-rules"], "deep");
+  assert.equal(seen[0].contextTokens, 24000);
+});
+
+test("non-strict classes are unchanged: widened band and null still resolve (null → box default)", async () => {
+  const seen = [];
+  const widened = await resolveWith(fakeRoute({ model: OPUS, trace: winnerTrace(0.85, true) }, seen), "curator-notes");
+  assert.deepEqual(widened, OPUS);
+  assert.equal(seen[0].withTrace, undefined, "non-strict callers get the bare model, no trace requested");
+  assert.equal(await resolveWith(fakeRoute({ model: null, trace: null }), "knowledge-capture"), null);
+  assert.equal(await resolveWith(() => { throw new Error("boom"); }, "gatekeeper"), null);
+});
+
+test("empty catalogue + the real router under strict → no-qualifying-model", async () => {
+  await assert.rejects(
+    () => defaultResolveModel(
+      { taskClass: "curator-rules", tier: "deep", meta: getTaskClass("curator-rules"), configGet: async () => ({}) },
+      { listModels: async () => [] },
+    ),
+    (e) => e.code === "no-qualifying-model",
+  );
+});
+
+test("real router: haiku-only catalogue is a widened band for a deep strict class; opus qualifies", async () => {
+  const haiku = _normalizeProviderModel("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" }));
+  const opus = _normalizeProviderModel("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" }));
+  const route = (args) => chooseSubagentModel({ ...args, services: routingServicesFor(args.catalog) });
+  await assert.rejects(
+    () => defaultResolveModel(
+      { taskClass: "curator-rules", tier: "deep", meta: getTaskClass("curator-rules"), configGet: async () => ({}) },
+      { listModels: async () => [haiku], route },
+    ),
+    (e) => e.code === "no-qualifying-model",
+  );
+  const ok = await defaultResolveModel(
+    { taskClass: "curator-rules", tier: "deep", meta: getTaskClass("curator-rules"), configGet: async () => ({}) },
+    { listModels: async () => [haiku, opus], route },
+  );
+  assert.equal(ok.modelID, "claude-opus-4");
+  // the same haiku-only catalogue is fine for a non-strict deep-ish class
+  const lenient = await defaultResolveModel(
+    { taskClass: "curator-notes", tier: "mid", meta: getTaskClass("curator-notes"), configGet: async () => ({}) },
+    { listModels: async () => [haiku], route },
+  );
+  assert.equal(lenient.modelID, "claude-haiku-4");
+});
+
+test("runEphemeral maps no-qualifying-model to a run outcome (no throw, no session, no cascade)", async () => {
+  let prompted = 0;
+  const oc = { async runEphemeralSession() { prompted += 1; return { text: "never" }; } };
+  const out = await runEphemeral({
+    taskClass: "curator-rules",
+    deps: {
+      oc,
+      engineState: fakeEngineState(),
+      resolveModel: (a) => resolveWith(fakeRoute({ model: null, trace: null }), "curator-rules"),
+    },
+  });
+  assert.deepEqual(out, { ok: false, code: "no-qualifying-model", taskClass: "curator-rules", tier: "deep" });
+  assert.equal(prompted, 0);
+});
+
+test("resolveModelForClass: model, null (non-strict default), and typed verdicts", async () => {
+  const got = await resolveModelForClass("knowledge-trial", { resolveModel: async ({ tier }) => ({ providerID: "p", modelID: tier }) });
+  assert.deepEqual(got, { providerID: "p", modelID: "mid" });
+  assert.equal(await resolveModelForClass("knowledge-trial", { resolveModel: async () => null }), null);
+  const strictFail = await resolveModelForClass("curator-skills", { resolveModel: (a) => resolveWith(fakeRoute({ model: null }), "curator-skills") });
+  assert.deepEqual(strictFail, { ok: false, code: "no-qualifying-model", taskClass: "curator-skills", tier: "deep" });
+  const health = await resolveModelForClass("knowledge-trial", {
+    resolveModel: async () => { const e = new Error("dead"); e.code = "no-healthy-endpoint"; throw e; },
+  });
+  assert.equal(health.code, "no-healthy-endpoint");
+  await assert.rejects(() => resolveModelForClass("knowledge-trial", { resolveModel: async () => { throw new Error("crash"); } }), /crash/);
+  await assert.rejects(() => resolveModelForClass("nope"), /unknown task class/);
+});
+
+test("runEphemeral reports the session's REAL usage (tokens by kind + recorded cost) and falls back to the estimate without it", async () => {
+  const es = fakeEngineState();
+  const run = async (result) => {
+    const reported = [];
+    const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-u"); return { sid: "sid-u", text: "an answer", ...result }; } };
+    await runEphemeral({ taskClass: "curator-notes", context: [{ priority: 1, text: "some input" }], deps: { oc, engineState: es, resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } });
+    return reported;
+  };
+  const real = await run({ usage: { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300, usd: 0.07 } });
+  assert.equal(real.length, 1);
+  assert.ok(real[0].tokens < 100, "`tokens` stays the prompt+answer ESTIMATE (what the CTO budget prices), not the real total");
+  assert.deepEqual(real[0].usage, { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 });
+  assert.equal(real[0].usd, 0.07);
+  assert.equal(real[0].estimated, false);
+  // a subscription model records no cost: tokens only, no usd
+  const free = await run({ usage: { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 } });
+  assert.equal("usd" in free[0], false);
+  assert.deepEqual(free[0].usage, { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 });
+  // no recorded usage: the estimate, flagged
+  const est = await run({});
+  assert.equal(est[0].estimated, true);
+  assert.ok(est[0].tokens > 0);
+  assert.equal("usage" in est[0], false);
+});
+
+test("a run that THROWS still reports the instruction estimate, and the error still propagates", async () => {
+  const reported = [];
+  const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-t"); throw new Error("boom"); } };
+  await assert.rejects(
+    runEphemeral({ taskClass: "knowledge-capture", context: [{ priority: 1, text: "a long enough instruction to estimate" }], deps: { oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, reportCost: async (r) => { reported.push(r); } } }),
+    /boom/,
+  );
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0].estimated, true);
+  assert.ok(reported[0].tokens > 0);
+});
+
+test("a cache-heavy CTO run is priced exactly as before (the estimate at the blended rate) — never from its real cache totals", async () => {
+  const { priceTokens } = await import("./ctoBudget.mjs");
+  const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+  const model = { ...OPUS, cost };
+  const priced = [];
+  const oc = { async runEphemeralSession({ onCreated }) {
+    await onCreated("sid-c");
+    return { sid: "sid-c", text: "an answer", usage: { input: 100, output: 50, reasoning: 0, cacheRead: 400_000, cacheWrite: 20_000, usd: 1.9 } };
+  } };
+  for (const taskClass of ["ambient-summarize", "curator-notes"]) {
+    await runEphemeral({
+      taskClass,
+      context: [{ priority: 1, text: "x".repeat(400) }],
+      deps: { oc, engineState: fakeEngineState(), resolveModel: async () => model, reportCost: async (r) => { priced.push({ taskClass, r, usd: priceTokens({ model: r.model, tokens: r.tokens }) }); } },
+    });
+  }
+  const listInputOutput = (100 * cost.input + 50 * cost.output) / 1e6;
+  for (const { taskClass, r, usd } of priced) {
+    assert.equal(r.tokens, 100 + 3, `${taskClass}: tokens = the instruction + answer estimate`);
+    assert.ok(usd <= listInputOutput, `${taskClass}: priced $${usd} ≤ input+output at list rates $${listInputOutput}`);
+  }
+});

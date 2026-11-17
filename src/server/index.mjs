@@ -7,7 +7,7 @@
 // one less auth surface.
 
 import { createServer } from "node:http";
-import { resolvePipelineSession, isInternalSession } from "./internalSessions.mjs";
+import { resolvePipelineSession, isInternalSession, internalSessionIds } from "./internalSessions.mjs";
 import { withInternalMarker } from "./internalSessionMarker.mjs";
 import { resolvePlanParent } from "./ctoAct.mjs";
 import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
@@ -133,6 +133,17 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 // completed — the failure looked like an unavailable config surface rather
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
+import { createKnowledgeEngine } from "./knowledge/engine.mjs";
+import { handleKnowledgeRoute } from "./knowledge/routes.mjs";
+import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthored as createKnowledgeIsUserAuthored, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef, createIsManagedSession as createKnowledgeIsManagedSession, forwardListMessages as forwardKnowledgeListMessages, createKnowledgeRunner, knowledgePaths } from "./knowledge/integration.mjs";
+import { createKnowledgeParts } from "./knowledge/wiring.mjs";
+import { createShellCommandReader as createKnowledgeShellReader } from "./knowledge/readers.mjs";
+import { runDbTask as knowledgeRunDbTask } from "./dbOffload.mjs";
+import { createListPrices as createKnowledgeListPrices } from "./knowledge/pricing.mjs";
+import { createMessageReader as createKnowledgeMessageReader } from "./knowledge/search.mjs";
+import { createPromptOrigins } from "./promptOrigins.mjs";
+import { createTranscriptIndex } from "./transcriptIndex.mjs";
+import { describeModel } from "../shared/modelGuide.mjs";
 import { createRoutinesEngine, startRoutinesPoller, defaultStoreDeps as routinesStoreDeps, RoutineError } from "./routines.mjs";
 import { createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
 import { createClaudeSeatHealth } from "./claudeSeatHealth.mjs";
@@ -158,7 +169,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, completionOwnerOf as delegateCompletionOwnerOf, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -213,7 +224,7 @@ import { endpointAttempts, setOnProviderAttempt, attemptFromAssistantError } fro
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
-import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders, resolveCtoTurnModel, usableModelsNow } from "./ctoSessions.mjs";
+import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders, resolveCtoTurnModel, usableModelsNow, resolveModelForClass, KNOWLEDGE_TITLE_PREFIX } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import { createCtoSuggest } from "./ctoSuggest.mjs";
 // BET-1519: the per-class act executors are retired — ctoAct.mjs is now the
@@ -276,7 +287,7 @@ import {
 } from "./forge/poller.mjs";
 import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
-import { getAdapter } from "./forge/index.mjs";
+import { getAdapter, forgeRepoAccess, forgeFindOpenPullRequest, forgeCreatePullRequest, forgeUpdatePullRequest } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
 import { detectForgeWithHosts } from "./forge/selfhost.mjs";
 import { startForgeHealthCheck, healthCheckRepoHook } from "./forge/webhook.mjs";
@@ -644,6 +655,11 @@ const handoffEngine = createProductionHandoff({
   loadState: () => readJsonSync(statePath("handoffs.json"), null),
   saveState: (snapshot) => writeJsonAtomic(statePath("handoffs.json"), JSON.stringify(snapshot, null, 2)),
 });
+// Shared knowledge §9.2: the durable record of WHO authored each prompt message. Installed before
+// anything can send one (the CTO admission tick below may dispatch at boot); the SAME instance is
+// the knowledge engine's evidence check (`isUserAuthoredRef`).
+const promptOrigins = createPromptOrigins();
+oc.setPromptOrigins(promptOrigins);
 const promptDelivery = createPromptDelivery({
   // The admission seam: resolves to the live session, parks behind a fence.
   sendPrompt: (args) => handoffEngine.admitPrompt(args),
@@ -1363,6 +1379,8 @@ const delegateEngine = createDelegateEngine({
   // launch has to classify as refused-vs-unknown).
   moveSession: (sid, directory) => oc.moveSession(sid, directory),
   sendChildPrompt: (input) => oc.sendPrompt(input),
+  // Shared knowledge: a job's project is its worktree's, known only once it has been moved there.
+  pinKnowledgeSession: (args) => knowledgeEngine.pinSession(args),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   // N7 result to the parent: an admission like any other (§6.1) — a replaced
@@ -2015,6 +2033,99 @@ const optimizerPrices = createOptimizerPrices({
   loadCatalog: () => readJsonSync(PRICES_PATH, null),
 });
 
+// Shared knowledge (src/server/knowledge/, spec docs/superpowers/specs/2026-11-16-shared-knowledge.md):
+// the box's cross-session memory. Independent of the CTO engine (it starts below whatever `ctoEnabled`
+// says); its own budget and pollers. The opencode pump feeds it session events (observeRaw below);
+// /api/knowledge/* serves the AI tools and the `knowledge:*` rpc channels the desktop Knowledge card.
+// Every part is wired: the task-class runner (`knowledgeRunner`, curator + capture + corrections + skills), the
+// curator layer (inside the engine), and — through `createParts` — capture, the correction detector, repository
+// writes, the skill trial + learned skills, the blackboard import and the weekly notice (knowledge/wiring.mjs).
+// Their transcript reads go through opencode's HTTP API or the db worker thread, never opencode's database on
+// the event loop.
+//
+// Transcript search runs in worker threads (transcriptIndex.mjs): the index sync, whose size-cap
+// eviction ends in a 20-60 s/GB FTS5 optimize, must never block this process's event loop.
+const knowledgeForge = createKnowledgeForgeAdapters({ forgeRepoAccess, resolveToken: forgeResolveToken });
+const knowledgeTranscripts = createTranscriptIndex({
+  provenance: internalSessionIds,
+  isEnabled: async () => {
+    const s = await knowledgeEngine.settings.get();
+    return s.enabled && !s.observeOnly;
+  },
+});
+const knowledgeRunner = createKnowledgeRunner({
+  runEphemeral,
+  oc: { runEphemeralSession: oc.runSynchronousSession },
+  configGet: () => local.configGet(),
+});
+const knowledgePathsOnBox = knowledgePaths();
+const knowledgeEngine = createKnowledgeEngine({
+  config: { get: () => local.configGet(), update: (patch) => local.configUpdate(patch) },
+  runEphemeral: knowledgeRunner,
+  resolveModelForClass,
+  readShellCommands: createKnowledgeShellReader({ listMessages: forwardKnowledgeListMessages(oc) }),
+  globalAgentsPath: knowledgePathsOnBox.globalAgentsPath,
+  createParts: (foundation) =>
+    createKnowledgeParts(foundation, {
+      runEphemeral: knowledgeRunner,
+      resolveModelForClass,
+      configGet: () => local.configGet(),
+      oc: { listMessages: forwardKnowledgeListMessages(oc), createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
+      local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
+      runDbTask: knowledgeRunDbTask,
+      listTmuxProjects: () => tmux.listProjects(),
+      isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
+      getSession: async (sessionID) => {
+        const r = await oc.readSession(sessionID);
+        return r.state === "found" ? r.session : null;
+      },
+      isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
+      forge: { findOpenPullRequest: forgeFindOpenPullRequest, createPullRequest: forgeCreatePullRequest, updatePullRequest: forgeUpdatePullRequest, repoAccess: forgeRepoAccess },
+      resolveToken: forgeResolveToken,
+      fireNotify: (args) => push.fireNotify(args),
+      skillsDir: knowledgePathsOnBox.skillsDir,
+    }),
+  getSession: async (sessionID) => {
+    const r = await oc.readSession(sessionID);
+    return r.state === "found" ? r.session : null;
+  },
+  isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
+  // A child session of a Manta-owned background job carries its own directory: it never inherits its parent's project.
+  isManagedSession: createKnowledgeIsManagedSession({ loadJobs: loadDelegateJobs, completionOwnerOf: delegateCompletionOwnerOf }),
+  readMessages: createKnowledgeMessageReader({ listMessages: forwardKnowledgeListMessages(oc) }),
+  searchTranscripts: knowledgeTranscripts.searchTranscripts,
+  promptOrigins,
+  isUserAuthoredRef: createKnowledgeIsUserAuthoredRef(promptOrigins, {
+    // The role opencode stores for the message: an assistant message is never user-authored.
+    readRole: async (sessionID, messageID) => {
+      const m = await oc.getMessage(sessionID, messageID);
+      return m ? (m.info?.role ?? null) : null;
+    },
+  }),
+  getRepoAccess: knowledgeForge.getRepoAccess,
+  hasForgeLogin: knowledgeForge.hasForgeLogin,
+  bandOf: createKnowledgeBandOf(describeModel),
+  getPrices: createKnowledgeListPrices({
+    listProviders: oc.getProviders,
+    readConfig: readOpencodeConfig,
+    loadCatalog: () => readJsonSync(PRICES_PATH, null),
+  }).get,
+  fireNotify: (args) => push.fireNotify(args),
+});
+// The index file lives inside the store's folder: start indexing only once the store has written its .gitignore.
+knowledgeEngine
+  .start()
+  .catch((e) => console.warn("[knowledge] start failed:", e?.message ?? e))
+  .finally(() => knowledgeTranscripts.start());
+// Orphaned `knowledge:` sessions (a crash between create and delete) are swept on their own poller, so it runs
+// whether or not the CTO engine is on (the CTO's reaper only owns `cto:` titles).
+const knowledgeReaper = createEphemeralReaper({
+  oc: { listSessions: oc.listSessions, deleteSession: oc.deleteSessionRaw },
+  prefix: KNOWLEDGE_TITLE_PREFIX,
+});
+const stopKnowledgeReaper = knowledgeReaper.start().stop;
+void stopKnowledgeReaper;
+
 // ---------------------------------------------------------------------------
 // Optimizer P2.4 (BET-1346) — background compaction scheduler + constraint
 // pinning wiring.
@@ -2335,6 +2446,7 @@ void stopTuner;
 rpcHandlers = buildHandlers({
   usageCalibration,
   routines: routinesEngine,
+  knowledge: knowledgeEngine,
   tmux,
   oc,
   pty,
@@ -3826,6 +3938,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));
   // Routines: forms / permissions / execution outcomes of a routine run's session.
   routinesEngine.observeRaw(raw).catch((e) => console.warn("[routines] observeRaw failed:", e?.message ?? e));
+  // Shared knowledge: pins a session to its project at its first prompt; a subagent child inherits its parent's.
+  knowledgeEngine.observeRaw(raw);
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
     if (evt.type === "session.idle" && evt.properties?.sessionID) {
@@ -3833,6 +3947,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
       boxTimeZone.poke(); // a timezone restart may be owed; this is the moment to re-check
     }
     if (evt.type === "session.deleted" && evt.properties?.sessionID) commandCorrelator.forgetSession(evt.properties.sessionID);
+    // Shared knowledge: a deleted session's capture tracking is dropped (the adapted lifecycle event is the reliable signal).
+    if (evt.type === "session.deleted") knowledgeEngine.observeRaw(evt);
     try {
       observeLifecycleEvent(evt, raw);
     } catch (e) {
@@ -4561,6 +4677,15 @@ const handleRequest = async (req, res) => {
       // class-2 (BET-1460): schedule opencode tool — relays the message to the model (the card UI reads via /rpc).
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
+    return;
+  }
+
+  // ---------- Shared knowledge (AI tools: knowledge_note / knowledge_search / knowledge_read + the briefing hook) ----------
+  // POST /api/knowledge/notes | GET /api/knowledge/search | GET /api/knowledge/page |
+  // GET /api/knowledge/briefing | POST /api/knowledge/briefing/ack | POST /api/knowledge/briefing/reset.
+  // Consumer is the model (class-2 errors); the desktop card uses the `knowledge:*` rpc channels. Spec §11.2.
+  if (path.startsWith("/api/knowledge/")) {
+    await handleKnowledgeRoute({ engine: knowledgeEngine, req, res, path, url, readJsonBody, respondJson });
     return;
   }
 
@@ -6234,6 +6359,13 @@ const handleRequest = async (req, res) => {
           proposalId: body?.proposalId,
           sessionID: body?.sessionID,
         });
+        // Shared knowledge §5.4: an accepted proposal is ALSO a note for the project its key resolves to.
+        // Fire-and-forget: it never delays or fails the response.
+        if (result?.ok) {
+          void knowledgeEngine
+            .mirrorCtoFact({ project: body?.project, kind: body?.kind, statement: body?.statement, refs: body?.refs, sessionID: body?.sessionID })
+            .catch((e) => console.warn("[knowledge] cto mirror failed:", e?.message ?? e));
+        }
         respondJson(res, result.ok ? 200 : 400, result);
         return;
       }

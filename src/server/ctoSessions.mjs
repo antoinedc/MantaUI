@@ -16,6 +16,8 @@ import { chooseSubagentModel } from "./delegate.mjs";
 import { safeSummaryCode, runFailureClass, canFailover } from "./ctoRunOutcome.mjs";
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { modelUsability } from "../shared/modelRouter.mjs";
+import { tierRank } from "../shared/modelGuide.mjs";
+import { tierForScore } from "../shared/modelQuality.mjs";
 
 // ---------------------------------------------------------------------------
 // Task classes (§12.3) — a literal table in code. NEVER a model id.
@@ -28,6 +30,11 @@ import { modelUsability } from "../shared/modelRouter.mjs";
 // assembled context (absent → no cap). Model resolution always goes through
 // the existing model catalog/router (never hardcoded).
 // ---------------------------------------------------------------------------
+// Knowledge runs are titled `knowledge:<class>` so the knowledge engine can sweep
+// its own orphans (`createEphemeralReaper({ prefix: KNOWLEDGE_TITLE_PREFIX })`).
+export const KNOWLEDGE_TITLE_PREFIX = "knowledge:";
+const K = KNOWLEDGE_TITLE_PREFIX;
+
 export const TASK_CLASSES = Object.freeze({
   "ambient-summarize": Object.freeze({ tier: "nano", contextBudget: 4000 }),
   gatekeeper: Object.freeze({ tier: "nano" }),
@@ -37,20 +44,41 @@ export const TASK_CLASSES = Object.freeze({
   // BET-1517 (§9.1/§12.3): the resolution-plan triage — mid tier, ≤ 6k ctx.
   triage: Object.freeze({ tier: "mid", contextBudget: 6000 }),
   spawn: Object.freeze({ contextBudget: 8000 }),
+  // Shared knowledge (spec 2026-11-16-shared-knowledge §6.2). `timeoutMs` is the
+  // synchronous-session wait; `strict` refuses to widen the band or fall back to
+  // the box default (typed `no-qualifying-model`); `resolutionOnly` classes only
+  // resolve a model for the caller's own session and are never run here.
+  "knowledge-capture": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
+  "knowledge-corrections": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
+  "knowledge-trial": Object.freeze({ tier: "mid", resolutionOnly: true }),
+  "curator-notes": Object.freeze({ tier: "mid", contextBudget: 12000, timeoutMs: 180_000, titlePrefix: K }),
+  "curator-rules": Object.freeze({ tier: "deep", contextBudget: 24000, timeoutMs: 300_000, strict: true, titlePrefix: K }),
+  "curator-skills": Object.freeze({ tier: "deep", contextBudget: 24000, timeoutMs: 300_000, strict: true, titlePrefix: K }),
 });
 
 // Route-band per §12.3 tier — what the existing router is asked to satisfy.
 export const TIER_TO_ROUTER_TIER = Object.freeze({
   nano: "fast", // cheapest qualifying
   mid: "balanced",
+  deep: "deep",
 });
+
+// The synchronous-session wait polls the message list at this cadence
+// (opencode.mjs `runSynchronousSession` default); a class `timeoutMs` becomes
+// `maxAttempts` at the same cadence.
+export const EPHEMERAL_POLL_INTERVAL_MS = 1000;
 
 // Cascade rule (§12.3): an AMBIENT (nano) class may escalate exactly one tier
 // when its structured output fails validation, at most once per call. Mid-tier
-// classes and `spawn` never escalate.
+// classes, `deep` and `spawn` never escalate.
 export const TIER_ESCALATION = Object.freeze({ nano: "mid" });
 
 export const CTO_TITLE_PREFIX = "cto:";
+
+// Typed failure of a strict task class (spec shared-knowledge §6.2): the router
+// had no model in the requested band. Thrown by defaultResolveModel, mapped to a
+// run outcome by resolveModelOrVerdict — never reaches a caller as a throw.
+export const NO_QUALIFYING_MODEL = "no-qualifying-model";
 
 // Reaper (§3.1): every 10 min sweep orphaned `cto:` sessions older than 30 min
 // that are not in the active set (so a crash between create and delete can't
@@ -211,6 +239,9 @@ async function activeRemove(sid, { engineState }) {
  */
 export async function runEphemeral({ taskClass, operation, context = [], directory = "~", deps = {} } = {}) {
   const meta = getTaskClass(taskClass);
+  if (meta.resolutionOnly) {
+    throw new Error(`runEphemeral: task class "${taskClass}" only resolves a model (use resolveModelForClass)`);
+  }
   const op = ["segment-summary", "segment-one-liner", "tool-classification"].includes(operation) ? operation : taskClass;
   const record = async (kind, code) => {
     try {
@@ -291,15 +322,32 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
 // that throws the router's typed no-healthy-endpoint error maps to a
 // {ok:false, code} result (the run fails with that reason); any other throw
 // propagates unchanged (a resolver crash is still a runner-error, as before).
+// Strict classes add the typed `no-qualifying-model` verdict the same way.
 async function resolveModelOrVerdict(resolveModel, args) {
   try {
     return await resolveModel(args);
   } catch (e) {
-    if (e?.code === "no-healthy-endpoint") {
-      return { ok: false, code: "no-healthy-endpoint", taskClass: args.taskClass, tier: args.tier };
+    if (e?.code === "no-healthy-endpoint" || e?.code === NO_QUALIFYING_MODEL) {
+      return { ok: false, code: e.code, taskClass: args.taskClass, tier: args.tier };
     }
     throw e;
   }
+}
+
+/**
+ * Resolve the model for a task class WITHOUT running a session — for callers
+ * that drive their own session (the knowledge skill trial). Same resolver as
+ * runEphemeral, same typed verdicts.
+ *
+ * @param {string} taskClass  a key of TASK_CLASSES
+ * @param {{ configGet?: Function, resolveModel?: Function }} [opts]
+ * @returns {Promise<object|null | {ok:false, code:string, taskClass:string, tier:string}>}
+ *   a {providerID, modelID} (null → box default, non-strict only) or a verdict
+ *   `{ok:false, code: "no-healthy-endpoint"|"no-qualifying-model", …}`
+ */
+export async function resolveModelForClass(taskClass, { configGet, resolveModel = defaultResolveModel } = {}) {
+  const meta = getTaskClass(taskClass);
+  return resolveModelOrVerdict(resolveModel, { taskClass, tier: meta.tier, meta, configGet, excludeEndpointKeys: [] });
 }
 
 async function runOnce({ taskClass, meta, tier, context, directory, deps, operation,
@@ -341,33 +389,60 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
   const instruction = assembleContext(context, { taskClass });
 
   let sid = null;
-  try {
-    const res = await oc.runEphemeralSession({
-      directory,
-      title: `${CTO_TITLE_PREFIX}${taskClass}`,
-      // §4.1: the operation record's label must match the ledger's `operation`
-      // (the task class or the explicit op), not the title tag.
-      operation: operation ?? taskClass,
-      instruction,
-      model,
-      onCreated: async (s) => {
-        sid = s;
-        await activeAdd(s, { engineState });
-      },
-    });
-    // BET-1388 (§12.1): every ambient model call reports its token cost into
-    // budget.json. Best-effort — a metering failure must never mask the run.
-    // The engine wires this to the budget's record(); the default is a no-op.
+  // Metering (BET-1388 §12.1; shared-knowledge §6.7): every run reports its cost, best-effort — a metering
+  // failure must never mask the run. `tokens` is ALWAYS the prompt+answer size estimate: it is what the CTO's
+  // budget prices (one blended rate), so the CTO classes cost exactly what they did before real usage existed
+  // (a real total with cache reads/writes would be priced at that blended rate and inflate them). When the
+  // ephemeral session recorded its spend, `usage` ({input, output, reasoning, cacheRead, cacheWrite}) and `usd`
+  // (its recorded cost) travel BESIDE it for callers that price per component (the knowledge runner swaps them in
+  // for `tokens`); `estimated` says no real usage was available. A run that throws still reports the estimate.
+  const report = async (res) => {
+    const u = res?.usage;
+    const real = u && typeof u === "object" && u.input + u.output + u.reasoning + u.cacheRead + u.cacheWrite > 0;
     try {
       await reportCost({
         taskClass,
         tier,
         model,
         tokens: estimateTokens(instruction) + estimateTokens(res?.text ?? ""),
+        estimated: !real,
+        ...(real ? { usage: { input: u.input, output: u.output, reasoning: u.reasoning, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite } } : {}),
+        ...(real && typeof u.usd === "number" && u.usd > 0 ? { usd: u.usd } : {}),
       });
     } catch {
       /* metering is best-effort */
     }
+  };
+  try {
+    let res;
+    try {
+      res = await oc.runEphemeralSession({
+        directory,
+        title: `${meta.titlePrefix ?? CTO_TITLE_PREFIX}${taskClass}`,
+        // Per-class wait (only classes that declare one; the others keep the
+        // primitive's own default).
+        ...(meta.timeoutMs
+          ? {
+            timeoutMs: meta.timeoutMs,
+            pollIntervalMs: EPHEMERAL_POLL_INTERVAL_MS,
+            maxAttempts: Math.ceil(meta.timeoutMs / EPHEMERAL_POLL_INTERVAL_MS),
+          }
+          : {}),
+        // §4.1: the operation record's label must match the ledger's `operation`
+        // (the task class or the explicit op), not the title tag.
+        operation: operation ?? taskClass,
+        instruction,
+        model,
+        onCreated: async (s) => {
+          sid = s;
+          await activeAdd(s, { engineState });
+        },
+      });
+    } catch (e) {
+      await report(null); // the prompt was (probably) sent: charge the instruction estimate
+      throw e;
+    }
+    await report(res);
     return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid,
       // W6: the run's resolved model + whether it was pinned — runEphemeral
       // builds the exclusion set and classifies §4.1a refusals from these.
@@ -452,6 +527,31 @@ export async function readSnapshotsForRouting(reader) {
   return Array.isArray(reader) ? reader : [];
 }
 
+function noQualifyingModelError(taskClass, tier, why) {
+  const err = new Error(`no qualifying model for ${taskClass} (${tier} band): ${why}`);
+  err.code = NO_QUALIFYING_MODEL;
+  err.taskClass = taskClass;
+  err.tier = tier;
+  return err;
+}
+
+/**
+ * Pure strict-mode check over `chooseSubagentModel(..., {withTrace:true})`'s
+ * `{ model, trace }`: a reason string when the result does not qualify for the
+ * class's band, else null. A null model, a widened band (the router fell back
+ * to a neighbouring tier because the target was empty) and a winner whose
+ * quality tier is below the requested band all refuse.
+ */
+export function strictBandRefusal(routed, tier) {
+  if (!routed?.model) return "no model qualified";
+  const trace = routed.trace;
+  if (trace?.target?.widened === true) return "the band is empty (the router would widen it)";
+  const q = trace?.winner?.quality;
+  const winnerTier = tierForScore(q && q.known ? q.score : undefined);
+  if (tierRank(winnerTier) < tierRank(TIER_TO_ROUTER_TIER[tier])) return "the winner is below the band";
+  return null;
+}
+
 /**
  * Default model resolver: pick the CHEAPEST model satisfying the class tier
  * through the existing router. Reuses the same inputs delegate.mjs builds
@@ -471,7 +571,11 @@ export async function readSnapshotsForRouting(reader) {
  * candidate, so no new exclusion state, no router change, no second health
  * overlay to keep in sync.
  */
-export async function defaultResolveModel({ taskClass, tier, meta, configGet, excludeEndpointKeys = [] }) {
+export async function defaultResolveModel(
+  { taskClass, tier, meta, configGet, excludeEndpointKeys = [] },
+  // Test seams: the routable catalogue reader and the router wrapper.
+  { listModels = listRoutableModels, route = chooseSubagentModel } = {},
+) {
   const nowMs = Date.now();
   let cfg = {};
   if (typeof configGet === "function") {
@@ -491,7 +595,7 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet, ex
 
   let catalog = [];
   try {
-    catalog = (await listRoutableModels("sub", cfg)) ?? [];
+    catalog = (await listModels("sub", cfg)) ?? [];
   } catch {
     catalog = [];
   }
@@ -525,8 +629,16 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet, ex
     services = null; // degraded → router routes on absent context (box default)
   }
 
+  // Strict classes (rule/skill work) never take a widened band, a below-band
+  // winner or the box default: every one of those is a typed refusal.
+  const strict = meta?.strict === true;
+  const nullOrRefuse = (why) => {
+    if (strict) throw noQualifyingModelError(taskClass, tier, why);
+    return null;
+  };
+
   try {
-    const chosen = chooseSubagentModel({
+    const routed = route({
       incumbent: null,
       catalog,
       policy: forcedPolicy,
@@ -534,7 +646,13 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet, ex
       nowMs,
       contextTokens: meta?.contextBudget ?? undefined,
       services,
+      ...(strict ? { withTrace: true } : {}),
     });
+    const chosen = strict ? routed.model : routed;
+    if (strict) {
+      const why = strictBandRefusal(routed, tier);
+      if (why) throw noQualifyingModelError(taskClass, tier, why);
+    }
     // BET-1388 (§12.1 / §13.3): attach the catalogue's pricing data (`cost`) to
     // the resolved model so the budget can price the turn. chooseSubagentModel
     // returns a provider/model id only; the run does not need cost, but the
@@ -550,7 +668,8 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet, ex
     // BET-1535 (S3): the typed verdict propagates to runOnce — it fails the
     // run. Everything else is a resolution failure → null (box default), as
     // before.
-    if (e?.code !== "no-healthy-endpoint") return null;
+    if (e?.code === NO_QUALIFYING_MODEL) throw e;
+    if (e?.code !== "no-healthy-endpoint") return nullOrRefuse("model resolution failed");
     // W8 anti-brick (BET-1536): ONE bounded last-resort probe against the
     // least-recently-failed excluded endpoint before failing the run; a pass
     // lifts the exclusion and the resolution retries once. The final
@@ -570,9 +689,10 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet, ex
           // visible to the router — services are rebuilt inside). The
           // operation's own exclusion set still applies: the endpoints this
           // operation already failed on do not re-enter.
-          return await defaultResolveModel({ taskClass, tier, meta, configGet, excludeEndpointKeys });
+          return await defaultResolveModel({ taskClass, tier, meta, configGet, excludeEndpointKeys }, { listModels, route });
         } catch (e2) {
-          if (e2?.code !== "no-healthy-endpoint") return null;
+          if (e2?.code === NO_QUALIFYING_MODEL) throw e2;
+          if (e2?.code !== "no-healthy-endpoint") return nullOrRefuse("model resolution failed");
           if (e2.healthOnly === true && typeof engine.raiseSelfDoubtAlarm === "function") {
             try {
               await engine.raiseSelfDoubtAlarm({ excluded: e2.excluded, reason: e2.message });

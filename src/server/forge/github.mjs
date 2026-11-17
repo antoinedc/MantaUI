@@ -24,72 +24,16 @@
 //      coerce it to false — the shared type has three states for this reason.
 
 import { normalizePrState, repoKey, rollupChecks } from "../../shared/forge.mjs";
+import { listPlainComments, putMerge, qs, writePlainComment } from "./requestShared.mjs";
+
+export {
+  GithubRequestError,
+  MergeNotAllowedError,
+  MergeShaMismatchError,
+  MergePermissionError,
+} from "./requestShared.mjs";
 
 const API = "https://api.github.com";
-
-// Error thrown when a request to the forge fails in a way that is not a
-// rate-limit (a genuine network/HTTP failure the caller should surface, not
-// swallow into a stale value). Carries the URL for diagnostics.
-export class GithubRequestError extends Error {
-  constructor(status, url) {
-    super(`github request failed (${status}) for ${url}`);
-    this.name = "GithubRequestError";
-    this.status = status;
-    this.url = url;
-  }
-}
-
-// Typed merge failures (issue §4). The UI cannot act on a generic "merge
-// failed" — each status has a different next action, so each is its own class:
-//   405 → cannot merge (branch protection / draft / conflict)
-//   409 → the head SHA no longer matches what the user reviewed
-//   403 → no permission to merge
-// Anything else falls through to the generic GithubRequestError. The base
-// error class carries `.status` so callers can still switch on the raw code.
-export class MergeNotAllowedError extends Error {
-  constructor(url) {
-    super(`cannot merge ${url}`);
-    this.name = "MergeNotAllowedError";
-    this.status = 405;
-    this.kind = "cannot_merge";
-    this.url = url;
-  }
-}
-export class MergeShaMismatchError extends Error {
-  constructor(url) {
-    super(`head sha no longer matches for ${url}`);
-    this.name = "MergeShaMismatchError";
-    this.status = 409;
-    this.kind = "sha_mismatch";
-    this.url = url;
-  }
-}
-export class MergePermissionError extends Error {
-  constructor(url) {
-    super(`no permission to merge ${url}`);
-    this.name = "MergePermissionError";
-    this.status = 403;
-    this.kind = "permission";
-    this.url = url;
-  }
-}
-
-// Map a merge PUT's failure status to its distinguished error kind. Anything
-// not in the three known statuses stays an ordinary GithubRequestError (the
-// caller can still read `.status`). 404 is not a merge state — a vanished PR
-// is surfaced generically rather than as one of the three actionable kinds.
-function mergeFailure(status, url) {
-  if (status === 405) return new MergeNotAllowedError(url);
-  if (status === 409) return new MergeShaMismatchError(url);
-  if (status === 403) return new MergePermissionError(url);
-  return new GithubRequestError(status, url);
-}
-
-function qs(params) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "");
-  if (entries.length === 0) return "";
-  return "?" + new URLSearchParams(entries).toString();
-}
 
 function issuePath(repo) {
   return `/repos/${repo.owner}/${repo.repo}`;
@@ -401,7 +345,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * resolving a job's own PR by its branch): GitHub takes `head` as
      * `owner:branch`.
      * @param {{ owner: string, repo: string }} repo
-     * @param {{ state?: string, head?: string }} [filter]
+     * @param {{ state?: string, head?: string, fresh?: boolean }} [filter]
      * @returns {Promise<{ data: import("./index.mjs").PullRequestLike[], stale: boolean }>}
      */
     async listPullRequests(repo, filter = {}) {
@@ -409,7 +353,9 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         state: filter.state ?? "open",
         head: filter.head ? `${repo.owner}:${filter.head}` : undefined,
       })}`;
-      const { data, stale } = await request(url);
+      // `fresh` revalidates instead of serving the 30s memory window (a 304 is
+      // free) — for callers that just wrote and must see their own PR.
+      const { data, stale } = await request(url, filter.fresh ? { ttl: 0 } : undefined);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((p) => normalizePr(p)), stale };
     },
@@ -563,19 +509,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
     async merge(repo, number, { method = "merge", sha } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
       const url = `${apiBase}${issuePath(repo)}/pulls/${number}/merge`;
-      let data;
-      try {
-        ({ data } = await requestWrite(url, {
-          method: "PUT",
-          body: { merge_method: method, sha },
-        }));
-      } catch (err) {
-        if (err && typeof err === "object" && typeof err.status === "number" && err.name === "GithubRequestError") {
-          throw mergeFailure(err.status, url);
-        }
-        throw err;
-      }
-      return { data, stale: false };
+      return putMerge(requestWrite, url, { merge_method: method, sha });
     },
 
     // ---- Review writes (BET-793) ------------------------------------------
@@ -679,10 +613,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<{ id: any, body: string }>, stale: boolean }>}
      */
     async listIssueComments(repo, number) {
-      const url = `${apiBase}${issuePath(repo)}/issues/${number}/comments`;
-      const { data, stale } = await request(url);
-      const raw = Array.isArray(data) ? data : [];
-      return { data: raw.map((c) => ({ id: c?.id ?? null, body: c?.body ?? "" })), stale };
+      return listPlainComments(request, `${apiBase}${issuePath(repo)}/issues/${number}/comments`);
     },
 
     /**
@@ -695,9 +626,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async createIssueComment(repo, number, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${apiBase}${issuePath(repo)}/issues/${number}/comments`;
-      const { data } = await requestWrite(url, { method: "POST", body: { body } });
-      return { data: { id: data?.id ?? null }, stale: false };
+      return writePlainComment(requestWrite, `${apiBase}${issuePath(repo)}/issues/${number}/comments`, "POST", body);
     },
 
     /**
@@ -714,9 +643,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async updateIssueComment(repo, _number, commentId, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${apiBase}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
-      const { data } = await requestWrite(url, { method: "PATCH", body: { body } });
-      return { data: { id: data?.id ?? null }, stale: false };
+      return writePlainComment(requestWrite, `${apiBase}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`, "PATCH", body);
     },
 
     /**
@@ -734,6 +661,48 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         // leave data empty — an unknown default branch is unknown
       }
       return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : null;
+    },
+
+    /**
+     * GET /repos/{o}/{r} — what the connected user may do with ONE repo:
+     * `canPush` (permissions.push; false when the payload carries no
+     * permissions, e.g. an anonymous read, or the repo is archived), `isFork`
+     * and the default branch. Always revalidated (`ttl: 0` → a conditional
+     * GET, free on a 304) because the answer gates an outward write. A failed
+     * request throws the request layer's typed error (404 → not found or no
+     * access, 401 rejected, …) — it is never turned into `canPush: false`.
+     * @param {{ owner: string, repo: string }} repo
+     * @returns {Promise<{ data: { canPush: boolean, isFork: boolean, defaultBranch: string }, stale: boolean }>}
+     */
+    async getRepoAccess(repo) {
+      const { data, stale } = await request(`${apiBase}${issuePath(repo)}`, { ttl: 0 });
+      return {
+        data: {
+          canPush: data?.permissions?.push === true && data?.archived !== true,
+          isFork: data?.fork === true,
+          defaultBranch: typeof data?.default_branch === "string" ? data.default_branch : "",
+        },
+        stale,
+      };
+    },
+
+    /**
+     * PATCH /repos/{o}/{r}/pulls/{n} — change a pull request's title and/or
+     * body. Only the fields given are sent. Returns the updated, normalised PR.
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @param {{ title?: string, body?: string }} input
+     * @returns {Promise<{ data: import("./index.mjs").PullRequestLike, stale: boolean }>}
+     */
+    async updatePullRequest(repo, number, { title, body } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const patch = {};
+      if (typeof title === "string") patch.title = title;
+      if (typeof body === "string") patch.body = body;
+      if (Object.keys(patch).length === 0) throw new Error("nothing to update");
+      const url = `${apiBase}${issuePath(repo)}/pulls/${number}`;
+      const { data } = await requestWrite(url, { method: "PATCH", body: patch });
+      return { data: normalizePr(data), stale: false };
     },
 
     /**

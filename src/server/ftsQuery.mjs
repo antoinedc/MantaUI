@@ -25,6 +25,14 @@
 // error, quoted `*` does not expand, and `"a" AND "b"` is plain boolean
 // conjunction.
 //
+// A second builder, `ftsAnyTermExpression`, serves RANKED recall queries
+// (shared-knowledge §7.2): the same literal quoting, but the terms are OR-ed, so
+// a row matches when ANY term appears and bm25 (the index's `rank`) puts the rows
+// matching more / rarer terms first. Duplicate terms are folded (case-insensitive)
+// and the term count is capped, so a pasted paragraph cannot build an unbounded
+// expression. A punctuation-only term yields zero tokens and simply matches
+// nothing inside the OR.
+//
 // Pure: no I/O, no imports. Pinned by ctoSearchIndex.test.mjs.
 
 /**
@@ -40,4 +48,33 @@ export function ftsMatchExpression(query) {
   if (terms.length === 0) return { ok: false, reason: "query must contain non-whitespace text" };
   const quoted = terms.map((t) => `"${t.replace(/"/g, '""')}"`);
   return { ok: true, expr: quoted.join(" AND "), terms };
+}
+
+/** Most distinct terms an any-term expression keeps (the rest are reported, not silently searched). */
+export const FTS_ANY_TERM_MAX = 16;
+
+/**
+ * Build the MATCH expression for a ranked any-term query: every term is a quoted
+ * literal, joined with OR.
+ *
+ * @param {unknown} query
+ * @param {{ maxTerms?: number }} [opts]
+ * @returns {{ ok: true, expr: string, terms: string[], droppedTerms: number }
+ *          | { ok: false, reason: string }}
+ */
+export function ftsAnyTermExpression(query, { maxTerms = FTS_ANY_TERM_MAX } = {}) {
+  if (typeof query !== "string") return { ok: false, reason: "query must be a string" };
+  const seen = new Set();
+  const all = [];
+  for (const t of query.split(/\s+/)) {
+    if (t === "") continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    all.push(t);
+  }
+  if (all.length === 0) return { ok: false, reason: "query must contain non-whitespace text" };
+  const cap = Math.max(1, Math.floor(Number(maxTerms)) || FTS_ANY_TERM_MAX);
+  const terms = all.slice(0, cap);
+  return { ok: true, expr: terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR "), terms, droppedTerms: all.length - terms.length };
 }

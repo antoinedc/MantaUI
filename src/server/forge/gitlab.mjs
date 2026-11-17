@@ -43,25 +43,12 @@
 // designed (spec §3.2).
 
 import { normalizePrState } from "../../shared/forge.mjs";
-import { GithubRequestError, MergeNotAllowedError, MergeShaMismatchError, MergePermissionError } from "./github.mjs";
+import { listPlainComments, putMerge, qs, writePlainComment } from "./requestShared.mjs";
 
 const API = "https://gitlab.com/api/v4";
 
-// Map a merge PUT's failure status to its distinguished error kind, exactly as
-// the GitHub adapter does. GitLab: 405 = not mergeable, 409 = head sha no
-// longer matches, 403 = no permission; anything else stays generic.
-function mergeFailure(status, url) {
-  if (status === 405) return new MergeNotAllowedError(url);
-  if (status === 409) return new MergeShaMismatchError(url);
-  if (status === 403) return new MergePermissionError(url);
-  return new GithubRequestError(status, url);
-}
-
-function qs(params) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "");
-  if (entries.length === 0) return "";
-  return "?" + new URLSearchParams(entries).toString();
-}
+// GitLab's Developer role — the lowest one that can push to a branch.
+const DEVELOPER_ACCESS = 30;
 
 // The GitLab project path is `/projects/<url-encoded-full-path>` where the full
 // path is `owner/repo` (owner may itself be `group/subgroup`). `detectForge`
@@ -149,9 +136,20 @@ function normalizeMr(raw, { unresolvedThreads = 0 } = {}) {
 // map to a pending-ish `waiting` status so rollupChecks rolls them to yellow,
 // and the raw list is kept for display (spec §3.4②).
 function normalizePipeline(p) {
-  const url = p?.web_url ?? "";
-  const name = p?.name ?? "pipeline";
-  switch (p?.status) {
+  return normalizeCiStatus(p?.status, p?.name ?? "pipeline", p?.web_url ?? "");
+}
+
+// GitLab commit-status `status` values → shared check vocabulary. Same manual /
+// scheduled → yellow rule as pipelines.
+function normalizeCommitStatus(s) {
+  return normalizeCiStatus(s?.status, s?.name ?? s?.ref ?? "status", s?.target_url ?? "");
+}
+
+// The shared status vocabulary for a pipeline or a commit status (their
+// `status` values overlap; pipelines add the not-yet-started ones, which fall
+// into the same default).
+function normalizeCiStatus(status, name, url) {
+  switch (status) {
     case "success":
       return { name, status: "completed", conclusion: "success", url };
     case "failed":
@@ -164,28 +162,6 @@ function normalizePipeline(p) {
       return { name, status: "waiting", url };
     default:
       // created / waiting_for_resource / preparing / pending / running
-      return { name, status: "running", url };
-  }
-}
-
-// GitLab commit-status `status` values → shared check vocabulary. Same manual /
-// scheduled → yellow rule as pipelines.
-function normalizeCommitStatus(s) {
-  const url = s?.target_url ?? "";
-  const name = s?.name ?? s?.ref ?? "status";
-  switch (s?.status) {
-    case "success":
-      return { name, status: "completed", conclusion: "success", url };
-    case "failed":
-      return { name, status: "completed", conclusion: "failure", url };
-    case "canceled":
-    case "skipped":
-      return { name, status: "completed", conclusion: undefined, url };
-    case "manual":
-    case "scheduled":
-      return { name, status: "waiting", url };
-    default:
-      // pending / running
       return { name, status: "running", url };
   }
 }
@@ -319,7 +295,9 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
         state: stateFilter(filter.state ?? "opened"),
         source_branch: filter.head || undefined,
       })}`;
-      const { data, stale } = await request(url);
+      // `fresh` revalidates instead of serving the 30s memory window (a 304 is
+      // free) — for callers that just wrote and must see their own MR.
+      const { data, stale } = await request(url, filter.fresh ? { ttl: 0 } : undefined);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((m) => normalizeMr(m)), stale };
     },
@@ -401,16 +379,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     async merge(repo, number, { method = "merge", sha } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
       const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/merge`;
-      let data;
-      try {
-        ({ data } = await requestWrite(url, { method: "PUT", body: { sha } }));
-      } catch (err) {
-        if (err && typeof err === "object" && typeof err.status === "number" && err.name === "GithubRequestError") {
-          throw mergeFailure(err.status, url);
-        }
-        throw err;
-      }
-      return { data, stale: false };
+      return putMerge(requestWrite, url, { sha });
     },
 
     // ---- Review writes (BET-793) -----------------------------------------
@@ -499,26 +468,55 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // MR notes (GitLab's plain comments live on the MR, not an issues endpoint
     // — mismatch #4 again). The progress sink reads these for its topic marker.
     async listIssueComments(repo, number) {
-      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes`;
-      const { data, stale } = await request(url);
-      const raw = Array.isArray(data) ? data : [];
-      return { data: raw.map((c) => ({ id: c?.id ?? null, body: c?.body ?? "" })), stale };
+      return listPlainComments(request, `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes`);
     },
 
     async createIssueComment(repo, number, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes`;
-      const { data } = await requestWrite(url, { method: "POST", body: { body } });
-      return { data: { id: data?.id ?? null }, stale: false };
+      return writePlainComment(requestWrite, `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes`, "POST", body);
     },
 
     // GitLab note ids are iid-scoped, so this needs the MR number where
     // GitHub's comment id is global — an interface asymmetry GitLab forces.
     async updateIssueComment(repo, number, commentId, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes/${commentId}`;
-      const { data } = await requestWrite(url, { method: "PUT", body: { body } });
-      return { data: { id: data?.id ?? null }, stale: false };
+      return writePlainComment(requestWrite, `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes/${commentId}`, "PUT", body);
+    },
+
+    // GET /projects/{encoded id} — what the connected user may do with ONE
+    // project. `canPush` is Developer (30) or above through the project or its
+    // group (either access object may be null) and the project not archived;
+    // `isFork` is the presence of `forked_from_project`. Always revalidated
+    // (`ttl: 0`, a conditional GET) because the answer gates an outward write.
+    // A failed request throws the request layer's typed error — never a silent
+    // `canPush: false`.
+    async getRepoAccess(repo) {
+      const { data, stale } = await request(`${apiBase}${projectPath(repo)}`, { ttl: 0 });
+      const level = Math.max(
+        Number(data?.permissions?.project_access?.access_level) || 0,
+        Number(data?.permissions?.group_access?.access_level) || 0,
+      );
+      return {
+        data: {
+          canPush: level >= DEVELOPER_ACCESS && data?.archived !== true,
+          isFork: Boolean(data?.forked_from_project),
+          defaultBranch: typeof data?.default_branch === "string" ? data.default_branch : "",
+        },
+        stale,
+      };
+    },
+
+    // PUT /projects/{id}/merge_requests/{iid} — change an MR's title and/or
+    // description (the shared `body`). Only the fields given are sent.
+    async updatePullRequest(repo, number, { title, body } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const put = {};
+      if (typeof title === "string") put.title = title;
+      if (typeof body === "string") put.description = body;
+      if (Object.keys(put).length === 0) throw new Error("nothing to update");
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}`;
+      const { data } = await requestWrite(url, { method: "PUT", body: put });
+      return { data: normalizeMr(data), stale: false };
     },
 
     // GET /projects/{encoded id} — the repo's default branch (the PR base).

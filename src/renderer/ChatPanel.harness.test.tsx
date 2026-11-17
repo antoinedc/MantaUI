@@ -1823,6 +1823,7 @@ describe("ChatPanel attachment auto-submit (BET-1124)", () => {
 // (an older box, or an ordinary question) is an ordinary question card whose options still answer it.
 describe("ChatPanel plan question (box-decided)", () => {
   let h: Harness | null = null;
+  let promptCalls: unknown[][] = [];
   afterEach(() => {
     h?.unmount();
     h = null;
@@ -1841,11 +1842,27 @@ describe("ChatPanel plan question (box-decided)", () => {
   });
 
   async function open(q: ReturnType<typeof question>) {
-    const { bus } = installMockApi({ opencodeMessages: () => Promise.resolve(transcript) });
+    promptCalls = [];
+    const { bus } = installMockApi({
+      opencodeMessages: () => Promise.resolve(transcript),
+      opencodePrompt: (...a: unknown[]) => {
+        promptCalls.push(a);
+        return Promise.resolve();
+      },
+      opencodeQuestionReply: () => Promise.resolve(),
+    });
     resetStore();
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
     await emitStreamAndFlush(bus, h, { sub: "questions", sessionId: "ses_test", payload: { questions: [q] } });
+  }
+
+  async function clickBuildHere() {
+    const build = Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Build here") as HTMLButtonElement;
+    await act(async () => {
+      build.click();
+    });
+    await h!.flush();
   }
 
   it("a question with `plan` renders the plan card (title, counts, page link) and not the ordinary card", async () => {
@@ -1855,6 +1872,25 @@ describe("ChatPanel plan question (box-decided)", () => {
     expect(h!.text()).toContain("2 files");
     expect(h!.text()).toContain("Build here");
     expect(h!.text()).not.toContain("Switch?");
+  });
+
+  it("Build here re-sends plan + typed feedback as ONE message, flagged app-generated (never user-authored evidence)", async () => {
+    await open(question({ title: "Ship login", text: "# Ship login\n- step", steps: 1, files: 0, path: null, pageUrl: "https://b.example/pages/plan-x" }));
+    const input = h!.container.querySelector("input[type=text], input:not([type])") as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(input, "also add tests");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickBuildHere();
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0][1]).toBe("# Ship login\n- step\n\nalso add tests");
+    expect((promptCalls[0][6] as { appGenerated?: boolean }).appGenerated).toBe(true);
+  });
+
+  it("Build here without feedback sends just the plan, app-generated", async () => {
+    await open(question({ title: "Ship login", text: "# Ship login\n- step", steps: 1, files: 0, path: null, pageUrl: "https://b.example/pages/plan-x" }));
+    await clickBuildHere();
+    expect(promptCalls.map((c) => [c[1], (c[6] as { appGenerated?: boolean }).appGenerated])).toEqual([["# Ship login\n- step", true]]);
   });
 
   it("the same question WITHOUT `plan` is an ordinary question card (its options still answer it)", async () => {

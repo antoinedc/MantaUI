@@ -6,6 +6,7 @@ import {
   Terminal,
   KeyRound,
   Key,
+  BookOpen,
   Sparkles,
   GitBranch,
   Folder,
@@ -27,6 +28,7 @@ import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { OptimizerCard } from "./OptimizerCard";
 import { SummaryModelCard } from "./SummaryModelCard";
+import { KnowledgeCard } from "./settings/KnowledgeCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
@@ -244,6 +246,7 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   accounts: KeyRound,
   models: Sparkles,
   sessions: GitBranch,
+  knowledge: BookOpen,
   files: Folder,
   extensions: Plug,
   secrets: Key,
@@ -1467,6 +1470,13 @@ export function Settings({
             />
           </GroupCard>
         </>
+      );
+    }
+    if (section === "knowledge") {
+      return (
+        <GroupCard title="Shared knowledge">
+          <KnowledgeCard onNavigated={onClose} />
+        </GroupCard>
       );
     }
     if (section === "secrets") return <SecretsSettings onNavigated={onClose} />;

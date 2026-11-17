@@ -126,8 +126,8 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
     getMessageCalls: 0,
     transcript: new Map(), // messageID → receipt row
     rows: [...rows],
-    async sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID }) {
-      oc.sends.push({ sessionId, text, model, agent, attachments, mentions, messageID });
+    async sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID, origin }) {
+      oc.sends.push({ sessionId, text, model, agent, attachments, mentions, messageID, origin });
       applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label: "sendPrompt" });
       return undefined; // the 204
     },
@@ -297,6 +297,21 @@ test("dispatch resolves the CURRENT binding at dispatch time and persists receip
   assert.equal(record.sessionId, "ses_cto");
   assert.equal(record.dispatchGeneration, 3);
   assert.equal(record.messageID, oc.sends[0].messageID);
+});
+
+test("a human send reaches the prompt chokepoint stamped user-authored (shared-knowledge §9.2); a background send is not", async () => {
+  const { svc, oc } = buildService();
+  await svc.submit({ id: "evt_human_origin", text: "ship it", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.equal(oc.sends[0].origin, "user");
+  oc.completeTurn(oc.sends[0].messageID);
+  await svc.reconcile();
+  await svc.submit({ id: "evt_bg_origin", text: "synthesis", origin: "background" });
+  await svc.tick();
+  const bg = oc.sends.find((x) => x.text === "synthesis");
+  assert.ok(bg, "the background submission was dispatched");
+  assert.equal(bg.origin, undefined);
 });
 
 test("currentAcceptedHumanTurn exposes only the trusted active source required to bind a work charter", async () => {

@@ -70,6 +70,7 @@ import {
   writeSavedDelegateModel,
   resolveActiveModel,
   resolveAgentMentions,
+  splitSendableAttachments,
   type Attachment,
   type ModelSelection,
   type SessionMode,
@@ -1627,10 +1628,7 @@ export function ChatPanel({
     }
     // Only media chips become multimodal FileParts; path-ref chips were
     // already folded into `text`.
-    const sentAttachments = submitAttachments.filter((a) => a.status === "ready" && a.remotePath);
-    const readyAttachments = sentAttachments
-      .filter((a) => !a.asPathRef)
-      .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+    const { sent: sentAttachments, media: readyAttachments } = splitSendableAttachments(submitAttachments);
     const unsupported = unsupportedAttachmentsMessage(readyAttachments);
     if (unsupported) {
       setSendError(unsupported);
@@ -1724,10 +1722,7 @@ export function ChatPanel({
     const { text, draft, submitAttachments, agent } = args;
     const slashText = splitSlashText(text);
     if (!slashText) return;
-    const sentAttachments = submitAttachments.filter((a) => a.status === "ready" && a.remotePath);
-    const readyAttachments = sentAttachments
-      .filter((a) => !a.asPathRef)
-      .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+    const { sent: sentAttachments, media: readyAttachments } = splitSendableAttachments(submitAttachments);
     const unsupported = unsupportedAttachmentsMessage(readyAttachments);
     if (unsupported) {
       setSendError(unsupported);
@@ -1835,13 +1830,7 @@ export function ChatPanel({
     // its placeholder keeps the prefix id and goes with the first user message.
     // Only media chips become multimodal FileParts; path-ref chips were already
     // folded into `text` above.
-    const readyAttachments = submitAttachments
-      .filter((a) => a.status === "ready" && a.remotePath && !a.asPathRef)
-      .map((a) => ({
-        remotePath: a.remotePath!,
-        mime: a.mime,
-        filename: a.filename,
-      }));
+    const { media: readyAttachments } = splitSendableAttachments(submitAttachments);
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
     const cmdName = slashMatch ? slashMatch[1] : null;
     const knownCommand =
@@ -3067,20 +3056,16 @@ export function ChatPanel({
     async (q: QuestionRequest, feedback: string) => {
       // Answer "Yes" so opencode switches to the build agent...
       await replyQuestion(q, [["Yes"]]);
-      // ...then re-send the plan text ourselves with the user's feedback
-      // appended. This is a resubmit (not a toggle) so the feedback text lands
-      // in the build turn with the session's one model.
+      // ...then re-send the plan text ourselves, with the user's feedback appended, as ONE message (a resubmit,
+      // not a toggle, so the build turn runs with the session's one model and the feedback lands in it).
+      // The text is mostly the plan the plan AGENT wrote, so it goes out `appGenerated`: the box never records
+      // it as user-authored evidence (shared-knowledge §9.2) — the feedback riding in it doesn't count either.
       setPlanOn(false);
       writePlanSaved(sessionId, false);
       try {
-        await window.api.opencodePrompt(
-          sessionId,
-          buildPlanPrompt(q, feedback),
-          sessionModel ?? undefined,
-          [],
-          undefined,
-          undefined,
-        );
+        await window.api.opencodePrompt(sessionId, buildPlanPrompt(q, feedback), sessionModel ?? undefined, [], undefined, undefined, {
+          appGenerated: true,
+        });
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
       }

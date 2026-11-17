@@ -233,6 +233,28 @@ test("held while fenced → released IN ORDER to the successor after the accepte
   assert.equal(p.engine._runtime.releasing.size, 0);
 });
 
+test("prompt origin rides every admit path: posted straight, journalled while held, and delivered after the hold", async () => {
+  const w = standardWorld();
+  const direct = await w.engine.admitPrompt({ sessionId: "ses_p", text: "typed", messageID: "msg_direct", origin: "user" });
+  assert.equal(direct.held, undefined);
+  assert.equal(w.posts.find((x) => x.id === "msg_direct").args.origin, "user", "the ordinary path forwards it to the prompt call");
+
+  const r = await readyRecord(w);
+  const p = pausedAt(w, "create");
+  const start = p.engine.start(r.id, START_SEND);
+  await p.reached;
+  await p.engine.admitPrompt({ sessionId: "ses_p", text: "held user", messageID: "msg_hu", origin: "user" });
+  await p.engine.admitPrompt({ sessionId: "ses_p", text: "held bg", messageID: "msg_hb" });
+  const journal = JSON.parse(w.disk.json).held.ses_p;
+  assert.equal(journal.find((x) => x.id === "msg_hu").args.origin, "user", "persisted with the held prompt");
+  assert.equal("origin" in journal.find((x) => x.id === "msg_hb").args, false, "a caller that sets none stays unset");
+  p.release();
+  const out = await start;
+  const sent = w.posts.filter((x) => x.target === out.successorId);
+  assert.equal(sent.find((x) => x.id === "msg_hu").args.origin, "user", "survives the hold and the redirect to the successor");
+  assert.equal(sent.find((x) => x.id === "msg_hb").args.origin, undefined);
+});
+
 test("held while fenced → released IN ORDER to the PREDECESSOR on rollback; the record fails with Retry", async () => {
   const w = standardWorld();
   const r = await readyRecord(w);
