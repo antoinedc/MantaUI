@@ -8,20 +8,48 @@ import { createShellCommandReader, createSkillLoadReader, createToolCallReader, 
 const tool = (command, name = "bash") => ({ type: "tool", tool: name, state: { input: { command }, output: "ok" } });
 const m = (id, role, text, parts = []) => ({ info: { id, role, time: { created: 1 } }, parts: [{ type: "text", text }, ...parts] });
 
-test("authed git: network commands carry a one-shot credential header; others and unknown hosts pass through", async () => {
+test("authed git: network commands carry the credential in the ENVIRONMENT (never argv); others and unknown hosts pass through", async () => {
   const seen = [];
-  const git = { run: async (args, o) => (seen.push(args), args[0] === "remote" ? "https://github.com/acme/widget.git\n" : "") };
-  const authed = createAuthedGit(git, async (host) => (host === "github.com" ? { token: "tok" } : null));
-  await authed.run(["clone", "--quiet", "https://github.com/acme/widget.git", "/x"], {});
-  await authed.run(["fetch", "--prune", "origin"], { cwd: "/x" });
+  const git = { run: async (args, o) => (seen.push({ args, env: o?.env, cwd: o?.cwd }), args[0] === "remote" ? "https://github.com/acme/widget.git\n" : "") };
+  const authed = createAuthedGit(git, async (host) => (host === "github.com" ? { token: "tok-SECRET" } : null));
+  await authed.run(["clone", "--quiet", "--", "https://github.com/acme/widget.git", "/x"], {});
+  await authed.run(["fetch", "--prune", "origin"], { cwd: "/x", env: { LC_ALL: "C" } });
   await authed.run(["status"], { cwd: "/x" });
   await authed.run(["clone", "https://gitlab.example.com/a/b.git", "/y"], {});
-  const header = `http.extraheader=Authorization: Basic ${forgeBasicAuth("github.com", "tok")}`;
-  assert.deepEqual(seen.filter((a) => a[0] === "-c").map((a) => a.slice(0, 2)), [["-c", header], ["-c", header]]);
-  assert.ok(seen.some((a) => a[0] === "status"));
-  assert.ok(seen.some((a) => a[0] === "clone" && a[1] === "https://gitlab.example.com/a/b.git"), "no credential for an unknown host");
+  const value = `Authorization: Basic ${forgeBasicAuth("github.com", "tok-SECRET")}`;
+  const net = seen.filter((c) => c.env?.GIT_CONFIG_COUNT);
+  assert.equal(net.length, 2);
+  for (const c of net) {
+    assert.deepEqual([c.env.GIT_CONFIG_COUNT, c.env.GIT_CONFIG_KEY_0, c.env.GIT_CONFIG_VALUE_0], ["1", "http.extraheader", value]);
+  }
+  assert.equal(net[1].env.LC_ALL, "C"); // the caller's own env survives
+  assert.equal(net[1].cwd, "/x");
+  // the token (raw or its base64 header) is on no argv, and no `-c` option is used
+  const tok = forgeBasicAuth("github.com", "tok-SECRET");
+  for (const c of seen) assert.ok(!c.args.some((a) => a === "-c" || a.includes("tok-SECRET") || a.includes(tok)), c.args.join(" "));
+  assert.ok(seen.some((c) => c.args[0] === "status" && !c.env));
+  assert.ok(seen.some((c) => c.args[0] === "clone" && c.args[1] === "https://gitlab.example.com/a/b.git" && !c.env), "no credential for an unknown host");
   assert.equal(Buffer.from(forgeBasicAuth("gitlab.com", "t"), "base64").toString(), "oauth2:t");
   assert.equal(Buffer.from(forgeBasicAuth("github.com", "t"), "base64").toString(), "x-access-token:t");
+});
+
+test("authed git: an existing GIT_CONFIG_COUNT is extended, not clobbered", async () => {
+  let env;
+  const authed = createAuthedGit({ run: async (_a, o) => (env = o.env, "") }, async () => "tok");
+  await authed.run(["fetch", "https://github.com/a/b.git"], { env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "x.y", GIT_CONFIG_VALUE_0: "z" } });
+  assert.deepEqual([env.GIT_CONFIG_COUNT, env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_KEY_1], ["2", "x.y", "http.extraheader"]);
+});
+
+test("authed git: the real git runner passes the env config through to git (credential reaches the process)", async (t) => {
+  const { createGitRunner } = await import("./gitRunner.mjs");
+  try {
+    await import("simple-git");
+  } catch {
+    return t.skip("simple-git isn't installed here");
+  }
+  const authed = createAuthedGit(createGitRunner({ defaultCwd: process.cwd() }), async () => "tok-ENV");
+  const out = await authed.run(["ls-remote", "https://github.com/a/b.git"], { env: { GIT_CONFIG_NOSYSTEM: "1" } }).catch((e) => String(e.stderr ?? e.message));
+  assert.ok(!/unsafe|not allowed|allowUnsafe/i.test(out), out); // simple-git's env guard didn't refuse the GIT_CONFIG_* names
 });
 
 test("the runner wrapper merges its own collaborators under the caller's deps", async () => {

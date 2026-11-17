@@ -327,7 +327,7 @@ test("a learned skill: capture notes + runbooks → detect → evidence bar → 
   const widgetRepo = "https://github.com/acme/widget.git";
   const gadgetRepo = "https://github.com/acme/gadget.git";
   const work = (sid, base) => [
-    msg(`${sid}_u1`, "user", `please run the e2e suite for ${sid}`, base),
+    msg(`${sid}_u1`, "user", `please run the e2e suite locally and build first, for ${sid}`, base),
     msg(`${sid}_a1`, "assistant", "building", base + 1, ["npm run build", "npm run e2e"]),
     msg(`${sid}_u2`, "user", "thanks, that is how I like it", base + 2),
     msg(`${sid}_u3`, "user", "also run it again later", base + 3),
@@ -341,8 +341,8 @@ test("a learned skill: capture notes + runbooks → detect → evidence bar → 
     steps: [{ command: "npm run build", purpose: "Build" }, { command: "npm run e2e", purpose: "Run it" }],
     sessions: ["ses_w1", "ses_g1"],
     requests: [
-      { sessionID: "ses_w1", messageID: "ses_w1_u1", quote: "please run the e2e suite" },
-      { sessionID: "ses_g1", messageID: "ses_g1_u1", quote: "please run the e2e suite" },
+      { sessionID: "ses_w1", messageID: "ses_w1_u1", quote: "please run the e2e suite locally and build first" },
+      { sessionID: "ses_g1", messageID: "ses_g1_u1", quote: "please run the e2e suite locally and build first" },
     ],
   };
   const r = await e2eRig({

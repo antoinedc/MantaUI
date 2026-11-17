@@ -50,6 +50,7 @@ test("a fake simple-git is driven with the baseDir, merged env and raw args", as
   assert.ok(!("EDITOR" in seen[0][1]) && !("GIT_SSH_COMMAND" in seen[0][1])); // the box user's editor/ssh command never reach git
   assert.deepEqual(seen[1], ["raw", ["status"], "/x"]);
   assert.deepEqual(optsSeen[0].allowEnvironment, ["GIT_TERMINAL_PROMPT", "GIT_AUTHOR_NAME"]);
+  assert.deepEqual(optsSeen[0].unsafe, { allowUnsafeConfigEnvCount: true }); // per-command credential via GIT_CONFIG_COUNT/KEY_n/VALUE_n
   await assert.rejects(g.run(["boom"], { cwd: "/y" }), (e) => /nope/.test(e.stderr));
 });
 

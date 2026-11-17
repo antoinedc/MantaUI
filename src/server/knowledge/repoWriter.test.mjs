@@ -10,7 +10,7 @@ import { execGitRunner, memState, tmpDir } from "./testHelpers.mjs";
 const SLUG = "widgets-0123456789";
 const ID = ["-c", "user.name=t", "-c", "user.email=t@t"];
 
-async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, allowed = true, access = { ok: true, canPush: true, isFork: false, defaultBranch: "main" }, scanFlag = null, getPullRequest = null } = {}) {
+async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, allowed = true, access = { ok: true, canPush: true, isFork: false, defaultBranch: "main" }, scanFlag = null, getPullRequest = null, notifyFails = 0, createFails = false } = {}) {
   const root = await tmpDir("repowriter-");
   const remote = join(root, "remote.git");
   const g = execGitRunner(root);
@@ -32,7 +32,7 @@ async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, al
   await mkdir(dir);
   const state = await memState();
   const cfg = { mode, allowed, access: { ...access } };
-  const calls = { create: [], update: [], find: [], notify: [], repoAccess: 0 };
+  const calls = { create: [], update: [], find: [], notify: [], notifyFailed: 0, repoAccess: 0 };
   const prs = []; // fake forge state
   const forge = {
     repoAccess: async () => {
@@ -45,6 +45,7 @@ async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, al
     },
     createPullRequest: async (_t, input) => {
       calls.create.push(input);
+      if (createFails) return { ok: false, error: "rejected", message: "GitHub refused the pull request." };
       const pr = { number: prs.length + 1, url: `https://github.com/acme/widgets/pull/${prs.length + 1}`, headRef: input.head, state: "open", body: input.body };
       prs.push(pr);
       return { ok: true, pr };
@@ -55,11 +56,28 @@ async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, al
       pr.body = input.body ?? pr.body;
       return { ok: true, pr };
     },
-    ...(getPullRequest ? { getPullRequest: async (_t, n) => ({ ok: true, pr: prs.find((p) => p.number === n) }) } : {}),
+    ...(getPullRequest === "fail"
+      ? { getPullRequest: async () => ({ ok: false, error: "network", message: "offline" }) }
+      : getPullRequest
+        ? { getPullRequest: async (_t, n) => ({ ok: true, pr: prs.find((p) => p.number === n) }) }
+        : {}),
+  };
+  const baseGit = execGitRunner(dir);
+  const hooks = { beforePush: null };
+  const gitRunner = {
+    run: async (args, o) => {
+      if (hooks.beforePush && args.includes("push")) {
+        const fn = hooks.beforePush;
+        hooks.beforePush = null;
+        await fn();
+      }
+      return baseGit.run(args, o);
+    },
   };
   const writer = createRepoWriter({
     dir,
-    git: execGitRunner(dir),
+    git: gitRunner,
+    recentDirectories: () => cfg.dirs ?? [],
     registry: { get: async (slug) => (slug === SLUG ? { slug, canonicalId: "github.com/acme/widgets", displayName: "widgets" } : null) },
     settings: {
       effectiveRepoRules: async () => (cfg.allowed || cfg.mode === "box-only" ? { repoRules: cfg.mode, reason: null } : { repoRules: "box-only", reason: "You can't push to this repository." }),
@@ -68,7 +86,13 @@ async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, al
     state,
     scanner: { scan: async (t) => (scanFlag && String(t).includes(scanFlag) ? { clean: false, unavailable: false, hits: [{}] } : { clean: true, unavailable: false, hits: [] }) },
     forge,
-    fireNotify: async (n) => calls.notify.push(n),
+    fireNotify: async (n) => {
+      if (calls.notify.length + calls.notifyFailed < notifyFails) {
+        calls.notifyFailed++;
+        throw new Error("push gateway down");
+      }
+      calls.notify.push(n);
+    },
     remoteUrlFor: () => `file://${remote}`,
     log: () => {},
   });
@@ -96,7 +120,7 @@ async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, al
     }
   };
   const remoteLog = async (ref = "main") => (await g.run(["--git-dir", remote, "log", "--format=%s", ref])).trim().split("\n");
-  return { root, remote, dir, state, cfg, calls, prs, writer, g, peer, clone, remoteFile, remoteHas, remoteLog, slug: SLUG };
+  return { root, remote, dir, state, cfg, calls, prs, writer, g, peer, clone, remoteFile, remoteHas, remoteLog, hooks, slug: SLUG };
 }
 
 const rules = (...r) => r;
@@ -139,8 +163,10 @@ test("direct: creates AGENTS.md when missing; identical rules are a no-op; a cha
   assert.deepEqual(parseBlockRules(findBlock(await t.remoteFile()).text), ["A", "B"]);
   assert.equal((await t.remoteLog()).length, before + 1);
   // no rules at all removes the block
+  // no rules at all removes the block — and the AGENTS.md the curator created, since nothing else is in it
   await t.writer.applyRules(SLUG, []);
-  assert.equal(findBlock(await t.remoteFile()).status, "none");
+  assert.equal(await t.remoteFile(), null);
+  assert.equal((await t.remoteLog())[0].match(/Update Manta/) !== null, true);
 });
 
 test("repo-facing text carries no refs, ids or quotes (commit and file)", async () => {
@@ -467,4 +493,169 @@ test("a project without a GitHub/GitLab remote is box-only", async () => {
   });
   assert.equal((await w.applyRules(SLUG, rules("A"))).mode, "box-only");
   assert.deepEqual(await w.sync(SLUG), { handEdit: null, prState: "none" });
+});
+
+// ---- fix round F1 ----------------------------------------------------------------------------------
+
+const peerCommit = async (t, branch, file, edit, msg = "person edit") => {
+  const pg = await t.peer();
+  await pg.run(["checkout", "-q", "-B", branch, `origin/${branch}`]);
+  const p = join(t.clone, file);
+  const cur = await readFile(p, "utf8").catch(() => "");
+  await writeFile(p, edit(cur));
+  await pg.run(["add", "-A"]);
+  await pg.run([...ID, "commit", "-q", "-m", msg]);
+  await pg.run(["push", "-q", "origin", branch]);
+};
+
+test("R2-B2: a hand edit that lands while a direct push is in flight is never overwritten", async () => {
+  const t = await rig();
+  await t.writer.applyRules(SLUG, rules("A"));
+  t.hooks.beforePush = () => peerCommit(t, "main", "AGENTS.md", (c) => c.replace("- A", "- A, hand edited in flight"), "hand edit");
+  const r = await t.writer.applyRules(SLUG, rules("A", "B"));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /person edited/);
+  assert.match(r.handEdit, /hand edited in flight/);
+  assert.match(await t.remoteFile(), /hand edited in flight/);
+  assert.ok(!/- B/.test(await t.remoteFile()));
+  assert.ok(t.writer.status(SLUG).pendingHandEdit);
+  assert.match((await t.writer.sync(SLUG)).handEdit, /hand edited in flight/);
+  // adopted, so the curator can write on top of it
+  assert.equal((await t.writer.applyRules(SLUG, rules("A, hand edited in flight", "B"))).ok, true);
+});
+
+test("R2-B2: an unrelated push in flight is just re-applied on top (no false hand edit)", async () => {
+  const t = await rig({ files: { "README.md": "x", "AGENTS.md": "# a\n" } });
+  await t.writer.applyRules(SLUG, rules("A"));
+  t.hooks.beforePush = () => peerCommit(t, "main", "README.md", () => "changed\n", "docs");
+  const r = await t.writer.applyRules(SLUG, rules("A", "B"));
+  assert.equal(r.ok, true);
+  assert.deepEqual(parseBlockRules(findBlock(await t.remoteFile()).text), ["A", "B"]);
+  assert.equal(await t.remoteFile("main", "README.md"), "changed\n");
+});
+
+test("R2-S1: a reviewer's edit on the PR branch is adopted, not overwritten or force-pushed over", async () => {
+  const t = await rig({ mode: "pull-request" });
+  await t.writer.applyRules(SLUG, rules("A"));
+  await peerCommit(t, PR_BRANCH, "AGENTS.md", (c) => c.replace("- A", "- A, reviewer reworded"), "review fix");
+  const tip = (await t.g.run(["--git-dir", t.remote, "rev-parse", PR_BRANCH])).trim();
+  const r = await t.writer.applyRules(SLUG, rules("A", "B"));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /reviewer edited/);
+  assert.match(r.handEdit, /reviewer reworded/);
+  assert.equal((await t.g.run(["--git-dir", t.remote, "rev-parse", PR_BRANCH])).trim(), tip);
+  const s = await t.writer.sync(SLUG);
+  assert.equal(s.prState, "open");
+  assert.match(s.handEdit, /reviewer reworded/);
+  assert.equal((await t.writer.sync(SLUG)).handEdit, null); // reported once
+  const ok = await t.writer.applyRules(SLUG, rules("A, reviewer reworded", "B"));
+  assert.equal(ok.ok, true);
+  assert.deepEqual(parseBlockRules(findBlock(await t.remoteFile(PR_BRANCH)).text), ["A, reviewer reworded", "B"]);
+  assert.ok((await t.remoteLog(PR_BRANCH)).includes("review fix"), "the reviewer's commit is still in the history");
+});
+
+async function conflictingDefault(t) {
+  await peerCommit(t, "main", "AGENTS.md", () => "# b\n", "retitle");
+}
+
+test("R2-S1: a PR branch with a person's commits that no longer merges is left alone (no force push)", async () => {
+  const t = await rig({ mode: "pull-request", files: { "README.md": "x", "AGENTS.md": "# a\n" } });
+  await t.writer.applyRules(SLUG, rules("A"));
+  await peerCommit(t, PR_BRANCH, "README.md", () => "reviewer note\n", "reviewer commit");
+  await conflictingDefault(t);
+  const tip = (await t.g.run(["--git-dir", t.remote, "rev-parse", PR_BRANCH])).trim();
+  const r = await t.writer.applyRules(SLUG, rules("A", "B"));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /commits from people/);
+  assert.equal((await t.g.run(["--git-dir", t.remote, "rev-parse", PR_BRANCH])).trim(), tip);
+});
+
+test("R2-S1: a branch made only of Manta's commits is rebuilt from the new default (force-with-lease)", async () => {
+  const t = await rig({ mode: "pull-request", files: { "README.md": "x", "AGENTS.md": "# a\n" } });
+  await t.writer.applyRules(SLUG, rules("A"));
+  await conflictingDefault(t);
+  const r = await t.writer.applyRules(SLUG, rules("A", "B"));
+  assert.equal(r.ok, true);
+  const text = await t.remoteFile(PR_BRANCH);
+  assert.ok(text.startsWith("# b\n"));
+  assert.deepEqual(parseBlockRules(findBlock(text).text), ["A", "B"]);
+});
+
+test("R2-S5: the forge's own answer wins — closed PR plus an overlapping hand edit on the default branch is `closed`", async () => {
+  const t = await rig({ mode: "pull-request", getPullRequest: true });
+  await t.writer.applyRules(SLUG, rules("Use pnpm"));
+  await peerCommit(t, "main", "AGENTS.md", () => `# a\n\n${renderBlock(["Use pnpm always, said a person"]).block}\n`, "hand edit overlapping the PR");
+  t.prs[0].state = "closed";
+  const s = await t.writer.sync(SLUG);
+  assert.equal(s.prState, "closed");
+  assert.match(s.handEdit, /Use pnpm always/);
+  assert.equal(s.mergedText, undefined);
+});
+
+test("R2-S5: when the forge call fails the git-based inference is only a fallback", async () => {
+  const t = await rig({ mode: "pull-request", getPullRequest: "fail" });
+  await t.writer.applyRules(SLUG, rules("Use pnpm"));
+  assert.equal((await t.writer.sync(SLUG)).prState, "open"); // fallback: the PR is still listed as open
+  await mergePrBranch(t, { squash: true, edit: ["Use pnpm", "Use pnpm always"] });
+  t.prs[0].state = "closed";
+  assert.equal((await t.writer.sync(SLUG)).prState, "merged-edited");
+});
+
+test("R2-S6: clones from the origin of the project's most recent clone (ssh stays ssh); other repos and failures fall back to https", async () => {
+  const calls = [];
+  const store = await tmpDir("repowriter-store-");
+  const mk = (originOf) =>
+    createRepoWriter({
+      dir: store,
+      git: {
+        run: async (args, o) => {
+          calls.push({ args, cwd: o?.cwd });
+          if (args[0] === "remote") {
+            const u = originOf[o.cwd];
+            if (!u) throw new Error("not a git repository");
+            return `${u}\n`;
+          }
+          throw new Error("stop after clone");
+        },
+      },
+      recentDirectories: () => ["/home/dev/gone", "/home/dev/other", "/home/dev/widgets"],
+      registry: { get: async () => ({ slug: SLUG, canonicalId: "github.com/acme/widgets", displayName: "widgets" }) },
+      settings: { effectiveRepoRules: async () => ({ repoRules: "direct", reason: null }), outward: async () => ({ allowed: true, defaultBranch: "main" }) },
+      state: { kvGet: () => null, kvSet() {}, kvDelete() {} },
+      scanner: { scan: async () => ({ clean: true }) },
+      forge: {},
+      log: () => {},
+    });
+  await mk({ "/home/dev/other": "git@github.com:someone/else.git", "/home/dev/widgets": "git@github.com:acme/widgets.git" }).applyRules(SLUG, rules("A"));
+  const clone = calls.find((c) => c.args[0] === "clone");
+  assert.deepEqual(clone.args.slice(0, 4), ["clone", "--filter=blob:none", "--quiet", "--"]);
+  assert.equal(clone.args[4], "git@github.com:acme/widgets.git"); // the other repo's clone was skipped, the missing dir too
+
+  calls.length = 0;
+  await mk({}).applyRules(SLUG, rules("A"));
+  assert.equal(calls.find((c) => c.args[0] === "clone").args[4], "https://github.com/acme/widgets.git");
+});
+
+test("nit: the first-outward notification is recorded only after it was sent; a failed PR creation is worded as such", async () => {
+  const t = await rig({ notifyFails: 1 });
+  await t.writer.applyRules(SLUG, rules("A")); // notification fails, the write still succeeds
+  assert.equal(t.calls.notify.length, 0);
+  await t.writer.applyRules(SLUG, rules("A", "B")); // tried again, now sent
+  assert.equal(t.calls.notify.length, 1);
+  await t.writer.applyRules(SLUG, rules("A", "B", "C"));
+  assert.equal(t.calls.notify.length, 1);
+
+  const u = await rig({ mode: "pull-request", createFails: true });
+  const r = await u.writer.applyRules(SLUG, rules("A"));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /Pushed manta\/knowledge, but/);
+  assert.match(u.calls.notify[0].message, /pushed the manta\/knowledge branch/);
+  assert.match(u.calls.notify[0].message, /couldn't be opened/);
+});
+
+test("nit: removing the block keeps an AGENTS.md that holds anything else", async () => {
+  const t = await rig({ files: { "README.md": "x", "AGENTS.md": "# Agents\n\nBe nice.\n" } });
+  await t.writer.applyRules(SLUG, rules("A"));
+  await t.writer.applyRules(SLUG, []);
+  assert.equal(await t.remoteFile(), "# Agents\n\nBe nice.\n");
 });

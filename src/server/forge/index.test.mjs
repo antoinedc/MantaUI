@@ -34,6 +34,7 @@ import {
   forgeFindOpenPullRequest,
   forgeCreatePullRequest,
   forgeUpdatePullRequest,
+  forgeGetPullRequest,
 } from "./index.mjs";
 import { createCloneStore } from "./clone.mjs";
 import { getDraft, putComment } from "./draft.mjs";
@@ -2098,6 +2099,28 @@ test("forgeFindOpenPullRequest validates input and reports forge failures", asyn
   assert.equal(f.calls.length, 0);
   const nf = routedFetch({ [`${GH}/pulls?state=open&head=acme%3Ab`]: { status: 404, body: {} } });
   assert.equal((await forgeFindOpenPullRequest("github.com/acme/widget", "b", repoDeps(nf))).error, "not_found");
+});
+
+test("forgeGetPullRequest reports open / closed / merged by repo + number on both forges; validates input", async () => {
+  const ghPr = (extra) => ({ number: 5, title: "k", html_url: "https://github.com/acme/widget/pull/5", head: { ref: "manta/knowledge" }, base: { ref: "main" }, user: { login: "x" }, ...extra });
+  const ghRoutes = (extra) => routedFetch({ [`${GH}/pulls/5`]: { body: ghPr(extra) } });
+  assert.deepEqual((await forgeGetPullRequest("github.com/acme/widget", 5, repoDeps(ghRoutes({ state: "open" })))).pr, { state: "open", merged: false, number: 5, url: "https://github.com/acme/widget/pull/5" });
+  assert.deepEqual((await forgeGetPullRequest({ repoKey: "github.com/acme/widget" }, 5, repoDeps(ghRoutes({ state: "closed", merged: false })))).pr.state, "closed");
+  const merged = (await forgeGetPullRequest("github.com/acme/widget", 5, repoDeps(ghRoutes({ state: "closed", merged: true })))).pr;
+  assert.deepEqual([merged.state, merged.merged], ["merged", true]);
+
+  const gl = routedFetch({ [`${GL}/merge_requests/9`]: { body: { iid: 9, title: "k", state: "merged", source_branch: "h", target_branch: "main", web_url: "u" } } });
+  const g = await forgeGetPullRequest("gitlab.com/acme/widget", 9, repoDeps(gl));
+  assert.deepEqual([g.ok, g.pr.number, g.pr.merged], [true, 9, true]);
+
+  const f = routedFetch({});
+  assert.equal((await forgeGetPullRequest("github.com/acme/widget", 0, repoDeps(f))).error, "bad_request");
+  assert.equal((await forgeGetPullRequest("github.com/acme/widget", "x", repoDeps(f))).error, "bad_request");
+  assert.equal(f.calls.length, 0);
+  const nf = routedFetch({ [`${GH}/pulls/5`]: { status: 404, body: {} } });
+  const miss = await forgeGetPullRequest("github.com/acme/widget", 5, repoDeps(nf));
+  assert.deepEqual([miss.ok, miss.error], [false, "not_found"]);
+  assert.equal((await forgeGetPullRequest("https://example.org/a/b.git", 5, repoDeps(f))).error, "no_forge");
 });
 
 test("forgeUpdatePullRequest updates title/body on GitHub (PATCH) and GitLab (PUT)", async () => {

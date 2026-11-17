@@ -28,7 +28,10 @@ export function createGitRunner({ simpleGitFactory, defaultCwd } = {}) {
       const ambient = Object.fromEntries(Object.entries(process.env).filter(([k]) => AMBIENT_RE.test(k)));
       const full = { ...ambient, ...BASE_ENV, ...(env ?? {}) };
       const allowEnvironment = Object.keys({ ...BASE_ENV, ...(env ?? {}) }).filter((k) => /^git_/i.test(k));
-      const git = simpleGit({ baseDir: cwd, timeout: { block: BLOCK_TIMEOUT_MS }, allowEnvironment }).env(full);
+      // `allowUnsafeConfigEnvCount`: the repository writer hands the forge credential to ONE command through
+      // GIT_CONFIG_COUNT/KEY_n/VALUE_n (never argv, where /proc shows it). Ambient GIT_* variables never reach the child
+      // (see AMBIENT_RE), so only a caller that sets them explicitly can use this.
+      const git = simpleGit({ baseDir: cwd, timeout: { block: BLOCK_TIMEOUT_MS }, allowEnvironment, unsafe: { allowUnsafeConfigEnvCount: true } }).env(full);
       try {
         return await git.raw(args);
       } catch (e) {

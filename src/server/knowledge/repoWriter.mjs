@@ -15,17 +15,20 @@
 //   deps: dir (store dir), git (runner {run(args,{cwd})}), registry {get(slug)}, settings
 //         {effectiveRepoRules, outward}, state {kvGet,kvSet,kvDelete}, scanner {scan},
 //         forge {findOpenPullRequest, createPullRequest, updatePullRequest, repoAccess?, getPullRequest?},
-//         fireNotify?, remoteUrlFor?(project, parts) → url, now?, log?
+//         fireNotify?, recentDirectories?(slug) → string[] (the project's clones, most recent first; the default clone
+//         URL is the origin of the first one that still is that repo), remoteUrlFor?(project, parts) → url, now?, log?
 
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { repoKeyParts } from "../../shared/forge.mjs";
+import { normalizeRemote } from "./identity.mjs";
 import { applyBlock, findBlock, hashBlock, parseBlockRules, renderBlock } from "./repoBlock.mjs";
 
 export const PR_BRANCH = "manta/knowledge";
 const AGENTS = "AGENTS.md";
-const IDENTITY = ["-c", "user.name=Manta curator", "-c", "user.email=curator@manta.invalid", "-c", "commit.gpgsign=false"];
+const CURATOR_EMAIL = "curator@manta.invalid";
+const IDENTITY = ["-c", "user.name=Manta curator", "-c", `user.email=${CURATOR_EMAIL}`, "-c", "commit.gpgsign=false"];
 const HISTORY_CAP = 40;
 const NONE = "none";
 const isOutward = (m) => m === "pull-request" || m === "direct";
@@ -43,7 +46,7 @@ class WriteStop extends Error {
   }
 }
 
-export function createRepoWriter({ dir, git, registry, settings, state, scanner, forge = {}, fireNotify, remoteUrlFor, now = Date.now, log = console.warn } = {}) {
+export function createRepoWriter({ dir, git, registry, settings, state, scanner, forge = {}, fireNotify, remoteUrlFor, recentDirectories, now = Date.now, log = console.warn } = {}) {
   if (!dir || !git || !registry || !settings || !state || !scanner) throw new Error("createRepoWriter: dir, git, registry, settings, state and scanner are required");
   const reposDir = join(dir, ".repos");
   const locks = new Map();
@@ -101,12 +104,30 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     },
   });
 
+  /**
+   * Where to clone from: the origin of the project's most recently used clone (so ssh/https matches the credentials the
+   * user already has on this box), as long as it still names the same repository; else https.
+   */
+  async function defaultRemoteUrl(project, parts, slug) {
+    for (const d of (recentDirectories?.(slug) ?? []).slice(0, 5)) {
+      let url = null;
+      try {
+        url = String(await git.run(["remote", "get-url", "origin"], { cwd: d })).trim();
+      } catch {
+        continue;
+      }
+      const id = normalizeRemote(url)?.id;
+      if (url && id === project.canonicalId) return url;
+    }
+    return `https://${parts.host}/${parts.owner}/${parts.repo}.git`;
+  }
+
   async function context(slug) {
     const project = await registry.get(slug);
     if (!project) return null;
     const parts = repoKeyParts(project.canonicalId);
     if (!parts) return { project, parts: null };
-    const remoteUrl = remoteUrlFor ? await remoteUrlFor(project, parts) : `https://${parts.host}/${parts.owner}/${parts.repo}.git`;
+    const remoteUrl = remoteUrlFor ? await remoteUrlFor(project, parts) : await defaultRemoteUrl(project, parts, slug);
     return { project, parts, remoteUrl, target: { repoKey: project.canonicalId }, path: join(reposDir, slug) };
   }
 
@@ -114,7 +135,7 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     await mkdir(reposDir, { recursive: true });
     if (!existsSync(join(ctx.path, ".git"))) {
       await rm(ctx.path, { recursive: true, force: true });
-      await git.run(["clone", "--filter=blob:none", "--quiet", ctx.remoteUrl, ctx.path], { cwd: reposDir });
+      await git.run(["clone", "--filter=blob:none", "--quiet", "--", ctx.remoteUrl, ctx.path], { cwd: reposDir });
     }
     const g = G(ctx.path);
     if ((await g.try(["remote", "get-url", "origin"])) !== ctx.remoteUrl) await g.run(["remote", "set-url", "origin", ctx.remoteUrl]);
@@ -191,15 +212,16 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     return r.unavailable ? `The secret scanner is unavailable, so the ${label} wasn't written.` : `The ${label} looked like it contained a secret, so it wasn't written.`;
   }
 
+  /** The first outward action on a repo notifies at once; recorded only after the notification really went out. */
   async function notifyFirst(slug, ctx, how) {
     if (!fireNotify || kvGet(slug, "notified") === "1") return;
-    kvSet(slug, "notified", "1");
     try {
       await fireNotify({
         title: "Manta changed a repository",
         message: `Manta ${how} for ${ctx.parts.owner}/${ctx.parts.repo}: shared project rules in AGENTS.md. Open Settings → Knowledge to review or undo it.`,
         tag: `knowledge-outward-${slug}`,
       });
+      kvSet(slug, "notified", "1");
     } catch (e) {
       log("[knowledge] outward notification failed:", e?.message ?? e);
     }
@@ -216,6 +238,42 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     // No baseline yet: an existing block that Manta never wrote is somebody's, so adopt it first.
     const handEdit = seen === null ? text !== null : h !== seen && h !== written;
     return { text, h, handEdit, corrupt: f.status === "corrupt" ? f.reason : null };
+  }
+
+  /**
+   * Never overwrite a person's edit of the block on the default branch. `{block: result}` refuses the write (and records the
+   * edit so `sync` hands it to the curator to adopt); `{cls}` says it is safe to go on.
+   */
+  async function guardDefault(slug, g, defaultBranch, mode) {
+    const def = await readAt(g, `origin/${defaultBranch}`);
+    if (def.symlink) return { block: { ok: false, mode, error: "AGENTS.md in this repository is a symlink, so it was left alone." } };
+    const cls = classifyDefault(slug, def.text);
+    if (cls.corrupt) return { block: { ok: false, mode, error: `AGENTS.md has a damaged managed block (${cls.corrupt}), so it was left alone.` } };
+    const pending = kvGet(slug, "pendingHandEdit");
+    if (pending !== null || cls.handEdit) {
+      if (pending === null && kvJson(slug, "pr", null) === null) kvSet(slug, "pendingHandEdit", cls.text ?? "");
+      return { block: { ok: false, mode, error: "A person edited the managed block; Manta adopts their version first.", handEdit: pending ?? cls.text ?? "" } };
+    }
+    return { cls };
+  }
+
+  /** The block on the PR branch when a reviewer changed it since Manta last pushed (compared with `prBlockHash`), else null. */
+  async function branchEdit(slug, g) {
+    const prHash = kvGet(slug, "prBlockHash");
+    if (prHash === null || !(await g.ok(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${PR_BRANCH}`]))) return null;
+    const at = await readAt(g, `origin/${PR_BRANCH}`);
+    if (at.symlink) return null;
+    const f = findBlock(at.text);
+    if (f.status === "corrupt") return null;
+    const h = hashKey(f.status === "found" ? hashBlock(f.text) : null);
+    return h === prHash ? null : { text: f.status === "found" ? f.text : "", h };
+  }
+
+  /** Every commit in default..branch was made by Manta's curator identity (so rebuilding the branch loses no person's work). */
+  async function branchIsOurs(g, defaultBranch) {
+    const rows = await g.try(["log", "--format=%ae%n%ce", `origin/${defaultBranch}..origin/${PR_BRANCH}`]);
+    if (rows === null) return false;
+    return rows.split("\n").filter(Boolean).every((e) => e.trim() === CURATOR_EMAIL);
   }
 
   // ---- the change itself -------------------------------------------------------------------------
@@ -239,7 +297,9 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     const next = applyBlock(cur.text, block);
     const prevText = f.status === "found" ? f.text : null;
     if (next === cur.text) return { changed: false, prevText };
-    await writeFile(join(ctx.path, AGENTS), next);
+    // The block was all the file held (the curator created it): remove the file rather than leave an empty one.
+    if (next.trim() === "" && block === null) await rm(join(ctx.path, AGENTS), { force: true });
+    else await writeFile(join(ctx.path, AGENTS), next);
     return { changed: true, prevText };
   }
 
@@ -287,8 +347,11 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
       try {
         await g.run(["push", "--quiet", "origin", `HEAD:${defaultBranch}`]);
       } catch (e) {
-        if (attempt === 0 && /non-fast-forward|fetch first|stale info/i.test(errText(e))) {
+        if (attempt === 0 && /non-fast-forward|fetch first|stale info|rejected/i.test(String(e?.stderr || e?.message || e))) {
           await g.run(["fetch", "--prune", "--quiet", "origin"]);
+          // Someone pushed while we were committing: look at what is there NOW before re-staging on top of it.
+          const again = await guardDefault(slug, g, defaultBranch, mode);
+          if (again.block) return again.block;
           continue;
         }
         log(`[knowledge] direct push rejected for ${slug}: ${errText(e)}`);
@@ -314,12 +377,19 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     let lease = null;
     let rebuilt = false;
     if (remoteTip) {
+      const edited = await branchEdit(slug, g);
+      if (edited) {
+        return { ok: false, mode, error: `A reviewer edited the managed block on ${PR_BRANCH}; Manta adopts their version first.`, handEdit: edited.text };
+      }
       await checkout(g, ["-B", PR_BRANCH, remoteRef]);
       if (!(await g.ok(["merge-base", "--is-ancestor", `origin/${defaultBranch}`, "HEAD"]))) {
         const merged = await g.ok([...IDENTITY, "merge", "--quiet", "--no-edit", `origin/${defaultBranch}`]);
         if (!merged) {
-          // The default branch moved under the block: rebuild the branch from it (one new commit).
           await g.ok(["merge", "--abort"]);
+          if (!(await branchIsOurs(g, defaultBranch))) {
+            return { ok: false, mode, error: `${PR_BRANCH} has commits from people and no longer merges with the default branch, so Manta left it alone.` };
+          }
+          // The default branch moved under the block and the branch holds only Manta's commits: rebuild it (one new commit).
           await checkout(g, ["-B", PR_BRANCH, `origin/${defaultBranch}`]);
           lease = remoteTip;
           rebuilt = true;
@@ -356,7 +426,7 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
     setJson(slug, "prRules", rendered.rules);
     const pr = await ensurePullRequest(ctx, defaultBranch, rendered.rules);
     if (pr.pr) setJson(slug, "pr", { ...pr.pr, head: PR_BRANCH, openedAt: kvJson(slug, "pr", null)?.openedAt ?? now(), baselineHash: kvJson(slug, "pr", null)?.baselineHash ?? kvGet(slug, "lastSeenDefaultHash") });
-    await notifyFirst(slug, ctx, "opened a pull request");
+    await notifyFirst(slug, ctx, pr.pr ? "opened a pull request" : `pushed the ${PR_BRANCH} branch (the pull request couldn't be opened)`);
     if (pr.error) return { ok: false, mode, sha, changed: st.changed, error: `Pushed ${PR_BRANCH}, but ${pr.error}`, ...(pr.pr ? { pr: pr.pr } : {}) };
     return { ok: true, mode, sha, changed: st.changed, pr: pr.pr };
   }
@@ -378,16 +448,9 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
       const g = await ensureClone(ctx);
       const defaultBranch = await defaultBranchOf(g, m.defaultBranch);
       kvSet(slug, "defaultBranch", defaultBranch);
-      const def = await readAt(g, `origin/${defaultBranch}`);
-      if (def.symlink) return { ok: false, mode: m.mode, error: "AGENTS.md in this repository is a symlink, so it was left alone." };
-      const cls = classifyDefault(slug, def.text);
-      if (cls.corrupt) return { ok: false, mode: m.mode, error: `AGENTS.md has a damaged managed block (${cls.corrupt}), so it was left alone.` };
-      // Never overwrite a person's edit: refuse until sync() has handed it to the curator to adopt.
-      const pending = kvGet(slug, "pendingHandEdit");
-      if (pending !== null || cls.handEdit) {
-        if (pending === null && kvJson(slug, "pr", null) === null) kvSet(slug, "pendingHandEdit", cls.text ?? "");
-        return { ok: false, mode: m.mode, error: "A person edited the managed block; Manta adopts their version first.", handEdit: pending ?? cls.text ?? "" };
-      }
+      const guard = await guardDefault(slug, g, defaultBranch, m.mode);
+      if (guard.block) return guard.block;
+      const { cls } = guard;
       if (rendered.block === null && cls.text === null && kvJson(slug, "pr", null) === null) return { ok: true, mode: m.mode, changed: false };
       return m.mode === "direct" ? await writeDirect(slug, ctx, g, defaultBranch, rendered) : await writePullRequest(slug, ctx, g, defaultBranch, rendered);
     } catch (e) {
@@ -400,18 +463,27 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
   const applyRules = (slug, rules) => serial(slug, () => applyRulesLocked(slug, Array.isArray(rules) ? rules : []));
 
   // ---- sync -------------------------------------------------------------------------------------------
-  /** How the recorded PR ended, from the forge when it can say, else inferred from git. */
+  /** How the recorded PR ended: from the forge when it can say, inferred from git only when that call fails. */
   async function prLifecycle(slug, ctx, g, defaultBranch, pr, cls) {
     let ended = null; // null = still open
+    let answered = false;
+    let callError = null;
     if (forge.getPullRequest) {
-      const r = await forge.getPullRequest(ctx.target, pr.number);
-      if (!r?.ok) return { state: "open", error: r?.message ?? "Couldn't check the pull request." };
-      const s = String(r.pr?.state ?? "");
-      if (r.pr?.merged === true || s === "merged") ended = "merged";
-      else if (s === "closed") ended = "closed";
-    } else {
+      try {
+        const r = await forge.getPullRequest(ctx.target, pr.number);
+        if (r?.ok) {
+          answered = true;
+          const st = String(r.pr?.state ?? "");
+          if (r.pr?.merged === true || st === "merged") ended = "merged";
+          else if (st === "closed") ended = "closed";
+        } else callError = r?.message ?? "Couldn't check the pull request.";
+      } catch (e) {
+        callError = errText(e);
+      }
+    }
+    if (!answered) {
       const found = await forge.findOpenPullRequest(ctx.target, pr.head ?? PR_BRANCH);
-      if (!found?.ok) return { state: "open", error: found?.message ?? "Couldn't check the pull request." };
+      if (!found?.ok) return { state: "open", error: found?.message ?? callError ?? "Couldn't check the pull request." };
       if (!found.pr) ended = "unknown";
     }
     if (ended === null) {
@@ -474,6 +546,16 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
         markHistory(slug, (e) => e.mode === "pull-request" && !e.superseded && !e.reverted, { merged: true });
         return out;
       }
+      if (life.state === "open") {
+        const edited = await branchEdit(slug, g);
+        if (edited) {
+          // A reviewer changed the block on the PR branch: adopt it as truth and build on top of it.
+          out.handEdit = edited.text;
+          kvSet(slug, "prBlockHash", edited.h);
+          kvSet(slug, "lastWrittenHash", edited.h);
+          setJson(slug, "prRules", edited.text ? parseBlockRules(edited.text) : []);
+        }
+      }
       if (life.state === "closed") {
         // Closed unmerged: the block on the default branch is back to what it was; later edits still count.
         setJson(slug, "pr", null);
@@ -488,9 +570,9 @@ export function createRepoWriter({ dir, git, registry, settings, state, scanner,
 
     const pending = kvGet(slug, "pendingHandEdit");
     if (pending !== null) {
-      out.handEdit = pending;
+      out.handEdit ??= pending;
       kvSet(slug, "pendingHandEdit", null);
-    } else if (cls.handEdit && !cls.corrupt) out.handEdit = cls.text ?? "";
+    } else if (cls.handEdit && !cls.corrupt) out.handEdit ??= cls.text ?? "";
     if (!cls.corrupt) kvSet(slug, "lastSeenDefaultHash", cls.h);
     return out;
   }

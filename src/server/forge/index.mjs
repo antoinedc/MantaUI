@@ -1491,6 +1491,29 @@ export async function forgeCreatePullRequest(target, input = {}, deps = {}) {
 }
 
 /**
+ * One pull request (merge request) by number, addressed by repository rather than by a checkout: how it stands
+ * (`state`: open | draft | merged | closed, and `merged`). The adapter's short freshness window (≤ 30 s) applies.
+ *
+ * @param {string | { remoteUrl?: string, repoKey?: string }} target
+ * @param {number} number
+ * @param {object} [deps]
+ * @returns {Promise<{ ok: true, pr: { state: string, merged: boolean, number: number, url: string } } | { ok: false, error: string, message: string }>}
+ */
+export async function forgeGetPullRequest(target, number, deps = {}) {
+  const n = Number(number);
+  if (!Number.isInteger(n) || n <= 0) return repoCallFailure("bad_request");
+  const ctx = await resolveRepoTarget(target, deps);
+  if (ctx.error) return repoCallFailure(ctx.error);
+  try {
+    const { data } = await ctx.adapter.getPullRequest(ctx.repo, n);
+    const state = String(data?.state ?? "");
+    return { ok: true, pr: { state, merged: state === "merged", number: data?.number ?? n, url: data?.url ?? "" } };
+  } catch (e) {
+    return repoCallError(e);
+  }
+}
+
+/**
  * Change an existing pull request's title and/or body (only the fields given).
  *
  * @param {string | { remoteUrl?: string, repoKey?: string }} target

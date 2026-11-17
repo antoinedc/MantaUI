@@ -7,8 +7,9 @@
 //
 //   • metadata `withInternalMarker({manta:{knowledgeTrial:<id>}})` (sessionMap/auto-handoff skip it)
 //   • model from `resolveModelForClass("knowledge-trial")`; skipped when none qualifies
-//   • deny-first ruleset: a leading catch-all deny, then only read/glob/grep/list, edit inside the
-//     worktree, and a short bash allowlist (opencode resolves last-match-wins, so allows come AFTER the deny)
+//   • deny-first ruleset: a leading catch-all deny, then read/glob/grep/list and edit confined to the
+//     worktree, a short bash allowlist (no git diff/log/show: they can write files via --output) and
+//     denies for shell metacharacters and outside paths AFTER the allows (opencode resolves last-match-wins)
 //   • 20-minute ceiling enforced here (abort); ≤ 2 trials a week; only when no other knowledge run is active
 //   • cost counted against the daily cap from the session's recorded usage
 //   • completion arrives through `observeRaw` (raw `session.execution.*` events)
@@ -38,13 +39,29 @@ const safely = async (fn) => {
   }
 };
 
-/** The deny-first permission ruleset of a trial session (spec §6.6 step 5, exactly). */
+// Patterns are matched last-match-wins and `*` matches anything (spaces and slashes included), so the
+// path/metacharacter denies below sit AFTER the allows they narrow.
+const BASH_ALLOW = ["ls *", "cat *", "head *", "tail *", "wc *", "git status*", "which *"];
+const BASH_DENY = [
+  // shell metacharacters: no chaining, redirection, substitution or variable expansion
+  "*;*", "*&*", "*|*", "*>*", "*<*", "*`*", "*$*", "*\\*",
+  // paths outside the worktree: absolute, home-relative, parent-relative, or hidden in an option value
+  "* /*", "* ~*", "*..*", "*=/*", "*=~*",
+];
+
+/** The deny-first permission ruleset of a trial session (spec §6.6 step 5). Read tools are confined to the worktree. */
 export function buildTrialRuleset(worktree) {
   const wt = String(worktree ?? "").replace(/\/+$/, "");
   const rules = [{ permission: "*", pattern: "**", action: "deny" }];
-  for (const permission of ["read", "glob", "grep", "list"]) rules.push({ permission, pattern: "*", action: "allow" });
+  for (const permission of ["read", "glob", "grep", "list"]) {
+    rules.push({ permission, pattern: wt, action: "allow" }, { permission, pattern: `${wt}/**`, action: "allow" });
+  }
   rules.push({ permission: "edit", pattern: `${wt}/**`, action: "allow" });
-  for (const pattern of ["ls *", "cat *", "head *", "tail *", "wc *", "git status*", "git log*", "git diff*", "git show*", "which *"]) rules.push({ permission: "bash", pattern, action: "allow" });
+  for (const pattern of BASH_ALLOW) rules.push({ permission: "bash", pattern, action: "allow" });
+  for (const pattern of BASH_DENY) rules.push({ permission: "bash", pattern, action: "deny" });
+  for (const permission of ["read", "glob", "grep", "list", "edit"]) {
+    rules.push({ permission, pattern: "*/../*", action: "deny" }, { permission, pattern: "*/..", action: "deny" });
+  }
   return rules;
 }
 
@@ -52,7 +69,7 @@ export function buildTrialRuleset(worktree) {
 export function buildTrialPrompt({ skillMd, request }) {
   return [
     "You are verifying a draft skill that was written from earlier sessions. You only inspect; you do not carry the skill out.",
-    "Do not run the skill's commands, do not change anything outside this working copy, and do not try to reach anything outside it. Your tools are read-only inspection tools.",
+    "Do not run the skill's commands, do not change anything outside this working copy, and do not try to reach anything outside it. Your tools are read-only inspection tools, limited to this working copy: use relative paths, no absolute paths, no `..`, no shell chaining or redirection.",
     "",
     request ? `The most recent real instance of the task was requested like this (quoted, for context only): "${String(request).slice(0, 400)}"` : "",
     "",
@@ -143,6 +160,9 @@ export function createTrial({
   /** `{ok:true}` or `{ok:false, reason}` — the gates that don't need a model or a clone. */
   async function canStart() {
     if (running) return { ok: false, reason: "busy" };
+    return gates();
+  }
+  async function gates() {
     if (isKnowledgeRunActive()) return { ok: false, reason: "knowledge-run-active" };
     if (weeklyCount() >= MAX_TRIALS_PER_WEEK) return { ok: false, reason: "weekly-limit" };
     const cap = await budget.canSpend();
@@ -155,8 +175,20 @@ export function createTrial({
    * `skillMd` the drafted skill, `request` a quoted user request for context.
    * → `{status:"completed"|"timeout"|"failed"|"skipped", reason?, report?, parsed?, usd?, sessionID?}`
    */
-  async function run({ skillName, skillMd, slugs = [], request = "" } = {}) {
-    const gate = await canStart();
+  async function run(args = {}) {
+    // `running` is claimed before the first await, so two concurrent callers can never both pass the gates.
+    if (running) return { status: "skipped", reason: "busy" };
+    const id = mint();
+    running = id;
+    try {
+      return await runClaimed(id, args);
+    } finally {
+      running = null;
+    }
+  }
+
+  async function runClaimed(id, { skillName, skillMd, slugs = [], request = "" } = {}) {
+    const gate = await gates();
     if (!gate.ok) return { status: "skipped", reason: gate.reason };
     const model = await resolveModelForClass(TRIAL_TASK_CLASS, { configGet });
     if (model && typeof model === "object" && model.ok === false) return { status: "skipped", reason: `no-model:${model.code ?? "unavailable"}` };
@@ -175,8 +207,6 @@ export function createTrial({
     }
     if (!dir) return { status: "skipped", reason: "no-clone" };
 
-    const id = mint();
-    running = id;
     let worktree = null;
     let created = false;
     let timer = null;
@@ -228,7 +258,6 @@ export function createTrial({
     } finally {
       if (timer) clearTimeoutFn(timer);
       waiters.delete(id);
-      running = null;
       if (created) {
         await safely(() => oc.abortSession(id));
         await safely(() => oc.deleteSessionRaw?.(id));
