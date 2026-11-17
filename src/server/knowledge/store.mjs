@@ -123,7 +123,7 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
   }
 
   async function dirtyPaths() {
-    const out = (await tryRun(["status", "--porcelain", "-z", "--untracked-files=all"])) ?? "";
+    const out = (await tryRun(["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all"])) ?? "";
     const parts = out.split("\0").filter(Boolean);
     const paths = [];
     for (let i = 0; i < parts.length; i++) {
@@ -199,7 +199,7 @@ export function createKnowledgeStore({ dir, git, scan, now = Date.now, log = con
       const startedAt = Date.now();
       let out;
       try {
-        out = await run(["status", "--porcelain", "-z", "--untracked-files=all"]);
+        out = await run(["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all"]);
       } catch {
         return; // can't tell: keep what we knew
       }
