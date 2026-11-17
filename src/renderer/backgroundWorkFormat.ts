@@ -1,5 +1,5 @@
 // Pure copy + formatting for the background work budget (spec 2026-11-17-background-work-budget.md
-// §10, with §17.20/§17.21): the Settings card, the one-line status in the Knowledge card and the CTO
+// §10, with §17.20/§17.21, and the follow-ups spec §2): the Settings card, the one-line status in the Knowledge card and the CTO
 // pane, and the CTO thrifty banner all speak through these helpers, so the words never drift.
 
 import { formatTokens } from "../shared/formatTokens.mjs";
@@ -30,6 +30,11 @@ export const LEVEL_LIMITS_HELP =
   "Shares are estimated from token counts, so cached context counts in full and the figure errs on the high side. " +
   "A window already in use when Manta first sees it starts counting from zero.";
 export const CAP_HELP = "0 turns background work off on API keys.";
+export const RUN_WHEN_BUSY_LABEL = "Keep running when my plan is busy";
+export const RUN_WHEN_BUSY_HELP =
+  "Background work still stays within its share (5% of a week on Normal), but no longer waits when your own usage is high.";
+/** What the Knowledge card, the CTO pane and the Settings card call themselves in a paused sentence. */
+export const DEFAULT_SUBJECT = "Background work";
 
 // ---- the cap input ----------------------------------------------------------------------------
 
@@ -54,6 +59,8 @@ export const formatUsdShort = (n: number): string => {
 };
 /** The text the cap input shows for a stored value. */
 export const capInputText = (n: number): string => (Math.round(n * 100) / 100).toFixed(2);
+
+const finite = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** A percent of a window: whole numbers, "<1%" for a trace, "0%" for none. */
 export function formatPct(n: number | null | undefined): string {
@@ -102,8 +109,15 @@ const resumesPhrase = (ms: number | null | undefined, now: number, fmt: TimeForm
 
 // ---- windows and plans -------------------------------------------------------------------------
 
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
 /** A weekly-kind window: "weekly" or "weekly_scoped:*". Everything else is a short window. */
 export const isWeeklyKind = (kind: string | undefined): boolean => typeof kind === "string" && (kind === "weekly" || kind.startsWith("weekly"));
+
+/** Weekly by kind, or by length: a 7-day window an adapter reports as "session" is still a week (spec §6). */
+export const isWeeklyWindow = (w: Pick<BudgetWindow, "kind" | "spanMs">): boolean =>
+  isWeeklyKind(w.kind) || (typeof w.spanMs === "number" && w.spanMs >= 2 * DAY_MS);
 
 const ADAPTER_NAMES: Record<string, string> = {
   claude: "Claude",
@@ -119,8 +133,17 @@ export function planName(plan: Pick<BudgetPlanStatus, "adapter" | "planLabel">):
   return ADAPTER_NAMES[key] ?? (key ? key[0].toUpperCase() + key.slice(1) : "Plan");
 }
 
-/** "week", "5-hour window", or the window's own label for any other kind. */
-function windowNoun(w: Pick<BudgetWindow, "kind" | "label">): string {
+const nearSpan = (span: number, target: number): boolean => Math.abs(span - target) <= target * 0.1;
+
+/** "week", "5-hour window", or "<label> window" from the window's length; the kind when the length is unknown. */
+function windowNoun(w: Pick<BudgetWindow, "kind" | "label" | "spanMs">): string {
+  const span = typeof w.spanMs === "number" && w.spanMs > 0 ? w.spanMs : null;
+  if (span !== null) {
+    if (nearSpan(span, 5 * HOUR_MS)) return "5-hour window";
+    if (nearSpan(span, 7 * DAY_MS) && (w.kind === "weekly" || !isWeeklyKind(w.kind))) return "week";
+    if (w.label) return `${w.label} window`;
+    return span >= DAY_MS ? `${Math.round(span / DAY_MS)}-day window` : `${Math.max(1, Math.round(span / HOUR_MS))}-hour window`;
+  }
   if (w.kind === "weekly") return "week";
   if (w.kind === "session") return "5-hour window";
   if (isWeeklyKind(w.kind)) return w.label ? w.label.toLowerCase() : "week";
@@ -131,15 +154,35 @@ const findWindow = (plan: BudgetPlanStatus | null | undefined, key: string | und
   key && plan ? plan.windows.find((w) => w.key === key) : undefined;
 
 /** "this week" / "this 5-hour window". */
-const thisWindow = (w: Pick<BudgetWindow, "kind" | "label"> | undefined): string => `this ${w ? windowNoun(w) : "week"}`;
+const thisWindow = (w: Pick<BudgetWindow, "kind" | "label" | "spanMs"> | undefined): string => `this ${w ? windowNoun(w) : "week"}`;
+
+/** "your Claude week" / "your 5-hour window" — the window as the user owns it. */
+function ownWindow(w: BudgetWindow | undefined, plan: BudgetPlanStatus | null): string {
+  const noun = w ? windowNoun(w) : "week";
+  return noun === "week" ? `your ${plan ? `${planName(plan)} ` : ""}week` : `your ${noun}`;
+}
+
+/** "2½ days", "5 hours": how long a window has been running, to half a day (hours under a day). */
+export function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  if (ms < HOUR_MS) return "under an hour";
+  if (ms < DAY_MS) {
+    const h = Math.round(ms / HOUR_MS);
+    if (h < 24) return h === 1 ? "1 hour" : `${h} hours`;
+  }
+  const halves = Math.max(1, Math.round((ms / DAY_MS) * 2) / 2);
+  const whole = Math.floor(halves);
+  return halves === 1 ? "1 day" : `${whole}${halves % 1 ? "½" : ""} days`;
+}
 
 /** Background share lines of one plan: "Background work used 2% of your Claude week · 4% of this 5-hour window". */
 export function planUsageText(plan: BudgetPlanStatus): string | null {
-  const ws = [...plan.windows].sort((a, b) => Number(isWeeklyKind(b.kind)) - Number(isWeeklyKind(a.kind)));
+  const ws = [...plan.windows].sort((a, b) => Number(isWeeklyWindow(b)) - Number(isWeeklyWindow(a)));
   if (ws.length === 0) return null;
   const name = planName(plan);
   const bits = ws.map((w, i) => {
-    const phrase = w.kind === "weekly" ? `your ${name} week` : isWeeklyKind(w.kind) ? `your ${name} ${windowNoun(w)}` : `this ${windowNoun(w)}`;
+    const noun = windowNoun(w);
+    const phrase = noun === "week" ? `your ${name} week` : isWeeklyWindow(w) ? `your ${name} ${noun}` : `this ${noun}`;
     return i === 0 ? `Background work used ${formatPct(w.bgPct)} of ${phrase}` : `${formatPct(w.bgPct)} of ${phrase}`;
   });
   return bits.join(" · ");
@@ -161,6 +204,10 @@ export type CopyContext = {
   dailyCapUsd: number;
   now?: number;
   fmt?: TimeFormat;
+  /** Who is waiting: "Knowledge", "The CTO" or the default "Background work". */
+  subject?: string;
+  /** The subject reads as a plural ("Larger jobs are waiting"). */
+  plural?: boolean;
 };
 
 function reasonValue(p: BudgetPaused, w: BudgetWindow | undefined, pick: "pct" | "projected" | "cap"): number | null {
@@ -170,46 +217,63 @@ function reasonValue(p: BudgetPaused, w: BudgetWindow | undefined, pick: "pct" |
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-/** The sentence for a paused continuous-work reason (spec §10 table as amended by §17.21). */
+/** The sentence for a paused continuous-work reason (spec 2026-11-17-background-budget-followups §2). */
 export function pausedCopy(p: BudgetPaused, ctx: CopyContext): string {
   const now = ctx.now ?? Date.now();
   const fmt = ctx.fmt ?? {};
   const plan = ctx.plan ?? null;
   const w = findWindow(plan, p.windowKey);
-  const weekly = w ? isWeeklyKind(w.kind) : true;
-  const name = plan ? planName(plan) : "plan";
-  const resumes = resumesPhrase(p.resumesAt, now, fmt);
-  const resumesCap = resumesPhrase(p.resumesAt, now, fmt, true);
-  const dash = (head: string) => (resumes ? `${head} — ${resumes}` : head);
+  const s = ctx.subject ?? DEFAULT_SUBJECT;
+  const pl = ctx.plural === true;
+  const be = pl ? "are" : "is";
+  const it = pl ? "they" : "it";
+  const It = pl ? "They" : "It";
+  const resume = pl ? "resume" : "resumes";
+  const at = (ms: number) => formatResumes(ms, now, fmt);
+  const noun = w ? windowNoun(w) : "week";
+  const resetWord = noun === "week" ? "the week" : "that window";
+  const thing = ownWindow(w, plan);
+  // "It resumes Sat 08:00 when the week resets." — said only when the instant is known.
+  const resetClause = (ms: number | null | undefined) => (finite(ms) ? ` ${It} ${resume} ${at(ms)} when ${resetWord} resets.` : "");
   switch (p.reason) {
     case "off":
-      return "Off on plans";
+      return "Background work is off for your plans.";
     case "level-cap": {
       const cap = reasonValue(p, w, "cap");
-      return dash(`Reached ${thisWindow(w)}'s background limit${cap != null ? ` (${formatPct(cap)})` : ""}`);
+      return `${s} ${pl ? "have" : "has"} used ${pl ? "their" : "its"} share of ${thing}${cap != null ? ` (${formatPct(cap)})` : ""}.${resetClause(p.resumesAt)}`;
     }
     case "window-busy": {
       const pct = reasonValue(p, w, "pct");
-      const used = pct != null ? ` is ${formatPct(pct)} used` : " is busy";
-      if (weekly) return `Paused — ${thisWindow(w)}${used}.${resumesCap ? ` ${resumesCap}, when it resets.` : ""}`;
-      return `Paused — your ${windowNoun(w!)}${used}.${resumesCap ? ` ${resumesCap}, when it resets.` : ""}`;
+      const using = plan ? planName(plan) : "your plan";
+      return `${s} ${be} waiting while you're using ${using} heavily: ${thing} is ${pct != null ? `${formatPct(pct)} used` : "busy"}.${resetClause(p.resumesAt)}`;
     }
     case "projected-high": {
       const proj = reasonValue(p, w, "projected");
-      const track = proj != null && proj > 100 ? "on track to run out before the reset" : proj != null ? `on track to end at ${formatPct(proj)}` : "on track to end too high";
-      const tail = p.resumesAt != null ? ` — resumes around ${formatResumes(p.resumesAt, now, fmt).replace(/^at /, "")} if usage stays flat` : "";
-      return `Paused — ${thisWindow(w)} is ${track}${tail}`;
+      const pace = proj == null ? `on pace to use too much of it` : proj > 100 ? `on pace for more than the whole ${noun}` : `on pace to end at ${formatPct(proj)}`;
+      const start = w?.windowStart;
+      const elapsed = finite(start) && now > start ? formatElapsed(now - start) : "";
+      const used = w && finite(w.pct) ? `you've used ${formatPct(w.pct)} ${elapsed ? `in ${elapsed}` : "so far"}, ${pace}.` : `${thing} is ${pace}.`;
+      const reset = w?.resetsAt ?? null;
+      const early = finite(p.resumesAt) && (reset == null || p.resumesAt < reset - 60_000);
+      let tail = "";
+      if (early) {
+        tail = ` ${It} ${resume} ${at(p.resumesAt!)} if your usage slows${finite(reset) ? `, or ${at(reset)} when ${resetWord} resets` : ""}.`;
+      } else {
+        tail = resetClause(reset ?? p.resumesAt);
+      }
+      return `${s} ${be} waiting so ${it} ${pl ? "don't" : "doesn't"} use up ${thing}: ${used}${tail}`;
     }
     case "exhausted": {
-      const what = w && !weekly ? windowNoun(w) : [name, w ? windowNoun(w) : plan ? "week" : "quota"].filter(Boolean).join(" ");
-      return dash(`Your ${what} is used up`);
+      const what = noun === "week" ? `${plan ? `${planName(plan)} ` : ""}week` : noun;
+      const when = finite(p.resumesAt) ? at(p.resumesAt) : "when it resets";
+      return `Your ${what} is used up. ${s} ${resume} ${when}.`;
     }
     case "usd-cap":
-      return dash(`Reached today's ${formatUsd(ctx.dailyCapUsd)} API-key cap`);
+      return `${s} reached today's ${formatUsd(ctx.dailyCapUsd)} API-key limit.${finite(p.resumesAt) ? ` ${It} ${resume} ${at(p.resumesAt)}.` : ""}`;
     case "unavailable":
-      return "Background work is waiting — the budget couldn't be read";
+      return `${s} ${be} waiting: the budget couldn't be read. ${It} will retry.`;
     default:
-      return "Background work is paused";
+      return `${s} ${be} paused.`;
   }
 }
 
@@ -225,8 +289,7 @@ export function batchPausedCopy(p: BudgetPaused, ctx: CopyContext, paused?: Budg
   if (p.reason === "usd-cap") {
     return "Larger jobs paused — they've used their share of today's API-key cap; capture continues.";
   }
-  const base = pausedCopy(p, ctx);
-  return `Larger jobs: ${base[0].toLowerCase()}${base.slice(1)}`;
+  return pausedCopy(p, { ...ctx, subject: "Larger jobs", plural: true });
 }
 
 const WORK_LABELS: Record<string, string> = {
@@ -281,15 +344,15 @@ export function statusRows(status: BudgetStatus, now: number = Date.now(), fmt: 
 }
 
 /**
- * The one-line status the Knowledge card and the CTO pane show: the first refusal in words, else the
- * usage in plan or dollar terms. Null when the status has nothing to say (no providers).
+ * The one-line status the Knowledge card and the CTO pane show: the first refusal in words (the subject is who is
+ * waiting), else the usage in plan or dollar terms. Null when the status has nothing to say (no providers).
  */
-export function summaryLine(status: BudgetStatus, now: number = Date.now(), fmt: TimeFormat = {}): StatusRow | null {
+export function summaryLine(status: BudgetStatus, subject: string = DEFAULT_SUBJECT, now: number = Date.now(), fmt: TimeFormat = {}): StatusRow | null {
   const cap = status.dailyCapUsd;
   for (const plan of status.plans) {
-    if (plan.paused) return { id: `plan-${plan.adapter}-paused`, tone: "warn", text: pausedCopy(plan.paused, { plan, dailyCapUsd: cap, now, fmt }) };
+    if (plan.paused) return { id: `plan-${plan.adapter}-paused`, tone: "warn", text: pausedCopy(plan.paused, { plan, dailyCapUsd: cap, now, fmt, subject }) };
   }
-  if (status.payg.paused) return { id: "payg-paused", tone: "warn", text: pausedCopy(status.payg.paused, { dailyCapUsd: cap, now, fmt }) };
+  if (status.payg.paused) return { id: "payg-paused", tone: "warn", text: pausedCopy(status.payg.paused, { dailyCapUsd: cap, now, fmt, subject }) };
   for (const plan of status.plans) {
     if (plan.fallback) return { id: `plan-${plan.adapter}-fallback`, tone: "warn", text: fallbackText(plan, cap) };
   }
@@ -303,14 +366,14 @@ export function summaryLine(status: BudgetStatus, now: number = Date.now(), fmt:
 }
 
 /** The refusal behind the CTO's thrifty mode, in words: a cap refusal when there is one, else the first refusal. */
-export function thriftyReasonText(status: BudgetStatus | null, now: number = Date.now(), fmt: TimeFormat = {}): string | null {
+export function thriftyReasonText(status: BudgetStatus | null, subject: string = DEFAULT_SUBJECT, now: number = Date.now(), fmt: TimeFormat = {}): string | null {
   if (!status) return null;
   const cap = status.dailyCapUsd;
   const candidates: { p: BudgetPaused; plan?: BudgetPlanStatus }[] = [];
   if (status.payg.paused) candidates.push({ p: status.payg.paused });
   for (const plan of status.plans) if (plan.paused) candidates.push({ p: plan.paused, plan });
   const pick = candidates.find((c) => c.p.reason === "usd-cap" || c.p.reason === "level-cap") ?? candidates[0];
-  return pick ? pausedCopy(pick.p, { plan: pick.plan, dailyCapUsd: cap, now, fmt }) : null;
+  return pick ? pausedCopy(pick.p, { plan: pick.plan, dailyCapUsd: cap, now, fmt, subject }) : null;
 }
 
 const THRIFTY_GENERIC = "The CTO is limiting background work to stay inside its budget.";
@@ -320,9 +383,15 @@ const THRIFTY_GENERIC = "The CTO is limiting background work to stay inside its 
  * (`cap_hit`) AND that refusal still stands; a watchdog thrifty, an older box (no reason), an unreadable budget or a
  * cause that has cleared all get the generic line — a refusal that is not the cause must not be shown as the cause.
  */
-export function thriftyBannerText(thriftyReason: string | null | undefined, status: BudgetStatus | null, now: number = Date.now(), fmt: TimeFormat = {}): string {
+export function thriftyBannerText(
+  thriftyReason: string | null | undefined,
+  status: BudgetStatus | null,
+  subject: string = DEFAULT_SUBJECT,
+  now: number = Date.now(),
+  fmt: TimeFormat = {},
+): string {
   if (thriftyReason !== "cap_hit") return THRIFTY_GENERIC;
-  return thriftyReasonText(status, now, fmt) ?? THRIFTY_GENERIC;
+  return thriftyReasonText(status, subject, now, fmt) ?? THRIFTY_GENERIC;
 }
 
 /** The work types of each subsystem (the server's WORK_CLASS keys, partitioned): not every one shares a name prefix. */

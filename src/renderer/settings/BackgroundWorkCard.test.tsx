@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
-// Settings → Models "Background work" (background work budget spec §10, §17.20/§17.21): the level control and the
-// API-key cap each show only when they apply, every refusal is worded, and every save reports both outcomes.
+// Settings → Background work (background work budget spec §10, §17.20/§17.21, follow-ups §3–§4): the level control, the
+// plan-busy override and the API-key cap each show only when they apply, every refusal is worded, and every save reports both outcomes.
 
 import { afterEach, describe, expect, it } from "vitest";
 import { act } from "react";
@@ -10,8 +10,8 @@ import { buttonByText, mountWithMockApi, type Harness, type MockApi } from "../t
 import { clearBackgroundWorkFocus, openBackgroundWorkSettings } from "../useBackgroundStatus";
 import { BackgroundWorkCard } from "./BackgroundWorkCard";
 
-const weekWindow = { key: "claude:weekly", kind: "weekly", label: "Week", pct: 40, bgPct: 2, cap: 5, projectedPct: 60, resetsAt: Date.now() + 3 * 86_400_000 };
-const sessionWindow = { key: "claude:session", kind: "session", label: "5-hour", pct: 30, bgPct: 4, cap: 10, projectedPct: null, resetsAt: Date.now() + 3_600_000 };
+const weekWindow = { key: "claude:weekly", kind: "weekly", label: "Week", pct: 40, bgPct: 2, cap: 5, projectedPct: 60, resetsAt: Date.now() + 3 * 86_400_000, windowStart: null, spanMs: null };
+const sessionWindow = { key: "claude:session", kind: "session", label: "5-hour", pct: 30, bgPct: 4, cap: 10, projectedPct: null, resetsAt: Date.now() + 3_600_000, windowStart: null, spanMs: null };
 
 const claude = (over: Record<string, unknown> = {}) => ({
   adapter: "claude",
@@ -23,6 +23,7 @@ const claude = (over: Record<string, unknown> = {}) => ({
 
 const status = (over: Partial<BudgetStatus> = {}): BudgetStatus => ({
   level: "normal",
+  runWhenBusy: false,
   dailyCapUsd: 5,
   payg: { providers: [], usdToday: 0, usdMonth: 0 },
   plans: [claude()],
@@ -151,7 +152,7 @@ describe("BackgroundWorkCard", () => {
           ),
       });
       const rows = rowTexts();
-      expect(rows[1]).toMatch(/^Reached this week's background limit \(5%\) — resumes /);
+      expect(rows[1]).toMatch(/^Background work has used its share of your Claude week \(5%\)\. It resumes .* when the week resets\.$/);
       expect(rows[1]).toContain("09:00");
       expect(rows[2]).toBe("Weekly tidy waiting for a quiet moment");
     });
@@ -169,7 +170,7 @@ describe("BackgroundWorkCard", () => {
         backgroundStatus: () =>
           Promise.resolve(status({ plans: [], payg: { ...payg, paused: { reason: "usd-cap", resumesAt: new Date(2026, 10, 18, 0, 0, 0).getTime() } } })),
       });
-      expect(rowTexts()).toContain("Reached today's $5.00 API-key cap — resumes at midnight");
+      expect(rowTexts()).toContain("Background work reached today's $5.00 API-key limit. It resumes at midnight.");
     });
   });
 
@@ -228,6 +229,82 @@ describe("BackgroundWorkCard", () => {
       await open();
       await click(button("Normal"));
       expect(api.calls.configUpdate).toBeUndefined();
+    });
+  });
+
+  describe("keep running when my plan is busy", () => {
+    const checkbox = () => q<HTMLInputElement>('input[type="checkbox"]');
+    const busyStatus = (runWhenBusy: boolean, level: "off" | "light" | "normal" = "normal") => status({ runWhenBusy, level });
+
+    it("shows its label, its help text as the description, and the box's value", async () => {
+      await open({ backgroundStatus: () => Promise.resolve(busyStatus(true)) });
+      const box = checkbox()!;
+      expect(box).toBeTruthy();
+      expect(box.checked).toBe(true);
+      expect(h!.text()).toContain("Keep running when my plan is busy");
+      const help = document.getElementById(box.getAttribute("aria-describedby")!);
+      expect(help?.textContent).toBe(
+        "Background work still stays within its share (5% of a week on Normal), but no longer waits when your own usage is high.",
+      );
+      expect(box.labels?.[0]?.textContent).toBe("Keep running when my plan is busy");
+    });
+
+    it("is hidden while the level is Off, and comes back with the level", async () => {
+      let level: "off" | "normal" = "off";
+      await open({
+        backgroundStatus: () => Promise.resolve(busyStatus(false, level)),
+        configUpdate: (patch: { backgroundWork: { level: "off" | "normal" } }) => {
+          level = patch.backgroundWork.level;
+          return Promise.resolve({});
+        },
+      });
+      expect(checkbox()).toBeNull();
+      expect(h!.text()).not.toContain("Keep running when my plan is busy");
+      await click(button("Normal"));
+      expect(checkbox()).toBeTruthy();
+    });
+
+    it("is not offered on a box that sends no such setting, and not without a plan", async () => {
+      await open({ backgroundStatus: () => Promise.resolve({ ...status(), runWhenBusy: undefined } as unknown as BudgetStatus) });
+      expect(checkbox()).toBeNull();
+      h!.unmount();
+      await open({ backgroundStatus: () => Promise.resolve(status({ plans: [], payg })) });
+      expect(checkbox()).toBeNull();
+    });
+
+    it("saves the change, then says what the box now does", async () => {
+      let on = false;
+      await open({
+        backgroundStatus: () => Promise.resolve(busyStatus(on)),
+        configUpdate: (patch: { backgroundWork: { runWhenBusy: boolean } }) => {
+          on = patch.backgroundWork.runWhenBusy;
+          return Promise.resolve({});
+        },
+      });
+      await click(checkbox());
+      expect(api.calls.configUpdate).toEqual([[{ backgroundWork: { runWhenBusy: true } }]]);
+      expect(notice()).toBe("Background work will keep running when your plan is busy.");
+      expect(q('[data-testid="background-work-notice"]')!.getAttribute("role")).toBe("status");
+      expect(checkbox()!.checked).toBe(true);
+      await click(checkbox());
+      expect(api.calls.configUpdate![1]).toEqual([{ backgroundWork: { runWhenBusy: false } }]);
+      expect(notice()).toBe("Background work will wait when your plan is busy.");
+      expect(checkbox()!.checked).toBe(false);
+    });
+
+    it("a refused save shows the box's message and puts the old value back", async () => {
+      await open({ configUpdate: () => Promise.reject(new Error("backgroundWork.runWhenBusy must be true or false")) });
+      await click(checkbox());
+      expect(q('[data-testid="background-work-notice"]')!.getAttribute("role")).toBe("alert");
+      expect(notice()).toBe("Couldn't save: backgroundWork.runWhenBusy must be true or false");
+      expect(checkbox()!.checked).toBe(false);
+    });
+
+    it("tells the user when the box kept the other value", async () => {
+      await open({ configUpdate: () => Promise.resolve({}) }); // the status keeps saying off
+      await click(checkbox());
+      expect(notice()).toBe('The box kept "Keep running when my plan is busy" off instead of on.');
+      expect(checkbox()!.checked).toBe(false);
     });
   });
 
@@ -295,7 +372,7 @@ describe("BackgroundWorkCard", () => {
     });
   });
 
-  describe("opened from a Change link", () => {
+  describe("opened from a Background work settings link", () => {
     it("takes focus and scrolls itself into view when the request came before it mounted", async () => {
       openBackgroundWorkSettings();
       await open();

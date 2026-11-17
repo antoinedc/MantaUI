@@ -1,9 +1,9 @@
-// One line of background-work budget status plus a "Change" link that opens Settings at the budget card.
+// One line of background-work budget status plus a "Background work settings" link that opens Settings at the budget card.
 // Used by the Knowledge card and the CTO pane (spec 2026-11-17-background-work-budget.md §10); the words come
 // from backgroundWorkFormat so they match the card and the CTO thrifty banner.
 
 import { LABEL_CLS } from "./Field";
-import { shareLine, summaryLine } from "./backgroundWorkFormat";
+import { DEFAULT_SUBJECT, shareLine, summaryLine } from "./backgroundWorkFormat";
 import { openBackgroundWorkSettings, type BackgroundStatusState } from "./useBackgroundStatus";
 
 const TONE_CLS = { info: "text-text-muted", warn: "text-warn" } as const;
@@ -13,8 +13,8 @@ export const CHANGE_LINK_CLS =
 
 export function ChangeBudgetLink() {
   return (
-    <button type="button" onClick={openBackgroundWorkSettings} aria-label="Change background work budget" className={CHANGE_LINK_CLS}>
-      Change
+    <button type="button" onClick={openBackgroundWorkSettings} aria-label="Background work settings" className={CHANGE_LINK_CLS}>
+      Background work settings
     </button>
   );
 }
@@ -24,10 +24,13 @@ export function BackgroundStatusLine({
   onRetry,
   share,
   label,
+  subject = DEFAULT_SUBJECT,
   testId = "background-status",
 }: {
   /** A small heading shown above the line, only when there is a line to show. */
   label?: string;
+  /** Who is waiting in a paused sentence: "Knowledge", "The CTO"; the default is "Background work". */
+  subject?: string;
   state: BackgroundStatusState;
   onRetry?: () => void;
   /** Also show this subsystem's own use today, e.g. { workTypes: KNOWLEDGE_WORK_TYPES, noun: "Knowledge work" }. */
@@ -61,7 +64,7 @@ export function BackgroundStatusLine({
       </div>
     );
   }
-  const line = summaryLine(state.status);
+  const line = summaryLine(state.status, subject);
   const mine = share ? shareLine(state.status, share.workTypes, share.noun) : null;
   // Nothing connected → nothing to describe or change. With an account but no figures yet, still offer the link.
   const hasAccounts = state.status.plans.length > 0 || state.status.payg.providers.length > 0;

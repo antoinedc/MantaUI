@@ -392,29 +392,29 @@ describe("KnowledgeCard", () => {
     it("says why work is paused, in words", async () => {
       await open({
         backgroundStatus: () =>
-          Promise.resolve(status({ plans: [{ adapter: "claude", fallback: false, windows: [], paused: { reason: "off", resumesAt: null } }] })),
+          Promise.resolve(status({ plans: [{ adapter: "claude", fallback: false, windows: [], paused: { reason: "unavailable", resumesAt: null } }] })),
       });
-      expect(q('[data-testid="knowledge-budget-status"]')!.textContent).toContain("Off on plans");
+      expect(q('[data-testid="knowledge-budget-status"]')!.textContent).toContain("Knowledge is waiting: the budget couldn't be read. It will retry.");
     });
 
-    it("Change opens Settings at the Background work card", async () => {
+    it("Background work settings opens Settings at the Background work section", async () => {
       await open({ backgroundStatus: () => Promise.resolve(status()) });
       const seen: unknown[] = [];
       const on = (e: Event) => seen.push((e as CustomEvent).detail);
       window.addEventListener("manta-open-settings", on);
       try {
-        await click(button("Change"));
+        await click(button("Background work settings"));
       } finally {
         window.removeEventListener("manta-open-settings", on);
         clearBackgroundWorkFocus();
       }
-      expect(seen).toEqual([{ section: "models", backgroundWork: true }]);
+      expect(seen).toEqual([{ section: "background", backgroundWork: true }]);
     });
 
     it("an older box (no budget channel) shows nothing", async () => {
       await open({ backgroundStatus: () => Promise.reject(new Error("unknown rpc channel: background:status")) });
       expect(q('[data-testid="knowledge-budget-status"]')).toBeNull();
-      expect(button("Change")).toBeUndefined();
+      expect(button("Background work settings")).toBeUndefined();
     });
 
     it("a failed read says so and Retry reads again", async () => {

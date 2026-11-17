@@ -1,9 +1,10 @@
-// ===== BackgroundWorkCard (background work budget spec §10, §17.20/§17.21) =====
+// ===== BackgroundWorkCard (background work budget spec §10, §17.20/§17.21; follow-ups spec §3, §4) =====
 //
-// Settings → Models: the ONE budget for everything Manta does in the background (shared knowledge and the
-// background CTO). Two controls — "Background work on plans" (Off / Light / Normal, the existing Segmented) and
-// "API keys: daily cap" (dollars) — each shown only when it applies, plus a status row per plan with the reason
-// and the local time when background work resumes.
+// Settings → Background work: the ONE budget for everything Manta does in the background (shared knowledge and
+// the background CTO). Controls — "Background work on plans" (Off / Light / Normal, the existing Segmented),
+// "Keep running when my plan is busy" (a checkbox, hidden while the level is Off) and "API keys: daily cap"
+// (dollars) — each shown only when it applies, plus a status row per plan with the reason and the local time
+// when background work resumes.
 //
 // Every control reports its outcome (AGENTS.md "never stub a control"): a save says what the box now has, a
 // failure shows the box's message and puts the previous value back. A half-typed cap survives the 30 s refresh
@@ -16,11 +17,14 @@ import { INPUT_BASE, LABEL_CLS } from "../Field";
 import { Segmented } from "../Segmented";
 import { UpdateBoxNote } from "../components/UpdateBoxNote";
 import type { BackgroundWorkLevel, BudgetStatus } from "../../shared/api";
+import { Checkbox } from "../Checkbox";
 import {
   CAP_HELP,
   LEVEL_HELP,
   LEVEL_LIMITS_HELP,
   LEVEL_OPTIONS,
+  RUN_WHEN_BUSY_HELP,
+  RUN_WHEN_BUSY_LABEL,
   capInputText,
   formatUsd,
   levelLabel,
@@ -37,6 +41,7 @@ import {
   useBackgroundStatus,
 } from "../useBackgroundStatus";
 
+type Patch = { level?: BackgroundWorkLevel; dailyCapUsd?: number; runWhenBusy?: boolean };
 type Notice = { tone: "ok" | "error"; text: string };
 const NOTICE_CLS = { ok: "text-ok", error: "text-danger" } as const;
 const ROW_CLS = { info: "text-text-muted", warn: "text-warn" } as const;
@@ -50,6 +55,7 @@ export function BackgroundWorkCard() {
   const savingRef = useRef(false);
   // What the user is choosing/typing right now; null = show what the box has.
   const [pendingLevel, setPendingLevel] = useState<BackgroundWorkLevel | null>(null);
+  const [pendingBusy, setPendingBusy] = useState<boolean | null>(null);
   const [capText, setCapText] = useState<string | null>(null);
   const [capError, setCapError] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -58,6 +64,8 @@ export function BackgroundWorkCard() {
   const alive = useRef(true);
   const capId = useId();
   const capHelpId = useId();
+  const busyId = useId();
+  const busyHelpId = useId();
   const capErrorId = useId();
   useEffect(() => {
     alive.current = true;
@@ -108,14 +116,17 @@ export function BackgroundWorkCard() {
   }
 
   const status: BudgetStatus = state.status;
+  const showLevel = showLevelControl(status);
   const level = pendingLevel ?? status.level;
+  // An older box sends no such field: the control isn't offered rather than shown dead.
+  const showRunWhenBusy = showLevel && level !== "off" && typeof status.runWhenBusy === "boolean";
+  const runWhenBusy = pendingBusy ?? status.runWhenBusy === true;
   const capShown = capText ?? capInputText(status.dailyCapUsd);
   const capDirty = capText !== null && capText.trim() !== capInputText(status.dailyCapUsd);
   const rows = statusRows(status);
-  const showLevel = showLevelControl(status);
   const showCap = showCapControl(status);
 
-  const run = async (patch: { level?: BackgroundWorkLevel; dailyCapUsd?: number }, check: (s: BudgetStatus) => string | null): Promise<boolean> => {
+  const run = async (patch: Patch, check: (s: BudgetStatus) => string | null): Promise<boolean> => {
     if (savingRef.current) return false;
     savingRef.current = true;
     setSaving(true);
@@ -150,12 +161,18 @@ export function BackgroundWorkCard() {
       if (alive.current) {
         setSaving(false);
         setPendingLevel(null);
+        setPendingBusy(null);
       }
     }
   };
 
-  const okText = (patch: { level?: BackgroundWorkLevel; dailyCapUsd?: number }, fresh: BudgetStatus | null): string => {
+  const okText = (patch: Patch, fresh: BudgetStatus | null): string => {
     if (patch.level !== undefined) return `Background work on plans set to ${levelLabel(fresh?.level ?? patch.level)}.`;
+    if (patch.runWhenBusy !== undefined) {
+      return (fresh?.runWhenBusy ?? patch.runWhenBusy)
+        ? "Background work will keep running when your plan is busy."
+        : "Background work will wait when your plan is busy.";
+    }
     return `API-key daily cap set to ${formatUsd(fresh?.dailyCapUsd ?? patch.dailyCapUsd ?? 0)}.`;
   };
 
@@ -163,6 +180,14 @@ export function BackgroundWorkCard() {
     if (savingRef.current || next === status.level) return;
     setPendingLevel(next);
     void run({ level: next }, (s) => (s.level === next ? null : `The box kept ${levelLabel(s.level)} instead of ${levelLabel(next)}.`));
+  };
+
+  const pickRunWhenBusy = (next: boolean) => {
+    if (savingRef.current || next === status.runWhenBusy) return;
+    setPendingBusy(next);
+    void run({ runWhenBusy: next }, (s) =>
+      s.runWhenBusy === next ? null : `The box kept "${RUN_WHEN_BUSY_LABEL}" ${s.runWhenBusy ? "on" : "off"} instead of ${next ? "on" : "off"}.`,
+    );
   };
 
   const onCapSubmit = (e: React.FormEvent) => {
@@ -210,6 +235,14 @@ export function BackgroundWorkCard() {
           </div>
           <Segmented label="Background work on plans" options={LEVEL_OPTIONS} value={level} onChange={pickLevel} hook="manta-bgwork-level" />
           <div className="text-meta text-text-faint max-w-[62ch]">{LEVEL_HELP}</div>
+          {showRunWhenBusy && (
+            <div className="space-y-1 pt-1">
+              <Checkbox id={busyId} checked={runWhenBusy} onChange={pickRunWhenBusy} disabled={saving} label={RUN_WHEN_BUSY_LABEL} describedBy={busyHelpId} />
+              <div id={busyHelpId} className="text-meta text-text-faint max-w-[62ch]">
+                {RUN_WHEN_BUSY_HELP}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

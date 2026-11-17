@@ -8,6 +8,7 @@ import {
   Key,
   BookOpen,
   Sparkles,
+  Gauge,
   GitBranch,
   Folder,
   Plug,
@@ -246,6 +247,7 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   box: Terminal,
   accounts: KeyRound,
   models: Sparkles,
+  background: Gauge,
   sessions: GitBranch,
   knowledge: BookOpen,
   files: Folder,
@@ -1060,6 +1062,14 @@ export function Settings({
         </SettingsRow>
       );
     }
+    if (entry.id === "backgroundWorkCard") {
+      // Search hit for the Background work section (a `custom` entry): jump to it.
+      return (
+        <SettingsRow name={entry.label} help={entry.help}>
+          <Button tone="default" onClick={() => { setQuery(""); setActiveTab("background"); }}>Open Background work</Button>
+        </SettingsRow>
+      );
+    }
     const cur = entry.configKey ? values[entry.configKey] : undefined;
     switch (entry.control) {
       case "toggle":
@@ -1273,10 +1283,16 @@ export function Settings({
             <ModelsCard />
             <SummaryModelCard />
             <ModelLedgerCard />
-            <BackgroundWorkCard />
             <OptimizerCard />
           </GroupCard>
         </>
+      );
+    }
+    if (section === "background") {
+      return (
+        <GroupCard>
+          <BackgroundWorkCard />
+        </GroupCard>
       );
     }
     if (section === "extensions") {

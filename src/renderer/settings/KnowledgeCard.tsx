@@ -525,6 +525,7 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
         <div className="py-3 empty:hidden" data-testid="knowledge-budget">
           <BackgroundStatusLine
             label="Background work budget"
+            subject="Knowledge"
             state={budget.state}
             onRetry={() => void budget.refresh()}
             share={{ workTypes: KNOWLEDGE_WORK_TYPES, noun: "Knowledge work" }}
