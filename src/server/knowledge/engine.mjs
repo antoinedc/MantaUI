@@ -21,6 +21,7 @@
 // NEVER call `registry.identify()` while holding the store lock: it commits
 // `projects.json` through the same lock.
 
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startPoller } from "../startPoller.mjs";
 import { estimateTokens as defaultEstimateTokens } from "../ctoSessions.mjs";
@@ -37,6 +38,8 @@ import { createBriefings } from "./briefing.mjs";
 import { createPageIndex, createSearch } from "./search.mjs";
 import { createBudget } from "./budget.mjs";
 import { createChangeLog } from "./changes.mjs";
+import { createCuratorLayer } from "./curator.mjs";
+import { createRulesStore } from "./rules.mjs";
 import { listSessionsPage as defaultListSessionsPage } from "./backfillSource.mjs";
 import { statePath } from "../../shared/paths.mjs";
 
@@ -66,6 +69,19 @@ const disabled = (reason = "Shared knowledge is off.") => new KnowledgeError("di
  *   fireNotify({message, title, tag})        push.fireNotify
  *   estimateTokens(text)                     default: ctoSessions.estimateTokens
  *   runEphemeral / resolveModelForClass      the CTO task-class runner, carried for the curator [INTEGRATION: runner]
+ *
+ * The curator layer (curator.mjs, tidy.mjs, undo.mjs, globalBlock.mjs) is wired here. Each part is OFF when
+ * its dep is absent and `status().parts` says so — never a crash:
+ *   runEphemeral({taskClass, operation, context, directory, deps:{reportCost, validate}}) → {text}|{ok:false, code}
+ *                                            the curator's model calls (absent → no curation)
+ *   isUserAuthoredRef + readMessages         user-authored evidence (absent → no rules/preferences)
+ *   readShellCommands(sessionID) → string[]|null   shell tool-call inputs of a session (absent → commands on pages refused)
+ *   corrections {runWeekly, recurrenceSince}       the correction detector (A2)
+ *   repoWriter {applyRules, sync, revert}          outward repository writes (A3)
+ *   skills {detect, retire, remove, sourceProjects[, list]}   learned skills (A3)
+ *   globalAgentsPath                         the global opencode AGENTS.md (absent → no global block)
+ *   refResolves(ref) → boolean|null          tidy re-verification override (default: messages, pages and files)
+ *   curatorMs                                curator poll interval (default 60 s)
  */
 export function createKnowledgeEngine(deps = {}) {
   const { config } = deps;
@@ -80,6 +96,8 @@ export function createKnowledgeEngine(deps = {}) {
   let initError = null;
   let readyP = null;
   let poller = null;
+  let curatorPoller = null;
+  let curatorTick = null;
   let enabledMemo = { at: 0, value: null };
   let derivedRunning = null;
   let derivedAgain = false;
@@ -163,6 +181,7 @@ export function createKnowledgeEngine(deps = {}) {
         onDrop: (slug, n) => changes.add({ kind: "dropped", summary: `Dropped ${n} queued note${n === 1 ? "" : "s"}`, reason: "The note queue for this project was full (500).", area: "project", slug }),
       });
       const budget = createBudget({ state, settings, getPrices: deps.getPrices, bandOf: deps.bandOf, now });
+      const rules = createRulesStore({ store, state, now });
       const briefings = createBriefings({
         state,
         store,
@@ -176,13 +195,28 @@ export function createKnowledgeEngine(deps = {}) {
           const e = await enabledState();
           return e.enabled && !e.observeOnly;
         },
-        projectRules: deps.projectRules,
+        projectRules: deps.projectRules ?? ((slug, o) => rules.projectRulesForBriefing(slug, o)),
         dir: join(dir, ".briefings"),
         now,
       });
       const pageIndex = createPageIndex({ state, store, now });
       const search = createSearch({ state, store, registry, sessionMap, settings, searchTranscripts: deps.searchTranscripts, readMessages: deps.readMessages });
-      c = { state, scanner, store, registry, resolver, changes, sessionMap, queue, budget, briefings, pageIndex, search };
+      const briefingsDir = join(dir, ".briefings");
+      const layerDeps = {
+        ...deps,
+        sessionBriefingText:
+          deps.sessionBriefingText ??
+          (async (sid) => {
+            if (typeof sid !== "string" || !/^[A-Za-z0-9_-]{3,80}$/.test(sid)) return "";
+            try {
+              return await readFile(join(briefingsDir, `${sid}.txt`), "utf8");
+            } catch {
+              return "";
+            }
+          }),
+      };
+      const layer = createCuratorLayer({ store, state, queue, settings, budget, changes, registry, sessionMap, briefings, rules, git, dir, deps: layerDeps, now, log, estimateTokens });
+      c = { state, scanner, store, registry, resolver, changes, sessionMap, queue, budget, briefings, pageIndex, search, layer };
       store.onCommit(() => void scheduleDerived());
       await scheduleDerived();
       await maybeNotifyUpgrade();
@@ -233,11 +267,30 @@ export function createKnowledgeEngine(deps = {}) {
   async function start() {
     await ready();
     if (c && !poller) poller = startPoller(maintenance, { intervalMs: deps.maintenanceMs ?? 60_000, label: "knowledge", now });
+    if (c && !curatorPoller) {
+      curatorPoller = startPoller(
+        async () => {
+          const layer = c?.layer;
+          if (!layer) return;
+          curatorTick = layer.tick();
+          try {
+            await curatorTick;
+          } finally {
+            curatorTick = null;
+          }
+        },
+        { intervalMs: deps.curatorMs ?? 60_000, label: "knowledge-curator", now, immediate: deps.curatorImmediate ?? false },
+      );
+    }
     return status();
   }
   async function stop() {
     poller?.stop();
     poller = null;
+    curatorPoller?.stop();
+    curatorPoller = null;
+    if (curatorTick) await Promise.race([curatorTick.catch(() => {}), new Promise((r) => setTimeout(r, 3000).unref())]);
+    if (derivedRunning) await derivedRunning.catch(() => {});
     if (c) {
       c.state.close();
     }
@@ -341,6 +394,9 @@ export function createKnowledgeEngine(deps = {}) {
       queued,
       briefings: { startedThisWeek: wk.served, missedThisWeek: wk.missed },
       backfillDone: c.sessionMap.backfillDone(),
+      parts: c.layer.capabilities(),
+      curatorBusy: c.layer.curator.isBusy(),
+      lastTidy: Number(c.state.kvGet("tidy.lastRun") ?? 0) || null,
     };
   }
 
@@ -359,6 +415,7 @@ export function createKnowledgeEngine(deps = {}) {
       void c.briefings.precomputeAll().catch((e) => log("[knowledge] briefing refresh failed:", e?.message ?? e));
     }
     try {
+      await c?.layer.onSettingsChanged({ prev, next });
       await deps.onSettingsChanged?.({ prev, next });
     } catch (e) {
       log("[knowledge] onSettingsChanged failed:", e?.message ?? e);
@@ -380,10 +437,10 @@ export function createKnowledgeEngine(deps = {}) {
     if (!change) return { ok: false, reason: "That change no longer exists." };
     if (change.undoneAt) return { ok: false, reason: "That change was already undone." };
     if (!change.undoable) return { ok: false, reason: "That change can't be undone." };
-    if (!deps.undo) return { ok: false, reason: "Undo isn't available yet on this box." };
+    const undoImpl = deps.undo ?? c.layer.undo;
     let res;
     try {
-      res = await deps.undo(change, { store: c.store, changes: c.changes, registry: c.registry });
+      res = await undoImpl(change, { store: c.store, changes: c.changes, registry: c.registry });
     } catch (e) {
       res = { ok: false, reason: isKnowledgeError(e) ? e.message : `Undo failed: ${String(e?.message ?? e).slice(0, 200)}` };
     }
@@ -418,6 +475,16 @@ export function createKnowledgeEngine(deps = {}) {
     refreshDerived: scheduleDerived,
     settings,
     deps,
+    /** Run one curator batch for a project now (the same path the timer takes). */
+    async runCurator(slug, opts) {
+      const ctx = await requireOn();
+      return ctx.layer.curator.runBatch(slug, opts);
+    },
+    /** Run the weekly tidy-up now. */
+    async runTidy(opts) {
+      const ctx = await requireOn();
+      return ctx.layer.tidy.run(opts);
+    },
     // Foundation handles for the curator/capture layer — valid after `ready()` resolves.
     get store() {
       return c?.store ?? null;
@@ -448,6 +515,10 @@ export function createKnowledgeEngine(deps = {}) {
     },
     get pageIndex() {
       return c?.pageIndex ?? null;
+    },
+    /** The curator layer: curator, tidy, tombstones, rules, globalBlock, validator, undo, downgrade. */
+    get layer() {
+      return c?.layer ?? null;
     },
     effectiveFor,
   };
