@@ -26,7 +26,7 @@ import { KnowledgeError } from "./errors.mjs";
 
 export const CURATOR = Object.freeze({ name: "Manta curator", email: "curator@manta.invalid" });
 export const USER_FALLBACK = Object.freeze({ name: "User", email: "user@manta.invalid" });
-export const GITIGNORE = ".queue/\n.repos/\n.briefings/\nstate.sqlite\nstate.sqlite-wal\nstate.sqlite-shm\nstate.sqlite-journal\n";
+export const GITIGNORE = ".queue/\n.repos/\n.briefings/\nstate.sqlite\nstate.sqlite-wal\nstate.sqlite-shm\nstate.sqlite-journal\nsearch-index.sqlite\nsearch-index.sqlite-wal\nsearch-index.sqlite-shm\nsearch-index.sqlite-journal\n";
 const EMPTY_TOMBSTONES = `${JSON.stringify({ version: 1, tombstones: [] }, null, 2)}\n`;
 const SHA_RE = /^[0-9a-f]{7,40}$/;
 const SEP = "\x1f";

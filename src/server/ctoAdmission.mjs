@@ -1395,6 +1395,8 @@ export function createCtoAdmission({
                 attachments: claimed.attachments,
                 mentions: claimed.mentions,
                 messageID: claimed.messageID,
+                // Shared-knowledge §9.2: the CTO conversation's human sends are user-authored.
+                origin: claimed.origin === "human" ? "user" : undefined,
                 signal,
               }),
         `${isCommand ? "sendCommand" : "sendPrompt"} (${claimed.id})`,

@@ -6,6 +6,7 @@ import {
   Terminal,
   KeyRound,
   Key,
+  BookOpen,
   Sparkles,
   GitBranch,
   Folder,
@@ -245,6 +246,7 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   accounts: KeyRound,
   models: Sparkles,
   sessions: GitBranch,
+  knowledge: BookOpen,
   files: Folder,
   extensions: Plug,
   secrets: Key,
@@ -1470,9 +1472,9 @@ export function Settings({
         </>
       );
     }
-    if (section === "sessions") {
+    if (section === "knowledge") {
       return (
-        <GroupCard title="Knowledge">
+        <GroupCard title="Shared knowledge">
           <KnowledgeCard onNavigated={onClose} />
         </GroupCard>
       );

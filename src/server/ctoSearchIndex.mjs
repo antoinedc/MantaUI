@@ -286,6 +286,12 @@ function extractEvidence(part, limits) {
  *   node:sqlite module (tests count connections; `null` → `unsupported`).
  *   Default: lazy `import("node:sqlite")` on first use.
  * @param {number} [deps.maxBytes]  size cap of the index (live bytes); default 1 GiB.
+ * @param {boolean} [deps.readOnly]  a SEARCH-ONLY instance over an index another instance (usually in
+ *   another thread) writes: it opens the existing, Manta-marked file read-only, never initializes,
+ *   never writes, and `sync()` refuses. An index that does not exist yet answers `index_error`.
+ * @param {boolean} [deps.wal]  put the index in WAL mode on open (writer side), so a reader never
+ *   waits for a writer — a long FTS5 `optimize` included. Default off (rollback journal, as before).
+ * @param {number} [deps.busyTimeoutMs]  SQLite busy timeout on the owned connection (0 = none).
  */
 export function createCtoSearchIndex(deps = {}) {
   const {
@@ -294,6 +300,9 @@ export function createCtoSearchIndex(deps = {}) {
     now = Date.now,
     sqliteModule,
     maxBytes = CTO_SEARCH_INDEX_LIMITS.maxIndexBytes,
+    readOnly = false,
+    wal = false,
+    busyTimeoutMs = 0,
   } = deps;
 
   let db = null;
@@ -372,9 +381,12 @@ export function createCtoSearchIndex(deps = {}) {
       let ro = null;
       try {
         ro = new mod.DatabaseSync(path, { readOnly: true });
-        const check = ro.prepare("PRAGMA quick_check").get();
-        if (!check || check.quick_check !== "ok") {
-          return { status: "index_corrupt", detail: `index failed quick_check (${check?.quick_check ?? "unknown"}); file retained — explicit recovery required` };
+        // A search-only instance trusts the writer's own check (a quick_check reads the whole file).
+        if (!readOnly) {
+          const check = ro.prepare("PRAGMA quick_check").get();
+          if (!check || check.quick_check !== "ok") {
+            return { status: "index_corrupt", detail: `index failed quick_check (${check?.quick_check ?? "unknown"}); file retained — explicit recovery required` };
+          }
         }
         const appId = ro.prepare("PRAGMA application_id").get();
         if (!appId || appId.application_id !== APPLICATION_ID) {
@@ -399,6 +411,8 @@ export function createCtoSearchIndex(deps = {}) {
           }
         }
       }
+    } else if (readOnly) {
+      return { status: "index_error", detail: "the search index has not been built yet" };
     } else {
       try {
         mkdirSync(dirname(path), { recursive: true });
@@ -408,13 +422,27 @@ export function createCtoSearchIndex(deps = {}) {
     }
     let d;
     try {
-      d = new mod.DatabaseSync(path);
+      d = readOnly ? new mod.DatabaseSync(path, { readOnly: true }) : new mod.DatabaseSync(path);
     } catch (e) {
       return { status: classifyError(e), detail: `cannot open index: ${e?.message ?? e}` };
     }
+    if (busyTimeoutMs > 0) {
+      try {
+        d.exec(`PRAGMA busy_timeout = ${Math.trunc(busyTimeoutMs)}`);
+      } catch {
+        /* non-fatal */
+      }
+    }
+    if (readOnly) return { db: d };
     try {
       // A brand-new file: let freed pages be handed back to the OS after an eviction.
+      // (auto_vacuum must be chosen BEFORE the journal mode or any table exists.)
       if (d.prepare("PRAGMA page_count").get().page_count === 0) d.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      if (wal) {
+        d.exec("PRAGMA journal_mode = WAL");
+        // An eviction's optimize rewrites the whole index through the WAL: hand the file back afterwards.
+        d.exec("PRAGMA journal_size_limit = 67108864");
+      }
       d.exec("BEGIN IMMEDIATE");
       d.exec(DDL);
       const ver = d.prepare("SELECT value FROM index_meta WHERE key = 'schema_version'").get();
@@ -855,6 +883,7 @@ export function createCtoSearchIndex(deps = {}) {
     async sync({ limit, provenanceFilter: provenanceOverride } = {}) {
       if (closed) return closedEnvelope("sync");
       const base = baseEnvelope();
+      if (readOnly) return { ...failEnvelope("invalid_input", "this index instance is read-only; sync on the writer"), scanned: zeroCounts(), sweep: null };
       const batch = clampLimit(limit, CTO_SEARCH_INDEX_LIMITS.syncBatchDefault, CTO_SEARCH_INDEX_LIMITS.syncBatchMax);
       const resolveProvenance = provenanceOverride ?? provenanceFilter;
 

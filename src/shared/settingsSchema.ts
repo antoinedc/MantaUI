@@ -25,6 +25,7 @@ export const PRESETS = ["economy", "balanced", "performance"];
 //   Models                     ← which model, cache TTL
 //   ── AGENT ──
 //   Sessions                   ← per-session behaviour
+//   Knowledge                  ← what sessions learn and share (desktop only)
 //   Files                      ← agent ↔ laptop file flow
 //   Extensions                 ← plugins, skill registries, AI-CLI flags
 //   Secrets                    ← credentials agents can use (desktop only)
@@ -52,6 +53,7 @@ export type SettingSectionId =
   | "accounts"
   | "models"
   | "sessions"
+  | "knowledge"
   | "files"
   | "extensions"
   | "secrets"
@@ -103,6 +105,7 @@ export const SETTING_SECTIONS: SettingSection[] = [
   { id: "accounts", label: "Accounts", group: "SETUP" },
   { id: "models", label: "Models", group: "SETUP", wide: true },
   { id: "sessions", label: "Sessions", group: "AGENT" },
+  { id: "knowledge", label: "Knowledge", group: "AGENT" },
   { id: "files", label: "Files", group: "AGENT" },
   { id: "extensions", label: "Extensions", group: "AGENT" },
   // Wide: the grouped tables (name · hint · updated · actions) need the room.
@@ -343,6 +346,21 @@ export const SETTINGS: SettingEntry[] = [
     platform: "mobile",
     default: false,
     group: "Permissions",
+  },
+
+  // ----- knowledge (shared knowledge, docs/superpowers/specs/2026-11-16-shared-knowledge.md §4) -----
+  // One custom anchor: KnowledgeCard draws the real controls (switch, daily cap,
+  // repo rules, sharing, per-project list, recent changes with undo). It exists
+  // so settings search lists the section by what is in it.
+  {
+    id: "knowledgeCard",
+    section: "knowledge",
+    label: "Shared knowledge",
+    help: "Notes Manta keeps from your sessions and shares between them and between projects: the on/off switch, daily spend cap, repo rules (box only, pull request, direct), sharing (share and read, read only, private), the per-project list, and recent changes you can undo.",
+    control: "custom",
+    configKey: null,
+    platform: "desktop",
+    default: null,
   },
 
   // ----- files (agent ↔ laptop file flow) -----

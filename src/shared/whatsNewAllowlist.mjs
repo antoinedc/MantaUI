@@ -31,6 +31,7 @@ export const WHATS_NEW_SETTINGS_SECTIONS = Object.freeze([
   "accounts",
   "models",
   "sessions",
+  "knowledge",
   "files",
   "extensions",
   "secrets",

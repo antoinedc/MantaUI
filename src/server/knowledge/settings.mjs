@@ -140,7 +140,7 @@ export function effectiveFor(settings, slug) {
 
 /**
  * deps: config {get(), update(patch)}, registry (list/get), getRepoAccess({kind, host, owner, repo}) →
- * {canPush, isFork, defaultBranch}, hasForgeLogin(kind) → boolean, now.
+ * {canPush, isFork, defaultBranch}, hasForgeLogin(kind, host) → boolean, now.
  */
 export function createSettings({ config, registry, getRepoAccess, hasForgeLogin, now = Date.now } = {}) {
   const accessCache = new Map(); // canonicalId → {at, value}
@@ -158,7 +158,7 @@ export function createSettings({ config, registry, getRepoAccess, hasForgeLogin,
     if (!getRepoAccess || !hasForgeLogin) return { allowed: false, reason: "Repository access can't be checked on this box." };
     let login = false;
     try {
-      login = (await hasForgeLogin(parts.kind)) === true;
+      login = (await hasForgeLogin(parts.kind, parts.host)) === true;
     } catch {
       login = false;
     }
@@ -173,7 +173,8 @@ export function createSettings({ config, registry, getRepoAccess, hasForgeLogin,
         value = null;
       }
       hit = { at: t, value };
-      accessCache.set(project.canonicalId, hit);
+      // A failed check is not remembered: a flaky network must not keep outward modes off for 10 minutes.
+      if (value) accessCache.set(project.canonicalId, hit);
     }
     const a = hit.value;
     if (!a) return { allowed: false, reason: "Couldn't check your access to this repository." };
@@ -226,7 +227,8 @@ export function createSettings({ config, registry, getRepoAccess, hasForgeLogin,
           canonicalId: p.canonicalId,
           repoRules: e.repoRules,
           sharing: e.sharing,
-          overridden: { repoRules: s.projects[p.slug]?.repoRules !== undefined, sharing: s.projects[p.slug]?.sharing !== undefined },
+          repoRulesOverride: s.projects[p.slug]?.repoRules !== undefined,
+          sharingOverride: s.projects[p.slug]?.sharing !== undefined,
           outwardAllowed: o.allowed,
         };
         if (!o.allowed) row.outwardReason = o.reason;

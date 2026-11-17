@@ -7,7 +7,7 @@
 // one less auth surface.
 
 import { createServer } from "node:http";
-import { resolvePipelineSession, isInternalSession } from "./internalSessions.mjs";
+import { resolvePipelineSession, isInternalSession, internalSessionIds } from "./internalSessions.mjs";
 import { withInternalMarker } from "./internalSessionMarker.mjs";
 import { resolvePlanParent } from "./ctoAct.mjs";
 import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
@@ -135,8 +135,12 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { createKnowledgeEngine } from "./knowledge/engine.mjs";
 import { handleKnowledgeRoute } from "./knowledge/routes.mjs";
+import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef } from "./knowledge/integration.mjs";
 import { createListPrices as createKnowledgeListPrices } from "./knowledge/pricing.mjs";
 import { createMessageReader as createKnowledgeMessageReader } from "./knowledge/search.mjs";
+import { createPromptOrigins } from "./promptOrigins.mjs";
+import { createTranscriptIndex } from "./transcriptIndex.mjs";
+import { describeModel } from "../shared/modelGuide.mjs";
 import { createRoutinesEngine, startRoutinesPoller, defaultStoreDeps as routinesStoreDeps, RoutineError } from "./routines.mjs";
 import { createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
 import { createClaudeSeatHealth } from "./claudeSeatHealth.mjs";
@@ -280,7 +284,7 @@ import {
 } from "./forge/poller.mjs";
 import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
-import { getAdapter } from "./forge/index.mjs";
+import { getAdapter, forgeRepoAccess } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
 import { detectForgeWithHosts } from "./forge/selfhost.mjs";
 import { startForgeHealthCheck, healthCheckRepoHook } from "./forge/webhook.mjs";
@@ -648,6 +652,11 @@ const handoffEngine = createProductionHandoff({
   loadState: () => readJsonSync(statePath("handoffs.json"), null),
   saveState: (snapshot) => writeJsonAtomic(statePath("handoffs.json"), JSON.stringify(snapshot, null, 2)),
 });
+// Shared knowledge §9.2: the durable record of WHO authored each prompt message. Installed before
+// anything can send one (the CTO admission tick below may dispatch at boot); the SAME instance is
+// the knowledge engine's evidence check (`isUserAuthoredRef`).
+const promptOrigins = createPromptOrigins();
+oc.setPromptOrigins(promptOrigins);
 const promptDelivery = createPromptDelivery({
   // The admission seam: resolves to the live session, parks behind a fence.
   sendPrompt: (args) => handoffEngine.admitPrompt(args),
@@ -2020,11 +2029,22 @@ const optimizerPrices = createOptimizerPrices({
 });
 
 // Shared knowledge (src/server/knowledge/, spec docs/superpowers/specs/2026-11-16-shared-knowledge.md):
-// the box's cross-session memory. Independent of the CTO engine; its own budget and pollers.
-// The opencode pump feeds it session events (observeRaw below); /api/knowledge/* serves the AI
-// tools and the `knowledge:*` rpc channels the desktop Knowledge card. Integration points not
-// wired here yet (each degrades to "feature absent", never to an error): searchTranscripts,
-// isUserAuthoredRef, getRepoAccess/hasForgeLogin, the task-class runner, the curator's undo.
+// the box's cross-session memory. Independent of the CTO engine (it starts below whatever `ctoEnabled`
+// says); its own budget and pollers. The opencode pump feeds it session events (observeRaw below);
+// /api/knowledge/* serves the AI tools and the `knowledge:*` rpc channels the desktop Knowledge card.
+// Not wired here yet (each degrades to "feature absent", never to an error): the task-class runner, the
+// curator, capture and the curator's undo — they plug in through the engine's deps/getters.
+//
+// Transcript search runs in worker threads (transcriptIndex.mjs): the index sync, whose size-cap
+// eviction ends in a 20-60 s/GB FTS5 optimize, must never block this process's event loop.
+const knowledgeForge = createKnowledgeForgeAdapters({ forgeRepoAccess, resolveToken: forgeResolveToken });
+const knowledgeTranscripts = createTranscriptIndex({
+  provenance: internalSessionIds,
+  isEnabled: async () => {
+    const s = await knowledgeEngine.settings.get();
+    return s.enabled && !s.observeOnly;
+  },
+});
 const knowledgeEngine = createKnowledgeEngine({
   config: { get: () => local.configGet(), update: (patch) => local.configUpdate(patch) },
   getSession: async (sessionID) => {
@@ -2033,6 +2053,12 @@ const knowledgeEngine = createKnowledgeEngine({
   },
   isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
   readMessages: createKnowledgeMessageReader({ listMessages: (sessionID) => oc.listMessages(sessionID) }),
+  searchTranscripts: knowledgeTranscripts.searchTranscripts,
+  promptOrigins,
+  isUserAuthoredRef: createKnowledgeIsUserAuthoredRef(promptOrigins),
+  getRepoAccess: knowledgeForge.getRepoAccess,
+  hasForgeLogin: knowledgeForge.hasForgeLogin,
+  bandOf: createKnowledgeBandOf(describeModel),
   getPrices: createKnowledgeListPrices({
     listProviders: oc.getProviders,
     readConfig: readOpencodeConfig,
@@ -2040,7 +2066,11 @@ const knowledgeEngine = createKnowledgeEngine({
   }).get,
   fireNotify: (args) => push.fireNotify(args),
 });
-knowledgeEngine.start().catch((e) => console.warn("[knowledge] start failed:", e?.message ?? e));
+// The index file lives inside the store's folder: start indexing only once the store has written its .gitignore.
+knowledgeEngine
+  .start()
+  .catch((e) => console.warn("[knowledge] start failed:", e?.message ?? e))
+  .finally(() => knowledgeTranscripts.start());
 
 // ---------------------------------------------------------------------------
 // Optimizer P2.4 (BET-1346) — background compaction scheduler + constraint
