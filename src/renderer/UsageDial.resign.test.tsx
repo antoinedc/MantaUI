@@ -2,7 +2,7 @@
 //
 // The "Logged out" badge in the usage popover and the sign-back-in modal it
 // opens (spec 2026-10-15-seat-resign): shown for signed-out / expired seats —
-// in the conversation's header and in "Other seats" — never for a healthy one;
+// in the conversation's highlighted first row and in the other seat rows — never for a healthy one;
 // pressing it closes the popover and opens the modal OUTSIDE the popover.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -83,20 +83,22 @@ describe("UsageDial — Logged out badge", () => {
     expect(popover.textContent).not.toContain("Logged out");
   });
 
-  it.each<SeatState>(["signed-out", "expired"])("shows on an Other seats row that is %s, and only on that row", async (status) => {
+  it.each<SeatState>(["signed-out", "expired"])("shows on another seat's row that is %s, and only on that row", async (status) => {
     const { popover } = await open(viewWith({ s3: status }));
     const row = popover.querySelector('[data-seat-id="s3"]') as HTMLElement;
     expect(badges(row)).toHaveLength(1);
     expect(badges(popover)).toHaveLength(1);
-    expect(popover.querySelector('[data-testid="usage-conversation-seat"]')!.textContent).not.toContain("Logged out");
+    expect(badges(popover.querySelector('[data-current="true"]')!)).toHaveLength(0);
     expect(popover.textContent).not.toContain("Fix"); // the old link is gone
   });
 
-  it.each<SeatState>(["signed-out", "expired"])("shows in the conversation's seat header when that seat is %s", async (status) => {
+  it.each<SeatState>(["signed-out", "expired"])("shows in the conversation's own (highlighted first) row when that seat is %s", async (status) => {
     const { popover } = await open(viewWith({ s1: status }));
-    const header = popover.querySelector('[data-testid="usage-conversation-seat"]') as HTMLElement;
-    expect(badges(header)).toHaveLength(1);
+    const first = popover.querySelector('[data-seat-id="s1"]') as HTMLElement;
+    expect(first.getAttribute("data-current")).toBe("true");
+    expect(badges(first)).toHaveLength(1);
     expect(badges(popover)).toHaveLength(1);
+    expect(popover.querySelector('[data-testid="usage-conversation-seat"]')).toBeNull();
   });
 
   it("an unknown-state seat (no reading yet) is not badged", async () => {
@@ -118,7 +120,7 @@ describe("UsageDial — Logged out badge", () => {
     expect(api.calls.accountsResignSeat[0][0]).toEqual({ provider: "claude", seatId: "s3" });
   });
 
-  it("the header badge opens the modal for the conversation's own seat", async () => {
+  it("the first-row badge opens the modal for the conversation's own seat", async () => {
     const { api, popover } = await open(viewWith({ s1: "expired" }));
     await act(async () => {
       badges(popover)[0].click();

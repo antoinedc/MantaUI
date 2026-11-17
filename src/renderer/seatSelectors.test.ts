@@ -3,7 +3,6 @@ import {
   combinedSeatWindows,
   usageDialState,
   describeSeatLine,
-  formatLastMove,
   hasSeatChoice,
   isMoveComing,
   isSameOrgMove,
@@ -200,25 +199,6 @@ describe("isSameOrgMove", () => {
     const v = threeSeatView();
     expect(isSameOrgMove(v, "s1", "s2")).toBe(true);
     expect(isSameOrgMove(v, "s1", "s3")).toBe(false);
-  });
-});
-
-describe("formatLastMove", () => {
-  it("names the origin, reason and age; hides after 5h", () => {
-    // The words are the box's (`line`, `resentText`); the client adds only the age + the 5h window.
-    const m = { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "load", line: "Moved from Seat 1 · to balance load" };
-    expect(formatLastMove(m, NOW)?.line).toBe("Moved from Seat 1 · to balance load · 2h ago");
-    expect(formatLastMove({ ...m, at: NOW - 6 * 3_600_000 }, NOW)).toBeNull();
-    expect(formatLastMove(null, NOW)).toBeNull();
-  });
-  it("shows the box's re-sent figure for a cross-org move, and nothing for an older box with no wording", () => {
-    const r = formatLastMove(
-      { from: "s1", fromLabel: "Seat 1", at: NOW - 60_000, reason: "full", line: "Moved from Seat 1", resentText: "history re-sent: 128k" },
-      NOW,
-    );
-    expect(r?.resent).toBe("history re-sent: 128k");
-    expect(r?.line).toBe("Moved from Seat 1 · 1m ago");
-    expect(formatLastMove({ from: "s1", fromLabel: "Seat 1", at: NOW - 60_000, reason: "full" }, NOW)).toBeNull();
   });
 });
 

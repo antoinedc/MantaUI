@@ -42,11 +42,16 @@ describe("usage window colours come from the box", () => {
   });
 
   it("window bars (cards + seat table) use the box's tone too", () => {
-    h = mount(<WindowBar w={win({ pct: 80, tone: "warn" })} nowMs={0} small />);
+    h = mount(<WindowBar w={win({ pct: 80, tone: "warn" })} nowMs={0} />);
     const warn = h.container.querySelector<HTMLElement>("span.absolute")!.style.backgroundColor;
     expect(warn).not.toBe("");
     h.unmount();
-    h = mount(<WindowBar w={win({ pct: 80, tone: "under" })} nowMs={0} small />);
+    h = mount(<WindowBar w={win({ pct: 80, tone: "under" })} nowMs={0} />);
     expect(h.container.querySelector<HTMLElement>("span.absolute")!.style.backgroundColor).not.toBe(warn);
+  });
+
+  it("window bars are 3px tall", () => {
+    h = mount(<WindowBar w={win({ pct: 50 })} nowMs={0} />);
+    expect(h.container.querySelector("span.relative")!.className).toContain("h-[3px]");
   });
 });

@@ -10,7 +10,6 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { installMockApi, mount, resetStore, type Harness } from "./testHarness";
 import { UsageDial } from "./UsageDial";
-import { formatResetHeadline } from "./chatUtils";
 import { NOW, claudeSnapshot, oneSeatView, seat, threeSeatView } from "./seatFixtures";
 import type { ProviderView, UsageSnapshot, UsageWindow } from "../shared/types";
 
@@ -63,7 +62,6 @@ async function open(opts: { windows?: UsageWindow[]; view?: ProviderView; seatId
   return h.docQuery(".manta-usage-popover") as HTMLElement;
 }
 
-const cards = (p: HTMLElement) => Array.from(p.querySelectorAll<HTMLElement>('[data-testid="usage-reset-card"]'));
 const tooltip = () => document.body.querySelector<HTMLElement>("[data-reset-tooltip]");
 // What a sighted user reads: the visually-hidden reset descriptions are left out.
 const visibleText = (el: Element) => {
@@ -76,70 +74,97 @@ const escape = (el: Element) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
   });
 
-describe("reset cards — the conversation's seat", () => {
+describe("single-seat provider — one highlighted row built from the snapshot", () => {
   const session = win("session", 62, { resetsAt: T + 2 * H + 20 * MIN, startedAt: T - 2 * H - 40 * MIN });
   const weekly = win("weekly", 41, { resetsAt: T + 40 * H });
+  const firstRow = (p: HTMLElement) => p.querySelector('[data-testid="usage-seat-table"] [data-current]') as HTMLElement;
+  const cells = (p: HTMLElement) => Array.from(firstRow(p).querySelectorAll<HTMLElement>("[data-window-kind]"));
 
-  it("one card per bar window: noun, percentage, absolute headline, countdown — no 'used' wording", async () => {
+  it("no reset cards: after the header the popover starts with the table", async () => {
     const p = await open({ now: T, windows: [session, weekly] });
-    const [c5, cw] = cards(p);
-    expect(cards(p)).toHaveLength(2);
-    expect(c5.textContent).toContain("5-hour · resets");
+    expect(p.querySelector('[data-testid="usage-reset-cards"]')).toBeNull();
+    expect(p.querySelector('[data-testid="usage-reset-card"]')).toBeNull();
+    expect(p.textContent).not.toContain("resets");
+    expect(p.children[1].getAttribute("data-testid")).toBe("usage-seat-table");
+  });
+
+  it("renders a one-row table: figure + countdown per window, no Use / next / badge, no 'used' wording", async () => {
+    const p = await open({ now: T, windows: [session, weekly] });
+    const table = p.querySelector('[data-testid="usage-seat-table"]') as HTMLElement;
+    expect(table.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(Array.from(table.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly"]);
+    const row = firstRow(p);
+    expect(row.textContent).toContain("Max 20x"); // the snapshot's plan names the row
+    expect(row.textContent).toContain("this conversation");
+    expect(row.querySelector("button")).toBeNull();
+    expect(row.querySelector(".manta-seat-next")).toBeNull();
+    const [c5, cw] = cells(p);
     expect(c5.textContent).toContain("62%");
-    expect(c5.textContent).toContain(formatResetHeadline(session.resetsAt, T));
     expect(c5.textContent).toContain("in 2h20m");
-    expect(cw.textContent).toContain("Weekly · resets");
-    expect(cw.textContent).toContain(formatResetHeadline(weekly.resetsAt, T));
+    expect(cw.textContent).toContain("41%");
     expect(cw.textContent).toContain("in 1d16h");
     expect(p.textContent).not.toMatch(/\bused\b/);
   });
 
-  it("a window with one bar window renders one full-width card", async () => {
+  it("a provider with one window renders one window column", async () => {
     const p = await open({ now: T, windows: [session] });
-    expect(cards(p)).toHaveLength(1);
-    expect(p.querySelector('[data-testid="usage-reset-cards"]')!.className).toContain("grid-cols-1");
+    expect(Array.from(p.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour"]);
+    expect(cells(p)).toHaveLength(1);
+  });
+
+  it("the account's label names the row when the box reports one", async () => {
+    const p = await open({ now: T, windows: [session, weekly], view: oneSeatView() });
+    // one seat: still no seat choice, so the same one-row table (not the multi-seat one)
+    expect(firstRow(p).textContent).toContain("Work");
+  });
+
+  it("the bars are 3px tall", async () => {
+    const p = await open({ now: T, windows: [session, weekly] });
+    for (const c of cells(p)) {
+      const bar = c.querySelector("span.relative") as HTMLElement;
+      expect(bar.className).toContain("h-[3px]");
+      expect(bar.className).not.toMatch(/h-\[(5|6)px\]/);
+    }
   });
 
   it("the position dot is there only when 'now' can be placed in the window", async () => {
     const p = await open({ now: T, windows: [session, weekly] }); // weekly: no startedAt, no spanMs
-    expect(cards(p)[0].querySelector("[data-window-dot]")).toBeTruthy();
-    expect(cards(p)[0].querySelector("[title$='of the way through this window']")).toBeTruthy();
-    expect(cards(p)[1].querySelector("[data-window-dot]")).toBeNull();
+    expect(cells(p)[0].querySelector("[data-window-dot]")).toBeTruthy();
+    expect(cells(p)[0].querySelector("[title$='of the way through this window']")).toBeTruthy();
+    expect(cells(p)[1].querySelector("[data-window-dot]")).toBeNull();
     h!.unmount();
     const p2 = await open({ now: T, windows: [session, { ...weekly, spanMs: 7 * 24 * H }] });
-    expect(cards(p2)[1].querySelector("[data-window-dot]")).toBeTruthy();
+    expect(cells(p2)[1].querySelector("[data-window-dot]")).toBeTruthy();
   });
 
-  it("a window mid-reset says 'Resetting…': no countdown, empty bar, no dot", async () => {
+  it("a window mid-reset says 'resetting…': no countdown, empty bar, no dot", async () => {
     const p = await open({ now: T, windows: [win("session", 90, { resetsAt: T - 1000, stale: true, spanMs: 5 * H }), weekly] });
-    const c = cards(p)[0];
-    expect(c.textContent).toContain("Resetting…");
+    const c = cells(p)[0];
+    expect(c.textContent).toContain("resetting…");
     expect(c.querySelector("[data-reset-timer]")).toBeNull();
     expect(c.querySelector("[data-window-dot]")).toBeNull();
     expect((c.querySelector("span.absolute") as HTMLElement).style.width).toBe("0%");
   });
 
-  it("a window that has not started says so; one with usage but no reset time shows a dash", async () => {
+  it("a window that has not started says so; one with usage but no reset time has no countdown", async () => {
     const p = await open({ now: T, windows: [win("session", 0), win("weekly", 18)] });
-    const [c5, cw] = cards(p);
-    expect(c5.textContent).toContain("Not started");
-    expect(c5.textContent).toContain("starts on first use");
+    const [c5, cw] = cells(p);
+    expect(c5.textContent).toContain("not started");
     expect(c5.querySelector("[data-window-dot]")).toBeNull();
-    expect(cw.querySelector(".font-semibold")!.textContent).toBe("—");
+    expect(cw.textContent).toContain("18%");
     expect(cw.querySelector("[data-reset-timer]")).toBeNull();
     expect((cw.querySelector("span.absolute") as HTMLElement).style.width).toBe("18%");
   });
 
-  it("a window blocked by a used-up longer one is greyed and says why instead of a countdown", async () => {
+  it("a window blocked by a used-up longer one is greyed and says why", async () => {
     const p = await open({ now: T, windows: [win("session", 10, { resetsAt: T + H }), win("weekly", 100, { resetsAt: T + 40 * H })] });
-    const c = cards(p)[0];
+    const c = cells(p)[0];
     expect(c.getAttribute("data-blocked")).toBe("true");
-    expect(c.className).toContain("opacity-50");
-    expect(c.textContent).toContain("not usable until the 7d limit resets");
-    expect(c.querySelector("[data-reset-timer]")).toBeNull();
+    expect(c.className).toContain("opacity-40");
+    expect(c.getAttribute("title")).toBe("Not usable until the 7d limit resets");
   });
 
-  it("other windows: shares a card's reset, has its own countdown, or is not active", async () => {
+  it("other windows sit under the table: shares a column's reset, or has its own countdown; inactive ones are left out", async () => {
     const p = await open({
       now: T,
       windows: [
@@ -152,11 +177,20 @@ describe("reset cards — the conversation's seat", () => {
     });
     const extras = p.querySelector('[data-testid="usage-extra-windows"]') as HTMLElement;
     const lines = Array.from(extras.children).map(visibleText);
-    expect(lines[0]).toBe("7d · Fable 12% · resets with the weekly window");
-    expect(lines[1]).toBe("7d · Opus 30% · in 3h");
-    expect(lines[2]).toBe("7d · Sonnet · not active");
+    expect(lines).toEqual(["7d · Fable 12% · resets with the weekly window", "7d · Opus 30% · in 3h"]);
     expect(extras.children[1].querySelector("[data-reset-timer]")).toBeTruthy();
-    expect(cards(p)).toHaveLength(2); // the scoped windows are not cards
+    expect(p.textContent).not.toContain("Sonnet");
+    expect(p.textContent).not.toContain("not active");
+    expect(extras.previousElementSibling!.getAttribute("data-testid")).toBe("usage-seat-table");
+    expect(cells(p)).toHaveLength(2); // the scoped windows are not columns
+  });
+
+  it("only inactive extras: no extras block at all", async () => {
+    const p = await open({
+      now: T,
+      windows: [session, weekly, win("weekly_scoped:sonnet", 0, { label: "7d · Sonnet", scope: "Sonnet", active: false })],
+    });
+    expect(p.querySelector('[data-testid="usage-extra-windows"]')).toBeNull();
   });
 });
 
@@ -181,9 +215,11 @@ describe("seat table", () => {
     }
   });
 
-  it("no table with one seat", async () => {
+  it("one seat on the box: the one-row table, with no seat-choice controls", async () => {
     const p = await open({ view: oneSeatView(), seatId: "s1" });
-    expect(p.querySelector('[data-testid="usage-seat-table"]')).toBeNull();
+    expect(p.querySelectorAll('[data-testid="usage-seat-table"] tbody tr')).toHaveLength(1);
+    expect(p.querySelector("[data-seat-id]")).toBeNull();
+    expect(p.textContent).not.toContain("Manage seats");
   });
 
   it("a conversation with no seat yet: the seat new conversations start on leads, and says so", async () => {

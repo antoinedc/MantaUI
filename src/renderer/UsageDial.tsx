@@ -17,8 +17,6 @@ import {
   combinedSeatWindows,
   cssVar,
   findSeat,
-  formatLastMove,
-  formatResetHeadline,
   formatUpdatedAgo,
   formatWindowReset,
   hasSeatChoice,
@@ -283,14 +281,14 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         role="dialog"
         ariaLabel="Plan usage"
         hook="manta-usage-popover"
-        // Sized to its content: at least 440px, wider when a row needs it (long
+        // Sized to its content: at least 420px, wider when a row needs it (long
         // seat/account names, credit lines), capped by the window. Free-flowing
         // prose below opts out of driving the width (`w-0 min-w-full`) so a
         // sentence wraps instead of stretching the card. It never scrolls while
         // it fits; the height cap + overflow-y is ONLY the last resort for a
         // card taller than the window, so the footer and a seat-switch confirm
         // stay reachable instead of being clipped off-screen.
-        surfaceClassName="w-max min-w-[440px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden p-4"
+        surfaceClassName="w-max min-w-[420px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden p-4"
       >
         <UsagePopoverBody
           snapshot={snapshot}
@@ -299,7 +297,6 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
           view={view}
           multi={multi}
           current={current}
-          sessionSeat={sessionSeat}
           nowMs={nowMs}
           onNavigate={() => setOpen(false)}
           onResign={(target) => {
@@ -322,7 +319,6 @@ function UsagePopoverBody({
   view,
   multi,
   current,
-  sessionSeat,
   nowMs,
   onNavigate,
   onResign,
@@ -333,15 +329,13 @@ function UsagePopoverBody({
   view: ProviderView | null;
   multi: boolean;
   current: ReturnType<typeof selectConversationSeat>;
-  sessionSeat: import("../shared/types").SessionSeat | null;
   nowMs: number;
   onNavigate: () => void;
   onResign: (target: ResignTarget) => void;
 }) {
   const switcher = useSeatSwitch(view);
-  const lastMove = formatLastMove(sessionSeat?.lastMove, nowMs);
   const nextId = view && view.mode === "auto" ? nextSeatHint(view, current?.seat.id ?? null, nowMs) : null;
-  // No assignment yet (a brand-new conversation): the windows above are the
+  // No assignment yet (a brand-new conversation): the windows are the
   // aggregate — the seat a new conversation would start on. Say so.
   const startsOn =
     multi && !current && view ? findSeat(view, view.mode === "manual" ? view.activeSeatId : view.nextSeatId) : null;
@@ -355,6 +349,30 @@ function UsagePopoverBody({
 
   const resignTarget = (seat: SeatView, accountLabel: string): ResignTarget | null =>
     view ? { provider: view.provider, seat, accountLabel } : null;
+
+  const columns = seatBarWindows(snapshot.windows);
+  // The leading, highlighted row: this conversation's seat (or where a new one
+  // starts); with no seat choice, the subscription itself, from the snapshot.
+  const firstRow: SeatTableFirst | null = headerSeat
+    ? {
+        seat: headerSeat.seat,
+        name: seatName(headerSeat),
+        sub: current ? "this conversation" : "new conversations start here",
+        windows: headerSeat.seat.windows,
+        onResign: () => {
+          const t = resignTarget(headerSeat.seat, headerSeat.account.label);
+          if (t) onResign(t);
+        },
+      }
+    : multi
+      ? null
+      : {
+          seat: null,
+          name: view?.accounts[0]?.label ?? snapshot.planLabel ?? label,
+          sub: "this conversation",
+          windows: snapshot.windows,
+          onResign: null,
+        };
 
   const manage = (provider?: ProviderView["provider"]) => {
     onNavigate();
@@ -386,33 +404,26 @@ function UsagePopoverBody({
         </span>
       </div>
 
-      {multi && (current || startsOn) && (
-        <div className="mb-3 flex items-baseline justify-between gap-2 text-meta" data-testid="usage-conversation-seat">
-          <span className="min-w-0 truncate font-medium text-text">
-            {current ? seatName(current) : startsOn ? seatName(startsOn) : ""}
-          </span>
-          {!current && startsOn && <span className="shrink-0 text-text-faint">new conversations start here</span>}
-          {headerSeat && seatStateText(headerSeat.seat.status) && (
-            <LoggedOutBadge
-              seat={headerSeat.seat}
-              onClick={() => {
-                const t = resignTarget(headerSeat.seat, headerSeat.account.label);
-                if (t) onResign(t);
-              }}
-            />
-          )}
-        </div>
-      )}
-
       {state.awaitingReset && (
         <div className="mb-3 w-0 min-w-full break-words text-meta text-text-faint">
           Quota is being reset. Usage numbers might look off for a few minutes.
         </div>
       )}
 
-      <div className="w-0 min-w-full">
-        <ResetCards windows={snapshot.windows} nowMs={nowMs} />
-      </div>
+      <SeatTable
+        view={multi ? view : null}
+        columns={columns}
+        first={firstRow}
+        groups={groups}
+        nextId={nextId}
+        nowMs={nowMs}
+        switcher={switcher}
+        onResign={(seat, accountLabel) => {
+          const t = resignTarget(seat, accountLabel);
+          if (t) onResign(t);
+        }}
+      />
+      <ExtraWindows windows={snapshot.windows} columns={columns} nowMs={nowMs} />
       {snapshot.windows.some((w) => w.tone == null) && (
         <div className="mt-2 w-0 min-w-full break-words text-meta text-text-faint">Update your box to see usage colours.</div>
       )}
@@ -426,37 +437,6 @@ function UsagePopoverBody({
             </div>
           ))}
         </div>
-      )}
-
-      {lastMove && (
-        <div className="mt-3 pt-3 w-0 min-w-full break-words border-t border-border-subtle text-meta text-text-muted" data-testid="usage-last-move">
-          <div>{lastMove.line}</div>
-          {lastMove.resent && <div className="text-text-faint">{lastMove.resent}</div>}
-        </div>
-      )}
-
-      {multi && view && (
-        <SeatTable
-          view={view}
-          columns={seatBarWindows(snapshot.windows)}
-          first={
-            headerSeat
-              ? {
-                  seat: headerSeat.seat,
-                  name: seatName(headerSeat),
-                  sub: current ? "this conversation" : "new conversations start here",
-                }
-              : null
-          }
-          groups={groups}
-          nextId={nextId}
-          nowMs={nowMs}
-          switcher={switcher}
-          onResign={(seat, accountLabel) => {
-            const t = resignTarget(seat, accountLabel);
-            if (t) onResign(t);
-          }}
-        />
       )}
 
       <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between gap-2">
@@ -509,14 +489,12 @@ const clampPct = (n: number) => Math.max(0, Math.min(100, n));
 // A usage bar: the coloured fill is how much of the quota is used, the small
 // white dot is how far through its window "now" is (fill ahead of the dot =
 // burning faster than the window). No dot when the position isn't known.
-export function WindowBar({ w, nowMs, small = false }: { w: UsageWindow; nowMs: number; small?: boolean }) {
+export function WindowBar({ w, nowMs }: { w: UsageWindow; nowMs: number }) {
   const empty = w.active === false || windowResetState(w, nowMs) === "resetting";
   const progress = windowProgress(w, nowMs);
-  // Dot radius: 3 px across on the 5 px bar, 4 px on the 6 px one.
-  const r = small ? 1.5 : 2;
   return (
     <span
-      className={`relative block w-full rounded-full bg-fill-active ${small ? "h-[5px]" : "h-[6px]"}`}
+      className="relative block h-[3px] w-full rounded-full bg-fill-active"
       title={progress != null ? `${Math.round(progress * 100)}% of the way through this window` : undefined}
     >
       <span
@@ -530,12 +508,13 @@ export function WindowBar({ w, nowMs, small = false }: { w: UsageWindow; nowMs: 
         // Painted as a gradient on a full-size overlay rather than as a small
         // positioned element: its centre is then exactly the bar's centre line at
         // any row offset, instead of snapping to a different pixel than the bar.
+        // White core 1px in radius, ring out to 1.5px, soft edge.
         <span
           data-window-dot="true"
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 rounded-full"
           style={{
-            backgroundImage: `radial-gradient(circle at ${Math.max(4, Math.min(96, progress * 100))}% 50%, var(--usage-dot) ${r}px, var(--usage-dot-ring) ${r + 0.4}px ${r + 1}px, transparent ${r + 1.4}px)`,
+            backgroundImage: `radial-gradient(circle at ${Math.max(4, Math.min(96, progress * 100))}% 50%, var(--usage-dot) 1px, var(--usage-dot-ring) 1.2px 1.5px, transparent 1.8px)`,
           }}
         />
       )}
@@ -543,83 +522,26 @@ export function WindowBar({ w, nowMs, small = false }: { w: UsageWindow; nowMs: 
   );
 }
 
-// The conversation's seat: one card per bar window (5-hour + weekly) with the
-// absolute reset as the headline, then a faint line for every other window.
-function ResetCards({ windows, nowMs }: { windows: UsageWindow[]; nowMs: number }) {
-  const cards = seatBarWindows(windows);
-  if (cards.length === 0) return null;
-  const extras = windows.filter((w) => !cards.includes(w));
+// Every other window of the conversation's seat (a model-scoped cap, a third
+// window), one faint line each, straight under the table. Windows the provider
+// says are not in force are left out.
+function ExtraWindows({ windows, columns, nowMs }: { windows: UsageWindow[]; columns: UsageWindow[]; nowMs: number }) {
+  const extras = windows.filter((w) => !columns.includes(w) && w.active !== false);
+  if (extras.length === 0) return null;
   return (
-    <>
-      <div
-        className={`grid gap-2 mb-[10px] ${cards.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
-        data-testid="usage-reset-cards"
-      >
-        {cards.map((w) => (
-          <ResetCard key={w.kind} w={w} blockedBy={usageWindowBlocker(windows, w)} nowMs={nowMs} />
-        ))}
-      </div>
-      {extras.length > 0 ? (
-        <div className="mb-3 flex flex-col gap-1 text-meta text-text-faint" data-testid="usage-extra-windows">
-          {extras.map((w) => (
-            <ExtraWindowLine key={w.kind} w={w} cards={cards} nowMs={nowMs} />
-          ))}
-        </div>
-      ) : (
-        <div className="mb-1" />
-      )}
-    </>
-  );
-}
-
-function ResetCard({ w, blockedBy, nowMs }: { w: UsageWindow; blockedBy: UsageWindow | null; nowMs: number }) {
-  const state = windowResetState(w, nowMs);
-  const headline =
-    state === "resetting"
-      ? "Resetting…"
-      : state === "not-started"
-        ? "Not started"
-        : state === "no-reset"
-          ? "—"
-          : formatResetHeadline(w.resetsAt, nowMs);
-  return (
-    <div
-      data-testid="usage-reset-card"
-      data-window-kind={w.kind}
-      data-blocked={blockedBy ? "true" : undefined}
-      className={
-        "rounded-md border border-border-subtle bg-inset px-[10px] pt-[9px] pb-[10px]" + (blockedBy ? " opacity-50" : "")
-      }
-    >
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-micro uppercase text-text-faint">{windowNoun(w)} · resets</span>
-        <span className="font-mono text-meta tabular-nums text-text-muted">
-          {state === "resetting" ? "—" : `${Math.round(clampPct(w.pct))}%`}
-        </span>
-      </div>
-      <div className="mt-[3px] text-prose font-semibold text-text">{headline}</div>
-      <div className="text-meta text-text-faint">
-        {blockedBy ? (
-          `not usable until the ${blockedBy.label} limit resets`
-        ) : state === "scheduled" ? (
-          <ResetTimer resetsAt={w.resetsAt as number} startedAt={w.startedAt} nowMs={nowMs} className="text-text-muted" />
-        ) : state === "not-started" ? (
-          "starts on first use"
-        ) : null}
-      </div>
-      <div className="mt-2">
-        <WindowBar w={w} nowMs={nowMs} />
-      </div>
+    <div className="mt-2 flex w-0 min-w-full flex-col gap-1 break-words text-meta text-text-faint" data-testid="usage-extra-windows">
+      {extras.map((w) => (
+        <ExtraWindowLine key={w.kind} w={w} columns={columns} nowMs={nowMs} />
+      ))}
     </div>
   );
 }
 
-function ExtraWindowLine({ w, cards, nowMs }: { w: UsageWindow; cards: UsageWindow[]; nowMs: number }) {
-  if (w.active === false) return <div>{w.label} · not active</div>;
+function ExtraWindowLine({ w, columns, nowMs }: { w: UsageWindow; columns: UsageWindow[]; nowMs: number }) {
   const state = windowResetState(w, nowMs);
   if (state === "resetting") return <div>{w.label} · resetting…</div>;
   const head = `${w.label} ${Math.round(clampPct(w.pct))}%`;
-  const shared = state === "scheduled" ? cards.find((c) => c.resetsAt === w.resetsAt) : undefined;
+  const shared = state === "scheduled" ? columns.find((c) => c.resetsAt === w.resetsAt) : undefined;
   if (shared) return <div>{`${head} · resets with the ${windowNoun(shared).toLowerCase()} window`}</div>;
   if (state === "scheduled") {
     return (
@@ -631,11 +553,19 @@ function ExtraWindowLine({ w, cards, nowMs }: { w: UsageWindow; cards: UsageWind
   return <div>{head}</div>;
 }
 
-type SeatTableFirst = { seat: SeatView; name: string; sub: string };
+type SeatTableFirst = {
+  /** The seat behind the row; null for a subscription with no seat choice. */
+  seat: SeatView | null;
+  name: string;
+  sub: string;
+  windows: UsageWindow[];
+  onResign: (() => void) | null;
+};
 
-// Every seat of the provider, one row each, with its 5-hour and weekly window as
-// a figure + countdown + bar. The conversation's seat (or the one a new
-// conversation starts on) leads, highlighted; the rest follow in the box's order.
+// The usage table: one row per seat, each with its 5-hour and weekly window as a
+// figure + countdown + bar. The conversation's seat (or the one a new
+// conversation starts on) leads, highlighted; the rest follow in the box's
+// order. A subscription with no seat choice is the same table with one row.
 function SeatTable({
   view,
   columns,
@@ -646,7 +576,7 @@ function SeatTable({
   switcher,
   onResign,
 }: {
-  view: ProviderView;
+  view: ProviderView | null;
   columns: UsageWindow[];
   first: SeatTableFirst | null;
   groups: ReturnType<typeof orderOtherSeats>;
@@ -655,9 +585,10 @@ function SeatTable({
   switcher: ReturnType<typeof useSeatSwitch>;
   onResign: (seat: SeatView, accountLabel: string) => void;
 }) {
+  if (columns.length === 0) return null;
   const span = columns.length + 1;
   return (
-    <div className="mt-3 pt-3 w-0 min-w-full border-t border-border-subtle" data-testid="usage-seat-table">
+    <div className="w-0 min-w-full" data-testid="usage-seat-table">
       <table className="manta-seat-list w-full table-fixed border-collapse text-label">
         <colgroup>
           <col />
@@ -681,13 +612,14 @@ function SeatTable({
               seat={first.seat}
               name={first.name}
               sub={first.sub}
+              windows={first.windows}
               highlighted
               isNext={false}
               columns={columns}
               view={view}
               nowMs={nowMs}
               switcher={switcher}
-              onResign={null}
+              onResign={first.onResign}
               span={span}
             />
           )}
@@ -706,6 +638,7 @@ function SeatTable({
                   seat={seat}
                   name={seat.label}
                   sub={null}
+                  windows={seat.windows}
                   highlighted={false}
                   isNext={nextId === seat.id}
                   columns={columns}
@@ -728,6 +661,7 @@ function SeatRow({
   seat,
   name,
   sub,
+  windows,
   highlighted,
   isNext,
   columns,
@@ -737,34 +671,34 @@ function SeatRow({
   onResign,
   span,
 }: {
-  seat: SeatView;
+  seat: SeatView | null;
   name: string;
   sub: string | null;
+  windows: UsageWindow[];
   highlighted: boolean;
   isNext: boolean;
   columns: UsageWindow[];
-  view: ProviderView;
+  view: ProviderView | null;
   nowMs: number;
   switcher: ReturnType<typeof useSeatSwitch>;
   onResign: (() => void) | null;
   span: number;
 }) {
-  // The leading row has no onResign: its Logged out badge is in the seat line above.
-  const broken = seatStateText(seat.status);
-  const confirming = switcher.confirmId === seat.id;
-  const busy = switcher.busyId === seat.id;
-  const crossOrg = !isSameOrgMove(view, view.activeSeatId, seat.id);
+  const broken = seat ? seatStateText(seat.status) : null;
+  const confirming = seat != null && switcher.confirmId === seat.id;
+  const busy = seat != null && switcher.busyId === seat.id;
+  const crossOrg = seat != null && view != null && !isSameOrgMove(view, view.activeSeatId, seat.id);
   const cell = "border-t border-border-subtle pt-2 pb-[9px] align-top" + (highlighted ? " bg-accent-bg" : "");
   return (
     <>
-      <tr data-seat-id={seat.id} data-current={highlighted ? "true" : undefined}>
+      <tr data-seat-id={seat?.id} data-current={highlighted ? "true" : undefined}>
         <td
           className={`${cell} pl-2 break-words`}
           style={highlighted ? { boxShadow: "inset 2px 0 0 var(--accent)" } : undefined}
         >
           <div className="flex flex-wrap items-center gap-x-1 text-text">
             <span className="min-w-0 break-words">{name}</span>
-            {broken && onResign && <LoggedOutBadge seat={seat} onClick={onResign} />}
+            {seat && broken && onResign && <LoggedOutBadge seat={seat} onClick={onResign} />}
             {isNext && (
               <span
                 className="manta-seat-next shrink-0 rounded-xs px-1 text-meta bg-accent-bg text-accent"
@@ -775,7 +709,7 @@ function SeatRow({
             )}
           </div>
           {sub && <div className="text-meta text-text-faint">{sub}</div>}
-          {!highlighted && view.mode === "manual" && (
+          {seat && !highlighted && view?.mode === "manual" && (
             <button
               type="button"
               onClick={() => switcher.request(seat)}
@@ -789,11 +723,11 @@ function SeatRow({
         </td>
         {columns.map((c, i) => (
           <td key={c.kind} className={`${cell} whitespace-nowrap pl-[14px] ${i === columns.length - 1 ? "pr-2" : ""}`}>
-            <SeatWindowCell seat={seat} reference={c} nowMs={nowMs} />
+            <SeatWindowCell windows={windows} reference={c} nowMs={nowMs} />
           </td>
         ))}
       </tr>
-      {confirming && (
+      {seat && confirming && (
         <tr>
           <td colSpan={span} className="pb-2 pl-2 pr-2">
             <div role="alert" className="w-0 min-w-full break-words rounded-xs border border-border bg-bg px-2 py-1 text-label text-text-muted">
@@ -824,17 +758,16 @@ function SeatRow({
   );
 }
 
-// One seat's reading for one column: the figure, the countdown only (never a
-// date — the card above and the tooltip carry that), and the bar. Shares the
-// popover's colour ladder (toneRingColor) so a seat can never read green here
-// and red in the ring.
-function SeatWindowCell({ seat, reference, nowMs }: { seat: SeatView; reference: UsageWindow; nowMs: number }) {
-  const bars = seatBarWindows(seat.windows);
+// One row's reading for one column: the figure, the countdown only (never a
+// date — the tooltip carries that), and the bar. Shares the popover's colour
+// ladder (toneRingColor) so a seat can never read green here and red in the ring.
+function SeatWindowCell({ windows, reference, nowMs }: { windows: UsageWindow[]; reference: UsageWindow; nowMs: number }) {
+  const bars = seatBarWindows(windows);
   if (bars.length === 0) return <span className="text-meta text-text-faint">no reading</span>;
   const w = bars.find((b) => b.kind === reference.kind);
   if (!w) return <span className="text-meta text-text-faint">—</span>;
   const state = windowResetState(w, nowMs);
-  const blockedBy = usageWindowBlocker(seat.windows, w);
+  const blockedBy = usageWindowBlocker(windows, w);
   const hot = state !== "resetting" && (w.tone === "warn" || w.tone === "danger" || w.tone === "over");
   return (
     <div
@@ -858,7 +791,7 @@ function SeatWindowCell({ seat, reference, nowMs }: { seat: SeatView; reference:
           <span className="text-meta text-text-faint">not started</span>
         ) : null}
       </div>
-      <WindowBar w={w} nowMs={nowMs} small />
+      <WindowBar w={w} nowMs={nowMs} />
     </div>
   );
 }
