@@ -27,6 +27,7 @@ import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { OptimizerCard } from "./OptimizerCard";
 import { SummaryModelCard } from "./SummaryModelCard";
+import { KnowledgeCard } from "./settings/KnowledgeCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
@@ -1467,6 +1468,13 @@ export function Settings({
             />
           </GroupCard>
         </>
+      );
+    }
+    if (section === "sessions") {
+      return (
+        <GroupCard title="Knowledge">
+          <KnowledgeCard onNavigated={onClose} />
+        </GroupCard>
       );
     }
     if (section === "secrets") return <SecretsSettings onNavigated={onClose} />;

@@ -1423,6 +1423,10 @@ export const httpApi: Api = {
   summaryModelStatus: () => rpc("summary-model:status", {}),
   summaryModelSearch: (input) => rpc("summary-model:search", input),
   summaryModelSet: (input) => rpc("summary-model:set", input),
+  knowledgeSettingsGet: () => rpc("knowledge:settings-get", {}),
+  knowledgeSettingsSet: (input) => rpc("knowledge:settings-set", input),
+  knowledgeChanges: (input) => rpc("knowledge:changes", input ?? {}),
+  knowledgeUndo: (input) => rpc("knowledge:undo", input),
 
   // BET-1148: the box publishes ONE `media` bus kind with an `action`
   // discriminator (begin / show / fail) whenever the media tools land a
