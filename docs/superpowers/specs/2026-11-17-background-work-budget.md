@@ -1,480 +1,537 @@
 # Background work budget — one budget for shared knowledge and the background CTO
 
-Status: draft rev 2 (2026-11-17) — rev 1 reviewed by two Fable 5.2 reviewers; all Blocker/Should findings addressed.
+Status: draft rev 2 (2026-11-17) — rev 1 reviewed by two reviewers; findings folded in (§15).
 Owner: box server (`src/server/`), desktop renderer (`src/renderer/`)
 
 ## 1. Problem
 
 Two subsystems spend model calls the user did not ask for:
 
-- **Shared knowledge** (`src/server/knowledge/`, PR #1688): capture, curator batches, the weekly
-  corrections pass, the weekly tidy, skill trials. Bounded by knowledge `dailyCapUsd` ($1/day,
-  `knowledge/budget.mjs`, `knowledge/settings.mjs`).
-- **Background CTO**: ambient calls bounded by `ctoAmbientCap` ($2.50/day, `ctoBudget.mjs`); overnight
-  jobs bounded by a plan-window reserve or `ctoNightCapUsd` ($5/night); the history backfill by its own
-  one-off $3 (`ctoBackfill.mjs`).
+- **Shared knowledge** (`src/server/knowledge/`, PR #1688): capture, curator batches, corrections pass,
+  weekly tidy, skill trials. Bounded by knowledge `dailyCapUsd` (default $1/day, `knowledge/budget.mjs`).
+- **Background CTO**: ambient work bounded by `ctoAmbientCap` ($2.50/day, `ctoBudget.mjs`), overnight
+  jobs bounded by a plan-window reserve or, without a windowed plan, `ctoNightCapUsd` ($5/night); the
+  history backfill has its own one-off $3 cap (`ctoBackfill.mjs`).
 
-Everything is priced in list-price dollars. On a subscription plan (Claude Max, ChatGPT Pro, Kimi) those
-dollars are fictional: the real cost is plan quota, which is either spare (wasted at the window reset) or
-scarce (taken from the user). A dollar cap is both too tight (stops useful work while quota idles) and too
-loose (does not see the user running out). On a pay-per-token key the dollars are real.
+Everything is priced in dollars at list price. On a subscription plan (Claude Max, ChatGPT Pro, Kimi)
+those dollars are fictional: the real cost is plan quota, which is either spare (wasted at the reset) or
+scarce (taken from the user). A dollar cap is too tight when quota is idle and blind when the user is
+about to run out. On a pay-per-token key the dollars are real and a dollar cap is right.
 
-Bugs in the overnight budget seam (`index.mjs`, `adaptiveCtoOvernight.budget`, ~2893-2945), confirmed by
-review:
+Bugs in the overnight budget seam (`src/server/index.mjs`, `adaptiveCtoOvernight.budget`, confirmed):
 
-1. It filters snapshots on `s.windowed === true`; snapshots never carry `windowed` (only adapter objects
-   do, e.g. `usageAdapters/claude.mjs`), so every plan is treated as windowless.
-2. It passes the window's `pct` (percent **used**) as `remainingPct`, picking the most-used provider as
-   "most headroom".
-3. The windowless lookup `s?.windowed === false` never matches either, so the provider is always the
-   hard-coded `"anthropic"`.
+1. It filters snapshots on `s.windowed === true`; `windowed` exists on adapter objects
+   (`usageAdapters/claude.mjs`), never on snapshots, so no plan is ever treated as windowed.
+2. It passes the window's `pct` (percent USED) as `remainingPct` and picks the provider with the
+   highest used pct as the one with "most headroom".
+3. The windowless fallback's `find(s => s.windowed === false)` never matches either, so the provider is
+   always the hard-coded `"anthropic"`.
 
-These bugs are why overnight jobs run today at all: the windowed path, if reached, yields a spendable
-fraction ≤ 0.4 while every candidate job costs 1 (`ctoOvernight.mjs` `selectPortfolio`), so fixing the
-bugs alone would stop overnight work on plans. §7.3 handles both.
+The overnight scheduler only runs jobs today because of bug 1: the windowless path yields
+`spendableFrac: null` (treated as 1), while a correctly computed windowed `spendableFrac` (≤ 0.4 with the
+≥ 60 % fallback reserve) would reject every candidate, whose `predictedCost` is 1 (`ctoOvernight.mjs`
+`selectPortfolio`). Fixing the bugs therefore requires replacing the selection unit (§7.3).
 
 ## 2. Goal and decisions
 
 User decisions (2026-11-17):
 
-- **One budget** governs all background work of shared knowledge AND the background CTO (ambient,
+- **One budget** governs all background work of shared knowledge and the background CTO (ambient,
   overnight, backfill). Routines keep their own controls (out of scope).
-- **Plans** are budgeted as a share of plan quota windows; setting **Background work on plans:
-  Off / Light / Normal**, default **Normal**.
-- **Pay-per-token** (API keys, credit accounts) keeps a dollar cap, **$5/day** default, user-editable.
-- Plans use **spare quota only**, prefer running while the user is away, and run weekly batch jobs close
-  to a window reset when that quota would otherwise be wasted.
+- **Subscription plans** are budgeted as a share of plan quota windows, through one setting
+  **Background work on plans: Off / Light / Normal**, default **Normal**.
+- **Pay-per-token** (API keys, credit accounts) keeps a dollar cap, **$5/day by default**, user-editable.
+- On a plan, background work uses **spare quota only**, prefers running while the user is away, and runs
+  its weekly batch jobs close to a reset when that quota would otherwise be wasted.
 - Plan usage is shown in plan terms ("2% of your Claude week").
 
-Decisions made in this spec (listed in the PR body for the user to veto):
+Decisions made by this spec (flag them in the PR body):
 
-- **D1 — The CTO night cap and ambient cap fold in.** `ctoAmbientCap`, `ctoNightCapUsd` (and the legacy
-  `ctoAmbientCapUsd`) are retired. On pay-per-token there is ONE daily dollar cap for all background
-  work; §5.4 keeps batch jobs from starving continuous work. Old values are not carried over.
-- **D2 — On plans, the level caps replace the overnight reserve as the selection bound.** The reserve
-  forecast keeps running for the Health card only. Consequence the user should know: overnight work on a
-  plan is bounded by Normal = 5% of a week / 10% of a 5h window, far less than the reserve allowed.
-- **D3 — Overnight CTO jobs pin their model** to the box default model (the model `nightModelCost`
-  already prices) so their billing mode is known before dispatch.
-- **D4 — The gate fails CLOSED** (today's CTO gate fails open): if the budget cannot read its own state,
-  background work waits.
-- **D5 — The pay-per-token cap and the plan level are independent.** "Off" stops plan background work
-  only; `$0` stops pay-per-token background work. The UI names the providers each control governs and
-  hides a control that governs nothing on this box.
+- **The CTO's night cap and ambient cap fold in.** `ctoNightCapUsd`, `ctoAmbientCap` and knowledge
+  `dailyCapUsd` are retired; one daily dollar cap covers all background work on pay-per-token. Old values
+  are not carried over (fresh $5 default), except that an older desktop saving knowledge `dailyCapUsd`
+  sets the new cap (§9).
+- **Batch work may not use the whole budget.** Batch work (weekly passes, trials, overnight jobs,
+  backfill) stops at 60 % of each cap; the last 40 % is kept for continuous work (capture, curation, CTO
+  ambient). Reason: one overnight job could otherwise spend the whole $5 at 01:00, or the whole weekly
+  plan share on Monday, and starve capture for the rest of the day/week.
+- **On plans the level caps also bound overnight work**, replacing the reserve fraction as the selection
+  bound (the reserve stays as a Health-card forecast). This makes overnight work on a plan at most 5 % of
+  a week / 10 % of a 5-hour window on Normal — far less than the old reserve intended. That follows from
+  the user's level choice; the PR body says so.
+- **Gates fail closed** (today the CTO gate fails open): when the budget cannot decide, background work
+  waits.
 
 ## 3. Definitions
 
-- **Background work**: a model call or job started by shared knowledge or the background CTO. Each has a
-  **work type** and a **class** (§5.1).
-- **Window**: a `UsageWindow` (`usage.mjs`): `kind`, `pct` = percent USED, `resetsAt`, optional
-  `startedAt`, `stale`, `active`, `models`. **Weekly-kind** = `kind` starts with `"weekly"` (includes
-  `weekly_scoped:*`); every other kind is **short** (5h session, daily…).
-- **Window key**: `"<adapter>:<kind>"` (the key `usage.mjs` history and `optimizer/forecast.mjs` use).
-- **bgPct**: pct-points of a window consumed by background work since the window started (§6).
-- **Level caps**:
+- **Background work**: every model call or job started by shared knowledge or the background CTO rather
+  than the user. Each has a **work type** and a **class** (continuous / batch), §5.1.
+- **Billing mode** of a call: `plan` or `payg`, from the model the call will use (§4).
+- **Window**: a `UsageWindow` of an adapter's aggregate usage snapshot (`usage.mjs`): `kind`, `pct`
+  (percent USED, 0–100), `resetsAt`, optional `startedAt`, `stale`, `active`, `models`.
+- **Weekly-kind window**: `kind === "weekly"` or `kind.startsWith("weekly")` (e.g. `weekly_scoped:*`).
+  Every other kind ("session" = 5-hour, daily, …) is a **short window**.
+- **Background share** `bgPct` of a window: pct-points of that window consumed by background work since
+  the window started (§6).
+- **Level caps** (share of a window background work may use):
 
-  | Level | weekly-kind | short |
+  | Level | weekly-kind window | short window |
   |---|---|---|
-  | Off | 0 | 0 |
+  | Off | 0 % | 0 % |
   | Light | 2 % | 5 % |
   | Normal (default) | 5 % | 10 % |
 
-- **Batch ceiling**: batch-class work may only use the first **60 %** of a cap (plan: of each level cap;
-  pay-per-token: of `dailyCapUsd`). Continuous work may use 100 %.
-- **User away**: desktop presence is not `present` (`push.desktopState`) AND no user-started turn on the
-  box in the last 15 minutes (the CTO engine's last-user-prompt signal, `ctoEngine.mjs` ~2919-2931;
-  expose it to the budget as an injected `lastUserPromptAt()`). Covers a user working from the phone with
-  the desktop closed.
+- **Batch ceiling** = 60 % of a cap (`BATCH_SHARE = 0.6`): payg `0.6 × dailyCapUsd`, plan
+  `0.6 × levelCap(kind)` per window.
 
-## 4. Billing mode of a model
+## 4. Billing mode
 
-For `{providerID, modelID}`:
+For a call on `{providerID, modelID}` (a `null` model = the box default model, resolved the same way the
+runner dispatches it):
 
-1. `adapter = adapterForProviderID(providerID)`. None → **pay-per-token**.
-2. The adapter's aggregate snapshot in `listSnapshots()`. Missing (adapter failing, never fetched) →
-   **pay-per-token with `fallback: true`** (the bounded option; the UI says why, §10).
-3. `snapshot.kind === "credit"` → **pay-per-token**. Otherwise → **plan** (a subscription that also reports
-   a balance, codex, is plan).
+1. `adapter = adapterForProviderID(providerID)`. None → **payg**.
+2. The adapter's aggregate snapshot from `listSnapshots()`. `snapshot.kind === "credit"` → **payg**.
+   Otherwise (`"subscription"`, or absent kind with at least one window) → **plan**; a subscription that
+   also reports a balance (codex) is plan.
+3. Snapshot missing (never fetched, adapter failing) → **payg with `fallback: true`**: the dollar cap
+   governs and the UI says why (§10). This keeps the work bounded without silently pretending.
 
 Governing windows of a plan call: the snapshot's windows with `active !== false` that apply to the model
-(reuse `windowAppliesToModel`, `src/shared/seatChoice.mjs`; do not copy it).
-
-A `null` model (non-strict classes resolve to "box default") is resolved to the box default model
-(config `defaultModel`, else opencode's default) before classification.
+(reuse `windowAppliesToModel` — do not copy it).
 
 ## 5. The shared module
 
-New `src/server/backgroundBudget.mjs`, dependency-injected, created once in `index.mjs`, passed to the
-knowledge engine, the CTO engine, the overnight scheduler and the backfill. It replaces the cap logic of
-`knowledge/budget.mjs` and the ambient/night-cap logic of `ctoBudget.mjs`.
+New `src/server/backgroundBudget.mjs`, dependency-injected like `ctoBudget.mjs`, created once in
+`index.mjs` and handed to the knowledge engine, the CTO engine, the overnight scheduler and the backfill.
+It replaces `knowledge/budget.mjs`'s cap logic and `ctoBudget.mjs`'s ambient/night cap logic.
 
 ### 5.1 Work types
 
 | Work type | Owner | Class |
 |---|---|---|
 | `knowledge-capture`, `curator-notes`, `curator-rules`, `curator-skills` | knowledge | continuous |
-| `knowledge-corrections`, `knowledge-tidy`, `knowledge-trial` | knowledge | batch |
+| `knowledge-corrections` (weekly pass), `knowledge-tidy`, `knowledge-trial` | knowledge | batch |
 | `cto-ambient` (every ambient model call) | CTO | continuous |
-| `cto-overnight`, `cto-backfill` | CTO | batch |
+| `cto-overnight` (overnight delegate jobs), `cto-backfill` | CTO | batch |
 
-The briefing and knowledge tools make no model calls and are never gated. The curator's 24 batches per
-project per day stays. `cto-backfill` keeps its own one-off lifetime total ($3, `ctoBackfill.mjs`) in
-addition to `check` — it is a one-time import ceiling, not a daily budget.
+The knowledge briefing and tools make no model calls and are never gated. The curator's 24
+batches/project/day limit stays. The backfill keeps its one-off lifetime $3 ceiling in addition.
 
 ### 5.2 API
 
 ```
 createBackgroundBudget({
-  store,               // JSON state: jsonStore atomic writes under a mutex (ctoStores.patchStore pattern)
-  log,                 // append-only JSONL evidence log (§11), delegateLivenessLog.mjs pattern
-  configGet, listSnapshots, usageHistory /* getUsageHistory */,
-  providerTokenTotals, // modelLedger.mjs
-  getPrices, bandOf,   // pricing (§5.5)
-  resolveDefaultModel, // () => {providerID, modelID} | null
-  desktopState, lastUserPromptAt, now,
+  store,                // JSON state, atomic writes + mutex (jsonStore + the ctoStores.patchStore pattern)
+  log,                  // append-only evidence log (§11), delegateLivenessLog.mjs pattern
+  configGet,            // reads `backgroundWork`
+  listSnapshots,        // usage.mjs
+  providerTokenTotals,  // modelLedger.mjs ({sinceMs}) → {byProvider} | null
+  getPrices, bandOf,    // pricing (§5.5)
+  userAway,             // () => boolean (§8)
+  resolveDefaultModel,  // () => {providerID, modelID} | null — the box default
+  now,
 })
 → {
-  check({ workType, model?, estimate? }) → Promise<Decision>
-  record({ workType, model, usage?, usd?, inLedger, sessionId? }) → Promise<{usd, priced, mode}>
-  goodMomentForBatch({ workType, model?, dueSince }) → Promise<{ok, reason, rule?}>   // §8
-  tick()               // §6.2; run by its own 10-min poller AND on `usage.updated`
-  status() → Promise<BudgetStatus>   // §10
-  todayUsd({ workType?, mode? }) → number
+  check({ workType, model, estimateUsd?, estimateTokens? }) → Promise<Decision>
+  record({ workType, model, usage?, usd?, inLedger }) → Promise<{usd, priced, mode}>
+  goodMomentForBatch({ workType, model, dueSince }) → Promise<{ok, rule|null, reason|null}>
+  tick()                // §6.2; runs on its own 10-min poller AND on usage.updated
+  status() → Promise<BudgetStatus>   // UI (§10)
+  usdToday({ workType?, mode? }) → number
 }
-Decision = { ok, mode: "plan"|"payg", fallback?: true, reason: null|ReasonCode, key?, resumesAt? }
+Decision   = { ok, mode: "plan"|"payg", fallback: boolean, reason: null|ReasonCode, window?: {key, pct, bgPct, cap, resetsAt}, resumesAt: number|null }
 ReasonCode = "off" | "level-cap" | "window-busy" | "projected-high" | "exhausted" | "usd-cap" | "unavailable"
 ```
 
-- `model` omitted → the box default model (an advisory early check; see §5.6 for the authoritative one).
-- `estimate` = `{usd?, tokens?}` for a batch job about to start (overnight uses `nightModelCost` × the
-  job's estimated tokens; others omit it). Payg refuses when `spent + estimate.usd` exceeds the batch
-  ceiling; plan refuses when `bgPct + estimate.tokens / tokensPerPct` exceeds it (skip when unknown).
-- `check` and `record` never throw. `check` refuses with `unavailable` when its own state cannot be read
-  (D4). `record` drops the spend on a store failure (logged; the call already happened).
-- `resumesAt`: the window's `resetsAt` for plan refusals, next local midnight for `usd-cap`.
+`check` and `record` never throw. If `check` cannot read its own state it refuses with `unavailable`.
+`record` logs and drops on a store failure (the call already happened). Every refusal is written to the
+evidence log (§11).
 
 ### 5.3 Decision rule (`check`)
 
-Pay-per-token: `spent < cap` (cap = `dailyCapUsd`, or 60 % of it for batch); else `usd-cap`. Spend counted
-is all background work in pay-per-token mode today (local day).
+`cap(workType)` = the full cap for continuous work, the batch ceiling for batch work.
 
-Plan — every governing window must pass:
+**payg**: refuse `usd-cap` when `usdToday({mode:"payg"}) + (estimateUsd ?? 0) >= cap`. `dailyCapUsd = 0`
+means no background work on pay-per-token. `resumesAt` = next local midnight.
+
+**plan**, per governing window (all must pass; the first failure is reported):
 
 1. level `off` → `off`.
-2. `snapshot.exhausted` or `pct ≥ 100` → `exhausted`.
-3. Short window, not `stale`, `pct > 70` → `window-busy`.
-4. Weekly-kind window: `projected = projectedAtReset(window)` (§5.3.1). If known and `> 80` →
-   `projected-high`. If unknown and `pct > 70` → `window-busy`.
-5. `bgPct + inFlightPct ≥ cap` (level cap, or 60 % of it for batch) → `level-cap`.
+2. `snapshot.exhausted` or `pct >= 100` → `exhausted` (`resumesAt = resetsAt`).
+3. `bgPct + inFlightPct + estimatePct >= cap` → `level-cap` (`resumesAt = resetsAt`). `estimatePct` =
+   `estimateTokens / tokensPerPct` when both are known, else 0.
+4. Short window, not stale, `pct > 70` → `window-busy` (`resumesAt = resetsAt`).
+5. Weekly-kind window, not stale: if `projectedPct` (§6.5) is known and `> 80` → `projected-high`;
+   if unknown, apply rule 4's `pct > 70` instead (`window-busy`).
 
-A `stale` window (reset passed, new numbers not yet published) counts as fresh: rules 3–4 skipped, bgPct 0.
-Thresholds 70/80, level caps and 60 % batch ceiling are exported constants.
+A `stale` window (its reset passed, the provider has not published the new window) is treated as a fresh
+window: rules 4–5 skipped, `bgPct = 0`.
 
-#### 5.3.1 Projection (weekly-kind only)
-
-`optimizer/forecast.forecastAtReset` is NOT used: it extrapolates the median of positive burn rates over
-all remaining hours, ignoring idle time; replayed on this box's history it predicted > 80 % for ~2/3 of
-windows that ended ≤ 80 % (review finding). Instead, time-weighted, idle time included:
-
-```
-start   = window.startedAt ?? accumulator.windowStart   // the previous resetsAt we observed (§6.1)
-elapsed = (now - start) / (resetsAt - start)
-projected = elapsed >= 0.2 ? pct / elapsed : null
-```
-
-No `start` known (first window after install, provider without `startedAt`) → `null`. Never guess a start
-from an assumed window length (`UsageWindow` contract).
+Thresholds (70, 80), `BATCH_SHARE` and the level caps are exported constants.
 
 ### 5.4 Recording
 
-`record` is called with REAL usage (the runner's `usage` object, never the size estimate in `tokens`;
-`ctoSessions.mjs` report hook) and:
+`record` is called with REAL usage (the runner's `usage`, never its size estimate `tokens`):
 
-- prices it (§5.5) and adds $ to today's totals per work type and per mode;
-- plan mode: adds `tokensSent(usage)` (input + output + cacheRead + cacheWrite + reasoning — export
-  `tokensSent` from `modelLedger.mjs` and add reasoning there too, so both sides use one formula) to the
-  window accumulators of the call's adapter — to `bgLedgerTokens` when `inLedger`, else
-  `bgOffLedgerTokens` (§6.2);
-- appends a `spend` row to the evidence log (§11);
-- keeps 60 days of daily totals.
+- prices it at list price (§5.5) and adds it to the day's total per work type and mode;
+- in plan mode adds `tokensSent(usage)` to `bgTokensSinceTick` of every governing window, and when
+  `inLedger === false` also to `bgNotInLedgerSinceTick` (§6.2). `tokensSent` is exported from
+  `modelLedger.mjs` and reused (input + output + cacheRead + cacheWrite);
+- keeps per-work-type daily totals (calls, usd, tokens) for 60 days.
 
-`inLedger` is false for ephemeral sessions (they are deleted after each call, `ctoSessions.mjs` ~215;
-`knowledge/trial.mjs` ~314; the ledger drops deleted sessions) and true for persistent sessions
-(overnight delegate jobs).
+Who records what:
 
-Knowledge keeps writing its own `budget_ledger` rows for its per-class report (Knowledge card, measurement
-routine); the CTO keeps writing `budget.json` day buckets for the ROI roll, using the usd returned by the
-shared `record` (ROI moves to the shared pricing).
+- Ephemeral runs (knowledge and CTO ambient, both through `ctoSessions.runEphemeral`): after the run,
+  `inLedger: false` — ephemeral sessions are deleted after the call and the ledger drops deleted sessions.
+- Overnight delegate jobs: INCREMENTALLY, from the delegate sweep's usage fold (the place that updates
+  `jobProgress.usage`): each sweep records the delta of `jobProgress.usage.tokens` since the last record
+  (approximating `tokensSent`; it includes reasoning) and of `costUsd` when not partial (else priced),
+  `inLedger: true` (the job's session persists). A final record at the terminal transition catches the rest.
+- Backfill: as its runs finish, like ephemeral runs.
+
+The knowledge subsystem keeps writing its own `budget_ledger` rows for its per-class report; the CTO keeps
+writing `budget.json` day buckets (the ROI roll reads them), now with the shared price.
 
 ### 5.5 Pricing
 
-One path: move `normalizeTokens`, `priceTokens`, `resolveRates` from `knowledge/budget.mjs` into the shared
-module (an unpriced model is charged at the dearest priced model of its band, so caps always apply). A
-recorded `usd` (opencode's own cost) is used as-is when present. `ctoBudget.priceTokens` (prices
-unpriceable models at $0) is no longer used for budgets.
+One path for both subsystems: move `normalizeTokens`, `priceTokens`, `resolveRates` from
+`knowledge/budget.mjs` into the shared module (an unpriced model is charged at the dearest priced model of
+its band, so the cap always applies). `ctoBudget.priceTokens` (unpriceable → $0) stops being used for
+spend; the ROI month totals change accordingly (noted in the PR body). A recorded `usd` from a session is
+used as-is.
 
-### 5.6 Where the gate runs
+## 6. Background share of a window
 
-Callers do not know the model until the runner resolves it, and failover / tier escalation switch models
-mid-run (`ctoSessions.mjs` ~263-314). So:
+Plan usage is reported per account. Background work's share is attributed proportionally to token counts
+measured the same way on both sides.
 
-- **Authoritative gate**: `runEphemeral` (`ctoSessions.mjs`, used by both CTO ambient and every knowledge
-  caller via `knowledge/integration.mjs`) gets a `deps.preflight({taskClass, model})` hook, called after
-  model resolution (null → box default) and BEFORE `runEphemeralSession`, on every attempt. A refusal
-  returns `{ok:false, code:"budget:<reason>"}` with no model call. Knowledge and CTO wire it to
-  `check({workType, model})`.
-- **Early gate** (cheap, avoids preparing work): existing `canSpend()` sites (`capture.mjs:435`,
-  `curator.mjs:162/685`, `corrections.mjs:264/355`, `skills.mjs:419`, `trial.mjs:215`) and the CTO
-  `beginEphemeral` gate call `check({workType, model: <class's resolved model if cheaply known, else
-  omitted>})`.
-- **Overnight**: model pinned (D3), passed explicitly to `startDelegateJob`; `check` + `goodMomentForBatch`
-  before each dispatch.
-- **Trials** (their own sessions, not `runEphemeral`) call `check` with their resolved model (resolved at
-  `trial.mjs` ~240; move the gate after it).
-
-## 6. Background share of a window (bgPct)
-
-Plan usage is reported per account. Background share is attributed proportionally to tokens.
-
-### 6.1 Accumulator per window key (persisted)
+### 6.1 State per window key `"<adapter>:<kind>"`
 
 ```
-{ resetsAt, windowStart|null, bgPct, bgLedgerTokens, bgOffLedgerTokens,
-  lastTick: {at, pct} | null, lastRatio: number|null /* tokens per pct */ }
+{ resetsAt, windowStart: number|null, bgPct, bgTokensSinceTick, bgNotInLedgerSinceTick,
+  lastTick: {at, pct} | null, tokensPerPct: number|null }
 ```
 
-### 6.2 Tick
+### 6.2 Tick (`tick()`: a 10-minute poller, plus on every `usage.updated`)
 
-Runs on its own 10-minute poller and on every `usage.updated` (which only fires on content changes), over
-`listSnapshots()`. Per plan window:
+For each plan window of each snapshot:
 
-1. **Reset**: a reset happened when `now ≥ accumulator.resetsAt` (old reset passed) or `resetsAt` advanced
-   by more than 1 hour. (Codex computes `resetsAt = now + reset_after_seconds` every poll, and multi-seat
-   aggregates drop pct on seat switches: neither a small `resetsAt` drift nor a pct drop alone is a
-   reset.) On reset: `windowStart = old resetsAt` (if it is ≤ now), `bgPct = 0`, token counters 0,
-   `lastTick = {at: now, pct}`, `resetsAt = new`. Append `window-close {key, finalPct: lastTick.pct, bgPct,
-   cap, hit100At}` to the log. Stop.
-2. No `lastTick` → set it, stop.
-3. `L` = `providerTokenTotals({sinceMs: lastTick.at})` summed over the snapshot's `providerIDs`. `null`
-   (ledger unavailable) → stop; keep everything for the next tick.
-4. `T = L + bgOffLedgerTokens` (ephemeral background tokens are not in the ledger; persistent ones are,
-   once). `B = bgLedgerTokens + bgOffLedgerTokens`. `dPct = pct - lastTick.pct`.
-5. `dPct > 0` and `T > 0` → `bgPct += dPct × min(1, B / T)`, `lastRatio = T / dPct`, then
-   `lastTick = {at: now, pct}` and token counters 0. Otherwise (no movement yet: pct moves in coarse
-   steps) → keep `lastTick` and the counters so the tokens are attributed when pct moves. If `dPct ≤ 0`
-   persists past 6 hours, reset `lastTick` and counters (nothing measurable happened).
-6. Append `tick {key, dPct, T, B, bgPct, lastRatio}`.
+1. **Reset**: the stored `resetsAt` has passed (`now >= stored.resetsAt`) OR the new `resetsAt` is more
+   than 1 hour later than the stored one. (Codex reports `resetsAt = now + reset_after`, which drifts by
+   seconds every poll; multi-seat aggregates can drop pct when the seat switches — neither is a reset, so
+   pct drops alone are ignored.) On reset: `windowStart` = the old `resetsAt` (or the window's own
+   `startedAt` when present), `bgPct = 0`, both token counters `= 0`, `lastTick = {at: now, pct}`; stop.
+   First sighting: `windowStart = startedAt ?? null`, `lastTick = {at: now, pct}`; stop.
+2. `L` = `providerTokenTotals({sinceMs: lastTick.at})` summed over the snapshot's `providerIDs`;
+   `null` → skip this window this tick (counters carry forward).
+3. `T = L + bgNotInLedgerSinceTick` — all tokens of these providers since the last tick, background ones
+   counted exactly once.
+4. `dPct = pct - lastTick.pct`. If `dPct <= 0`: keep `lastTick` and both counters (pct moves in coarse
+   steps; the tokens are attributed when it moves). Stop.
+5. If `T > 0`: `bgPct += dPct × min(1, bgTokensSinceTick / T)`, and `tokensPerPct = T / dPct` when
+   `dPct >= 1` (else keep the previous). If `T = 0` the movement came from another device or the
+   provider's web app: nothing is attributed.
+6. `lastTick = {at: now, pct}`, both counters `= 0`.
 
 ### 6.3 Between ticks
 
-`inFlightPct = (bgLedgerTokens + bgOffLedgerTokens) / ratio`, `ratio` = the optimizer pacing's measured
-tokens-per-pct for the key (`optimizerPacing.pressureWindows()`), else `lastRatio`, else 0 (the next tick
-catches up).
+`inFlightPct = bgTokensSinceTick / tokensPerPct` when `tokensPerPct` is known (fall back to the optimizer
+pacing state's `pressureWindows()[key].tokensPerPct`), else 0 (the next tick catches up; overnight jobs
+record incrementally, so overshoot is bounded by roughly one sweep plus one tick of background work).
 
-### 6.4 Known limits (stated in the card's help text)
+### 6.4 Known limits (stated in the UI help, not hidden)
 
-- Attribution is by raw token share; cache reads count fully on both sides, so background work with large
-  cached contexts is over-counted vs quota weighting — conservative.
-- Usage from other devices / the provider's web app is attributed to nobody on this box (correct).
-- On first install bgPct starts at 0 mid-window, and the weekly projection is unknown until one reset has
-  been observed (unless the provider reports `startedAt`).
+- Attribution is by raw token share; cache reads count fully on both sides. Background work with large
+  cached contexts is over-counted relative to quota weighting — the error is conservative.
+- On first install or first sighting of a window, the share starts at 0 mid-window.
 
-Rejected alternative: `bgPct = bgTokens / tokensPerPct` from the optimizer pacing alone. Its numerator
-comes from the same ledger, which excludes deleted ephemeral sessions, so the conversion is biased exactly
-where background work lives; it is used only for the between-ticks estimate.
+### 6.5 Projected end of a weekly window
 
-## 7. Background CTO
+`projectedPct = pct × span / elapsed` with `span = resetsAt - windowStart`, `elapsed = now - windowStart`,
+known only when `windowStart` is known and `elapsed >= 0.2 × span`. This counts idle time in the rate
+(unlike `optimizer/forecast.forecastAtReset`, which extrapolates the median ACTIVE burn rate and on this
+box's history exceeds 80 % in most windows that actually ended below it). Not used for short windows.
 
-### 7.1 Ambient
+## 7. Background CTO integration
 
-- `beginEphemeral`'s cap check (`budget.isCapHit` + `ambientCapUsd`) → early `check` (§5.6); the
-  authoritative check is the runner preflight. Error code stays `cto_cap_hit` for compatibility; the reason
-  goes in the ledger row.
-- Thrifty mode flips only on `usd-cap` and `level-cap` (lasting conditions). `window-busy`,
-  `projected-high`, `exhausted`, `unavailable` just refuse the call (they clear within hours; thrifty
-  clears only at midnight).
-- `reportAmbientSpend` → shared `record` with real usage, `inLedger:false`.
-- Watchdog (`index.mjs` ~3590): measures `cto-ambient` **pay-per-token** dollars only, floor
-  `dailyCapUsd / 24`. On plans the level caps bound runaway spend; list-price dollars there are not money
-  and would false-trip the 2×/4× multiples.
-- Readers of the retired caps updated: `ctoHealth.mjs` (~96, 143), `index.mjs` ~5763, the usage-burn
-  watcher (`ctoEngine.mjs` ~1493, `ctoWatchers.mjs` ~186, 639), `ctoView.ts` ~127-149, `CtoPanel.tsx`.
+### 7.1 Gate placement — the model is only known inside the runner
 
-### 7.2 Overnight
+`ctoSessions.runEphemeral` gains a `preflight({taskClass, tier, model})` dependency, called after model
+resolution and before each dispatch attempt (including failover and tier escalation); a `null` model is
+passed as `resolveDefaultModel()`. A refusing preflight ends the run with `{ok:false, code:"budget",
+reason}` and makes no model call. The knowledge runner (`knowledge/integration.mjs`) and the CTO ambient
+runner both pass a preflight that calls `check({workType, model})`.
 
-- Before each dispatch: `check({workType:"cto-overnight", model, estimate})` + `goodMomentForBatch`. A
-  refusal stops dispatch for that tick only; the scheduler re-evaluates on its next tick. Only `off`,
-  `usd-cap` and a weekly-kind `level-cap` end the night.
-- Usage is recorded incrementally: the delegate sweep fold (`delegate.mjs` ~4988) already updates
-  `jobProgress.usage = {tokens, costUsd, costPartial}`; for CTO overnight jobs it calls `record` with the
-  DELTA since the last fold (`usage: {tokens: Δ}` treated as `tokensSent`, `usd: ΔcostUsd` when not
-  partial, `inLedger:true`). So multi-hour jobs count in the ticks they run in.
-- Removed: `overnightSpendUsd`, `nightCapUsd`, the windowless night-cap branch, the
-  `cto.overnight.night_cap_hit` row. A refusal is ledgered `cto.overnight.budget_refused {reason}` once
-  per reason per night.
+Callers' existing early gates (`capture`, `curator`, `corrections`, `skills`, `trial`, CTO
+`beginEphemeral`) stay, as cheap early exits, calling `check` with the model their class resolves to
+(`resolveModelForClass`, or the default model when the class is unpinned). The preflight is authoritative.
 
-### 7.3 Overnight seam
+### 7.2 Ambient
 
-`adaptiveCtoOvernight.budget` becomes:
+- `beginEphemeral`'s cap test (`budget.isCapHit` + `budgetAmbientCapUsd`) becomes the early `check`.
+  Only `usd-cap` and `level-cap` refusals flip thrifty mode (`setThrifty(true, {reason:"cap_hit"})`);
+  `window-busy`, `projected-high`, `exhausted`, `unavailable` refuse the call without flipping thrifty
+  (thrifty only clears at local midnight, so a transient condition must not shed rollups all day). The
+  error code stays `cto_cap_hit` for compatibility; the ledger row carries the reason.
+- The usage-burn watcher (`ctoEngine.mjs` ~:1493, `ctoWatchers.mjs`) and the A2 watchdog read
+  `usdToday({workType:"cto-ambient", mode:"payg"})`-based figures; the watchdog's floor uses
+  `dailyCapUsd / 24`. On a plan the watchdog sees no payg spend and stays quiet — runaway protection there
+  is the level cap.
 
-1. Resolve the pinned overnight model and its billing mode (§4).
-2. Plan: binding window = the governing window with the highest `pct`;
-   `computeSpendable({provider: adapter, remainingPct: 100 - pct, windowKind: kind, windowed: true})` for
-   the Health card. The returned plan's `spendableFrac` is set to `null` (unbounded by fraction —
-   selection is bounded by `check` per dispatch, D2).
-3. Payg: `computeSpendable({windowed:false, provider: adapter ?? providerID})` for the Health card;
-   `spendableFrac = 0` if `check` refuses, else `null`.
-4. Tests pin: a subscription snapshot takes the windowed path; `remainingPct = 100 - used`; binding window
-   = most used; a default-cost candidate is selected on a plan with headroom; nothing is selected after a
-   `usd-cap` refusal.
+### 7.3 Overnight
 
-## 8. Timing
+- Selection: the overnight portfolio no longer uses `spendableFrac` as a budget fraction against
+  `predictedCost: 1`. `adaptiveCtoOvernight.budget` returns `spendableFrac: null` (select by the
+  scheduler's own limits) when `check({workType:"cto-overnight", model, estimateUsd})` passes, and `0`
+  when it refuses. `estimateUsd` = the existing `nightModelCost` × the candidate's estimated tokens.
+- The overnight job's model is pinned: dispatch passes the model the budget checked (the configured
+  default model, today's `nightModelCost` source) to `startDelegateJob`, so the checked provider is the
+  billed one.
+- Every overnight tick re-evaluates; a refusal stops dispatching until a later tick passes (a 23:00
+  `window-busy` does not cancel a night whose 5-hour window resets at 01:00).
+- The reserve: `computeSpendable` still runs for the Health card, with the §1 bugs fixed — plan
+  providers are those whose snapshot is plan mode (§4), the binding window is the governing window with
+  the highest `pct`, `remainingPct = 100 - pct`, and the provider is that snapshot's adapter (no
+  hard-coded `"anthropic"`). `nightCapUsd()`, `overnightSpendUsd()`, the windowless night-cap branch and
+  the `cto.overnight.night_cap_hit` row are removed; a refusal is ledgered once per night as
+  `cto.overnight.budget_refused {reason}`.
+- Overnight dispatch also requires `goodMomentForBatch` (§8); at night rule 1 normally holds.
+
+## 8. Timing: spare quota, presence, near-reset
+
+`userAway()` = the desktop is not `present` (`push.desktopState`) AND no user-started turn on the box in
+the last 15 minutes (the CTO engine's last-user-prompt time; a phone user counts as present).
 
 - **Continuous work** runs whenever `check` passes.
-- **Batch work** keeps its existing due schedule (`TIDY_EVERY_MS`, `corrections.shouldRun`, the trial
-  queue, the overnight window, the backfill) but STARTS only when `goodMomentForBatch` is ok:
-  `check` passes (batch ceiling) AND one of
-  1. **away**: the user is away (§3);
-  2. **near-reset** (plan): a governing weekly-kind window resets within 24 h — its unused quota is about
-     to be lost;
-  3. **overdue**: due for more than 48 h (must not starve; `check` still applies).
-- A refused batch job stays due; its own poller retries (no new scheduler). Each start appends
-  `batch-start {workType, rule, desktopState, hoursToReset, pct, projected, dueForH}`.
+- **Batch work** becomes due on its existing schedule (`TIDY_EVERY_MS`, `corrections.shouldRun`, the
+  trial queue, the overnight window, backfill) but only STARTS when `check` passes AND one of:
+  1. `userAway()`;
+  2. plan mode and a governing weekly-kind window resets within 24 h (spare quota about to be wasted);
+  3. the job has been due for more than 48 h (it must not starve).
+  A refused batch job stays due and is retried by its own poller (no new scheduler). Each start is logged
+  with the rule that admitted it (§11).
 
 ## 9. Configuration and migration
 
+New config key (`local.mjs` defaults):
+
 ```
-backgroundWork: { level: "normal", dailyCapUsd: 5 }      // ~/.manta/config.json, defaults in local.mjs
+backgroundWork: { level: "normal", dailyCapUsd: 5 }
 ```
 
-- `config:update` (`rpc.mjs` ~1057) gets a validating step for this key (`local.configUpdate` is a blind
-  shallow merge): a partial `backgroundWork` patch is MERGED with the stored object; `level ∈ {off, light,
-  normal}`; `dailyCapUsd` a number 0–100 rounded to cents; invalid values are rejected with a readable 400
-  (the control shows it). The same step deletes `ctoAmbientCap`, `ctoAmbientCapUsd`, `ctoNightCapUsd` from
-  the stored config on any write.
-- Version skew (older desktop, newer box): a write of `ctoAmbientCap` / `ctoNightCapUsd` is dropped
-  silently by that step (desktops auto-update; the window is short). Knowledge settings keep a
-  `dailyCapUsd` case in `applyPatch` (it throws 400 on unknown keys, `knowledge/settings.mjs` ~122) that
-  writes `backgroundWork.dailyCapUsd`, and the knowledge settings wire keeps returning `dailyCapUsd`
-  (mirroring `backgroundWork.dailyCapUsd`) because an older `knowledgeFormat.ts` treats a missing value as
-  capped. `MAX_DAILY_CAP_USD` moves to the shared module (100).
-- No user action on upgrade: defaults apply on first read.
+- `config:update` (`rpc.mjs`) gains validation for this key: `level ∈ {off, light, normal}`,
+  `dailyCapUsd` a number 0–100 rounded to cents; a partial object is MERGED into the stored one (today's
+  `configUpdate` is a shallow replace, which would drop `dailyCapUsd` when only `level` is sent); an
+  invalid value is rejected with a message the UI shows. Invalid stored values read as defaults.
+- Retired keys `ctoAmbientCap`, `ctoAmbientCapUsd`, `ctoNightCapUsd`: no longer read; stripped from the
+  config by `config:update`; a write of them from an older desktop is ignored (not an error — an error
+  would fail the whole config save).
+- Knowledge settings: `dailyCapUsd` leaves the schema; `applyPatch` keeps a `case "dailyCapUsd"` that sets
+  `backgroundWork.dailyCapUsd` (an older desktop's cap input keeps working and means the same thing now).
+  The settings read still returns `dailyCapUsd` mirroring `backgroundWork.dailyCapUsd` so an older
+  desktop's card renders; `MAX_DAILY_CAP_USD` moves to the shared module.
+- No user action on upgrade (defaults apply on first read).
 
-Every reader of the retired keys and fields is updated (from review): server `index.mjs` ~5763,
-`ctoHealth.mjs`, `knowledge/engine.mjs` ~248 (notice copy) and ~406-408 (`capUsd`, `capReached` →
-from `status()`), `local.mjs`; renderer `CtoPanel.tsx`, `ctoView.ts`, `knowledgeFormat.ts` ~87-93,
-`settings/KnowledgeCard.tsx`, `types.ts` ~325/336, `api.ts` ~1059/1076; tests `knowledge/contract.test.mjs`
-~214/245, `ctoBudget`, `ctoEngine.overnight`, `ctoHealth`, `ctoView`, `ctoSettingsTau`. iOS
-(`mobile/native`) and `docs/opencode-plugins-v2` have no references.
+Readers to update (from review): `ctoHealth.mjs` (cap row), `index.mjs` health/cto config payload
+(~:5763), `knowledge/engine.mjs` (status `capUsd`/`capReached`, notice copy), `ctoBackfill.mjs`,
+`ctoWatchers.mjs`, renderer `CtoPanel.tsx`, `ctoView.ts`, `settings/KnowledgeCard.tsx`,
+`knowledgeFormat.ts`, `types.ts`, `api.ts`, and the tests `knowledge/contract.test.mjs`, `ctoBudget`,
+`ctoEngine.overnight`, `ctoHealth`, `ctoView`, `ctoSettingsTau`. The iOS app and the opencode plugins do
+not reference these keys.
 
 ## 10. UI
 
-**Home: Settings → Models**, a `BackgroundWorkCard` beside the Optimizer card (it is a box-wide setting,
-not a per-feature one). The Knowledge card and the CTO pane each show a one-line status from the same data
-plus a **Change** link that opens Settings at the card, and their own work-type split ("Knowledge today:
-14 calls"). The CTO thrifty banner shows the reason in words, not "cap hit".
+**Home: Settings → Models**, a `BackgroundWorkCard` next to the Optimizer card (the full controls). The
+Knowledge card and the CTO pane show a one-line status from the same data plus a "Change" link that opens
+that card, and their own work types' share (`byWork`).
 
 Card contents:
 
-- **Background work on plans** — Off / Light / Normal (existing `Segmented` control, radio semantics;
-  guides `forms`, `accessibility`, `brand-consistent-forms`). Subtitle names the plans it governs
-  ("Claude Max, ChatGPT Pro"). Hidden when no plan is connected.
-- **API keys: up to $X/day** — dollar input; subtitle names the pay-per-token providers ("OpenRouter";
-  "$0 turns it off"). Shows today and month-to-date ("$1.20 today · $23.40 this month"). Hidden when no
-  pay-per-token provider is connected AND no plan is in fallback.
-- **Status** per plan: "Used 2% of your Claude week · 4% of this 5-hour window (limits 5% / 10%)".
-  Paused states, each with when it resumes:
+- **Background work on plans** (shown only when at least one plan provider exists, listing them):
+  Off / Light / Normal — the existing `Segmented` control (native radio semantics; modern-web-guidance
+  guides `forms`, `accessibility`, `brand-consistent-forms`). Help: "Uses spare plan quota only: up to 5%
+  of a week and 10% of a 5-hour window on Normal. Background work pauses while you're using a window
+  heavily."
+- **API keys: daily cap** (shown when at least one pay-per-token provider exists, listing them, or when a
+  plan is in fallback): dollar input; "0 turns background work off on API keys". Shows today and
+  month-to-date: "$1.20 of $5.00 today · $18.40 this month".
+- **Status**, one row per plan provider: "Background work used 2% of your Claude week · 4% of this 5-hour
+  window". When paused, the reason and when it resumes:
+  - `level-cap`: "Reached this week's background limit (5%) — resumes Thu 09:00"
+  - `window-busy`: "Paused — your 5-hour window is 74% used — resumes at 14:00 or when you ease off"
+  - `projected-high`: "Paused — this week is on track to end at 86% — resumes Mon 09:00"
+  - `exhausted`: "Your Claude week is used up — resumes Mon 09:00"
+  - `off`: "Off on plans"
+  - `usd-cap`: "Reached today's $5.00 API-key cap — resumes at midnight"
+  - `unavailable`: "Background work is waiting — the budget couldn't be read"
+  - fallback: "Claude usage unavailable — limited by the $5 daily cap until it returns"
+  - due batch job waiting: "Weekly tidy waiting for a quiet moment"
+- The CTO thrifty banner shows the reason in the same words, not a bare "cap hit".
+- Every control reports its outcome (AGENTS.md "never stub a control").
 
-  | Reason | Copy |
-  |---|---|
-  | off | "Off for plans." |
-  | level-cap | "Reached this week's background limit (5%) — resumes Thu 09:00." / "…this 5-hour window's limit (10%) — resumes 14:30." |
-  | window-busy | "Paused — your 5-hour window is 74% used. Resumes 14:30 or when it frees up." |
-  | projected-high | "Paused — this week is on track to end at 86%. Resumes Thu 09:00." |
-  | exhausted | "Your Claude week is used up — resumes Thu 09:00." |
-  | usd-cap | "Reached today's $5.00 — resumes at midnight." |
-  | unavailable | "Paused — couldn't read the budget. Retrying." |
-  | fallback | "Claude usage unavailable — limited by the $5.00 daily API cap until it returns." |
-  | batch waiting | "Weekly tidy waiting for a quiet moment (when you're away or before the week resets)." |
-
-- Help text states the §6.4 limits in plain words.
-- Every control reports its outcome (AGENTS.md "never stub a control"): saving shows a confirmation; a
-  rejected value shows the server's message and restores the old value.
-
-Wire: rpc `background:status` → `BudgetStatus`; writes via `configUpdate({backgroundWork: {...}})`.
-Refetch on open + 30 s poll while visible.
+Wire: `background:status` rpc → `BudgetStatus`; settings through `configGet` / `config:update`. Refetch on
+open + 30 s while visible.
 
 ```
 BudgetStatus = {
-  level, dailyCapUsd, spentUsdToday, spentUsdMonth,
-  payg: { providers: [label] },
-  plans: [{ adapter, label, fallback?: true,
+  level, dailyCapUsd, payg: { providers: string[], usdToday, usdMonth },
+  plans: [{ adapter, planLabel?, fallback: boolean,
             windows: [{key, kind, label, pct, bgPct, cap, projectedPct|null, resetsAt}],
-            paused: null | {reason, key?, value?, resumesAt?} }],
-  batchWaiting: [{workType, dueSince}],
-  byWork: [{workType, calls, usd}]          // today
+            paused: null | {reason, windowKey?, value?, resumesAt|null} }],
+  waitingBatch: [{workType, dueSince}],
+  byWork: [{workType, calls, usd, tokens}]   // today
 }
 ```
 
-## 11. Evidence log
+## 11. Evidence log (for the follow-up routine)
 
-Append-only `~/.manta/background-budget.jsonl` (via `statePath`, the `delegateLivenessLog.mjs` pattern:
-size-capped rotation), rows:
+Append-only `~/.manta/background-budget.jsonl` (state path; rotated/pruned to 60 days, the
+`delegateLivenessLog.mjs` pattern). Rows:
 
-- `spend {ts, workType, mode, key?, tokens, usd}`
-- `refused {ts, workType, reason, key?, pct?, projected?, bgPct?, count}` — coalesced per (workType,
-  reason, hour) with a count
-- `batch-start {…}` (§8), `tick {…}` (§6.2), `window-close {…}` (§6.2)
-
-The follow-up routine (§14) reads only this file plus `usage-history.json`.
+- `refused {ts, workType, reason, key, pct, projectedPct, bgPct, count}` — coalesced per
+  (workType, reason, hour) with a count;
+- `batch-start {ts, workType, rule, desktopState, userAway, hoursToReset, pct, projectedPct, dueForH}`;
+- `spend {ts, workType, mode, tokens, usd, key}`;
+- `tick {ts, key, dPct, T, bgTokens, bgPct, tokensPerPct}`;
+- `window-close {ts, key, finalPct, bgPct, cap, hit100At|null}` — written at reset.
 
 ## 12. Libraries considered
 
 | Need | Chosen | Considered, and why not |
 |---|---|---|
-| Budget gate / quota-share accounting | own module | `bottleneck` 2.19.5 (MIT, 15.5M/wk, last publish 2019-08) and `rate-limiter-flexible` 11.5.0 (ISC, 4.7M/wk, 2026-11) limit request RATE/concurrency; neither models "share of an externally reported quota window". `p-limit` 7.3.3 (455M/wk) is concurrency only. |
-| Usage windows + history | existing `usage.mjs` poller | — |
-| Tokens per pct | existing `optimizer/pacing.mjs` (between ticks only) + `modelLedger.providerTokenTotals` | pacing alone as the attribution: biased (§6.4). |
-| Window projection | own 3-line time-weighted projection | `optimizer/forecast.forecastAtReset` (ignores idle time; measured too pessimistic, §5.3.1); `ctoForecast.mjs` forecasts next-DAY fractions, not end-of-window. |
-| Presence | existing `push.desktopState` + CTO last-prompt signal | — |
-| State persistence | existing `jsonStore` atomic writes + store mutex | `lowdb` 7.0.1 (MIT, 2.1M/wk, last publish 2023-12): a dependency for what the atomic writer does; state is a few KB. `node:sqlite` (knowledge's) would couple the CTO to the knowledge DB. |
-| Evidence log | existing `delegateLivenessLog.mjs` pattern | a logging library: JSONL append with rotation already exists in-repo. |
-| Pricing | knowledge's pricing, moved | `ctoBudget.priceTokens` (unpriced = $0, a cap could never trip). |
-| Level control | existing `Segmented` | new control / select library. |
+| Budget gate / quota accounting | own module | `bottleneck` 2.19.5 (MIT, 15.5M/wk, last publish 2019-08), `rate-limiter-flexible` 11.5.0 (ISC, 4.7M/wk, 2026-11): request rate / concurrency limiters; neither models a share of an externally reported quota window. `p-limit` 7.3.3: concurrency only. |
+| Usage windows | existing `usage.mjs` poller | — |
+| Tokens per pct | measured in §6.2, falling back to `optimizer/pacing.mjs` | Using pacing's `tokensPerPct` as the primary: its numerator comes from the ledger, which excludes deleted ephemeral sessions — the very background work being measured. |
+| End-of-window projection | own linear projection (§6.5) | `optimizer/forecast.forecastAtReset`: extrapolates active-only burn, pessimistic on idle boxes (measured on this box's history). `ctoForecast` forecasts next-day demand, not end-of-window. |
+| Presence | `push.desktopState` + CTO last-prompt time | — |
+| Persistence | `jsonStore` atomic writes + store mutex; JSONL evidence log on the existing pattern | `lowdb` 7.0.1 (MIT, 2.1M/wk, last publish 2023-12): extra dependency for what the atomic writer already does. |
+| Pricing | knowledge pricing moved to the shared module | `ctoBudget.priceTokens`: prices unpriceable models at $0. |
+| Level control | existing `Segmented` | — |
 
 ## 13. Tests
 
 Server (`node:test`, injected I/O):
 
-- `backgroundBudget.test.mjs`: billing mode (no adapter, missing snapshot → fallback, credit,
-  subscription, codex with balance, null model → default); every rule and reason incl. stale windows,
-  unknown projection, batch ceiling, estimates; projection (elapsed < 0.2, startedAt vs observed start);
-  tick (attribution with on/off-ledger tokens, dPct ≤ 0 carry-forward, 6 h expiry, ledger null, codex
-  resetsAt drift is NOT a reset, pct drop alone is NOT a reset, real reset sets windowStart and logs
-  window-close); in-flight estimate fallbacks; `goodMomentForBatch` (away incl. phone-only user, near-reset,
-  overdue, present mid-week refused); fail-closed on unreadable state; persistence round-trip; pricing
-  fallback; evidence-log coalescing.
-- `ctoSessions` preflight: called per attempt after resolution, refusal prevents the model call, null model
+- `backgroundBudget.test.mjs`: billing mode (no adapter, credit, subscription, codex with balance,
+  missing snapshot → fallback); every rule and reason incl. stale windows, unknown projection, batch
+  ceiling vs continuous, estimates; payg cap incl. 0; tick: reset by passed resetsAt and by > 1 h jump,
+  NOT by codex drift or a pct drop; dPct ≤ 0 carries counters; `L = null` skips; not-in-ledger tokens in
+  the denominator once; T = 0; projection gating (< 20 % elapsed, unknown start); in-flight estimate;
+  `goodMomentForBatch` rules 1–3 and refusal; `userAway` with phone activity; store round trip; evidence
+  rows and coalescing; pricing fallback.
+- `ctoSessions`: preflight runs per attempt (failover, escalation), refuses before any call, `null` model
   → default.
-- Knowledge: every early gate through `check`; `dailyCapUsd` settings case maps to the new key; contract
-  test updated.
-- CTO: ambient refusal reasons → thrifty only for usd-cap/level-cap; overnight §7.3 pins; incremental
-  overnight recording from the sweep fold; watchdog uses payg ambient dollars only.
-- `config:update` validation, merge of partial patches, retired-key deletion.
+- knowledge: gates through `check`; settings mirror + legacy `dailyCapUsd` write.
+- CTO: thrifty only on `usd-cap`/`level-cap`; overnight seam (plan detection, `remainingPct = 100 - pct`,
+  binding window, adapter provider, pinned model, a default-cost job IS selected when `check` passes);
+  incremental overnight recording; watchdog floor.
+- `rpc` `config:update`: merge, validation, retired-key stripping.
 
-Renderer (vitest): status copy for every reason, fallback, batch waiting, hidden controls, save success and
-error paths.
+Renderer (vitest): status copy for every reason incl. fallback and waiting batch; payg line with month;
+visibility rules for the two controls; save error path.
 
-All verification on Freestyle VMs (`~/.local/bin/fs-run.sh`), never on the dev box.
+Heavy verification runs on Freestyle VMs (`~/.local/bin/fs-run.sh`), never on the dev box.
 
 ## 14. Follow-up routine
 
-Created when the change merges (`routine_create`, Mondays 09:00 for 3 weeks, then it disables itself).
-Reads `background-budget.jsonl` + `usage-history.json` (read-only) and reports per week: bgPct per window at
-close vs cap; refusals by reason; batch starts by rule (away / near-reset / overdue); weeks where the user
-hit 100 % with background spend in the previous 24 h; payg dollars per day. Decision: adjust level caps
-(5/10, 2/5), 70/80 thresholds, the 60 % batch ceiling.
+Created when the PR merges (`routine_create`, weekly for 3 weeks, then disables itself): reads
+`background-budget.jsonl` and the usage history; reports per window per week the background share, each
+pause reason's frequency, which rule admitted batch starts (away / near reset / overdue), and any week the
+user hit 100 % while background work had spent in the preceding 24 h. Informs: adjusting the level caps,
+`BATCH_SHARE`, the 70/80 thresholds.
 
-## 15. Out of scope
+## 15. Review changes (rev 1 → rev 2)
 
-Routines; the CTO effort tier; optimizer pacing/routing; per-seat budgets (the aggregate snapshot governs).
+Attribution counts deleted ephemeral sessions (`inLedger`), carries counters over flat ticks, and
+detects resets by `resetsAt` only; the gate moved into the runner (preflight) because the model is
+resolved there; overnight selection stops using `spendableFrac` against unit costs; the active-burn
+forecast was replaced by a time-weighted projection for weekly windows; batch ceiling at 60 %; thrifty only
+on cap refusals; watchdog on payg ambient spend; presence includes phone activity; config merge and
+validation; older-desktop compatibility; UI home in Settings with status lines in the panes; evidence log.
+
+## 16. Out of scope
+
+Routines; the CTO effort tier; the optimizer's pacing and routing; per-seat budgets (the aggregate
+snapshot governs).
+
+
+## 17. Rev 3 amendments (normative — these override earlier sections)
+
+**Gate and runner**
+
+1. One `createCtoRunner` wrapper (shape of `createKnowledgeRunner`) injects `preflight` and `reportCost`
+   into `runEphemeral`; ALL CTO call sites use it (`index.mjs` ~2785, ~2827, ~3324, ~3420
+   `gatedSuggestionEphemeral` — which today records nothing —, `ctoEngine.mjs` ~1228, the backfill
+   runner). `runEphemeral` without a preflight refuses (`code:"budget"`, reason `unavailable`) — tested.
+2. Preflight refusal code `budget` joins `ctoRunOutcome` `CODES` (no `unknown-error` rows) and is a local
+   failure (no failover/escalation). Knowledge callers map it to their existing cap path
+   (`{status:"cap"}` + `noteCapReached`; trial `cap-reached`), never "failed"/retry-with-skip.
+3. Thrifty is flipped by the engine-supplied preflight, only on `usd-cap` and a WEEKLY-kind `level-cap`
+   (a short-window `level-cap` clears within hours; thrifty clears only at midnight). `beginEphemeral`
+   drops its budget test (it has no task class); it keeps its rate limits.
+4. An `estimated` run (no real usage) records its size estimate rather than nothing.
+
+**Accounting**
+
+5. Batch work is tracked separately: per window `batchPct` (plan) and per day `batchUsd` (payg), alongside
+   the totals. Batch is refused when `batch ≥ 0.6 × cap` OR `total ≥ cap`. Within 24 h of a governing
+   weekly-kind window's reset the batch ceiling lifts to the full cap.
+6. §6.2 step 4: `dPct === 0` carries counters; `dPct < 0` (seat switch) rebases
+   `lastTick = {at: now, pct}` and zeroes both counters, keeping `bgPct`.
+7. Absent `resetsAt`: stored absent + new present = first sighting; `resumesAt = null`; no reset detection
+   without `resetsAt`.
+8. Weekly-kind `windowStart` when unknown: `resetsAt − 7 days` (`weekly_scoped:*` included). Short windows
+   keep `null`.
+9. Tokens recorded while a plan is in fallback (snapshot missing) are kept per adapter and added to that
+   adapter's windows' counters at the next successful tick.
+10. Near the end of a week (≤ 24 h to reset) the weekly projection rule is replaced by
+    `pct + (levelCap − bgPct) ≤ 95`.
+11. `projected-high` `resumesAt = min(resetsAt, windowStart + (pct / 80) × span)` (when usage stays flat).
+
+**Overnight**
+
+12. No cost estimates (`estimateUsd`/`estimateTokens` are removed from the API): the seam has no
+    candidate and the only token figure is a prompt-size estimate. `check` runs in `dispatchPlan` per
+    dispatch. A running job is never interrupted on crossing a cap; caps bound new dispatches.
+13. Model pin: the box default model if it is in the subagent-approved (ticked) set, else the candidate's
+    `modelHint` if ticked, else do not dispatch and ledger `cto.overnight.budget_refused {reason:
+    "no-model"}`. PR body states that pinning turns Auto routing off for overnight jobs.
+14. Incremental recording: the delegate record gets `budgetWorkType` (set for overnight dispatches —
+    `actor:"cto"` alone does not identify them) and a persisted cursor `budgetRecorded: {tokens, usd}`.
+    A hook at both usage-fold sites (`delegate.mjs` ~2660 and ~4999), invoked OUTSIDE the jobs lock,
+    records the delta past the cursor and advances it; restart-safe, no double count.
+15. Watchdog: both measured burn and the expected baseline read the shared module's `cto-ambient` payg
+    daily totals (not `budget.json`, which also holds plan-mode and overnight spend).
+
+**Presence and timing**
+
+16. `lastUserPromptAt`: a small in-memory tracker on manta-server's opencode event pump — a user message
+    in any session that is not background (ephemeral, delegate job, routine run, CTO conversation) sets
+    it. Exposed to the budget; after a restart it is 0.
+17. Weekly batch jobs (`knowledge-corrections`, `knowledge-tidy`) in plan mode become due at
+    `resetsAt − 24 h` of the governing weekly window once their own interval has elapsed; the 48 h overdue
+    rule counts from that moment. (Payg: their existing schedule.)
+
+**Config and compatibility**
+
+18. One exported validate-and-merge function for `backgroundWork`, used by `config:update` AND by the
+    knowledge settings legacy `dailyCapUsd` case; it calls `syncState.applyConfig` like other writes.
+19. Knowledge settings wire mirrors `spentTodayUsd` as payg background spend only (so an older desktop
+    never shows "waits until tomorrow" for plan-mode list-price spend). Older desktops' CTO cap inputs
+    revert silently — accepted for the short version-skew window, noted in the PR body.
+
+**Status and copy**
+
+20. `BudgetStatus`: each plan row and the payg block carry `paused` (continuous work, box default model)
+    AND `batchPaused`. Copy for batch: "Larger jobs paused — they've used their share of this week (3%);
+    capture continues."
+21. Copy fixes: `window-busy` short → "Paused — your 5-hour window is 74% used. Resumes at 14:00, when it
+    resets."; weekly fallback → "this week is 74% used"; `projected-high` → "…on track to end at 86% —
+    resumes around Sat 06:00 if usage stays flat"; a projection above 100 is shown as "on track to run out
+    before the reset".
+
+**Evidence log**
+
+22. `refused` rows add `class`, `cap`, `ceiling` (true when the batch ceiling, not the cap, refused);
+    `spend` rows add `class`, `fallback`; `tick` and `window-close` add `batchPct`; window state keeps
+    `hit100At` (first tick with `pct ≥ 100`) for `window-close`.
