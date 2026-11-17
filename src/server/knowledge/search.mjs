@@ -27,6 +27,19 @@ export const MESSAGE_TEXT_MAX = 2000;
 export const NEIGHBORHOOD = 5;
 const PAGE_BODY_INDEX_MAX = 200_000;
 
+// An any-term (OR) query ranks on what is distinctive: short words and common stop words would match nearly every
+// row and drown the real terms. Used for the transcript query and the wiki's OR fallback; a query made ONLY of
+// such words keeps its terms (it is all the caller gave).
+const STOP_WORDS = new Set(["the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was", "one", "our", "out", "has", "have", "how", "its", "that", "this", "with", "from", "they", "will", "what", "when", "where", "which", "who", "why", "your", "about", "into", "than", "then", "them", "were", "been", "does", "did", "should", "would", "could", "there", "their", "also", "just", "like", "some", "more", "most", "very"]);
+export function significantTerms(terms) {
+  const list = (terms ?? []).filter((t) => typeof t === "string" && t !== "");
+  const keep = list.filter((t) => {
+    const w = t.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+    return w.length >= 3 && !STOP_WORDS.has(w);
+  });
+  return keep.length > 0 ? keep : list;
+}
+
 const clip = (s, n) => {
   const t = String(s ?? "").replace(/\s+/g, " ").trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
@@ -90,9 +103,13 @@ export function createPageIndex({ state, store, now = Date.now } = {}) {
 
 /**
  * deps: state, store, registry, sessionMap, settings, searchTranscripts, readMessages({sessionID, messageIDs, radius}) →
- * [{id, role, text, at}] | null.
+ * [{id, role, text, at}] | null, scanner {redact(text) → {text, unavailable?}}.
+ *
+ * Transcript text that leaves a project is secret-redacted: a snippet or message of a session that belongs to
+ * a project OTHER than the caller's goes through `scanner.redact`; with no scanner, or one that is unavailable,
+ * the text is omitted rather than shown raw. The caller's own project (and own session) is shown as is.
  */
-export function createSearch({ state, store, registry, sessionMap, settings, searchTranscripts, readMessages } = {}) {
+export function createSearch({ state, store, registry, sessionMap, settings, searchTranscripts, readMessages, scanner } = {}) {
   const db = state.db;
 
   async function callerContext(sessionID) {
@@ -102,6 +119,17 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
     // unmapped → private (fail closed)
     const callerMode = callerSlug ? modeOf(callerSlug) : "private";
     return { callerSlug, callerMode, modeOf };
+  }
+
+  /** The text to show for a session of project `slug`: raw for the caller's own project, redacted for any other, "" if it can't be. */
+  async function shown(text, slug, ctx, { own = false } = {}) {
+    if (own || (slug && slug === ctx.callerSlug)) return String(text ?? "");
+    try {
+      const r = scanner ? await scanner.redact(String(text ?? "")) : null;
+      return r && !r.unavailable && typeof r.text === "string" ? r.text : "";
+    } catch {
+      return "";
+    }
   }
 
   function validate({ query, scope, sources, limit }) {
@@ -128,7 +156,7 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
         )
         .all(expr);
     let rows = run(m.expr);
-    if (rows.length === 0 && m.terms.length > 1) rows = run(m.terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR "));
+    if (rows.length === 0 && m.terms.length > 1) rows = run(significantTerms(m.terms).map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR "));
     const out = [];
     for (const r of rows) {
       if (r.area === "project" ? !readable.has(r.slug) : !canReadPage(r.path, { ...ctx })) continue;
@@ -151,7 +179,7 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
       if (directories.length > 0) {
         let r = null;
         try {
-          r = await searchTranscripts({ query: v.q, directories, anyTerms: true, limit: v.limit * 3 });
+          r = await searchTranscripts({ query: significantTerms(v.q.split(/\s+/)).join(" "), directories, anyTerms: true, limit: v.limit * 3 });
         } catch (e) {
           console.warn("[knowledge] transcript search failed:", e?.message ?? e);
         }
@@ -160,7 +188,8 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
         for (const h of r?.hits ?? []) {
           const slug = sessionMap.get(h.sessionID)?.slug ?? null;
           if (!slug || !readable.has(slug)) continue;
-          sess.push({ source: "sessions", project: slug, title: clip(h.title ?? "Session", 80), snippet: clip(h.snippet, SNIPPET_MAX), ref: `msg:${h.sessionID}/${h.messageID}`, at: h.at ?? null });
+          const snippet = await shown(h.snippet, slug, ctx, { own: h.sessionID === sessionID });
+          sess.push({ source: "sessions", project: slug, title: clip(h.title ?? "Session", 80), snippet: clip(snippet, SNIPPET_MAX), ref: `msg:${h.sessionID}/${h.messageID}`, at: h.at ?? null });
         }
         sess.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
         hits.push(...sess);
@@ -197,7 +226,12 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
     if (messageIDs.length === 0 || !readMessages) throw new KnowledgeError("not-found", "No such message.", { status: 404 });
     const rows = await readMessages({ sessionID: sid, messageIDs, radius: NEIGHBORHOOD });
     if (!rows || rows.length === 0) throw new KnowledgeError("not-found", "No such message.", { status: 404 });
-    return { kind: "session", sessionID: sid, messages: rows.map((m) => ({ id: m.id, role: m.role, text: String(m.text ?? "").slice(0, MESSAGE_TEXT_MAX), at: m.at })) };
+    const messages = [];
+    for (const m of rows) {
+      const text = await shown(String(m.text ?? "").slice(0, MESSAGE_TEXT_MAX), slug, ctx, { own });
+      messages.push({ id: m.id, role: m.role, text: text.slice(0, MESSAGE_TEXT_MAX), at: m.at });
+    }
+    return { kind: "session", sessionID: sid, messages };
   }
 
   return { search, page };

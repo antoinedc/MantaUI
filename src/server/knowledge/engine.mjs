@@ -202,7 +202,7 @@ export function createKnowledgeEngine(deps = {}) {
         now,
       });
       const pageIndex = createPageIndex({ state, store, now });
-      const search = createSearch({ state, store, registry, sessionMap, settings, searchTranscripts: deps.searchTranscripts, readMessages: deps.readMessages });
+      const search = createSearch({ state, store, registry, sessionMap, settings, searchTranscripts: deps.searchTranscripts, readMessages: deps.readMessages, scanner });
       const briefingsDir = join(dir, ".briefings");
       // The parts on top of the foundation (capture, corrections, repository writes, skills, blackboard import,
       // the weekly notice): built by the composition root's factory from the handles that exist only now.

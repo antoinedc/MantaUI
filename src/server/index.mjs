@@ -1379,6 +1379,8 @@ const delegateEngine = createDelegateEngine({
   // launch has to classify as refused-vs-unknown).
   moveSession: (sid, directory) => oc.moveSession(sid, directory),
   sendChildPrompt: (input) => oc.sendPrompt(input),
+  // Shared knowledge: a job's project is its worktree's, known only once it has been moved there.
+  pinKnowledgeSession: (args) => knowledgeEngine.pinSession(args),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   // N7 result to the parent: an admission like any other (§6.1) — a replaced

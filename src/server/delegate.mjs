@@ -3528,12 +3528,28 @@ async function rollbackLaunch(job, deps) {
  * admitted, so the record, child and window stay, marked `uncertain`, and the
  * sweeper keeps reconciling them.
  */
+function pinKnowledgeSession(deps, job) {
+  const directory = job.executionDirectory ?? job.worktree ?? job.parentDirectory;
+  if (typeof deps.pinKnowledgeSession !== "function" || !directory || !job.childSessionID) return;
+  try {
+    Promise.resolve(deps.pinKnowledgeSession({ sessionID: job.childSessionID, directory, force: true })).catch((e) =>
+      console.warn(`[delegate] knowledge pin of ${job.childSessionID} failed:`, e?.message ?? e),
+    );
+  } catch (e) {
+    console.warn(`[delegate] knowledge pin of ${job.childSessionID} failed:`, e?.message ?? e);
+  }
+}
+
 async function submitCommand(job, deps, { reconciled = false, undo = {} } = {}) {
   const delegate = !!job.launch;
   const continuation = !!job.launch?.continuation;
   const run = job.commandRun ?? {};
   try {
     if (delegate) {
+      // Shared knowledge §3.1: the child was created under its parent and has just been moved into its
+      // worktree, so only NOW does it have its real directory — pin it to that project (forced: it wins over a
+      // parent-/move-sourced mapping). Fire-and-forget; it never delays or fails the launch.
+      pinKnowledgeSession(deps, job);
       // A delegate job's opening prompt goes straight to the child (never through
       // promptDelivery, which swallows the failure this has to classify). The
       // persisted message id makes a retry after an unknown outcome admit once.
