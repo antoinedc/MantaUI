@@ -1,6 +1,6 @@
 # Background work budget — one budget for shared knowledge and the background CTO
 
-Status: draft rev 2 (2026-11-17) — rev 1 reviewed by two reviewers; findings folded in (§15).
+Status: rev 3 (2026-11-17) — two review rounds, round 2 found no blockers. **§17 amends earlier sections and wins on any conflict.** User approved (2026-11-17): one API-key cap with the 60 % batch ceiling; level caps bound overnight work on plans; overnight jobs pinned to the default model.
 Owner: box server (`src/server/`), desktop renderer (`src/renderer/`)
 
 ## 1. Problem
