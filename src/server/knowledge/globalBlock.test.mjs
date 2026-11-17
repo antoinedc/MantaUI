@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BLOCK_END, BLOCK_START, GLOBAL_HEADING, MIRROR_PATH, PREFERENCES_PATH, findBlock, renderBlock, spliceBlock } from "./globalBlock.mjs";
+import { BLOCK_END, BLOCK_START, GLOBAL_HEADING, MIRROR_PATH, PREFERENCES_PATH, createGlobalBlock, findBlock, renderBlock, spliceBlock } from "./globalBlock.mjs";
 import { curatorRig } from "./curatorRig.mjs";
 import { tmpDir } from "./testHelpers.mjs";
 
@@ -123,5 +123,127 @@ test("without a global path the block is off and says so", async () => {
   assert.equal(r.engine.layer.globalBlock.enabled, false);
   assert.deepEqual(await r.engine.layer.globalBlock.apply({}), { ok: false, off: true });
   assert.deepEqual(await r.engine.layer.globalBlock.runDailyIfDue(), { ran: false, reason: "off" });
+  await r.engine.stop();
+});
+
+function standalone(r, globalPath, over = {}) {
+  const reports = [];
+  const gb = createGlobalBlock({ path: globalPath, store: r.engine.store, state: r.engine.state, now: () => r.clock.t, log: () => {}, report: (e) => reports.push(e), ...over });
+  return { gb, reports };
+}
+
+test("the global block is secret-scanned: a preference with a secret is left out of the file and reported; the rest is written", async () => {
+  const { r, globalPath } = await prefRig({ over: { secretValues: () => ["hunter2-super-secret-value"] } });
+  // (written to the folder by hand, so the store's own commit scan hasn't seen it)
+  await r.writeStore(PREFERENCES_PATH, "---\ntitle: Preferences\n---\n# Preferences\n\n- Prefer tabs\n- Token is hunter2-super-secret-value\n- Never force-push\n");
+  const res = await r.engine.layer.globalBlock.apply({ reason: "test" });
+  assert.equal(res.ok, true);
+  const txt = await readFile(globalPath, "utf8");
+  assert.match(txt, /Prefer tabs/);
+  assert.match(txt, /Never force-push/);
+  assert.doesNotMatch(txt, /hunter2/);
+  assert.doesNotMatch(await r.engine.store.read(MIRROR_PATH), /hunter2/);
+  const items = (await r.engine.changes({ limit: 50 })).items;
+  assert.ok(items.some((i) => i.kind === "dropped" && /Left a preference out of the global instructions/.test(i.summary)));
+  await r.engine.stop();
+});
+
+test("a hand edit of the block that contains a secret is not adopted", async () => {
+  const { r, globalPath } = await prefRig({ over: { secretValues: () => ["hunter2-super-secret-value"] } });
+  await writePrefs(r, ["Prefer tabs"]);
+  await r.engine.layer.globalBlock.apply({});
+  const edited = (await readFile(globalPath, "utf8")).replace("- Prefer tabs", "- Prefer tabs\n- key hunter2-super-secret-value");
+  await writeFile(globalPath, edited);
+  await r.engine.layer.globalBlock.apply({});
+  assert.doesNotMatch(await r.engine.store.read(PREFERENCES_PATH), /hunter2/);
+  assert.doesNotMatch(await readFile(globalPath, "utf8"), /hunter2/);
+  await r.engine.stop();
+});
+
+test("the daily batch day is recorded only after a successful write; a failure is reported once and retried (after the back-off)", async () => {
+  const { r, globalPath } = await prefRig();
+  await writePrefs(r, ["Prefer tabs"]);
+  let fail = true;
+  const { gb, reports } = standalone(r, globalPath, { writeFileFn: async (p, t) => (fail ? Promise.reject(new Error("disk full")) : writeFile(p, t)) });
+  gb.markPending();
+  r.clock.t = Date.parse("2026-11-17T04:05:00");
+  const first = await gb.runDailyIfDue();
+  assert.equal(first.ok, false);
+  assert.equal(reports.length, 1);
+  assert.match(reports[0].reason, /disk full/);
+  assert.equal(gb.isPending(), true);
+  assert.deepEqual(await gb.runDailyIfDue(), { ran: false, reason: "backoff" });
+  r.clock.t += 16 * 60_000; // same day, past the back-off: tried again, reported not again
+  assert.equal((await gb.runDailyIfDue()).ok, false);
+  assert.equal(reports.length, 1);
+  fail = false;
+  r.clock.t += 16 * 60_000;
+  const ok = await gb.runDailyIfDue();
+  assert.equal(ok.ok, true);
+  assert.match(await readFile(globalPath, "utf8"), /Prefer tabs/);
+  assert.deepEqual(await gb.runDailyIfDue(), { ran: false, reason: "already-ran" });
+  await r.engine.stop();
+});
+
+test("every write of the global file goes through one mutex (undo, the daily batch, the downgrade) and is atomic: temp file + rename in the same directory", async () => {
+  const { r, globalPath } = await prefRig();
+  await writePrefs(r, ["One"]);
+  let active = 0;
+  let maxActive = 0;
+  const renames = [];
+  const slow = async (p, t) => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((res) => setTimeout(res, 20));
+    await writeFile(p, t);
+    active--;
+  };
+  const { gb } = standalone(r, globalPath, { writeFileFn: slow, renameFn: async (a, b) => (renames.push([a, b]), (await import("node:fs/promises")).rename(a, b)) });
+  const first = gb.apply({ reason: "undo" });
+  await writePrefs(r, ["One", "Two"]);
+  const second = gb.apply({ reason: "batch" });
+  const third = gb.apply({ reason: "downgrade" });
+  await Promise.all([first, second, third]);
+  assert.equal(maxActive, 1, "writes never overlap");
+  assert.ok(renames.length >= 1);
+  for (const [tmp, target] of renames) {
+    assert.equal(dirname(tmp), dirname(target));
+    assert.notEqual(tmp, target);
+  }
+  const txt = await readFile(globalPath, "utf8");
+  assert.match(txt, /- One\n- Two\n/);
+  assert.equal(txt.split(BLOCK_START).length, 2, "one block, not interleaved halves");
+  const left = (await readdir(dirname(globalPath))).filter((f) => f.endsWith(".tmp"));
+  assert.deepEqual(left, []);
+  await r.engine.stop();
+});
+
+test("a symlinked AGENTS.md is written through its target and stays a symlink", async () => {
+  const { r } = await prefRig();
+  const dir = await tmpDir("global-link-");
+  const real = join(dir, "dotfiles-AGENTS.md");
+  const link = join(dir, "AGENTS.md");
+  await writeFile(real, "# mine\n");
+  await symlink(real, link);
+  await writePrefs(r, ["Prefer tabs"]);
+  const { gb } = standalone(r, link);
+  assert.equal((await gb.apply({})).ok, true);
+  assert.equal((await lstat(link)).isSymbolicLink(), true);
+  assert.match(await readFile(real, "utf8"), /Prefer tabs/);
+  assert.ok((await readFile(real, "utf8")).startsWith("# mine\n"));
+  await r.engine.stop();
+});
+
+test("an undo whose global write fails still undoes, and hands the caller a warning (engine.undo passes it on)", async () => {
+  const { r, globalPath } = await prefRig();
+  const rule = (await import("./decisions.mjs")).normalizeDecision;
+  void rule;
+  await writePrefs(r, ["Prefer tabs"]);
+  const id = r.engine.changesLog.add({ kind: "applied", summary: "Noted a preference: Prefer tabs", undoable: true, commitSha: await r.engine.store.head(), data: { kind: "preference", path: PREFERENCES_PATH, text: "Prefer tabs", noTombstone: true } });
+  await mkdir(globalPath, { recursive: true }); // the "file" is a directory: the write must fail
+  const res = await r.engine.undo({ id });
+  assert.equal(res.ok, true);
+  assert.match(res.warning, /global file couldn't be updated/);
+  assert.equal(r.engine.layer.globalBlock.isPending(), true, "left for the daily batch to retry");
   await r.engine.stop();
 });

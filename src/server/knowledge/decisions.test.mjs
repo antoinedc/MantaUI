@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { claimSupported, quoteSupports } from "./support.mjs";
 import { createMessageCache, buildPageEdit, checkBudgets, commandExecuted, containsQuote, createDecisionValidator, extractCommands, isBriefingEcho, newCommandLines, normalizeDecision, parseDecisionOutput, removedUserLines } from "./decisions.mjs";
 import { createTombstones, decisionKey } from "./tombstones.mjs";
 
@@ -260,17 +261,34 @@ test("skill.propose is refused in the curator loop; drop passes through; unknown
   assert.equal((await v.validate({ type: "page.edit", target: { area: "elsewhere", path: "x" }, content: "x", reason: "r", evidence: [] }, vctx())).kind, "dropped");
 });
 
-test("createMessageCache reads each session once per batch, bounds its reads and reports unknowns", async () => {
+test("createMessageCache: one read fills a session's neighbourhood, reads are bounded, unknown differs from missing", async () => {
   const calls = [];
-  const cache = createMessageCache({ maxReads: 2, readMessages: async ({ sessionID, messageIDs }) => (calls.push([sessionID, messageIDs]), sessionID === "bad" ? Promise.reject(new Error("x")) : messageIDs.filter((i) => i !== "gone").map((id) => ({ id, role: "user", text: id }))) });
-  await cache.prefetch(["msg:s1/a", "msg:s1/b", "part:s1/c", "msg:s2/a"]);
+  const all = ["a", "b", "c"].map((id) => ({ id, role: "user", text: id }));
+  const cache = createMessageCache({ maxReads: 2, readMessages: async ({ sessionID, messageIDs, radius }) => (calls.push([sessionID, messageIDs, radius]), sessionID === "bad" ? Promise.reject(new Error("x")) : messageIDs[0] === "gone" || sessionID === "empty" ? [] : all) });
+  await cache.prefetch(["msg:s1/a", "msg:s1/b", "part:s1/c"]);
+  assert.equal(calls.length, 1, "the neighbours came with the first read");
+  assert.deepEqual(calls[0].slice(0, 2), ["s1", ["a"]]);
+  assert.equal((await cache.get("s1", "b")).id, "b");
+  assert.equal(await cache.get("s1", "gone"), null); // the session answered; it isn't there
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0], ["s1", ["a", "b", "c"]]);
-  assert.equal((await cache.get("s1", "a")).id, "a");
-  assert.equal((await cache.get("s1", "a")).id, "a");
-  assert.equal(calls.length, 2);
-  assert.equal(await cache.get("s1", "gone"), undefined); // budget spent: unknown, not "missing"
-  const c2 = createMessageCache({ readMessages: async () => [] });
-  assert.equal(await c2.get("s", "gone"), null); // the session answered and it isn't there
+  assert.equal(await cache.get("s2", "a"), undefined); // budget spent: unknown, not "missing"
   assert.equal(await createMessageCache({ readMessages: async () => { throw new Error("x"); } }).get("s", "m"), undefined);
+  assert.equal(cache.reads, 2);
+});
+
+test("support.mjs: a quote supports a claim only when it is ≥ 20 characters and shares ≥ 2 content words", () => {
+  assert.equal(quoteSupports("Use pnpm for installing packages", "no, use pnpm for installing packages here"), true);
+  assert.equal(quoteSupports("Use pnpm for installing packages", "pnpm is what installs everything"), false, "only one shared content word");
+  assert.equal(quoteSupports("Use pnpm for installing packages", "pnpm installing"), false, "too short");
+  assert.equal(quoteSupports("Write migrations in SQL", "that is what you should have done there"), false, "stop words don't count");
+  assert.equal(quoteSupports("Use PNPM for   installing packages", "NO,   USE pnpm for installing  packages!!"), true, "case and whitespace don't matter");
+  assert.equal(claimSupported("Use pnpm for installing packages", ["too short", "no, use pnpm for installing packages here"]), true);
+  assert.equal(claimSupported("Use pnpm for installing packages", []), false);
+  assert.equal(claimSupported("Use pnpm for installing packages", undefined), false);
+});
+
+test("buildPageEdit leaves unparsable front matter exactly as it was (no second front matter block)", () => {
+  const broken = "---\ntitle: [unclosed\n---\n# Gotchas\n\nold\n";
+  const r = buildPageEdit(broken, { target: { path: "projects/x-0123456789/gotchas.md" }, content: "# Gotchas\n\nnew\n" }, { today: "2026-11-17", sources: ["msg:s/m"] });
+  assert.equal(r.source, "---\ntitle: [unclosed\n---\n# Gotchas\n\nnew\n");
 });

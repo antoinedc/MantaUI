@@ -885,6 +885,7 @@ export function createCuratorLayer(parts) {
     curator,
     undo: undo.undo,
     undoChange: undo.undoChange,
+    undoClosedPr: undo.undoClosedPr,
     tidy,
     downgrade,
     onSettingsChanged: (args) => downgrade.onSettingsChanged(args),

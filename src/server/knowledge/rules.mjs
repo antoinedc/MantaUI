@@ -189,6 +189,8 @@ export function createRulesStore({ store, state, now = Date.now } = {}) {
     for (const r of tracked(slug)) {
       if (!present.has(r.hash)) {
         db.prepare("DELETE FROM curator_rules WHERE slug = ? AND hash = ?").run(slug, r.hash);
+        // taking the line out by hand counts as saying "no": the same correction isn't turned into a rule again
+        if (r.cluster_id) retireCluster(r.cluster_id);
         n++;
       }
     }

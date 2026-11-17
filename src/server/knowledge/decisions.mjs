@@ -302,11 +302,13 @@ export function buildPageEdit(current, d, { today, sources = [] } = {}) {
 // ---- per-run message cache -------------------------------------------------------------
 
 /**
- * A per-run, per-session cache over `readMessages` with a bound on reads. `get(sessionID, messageID)` →
- * the message, `null` when the session answered and it isn't there, `undefined` when it can't be told
- * (read failed, or the run's read budget is spent). `prefetch(refs)` reads each session's messages in one call.
+ * A per-run, per-session cache over `readMessages` with a bound on reads. The reader returns the window of
+ * messages around the first id it is asked for (never several ids at once), so one read also fills the cache
+ * with that session's neighbours: refs to the same stretch of a session cost one read. `get(sessionID,
+ * messageID)` → the message, `null` when the session answered and it isn't there, `undefined` when it can't
+ * be told (read failed, or the run's read budget is spent). `prefetch(refs)` just warms the cache.
  */
-export function createMessageCache({ readMessages, maxReads = 200, batch = 40 } = {}) {
+export function createMessageCache({ readMessages, maxReads = 200, window = 25 } = {}) {
   const bySession = new Map();
   let reads = 0;
   const slot = (sid) => {
@@ -314,40 +316,39 @@ export function createMessageCache({ readMessages, maxReads = 200, batch = 40 } 
     if (!m) bySession.set(sid, (m = new Map()));
     return m;
   };
-  async function load(sid, ids) {
+  async function load(sid, id) {
     const m = slot(sid);
-    const want = [...new Set(ids)].filter((id) => !m.has(id));
-    for (let i = 0; i < want.length; i += batch) {
-      const part = want.slice(i, i + batch);
-      if (!readMessages || reads >= maxReads) {
-        for (const id of part) m.set(id, undefined);
-        continue;
-      }
-      reads++;
-      let msgs = null;
-      try {
-        msgs = await readMessages({ sessionID: sid, messageIDs: part, radius: 0 });
-      } catch {
-        msgs = null;
-      }
-      for (const id of part) m.set(id, Array.isArray(msgs) ? (msgs.find((x) => x.id === id) ?? null) : undefined);
+    if (!readMessages || reads >= maxReads) {
+      m.set(id, undefined);
+      return;
     }
+    reads++;
+    let msgs = null;
+    try {
+      msgs = await readMessages({ sessionID: sid, messageIDs: [id], radius: window });
+    } catch {
+      msgs = null;
+    }
+    if (!Array.isArray(msgs)) {
+      m.set(id, undefined);
+      return;
+    }
+    for (const x of msgs) if (x && typeof x.id === "string") m.set(x.id, { id: x.id, role: x.role, text: x.text, at: x.at });
+    if (!m.has(id) || m.get(id) === undefined) m.set(id, null);
   }
   return {
     get reads() {
       return reads;
     },
     async prefetch(refs) {
-      const groups = new Map();
       for (const r of refs ?? []) {
         const x = /^(?:msg|part):([^/]+)\/(.+)$/.exec(r ?? "");
-        if (x) groups.set(x[1], [...(groups.get(x[1]) ?? []), x[2]]);
+        if (x) await this.get(x[1], x[2]);
       }
-      for (const [sid, ids] of groups) await load(sid, ids);
     },
     async get(sessionID, messageID) {
       const m = slot(sessionID);
-      if (!m.has(messageID)) await load(sessionID, [messageID]);
+      if (!m.has(messageID)) await load(sessionID, messageID);
       return m.get(messageID);
     },
   };

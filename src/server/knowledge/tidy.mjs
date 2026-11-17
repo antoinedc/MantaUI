@@ -211,6 +211,7 @@ export function createTidy(kc) {
     for (const row of rules.trackedWithCluster()) {
       if (!(await rules.read(row.slug)).some((t) => normText(t) === normText(row.text))) {
         rules.untrack(row.slug, row.text); // its bullet is gone: nothing to rewrite or remove
+        rules.retireCluster(row.cluster_id);
         continue;
       }
       let n = 0;
@@ -497,7 +498,7 @@ export function createDowngradeCleanup(kc) {
       const m = MSG_RE.exec(ref);
       if (m) {
         const msg = await messages.get(m[1], m[2]);
-        if (msg?.text) out.push({ ref, text: String(msg.text).slice(0, 500) });
+        out.push({ ref, text: msg?.text ? String(msg.text).slice(0, 500) : "" });
       } else if (ref.startsWith("page:")) {
         const src = await store.read(ref.slice(5));
         if (src) out.push({ ref, text: summarizeBody(parsePage(src).body, 400) });

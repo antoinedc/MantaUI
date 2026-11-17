@@ -26,12 +26,12 @@ const msg = (id, role, text, at, tools = []) => ({
 });
 
 const UEV = {
-  ses_one: [msg("msg_1", "user", "no, use pnpm not npm", 1), msg("msg_2", "user", "I told you before: use pnpm", 2)],
-  ses_two: [msg("msg_1", "user", "pnpm please, never npm", 1)],
+  ses_one: [msg("msg_1", "user", "no, use pnpm for installing packages here, not npm", 1), msg("msg_2", "user", "I told you before: pnpm is what installs packages in this repo", 2)],
+  ses_two: [msg("msg_1", "user", "again: always use pnpm for installing packages please", 1)],
 };
 const USER_MESSAGES = new Set(["msg_1", "msg_2"]);
-const threeQuotes = [["msg:ses_one/msg_1", "use pnpm not npm"], ["msg:ses_one/msg_2", "use pnpm"], ["msg:ses_two/msg_1", "pnpm please"]];
-const ruleDecision = (content = "Use pnpm, never npm") => ({ type: "rule.add", target: { area: "project" }, content, reason: "The same correction three times", evidence: threeQuotes.map(([ref, quote]) => ({ ref, quote })) });
+const threeQuotes = [["msg:ses_one/msg_1", "use pnpm for installing packages"], ["msg:ses_one/msg_2", "pnpm is what installs packages"], ["msg:ses_two/msg_1", "use pnpm for installing packages"]];
+const ruleDecision = (content = "Use pnpm for installing packages, never npm") => ({ type: "rule.add", target: { area: "project" }, content, reason: "The same correction three times", evidence: threeQuotes.map(([ref, quote]) => ({ ref, quote })) });
 const refs3 = ["msg:ses_one/msg_1", "msg:ses_one/msg_2", "msg:ses_two/msg_1"];
 const decide = (decisions) => ({ text: JSON.stringify({ decisions }) });
 
@@ -199,31 +199,31 @@ test("a rule travels notes → curator → store commit → briefing → undo (R
   const out = await r.engine.runCurator(r.slug, { force: true });
   assert.equal(out.applied, 2, JSON.stringify(out));
   assert.match(await readFile(join(r.dir, `projects/${r.slug}/gotchas.md`), "utf8"), /warm-up/);
-  assert.match(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8"), /- Use pnpm, never npm/);
+  assert.match(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8"), /- Use pnpm for installing packages, never npm/);
   const trailers = (await r.engine.store.log({ limit: 10 })).filter((c) => c.trailers["Manta-Decision"]);
   assert.equal(trailers.length, 2);
 
   // the briefing a new session reads carries the rule
   await r.engine.refreshDerived();
   const b = await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 });
-  assert.match(b.text, /Standing rules from the user for this project:\n- Use pnpm, never npm/);
+  assert.match(b.text, /Standing rules from the user for this project:\n- Use pnpm for installing packages, never npm/);
 
   // undo over the desktop RPC channel reverts the commit and writes a tombstone
   const ruleChange = (await changesOf(r.engine)).find((c) => c.kind === "applied" && /pnpm/.test(c.summary));
   assert.ok(ruleChange?.undoable);
   assert.deepEqual(await r.channels["knowledge:undo"]({ id: ruleChange.id }), { ok: true });
-  assert.doesNotMatch((await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8").catch(() => "")) || "", /Use pnpm, never npm/);
+  assert.doesNotMatch((await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8").catch(() => "")) || "", /Use pnpm for installing packages, never npm/);
   const tomb = JSON.parse(await r.engine.store.read("tombstones.json"));
   assert.equal(tomb.tombstones.filter((t) => t.kind === "rule").length, 1);
   assert.ok((await changesOf(r.engine)).find((c) => c.id === ruleChange.id).undoneAt);
   await r.engine.refreshDerived();
-  assert.doesNotMatch((await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 })).text, /Use pnpm, never npm/);
+  assert.doesNotMatch((await r.engine.briefing({ sessionID: "ses_one", assistantMessages: 0 })).text, /Use pnpm for installing packages, never npm/);
 
   // the same proposal later is dropped, with its reason on record
   await r.post("/api/knowledge/notes", { sessionID: "ses_one", kind: "preference", text: "Please keep using pnpm only", refs: refs3 });
   const again = await r.engine.runCurator(r.slug, { force: true });
   assert.equal(again.applied, 0, JSON.stringify(again));
-  assert.doesNotMatch(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8").catch(() => ""), /Use pnpm, never npm/);
+  assert.doesNotMatch(await readFile(join(r.dir, `projects/${r.slug}/rules.md`), "utf8").catch(() => ""), /Use pnpm for installing packages, never npm/);
   const refused = (await changesOf(r.engine)).filter((c) => (c.kind === "dropped" || c.kind === "skipped") && /undid|undone|before/i.test(c.reason));
   assert.ok(refused.length >= 1, JSON.stringify((await changesOf(r.engine)).map((c) => [c.kind, c.reason])));
   await r.engine.stop();
@@ -235,7 +235,7 @@ test("pull-request mode: the rule goes to the repository through the repo writer
     stored: { repoRules: "pull-request" },
     transcripts: UEV,
     remote,
-    runner: (a) => (a.taskClass === "curator-rules" ? decide([ruleDecision(r.next ?? "Use pnpm, never npm")]) : decide([])),
+    runner: (a) => (a.taskClass === "curator-rules" ? decide([ruleDecision(r.next ?? "Use pnpm for installing packages, never npm")]) : decide([])),
   });
   r.slug = await r.slugOf("ses_one");
   await r.slugOf("ses_two");
@@ -245,7 +245,7 @@ test("pull-request mode: the rule goes to the repository through the repo writer
 
   assert.equal(r.forge.created.length, 1);
   assert.equal(r.forge.created[0].head, "manta/knowledge");
-  assert.match((await remote.show("manta/knowledge")) ?? "", /Use pnpm, never npm/);
+  assert.match((await remote.show("manta/knowledge")) ?? "", /Use pnpm for installing packages, never npm/);
   assert.equal(await remote.show("main"), null, "main is untouched in pull-request mode");
   const outward = (await changesOf(r.engine)).find((c) => c.kind === "outward");
   assert.ok(outward?.undoable);
@@ -256,8 +256,8 @@ test("pull-request mode: the rule goes to the repository through the repo writer
   assert.equal(r.notes.filter((n) => n.tag === `knowledge-outward-${r.slug}`).length, 1, "exactly one first-write notice, from the repo writer");
 
   // a second rule refreshes the same pull request and adds no second notice
-  r.next = "Run the tests before committing";
-  await r.post("/api/knowledge/notes", { sessionID: "ses_one", kind: "preference", text: "Always run tests before you commit", refs: refs3 });
+  r.next = "Use pnpm for installing packages in every workspace package";
+  await r.post("/api/knowledge/notes", { sessionID: "ses_one", kind: "preference", text: "Install packages with pnpm in every workspace package", refs: refs3 });
   assert.equal((await r.engine.runCurator(r.slug, { force: true })).applied, 1);
   assert.equal(r.forge.created.length, 1);
   assert.ok(r.forge.updated.length >= 1);
@@ -268,7 +268,7 @@ test("pull-request mode: the rule goes to the repository through the repo writer
   const latest = outwards[0];
   const res = await r.channels["knowledge:undo"]({ id: latest.id });
   assert.deepEqual(res, { ok: true }, JSON.stringify(res));
-  assert.doesNotMatch((await remote.show("manta/knowledge")) ?? "", /Run the tests before committing/);
+  assert.doesNotMatch((await remote.show("manta/knowledge")) ?? "", /in every workspace package/);
   await r.engine.stop();
 });
 

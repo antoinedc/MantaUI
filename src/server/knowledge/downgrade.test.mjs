@@ -95,12 +95,97 @@ test("a page with only the downgraded project's evidence but the user's own line
   await r.engine.stop();
 });
 
-test("downgrade removals are undoable (the page comes back) and never tombstoned", async () => {
+test("downgrade removals are undoable once the project shares again — and refused (with the reason) while it still doesn't; never tombstoned", async () => {
   const { r, w } = await setup();
   await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
   const ch = (await changesOf(r.engine)).find((i) => /Removed Only W/.test(i.summary));
+  const refused = await r.engine.undo({ id: ch.id });
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /still doesn't share its knowledge, so this can't be restored/);
+  assert.equal(await r.engine.store.read("commons/howto/only-w.md"), null);
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "share-and-read" } } });
   assert.deepEqual(await r.engine.undo({ id: ch.id }), { ok: true });
   assert.match(await r.engine.store.read("commons/howto/only-w.md"), /Only W/);
   assert.equal(JSON.parse(await r.engine.store.read("tombstones.json")).tombstones.length, 0);
+  await r.engine.stop();
+});
+
+const rewriteRunner = (rig) => (a) => {
+  const t = a.context.map((b) => b.text).join("\n\n");
+  if (!/stopped sharing/.test(t)) return rig.decide([]);
+  const path = /page \((?:commons|user)\) (\S+),/.exec(t)[1];
+  const remaining = JSON.parse(/remaining_sources:\n(\[[\s\S]*?\n\])/.exec(t)[1]);
+  return rig.decide([{ type: "page.edit", target: { area: path.split("/")[0], path }, content: "Only what the remaining projects support.\n", reason: "Removed what only the stopped project contributed", evidence: [{ ref: remaining[0].ref }] }]);
+};
+
+async function manyContributors(over = {}) {
+  const h = {};
+  h.r = await curatorRig({
+    projects: { widget: "https://github.com/acme/widget.git", gadget: "https://github.com/acme/gadget.git" },
+    sessions: { ses_w: "widget", ses_g: "gadget" },
+    messages: { ses_g: Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`msg_${i + 1}`, { role: "user", text: `gadget fact ${i + 1}` }])) },
+    runner: (a) => h.runner(a),
+    ...over,
+  });
+  const r = h.r;
+  h.runner = rewriteRunner(r);
+  const w = await r.slugOf("ses_w");
+  const g = await r.slugOf("ses_g");
+  const cur = r.engine.layer.curator;
+  const vctx = await cur.vctxFor(w);
+  // 25 contributions to ONE shared page: the first from widget, 24 more from gadget — a page's own `sources` keeps only the last 24
+  const decisions = Array.from({ length: 25 }, (_, i) => ({ type: "page.edit", target: { area: "commons", path: "commons/howto/big.md" }, content: `Fact number ${i + 1} about releases.\n`, reason: "seen", evidence: [{ ref: i === 0 ? "msg:ses_w/msg_1" : `msg:ses_g/msg_${i}` }] }));
+  const out = await cur.processDecisions(decisions, vctx, { batchId: "b_x", slug: w, taskClass: "curator-notes" });
+  assert.equal(out.applied, 25);
+  return { h, r, w, g };
+}
+
+test("the contributor table is uncapped: with 25 contributors the page's own sources forget the first, the table does not — and the downgrade rewrites the page without it", async () => {
+  const { h, r, w, g } = await manyContributors();
+  const before = await r.engine.store.read("commons/howto/big.md");
+  assert.doesNotMatch(before, /ses_w/, "the 24-entry `sources` list no longer names widget");
+  assert.equal(r.engine.layer.rules.contribs("commons/howto/big.md").length, 25);
+  assert.equal(r.engine.layer.rules.contribs("commons/howto/big.md").filter((c) => c.slug === w).length, 1);
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
+  const after = await r.engine.store.read("commons/howto/big.md");
+  assert.match(after, /Only what the remaining projects support\./);
+  assert.doesNotMatch(after, /Fact number 1 /);
+  assert.doesNotMatch(after, /ses_w/);
+  assert.equal(r.engine.layer.rules.contribs("commons/howto/big.md").filter((c) => c.slug === w).length, 0);
+  const items = await changesOf(r.engine);
+  const rewrite = items.find((i) => i.kind === "applied" && i.data === undefined && /Updated Big/.test(i.summary) && i.undoable);
+  assert.ok(rewrite);
+  const full = r.engine.changesLog.get(items.filter((i) => /Updated Big/.test(i.summary))[0].id);
+  assert.deepEqual([full.data.kind, full.data.slugs], ["downgrade", [w]]);
+  // the rewrite's own undo is refused while widget still doesn't share
+  assert.equal((await r.engine.undo({ id: full.id })).ok, false);
+  void g;
+  void h;
+  await r.engine.stop();
+});
+
+test("a mixed page that couldn't be rewritten (no capable model) keeps its references stripped, is reported as waiting, and is retried later", async () => {
+  let up = false;
+  const h = {};
+  const r = await curatorRig({
+    projects: { widget: "https://github.com/acme/widget.git", gadget: "https://github.com/acme/gadget.git" },
+    sessions: { ses_w: "widget", ses_g: "gadget" },
+    messages: { ses_g: { msg_1: { role: "user", text: "gadget fact" } } },
+    runner: (a) => (up ? h.runner(a) : { ok: false, code: "no-qualifying-model" }),
+  });
+  h.runner = rewriteRunner(r);
+  const w = await r.slugOf("ses_w");
+  await r.slugOf("ses_g");
+  const cur = r.engine.layer.curator;
+  const vctx = await cur.vctxFor(w);
+  const two = (content, ref) => ({ type: "page.edit", target: { area: "commons", path: "commons/howto/two.md" }, content, reason: "seen", evidence: [{ ref }] });
+  assert.equal((await cur.processDecisions([two("Generic.\n", "msg:ses_w/msg_1"), two("Generic, extended.\n", "msg:ses_g/msg_1")], vctx, { batchId: "b_x", slug: w, taskClass: "curator-notes" })).applied, 2);
+  await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
+  assert.ok((await changesOf(r.engine)).some((i) => i.kind === "waiting" && /is waiting/.test(i.summary)));
+  assert.doesNotMatch(await r.engine.store.read("commons/howto/two.md"), /ses_w/);
+  up = true;
+  assert.equal(await r.engine.layer.downgrade.retryPending(), 1);
+  assert.match(await r.engine.store.read("commons/howto/two.md"), /Only what the remaining projects support/);
+  assert.equal(await r.engine.layer.downgrade.retryPending(), 0);
   await r.engine.stop();
 });

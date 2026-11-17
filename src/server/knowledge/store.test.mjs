@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createKnowledgeStore, formatMessage, parseTrailers } from "./store.mjs";
 import { execGitRunner, tmpDir } from "./testHelpers.mjs";
@@ -124,4 +124,41 @@ test("formatMessage / parseTrailers", () => {
   const m = formatMessage({ message: "Sub\nject", body: "why", trailers: { "Manta-Batch": "b_1", Skip: "" } });
   assert.equal(m, "Sub ject\n\nwhy\n\nManta-Batch: b_1");
   assert.deepEqual(parseTrailers("why\n\nManta-Batch: b_1\nManta-Decision: d_2"), { "Manta-Batch": "b_1", "Manta-Decision": "d_2" });
+});
+
+test("user edits are scanned before they are committed as the user's: a secret keeps THAT path out (reported once), clean paths still commit, and every user commit is announced", async () => {
+  const skipped = [];
+  const commits = [];
+  const { dir, store } = await mk({ scan: async (t) => ({ clean: !/sk-live-SECRET/.test(t), unavailable: false, hits: [] }) });
+  store.onDirtySkipped((e) => skipped.push(e));
+  store.onUserCommit((e) => commits.push(e));
+  await mkdir(join(dir, "projects/p-0123456789"), { recursive: true });
+  await writeFile(join(dir, "projects/p-0123456789/leak.md"), "token sk-live-SECRET\n");
+  await writeFile(join(dir, "projects/p-0123456789/fine.md"), "fine\n");
+  const sha = await store.commitDirtyAsUser();
+  assert.ok(sha);
+  assert.deepEqual(commits.map((c) => c.paths), [["projects/p-0123456789/fine.md"]]);
+  assert.deepEqual(skipped.map((s) => s.path), ["projects/p-0123456789/leak.md"]);
+  assert.match((await store.dirty()).join(","), /leak\.md/);
+  assert.equal(await store.lastCommitFor("projects/p-0123456789/leak.md"), null);
+  // nothing else to commit: reported once, not again
+  assert.equal(await store.commitDirtyAsUser(), null);
+  assert.equal(skipped.length, 1);
+  // it stays out of every later commit (the curator's own too) …
+  await store.commit({ path: "projects/p-0123456789/other.md", content: "x\n", message: "other" });
+  assert.equal(await store.lastCommitFor("projects/p-0123456789/leak.md"), null);
+  // … until the secret is gone
+  await writeFile(join(dir, "projects/p-0123456789/leak.md"), "cleaned\n");
+  assert.ok(await store.commitDirtyAsUser());
+  assert.equal(commits.length, 2);
+});
+
+test("an unavailable scanner keeps dirty paths out too (nothing is committed as the user's unscanned)", async () => {
+  const skipped = [];
+  const { dir, store } = await mk({ scan: async () => ({ clean: false, unavailable: true, hits: [] }) });
+  store.onDirtySkipped((e) => skipped.push(e));
+  await writeFile(join(dir, "commons-note.md"), "x\n");
+  assert.equal(await store.commitDirtyAsUser(), null);
+  assert.equal(skipped[0].unavailable, true);
+  assert.match(skipped[0].reason, /scanner is unavailable/);
 });
