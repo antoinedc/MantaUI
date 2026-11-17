@@ -383,15 +383,15 @@ test("cto:conversation-submit: stable id, durable queue projection, server-owned
 // Seams: direct sends / slash commands at the conversation session
 // ---------------------------------------------------------------------------
 
-test("a client-supplied prompt origin never reaches the CTO conversation's send (admitDirect forwards no origin)", async () => {
+test("the CTO conversation's human send is stamped user-authored by admission, whatever origin the client claims (shared-knowledge §9.2)", async () => {
   const t = compose();
   const open = await dispatch(t.handlers, "cto:conversation-open", []);
   await dispatch(t.handlers, "opencode:prompt", [
-    { sessionId: open.sessionId, text: "status please", messageID: "m_origin_1", origin: "user" },
+    { sessionId: open.sessionId, text: "status please", messageID: "m_origin_1", origin: "schedule" },
   ]);
   assert.ok(await waitFor(() => t.oc.sends.length >= 1));
-  assert.notEqual(t.oc.sends[0].origin, "user");
-  assert.equal("origin" in t.oc.sends[0], false);
+  // admitDirect forwards no client origin; the human admission record is what makes it "user".
+  assert.equal(t.oc.sends[0].origin, "user");
 });
 
 test("CTO admits text and attachments but rejects inline @agent tasks with an actionable error", async () => {

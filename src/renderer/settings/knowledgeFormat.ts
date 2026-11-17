@@ -132,6 +132,7 @@ const AREA_LABEL: Record<string, string> = {
 /** Where a change landed, in words. */
 export function changeWhere(c: Pick<KnowledgeChange, "area" | "slug">, projects: KnowledgeProjectRow[]): string {
   const project = c.slug ? projects.find((p) => p.slug === c.slug)?.displayName ?? c.slug : null;
+  if (!c.area) return project ? `Project: ${project}` : "Knowledge";
   if (c.area === "project") return project ? `Project: ${project}` : "Project";
   const base = AREA_LABEL[c.area] ?? c.area;
   return project ? `${base} · ${project}` : base;

@@ -1101,7 +1101,7 @@ export interface KnowledgeChangesPage {
 
 export type KnowledgeUndoResult =
   | { ok: true }
-  | { ok: false; reason: string; conflictWith?: string };
+  | { ok: false; reason: string; /** The later change that blocks the undo, as one readable phrase. */ conflictWith?: string };
 
 export interface HandoffLinks {
   /** Set on a predecessor that was replaced (clear). */

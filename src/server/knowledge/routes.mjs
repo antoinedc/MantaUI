@@ -77,6 +77,49 @@ export async function handleKnowledgeRoute({ engine, req, res, path, url, readJs
   }
 }
 
+const WAITING_MODEL_MS = 24 * 3600 * 1000;
+
+/**
+ * Rule/skill work has waited more than 24 h for a capable model (§6.2): the oldest "waiting"
+ * change carrying the `no-qualifying-model` code since the last time a decision was actually
+ * evaluated (an `applied` or `skipped` change proves a model answered). The curator layer
+ * records `{kind: "waiting", data: {code: "no-qualifying-model"}}` on each blocked attempt.
+ */
+export function waitingForCapableModel(engine, now = Date.now()) {
+  const db = engine?.state?.db;
+  if (!db) return false;
+  try {
+    const row = db
+      .prepare(
+        `SELECT MIN(at) AS t FROM changes
+         WHERE kind = 'waiting' AND data LIKE '%"no-qualifying-model"%'
+           AND at > COALESCE((SELECT MAX(at) FROM changes WHERE kind IN ('applied', 'skipped')), 0)`,
+      )
+      .get();
+    return row?.t != null && now - row.t >= WAITING_MODEL_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `knowledge:settings-get` / `settings-set` answer the desktop card reads (§11.6): the flat
+ * settings with one row per project (`repoRulesOverride`/`sharingOverride`, `outwardAllowed`,
+ * `outwardReason?`), plus the optional status fields when the subsystem can say them.
+ */
+export function toSettingsWire(result, engine, now = Date.now()) {
+  const { status, ...view } = result ?? {};
+  const out = { ...view };
+  if (status?.state === "unsupported" || status?.state === "error") out.unavailableReason = status.reason;
+  if (typeof status?.spentUsd === "number") out.spentTodayUsd = status.spentUsd;
+  if (typeof status?.briefings?.missedThisWeek === "number") out.sessionsWithoutBriefingThisWeek = status.briefings.missedThisWeek;
+  if (waitingForCapableModel(engine, now)) out.waitingForCapableModel = true;
+  return out;
+}
+
+/** `conflictWith` reaches the card as one readable string (it prints it inside a sentence). */
+const conflictText = (c) => (c && typeof c === "object" ? [c.subject, c.sha ? `(${String(c.sha).slice(0, 7)})` : ""].filter(Boolean).join(" ") : c);
+
 /** The `knowledge:*` RPC channels for rpc.mjs `buildHandlers` (the desktop Knowledge card). */
 export function buildKnowledgeChannels(engine) {
   const need = () => {
@@ -85,9 +128,15 @@ export function buildKnowledgeChannels(engine) {
   };
   return {
     "knowledge:status": () => need().status(),
-    "knowledge:settings-get": () => need().settingsGet(),
-    "knowledge:settings-set": (args) => need().settingsSet(args && typeof args === "object" && "patch" in args ? args.patch : args),
-    "knowledge:changes": (args) => need().changes(args ?? {}),
-    "knowledge:undo": (args) => need().undo(args ?? {}),
+    "knowledge:settings-get": async () => toSettingsWire(await need().settingsGet(), engine),
+    "knowledge:settings-set": async (args) => toSettingsWire(await need().settingsSet(args && typeof args === "object" && "patch" in args ? args.patch : args), engine),
+    "knowledge:changes": async (args) => {
+      const page = await need().changes(args ?? {});
+      return { ...page, items: (page.items ?? []).map((c) => ({ ...c, area: c.area ?? "" })) };
+    },
+    "knowledge:undo": async (args) => {
+      const r = await need().undo(args ?? {});
+      return r?.ok === false && r.conflictWith ? { ...r, conflictWith: conflictText(r.conflictWith) } : r;
+    },
   };
 }

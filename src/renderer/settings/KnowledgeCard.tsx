@@ -1,6 +1,6 @@
 // ===== KnowledgeCard (shared-knowledge spec §4, §8, §11.6) =====
 //
-// Settings → Sessions "Knowledge": the master switch, the daily spend cap, the
+// Settings → Knowledge: the master switch, the daily spend cap, the
 // global defaults and a per-project list for repo rules and sharing, status lines
 // from the settings payload, "View knowledge" (opens the store in the Explorer)
 // and the Recent changes list with Undo.

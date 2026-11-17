@@ -95,8 +95,8 @@ test("view: one row per detected project with effective settings and outward ava
   const view = await r.settings.view();
   assert.equal(view.sharing, "read-only");
   assert.deepEqual(view.projects.map((p) => [p.slug, p.sharing, p.outwardAllowed]), [[A, "read-only", true], [B, "private", false]]);
-  assert.equal(view.projects[1].overridden.sharing, true);
-  assert.equal(view.projects[0].overridden.sharing, false);
+  assert.equal(view.projects[1].sharingOverride, true);
+  assert.equal(view.projects[0].sharingOverride, false);
 });
 
 test("access lookups are cached per repo", async () => {
