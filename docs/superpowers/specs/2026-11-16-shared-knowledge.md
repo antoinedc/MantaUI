@@ -1,6 +1,6 @@
 # Shared knowledge: stop re-explaining things across sessions and projects
 
-Status: approved — review round 3 verdict "implementable"; revision 6 folds its clarifications in, 2026-11-16.
+Status: approved; revision 8 (2026-11-17) records the code-review decisions on prompt origins (§9.2).
 Scope: the box server, the V2 `manta` opencode plugin, desktop Settings. No iOS
 surface in v1.
 
@@ -570,6 +570,17 @@ immediately (a user action).
    Origins are stored in `state.sqlite` (`prompt_origin`, kept 90 days). A
    message with any other origin, no record, or from before the upgrade is not
    user-authored.
+   - The origin is recorded only after opencode accepted the prompt, never for a
+     message id that already exists, and a ref counts only if the recorded row's
+     session matches the ref's session and opencode's stored message has role
+     `user`. A client may lower a send's origin (`appGenerated: true` →
+     `unknown`, used by "Build here" for the plan text) but never raise it.
+   - **Known limit (v1):** the desktop, iOS and the box's own AI tools share one
+     box token, which any same-user process can read. A process that impersonates
+     the client can therefore obtain a `user` origin. Closing this needs separate
+     device and agent tokens in the auth layer (follow-up). Until then the
+     outward default stays `box-only`, and the first outward write per repo
+     notifies the user at once.
 3. **Derived content** (from assistant text, tool output, files, web pages) may
    create page claims only, never rules or preferences; it leads to a skill only
    through §6.6's evidence bar. Commands on pages must pass the
