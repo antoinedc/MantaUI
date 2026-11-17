@@ -13,7 +13,7 @@ const msg = (id, role, at, text, extra = []) => ({ id, role, at, parts: [...(tex
 const tool = (command, output = "ok") => ({ id: "x", type: "tool", tool: "bash", command, output });
 
 async function rig({ messages = [], session = { title: "fix the build" }, userAuthored = ["msg_u1", "msg_u2", "msg_u3", "msg_u4"], answer, over = {} } = {}) {
-  const state = await memState();
+  const state = over.state ?? (await memState());
   const root = await tmpDir("knowledge-capture-");
   let t = 10_000_000;
   const now = () => t;
@@ -742,21 +742,9 @@ test("capture-2 migration: a capture table from before the catch-up gains the ba
       session_id TEXT PRIMARY KEY, last_event_at INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0,
       cursor_at INTEGER NOT NULL DEFAULT 0, cursor_id TEXT NOT NULL DEFAULT '', captured_at INTEGER, notes INTEGER NOT NULL DEFAULT 0);`);
   state.db.prepare("INSERT INTO capture_session (session_id, last_event_at, dirty, cursor_at, cursor_id, notes) VALUES ('ses_old', 5, 1, 7, 'msg_7', 2)").run();
-  const root = await tmpDir("knowledge-capture-");
-  const mk = () =>
-    createCapture({
-      state,
-      queue: createQueue({ state, scanner, root, now: () => 1 }),
-      log: () => {},
-      sessionMap: { get: () => ({ slug: SLUG }), markCaptured() {} },
-      budget: { canSpend: async () => ({ ok: true }), record: async () => {} },
-      settings: { get: async () => ({ enabled: true }) },
-      runEphemeral: async () => ({ text: "{}" }),
-      readSince: async () => [],
-      scanner,
-    });
-  mk();
-  mk(); // the second engine on the same state: the migration is applied once
+  const mk = () => rig({ over: { state } });
+  await mk();
+  await mk(); // the second engine on the same state: the migration is applied once
   const row = state.db.prepare("SELECT * FROM capture_session WHERE session_id = 'ses_old'").get();
   assert.deepEqual({ ...row }, { session_id: "ses_old", last_event_at: 5, dirty: 1, cursor_at: 7, cursor_id: "msg_7", captured_at: null, notes: 2, backlog_since: null, backlog_day: null, backlog_windows: 0 });
 });
