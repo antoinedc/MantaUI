@@ -1351,6 +1351,168 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
   }
 }
 
+// ---- Repo-addressed operations (no cwd) -------------------------------------------
+//
+// Everything above resolves `cwd → origin → repo`. The shared-knowledge curator
+// works on its OWN clone of a project's remote, so it addresses a repo by its
+// remote URL or canonical key (`host/owner/repo`) and uses the box's existing
+// forge login (the §3.3 token ladder) — no new credential. Each call returns
+// `{ ok: true, … }` or `{ ok: false, error, message }` and never throws for a
+// forge failure: `no_forge` / `not_connected` as elsewhere, plus the
+// classifyForgeError kinds (`rejected` / `forbidden` / `rate_limited` /
+// `network` / `unknown`), `not_found` (404 — also what a forge answers for a
+// repo the login cannot see) and `bad_request` (invalid input, nothing sent).
+
+const REPO_CALL_MESSAGES = Object.freeze({
+  no_forge: "This remote isn't a GitHub or GitLab repository Manta knows about.",
+  not_connected: "No forge login on this box for that host.",
+  not_found: "The forge says that repository (or pull request) doesn't exist, or this login can't see it.",
+  rejected: "The forge rejected the box's login.",
+  forbidden: "The forge refused this request (permissions or SSO).",
+  rate_limited: "The forge is rate limiting this box; try again shortly.",
+  network: "Couldn't reach the forge.",
+  unknown: "The forge returned an unexpected error.",
+  bad_request: "Invalid request.",
+});
+
+function repoCallFailure(error) {
+  return { ok: false, error, message: REPO_CALL_MESSAGES[error] ?? REPO_CALL_MESSAGES.unknown };
+}
+
+function repoCallError(e) {
+  return repoCallFailure(e && e.status === 404 ? "not_found" : classifyForgeError(e));
+}
+
+/**
+ * Resolve a repo addressed by `target` — a remote URL (https / ssh / scp-like),
+ * a `host/owner/repo` key, or `{ remoteUrl }` / `{ repoKey }` — to
+ * `{ forge, repo, adapter, repoKey }`, or `{ error: "no_forge" | "not_connected" }`.
+ * Self-hosted hosts configured in `forgeHosts` resolve with their apiBase.
+ *
+ * @param {string | { remoteUrl?: string, repoKey?: string }} target
+ * @param {{ detectForge?: Function, resolveToken?: typeof authResolveToken, getAdapter?: typeof getAdapter }} [deps]
+ */
+export async function resolveRepoTarget(target, deps = {}) {
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+  const detectForge = deps.detectForge ?? detectFromConfig;
+
+  const raw = typeof target === "string" ? target : (target?.remoteUrl ?? target?.repoKey);
+  if (typeof raw !== "string" || !raw.trim()) return { error: "no_forge" };
+  const input = raw.trim();
+  let forge = await detectForge(input, deps);
+  // A bare `host/owner/repo` key is not a URL; try it as one.
+  if (!forge && !/^[a-z+]+:\/\//i.test(input) && !input.includes("@")) {
+    forge = await detectForge(`https://${input}`, deps);
+  }
+  if (!forge || !isKnownKind(forge.kind)) return { error: "no_forge" };
+  const tok = await resolveToken(forge.host);
+  if (!tok) return { error: "not_connected" };
+  return {
+    forge,
+    repo: { owner: forge.owner, repo: forge.repo },
+    adapter: getAdapterFn(forge.kind, tok.token, forge.apiBase),
+    repoKey: forgeRepoKey({ host: forge.host, owner: forge.owner, repo: forge.repo }),
+  };
+}
+
+/**
+ * What the box's forge login may do with one repo: `canPush`, `isFork`,
+ * `defaultBranch`. Always revalidated against the forge (it gates outward
+ * writes).
+ *
+ * @param {string | { remoteUrl?: string, repoKey?: string }} target
+ * @param {object} [deps] injectable I/O (see resolveRepoTarget)
+ * @returns {Promise<{ ok: true, canPush: boolean, isFork: boolean, defaultBranch: string, kind: string, host: string, repoKey: string, stale: boolean } | { ok: false, error: string, message: string }>}
+ */
+export async function forgeRepoAccess(target, deps = {}) {
+  const ctx = await resolveRepoTarget(target, deps);
+  if (ctx.error) return repoCallFailure(ctx.error);
+  try {
+    const { data, stale } = await ctx.adapter.getRepoAccess(ctx.repo);
+    return {
+      ok: true,
+      canPush: Boolean(data?.canPush),
+      isFork: Boolean(data?.isFork),
+      defaultBranch: typeof data?.defaultBranch === "string" ? data.defaultBranch : "",
+      kind: ctx.forge.kind,
+      host: ctx.forge.host,
+      repoKey: ctx.repoKey,
+      stale: Boolean(stale),
+    };
+  } catch (e) {
+    return repoCallError(e);
+  }
+}
+
+/**
+ * The open pull request (merge request) whose head branch is `head`, or
+ * `{ ok: true, pr: null }` when there is none. Revalidated, so a PR created a
+ * moment ago is found.
+ *
+ * @param {string | { remoteUrl?: string, repoKey?: string }} target
+ * @param {string} head branch name (not `owner:branch`)
+ * @param {object} [deps]
+ * @returns {Promise<{ ok: true, pr: object | null } | { ok: false, error: string, message: string }>}
+ */
+export async function forgeFindOpenPullRequest(target, head, deps = {}) {
+  if (typeof head !== "string" || !head.trim()) return repoCallFailure("bad_request");
+  const ctx = await resolveRepoTarget(target, deps);
+  if (ctx.error) return repoCallFailure(ctx.error);
+  try {
+    const { data } = await ctx.adapter.listPullRequests(ctx.repo, { state: "open", head, fresh: true });
+    const pr = (Array.isArray(data) ? data : []).find((p) => p.headRef === head) ?? null;
+    return { ok: true, pr };
+  } catch (e) {
+    return repoCallError(e);
+  }
+}
+
+/**
+ * Open a pull request (merge request) `head` → `base`. The branch must already
+ * be pushed. Always a real (non-draft) PR unless `draft` is passed.
+ *
+ * @param {string | { remoteUrl?: string, repoKey?: string }} target
+ * @param {{ title: string, head: string, base: string, body?: string, draft?: boolean }} input
+ * @param {object} [deps]
+ * @returns {Promise<{ ok: true, pr: object } | { ok: false, error: string, message: string }>}
+ */
+export async function forgeCreatePullRequest(target, input = {}, deps = {}) {
+  const { title, head, base, body = "", draft = false } = input ?? {};
+  if (![title, head, base].every((s) => typeof s === "string" && s.trim())) return repoCallFailure("bad_request");
+  const ctx = await resolveRepoTarget(target, deps);
+  if (ctx.error) return repoCallFailure(ctx.error);
+  try {
+    const { data } = await ctx.adapter.createPullRequest(ctx.repo, { title, head, base, body, draft });
+    return { ok: true, pr: data };
+  } catch (e) {
+    return repoCallError(e);
+  }
+}
+
+/**
+ * Change an existing pull request's title and/or body (only the fields given).
+ *
+ * @param {string | { remoteUrl?: string, repoKey?: string }} target
+ * @param {{ number: number, title?: string, body?: string }} input
+ * @param {object} [deps]
+ * @returns {Promise<{ ok: true, pr: object } | { ok: false, error: string, message: string }>}
+ */
+export async function forgeUpdatePullRequest(target, input = {}, deps = {}) {
+  const { number, title, body } = input ?? {};
+  const n = Number(number);
+  const hasField = typeof title === "string" || typeof body === "string";
+  if (!Number.isInteger(n) || n <= 0 || !hasField) return repoCallFailure("bad_request");
+  const ctx = await resolveRepoTarget(target, deps);
+  if (ctx.error) return repoCallFailure(ctx.error);
+  try {
+    const { data } = await ctx.adapter.updatePullRequest(ctx.repo, n, { title, body });
+    return { ok: true, pr: data };
+  } catch (e) {
+    return repoCallError(e);
+  }
+}
+
 // ---- Adapter interface (the seam a second adapter implements) ------------------
 
 /**
@@ -1629,7 +1791,9 @@ export async function draftSubmitForCwd(ref, input = {}, deps = {}) {
  * @typedef {Object} ForgeAdapter
  * @property {"github" | "gitlab"} kind
  * @property {((repo: { owner: string, repo: string }, number: number, input: { discussionId: string }) => Promise<{ data: any, stale: boolean }>)} [resolveThread] — OPTIONAL.
- * @property {(repo: { owner: string, repo: string }, filter?: { state?: string }) => Promise<{ data: Array<any>, stale: boolean }>} listPullRequests
+ * @property {(repo: { owner: string, repo: string }, filter?: { state?: string, head?: string, fresh?: boolean }) => Promise<{ data: Array<any>, stale: boolean }>} listPullRequests
+ * @property {(repo: { owner: string, repo: string }) => Promise<{ data: { canPush: boolean, isFork: boolean, defaultBranch: string }, stale: boolean }>} getRepoAccess
+ * @property {(repo: { owner: string, repo: string }, number: number, input: { title?: string, body?: string }) => Promise<{ data: any, stale: boolean }>} updatePullRequest
  * @property {(repo: { owner: string, repo: string }, number: number) => Promise<{ data: any, stale: boolean }>} getPullRequest
  * @property {(repo: { owner: string, repo: string }, filter?: { state?: string }) => Promise<{ data: Array<any>, stale: boolean }>} listIssues
  * @property {(repo: { owner: string, repo: string }, sha: string) => Promise<{ data: Array<any>, stale: boolean }>} getChecks

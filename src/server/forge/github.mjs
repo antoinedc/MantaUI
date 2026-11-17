@@ -401,7 +401,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * resolving a job's own PR by its branch): GitHub takes `head` as
      * `owner:branch`.
      * @param {{ owner: string, repo: string }} repo
-     * @param {{ state?: string, head?: string }} [filter]
+     * @param {{ state?: string, head?: string, fresh?: boolean }} [filter]
      * @returns {Promise<{ data: import("./index.mjs").PullRequestLike[], stale: boolean }>}
      */
     async listPullRequests(repo, filter = {}) {
@@ -409,7 +409,9 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         state: filter.state ?? "open",
         head: filter.head ? `${repo.owner}:${filter.head}` : undefined,
       })}`;
-      const { data, stale } = await request(url);
+      // `fresh` revalidates instead of serving the 30s memory window (a 304 is
+      // free) — for callers that just wrote and must see their own PR.
+      const { data, stale } = await request(url, filter.fresh ? { ttl: 0 } : undefined);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((p) => normalizePr(p)), stale };
     },
@@ -734,6 +736,48 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         // leave data empty — an unknown default branch is unknown
       }
       return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : null;
+    },
+
+    /**
+     * GET /repos/{o}/{r} — what the connected user may do with ONE repo:
+     * `canPush` (permissions.push; false when the payload carries no
+     * permissions, e.g. an anonymous read, or the repo is archived), `isFork`
+     * and the default branch. Always revalidated (`ttl: 0` → a conditional
+     * GET, free on a 304) because the answer gates an outward write. A failed
+     * request throws the request layer's typed error (404 → not found or no
+     * access, 401 rejected, …) — it is never turned into `canPush: false`.
+     * @param {{ owner: string, repo: string }} repo
+     * @returns {Promise<{ data: { canPush: boolean, isFork: boolean, defaultBranch: string }, stale: boolean }>}
+     */
+    async getRepoAccess(repo) {
+      const { data, stale } = await request(`${apiBase}${issuePath(repo)}`, { ttl: 0 });
+      return {
+        data: {
+          canPush: data?.permissions?.push === true && data?.archived !== true,
+          isFork: data?.fork === true,
+          defaultBranch: typeof data?.default_branch === "string" ? data.default_branch : "",
+        },
+        stale,
+      };
+    },
+
+    /**
+     * PATCH /repos/{o}/{r}/pulls/{n} — change a pull request's title and/or
+     * body. Only the fields given are sent. Returns the updated, normalised PR.
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @param {{ title?: string, body?: string }} input
+     * @returns {Promise<{ data: import("./index.mjs").PullRequestLike, stale: boolean }>}
+     */
+    async updatePullRequest(repo, number, { title, body } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const patch = {};
+      if (typeof title === "string") patch.title = title;
+      if (typeof body === "string") patch.body = body;
+      if (Object.keys(patch).length === 0) throw new Error("nothing to update");
+      const url = `${apiBase}${issuePath(repo)}/pulls/${number}`;
+      const { data } = await requestWrite(url, { method: "PATCH", body: patch });
+      return { data: normalizePr(data), stale: false };
     },
 
     /**

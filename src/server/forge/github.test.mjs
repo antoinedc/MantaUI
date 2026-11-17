@@ -697,3 +697,91 @@ test("mergeInboxSources precedence: checks failing > review requested > assigned
   assert.equal(m3[0].reason, "checks failing");
   assert.equal(m4[0].reason, "checks failing");
 });
+
+// ---------------------------------------------------------------------------
+// Shared knowledge: getRepoAccess + updatePullRequest + fresh head lookup
+// ---------------------------------------------------------------------------
+
+const REPO_URL = "https://api.github.com/repos/acme/widget";
+
+function recordingRequest(map) {
+  const calls = [];
+  const request = async (url, opts) => {
+    calls.push({ url, opts });
+    const v = map[url];
+    if (v instanceof Error) throw v;
+    return { data: v, stale: false };
+  };
+  request.calls = calls;
+  return request;
+}
+
+test("getRepoAccess maps push permission, fork and default branch; always revalidates", async () => {
+  const request = recordingRequest({
+    [REPO_URL]: { permissions: { push: true, pull: true }, fork: false, default_branch: "trunk" },
+  });
+  const { data } = await createGithubAdapter(request).getRepoAccess(REPO);
+  assert.deepEqual(data, { canPush: true, isFork: false, defaultBranch: "trunk" });
+  assert.deepEqual(request.calls[0].opts, { ttl: 0 });
+});
+
+test("getRepoAccess: read-only, missing permissions and archived repos cannot push", async () => {
+  const readOnly = recordingRequest({ [REPO_URL]: { permissions: { push: false }, default_branch: "main" } });
+  assert.equal((await createGithubAdapter(readOnly).getRepoAccess(REPO)).data.canPush, false);
+  const anonymous = recordingRequest({ [REPO_URL]: { default_branch: "main" } });
+  assert.equal((await createGithubAdapter(anonymous).getRepoAccess(REPO)).data.canPush, false);
+  const archived = recordingRequest({ [REPO_URL]: { permissions: { push: true }, archived: true, default_branch: "main" } });
+  assert.equal((await createGithubAdapter(archived).getRepoAccess(REPO)).data.canPush, false);
+});
+
+test("getRepoAccess reports a fork", async () => {
+  const request = recordingRequest({ [REPO_URL]: { permissions: { push: true }, fork: true, default_branch: "main" } });
+  const { data } = await createGithubAdapter(request).getRepoAccess(REPO);
+  assert.equal(data.isFork, true);
+  assert.equal(data.canPush, true);
+});
+
+test("getRepoAccess surfaces the typed request error for 404 and 401 (never canPush:false)", async () => {
+  for (const status of [404, 401]) {
+    const request = recordingRequest({ [REPO_URL]: new GithubRequestError(status, REPO_URL) });
+    await assert.rejects(
+      createGithubAdapter(request).getRepoAccess(REPO),
+      (e) => e.name === "GithubRequestError" && e.status === status,
+    );
+  }
+});
+
+test("updatePullRequest PATCHes only the given fields and normalises the PR", async () => {
+  const url = `${REPO_URL}/pulls/42`;
+  const write = fakeWrite({ [url]: { ...PR_FIXTURE, title: "New title", body: "New body" } });
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+
+  const { data: pr } = await adapter.updatePullRequest(REPO, 42, { title: "New title", body: "New body" });
+  assert.equal(write.calls[0].url, url);
+  assert.equal(write.calls[0].opts.method, "PATCH");
+  assert.deepEqual(write.calls[0].opts.body, { title: "New title", body: "New body" });
+  assert.equal(pr.number, 42);
+  assert.equal(pr.title, "New title");
+  assert.equal(pr.body, "New body");
+
+  await adapter.updatePullRequest(REPO, 42, { body: "only body" });
+  assert.deepEqual(write.calls[1].opts.body, { body: "only body" });
+});
+
+test("updatePullRequest refuses an empty update and a missing write transport", async () => {
+  const write = fakeWrite();
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+  await assert.rejects(adapter.updatePullRequest(REPO, 42, {}), /nothing to update/);
+  assert.equal(write.calls.length, 0);
+  await assert.rejects(createGithubAdapter(async () => ({ data: [] })).updatePullRequest(REPO, 42, { title: "x" }), /write transport/);
+});
+
+test("listPullRequests({fresh}) bypasses the freshness window; default does not", async () => {
+  const url = `${REPO_URL}/pulls?state=open&head=acme%3Amanta%2Fknowledge`;
+  const request = recordingRequest({ [url]: [] });
+  const adapter = createGithubAdapter(request);
+  await adapter.listPullRequests(REPO, { head: "manta/knowledge" });
+  await adapter.listPullRequests(REPO, { head: "manta/knowledge", fresh: true });
+  assert.equal(request.calls[0].opts, undefined);
+  assert.deepEqual(request.calls[1].opts, { ttl: 0 });
+});
