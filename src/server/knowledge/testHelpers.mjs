@@ -54,12 +54,48 @@ export function memConfig(initial) {
 }
 
 /**
+ * A stand-in for the shared background budget (src/server/backgroundBudget.mjs): allows everything unless `refuse` is
+ * set (a reason code, or `(args) => reason|null`), and records every call. `good` answers `goodMomentForBatch`,
+ * `payg` is `usdToday`.
+ */
+export function fakeBackgroundBudget({ refuse = null, good = true, payg = 0 } = {}) {
+  const calls = { check: [], record: [], goodMoment: [], dueAt: [] };
+  const bb = {
+    calls,
+    refuse,
+    good,
+    payg,
+    dueAtFn: null,
+    async check(args) {
+      calls.check.push(args);
+      const reason = typeof bb.refuse === "function" ? bb.refuse(args) : bb.refuse;
+      return reason ? { ok: false, mode: "payg", fallback: false, reason, resumesAt: null } : { ok: true, mode: "payg", fallback: false, reason: null, resumesAt: null };
+    },
+    async record(args) {
+      calls.record.push(args);
+      return { usd: 0, priced: true, mode: "payg" };
+    },
+    async goodMomentForBatch(args) {
+      calls.goodMoment.push(args);
+      return bb.good ? { ok: true, rule: "away", reason: null } : { ok: false, rule: null, reason: "waiting-for-quiet" };
+    },
+    async dueAt(args) {
+      calls.dueAt.push(args);
+      return bb.dueAtFn ? bb.dueAtFn(args) : args.intervalDueAt;
+    },
+    usdToday: () => bb.payg,
+  };
+  return bb;
+}
+
+/**
  * The engine deps every engine-level fixture shares: a git store at `dir`, sessions resolved to the temp repos
  * (`sessions` maps session id → project name; an unknown session lands in the first repo), a notification
  * recorder, a manual clock and quiet timers. Spread it into createKnowledgeEngine and add the rest.
  */
 export function baseEngineDeps({ dir, repos, sessions, config, notes, clock }) {
   return {
+    backgroundBudget: fakeBackgroundBudget(),
     dir,
     git: execGitRunner(dir),
     config,

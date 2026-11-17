@@ -4,7 +4,7 @@ import { curatorRig } from "./curatorRig.mjs";
 import { PREFERENCES_PATH } from "./globalBlock.mjs";
 import { replaceBullets, similarity } from "./tidy.mjs";
 import { createCorrectionDetector } from "./corrections.mjs";
-import { memState } from "./testHelpers.mjs";
+import { fakeBackgroundBudget, memState } from "./testHelpers.mjs";
 
 const changesOf = async (engine) => (await engine.changes({ limit: 200 })).items;
 const SENT = "Deploy by tagging the release and pushing the tag, then wait for the pipeline to finish before you verify that the site responds with the new version number. ";
@@ -39,6 +39,53 @@ test("the weekly tidy runs once a week from the timer, not before, and says noth
   assert.equal((await r.engine.layer.tidy.tickWeekly()).status, "ran");
   assert.equal(r.notes.filter((n) => n.tag === "knowledge-weekly").length, 0);
   assert.ok((await r.engine.status()).lastTidy);
+  await r.engine.stop();
+});
+
+test("the weekly tidy starts only when due, the budget allows it AND it is a good moment; a refused job stays due; dueAt moves the due time on a plan", async () => {
+  const bb = fakeBackgroundBudget();
+  const r = await rigWith({ over: { backgroundBudget: bb } });
+  await r.slugOf("ses_one");
+  const tidy = r.engine.layer.tidy;
+  assert.equal((await tidy.tickWeekly()).status, "ran"); // never run before → due
+  const due = (await r.engine.status()).lastTidy + 7 * 24 * 3600_000;
+  r.clock.t += 8 * 24 * 3600_000;
+  // not a good moment: nothing starts, nothing is spent, and the answer is asked once per decision
+  bb.good = false;
+  const before = bb.calls.goodMoment.length;
+  assert.equal(await tidy.tickWeekly(), null);
+  assert.equal(bb.calls.goodMoment.length, before + 1);
+  assert.equal(bb.calls.goodMoment.at(-1).workType, "knowledge-tidy");
+  assert.equal(bb.calls.goodMoment.at(-1).dueSince, due);
+  // the budget refuses: no start, and the good-moment question (which logs a start) is not asked
+  bb.refuse = "level-cap";
+  assert.equal(await tidy.tickWeekly(), null);
+  assert.equal(bb.calls.goodMoment.length, before + 1);
+  assert.ok(bb.calls.check.some((c) => c.workType === "knowledge-tidy"));
+  // still due: both conditions clear → it runs
+  bb.refuse = null;
+  bb.good = true;
+  assert.equal((await tidy.tickWeekly()).status, "ran");
+  // on a plan the due time moves to 24 h before the weekly reset: not due yet → no start, no questions
+  r.clock.t += 8 * 24 * 3600_000;
+  bb.dueAtFn = () => r.clock.t + 3600_000;
+  const asked = bb.calls.goodMoment.length;
+  assert.equal(await tidy.tickWeekly(), null);
+  assert.equal(bb.calls.goodMoment.length, asked);
+  await r.engine.stop();
+});
+
+test("the tidy's own model calls run as the batch work type knowledge-tidy (but the rules task class); the downgrade cleanup does not", async () => {
+  const r = await rigWith({ runner: (_a, _c, rig) => rig.decide([]) });
+  await r.slugOf("ses_one");
+  // a commons pass needs two sharing projects; drive the curator call the tidy uses directly
+  await r.engine.layer.curator.callModel({ taskClass: "curator-rules", workType: "knowledge-tidy", slug: null, blocks: [{ priority: 1, text: "x" }] });
+  await r.engine.layer.curator.callModel({ taskClass: "curator-rules", slug: null, blocks: [{ priority: 1, text: "x" }] });
+  assert.equal(r.calls[0].args.workType, "knowledge-tidy");
+  assert.equal(r.calls[0].taskClass, "curator-rules");
+  assert.ok(!("workType" in r.calls[1].args));
+  const checks = r.engine.deps.backgroundBudget.calls.check.filter((c) => c.workType !== "knowledge-capture"); // (the status read asks for capture)
+  assert.deepEqual(checks.map((c) => c.workType), ["knowledge-tidy", "curator-rules"]);
   await r.engine.stop();
 });
 

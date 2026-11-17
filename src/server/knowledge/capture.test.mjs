@@ -170,6 +170,22 @@ test("off when the master switch is off; still runs in observeOnly; stops at the
   assert.equal((await capped.cap.tick()).captured, 1);
 });
 
+test("the early gate is asked for capture's work type; a runner refusal (code budget) is a budget skip, not a failure: no backoff, the next tick retries", async () => {
+  const asked = [];
+  const r = await rig({ messages: four(), answer: ANSWER, over: { budget: { canSpend: async (a) => (asked.push(a), { ok: true }), record: async () => {} } } });
+  r.store.fail = { ok: false, code: "budget", reason: "window-busy" };
+  r.cap.observeRaw(ev("session.execution.started"));
+  r.advance(11 * MIN);
+  const t = await r.cap.tick();
+  assert.equal(t.captured, 0);
+  assert.deepEqual(asked, [{ workType: "knowledge-capture" }]);
+  assert.equal(r.runs.length, 1);
+  assert.equal((await r.cap.captureSession("ses_1")).skipped, "budget");
+  // no 30-minute backoff: with the budget back the very next tick captures
+  r.store.fail = null;
+  assert.equal((await r.cap.tick()).captured, 1);
+});
+
 test("a runner failure (no qualifying model) keeps the session pending and backs off 30 minutes", async () => {
   const r = await rig({ messages: four(), answer: ANSWER });
   r.store.fail = { ok: false, code: "no-qualifying-model" };

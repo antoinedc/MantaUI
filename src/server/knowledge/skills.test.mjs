@@ -49,7 +49,7 @@ async function rig(over = {}) {
   };
   const userAuthored = over.userAuthored ?? new Set(["msg_user1", "msg_user2"]);
   const mapping = over.mapping ?? { [S1]: "proj-a-0123456789", [S2]: "proj-b-0123456789" };
-  const counts = { detect: 0, grade: 0, trial: 0, trialArgs: [] };
+  const counts = { detect: 0, grade: 0, trial: 0, trialArgs: [], spend: [] };
   const changes = [];
   const trialResult = over.trialResult ?? (() => ({ status: "completed", report: GOOD_REPORT, parsed: undefined, usd: 0.1 }));
   const rigCtx = {
@@ -66,9 +66,10 @@ async function rig(over = {}) {
         return { text: `\`\`\`json\n${JSON.stringify({ skills: over.candidates ?? [candidate()] })}\n\`\`\`` };
       }
       counts.grade++;
+      if (over.gradeFail) return over.gradeFail;
       return { text: JSON.stringify({ verdict: over.grade ?? "pass", reason: "fine" }) };
     },
-    budget: { canSpend: async () => ({ ok: cfg.capOk }) },
+    budget: { canSpend: async (a) => (counts.spend.push(a), { ok: cfg.capOk }) },
     loadEvidence: async () => ({
       notes: [1, 2, 3].map((i) => ({ id: `n_${i}`, slug: "proj-a-0123456789", sessionID: i === 3 ? S2 : S1, text: "Run npm run build then npm run e2e" })),
       runbooks: [],
@@ -236,6 +237,30 @@ test("a trial that can't run yet keeps the candidate pending and retries it firs
   assert.equal(t.counts.trial, 2);
   assert.equal(t.counts.grade, 1);
   assert.equal(t.skills.pendingWrites().length, 1);
+});
+
+test("budget: detection asks for the curator-skills work type; a trial gets the candidate's due time; a trial waiting for a quiet moment keeps it pending and stops the pass", async () => {
+  let quiet = true;
+  const t = await rig({ trialResult: () => (quiet ? { status: "skipped", reason: "waiting-for-quiet" } : { status: "completed", report: GOOD_REPORT, usd: 0.1 }) });
+  assert.equal(await t.skills.detect(), 0);
+  assert.deepEqual(t.counts.spend, [{ workType: "curator-skills" }]);
+  assert.equal(t.counts.trial, 1);
+  assert.equal(typeof t.counts.trialArgs[0].dueSince, "number");
+  // the pending candidate is retried first, once the moment is right; it stops at the first waiting one (no model call)
+  assert.equal(await t.skills.detect(), 0);
+  assert.equal(t.counts.trial, 2);
+  assert.equal(t.counts.detect, 1, "the second pass stopped before asking the model for more candidates");
+  quiet = false;
+  assert.equal(await t.skills.detect(), 1);
+  assert.equal(t.skills.pendingWrites().length, 1);
+});
+
+test("budget: a grader refused by the budget (code budget) keeps the candidate pending as cap-reached — not rejected, not a failed trial", async () => {
+  const t = await rig({ gradeFail: { ok: false, code: "budget", reason: "level-cap" } });
+  assert.equal(await t.skills.detect(), 0);
+  assert.equal(t.skills.pendingWrites().length, 0);
+  const row = t.state.db.prepare("SELECT status, reason FROM skill_candidates").get();
+  assert.deepEqual({ ...row }, { status: "pending-trial", reason: "cap-reached" });
 });
 
 test("no trial runner behaves like a skipped trial (never installs untested)", async () => {

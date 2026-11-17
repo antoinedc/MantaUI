@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createKnowledgeEngine } from "./engine.mjs";
 import { buildKnowledgeChannels, handleKnowledgeRoute } from "./routes.mjs";
-import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
+import { execGitRunner, fakeBackgroundBudget, makeRepo, tmpDir } from "./testHelpers.mjs";
 
 const fakeLint = async () => ({ preset: { meta: { id: "p" } }, lintSource: async () => ({ messages: [] }) });
 
@@ -14,7 +14,9 @@ async function rig({ stored, sessions = {}, over = {}, repoRemote = "https://git
   let cfg = { knowledge: stored };
   const updates = [];
   const notes = [];
+  const backgroundBudget = fakeBackgroundBudget();
   const engine = createKnowledgeEngine({
+    backgroundBudget,
     dir,
     git: execGitRunner(dir),
     config: { get: async () => cfg, update: async (p) => (updates.push(p), (cfg = { ...cfg, ...p })) },
@@ -29,7 +31,7 @@ async function rig({ stored, sessions = {}, over = {}, repoRemote = "https://git
     listSessionsPage: async () => [],
     ...over,
   });
-  return { engine, dir, repo, updates, notes, getCfg: () => cfg };
+  return { engine, dir, repo, updates, notes, backgroundBudget, getCfg: () => cfg };
 }
 const started = (id, extra = {}) => ({ type: "session.execution.started", data: { sessionID: id, ...extra } });
 
@@ -55,7 +57,8 @@ test("without node:sqlite the subsystem is off and says why; tools answer 503 di
   assert.deepEqual(await engine.briefing({ sessionID: "ses_x1", assistantMessages: 0 }), { text: "", token: null });
   assert.equal((await engine.settingsGet()).status.state, "unsupported");
   await engine.settingsSet({ dailyCapUsd: 3 });
-  assert.equal(updates[0].knowledge.dailyCapUsd, 3);
+  assert.equal(updates[0].backgroundWork.dailyCapUsd, 3); // the legacy cap key writes the shared setting
+  assert.ok(!("dailyCapUsd" in updates[0].knowledge));
   assert.deepEqual(await engine.changes(), { items: [], nextCursor: null });
   assert.equal((await engine.undo({ id: "c_x" })).ok, false);
   await engine.observeRaw(started("ses_x1")); // no throw
@@ -172,13 +175,39 @@ test("the upgrade notification is sent once, when the feature is on, and says wh
   const { engine, notes, dir } = await rig();
   await engine.start();
   assert.equal(notes.length, 1);
-  assert.match(notes[0].message, /\$1\.00 a day/);
+  assert.match(notes[0].message, /\$5\.00 a day on API keys/);
   assert.match(notes[0].message, /Settings → Knowledge/);
   await engine.stop();
   const again = createKnowledgeEngine({ dir, git: execGitRunner(dir), config: { get: async () => ({}), update: async () => {} }, loadLint: fakeLint, secretValues: () => [], listSessionsPage: async () => [], fireNotify: async (n) => notes.push(n), log: () => {} });
   await again.start();
   assert.equal(notes.length, 1);
   await again.stop();
+});
+
+test("status: spend is the shared budget's pay-per-token figure, the cap its one daily cap, and capReached means paused for any reason", async () => {
+  const clock = { t: 1_800_000_000_000 };
+  const { engine, backgroundBudget } = await rig({ over: { now: () => clock.t } });
+  await engine.start();
+  backgroundBudget.payg = 1.25;
+  let s = await engine.status();
+  assert.equal(s.spentUsd, 1.25);
+  assert.equal(s.capUsd, 5);
+  assert.equal(s.capReached, false);
+  assert.equal(s.budgetPaused, null);
+  backgroundBudget.refuse = "level-cap";
+  // memoised for a minute (a polling card must not flood the budget's evidence log) …
+  assert.equal((await engine.status()).capReached, false);
+  clock.t += 61_000;
+  s = await engine.status();
+  assert.equal(s.capReached, true);
+  assert.deepEqual(s.budgetPaused, { reason: "level-cap", resumesAt: null });
+  // … except right after a settings write, which can change the answer
+  backgroundBudget.refuse = null;
+  await engine.settingsSet({ dailyCapUsd: 8 });
+  s = await engine.status();
+  assert.equal(s.capReached, false);
+  assert.equal(s.capUsd, 8);
+  await engine.stop();
 });
 
 test("changes + undo: the record is listed newest-first; undo calls the injected curator undo and records every outcome", async () => {
