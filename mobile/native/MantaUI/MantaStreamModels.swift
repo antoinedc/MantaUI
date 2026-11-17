@@ -367,6 +367,9 @@ struct StreamFlushPayload: Codable, Equatable, Sendable {
     var partID: String
     var field: String
     var text: String
+    /// `true` on a focus replay: `text` is the WHOLE text streamed so far for the
+    /// part, to be set rather than appended. Absent on every normal flush.
+    var replay: Bool? = nil
 }
 
 /// `sub: "running"` — derived from `session.status` (busy/tworking/retry).

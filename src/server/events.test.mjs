@@ -232,6 +232,57 @@ test("attachEventsWs without any filter input delivers everything, snapshot incl
   assert.deepEqual(ws.sent.map((s) => JSON.parse(s).kind), ["pty", "stream", "status"]);
 });
 
+test("attachEventsWs: focusing a session replays its in-flight text to that connection only, before later flushes", () => {
+  const open = { a: [{ messageID: "m1", partID: "m1:text:0", field: "text", text: "Hel" }, { messageID: "m1", partID: "m1:reasoning:0", field: "reasoning", text: "hm" }], b: [{ messageID: "m2", partID: "m2:text:0", field: "text", text: "x" }] };
+  const asked = [];
+  const inFlightText = (sid) => { asked.push(sid); return open[sid] ?? []; };
+  const bus = createBus();
+  const ws = fakeWs();
+  const other = fakeWs();
+  attachEventsWs(bus, ws, { inFlightText });
+  attachEventsWs(bus, other, { inFlightText });
+
+  ws._emit("message", JSON.stringify({ type: "focus", sessions: ["a", "none"] }));
+  const frames = ws.sent.map((s) => JSON.parse(s));
+  assert.deepEqual(frames, [
+    { kind: "stream", sub: "flush", sessionId: "a", payload: { messageID: "m1", partID: "m1:text:0", field: "text", text: "Hel", replay: true } },
+    { kind: "stream", sub: "flush", sessionId: "a", payload: { messageID: "m1", partID: "m1:reasoning:0", field: "reasoning", text: "hm", replay: true } },
+  ], "one replay frame per open part, nothing for a session with no in-flight text");
+  assert.equal(other.sent.length, 0, "other connections are unaffected");
+
+  bus.publish({ kind: "stream", sub: "flush", sessionId: "a", payload: { partID: "m1:text:0", text: "lo" } });
+  assert.equal(JSON.parse(ws.sent.at(-1)).payload.text, "lo", "live frames come after the replay");
+
+  ws.sent.length = 0;
+  asked.length = 0;
+  ws._emit("message", JSON.stringify({ type: "focus", sessions: ["a", "b"] }));
+  assert.deepEqual(asked, ["b"], "an already-focused id is not replayed again");
+  assert.deepEqual(ws.sent.map((s) => JSON.parse(s).sessionId), ["b"]);
+});
+
+test("attachEventsWs: no focus message or no reader means no replay; a reader that throws is tolerated", () => {
+  const bus = createBus();
+  const withReader = fakeWs();
+  attachEventsWs(bus, withReader, { inFlightText: () => [{ messageID: "m", partID: "m:text:0", field: "text", text: "t" }] });
+  bus.publish(stream("running", "a"));
+  assert.deepEqual(withReader.sent.map((s) => JSON.parse(s).sub), ["running"], "connecting alone replays nothing");
+
+  const noReader = fakeWs();
+  attachEventsWs(bus, noReader);
+  noReader._emit("message", JSON.stringify({ type: "focus", sessions: ["a"] }));
+  assert.equal(noReader.sent.length, 0);
+
+  const throwing = fakeWs();
+  attachEventsWs(bus, throwing, { inFlightText: () => { throw new Error("boom"); } });
+  throwing._emit("message", JSON.stringify({ type: "focus", sessions: ["a"] }));
+  assert.equal(throwing.sent.length, 0);
+
+  const noStream = fakeWs();
+  attachEventsWs(bus, noStream, { kinds: ["pty"], inFlightText: () => [{ messageID: "m", partID: "m:text:0", field: "text", text: "t" }] });
+  noStream._emit("message", JSON.stringify({ type: "focus", sessions: ["a"] }));
+  assert.equal(noStream.sent.length, 0, "a connection that excluded `stream` gets no replay");
+});
+
 test("handleEventsRequest: ?kinds narrows the SSE stream; no param delivers everything", () => {
   const run = (url) => {
     const bus = createBus();

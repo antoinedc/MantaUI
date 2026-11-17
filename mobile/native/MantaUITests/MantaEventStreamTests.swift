@@ -341,6 +341,52 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(state.textByPart["other"], "x")
     }
 
+    private func flushFrame(_ partID: String, _ field: String, _ text: String, replay: Bool? = nil) throws -> MantaStreamFrame {
+        let replayKey = replay.map { #","replay":\#($0)"# } ?? ""
+        return try MantaStreamFrame.parse(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"\#(partID)","field":"\#(field)","text":"\#(text)"\#(replayKey)}}"#)
+    }
+
+    func testReplayFlushOnAnUnknownPartCreatesIt() throws {
+        let state = MantaStreamRouter.applying(try flushFrame("part_3", "text", "Hello world", replay: true), to: nil)
+        XCTAssertEqual(state.textByPart["part_3"], "Hello world")
+        XCTAssertEqual(state.chunks.count, 1)
+        XCTAssertEqual(state.chunks.first?.messageID, "msg_2")
+    }
+
+    func testReplayFlushReplacesAHeldPrefixWithoutDuplicating() throws {
+        var state = MantaStreamRouter.applying(try flushFrame("part_3", "text", "Hello "), to: nil)
+        state = MantaStreamRouter.applying(try flushFrame("part_3", "text", "Hello world", replay: true), to: state)
+        XCTAssertEqual(state.textByPart["part_3"], "Hello world")
+        XCTAssertEqual(state.chunks.count, 1)
+    }
+
+    func testReplayFlushKeepsChunkOrder() throws {
+        var state = MantaStreamRouter.applying(try flushFrame("a", "text", "one"), to: nil)
+        state = MantaStreamRouter.applying(try flushFrame("b", "text", "two"), to: state)
+        state = MantaStreamRouter.applying(try flushFrame("a", "text", "one!", replay: true), to: state)
+        XCTAssertEqual(state.chunks.map(\.partID), ["a", "b"])
+        XCTAssertEqual(state.liveText, "one!\n\ntwo")
+    }
+
+    func testNormalFlushAfterAReplayAppends() throws {
+        var state = MantaStreamRouter.applying(try flushFrame("part_3", "text", "Hello ", replay: true), to: nil)
+        state = MantaStreamRouter.applying(try flushFrame("part_3", "text", "world"), to: state)
+        XCTAssertEqual(state.textByPart["part_3"], "Hello world")
+        state = MantaStreamRouter.applying(try flushFrame("part_3", "text", "!", replay: false), to: state)
+        XCTAssertEqual(state.textByPart["part_3"], "Hello world!")
+    }
+
+    func testReplayTextAndReasoningAreIndependent() throws {
+        var state = MantaStreamRouter.applying(try flushFrame("part_1", "text", "prose"), to: nil)
+        state = MantaStreamRouter.applying(try flushFrame("part_1", "reasoning", "think", replay: true), to: state)
+        XCTAssertEqual(state.textByPart["part_1"], "prose")
+        XCTAssertEqual(state.reasoningByPart["part_1"], "think")
+        state = MantaStreamRouter.applying(try flushFrame("part_1", "text", "prose again", replay: true), to: state)
+        XCTAssertEqual(state.textByPart["part_1"], "prose again")
+        XCTAssertEqual(state.reasoningByPart["part_1"], "think")
+        XCTAssertEqual(state.chunks.count, 2)
+    }
+
     func testSetsRunningAndTurnComplete() throws {
         var state = MantaSessionStreamState(sessionId: "ses_1")
         let running = try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#)

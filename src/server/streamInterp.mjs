@@ -89,6 +89,10 @@ const MAX_TOOL_OUTPUT_CHARS = 20_000;
 // How often a running shell's output is read (V2 pushes no per-chunk event).
 export const SHELL_POLL_MS = 250;
 
+// Bounds of the in-flight streamed-text store (`inFlightText`).
+export const IN_FLIGHT_MAX_CHARS = 200_000; // per part
+export const IN_FLIGHT_MAX_SESSIONS = 64;
+
 // ---------------------------------------------------------------------------
 // The pending-user-message list (K2/K3) — pure core.
 //
@@ -268,6 +272,31 @@ export function createStreamInterpreter({
     if (!sessions.has(sid)) sessions.set(sid, newSessionState());
     return sessions.get(sid);
   }
+  // Text still being streamed. V2's text/reasoning deltas are ephemeral (the transcript only gains the text at
+  // `*.ended`), so a client that starts listening mid-segment is handed what was streamed so far (`inFlightText`).
+  // sid -> Map(partID -> {messageID, partID, field, text}); Map order = creation order.
+  const inFlight = new Map();
+  function noteInFlight(sid, messageID, partID, field, chunk) {
+    let parts = inFlight.get(sid);
+    if (!parts) {
+      if (inFlight.size >= IN_FLIGHT_MAX_SESSIONS) inFlight.delete(inFlight.keys().next().value);
+      parts = new Map();
+      inFlight.set(sid, parts);
+    }
+    let entry = parts.get(partID);
+    if (!entry) {
+      entry = { messageID, partID, field, text: "" };
+      parts.set(partID, entry);
+    }
+    const room = IN_FLIGHT_MAX_CHARS - entry.text.length;
+    if (room > 0) entry.text += chunk.length > room ? chunk.slice(0, room) : chunk;
+  }
+  function endInFlight(sid, partID) {
+    const parts = inFlight.get(sid);
+    if (!parts) return;
+    parts.delete(partID);
+    if (parts.size === 0) inFlight.delete(sid);
+  }
   function emit(sid, sub, payload) {
     publish({ kind: "stream", sub, sessionId: sid, payload });
   }
@@ -353,6 +382,7 @@ export function createStreamInterpreter({
       e.timer = null;
     }
     changed.clear();
+    inFlight.clear();
     for (const st of sessions.values()) for (const t of st.tools.values()) t.poll?.stop();
   }
 
@@ -434,6 +464,7 @@ export function createStreamInterpreter({
   }
 
   function emitTurnComplete(sid, st, complete) {
+    if (complete) inFlight.delete(sid);
     setRunning(st, st.running && !complete);
     emit(sid, "turnComplete", { complete, running: st.running, since: st.runningSince });
     runLedger.onTurnComplete(sid, complete);
@@ -835,6 +866,7 @@ export function createStreamInterpreter({
     const st = state(sid);
     switch (evt.type) {
       case "session.execution.started": {
+        inFlight.delete(sid);
         clearRetry(sid, st);
         emitRunning(sid, st, true);
         return;
@@ -929,6 +961,10 @@ export function createStreamInterpreter({
       case "session.text.ended":
       case "session.reasoning.started":
       case "session.reasoning.ended": {
+        if (evt.type.endsWith(".ended") && d.assistantMessageID) {
+          const field = evt.type === "session.reasoning.ended" ? "reasoning" : "text";
+          endInFlight(sid, `${d.assistantMessageID}:${field}:${d.ordinal ?? 0}`);
+        }
         noteMessageChanged(sid, d.assistantMessageID);
         return;
       }
@@ -943,6 +979,7 @@ export function createStreamInterpreter({
         // V2 deltas are phrase-level already, so they are forwarded as they
         // arrive; the part id is the one the transcript mapper gives the block.
         const partID = `${messageID}:${field}:${d.ordinal ?? 0}`;
+        noteInFlight(sid, messageID, partID, field, chunk);
         emit(sid, "flush", { messageID, partID, field, text: chunk });
         (reasoning ? runLedger.onReasoning : runLedger.onText)(sid, { partID, messageID, text: chunk });
         return;
@@ -1076,6 +1113,7 @@ export function createStreamInterpreter({
         const own = sessions.get(sid);
         if (own) for (const t of own.tools.values()) stopShellPoll(t);
         sessions.delete(sid);
+        inFlight.delete(sid);
         runLedger.onDeleted(sid);
         childParent.delete(sid);
         return;
@@ -1277,6 +1315,8 @@ export function createStreamInterpreter({
       emit(sid, "commandExecuted", { messageID, name, arguments: args ?? "" });
     },
     getState: (sid) => sessions.get(sid),
+    /** Text streamed so far for the session's still-open text/reasoning parts, in creation order (a copy). */
+    inFlightText: (sid) => [...(inFlight.get(sid)?.values() ?? [])].map((p) => ({ ...p })),
     knownSessionIds: () => [...sessions.keys()],
     // Replay current edge-only state for the bus's connect-time snapshot
     // (BET-913 + BET-916 + BET-922). These frames are emitted only on an EDGE —

@@ -6915,7 +6915,7 @@ const handleUpgrade = (req, socket, head) => {
   if (url.pathname === "/events") {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,
     // which can't reliably receive EventSource). Same bus + envelope.
-    wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws, { kinds: parseKindsParam(url.searchParams.get("kinds")) }));
+    wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws, { kinds: parseKindsParam(url.searchParams.get("kinds")), inFlightText: (sid) => streamInterp.inFlightText(sid) }));
     return;
   }
   if (url.pathname === "/pty") {

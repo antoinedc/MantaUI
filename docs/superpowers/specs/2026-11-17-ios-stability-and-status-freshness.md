@@ -91,6 +91,13 @@ Applies to the WebSocket `/events` path (`attachEventsWs`). The SSE path takes o
   message FIRST and only then fetches that session's transcript, so no `flush` frame can fall
   between the fetch and the focus taking effect. Overlap duplicates are absorbed by B3's dedupe.
   After every reconnect the client re-sends its kinds and focus messages before relying on frames.
+- **In-flight text replay:** V2's `session.text.delta` / `session.reasoning.delta` are ephemeral (the
+  transcript only gains the text at `*.ended`), so the interpreter keeps the text streamed so far for each
+  open part (`inFlightText(sid)`; 200,000 chars per part, 64 sessions; dropped on the part's `ended`, the
+  turn's end, session delete). When a focus message ADDS a session id (first message included), the box
+  immediately sends that connection only, per open part, a `flush` envelope whose payload carries
+  `replay:true` — the client SETS that part's text to exactly the payload text (not append). Already-focused
+  ids get nothing.
 - The pure decision lives in `events.mjs` as an exported, unit-tested
   `createEventFilter({ kinds })` returning `{ accepts(evt), setKinds(list), setFocus(ids) }`.
 

@@ -4,7 +4,7 @@ import { describeTruncation } from "../shared/streamInterpretation.mjs";
 // end-to-end streams live in streamInterp.golden.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createStreamInterpreter, SHELL_POLL_MS } from "./streamInterp.mjs";
+import { createStreamInterpreter, SHELL_POLL_MS, IN_FLIGHT_MAX_CHARS, IN_FLIGHT_MAX_SESSIONS } from "./streamInterp.mjs";
 import { permissionFromV2, questionFromForm } from "../shared/opencodeV2.mjs";
 
 const SID = "ses_main";
@@ -177,6 +177,64 @@ test("a delta with no message id or no text emits nothing", () => {
   interp.interpret(ev("session.text.delta", { delta: "x" }));
   interp.interpret(ev("session.text.delta", { assistantMessageID: MID, delta: "" }));
   assert.equal(subs(events, "flush").length, 0);
+});
+
+// ---- in-flight text (replayed to a client that focuses a session mid-segment) ----
+
+test("inFlightText accumulates deltas per part in creation order and returns copies", () => {
+  const { interp } = make();
+  assert.deepEqual(interp.inFlightText(SID), []);
+  interp.interpret(ev("session.reasoning.delta", { assistantMessageID: MID, ordinal: 0, delta: "think" }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "Hel" }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "lo" }));
+  const got = interp.inFlightText(SID);
+  assert.deepEqual(got, [
+    { messageID: MID, partID: `${MID}:reasoning:0`, field: "reasoning", text: "think" },
+    { messageID: MID, partID: `${MID}:text:0`, field: "text", text: "Hello" },
+  ]);
+  got[1].text = "mutated";
+  assert.equal(interp.inFlightText(SID)[1].text, "Hello");
+});
+
+test("inFlightText drops a part on its ended event and keeps the others", () => {
+  const { interp } = make();
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "a" }));
+  interp.interpret(ev("session.reasoning.delta", { assistantMessageID: MID, ordinal: 0, delta: "b" }));
+  interp.interpret(ev("session.text.ended", { assistantMessageID: MID, ordinal: 0, text: "a" }));
+  assert.deepEqual(interp.inFlightText(SID).map((p) => p.partID), [`${MID}:reasoning:0`]);
+  interp.interpret(ev("session.reasoning.ended", { assistantMessageID: MID, ordinal: 0, text: "b" }));
+  assert.deepEqual(interp.inFlightText(SID), []);
+});
+
+test("inFlightText is cleared when the turn ends (any outcome) and when the session is deleted", () => {
+  for (const end of ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"]) {
+    const { interp } = make();
+    interp.interpret(ev("session.execution.started"));
+    interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "partial" }));
+    assert.equal(interp.inFlightText(SID).length, 1, end);
+    interp.interpret(ev(end, { error: { type: "provider.internal", message: "x" } }));
+    assert.deepEqual(interp.inFlightText(SID), [], end);
+  }
+});
+
+test("inFlightText caps each part at IN_FLIGHT_MAX_CHARS and the store at IN_FLIGHT_MAX_SESSIONS (oldest evicted)", () => {
+  const { interp } = make();
+  const big = "x".repeat(IN_FLIGHT_MAX_CHARS - 5);
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: big }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "0123456789" }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "more" }));
+  const [part] = interp.inFlightText(SID);
+  assert.equal(part.text.length, IN_FLIGHT_MAX_CHARS);
+  assert.ok(part.text.endsWith("01234"));
+
+  const { interp: many } = make();
+  const sid = (i) => `ses_${i}`;
+  for (let i = 0; i < IN_FLIGHT_MAX_SESSIONS + 1; i++) {
+    many.interpret({ id: `evt_cap_${i}_${++n}`, type: "session.text.delta", data: { sessionID: sid(i), assistantMessageID: MID, ordinal: 0, delta: "t" } });
+  }
+  assert.deepEqual(many.inFlightText(sid(0)), [], "the oldest session was evicted");
+  assert.equal(many.inFlightText(sid(1)).length, 1);
+  assert.equal(many.inFlightText(sid(IN_FLIGHT_MAX_SESSIONS)).length, 1);
 });
 
 // ---- steps: stepEnded / truncation / context / cache ----

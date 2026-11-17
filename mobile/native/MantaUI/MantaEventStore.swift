@@ -160,10 +160,15 @@ struct MantaSessionStreamState: Equatable, Sendable {
     }
 
     /// Append a flushed chunk, extending the part's text when it is already
-    /// known. Text and reasoning are tracked separately for the same part.
+    /// known. Text and reasoning are tracked separately for the same part. A
+    /// replay payload carries the whole text so far and replaces it instead.
     mutating func appending(_ payload: StreamFlushPayload) {
         if let i = chunks.firstIndex(where: { $0.partID == payload.partID && $0.field == payload.field }) {
-            chunks[i].text += payload.text
+            if payload.replay == true {
+                chunks[i].text = payload.text
+            } else {
+                chunks[i].text += payload.text
+            }
         } else {
             chunks.append(StreamTextChunk(
                 partID: payload.partID,

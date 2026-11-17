@@ -337,7 +337,7 @@ final class MantaTransportTests: XCTestCase {
         let lastFetch = Date(timeIntervalSince1970: 1_000)
         XCTAssertTrue(
             BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: lastFetch.addingTimeInterval(1), lastFetch: lastFetch),
-            "a submit must refetch even before the 5s interval elapses"
+            "a submit must refetch even before the poll interval elapses"
         )
     }
 
@@ -348,7 +348,7 @@ final class MantaTransportTests: XCTestCase {
         )
     }
 
-    /// A plain tick (didSubmit == false) still follows the 5s interval — it is
+    /// A plain tick (didSubmit == false) still follows the poll interval — it is
     /// not upgraded to an unconditional refetch by the submit path.
     func testBranchTickRespectsIntervalEvenWhenNotSubmit() {
         let lastFetch = Date(timeIntervalSince1970: 1_000)
@@ -356,7 +356,7 @@ final class MantaTransportTests: XCTestCase {
             BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(1), lastFetch: lastFetch)
         )
         XCTAssertTrue(
-            BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(5), lastFetch: lastFetch)
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval), lastFetch: lastFetch)
         )
     }
 }
