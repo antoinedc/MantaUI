@@ -1,6 +1,6 @@
 # Background work budget — follow-ups after first use
 
-Status: rev 2 (2026-11-17) — review round 1 folded in. Builds on `2026-11-17-background-work-budget.md` (PR #1690, merged 372cfcd5).
+Status: rev 3 (2026-11-17) — two review rounds folded in; §5.6 amends §5.1–5.5. Builds on `2026-11-17-background-work-budget.md` (PR #1690, merged 372cfcd5).
 Owner: box server (`src/server/`), desktop renderer (`src/renderer/`).
 
 ## 1. What happened
@@ -133,6 +133,31 @@ validation per window. At most 8 windows per session per day (the rest waits for
   captures in later ticks (unlike `budget`, which still breaks the tick).
 - Spend stays under the existing level cap / daily cap; no new budget accounting.
 
+### 5.6 Rev 3 amendments (win over 5.1–5.5)
+
+1. **User-message gate.** The "≥ 3 new user messages" gate (`too-few-messages`) is evaluated ONCE on the
+   whole span since the bookmark, before summaries and windowing. Once a session is in backlog, every window
+   runs regardless of its own user-message count; a window with nothing capturable (after §5.2) advances the
+   bookmark with no model call.
+2. **Backlog selection.** The backlog step selects from the capture table by `backlog_since IS NOT NULL`,
+   independent of `dirty`, ordered by most recent activity; it does not require the 10-minute idle (the
+   session was already idle when it became backlog). A compaction-triggered capture on a backlog session also
+   runs only one window. `backlog_since` is cleared when the bookmark reaches the end.
+3. **`listMessagesSince` keeps the OLDEST.** It pages newest-first down to the bookmark, keeping a rolling
+   buffer of the oldest `max` messages after the bookmark; newer ones stay unread for later windows. "[N
+   older messages not read]" is reported only when the 10,000-record ceiling is hit before reaching the
+   bookmark.
+4. **Bookmark after a summary.** A span replaced by a summary advances the bookmark to its last replaced
+   message (the last at or before the handoff's `createdAt`, or the compaction message itself).
+5. **Daily cap persisted.** `capture-2` adds `backlog_day` and `backlog_windows` (count) next to
+   `backlog_since`.
+6. **Successor preamble.** The skip/strip of the delivered handoff preamble in a successor applies ALWAYS
+   (the preamble is never user-authored evidence), not only when the predecessor used the summary.
+7. **Summary role.** Summary aliases carry role `summary` (non-user), so the existing rule makes any note
+   citing them `derived`.
+8. **Settings search label** for the `custom` entry: "Background work — plans and API-key limit". If the
+   visual gate enumerates Settings sections, add the new section's row.
+
 ## 6. Window length and the ChatGPT fix
 
 - `UsageWindow` gains optional `spanMs` (window length). Codex sets it from `limit_window_seconds`;
@@ -149,18 +174,18 @@ validation per window. At most 8 windows per session per day (the rest waits for
 
 | Need | Chosen | Considered, and why not |
 |---|---|---|
-| Transcript condensing | own pure function | Generic summarizers (LLM-based) are what §5.3 already uses only as a fallback; there is no maintained library that understands OpenCode tool parts. |
+| Transcript condensing | own pure function | LLM summarizers cost the allowance this feature exists to save; no maintained library understands OpenCode tool parts. |
 | Summaries | existing handoff store + OpenCode compaction messages | — |
 | Paging transcripts | new `listMessagesSince` over the existing reader | — (no paging exists today) |
 | Settings section | existing Settings section framework | — |
 
 ## 8. Tests
 
-- Copy: every reason × subject; elapsed formatting; override hides busy/projected lines.
+- Copy: every reason × subject; elapsed formatting.
 - Settings: section exists, link opens it and focuses the card, search finds it; override toggle saves
   and reports errors.
 - Budget: `runWhenBusy` skips exactly the two rules; `spanMs` weekly classification and windowStart;
-  catch-up headroom accounting.
+  
 - Codex adapter: `spanMs` from `limit_window_seconds`; a 7-day primary window is weekly for the budget.
 - Capture: `listMessagesSince` stops at the bookmark; `condenseForCapture` fixtures; summaries used only
   when the span doesn't fit (handoff for send/armed/draft successors, compaction), citations and
