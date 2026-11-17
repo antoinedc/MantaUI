@@ -3067,20 +3067,18 @@ export function ChatPanel({
     async (q: QuestionRequest, feedback: string) => {
       // Answer "Yes" so opencode switches to the build agent...
       await replyQuestion(q, [["Yes"]]);
-      // ...then re-send the plan text ourselves with the user's feedback
-      // appended. This is a resubmit (not a toggle) so the feedback text lands
-      // in the build turn with the session's one model.
+      // ...then re-send the plan text ourselves. This is a resubmit (not a toggle) so the build turn runs
+      // with the session's one model. The plan is text the plan AGENT wrote, not the user: it goes out
+      // `appGenerated` so the box never records it as user-authored evidence (shared-knowledge §9.2).
+      // The user's own feedback, if any, follows as a normal message so it still counts as theirs.
       setPlanOn(false);
       writePlanSaved(sessionId, false);
       try {
-        await window.api.opencodePrompt(
-          sessionId,
-          buildPlanPrompt(q, feedback),
-          sessionModel ?? undefined,
-          [],
-          undefined,
-          undefined,
-        );
+        await window.api.opencodePrompt(sessionId, q.plan?.text ?? "", sessionModel ?? undefined, [], undefined, undefined, {
+          appGenerated: true,
+        });
+        const typed = feedback.trim();
+        if (typed) await window.api.opencodePrompt(sessionId, typed, sessionModel ?? undefined, [], undefined, undefined);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
       }

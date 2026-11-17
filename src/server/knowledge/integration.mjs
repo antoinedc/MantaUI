@@ -9,21 +9,50 @@ import { parsePartId } from "../opencodeDb.mjs";
 const MSG_REF = /^(msg|part):([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/;
 
 /**
- * `isUserAuthoredRef(ref, {sessionID})` for the note queue (§9.2): a `msg:`/`part:` ref is
- * user-authored only when a `user` origin was recorded for its message at the one prompt
- * chokepoint. A `part:` ref resolves to its message(s). Everything else — no record, a
- * non-message ref, a message from before the upgrade — is NOT user-authored (fail closed).
+ * `isUserAuthoredRef(ref, {sessionID})` for the note queue and the curator's bars (§9.2): a `msg:`/`part:`
+ * ref is user-authored only when
+ *   • a `user` origin was recorded for its message at the one prompt chokepoint, AND
+ *   • that record belongs to the ref's own session (a record for the same id in another session proves nothing), AND
+ *   • opencode's stored message in that session really has role "user" (defense in depth: an assistant
+ *     message can never be user-authored, whatever was recorded).
+ * A `part:` ref resolves to its message(s). Everything else — no record, a non-message ref, a message from
+ * before the upgrade, a lookup that fails — is NOT user-authored (fail closed).
  *
- * @param {{ isUserAuthored(messageID: string): boolean }} promptOrigins
+ * @param {{ getRecord(messageID: string): ({origin: string, sessionID: string} | null) }} promptOrigins
+ * @param {{ readRole?: (sessionID: string, messageID: string) => Promise<string | null> }} [deps]
+ *   `readRole` answers the stored role of a message ("user" | "assistant" | …), null when unknown. Absent → the
+ *   role check is skipped (tests of the record rules only); index.mjs always supplies it.
  */
-export function createIsUserAuthoredRef(promptOrigins) {
-  return function isUserAuthoredRef(ref) {
+export function createIsUserAuthoredRef(promptOrigins, { readRole } = {}) {
+  return async function isUserAuthoredRef(ref) {
     const m = MSG_REF.exec(typeof ref === "string" ? ref.trim() : "");
     if (!m) return false;
-    const [, type, , id] = m;
+    const [, type, sessionID, id] = m;
     const messageIDs = type === "msg" ? [id] : (parsePartId(id)?.messageIds ?? []);
+    for (const mid of messageIDs) {
+      try {
+        const rec = promptOrigins.getRecord(mid);
+        if (!rec || rec.origin !== "user" || rec.sessionID !== sessionID) continue;
+        if (readRole && (await readRole(sessionID, mid)) !== "user") continue;
+        return true;
+      } catch {
+        /* fail closed for this message */
+      }
+    }
+    return false;
+  };
+}
+
+/**
+ * The `isUserAuthored(messageID, {sessionID?})` seam the capture, correction and skill layers take: the
+ * recorded origin is `user` and, when the caller names a session, the record belongs to that session.
+ * (Those callers already read the message's role from opencode.)
+ */
+export function createIsUserAuthored(promptOrigins) {
+  return function isUserAuthored(messageID, { sessionID } = {}) {
     try {
-      return messageIDs.some((mid) => promptOrigins.isUserAuthored(mid) === true);
+      const rec = promptOrigins.getRecord(messageID);
+      return !!rec && rec.origin === "user" && (sessionID === undefined || rec.sessionID === sessionID);
     } catch {
       return false;
     }

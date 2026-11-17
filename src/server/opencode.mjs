@@ -652,23 +652,23 @@ export function setPromptOrigins(store) {
  * the id again (it never reached the inbox). commandOrigins.test.mjs fails if a
  * session-prompt call appears anywhere else in src/server.
  *
- * `origin` (default "unknown") is recorded with the message id before the
- * request, so a message can later be told apart as user-authored (§9.2). It is
- * a server-set input: only callers inside manta-server pass it, never a client.
+ * `origin` (default "unknown") is recorded with the message id (§9.2) — but only
+ * AFTER opencode answered 2xx, and never for a caller-chosen id that already
+ * exists in the session (an existing assistant message must not become
+ * "user-authored" by re-posting its id; an id we cannot check is not recorded
+ * either). It is a server-set input: only callers inside manta-server pass it.
  * @param {string} sessionId
  * @param {{ text: string, id?: string, files?: any[], agents?: any[], skills?: any[], delivery?: "steer"|"queue" }} body
  * @param {{ signal?: AbortSignal, origin?: string }} [opts]
  * @returns {Promise<import("./opencodeClient.mjs").HttpFailure|null>} null once accepted; the refusal (a non-2xx) otherwise
  */
 async function postPrompt(sessionId, body, { signal, origin = "unknown" } = {}) {
-  const id = typeof body.id === "string" && body.id ? body.id : mintPromptId();
+  const callerChoseId = typeof body.id === "string" && body.id !== "";
+  const id = callerChoseId ? body.id : mintPromptId();
+  // A minted id cannot exist yet; a caller's might. Checked BEFORE the send (afterwards it always exists).
+  let mayRecord = true;
+  if (promptOrigins && callerChoseId) mayRecord = (await readMessageStrict(sessionId, id, { signal })).state === "missing";
   commandCorrelator.registerPromptId(sessionId, id);
-  try {
-    promptOrigins?.record({ messageID: id, sessionID: sessionId, origin });
-  } catch (e) {
-    // Recording is evidence bookkeeping: a failure must never stop the user's message.
-    console.warn("[opencode] could not record the prompt origin:", e?.message ?? e);
-  }
   // (A transport failure / abort throws past here with the id still registered:
   // the server may have accepted it after all.)
   /** @type {import("./opencodeClient.mjs").HttpFailure|null} */
@@ -681,6 +681,14 @@ async function postPrompt(sessionId, body, { signal, origin = "unknown" } = {}) 
     },
   });
   if (refused && refused.status >= 400 && refused.status < 500) commandCorrelator.unregisterPromptId(sessionId, id);
+  if (!refused && mayRecord) {
+    try {
+      promptOrigins?.record({ messageID: id, sessionID: sessionId, origin });
+    } catch (e) {
+      // Recording is evidence bookkeeping: a failure must never fail the user's (already accepted) message.
+      console.warn("[opencode] could not record the prompt origin:", e?.message ?? e);
+    }
+  }
   return refused;
 }
 

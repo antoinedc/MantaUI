@@ -135,7 +135,7 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { createKnowledgeEngine } from "./knowledge/engine.mjs";
 import { handleKnowledgeRoute } from "./knowledge/routes.mjs";
-import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef, createKnowledgeRunner, knowledgePaths } from "./knowledge/integration.mjs";
+import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthored as createKnowledgeIsUserAuthored, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef, createKnowledgeRunner, knowledgePaths } from "./knowledge/integration.mjs";
 import { createKnowledgeParts } from "./knowledge/wiring.mjs";
 import { createShellCommandReader as createKnowledgeShellReader } from "./knowledge/readers.mjs";
 import { runDbTask as knowledgeRunDbTask } from "./dbOffload.mjs";
@@ -2072,7 +2072,7 @@ const knowledgeEngine = createKnowledgeEngine({
       local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
       runDbTask: knowledgeRunDbTask,
       listTmuxProjects: () => tmux.listProjects(),
-      isUserAuthored: (messageID) => promptOrigins.isUserAuthored(messageID),
+      isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
       getSession: async (sessionID) => {
         const r = await oc.readSession(sessionID);
         return r.state === "found" ? r.session : null;
@@ -2091,7 +2091,13 @@ const knowledgeEngine = createKnowledgeEngine({
   readMessages: createKnowledgeMessageReader({ listMessages: (sessionID) => oc.listMessages(sessionID) }),
   searchTranscripts: knowledgeTranscripts.searchTranscripts,
   promptOrigins,
-  isUserAuthoredRef: createKnowledgeIsUserAuthoredRef(promptOrigins),
+  isUserAuthoredRef: createKnowledgeIsUserAuthoredRef(promptOrigins, {
+    // The role opencode stores for the message: an assistant message is never user-authored.
+    readRole: async (sessionID, messageID) => {
+      const m = await oc.getMessage(sessionID, messageID);
+      return m ? (m.info?.role ?? null) : null;
+    },
+  }),
   getRepoAccess: knowledgeForge.getRepoAccess,
   hasForgeLogin: knowledgeForge.hasForgeLogin,
   bandOf: createKnowledgeBandOf(describeModel),

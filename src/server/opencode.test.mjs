@@ -755,16 +755,17 @@ function originRecorder() {
   return { rows, record: (r) => { rows.push(r); return true; } };
 }
 
-test("sendPrompt records the origin with the message id BEFORE the POST; the default is unknown", async () => {
+test("sendPrompt records the origin only AFTER opencode accepted the message; the default is unknown", async () => {
   const store = originRecorder();
   setPromptOrigins(store);
   try {
-    let recordedBeforePost = null;
+    let rowsDuringPost = null;
     const calls = await withV2(
       {
         "GET /api/session/ses_a": { data: SESSION() },
+        "GET /api/session/ses_a/message/msg_mine": new Response("nope", { status: 404 }),
         "POST /api/session/ses_a/prompt": () => {
-          recordedBeforePost ??= store.rows.length;
+          rowsDuringPost ??= store.rows.length;
           return { data: {} };
         },
       },
@@ -773,11 +774,57 @@ test("sendPrompt records the origin with the message id BEFORE the POST; the def
         await sendPrompt({ sessionId: "ses_a", text: "bg" });
       },
     );
-    assert.equal(recordedBeforePost, 1, "the origin was written before the request went out");
+    assert.equal(rowsDuringPost, 0, "nothing is written before the request is answered");
     const bodies = only(calls, "POST", "/api/session/ses_a/prompt").map((c) => c.body);
     assert.deepEqual(store.rows[0], { messageID: "msg_mine", sessionID: "ses_a", origin: "user" });
     assert.equal(store.rows[1].messageID, bodies[1].id, "a minted id is what gets recorded");
     assert.equal(store.rows[1].origin, "unknown");
+    assert.equal(only(calls, "GET", "/api/session/ses_a/message/msg_mine").length, 1, "a caller-chosen id is checked before the send");
+    assert.equal(calls.filter((c) => c.method === "GET" && c.path.includes("/message/")).length, 1, "a minted id is not looked up");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a message id that already exists in the session never gets an origin (re-posting an assistant id cannot make it user-authored)", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    for (const lookup of [{ data: { id: "msg_asst", type: "assistant" } }, new Response("busy", { status: 500 })]) {
+      const calls = await withV2(
+        {
+          "GET /api/session/ses_a": { data: SESSION() },
+          "GET /api/session/ses_a/message/msg_asst": lookup,
+          "POST /api/session/ses_a/prompt": { data: {} },
+        },
+        async () => {
+          await sendPrompt({ sessionId: "ses_a", text: "forged", origin: "user", messageID: "msg_asst" });
+        },
+      );
+      assert.equal(only(calls, "POST", "/api/session/ses_a/prompt").length, 1, "the message itself is still sent");
+    }
+    assert.deepEqual(store.rows, [], "existing id (or one that could not be checked) → no origin recorded");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
+test("a refused prompt (4xx) leaves no origin row", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    await withV2(
+      {
+        "GET /api/session/ses_a": { data: SESSION() },
+        "GET /api/session/ses_a/message/msg_x": new Response("nope", { status: 404 }),
+        "POST /api/session/ses_a/prompt": new Response("bad", { status: 400 }),
+      },
+      async () => {
+        await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user", messageID: "msg_x" }));
+        await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user" }));
+      },
+    );
+    assert.deepEqual(store.rows, []);
   } finally {
     setPromptOrigins(null);
   }
