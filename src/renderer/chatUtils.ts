@@ -2848,6 +2848,84 @@ export function formatWindowReset(
   return isSameLocalDay(resetsAt, nowMs) ? line : `${line} (${formatResetAt(resetsAt, nowMs)})`;
 }
 
+const RESET_DATE_FMT = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
+
+/** "Thu 19 Nov" — locale order, commas dropped. */
+function formatShortDate(ts: number): string {
+  return RESET_DATE_FMT.format(ts).replace(/,/g, "");
+}
+
+/** The usage card's headline: "16:40" on the same local day, else
+ *  "Thu 19 Nov · 09:00". "" for a missing/non-finite instant. */
+export function formatResetHeadline(resetsAt: number | null | undefined, nowMs: number): string {
+  if (resetsAt == null || !Number.isFinite(resetsAt)) return "";
+  const time = RESET_TIME_FMT.format(resetsAt);
+  return isSameLocalDay(resetsAt, nowMs) ? time : `${formatShortDate(resetsAt)} · ${time}`;
+}
+
+/** The reset tooltip's two lines. `title` is "Resets Today, Tue 17 Nov at 15:05"
+ *  ("Today, " only on the same local day); `sub` is "in 2h20m", plus
+ *  " · window started 11:40" / "… Thu 12 Nov" only when the provider reported
+ *  `startedAt`. Null for a missing/non-finite reset. */
+export function formatResetTooltip(
+  resetsAt: number | null | undefined,
+  startedAt: number | null | undefined,
+  nowMs: number,
+): { title: string; sub: string } | null {
+  if (resetsAt == null || !Number.isFinite(resetsAt)) return null;
+  const today = isSameLocalDay(resetsAt, nowMs) ? "Today, " : "";
+  const title = `Resets ${today}${formatShortDate(resetsAt)} at ${RESET_TIME_FMT.format(resetsAt)}`;
+  let sub = `in ${formatResetDistance(resetsAt - nowMs)}`;
+  if (startedAt != null && Number.isFinite(startedAt)) {
+    sub += ` · window started ${isSameLocalDay(startedAt, nowMs) ? RESET_TIME_FMT.format(startedAt) : formatShortDate(startedAt)}`;
+  }
+  return { title, sub };
+}
+
+/** How far through its window "now" is, 0..1 — the position dot on a usage bar.
+ *  From `startedAt` + `resetsAt` when both are known, else `resetsAt` + `spanMs`.
+ *  Null (no dot) when it can't be known: stale, inactive, no reset, no span, or
+ *  a reset already in the past. */
+export function windowProgress(w: UsageWindow, nowMs: number): number | null {
+  if (w.stale === true || w.active === false) return null;
+  const end = w.resetsAt;
+  if (end == null || !Number.isFinite(end) || end <= nowMs) return null;
+  let p: number;
+  if (w.startedAt != null && Number.isFinite(w.startedAt) && end > w.startedAt) {
+    p = (nowMs - w.startedAt) / (end - w.startedAt);
+  } else if (w.spanMs != null && Number.isFinite(w.spanMs) && w.spanMs > 0) {
+    p = 1 - (end - nowMs) / w.spanMs;
+  } else {
+    return null;
+  }
+  return Math.max(0, Math.min(1, p));
+}
+
+const FIVE_HOURS_MS = 5 * 3_600_000;
+const WEEK_MS = 7 * 86_400_000;
+
+/** The usage card / seat-table name of a window: "5-hour", "Weekly", else the
+ *  window's own label. Derived from kind / span / label, never a provider name. */
+export function windowNoun(w: UsageWindow): string {
+  if (w.kind === "weekly" || w.spanMs === WEEK_MS) return "Weekly";
+  if (w.spanMs === FIVE_HOURS_MS || (w.spanMs == null && w.kind === "session" && /^5\s*h/i.test(w.label))) {
+    return "5-hour";
+  }
+  return w.label;
+}
+
+export type WindowResetState = "resetting" | "not-started" | "no-reset" | "scheduled";
+
+/** What a window can say about its next reset: its reset has passed and the new
+ *  numbers aren't in yet; it has not started (0%, no reset time); it has usage but
+ *  the provider sent no reset time; or a reset is scheduled. */
+export function windowResetState(w: UsageWindow, nowMs: number): WindowResetState {
+  const hasReset = w.resetsAt != null && Number.isFinite(w.resetsAt);
+  if (w.stale === true || (hasReset && (w.resetsAt as number) <= nowMs)) return "resetting";
+  if (!hasReset) return w.pct > 0 ? "no-reset" : "not-started";
+  return "scheduled";
+}
+
 // "updated 3m ago" / "updated just now" — the popover footer's freshness
 // line. Reuses formatAge's unit ladder (now/Nm/Nh/Nd) for the same relative-
 // time vocabulary as the sidebar, above.
@@ -3216,19 +3294,6 @@ export function seatBarWindows(windows: UsageWindow[] | null | undefined): Usage
     list.find((w) => w !== session && w.kind === "weekly") ??
     list.find((w) => w !== session && !w.scope);
   return weekly ? [session, weekly] : [session];
-}
-
-/** The reset hint for a seat at/over the move line ("resets 14:10"), taken from
- *  the window that drives its load. Null below the line or with no reset time. */
-export function seatResetHint(seat: SeatView, nowMs: number): string | null {
-  const load = seatLoad(seat);
-  if (load == null || load < SEAT_MOVE_LOAD_PCT) return null;
-  const driver = seat.windows
-    .filter((w) => w.active !== false && w.stale !== true)
-    .reduce<UsageWindow | null>((m, w) => (!m || w.pct > m.pct ? w : m), null);
-  // Time remaining, like the popover's own window rows ("resets in 2h10m");
-  // the local date/time is appended only when the reset isn't today.
-  return formatWindowReset(driver?.resetsAt, nowMs);
 }
 
 /**

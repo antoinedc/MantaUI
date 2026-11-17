@@ -6,7 +6,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
-import { UsageWindowRow, SeatMiniBars } from "./UsageDial";
+import { UsageWindowRow, WindowBar } from "./UsageDial";
 import type { UsageWindow } from "../shared/types";
 
 const fill = (h: Harness) => h.container.querySelector<HTMLElement>("span.block.h-full")!.style.backgroundColor;
@@ -41,9 +41,12 @@ describe("usage window colours come from the box", () => {
     expect(awaiting).toBe(fill(h));
   });
 
-  it("seat mini bars use the box's tone too", () => {
-    const seat = { id: "s", windows: [win({ pct: 80, tone: "warn" })] } as never;
-    h = mount(<SeatMiniBars seat={seat} nowMs={0} />);
-    expect(h.container.querySelector<HTMLElement>("[data-window-kind] span.block")!.style.backgroundColor).not.toBe("");
+  it("window bars (cards + seat table) use the box's tone too", () => {
+    h = mount(<WindowBar w={win({ pct: 80, tone: "warn" })} nowMs={0} small />);
+    const warn = h.container.querySelector<HTMLElement>("span.absolute")!.style.backgroundColor;
+    expect(warn).not.toBe("");
+    h.unmount();
+    h = mount(<WindowBar w={win({ pct: 80, tone: "under" })} nowMs={0} small />);
+    expect(h.container.querySelector<HTMLElement>("span.absolute")!.style.backgroundColor).not.toBe(warn);
   });
 });

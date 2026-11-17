@@ -11,7 +11,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { act, useRef } from "react";
 import { mount, mountSessionHeader, type Harness } from "./testHarness";
-import { Popover } from "./Popover";
+import { Popover, placeFloating } from "./Popover";
 
 // Renders a trigger button + a Popover whose open state is externally
 // controlled by `open` / `onToggle` so the test can observe onClose calls.
@@ -161,5 +161,35 @@ describe("StatusOverflow — the overflow Dropdown is portalled, not clipped (BE
     // The surface is a direct child of <body> — NOT nested under any
     // overflow-hidden ancestor, so it can never be clipped to a menu row.
     expect(surface!.parentElement).toBe(document.body);
+  });
+});
+
+describe("placeFloating — the shared placement math", () => {
+  const vp = { width: 1000, height: 800 };
+  const anchor = { top: 400, bottom: 420, left: 300, right: 360 };
+  const size = { width: 200, height: 60 };
+
+  it("places above, centred or end-aligned, with the gap", () => {
+    expect(placeFloating(anchor, size, vp, "above", "center", 8)).toEqual({ top: 332, left: 230, side: "above" });
+    expect(placeFloating(anchor, size, vp, "above", "end")).toEqual({ top: 336, left: 160, side: "above" });
+    expect(placeFloating(anchor, size, vp, "below", "start")).toEqual({ top: 424, left: 300, side: "below" });
+  });
+
+  it("flips only when the preferred side can't fit and the other has more room", () => {
+    const high = { top: 20, bottom: 40, left: 300, right: 360 };
+    expect(placeFloating(high, size, vp, "above", "start").side).toBe("below");
+    const low = { top: 760, bottom: 780, left: 300, right: 360 };
+    expect(placeFloating(low, size, vp, "below", "start").side).toBe("above");
+    // no room on either side: stays on the preferred one
+    expect(placeFloating(anchor, { width: 10, height: 900 }, vp, "above", "start").side).toBe("above");
+  });
+
+  it("clamps into the viewport with an 8px margin", () => {
+    const edge = { top: 400, bottom: 420, left: 0, right: 20 };
+    expect(placeFloating(edge, size, vp, "above", "center", 8).left).toBe(8);
+    const right = { top: 400, bottom: 420, left: 980, right: 1000 };
+    expect(placeFloating(right, size, vp, "above", "start").left).toBe(792);
+    const top = { top: 0, bottom: 20, left: 300, right: 360 };
+    expect(placeFloating(top, size, vp, "above", "start").top).toBeGreaterThanOrEqual(8);
   });
 });

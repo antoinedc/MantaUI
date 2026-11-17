@@ -2,7 +2,7 @@
 //
 // The multi-account usage dial + popover (spec §7a): one seat is unchanged,
 // several seats add the seat sections, auto shows "next" + the ↷ badge, manual
-// shows a working "Use" button that reports its result.
+// shows a working "Use this seat" link that reports its result.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
@@ -57,10 +57,11 @@ describe("UsageDial — one seat (unchanged)", () => {
     const { popover } = await open([oneSeatView()], { seatId: "s1" });
     expect(popover).toBeTruthy();
     expect(popover.textContent).toContain("Claude");
-    expect(popover.textContent).toContain("5h");
-    expect(popover.textContent).toContain("7d");
+    expect(popover.textContent).toContain("5-hour · resets");
+    expect(popover.textContent).toContain("Weekly · resets");
     expect(popover.textContent).toMatch(/updated/i);
     expect(popover.textContent).not.toContain("Other seats");
+    expect(popover.querySelector('[data-testid="usage-seat-table"]')).toBeNull();
     expect(popover.textContent).not.toContain("Manage seats");
     expect(popover.textContent).not.toContain("Automatic");
     expect(popover.querySelector('[data-testid="usage-conversation-seat"]')).toBeNull();
@@ -69,7 +70,7 @@ describe("UsageDial — one seat (unchanged)", () => {
 
   it("no seat info at all (older box): same classic popover", async () => {
     const { popover } = await open([], { seatId: null });
-    expect(popover.textContent).toContain("5h");
+    expect(popover.textContent).toContain("5-hour · resets");
     expect(popover.textContent).not.toContain("Other seats");
   });
 });
@@ -91,9 +92,12 @@ describe("UsageDial — three seats, automatic", () => {
     expect(popover.textContent).not.toContain("58%");
     expect(popover.textContent).toContain("Automatic");
     expect(popover.querySelector('[data-testid="usage-conversation-seat"]')?.textContent).toContain("Work · Seat 1");
-    expect(popover.textContent).toContain("Other seats");
-    // grouped under their accounts, current seat excluded
-    expect(popover.querySelector('[data-seat-id="s1"]')).toBeNull();
+    // one table: this conversation's seat leads (highlighted), the others follow grouped under their accounts
+    expect(popover.querySelector('[data-testid="usage-seat-table"]')).toBeTruthy();
+    const s1 = popover.querySelector('[data-seat-id="s1"]') as HTMLElement;
+    expect(s1.getAttribute("data-current")).toBe("true");
+    expect(s1.textContent).toContain("this conversation");
+    expect(s1.textContent).not.toContain("next");
     const s2 = popover.querySelector('[data-seat-id="s2"]') as HTMLElement;
     const s3 = popover.querySelector('[data-seat-id="s3"]') as HTMLElement;
     expect(s2.textContent).toContain("next");
@@ -101,7 +105,7 @@ describe("UsageDial — three seats, automatic", () => {
     expect(popover.textContent).toContain("Personal");
     expect(popover.textContent).toContain("Manage seats");
     // auto mode: no Use buttons
-    expect(Array.from(popover.querySelectorAll("button")).some((b) => b.textContent === "Use")).toBe(false);
+    expect(Array.from(popover.querySelectorAll("button")).some((b) => b.textContent === "Use this seat")).toBe(false);
   });
 
   it("every seat mid-reset: the ring is an empty pulsing track and the tooltip says so", async () => {
@@ -188,7 +192,6 @@ describe("UsageDial — three seats, automatic", () => {
     const { popover } = await open([threeSeatView(), codex], { seatId: "s1", usage: [claudeSnapshot, codexSnapshot] });
     expect(popover.querySelector('[data-testid="usage-other-subscriptions"]')).toBeNull();
     expect(popover.textContent).not.toContain("OpenAI");
-    expect(popover.textContent).not.toContain("this conversation");
     expect(popover.textContent).not.toMatch(/\d+ chats?\b/);
     const manage = Array.from(popover.querySelectorAll("button")).find((b) => b.textContent === "Manage seats")!;
     await act(async () => {
@@ -205,7 +208,7 @@ describe("UsageDial — three seats, automatic", () => {
     v.accounts[1].seats = Array.from({ length: 6 }, (_, i) => seat(`x${i}`, `Extra ${i}`, 10 + i));
     const { popover } = await open([v], { seatId: "s1" });
     const list = popover.querySelector(".manta-seat-list") as HTMLElement;
-    expect(list.querySelectorAll("[data-seat-id]").length).toBe(7); // 6 extras + the other personal seat
+    expect(list.querySelectorAll("[data-seat-id]:not([data-current])").length).toBe(7); // 6 extras + the other personal seat
     expect(list.style.maxHeight).toBe("");
     // The list itself never scrolls…
     expect(list.className).not.toMatch(/overflow-(y-|x-)?(auto|scroll)|max-h-/);
@@ -237,8 +240,9 @@ describe("UsageDial — manual mode", () => {
     expect(h!.container.querySelector("[data-move-coming]")).toBeNull();
     expect(popover.textContent).toContain("Manual");
     expect(popover.querySelector(".manta-seat-next")).toBeNull();
-    const uses = Array.from(popover.querySelectorAll("button")).filter((b) => b.textContent === "Use");
+    const uses = Array.from(popover.querySelectorAll("button")).filter((b) => b.textContent === "Use this seat");
     expect(uses).toHaveLength(2);
+    expect(popover.querySelector('[data-seat-id="s1"] button')).toBeNull(); // the conversation's own seat has none
   });
 
   it("Use on a same-org seat calls set-active at once and reports the result", async () => {
@@ -246,7 +250,7 @@ describe("UsageDial — manual mode", () => {
     const setActive = vi.fn(() => Promise.resolve(after));
     const { api, popover } = await open([manual()], { seatId: "s1", extraApi: { accountsSetActive: setActive } });
     const use = popover.querySelector('[data-seat-id="s2"] button') as HTMLButtonElement;
-    expect(use.textContent).toBe("Use");
+    expect(use.textContent).toBe("Use this seat");
     await act(async () => {
       use.click();
     });

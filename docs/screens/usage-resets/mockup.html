@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage popover — Proposal B, revised</title>
+<style>
+[data-theme="dark"]{--canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;--inset:#070B16;--border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;--tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;--accent:#5A88FF;--accent-tx:#7BA0FF;--ok:#3DD9A4;--warn:#FACC15;--danger:#FF6B7A;--warn-bg:#FACC151f;--accent-bg:#5A88FF1f;--fill-active:rgba(255,255,255,.10);--shadow-lg:0 20px 56px rgb(0 0 0/.6);--dot:#FFFFFF;--dot-ring:rgba(0,0,0,.45)}
+[data-theme="light"]{--canvas:#F7F5F1;--panel:#F2EFEA;--card:#FFFFFF;--raised:#FFFFFF;--inset:#F4F1EC;--border-subtle:#E8E4DD;--border:#D6D0C6;--border-strong:#857C6E;--tx1:#33302B;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;--accent:#2E6BFF;--accent-tx:#2357D6;--ok:#0A7A53;--warn:#6E6200;--danger:#BE2F3C;--warn-bg:#6E62001a;--accent-bg:#2E6BFF1a;--fill-active:rgba(26,24,21,.09);--shadow-lg:0 20px 56px rgb(26 24 21/.14);--dot:#FFFFFF;--dot-ring:rgba(26,24,21,.55)}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--canvas);color:var(--tx1);font-family:"Inter Variable",Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.mono{font-family:"JetBrains Mono Variable","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+header.page{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;padding:14px 28px;background:var(--panel);border-bottom:1px solid var(--border-subtle)}
+header.page h1{font-size:17px;margin:0;font-weight:600}
+header.page .sub{font-size:12px;color:var(--tx3)}
+header.page .sp{flex:1}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.seg button{all:unset;cursor:pointer;padding:4px 10px;font-size:12px;color:var(--tx2)}
+.seg button[aria-pressed="true"]{background:var(--accent-bg);color:var(--accent-tx)}
+main{padding:24px 28px 80px;display:grid;grid-template-columns:300px 1fr;gap:28px;align-items:start}
+.note .tag{display:inline-block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-tx);margin-bottom:6px}
+.note h2{font-size:17px;margin:0 0 6px;font-weight:600}
+.note p,.note li{font-size:13px;line-height:1.5;color:var(--tx2)}
+.note ul{padding-left:18px;margin:6px 0}
+.stage{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start;padding:20px 20px 60px;border-radius:12px;background:var(--panel);border:1px solid var(--border-subtle)}
+.cap{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);margin-bottom:8px}
+
+.pop{width:440px;padding:16px;border-radius:12px;border:1px solid var(--border);background:var(--card);box-shadow:var(--shadow-lg);font-size:12px;line-height:1.4}
+.hdr{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:12px}
+.hdr .t{font-size:15px;font-weight:600}
+.hdr .r{display:flex;gap:8px;align-items:baseline;color:var(--tx3)}
+.pill{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:999px;padding:0 8px;font-size:12px;color:var(--tx2)}
+.seatline{margin-bottom:12px;font-weight:500}
+.faint{color:var(--tx3)} .muted{color:var(--tx2)}
+.divider{margin-top:12px;padding-top:12px;border-top:1px solid var(--border-subtle)}
+.foot{display:flex;justify-content:space-between;align-items:center}
+.link{color:var(--tx2);text-decoration:underline dotted}
+.next{font-size:12px;background:var(--accent-bg);color:var(--accent-tx);border-radius:4px;padding:0 4px}
+.lo{white-space:nowrap;font-size:12px;font-weight:600;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:0 8px}
+
+/* usage bar + "now" dot */
+.wbar{position:relative;height:6px;border-radius:999px;background:var(--fill-active)}
+.wbar>.fill{position:absolute;inset:0 auto 0 0;border-radius:999px}
+.wbar>.dot{position:absolute;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:var(--dot);box-shadow:0 0 0 1px var(--dot-ring)}
+.wbar.sm{height:5px}
+.wbar.sm>.dot{width:3px;height:3px;margin:-1.5px 0 0 -1.5px}
+
+/* cards */
+.chips{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.chip{border:1px solid var(--border-subtle);background:var(--inset);border-radius:8px;padding:9px 10px 10px}
+.chip .top{display:flex;justify-content:space-between;align-items:baseline}
+.chip .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)}
+.chip .pct{font-size:12px;color:var(--tx2)}
+.chip .w{font-size:15px;font-weight:600;margin:3px 0 1px}
+.chip .wbar{margin-top:8px}
+
+/* timer + tooltip */
+.timer{position:relative;display:inline-block;color:var(--tx2);cursor:default;border-radius:4px;outline:none;text-decoration:underline dotted transparent;text-underline-offset:3px}
+.timer:hover,.timer:focus-visible{color:var(--tx1);text-decoration-color:var(--tx3)}
+.timer:focus-visible{box-shadow:0 0 0 2px var(--accent)}
+.tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:3;white-space:nowrap;padding:7px 10px;border-radius:6px;background:var(--raised);border:1px solid var(--border);box-shadow:0 8px 24px rgb(0 0 0/.35);font-size:12px;line-height:1.45;color:var(--tx1);text-align:left;pointer-events:none;opacity:0;visibility:hidden;transition:opacity .12s}
+.tip .d{font-weight:600}
+.tip .s{color:var(--tx3)}
+.timer:hover .tip,.timer:focus-visible .tip,.timer.pin .tip{opacity:1;visibility:visible}
+.timer.right .tip{left:auto;right:-8px;transform:none}
+.timer.pin .tip{bottom:auto;top:calc(100% + 8px)}
+
+/* table */
+.tbl{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+.tbl col.c{width:118px}
+.tbl th{font-weight:500;color:var(--tx3);text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:0 0 6px 14px}
+.tbl th:first-child{padding-left:8px}
+.tbl td{padding:8px 0 9px 14px;border-top:1px solid var(--border-subtle);vertical-align:top;white-space:nowrap}
+.tbl td:first-child{padding-left:8px;white-space:normal}
+.tbl td:last-child{padding-right:8px}
+.tbl tr.cur td{background:var(--accent-bg)}
+.tbl tr.cur td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
+.cell .l{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+.cell .p{font-weight:500}
+.cell .l .timer{font-size:12px}
+.sname small{display:block;font-size:12px;color:var(--tx3)}
+</style>
+</head>
+<body>
+<header class="page">
+  <div><h1>Usage popover — Proposal B, revised</h1>
+  <div class="sub">Frozen “now”: Tue 17 Nov, 14:20 · hover any countdown for the exact reset date (one tooltip is pinned open in each popover to show it)</div></div>
+  <div class="sp"></div>
+  <div class="seg" role="group" aria-label="Theme">
+    <button type="button" data-theme-btn="dark" aria-pressed="true">Dark</button>
+    <button type="button" data-theme-btn="light" aria-pressed="false">Light</button>
+  </div>
+</header>
+<main>
+  <div class="note"><span class="tag">Proposal B · v2</span><h2>Reset cards + seat table</h2>
+    <ul>
+      <li><b>This conversation's seat</b> (the cards): the reset date and time are the headline, because there's room, with the countdown under them.</li>
+      <li><b>Seat table</b>: countdown only (“in 2h 20m”). Hover or keyboard-focus a countdown → tooltip with the exact reset date and time.</li>
+      <li>“used” wording removed; cards are labelled just “Resets”.</li>
+      <li>Every bar now shows <b>two things</b>: the coloured fill is how much quota is used, and the <b>small white dot is where we are in the window</b>. Fill ahead of the dot = burning faster than the window.</li>
+      <li>A window that hasn't started shows “not started” and an empty bar with no dot.</li>
+    </ul>
+  </div>
+  <div class="stage" id="stage"></div>
+</main>
+<script>
+const C = { ok:"var(--ok)", warn:"var(--warn)", danger:"var(--danger)" };
+const tone = p => p >= 95 ? "danger" : p >= 80 ? "warn" : "ok";
+// w: {pct, in, date, start, pos(0..1 through window), idle}
+const claude = { name:"Claude", plan:"Max 20x", mode:"Automatic",
+  current:{ name:"Personal · Seat 2",
+    s5:{pct:62,in:"2h 20m",big:"16:40",date:"Today, Tue 17 Nov at 16:40",start:"Window started 11:40",pos:.53},
+    s7:{pct:41,in:"1d 18h",big:"Thu 19 Nov · 09:00",date:"Thu 19 Nov at 09:00",start:"Window started Thu 12 Nov",pos:.75},
+    scoped:"Weekly · Fable 12% · resets with the weekly window" },
+  others:[
+    {name:"Personal · Seat 1", w:[{pct:97,in:"45m",date:"Today, Tue 17 Nov at 15:05",pos:.85},{pct:70,in:"4d 8h",date:"Sat 21 Nov at 22:00",pos:.38}]},
+    {name:"Acme · Seat 1", next:true, w:[{pct:0,idle:true},{pct:18,in:"5d 17h",date:"Mon 23 Nov at 07:00",pos:.18}]},
+    {name:"Acme · Seat 2", lo:true},
+  ]};
+const openai = { name:"OpenAI", plan:"Pro", mode:"Manual",
+  current:{ name:"antoine@ · Personal",
+    s5:{pct:23,in:"1h 32m",big:"15:52",date:"Today, Tue 17 Nov at 15:52",start:"Window started 10:52",pos:.69},
+    s7:{pct:55,in:"2d 21h",big:"Fri 20 Nov · 11:30",date:"Fri 20 Nov at 11:30",start:"Window started Fri 13 Nov",pos:.59} },
+  others:[ {name:"Team workspace", w:[{pct:0,idle:true},{pct:8,in:"22h",date:"Wed 18 Nov at 08:00",pos:.87}]} ],
+  extras:[["Credits balance","0"]] };
+
+const bar = (w,sm) => `<div class="wbar${sm?" sm":""}"${w.idle?"":` title="${Math.round(w.pos*100)}% of the way through this window"`}>
+  <span class="fill" style="width:${w.pct}%;background:${C[tone(w.pct)]}"></span>${w.idle?"":`<span class="dot" style="left:${Math.max(4,Math.min(96,w.pos*100))}%"></span>`}</div>`;
+const timer = (w,{pin=false,right=false}={}) => `<span class="timer${pin?" pin":""}${right?" right":""}" tabindex="0" aria-label="Resets ${w.date}, in ${w.in}">in ${w.in}<span class="tip" role="tooltip"><span class="d">Resets ${w.date}</span><br><span class="s">in ${w.in}${w.start?" · "+w.start.toLowerCase():""}</span></span></span>`;
+
+const chip = (k,w) => `<div class="chip"><div class="top"><span class="k">${k}</span><span class="pct mono">${w.pct}%</span></div>
+  <div class="w">${w.big}</div><div class="faint">${timer(w)}</div>${bar(w)}</div>`;
+
+const cell = (w,opts) => w ? (w.idle
+  ? `<div class="cell"><div class="l"><span class="p mono">0%</span><span class="faint" style="font-size:12px">not started</span></div>${bar(w,true)}</div>`
+  : `<div class="cell"><div class="l"><span class="p mono" style="color:${tone(w.pct)==="ok"?"var(--tx1)":C[tone(w.pct)]}">${w.pct}%</span>${timer(w,opts)}</div>${bar(w,true)}</div>`)
+  : `<span class="faint">—</span>`;
+
+function pop(d, pinSeat){
+  const c = d.current;
+  const rows = [{name:c.name,cur:true,w:[c.s5,c.s7]},...d.others].map((s,i)=>`<tr class="${s.cur?"cur":""}">
+    <td><div class="sname">${s.name}${s.next?' <span class="next">next</span>':""}${s.lo?' <span class="lo">Logged out</span>':""}
+      <small>${s.cur?"this conversation":(d.mode==="Manual"&&!s.lo?'<span class="link">Use this seat</span>':"")}</small></div></td>
+    <td>${s.lo?'<span class="faint">no reading</span>':cell(s.w[0])}</td>
+    <td>${s.lo?'<span class="faint">no reading</span>':cell(s.w[1],{right:true,pin:i===pinSeat})}</td></tr>`).join("");
+  return `<div class="pop">
+    <div class="hdr"><span class="t">${d.name}</span><span class="r"><span>${d.plan}</span><span class="pill">${d.mode}</span></span></div>
+    <div class="seatline">${c.name}</div>
+    <div class="chips">${chip("5-hour · resets",c.s5)}${chip("Weekly · resets",c.s7)}</div>
+    ${c.scoped?`<div class="faint" style="margin:0 0 12px;font-size:12px">${c.scoped}</div>`:'<div style="height:4px"></div>'}
+    <table class="tbl"><colgroup><col><col class="c"><col class="c"></colgroup>
+      <thead><tr><th>Seat</th><th>5-hour</th><th>Weekly</th></tr></thead><tbody>${rows}</tbody></table>
+    ${d.extras?`<div class="divider">${d.extras.map(([a,b])=>`<div style="display:flex;justify-content:space-between"><span class="faint">${a}</span><span class="mono muted">${b}</span></div>`).join("")}</div>`:""}
+    <div class="divider foot"><span class="link">Manage seats</span><span class="faint">updated 2m ago</span></div></div>`;
+}
+document.getElementById("stage").innerHTML =
+  `<div><div class="cap">Claude · 4 seats · automatic</div>${pop(claude,2)}</div>
+   <div><div class="cap">OpenAI · 2 seats · manual</div>${pop(openai,-1)}</div>`;
+document.querySelectorAll("[data-theme-btn]").forEach(b=>b.addEventListener("click",()=>{
+  document.documentElement.dataset.theme=b.dataset.themeBtn;
+  document.querySelectorAll("[data-theme-btn]").forEach(x=>x.setAttribute("aria-pressed",String(x===b)));
+}));
+</script>
+</body>
+</html>

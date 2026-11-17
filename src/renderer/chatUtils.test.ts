@@ -111,6 +111,11 @@ import {
   formatWindowReset,
   formatResetAt,
   formatResetDistance,
+  formatResetHeadline,
+  formatResetTooltip,
+  windowProgress,
+  windowNoun,
+  windowResetState,
   formatTimerDuration,
   formatUpdatedAgo,
   usageStale,
@@ -140,7 +145,7 @@ import {
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, UsageWindow, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
 
 
 
@@ -4639,6 +4644,95 @@ describe("describeCatchUpPill", () => {
       label: "Couldn't load the latest steps",
       tone: "error",
       action: "retry",
+    });
+  });
+});
+
+describe("usage reset helpers", () => {
+  // Local-time fixtures (see formatResetAt): same-day vs cross-day is deterministic.
+  const now = new Date(2026, 10, 17, 14, 20, 0).getTime(); // Tue 17 Nov, 14:20 local
+  const H = 3_600_000;
+  const at = (d: number, h: number, m = 0) => new Date(2026, 10, 17 + d, h, m, 0).getTime();
+  const win = (extra: Partial<UsageWindow> = {}): UsageWindow => ({ kind: "session", label: "5h", pct: 50, ...extra });
+
+  describe("windowProgress", () => {
+    it("uses startedAt + resetsAt when both are known", () => {
+      expect(windowProgress(win({ startedAt: now - H, resetsAt: now + 3 * H, spanMs: 100 * H }), now)).toBeCloseTo(0.25);
+    });
+    it("falls back to resetsAt + spanMs", () => {
+      expect(windowProgress(win({ resetsAt: now + 2 * H, spanMs: 5 * H }), now)).toBeCloseTo(0.6);
+    });
+    it("clamps to 0..1", () => {
+      expect(windowProgress(win({ startedAt: now + H, resetsAt: now + 2 * H }), now)).toBe(0);
+      expect(windowProgress(win({ resetsAt: now + 10 * H, spanMs: 5 * H }), now)).toBe(0);
+    });
+    it("is null when the position can't be known", () => {
+      expect(windowProgress(win({ resetsAt: now + H, spanMs: 5 * H, stale: true }), now)).toBeNull();
+      expect(windowProgress(win({ resetsAt: now + H, spanMs: 5 * H, active: false }), now)).toBeNull();
+      expect(windowProgress(win({ spanMs: 5 * H }), now)).toBeNull(); // no reset
+      expect(windowProgress(win({ resetsAt: now + H }), now)).toBeNull(); // no start, no span
+      expect(windowProgress(win({ resetsAt: now - 1, spanMs: 5 * H }), now)).toBeNull(); // reset in the past
+      expect(windowProgress(win({ resetsAt: now, startedAt: now - H }), now)).toBeNull();
+    });
+  });
+
+  describe("windowNoun", () => {
+    it("names the 5-hour and weekly windows, else the window's own label", () => {
+      expect(windowNoun(win())).toBe("5-hour");
+      expect(windowNoun(win({ label: "session", spanMs: 5 * H }))).toBe("5-hour");
+      expect(windowNoun(win({ kind: "weekly", label: "7d" }))).toBe("Weekly");
+      expect(windowNoun(win({ kind: "other", label: "wk", spanMs: 7 * 24 * H }))).toBe("Weekly");
+      expect(windowNoun(win({ kind: "daily", label: "24h" }))).toBe("24h");
+      expect(windowNoun(win({ kind: "session", label: "3h" }))).toBe("3h");
+    });
+  });
+
+  describe("windowResetState", () => {
+    it("tells resetting / not-started / no-reset / scheduled apart", () => {
+      expect(windowResetState(win({ pct: 40, resetsAt: now + H, stale: true }), now)).toBe("resetting");
+      expect(windowResetState(win({ pct: 40, resetsAt: now - 1 }), now)).toBe("resetting");
+      expect(windowResetState(win({ pct: 0 }), now)).toBe("not-started");
+      expect(windowResetState(win({ pct: 12 }), now)).toBe("no-reset");
+      expect(windowResetState(win({ pct: 12, resetsAt: now + H }), now)).toBe("scheduled");
+    });
+  });
+
+  describe("formatResetHeadline", () => {
+    it("is the time alone on the same local day", () => {
+      const r = formatResetHeadline(at(0, 16, 40), now);
+      expect(r).not.toBe("");
+      expect(r).not.toContain("·");
+    });
+    it("adds the date and a middle dot on another day", () => {
+      const r = formatResetHeadline(at(2, 9, 0), now);
+      expect(r).toContain(" · ");
+      expect(r).not.toContain(",");
+      expect(r.split(" · ")[1]).toBe(formatResetHeadline(at(0, 9, 0), now));
+    });
+    it("is '' for a missing instant", () => {
+      expect(formatResetHeadline(undefined, now)).toBe("");
+      expect(formatResetHeadline(NaN, now)).toBe("");
+    });
+  });
+
+  describe("formatResetTooltip", () => {
+    it("prefixes 'Today, ' on the same local day only", () => {
+      const same = formatResetTooltip(at(0, 15, 5), undefined, now)!;
+      expect(same.title).toMatch(/^Resets Today, .+ at .+$/);
+      const other = formatResetTooltip(at(2, 9, 0), undefined, now)!;
+      expect(other.title).toMatch(/^Resets .+ at .+$/);
+      expect(other.title).not.toContain("Today");
+    });
+    it("second line is the distance, plus the window start only when the provider reported it", () => {
+      const resetsAt = now + 2 * H + 20 * 60_000;
+      expect(formatResetTooltip(resetsAt, undefined, now)!.sub).toBe("in 2h20m");
+      const withStart = formatResetTooltip(resetsAt, at(0, 11, 40), now)!.sub;
+      expect(withStart).toMatch(/^in 2h20m · window started .+/);
+      // another day → a date, not a bare time
+      expect(formatResetTooltip(resetsAt, at(-5, 11, 40), now)!.sub).not.toBe(withStart);
+    });
+    it("is null for a missing instant", () => {
+      expect(formatResetTooltip(undefined, undefined, now)).toBeNull();
     });
   });
 });
