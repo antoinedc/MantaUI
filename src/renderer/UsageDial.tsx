@@ -787,7 +787,7 @@ function SeatRow({
         </td>
         {columns.map((c, i) => (
           <td key={c.kind} className={`${cell} whitespace-nowrap pl-[14px] ${i === columns.length - 1 ? "pr-2" : ""}`}>
-            <SeatWindowCell seat={seat} reference={c} index={i} nowMs={nowMs} />
+            <SeatWindowCell seat={seat} reference={c} nowMs={nowMs} />
           </td>
         ))}
       </tr>
@@ -826,10 +826,10 @@ function SeatRow({
 // date — the card above and the tooltip carry that), and the bar. Shares the
 // popover's colour ladder (toneRingColor) so a seat can never read green here
 // and red in the ring.
-function SeatWindowCell({ seat, reference, index, nowMs }: { seat: SeatView; reference: UsageWindow; index: number; nowMs: number }) {
+function SeatWindowCell({ seat, reference, nowMs }: { seat: SeatView; reference: UsageWindow; nowMs: number }) {
   const bars = seatBarWindows(seat.windows);
   if (bars.length === 0) return <span className="text-meta text-text-faint">no reading</span>;
-  const w = bars.find((b) => b.kind === reference.kind) ?? bars[index];
+  const w = bars.find((b) => b.kind === reference.kind);
   if (!w) return <span className="text-meta text-text-faint">—</span>;
   const state = windowResetState(w, nowMs);
   const blockedBy = usageWindowBlocker(seat.windows, w);

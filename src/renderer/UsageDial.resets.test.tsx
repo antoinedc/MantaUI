@@ -64,7 +64,13 @@ async function open(opts: { windows?: UsageWindow[]; view?: ProviderView; seatId
 }
 
 const cards = (p: HTMLElement) => Array.from(p.querySelectorAll<HTMLElement>('[data-testid="usage-reset-card"]'));
-const tooltip = () => document.body.querySelector<HTMLElement>('[role="tooltip"]');
+const tooltip = () => document.body.querySelector<HTMLElement>("[data-reset-tooltip]");
+// What a sighted user reads: the visually-hidden reset descriptions are left out.
+const visibleText = (el: Element) => {
+  const c = el.cloneNode(true) as HTMLElement;
+  c.querySelectorAll(".sr-only").forEach((n) => n.remove());
+  return c.textContent ?? "";
+};
 const escape = (el: Element) =>
   act(() => {
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
@@ -145,7 +151,7 @@ describe("reset cards — the conversation's seat", () => {
       ],
     });
     const extras = p.querySelector('[data-testid="usage-extra-windows"]') as HTMLElement;
-    const lines = Array.from(extras.children).map((c) => c.textContent);
+    const lines = Array.from(extras.children).map(visibleText);
     expect(lines[0]).toBe("7d · Fable 12% · resets with the weekly window");
     expect(lines[1]).toBe("7d · Opus 30% · in 3h");
     expect(lines[2]).toBe("7d · Sonnet · not active");
@@ -169,7 +175,7 @@ describe("seat table", () => {
       for (const c of cells) {
         expect(c.textContent).toMatch(/\d+%/);
         expect(c.textContent).toContain("in 3h");
-        expect(c.textContent).not.toMatch(/\d:\d\d/); // never a date or a clock time in the table
+        expect(visibleText(c)).not.toMatch(/\d:\d\d/); // never a date or a clock time in the table
         expect(c.querySelector("[data-window-kind]")).toBeTruthy();
       }
     }
@@ -219,6 +225,17 @@ describe("seat table", () => {
     expect(s4.querySelector('[data-testid="seat-logged-out"]')).toBeTruthy();
   });
 
+  it("a seat with only a weekly window shows '—' under 5-hour and its weekly figure once", async () => {
+    const v = threeSeatView();
+    v.accounts[1].seats[0] = { ...seat("s3", "Seat 1", 0), windows: [win("weekly", 37, { resetsAt: NOW + 3 * H })] };
+    const p = await open({ view: v, seatId: "s1" });
+    const cells = Array.from(p.querySelectorAll('[data-seat-id="s3"] td')).slice(1);
+    expect(cells[0].textContent).toBe("—");
+    expect(cells[0].querySelector("[data-window-kind]")).toBeNull();
+    expect(cells[1].textContent).toContain("37%");
+    expect(p.querySelector('[data-seat-id="s3"]')!.textContent!.match(/37%/g)).toHaveLength(1);
+  });
+
   it("manual mode: 'Use this seat' asks first for a cross-org seat, inside the table", async () => {
     const view = threeSeatView({ mode: "manual", activeSeatId: "s1", nextSeatId: null });
     const p = await open({ view, seatId: "s1" });
@@ -239,6 +256,7 @@ describe("reset timer tooltip", () => {
     win("weekly", 41, { resetsAt: T + 40 * H }),
   ];
   const timer = (p: HTMLElement) => p.querySelector("[data-reset-timer]") as HTMLElement;
+  const descriptionId = (p: HTMLElement) => timer(p).getAttribute("aria-describedby");
 
   it("opens on focus with the exact reset, described by the timer; focus stays on the timer", async () => {
     const p = await open({ now: T, windows });
@@ -246,7 +264,9 @@ describe("reset timer tooltip", () => {
     await act(async () => timer(p).focus());
     const tip = tooltip()!;
     expect(tip.textContent).toMatch(/^Resets Today, .+ at .+in 2h20m · window started .+$/);
-    expect(timer(p).getAttribute("aria-describedby")).toBe(tip.id);
+    expect(timer(p).getAttribute("aria-describedby")).toBe(descriptionId(p));
+    expect(tip.getAttribute("aria-hidden")).toBe("true"); // the text is exposed once, via the description
+    expect(tip.hasAttribute("role")).toBe(false);
     expect(timer(p).hasAttribute("aria-expanded")).toBe(false);
     expect(document.activeElement).toBe(timer(p));
     // portalled onto <body>, above the popover, never inside its scroll area
@@ -258,7 +278,19 @@ describe("reset timer tooltip", () => {
       await new Promise((r) => setTimeout(r, 200));
     });
     expect(tooltip()).toBeNull();
-    expect(timer(p).hasAttribute("aria-describedby")).toBe(false);
+    expect(timer(p).getAttribute("aria-describedby")).toBe(descriptionId(p)); // still described when closed
+  });
+
+  it("the description is reachable while the tooltip is closed, before and at focus", async () => {
+    const p = await open({ now: T, windows });
+    expect(tooltip()).toBeNull();
+    const id = timer(p).getAttribute("aria-describedby")!;
+    const desc = document.getElementById(id)!;
+    expect(desc.className).toContain("sr-only");
+    expect(desc.textContent).toMatch(/^Resets Today, .+ at .+\. in 2h20m · window started .+$/);
+    expect(Array.from(document.querySelectorAll("[id]")).filter((e) => e.id === id)).toHaveLength(1);
+    await act(async () => timer(p).focus());
+    expect(timer(p).getAttribute("aria-describedby")).toBe(id);
   });
 
   it("opens on hover after a short delay and stays open while the pointer is over the tooltip", async () => {

@@ -4,7 +4,10 @@
 // neither. Accessibility follows WCAG 1.4.13 and the interest-triggered-tooltip
 // guide: the timer is focusable and described by the tooltip, the tooltip is
 // hoverable, stays until dismissed, closes on Escape, and focus never moves
-// into it. It is portalled + fixed so the popover's own scroll area can't clip
+// into it. The description lives in an always-present visually-hidden element
+// the timer points at, so it is reachable the moment the timer takes focus; the
+// visual tooltip is aria-hidden so the text is never exposed twice. It is
+// portalled + fixed so the popover's own scroll area can't clip
 // it (the same pattern, and the same placement math, as Popover).
 
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
@@ -34,7 +37,7 @@ export const ResetTimer = memo(function ResetTimer({
   // Who is holding the tooltip open: the pointer over the timer, the pointer over
   // the tooltip itself, or keyboard focus on the timer.
   const holds = useRef({ hover: false, tip: false, focus: false });
-  const id = useId();
+  const descId = `${useId()}-reset`;
 
   const clear = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -103,7 +106,7 @@ export const ResetTimer = memo(function ResetTimer({
         ref={anchorRef}
         tabIndex={0}
         data-reset-timer="true"
-        aria-describedby={open && tip ? id : undefined}
+        aria-describedby={tip ? descId : undefined}
         className={
           "cursor-default rounded-xs underline decoration-dotted decoration-transparent underline-offset-[3px] " +
           "hover:text-text hover:decoration-text-faint focus:outline-none focus-visible:text-text " +
@@ -132,12 +135,17 @@ export const ResetTimer = memo(function ResetTimer({
       >
         in {formatResetDistance(resetsAt - nowMs)}
       </span>
+      {tip && (
+        <span id={descId} role="tooltip" className="sr-only">
+          {tip.title}. {tip.sub}
+        </span>
+      )}
       {open && tip
         ? createPortal(
             <div
               ref={tipRef}
-              id={id}
-              role="tooltip"
+              data-reset-tooltip="true"
+              aria-hidden="true"
               className="whitespace-nowrap rounded-sm border border-border bg-raised px-[10px] py-[7px] text-left text-meta text-text shadow-md"
               style={{
                 position: "fixed",
