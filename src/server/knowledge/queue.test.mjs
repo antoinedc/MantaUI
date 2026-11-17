@@ -106,3 +106,31 @@ test("concurrent enqueues don't lose notes", async () => {
   await Promise.all(Array.from({ length: 20 }, (_, i) => q.enqueue(note({ text: `n ${i}` }))));
   assert.equal(await q.count(SLUG), 20);
 });
+
+test("R3-S4: each ref is scanned; a ref with a secret is dropped, the note stays while one ref remains, else it is rejected", async () => {
+  const { q } = await rig();
+  const dirty = "url:https://example.com/hook?token=SECRETVALUE";
+  const r = await q.enqueue(note({ refs: [dirty, "commit:abcdef1"], text: "Hook is documented" }));
+  assert.equal(r.accepted, true);
+  const [n] = await q.list(SLUG);
+  assert.deepEqual(n.refs, ["commit:abcdef1"]);
+  const none = await q.enqueue(note({ refs: [dirty], text: "Other note" }));
+  assert.equal(none.accepted, false);
+  assert.match(none.reason, /secret/);
+  assert.equal((await q.list(SLUG)).length, 1);
+  // a non-tool origin may carry no refs at all: kept
+  const imp = await q.enqueue(note({ origin: "import", refs: [dirty], text: "Imported fact", derived: true }));
+  assert.equal(imp.accepted, true);
+  assert.deepEqual((await q.list(SLUG)).at(-1).refs, []);
+  // scanner unavailable on a ref → refused
+  const { q: q2 } = await rig({ scanner: { redact: async (t) => ({ text: t, redacted: 0, unavailable: t.startsWith("commit:") }) } });
+  assert.equal((await q2.enqueue(note({ refs: ["commit:abcdef1"], text: "q" }))).accepted, false);
+});
+
+test("R3-nit: a slug that is not the pinned shape never reaches the file system", async () => {
+  const { q } = await rig();
+  for (const bad of ["../evil", "a/b", "ALPHA-0123456789", "", undefined]) {
+    await assert.rejects(q.enqueue(note({ slug: bad })), NoteRejected, String(bad));
+    await assert.rejects(q.list(bad), NoteRejected);
+  }
+});

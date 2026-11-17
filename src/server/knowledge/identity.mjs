@@ -110,14 +110,22 @@ export function createIdentityResolver({ git, realpath = fsRealpath, isDirectory
     });
   const cache = new Map(); // dir → { at, value }
 
-  async function gitOut(cwd, args) {
+  // A git failure is NEVER read as "not a repository" unless git says so: a timeout, a dubious-ownership refusal or a
+  // locked repo says nothing about what the directory is, and a wrong `box`/`path:` identity would be permanent.
+  const TRANSIENT = Symbol("transient");
+  async function gitOut(cwd, args, { tolerate = false } = {}) {
     try {
       return await git.run(args, { cwd });
-    } catch {
-      return null;
+    } catch (e) {
+      if (tolerate) return null;
+      const text = `${e?.stderr ?? ""}\n${e?.message ?? ""}`;
+      if (/not a git repository/i.test(text)) return NOT_A_REPO;
+      return TRANSIENT;
     }
   }
+  const NOT_A_REPO = Symbol("not-a-repo");
 
+  /** The identity, or TRANSIENT when git could not answer (never cached, retried by the next caller). */
   async function resolveUncached(directory) {
     if (!(await isDir(directory))) return null;
     let dir;
@@ -127,22 +135,35 @@ export function createIdentityResolver({ git, realpath = fsRealpath, isDirectory
       return null;
     }
     const top = await gitOut(dir, ["rev-parse", "--show-toplevel"]);
-    if (top === null || top.trim() === "") return { ...BOX_PROJECT };
-    const wt = parseMainWorktree(await gitOut(dir, ["worktree", "list", "--porcelain"]));
+    if (top === NOT_A_REPO) return { ...BOX_PROJECT };
+    if (top === TRANSIENT || String(top).trim() === "") return TRANSIENT;
+    const wtOut = await gitOut(dir, ["worktree", "list", "--porcelain"]);
+    if (wtOut === TRANSIENT || wtOut === NOT_A_REPO) return TRANSIENT;
+    const wt = parseMainWorktree(wtOut);
     let root = wt ?? top.trim();
     try {
       root = await realpath(root);
     } catch {
       /* keep as reported */
     }
-    const names = (await gitOut(dir, ["remote"])) ?? "";
+    const rootCommit = await rootCommitOf(dir);
+    const names = await gitOut(dir, ["remote"]);
+    if (names === TRANSIENT || names === NOT_A_REPO) return TRANSIENT;
     const remoteName = pickRemoteName(names.split("\n"));
     if (remoteName) {
       const url = await gitOut(dir, ["remote", "get-url", remoteName]);
-      const parsed = normalizeRemote(url ?? "");
-      if (parsed) return { canonicalId: parsed.id, name: parsed.name, repoRoot: root, kind: "remote", pathId: `path:${root}` };
+      if (url === TRANSIENT || url === NOT_A_REPO) return TRANSIENT;
+      const parsed = normalizeRemote(url);
+      if (parsed) return { canonicalId: parsed.id, name: parsed.name, repoRoot: root, kind: "remote", pathId: `path:${root}`, rootCommit };
     }
-    return { canonicalId: `path:${root}`, name: basename(root), repoRoot: root, kind: "path", pathId: `path:${root}` };
+    return { canonicalId: `path:${root}`, name: basename(root), repoRoot: root, kind: "path", pathId: `path:${root}`, rootCommit };
+  }
+
+  /** The repository's first root commit (sorted, so it is stable); null for an empty repository. */
+  async function rootCommitOf(dir) {
+    const out = await gitOut(dir, ["rev-list", "--max-parents=0", "HEAD"], { tolerate: true });
+    const first = out ? out.split("\n").map((l) => l.trim()).filter(Boolean).sort()[0] : null;
+    return first && /^[0-9a-f]{7,64}$/.test(first) ? first : null;
   }
 
   return {
@@ -152,6 +173,8 @@ export function createIdentityResolver({ git, realpath = fsRealpath, isDirectory
       const hit = cache.get(directory);
       if (hit && t - hit.at < cacheMs) return hit.value;
       const value = await resolveUncached(directory);
+      if (value === TRANSIENT) return null;
+      if (value === null) return null;
       cache.set(directory, { at: t, value });
       if (cache.size > 2000) cache.delete(cache.keys().next().value);
       return value;
@@ -182,6 +205,14 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
     if (doc) return doc;
     const loaded = await load();
     doc = loaded && typeof loaded === "object" && loaded.projects && typeof loaded.projects === "object" ? loaded : emptyRegistry();
+    // projects.json is hand-editable: a slug becomes a file path and a config key, so only well-formed entries are kept.
+    for (const [key, p] of Object.entries(doc.projects)) {
+      if (!SLUG_RE.test(key) || !p || typeof p !== "object" || p.slug !== key || typeof p.canonicalId !== "string") delete doc.projects[key];
+      else {
+        p.aliases = Array.isArray(p.aliases) ? p.aliases.filter((a) => typeof a === "string") : [];
+        p.paths = Array.isArray(p.paths) ? p.paths.filter((a) => typeof a === "string") : [];
+      }
+    }
     return doc;
   };
   const byId = (d, id) => Object.values(d.projects).find((p) => p.canonicalId === id || p.aliases.includes(id));
@@ -230,8 +261,12 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
           oldRoot = prev?.repoRoot ?? movedFrom;
         }
         const candidates = [r.pathId, oldRoot ? `path:${oldRoot}` : null].filter(Boolean);
+        // A path match carries a project over only when it is still the same repository: the root commit matches the
+        // one recorded, or the project was identified by path in the first place (nothing else to compare). A different
+        // repository cloned into a reused folder is a new project.
+        const sameRepo = (p) => p.canonicalId.startsWith("path:") || (!!p.rootCommit && !!r.rootCommit && p.rootCommit === r.rootCommit);
         project =
-          Object.values(d.projects).find((p) => oldRoot && p.paths.includes(oldRoot)) ??
+          Object.values(d.projects).find((p) => oldRoot && p.paths.includes(oldRoot) && sameRepo(p)) ??
           candidates.map((id) => byId(d, id)).find(Boolean);
         if (project && project.canonicalId !== r.canonicalId) {
           addUnique(project.aliases, project.canonicalId);
@@ -242,11 +277,16 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
       }
       if (!project) {
         const slug = slugFor(r.canonicalId, r.name);
-        project = { canonicalId: r.canonicalId, slug, displayName: r.name, aliases: [], paths: [] };
+        project = { canonicalId: r.canonicalId, slug, displayName: r.name, aliases: [], paths: [], ...(r.rootCommit ? { rootCommit: r.rootCommit } : {}) };
         d.projects[slug] = project;
         created = true;
         changed = true;
         message = `Register project ${slug}`;
+      }
+      if (r.rootCommit && !project.rootCommit && r.kind !== "box") {
+        project.rootCommit = r.rootCommit;
+        changed = true;
+        message ||= `Record root commit for ${project.slug}`;
       }
       if (r.repoRoot && !project.paths.includes(r.repoRoot)) {
         project.paths.push(r.repoRoot);

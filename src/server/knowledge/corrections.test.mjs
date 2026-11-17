@@ -45,6 +45,7 @@ async function rig({ messages = [], table = {}, authored, mapped = (id) => ({ sl
     runEphemeral,
     readUserMessages: async ({ skip, limit }) => messages.filter((m) => !skip(m.id)).slice(0, limit),
     isUserAuthored: (id) => (authored ? authored.has(id) : true),
+    scanner: { redact: async (t) => ({ text: t, redacted: 0, unavailable: false }) },
     ...over,
   });
   return { det, state, runEphemeral, costs, advance: (ms) => (t += ms), setBudget: (v) => (budgetOk = v), set: (m) => messages.splice(0, messages.length, ...m) };
@@ -232,6 +233,7 @@ test("default reader: user-authored messages from prompt_origin in mapped sessio
       { id: "msg_u0", sessionId: "ses_a", timeCreated: 50, data: { role: "user" } }, // first message: no assistant before it
       { id: "msg_u2", sessionId: "ses_b", timeCreated: 300, data: { role: "user" } },
       { id: "msg_u3", sessionId: "ses_a", timeCreated: 400, data: { role: "user" } }, // not user-authored
+      { id: "msg_u4", sessionId: "ses_a", timeCreated: 500, data: { role: "user" } }, // preceded by another user message
     ],
     parts: [
       { id: "p_a1", messageId: "msg_a1", sessionId: "ses_a", timeCreated: 100, data: { type: "text", text: "assistant says" } },
@@ -239,12 +241,13 @@ test("default reader: user-authored messages from prompt_origin in mapped sessio
       { id: "p_u0", messageId: "msg_u0", sessionId: "ses_a", timeCreated: 50, data: { type: "text", text: "first prompt" } },
       { id: "p_u2", messageId: "msg_u2", sessionId: "ses_b", timeCreated: 300, data: { type: "text", text: "other session" } },
       { id: "p_u3", messageId: "msg_u3", sessionId: "ses_a", timeCreated: 400, data: { type: "text", text: "from a webhook" } },
+      { id: "p_u4", messageId: "msg_u4", sessionId: "ses_a", timeCreated: 500, data: { type: "text", text: "second in a row" } },
     ],
   });
   const state = await memState();
   state.db.exec("CREATE TABLE prompt_origin (message_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, origin TEXT NOT NULL, at INTEGER NOT NULL)");
   const ins = state.db.prepare("INSERT INTO prompt_origin VALUES (?, ?, ?, ?)");
-  for (const [id, sid, origin] of [["msg_u0", "ses_a", "user"], ["msg_u1", "ses_a", "user"], ["msg_u2", "ses_b", "user"], ["msg_u3", "ses_a", "webhook"]]) ins.run(id, sid, origin, 1000);
+  for (const [id, sid, origin] of [["msg_u0", "ses_a", "user"], ["msg_u1", "ses_a", "user"], ["msg_u2", "ses_b", "user"], ["msg_u3", "ses_a", "webhook"], ["msg_u4", "ses_a", "user"]]) ins.run(id, sid, origin, 1000);
   const sp = state.db.prepare("INSERT INTO session_project (session_id, slug, canonical_id, source, pinned_at) VALUES (?, 'alpha-0123456789', 'x', 'prompt', 0)");
   sp.run("ses_a");
   // ses_b is not mapped → its message is never read
@@ -253,8 +256,8 @@ test("default reader: user-authored messages from prompt_origin in mapped sessio
     await withFixtureDb(fixture, async () => {
       const read = createUserMessageReader({ state, runDbTask, log: () => {} });
       const rows = await read({ sinceMs: 0, limit: 100 });
-      assert.deepEqual(rows.map((r) => [r.id, r.text, r.afterAssistant]).sort(), [["msg_u0", "first prompt", false], ["msg_u1", "no, use pnpm", true]]);
-      assert.deepEqual((await read({ sinceMs: 0, limit: 100, skip: (id) => id === "msg_u1" })).map((r) => r.id), ["msg_u0"]);
+      assert.deepEqual(rows.map((r) => [r.id, r.text, r.afterAssistant]).sort(), [["msg_u0", "first prompt", false], ["msg_u1", "no, use pnpm", true], ["msg_u4", "second in a row", false]]);
+      assert.deepEqual((await read({ sinceMs: 0, limit: 100, skip: (id) => id === "msg_u1" })).map((r) => r.id).sort(), ["msg_u0", "msg_u4"]);
     });
   } finally {
     _setOffloadMode("worker");
@@ -267,4 +270,39 @@ test("default reader degrades to [] without a prompt_origin table", async () => 
   const state = await memState();
   const read = createUserMessageReader({ state, runDbTask: async () => assert.fail("must not read"), log: () => {} });
   assert.deepEqual(await read({ sinceMs: 0 }), []);
+});
+
+test("R3-B3: message text is redacted before the classifier and clustering calls; a secrets-store value never reaches the runner", async () => {
+  const SECRET = "sk-live-0123456789abcdef";
+  const prompts = [];
+  const r = await rig({
+    messages: [um(`use pnpm, my token is ${SECRET}`, "ses_a", 3), um(`pnpm again ${SECRET}`, "ses_b", 2)],
+    table: { pnpm: { label: "correction", lesson: `Use pnpm, never npm. (${SECRET})` } },
+    over: { scanner: { redact: async (t) => ({ text: t.split(SECRET).join("[REDACTED]"), redacted: 1, unavailable: false }) } },
+  });
+  const inner = r.runEphemeral;
+  r.det = createCorrectionDetector({
+    state: r.state,
+    now: () => T0,
+    log: () => {},
+    sessionMap: { get: () => ({ slug: "alpha-0123456789" }) },
+    budget: { canSpend: async () => true && { ok: true }, record: async () => {} },
+    settings: { get: async () => ({ enabled: true }) },
+    runEphemeral: async (args) => (prompts.push(args.context[0].text), inner(args)),
+    readUserMessages: async ({ skip }) => [um(`use pnpm, my token is ${SECRET}`, "ses_a", 3), um(`pnpm again ${SECRET}`, "ses_b", 2)].filter((m) => !skip(m.id)),
+    isUserAuthored: () => true,
+    scanner: { redact: async (t) => ({ text: t.split(SECRET).join("[REDACTED]"), redacted: 1, unavailable: false }) },
+  });
+  await r.det.runWeekly();
+  assert.ok(prompts.length >= 1);
+  for (const p of prompts) assert.ok(!p.includes(SECRET));
+  assert.ok(prompts[0].includes("[REDACTED]"));
+});
+
+test("R3-B3: scanner unavailable → no classifier call and nothing is stored", async () => {
+  const r = await rig({ messages: [um("use pnpm", "ses_a", 1)], table: { pnpm: PNPM }, over: { scanner: { redact: async () => ({ text: "", unavailable: true }) } } });
+  assert.deepEqual(await r.det.runWeekly(), []);
+  assert.equal(r.runEphemeral.calls.length, 0);
+  assert.equal(r.state.db.prepare("SELECT COUNT(*) AS n FROM corr_msg").get().n, 0);
+  assert.equal(r.det.shouldRun(T0), true);
 });

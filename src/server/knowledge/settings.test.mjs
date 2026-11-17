@@ -112,3 +112,18 @@ test("applyPatch is pure over its inputs", async () => {
   assert.equal(cur.enabled, true);
   assert.equal(next.enabled, false);
 });
+
+test("concurrent set() calls are serialized: neither patch is lost", async () => {
+  let cfg = { knowledge: undefined };
+  const settings = createSettings({
+    // a slow config write widens the read-modify-write window
+    config: { get: async () => cfg, update: async (p) => { await new Promise((r) => setTimeout(r, 15)); cfg = { ...cfg, ...p }; } },
+    registry: { list: async () => [], get: async () => null },
+    hasForgeLogin: async () => false,
+  });
+  await Promise.all([settings.set({ dailyCapUsd: 2 }), settings.set({ sharing: "read-only" }), settings.set({ enabled: false })]);
+  const s = await settings.get();
+  assert.equal(s.dailyCapUsd, 2);
+  assert.equal(s.sharing, "read-only");
+  assert.equal(s.enabled, false);
+});

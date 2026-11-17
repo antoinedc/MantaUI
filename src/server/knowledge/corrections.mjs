@@ -88,7 +88,7 @@ const clip = (s, n) => {
 const USER_MESSAGES_SQL = `
   SELECT p.id AS id, p.session_id AS session_id, p.time_created AS time_created,
          json_extract(p.data, '$.text') AS text,
-         EXISTS (SELECT 1 FROM session_message a WHERE a.session_id = p.session_id AND a.type = 'assistant' AND a.seq < p.seq) AS after_assistant
+         COALESCE((SELECT a.type = 'assistant' FROM session_message a WHERE a.session_id = p.session_id AND a.type IN ('user', 'assistant') AND a.seq < p.seq ORDER BY a.seq DESC LIMIT 1), 0) AS after_assistant
   FROM session_message p
   WHERE p.session_id = ? AND p.type = 'user' AND p.time_created >= ? /*RANGE*/
   ORDER BY p.time_created DESC`;
@@ -183,12 +183,13 @@ const CLUSTER_INSTRUCTIONS = [
  *   runEphemeral     ({taskClass, context, directory?, deps:{reportCost}}) → {text, model?}|{ok:false, code}
  *   readUserMessages ({sinceMs, limit, skip(id)}) → [{id, sessionID, at, text, afterAssistant}]  (createUserMessageReader)
  *   isUserAuthored   (messageID) → boolean            prompt-origin record (§9.2)
- *   scanner          optional {redact(text)} — lessons and evidence quotes are redacted before they are stored
+ *   scanner          {redact(text)} — every prompt body is redacted before ANY model sees it (unavailable → no call),
+ *                    and lessons / evidence quotes are redacted before they are stored
  *   now, log
  */
 export function createCorrectionDetector(deps = {}) {
   const { state, sessionMap, budget, settings, runEphemeral, readUserMessages } = deps;
-  for (const k of ["state", "sessionMap", "budget", "settings", "runEphemeral", "readUserMessages"]) if (!deps[k]) throw new Error(`createCorrectionDetector: ${k} is required`);
+  for (const k of ["state", "sessionMap", "budget", "settings", "runEphemeral", "readUserMessages", "scanner"]) if (!deps[k]) throw new Error(`createCorrectionDetector: ${k} is required`);
   const now = deps.now ?? Date.now;
   const log = deps.log ?? console.warn;
   const isUserAuthored = deps.isUserAuthored ?? (() => false);
@@ -233,12 +234,22 @@ export function createCorrectionDetector(deps = {}) {
   const insCluster = db.prepare("INSERT OR IGNORE INTO corr_cluster (cluster_id, lesson, created_at) VALUES (?, ?, ?)");
 
   const redact = async (text) => {
-    if (!deps.scanner?.redact || !text) return text;
+    if (!text) return text;
     const r = await deps.scanner.redact(text);
     return r.unavailable ? "" : r.text;
   };
 
-  async function callRunner(prompt, slug = null) {
+  /** One model call: `body` (the untrusted data) is redacted first; a scanner that can't run means NO call. */
+  async function callRunner(instructions, body, slug = null) {
+    let clean;
+    try {
+      const r = await deps.scanner.redact(body);
+      if (r.unavailable) return { ok: false, code: "scanner" };
+      clean = r.text;
+    } catch {
+      return { ok: false, code: "scanner" };
+    }
+    const prompt = `${instructions}\n\n${clean}`;
     const res = await runEphemeral({ taskClass: TASK_CLASS, context: [{ priority: 10, text: prompt }], directory: "~", deps: { reportCost: makeReportCost(budget, slug) } });
     if (!res || res.ok === false) return { ok: false, code: String(res?.code ?? "run-failed") };
     return { ok: true, text: String(res.text ?? ""), model: modelLabel(res.model) };
@@ -258,14 +269,14 @@ export function createCorrectionDetector(deps = {}) {
       const body = batch.map((m, i) => `[${i + 1}] ${clip(m.text.replace(/\s+/g, " ").trim(), MESSAGE_CLIP)}`).join("\n");
       let r;
       try {
-        r = await callRunner(`${CLASSIFY_INSTRUCTIONS}\n\nMESSAGES:\n${body}`);
+        r = await callRunner(CLASSIFY_INSTRUCTIONS, `MESSAGES:\n${body}`);
       } catch (e) {
         log("[knowledge] correction classify failed:", e?.message ?? e);
         r = { ok: false, code: "run-failed" };
       }
       if (!r.ok) {
         stats.stopped = r.code;
-        if (r.code === "no-qualifying-model" || r.code === "no-healthy-endpoint") break;
+        if (r.code === "no-qualifying-model" || r.code === "no-healthy-endpoint" || r.code === "scanner") break;
         if (++failures >= 2) break;
         continue;
       }
@@ -342,9 +353,9 @@ export function createCorrectionDetector(deps = {}) {
       if (cands.length > 0 || batch.length > 1) {
         const spend = await budget.canSpend();
         if (spend.ok) {
-          const prompt = `${CLUSTER_INSTRUCTIONS}\n\nEXISTING CLUSTERS:\n${cands.map((c, i) => `C${i + 1}: ${c.lesson}`).join("\n") || "(none)"}\n\nNEW LESSONS:\n${batch.map((b, i) => `[${i + 1}] ${b.lesson}`).join("\n")}`;
+          const body = `EXISTING CLUSTERS:\n${cands.map((c, i) => `C${i + 1}: ${c.lesson}`).join("\n") || "(none)"}\n\nNEW LESSONS:\n${batch.map((b, i) => `[${i + 1}] ${b.lesson}`).join("\n")}`;
           try {
-            const r = await callRunner(prompt);
+            const r = await callRunner(CLUSTER_INSTRUCTIONS, body);
             if (r.ok) {
               const json = extractJson(r.text);
               for (const a of Array.isArray(json?.assignments) ? json.assignments : []) {

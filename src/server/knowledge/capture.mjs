@@ -72,15 +72,18 @@ export function extractJson(text) {
 }
 
 /**
- * `deps.reportCost` for a runner call: converts the runner's token estimate into a budget record.
- * The runner reports ONE number (prompt + answer); these classes are prompt-heavy, so 90 % is priced as
- * input and 10 % as output.
+ * `deps.reportCost` for a runner call → a budget record. The runner reports the REAL usage of the ephemeral session
+ * (`tokens: {input, output, reasoning, cacheRead, cacheWrite}` and/or `usd`), which is passed to the budget as given
+ * (it prices each component). Only when the runner could report just ONE total number (an estimate of prompt +
+ * answer) is it split 90 % input / 10 % output — these classes are prompt-heavy.
  */
 export function makeReportCost(budget, slug = null) {
-  return async ({ taskClass, model, tokens } = {}) => {
-    let t = tokens;
-    if (typeof t === "number") t = { input: Math.round(t * 0.9), output: Math.round(t * 0.1) };
-    await budget.record({ taskClass, model, tokens: t, slug });
+  return async ({ taskClass, model, tokens, usd } = {}) => {
+    const rec = { taskClass, model, slug };
+    if (typeof usd === "number" && Number.isFinite(usd) && usd >= 0) rec.usd = usd;
+    else if (typeof tokens === "number") rec.tokens = { input: Math.round(tokens * 0.9), output: Math.round(tokens * 0.1) };
+    else rec.tokens = tokens;
+    await budget.record(rec);
   };
 }
 
@@ -91,8 +94,8 @@ export const modelLabel = (m) => (m && typeof m === "object" && m.providerID && 
 
 /**
  * A capture message source over the box's transcript reader
- * (`listMessages(sessionID) → [{info:{id, role, time:{created}}, parts:[…V1-shaped parts]}]`, i.e.
- * `oc.listMessages`). Returns `readMessages({sessionID, after:{at,id}, limit})` →
+ * (`listMessages(sessionID, {limit}) → [{info:{id, role, time:{created}}, parts:[…V1-shaped parts]}]`, i.e.
+ * `oc.listMessages`, which returns the newest `limit` messages). Returns `readSince({sessionID, after:{at,id}, limit})` →
  * `[{id, role, at, parts:[{id, type:"text"|"tool", text?, tool?, command?, output?}]}]`, oldest first,
  * only messages after the cursor, at most `limit` (the NEWEST ones when over).
  *
@@ -101,8 +104,8 @@ export const modelLabel = (m) => (m && typeof m === "object" && m.providerID && 
  */
 export function createCaptureMessageSource({ listMessages }) {
   const after = (m, c) => !c || m.at > c.at || (m.at === c.at && m.id > c.id);
-  return async function readMessages({ sessionID, after: cursor = null, limit = READ_LIMIT } = {}) {
-    const all = (await listMessages(sessionID)) ?? [];
+  return async function readSince({ sessionID, after: cursor = null, limit = READ_LIMIT } = {}) {
+    const all = (await listMessages(sessionID, { limit })) ?? [];
     const out = [];
     for (const raw of all) {
       const info = raw?.info ?? raw;
@@ -261,15 +264,16 @@ export async function parseCaptureNotes(answer, aliases, { sessionID, isUserAuth
  *   settings         get() → {enabled, observeOnly, …}
  *   runEphemeral     ({taskClass, context, directory?, deps:{reportCost}}) → {text, model?}|{ok:false, code}.
  *                    The wrapper MUST merge `deps` with the runner's own (`oc`, `configGet`).
- *   readMessages     ({sessionID, after:{at,id}|null, limit}) → normalized messages (createCaptureMessageSource)
+ *   readSince        ({sessionID, after:{at,id}|null, limit}) → normalized messages (createCaptureMessageSource)
+ *   scanner          {redact(text)} — the transcript is redacted before ANY model sees it (unavailable → no call)
  *   isUserAuthored   (messageID) → boolean            prompt-origin record (§9.2)
  *   getSession       (id) → session|null              for the exclusion rules
  *   isCtoSession     (id) → boolean|Promise
  *   now, log, idleMs, minUserMessages (tests)
  */
 export function createCapture(deps = {}) {
-  const { state, sessionMap, queue, budget, settings, runEphemeral, readMessages } = deps;
-  for (const k of ["state", "sessionMap", "queue", "budget", "settings", "runEphemeral", "readMessages"]) if (!deps[k]) throw new Error(`createCapture: ${k} is required`);
+  const { state, sessionMap, queue, budget, settings, runEphemeral, readSince, scanner } = deps;
+  for (const k of ["state", "sessionMap", "queue", "budget", "settings", "runEphemeral", "readSince", "scanner"]) if (!deps[k]) throw new Error(`createCapture: ${k} is required`);
   const now = deps.now ?? Date.now;
   const log = deps.log ?? console.warn;
   const idleMs = deps.idleMs ?? IDLE_MS;
@@ -337,19 +341,20 @@ export function createCapture(deps = {}) {
     }
   }
 
+  /** true | false | "unknown" — a lookup that fails is NOT "not excluded": the tick is skipped and retried. */
   async function isExcluded(sessionID) {
     if (excluded.has(sessionID)) return true;
     let session = null;
     try {
       session = (await deps.getSession?.(sessionID)) ?? null;
     } catch {
-      return false; // can't tell right now: the next tick asks again
+      return "unknown";
     }
     let cto = false;
     try {
       cto = (await deps.isCtoSession?.(sessionID)) === true;
     } catch {
-      return false;
+      return "unknown";
     }
     const title = typeof session?.title === "string" ? session.title : "";
     const reason = sessionExclusion(session, { isCto: cto }) ?? (KNOWLEDGE_TITLE_PREFIXES.some((p) => title.startsWith(p)) ? "knowledge-session" : null);
@@ -419,7 +424,9 @@ export function createCapture(deps = {}) {
       forget(sessionID);
       return { captured: false, notes: 0, skipped: "unmapped" };
     }
-    if (await isExcluded(sessionID)) {
+    const exclusion = await isExcluded(sessionID);
+    if (exclusion === "unknown") return { captured: false, notes: 0, skipped: "lookup-failed" };
+    if (exclusion) {
       forget(sessionID);
       return { captured: false, notes: 0, skipped: "excluded" };
     }
@@ -431,7 +438,7 @@ export function createCapture(deps = {}) {
     const cursor = row && (row.cursor_at > 0 || row.cursor_id) ? { at: row.cursor_at, id: row.cursor_id } : null;
     let messages;
     try {
-      messages = (await readMessages({ sessionID, after: cursor, limit: READ_LIMIT })) ?? [];
+      messages = (await readSince({ sessionID, after: cursor, limit: READ_LIMIT })) ?? [];
     } catch (e) {
       st.retryAt = t + RETRY_MS;
       log("[knowledge] capture read failed:", e?.message ?? e);
@@ -447,7 +454,16 @@ export function createCapture(deps = {}) {
     }
 
     const input = buildCaptureInput(messages, { sessionID });
-    const prompt = `${CAPTURE_INSTRUCTIONS}\n\nTRANSCRIPT (messages since the last capture):\n\n${input.text}`;
+    // Secrets never reach a model: the transcript is redacted first; a scanner that can't run means no call at all.
+    let transcript;
+    try {
+      const red = await scanner.redact(input.text);
+      if (red.unavailable) return { captured: false, notes: 0, skipped: "scanner" };
+      transcript = red.text;
+    } catch {
+      return { captured: false, notes: 0, skipped: "scanner" };
+    }
+    const prompt = `${CAPTURE_INSTRUCTIONS}\n\nTRANSCRIPT (messages since the last capture):\n\n${transcript}`;
     let res;
     try {
       res = await runEphemeral({ taskClass: TASK_CLASS, context: [{ priority: 10, text: prompt }], directory: "~", deps: { reportCost: makeReportCost(budget, mapping.slug) } });

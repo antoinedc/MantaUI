@@ -21,6 +21,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { statePath } from "../../shared/paths.mjs";
 import { NOTE_TEXT_MAX, NOTE_REFS_MAX, NoteRejected, isValidRef } from "./queue.mjs";
+import { BOX_ID } from "./identity.mjs";
 
 export const PROGRESS_KEY = "import.cto.progress";
 export const DONE_KEY = "import.cto.done";
@@ -60,7 +61,7 @@ export const isActiveFact = (f, t) => !!f && typeof f.statement === "string" && 
 /**
  * The shared key resolution (§6.1 / §5.4).
  * deps: listTmuxProjects() → [{tmuxSession, windows:[{paneCurrentPath, opencodeSessionId?}]}]   (`tmux.listProjects`)
- *       registry {identify(dir) → {slug}|null}, sessionMap? {get(sessionID) → {slug}|null}
+ *       registry {identify(dir) → {slug, canonicalId}|null}, sessionMap? {get(sessionID) → {slug}|null}
  * `resolve(key)` → `{ok:true, slug}` | `{ok:false, reason}`; never throws.
  */
 export function createKeyResolver({ listTmuxProjects, registry, sessionMap, now = Date.now, cacheMs = RESOLVE_CACHE_MS } = {}) {
@@ -75,35 +76,59 @@ export function createKeyResolver({ listTmuxProjects, registry, sessionMap, now 
     return cache.projects;
   }
 
-  async function slugOfWindow(w) {
+  /** `{slug, box}` of a window, or null when it cannot be resolved. `box` = outside any repository. */
+  async function projectOfWindow(w) {
     const dir = typeof w?.paneCurrentPath === "string" ? w.paneCurrentPath : "";
     if (dir) {
-      if (!dirCache.has(dir)) dirCache.set(dir, registry.identify(dir).then((r) => r?.slug ?? null, () => null));
-      const slug = await dirCache.get(dir);
-      if (slug) return slug;
+      if (!dirCache.has(dir)) dirCache.set(dir, registry.identify(dir).then((r) => (r?.slug ? { slug: r.slug, box: r.canonicalId === BOX_ID } : null), () => null));
+      const hit = await dirCache.get(dir);
+      if (hit) return hit;
     }
-    return (w?.opencodeSessionId && sessionMap?.get(w.opencodeSessionId)?.slug) || null;
+    const slug = (w?.opencodeSessionId && sessionMap?.get(w.opencodeSessionId)?.slug) || null;
+    return slug ? { slug, box: false } : null;
   }
 
-  async function resolve(key) {
+  /** The one project the given opencode sessions are mapped to (the facts' own authors), else null. */
+  function slugFromSessions(sessionIDs) {
+    const slugs = new Set();
+    for (const id of sessionIDs ?? []) {
+      const slug = typeof id === "string" ? sessionMap?.get(id)?.slug : null;
+      if (slug) slugs.add(slug);
+    }
+    return slugs.size === 1 ? [...slugs][0] : null;
+  }
+
+  /**
+   * `sessionIDs` (optional): opencode sessions that wrote facts under this key. They resolve a key whose tmux session
+   * no longer exists (a PAST name) through the session map — only when they all agree on one project.
+   */
+  async function resolve(key, { sessionIDs = [] } = {}) {
     try {
       const k = String(key ?? "").trim();
       if (!k) return { ok: false, reason: "empty key" };
+      const fallback = (reason) => {
+        const slug = slugFromSessions(sessionIDs);
+        return slug ? { ok: true, slug } : { ok: false, reason };
+      };
       const list = await projects();
       let hits = list.filter((p) => p.tmuxSession === k);
       if (hits.length === 0) {
         hits = list.filter((p) => String(p.tmuxSession ?? "").toLowerCase() === k.toLowerCase());
         if (hits.length > 1) return { ok: false, reason: "ambiguous: several tmux sessions match that name" };
       }
-      if (hits.length === 0) return { ok: false, reason: "no tmux session with that name" };
-      const slugs = new Set();
+      if (hits.length === 0) return fallback("no tmux session with that name");
+      const real = new Set();
+      let box = false;
       for (const w of hits[0].windows ?? []) {
-        const s = await slugOfWindow(w);
-        if (s) slugs.add(s);
+        const p = await projectOfWindow(w);
+        if (!p) continue;
+        if (p.box) box = true;
+        else real.add(p.slug);
       }
-      if (slugs.size === 0) return { ok: false, reason: "none of its windows resolve to a project" };
-      if (slugs.size > 1) return { ok: false, reason: `ambiguous: its windows span ${slugs.size} projects` };
-      return { ok: true, slug: [...slugs][0] };
+      // Windows outside any repository (a shell in ~) don't make a session ambiguous when a real project is also there.
+      if (real.size === 0) return fallback(box ? "its windows are outside any repository" : "none of its windows resolve to a project");
+      if (real.size > 1) return { ok: false, reason: `ambiguous: its windows span ${real.size} projects` };
+      return { ok: true, slug: [...real][0] };
     } catch (e) {
       return { ok: false, reason: `could not resolve: ${String(e?.message ?? e).slice(0, 80)}` };
     }
@@ -142,15 +167,18 @@ export function createBlackboardImport(deps = {}) {
   const saveProgress = (p) => state.kvSet(PROGRESS_KEY, JSON.stringify(p));
   const isDone = () => state.kvGet(DONE_KEY) === "1";
 
-  async function importKey(key, slug) {
-    let doc;
+  /** The key's file → its ACTIVE facts, or `{error}`. */
+  async function readFacts(key) {
     try {
-      doc = JSON.parse(await read(join(factsDir, `${key}.json`), "utf8"));
+      const doc = JSON.parse(await read(join(factsDir, `${key}.json`), "utf8"));
+      const t = now();
+      return { facts: (Array.isArray(doc?.facts) ? doc.facts : []).filter((f) => isActiveFact(f, t)) };
     } catch (e) {
-      return { s: "skipped", reason: `unreadable (${String(e?.code ?? e?.message ?? e).slice(0, 40)})` };
+      return { error: `unreadable (${String(e?.code ?? e?.message ?? e).slice(0, 40)})` };
     }
-    const t = now();
-    const facts = (Array.isArray(doc?.facts) ? doc.facts : []).filter((f) => isActiveFact(f, t));
+  }
+
+  async function importFacts(facts, slug) {
     let n = 0;
     for (const f of facts) {
       let r;
@@ -220,11 +248,13 @@ export function createBlackboardImport(deps = {}) {
     for (const key of names) {
       if (progress.keys[key]) continue;
       if (now() >= deadline) break;
-      const res = await resolver.resolve(key);
+      const read_ = await readFacts(key);
       let entry;
-      if (!res.ok) entry = { s: "skipped", reason: res.reason };
+      const res = read_.error ? null : await resolver.resolve(key, { sessionIDs: read_.facts.map((f) => f.sender?.sessionID).filter((x) => typeof x === "string") });
+      if (read_.error) entry = { s: "skipped", reason: read_.error };
+      else if (!res.ok) entry = { s: "skipped", reason: res.reason };
       else {
-        entry = await importKey(key, res.slug);
+        entry = await importFacts(read_.facts, res.slug);
         if (entry.s === "paused") {
           log("[knowledge] blackboard import paused:", entry.reason);
           break; // retried by the next slice; nothing recorded for this key

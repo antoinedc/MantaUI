@@ -338,9 +338,9 @@ export function createKnowledgeEngine(deps = {}) {
    * (first user message) when the caller already knows the directory. Same rules as the event
    * path (excluded sessions are never mapped; a move re-pins only while nothing is captured).
    */
-  async function pinSession({ sessionID, directory } = {}) {
+  async function pinSession({ sessionID, directory, force = false } = {}) {
     if (!c || !(await enabledState()).enabled || typeof sessionID !== "string" || !sessionID) return null;
-    return c.sessionMap.pin({ sessionID, directory, source: "prompt" });
+    return c.sessionMap.pin({ sessionID, directory, source: "prompt", force: force === true });
   }
 
   // ---- AI-facing operations (HTTP routes) -----------------------------------------

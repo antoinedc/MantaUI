@@ -24,7 +24,7 @@ export function createCtoMirror({ resolver, queue, settings, log = console.warn 
       if (!(await settings.get()).enabled) return { enqueued: false, reason: "disabled" };
       const text = typeof statement === "string" ? statement.replace(/\s+/g, " ").trim().slice(0, NOTE_TEXT_MAX) : "";
       if (!text) return { enqueued: false, reason: "empty statement" };
-      const res = await resolver.resolve(project);
+      const res = await resolver.resolve(project, { sessionIDs: typeof sessionID === "string" && sessionID ? [sessionID] : [] });
       if (!res.ok) return { enqueued: false, reason: res.reason };
       const r = await queue.enqueue({
         slug: res.slug,

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { statePath } from "../../shared/paths.mjs";
 import { createMutex } from "../jsonStore.mjs";
 import { newNoteId } from "./ids.mjs";
+import { SLUG_RE } from "./identity.mjs";
 
 export const NOTE_KINDS = Object.freeze(["howto", "gotcha", "decision", "preference", "status"]);
 export const NOTE_ORIGINS = Object.freeze(["tool", "capture", "cto", "import"]);
@@ -73,7 +74,11 @@ export function createQueue({ state, scanner, now = Date.now, root = statePath("
     if (!l) locks.set(slug, (l = createMutex()));
     return l;
   };
-  const fileFor = (slug) => join(root, `${slug}.jsonl`);
+  // The slug becomes a file name: only the pinned shape is ever allowed to reach the file system.
+  const fileFor = (slug) => {
+    if (typeof slug !== "string" || !SLUG_RE.test(slug)) throw new NoteRejected("Invalid project slug.", "invalid-slug");
+    return join(root, `${slug}.jsonl`);
+  };
 
   async function readAll(slug) {
     let raw;
@@ -107,10 +112,21 @@ export function createQueue({ state, scanner, now = Date.now, root = statePath("
    * (duplicate, scanner unavailable). Validation errors throw NoteRejected.
    */
   function enqueue({ slug, sessionID, origin = "tool", kind, text, refs = [], derived }) {
+    if (typeof slug !== "string" || !SLUG_RE.test(slug)) return Promise.reject(new NoteRejected("Invalid project slug.", "invalid-slug"));
     return lockFor(slug).runExclusive(async () => {
       const clean = validateNote({ kind, text, refs }, { origin });
       const red = await scanner.redact(clean.text);
       if (red.unavailable) return { accepted: false, reason: "The secret scanner is unavailable, so the note wasn't kept." };
+      // Refs are text too (a `url:` with a token, a `file:` path): each is scanned and a ref with a hit is dropped.
+      const keptRefs = [];
+      for (const ref of clean.refs) {
+        const r = await scanner.redact(ref);
+        if (r.unavailable) return { accepted: false, reason: "The secret scanner is unavailable, so the note wasn't kept." };
+        if (!(r.redacted > 0) && r.text === ref) keptRefs.push(ref);
+      }
+      const refsDropped = clean.refs.length - keptRefs.length;
+      clean.refs = keptRefs;
+      if (refsDropped > 0 && keptRefs.length === 0 && origin === "tool") return { accepted: false, reason: "Every ref contained a secret, so the note wasn't kept." };
       const t = now();
       const hash = noteHash(clean.kind, red.text);
       db.prepare("DELETE FROM note_hash WHERE at < ?").run(t - DEDUP_MS);
