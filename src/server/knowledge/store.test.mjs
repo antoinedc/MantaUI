@@ -162,3 +162,21 @@ test("an unavailable scanner keeps dirty paths out too (nothing is committed as 
   assert.equal(skipped[0].unavailable, true);
   assert.match(skipped[0].reason, /scanner is unavailable/);
 });
+
+test("N3: a path kept out of the store because of a secret is read as its COMMITTED version (null if never committed)", async () => {
+  const { dir, store } = await mk({ scan: async (t) => ({ clean: !/sk-live-SECRET/.test(t), unavailable: false, hits: [] }) });
+  const rel = "projects/p-0123456789/gotchas.md";
+  await store.commit({ path: rel, content: "committed text\n", message: "add" });
+  assert.equal(await store.read(rel), "committed text\n");
+  await writeFile(join(dir, rel), "committed text\nleaked sk-live-SECRET\n");
+  assert.equal(await store.read(rel), "committed text\n", "served before any commit pass has seen it");
+  assert.equal(await store.commitDirtyAsUser(), null);
+  assert.equal(await store.read(rel), "committed text\n");
+  const fresh = "projects/p-0123456789/new.md";
+  await writeFile(join(dir, fresh), "sk-live-SECRET\n");
+  assert.equal(await store.read(fresh), null, "never committed → absent");
+  // cleaned → the working file is served again
+  await writeFile(join(dir, rel), "cleaned edit\n");
+  assert.equal(await store.read(rel), "cleaned edit\n");
+  assert.equal(await store.read("projects/p-0123456789/none.md"), null);
+});

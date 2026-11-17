@@ -159,6 +159,7 @@ describe("plugin ↔ server (§11.2, §11.3)", { skip }, () => {
     await engine.observeRaw(started("ses_one"));
     const slug = engine.sessionMap.get("ses_one").slug;
     await engine.store.commit({ path: `projects/${slug}/rules.md`, content: "- Use pnpm\n", message: "rules" });
+    engine.layer.rules.track({ slug, text: "Use pnpm", reason: "confirmed" });
     await engine.store.commit({ path: `projects/${slug}/overview.md`, content: "# Widget\n\n## Briefing\nA small widget service.\n", message: "overview" });
     await engine.refreshDerived();
 
