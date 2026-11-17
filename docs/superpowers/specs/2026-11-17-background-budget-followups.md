@@ -1,6 +1,6 @@
 # Background work budget — follow-ups after first use
 
-Status: draft rev 1 (2026-11-17). Builds on `2026-11-17-background-work-budget.md` (PR #1690, merged 372cfcd5).
+Status: rev 2 (2026-11-17) — review round 1 folded in. Builds on `2026-11-17-background-work-budget.md` (PR #1690, merged 372cfcd5).
 Owner: box server (`src/server/`), desktop renderer (`src/renderer/`).
 
 ## 1. What happened
@@ -37,16 +37,21 @@ passed by the caller ("Knowledge", "The CTO", or "Background work" on the card).
 | unavailable | "Knowledge is waiting: the budget couldn't be read. It will retry." |
 
 - "2½ days" = elapsed time of the window (needs its start: §6), rounded to half days (hours under a day).
-- When the override (§4) is on and the only refusals are `projected-high`/`window-busy`, those lines are
-  not shown (the work runs).
-- The "Change" link text becomes "Background work settings".
+- The "Change" link text becomes "Background work settings" (aria label to match). `summaryLine` and the
+  status line take a `subject` parameter.
+- Elapsed time and the window noun need `windowStart` and `spanMs` on the wire: `BudgetWindow` gains
+  `windowStart: number|null` and `spanMs: number|null`; the renderer derives the noun from `spanMs`
+  (5-hour window / week / "<label> window"), falling back to `kind`.
 
 ## 3. Its own Settings section
 
 New Settings section **Background work** (`sectionId: "background"`, icon from the existing set) holding
 the `BackgroundWorkCard`; removed from Models. The Knowledge card's and CTO pane's "Background work
 settings" link opens this section and focuses the card heading (existing `manta-open-settings` event with
-`section:"background"`). Settings search indexes it ("budget", "background", "quota", "spend", "cap").
+`section:"background"`). Settings search indexes it ("budget", "background", "quota", "spend", "cap") through a `custom` schema
+entry. Touch points: `SettingSectionId` + `SETTING_SECTIONS` (`settingsSchema.ts`; placed directly after
+Models in the same nav group), `SECTION_ICONS` (`Settings.tsx`), remove the Models render,
+`openBackgroundWorkSettings` targets `background`.
 
 ## 4. Override: "Keep running when my plan is busy"
 
@@ -57,67 +62,76 @@ settings" link opens this section and focuses the card heading (existing `manta-
 - UI: a checkbox under the level control, label "Keep running when my plan is busy", help "Background work
   still stays within its share (5% of a week on Normal), but no longer waits when your own usage is high."
   Hidden when level is Off. Save behaviour = the other controls (visible success/error).
-- Status/`check` unchanged otherwise; evidence `refused` rows simply stop for those reasons.
+- Plumbing: `readBackgroundWork` / `validateAndMergeBackgroundWork` / defaults (`DEFAULT_BACKGROUND_WORK`,
+  `local.mjs`) / `AppConfig` type carry `runWhenBusy`; `status()` returns it (the card reads its values from
+  status). The rule sites skipped are the short-window busy rule, the weekly projection rule, its near-reset
+  variant and the weekly no-projection busy fallback.
 
 ## 5. Catching up after a pause, condensed
 
 Today a paused capture keeps its bookmark (cursor) per session and catches up on resume, but reads only the
 newest 400 messages and fits ~24k characters, so long backlogs lose their early/middle parts.
 
-### 5.1 Reading the backlog: summaries first
+### 5.1 Reading forward from the bookmark
 
-For a session being captured, build its input from the bookmark forward, in this order of preference:
-
-1. **Manta handoff summary.** If the session (or a predecessor whose capture bookmark is behind its
-   handoff) has a committed handoff record in `~/.manta/handoffs.json` (`records[*]` with
-   `fromSessionId`, `state:"committed"`, `text`, `createdAt`), the handoff `text` replaces that session's
-   history up to the handoff's `createdAt`. A successor session's first user message that IS the handoff
-   preamble is skipped (it would be read twice). Read through an injected `handoffSummaries(sessionID) →
-   [{createdAt, text, successorId}]` from the handoff engine (never parse the file in knowledge).
-2. **OpenCode compaction summary.** A completed compaction appears in the transcript as a `summary:true`
-   message; history before the newest compaction after the bookmark is replaced by its summary text.
-3. **Condensed raw history** for whatever remains (§5.2).
-
-Summary text is marked in the capture input (`[handoff summary]`, `[compaction summary]`) and cites the
-session (`msg:` ref of the summary message, or the handoff record's message id when available) so notes
-stay evidence-backed.
+- New `oc.listMessagesSince(sessionId, {after: {at, id}, max})` (`src/server/opencode.mjs`): pages the
+  session newest-first (the existing reader) and stops at the bookmark, returning oldest-first, at most
+  `max` (default 2,000) messages; never loads more than the existing 10,000-record ceiling. The capture
+  reader (`createCaptureMessageSource`) uses it when a bookmark exists, and keeps the `summary` flag of a
+  completed compaction message (`mapTimeline` already sets `info.summary`). A span beyond `max` is reported
+  in the input as "[N older messages not read]" and logged.
 
 ### 5.2 Condensing raw history (no model)
 
-A pure `condenseForCapture(messages)` in `knowledge/capture.mjs` (or a sibling module):
+A pure `condenseForCapture(messages)` (new `knowledge/condense.mjs`), applied to backlog input only:
 
-- Keep whole: user messages; the last assistant text of each turn; tool calls that failed (status error /
+- Keep whole: user messages; the last assistant text of each turn; failed tool calls (error status /
   non-zero exit) with the first and last lines of their output; edits/writes as "edited <path>".
 - Collapse to one-line markers: runs of reads/greps/globs/lists ("read 14 files in src/server"), passing
   test/build commands ("ran npm test: passed"), web fetches ("fetched 3 pages").
-- Drop: tool outputs of successful read-only tools, reasoning, synthetic/ignored parts, intermediate
-  assistant text superseded in the same turn.
-- Deterministic; tested on fixtures; idempotent on already-condensed input.
+- Drop: successful read-only tool outputs, reasoning, synthetic/ignored parts, intermediate assistant text
+  superseded later in the same turn.
+- Deterministic, idempotent, keeps message ids so citations still resolve.
 
-### 5.3 Chunking and the cheap pre-pass
+### 5.3 Summaries for spans too big to read
 
-- After 5.1–5.2, if the backlog still exceeds `MAX_INPUT_CHARS` (24k), split it into chunks of ≤ 24k
-  oldest-first, and for each chunk except the last run one **condense** call on the cheapest band
-  (new task class `knowledge-condense`, band `fast`, work type `knowledge-capture` so it shares the
-  capture budget), producing ≤ 2k chars of "what happened, what was decided, what failed, what the user
-  corrected", with the cited message ids kept. The final capture call reads the condensed chunks + the
-  last raw chunk.
-- Hard cap per catch-up: at most 6 condense calls per session per catch-up; beyond that the oldest
-  chunks are summarised by §5.2 only (logged, never silently dropped: the capture input says "[earlier:
-  N messages condensed without a model]").
-- The 400-message read limit is lifted for catch-up: read pages from the bookmark forward (paged
-  `listMessages`) up to 5,000 messages; the rest is reported in the input the same way.
+Only when the raw span from the bookmark, AFTER §5.2, does not fit one capture input (`MAX_INPUT_CHARS`,
+24k chars) — otherwise raw wins and summary messages are skipped (they would re-state already-captured
+history):
 
-### 5.4 Pacing
+1. **Manta handoff summary.** New sync engine method `handoff.summariesFor(sessionId)` over committed
+   records → `{asPredecessor: [{recordId, createdAt, text, successorId, disposition, messageId}],
+   asSuccessor: {recordId, fromSessionId, createdAt, text, disposition, messageId} | null}`, `text` being
+   the delivered text (`internal.textOverride` when set). If the session handed off after the bookmark, the
+   summary replaces the raw span bookmark→`createdAt` (request time — a conservative cutoff). In the
+   SUCCESSOR, the delivered preamble is not read twice: disposition `send` → skip the message with
+   `messageId`; `armed` → strip the `preamble + "\n\n---\n\n"` prefix from its first user message (keep the
+   user's own text); draft → skip only on exact text match. Records pruned (30 days / newest 500) → fall
+   through to 2/3.
+2. **OpenCode compaction summary** (a `summary:true` message after the bookmark): replaces the raw span
+   before it. Summary text is exempt from the 1,200-char assistant clip (cap it at 8k chars).
+3. Otherwise: §5.4 windows.
 
-- Backlog = sessions whose bookmark is behind and that became due while capture was refused.
-- Capture processes the most recently active backlog sessions first.
-- A catch-up session may start only when the budget allows AND the catch-up spend in the current window
-  (plan: share of the governing window; payg: today's $) stays under **half of what remains** of the
-  level cap / daily cap. Ordinary (non-backlog) captures are never held back by this rule.
-- Implemented as an optional `headroom` argument on `backgroundBudget.check` for this work only
-  (`check({workType, model, maxShareOfRemaining: 0.5, tag: "catch-up"})`), with the budget tracking
-  catch-up spend per window/day separately (same accounting style as `batch`).
+Citations: a handoff summary cites `msg:<successorId>/<messageId>` for `send`, else the predecessor's last
+message at or before `createdAt`; a compaction summary cites its own message. Notes whose only evidence is a
+summary are marked `derived: true`.
+
+### 5.4 Catch-up in ordinary windows, oldest first
+
+What doesn't fit one input after 5.1–5.3 is captured as successive ordinary captures over ≤ 24k-char
+windows, oldest first, each advancing the bookmark to its last message. Resumable: a refusal or failure
+mid-way loses nothing already captured. No new task class or model; same redaction, aliases and
+validation per window. At most 8 windows per session per day (the rest waits for the next day, logged).
+
+### 5.5 Pacing (no budget change)
+
+- A session is in **backlog** when its bookmark is more than one window behind (persisted per session as
+  `backlog_since` in the capture table; schema migration `capture-2`).
+- Each capture tick first runs ordinary due captures (unchanged), then at most ONE backlog window, most
+  recently active session first.
+- A budget refusal of a backlog window returns skip code `budget-backlog`, which does NOT stop ordinary
+  captures in later ticks (unlike `budget`, which still breaks the tick).
+- Spend stays under the existing level cap / daily cap; no new budget accounting.
 
 ## 6. Window length and the ChatGPT fix
 
@@ -126,8 +140,10 @@ A pure `condenseForCapture(messages)` in `knowledge/capture.mjs` (or a sibling m
 - The budget treats a window as weekly-kind when `isWeeklyKind(kind)` OR `spanMs ≥ 2 days`, and as short
   otherwise; `windowStart` default = `resetsAt − spanMs` when `spanMs` is known (replaces the
   weekly-only 7-day default).
-- The codex adapter keeps `kind` names (other consumers key history on them); only the budget and the
-  copy read `spanMs`. Window noun in copy: "5-hour window" / "week" / "<label> window" from `spanMs`.
+- `normalizeWindow` passes `spanMs` through. The codex adapter keeps `kind` names (other consumers key
+  history on them); only the budget and the copy read `spanMs`. Every `isWeeklyKind(...)` use in
+  `backgroundBudget.mjs` becomes a window-based `isWeeklyWindow(w)`. Note: the ChatGPT 7-day window's
+  cap drops from 10 % to 5 % (Normal) once reclassified — expected. Window noun in copy: "5-hour window" / "week" / "<label> window" from `spanMs`.
 
 ## 7. Libraries considered
 
@@ -135,7 +151,7 @@ A pure `condenseForCapture(messages)` in `knowledge/capture.mjs` (or a sibling m
 |---|---|---|
 | Transcript condensing | own pure function | Generic summarizers (LLM-based) are what §5.3 already uses only as a fallback; there is no maintained library that understands OpenCode tool parts. |
 | Summaries | existing handoff store + OpenCode compaction messages | — |
-| Paging transcripts | existing `listMessages` paging | — |
+| Paging transcripts | new `listMessagesSince` over the existing reader | — (no paging exists today) |
 | Settings section | existing Settings section framework | — |
 
 ## 8. Tests
@@ -146,8 +162,10 @@ A pure `condenseForCapture(messages)` in `knowledge/capture.mjs` (or a sibling m
 - Budget: `runWhenBusy` skips exactly the two rules; `spanMs` weekly classification and windowStart;
   catch-up headroom accounting.
 - Codex adapter: `spanMs` from `limit_window_seconds`; a 7-day primary window is weekly for the budget.
-- Capture: handoff summary replaces pre-handoff history (and the successor's preamble message is skipped);
-  compaction summary replaces earlier history; `condenseForCapture` fixtures; chunking with the
-  condense call (fake runner) and the 6-call cap; 5,000-message paging; backlog ordering and pacing.
+- Capture: `listMessagesSince` stops at the bookmark; `condenseForCapture` fixtures; summaries used only
+  when the span doesn't fit (handoff for send/armed/draft successors, compaction), citations and
+  `derived`; window-by-window catch-up advances the bookmark per window and resumes after a refusal; 8
+  windows/day cap; one backlog window per tick after ordinary captures; `budget-backlog` doesn't stop
+  ordinary captures; `capture-2` migration.
 
 Verification on Freestyle VMs only.
