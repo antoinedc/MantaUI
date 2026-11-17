@@ -763,14 +763,14 @@ test("runEphemeral reports the session's REAL usage (tokens by kind + recorded c
   };
   const real = await run({ usage: { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300, usd: 0.07 } });
   assert.equal(real.length, 1);
-  assert.equal(real[0].tokens, 5550, "one number (what the CTO budget reads): the real total");
+  assert.ok(real[0].tokens < 100, "`tokens` stays the prompt+answer ESTIMATE (what the CTO budget prices), not the real total");
   assert.deepEqual(real[0].usage, { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 });
   assert.equal(real[0].usd, 0.07);
   assert.equal(real[0].estimated, false);
   // a subscription model records no cost: tokens only, no usd
   const free = await run({ usage: { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 } });
   assert.equal("usd" in free[0], false);
-  assert.equal(free[0].tokens, 15);
+  assert.deepEqual(free[0].usage, { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 });
   // no recorded usage: the estimate, flagged
   const est = await run({});
   assert.equal(est[0].estimated, true);
@@ -788,4 +788,27 @@ test("a run that THROWS still reports the instruction estimate, and the error st
   assert.equal(reported.length, 1);
   assert.equal(reported[0].estimated, true);
   assert.ok(reported[0].tokens > 0);
+});
+
+test("a cache-heavy CTO run is priced exactly as before (the estimate at the blended rate) — never from its real cache totals", async () => {
+  const { priceTokens } = await import("./ctoBudget.mjs");
+  const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+  const model = { ...OPUS, cost };
+  const priced = [];
+  const oc = { async runEphemeralSession({ onCreated }) {
+    await onCreated("sid-c");
+    return { sid: "sid-c", text: "an answer", usage: { input: 100, output: 50, reasoning: 0, cacheRead: 400_000, cacheWrite: 20_000, usd: 1.9 } };
+  } };
+  for (const taskClass of ["ambient-summarize", "curator-notes"]) {
+    await runEphemeral({
+      taskClass,
+      context: [{ priority: 1, text: "x".repeat(400) }],
+      deps: { oc, engineState: fakeEngineState(), resolveModel: async () => model, reportCost: async (r) => { priced.push({ taskClass, r, usd: priceTokens({ model: r.model, tokens: r.tokens }) }); } },
+    });
+  }
+  const listInputOutput = (100 * cost.input + 50 * cost.output) / 1e6;
+  for (const { taskClass, r, usd } of priced) {
+    assert.equal(r.tokens, 100 + 3, `${taskClass}: tokens = the instruction + answer estimate`);
+    assert.ok(usd <= listInputOutput, `${taskClass}: priced $${usd} ≤ input+output at list rates $${listInputOutput}`);
+  }
 });

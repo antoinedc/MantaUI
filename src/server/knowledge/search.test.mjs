@@ -237,3 +237,22 @@ test("the transcript query handed to the index has the filler removed; the wiki 
   const r = await search.search({ sessionID: "ses_a", query: "the of zzzqq release", sources: ["wiki"] });
   assert.ok(refs(r).includes(`page:projects/${A}/runbooks/release.md`));
 });
+
+test("redaction happens BEFORE truncation (a secret straddling the limit is masked whole) and other projects' session titles are redacted too", async () => {
+  const secret = "sk-abcdef123456";
+  // the secret begins 5 characters before the 2000-char cut of the message text
+  const long = `${"x".repeat(1995)}${secret} tail`;
+  const messages = async () => [{ id: "msg_1", role: "user", text: long, at: 1 }];
+  const { search } = await rig({
+    messages,
+    transcripts: async () => ({ hits: [{ sessionID: "ses_b", messageID: "msg_1", partID: "prt_1", snippet: "plain", title: `Fix ${secret} leak`, at: 5 }], truncated: false }),
+  });
+  const page = await search.page({ sessionID: "ses_a", ref: "msg:ses_b/msg_1" });
+  assert.ok(!page.messages[0].text.includes("sk-abc"), "no fragment of the secret survives the cut");
+  assert.ok(page.messages[0].text.length <= 2000);
+  const r = await search.search({ sessionID: "ses_a", query: "leak", scope: "all", sources: ["sessions"] });
+  assert.equal(r.hits[0].title, "Fix [REDACTED] leak");
+  const own = await rig({ transcripts: async () => ({ hits: [{ sessionID: "ses_a", messageID: "msg_1", partID: "prt_1", snippet: "plain", title: `Fix ${secret} leak`, at: 5 }], truncated: false }) });
+  const mine = await own.search.search({ sessionID: "ses_a", query: "leak", sources: ["sessions"] });
+  assert.equal(mine.hits[0].title, `Fix ${secret} leak`, "the caller's own project is shown as is");
+});

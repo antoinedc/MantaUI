@@ -32,6 +32,20 @@ export const SHARING_OPTIONS: ReadonlyArray<{ value: KnowledgeSharing; label: st
   { value: "private", label: "Private", description: "Neither reads nor contributes shared knowledge." },
 ];
 
+/** How much a sharing mode exposes: private < read only < share & read. */
+const SHARING_RANK: Record<KnowledgeSharing, number> = { private: 0, "read-only": 1, "share-and-read": 2 };
+
+/**
+ * The sentence to confirm before MOVING toward more sharing (what `pending` exposes beyond `saved`), or null when the
+ * change shares the same or less. `what` names the project ("manta") or the default's scope.
+ */
+export function sharingConfirmText(saved: KnowledgeSharing, pending: KnowledgeSharing, what: string): string | null {
+  if (SHARING_RANK[pending] <= SHARING_RANK[saved]) return null;
+  return pending === "read-only"
+    ? `${what} will start reading the shared how-tos, preferences and skills other projects contributed. It still contributes nothing and stays out of other projects' search.`
+    : `Notes, preferences and skills learned in ${what} will feed the shared knowledge, and its notes and past sessions will show up in other projects' search and briefings.`;
+}
+
 export const repoRulesLabel = (v: KnowledgeRepoRules): string => REPO_RULES_OPTIONS.find((o) => o.value === v)?.label ?? v;
 export const sharingLabel = (v: KnowledgeSharing): string => SHARING_OPTIONS.find((o) => o.value === v)?.label ?? v;
 

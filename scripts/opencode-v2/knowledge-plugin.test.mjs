@@ -177,7 +177,7 @@ describe("briefing delivery", () => {
     assert.equal(calls[0].query.assistantMessages, "3");
   });
 
-  test("a compaction resets only once it COMPLETED (compaction.ended); the hook alone resets nothing", async () => {
+  test("a compaction resets only once it COMPLETED (session.compacted); the hook alone resets nothing", async () => {
     let n = 0;
     const { b, calls } = briefingWith({
       "GET /api/knowledge/briefing": () => ({ status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }),
@@ -194,7 +194,7 @@ describe("briefing delivery", () => {
     const system = [IDENTITY];
     await b.onContext(ev(system));
     await b.flush();
-    assert.equal(system[1].text, `${BRIEF} v2`, "after compaction.ended the next request starts fresh");
+    assert.equal(system[1].text, `${BRIEF} v2`, "after the compaction completed the next request starts fresh");
     assert.deepEqual(calls.filter((c) => c.path.endsWith("/reset")).map((c) => c.body), [{ sessionID: "ses_a" }]);
     assert.deepEqual(calls.filter((c) => c.path.endsWith("/ack")).map((c) => c.body.token), ["tok1", "tok2"]);
   });
@@ -235,7 +235,23 @@ describe("briefing delivery", () => {
     assert.equal(system[1].text, `${BRIEF} v2`);
   });
 
-  test("compaction.ended also clears an abandoned start", async () => {
+  test("a reset still in flight is awaited before the next briefing is fetched", async () => {
+    const order = [];
+    let n = 0;
+    const { b } = briefingWith({
+      "GET /api/knowledge/briefing": () => { order.push("get"); return { status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }; },
+      "POST /api/knowledge/briefing/ack": ok({ ok: true }),
+      "POST /api/knowledge/briefing/reset": async () => { order.push("reset:start"); await sleep(80); order.push("reset:done"); return { status: 200, body: { ok: true } }; },
+    });
+    await b.onContext(ev([IDENTITY]));
+    await b.flush();
+    order.length = 0;
+    void b.onCompactionEnded("ses_a"); // not awaited: the reset is on its way
+    await b.onContext(ev([IDENTITY]));
+    assert.deepEqual(order, ["reset:start", "reset:done", "get"]);
+  });
+
+  test("completion also clears an abandoned start", async () => {
     let slow = true;
     const { b } = briefingWith({
       "GET /api/knowledge/briefing": async () => {
@@ -392,7 +408,7 @@ describe("installBriefing / plugin entry wiring", () => {
     assert.equal(count(srv.calls, "POST /api/knowledge/briefing/reset"), 0, "the hook alone does not reset");
   });
 
-  test("session.compaction.ended from the event stream posts the reset", async () => {
+  test("session.compacted from the event stream posts the reset (compaction.failed resets nothing)", async () => {
     const srv = fakeServer({
       "GET /api/knowledge/briefing": ok({ text: BRIEF, token: "tok1" }),
       "POST /api/knowledge/briefing/ack": ok({ ok: true }),
@@ -401,7 +417,8 @@ describe("installBriefing / plugin entry wiring", () => {
     globalThis.fetch = srv.fetchFn;
     const ctx = pluginCtx([
       { type: "session.compaction.failed", data: { sessionID: "ses_f" } },
-      { type: "session.compaction.ended", data: { sessionID: "ses_a" } },
+      { type: "session.compaction.ended", data: { sessionID: "ses_x" } }, // not the box's end-of-compaction event: ignored
+      { type: "session.compacted", data: { sessionID: "ses_a" } },
     ]);
     await installBriefing(ctx);
     await sleep(20);

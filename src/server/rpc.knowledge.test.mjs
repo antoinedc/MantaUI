@@ -54,7 +54,7 @@ test("an unwired box answers 503 on every knowledge channel", async () => {
 
 // ---- opencode:prompt: origin lowering (§9.2) and the project pin at the first prompt (§3.1) ----
 
-function promptRig({ session = { state: "found", session: { directory: "/work/wt" } }, cached = null } = {}) {
+function promptRig({ session = { state: "found", session: { directory: "/work/wt" } }, cached = null, handoff = null } = {}) {
   const sends = [];
   const pins = [];
   const oc = {
@@ -62,8 +62,9 @@ function promptRig({ session = { state: "found", session: { directory: "/work/wt
     readSession: async () => session,
     cachedSessionDirectory: () => cached,
   };
-  const knowledge = { pinSession: async (a) => void pins.push(a) };
+  const knowledge = { pinSession: async (a) => (pins.push(a), { slug: "p" }) };
   const handlers = buildHandlers({
+    ...(handoff ? { handoff } : {}),
     tmux: { listProjects: async () => [] },
     pty: {},
     bus: {},
@@ -122,4 +123,36 @@ test("knowledge:undo hands the engine's warning to the caller untouched", async 
   const knowledge = { undo: async () => ({ ok: true, warning: "The skill was removed, but Manta couldn't remember that." }) };
   const { handlers } = rig({ knowledge });
   assert.deepEqual(await dispatch(handlers, "knowledge:undo", [{ id: "c_1" }]), { ok: true, warning: "The skill was removed, but Manta couldn't remember that." });
+});
+
+test("opencode:prompt pins the session the message was DELIVERED to (after handoff admission), once per session", async () => {
+  const handoff = { admitPrompt: async (i) => ({ deliveredTo: i.sessionId === "ses_old" ? "ses_new" : i.sessionId }), guardCommand: (s) => ({ target: s }), chainOf: () => [] };
+  const { handlers, pins } = promptRig({ handoff });
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_old", text: "hi" }]);
+  await tick();
+  assert.deepEqual(pins.map((p) => p.sessionID), ["ses_new"]);
+  // a second send to the same session does not ask again (a forced pin from here already exists)…
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_old", text: "again" }]);
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_new", text: "direct" }]);
+  await tick();
+  assert.deepEqual(pins.map((p) => p.sessionID), ["ses_new"]);
+  // …but another session is pinned
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_other", text: "x" }]);
+  await tick();
+  assert.deepEqual(pins.map((p) => p.sessionID), ["ses_new", "ses_other"]);
+});
+
+test("a pin that came back unmapped is not remembered (it is tried again on the next send)", async () => {
+  const sends = [];
+  const pins = [];
+  const handlers = buildHandlers({
+    tmux: { listProjects: async () => [] }, pty: {}, bus: {}, syncState: {}, local: { configGet: async () => ({}) }, push: {},
+    oc: { sendPrompt: async (a) => void sends.push(a), readSession: async () => ({ state: "found", session: { directory: "/d" } }) },
+    knowledge: { pinSession: async (a) => (pins.push(a), null) },
+  });
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "1" }]);
+  await tick();
+  await dispatch(handlers, "opencode:prompt", [{ sessionId: "ses_a", text: "2" }]);
+  await tick();
+  assert.equal(pins.length, 2);
 });

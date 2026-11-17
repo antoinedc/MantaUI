@@ -722,9 +722,13 @@ export function buildHandlers({
     return rest;
   }
   // Shared knowledge §3.1/§9.2: pin the session to the project of the directory it has NOW. Fire-and-forget (the
-  // caller never awaits it); `force` lets this authoritative pin win over a parent-/move-sourced mapping.
+  // caller never awaits it); `force` lets this authoritative pin win over a parent-/move-sourced mapping. The session
+  // pinned is the one the message actually reached (`deliveredTo`, after handoff admission). A session that already
+  // holds a forced pin from here is not asked again (in-memory, bounded): the mapping only changes while nothing is
+  // captured, and every send would otherwise cost a session read.
+  const knowledgePinned = new Set();
   function pinForKnowledge(sessionId) {
-    if (!knowledge?.pinSession || typeof sessionId !== "string" || !sessionId) return;
+    if (!knowledge?.pinSession || typeof sessionId !== "string" || !sessionId || knowledgePinned.has(sessionId)) return;
     void (async () => {
       let directory = null;
       try {
@@ -735,7 +739,11 @@ export function buildHandlers({
       }
       directory ??= oc.cachedSessionDirectory?.(sessionId) ?? null;
       if (!directory) return;
-      await knowledge.pinSession({ sessionID: sessionId, directory, force: true });
+      const mapped = await knowledge.pinSession({ sessionID: sessionId, directory, force: true });
+      if (mapped) {
+        knowledgePinned.add(sessionId);
+        if (knowledgePinned.size > 2000) knowledgePinned.delete(knowledgePinned.values().next().value);
+      }
     })().catch((e) => console.warn("[knowledge] pin at the first prompt failed:", e?.message ?? e));
   }
   // The user's own send into a session: a viewer window showing it (any member of its handoff chain) becomes
@@ -1693,15 +1701,15 @@ export function buildHandlers({
       // The flag itself never travels on.
       const { appGenerated, ...clientInput } = input ?? {};
       const userInput = input && { ...clientInput, origin: appGenerated === true ? "unknown" : "user" };
-      // Shared knowledge §3.1: a session is pinned to its project at its first user prompt, from the
-      // directory it has NOW (a background job was created under its parent and moved into its worktree).
-      // Fire-and-forget: it can never delay or fail the send.
-      if (userInput) pinForKnowledge(userInput.sessionId);
       // Auto-handoff §6.1: the admission resolver runs before anything else — a
       // replaced conversation's message goes to its successor, a fenced one is
       // held. The result carries `deliveredTo`.
-      if (handoff && userInput) return handoff.admitPrompt(userInput);
-      return oc.sendPrompt(userInput);
+      const result = handoff && userInput ? await handoff.admitPrompt(userInput) : await oc.sendPrompt(userInput);
+      // Shared knowledge §3.1: a session is pinned to its project at its first user prompt, from the directory it
+      // has NOW (a background job was created under its parent and moved into its worktree), for the session the
+      // message reached. Fire-and-forget: it can never delay or fail the send.
+      if (userInput) pinForKnowledge(result?.deliveredTo ?? userInput.sessionId);
+      return result;
     },
 
     // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)

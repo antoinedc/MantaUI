@@ -390,22 +390,23 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
 
   let sid = null;
   // Metering (BET-1388 §12.1; shared-knowledge §6.7): every run reports its cost, best-effort — a metering
-  // failure must never mask the run. `tokens` stays ONE number (what the CTO's budget reads): the run's real
-  // total when the ephemeral session recorded usage, else the estimate. `usage` ({input, output, reasoning,
-  // cacheRead, cacheWrite}) and `usd` (the session's recorded cost) travel beside it for callers that price
-  // per component; `estimated` says which one this is. A run that throws still reports the instruction estimate.
+  // failure must never mask the run. `tokens` is ALWAYS the prompt+answer size estimate: it is what the CTO's
+  // budget prices (one blended rate), so the CTO classes cost exactly what they did before real usage existed
+  // (a real total with cache reads/writes would be priced at that blended rate and inflate them). When the
+  // ephemeral session recorded its spend, `usage` ({input, output, reasoning, cacheRead, cacheWrite}) and `usd`
+  // (its recorded cost) travel BESIDE it for callers that price per component (the knowledge runner swaps them in
+  // for `tokens`); `estimated` says no real usage was available. A run that throws still reports the estimate.
   const report = async (res) => {
     const u = res?.usage;
-    const real = u && typeof u === "object";
-    const total = real ? u.input + u.output + u.reasoning + u.cacheRead + u.cacheWrite : 0;
+    const real = u && typeof u === "object" && u.input + u.output + u.reasoning + u.cacheRead + u.cacheWrite > 0;
     try {
       await reportCost({
         taskClass,
         tier,
         model,
-        tokens: real && total > 0 ? total : estimateTokens(instruction) + estimateTokens(res?.text ?? ""),
-        estimated: !(real && total > 0),
-        ...(real && total > 0 ? { usage: { input: u.input, output: u.output, reasoning: u.reasoning, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite } } : {}),
+        tokens: estimateTokens(instruction) + estimateTokens(res?.text ?? ""),
+        estimated: !real,
+        ...(real ? { usage: { input: u.input, output: u.output, reasoning: u.reasoning, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite } } : {}),
         ...(real && typeof u.usd === "number" && u.usd > 0 ? { usd: u.usd } : {}),
       });
     } catch {

@@ -659,15 +659,17 @@ export function setPromptOrigins(store) {
  * either). It is a server-set input: only callers inside manta-server pass it.
  * @param {string} sessionId
  * @param {{ text: string, id?: string, files?: any[], agents?: any[], skills?: any[], delivery?: "steer"|"queue" }} body
- * @param {{ signal?: AbortSignal, origin?: string }} [opts]
+ * @param {{ signal?: AbortSignal, origin?: string, idCheck?: Promise<{ state: "found" | "missing" | "unknown" }> }} [opts]
  * @returns {Promise<import("./opencodeClient.mjs").HttpFailure|null>} null once accepted; the refusal (a non-2xx) otherwise
  */
-async function postPrompt(sessionId, body, { signal, origin = "unknown" } = {}) {
+async function postPrompt(sessionId, body, { signal, origin = "unknown", idCheck } = {}) {
   const callerChoseId = typeof body.id === "string" && body.id !== "";
   const id = callerChoseId ? body.id : mintPromptId();
-  // A minted id cannot exist yet; a caller's might. Checked BEFORE the send (afterwards it always exists).
+  // Only a `user` origin is evidence, so only it needs the check: can that id already exist? A minted id cannot; a
+  // caller's might. Checked BEFORE the send (afterwards it always exists) — `idCheck` lets the caller start it
+  // alongside other work (see sendPrompt); otherwise it runs here.
   let mayRecord = true;
-  if (promptOrigins && callerChoseId) mayRecord = (await readMessageStrict(sessionId, id, { signal })).state === "missing";
+  if (promptOrigins && callerChoseId && origin === "user") mayRecord = ((await (idCheck ?? readMessageStrict(sessionId, id, { signal }))).state === "missing");
   commandCorrelator.registerPromptId(sessionId, id);
   // (A transport failure / abort throws past here with the id still registered:
   // the server may have accepted it after all.)
@@ -761,6 +763,8 @@ function fileInputs(attachments) {
  * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", origin?: string, signal?: AbortSignal }} opts
  */
 export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, origin, signal }) {
+  // The user-origin id check (see postPrompt) runs alongside the session-controls sync, not after it.
+  const idCheck = promptOrigins && messageID && origin === "user" ? readMessageStrict(sessionId, messageID, { signal }) : undefined;
   if (!delivery) await syncSessionControls(sessionId, { model, agent, signal });
   const body = { text };
   const files = fileInputs(attachments);
@@ -777,7 +781,7 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
   if (messageID) body.id = messageID;
   if (delivery) body.delivery = delivery;
 
-  const refused = await postPrompt(sessionId, body, { signal, origin });
+  const refused = await postPrompt(sessionId, body, { signal, origin, idCheck });
   if (refused) {
     const err = /** @type {Error & { status?: number, retryAfterMs?: number }} */ (new Error(`opencode sendPrompt ${refused.status}: ${refused.text}`));
     // Mirror the usage-meter HTTP error shape (usageAdapters/httpError.mjs):

@@ -5,7 +5,8 @@
 //                      blocks (manta-claude-max keeps its identity first), ack once
 //   later requests   → append the SAME text again (byte-stable for the prompt cache)
 //   compaction       → the `compaction` hook only NOTES that a compaction began; once it has COMPLETED
-//                      (the `session.compaction.ended` event) → POST /briefing/reset and forget the cached
+//                      (the `session.compacted` event — the one the box itself treats as the end of a
+//                      compaction, streamInterp.mjs) → POST /briefing/reset and forget the cached
 //                      text (one fresh start allowed). A compaction that fails (`session.compaction.failed`)
 //                      resets nothing. Without the event stream the fallback is documented in onContext:
 //                      reset on the first request after the compaction hook ran.
@@ -106,7 +107,8 @@ export function createBriefing(deps: BriefingDeps) {
   const empty = lruSet(MAX_TRACKED); // the server deliberately answered "" — no briefing for this start
   const missed = lruSet(MAX_TRACKED); // abandoned after waitMs — no briefing for this start
   const compacting = lruSet(MAX_TRACKED); // a compaction began and has not ended/failed yet
-  let eventsLive = false; // the plugin's event stream is subscribed, so `compaction.ended` will be seen
+  const resets = new Map<string, Promise<unknown>>(); // reset POSTs still in flight, awaited before the next fetch
+  let eventsLive = false; // the plugin's event stream is subscribed, so `session.compacted` will be seen
   const prefetches = new Map<string, { directory: string | undefined; promise: Promise<Fetched | null> }>();
   const pending = new Map<string, Promise<Applied | null>>();
   const acks = new Set<Promise<void>>();
@@ -196,7 +198,13 @@ export function createBriefing(deps: BriefingDeps) {
 
   async function finishCompaction(sessionID: string): Promise<void> {
     forget(sessionID);
-    await post("/api/knowledge/briefing/reset", { sessionID }, RESET_TIMEOUT_MS);
+    const p = post("/api/knowledge/briefing/reset", { sessionID }, RESET_TIMEOUT_MS);
+    resets.set(sessionID, p);
+    try {
+      await p;
+    } finally {
+      if (resets.get(sessionID) === p) resets.delete(sessionID);
+    }
   }
 
   return {
@@ -223,10 +231,13 @@ export function createBriefing(deps: BriefingDeps) {
         const sessionID = event?.sessionID;
         const system = event?.system;
         if (typeof sessionID !== "string" || !sessionID || !Array.isArray(system)) return;
-        // Fallback when the event stream is not available (so `compaction.ended` can never arrive): the first
+        // Fallback when the event stream is not available (so `session.compacted` can never arrive): the first
         // request after the compaction hook ran is the earliest point we can call the compaction over. If that
         // compaction in fact failed this starts one extra briefing — harmless, and only without the stream.
         if (!eventsLive && compacting.has(sessionID)) await finishCompaction(sessionID);
+        // A reset still on its way must land BEFORE we ask for a briefing, or the server would answer from the old state.
+        const resetting = resets.get(sessionID);
+        if (resetting) await resetting;
         let entry = applied.get(sessionID) ?? null;
         if (!entry) {
           if (empty.has(sessionID) || missed.has(sessionID)) return;
@@ -258,7 +269,7 @@ export function createBriefing(deps: BriefingDeps) {
       }
     },
 
-    /** `session.compaction.ended`: the conversation WAS compacted — the next request may start a fresh briefing. */
+    /** `session.compacted`: the conversation WAS compacted — the next request may start a fresh briefing. */
     async onCompactionEnded(sessionID: unknown): Promise<void> {
       try {
         if (typeof sessionID === "string" && sessionID) await finishCompaction(sessionID);
@@ -272,7 +283,7 @@ export function createBriefing(deps: BriefingDeps) {
       if (typeof sessionID === "string") compacting.delete(sessionID);
     },
 
-    /** The plugin's event stream is up: `compaction.ended` is authoritative from now on. */
+    /** The plugin's event stream is up: `session.compacted` is authoritative from now on. */
     setEventsLive(live: boolean): void {
       eventsLive = live;
     },
@@ -327,7 +338,7 @@ export async function installBriefing(ctx: any, overrides: Partial<BriefingDeps>
             briefing.onSessionCreated(ev.data);
           } else if (ev?.type === "session.deleted") {
             briefing.onSessionDeleted(ev?.data?.sessionID);
-          } else if (ev?.type === "session.compaction.ended") {
+          } else if (ev?.type === "session.compacted") {
             void briefing.onCompactionEnded(ev?.data?.sessionID);
           } else if (ev?.type === "session.compaction.failed") {
             briefing.onCompactionFailed(ev?.data?.sessionID);
@@ -336,7 +347,7 @@ export async function installBriefing(ctx: any, overrides: Partial<BriefingDeps>
       } catch {
         /* stream unavailable — fail open */
       }
-      // The stream ended or never came up: `compaction.ended` can no longer be relied on.
+      // The stream ended or never came up: `session.compacted` can no longer be relied on.
       briefing.setEventsLive(false);
     })();
   }
