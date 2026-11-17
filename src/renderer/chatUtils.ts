@@ -2855,14 +2855,6 @@ function formatShortDate(ts: number): string {
   return RESET_DATE_FMT.format(ts).replace(/,/g, "");
 }
 
-/** The usage card's headline: "16:40" on the same local day, else
- *  "Thu 19 Nov · 09:00". "" for a missing/non-finite instant. */
-export function formatResetHeadline(resetsAt: number | null | undefined, nowMs: number): string {
-  if (resetsAt == null || !Number.isFinite(resetsAt)) return "";
-  const time = RESET_TIME_FMT.format(resetsAt);
-  return isSameLocalDay(resetsAt, nowMs) ? time : `${formatShortDate(resetsAt)} · ${time}`;
-}
-
 /** The reset tooltip's two lines. `title` is "Resets Today, Tue 17 Nov at 15:05"
  *  ("Today, " only on the same local day); `sub` is "in 2h20m", plus
  *  " · window started 11:40" / "… Thu 12 Nov" only when the provider reported
@@ -2956,9 +2948,6 @@ export function usageStale(fetchedAt: number, nowMs: number): boolean {
 export const SEAT_MOVE_LOAD_PCT = 95;
 /** …and goes to a seat that is under this one (or, at 100%, any seat with room). */
 export const SEAT_TARGET_LOAD_PCT = 70;
-/** A "last move" line stays on screen this long (§7a item 3). */
-export const SEAT_LAST_MOVE_WINDOW_MS = 5 * 60 * 60_000;
-
 export { seatLoad };
 
 /** A seat is usable by a move only when it is signed in (an unknown status is
@@ -3250,21 +3239,6 @@ export function isSameOrgMove(
   // No known origin (nothing active yet): nothing is being re-sent from it.
   if (!from || !to) return true;
   return from.account.id === to.account.id;
-}
-
-/** The box's move line ("Moved from Seat 1 · seat was at its limit") plus the age — the
- *  one thing the client adds, from its own clock — or null once the move is older than 5h
- *  or the box (older) sent no wording. */
-export function formatLastMove(
-  move: SessionSeat["lastMove"] | null | undefined,
-  nowMs: number,
-): { line: string; resent: string | null } | null {
-  if (!move || !Number.isFinite(move.at) || !move.line) return null;
-  const age = nowMs - move.at;
-  if (age > SEAT_LAST_MOVE_WINDOW_MS) return null;
-  const ago = formatAge(Math.max(0, age));
-  const when = ago === "now" ? "just now" : `${ago} ago`;
-  return { line: `${move.line} · ${when}`, resent: move.resentText ?? null };
 }
 
 /** "Seat: Work · Seat 2" — the session header's context-popover line. Names come

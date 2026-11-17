@@ -111,7 +111,6 @@ import {
   formatWindowReset,
   formatResetAt,
   formatResetDistance,
-  formatResetHeadline,
   formatResetTooltip,
   windowProgress,
   windowNoun,
@@ -4694,24 +4693,6 @@ describe("usage reset helpers", () => {
       expect(windowResetState(win({ pct: 0 }), now)).toBe("not-started");
       expect(windowResetState(win({ pct: 12 }), now)).toBe("no-reset");
       expect(windowResetState(win({ pct: 12, resetsAt: now + H }), now)).toBe("scheduled");
-    });
-  });
-
-  describe("formatResetHeadline", () => {
-    it("is the time alone on the same local day", () => {
-      const r = formatResetHeadline(at(0, 16, 40), now);
-      expect(r).not.toBe("");
-      expect(r).not.toContain("·");
-    });
-    it("adds the date and a middle dot on another day", () => {
-      const r = formatResetHeadline(at(2, 9, 0), now);
-      expect(r).toContain(" · ");
-      expect(r).not.toContain(",");
-      expect(r.split(" · ")[1]).toBe(formatResetHeadline(at(0, 9, 0), now));
-    });
-    it("is '' for a missing instant", () => {
-      expect(formatResetHeadline(undefined, now)).toBe("");
-      expect(formatResetHeadline(NaN, now)).toBe("");
     });
   });
 

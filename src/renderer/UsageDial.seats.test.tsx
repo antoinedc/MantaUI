@@ -57,11 +57,12 @@ describe("UsageDial — one seat (unchanged)", () => {
     const { popover } = await open([oneSeatView()], { seatId: "s1" });
     expect(popover).toBeTruthy();
     expect(popover.textContent).toContain("Claude");
-    expect(popover.textContent).toContain("5-hour · resets");
-    expect(popover.textContent).toContain("Weekly · resets");
     expect(popover.textContent).toMatch(/updated/i);
     expect(popover.textContent).not.toContain("Other seats");
-    expect(popover.querySelector('[data-testid="usage-seat-table"]')).toBeNull();
+    // one seat: the same table with a single highlighted row, and no cards
+    expect(popover.querySelector('[data-testid="usage-reset-cards"]')).toBeNull();
+    expect(popover.querySelectorAll('[data-testid="usage-seat-table"] tbody tr')).toHaveLength(1);
+    expect(Array.from(popover.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly"]);
     expect(popover.textContent).not.toContain("Manage seats");
     expect(popover.textContent).not.toContain("Automatic");
     expect(popover.querySelector('[data-testid="usage-conversation-seat"]')).toBeNull();
@@ -70,7 +71,7 @@ describe("UsageDial — one seat (unchanged)", () => {
 
   it("no seat info at all (older box): same classic popover", async () => {
     const { popover } = await open([], { seatId: null });
-    expect(popover.textContent).toContain("5-hour · resets");
+    expect(popover.querySelectorAll('[data-testid="usage-seat-table"] tbody tr')).toHaveLength(1);
     expect(popover.textContent).not.toContain("Other seats");
   });
 });
@@ -91,7 +92,9 @@ describe("UsageDial — three seats, automatic", () => {
     expect(popover.textContent).toContain("96%");
     expect(popover.textContent).not.toContain("58%");
     expect(popover.textContent).toContain("Automatic");
-    expect(popover.querySelector('[data-testid="usage-conversation-seat"]')?.textContent).toContain("Work · Seat 1");
+    // the separate seat line is gone: the highlighted first row names the seat
+    expect(popover.querySelector('[data-testid="usage-conversation-seat"]')).toBeNull();
+    expect(popover.querySelector('[data-testid="usage-reset-cards"]')).toBeNull();
     // one table: this conversation's seat leads (highlighted), the others follow grouped under their accounts
     expect(popover.querySelector('[data-testid="usage-seat-table"]')).toBeTruthy();
     const s1 = popover.querySelector('[data-seat-id="s1"]') as HTMLElement;
@@ -130,13 +133,14 @@ describe("UsageDial — three seats, automatic", () => {
     expect(s2bars.querySelector('[data-window-kind="weekly"]')?.getAttribute("data-blocked")).toBeNull();
   });
 
-  it("on the blocked seat itself, the popover's 5h row is greyed and says why", async () => {
+  it("on the blocked seat itself, its 5h cell in the highlighted first row is greyed and says why", async () => {
     const v = threeSeatView();
     v.accounts[0].seats[1] = seat("s2", "Seat 2", 20, 100);
     const { popover } = await open([v], { seatId: "s2" });
-    expect(popover.querySelector('[data-blocked="true"]')?.textContent).toContain(
-      "not usable until the 7d limit resets",
-    );
+    const blocked = popover.querySelector('[data-current="true"] [data-blocked="true"]') as HTMLElement;
+    expect(blocked.getAttribute("data-window-kind")).toBe("session");
+    expect(blocked.className).toContain("opacity-40");
+    expect(blocked.getAttribute("title")).toBe("Not usable until the 7d limit resets");
   });
 
   it("manual mode on a seat whose 7d is used up: the ring reads full, not 20%", async () => {
@@ -175,14 +179,14 @@ describe("UsageDial — three seats, automatic", () => {
     expect(h!.container.querySelector('[data-move-coming="true"]')).toBeTruthy();
   });
 
-  it("shows the last move (and the re-sent history for a cross-org move)", async () => {
+  it("no last-move block, even when the box reports a move", async () => {
     const { popover } = await open([threeSeatView()], {
       seatId: "s2",
       lastMove: { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "load", crossOrg: true, line: "Moved from Seat 1 · to balance load", resentText: "history re-sent: 128k" },
     });
-    const lm = popover.querySelector('[data-testid="usage-last-move"]') as HTMLElement;
-    expect(lm.textContent).toContain("Moved from Seat 1 · to balance load · 2h ago");
-    expect(lm.textContent).toContain("history re-sent: 128k");
+    expect(popover.querySelector('[data-testid="usage-last-move"]')).toBeNull();
+    expect(popover.textContent).not.toContain("Moved from");
+    expect(popover.textContent).not.toContain("history re-sent");
   });
 
   it("shows only the current provider (no other subscriptions) and 'Manage seats' opens Settings → Accounts", async () => {

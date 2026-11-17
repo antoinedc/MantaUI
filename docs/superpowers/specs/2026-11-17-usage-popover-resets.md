@@ -84,3 +84,15 @@ Modern Web Guidance used: `interest-triggered-tooltips` (WCAG 1.4.13 rules, ARIA
 - Card headline/countdown/tooltip formatting helpers (same day vs other day, "Today, " prefix, startedAt clause).
 - Component: cards render one per bar window with absolute headline; table rows for every seat with countdown-only cells (no date text in the table); not-started / stale / no-reading / logged-out / blocked states; manual-mode "Use this seat" opens the existing confirm; tooltip opens on focus and hover, closes on Escape without closing the popover; dot present only when progress is known.
 - Existing `UsageDial.*.test.tsx`, `seatSelectors.test.ts`, `UsageWindowRow.test.tsx` updated where they asserted the removed popover markup — never deleted to make them pass unless the thing they test is gone.
+
+## Revision 2026-11-18 — compact popover
+
+The popover was too big; this supersedes the parts of the design above it contradicts.
+
+- Reset cards (§1) removed; after the header the popover starts with the seat table. The absolute-reset headline is gone with them (the tooltip still carries the exact date); `formatResetHeadline` is deleted.
+- The conversation-seat line is removed; the table's highlighted first row names the seat and carries its Logged-out badge (a working control that opens the re-sign flow).
+- The last-move block is removed, with `formatLastMove`.
+- A provider with no seat choice (or no `view`) gets the same table with one highlighted row built from `snapshot.windows` (name = the account label, else the plan, else the provider; sub-line "this conversation"; no Use / next / badge). No window columns, no table.
+- Other windows (scoped caps, a third window) stay as faint lines directly under the table; inactive ones are omitted (no "not active" line).
+- Table bars are 3 px tall (the non-small bar variant is removed); the position dot is a white core of 1 px radius with a ring out to 1.5 px, still a gradient overlay.
+- Popover minimum width back to 420 px.
