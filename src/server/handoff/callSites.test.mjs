@@ -94,26 +94,42 @@ test("promptDelivery resolves before the redirect/busy check, and again at drain
 test("the client send and command rpc handlers run the resolver before anything else", () => {
   const rpc = read("rpc.mjs");
   assert.match(rpc, /if \(handoff && userInput\) return handoff\.admitPrompt\(userInput\);\s*return oc\.sendPrompt\(userInput\);/);
-  assert.match(rpc, /const userInput = input && \{ \.\.\.input, origin: "user" \};/, "the user origin is set server-side, after the client's fields");
+  assert.match(rpc, /const \{ appGenerated, \.\.\.clientInput \} = input \?\? \{\};\s*const userInput = input && \{ \.\.\.clientInput, origin: appGenerated === true \? "unknown" : "user" \};/, "the user origin is set server-side, after the client's fields; a client can only lower it");
   assert.match(rpc, /if \(handoff && input\) input = \{ \.\.\.input, sessionId: handoff\.guardCommand\(input\.sessionId\)\.target \};/);
   const cmd = rpc.slice(rpc.indexOf('"opencode:run-command"'));
   assert.ok(cmd.indexOf("handoff.guardCommand(") < cmd.indexOf("runBackgroundCommand(input)"), "the guard precedes the background-run branch");
   assert.ok(cmd.indexOf("handoff.guardCommand(") < cmd.indexOf("oc.runCommand("), "…and the direct run");
 });
 
-test("only the opencode:prompt rpc handler stamps a prompt origin of user (shared-knowledge §9.2)", () => {
-  const offenders = [];
+// Every place that can STAMP a prompt as user-authored: an `origin` field/argument that can evaluate to "user"
+// (plain, ternary or any expression on the same line). Evidence for rules and preferences rests on these, so a new
+// one must be a deliberate decision made here.
+const USER_ORIGIN_SITES = {
+  "rpc.mjs": { count: 1, why: "the opencode:prompt handler: the one place a client's send becomes user-authored (a client can only lower it)" },
+  "ctoAdmission.mjs": { count: 1, why: "the CTO conversation's dispatch: a HUMAN-origin submission (typed by the user in the CTO conversation, the origin set by the admission engine itself) is user-authored; background submissions are never" },
+};
+
+test("only the allow-listed sites stamp a prompt origin of user (shared-knowledge §9.2)", () => {
+  const seen = {};
   for (const file of walk(SERVER_DIR)) {
     const rel = relative(SERVER_DIR, file);
-    if (/\.test\.mjs$/.test(rel) || rel === "rpc.mjs" || rel === "promptOrigins.mjs") continue;
+    if (/\.test\.mjs$/.test(rel) || rel === "promptOrigins.mjs") continue;
     const text = readFileSync(file, "utf8");
-    if (!/sendPrompt|admitPrompt/.test(text)) continue; // unrelated `origin` fields (e.g. artifact links)
-    text.split("\n").forEach((line, i) => {
+    if (!/sendPrompt|admitPrompt|promptOrigins/.test(text)) continue; // unrelated `origin` fields (artifact links, handoff origins)
+    text.split("\n").forEach((line) => {
       const code = line.trim();
       if (code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) return;
-      if (/\borigin:\s*["']user["']/.test(code)) offenders.push(`${rel}:${i + 1}`);
+      // an `origin:` property whose value can be the "user" literal: `origin: "user"`, `origin: cond ? "user" : …`
+      if (/\borigin:\s*[^,}]*["']user["']/.test(code)) seen[rel] = (seen[rel] ?? 0) + 1;
     });
   }
-  assert.deepEqual(offenders, []);
-  assert.equal((read("rpc.mjs").match(/origin:\s*["']user["']/g) ?? []).length, 1, "exactly one stamping site in rpc.mjs");
+  const problems = [];
+  for (const [rel, n] of Object.entries(seen)) {
+    const want = USER_ORIGIN_SITES[rel];
+    if (!want) problems.push(`${rel}: ${n} site(s) that can stamp a prompt origin of "user" — only the opencode:prompt handler and the CTO admission may; add it to USER_ORIGIN_SITES with the reason only if it is truly user-typed`);
+    else if (want.count !== n) problems.push(`${rel}: expected ${want.count} stamping site(s), found ${n} (${want.why})`);
+  }
+  for (const rel of Object.keys(USER_ORIGIN_SITES)) if (!seen[rel]) problems.push(`${rel}: listed but no stamping site found — update the table`);
+  assert.deepEqual(problems, []);
+  assert.match(read("ctoAdmission.mjs"), /origin: claimed\.origin === "human" \? "user" : undefined/, "admission stamps user only for a human submission");
 });

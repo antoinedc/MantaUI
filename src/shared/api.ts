@@ -1100,7 +1100,8 @@ export interface KnowledgeChangesPage {
 }
 
 export type KnowledgeUndoResult =
-  | { ok: true }
+  /** `warning`: the undo happened but something around it didn't (e.g. a managed file couldn't be re-rendered). */
+  | { ok: true; warning?: string }
   | { ok: false; reason: string; /** The later change that blocks the undo, as one readable phrase. */ conflictWith?: string };
 
 export interface HandoffLinks {

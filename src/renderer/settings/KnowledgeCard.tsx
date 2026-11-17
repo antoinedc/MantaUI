@@ -12,8 +12,14 @@
 //
 // Radio groups are native `<fieldset>`/`<legend>` + `input[type=radio]` tinted
 // with `accent-color` (modern-web-guidance: forms, brand-consistent-forms).
+//
+// A radio group never auto-submits on an arrow key (forms guide: no auto-submit on radio change). Sharing groups
+// save on a deliberate pick; REPO RULES groups (default + per project) hold a pending selection until Apply, with a
+// confirm step before Pull request / Direct, because that is the choice that lets Manta write to a repository.
+// While a save runs a group is `aria-busy` rather than `disabled`, so keyboard focus stays where it was
+// (accessibility guide: `disabled` removes the control from the focus order).
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   KnowledgeChange,
   KnowledgeProjectRow,
@@ -67,7 +73,7 @@ type ChangesState =
   | { kind: "error"; message: string }
   | { kind: "ok"; items: KnowledgeChange[]; nextCursor: string | null };
 
-type UndoState = { busy: boolean; failure?: string };
+type UndoState = { busy: boolean; failure?: string; warning?: string };
 
 type RadioOption<V extends string> = {
   value: V;
@@ -82,37 +88,43 @@ function RadioGroup<V extends string>({
   options,
   value,
   onChange,
-  disabled,
+  busy,
   note,
   noteTone = "warn",
+  footer,
 }: {
   legend: string;
   name: string;
   options: ReadonlyArray<RadioOption<V>>;
   value: V;
   onChange: (v: V) => void;
-  disabled: boolean;
+  /** A save is running: the group reports aria-busy and ignores picks, but stays focusable. */
+  busy: boolean;
+  /** Controls under the options (the Repo rules Apply / confirm row). */
+  footer?: ReactNode;
   /** Visible text under the options, tied to every disabled option. */
   note?: string;
   noteTone?: "warn" | "faint";
 }) {
   const noteId = useId();
   return (
-    <fieldset className="min-w-0 space-y-2">
+    <fieldset className="min-w-0 space-y-2" aria-busy={busy ? true : undefined}>
       <legend className={`${LABEL_CLS} mb-1`}>{legend}</legend>
       {options.map((o) => (
         <label
           key={o.value}
-          className={"flex items-start gap-2 " + (disabled || o.disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer")}
+          className={"flex items-start gap-2 " + (o.disabled ? "cursor-not-allowed opacity-60" : busy ? "cursor-progress" : "cursor-pointer")}
         >
           <input
             type="radio"
             name={name}
             value={o.value}
             checked={value === o.value}
-            disabled={disabled || o.disabled}
+            disabled={o.disabled}
             aria-describedby={o.disabled && note ? noteId : undefined}
-            onChange={() => onChange(o.value)}
+            onChange={() => {
+              if (!busy) onChange(o.value);
+            }}
             style={{ accentColor: "var(--accent-solid)" }}
             className="mt-[3px] h-4 w-4 flex-none cursor-[inherit] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
           />
@@ -127,7 +139,99 @@ function RadioGroup<V extends string>({
           {note}
         </div>
       )}
+      {footer}
     </fieldset>
+  );
+}
+
+const isOutwardValue = (v: string): v is "pull-request" | "direct" => v === "pull-request" || v === "direct";
+
+/**
+ * A Repo rules group: the radios choose a PENDING value; nothing is saved until Apply, and choosing Pull request or
+ * Direct asks for a confirmation first. `savedValue` is what the box has (the group snaps back to it whenever it
+ * changes); Apply is `aria-disabled` (not `disabled`) when there is nothing to apply, so focus never drops.
+ */
+function RepoRulesGroup<V extends string>({
+  legend,
+  name,
+  options,
+  savedValue,
+  busy,
+  note,
+  what,
+  onApply,
+}: {
+  legend: string;
+  name: string;
+  options: ReadonlyArray<RadioOption<V>>;
+  savedValue: V;
+  busy: boolean;
+  note?: string;
+  /** What the confirm text says the choice applies to ("manta" / "every project without its own setting"). */
+  what: string;
+  onApply: (v: V) => void;
+}) {
+  const [pending, setPending] = useState<V>(savedValue);
+  const [confirming, setConfirming] = useState(false);
+  const confirmId = useId();
+  useEffect(() => {
+    setPending(savedValue);
+    setConfirming(false);
+  }, [savedValue]);
+  const dirty = pending !== savedValue;
+  const apply = () => {
+    if (busy || !dirty) return;
+    if (isOutwardValue(pending)) setConfirming(true);
+    else onApply(pending);
+  };
+  const confirmText =
+    pending === "pull-request"
+      ? `Manta will open one pull request with its learned rules in the repository for ${what}. It never merges it.`
+      : `Manta will commit its learned rules straight to the default branch of the repository for ${what} and push. A rejected push becomes a pull request.`;
+  return (
+    <RadioGroup
+      legend={legend}
+      name={name}
+      options={options}
+      value={pending}
+      busy={busy}
+      note={note}
+      onChange={(v) => {
+        setPending(v);
+        setConfirming(false);
+      }}
+      footer={
+        <div className="space-y-2 pt-1">
+          <Button tone="default" hook="manta-knowledge-apply" ariaDisabled={busy || !dirty} onClick={apply}>
+            {busy ? "Applying…" : "Apply"}
+          </Button>
+          {confirming && (
+            <div role="group" aria-labelledby={confirmId} className="rounded-md border border-warn px-3 py-2 space-y-2" data-testid={`${name}-confirm`}>
+              <div id={confirmId} className="text-meta text-text break-words">
+                {confirmText}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  tone="primary"
+                  hook="manta-knowledge-confirm"
+                  ariaDisabled={busy}
+                  onClick={() => {
+                    if (busy) return;
+                    setConfirming(false);
+                    onApply(pending);
+                  }}
+                >
+                  Confirm
+                </Button>
+                <Button tone="default" onClick={() => setConfirming(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      }
+    />
   );
 }
 
@@ -164,23 +268,22 @@ function ProjectRow({
         {row.canonicalId}
       </div>
       <div className="mt-3 grid grid-cols-2 gap-4">
-        <RadioGroup
+        <RepoRulesGroup
           legend="Repo rules"
           name={`knowledge-${row.slug}-repoRules`}
           options={repoOptions}
-          value={repoOverride ? row.repoRules : DEFAULT_VALUE}
-          disabled={busy}
+          savedValue={repoOverride ? row.repoRules : DEFAULT_VALUE}
+          busy={busy}
           note={outwardNote}
-          onChange={(v) =>
-            onPatch({ projects: { [row.slug]: { repoRules: v === DEFAULT_VALUE ? null : v } } })
-          }
+          what={row.displayName}
+          onApply={(v) => onPatch({ projects: { [row.slug]: { repoRules: v === DEFAULT_VALUE ? null : v } } })}
         />
         <RadioGroup
           legend="Sharing"
           name={`knowledge-${row.slug}-sharing`}
           options={sharingOptions}
           value={sharingOverride ? row.sharing : DEFAULT_VALUE}
-          disabled={busy}
+          busy={busy}
           onChange={(v) => onPatch({ projects: { [row.slug]: { sharing: v === DEFAULT_VALUE ? null : v } } })}
         />
       </div>
@@ -314,7 +417,8 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
       if (!alive.current) return;
       if (r && r.ok === true) {
         setUndoneIds((m) => ({ ...m, [c.id]: Date.now() }));
-        setUndoById((m) => ({ ...m, [c.id]: { busy: false } }));
+        const warning = typeof r.warning === "string" && r.warning.trim() ? r.warning.trim() : undefined;
+        setUndoById((m) => ({ ...m, [c.id]: { busy: false, ...(warning ? { warning } : {}) } }));
       } else if (r && r.ok === false) {
         setUndoById((m) => ({ ...m, [c.id]: { busy: false, failure: describeUndoFailure(r) } }));
       } else {
@@ -478,20 +582,21 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
           <div className="text-meta text-text-faint max-w-[62ch]">Applied to every project that doesn't set its own.</div>
         </div>
         <div className="grid grid-cols-2 gap-4">
-          <RadioGroup
+          <RepoRulesGroup
             legend="Repo rules"
             name="knowledge-default-repoRules"
             options={REPO_RULES_OPTIONS}
-            value={s.repoRules}
-            disabled={busy}
-            onChange={(v) => void save({ repoRules: v }, `Default repo rules set to ${repoRulesLabel(v)}.`)}
+            savedValue={s.repoRules}
+            busy={busy}
+            what="each project that uses the default (only where this box can push to the repository)"
+            onApply={(v) => void save({ repoRules: v }, `Default repo rules set to ${repoRulesLabel(v)}.`)}
           />
           <RadioGroup
             legend="Sharing"
             name="knowledge-default-sharing"
             options={SHARING_OPTIONS}
             value={s.sharing}
-            disabled={busy}
+            busy={busy}
             onChange={(v) =>
               void save({ sharing: v }, `Default sharing set to ${SHARING_OPTIONS.find((o) => o.value === v)?.label ?? v}.`)
             }
@@ -594,6 +699,11 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
                     )}
                   </div>
                   {c.error && <div className="text-meta text-danger break-words">{c.error}</div>}
+                  {st?.warning && (
+                    <div role="status" className="text-meta text-warn break-words" data-testid={`knowledge-undo-warning-${c.id}`}>
+                      Undone, but: {st.warning}
+                    </div>
+                  )}
                   {st?.failure && (
                     <div role="alert" className="text-meta text-danger break-words" data-testid={`knowledge-undo-error-${c.id}`}>
                       {st.failure}
