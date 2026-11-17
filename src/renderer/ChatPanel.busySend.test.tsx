@@ -84,6 +84,24 @@ describe("ChatPanel busy send + inbox", () => {
       sessionId: SID,
       payload: { questions: [{ id: "q1", sessionID: SID, requestId: "que_1", questions: [{ header: "H", question: "Which?", options: [{ label: "a" }] }] }] },
     });
+  /** A pending question, then a send with `chord`: the question is rejected (awaited) BEFORE the message goes out. */
+  async function questionRejectedBeforeSend(chord?: KeyboardEventInit) {
+    const order: string[] = [];
+    await open({
+      opencodeQuestionReject: () => {
+        order.push("reject");
+        return Promise.resolve();
+      },
+      opencodePrompt: () => {
+        order.push("prompt");
+        return Promise.resolve();
+      },
+    });
+    await emitQuestion();
+    await type("go with a");
+    await key("Enter", chord);
+    expect(order).toEqual(["reject", "prompt"]);
+  }
   async function setRunning(running: boolean) {
     await emitStreamAndFlush(bus, h!, { sub: "running", sessionId: SID, payload: { running } });
   }
@@ -207,32 +225,8 @@ describe("ChatPanel busy send + inbox", () => {
       expect(api.calls.opencodePrompt).toHaveLength(1);
     });
 
-    /** A pending question, then a send with `chord`: the question is rejected (awaited) BEFORE the message goes out. */
-    async function questionRejectedBeforeSend(chord?: KeyboardEventInit) {
-      const order: string[] = [];
-      await open({
-        opencodeQuestionReject: () => {
-          order.push("reject");
-          return Promise.resolve();
-        },
-        opencodePrompt: () => {
-          order.push("prompt");
-          return Promise.resolve();
-        },
-      });
-      await emitQuestion();
-      await type("go with a");
-      await key("Enter", chord);
-      expect(order).toEqual(["reject", "prompt"]);
-    }
-
     it("a pending question is rejected (awaited) BEFORE the message is sent", async () => {
       await questionRejectedBeforeSend();
-    });
-      await emitQuestion();
-      await type("go with a");
-      await key("Enter");
-      expect(order).toEqual(["reject", "prompt"]);
     });
 
     it("if the question can't be rejected NOTHING is sent, the draft is kept and the error shown", async () => {
@@ -326,11 +320,6 @@ describe("ChatPanel busy send + inbox", () => {
 
     it("a pending question is rejected (awaited) BEFORE the message is sent", async () => {
       await questionRejectedBeforeSend(altEnter);
-    });
-      await emitQuestion();
-      await type("go with a");
-      await key("Enter", altEnter);
-      expect(order).toEqual(["reject", "prompt"]);
     });
 
     it("the timer that drops a settled sending row is cleared with the panel (nothing fires into an unmounted tree)", async () => {
