@@ -50,6 +50,10 @@ pinned OpenCode V2 binary, never the live service. Answers are recorded in
    on every request, or once per session/process? Decides whether §6.8's daily
    batching is required (it stays as the default either way).
 
+Spike results: `docs/opencode-v2/spikes/knowledge/FINDINGS.md` (pinned
+2.0.30): 1 yes, 2 yes, 3 re-read within ~2.5 s via `<system-update>`
+messages.
+
 ## 1. Problem
 
 Measured on the dev box, 2026-11-16:
@@ -312,6 +316,7 @@ This runner works with the CTO engine off; only the budget hook differs (§6.7).
 |---|---|---|---|---|
 | `knowledge-capture` | notes from a work stretch | `nano` → `fast` | 8k | no |
 | `knowledge-corrections` | classify user messages | `nano` → `fast` | 8k | no |
+| `knowledge-trial` | model resolution only, for the skill trial session (§6.6) | `mid` → `balanced` | — | no |
 | `curator-notes` | notes → page edits | `mid` → `balanced` | 12k | no |
 | `curator-rules` | rules, preferences, commons rewrites, conflicts | `deep` → `deep` | 24k | yes |
 | `curator-skills` | skill drafts, trial grading | `deep` → `deep` | 24k | yes |
@@ -453,9 +458,12 @@ original source, so the rest of a page keeps its exact formatting.
 
 ### 6.8 Global writes are batched
 
-Writes that change every session's instructions (the global managed block,
-learned skills) are applied once a day at 04:00 box-local time, so live
-sessions' prompt caches are not invalidated throughout the day. Undo applies
+Spike §0.3: opencode re-reads the global `AGENTS.md` and the skills folder
+within ~2.5 s and tells running sessions through an appended
+`<system-update>` user message (the system block stays byte-identical; new
+sessions get the new text in their system block). So these writes do not break
+prompt caches, but each one adds a message to every active session. They are
+therefore applied once a day at 04:00 box-local time. Undo applies
 immediately (a user action).
 
 ## 7. Reading
@@ -465,11 +473,14 @@ immediately (a user action).
 - **Precomputed per project** on every store commit and after every fetch of
   the curator's clone (a merged PR changes the rules part)
   (`.briefings/project-<slug>.txt`), so serving it is a file read.
-- **Delivery**: the `manta` plugin prefetches the briefing when a session
-  starts (session-created event if §0.2 confirms one, else asynchronously on
-  the first `context` hook call) with `GET /api/knowledge/briefing`, and its
-  `context` hook **appends** the cached text after the existing system blocks
-  (so `manta-claude-max` keeps its identity first).
+- **Delivery** (spike §0 answered: async `context` handlers are awaited, and
+  `ctx.event.subscribe()` delivers `session.created` with `sessionID`,
+  `parentID`, `location.directory` ~440 ms before the first `context` call):
+  the `manta` plugin starts `GET /api/knowledge/briefing` on `session.created`;
+  its `context` hook awaits that prefetch for at most 1,000 ms, then
+  **appends** the text after the existing system blocks (so `manta-claude-max`
+  keeps its identity first). A prefetch still pending after 1,000 ms is
+  abandoned and not acked (no briefing for that start).
 - **Byte stability, acknowledged**: the server returns `{text, token}`. The
   plugin calls `POST /api/knowledge/briefing/ack {sessionID, token}` when it
   actually injects. From then on the server returns the same bytes for that
