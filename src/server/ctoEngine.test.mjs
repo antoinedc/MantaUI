@@ -445,6 +445,9 @@ test("ambientPreflight: thrifty flips ONLY on usd-cap and a WEEKLY-kind level-ca
     [{ ok: false, reason: "level-cap", window: { key: "claude:weekly" } }, true],
     [{ ok: false, reason: "level-cap", window: { key: "claude:weekly_scoped:opus" } }, true],
     [{ ok: false, reason: "level-cap", window: { key: "claude:session" } }, false],
+    // the budget's own classification wins over the key: a ChatGPT 7-day window is named "session"
+    [{ ok: false, reason: "level-cap", window: { key: "codex:session", weekly: true } }, true],
+    [{ ok: false, reason: "level-cap", window: { key: "claude:session", weekly: false } }, false],
     [{ ok: false, reason: "window-busy", window: { key: "claude:session" } }, false],
     [{ ok: false, reason: "projected-high", window: { key: "claude:weekly" } }, false],
     [{ ok: false, reason: "exhausted", window: { key: "claude:weekly" } }, false],

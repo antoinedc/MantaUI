@@ -537,6 +537,7 @@ export function createBackgroundBudget({
     bgPct: round2(v.bgPct),
     cap: v.cap,
     resetsAt: v.resetsAt,
+    weekly: v.weekly === true,
     ...(v.projectedPct != null ? { projectedPct: round2(v.projectedPct) } : {}),
   });
 
