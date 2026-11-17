@@ -9,7 +9,7 @@
 import { describe, test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, existsSync, realpathSync, rmSync, readFileSync, openSync, closeSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, existsSync, realpathSync, renameSync, rmSync, readFileSync, openSync, closeSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import {
@@ -428,6 +428,14 @@ describe("reclaim: the closed allowlist", () => {
   });
 });
 
+/** A first reclaim that stops at `failPath`: the manifest is persisted and everything after it remains. */
+async function partialReclaim(fx, failPath) {
+  const store = { data: structuredClone(completedState(fx)) };
+  const a = await makeBox(fx, { io: { fs: guardedFs(fx, { failUnlink: (p) => p === failPath }) }, store });
+  await a.engine.reclaim();
+  return store;
+}
+
 describe("reclaim: POST — the manifest, deletion order, resume", () => {
   test("happy path: manifest is persisted BEFORE the first unlink; live files + other files survive", async () => {
     const fx = makeFixture();
@@ -542,9 +550,7 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
 
   test("a resumed run refuses when opencode now holds a remaining target open", async () => {
     const fx = makeFixture();
-    const store = { data: structuredClone(completedState(fx)) };
-    const a = await makeBox(fx, { io: { fs: guardedFs(fx, { failUnlink: (p) => p === fx.v1shm }) }, store });
-    await a.engine.reclaim();
+    const store = await partialReclaim(fx, fx.v1shm);
     const fs2 = guardedFs(fx);
     const b = await makeBox(fx, { io: { fs: fs2, openFiles: async () => [{ path: fx.live }, { path: fx.v1shm }] }, store });
     const r = await b.engine.reclaim();
@@ -567,12 +573,14 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
 
   test("a manifest entry replaced by a DIFFERENT file (different inode) is refused", async () => {
     const fx = makeFixture();
-    const store = { data: structuredClone(completedState(fx)) };
-    const a = await makeBox(fx, { io: { fs: guardedFs(fx, { failUnlink: (p) => p === fx.v1shm }) }, store });
-    await a.engine.reclaim(); // v1 + v1wal gone, v1shm and bin remain, manifest persisted
+    const store = await partialReclaim(fx, fx.v1shm); // v1 + v1wal gone, v1shm and bin remain, manifest persisted
     // Between the runs the shm file is deleted and a brand-new file takes its name.
-    rmSync(fx.v1shm);
-    fx.put(fx.v1shm, 99);
+    // Create the impostor BEFORE the original goes away and rename it over it: deleting first and then
+    // creating lets the filesystem hand the freed inode straight back, and the "different file" would
+    // then be indistinguishable from the original.
+    const impostor = join(fx.data, "impostor.tmp");
+    fx.put(impostor, 99);
+    renameSync(impostor, fx.v1shm);
     const fs2 = guardedFs(fx);
     const b = await makeBox(fx, { io: { fs: fs2 }, store });
     const r = await b.engine.reclaim();
@@ -584,6 +592,11 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
   });
 
   describe("forged manifest (the state file is as untrusted as the rest of it)", () => {
+    const reclaimWithManifest = async (fx, manifest) => {
+      const fs = guardedFs(fx);
+      const { engine, store } = await makeBox(fx, { state: completedState(fx, { reclaim: manifest }), io: { fs } });
+      return { fs, store, r: await engine.reclaim() };
+    };
     const forged = async (fx, path, nameNote, re) => {
       const st = statSync(path, { bigint: true });
       const manifest = {
@@ -591,9 +604,7 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
         startedAt: 1,
         targets: [{ path, dev: String(st.dev), ino: String(st.ino), size: Number(st.size), removed: false }],
       };
-      const fs = guardedFs(fx);
-      const { engine, store } = await makeBox(fx, { state: completedState(fx, { reclaim: manifest }), io: { fs } });
-      const r = await engine.reclaim();
+      const { fs, store, r } = await reclaimWithManifest(fx, manifest);
       assert.equal(r.ok, false, nameNote);
       assert.match(r.error, re, nameNote);
       assert.deepEqual(fs.unlinked, [], `${nameNote}: nothing unlinked`);
@@ -638,9 +649,7 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
       symlinkSync(victim, link);
       const st = statSync(victim, { bigint: true });
       const manifest = { state: "failed", targets: [{ path: link, dev: String(st.dev), ino: String(st.ino), size: 12, removed: false }] };
-      const fs = guardedFs(fx);
-      const { engine } = await makeBox(fx, { state: completedState(fx, { reclaim: manifest }), io: { fs } });
-      const r = await engine.reclaim();
+      const { r } = await reclaimWithManifest(fx, manifest);
       assert.equal(r.ok, false);
       assert.match(r.error, /not a regular file/);
       assert.ok(exists(victim));
@@ -651,9 +660,7 @@ describe("reclaim: POST — the manifest, deletion order, resume", () => {
       const sneaky = `${fx.data}/../data/opencode.db`; // join() would normalise it away
       const st = statSync(fx.v1, { bigint: true });
       const manifest = { state: "failed", targets: [{ path: sneaky, dev: String(st.dev), ino: String(st.ino), size: 1, removed: false }] };
-      const fs = guardedFs(fx);
-      const { engine } = await makeBox(fx, { state: completedState(fx, { reclaim: manifest }), io: { fs } });
-      const r = await engine.reclaim();
+      const { fs, r } = await reclaimWithManifest(fx, manifest);
       assert.equal(r.ok, false);
       assert.deepEqual(fs.unlinked, []);
       assert.ok(exists(fx.v1));
