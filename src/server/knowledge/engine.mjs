@@ -1,0 +1,443 @@
+// engine.mjs — the knowledge engine factory (spec §6.3, §11.1): constructs and wires
+// every foundation module, owns the lifecycle and the pollers, and exposes the
+// operations the HTTP routes and RPC channels call.
+//
+// INDEPENDENT of the CTO engine (`ctoEnabled`): its own settings, budget, pollers.
+// Without Node 24 (`node:sqlite`) the subsystem is off and says why (`status()`).
+//
+// The layers built on top of this foundation (curator, capture, correction detector,
+// skills, undo, repo writes) get everything they need from the returned object:
+//   engine.store      git store: withLock(tx => tx.commit/revert/…), onCommit, listPages…
+//   engine.state      state.sqlite (state.migrate(id, ddl) for their own tables)
+//   engine.registry   project registry (list/get/identify)
+//   engine.sessionMap session → project map (get/pin/markCaptured/directoriesFor)
+//   engine.queue      note queue (enqueue/list/consume/stats/slugs)
+//   engine.settings   settings (get/effective/effectiveRepoRules/outward/set)
+//   engine.budget     spend ledger (canSpend/record/canBatch/recordBatch)
+//   engine.changesLog Recent-changes log (add/list/get/markUndone/setError); engine.changes() is the RPC list
+//   engine.scanner    secret scanner (scan/redact)
+//   engine.briefings  briefing precompute/serving
+//   engine.deps       the injected deps (runner, prompt origins, forge, …)
+// NEVER call `registry.identify()` while holding the store lock: it commits
+// `projects.json` through the same lock.
+
+import { join } from "node:path";
+import { startPoller } from "../startPoller.mjs";
+import { estimateTokens as defaultEstimateTokens } from "../ctoSessions.mjs";
+import { KnowledgeError, isKnowledgeError } from "./errors.mjs";
+import { createGitRunner } from "./gitRunner.mjs";
+import { createIdentityResolver, createProjectRegistry, emptyRegistry } from "./identity.mjs";
+import { openState } from "./state.mjs";
+import { createSessionMap } from "./sessionMap.mjs";
+import { createKnowledgeStore } from "./store.mjs";
+import { createSettings, effectiveFor } from "./settings.mjs";
+import { createSecretScanner } from "./secretScan.mjs";
+import { createQueue, NoteRejected, validateNote } from "./queue.mjs";
+import { createBriefings } from "./briefing.mjs";
+import { createPageIndex, createSearch } from "./search.mjs";
+import { createBudget } from "./budget.mjs";
+import { createChangeLog } from "./changes.mjs";
+import { listSessionsPage as defaultListSessionsPage } from "./backfillSource.mjs";
+import { statePath } from "../../shared/paths.mjs";
+
+const ENABLED_MEMO_MS = 5000;
+const DAY_MS = 24 * 3600 * 1000;
+const OBSERVE_TYPES = new Set(["session.created", "session.execution.started", "session.status"]);
+
+const disabled = (reason = "Shared knowledge is off.") => new KnowledgeError("disabled", reason, { status: 503 });
+
+/**
+ * deps (all optional except `config`):
+ *   config {get(), update(patch)}            local.configGet / configUpdate
+ *   dir, git, importSqlite, now, log
+ *   getSession(id) → session|null            {directory, parentID, agent, metadata, projectID}
+ *   isCtoSession(id) → boolean               ctoConversation.isConversationSession
+ *   listSessionsPage({afterId, limit})       history backfill source (default: opencode's session_v2)
+ *   searchTranscripts({query, directories, anyTerms, limit}) → {hits, truncated}   [INTEGRATION: ctoSearchIndex]
+ *   readMessages({sessionID, messageIDs, radius}) → [{id, role, text, at}] | null
+ *   isUserAuthoredRef(ref, {sessionID}) → boolean                                   [INTEGRATION: prompt origins]
+ *   getRepoAccess({kind, host, owner, repo}) → {canPush, isFork, defaultBranch}     [INTEGRATION: forge]
+ *   hasForgeLogin(kind) → boolean                                                   [INTEGRATION: forge]
+ *   getPrices() / bandOf(providerID, modelID)  budget pricing (optimizer prices, router band)
+ *   projectRules(slug, {repoRules}) → string[] briefing part 1 override
+ *   undo(change, ctx) → {ok:true} | {ok:false, reason, conflictWith?}                [curator layer]
+ *   onSettingsChanged({prev, next})          downgrade cleanup hook                  [curator layer]
+ *   secretValues() / loadLint()              secret scanner overrides (tests)
+ *   fireNotify({message, title, tag})        push.fireNotify
+ *   estimateTokens(text)                     default: ctoSessions.estimateTokens
+ *   runEphemeral / resolveModelForClass      the CTO task-class runner, carried for the curator [INTEGRATION: runner]
+ */
+export function createKnowledgeEngine(deps = {}) {
+  const { config } = deps;
+  if (!config || typeof config.get !== "function" || typeof config.update !== "function") throw new Error("createKnowledgeEngine: config {get, update} is required");
+  const dir = deps.dir ?? statePath("knowledge");
+  const now = deps.now ?? Date.now;
+  const log = deps.log ?? console.warn;
+  const estimateTokens = deps.estimateTokens ?? defaultEstimateTokens;
+  const git = deps.git ?? createGitRunner({ defaultCwd: dir });
+
+  let c = null; // the wired context, set by init()
+  let initError = null;
+  let readyP = null;
+  let poller = null;
+  let enabledMemo = { at: 0, value: null };
+  let derivedRunning = null;
+  let derivedAgain = false;
+
+  const registryProxy = {
+    list: async () => (c ? c.registry.list() : []),
+    get: async (slug) => (c ? c.registry.get(slug) : null),
+  };
+  const settings = createSettings({ config, registry: registryProxy, getRepoAccess: deps.getRepoAccess, hasForgeLogin: deps.hasForgeLogin, now });
+
+  async function enabledState() {
+    const t = now();
+    if (enabledMemo.value && t - enabledMemo.at < ENABLED_MEMO_MS) return enabledMemo.value;
+    const s = await settings.get();
+    enabledMemo = { at: t, value: { enabled: s.enabled, observeOnly: s.observeOnly } };
+    return enabledMemo.value;
+  }
+  const invalidateEnabled = () => {
+    enabledMemo = { at: 0, value: null };
+  };
+
+  // ---- derived data: page index + briefings, refreshed after every store commit -----------
+  function scheduleDerived() {
+    if (!c) return Promise.resolve();
+    if (derivedRunning) {
+      derivedAgain = true;
+      return derivedRunning;
+    }
+    derivedRunning = (async () => {
+      do {
+        derivedAgain = false;
+        try {
+          await c.pageIndex.rebuild();
+          await c.briefings.precomputeAll();
+        } catch (e) {
+          log("[knowledge] derived refresh failed:", e?.message ?? e);
+        }
+      } while (derivedAgain);
+    })().finally(() => {
+      derivedRunning = null;
+    });
+    return derivedRunning;
+  }
+
+  async function init() {
+    let state;
+    try {
+      state = await openState({ path: join(dir, "state.sqlite"), importSqlite: deps.importSqlite });
+    } catch (e) {
+      initError = e;
+      return;
+    }
+    try {
+      const scanner = createSecretScanner({ loadLint: deps.loadLint, secretValues: deps.secretValues });
+      const store = createKnowledgeStore({ dir, git, scan: (t) => scanner.scan(t), now, log });
+      await store.init();
+      const resolver = createIdentityResolver({ git, now });
+      const registry = createProjectRegistry({
+        resolver,
+        now,
+        load: async () => {
+          const raw = await store.read("projects.json");
+          try {
+            return raw ? JSON.parse(raw) : emptyRegistry();
+          } catch {
+            return emptyRegistry();
+          }
+        },
+        save: async (doc, message) => {
+          await store.commit({ path: "projects.json", content: `${JSON.stringify(doc, null, 2)}\n`, message });
+        },
+      });
+      const changes = createChangeLog({ state, now });
+      const sessionMap = createSessionMap({ state, registry, getSession: deps.getSession, isCtoSession: deps.isCtoSession, listSessionsPage: deps.listSessionsPage ?? defaultListSessionsPage, now, log });
+      const queue = createQueue({
+        state,
+        scanner,
+        now,
+        root: join(dir, ".queue"),
+        isUserAuthoredRef: deps.isUserAuthoredRef,
+        onDrop: (slug, n) => changes.add({ kind: "dropped", summary: `Dropped ${n} queued note${n === 1 ? "" : "s"}`, reason: "The note queue for this project was full (500).", area: "project", slug }),
+      });
+      const budget = createBudget({ state, settings, getPrices: deps.getPrices, bandOf: deps.bandOf, now });
+      const briefings = createBriefings({
+        state,
+        store,
+        registry,
+        sessionMap,
+        settings,
+        estimateTokens,
+        getSession: deps.getSession,
+        isCtoSession: deps.isCtoSession,
+        isActive: async () => {
+          const e = await enabledState();
+          return e.enabled && !e.observeOnly;
+        },
+        projectRules: deps.projectRules,
+        dir: join(dir, ".briefings"),
+        now,
+      });
+      const pageIndex = createPageIndex({ state, store, now });
+      const search = createSearch({ state, store, registry, sessionMap, settings, searchTranscripts: deps.searchTranscripts, readMessages: deps.readMessages });
+      c = { state, scanner, store, registry, resolver, changes, sessionMap, queue, budget, briefings, pageIndex, search };
+      store.onCommit(() => void scheduleDerived());
+      await scheduleDerived();
+      await maybeNotifyUpgrade();
+    } catch (e) {
+      initError = e;
+      c = null;
+      state.close();
+      log("[knowledge] failed to start:", e?.message ?? e);
+    }
+  }
+
+  async function maybeNotifyUpgrade() {
+    if (!c || !deps.fireNotify || c.state.kvGet("upgrade.notified") === "1") return;
+    const s = await settings.get();
+    if (!s.enabled || s.observeOnly) return;
+    c.state.kvSet("upgrade.notified", "1");
+    try {
+      await deps.fireNotify({
+        title: "Shared knowledge is on",
+        message: `Manta now keeps short notes from your sessions and shares what it learns between them. It spends up to $${s.dailyCapUsd.toFixed(2)} a day on models Manta picks. Open Settings → Knowledge to review it or turn it off.`,
+        tag: "knowledge-upgrade",
+      });
+    } catch (e) {
+      log("[knowledge] upgrade notification failed:", e?.message ?? e);
+    }
+  }
+
+  const ready = () => (readyP ??= init());
+
+  let lastPrune = 0;
+  async function maintenance() {
+    if (!c) return;
+    const e = await enabledState();
+    if (!e.enabled) return;
+    try {
+      await c.sessionMap.backfillStep({ budgetMs: 2000 });
+    } catch (err) {
+      if (err?.code !== "no_db") log("[knowledge] backfill step failed:", err?.message ?? err);
+    }
+    await c.briefings.sweep();
+    if (now() - lastPrune > DAY_MS) {
+      lastPrune = now();
+      c.budget.prune();
+      c.changes.prune();
+    }
+  }
+
+  async function start() {
+    await ready();
+    if (c && !poller) poller = startPoller(maintenance, { intervalMs: deps.maintenanceMs ?? 60_000, label: "knowledge", now });
+    return status();
+  }
+  async function stop() {
+    poller?.stop();
+    poller = null;
+    if (c) {
+      c.state.close();
+    }
+    c = null;
+    readyP = null;
+  }
+
+  // ---- guards ---------------------------------------------------------------------
+  async function requireOn({ allowObserveOnly = false } = {}) {
+    await ready();
+    if (!c) throw disabled(initError?.code === "unsupported" ? "Shared knowledge needs the Node 24 runtime and is off on this box." : "Shared knowledge isn't available on this box.");
+    const e = await enabledState();
+    if (!e.enabled) throw disabled();
+    if (e.observeOnly && !allowObserveOnly) throw disabled();
+    return c;
+  }
+
+  // ---- events ---------------------------------------------------------------------
+  /** Feed raw V2 events and/or lifecycle events from the opencode pump. Never throws. */
+  async function observeRaw(ev) {
+    try {
+      if (!c || !OBSERVE_TYPES.has(ev?.type)) return;
+      if (!(await enabledState()).enabled) return;
+      await c.sessionMap.observe(ev);
+    } catch (e) {
+      log("[knowledge] observe failed:", e?.message ?? e);
+    }
+  }
+
+  // ---- AI-facing operations (HTTP routes) -----------------------------------------
+  async function enqueueNote({ sessionID, kind, text, refs } = {}) {
+    const ctx = await requireOn({ allowObserveOnly: true });
+    let clean;
+    try {
+      clean = validateNote({ kind, text, refs }, { origin: "tool" });
+    } catch (e) {
+      if (e instanceof NoteRejected) throw new KnowledgeError("invalid-note", e.reason, { status: 400 });
+      throw e;
+    }
+    if (typeof sessionID !== "string" || sessionID === "") throw new KnowledgeError("invalid-note", "sessionID is required.", { status: 400 });
+    let mapping = ctx.sessionMap.get(sessionID);
+    if (!mapping) mapping = await ctx.sessionMap.pin({ sessionID, source: "note" });
+    if (!mapping) return { accepted: false, reason: "This session isn't part of a known project, so the note wasn't kept." };
+    const r = await ctx.queue.enqueue({ slug: mapping.slug, sessionID, origin: "tool", ...clean });
+    return r.accepted ? { accepted: true, id: r.id } : { accepted: false, reason: r.reason };
+  }
+
+  const search = async (args) => (await requireOn()).search.search(args);
+  const readPage = async (args) => (await requireOn()).search.page(args);
+  const briefing = async (args) => {
+    await ready();
+    if (!c) return { text: "", token: null };
+    return c.briefings.request(args);
+  };
+  const briefingAck = async (args) => {
+    await ready();
+    if (!c) throw new KnowledgeError("stale-token", "That briefing token is no longer current.", { status: 409 });
+    return c.briefings.ack(args);
+  };
+  const briefingReset = async (args) => {
+    await ready();
+    return c ? c.briefings.reset(args) : { ok: true };
+  };
+
+  // ---- desktop operations (RPC) ---------------------------------------------------
+  async function status() {
+    await ready();
+    const s = await settings.get();
+    if (!c) {
+      const unsupported = initError?.code === "unsupported";
+      return {
+        state: unsupported ? "unsupported" : "error",
+        enabled: s.enabled,
+        reason: unsupported ? "Shared knowledge needs the Node 24 runtime (node:sqlite), so it is off on this box." : `Shared knowledge couldn't start: ${String(initError?.message ?? "unknown error").slice(0, 200)}`,
+      };
+    }
+    const spent = c.budget.spentToday();
+    const queued = {};
+    for (const slug of await c.queue.slugs()) {
+      const n = await c.queue.count(slug);
+      if (n > 0) queued[slug] = n;
+    }
+    const wk = c.briefings.weekStats();
+    return {
+      state: s.enabled ? "on" : "off",
+      enabled: s.enabled,
+      ...(s.observeOnly ? { observeOnly: true } : {}),
+      spentUsd: spent,
+      capUsd: s.dailyCapUsd,
+      capReached: spent >= s.dailyCapUsd,
+      queued,
+      briefings: { startedThisWeek: wk.served, missedThisWeek: wk.missed },
+      backfillDone: c.sessionMap.backfillDone(),
+    };
+  }
+
+  async function settingsGet() {
+    await ready();
+    return { ...(await settings.view()), status: await status() };
+  }
+
+  async function settingsSet(patch) {
+    await ready();
+    const prev = await settings.get();
+    const next = await settings.set(patch);
+    invalidateEnabled();
+    if (c) {
+      if (!prev.enabled && next.enabled) c.state.kvDelete("backfill.done");
+      void c.briefings.precomputeAll().catch((e) => log("[knowledge] briefing refresh failed:", e?.message ?? e));
+    }
+    try {
+      await deps.onSettingsChanged?.({ prev, next });
+    } catch (e) {
+      log("[knowledge] onSettingsChanged failed:", e?.message ?? e);
+    }
+    return settingsGet();
+  }
+
+  async function changesList(args = {}) {
+    await ready();
+    if (!c) return { items: [], nextCursor: null };
+    return c.changes.list({ cursor: args?.cursor, limit: args?.limit });
+  }
+
+  /** `knowledge:undo {id}` → `{ok:true}` | `{ok:false, reason, conflictWith?}`; every outcome is recorded on the change. */
+  async function undo(args = {}) {
+    await ready();
+    if (!c) return { ok: false, reason: "Shared knowledge is off on this box." };
+    const change = typeof args?.id === "string" ? c.changes.get(args.id) : null;
+    if (!change) return { ok: false, reason: "That change no longer exists." };
+    if (change.undoneAt) return { ok: false, reason: "That change was already undone." };
+    if (!change.undoable) return { ok: false, reason: "That change can't be undone." };
+    if (!deps.undo) return { ok: false, reason: "Undo isn't available yet on this box." };
+    let res;
+    try {
+      res = await deps.undo(change, { store: c.store, changes: c.changes, registry: c.registry });
+    } catch (e) {
+      res = { ok: false, reason: isKnowledgeError(e) ? e.message : `Undo failed: ${String(e?.message ?? e).slice(0, 200)}` };
+    }
+    if (res?.ok) {
+      c.changes.markUndone(change.id);
+      return { ok: true };
+    }
+    const out = { ok: false, reason: String(res?.reason ?? "Undo failed."), ...(res?.conflictWith ? { conflictWith: res.conflictWith } : {}) };
+    c.changes.setError(change.id, out.reason);
+    return out;
+  }
+
+  return {
+    start,
+    stop,
+    ready,
+    status,
+    observeRaw,
+    observeEvent: observeRaw,
+    enqueueNote,
+    search,
+    readPage,
+    briefing,
+    briefingAck,
+    briefingReset,
+    settingsGet,
+    settingsSet,
+    changes: changesList,
+    undo,
+    maintenance,
+    refreshDerived: scheduleDerived,
+    settings,
+    deps,
+    // Foundation handles for the curator/capture layer — valid after `ready()` resolves.
+    get store() {
+      return c?.store ?? null;
+    },
+    get state() {
+      return c?.state ?? null;
+    },
+    get registry() {
+      return c?.registry ?? null;
+    },
+    get sessionMap() {
+      return c?.sessionMap ?? null;
+    },
+    get queue() {
+      return c?.queue ?? null;
+    },
+    get budget() {
+      return c?.budget ?? null;
+    },
+    get changesLog() {
+      return c?.changes ?? null;
+    },
+    get scanner() {
+      return c?.scanner ?? null;
+    },
+    get briefings() {
+      return c?.briefings ?? null;
+    },
+    get pageIndex() {
+      return c?.pageIndex ?? null;
+    },
+    effectiveFor,
+  };
+}

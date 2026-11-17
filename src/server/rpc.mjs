@@ -2,6 +2,7 @@
 // Mirrors Electron ipcMain.handle semantics.
 
 import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
+import { buildKnowledgeChannels } from "./knowledge/routes.mjs";
 import { describeInboxCancel, describeInboxSetDelivery } from "./inboxCopy.mjs";
 import { backgroundCommandNames as defaultBackgroundCommandNames } from "./commandBackground.mjs";
 import { dirname, join } from "node:path";
@@ -568,6 +569,9 @@ export function buildHandlers({
   // Routines engine (src/server/routines.mjs). Null when not wired (tests): every
   // `routines:*` channel then answers a plain sentence instead of throwing a TypeError.
   routines = null,
+  // Shared-knowledge engine (src/server/knowledge/engine.mjs). Null when not wired (tests): every
+  // `knowledge:*` channel then answers 503.
+  knowledge = null,
   // WS02 (SF-4): the box's reading of background-job records (read-only refusal,
   // job view, list labels, approve rule check). Null when not wired (tests).
   delegateView = null,
@@ -1033,6 +1037,11 @@ export function buildHandlers({
       if (patch && typeof patch === "object" && ("summaryModel" in patch || "summaryModelOptOut" in patch)) {
         const { summaryModel: _s, summaryModelOptOut: _o, ...rest } = patch;
         patch = rest;
+      }
+      // The Knowledge settings are written only by `knowledge:settings-set` (validated, sole
+      // writer): a generic config write can never set them. Dotted `knowledge.*` keys too.
+      if (patch && typeof patch === "object" && Object.keys(patch).some((k) => k === "knowledge" || k.startsWith("knowledge."))) {
+        patch = Object.fromEntries(Object.entries(patch).filter(([k]) => k !== "knowledge" && !k.startsWith("knowledge.")));
       }
       if (patch?.handoffMode !== undefined && !["auto", "suggest", "off"].includes(patch.handoffMode)) {
         throw new Error('handoffMode must be "auto", "suggest" or "off"');
@@ -2751,6 +2760,9 @@ export function buildHandlers({
     // same poller, same ⏰ card. Returns { ok, job?, error? }.
     "schedule:create": (input) =>
       scheduleCreateJob(input || {}, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- shared knowledge (src/server/knowledge/; spec docs/superpowers/specs/2026-11-16-shared-knowledge.md §11.6) ----
+    ...buildKnowledgeChannels(knowledge),
 
     // ---- routines (manta-server owned; src/server/routines.mjs, spec §5.1) ----
     // Args/returns are the pinned wire contract in src/shared/routines.ts. A refusal is a

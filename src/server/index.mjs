@@ -133,6 +133,10 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 // completed — the failure looked like an unavailable config surface rather
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
+import { createKnowledgeEngine } from "./knowledge/engine.mjs";
+import { handleKnowledgeRoute } from "./knowledge/routes.mjs";
+import { createListPrices as createKnowledgeListPrices } from "./knowledge/pricing.mjs";
+import { createMessageReader as createKnowledgeMessageReader } from "./knowledge/search.mjs";
 import { createRoutinesEngine, startRoutinesPoller, defaultStoreDeps as routinesStoreDeps, RoutineError } from "./routines.mjs";
 import { createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
 import { createClaudeSeatHealth } from "./claudeSeatHealth.mjs";
@@ -2015,6 +2019,29 @@ const optimizerPrices = createOptimizerPrices({
   loadCatalog: () => readJsonSync(PRICES_PATH, null),
 });
 
+// Shared knowledge (src/server/knowledge/, spec docs/superpowers/specs/2026-11-16-shared-knowledge.md):
+// the box's cross-session memory. Independent of the CTO engine; its own budget and pollers.
+// The opencode pump feeds it session events (observeRaw below); /api/knowledge/* serves the AI
+// tools and the `knowledge:*` rpc channels the desktop Knowledge card. Integration points not
+// wired here yet (each degrades to "feature absent", never to an error): searchTranscripts,
+// isUserAuthoredRef, getRepoAccess/hasForgeLogin, the task-class runner, the curator's undo.
+const knowledgeEngine = createKnowledgeEngine({
+  config: { get: () => local.configGet(), update: (patch) => local.configUpdate(patch) },
+  getSession: async (sessionID) => {
+    const r = await oc.readSession(sessionID);
+    return r.state === "found" ? r.session : null;
+  },
+  isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
+  readMessages: createKnowledgeMessageReader({ listMessages: (sessionID) => oc.listMessages(sessionID) }),
+  getPrices: createKnowledgeListPrices({
+    listProviders: oc.getProviders,
+    readConfig: readOpencodeConfig,
+    loadCatalog: () => readJsonSync(PRICES_PATH, null),
+  }).get,
+  fireNotify: (args) => push.fireNotify(args),
+});
+knowledgeEngine.start().catch((e) => console.warn("[knowledge] start failed:", e?.message ?? e));
+
 // ---------------------------------------------------------------------------
 // Optimizer P2.4 (BET-1346) — background compaction scheduler + constraint
 // pinning wiring.
@@ -2335,6 +2362,7 @@ void stopTuner;
 rpcHandlers = buildHandlers({
   usageCalibration,
   routines: routinesEngine,
+  knowledge: knowledgeEngine,
   tmux,
   oc,
   pty,
@@ -3826,6 +3854,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));
   // Routines: forms / permissions / execution outcomes of a routine run's session.
   routinesEngine.observeRaw(raw).catch((e) => console.warn("[routines] observeRaw failed:", e?.message ?? e));
+  // Shared knowledge: pins a session to its project at its first prompt; a subagent child inherits its parent's.
+  knowledgeEngine.observeRaw(raw);
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
     if (evt.type === "session.idle" && evt.properties?.sessionID) {
@@ -4561,6 +4591,15 @@ const handleRequest = async (req, res) => {
       // class-2 (BET-1460): schedule opencode tool — relays the message to the model (the card UI reads via /rpc).
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
+    return;
+  }
+
+  // ---------- Shared knowledge (AI tools: knowledge_note / knowledge_search / knowledge_read + the briefing hook) ----------
+  // POST /api/knowledge/notes | GET /api/knowledge/search | GET /api/knowledge/page |
+  // GET /api/knowledge/briefing | POST /api/knowledge/briefing/ack | POST /api/knowledge/briefing/reset.
+  // Consumer is the model (class-2 errors); the desktop card uses the `knowledge:*` rpc channels. Spec §11.2.
+  if (path.startsWith("/api/knowledge/")) {
+    await handleKnowledgeRoute({ engine: knowledgeEngine, req, res, path, url, readJsonBody, respondJson });
     return;
   }
 
