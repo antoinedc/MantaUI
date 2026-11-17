@@ -96,3 +96,4 @@ The popover was too big; this supersedes the parts of the design above it contra
 - Other windows (scoped caps, a third window) stay as faint lines directly under the table; inactive ones are omitted (no "not active" line).
 - Table bars are 3 px tall (the non-small bar variant is removed); the position dot is a white core of 1 px radius with a ring out to 1.5 px, still a gradient overlay.
 - Popover minimum width back to 420 px.
+- A model-scoped (or any other) extra window is no longer a faint line under the table: every other ACTIVE window kind that any row has becomes its own column, after 5-hour and Weekly, by first appearance (`usageTableColumns`). Its header is the window's `scope` (else its noun) with the full label in a `title`; a seat without that window, or with it inactive, shows "—". The popover's minimum width grows by 110 px per column beyond two (`usagePopoverMinWidth`); window columns stay 118 px.

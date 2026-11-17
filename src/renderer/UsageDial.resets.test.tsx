@@ -164,33 +164,43 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     expect(c.getAttribute("title")).toBe("Not usable until the 7d limit resets");
   });
 
-  it("other windows sit under the table: shares a column's reset, or has its own countdown; inactive ones are left out", async () => {
+  it("a model-scoped window is a third column, per seat: scope as the header, the usual cell, no line under the table", async () => {
+    const fable = win("weekly_scoped:fable", 12, { label: "7d · Fable", scope: "Fable", resetsAt: T + 3 * H, spanMs: 7 * 24 * H });
     const p = await open({
       now: T,
-      windows: [
-        session,
-        weekly,
-        win("weekly_scoped:fable", 12, { label: "7d · Fable", scope: "Fable", resetsAt: weekly.resetsAt }),
-        win("weekly_scoped:opus", 30, { label: "7d · Opus", scope: "Opus", resetsAt: T + 3 * H }),
-        win("weekly_scoped:sonnet", 0, { label: "7d · Sonnet", scope: "Sonnet", active: false }),
-      ],
+      windows: [session, weekly, fable, win("weekly_scoped:sonnet", 0, { label: "7d · Sonnet", scope: "Sonnet", active: false })],
     });
-    const extras = p.querySelector('[data-testid="usage-extra-windows"]') as HTMLElement;
-    const lines = Array.from(extras.children).map(visibleText);
-    expect(lines).toEqual(["7d · Fable 12% · resets with the weekly window", "7d · Opus 30% · in 3h"]);
-    expect(extras.children[1].querySelector("[data-reset-timer]")).toBeTruthy();
+    const heads = Array.from(p.querySelectorAll<HTMLElement>("th"));
+    expect(heads.map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly", "Fable"]); // inactive Sonnet: no column
+    expect(heads[3].getAttribute("title")).toBe("7d · Fable — a weekly limit that applies only to this model");
+    expect(heads[1].hasAttribute("title")).toBe(false);
+    const third = cells(p)[2];
+    expect(third.getAttribute("data-window-kind")).toBe("weekly_scoped:fable");
+    expect(third.textContent).toContain("12%");
+    expect(third.textContent).toContain("in 3h");
+    expect(third.querySelector("[data-reset-timer]")).toBeTruthy();
+    expect(third.querySelector("span.relative")!.className).toContain("h-[3px]");
+    expect(third.querySelector("[data-window-dot]")).toBeTruthy();
+    // every window is in a column: nothing under the table
+    expect(p.querySelector('[data-testid="usage-extra-windows"]')).toBeNull();
+    expect(p.textContent).not.toContain("resets with the");
     expect(p.textContent).not.toContain("Sonnet");
     expect(p.textContent).not.toContain("not active");
-    expect(extras.previousElementSibling!.getAttribute("data-testid")).toBe("usage-seat-table");
-    expect(cells(p)).toHaveLength(2); // the scoped windows are not columns
+    expect(p.getAttribute("style") ?? "").toContain("530px"); // 420 + 110 for the third column
   });
 
-  it("only inactive extras: no extras block at all", async () => {
+  it("two window columns keep the 420px minimum", async () => {
+    const p = await open({ now: T, windows: [session, weekly] });
+    expect(p.style.minWidth).toBe("");
+    expect(p.className).toContain("min-w-[420px]");
+  });
+
+  it("only inactive extra windows: no third column", async () => {
     const p = await open({
       now: T,
       windows: [session, weekly, win("weekly_scoped:sonnet", 0, { label: "7d · Sonnet", scope: "Sonnet", active: false })],
     });
-    expect(p.querySelector('[data-testid="usage-extra-windows"]')).toBeNull();
+    expect(Array.from(p.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly"]);
   });
 });
 
@@ -270,6 +280,37 @@ describe("seat table", () => {
     expect(cells[0].querySelector("[data-window-kind]")).toBeNull();
     expect(cells[1].textContent).toContain("37%");
     expect(p.querySelector('[data-seat-id="s3"]')!.textContent!.match(/37%/g)).toHaveLength(1);
+  });
+
+  it("a window kind only some seats have: its own column; seats without it (or with it inactive) show a dash", async () => {
+    const scoped = (pct: number, extra: Partial<UsageWindow> = {}) =>
+      win("weekly_scoped:fable", pct, { label: "7d · Fable", scope: "Fable", resetsAt: NOW + 3 * H, ...extra });
+    const v = threeSeatView();
+    // s1 (the conversation's) has no Fable window; s2 has it; s3 has it inactive
+    v.accounts[0].seats[1] = { ...seat("s2", "Seat 2", 20, 15), windows: [...seat("s2", "x", 20, 15).windows, scoped(100)] };
+    v.accounts[1].seats[0] = { ...seat("s3", "Seat 1", 55, 30), windows: [...seat("s3", "x", 55, 30).windows, scoped(0, { active: false })] };
+    const p = await open({ view: v, seatId: "s1" });
+    expect(Array.from(p.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly", "Fable"]);
+    const third = (id: string) => Array.from(p.querySelectorAll(`[data-seat-id="${id}"] td`))[3] as HTMLElement;
+    expect(third("s1").textContent).toBe("—");
+    expect(third("s3").textContent).toBe("—");
+    expect(third("s2").textContent).toContain("100%");
+    expect(third("s2").querySelector("[data-window-kind]")!.getAttribute("data-window-kind")).toBe("weekly_scoped:fable");
+    expect(p.getAttribute("style") ?? "").toContain("530px");
+  });
+
+  it("the conversation's seat has the window, the others don't: they show a dash", async () => {
+    const v = threeSeatView();
+    v.accounts[0].seats[0] = {
+      ...seat("s1", "Seat 1", 96, 40, { live: true }),
+      windows: [...seat("s1", "x", 96, 40).windows, win("weekly_scoped:fable", 100, { label: "7d · Fable", scope: "Fable", resetsAt: NOW + 3 * H })],
+    };
+    const p = await open({ view: v, seatId: "s1" });
+    const cellsOf = (id: string) => Array.from(p.querySelectorAll(`[data-seat-id="${id}"] td`)).slice(1);
+    expect(cellsOf("s1")).toHaveLength(3);
+    expect(cellsOf("s1")[2].textContent).toContain("100%");
+    expect(cellsOf("s2")[2].textContent).toBe("—");
+    expect(cellsOf("s3")[2].textContent).toBe("—");
   });
 
   it("manual mode: 'Use this seat' asks first for a cross-org seat, inside the table", async () => {

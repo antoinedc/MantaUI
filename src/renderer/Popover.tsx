@@ -15,6 +15,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -77,6 +78,7 @@ export function Popover({
   id,
   hook,
   surfaceClassName,
+  surfaceStyle,
   panelRef,
   onKeyDown,
   children,
@@ -94,6 +96,8 @@ export function Popover({
   hook?: string;
   /** Width + padding utilities ONLY ("w-[360px] p-4"). Never chrome. */
   surfaceClassName?: string;
+  /** A computed size that cannot be a class (a width derived from content). */
+  surfaceStyle?: CSSProperties;
   /** External ref to the portalled surface (callers that query it for roving). */
   panelRef?: RefObject<HTMLDivElement>;
   /** Keyboard nav for content INSIDE the surface (the surface is portalled, so
@@ -176,7 +180,7 @@ export function Popover({
         `${hook ? `${hook} ` : ""}${POPOVER_SURFACE}` +
         (surfaceClassName ? ` ${surfaceClassName}` : "")
       }
-      style={{ position: "fixed", top: pos?.top, left: pos?.left, zIndex: inModal ? 55 : 40 }}
+      style={{ ...surfaceStyle, position: "fixed", top: pos?.top, left: pos?.left, zIndex: inModal ? 55 : 40 }}
       onKeyDown={(e) => {
         onKeyDown?.(e);
         // Escape closes THIS surface only: React bubbles portalled events up the
