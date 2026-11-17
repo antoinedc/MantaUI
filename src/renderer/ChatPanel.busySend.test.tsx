@@ -78,6 +78,12 @@ describe("ChatPanel busy send + inbox", () => {
     return ev.defaultPrevented;
   }
   const altEnter = { altKey: true };
+  const emitQuestion = () =>
+    emitStreamAndFlush(bus, h!, {
+      sub: "questions",
+      sessionId: SID,
+      payload: { questions: [{ id: "q1", sessionID: SID, requestId: "que_1", questions: [{ header: "H", question: "Which?", options: [{ label: "a" }] }] }] },
+    });
   async function setRunning(running: boolean) {
     await emitStreamAndFlush(bus, h!, { sub: "running", sessionId: SID, payload: { running } });
   }
@@ -201,7 +207,8 @@ describe("ChatPanel busy send + inbox", () => {
       expect(api.calls.opencodePrompt).toHaveLength(1);
     });
 
-    it("a pending question is rejected (awaited) BEFORE the message is sent", async () => {
+    /** A pending question, then a send with `chord`: the question is rejected (awaited) BEFORE the message goes out. */
+    async function questionRejectedBeforeSend(chord?: KeyboardEventInit) {
       const order: string[] = [];
       await open({
         opencodeQuestionReject: () => {
@@ -213,11 +220,16 @@ describe("ChatPanel busy send + inbox", () => {
           return Promise.resolve();
         },
       });
-      await emitStreamAndFlush(bus, h!, {
-        sub: "questions",
-        sessionId: SID,
-        payload: { questions: [{ id: "q1", sessionID: SID, requestId: "que_1", questions: [{ header: "H", question: "Which?", options: [{ label: "a" }] }] }] },
-      });
+      await emitQuestion();
+      await type("go with a");
+      await key("Enter", chord);
+      expect(order).toEqual(["reject", "prompt"]);
+    }
+
+    it("a pending question is rejected (awaited) BEFORE the message is sent", async () => {
+      await questionRejectedBeforeSend();
+    });
+      await emitQuestion();
       await type("go with a");
       await key("Enter");
       expect(order).toEqual(["reject", "prompt"]);
@@ -235,11 +247,7 @@ describe("ChatPanel busy send + inbox", () => {
           ]),
         opencodeQuestionReject: () => Promise.reject(new Error("denied")),
       });
-      await emitStreamAndFlush(bus, h!, {
-        sub: "questions",
-        sessionId: SID,
-        payload: { questions: [{ id: "q1", sessionID: SID, requestId: "que_1", questions: [{ header: "H", question: "Which?", options: [{ label: "a" }] }] }] },
-      });
+      await emitQuestion();
       await type("go with a");
       await key("Enter");
       expect(api.calls.opencodePrompt ?? []).toEqual([]);
@@ -317,22 +325,9 @@ describe("ChatPanel busy send + inbox", () => {
     });
 
     it("a pending question is rejected (awaited) BEFORE the message is sent", async () => {
-      const order: string[] = [];
-      await open({
-        opencodeQuestionReject: () => {
-          order.push("reject");
-          return Promise.resolve();
-        },
-        opencodePrompt: () => {
-          order.push("prompt");
-          return Promise.resolve();
-        },
-      });
-      await emitStreamAndFlush(bus, h!, {
-        sub: "questions",
-        sessionId: SID,
-        payload: { questions: [{ id: "q1", sessionID: SID, requestId: "que_1", questions: [{ header: "H", question: "Which?", options: [{ label: "a" }] }] }] },
-      });
+      await questionRejectedBeforeSend(altEnter);
+    });
+      await emitQuestion();
       await type("go with a");
       await key("Enter", altEnter);
       expect(order).toEqual(["reject", "prompt"]);
@@ -719,27 +714,28 @@ describe("ChatPanel busy send + inbox", () => {
       expect(h.text()).not.toContain("EXPANDED TEMPLATE BODY");
     });
 
-    it("falls back to the live commandExecuted frame keyed by the user message id", async () => {
+    async function mountWithMsgs() {
       ({ api, bus } = installMockApi({ opencodeMessages: () => Promise.resolve(msgs()) }));
       resetStore();
       h = mount(<ChatPanel {...PROPS} />);
       await h.flush();
-      expect(h.text()).toContain("EXPANDED TEMPLATE BODY");
-      await emitStreamAndFlush(bus, h, {
+    }
+
+    it("falls back to the live commandExecuted frame keyed by the user message id", async () => {
+      await mountWithMsgs();
+      expect(h!.text()).toContain("EXPANDED TEMPLATE BODY");
+      await emitStreamAndFlush(bus, h!, {
         sub: "commandExecuted",
         sessionId: SID,
         payload: { messageID: "msg_u1", name: "init", arguments: "" },
       });
-      expect(h.text()).toContain("/init");
-      expect(h.text()).not.toContain("EXPANDED TEMPLATE BODY");
+      expect(h!.text()).toContain("/init");
+      expect(h!.text()).not.toContain("EXPANDED TEMPLATE BODY");
     });
 
     it("an unattributed command message just shows its text", async () => {
-      ({ api, bus } = installMockApi({ opencodeMessages: () => Promise.resolve(msgs()) }));
-      resetStore();
-      h = mount(<ChatPanel {...PROPS} />);
-      await h.flush();
-      expect(h.text()).toContain("EXPANDED TEMPLATE BODY");
+      await mountWithMsgs();
+      expect(h!.text()).toContain("EXPANDED TEMPLATE BODY");
     });
   });
 });
