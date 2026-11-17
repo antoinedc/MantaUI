@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseStatus, countSubagents, collectPanes, terminalTargets, MARK } from "./status.mjs";
+import { parseStatus, countSubagents, collectPanes, terminalTargets, createStatusPublisher, MARK } from "./status.mjs";
 
 // ----------------------------------------------------------------------------
 // countSubagents — pure helper
@@ -238,4 +238,28 @@ test("collectPanes returns empty string when list-windows itself fails", async (
     throw new Error("no tmux server running");
   };
   assert.equal(await collectPanes(fakeRun), "");
+});
+
+test("createStatusPublisher publishes only changed batches and replays the last one as a snapshot", () => {
+  const published = [];
+  const pub = createStatusPublisher({ publish: (e) => published.push(e) });
+  assert.deepEqual(pub.snapshot(), [], "nothing to replay before the first batch");
+  const a = [{ session: "p", windowIndex: 1, running: true, subagents: 0 }];
+  assert.equal(pub.publish(a), true);
+  assert.equal(pub.publish([{ ...a[0] }]), false, "an identical batch is not re-sent");
+  assert.equal(published.length, 1);
+  const b = [{ ...a[0], running: false }];
+  assert.equal(pub.publish(b), true);
+  assert.equal(pub.publish([]), true, "a window disappearing is a change");
+  assert.equal(pub.publish([]), false);
+  assert.deepEqual(published.map((e) => e.payload.length), [1, 1, 0]);
+  assert.deepEqual(pub.snapshot(), [{ kind: "status", payload: [] }]);
+});
+
+test("an empty first batch is still published once (a client learns there are no terminal windows)", () => {
+  const published = [];
+  const pub = createStatusPublisher({ publish: (e) => published.push(e) });
+  assert.equal(pub.publish([]), true);
+  assert.equal(pub.publish([]), false);
+  assert.deepEqual(pub.snapshot(), [{ kind: "status", payload: [] }]);
 });

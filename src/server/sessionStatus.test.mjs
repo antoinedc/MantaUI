@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { computeJobNesting, annotateJobs, sessionsWithActiveWork, deriveWindowStatus, runningChildCounts, createSessionStatus } from "./sessionStatus.mjs";
+import { computeJobNesting, annotateJobs, sessionsWithActiveWork, deriveWindowStatus, runningChildCounts, descendantSummary, createSessionStatus } from "./sessionStatus.mjs";
 
 const mkProject = (name, windows) => ({ tmuxSession: name, windows });
 
@@ -120,7 +120,7 @@ test("emits one frame per CHANGED payload only (coalesced), ancestors included",
   assert.equal(h.published.length, 3, "nothing changed → nothing emitted");
   h.st.observe(stream("running", "c", { running: true, type: "busy", since: 100 }));
   h.st.flush();
-  assert.deepEqual(last(h, "c"), { running: true, busy: true, startedAt: 100, attention: null, subagents: 0, stopped: false });
+  assert.deepEqual(last(h, "c"), { running: true, busy: true, startedAt: 100, attention: null, attentionBelow: null, subagents: 0, stopped: false });
   assert.equal(last(h, "p").busy, true, "a child starting flips its parent's busy");
   assert.equal(last(h, "p").subagents, 1);
   assert.equal(h.published.length, 5, "only the two sessions that changed");
@@ -240,7 +240,7 @@ test("snapshot replay is a full replacement of every windowed session; the map c
   assert.ok(frames.every((f) => f.kind === "stream" && f.sub === "windowStatus"));
   const map = h.st.windowStatusMap();
   assert.deepEqual(Object.keys(map).sort(), ["c", "p"]);
-  assert.deepEqual(map.c, { running: false, busy: false, startedAt: null, attention: null, subagents: 0, stopped: false });
+  assert.deepEqual(map.c, { running: false, busy: false, startedAt: null, attention: null, attentionBelow: null, subagents: 0, stopped: false });
 });
 
 test("runningSet replaces the running set; delegate.updated re-reads jobs and tells the list; the status poller's own frames are ignored", async () => {
@@ -360,6 +360,38 @@ test("direct-child counts are computed once per flush (runningChildCounts) and m
   const m = { running: new Set(["a", "b"]), parentOf: new Map([["a", "p"], ["b", "p"], ["x", "p"]]), jobs: [], own: new Map(), stopped: new Set() };
   assert.equal(runningChildCounts(m).get("p"), 2);
   assert.equal(deriveWindowStatus(m, "p").subagents, 2);
+});
+
+test("attentionBelow: the strongest ask among descendants at any depth, never the row's own ask", () => {
+  const own = new Map([["leaf", { attention: "permission" }], ["other", { attention: "question" }], ["p", { attention: "permission" }]]);
+  const m = {
+    running: new Set(["leaf"]),
+    parentOf: new Map([["leaf", "mid"], ["mid", "p"], ["other", "p"], ["solo", "q"]]),
+    jobs: [],
+    own,
+    stopped: new Set(),
+    pendingAsk: ["solo"],
+  };
+  assert.equal(deriveWindowStatus(m, "p").attentionBelow, "question", "question beats permission, found two levels down");
+  assert.equal(deriveWindowStatus(m, "p").attention, "permission", "the row's own ask stays in `attention`");
+  assert.equal(deriveWindowStatus(m, "mid").attentionBelow, "permission");
+  assert.equal(deriveWindowStatus(m, "leaf").attentionBelow, null, "own ask is excluded");
+  assert.equal(deriveWindowStatus(m, "q").attentionBelow, "permission", "a pending-ask session of unknown kind counts as a permission");
+  assert.equal(deriveWindowStatus(m, "nobody").attentionBelow, null);
+  assert.equal(descendantSummary(m).counts.get("p"), 2);
+  assert.equal(deriveWindowStatus({ ...m, askBelow: new Map(), childCounts: new Map() }, "p").attentionBelow, null, "precomputed maps are honoured");
+});
+
+test("attentionBelow rides the published row status and clears when the ask is answered", () => {
+  const h = harness({ windowed: ["p"] });
+  h.st._state.parentOf.set("c", "p");
+  h.st.observe(stream("attention", "c", { kind: "question" }));
+  h.st.flush();
+  assert.equal(last(h, "p").attentionBelow, "question");
+  assert.equal(last(h, "p").attention, null);
+  h.st.observe(stream("attention", "c", { kind: null }));
+  h.st.flush();
+  assert.equal(last(h, "p").attentionBelow, null);
 });
 
 // ---- the session graph (stage (a)): parentWindowIndex is a projection of the graph ----
@@ -1056,7 +1088,7 @@ test("tree: counts and busy come from the graph — running descendants at any d
   h.st.observe(stream("turnComplete", "T", { running: false }));
   h.st.observe(stream("turnComplete", "U", { running: false }));
   h.st.flush();
-  assert.deepEqual(h.published.filter((e) => e.sessionId === "D").at(-1).payload, { running: false, busy: false, startedAt: null, attention: null, subagents: 0, stopped: false });
+  assert.deepEqual(h.published.filter((e) => e.sessionId === "D").at(-1).payload, { running: false, busy: false, startedAt: null, attention: null, attentionBelow: null, subagents: 0, stopped: false });
 });
 
 test("tree: busy for a running root with no children, and a pending ask the interpreter holds counts even when no frame was seen", async () => {
@@ -1065,7 +1097,7 @@ test("tree: busy for a running root with no children, and a pending ask the inte
   h.st.observe(stream("running", "D", { running: true, since: 3 }));
   h.st.flush();
   const frame = (sid) => h.published.filter((e) => e.sessionId === sid).at(-1).payload;
-  assert.deepEqual(frame("D"), { running: true, busy: true, startedAt: 3, attention: null, subagents: 0, stopped: false });
+  assert.deepEqual(frame("D"), { running: true, busy: true, startedAt: 3, attention: null, attentionBelow: null, subagents: 0, stopped: false });
   assert.equal(frame("E").subagents, 1, "Q waits on an ask; E sees it");
 });
 

@@ -739,6 +739,10 @@ type State = {
   // edge was missed while disconnected, and lights a turn that was already
   // underway when the app connected.
   reconcileRunningSet: (sessionIds: string[]) => void;
+  // The box's connect replay starts with `runningSet`: every session's question / permission badge (red ? / !) is
+  // dropped here, and the `attention` frames that follow re-latch the ones still pending. Without it a badge whose
+  // answer event was missed while disconnected survived every reconnect. "idle" (done) and "blocked" are untouched.
+  clearBlockingAttention: () => void;
   // Chat-mode attention signals driven by opencode SSE. `question.asked`
   // (AI is blocked waiting for the user to pick an answer) and
   // `permission.asked` (AI is blocked waiting for tool-use approval)
@@ -1470,6 +1474,25 @@ export const useStore = create<State>((set, get) => ({
     }
     for (const sid of want) setChatRunning(sid, true);
   },
+
+  clearBlockingAttention: () =>
+    set((prev) => {
+      let changed = false;
+      const status: typeof prev.status = {};
+      for (const [session, windows] of Object.entries(prev.status)) {
+        const next: typeof windows = {};
+        for (const [idx, w] of Object.entries(windows)) {
+          if (w.attention && (w.attentionKind === "question" || w.attentionKind === "permission")) {
+            next[Number(idx)] = { ...w, attention: false, attentionKind: undefined };
+            changed = true;
+          } else {
+            next[Number(idx)] = w;
+          }
+        }
+        status[session] = next;
+      }
+      return changed ? { status } : prev;
+    }),
 
   setChatAttention: (sessionId, kind) =>
     set((prev) => {

@@ -172,6 +172,7 @@ function newSessionState() {
     cacheEmitted: null,        // key of the last `cache` emit (dedup)
     retryActive: false,        // a non-null `retry` frame is outstanding
     attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
+    rev: 0,                    // bumped on every running / ask change, so a slow read can tell a newer event overtook it
     compacted: false,          // a compaction ended; the transcript goes stale when its execution settles
     // The pending-user-message list (K3). `known` only after a hydration; `rev`
     // survives a reset to unknown so a re-hydrated snapshot always outranks the old one.
@@ -229,6 +230,7 @@ export function createStreamInterpreter({
   rebuildFromCanonical = null,
 }) {
   const sessions = new Map();
+  let revSeq = 0;
   const childParent = new Map(); // child session id -> parent session id
   // The activity tap (spec 2026-11-14 §A1): normalized, synchronous records for the job liveness engine.
   const activitySubscribers = new Set();
@@ -358,6 +360,7 @@ export function createStreamInterpreter({
   // over a pending permission (same precedence as peers.mjs), null when neither
   // is pending. Emitted on change only.
   function emitAttention(sid, st) {
+    st.rev = ++revSeq;
     const kind = st.questions.length > 0 ? "question" : st.permissions.length > 0 ? "permission" : null;
     if (kind === st.attention) return;
     st.attention = kind;
@@ -417,6 +420,7 @@ export function createStreamInterpreter({
   // The single place `running` changes. Stamps the idle->busy EDGE only, so a
   // mid-turn status re-emit cannot restart the clock.
   function setRunning(st, running) {
+    st.rev = ++revSeq;
     if (running && !st.running) st.runningSince = now();
     if (!running) st.runningSince = null;
     st.running = running;
@@ -1182,8 +1186,75 @@ export function createStreamInterpreter({
     emit(sid, "transcriptStale", {});
   }
 
+  // Bring one session in line with what opencode reports NOW (the periodic reconcile / first-connect seed), publishing
+  // ONLY the differences through the same emit paths as live events. `expectRev` (from `revOf` before the read) makes
+  // it a no-op when an event for the session landed while the read was in flight — the stream is fresher than a read.
+  // `onlyDrop` (the turn-end re-read) removes asks opencode no longer reports and never adds or starts anything.
+  // `adopt(kind, item)` vets an ask this interpreter does not hold yet (return false = ignore it for now).
+  // Questions go first so `attention` settles on the strongest kind in one frame. Never emits `transcriptStale` unless
+  // the running state changed.
+  function reconcile(sid, { running, permissions, questions, expectRev, onlyDrop = false, adopt } = {}) {
+    let st = sessions.get(sid);
+    if (expectRev !== undefined && (st ? st.rev : -1) !== expectRev) return { changed: false, stale: true };
+    const wantsState = running === true || (Array.isArray(permissions) && permissions.length > 0) || (Array.isArray(questions) && questions.length > 0);
+    if (!st) {
+      if (onlyDrop || !wantsState) return { changed: false, stale: false };
+      st = state(sid);
+      st.rev = ++revSeq;
+    }
+    let changed = false;
+    let runningChanged = false;
+    if (!onlyDrop) {
+      if (running === false && st.running) {
+        clearRetry(sid, st);
+        emitRunning(sid, st, false);
+        emitTurnComplete(sid, st, true);
+        changed = runningChanged = true;
+      } else if (running === true && !st.running) {
+        emitRunning(sid, st, true);
+        changed = runningChanged = true;
+      }
+    }
+    const merge = (held, read, apply, kind) => {
+      const next = [];
+      const heldIds = new Set(held.map((x) => x.id));
+      for (const item of read) {
+        const folded = apply([], item);
+        const id = folded[0]?.id;
+        if (id === undefined) continue;
+        if (heldIds.has(id)) next.push(held.find((x) => x.id === id));
+        else if (!onlyDrop && (adopt ? adopt(kind, item) !== false : true)) next.push(folded[0]);
+      }
+      return next;
+    };
+    const sameIds = (a, b) => a.length === b.length && a.every((x) => b.some((y) => y.id === x.id));
+    if (Array.isArray(questions)) {
+      const next = merge(st.questions, questions, (prev, q) => applyQuestionEvent(prev, "question.asked", q, sid), "question");
+      if (!sameIds(st.questions, next)) {
+        st.questions = next;
+        emitAttention(sid, st);
+        emit(sid, "questions", { questions: st.questions });
+        changed = true;
+      }
+    }
+    if (Array.isArray(permissions)) {
+      const next = merge(st.permissions, permissions, (prev, p) => applyPermissionEvent(prev, "permission.asked", p, sid), "permission");
+      if (!sameIds(st.permissions, next)) {
+        st.permissions = next;
+        emitAttention(sid, st);
+        emit(sid, "permissions", { permissions: st.permissions });
+        changed = true;
+      }
+    }
+    if (runningChanged) emit(sid, "transcriptStale", {});
+    return { changed, stale: false };
+  }
+
   return {
     interpret,
+    reconcile,
+    /** The session's change counter (-1 = unknown to the interpreter): read BEFORE a slow read, pass as `expectRev`. */
+    revOf: (sid) => (sessions.has(sid) ? sessions.get(sid).rev : -1),
     /** Subscribe to the activity tap (spec 2026-11-14 §A1): `fn(record)` is called synchronously. Returns the unsubscribe. */
     onActivity(fn) {
       if (typeof fn !== "function") return () => {};

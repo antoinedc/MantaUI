@@ -52,6 +52,7 @@ import { createPeekHandler, createDownloadHandler } from "./peek.mjs";
 import { createFilePath } from "./filePath.mjs";
 import { createProjectsHandler } from "./projectsRoute.mjs";
 import { createUploadHandler } from "./uploadRoute.mjs";
+import { createIosDiagnosticsHandler } from "./iosDiagnostics.mjs";
 import { CTO_SAFE_500_MESSAGE, HOOK_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
@@ -77,7 +78,7 @@ import { blendedPrice } from "../shared/blendedPrice.mjs";
     setTelemetrySink(shipper);
   }
 }
-import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
+import { createBus, handleEventsRequest, attachEventsWs, parseKindsParam } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
 import { resolveLauncherForSpawn } from "./launchersConfig.mjs";
 import { devicesView } from "./settingsViews.mjs";
@@ -92,6 +93,7 @@ import {
   oauthEpochFor,
 } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
+import { createStatusReconciler } from "./statusReconcile.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
@@ -428,7 +430,13 @@ oc.setCommandCorrelator(commandCorrelator);
 // interactive card reappear and stay answerable on a thin client).
 // `snapshotState()` returns these events; the bus replays them to each new
 // subscriber.
-bus.setSnapshot(() => [...questionsDecorator.decorateSnapshot(streamInterp.snapshotState()), ...(sessionStatusRef.current?.snapshotFrames() ?? [])]);
+// The terminal-status batch is only published when it changes (S8), so a new subscriber gets the last one here.
+let statusBatchSnapshot = () => [];
+bus.setSnapshot(() => [
+  ...questionsDecorator.decorateSnapshot(streamInterp.snapshotState()),
+  ...(sessionStatusRef.current?.snapshotFrames() ?? []),
+  ...statusBatchSnapshot(),
+]);
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a
@@ -509,7 +517,8 @@ push.setDesktopSink((payload) =>
 // Periodically capture every tmux pane and push WindowStatus[] batches so the
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
-const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
+const { stop: stopStatusPoller, snapshot: statusSnapshot } = startStatusPoller(bus, { intervalMs: 2000 });
+statusBatchSnapshot = statusSnapshot;
 // The latest terminal-window activity batch (chat windows are answered by the stream interpreter), so the box can
 // say whether a window is mid-turn without a client (WS11 D6).
 const terminalRunning = new Map();
@@ -3881,6 +3890,21 @@ function observeLifecycleEvent(evt, raw) {
   push.firePush(evt);
 }
 
+// Running / waiting state is compared with opencode's own reads on every (re)connect and every 45 s, and a session's
+// asks are re-read when its turn ends, so a missed event is corrected within about a minute (statusReconcile.mjs).
+const statusReconciler = createStatusReconciler({
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  listPermissions: (sid, o) => oc.listPermissions(sid, o),
+  listQuestions: (sid, o) => oc.listQuestions(sid, o),
+  interp: streamInterp,
+  autoAllow: async () => !!(await local.configGet())?.chatAutoAllow,
+  ownsSession: (sid) => delegateEngine.ownsSession(sid),
+  isAutoAnswered: (id) => autoAnsweredAsks.has(id),
+  log: (...a) => console.log(...a),
+  warn: (...a) => console.warn(...a),
+});
+const TURN_END_EVENTS = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
+
 // V2 has no event replay: after a reconnect, every session the interpreter
 // knows is re-read (running? pending asks?) and its clients told to refetch.
 async function resyncAfterReconnect() {
@@ -3931,6 +3955,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     return;
   }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
+  // The turn ended: an ask the box still holds for it that opencode no longer reports is stale.
+  if (TURN_END_EVENTS.has(raw?.type)) void statusReconciler.afterTurnEnd(raw.data?.sessionID).catch(() => {});
   // A background result opencode posts to a RETIRED (handed-off) session is relayed to the live end.
   handoffEngine.observeRaw(raw);
   // Delegate engine: raw child creation + execution outcomes (V2 jobs complete
@@ -3966,7 +3992,12 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   onConnect: ({ reconnect }) => {
     // opencode may have restarted outside Manta: its provider catalogue is no longer trustworthy.
     if (reconnect) oc.invalidateProvidersCache({ restarted: true });
-    if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+    // Every connect (the first too) then reconciles with opencode: after a restart the box knows no sessions yet, so
+    // this is what finds the running turns and pending asks it would otherwise never hear about.
+    const resynced = reconnect
+      ? resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e))
+      : Promise.resolve();
+    void resynced.then(() => statusReconciler.run({ reason: reconnect ? "reconnect" : "connect" }));
     // Events may have been missed: every job's live picture (tools, descendants) is rebuilt from reads by the next sweep.
     if (reconnect) void delegateEngine.onStreamReconnect().catch((e) => console.warn("[delegate] liveness reset failed:", e?.message ?? e));
     // The running set and the parent edges are rebuilt from opencode's own reads (no replay on V2).
@@ -3978,6 +4009,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     routinesEngine.onReconnect().catch((e) => console.warn("[routines] reconnect reconciliation failed:", e?.message ?? e));
   },
 });
+
+statusReconciler.start();
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
 const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";
@@ -4160,6 +4193,9 @@ const UPLOAD_ROOT = uploadRoot();
 // (extracted BET-1460 on the projectsRoute.mjs pattern; tested in uploadRoute.test.mjs).
 // Injected with the box's upload root (~/.manta-uploads).
 const uploadHandler = createUploadHandler({ uploadRoot: UPLOAD_ROOT });
+// OS-kill diagnostics the iOS app forwards from MetricKit (stored on the box; retention swept on write and hourly).
+const iosDiagnostics = createIosDiagnosticsHandler();
+startPoller(() => iosDiagnostics.sweep(), { intervalMs: 60 * 60 * 1000, label: "ios-diagnostics", immediate: false });
 const handoffHandler = createHandoffHandler({ engine: handoffEngine, readJson: (req) => readJsonBody(req) });
 
 // ---------- voice notes (BET-834) ----------
@@ -4552,6 +4588,10 @@ const handleRequest = async (req, res) => {
 
   if (req.method === "POST" && path === "/api/upload") {
     return uploadHandler(req, res, url);
+  }
+
+  if (req.method === "POST" && path === "/api/diagnostics/ios") {
+    return iosDiagnostics.handle(req, res);
   }
 
   // Auto-handoff REST routes (§11); the rpc channels twin them (rpc.mjs).
@@ -6875,7 +6915,7 @@ const handleUpgrade = (req, socket, head) => {
   if (url.pathname === "/events") {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,
     // which can't reliably receive EventSource). Same bus + envelope.
-    wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws));
+    wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws, { kinds: parseKindsParam(url.searchParams.get("kinds")) }));
     return;
   }
   if (url.pathname === "/pty") {

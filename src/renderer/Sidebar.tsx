@@ -14,7 +14,7 @@ import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
 import { InboxPalette } from "./InboxPalette";
 import type { Project, SessionClosePreview, SessionCloseResult, SessionTreeNode, TmuxWindow } from "../shared/types";
-import { buildRailGroups, virtualRowStatus, type RailGroup } from "./sessionTree";
+import { buildRailGroups, virtualRowStatus, windowRowStatus, type RailGroup } from "./sessionTree";
 import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import {
@@ -691,17 +691,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     const sid = projects
       .find((p) => p.tmuxSession === session)
       ?.windows.find((w) => w.index === idx)?.opencodeSessionId;
-    const rollup = sid ? windowStatusBySession[sid] : undefined;
-    if (!rollup) return own;
-    const running = own?.running === true || rollup.busy;
-    if (!running && rollup.subagents === 0 && !own) return own;
-    return {
-      ...(own ?? { attention: false }),
-      running,
-      subagents: rollup.subagents,
-      progressLabel:
-        own?.running || own?.progressLabel?.trim() ? own?.progressLabel : rollup.busy ? "background work" : own?.progressLabel,
-    };
+    return windowRowStatus(own, sid ? windowStatusBySession[sid] : undefined);
   };
 
   // A window-less row is halted when the box's rollup or its stopped-conversation record says a provider limit stopped it.

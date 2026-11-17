@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildRailGroups, flattenDescendants, projectTreeRoots, virtualRowStatus, windowsInRailOrder } from "./sessionTree";
+import { buildRailGroups, flattenDescendants, projectTreeRoots, virtualRowStatus, windowRowStatus, windowsInRailOrder } from "./sessionTree";
 import { flatSessions } from "./store";
 import type { Project, SessionTreeNode, TmuxWindow } from "../shared/types";
 
@@ -127,5 +127,36 @@ describe("virtualRowStatus", () => {
     expect(virtualRowStatus({ ...payload, running: true })?.running).toBe(true);
     expect(virtualRowStatus({ ...payload, attention: "permission" })).toMatchObject({ attention: true, attentionKind: "permission" });
     expect(virtualRowStatus(payload)).toMatchObject({ running: false, attention: false, attentionKind: undefined });
+  });
+  it("waits on you when its own ask OR one beneath it does (attention ?? attentionBelow)", () => {
+    expect(virtualRowStatus({ ...payload, attentionBelow: "question" })).toMatchObject({ attention: true, attentionKind: "question" });
+    expect(virtualRowStatus({ ...payload, attention: "permission", attentionBelow: "question" })).toMatchObject({ attentionKind: "permission" });
+    expect(virtualRowStatus({ ...payload, attentionBelow: null })).toMatchObject({ attention: false });
+  });
+});
+
+describe("windowRowStatus", () => {
+  const rollup = { running: false, busy: false, startedAt: null, attention: null, attentionBelow: null, subagents: 0, stopped: false } as const;
+  const own = { running: false, subagents: 0, attention: false } as const;
+
+  it("is the window's own status without a rollup", () => {
+    expect(windowRowStatus(own, undefined)).toBe(own);
+    expect(windowRowStatus(undefined, undefined)).toBeUndefined();
+  });
+  it("busy beneath reads as running and carries the subagent count", () => {
+    expect(windowRowStatus(own, { ...rollup, busy: true, subagents: 2 })).toMatchObject({ running: true, subagents: 2, progressLabel: "background work" });
+  });
+  it("an ask below shows the row as waiting with the same badge, even with no own status and an idle rollup otherwise", () => {
+    expect(windowRowStatus(own, { ...rollup, attentionBelow: "permission" })).toMatchObject({ attention: true, attentionKind: "permission" });
+    expect(windowRowStatus(undefined, { ...rollup, attentionBelow: "question" })).toMatchObject({ attention: true, attentionKind: "question" });
+  });
+  it("a blocking ask outranks the soft done latch, but never replaces the row's own blocking kind", () => {
+    const done = { ...own, attention: true, attentionKind: "idle" } as const;
+    expect(windowRowStatus(done, { ...rollup, attentionBelow: "question" })).toMatchObject({ attentionKind: "question" });
+    const own2 = { ...own, attention: true, attentionKind: "permission" } as const;
+    expect(windowRowStatus(own2, { ...rollup, attentionBelow: "question" })).toMatchObject({ attentionKind: "permission" });
+  });
+  it("nothing to show: quiet rollup and no own status stays undefined", () => {
+    expect(windowRowStatus(undefined, rollup)).toBeUndefined();
   });
 });
