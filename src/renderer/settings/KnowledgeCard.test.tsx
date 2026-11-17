@@ -68,6 +68,10 @@ describe("KnowledgeCard", () => {
   const button = (text: string) =>
     Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
   const radio = (name: string, value: string) => q<HTMLInputElement>(`input[type="radio"][name="${name}"][value="${value}"]`);
+  const applyBtn = (group: string) =>
+    q(`input[name="${group}"]`)!.closest("fieldset")!.querySelector("button.manta-knowledge-apply") as HTMLButtonElement;
+  const confirmBtn = (group: string, label: "Confirm" | "Cancel") =>
+    Array.from(q(`[data-testid="${group}-confirm"]`)!.querySelectorAll("button")).find((b) => b.textContent === label) as HTMLButtonElement;
   const notice = () => q('[data-testid="knowledge-notice"]')?.textContent ?? "";
   async function click(el: HTMLElement | null | undefined) {
     expect(el, "expected the control to exist").toBeTruthy();
@@ -171,24 +175,52 @@ describe("KnowledgeCard", () => {
     expect(sharing.closest("fieldset")!.getAttribute("aria-busy")).toBeNull();
   });
 
-  it("changing a default sends only that key", async () => {
+  it("changing a default Sharing pick saves only that key, and only on Apply (less sharing needs no confirm)", async () => {
     await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ sharing: "private" })) });
-    await click(radio("knowledge-default-sharing", "private"));
+    const group = "knowledge-default-sharing";
+    await click(radio(group, "private"));
+    expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+    await click(applyBtn(group));
+    expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
     expect(api.calls.knowledgeSettingsSet).toEqual([[{ patch: { sharing: "private" } }]]);
     expect(notice()).toBe("Default sharing set to Private.");
-    expect(radio("knowledge-default-sharing", "private")!.checked).toBe(true);
+    expect(radio(group, "private")!.checked).toBe(true);
   });
 
-  it("a per-project choice patches that project; 'use default' sends null", async () => {
-    const slug = "manta-0123456789";
+  it("moving the default to MORE sharing asks to confirm first", async () => {
     await open({
-      knowledgeSettingsSet: () => Promise.resolve(settings({ projects: [row({ sharing: "private", sharingOverride: true })] })),
+      knowledgeSettingsGet: () => Promise.resolve(settings({ sharing: "private" })),
+      knowledgeSettingsSet: () => Promise.resolve(settings({ sharing: "share-and-read" })),
     });
-    await click(radio(`knowledge-${slug}-sharing`, "private"));
+    const group = "knowledge-default-sharing";
+    await click(radio(group, "share-and-read"));
+    await click(applyBtn(group));
+    expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+    expect(q(`[data-testid="${group}-confirm"]`)!.textContent).toContain("feed the shared knowledge");
+    await click(confirmBtn(group, "Confirm"));
+    expect(api.calls.knowledgeSettingsSet).toEqual([[{ patch: { sharing: "share-and-read" } }]]);
+  });
+
+  it("a per-project Sharing pick patches that project on Apply; 'use default' sends null; more sharing is confirmed", async () => {
+    const slug = "manta-0123456789";
+    const group = `knowledge-${slug}-sharing`;
+    await open({
+      knowledgeSettingsGet: () => Promise.resolve(settings({ sharing: "read-only", projects: [row({ sharing: "read-only", sharingOverride: false })] })),
+      knowledgeSettingsSet: () => Promise.resolve(settings({ sharing: "read-only", projects: [row({ sharing: "private", sharingOverride: true })] })),
+    });
+    await click(radio(group, "private"));
+    expect(api.calls.knowledgeSettingsSet).toBeUndefined();
+    await click(applyBtn(group)); // read-only (inherited) → private: less sharing, no confirm
+    expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
     expect(api.calls.knowledgeSettingsSet![0]).toEqual([{ patch: { projects: { [slug]: { sharing: "private" } } } }]);
-    expect(radio(`knowledge-${slug}-sharing`, "private")!.checked).toBe(true);
+    expect(radio(group, "private")!.checked).toBe(true);
     expect(notice()).toBe("Saved manta.");
-    await click(radio(`knowledge-${slug}-sharing`, "default"));
+    // back to the default (read only) is MORE sharing than private: confirm, then null
+    await click(radio(group, "default"));
+    await click(applyBtn(group));
+    expect(q(`[data-testid="${group}-confirm"]`)!.textContent).toContain("manta will start reading the shared");
+    expect(api.calls.knowledgeSettingsSet).toHaveLength(1);
+    await click(confirmBtn(group, "Confirm"));
     expect(api.calls.knowledgeSettingsSet![1]).toEqual([{ patch: { projects: { [slug]: { sharing: null } } } }]);
   });
 
@@ -205,8 +237,6 @@ describe("KnowledgeCard", () => {
 
   describe("Repo rules (pending selection + Apply)", () => {
     const slug = "manta-0123456789";
-    const applyBtn = (group: string) =>
-      q(`fieldset:has(input[name="${group}"])`)!.querySelector("button.manta-knowledge-apply") as HTMLButtonElement;
     const arrowDown = async (el: HTMLElement) => {
       // A native radio group moves the selection and fires `change` on an arrow key.
       await act(async () => {
@@ -302,6 +332,27 @@ describe("KnowledgeCard", () => {
       expect(applyBtn(group).getAttribute("aria-disabled")).toBe("true"); // nothing pending any more
     });
 
+    it("Apply says why it can't act (title); Confirm gets focus when the panel opens and Apply when it closes", async () => {
+      await open();
+      for (const group of ["knowledge-default-repoRules", "knowledge-default-sharing"]) {
+        const apply = applyBtn(group);
+        expect(apply.getAttribute("aria-disabled")).toBe("true");
+        expect(apply.title).toBe("Choose a different option first.");
+      }
+      const group = "knowledge-default-repoRules";
+      await click(radio(group, "pull-request"));
+      expect(applyBtn(group).title).toBe("");
+      await click(applyBtn(group));
+      expect(document.activeElement).toBe(confirmBtn(group, "Confirm"));
+      await click(confirmBtn(group, "Cancel"));
+      expect(q(`[data-testid="${group}-confirm"]`)).toBeNull();
+      expect(document.activeElement).toBe(applyBtn(group));
+      // …and after Confirm too
+      await click(applyBtn(group));
+      await click(confirmBtn(group, "Confirm"));
+      expect(document.activeElement).toBe(applyBtn(group));
+    });
+
     it("a rejected save keeps the pending pick and reports the error", async () => {
       await open({ knowledgeSettingsSet: () => Promise.reject(new Error("invalid-setting")) });
       const group = "knowledge-default-repoRules";
@@ -376,6 +427,8 @@ describe("KnowledgeCard", () => {
       await open({ knowledgeSettingsSet: () => Promise.resolve(settings({ sharing: "private" })) });
       await typeInto(q<HTMLInputElement>('input[name="dailyCapUsd"]')!, "7");
       await click(radio("knowledge-default-sharing", "private"));
+      await click(applyBtn("knowledge-default-sharing"));
+      expect(api.calls.knowledgeSettingsSet).toHaveLength(1);
       expect(q<HTMLInputElement>('input[name="dailyCapUsd"]')!.value).toBe("7");
     });
   });

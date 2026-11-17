@@ -188,8 +188,11 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
         for (const h of r?.hits ?? []) {
           const slug = sessionMap.get(h.sessionID)?.slug ?? null;
           if (!slug || !readable.has(slug)) continue;
-          const snippet = await shown(h.snippet, slug, ctx, { own: h.sessionID === sessionID });
-          sess.push({ source: "sessions", project: slug, title: clip(h.title ?? "Session", 80), snippet: clip(snippet, SNIPPET_MAX), ref: `msg:${h.sessionID}/${h.messageID}`, at: h.at ?? null });
+          const own = h.sessionID === sessionID;
+          // Redact the WHOLE text first, truncate after: a secret cut at the limit would otherwise slip past the scanner.
+          const snippet = await shown(h.snippet, slug, ctx, { own });
+          const title = await shown(h.title ?? "Session", slug, ctx, { own });
+          sess.push({ source: "sessions", project: slug, title: clip(title || "Session", 80), snippet: clip(snippet, SNIPPET_MAX), ref: `msg:${h.sessionID}/${h.messageID}`, at: h.at ?? null });
         }
         sess.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
         hits.push(...sess);
@@ -228,7 +231,7 @@ export function createSearch({ state, store, registry, sessionMap, settings, sea
     if (!rows || rows.length === 0) throw new KnowledgeError("not-found", "No such message.", { status: 404 });
     const messages = [];
     for (const m of rows) {
-      const text = await shown(String(m.text ?? "").slice(0, MESSAGE_TEXT_MAX), slug, ctx, { own });
+      const text = await shown(String(m.text ?? ""), slug, ctx, { own });
       messages.push({ id: m.id, role: m.role, text: text.slice(0, MESSAGE_TEXT_MAX), at: m.at });
     }
     return { kind: "session", sessionID: sid, messages };

@@ -93,7 +93,7 @@ test("promptDelivery resolves before the redirect/busy check, and again at drain
 
 test("the client send and command rpc handlers run the resolver before anything else", () => {
   const rpc = read("rpc.mjs");
-  assert.match(rpc, /if \(handoff && userInput\) return handoff\.admitPrompt\(userInput\);\s*return oc\.sendPrompt\(userInput\);/);
+  assert.match(rpc, /const result = handoff && userInput \? await handoff\.admitPrompt\(userInput\) : await oc\.sendPrompt\(userInput\);/);
   assert.match(rpc, /const \{ appGenerated, \.\.\.clientInput \} = input \?\? \{\};\s*const userInput = input && \{ \.\.\.clientInput, origin: appGenerated === true \? "unknown" : "user" \};/, "the user origin is set server-side, after the client's fields; a client can only lower it");
   assert.match(rpc, /if \(handoff && input\) input = \{ \.\.\.input, sessionId: handoff\.guardCommand\(input\.sessionId\)\.target \};/);
   const cmd = rpc.slice(rpc.indexOf('"opencode:run-command"'));

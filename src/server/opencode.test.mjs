@@ -786,6 +786,40 @@ test("sendPrompt records the origin only AFTER opencode accepted the message; th
   }
 });
 
+test("the id check runs only for a user origin, and alongside the session-controls sync rather than after it", async () => {
+  const store = originRecorder();
+  setPromptOrigins(store);
+  try {
+    const events = [];
+    const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+    await withV2(
+      {
+        "GET /api/session/ses_a": async () => { events.push("session:start"); await sleepMs(40); events.push("session:end"); return { data: SESSION() }; },
+        "GET /api/session/ses_a/message/msg_mine": () => { events.push("check"); return new Response("nope", { status: 404 }); },
+        "POST /api/session/ses_a/prompt": () => { events.push("post"); return { data: {} }; },
+      },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "hi", origin: "user", messageID: "msg_mine" });
+      },
+    );
+    assert.ok(events.indexOf("check") < events.indexOf("session:end"), `the check started before the sync finished: ${events}`);
+    assert.ok(events.indexOf("check") < events.indexOf("post"));
+    assert.equal(store.rows.length, 1);
+
+    // a non-user origin with a caller-chosen id: no lookup at all
+    const calls = await withV2(
+      { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/prompt": { data: {} } },
+      async () => {
+        await sendPrompt({ sessionId: "ses_a", text: "bg", origin: "schedule", messageID: "msg_sched" });
+      },
+    );
+    assert.equal(calls.filter((c) => c.path.includes("/message/")).length, 0);
+    assert.equal(store.rows.at(-1).messageID, "msg_sched");
+  } finally {
+    setPromptOrigins(null);
+  }
+});
+
 test("a message id that already exists in the session never gets an origin (re-posting an assistant id cannot make it user-authored)", async () => {
   const store = originRecorder();
   setPromptOrigins(store);

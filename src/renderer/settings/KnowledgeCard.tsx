@@ -13,9 +13,9 @@
 // Radio groups are native `<fieldset>`/`<legend>` + `input[type=radio]` tinted
 // with `accent-color` (modern-web-guidance: forms, brand-consistent-forms).
 //
-// A radio group never auto-submits on an arrow key (forms guide: no auto-submit on radio change). Sharing groups
-// save on a deliberate pick; REPO RULES groups (default + per project) hold a pending selection until Apply, with a
-// confirm step before Pull request / Direct, because that is the choice that lets Manta write to a repository.
+// A radio group never auto-submits on an arrow key (forms guide: no auto-submit on radio change). Repo rules AND
+// Sharing groups (default + per project) hold a pending selection until Apply. A confirm step guards the choices
+// with a real consequence: Pull request / Direct (Manta writes to a repository) and moving to a mode that shares more.
 // While a save runs a group is `aria-busy` rather than `disabled`, so keyboard focus stays where it was
 // (accessibility guide: `disabled` removes the control from the focus order).
 
@@ -51,6 +51,7 @@ import {
   outwardLost,
   parseDailyCap,
   repoRulesLabel,
+  sharingConfirmText,
   statusLines,
 } from "./knowledgeFormat";
 
@@ -146,19 +147,29 @@ function RadioGroup<V extends string>({
 
 const isOutwardValue = (v: string): v is "pull-request" | "direct" => v === "pull-request" || v === "direct";
 
+const repoRulesConfirmText = (v: string, what: string): string | null =>
+  v === "pull-request"
+    ? `Manta will open one pull request with its learned rules in the repository for ${what}. It never merges it.`
+    : v === "direct"
+      ? `Manta will commit its learned rules straight to the default branch of the repository for ${what} and push. A rejected push becomes a pull request.`
+      : null;
+
 /**
- * A Repo rules group: the radios choose a PENDING value; nothing is saved until Apply, and choosing Pull request or
- * Direct asks for a confirmation first. `savedValue` is what the box has (the group snaps back to it whenever it
- * changes); Apply is `aria-disabled` (not `disabled`) when there is nothing to apply, so focus never drops.
+ * A radio group that holds a PENDING pick: nothing is saved until Apply, and a pick that `confirmText` words (a
+ * choice with a real consequence) asks for a confirmation first. `savedValue` is what the box has (the group snaps
+ * back to it whenever it changes). Apply is `aria-disabled` (not `disabled`) when it can't act, with the reason in its
+ * title, so keyboard focus never drops. Focus moves to Confirm when the panel opens and back to Apply when it closes.
+ *
+ * `confirmText(pending, saved)` → the sentence to confirm, or null for a pick that applies straight away.
  */
-function RepoRulesGroup<V extends string>({
+function PendingGroup<V extends string>({
   legend,
   name,
   options,
   savedValue,
   busy,
   note,
-  what,
+  confirmText,
   onApply,
 }: {
   legend: string;
@@ -167,27 +178,37 @@ function RepoRulesGroup<V extends string>({
   savedValue: V;
   busy: boolean;
   note?: string;
-  /** What the confirm text says the choice applies to ("manta" / "every project without its own setting"). */
-  what: string;
+  confirmText: (pending: V, saved: V) => string | null;
   onApply: (v: V) => void;
 }) {
   const [pending, setPending] = useState<V>(savedValue);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [focusNext, setFocusNext] = useState<"apply" | "confirm" | null>(null);
   const confirmId = useId();
+  const wrap = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setPending(savedValue);
-    setConfirming(false);
+    setConfirming(null);
   }, [savedValue]);
+  useEffect(() => {
+    if (!focusNext) return;
+    wrap.current?.querySelector<HTMLElement>(focusNext === "confirm" ? ".manta-knowledge-confirm" : ".manta-knowledge-apply")?.focus();
+    setFocusNext(null);
+  }, [focusNext, confirming]);
   const dirty = pending !== savedValue;
+  const applyReason = busy ? "Saving — wait for it to finish." : !dirty ? "Choose a different option first." : undefined;
   const apply = () => {
     if (busy || !dirty) return;
-    if (isOutwardValue(pending)) setConfirming(true);
-    else onApply(pending);
+    const text = confirmText(pending, savedValue);
+    if (text) {
+      setConfirming(text);
+      setFocusNext("confirm");
+    } else onApply(pending);
   };
-  const confirmText =
-    pending === "pull-request"
-      ? `Manta will open one pull request with its learned rules in the repository for ${what}. It never merges it.`
-      : `Manta will commit its learned rules straight to the default branch of the repository for ${what} and push. A rejected push becomes a pull request.`;
+  const close = () => {
+    setConfirming(null);
+    setFocusNext("apply");
+  };
   return (
     <RadioGroup
       legend={legend}
@@ -198,32 +219,33 @@ function RepoRulesGroup<V extends string>({
       note={note}
       onChange={(v) => {
         setPending(v);
-        setConfirming(false);
+        setConfirming(null);
       }}
       footer={
-        <div className="space-y-2 pt-1">
-          <Button tone="default" hook="manta-knowledge-apply" ariaDisabled={busy || !dirty} onClick={apply}>
+        <div ref={wrap} className="space-y-2 pt-1">
+          <Button tone="default" hook="manta-knowledge-apply" ariaDisabled={busy || !dirty} title={applyReason} onClick={apply}>
             {busy ? "Applying…" : "Apply"}
           </Button>
           {confirming && (
             <div role="group" aria-labelledby={confirmId} className="rounded-md border border-warn px-3 py-2 space-y-2" data-testid={`${name}-confirm`}>
               <div id={confirmId} className="text-meta text-text break-words">
-                {confirmText}
+                {confirming}
               </div>
               <div className="flex items-center gap-2">
                 <Button
                   tone="primary"
                   hook="manta-knowledge-confirm"
                   ariaDisabled={busy}
+                  title={busy ? "Saving — wait for it to finish." : undefined}
                   onClick={() => {
                     if (busy) return;
-                    setConfirming(false);
+                    close();
                     onApply(pending);
                   }}
                 >
                   Confirm
                 </Button>
-                <Button tone="default" onClick={() => setConfirming(false)}>
+                <Button tone="default" onClick={close}>
                   Cancel
                 </Button>
               </div>
@@ -268,23 +290,27 @@ function ProjectRow({
         {row.canonicalId}
       </div>
       <div className="mt-3 grid grid-cols-2 gap-4">
-        <RepoRulesGroup
+        <PendingGroup
           legend="Repo rules"
           name={`knowledge-${row.slug}-repoRules`}
           options={repoOptions}
           savedValue={repoOverride ? row.repoRules : DEFAULT_VALUE}
           busy={busy}
           note={outwardNote}
-          what={row.displayName}
+          confirmText={(v) => repoRulesConfirmText(v, row.displayName)}
           onApply={(v) => onPatch({ projects: { [row.slug]: { repoRules: v === DEFAULT_VALUE ? null : v } } })}
         />
-        <RadioGroup
+        <PendingGroup
           legend="Sharing"
           name={`knowledge-${row.slug}-sharing`}
           options={sharingOptions}
-          value={sharingOverride ? row.sharing : DEFAULT_VALUE}
+          savedValue={sharingOverride ? row.sharing : DEFAULT_VALUE}
           busy={busy}
-          onChange={(v) => onPatch({ projects: { [row.slug]: { sharing: v === DEFAULT_VALUE ? null : v } } })}
+          confirmText={(pending, saved) => {
+            const effective = (v: KnowledgeSharing | typeof DEFAULT_VALUE) => (v === DEFAULT_VALUE ? defaults.sharing : v);
+            return sharingConfirmText(effective(saved), effective(pending), row.displayName);
+          }}
+          onApply={(v) => onPatch({ projects: { [row.slug]: { sharing: v === DEFAULT_VALUE ? null : v } } })}
         />
       </div>
     </fieldset>
@@ -582,22 +608,23 @@ export function KnowledgeCard({ onNavigated }: { onNavigated?: () => void }) {
           <div className="text-meta text-text-faint max-w-[62ch]">Applied to every project that doesn't set its own.</div>
         </div>
         <div className="grid grid-cols-2 gap-4">
-          <RepoRulesGroup
+          <PendingGroup
             legend="Repo rules"
             name="knowledge-default-repoRules"
             options={REPO_RULES_OPTIONS}
             savedValue={s.repoRules}
             busy={busy}
-            what="each project that uses the default (only where this box can push to the repository)"
+            confirmText={(v) => repoRulesConfirmText(v, "each project that uses the default (only where this box can push to the repository)")}
             onApply={(v) => void save({ repoRules: v }, `Default repo rules set to ${repoRulesLabel(v)}.`)}
           />
-          <RadioGroup
+          <PendingGroup
             legend="Sharing"
             name="knowledge-default-sharing"
             options={SHARING_OPTIONS}
-            value={s.sharing}
+            savedValue={s.sharing}
             busy={busy}
-            onChange={(v) =>
+            confirmText={(pending, saved) => sharingConfirmText(saved, pending, "each project that uses the default")}
+            onApply={(v) =>
               void save({ sharing: v }, `Default sharing set to ${SHARING_OPTIONS.find((o) => o.value === v)?.label ?? v}.`)
             }
           />
