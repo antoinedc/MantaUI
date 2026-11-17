@@ -28,14 +28,16 @@ import { isValidRef } from "./queue.mjs";
 import { feedsShared } from "./sharing.mjs";
 import { CURATOR } from "./store.mjs";
 import { kindOf, targetKey } from "./tombstones.mjs";
-import { claimSupported, contentWords } from "./support.mjs";
+import { MIN_QUOTE_CHARS, claimSupported, commandExecuted, contentWords, splitShellSegments, wsnorm } from "./support.mjs";
+
+// The shared support helpers live in support.mjs; these names stay importable from here.
+export { MIN_QUOTE_CHARS, commandExecuted, splitShellSegments };
 import { GLOBAL_BUDGET_LINES, RULES_BUDGET_LINES, cleanBulletText } from "./rules.mjs";
 
 export const DECISION_TYPES = Object.freeze(["page.edit", "rule.add", "rule.change", "rule.remove", "preference.set", "skill.propose", "drop"]);
 export const DECISION_AREAS = Object.freeze(["project", "user", "commons", "repo-block", "global-block"]);
 export const BRIEFING_SECTION_MAX_LINES = 60;
 export const MAX_EVIDENCE = 12;
-export const MIN_QUOTE_CHARS = 8;
 export const GROUNDING = Object.freeze({ corrections: 3, sessions: 2 });
 export const PROTECTED_PAGES = Object.freeze(["user/preferences.md", "user/global-block.md"]);
 // pages only their own decision types change: rules.md (rule.*), preferences and how-the-user-works-here.md (preference.set)
@@ -44,7 +46,6 @@ export const LESSON_OVERLAP = 0.4;
 
 const norm = (s) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 export const normText = norm;
-const wsnorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const str = (v, max = 400) => (typeof v === "string" ? v.slice(0, max) : undefined);
 
@@ -145,55 +146,6 @@ export function extractCommands(markdown) {
     } else buf.push(line);
   }
   return out;
-}
-
-/** Split a shell command on `&&`, `||`, `;` and newlines that are OUTSIDE quotes. */
-export function splitShellSegments(command) {
-  const out = [];
-  let cur = "";
-  let quote = null;
-  const src = String(command ?? "");
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i];
-    if (quote) {
-      cur += ch;
-      if (ch === "\\" && quote === '"' && i + 1 < src.length) cur += src[++i];
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "\\" && i + 1 < src.length) {
-      cur += ch + src[++i];
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      cur += ch;
-      continue;
-    }
-    if (ch === ";" || ch === "\n" || (ch === "&" && src[i + 1] === "&") || (ch === "|" && src[i + 1] === "|")) {
-      if (ch === "&" || ch === "|") i++;
-      out.push(cur);
-      cur = "";
-      continue;
-    }
-    cur += ch;
-  }
-  out.push(cur);
-  return out.map(wsnorm).filter(Boolean);
-}
-
-/**
- * Was `line` run? It must equal a whole executed command or one whole segment of one — never a substring
- * (`echo "git push"` does not validate `git push`).
- */
-export function commandExecuted(line, executed) {
-  const needle = wsnorm(line);
-  if (!needle) return true;
-  for (const c of executed ?? []) {
-    if (wsnorm(c) === needle) return true;
-    if (splitShellSegments(c).includes(needle)) return true;
-  }
-  return false;
 }
 
 /** Command lines that are in `content` but not already on the page (`current`). */
@@ -574,7 +526,7 @@ export function createDecisionValidator({ store, tombstones, isUserAuthoredRef, 
         if (v.verified.length === 0) return no("skipped", "Removing a rule needs a message you wrote that says so; none could be verified.");
         // the message must be about THIS rule: a real sentence that shares a content word with it
         const about = contentWords(d.content);
-        if (!v.verified.some((x) => wsnorm(x.quote).length >= 20 && [...contentWords(x.quote)].some((w) => about.has(w)))) return no("skipped", "None of the messages you wrote is about that rule, so it wasn't removed.");
+        if (!v.verified.some((x) => wsnorm(x.quote).length >= MIN_QUOTE_CHARS && [...contentWords(x.quote)].some((w) => about.has(w)))) return no("skipped", "None of the messages you wrote is about that rule, so it wasn't removed.");
         d.evidence = v.verified.map((x) => ({ ref: x.ref, quote: x.quote }));
       } else {
         const v = await verifyEvidence(d.evidence, { messages: vctx.messages });

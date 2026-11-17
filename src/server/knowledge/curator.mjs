@@ -173,7 +173,9 @@ export function createCurator(kc) {
         directory: "~",
         deps: {
           reportCost: async (c) => {
-            await budget.record({ taskClass, model: c?.model ?? null, tokens: tokenObject(c?.tokens), slug });
+            // The runner reports the session's recorded cost (`usd`) and/or usage (the usage object comes as `tokens`);
+            // the dollars win, a plain number is a prompt-heavy estimate.
+            await budget.record({ taskClass, model: c?.model ?? null, tokens: tokenObject(c?.usage ?? c?.tokens), ...(typeof c?.usd === "number" && c.usd >= 0 ? { usd: c.usd } : {}), slug });
           },
           validate: async (out) => out?.ok !== false && validate(out?.text),
         },

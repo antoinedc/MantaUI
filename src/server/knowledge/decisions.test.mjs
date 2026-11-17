@@ -157,6 +157,13 @@ test("support: a rule unrelated to the quoted messages is refused even though th
   assert.equal(pref.ok, false);
 });
 
+test("rule evidence needs a sentence-sized quote (≥ 20 chars): the old 8-char bar is gone", async () => {
+  const msgs = [u("ses_a", "msg_1", A1), u("ses_b", "msg_1", A3)];
+  const v = ruleRig(msgs);
+  const r = await v.verifyEvidence(msgs.map((m) => ({ ref: m.ref, quote: "use pnpm now" })));
+  assert.deepEqual([r.verified.length, r.failed.map((f) => f.why)], [0, ["no usable quote", "no usable quote"]]);
+});
+
 test("support: with a cluster, the rule must overlap the cluster's lesson (wrong cluster refused)", async () => {
   const msgs = [u("ses_a", "msg_1", A1), u("ses_b", "msg_1", A3)];
   const v = ruleRig(msgs);

@@ -2,7 +2,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAuthedGit, forgeBasicAuth } from "./wiring.mjs";
-import { createKnowledgeRunner, knowledgeConfigDir, knowledgePaths } from "./integration.mjs";
+import { createIsManagedSession, createKnowledgeRunner, forwardListMessages, knowledgeConfigDir, knowledgePaths } from "./integration.mjs";
+import { createCaptureMessageSource } from "./capture.mjs";
+import { curatorRig } from "./curatorRig.mjs";
+import { readFile } from "node:fs/promises";
 import { createShellCommandReader, createSkillLoadReader, createToolCallReader, createTrialResultReader, createUserRequestLister, createSingleMessageReader } from "./readers.mjs";
 
 const tool = (command, name = "bash") => ({ type: "tool", tool: name, state: { input: { command }, output: "ok" } });
@@ -139,4 +142,98 @@ test("the skill-load query runs against the real V2 message schema", async (t) =
     db.close();
     fx.close();
   }
+});
+
+test("seam: capture's {limit} reaches opencode through the box wrapper (forwardListMessages), and index.mjs uses no option-dropping wrapper", async () => {
+  const seen = [];
+  const oc = { listMessages: async (sid, opts) => (seen.push({ sid, opts }), [m("msg_1", "user", "hello")]) };
+  const read = createCaptureMessageSource({ listMessages: forwardListMessages(oc) });
+  await read({ sessionID: "ses_a", after: null, limit: 37 });
+  assert.deepEqual(seen[0].opts, { limit: 37 });
+  const src = await readFile(new URL("../index.mjs", import.meta.url), "utf8");
+  const block = src.slice(src.indexOf("const knowledgeEngine = createKnowledgeEngine("), src.indexOf("const knowledgeReaper"));
+  assert.ok(block.includes("forwardKnowledgeListMessages(oc)"));
+  assert.doesNotMatch(block, /listMessages: \(\w+\) =>/, "a (sid) => oc.listMessages(sid) wrapper drops the options argument");
+  assert.match(block, /isManagedSession: createKnowledgeIsManagedSession\(/);
+});
+
+test("seam: createIsManagedSession — a Manta-owned job's child session is managed; an opencode-owned subagent, an observed session or an unknown id is not; a store failure throws", async () => {
+  const completionOwnerOf = (j) => j?.completionOwner ?? (j?.origin === "subagent" ? "opencode" : "manta");
+  const jobs = [
+    { id: "j1", childSessionID: "ses_job", origin: "delegate", status: "done" },
+    { id: "j2", childSessionID: "ses_task", origin: "subagent", status: "running" },
+    { id: "j3", childSessionID: "ses_seen", origin: "observed", status: "running" },
+    { id: "j4", childSessionID: "ses_cmd", origin: "command", status: "running" },
+  ];
+  const is = createIsManagedSession({ loadJobs: async () => jobs, completionOwnerOf });
+  assert.deepEqual(await Promise.all(["ses_job", "ses_task", "ses_seen", "ses_cmd", "ses_other", ""].map(is)), [true, false, false, true, false, false]);
+  await assert.rejects(createIsManagedSession({ loadJobs: async () => { throw new Error("read"); }, completionOwnerOf })("ses_job"));
+});
+
+test("seam: the engine hands isManagedSession to the session map — a job child never inherits its parent's project, a task child does", async () => {
+  const JOB = `ses_${"0123456789abcdef".repeat(2)}`;
+  const TASK = "ses_a1b2c3d4e5f6AbCdEfGhIjKlMn";
+  const r = await curatorRig({ over: { isManagedSession: async (id) => id === TASK } });
+  await r.slugOf("ses_one");
+  const created = (sessionID) => ({ type: "session.created", data: { sessionID, parentID: "ses_one" } });
+  await r.engine.observeRaw(created(TASK));
+  await r.engine.observeRaw(created(JOB));
+  assert.equal(r.engine.sessionMap.get(TASK), null); // the hook says it is a job's session
+  assert.ok(r.engine.sessionMap.get(JOB)); // hook present and says no → task child, whatever the id looks like
+  await r.engine.stop();
+});
+
+// ---- seam: the runner's cost shape ({tokens: usage-object-or-number, usd?, estimated}) reaches the ledger intact ----
+
+const USAGE = { input: 1000, output: 200, reasoning: 50, cacheRead: 4000, cacheWrite: 300 };
+const PRICES = { models: { "p/m": { input: 10, output: 20, cacheRead: 1, cacheWrite: 12 } } };
+const USAGE_USD = (1000 * 10 + 200 * 20 + 4000 * 1 + 300 * 12 + 50 * 20) / 1e6; // every component priced, reasoning at the output rate
+const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} !== ${b}`);
+const MODEL = { providerID: "p", modelID: "m" };
+const RUNNER_SHAPES = [
+  ["recorded cost wins", { tokens: 5550, usage: USAGE, usd: 0.07, estimated: false }, 0.07],
+  ["usage object priced per component", { tokens: 5550, usage: USAGE, estimated: false }, USAGE_USD],
+  ["plain estimate number = a total", { tokens: 1000, estimated: true }, (900 * 10 + 100 * 20) / 1e6],
+];
+
+async function ledgerBudget() {
+  const { memState } = await import("./testHelpers.mjs");
+  const { createBudget } = await import("./budget.mjs");
+  return createBudget({ state: await memState(), settings: { get: async () => ({ dailyCapUsd: 100 }) }, getPrices: async () => PRICES, bandOf: () => null });
+}
+
+test("seam: capture / corrections / skills (makeReportCost behind createKnowledgeRunner) price every runner cost shape", async () => {
+  const { makeReportCost } = await import("./capture.mjs");
+  for (const [name, shape, expected] of RUNNER_SHAPES) {
+    const budget = await ledgerBudget();
+    const run = createKnowledgeRunner({ runEphemeral: async ({ deps }) => (await deps.reportCost({ taskClass: "knowledge-capture", tier: "fast", model: MODEL, ...shape }), { text: "ok" }), oc: {}, configGet: async () => ({}) });
+    await run({ taskClass: "knowledge-capture", deps: { reportCost: makeReportCost(budget, "s1") } });
+    near(budget.spentToday(), expected);
+    assert.ok(budget.spentToday() > 0, name);
+  }
+});
+
+test("seam: the curator's reportCost prices every runner cost shape (the recorded cost wins; a usage object is priced per component)", async () => {
+  for (const [name, shape, expected] of RUNNER_SHAPES) {
+    const r = await curatorRig({
+      over: { getPrices: async () => PRICES },
+      runner: async (args, _calls) => (await args.deps.reportCost({ taskClass: args.taskClass, model: MODEL, ...shape }), { text: JSON.stringify({ decisions: [] }) }),
+    });
+    const slug = await r.slugOf("ses_one");
+    await r.note(slug, "ses_one", "howto", "a fact worth a run");
+    await r.engine.runCurator(slug, { force: true });
+    const rows = r.engine.state.db.prepare("SELECT usd FROM budget_ledger ORDER BY rowid").all();
+    // curator numbers are prompt-heavy (75/25); the curatorRig adds its own 4000-token record after the runner returns
+    near(rows[0].usd, name.startsWith("plain") ? (750 * 10 + 250 * 20) / 1e6 : expected);
+    await r.engine.stop();
+  }
+});
+
+test("seam: the trial's recorded usage (opencode's nested cache shape) is priced per component, cache included; a recorded cost wins", async () => {
+  const budget = await ledgerBudget();
+  const nested = { input: 1000, output: 200, cache: { read: 4000, write: 300 } };
+  const a = await budget.record({ taskClass: "knowledge-trial", model: MODEL, tokens: nested });
+  near(a.usd, (1000 * 10 + 200 * 20 + 4000 * 1 + 300 * 12) / 1e6);
+  const b = await budget.record({ taskClass: "knowledge-trial", model: MODEL, tokens: nested, usd: 0.5 });
+  assert.equal(b.usd, 0.5);
 });

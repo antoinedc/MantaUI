@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { curatorRig } from "./curatorRig.mjs";
 import { PREFERENCES_PATH } from "./globalBlock.mjs";
 import { replaceBullets, similarity } from "./tidy.mjs";
+import { createCorrectionDetector } from "./corrections.mjs";
+import { memState } from "./testHelpers.mjs";
 
 const changesOf = async (engine) => (await engine.changes({ limit: 200 })).items;
 const SENT = "Deploy by tagging the release and pushing the tag, then wait for the pipeline to finish before you verify that the site responds with the new version number. ";
@@ -214,6 +216,57 @@ test("a cluster's lesson reaching the user wiki comes from a member in a SHARING
   assert.match(prompt, /"lesson": "Use pnpm for installing packages"/); // the earliest SHARING member's, not the cluster-wide one
   assert.match(await r.engine.store.read(PREFERENCES_PATH), /Use pnpm for installing packages/);
   assert.doesNotMatch(await r.engine.store.read(PREFERENCES_PATH), /Private|gadget/i);
+  await r.engine.stop();
+});
+
+test("seam: a REAL detector's clusters (private + sharing members) → tidy → the model: the private member's wording never leaves the box", async () => {
+  let det;
+  const corrections = { runWeekly: () => det.runWeekly(), recurrenceSince: async () => 0 };
+  const r = await clusterRig({}, {
+    corrections,
+    projects: { widget: "https://github.com/acme/widget.git", gadget: "https://github.com/acme/gadget.git" },
+    sessions: { ses_one: "widget", ses_two: "widget", ses_g: "gadget" },
+    messages: { ses_one: { msg_a: { role: "user", text: UEV.ses_one.msg_1.text } }, ses_two: { msg_b: { role: "user", text: UEV.ses_two.msg_1.text } } },
+    userRefs: new Set(["msg:ses_one/msg_a", "msg:ses_two/msg_b"]),
+  });
+  await r.slugOf("ses_one");
+  await r.slugOf("ses_two");
+  const g = await r.slugOf("ses_g");
+  await r.engine.settingsSet({ projects: { [g]: { sharing: "private" } } });
+  const T = r.clock.t;
+  const msgs = [
+    { id: "msg_g", sessionID: "ses_g", at: T - 3 * 86_400_000, text: "always use pnpm for installing packages, gadget credentials hunter2", afterAssistant: true },
+    { id: "msg_a", sessionID: "ses_one", at: T - 2 * 86_400_000, text: UEV.ses_one.msg_1.text, afterAssistant: true },
+    { id: "msg_b", sessionID: "ses_two", at: T - 86_400_000, text: UEV.ses_two.msg_1.text, afterAssistant: true },
+  ];
+  const lessons = [["gadget", "Use pnpm for installing packages with gadget credentials"], ["here, not npm", "Use pnpm for installing packages"], ["please", "Use pnpm for installing packages"]];
+  const detectorRunner = async (args) => {
+    const prompt = args.context[0].text;
+    if (prompt.includes("NEW LESSONS:")) return { text: JSON.stringify({ assignments: [{ i: 1, cluster: null, same_as: null }, { i: 2, cluster: null, same_as: 1 }, { i: 3, cluster: null, same_as: 1 }] }), model: { providerID: "p", modelID: "small" } };
+    const results = [...prompt.matchAll(/^\[(\d+)\] (.*)$/gm)].map(([, i, text]) => ({ i: Number(i), label: "preference", lesson: lessons.find(([k]) => text.includes(k))[1] }));
+    return { text: JSON.stringify({ results }), model: { providerID: "p", modelID: "small" } };
+  };
+  det = createCorrectionDetector({
+    state: await memState(),
+    now: () => r.clock.t,
+    log: () => {},
+    sessionMap: r.engine.sessionMap,
+    budget: { canSpend: async () => ({ ok: true }), record: async () => {} },
+    settings: { get: async () => ({ enabled: true }) },
+    runEphemeral: detectorRunner,
+    readUserMessages: async ({ skip, limit }) => msgs.filter((m) => !skip(m.id)).slice(0, limit),
+    isUserAuthored: () => true,
+    scanner: { redact: async (t) => ({ text: t, redacted: 0, unavailable: false }) },
+  });
+  const clusters = await det.runWeekly();
+  assert.equal(clusters.length, 1);
+  assert.match(clusters[0].lesson, /gadget/); // the cluster-wide lesson IS the private member's (it was first)
+  assert.ok(clusters[0].evidence.every((e) => typeof e.lesson === "string" && Number.isFinite(e.at)));
+  const rep = await r.engine.layer.tidy.run();
+  assert.equal(rep.clustersApplied, 1);
+  for (const c of r.calls) assert.doesNotMatch(c.text, /gadget|credentials|hunter2/i);
+  assert.match(await r.engine.store.read(PREFERENCES_PATH), /Use pnpm for installing packages/);
+  assert.doesNotMatch(await r.engine.store.read(PREFERENCES_PATH), /gadget|credentials/i);
   await r.engine.stop();
 });
 

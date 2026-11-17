@@ -286,6 +286,16 @@ describe("desktop card ↔ server (§11.6)", { skip }, () => {
     assert.deepEqual(await ch["knowledge:undo"]({ id: "c_nope" }), { ok: false, reason: "That change no longer exists." });
   });
 
+  test("seam: an undo that worked WITH a warning reaches the card through knowledge:undo (and only then)", async () => {
+    let n = 0;
+    const { engine } = await rig({ over: { undo: async () => ({ ok: true, ...(n++ === 0 ? { warning: "Undone in the store, but the global file couldn't be updated (EACCES); it will be retried." } : {}) }) } });
+    const ch = buildKnowledgeChannels(engine);
+    const a = engine.changesLog.add({ kind: "applied", summary: "A", reason: "r", undoable: true });
+    const b = engine.changesLog.add({ kind: "applied", summary: "B", reason: "r", undoable: true });
+    assert.deepEqual(await ch["knowledge:undo"]({ id: a }), { ok: true, warning: "Undone in the store, but the global file couldn't be updated (EACCES); it will be retried." });
+    assert.deepEqual(await ch["knowledge:undo"]({ id: b }), { ok: true });
+  });
+
   test("the card's own logic reads the box's answers: override flags, status lines, outward note, change location, undo refusal", async () => {
     const { engine } = await rig({ over: { hasForgeLogin: async () => false, getRepoAccess: async () => null, undo: async () => ({ ok: false, reason: "A later change touched the same page.", conflictWith: { sha: "0123456789abcdef", subject: "Rewrote the release runbook" } }) } });
     const ch = buildKnowledgeChannels(engine);

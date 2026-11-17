@@ -117,3 +117,9 @@ test("opencode:prompt pins the session to its CURRENT directory with force, with
     console.warn = real;
   }
 });
+
+test("knowledge:undo hands the engine's warning to the caller untouched", async () => {
+  const knowledge = { undo: async () => ({ ok: true, warning: "The skill was removed, but Manta couldn't remember that." }) };
+  const { handlers } = rig({ knowledge });
+  assert.deepEqual(await dispatch(handlers, "knowledge:undo", [{ id: "c_1" }]), { ok: true, warning: "The skill was removed, but Manta couldn't remember that." });
+});

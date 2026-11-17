@@ -25,7 +25,8 @@
 //     lastRunAt(), shouldRun(now)                                           // scheduling helpers
 //   }
 //   Cluster = {clusterId, kind:"correction"|"preference", lesson, slug|null, sessions, count,
-//              evidence:[{ref, quote, sessionID}]}
+//              evidence:[{ref, quote, sessionID, lesson, at}]}   (lesson/at = that member's OWN redacted lesson and time:
+//              tidy takes the user-wiki lesson from a sharing member, never the cluster-wide one)
 
 import { createHash } from "node:crypto";
 import { extractJson, makeReportCost, modelLabel } from "./capture.mjs";
@@ -387,7 +388,7 @@ export function createCorrectionDetector(deps = {}) {
     const since = t - WINDOW_MS;
     const rows = db
       .prepare(
-        `SELECT m.message_id AS id, m.session_id AS sid, m.slug AS slug, m.at AS at, m.label AS label, m.excerpt AS excerpt, m.cluster_id AS cid, c.lesson AS lesson
+        `SELECT m.message_id AS id, m.session_id AS sid, m.slug AS slug, m.at AS at, m.label AS label, m.excerpt AS excerpt, m.cluster_id AS cid, m.lesson AS mlesson, c.lesson AS lesson
          FROM corr_msg m JOIN corr_cluster c ON c.cluster_id = m.cluster_id
          WHERE m.at >= ? AND m.label != 'other' ORDER BY m.at DESC`,
       )
@@ -424,7 +425,7 @@ export function createCorrectionDetector(deps = {}) {
         slug: slugs.size === 1 && [...slugs][0] ? [...slugs][0] : null,
         sessions: sessions.size,
         count,
-        evidence: [...first, ...rest].slice(0, EVIDENCE_MAX).map((m) => ({ ref: `msg:${m.sid}/${m.id}`, quote: m.excerpt, sessionID: m.sid })),
+        evidence: [...first, ...rest].slice(0, EVIDENCE_MAX).map((m) => ({ ref: `msg:${m.sid}/${m.id}`, quote: m.excerpt, sessionID: m.sid, lesson: m.mlesson ?? null, at: m.at })),
       });
     }
     return out.sort((a, b) => b.count - a.count || (a.clusterId < b.clusterId ? -1 : 1));

@@ -213,6 +213,27 @@ test("only opencode `task` children inherit; Manta-minted job sessions and uncla
   assert.equal(m2.get(TASK_ID), null);
 });
 
+test("with the isManagedSession hook, Manta's job records decide (the id format is only the fallback)", async () => {
+  const f = fakes({ sessions: { ses_p: { directory: "/repo/a" } }, dirs: { "/repo/a": A } });
+  const mk = async (isManagedSession) => {
+    const m = createSessionMap({ state: await memState(), registry: f.registry, getSession: async () => ({ directory: "/repo/a" }), isManagedSession, now: () => 1, log: () => {} });
+    await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+    return m;
+  };
+  const child = async (m, id) => {
+    await m.observe({ type: "session.created", data: { sessionID: id, parentID: "ses_p" } });
+    return m.get(id);
+  };
+  const jobs = await mk(async (id) => id === "ses_a1b2c3d4e5f6AbCdEfGhIjKlM1");
+  assert.equal(await child(jobs, "ses_a1b2c3d4e5f6AbCdEfGhIjKlM1"), null); // an opencode-looking id that IS a Manta job: not inherited
+  assert.equal((await child(jobs, TASK_ID)).slug, A.slug); // not a job: a task child inherits
+  assert.equal((await child(jobs, JOB_ID)).slug, A.slug); // the hook is the authority, not the id format
+  const failing = await mk(async () => {
+    throw new Error("store unreadable");
+  });
+  assert.equal(await child(failing, TASK_ID), null); // can't tell → fail closed
+});
+
 test("job lifecycle race: create → move execution with the OLD dir → dir change → first prompt <1 s → the worktree's project", async () => {
   const state = await memState();
   const sessions = { ses_p: { directory: "/cto" }, [JOB_ID]: { directory: "/cto" } };

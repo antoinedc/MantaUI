@@ -100,6 +100,18 @@ test("a correction cluster appears at ≥ 2 sessions; one session with 2 correct
   assert.equal(out[0].evidence[0].quote, "use pnpm");
 });
 
+test("each evidence item carries that member's OWN lesson and timestamp (tidy takes the user-wiki lesson from a sharing member)", async () => {
+  const a = um("use pnpm for installing packages", "ses_a", 3);
+  const b = um("pnpm for installing packages please", "ses_b", 2);
+  const r = await rig({ messages: [a, b], table: { "use pnpm": { label: "preference", lesson: "Use pnpm for installing packages (alpha detail)" }, "please": { label: "preference", lesson: "Use pnpm for installing packages" } }, clusterAnswer: () => [{ i: 1, cluster: null, same_as: null }, { i: 2, cluster: null, same_as: 1 }] });
+  const [c] = await r.det.runWeekly();
+  const byRef = Object.fromEntries(c.evidence.map((e) => [e.ref, e]));
+  assert.equal(byRef[`msg:ses_a/${a.id}`].lesson, "Use pnpm for installing packages (alpha detail)");
+  assert.equal(byRef[`msg:ses_a/${a.id}`].at, a.at);
+  assert.equal(byRef[`msg:ses_b/${b.id}`].lesson, "Use pnpm for installing packages");
+  assert.equal(byRef[`msg:ses_b/${b.id}`].at, b.at);
+});
+
 test("evidence is restricted to user-authored messages; pre-upgrade / non-user messages never count", async () => {
   const x = um("use pnpm", "ses_a", 3);
   const y = um("use pnpm", "ses_b", 2);

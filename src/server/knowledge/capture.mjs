@@ -78,7 +78,8 @@ export function extractJson(text) {
  * answer) is it split 90 % input / 10 % output — these classes are prompt-heavy.
  */
 export function makeReportCost(budget, slug = null) {
-  return async ({ taskClass, model, tokens, usd } = {}) => {
+  return async ({ taskClass, model, tokens: reported, usage, usd } = {}) => {
+    const tokens = usage ?? reported; // the runner's usage object, however it arrives (as `usage`, or already as `tokens`)
     const rec = { taskClass, model, slug };
     if (typeof usd === "number" && Number.isFinite(usd) && usd >= 0) rec.usd = usd;
     else if (typeof tokens === "number") rec.tokens = { input: Math.round(tokens * 0.9), output: Math.round(tokens * 0.1) };

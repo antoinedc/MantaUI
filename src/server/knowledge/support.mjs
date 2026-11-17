@@ -33,3 +33,55 @@ export function quoteSupports(claimText, quote) {
 export function claimSupported(claimText, quotes) {
   return (Array.isArray(quotes) ? quotes : []).some((q) => quoteSupports(claimText, q));
 }
+
+// ---- shell commands ----------------------------------------------------------------------
+
+/** Split a shell command on `&&`, `||`, `;` and newlines that are OUTSIDE quotes. */
+export function splitShellSegments(command) {
+  const out = [];
+  let cur = "";
+  let quote = null;
+  const src = String(command ?? "");
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      cur += ch;
+      if (ch === "\\" && quote === '"' && i + 1 < src.length) cur += src[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < src.length) {
+      cur += ch + src[++i];
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === ";" || ch === "\n" || (ch === "&" && src[i + 1] === "&") || (ch === "|" && src[i + 1] === "|")) {
+      if (ch === "&" || ch === "|") i++;
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map(wsnorm).filter(Boolean);
+}
+
+/**
+ * Was `line` run? It must equal a whole executed command or one whole segment of one — never a substring
+ * (`echo "git push"` does not validate `git push`). `wholeOnly` (learned-skill steps) accepts only a whole executed
+ * command: a step cut out of `cd app && npm run build` would lose the directory it ran in.
+ */
+export function commandExecuted(line, executed, { wholeOnly = false } = {}) {
+  const needle = wsnorm(line);
+  if (!needle) return !wholeOnly;
+  for (const c of executed ?? []) {
+    if (wsnorm(c) === needle) return true;
+    if (!wholeOnly && splitShellSegments(c).includes(needle)) return true;
+  }
+  return false;
+}

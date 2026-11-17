@@ -150,14 +150,15 @@ export function createSessionMap({ state, registry, getSession, isCtoSession, is
   function inheritFromParent(childId, parentId) {
     return serial(childId, async () => {
       if (get_.get(childId)) return get(childId);
-      let kind = classifyChildId(childId);
-      if (kind === "task") {
+      // Manta's own job records are the authority when the hook exists; the id format is only the fallback.
+      let kind;
+      if (typeof isManagedSession === "function") {
         try {
-          if ((await isManagedSession?.(childId)) === true) kind = "managed";
+          kind = (await isManagedSession(childId)) === true ? "managed" : "task";
         } catch {
           kind = "unknown";
         }
-      }
+      } else kind = classifyChildId(childId);
       if (kind !== "task") return null; // left unmapped until its first prompt pins it from its own directory
       const parent = get_.get(parentId);
       if (!parent) return null;

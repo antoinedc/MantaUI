@@ -29,7 +29,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { matchOutward } from "./outwardPatterns.mjs";
-import { MIN_QUOTE_CHARS, quoteSupports } from "./support.mjs";
+import { MIN_QUOTE_CHARS, commandExecuted, quoteSupports, wsnorm } from "./support.mjs";
 import { parseTrialReport } from "./trial.mjs";
 
 export const SKILL_PREFIX = "learned-";
@@ -56,17 +56,14 @@ export function slugifySkill(name) {
   return s.length >= 3 ? s : null;
 }
 
-export const normalizeCommand = (c) => String(c ?? "").replace(/\s+/g, " ").trim();
+export const normalizeCommand = wsnorm;
 
 /**
  * A step passes only when it equals a WHOLE executed command (whitespace-normalised). A step pulled out of a
  * `cd app && npm run build` chain would lose the directory it ran in, so the step must carry the whole chain.
  */
 export function commandWasExecuted(step, executed) {
-  const want = normalizeCommand(step);
-  if (!want) return false;
-  for (const raw of executed) if (normalizeCommand(raw) === want) return true;
-  return false;
+  return normalizeCommand(step) !== "" && commandExecuted(step, executed, { wholeOnly: true });
 }
 
 const oneLine = (s, max) =>
@@ -113,7 +110,7 @@ export function normalizeCandidate(raw) {
   const sessions = [...new Set((Array.isArray(raw.sessions) ? raw.sessions : []).filter(idOk))].slice(0, 12);
   const requests = [];
   for (const r of Array.isArray(raw.requests) ? raw.requests : []) {
-    if (idOk(r?.sessionID) && idOk(r?.messageID) && typeof r?.quote === "string" && r.quote.trim().length >= MIN_QUOTE_CHARS) {
+    if (idOk(r?.sessionID) && idOk(r?.messageID) && typeof r?.quote === "string" && wsnorm(r.quote).length >= MIN_QUOTE_CHARS) {
       requests.push({ sessionID: r.sessionID, messageID: r.messageID, quote: r.quote });
     }
   }

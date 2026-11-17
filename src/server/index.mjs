@@ -135,7 +135,7 @@ import { createOpencodeService } from "./upgradeV2Service.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { createKnowledgeEngine } from "./knowledge/engine.mjs";
 import { handleKnowledgeRoute } from "./knowledge/routes.mjs";
-import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthored as createKnowledgeIsUserAuthored, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef, createKnowledgeRunner, knowledgePaths } from "./knowledge/integration.mjs";
+import { createBandOf as createKnowledgeBandOf, createForgeAdapters as createKnowledgeForgeAdapters, createIsUserAuthored as createKnowledgeIsUserAuthored, createIsUserAuthoredRef as createKnowledgeIsUserAuthoredRef, createIsManagedSession as createKnowledgeIsManagedSession, forwardListMessages as forwardKnowledgeListMessages, createKnowledgeRunner, knowledgePaths } from "./knowledge/integration.mjs";
 import { createKnowledgeParts } from "./knowledge/wiring.mjs";
 import { createShellCommandReader as createKnowledgeShellReader } from "./knowledge/readers.mjs";
 import { runDbTask as knowledgeRunDbTask } from "./dbOffload.mjs";
@@ -169,7 +169,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, completionOwnerOf as delegateCompletionOwnerOf, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -2063,14 +2063,14 @@ const knowledgeEngine = createKnowledgeEngine({
   config: { get: () => local.configGet(), update: (patch) => local.configUpdate(patch) },
   runEphemeral: knowledgeRunner,
   resolveModelForClass,
-  readShellCommands: createKnowledgeShellReader({ listMessages: (sessionID) => oc.listMessages(sessionID) }),
+  readShellCommands: createKnowledgeShellReader({ listMessages: forwardKnowledgeListMessages(oc) }),
   globalAgentsPath: knowledgePathsOnBox.globalAgentsPath,
   createParts: (foundation) =>
     createKnowledgeParts(foundation, {
       runEphemeral: knowledgeRunner,
       resolveModelForClass,
       configGet: () => local.configGet(),
-      oc: { listMessages: (sessionID) => oc.listMessages(sessionID), createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
+      oc: { listMessages: forwardKnowledgeListMessages(oc), createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
       local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
       runDbTask: knowledgeRunDbTask,
       listTmuxProjects: () => tmux.listProjects(),
@@ -2090,7 +2090,9 @@ const knowledgeEngine = createKnowledgeEngine({
     return r.state === "found" ? r.session : null;
   },
   isCtoSession: (sessionID) => ctoConversation.isConversationSession(sessionID),
-  readMessages: createKnowledgeMessageReader({ listMessages: (sessionID) => oc.listMessages(sessionID) }),
+  // A child session of a Manta-owned background job carries its own directory: it never inherits its parent's project.
+  isManagedSession: createKnowledgeIsManagedSession({ loadJobs: loadDelegateJobs, completionOwnerOf: delegateCompletionOwnerOf }),
+  readMessages: createKnowledgeMessageReader({ listMessages: forwardKnowledgeListMessages(oc) }),
   searchTranscripts: knowledgeTranscripts.searchTranscripts,
   promptOrigins,
   isUserAuthoredRef: createKnowledgeIsUserAuthoredRef(promptOrigins, {

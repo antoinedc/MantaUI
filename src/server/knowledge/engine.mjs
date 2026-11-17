@@ -57,6 +57,7 @@ const disabled = (reason = "Shared knowledge is off.") => new KnowledgeError("di
  *   isCtoSession(id) → boolean               ctoConversation.isConversationSession
  *   listSessionsPage({afterId, limit})       history backfill source (default: opencode's session_v2)
  *   searchTranscripts({query, directories, anyTerms, limit}) → {hits, truncated}   [INTEGRATION: ctoSearchIndex]
+ *   isManagedSession(sessionID) → boolean   a session that is the child of a Manta-owned background job (never inherits its parent's project)
  *   readMessages({sessionID, messageIDs, radius}) → [{id, role, text, at}] | null
  *   isUserAuthoredRef(ref, {sessionID}) → boolean                                   [INTEGRATION: prompt origins]
  *   getRepoAccess({kind, host, owner, repo}) → {canPush, isFork, defaultBranch}     [INTEGRATION: forge]
@@ -173,7 +174,7 @@ export function createKnowledgeEngine(deps = {}) {
         },
       });
       const changes = createChangeLog({ state, now });
-      const sessionMap = createSessionMap({ state, registry, getSession: deps.getSession, isCtoSession: deps.isCtoSession, listSessionsPage: deps.listSessionsPage ?? defaultListSessionsPage, now, log });
+      const sessionMap = createSessionMap({ state, registry, getSession: deps.getSession, isCtoSession: deps.isCtoSession, isManagedSession: deps.isManagedSession, listSessionsPage: deps.listSessionsPage ?? defaultListSessionsPage, now, log });
       const queue = createQueue({
         state,
         scanner,

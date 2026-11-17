@@ -60,6 +60,28 @@ export function createIsUserAuthored(promptOrigins) {
 }
 
 /**
+ * The `listMessages(sessionID, opts)` every knowledge reader takes. It FORWARDS `opts` (`{limit}` from capture's
+ * bounded reads): a wrapper of the form `(sid) => oc.listMessages(sid)` silently drops them and reads whole transcripts.
+ */
+export const forwardListMessages = (oc) => (sessionID, opts) => oc.listMessages(sessionID, opts);
+
+/**
+ * `isManagedSession(sessionID)` for the session map: true when the session is the child session of a Manta-owned
+ * `delegate` job record (any status, any origin Manta completes). Such a session carries its own directory and
+ * never inherits its parent's project; a background `task` child (completion owner opencode, or a record only
+ * observed) is not managed. A store that can't be read throws, which the session map treats as "unknown" (not mapped).
+ *
+ * @param {{ loadJobs: () => Promise<object[]>, completionOwnerOf: (job: object) => string }} deps  delegate's own `loadJobs` / `completionOwnerOf`
+ */
+export function createIsManagedSession({ loadJobs, completionOwnerOf }) {
+  return async function isManagedSession(sessionID) {
+    if (typeof sessionID !== "string" || sessionID === "") return false;
+    const jobs = (await loadJobs()) ?? [];
+    return jobs.some((j) => j?.childSessionID === sessionID && j.origin !== "observed" && completionOwnerOf(j) === "manta");
+  };
+}
+
+/**
  * The two forge seams of the settings (§4.1): `getRepoAccess` and `hasForgeLogin`.
  *
  * @param {object} deps

@@ -40,7 +40,13 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 
 /** A bare total (the runner could only estimate prompt + answer) is split 90 % input / 10 % output. */
 export function normalizeTokens(tokens) {
   if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) return { input: Math.round(tokens * 0.9), output: Math.round(tokens * 0.1) };
-  return tokens && typeof tokens === "object" ? tokens : undefined;
+  if (!tokens || typeof tokens !== "object") return undefined;
+  // opencode's own message shape nests the cache buckets (`cache: {read, write}`); the runner's usage is flat.
+  if (tokens.cache && typeof tokens.cache === "object") {
+    const { cache, ...rest } = tokens;
+    return { ...rest, cacheRead: rest.cacheRead ?? cache.read, cacheWrite: rest.cacheWrite ?? cache.write };
+  }
+  return tokens;
 }
 
 export function priceTokens(tokens, rates) {
