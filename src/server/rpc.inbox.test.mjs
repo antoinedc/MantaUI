@@ -2,22 +2,8 @@
 // the opencode:inbox / inbox-cancel channels (K4) at the RPC seam.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stubRpcDeps } from "./fixtures/rpcStubDeps.mjs";
 import { dispatch, buildHandlers } from "./rpc.mjs";
-
-const stubDeps = () => ({
-  tmux: { listProjects: async () => [] },
-  pty: {},
-  bus: {},
-  syncState: {
-    refreshNow: async () => {},
-    applyConfig: () => {},
-    snapshot: () => ({ projects: [] }),
-    payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }),
-    everSucceeded: () => true,
-  },
-  local: { configGet: async () => ({ projects: [] }) },
-  push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
-});
 
 function rig({ withInterp = true } = {}) {
   const log = [];
@@ -51,7 +37,7 @@ function rig({ withInterp = true } = {}) {
         },
       }
     : null;
-  const handlers = buildHandlers({ oc, ctoConversation, streamInterp, ...stubDeps() });
+  const handlers = buildHandlers({ oc, ctoConversation, streamInterp, ...stubRpcDeps() });
   return { handlers, log };
 }
 

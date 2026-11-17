@@ -65,6 +65,17 @@ function briefingWith(routes, extra = {}) {
 }
 
 const ok = (body) => () => ({ status: 200, body });
+
+// A briefing whose every GET returns a new version (`<BRIEF> v1`, `v2`, …) with
+// a matching token, plus the ack/reset endpoints.
+function versionedBriefing() {
+  let n = 0;
+  return briefingWith({
+    "GET /api/knowledge/briefing": () => ({ status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }),
+    "POST /api/knowledge/briefing/ack": ok({ ok: true }),
+    "POST /api/knowledge/briefing/reset": ok({ ok: true }),
+  });
+}
 const ev = (system, extra = {}) => ({ sessionID: "ses_a", system, messages: [], ...extra });
 const count = (calls, route) => calls.filter((c) => `${c.method} ${c.path}` === route).length;
 
@@ -178,12 +189,7 @@ describe("briefing delivery", () => {
   });
 
   test("a compaction resets only once it COMPLETED (session.compacted); the hook alone resets nothing", async () => {
-    let n = 0;
-    const { b, calls } = briefingWith({
-      "GET /api/knowledge/briefing": () => ({ status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }),
-      "POST /api/knowledge/briefing/ack": ok({ ok: true }),
-      "POST /api/knowledge/briefing/reset": ok({ ok: true }),
-    });
+    const { b, calls } = versionedBriefing();
     b.setEventsLive(true);
     await b.onContext(ev([IDENTITY]));
     await b.flush();
@@ -218,12 +224,7 @@ describe("briefing delivery", () => {
   });
 
   test("without the event stream the first request after a compaction event is the reset point (documented fallback)", async () => {
-    let n = 0;
-    const { b, calls } = briefingWith({
-      "GET /api/knowledge/briefing": () => ({ status: 200, body: { text: `${BRIEF} v${++n}`, token: `tok${n}` } }),
-      "POST /api/knowledge/briefing/ack": ok({ ok: true }),
-      "POST /api/knowledge/briefing/reset": ok({ ok: true }),
-    });
+    const { b, calls } = versionedBriefing();
     await b.onContext(ev([IDENTITY]));
     await b.flush();
     await b.onCompaction({ sessionID: "ses_a", system: [] });

@@ -1857,6 +1857,14 @@ describe("ChatPanel plan question (box-decided)", () => {
     await emitStreamAndFlush(bus, h, { sub: "questions", sessionId: "ses_test", payload: { questions: [q] } });
   }
 
+  async function clickBuildHere() {
+    const build = Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Build here") as HTMLButtonElement;
+    await act(async () => {
+      build.click();
+    });
+    await h!.flush();
+  }
+
   it("a question with `plan` renders the plan card (title, counts, page link) and not the ordinary card", async () => {
     await open(question({ title: "Ship login", text: "# Ship login", steps: 3, files: 2, path: null, pageUrl: "https://b.example/pages/plan-x" }));
     expect(h!.text()).toContain("Ship login");
@@ -1873,11 +1881,7 @@ describe("ChatPanel plan question (box-decided)", () => {
       Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(input, "also add tests");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const build = Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Build here") as HTMLButtonElement;
-    await act(async () => {
-      build.click();
-    });
-    await h!.flush();
+    await clickBuildHere();
     expect(promptCalls).toHaveLength(1);
     expect(promptCalls[0][1]).toBe("# Ship login\n- step\n\nalso add tests");
     expect((promptCalls[0][6] as { appGenerated?: boolean }).appGenerated).toBe(true);
@@ -1885,11 +1889,7 @@ describe("ChatPanel plan question (box-decided)", () => {
 
   it("Build here without feedback sends just the plan, app-generated", async () => {
     await open(question({ title: "Ship login", text: "# Ship login\n- step", steps: 1, files: 0, path: null, pageUrl: "https://b.example/pages/plan-x" }));
-    const build = Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Build here") as HTMLButtonElement;
-    await act(async () => {
-      build.click();
-    });
-    await h!.flush();
+    await clickBuildHere();
     expect(promptCalls.map((c) => [c[1], (c[6] as { appGenerated?: boolean }).appGenerated])).toEqual([["# Ship login\n- step", true]]);
   });
 

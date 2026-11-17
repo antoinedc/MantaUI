@@ -15,6 +15,7 @@ import {
   mergeInboxSources,
 } from "./github.mjs";
 import { rollupChecks } from "../../shared/forge.mjs";
+import { recordingRequest } from "./recordingRequest.mjs";
 
 const REPO = { owner: "acme", repo: "widget" };
 
@@ -524,8 +525,9 @@ test("listMyRepos paginates until a short page and returns the union", async () 
   assert.equal(data.length, 137, "both pages are concatenated before filtering");
 });
 
-test("listMyRepos caps at 5 pages so a pathological account cannot hang the picker", async () => {
-  const full = Array.from({ length: 100 }, (_, i) => ({
+// One full page (100) of pushable repos, as `/user/repos` returns them.
+function fullRepoPage() {
+  return Array.from({ length: 100 }, (_, i) => ({
     name: `r${i}`,
     full_name: `acme/r${i}`,
     owner: { login: "acme" },
@@ -535,6 +537,10 @@ test("listMyRepos caps at 5 pages so a pathological account cannot hang the pick
     html_url: `https://github.com/acme/r${i}`,
     permissions: { push: true },
   }));
+}
+
+test("listMyRepos caps at 5 pages so a pathological account cannot hang the picker", async () => {
+  const full = fullRepoPage();
   let count = 0;
   const request = async () => {
     count += 1;
@@ -547,16 +553,7 @@ test("listMyRepos caps at 5 pages so a pathological account cannot hang the pick
 });
 
 test("listMyRepos reports stale when any page was stale", async () => {
-  const full = Array.from({ length: 100 }, (_, i) => ({
-    name: `r${i}`,
-    full_name: `acme/r${i}`,
-    owner: { login: "acme" },
-    pushed_at: "2026-08-01T00:00:00Z",
-    default_branch: "main",
-    clone_url: `https://github.com/acme/r${i}.git`,
-    html_url: `https://github.com/acme/r${i}`,
-    permissions: { push: true },
-  }));
+  const full = fullRepoPage();
   const request = async (url) => {
     const pageNum = Number(new URL(url).searchParams.get("page"));
     const data = pageNum === 1 ? full : full.slice(0, 10);
@@ -703,18 +700,6 @@ test("mergeInboxSources precedence: checks failing > review requested > assigned
 // ---------------------------------------------------------------------------
 
 const REPO_URL = "https://api.github.com/repos/acme/widget";
-
-function recordingRequest(map) {
-  const calls = [];
-  const request = async (url, opts) => {
-    calls.push({ url, opts });
-    const v = map[url];
-    if (v instanceof Error) throw v;
-    return { data: v, stale: false };
-  };
-  request.calls = calls;
-  return request;
-}
 
 test("getRepoAccess maps push permission, fork and default branch; always revalidates", async () => {
   const request = recordingRequest({

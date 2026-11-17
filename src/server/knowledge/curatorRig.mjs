@@ -4,9 +4,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createKnowledgeEngine } from "./engine.mjs";
-import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
+import { baseEngineDeps, makeRepo, memConfig, tmpDir } from "./testHelpers.mjs";
 
-const fakeLint = async () => ({ preset: { meta: { id: "p" } }, lintSource: async () => ({ messages: [] }) });
 export const started = (id) => ({ type: "session.execution.started", data: { sessionID: id } });
 
 /**
@@ -19,23 +18,11 @@ export async function curatorRig({ stored, projects = { widget: "https://github.
   const repos = {};
   for (const [name, remote] of Object.entries(projects)) repos[name] = await makeRepo({ remote });
   const clock = { t: Date.parse("2026-11-17T10:00:00") };
-  let cfg = { knowledge: stored };
+  const config = memConfig({ knowledge: stored });
   const calls = [];
   const notes = [];
   const engine = createKnowledgeEngine({
-    dir,
-    git: execGitRunner(dir),
-    config: { get: async () => cfg, update: async (p) => (cfg = { ...cfg, ...p }) },
-    getSession: async (id) => ({ directory: repos[sessions[id]] ?? repos[Object.keys(repos)[0]] }),
-    isCtoSession: async () => false,
-    loadLint: fakeLint,
-    secretValues: () => [],
-    fireNotify: async (n) => notes.push(n),
-    maintenanceMs: 3_600_000,
-    curatorMs: 3_600_000,
-    log: () => {},
-    listSessionsPage: async () => [],
-    now: () => clock.t,
+    ...baseEngineDeps({ dir, repos, sessions, config, notes, clock }),
     isUserAuthoredRef: (ref) => userRefs.has(ref),
     readMessages: async ({ sessionID, messageIDs }) => messageIDs.map((id) => ({ id, ...(messages[sessionID]?.[id] ?? {}) })).filter((m) => m.role),
     readShellCommands: async (sid) => shell[sid] ?? null,
@@ -61,5 +48,5 @@ export async function curatorRig({ stored, projects = { widget: "https://github.
   };
   const note = (slug, sid, kind, text, refs = [`msg:${sid}/msg_1`], extra = {}) => engine.queue.enqueue({ slug, sessionID: sid, origin: "tool", kind, text, refs, ...extra });
   const decide = (decisions) => ({ text: JSON.stringify({ decisions }) });
-  return { engine, dir, repos, clock, calls, notes, slugOf, note, decide, getCfg: () => cfg, async writeStore(rel, content) { await mkdir(join(dir, rel, ".."), { recursive: true }); await writeFile(join(dir, rel), content); } };
+  return { engine, dir, repos, clock, calls, notes, slugOf, note, decide, getCfg: config.current, async writeStore(rel, content) { await mkdir(join(dir, rel, ".."), { recursive: true }); await writeFile(join(dir, rel), content); } };
 }

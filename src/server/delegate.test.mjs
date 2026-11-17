@@ -308,15 +308,10 @@ test("resolveOwner finds the tmux session owning a session id", () => {
 
 function runningJob(i) {
   return {
-    id: `r${i}`, name: `job${i}`, prompt: "p", model: null,
-    parentSessionID: `parent${i}`, parentDirectory: "/repo",
-    childSessionID: `child${i}`, tmuxSession: "s", windowIndex: i,
-    worktree: null, branch: null, baseSha: null,
-    status: "running", activity: null,
-    createdAt: 1, startedAt: 1, finishedAt: null,
-    result: null, error: null, filesChanged: null,
-    engine: "v2", completionOwner: "manta", attempt: 1, launchState: "running", submittedAt: 1,
-    completionMessageId: "msg_fixture", completionDelivery: null,
+    ...runningObserverJob(),
+    id: `r${i}`, name: `job${i}`,
+    parentSessionID: `parent${i}`,
+    childSessionID: `child${i}`, windowIndex: i,
   };
 }
 

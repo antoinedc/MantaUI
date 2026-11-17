@@ -12,12 +12,10 @@ import { handleKnowledgeRoute, buildKnowledgeChannels, toSettingsWire } from "./
 import { createIsUserAuthored, createIsUserAuthoredRef } from "./integration.mjs";
 import { createMessageReader } from "./search.mjs";
 import { createShellCommandReader } from "./readers.mjs";
-import { execGitRunner, makeRepo, tmpDir } from "./testHelpers.mjs";
+import { baseEngineDeps, makeRepo, memConfig, seededBareRemote, tmpDir } from "./testHelpers.mjs";
 
-const fakeLint = async () => ({ preset: { meta: { id: "p" } }, lintSource: async () => ({ messages: [] }) });
 const exists = (p) => access(p).then(() => true, () => false);
 const changesOf = async (engine) => (await engine.changes({ limit: 200 })).items;
-const ID = ["-c", "user.name=t", "-c", "user.email=t@t"];
 
 /** A V1-shaped opencode message. */
 const msg = (id, role, text, at, tools = []) => ({
@@ -38,18 +36,7 @@ const decide = (decisions) => ({ text: JSON.stringify({ decisions }) });
 /** A bare "remote" with a README on main, for the repository writer. */
 async function bareRemote() {
   const root = await tmpDir("knowledge-e2e-remote-");
-  const remote = join(root, "remote.git");
-  const g = execGitRunner(root);
-  await g.run(["init", "--bare", "-q", "-b", "main", remote]);
-  const seed = join(root, "seed");
-  await mkdir(seed);
-  const sg = execGitRunner(seed);
-  await sg.run(["init", "-q", "-b", "main"]);
-  await writeFile(join(seed, "README.md"), "# Widget\n");
-  await sg.run(["add", "-A"]);
-  await sg.run([...ID, "commit", "-q", "-m", "init"]);
-  await sg.run(["remote", "add", "origin", `file://${remote}`]);
-  await sg.run(["push", "-q", "origin", "main"]);
+  const { remote, g } = await seededBareRemote(root, { "README.md": "# Widget\n" });
   return { remote, g, show: (ref, path = "AGENTS.md") => g.run(["--git-dir", remote, "show", `${ref}:${path}`]).catch(() => null) };
 }
 
@@ -59,7 +46,7 @@ async function e2eRig({ stored, transcripts = {}, runner, sessions = { ses_one: 
   const repos = {};
   for (const [name, url] of Object.entries(projects)) repos[name] = await makeRepo({ remote: url });
   const clock = { t: Date.parse("2026-11-17T10:00:00") };
-  let cfg = { knowledge: stored };
+  const config = memConfig({ knowledge: stored });
   if (facts) {
     // the engine's first maintenance pass runs at start: the blackboard has to be there already
     await mkdir(join(home, "facts"), { recursive: true });
@@ -91,19 +78,7 @@ async function e2eRig({ stored, transcripts = {}, runner, sessions = { ses_one: 
   const worktrees = [];
   let engine;
   engine = createKnowledgeEngine({
-    dir,
-    git: execGitRunner(dir),
-    config: { get: async () => cfg, update: async (p) => (cfg = { ...cfg, ...p }) },
-    getSession: async (id) => ({ directory: repos[sessions[id]] ?? repos[Object.keys(repos)[0]] }),
-    isCtoSession: async () => false,
-    loadLint: fakeLint,
-    secretValues: () => [],
-    fireNotify: async (n) => notes.push(n),
-    maintenanceMs: 3_600_000,
-    curatorMs: 3_600_000,
-    log: () => {},
-    listSessionsPage: async () => [],
-    now: () => clock.t,
+    ...baseEngineDeps({ dir, repos, sessions, config, notes, clock }),
     getRepoAccess: async () => ({ canPush: true, isFork: false, defaultBranch: "main" }),
     hasForgeLogin: async () => true,
     isUserAuthoredRef: createIsUserAuthoredRef(promptOrigins, { readRole: roleOf }),
@@ -116,7 +91,7 @@ async function e2eRig({ stored, transcripts = {}, runner, sessions = { ses_one: 
       createKnowledgeParts(foundation, {
         runEphemeral: modelRunner,
         resolveModelForClass: async () => ({ providerID: "p", modelID: "m" }),
-        configGet: async () => cfg,
+        configGet: config.get,
         oc,
         local: {
           gitAddWorktree: async ({ name }) => {

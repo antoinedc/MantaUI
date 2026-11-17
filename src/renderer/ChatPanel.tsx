@@ -70,6 +70,7 @@ import {
   writeSavedDelegateModel,
   resolveActiveModel,
   resolveAgentMentions,
+  splitSendableAttachments,
   type Attachment,
   type ModelSelection,
   type SessionMode,
@@ -1627,10 +1628,7 @@ export function ChatPanel({
     }
     // Only media chips become multimodal FileParts; path-ref chips were
     // already folded into `text`.
-    const sentAttachments = submitAttachments.filter((a) => a.status === "ready" && a.remotePath);
-    const readyAttachments = sentAttachments
-      .filter((a) => !a.asPathRef)
-      .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+    const { sent: sentAttachments, media: readyAttachments } = splitSendableAttachments(submitAttachments);
     const unsupported = unsupportedAttachmentsMessage(readyAttachments);
     if (unsupported) {
       setSendError(unsupported);
@@ -1724,10 +1722,7 @@ export function ChatPanel({
     const { text, draft, submitAttachments, agent } = args;
     const slashText = splitSlashText(text);
     if (!slashText) return;
-    const sentAttachments = submitAttachments.filter((a) => a.status === "ready" && a.remotePath);
-    const readyAttachments = sentAttachments
-      .filter((a) => !a.asPathRef)
-      .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+    const { sent: sentAttachments, media: readyAttachments } = splitSendableAttachments(submitAttachments);
     const unsupported = unsupportedAttachmentsMessage(readyAttachments);
     if (unsupported) {
       setSendError(unsupported);
@@ -1835,13 +1830,7 @@ export function ChatPanel({
     // its placeholder keeps the prefix id and goes with the first user message.
     // Only media chips become multimodal FileParts; path-ref chips were already
     // folded into `text` above.
-    const readyAttachments = submitAttachments
-      .filter((a) => a.status === "ready" && a.remotePath && !a.asPathRef)
-      .map((a) => ({
-        remotePath: a.remotePath!,
-        mime: a.mime,
-        filename: a.filename,
-      }));
+    const { media: readyAttachments } = splitSendableAttachments(submitAttachments);
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
     const cmdName = slashMatch ? slashMatch[1] : null;
     const knownCommand =

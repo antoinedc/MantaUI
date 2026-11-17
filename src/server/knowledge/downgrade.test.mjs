@@ -174,12 +174,7 @@ test("a mixed page that couldn't be rewritten (no capable model) keeps its refer
     runner: (a) => (up ? h.runner(a) : { ok: false, code: "no-qualifying-model" }),
   });
   h.runner = rewriteRunner(r);
-  const w = await r.slugOf("ses_w");
-  await r.slugOf("ses_g");
-  const cur = r.engine.layer.curator;
-  const vctx = await cur.vctxFor(w);
-  const two = (content, ref) => ({ type: "page.edit", target: { area: "commons", path: "commons/howto/two.md" }, content, reason: "seen", evidence: [{ ref }] });
-  assert.equal((await cur.processDecisions([two("Generic.\n", "msg:ses_w/msg_1"), two("Generic, extended.\n", "msg:ses_g/msg_1")], vctx, { batchId: "b_x", slug: w, taskClass: "curator-notes" })).applied, 2);
+  const w = await seedMixedPage(r);
   await r.engine.settingsSet({ projects: { [w]: { sharing: "private" } } });
   assert.ok((await changesOf(r.engine)).some((i) => i.kind === "waiting" && /is waiting/.test(i.summary)));
   assert.doesNotMatch(await r.engine.store.read("commons/howto/two.md"), /ses_w/);
@@ -192,6 +187,17 @@ test("a mixed page that couldn't be rewritten (no capable model) keeps its refer
   await r.engine.stop();
 });
 
+// Two sessions (widget, gadget) have each evidenced one edit of the same commons page; returns widget's slug.
+async function seedMixedPage(r) {
+  const w = await r.slugOf("ses_w");
+  await r.slugOf("ses_g");
+  const cur = r.engine.layer.curator;
+  const vctx = await cur.vctxFor(w);
+  const two = (content, ref) => ({ type: "page.edit", target: { area: "commons", path: "commons/howto/two.md" }, content, reason: "seen", evidence: [{ ref }] });
+  assert.equal((await cur.processDecisions([two("Generic.\n", "msg:ses_w/msg_1"), two("Generic, extended.\n", "msg:ses_g/msg_1")], vctx, { batchId: "b_x", slug: w, taskClass: "curator-notes" })).applied, 2);
+  return w;
+}
+
 async function mixedRig(over = {}) {
   const h = { mode: "rewrite" };
   const r = await curatorRig({
@@ -202,12 +208,7 @@ async function mixedRig(over = {}) {
     ...over,
   });
   h.runner = rewriteRunner(r);
-  const w = await r.slugOf("ses_w");
-  await r.slugOf("ses_g");
-  const cur = r.engine.layer.curator;
-  const vctx = await cur.vctxFor(w);
-  const two = (content, ref) => ({ type: "page.edit", target: { area: "commons", path: "commons/howto/two.md" }, content, reason: "seen", evidence: [{ ref }] });
-  assert.equal((await cur.processDecisions([two("Generic.\n", "msg:ses_w/msg_1"), two("Generic, extended.\n", "msg:ses_g/msg_1")], vctx, { batchId: "b_x", slug: w, taskClass: "curator-notes" })).applied, 2);
+  const w = await seedMixedPage(r);
   return { h, r, w };
 }
 

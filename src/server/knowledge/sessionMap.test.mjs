@@ -85,11 +85,17 @@ test("a move before anything is captured re-pins; after a capture it is never re
   assert.equal(m.get("ses_1").slug, A.slug);
 });
 
-test("a task subagent child inherits its parent's mapping on session.created{parentID}", async () => {
+// A session map in which `ses_p` (in /repo/a) has already started and been mapped to A.
+async function mappedParent() {
   const state = await memState();
   const f = fakes({ sessions: { ses_p: { directory: "/repo/a" } }, dirs: { "/repo/a": A } });
   const m = f.map(state);
   await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  return { f, m };
+}
+
+test("a task subagent child inherits its parent's mapping on session.created{parentID}", async () => {
+  const { m } = await mappedParent();
   await m.observe({ type: "session.created", data: { sessionID: TASK_ID, parentID: "ses_p" } });
   assert.equal(m.get(TASK_ID).slug, A.slug);
   assert.equal(m.get(TASK_ID).source, "parent");
@@ -197,10 +203,7 @@ test("backfill never overwrites a live mapping", async () => {
 });
 
 test("only opencode `task` children inherit; Manta-minted job sessions and unclassifiable ids never do", async () => {
-  const state = await memState();
-  const f = fakes({ sessions: { ses_p: { directory: "/repo/a" } }, dirs: { "/repo/a": A } });
-  const m = f.map(state);
-  await m.observe({ type: "session.execution.started", data: { sessionID: "ses_p" } });
+  const { f, m } = await mappedParent();
   for (const id of [JOB_ID, "ses_short", "weird"]) {
     await m.observe({ type: "session.created", data: { sessionID: id, parentID: "ses_p" } });
     assert.equal(m.get(id), null, id);

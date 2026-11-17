@@ -14,6 +14,7 @@ import {
 } from "./gitlab.mjs";
 import { GithubRequestError } from "./github.mjs";
 import { rollupChecks } from "../../shared/forge.mjs";
+import { recordingRequest } from "./recordingRequest.mjs";
 import { verifyGitlabSignature, resolveSignature } from "../webhooks.mjs";
 import { rotateOauthPair, parseGlabToken } from "./auth.mjs";
 
@@ -216,13 +217,19 @@ test("position building: added / removed / unchanged line → right new_line/old
 
 // ---- submitReview (mismatch #5): N discussions + one approve --------------
 
-test("submitReview posts N discussions (each buffered comment) then ONE approve", async () => {
+// MR !42 whose `/versions` reports `headSha`, with a recording write transport.
+function reviewRig(headSha) {
   const base = `${projectBase(REPO)}/merge_requests/42`;
   const write = fakeWrite({});
   const adapter = createGitlabAdapter(
-    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: "abc123" }] }),
+    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: headSha }] }),
     write,
   );
+  return { base, write, adapter };
+}
+
+test("submitReview posts N discussions (each buffered comment) then ONE approve", async () => {
+  const { base, write, adapter } = reviewRig("abc123");
 
   const comments = [
     { path: "a.ts", line: 1, side: "new", body: "c1" },
@@ -250,12 +257,7 @@ test("submitReview posts N discussions (each buffered comment) then ONE approve"
 });
 
 test("submitReview changes_requested → discussions + unapprove, no approve", async () => {
-  const base = `${projectBase(REPO)}/merge_requests/42`;
-  const write = fakeWrite({});
-  const adapter = createGitlabAdapter(
-    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: "h" }] }),
-    write,
-  );
+  const { base, write, adapter } = reviewRig("h");
   await adapter.submitReview(REPO, 42, {
     verdict: "changes_requested",
     body: "",
@@ -269,12 +271,7 @@ test("submitReview changes_requested → discussions + unapprove, no approve", a
 });
 
 test("submitReview posts a non-empty review body as a general MR note", async () => {
-  const base = `${projectBase(REPO)}/merge_requests/42`;
-  const write = fakeWrite({});
-  const adapter = createGitlabAdapter(
-    fakeRequest({ [`${base}/versions`]: [{ base_sha: "b", start_sha: "s", head_sha: "h" }] }),
-    write,
-  );
+  const { base, write, adapter } = reviewRig("h");
   await adapter.submitReview(REPO, 42, {
     verdict: "commented",
     body: "summary note",
@@ -531,18 +528,6 @@ test("getDefaultBranch returns null when the request fails", async () => {
 });
 
 // ---- Shared knowledge: getRepoAccess + updatePullRequest + fresh lookup -----
-
-function recordingRequest(map) {
-  const calls = [];
-  const request = async (url, opts) => {
-    calls.push({ url, opts });
-    const v = map[url];
-    if (v instanceof Error) throw v;
-    return { data: v, stale: false };
-  };
-  request.calls = calls;
-  return request;
-}
 
 test("getRepoAccess: Developer (30) via the project can push; always revalidates", async () => {
   const request = recordingRequest({

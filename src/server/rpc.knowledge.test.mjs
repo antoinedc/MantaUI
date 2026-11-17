@@ -2,20 +2,16 @@
 // and the `knowledge:*` channels reach the engine (503 when it isn't wired).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stubRpcDeps } from "./fixtures/rpcStubDeps.mjs";
 import { dispatch, buildHandlers } from "./rpc.mjs";
 
 function rig({ knowledge } = {}) {
   const updates = [];
-  const deps = {
-    tmux: { listProjects: async () => [] },
-    pty: {},
-    bus: {},
-    syncState: { refreshNow: async () => {}, applyConfig: () => {}, snapshot: () => ({ projects: [] }), payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }), everSucceeded: () => true },
-    local: { configGet: async () => ({ projects: [] }), configUpdate: async (p) => (updates.push(p), { ...p }) },
-    push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
+  const deps = stubRpcDeps({
+    local: { configUpdate: async (p) => (updates.push(p), { ...p }) },
     oc: {},
     ...(knowledge ? { knowledge } : {}),
-  };
+  });
   return { handlers: buildHandlers(deps), updates };
 }
 
@@ -63,17 +59,14 @@ function promptRig({ session = { state: "found", session: { directory: "/work/wt
     cachedSessionDirectory: () => cached,
   };
   const knowledge = { pinSession: async (a) => (pins.push(a), { slug: "p" }) };
-  const handlers = buildHandlers({
-    ...(handoff ? { handoff } : {}),
-    tmux: { listProjects: async () => [] },
-    pty: {},
-    bus: {},
-    syncState: { refreshNow: async () => {}, applyConfig: () => {}, snapshot: () => ({ projects: [] }), payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }), everSucceeded: () => true },
-    local: { configGet: async () => ({ projects: [] }), configUpdate: async (p) => p },
-    push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
-    oc,
-    knowledge,
-  });
+  const handlers = buildHandlers(
+    stubRpcDeps({
+      ...(handoff ? { handoff } : {}),
+      local: { configUpdate: async (p) => p },
+      oc,
+      knowledge,
+    }),
+  );
   return { handlers, sends, pins };
 }
 const tick = () => new Promise((r) => setTimeout(r, 10));

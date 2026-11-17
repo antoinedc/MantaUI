@@ -1,32 +1,18 @@
 // repoWriter tests: real git against a local bare "remote"; fakes for the forge, settings and scanner.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createRepoWriter, PR_BRANCH } from "./repoWriter.mjs";
 import { renderBlock, findBlock, parseBlockRules, START_MARKER } from "./repoBlock.mjs";
-import { execGitRunner, memState, tmpDir } from "./testHelpers.mjs";
+import { execGitRunner, memState, seededBareRemote, tmpDir } from "./testHelpers.mjs";
 
 const SLUG = "widgets-0123456789";
 const ID = ["-c", "user.name=t", "-c", "user.email=t@t"];
 
 async function rig({ mode = "direct", files = { "README.md": "# Widgets\n" }, allowed = true, access = { ok: true, canPush: true, isFork: false, defaultBranch: "main" }, scanFlag = null, getPullRequest = null, notifyFails = 0, createFails = false } = {}) {
   const root = await tmpDir("repowriter-");
-  const remote = join(root, "remote.git");
-  const g = execGitRunner(root);
-  await g.run(["init", "--bare", "-q", "-b", "main", remote]);
-  const seed = join(root, "seed");
-  await mkdir(seed);
-  const sg = execGitRunner(seed);
-  await sg.run(["init", "-q", "-b", "main"]);
-  for (const [n, c] of Object.entries(files)) {
-    if (c && typeof c === "object" && c.link) await symlink(c.link, join(seed, n));
-    else await writeFile(join(seed, n), c);
-  }
-  await sg.run(["add", "-A"]);
-  await sg.run([...ID, "commit", "-q", "-m", "init"]);
-  await sg.run(["remote", "add", "origin", `file://${remote}`]);
-  await sg.run(["push", "-q", "origin", "main"]);
+  const { remote, g } = await seededBareRemote(root, files);
 
   const dir = join(root, "store");
   await mkdir(dir);

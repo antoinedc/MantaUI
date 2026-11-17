@@ -257,15 +257,21 @@ test("forgeStatus: probe throws 401, source cli → NOT cleared, valid false", a
   assert.equal(status.valid, false);
 });
 
-test("forgeStatus: probe throws a network error → NOT cleared, valid null, nothing cached", async () => {
+// forgeStatus run twice against a probe that always throws `error`.
+async function statusTwiceWithFailingProbe(error) {
   let cleared = 0;
   let probeCalls = 0;
-  const getAdapterFn = () => ({ getViewer: async () => { probeCalls++; throw new Error("offline"); } });
+  const getAdapterFn = () => ({ getViewer: async () => { probeCalls++; throw error; } });
   const resolveToken = async () => ({ token: "t", source: "stored" });
   const detectCli = async () => ({ installed: true, authenticated: true, login: "cli" });
   const clearStored = async () => { cleared++; };
   const first = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
   const second = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
+  return { cleared, probeCalls, first, second };
+}
+
+test("forgeStatus: probe throws a network error → NOT cleared, valid null, nothing cached", async () => {
+  const { cleared, probeCalls, first, second } = await statusTwiceWithFailingProbe(new Error("offline"));
   assert.equal(cleared, 0, "a flaky network never signs anyone out");
   assert.equal(first.valid, null);
   assert.equal(second.valid, null);
@@ -273,14 +279,7 @@ test("forgeStatus: probe throws a network error → NOT cleared, valid null, not
 });
 
 test("forgeStatus: probe throws 403 → NOT cleared, valid null, nothing cached", async () => {
-  let cleared = 0;
-  let probeCalls = 0;
-  const getAdapterFn = () => ({ getViewer: async () => { probeCalls++; throw { status: 403 }; } });
-  const resolveToken = async () => ({ token: "t", source: "stored" });
-  const detectCli = async () => ({ installed: true, authenticated: true, login: "cli" });
-  const clearStored = async () => { cleared++; };
-  const first = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
-  const second = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
+  const { cleared, probeCalls, first, second } = await statusTwiceWithFailingProbe({ status: 403 });
   assert.equal(cleared, 0);
   assert.equal(first.valid, null);
   assert.equal(second.valid, null);

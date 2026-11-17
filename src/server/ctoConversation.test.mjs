@@ -17,6 +17,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
+import { stubRpcDeps } from "./fixtures/rpcStubDeps.mjs";
 import { dispatch, buildHandlers } from "./rpc.mjs";
 import { backgroundDeliveryId, createCtoConversationService } from "./ctoConversation.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
@@ -191,23 +192,6 @@ const waitFor = async (pred, rounds = 500) => {
   return false;
 };
 
-// Minimal tmux/local/syncState stubs — buildHandlers only closes over them;
-// the cto:conversation-* and opencode:prompt seam tests never touch them.
-const stubDeps = () => ({
-  tmux: { listProjects: async () => [] },
-  pty: {},
-  bus: {},
-  syncState: {
-    refreshNow: async () => {},
-    applyConfig: () => {},
-    snapshot: () => ({ projects: [] }),
-    payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }),
-    everSucceeded: () => true,
-  },
-  local: { configGet: async () => ({ projects: [] }) },
-  push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
-});
-
 // Compose the FULL production triangle (mirrors src/server/index.mjs): ONE
 // binding + ONE admission + the conversation service, the prompt-delivery
 // engine with its redirect, and the real channel map. Agent name is a stub
@@ -254,7 +238,7 @@ function compose({ stamp, bindingStore, admissionOptions, conversationOptions } 
     ...(stamp ? { stamp } : {}),
     ...conversationOptions,
   });
-  const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubDeps() });
+  const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubRpcDeps() });
   return { oc, binding, admission, svc, pd, handlers, bStore };
 }
 
@@ -315,7 +299,7 @@ test("cto:conversation-open creates exactly one role session under concurrency, 
 });
 
 test("cto:conversation-* channels answer an actionable error when the runtime is not wired", async () => {
-  const handlers = buildHandlers({ oc: {}, ...stubDeps() });
+  const handlers = buildHandlers({ oc: {}, ...stubRpcDeps() });
   await assert.rejects(
     () => dispatch(handlers, "cto:conversation-open", []),
     /cto conversation APIs are not wired on this box/,

@@ -3,17 +3,11 @@
 // src/server/handoff/*.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stubRpcDeps } from "./fixtures/rpcStubDeps.mjs";
 import { dispatch, buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { HandoffError } from "./handoff/engine.mjs";
 
-const stubDeps = () => ({
-  tmux: { listProjects: async () => [] },
-  pty: {},
-  bus: {},
-  syncState: { refreshNow: async () => {}, applyConfig: () => {}, snapshot: () => ({ projects: [] }), payloadSince: (_s, g) => ({ gen: g, seq: 0, changed: {} }), everSucceeded: () => true },
-  local: { configGet: async () => ({ projects: [] }), configUpdate: async (p) => p },
-  push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
-});
+const stubDeps = () => stubRpcDeps({ local: { configUpdate: async (p) => p } });
 
 function rig(handoffOver = {}) {
   const log = [];
