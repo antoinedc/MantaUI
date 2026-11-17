@@ -204,6 +204,8 @@ test("seam: capture's {limit} reaches opencode through the box wrapper (forwardL
   assert.ok(block.includes("forwardKnowledgeListMessages(oc)"));
   assert.doesNotMatch(block, /listMessages: \(\w+\) =>/, "a (sid) => oc.listMessages(sid) wrapper drops the options argument");
   assert.match(block, /isManagedSession: createKnowledgeIsManagedSession\(/);
+  assert.match(block, /listMessagesSince: oc\.listMessagesSince/, "capture's catch-up reads forward from the bookmark");
+  assert.match(block, /summariesFor: \(sessionID\) => handoffEngine\.summariesFor\(sessionID\)/, "capture reads the handoff engine's delivered summaries");
 });
 
 test("seam: every knowledge work type is one the shared budget knows; the knowledge runner over the REAL budget refuses at the pay-per-token cap and books what ran", async () => {

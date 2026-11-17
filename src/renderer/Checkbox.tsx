@@ -32,6 +32,7 @@ export function Checkbox({
   label,
   id,
   ariaLabel,
+  describedBy,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
@@ -41,6 +42,8 @@ export function Checkbox({
   id?: string;
   /** Accessible name for the input; required when `label` is omitted and the call site supplies its own text. */
   ariaLabel?: string;
+  /** Id of the help text that describes this checkbox (aria-describedby). */
+  describedBy?: string;
 }) {
   return (
     <label
@@ -58,6 +61,7 @@ export function Checkbox({
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         aria-label={ariaLabel}
+        aria-describedby={describedBy}
       />
       <span
         aria-hidden="true"

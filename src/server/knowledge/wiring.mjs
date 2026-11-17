@@ -147,7 +147,8 @@ export function createSkillEvidence({ state, queue, store, settings, now = Date.
  * @param {object} d    collaborators from manta-server:
  *   runEphemeral, resolveModelForClass, configGet,
  *   oc {listMessages, createSession, sendPrompt, abortSession, deleteSessionRaw?}, local {gitAddWorktree, gitRemoveWorktree},
- *   runDbTask, listTmuxProjects, isUserAuthored(messageID), getSession, isCtoSession,
+ *   runDbTask, listTmuxProjects, isUserAuthored(messageID), getSession, isCtoSession, summariesFor(sessionID) (the handoff
+ *   engine's delivered summaries; optional), oc.listMessagesSince (optional: catch-up reads forward from the bookmark),
  *   forge {findOpenPullRequest, createPullRequest, updatePullRequest, repoAccess?, getPullRequest?}, resolveToken,
  *   fireNotify, skillsDir, factsDir?, remoteUrlFor?
  */
@@ -156,6 +157,7 @@ export function createKnowledgeParts(ctx, d = {}) {
   const layerDeps = {};
   const caps = {};
   const listMessages = d.oc?.listMessages ? (sessionID, opts) => d.oc.listMessages(sessionID, opts) : null;
+  const listMessagesSince = d.oc?.listMessagesSince ? (sessionID, opts) => d.oc.listMessagesSince(sessionID, opts) : null;
   const isUserAuthored = d.isUserAuthored ?? (() => false);
   const runEphemeral = d.runEphemeral;
   const off = (why) => `off: ${why}`;
@@ -171,7 +173,8 @@ export function createKnowledgeParts(ctx, d = {}) {
       budget,
       settings,
       runEphemeral,
-      readSince: createCaptureMessageSource({ listMessages }),
+      readSince: createCaptureMessageSource({ listMessages, listMessagesSince }),
+      summariesFor: d.summariesFor,
       scanner,
       isUserAuthored,
       getSession: d.getSession,

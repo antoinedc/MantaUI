@@ -240,6 +240,21 @@ describe("searchSettings", () => {
     expect(searchSettings(ALL, "linked devices", "mobile").some((e) => e.id === "linkedDevicesMobile")).toBe(true);
   });
 
+  it.each(["budget", "background", "quota", "spend", "cap", "background work"])("finds the Background work section by %j", (term) => {
+    const hits = searchSettings(ALL, term, "desktop");
+    expect(hits.some((e) => e.id === "backgroundWorkCard" && e.section === "background")).toBe(true);
+  });
+
+  it("the Background work section sits right after Models, in the same group, desktop only", () => {
+    const ids = SETTING_SECTIONS.map((s) => s.id);
+    expect(ids[ids.indexOf("models") + 1]).toBe("background");
+    expect(SETTING_SECTIONS.find((s) => s.id === "background")).toMatchObject({ label: "Background work", group: SETTING_SECTIONS.find((s) => s.id === "models")!.group });
+    const entry = ALL.find((e) => e.id === "backgroundWorkCard")!;
+    expect(entry.label).toBe("Background work — plans and API-key limit");
+    expect(entry.control).toBe("custom");
+    expect(searchSettings(ALL, "background work", "mobile").some((e) => e.id === "backgroundWorkCard")).toBe(false);
+  });
+
   it("returns nothing for cto fields once the cto section is filtered out (BET-1191 flag off)", () => {
     // Settings hides the CTO section behind the VITE_MANTA_VOICE build flag by
     // filtering the section out of the entries it searches (`VOICE_SETTINGS`).

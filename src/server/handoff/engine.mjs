@@ -1909,6 +1909,30 @@ export function createHandoffEngine(deps = {}) {
     return rec ? present(rec) : null;
   }
 
+  /**
+   * The delivered handoff text of the COMMITTED records a session took part in (synchronous, no I/O) — what the knowledge
+   * capture reads instead of a long raw span. `text` is what was delivered (`internal.textOverride` when the user edited it).
+   * `asPredecessor`: records that replaced / branched this session, oldest first; `asSuccessor`: the newest record that
+   * started this session. A record that was pruned is simply absent.
+   * @returns {{ asPredecessor: {recordId:string, createdAt:number, text:string, successorId:string, disposition:string|undefined, messageId:string|undefined}[],
+   *             asSuccessor: {recordId:string, fromSessionId:string, createdAt:number, text:string, disposition:string|undefined, messageId:string|undefined} | null }}
+   */
+  function summariesFor(sessionId) {
+    const delivered = (r) => {
+      if (r?.state !== "committed") return "";
+      const t = r.internal?.textOverride ?? r.text;
+      return typeof t === "string" && t.trim() ? t : "";
+    };
+    const all = Object.values(state.records);
+    const asPredecessor = all
+      .filter((r) => r.fromSessionId === sessionId && delivered(r))
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((r) => ({ recordId: r.id, createdAt: r.createdAt, text: delivered(r), successorId: r.successorId, disposition: r.disposition, messageId: r.messageId }));
+    const succ = all.filter((r) => r.successorId === sessionId && delivered(r)).sort((a, b) => b.createdAt - a.createdAt)[0];
+    const asSuccessor = succ ? { recordId: succ.id, fromSessionId: succ.fromSessionId, createdAt: succ.createdAt, text: delivered(succ), disposition: succ.disposition, messageId: succ.messageId } : null;
+    return { asPredecessor, asSuccessor };
+  }
+
   /** §15: the plugin's budget policy. Authoritative per session only — null when this session has no measurement. */
   async function policyFor(sessionId) {
     const ctx = stepCtx.get(sessionId);
@@ -2669,6 +2693,7 @@ export function createHandoffEngine(deps = {}) {
     chainOf,
     successorOf,
     policyFor,
+    summariesFor,
     // lifecycle
     recover,
     sweep,

@@ -30,6 +30,7 @@ export const WHATS_NEW_SETTINGS_SECTIONS = Object.freeze([
   "box",
   "accounts",
   "models",
+  "background",
   "sessions",
   "knowledge",
   "files",

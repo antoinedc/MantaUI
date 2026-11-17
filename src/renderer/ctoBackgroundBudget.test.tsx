@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // The CTO pane and the one background work budget (spec 2026-11-17 §10): the ambient cap and the night cap
-// inputs are gone, the pane shows a one-line status with a Change link, and the thrifty banner says WHY in words.
+// inputs are gone, the pane shows a one-line status with a Background work settings link, and the thrifty banner says WHY in words.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
@@ -67,23 +67,23 @@ describe("CTO settings: the one budget", () => {
           status({ payg: { providers: ["openrouter"], usdToday: 5, usdMonth: 5, paused: { reason: "usd-cap", resumesAt: new Date(2026, 10, 18, 0, 0, 0).getTime() } } }),
         ),
     });
-    expect(q('[data-testid="cto-budget-status"]')!.textContent).toContain("Reached today's $5.00 API-key cap — resumes at midnight");
+    expect(q('[data-testid="cto-budget-status"]')!.textContent).toContain("The CTO reached today's $5.00 API-key limit. It resumes at midnight.");
   });
 
-  it("Change opens Settings at the Background work card", async () => {
+  it("Background work settings opens Settings at the Background work section", async () => {
     await openSettings();
     const seen: unknown[] = [];
     const on = (e: Event) => seen.push((e as CustomEvent).detail);
     window.addEventListener("manta-open-settings", on);
     try {
-      const change = Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Change")!;
+      const change = Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Background work settings")!;
       await act(async () => {
         change.click();
       });
     } finally {
       window.removeEventListener("manta-open-settings", on);
     }
-    expect(seen).toEqual([{ section: "models", backgroundWork: true }]);
+    expect(seen).toEqual([{ section: "background", backgroundWork: true }]);
   });
 
   it("an older box shows no budget line and nothing broken", async () => {
@@ -141,15 +141,15 @@ describe("CTO thrifty banner", () => {
   }
   const banner = () => h!.container.querySelector('[data-testid="cto-thrifty-banner"]');
 
-  it("names the reason in words, with a Change link", async () => {
+  it("names the reason in words, with a Background work settings link", async () => {
     await openDashboard("thrifty", () =>
       Promise.resolve(
         status({ payg: { providers: ["openrouter"], usdToday: 5, usdMonth: 5, paused: { reason: "usd-cap", resumesAt: new Date(2026, 10, 18, 0, 0, 0).getTime() } } }),
       ),
     );
     expect(banner()!.textContent).toContain("Thrifty mode");
-    expect(banner()!.textContent).toContain("Reached today's $5.00 API-key cap — resumes at midnight");
-    expect(Array.from(banner()!.querySelectorAll("button")).map((b) => b.textContent)).toEqual(["Change"]);
+    expect(banner()!.textContent).toContain("The CTO reached today's $5.00 API-key limit. It resumes at midnight.");
+    expect(Array.from(banner()!.querySelectorAll("button")).map((b) => b.textContent)).toEqual(["Background work settings"]);
   });
 
   it("a watchdog thrifty is not blamed on a budget refusal that happens to stand", async () => {

@@ -44,6 +44,12 @@ function resolveResetsAt(win, nowMs) {
   return undefined;
 }
 
+// `limit_window_seconds` → ms (undefined when absent/unusable: normalizeWindow then omits `spanMs`).
+function windowSpanMs(seconds) {
+  const s = Number(seconds);
+  return Number.isFinite(s) && s > 0 ? s * 1000 : undefined;
+}
+
 export const codexAdapter = {
   id: "codex",
   providerIDs: ["openai"],
@@ -73,6 +79,7 @@ export const codexAdapter = {
       ? normalizeWindow({
           kind: "session",
           label: usageWindowLabel(primary?.limit_window_seconds),
+          spanMs: windowSpanMs(primary?.limit_window_seconds),
           pct: primary?.used_percent,
           resetsAt: resolveResetsAt(primary, nowMs),
         })
@@ -84,6 +91,7 @@ export const codexAdapter = {
       ? normalizeWindow({
           kind: "weekly",
           label: usageWindowLabel(secondary?.limit_window_seconds),
+          spanMs: windowSpanMs(secondary?.limit_window_seconds),
           pct: secondary?.used_percent,
           resetsAt: resolveResetsAt(secondary, nowMs),
         })

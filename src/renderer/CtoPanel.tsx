@@ -811,7 +811,7 @@ export function CtoPanel({
           >
             <span className="font-medium text-text">Thrifty mode</span>
             <span className="text-text-muted">
-              {thriftyBannerText(state?.thriftyReason, thriftyBudget.state.kind === "ok" ? thriftyBudget.state.status : null)}
+              {thriftyBannerText(state?.thriftyReason, thriftyBudget.state.kind === "ok" ? thriftyBudget.state.status : null, "The CTO")}
             </span>
             <ChangeBudgetLink />
           </div>
@@ -1219,6 +1219,7 @@ export function SettingsView({
             </div>
             <div className="mt-1">
               <BackgroundStatusLine
+                subject="The CTO"
                 state={bgBudget.state}
                 onRetry={() => void bgBudget.refresh()}
                 share={{ workTypes: CTO_WORK_TYPES, noun: "CTO work" }}
@@ -1690,7 +1691,7 @@ function TonightBudgetCard({ tier, overnightOn, budgetState, onRetryBudget, budg
   // Overnight work spends the same background work budget as everything else: one status line, one place to change it.
   const status = (
     <div className="mt-3">
-      <BackgroundStatusLine state={budgetState} onRetry={onRetryBudget} testId="cto-tonight-budget-status" />
+      <BackgroundStatusLine subject="The CTO" state={budgetState} onRetry={onRetryBudget} testId="cto-tonight-budget-status" />
     </div>
   );
 

@@ -2,14 +2,17 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { BudgetPaused, BudgetPlanStatus, BudgetStatus, BudgetWindow } from "../shared/api";
 import {
+  runWhenBusyHelp,
   batchPausedCopy,
   fallbackText,
+  formatElapsed,
   formatPct,
   formatResumes,
   formatUsd,
   formatUsdShort,
   isBudgetStatus,
   isWeeklyKind,
+  isWeeklyWindow,
   pausedCopy,
   paygUsageText,
   parseApiKeyCap,
@@ -41,6 +44,8 @@ const week = (over: Partial<BudgetWindow> = {}): BudgetWindow => ({
   cap: 5,
   projectedPct: 60,
   resetsAt: at(23, 9),
+  windowStart: null,
+  spanMs: null,
   ...over,
 });
 const session = (over: Partial<BudgetWindow> = {}): BudgetWindow => ({
@@ -52,6 +57,8 @@ const session = (over: Partial<BudgetWindow> = {}): BudgetWindow => ({
   cap: 10,
   projectedPct: null,
   resetsAt: at(17, 14),
+  windowStart: null,
+  spanMs: null,
   ...over,
 });
 const plan = (over: Partial<BudgetPlanStatus> = {}): BudgetPlanStatus => ({
@@ -63,6 +70,7 @@ const plan = (over: Partial<BudgetPlanStatus> = {}): BudgetPlanStatus => ({
 });
 const status = (over: Partial<BudgetStatus> = {}): BudgetStatus => ({
   level: "normal",
+  runWhenBusy: false,
   dailyCapUsd: 5,
   payg: { providers: [], usdToday: 0, usdMonth: 0 },
   plans: [plan()],
@@ -70,7 +78,9 @@ const status = (over: Partial<BudgetStatus> = {}): BudgetStatus => ({
   byWork: [],
   ...over,
 });
-const ctx = (p?: BudgetPlanStatus) => ({ plan: p ?? plan(), dailyCapUsd: 5, now: NOW, fmt: FMT });
+const ctx = (p?: BudgetPlanStatus, subject?: string) => ({ plan: p ?? plan(), dailyCapUsd: 5, now: NOW, fmt: FMT, subject });
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 const paused = (over: Partial<BudgetPaused>): BudgetPaused => ({ reason: "level-cap", resumesAt: null, ...over });
 
 describe("parseApiKeyCap", () => {
@@ -124,6 +134,13 @@ describe("window kinds and names", () => {
     expect(isWeeklyKind("session")).toBe(false);
     expect(isWeeklyKind(undefined)).toBe(false);
   });
+  it("weekly-window: by kind or by a window of two days or more", () => {
+    expect(isWeeklyWindow({ kind: "weekly", spanMs: null })).toBe(true);
+    expect(isWeeklyWindow({ kind: "session", spanMs: null })).toBe(false);
+    expect(isWeeklyWindow({ kind: "session", spanMs: 5 * HOUR })).toBe(false);
+    expect(isWeeklyWindow({ kind: "session", spanMs: 7 * DAY })).toBe(true);
+    expect(isWeeklyWindow({ kind: "session", spanMs: 2 * DAY })).toBe(true);
+  });
   it("plan names", () => {
     expect(planName({ adapter: "claude" })).toBe("Claude");
     expect(planName({ adapter: "codex" })).toBe("ChatGPT");
@@ -133,59 +150,149 @@ describe("window kinds and names", () => {
   });
 });
 
-describe("pausedCopy — every reason", () => {
-  it("level-cap, weekly", () => {
-    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:weekly", value: 5, resumesAt: at(19, 9) }), ctx())).toBe(
-      "Reached this week's background limit (5%) — resumes Thu 09:00",
+describe("formatElapsed", () => {
+  it("half days from a day on, hours under a day", () => {
+    expect(formatElapsed(30 * 60_000)).toBe("under an hour");
+    expect(formatElapsed(HOUR)).toBe("1 hour");
+    expect(formatElapsed(5 * HOUR + 10 * 60_000)).toBe("5 hours");
+    expect(formatElapsed(DAY)).toBe("1 day");
+    expect(formatElapsed(1.5 * DAY)).toBe("1½ days");
+    expect(formatElapsed(2.4 * DAY)).toBe("2½ days");
+    expect(formatElapsed(2.2 * DAY)).toBe("2 days");
+    expect(formatElapsed(5.9 * DAY)).toBe("6 days");
+    expect(formatElapsed(23.8 * HOUR)).toBe("1 day");
+  });
+  it("is empty for nonsense", () => {
+    expect(formatElapsed(-1)).toBe("");
+    expect(formatElapsed(Number.NaN)).toBe("");
+  });
+});
+
+// The owner's 2026-11-17 case: 47% of the Claude week used 2½ days in, on pace for 132%.
+const busyWeek = (over: Partial<BudgetWindow> = {}) =>
+  week({ pct: 47, projectedPct: 132, resetsAt: at(21, 8), windowStart: NOW - 2.5 * DAY, spanMs: 7 * DAY, ...over });
+
+describe("pausedCopy — every reason, with a subject", () => {
+  it("projected-high: what is waiting, why, the figure, and both resume times", () => {
+    const c = ctx(plan({ windows: [busyWeek(), session()] }), "Knowledge");
+    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly", value: 132, resumesAt: at(19, 10, 40) }), c)).toBe(
+      "Knowledge is waiting so it doesn't use up your Claude week: you've used 47% in 2½ days, on pace for more than the whole week. " +
+        "It resumes Thu 10:40 if your usage slows, or Sat 08:00 when the week resets.",
     );
   });
-  it("level-cap, short window, quoting the window's cap when the box sent no value", () => {
-    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:session", resumesAt: at(17, 14) }), ctx())).toBe(
-      "Reached this 5-hour window's background limit (10%) — resumes at 14:00",
+  it("projected-high that ends below 100% says where it ends", () => {
+    const c = ctx(plan({ windows: [busyWeek({ projectedPct: 86 })] }), "The CTO");
+    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly", value: 86, resumesAt: at(19, 10, 40) }), c)).toBe(
+      "The CTO is waiting so it doesn't use up your Claude week: you've used 47% in 2½ days, on pace to end at 86%. " +
+        "It resumes Thu 10:40 if your usage slows, or Sat 08:00 when the week resets.",
     );
   });
-  it("window-busy, short window (§17.21)", () => {
-    expect(pausedCopy(paused({ reason: "window-busy", windowKey: "claude:session", value: 74, resumesAt: at(17, 14) }), ctx())).toBe(
-      "Paused — your 5-hour window is 74% used. Resumes at 14:00, when it resets.",
+  it("projected-high near the reset (no earlier resume) just says when the week resets", () => {
+    const c = ctx(plan({ windows: [busyWeek()] }), "Knowledge");
+    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly", value: 132, resumesAt: at(21, 8) }), c)).toBe(
+      "Knowledge is waiting so it doesn't use up your Claude week: you've used 47% in 2½ days, on pace for more than the whole week. It resumes Sat 08:00 when the week resets.",
     );
   });
-  it("window-busy, weekly fallback (§17.21)", () => {
-    expect(pausedCopy(paused({ reason: "window-busy", windowKey: "claude:weekly", value: 74, resumesAt: at(19, 9) }), ctx())).toBe(
-      "Paused — this week is 74% used. Resumes Thu 09:00, when it resets.",
+  it("projected-high with no window start still reads, and falls back to the window's projection", () => {
+    const c = ctx(plan({ windows: [week({ pct: 47, projectedPct: 91, resetsAt: at(21, 8) })] }), "Knowledge");
+    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly" }), c)).toBe(
+      "Knowledge is waiting so it doesn't use up your Claude week: you've used 47% so far, on pace to end at 91%. It resumes Sat 08:00 when the week resets.",
     );
   });
-  it("projected-high says when it resumes if usage stays flat (§17.21)", () => {
-    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly", value: 86, resumesAt: at(21, 6) }), ctx())).toBe(
-      "Paused — this week is on track to end at 86% — resumes around Sat 06:00 if usage stays flat",
+  it("projected-high on an hours-long window counts hours", () => {
+    const c = ctx(plan({ windows: [session({ pct: 60, projectedPct: 140, windowStart: NOW - 3 * HOUR, spanMs: 5 * HOUR })] }), "Knowledge");
+    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:session", value: 140, resumesAt: at(17, 14) }), c)).toBe(
+      "Knowledge is waiting so it doesn't use up your 5-hour window: you've used 60% in 3 hours, on pace for more than the whole 5-hour window. It resumes at 14:00 when that window resets.",
     );
   });
-  it("projected-high above 100 reads as running out before the reset (§17.21)", () => {
-    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly", value: 130, resumesAt: at(21, 6) }), ctx())).toBe(
-      "Paused — this week is on track to run out before the reset — resumes around Sat 06:00 if usage stays flat",
+  it("window-busy, short window", () => {
+    expect(pausedCopy(paused({ reason: "window-busy", windowKey: "claude:session", value: 74, resumesAt: at(17, 14) }), ctx(undefined, "Knowledge"))).toBe(
+      "Knowledge is waiting while you're using Claude heavily: your 5-hour window is 74% used. It resumes at 14:00 when that window resets.",
     );
   });
-  it("projected-high falls back to the window's projection", () => {
-    expect(pausedCopy(paused({ reason: "projected-high", windowKey: "claude:weekly" }), ctx(plan({ windows: [week({ projectedPct: 91 })] })))).toBe(
-      "Paused — this week is on track to end at 91%",
+  it("window-busy, weekly window", () => {
+    expect(pausedCopy(paused({ reason: "window-busy", windowKey: "claude:weekly", value: 74, resumesAt: at(21, 8) }), ctx(undefined, "Knowledge"))).toBe(
+      "Knowledge is waiting while you're using Claude heavily: your Claude week is 74% used. It resumes Sat 08:00 when the week resets.",
+    );
+  });
+  it("window-busy without a figure still reads, and the plan is named for the user", () => {
+    const codex = plan({ adapter: "codex", windows: [week({ key: "codex:weekly" })] });
+    expect(pausedCopy(paused({ reason: "window-busy", windowKey: "codex:weekly", value: undefined }), { plan: codex, dailyCapUsd: 5, now: NOW, fmt: FMT, subject: "The CTO" })).toBe(
+      "The CTO is waiting while you're using ChatGPT heavily: your ChatGPT week is 40% used.",
+    );
+  });
+  it("level-cap, weekly and short", () => {
+    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:weekly", value: 5, resumesAt: at(21, 8) }), ctx(undefined, "Knowledge"))).toBe(
+      "Knowledge has used its share of your Claude week (5%). It resumes Sat 08:00 when the week resets.",
+    );
+    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:session", resumesAt: at(17, 14) }), ctx(undefined, "Knowledge"))).toBe(
+      "Knowledge has used its share of your 5-hour window (10%). It resumes at 14:00 when that window resets.",
+    );
+  });
+  it("level-cap with no known resume time still reads as a sentence", () => {
+    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:weekly", value: 5 }), ctx(undefined, "Knowledge"))).toBe(
+      "Knowledge has used its share of your Claude week (5%).",
     );
   });
   it("exhausted", () => {
-    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:weekly", resumesAt: at(23, 9) }), ctx())).toBe(
-      "Your Claude week is used up — resumes Mon 09:00",
+    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:weekly", resumesAt: at(21, 8) }), ctx(undefined, "Knowledge"))).toBe(
+      "Your Claude week is used up. Knowledge resumes Sat 08:00.",
     );
-    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:session", resumesAt: at(17, 14) }), ctx())).toBe(
-      "Your 5-hour window is used up — resumes at 14:00",
+    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:session", resumesAt: at(17, 14) }), ctx(undefined, "The CTO"))).toBe(
+      "Your 5-hour window is used up. The CTO resumes at 14:00.",
+    );
+    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:weekly" }), ctx(undefined, "Knowledge"))).toBe(
+      "Your Claude week is used up. Knowledge resumes when it resets.",
     );
   });
-  it("off, usd-cap, unavailable", () => {
-    expect(pausedCopy(paused({ reason: "off" }), ctx())).toBe("Off on plans");
-    expect(pausedCopy(paused({ reason: "usd-cap", resumesAt: at(18, 0) }), { dailyCapUsd: 5, now: NOW, fmt: FMT })).toBe(
-      "Reached today's $5.00 API-key cap — resumes at midnight",
+  it("usd-cap", () => {
+    expect(pausedCopy(paused({ reason: "usd-cap", resumesAt: at(18, 0) }), { dailyCapUsd: 5, now: NOW, fmt: FMT, subject: "Knowledge" })).toBe(
+      "Knowledge reached today's $5.00 API-key limit. It resumes at midnight.",
     );
-    expect(pausedCopy(paused({ reason: "unavailable" }), ctx())).toBe("Background work is waiting — the budget couldn't be read");
+    expect(pausedCopy(paused({ reason: "usd-cap" }), { dailyCapUsd: 5, now: NOW, fmt: FMT, subject: "Knowledge" })).toBe("Knowledge reached today's $5.00 API-key limit.");
   });
-  it("a refusal with no known resume time still reads as a sentence", () => {
-    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:weekly", value: 5 }), ctx())).toBe("Reached this week's background limit (5%)");
+  it("off ignores the subject: it is off for every plan", () => {
+    expect(pausedCopy(paused({ reason: "off" }), ctx(undefined, "Knowledge"))).toBe("Background work is off for your plans.");
+    expect(pausedCopy(paused({ reason: "off" }), ctx())).toBe("Background work is off for your plans.");
+  });
+  it("unavailable", () => {
+    expect(pausedCopy(paused({ reason: "unavailable" }), ctx(undefined, "Knowledge"))).toBe("Knowledge is waiting: the budget couldn't be read. It will retry.");
+  });
+  it("the default subject is Background work, and a plural subject agrees", () => {
+    expect(pausedCopy(paused({ reason: "unavailable" }), ctx())).toBe("Background work is waiting: the budget couldn't be read. It will retry.");
+    expect(pausedCopy(paused({ reason: "unavailable" }), { ...ctx(), subject: "Larger jobs", plural: true })).toBe(
+      "Larger jobs are waiting: the budget couldn't be read. They will retry.",
+    );
+  });
+  it.each(["Knowledge", "The CTO", "Background work"])("every reason names %s (or says it is off for all plans)", (subject) => {
+    const reasons = ["level-cap", "window-busy", "projected-high", "exhausted", "usd-cap", "unavailable"] as const;
+    for (const reason of reasons) {
+      const text = pausedCopy(paused({ reason, windowKey: "claude:weekly", value: 50, resumesAt: at(21, 8) }), ctx(plan({ windows: [busyWeek()] }), subject));
+      expect(text, reason).toContain(subject);
+      expect(text.endsWith("."), reason).toBe(true);
+    }
+  });
+});
+
+describe("window nouns come from the window's length (spec §6)", () => {
+  it("a 7-day window an adapter calls a session is a week; a 5-hour one is a 5-hour window", () => {
+    const chatgptWeek = plan({ adapter: "codex", windows: [session({ key: "codex:session", pct: 70, spanMs: 7 * DAY, resetsAt: at(21, 8) })] });
+    expect(pausedCopy(paused({ reason: "window-busy", windowKey: "codex:session", value: 70, resumesAt: at(21, 8) }), ctx(chatgptWeek, "Knowledge"))).toBe(
+      "Knowledge is waiting while you're using ChatGPT heavily: your ChatGPT week is 70% used. It resumes Sat 08:00 when the week resets.",
+    );
+    expect(planUsageText(chatgptWeek)).toBe("Background work used 4% of your ChatGPT week");
+    const short = plan({ windows: [week({ kind: "weekly", spanMs: 5 * HOUR })] });
+    expect(pausedCopy(paused({ reason: "level-cap", windowKey: "claude:weekly", value: 10, resumesAt: at(17, 14) }), ctx(short, "Knowledge"))).toContain("your 5-hour window");
+  });
+  it("any other length is named from the window's label", () => {
+    const odd = plan({ windows: [session({ key: "claude:session", label: "Opus", spanMs: 3 * DAY, kind: "weekly_scoped:opus" })] });
+    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:session", resumesAt: at(18, 0) }), ctx(odd, "Knowledge"))).toBe(
+      "Your Opus window is used up. Knowledge resumes at midnight.",
+    );
+  });
+  it("without a length the kind decides, as before", () => {
+    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:weekly", resumesAt: at(21, 8) }), ctx(plan({ windows: [week({ spanMs: null })] }), "Knowledge"))).toContain("Your Claude week");
+    expect(pausedCopy(paused({ reason: "exhausted", windowKey: "claude:session", resumesAt: at(17, 14) }), ctx(undefined, "Knowledge"))).toContain("Your 5-hour window");
   });
 });
 
@@ -210,8 +317,9 @@ describe("fallback, waiting batch jobs and batch refusals", () => {
     const p = paused({ reason: "window-busy", windowKey: "claude:session", value: 74 });
     expect(batchPausedCopy(p, ctx(), p)).toBeNull();
   });
-  it("another batch reason is quoted with its own words", () => {
-    expect(batchPausedCopy(paused({ reason: "off" }), ctx())).toBe("Larger jobs: off on plans");
+  it("another batch reason is said with Larger jobs as the subject", () => {
+    expect(batchPausedCopy(paused({ reason: "unavailable" }), ctx())).toBe("Larger jobs are waiting: the budget couldn't be read. They will retry.");
+    expect(batchPausedCopy(paused({ reason: "off" }), ctx())).toBe("Background work is off for your plans.");
   });
 });
 
@@ -239,7 +347,7 @@ describe("statusRows", () => {
     );
     expect(rows.map((r) => r.text)).toEqual([
       "Background work used 2% of your Claude week · 4% of this 5-hour window",
-      "Reached this week's background limit (5%) — resumes Thu 09:00",
+      "Background work has used its share of your Claude week (5%). It resumes Thu 09:00 when the week resets.",
       "Weekly tidy waiting for a quiet moment",
     ]);
     expect(rows.map((r) => r.tone)).toEqual(["info", "warn", "info"]);
@@ -264,7 +372,7 @@ describe("statusRows", () => {
       NOW,
       FMT,
     );
-    expect(rows.map((r) => r.text)).toEqual(["Reached today's $5.00 API-key cap — resumes at midnight"]);
+    expect(rows.map((r) => r.text)).toEqual(["Background work reached today's $5.00 API-key limit. It resumes at midnight."]);
   });
   it("nothing to say → no rows", () => {
     expect(statusRows(status({ plans: [] }), NOW, FMT)).toEqual([]);
@@ -274,25 +382,31 @@ describe("statusRows", () => {
 describe("summaryLine", () => {
   it("prefers the first refusal", () => {
     const s = status({ plans: [plan({ paused: paused({ reason: "off" }) })] });
-    expect(summaryLine(s, NOW, FMT)).toEqual({ id: "plan-claude-paused", tone: "warn", text: "Off on plans" });
+    expect(summaryLine(s, "Knowledge", NOW, FMT)).toEqual({ id: "plan-claude-paused", tone: "warn", text: "Background work is off for your plans." });
+  });
+  it("speaks for the subject that asks", () => {
+    const s = status({ plans: [plan({ paused: paused({ reason: "unavailable" }) })] });
+    expect(summaryLine(s, "Knowledge", NOW, FMT)?.text).toBe("Knowledge is waiting: the budget couldn't be read. It will retry.");
+    expect(summaryLine(s, "The CTO", NOW, FMT)?.text).toBe("The CTO is waiting: the budget couldn't be read. It will retry.");
+    expect(summaryLine(s, undefined, NOW, FMT)?.text).toBe("Background work is waiting: the budget couldn't be read. It will retry.");
   });
   it("API-key refusal when no plan refuses", () => {
     const s = status({ payg: { providers: ["x"], usdToday: 5, usdMonth: 5, paused: paused({ reason: "usd-cap", resumesAt: at(18, 0) }) } });
-    expect(summaryLine(s, NOW, FMT)?.text).toBe("Reached today's $5.00 API-key cap — resumes at midnight");
+    expect(summaryLine(s, "Knowledge", NOW, FMT)?.text).toBe("Knowledge reached today's $5.00 API-key limit. It resumes at midnight.");
   });
   it("fallback", () => {
-    expect(summaryLine(status({ plans: [plan({ fallback: true })] }), NOW, FMT)?.text).toContain("usage unavailable");
+    expect(summaryLine(status({ plans: [plan({ fallback: true })] }), "Knowledge", NOW, FMT)?.text).toContain("usage unavailable");
   });
   it("usage in plan and dollar terms", () => {
     const s = status({ payg: { providers: ["x"], usdToday: 1.2, usdMonth: 9 } });
-    expect(summaryLine(s, NOW, FMT)).toEqual({
+    expect(summaryLine(s, "Knowledge", NOW, FMT)).toEqual({
       id: "usage",
       tone: "info",
       text: "Background work used 2% of your Claude week · 4% of this 5-hour window · $1.20 of $5.00 today on API keys",
     });
   });
   it("no providers → null", () => {
-    expect(summaryLine(status({ plans: [] }), NOW, FMT)).toBeNull();
+    expect(summaryLine(status({ plans: [] }), "Knowledge", NOW, FMT)).toBeNull();
   });
 });
 
@@ -301,7 +415,7 @@ describe("thriftyReasonText", () => {
     const s = status({
       payg: { providers: ["x"], usdToday: 5, usdMonth: 5, paused: paused({ reason: "usd-cap", resumesAt: at(18, 0) }) },
     });
-    expect(thriftyReasonText(s, NOW, FMT)).toBe("Reached today's $5.00 API-key cap — resumes at midnight");
+    expect(thriftyReasonText(s, "The CTO", NOW, FMT)).toBe("The CTO reached today's $5.00 API-key limit. It resumes at midnight.");
   });
   it("prefers a cap refusal over another one", () => {
     const s = status({
@@ -310,10 +424,10 @@ describe("thriftyReasonText", () => {
         plan({ adapter: "codex", windows: [week({ key: "codex:weekly" })], paused: paused({ reason: "level-cap", windowKey: "codex:weekly", value: 5, resumesAt: at(19, 9) }) }),
       ],
     });
-    expect(thriftyReasonText(s, NOW, FMT)).toBe("Reached this week's background limit (5%) — resumes Thu 09:00");
+    expect(thriftyReasonText(s, "The CTO", NOW, FMT)).toBe("The CTO has used its share of your ChatGPT week (5%). It resumes Thu 09:00 when the week resets.");
   });
   it("null when nothing refuses or there is no status", () => {
-    expect(thriftyReasonText(status(), NOW, FMT)).toBeNull();
+    expect(thriftyReasonText(status(), "The CTO", NOW, FMT)).toBeNull();
     expect(thriftyReasonText(null)).toBeNull();
   });
 });
@@ -322,14 +436,15 @@ describe("thriftyBannerText", () => {
   const refusing = () => status({ payg: { providers: ["openrouter"], usdToday: 5, usdMonth: 5, paused: { reason: "usd-cap", resumesAt: new Date(2026, 10, 18, 0, 0, 0).getTime() } } });
   const GENERIC = "The CTO is limiting background work to stay inside its budget.";
   it("quotes the budget only for a cap-hit thrifty whose refusal still stands", () => {
-    expect(thriftyBannerText("cap_hit", refusing(), NOW, FMT)).toBe(thriftyReasonText(refusing(), NOW, FMT));
-    expect(thriftyBannerText("cap_hit", status(), NOW, FMT)).toBe(GENERIC);
-    expect(thriftyBannerText("cap_hit", null, NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText("cap_hit", refusing(), "The CTO", NOW, FMT)).toBe(thriftyReasonText(refusing(), "The CTO", NOW, FMT));
+    expect(thriftyBannerText("cap_hit", refusing(), "The CTO", NOW, FMT)).toContain("The CTO reached today's $5.00 API-key limit.");
+    expect(thriftyBannerText("cap_hit", status(), "The CTO", NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText("cap_hit", null, "The CTO", NOW, FMT)).toBe(GENERIC);
   });
   it("is generic for the watchdog, for no reason and for an older box", () => {
-    expect(thriftyBannerText("watchdog", refusing(), NOW, FMT)).toBe(GENERIC);
-    expect(thriftyBannerText(null, refusing(), NOW, FMT)).toBe(GENERIC);
-    expect(thriftyBannerText(undefined, refusing(), NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText("watchdog", refusing(), "The CTO", NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText(null, refusing(), "The CTO", NOW, FMT)).toBe(GENERIC);
+    expect(thriftyBannerText(undefined, refusing(), "The CTO", NOW, FMT)).toBe(GENERIC);
   });
 });
 
@@ -394,5 +509,12 @@ describe("isBudgetStatus", () => {
     expect(isBudgetStatus(undefined)).toBe(false);
     expect(isBudgetStatus({})).toBe(false);
     expect(isBudgetStatus({ plans: [], payg: {} })).toBe(false);
+  });
+});
+
+describe("runWhenBusyHelp", () => {
+  it("quotes the level's own shares", () => {
+    expect(runWhenBusyHelp("light")).toContain("(2% of a week and 5% of a 5-hour window on Light)");
+    expect(runWhenBusyHelp("normal")).toContain("(5% of a week and 10% of a 5-hour window on Normal)");
   });
 });

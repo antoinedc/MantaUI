@@ -22,7 +22,7 @@ export const LEVELS = Object.freeze(["off", "light", "normal"]);
 export const DEFAULT_LEVEL = "normal";
 export const DEFAULT_DAILY_CAP_USD = 5;
 export const MAX_DAILY_CAP_USD = 100;
-export const DEFAULT_BACKGROUND_WORK = Object.freeze({ level: DEFAULT_LEVEL, dailyCapUsd: DEFAULT_DAILY_CAP_USD });
+export const DEFAULT_BACKGROUND_WORK = Object.freeze({ level: DEFAULT_LEVEL, dailyCapUsd: DEFAULT_DAILY_CAP_USD, runWhenBusy: false });
 
 /** Share of a window (percent) background work may use, by level. */
 export const LEVEL_CAPS = Object.freeze({
@@ -48,6 +48,8 @@ export const MIN_PROJECTION_ELAPSED = 0.2;
 /** A `resetsAt` this much later than the stored one is a reset (codex drifts by seconds per poll). */
 export const RESET_JUMP_MS = 3_600_000;
 export const WEEK_MS = 7 * 24 * 3_600_000;
+/** A window at least this long is weekly-kind whatever its `kind` says (ChatGPT reports its 7-day window as "session"). */
+export const WEEKLY_SPAN_MS = 2 * 24 * 3_600_000;
 export const RETENTION_DAYS = 60;
 export const TICK_MS = 10 * 60_000;
 const WINDOW_FORGET_MS = 14 * 24 * 3_600_000;
@@ -109,9 +111,14 @@ export function isWeeklyKind(kind) {
   return typeof kind === "string" && (kind === "weekly" || kind.startsWith("weekly"));
 }
 
-export function levelCap(level, kind) {
+/** A window is weekly when its kind says so OR it is at least 2 days long (`spanMs`). `w` needs only `kind` and `spanMs`. */
+export function isWeeklyWindow(w) {
+  return isWeeklyKind(w?.kind) || (finite(w?.spanMs) && w.spanMs >= WEEKLY_SPAN_MS);
+}
+
+export function levelCap(level, w) {
   const caps = LEVEL_CAPS[level] ?? LEVEL_CAPS[DEFAULT_LEVEL];
-  return isWeeklyKind(kind) ? caps.weekly : caps.short;
+  return isWeeklyWindow(typeof w === "string" ? { kind: w } : w) ? caps.weekly : caps.short;
 }
 
 const modelOf = (m) => {
@@ -134,6 +141,7 @@ export function readBackgroundWork(stored) {
   return {
     level: LEVELS.includes(o.level) ? o.level : DEFAULT_LEVEL,
     dailyCapUsd: validCap(o.dailyCapUsd) ? round2(o.dailyCapUsd) : DEFAULT_DAILY_CAP_USD,
+    runWhenBusy: o.runWhenBusy === true,
   };
 }
 
@@ -153,6 +161,9 @@ export function validateAndMergeBackgroundWork(current, patch) {
     } else if (key === "dailyCapUsd") {
       if (!validCap(value)) return { ok: false, error: `The daily cap for API keys must be a number from $0 to $${MAX_DAILY_CAP_USD}.` };
       next.dailyCapUsd = round2(value);
+    } else if (key === "runWhenBusy") {
+      if (typeof value !== "boolean") return { ok: false, error: "Keep running when my plan is busy must be on or off." };
+      next.runWhenBusy = value;
     } else {
       return { ok: false, error: `Unknown background work setting "${key}".` };
     }
@@ -233,10 +244,10 @@ export function weeklyDueAt({ mode, intervalDueAt, resetsAt } = {}) {
   return Math.max(intervalDueAt, resetsAt - NEAR_RESET_MS);
 }
 
-/** PURE. The end-of-window projection (§6.5, §17.8): known for a weekly-kind window once ≥ 20 % of it has elapsed. */
-export function projectWeeklyPct({ kind, pct, resetsAt, startedAt, windowStart, now }) {
-  if (!isWeeklyKind(kind) || !finite(pct) || !finite(resetsAt) || !finite(now)) return null;
-  const start = finite(startedAt) ? startedAt : finite(windowStart) ? windowStart : resetsAt - WEEK_MS;
+/** PURE. The end-of-window projection (§6.5, §17.8): known for a weekly window (kind or `spanMs`) once ≥ 20 % of it has elapsed. */
+export function projectWeeklyPct({ kind, spanMs, pct, resetsAt, startedAt, windowStart, now }) {
+  if (!isWeeklyWindow({ kind, spanMs }) || !finite(pct) || !finite(resetsAt) || !finite(now)) return null;
+  const start = finite(startedAt) ? startedAt : finite(windowStart) ? windowStart : resetsAt - (finite(spanMs) && spanMs > 0 ? spanMs : WEEK_MS);
   const span = resetsAt - start;
   const elapsed = now - start;
   if (!(span > 0) || elapsed < MIN_PROJECTION_ELAPSED * span || elapsed > span) return null;
@@ -496,16 +507,18 @@ export function createBackgroundBudget({
     const key = windowKey(snapshot, w);
     const stale = isStaleWindow(w, ts);
     const ws = stale ? null : state.windows[key];
-    const cap = levelCap(level, w.kind);
+    const cap = levelCap(level, w);
     const tpp = ws ? (finite(ws.tokensPerPct) && ws.tokensPerPct > 0 ? ws.tokensPerPct : ws.bgTokensSinceTick > 0 ? await pacingTokensPerPct(key) : null) : null;
     const inFlight = tpp ? num(ws.bgTokensSinceTick) / tpp : 0;
     const inFlightBatch = tpp ? num(ws.batchTokensSinceTick) / tpp : 0;
     const projectedPct = stale
       ? null
-      : projectWeeklyPct({ kind: w.kind, pct: w.pct, resetsAt: w.resetsAt, startedAt: w.startedAt, windowStart: ws?.windowStart, now: ts });
+      : projectWeeklyPct({ kind: w.kind, spanMs: w.spanMs, pct: w.pct, resetsAt: w.resetsAt, startedAt: w.startedAt, windowStart: ws?.windowStart, now: ts });
     return {
       key,
       kind: w.kind,
+      spanMs: finite(w.spanMs) && w.spanMs > 0 ? w.spanMs : null,
+      weekly: isWeeklyWindow(w),
       stale,
       pct: w.pct,
       bgPct: num(ws?.bgPct) + inFlight,
@@ -513,7 +526,7 @@ export function createBackgroundBudget({
       cap,
       projectedPct,
       resetsAt: finite(w.resetsAt) ? w.resetsAt : null,
-      windowStart: finite(w.startedAt) ? w.startedAt : finite(ws?.windowStart) ? ws.windowStart : isWeeklyKind(w.kind) && finite(w.resetsAt) ? w.resetsAt - WEEK_MS : null,
+      windowStart: finite(w.startedAt) ? w.startedAt : finite(ws?.windowStart) ? ws.windowStart : finite(w.resetsAt) && finite(w.spanMs) && w.spanMs > 0 ? w.resetsAt - w.spanMs : isWeeklyKind(w.kind) && finite(w.resetsAt) ? w.resetsAt - WEEK_MS : null,
       w,
     };
   }
@@ -524,10 +537,11 @@ export function createBackgroundBudget({
     bgPct: round2(v.bgPct),
     cap: v.cap,
     resetsAt: v.resetsAt,
+    weekly: v.weekly === true,
     ...(v.projectedPct != null ? { projectedPct: round2(v.projectedPct) } : {}),
   });
 
-  async function planDecision({ snapshot, windows, cls, level, ts }) {
+  async function planDecision({ snapshot, windows, cls, level, runWhenBusy = false, ts }) {
     const refuse = (reason, v, resumesAt, ceiling = false) => ({
       d: { ok: false, mode: "plan", fallback: false, reason, window: publicWindow(v), resumesAt: finite(resumesAt) ? resumesAt : null },
       cap: v.cap,
@@ -541,7 +555,7 @@ export function createBackgroundBudget({
     for (const w of windows) views.push(await windowView({ snapshot, w, level, ts }));
     const fresh = views.filter((v) => !v.stale);
     // §17.5: within 24 h of a weekly-kind reset the batch ceiling lifts to the full cap.
-    const lift = cls === CLASS.BATCH && fresh.some((v) => isWeeklyKind(v.kind) && finite(v.resetsAt) && v.resetsAt > ts && v.resetsAt - ts <= NEAR_RESET_MS);
+    const lift = cls === CLASS.BATCH && fresh.some((v) => v.weekly && finite(v.resetsAt) && v.resetsAt > ts && v.resetsAt - ts <= NEAR_RESET_MS);
 
     if (fresh.length > 0 && snapshot.exhausted === true) {
       const top = fresh.reduce((a, b) => (b.pct > a.pct ? b : a));
@@ -552,8 +566,8 @@ export function createBackgroundBudget({
       if (v.bgPct >= v.cap) return refuse("level-cap", v, v.resetsAt);
       if (cls === CLASS.BATCH && !lift && v.batchPct >= BATCH_SHARE * v.cap) return refuse("level-cap", v, v.resetsAt, true);
       if (v.stale) continue; // a stale reading describes the window that just ended: treated as fresh
-      const weekly = isWeeklyKind(v.kind);
-      if (!weekly) {
+      if (runWhenBusy) continue; // §4: the plan-busy rules (window-busy, projected-high) are skipped
+      if (!v.weekly) {
         if (v.pct > WINDOW_BUSY_PCT) return refuse("window-busy", v, v.resetsAt);
         continue;
       }
@@ -593,7 +607,7 @@ export function createBackgroundBudget({
     const bm = billingFor(m, await snapshots());
     const r = bm.mode === "payg"
       ? paygDecision({ cfg, cls, fallback: bm.fallback, ts })
-      : await planDecision({ snapshot: bm.snapshot, windows: bm.windows, cls, level: cfg.level, ts });
+      : await planDecision({ snapshot: bm.snapshot, windows: bm.windows, cls, level: cfg.level, runWhenBusy: cfg.runWhenBusy, ts });
     if (!r.d.ok) noteRefusal(workType, cls, r.d, { cap: r.cap, ceiling: r.ceiling });
     return { ...r, cls };
   }
@@ -714,7 +728,7 @@ export function createBackgroundBudget({
     if (bm.mode !== "plan") return { mode: bm.mode, resetsAt: null };
     let resetsAt = null;
     for (const w of bm.windows) {
-      if (!isWeeklyKind(w.kind) || isStaleWindow(w, now()) || !finite(w.resetsAt)) continue;
+      if (!isWeeklyWindow(w) || isStaleWindow(w, now()) || !finite(w.resetsAt)) continue;
       if (resetsAt === null || w.resetsAt < resetsAt) resetsAt = w.resetsAt;
     }
     return { mode: "plan", resetsAt };
@@ -755,11 +769,11 @@ export function createBackgroundBudget({
       try {
         const m = await pickModel(model);
         const bm = billingFor(m, await snapshots());
-        const w = bm.windows.filter((x) => isWeeklyKind(x.kind)).sort((a, b) => b.pct - a.pct)[0] ?? bm.windows[0];
+        const w = bm.windows.filter((x) => isWeeklyWindow(x)).sort((a, b) => b.pct - a.pct)[0] ?? bm.windows[0];
         if (w) {
           pct = w.pct;
           const ws = state?.windows?.[windowKey(bm.snapshot, w)];
-          projectedPct = projectWeeklyPct({ kind: w.kind, pct: w.pct, resetsAt: w.resetsAt, startedAt: w.startedAt, windowStart: ws?.windowStart, now: ts });
+          projectedPct = projectWeeklyPct({ kind: w.kind, spanMs: w.spanMs, pct: w.pct, resetsAt: w.resetsAt, startedAt: w.startedAt, windowStart: ws?.windowStart, now: ts });
         }
       } catch {
         /* evidence only */
@@ -854,7 +868,7 @@ export function createBackgroundBudget({
               finalPct: ws.lastTick?.pct ?? null,
               bgPct: round2(ws.bgPct),
               batchPct: round2(ws.batchPct),
-              cap: levelCap(cfg.level, w.kind),
+              cap: levelCap(cfg.level, w),
               hit100At: ws.hit100At ?? null,
             });
             ws.windowStart = finite(w.startedAt) ? w.startedAt : Math.min(storedReset, t);
@@ -975,8 +989,8 @@ export function createBackgroundBudget({
       const windows = governing(snap, useModel);
       const views = [];
       for (const w of windows) views.push(await windowView({ snapshot: snap, w, level: cfg.level, ts }));
-      const cont = windows.length ? await planDecision({ snapshot: snap, windows, cls: CLASS.CONTINUOUS, level: cfg.level, ts }) : null;
-      const bat = windows.length ? await planDecision({ snapshot: snap, windows, cls: CLASS.BATCH, level: cfg.level, ts }) : null;
+      const cont = windows.length ? await planDecision({ snapshot: snap, windows, cls: CLASS.CONTINUOUS, level: cfg.level, runWhenBusy: cfg.runWhenBusy, ts }) : null;
+      const bat = windows.length ? await planDecision({ snapshot: snap, windows, cls: CLASS.BATCH, level: cfg.level, runWhenBusy: cfg.runWhenBusy, ts }) : null;
       plans.push({
         adapter: snap.provider,
         ...(typeof snap.planLabel === "string" ? { planLabel: snap.planLabel } : {}),
@@ -990,6 +1004,8 @@ export function createBackgroundBudget({
           cap: v.cap,
           projectedPct: v.projectedPct == null ? null : round2(v.projectedPct),
           resetsAt: v.resetsAt,
+          windowStart: v.windowStart,
+          spanMs: v.spanMs,
         })),
         paused: cont ? pausedOf(cont, cfg) : null,
         batchPaused: bat ? pausedOf(bat, cfg) : null,
@@ -1037,6 +1053,7 @@ export function createBackgroundBudget({
     return {
       level: cfg.level,
       dailyCapUsd: cfg.dailyCapUsd,
+      runWhenBusy: cfg.runWhenBusy,
       payg: {
         providers: paygProviders,
         usdToday: round2(num(day.payg.usd)),

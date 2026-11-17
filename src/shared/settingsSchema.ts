@@ -52,6 +52,7 @@ export type SettingSectionId =
   | "box"
   | "accounts"
   | "models"
+  | "background"
   | "sessions"
   | "knowledge"
   | "files"
@@ -104,6 +105,7 @@ export const SETTING_SECTIONS: SettingSection[] = [
   { id: "box", label: "Box", group: "SETUP" },
   { id: "accounts", label: "Accounts", group: "SETUP" },
   { id: "models", label: "Models", group: "SETUP", wide: true },
+  { id: "background", label: "Background work", group: "SETUP" },
   { id: "sessions", label: "Sessions", group: "AGENT" },
   { id: "knowledge", label: "Knowledge", group: "AGENT" },
   { id: "files", label: "Files", group: "AGENT" },
@@ -300,6 +302,20 @@ export const SETTINGS: SettingEntry[] = [
     platform: "both",
     default: false,
     group: "Automatic Manta Routing",
+  },
+
+  // ----- background work (one budget for everything Manta does on its own) -----
+  // One custom anchor: BackgroundWorkCard draws the real controls (level, plan-busy override, API-key cap,
+  // status). It exists so settings search lists the section by what is in it.
+  {
+    id: "backgroundWorkCard",
+    section: "background",
+    label: "Background work — plans and API-key limit",
+    help: "How much of your plan quota and API-key spend shared knowledge and the background CTO may use: the budget, level, quota, spend and daily cap, and whether they keep running when your plan is busy.",
+    control: "custom",
+    configKey: null,
+    platform: "desktop",
+    default: null,
   },
 
   // ----- sessions (per-session behaviour) -----

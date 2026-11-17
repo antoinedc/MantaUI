@@ -549,6 +549,67 @@ export async function listMessages(sessionId, opts = {}) {
   return opts.slim ? slimTranscript(viewed) : viewed;
 }
 
+const isMessageRecord = (m) => isConversation(m) || (m?.type === "synthetic" && m?.metadata?.source === "subagent");
+
+/**
+ * The messages AFTER a bookmark, oldest first, at most `max` of them (knowledge capture's catch-up). Pages the timeline
+ * newest-first and stops at the bookmark, keeping a rolling buffer of the OLDEST `max` messages after it: newer ones stay
+ * unread for a later call, which starts from a later bookmark. Never reads past the 10,000-record ceiling.
+ *
+ * @param {string} sessionId
+ * @param {{ after?: {at:number, id:string}|null, max?: number }} [opts]  `after` = the bookmark (a message's `time.created` and id)
+ * @returns {Promise<{ messages: any[], hasMore: boolean, olderNotRead: boolean }>} `hasMore`: newer messages than the returned
+ *   ones exist; `olderNotRead`: the record ceiling was hit before the bookmark was reached (the span's start is unknown)
+ */
+export async function listMessagesSince(sessionId, { after = null, max = 2000 } = {}) {
+  const cap = Number.isFinite(max) && max > 0 ? Math.floor(max) : 2000;
+  const isAfter = (r) => {
+    if (!after) return true;
+    const at = Number(r?.time?.created) || 0;
+    return at > after.at || (at === after.at && String(r.id) > String(after.id));
+  };
+  let buf = []; // newest first, only records after the bookmark
+  let count = 0; // message records in buf
+  let hasMore = false;
+  let reached = false;
+  let cursor = null;
+  for (let page = 0; page < TIMELINE_MAX_PAGES && !reached; page++) {
+    const body = await ocCall(
+      "listMessagesSince",
+      (c, o) => c.message.list(cursor ? { sessionID: sessionId, cursor, limit: TIMELINE_PAGE } : { sessionID: sessionId, order: "desc", limit: TIMELINE_PAGE }, o),
+      { onHttpError: (f) => { throw plainError("listMessagesSince", f); } },
+    );
+    const rows = Array.isArray(body?.data) ? body.data : [];
+    for (const r of rows) {
+      if (isMessageRecord(r) && !isAfter(r)) {
+        reached = true;
+        break; // newest first: everything after this one is older still
+      }
+      if (!isMessageRecord(r) && !isAfter(r)) continue;
+      buf.push(r);
+      if (isMessageRecord(r)) count++;
+    }
+    if (count > cap) {
+      let drop = count - cap;
+      let n = 0;
+      while (n < buf.length && drop > 0) {
+        if (isMessageRecord(buf[n])) drop--;
+        n++;
+      }
+      buf = buf.slice(n);
+      count = cap;
+      hasMore = true;
+    }
+    cursor = body?.cursor?.next ?? null;
+    if (!cursor || rows.length === 0) {
+      reached = true; // the start of the timeline: nothing older to find
+      break;
+    }
+  }
+  const messages = mapTimeline(buf.reverse(), { sessionID: sessionId, directory: await directoryForTitles(sessionId) });
+  return { messages, hasMore, olderNotRead: !reached };
+}
+
 /** Fetch a single message by id (GET /api/session/{id}/message/{messageID}).
  *  Returns null on miss/error so the caller can fall back to a full refetch.
  *  @param {string} sessionId

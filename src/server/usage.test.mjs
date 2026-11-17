@@ -815,6 +815,40 @@ test("codex adapter: a window with no limit_window_seconds still yields a usable
   assert.equal(session.pct, 5);
 });
 
+test("codex adapter: spanMs comes from limit_window_seconds (a 7-day primary window is 7 d long and stays kind session); absent seconds → no spanMs", async () => {
+  const get = async (sample) =>
+    (await codexAdapter.fetch({ fetchImpl: async () => fakeResponse(200, sample), readToken: async () => "tok", now: () => 1_700_000_000_000 })).windows;
+  const [primary, secondary] = await get({
+    rate_limit: {
+      primary_window: { used_percent: 47, limit_window_seconds: 604800, reset_at: 1735700000000 },
+      secondary_window: { used_percent: 10, limit_window_seconds: 18000, reset_at: 1735700000000 },
+    },
+  });
+  assert.deepEqual([primary.kind, primary.label, primary.spanMs], ["session", "7d", 7 * 86_400_000]);
+  assert.equal(secondary.spanMs, 5 * 3_600_000);
+  const [bare] = await get({ rate_limit: { primary_window: { used_percent: 5, reset_at: 1735700000000 } } });
+  assert.equal("spanMs" in bare, false);
+});
+
+test("claude adapter: session windows are 5 h, weekly (and model-scoped weekly) windows 7 d", async () => {
+  const sample = {
+    five_hour: { utilization: 58, resets_at: "2026-08-13T14:20:00+00:00" },
+    seven_day: { utilization: 64, resets_at: "2026-08-13T22:00:00+00:00" },
+    limits: [{ group: "weekly", percent: 12, resets_at: "2026-08-13T22:00:00+00:00", scope: { model: { display_name: "Fable" } } }],
+  };
+  const snap = await claudeAdapter.fetch({ fetchImpl: async () => fakeResponse(200, sample), readCredentials: async () => ({ accessToken: "tok" }) });
+  const by = (k) => snap.windows.find((w) => w.kind === k);
+  assert.equal(by("session").spanMs, 5 * 3_600_000);
+  assert.equal(by("weekly").spanMs, 7 * 86_400_000);
+  assert.equal(by("weekly_scoped:fable").spanMs, 7 * 86_400_000);
+});
+
+test("normalizeWindow: spanMs passes through only when a positive number", () => {
+  assert.equal(normalizeWindow({ pct: 5, spanMs: 18_000_000 }).spanMs, 18_000_000);
+  assert.equal(normalizeWindow({ pct: 5, spanMs: "604800000" }).spanMs, 604_800_000);
+  for (const bad of [0, -1, NaN, "x", null, undefined]) assert.equal("spanMs" in normalizeWindow({ pct: 5, spanMs: bad }), false, String(bad));
+});
+
 test("codex adapter: detect() requires a non-empty token", async () => {
   assert.equal(await codexAdapter.detect({ readToken: async () => "tok" }), true);
   assert.equal(await codexAdapter.detect({ readToken: async () => null }), false);

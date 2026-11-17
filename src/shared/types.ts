@@ -330,7 +330,7 @@ export type AppConfig = {
   // work may use; `dailyCapUsd` (0–100) is the cap on pay-per-token API keys.
   // The CTO's old ambient/night caps and knowledge's daily cap are retired.
   // A partial object is merged by the box.
-  backgroundWork?: { level?: "off" | "light" | "normal"; dailyCapUsd?: number };
+  backgroundWork?: { level?: "off" | "light" | "normal"; dailyCapUsd?: number; runWhenBusy?: boolean };
   // Adaptive CTO (BET-1521, §9.3/§9.4): the autonomy threshold τ (0..1,
   // default 0.7) — act on its own when the candidate's confidence clears this
   // bar. The Settings τ control writes it; the gate + calibration read it.
@@ -2550,6 +2550,7 @@ export type UsageWindow = {
   resetsAt?: number; // epoch ms
   startedAt?: number; // epoch ms — when this window opened; absent when the
   // provider does not report one (never guess it from resetsAt minus a window length)
+  spanMs?: number; // the window's length in ms, when the provider reports it (codex limit_window_seconds; claude 5 h / 7 d)
   binding?: boolean; // the provider says this window bites first
   // A model-scoped window (Team plans): the model display name it applies to
   // ("Fable"). Absent for account-wide windows. `kind` is then

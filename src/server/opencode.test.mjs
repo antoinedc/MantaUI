@@ -18,6 +18,7 @@ import {
   getSessionDirectory,
   readSession,
   listMessages,
+  listMessagesSince,
   RUN_LOOKBACK,
   listMessagesForRebuild,
   REBUILD_WINDOW,
@@ -1085,6 +1086,76 @@ test("listMessages {limit}: stops reading pages once enough conversation records
     },
   );
   assert.equal(calls.filter((c) => c.query.cursor).length, 1);
+});
+
+const UT = (id, text, created) => ({ id, type: "user", text, time: { created } });
+const AT = (id, text, created) => ({ id, type: "assistant", agent: "build", model: { id: "m", providerID: "p" }, time: { created, completed: created }, content: [{ type: "text", text }] });
+// A 6-record session, newest first in two pages: u1 a1 u2 a2 | u3 a3 (created 1..6).
+const SINCE_PAGES = {
+  first: [AT("a3", "3", 6), UT("u3", "3", 5), { id: "i1", type: "idle", outcome: "succeeded", time: { created: 5 } }],
+  second: [AT("a2", "2", 4), UT("u2", "2", 3), AT("a1", "1", 2), UT("u1", "1", 1)],
+};
+const sincePages = ({ query }) => (query.cursor ? { data: SINCE_PAGES.second, cursor: { next: null } } : { data: SINCE_PAGES.first, cursor: { next: "C1" } });
+
+test("listMessagesSince stops at the bookmark: only messages after it, oldest first", async () => {
+  let pages = 0;
+  await withV2({ "GET /api/session/ses_a/message": (r) => (pages++, sincePages(r)) }, async () => {
+    const out = await listMessagesSince("ses_a", { after: { at: 3, id: "u2" } });
+    assert.deepEqual(out.messages.map((m) => m.info.id), ["a2", "u3", "a3"]);
+    assert.deepEqual([out.hasMore, out.olderNotRead], [false, false]);
+    assert.equal(pages, 2);
+  });
+});
+
+test("listMessagesSince: the bookmark inside the first page reads one page and never the older ones", async () => {
+  let pages = 0;
+  await withV2({ "GET /api/session/ses_a/message": (r) => (pages++, sincePages(r)) }, async () => {
+    const out = await listMessagesSince("ses_a", { after: { at: 5, id: "u3" } });
+    assert.deepEqual(out.messages.map((m) => m.info.id), ["a3"]);
+    assert.equal(pages, 1);
+  });
+});
+
+test("listMessagesSince keeps the OLDEST max messages after the bookmark (the newer ones are left for a later window)", async () => {
+  await withV2({ "GET /api/session/ses_a/message": sincePages }, async () => {
+    const out = await listMessagesSince("ses_a", { after: { at: 1, id: "u1" }, max: 3 });
+    assert.deepEqual(out.messages.map((m) => m.info.id), ["a1", "u2", "a2"]);
+    assert.deepEqual([out.hasMore, out.olderNotRead], [true, false]);
+    const none = await listMessagesSince("ses_a", { after: null, max: 2 });
+    assert.deepEqual(none.messages.map((m) => m.info.id), ["u1", "a1"]);
+    assert.equal(none.hasMore, true);
+  });
+});
+
+test("listMessagesSince: an id tie at the bookmark's time is ordered by id; a bookmark at the newest message returns nothing", async () => {
+  await withV2({ "GET /api/session/ses_a/message": sincePages }, async () => {
+    assert.deepEqual((await listMessagesSince("ses_a", { after: { at: 6, id: "a3" } })).messages, []);
+    assert.deepEqual((await listMessagesSince("ses_a", { after: { at: 5, id: "u2" } })).messages.map((m) => m.info.id), ["u3", "a3"], "same time, later id counts as after");
+  });
+});
+
+test("listMessagesSince reports olderNotRead only when the record ceiling is hit before the bookmark", async () => {
+  let n = 0;
+  await withV2(
+    {
+      "GET /api/session/ses_a/message": () => {
+        const base = 1_000_000 - n * 200;
+        n++;
+        return { data: Array.from({ length: 200 }, (_, i) => AT(`a${base - i}`, "x", base - i)), cursor: { next: `C${n}` } };
+      },
+    },
+    async () => {
+      const out = await listMessagesSince("ses_a", { after: { at: 1, id: "u0" }, max: 100 });
+      assert.equal(n, 50, "never more than the 10,000-record ceiling (50 pages)");
+      assert.deepEqual([out.olderNotRead, out.hasMore, out.messages.length], [true, true, 100]);
+    },
+  );
+});
+
+test("listMessagesSince non-2xx throws", async () => {
+  await withV2({ "GET /api/session/ses_a/message": () => new Response("x", { status: 500 }) }, async () => {
+    await assert.rejects(listMessagesSince("ses_a", { after: { at: 1, id: "u" } }), /listMessagesSince 500/);
+  });
 });
 
 test("listMessages non-2xx throws", async () => {

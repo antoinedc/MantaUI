@@ -44,6 +44,8 @@ function extraFor(pool, label) {
 }
 
 const WEEKLY_LABEL = usageWindowLabel(7 * 86400);
+const SESSION_SPAN_MS = 5 * 3_600_000;
+const WEEKLY_SPAN_MS = 7 * 86_400_000;
 
 // Team/Enterprise plans return `seven_day: null` and describe every cap in a
 // `limits[]` list instead:
@@ -73,6 +75,7 @@ function scopedWeekly(limit) {
   return normalizeWindow({
     kind: `weekly_scoped:${name.toLowerCase()}`,
     label: `${WEEKLY_LABEL} · ${name}`,
+    spanMs: WEEKLY_SPAN_MS,
     pct: limitPct(limit),
     resetsAt: limit.resets_at,
     scope: name,
@@ -123,6 +126,7 @@ export const claudeAdapter = {
       ? normalizeWindow({
           kind: "session",
           label: usageWindowLabel(5 * 3600),
+          spanMs: SESSION_SPAN_MS,
           pct: pctOf(fiveHour),
           resetsAt: fiveHour?.resets_at,
         })
@@ -130,6 +134,7 @@ export const claudeAdapter = {
         ? normalizeWindow({
             kind: "session",
             label: usageWindowLabel(5 * 3600),
+          spanMs: SESSION_SPAN_MS,
             pct: limitPct(sessionLimit),
             resetsAt: sessionLimit.resets_at,
             active: sessionLimit.is_active === false ? false : undefined,
@@ -145,6 +150,7 @@ export const claudeAdapter = {
       ? normalizeWindow({
           kind: "weekly",
           label: WEEKLY_LABEL,
+          spanMs: WEEKLY_SPAN_MS,
           pct: pctOf(sevenDay),
           resetsAt: sevenDay?.resets_at,
         })
@@ -152,6 +158,7 @@ export const claudeAdapter = {
         ? normalizeWindow({
             kind: "weekly",
             label: WEEKLY_LABEL,
+            spanMs: WEEKLY_SPAN_MS,
             pct: limitPct(weeklyLimit),
             resetsAt: weeklyLimit.resets_at,
             active: weeklyLimit.is_active === false ? false : undefined,

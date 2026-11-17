@@ -1060,6 +1060,8 @@ export function createCtoEngine(deps = {}) {
   function refusalFlipsThrifty(decision) {
     if (decision?.reason === "usd-cap") return true;
     if (decision?.reason !== "level-cap") return false;
+    // The budget says whether the refusing window is a week (a ChatGPT 7-day window is named "session").
+    if (typeof decision?.window?.weekly === "boolean") return decision.window.weekly;
     const key = typeof decision?.window?.key === "string" ? decision.window.key : "";
     return isWeeklyKind(key.slice(key.indexOf(":") + 1));
   }

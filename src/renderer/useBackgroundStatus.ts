@@ -66,10 +66,10 @@ export function useBackgroundStatus(enabled = true): {
   return { state, refresh, adopt };
 }
 
-// ---- "open Settings → Models at the budget card" bridge ---------------------------------------
+// ---- "open Settings → Background work at the budget card" bridge --------------------------------
 //
-// The Knowledge card and the CTO pane ask App (which owns the Settings modal) to open on Models via the
-// `manta-open-settings` window event; the card scrolls itself into view. The Settings modal may not be
+// The Knowledge card and the CTO pane ask App (which owns the Settings modal) to open on the Background work
+// section via the `manta-open-settings` window event; the card scrolls itself into view and focuses its heading. The Settings modal may not be
 // mounted yet when the event fires, so the request is also parked in a module flag the card consumes on
 // mount (the same shape as accountsData's openAccountsSettings).
 
@@ -79,7 +79,7 @@ let pendingFocus = false;
 
 export function openBackgroundWorkSettings(): void {
   pendingFocus = true;
-  window.dispatchEvent(new CustomEvent("manta-open-settings", { detail: { section: "models", backgroundWork: true } }));
+  window.dispatchEvent(new CustomEvent("manta-open-settings", { detail: { section: "background", backgroundWork: true } }));
 }
 
 /** True (once) when a link asked for the budget card. */

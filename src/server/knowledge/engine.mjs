@@ -258,7 +258,7 @@ export function createKnowledgeEngine(deps = {}) {
       const cap = readBackgroundWork((await config.get())?.backgroundWork).dailyCapUsd;
       await deps.fireNotify({
         title: "Shared knowledge is on",
-        message: `Manta now keeps short notes from your sessions and shares what it learns between them. It works in the background on spare plan quota, and spends up to $${cap.toFixed(2)} a day on API keys, on models Manta picks. Open Settings → Knowledge to review it or turn it off, or Settings → Models to change the limits.`,
+        message: `Manta now keeps short notes from your sessions and shares what it learns between them. It works in the background on spare plan quota, and spends up to $${cap.toFixed(2)} a day on API keys, on models Manta picks. Open Settings → Knowledge to review it or turn it off, or Settings → Background work to change the limits.`,
         tag: "knowledge-upgrade",
       });
     } catch (e) {

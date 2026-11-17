@@ -572,7 +572,7 @@ describe("Settings — Backup restore in-flight + ok:false (BET-1455)", () => {
   });
 });
 
-// Background work budget: the card lives in Models, and a "Change" link anywhere (here, Knowledge's) lands on it.
+// Background work budget: the card has its own Settings section, and a "Background work settings" link anywhere (here, Knowledge's) lands on it.
 describe("Settings — background work budget card", () => {
   let h: Harness | null = null;
 
@@ -585,6 +585,7 @@ describe("Settings — background work budget card", () => {
       backgroundStatus: () =>
         Promise.resolve({
           level: "normal",
+          runWhenBusy: false,
           dailyCapUsd: 5,
           payg: { providers: [], usdToday: 0, usdMonth: 0 },
           plans: [{ adapter: "claude", fallback: false, windows: [], paused: null }],
@@ -601,22 +602,73 @@ describe("Settings — background work budget card", () => {
     h = null;
   });
 
-  it("is mounted in the Models section", async () => {
+  const tab = (id: string) => h!.container.querySelector<HTMLButtonElement>(`#tab-${id}`);
+  const searchQuota = async () => {
+    const search = h!.container.querySelector<HTMLInputElement>('input[placeholder="Find a setting…"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "quota");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await h!.flush();
+  };
+  const openHit = () => [...h!.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Open Background work") as HTMLButtonElement;
+
+  it("is mounted in its own Background work section, right after Models, and not in Models", async () => {
     stubApi();
-    h = mount(<Settings onClose={() => {}} initialSection="models" />);
+    h = mount(<Settings onClose={() => {}} initialSection="background" />);
     await h.flush();
     await h.flush();
     expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeTruthy();
+    expect(tab("background")!.textContent).toBe("Background work");
+    expect(tab("background")!.getAttribute("aria-selected")).toBe("true");
+    const tabs = [...h.container.querySelectorAll('[role="tab"]')].map((t) => t.id);
+    expect(tabs[tabs.indexOf("tab-models") + 1]).toBe("tab-background");
+    act(() => tab("models")!.click());
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeNull();
   });
 
-  it("Knowledge's Change link switches the open Settings to Models, at the card", async () => {
+  it("search finds the section, and its hit opens it", async () => {
+    stubApi();
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await searchQuota();
+    expect(h.container.textContent).toContain("Background work — plans and API-key limit");
+    const open = openHit();
+    expect(open, "the search hit's Open button").toBeTruthy();
+    act(() => open.click());
+    await h.flush();
+    await h.flush();
+    expect(tab("background")!.getAttribute("aria-selected")).toBe("true");
+    expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeTruthy();
+    expect(document.activeElement?.textContent, "the card's heading is focused, like the other links to it").toBe("Background work");
+  });
+
+  it("search hit: with the section prop already 'background' (App's state unchanged) and the user on another tab, the hit still switches to it", async () => {
+    stubApi();
+    h = mount(<Settings onClose={() => {}} initialSection="background" />);
+    await h.flush();
+    await h.flush();
+    act(() => tab("models")!.click());
+    await h.flush();
+    expect(tab("background")!.getAttribute("aria-selected")).toBe("false");
+    await searchQuota();
+    const open = openHit();
+    act(() => open.click());
+    await h.flush();
+    await h.flush();
+    expect(tab("background")!.getAttribute("aria-selected")).toBe("true");
+    expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeTruthy();
+  });
+
+  it("Knowledge's Background work settings link switches the open Settings to its section, at the card", async () => {
     stubApi();
     h = mount(<Settings onClose={() => {}} initialSection="knowledge" />);
     await h.flush();
     await h.flush();
     expect(h.container.querySelector('[data-testid="background-work-card"]')).toBeNull();
-    const change = [...h.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Change") as HTMLButtonElement;
-    expect(change, "the Change link in the Knowledge card").toBeTruthy();
+    const change = [...h.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Background work settings") as HTMLButtonElement;
+    expect(change, "the Background work settings link in the Knowledge card").toBeTruthy();
     act(() => change.click());
     await h.flush();
     await h.flush();
