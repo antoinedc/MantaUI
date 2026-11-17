@@ -659,7 +659,7 @@ export function setPromptOrigins(store) {
  * either). It is a server-set input: only callers inside manta-server pass it.
  * @param {string} sessionId
  * @param {{ text: string, id?: string, files?: any[], agents?: any[], skills?: any[], delivery?: "steer"|"queue" }} body
- * @param {{ signal?: AbortSignal, origin?: string }} [opts]
+ * @param {{ signal?: AbortSignal, origin?: string, idCheck?: Promise<{ state: "found" | "missing" | "unknown" }> }} [opts]
  * @returns {Promise<import("./opencodeClient.mjs").HttpFailure|null>} null once accepted; the refusal (a non-2xx) otherwise
  */
 async function postPrompt(sessionId, body, { signal, origin = "unknown", idCheck } = {}) {
