@@ -218,7 +218,7 @@ final class ChatModelCatalog: ObservableObject {
     func subscribe(to eventStore: MantaEventStore) {
         guard !boundEvents else { return }
         boundEvents = true
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["models.updated", "model-prefs.updated"]) { [weak self] frame in
             switch frame.kind {
             case "models.updated":
                 self?.reload()

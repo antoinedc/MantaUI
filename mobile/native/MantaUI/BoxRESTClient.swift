@@ -150,7 +150,7 @@ struct BoxRESTClient: Sendable {
 
     private func noteUpgradeRefusal(status: Int?, body: Data) {
         if let status, UpgradeStatus.isUpgradeRefusal(statusCode: status, body: body) {
-            NotificationCenter.default.post(name: .mantaBoxUpgrading, object: nil)
+            UpgradeRefusalNotice.post()
         }
     }
 }

@@ -2055,6 +2055,23 @@ dot + `!`). `chatAutoAllow` suppresses `permission.asked` at the bus
 layer in both transports, so the sidebar naturally stays quiet in trust
 mode.
 
+## Status freshness + the `/events` filter (spec 2026-11-17-ios-stability-and-status-freshness)
+
+- **`/events` filter (C1).** A WS connection may pass `?kinds=a,b` and send `{"type":"kinds",…}` /
+  `{"type":"focus","sessions":[…]}` messages; the heavy stream subs (`flush`, `toolOutput`, `messageChanged`)
+  then reach it only for focused sessions. Pure logic: `createEventFilter` in `events.mjs`. The desktop sends
+  neither, so it still gets everything. iOS derives its kinds from its raw-frame registrations (see
+  `mobile/native/AGENTS.md`), so a new kind an iOS store consumes must be registered there or it never arrives.
+- **Status is reconciled, not only event-driven.** `statusReconcile.mjs` re-reads opencode's active sessions and
+  pending asks on every (re)connect and every 45 s, publishing only differences through the normal path; the
+  opencode event reader aborts and reconnects after a stall (no bytes for 90 s, armed only after a heartbeat).
+  Row status carries `attentionBelow` (an ask somewhere beneath the row); clients show "waiting" from
+  `attention ?? attentionBelow`. Every client treats a `runningSet` frame as the start of the replay and clears
+  ask badges first.
+- **`status` batches are published only when they change** (plus once per new subscriber).
+- **`POST /api/diagnostics/ios`** stores the iPhone's MetricKit reports (OS kills, hangs, CPU/memory/disk
+  exceptions, which Crashlytics never sees) under `~/.manta/ios-diagnostics/` (500 files / 50 MiB / 30 days).
+
 ## Chat-mode windows
 
 A second window type alongside the claude-TUI window. A tmux window running

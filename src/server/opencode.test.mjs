@@ -53,6 +53,7 @@ import {
   _resetSessionDirectoryCache,
   _setOcTransport,
   _setEventStreamTransport,
+  createStallMonitor,
   _getOcAgent,
   listReferences,
   findFiles,
@@ -521,6 +522,82 @@ test("subscribeEvents calls onDisconnect when an established stream drops", asyn
     _setEventStreamTransport(null);
   }
   assert.deepEqual(events.slice(0, 3), ["connect", "event", "disconnect"]);
+});
+
+test("createStallMonitor: unarmed until a heartbeat is seen; threshold = max(90 s, 3 x longest heartbeat gap)", () => {
+  let t = 1_000;
+  const m = createStallMonitor({ now: () => t });
+  t += 10 * 60_000;
+  assert.equal(m.stalled(), false, "no heartbeat seen: an opencode that is silent while idle never stalls");
+  m.onText(": heartbeat\n\n");
+  assert.equal(m.armed(), true);
+  assert.equal(m.thresholdMs(), 90_000);
+  t += 15_000;
+  m.onText(": heartbeat\n\n");
+  t += 89_000;
+  assert.equal(m.stalled(), false);
+  t += 2_000;
+  assert.equal(m.stalled(), true, "91 s of silence after a heartbeat");
+  m.onText('data: {"type":"x"}\n\n');
+  assert.equal(m.stalled(), false, "any byte resets the clock");
+  // A slower heartbeat raises the limit: 40 s gaps -> 120 s.
+  const slow = createStallMonitor({ now: () => t });
+  slow.onText(": heartbeat\n\n");
+  t += 40_000;
+  slow.onText(": heartbeat\n\n");
+  assert.equal(slow.thresholdMs(), 120_000);
+  t += 119_000;
+  assert.equal(slow.stalled(), false);
+  t += 2_000;
+  assert.equal(slow.stalled(), true);
+});
+
+test("subscribeEvents aborts a stream that goes silent after a heartbeat and reconnects (resync path)", async () => {
+  const enc = new TextEncoder();
+  const log = [];
+  let n = 0;
+  _setEventStreamTransport(async (_url, init) => {
+    n++;
+    if (n === 1) {
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(": heartbeat\n\n"));
+            init.signal.addEventListener("abort", () => { try { c.error(new Error("aborted")); } catch { /* closed */ } });
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return new Promise(() => {});
+  });
+  const stop = subscribeEvents(() => {}, {
+    reconnectMs: 5,
+    stall: { minMs: 40, checkMs: 10 },
+    onConnect: ({ reconnect }) => log.push(`connect:${reconnect}`),
+    onDisconnect: () => log.push("disconnect"),
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 400));
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
+  assert.deepEqual(log, ["connect:false", "disconnect"]);
+  assert.ok(n >= 2, "a second connection was attempted");
+});
+
+test("subscribeEvents leaves a quiet stream alone when no heartbeat was ever seen", async () => {
+  const log = [];
+  _setEventStreamTransport(async () => new Response(new ReadableStream({ start() {} }), { status: 200 }));
+  const stop = subscribeEvents(() => {}, { reconnectMs: 5, stall: { minMs: 20, checkMs: 5 }, onDisconnect: () => log.push("disconnect") });
+  try {
+    await new Promise((r) => setTimeout(r, 150));
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
+  assert.deepEqual(log, []);
 });
 
 // ---------------------------------------------------------------------------

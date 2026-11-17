@@ -90,7 +90,7 @@ final class GitForgeStore: ObservableObject {
 
     private let client: GitForgeClient
     private static let log = Logger(subsystem: "com.antoinedc.mantaui", category: "git-forge")
-    private static let pollInterval: TimeInterval = 5
+    private static let pollInterval: TimeInterval = MantaPollPolicy.forgeSeconds
 
     private var cwd: String?
     private var sceneActive = true
@@ -138,7 +138,7 @@ final class GitForgeStore: ObservableObject {
 
     // MARK: Polling
 
-    /// Poll the box every 5 s until cancelled (the view's `.task(id: cwd)` owns
+    /// Poll the box every 30 s until cancelled (the view's `.task(id: cwd)` owns
     /// it, so it stops when the chat disappears and restarts on a cwd change).
     func run(cwd: String) async {
         attach(cwd: cwd)

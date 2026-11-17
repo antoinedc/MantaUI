@@ -22,6 +22,7 @@ import UIKit
 struct SessionListView: View {
     @ObservedObject var store: SessionListStore
     @EnvironmentObject private var eventStore: MantaEventStore
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var pushRouter: MantaPushRouter
     @EnvironmentObject private var navigator: MantaNavigator
     @EnvironmentObject private var capabilities: BoxCapabilitiesStore
@@ -214,14 +215,20 @@ struct SessionListView: View {
         // The age chip advances on its own, like the desktop rail's 10s tick
         // (src/renderer/clock.ts, AGE_TICK_MS). Ungated: an idle list is exactly
         // the list whose ages must keep moving. — BET-1084.
-        .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { tick in
-            now = tick
+        // Runs only while the app is active AND the list is in front (nothing pushed); one immediate tick on return.
+        .task(id: MantaPollPolicy.shouldRun(sceneActive: scenePhase == .active, visible: path.isEmpty)) {
+            guard MantaPollPolicy.shouldRun(sceneActive: scenePhase == .active, visible: path.isEmpty) else { return }
+            while !Task.isCancelled {
+                now = Date()
+                try? await Task.sleep(nanoseconds: UInt64(MantaPollPolicy.ageLabelSeconds * 1_000_000_000))
+            }
         }
         // Popping the last session off the stack lands us back on the list.
         // Two jobs on that transition:
         .onChange(of: path.count) { count in
             guard count == 0 else { return }
-            // Back on the list means nothing is open, so nothing is highlighted.
+            // Back on the list means nothing is open, so nothing is highlighted — and no chat needs heavy frames.
+            eventStore.clearAllFocus()
             openRow = nil
             routedSessionID = nil
             // …and it is the one moment the list is on screen again after an
@@ -1400,7 +1407,7 @@ private struct SessionStatusDot: View {
     let state: SessionDotState
     let tokens: Tokens
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var animating = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Circle()
@@ -1410,14 +1417,10 @@ private struct SessionStatusDot: View {
             .overlay { if state == .halted { Circle().strokeBorder(color, lineWidth: 1.5) } }
             .frame(width: Metrics.spacing.sp2, height: Metrics.spacing.sp2)
             .overlay {
-                if state == .running && !reduceMotion {
-                    Circle()
-                        .strokeBorder(tokens.accent, lineWidth: 1.5)
-                        .scaleEffect(animating ? 2.5 : 1.2)
-                        .opacity(animating ? 0 : 0.55)
-                        .animation(.easeOut(duration: 1.8).repeatForever(autoreverses: false),
-                                   value: animating)
-                        .onAppear { animating = true }
+                // Only while the app is active: leaving the foreground removes the ring (and its repeating
+                // animation); coming back inserts a fresh one.
+                if state == .running && !reduceMotion && scenePhase == .active {
+                    PulsingRing(tokens: tokens)
                 }
             }
     }
@@ -1429,6 +1432,21 @@ private struct SessionStatusDot: View {
         case .halted: return tokens.warn
         case .idle: return tokens.tx4
         }
+    }
+}
+
+/// The pulsing ring of a running row. Its own view so its animation state starts fresh each time it is inserted.
+private struct PulsingRing: View {
+    let tokens: Tokens
+    @State private var animating = false
+
+    var body: some View {
+        Circle()
+            .strokeBorder(tokens.accent, lineWidth: 1.5)
+            .scaleEffect(animating ? 2.5 : 1.2)
+            .opacity(animating ? 0 : 0.55)
+            .animation(.easeOut(duration: 1.8).repeatForever(autoreverses: false), value: animating)
+            .onAppear { animating = true }
     }
 }
 

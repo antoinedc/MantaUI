@@ -160,10 +160,15 @@ struct MantaSessionStreamState: Equatable, Sendable {
     }
 
     /// Append a flushed chunk, extending the part's text when it is already
-    /// known. Text and reasoning are tracked separately for the same part.
+    /// known. Text and reasoning are tracked separately for the same part. A
+    /// replay payload carries the whole text so far and replaces it instead.
     mutating func appending(_ payload: StreamFlushPayload) {
         if let i = chunks.firstIndex(where: { $0.partID == payload.partID && $0.field == payload.field }) {
-            chunks[i].text += payload.text
+            if payload.replay == true {
+                chunks[i].text = payload.text
+            } else {
+                chunks[i].text += payload.text
+            }
         } else {
             chunks.append(StreamTextChunk(
                 partID: payload.partID,
@@ -196,10 +201,21 @@ enum MantaStreamRouter {
         epoch: String? = nil,
         connGen: Int = 0
     ) -> MantaSessionStreamState {
-        guard frame.kind == "stream", let sub = frame.sub else {
-            return state ?? MantaSessionStreamState(sessionId: frame.sessionId ?? "")
-        }
         var s = state ?? MantaSessionStreamState(sessionId: frame.sessionId ?? "")
+        apply(frame, to: &s, epoch: epoch, connGen: connGen)
+        return s
+    }
+
+    /// The same mapping, in place. The store uses this on a state it has taken OUT of its dictionary, so the
+    /// streamed text is appended to a uniquely-owned buffer instead of copying everything streamed so far on
+    /// every chunk.
+    static func apply(
+        _ frame: MantaStreamFrame,
+        to s: inout MantaSessionStreamState,
+        epoch: String? = nil,
+        connGen: Int = 0
+    ) {
+        guard frame.kind == "stream", let sub = frame.sub else { return }
         switch sub {
         case "flush":
             if let p = try? frame.decodedPayload(StreamFlushPayload.self) {
@@ -245,11 +261,11 @@ enum MantaStreamRouter {
                 if !s.toolStartOrder.contains(p.idx) { s.toolStartOrder.append(p.idx) }
             }
         case "toolOutput":
+            // Appended in place (never copy the tail out and back): a long bash run streams many chunks.
             if let p = try? frame.decodedPayload(StreamToolOutputPayload.self),
-               var t = s.tools[p.idx] {
-                t.tail += p.text
-                t.status = "running"
-                s.tools[p.idx] = t
+               s.tools[p.idx] != nil {
+                s.tools[p.idx]?.tail += p.text
+                s.tools[p.idx]?.status = "running"
             }
         case "toolEnded":
             if let p = try? frame.decodedPayload(StreamToolEndedPayload.self),
@@ -327,7 +343,6 @@ enum MantaStreamRouter {
         default:
             break
         }
-        return s
     }
 
     /// Return the box's authoritative start for a running-set entry, or keep
@@ -379,6 +394,9 @@ enum MantaStreamRouter {
             // whatever is still pending. Same-path, correctly-ordered marker.
             s.questions = nil
             s.permissions = nil
+            // C4: the row's asks (its own and the ones beneath it) are replayed with the rest of the snapshot.
+            s.windowStatus?.attention = nil
+            s.windowStatus?.attentionBelow = nil
             next[sid] = s
         }
         // A session the device has never seen a frame for can still be running.
@@ -442,9 +460,49 @@ protocol MantaEventStreamControl: AnyObject {
     func retryNow()
     func forceReconnect()
     func close(reason: String)
+    /// Send one text message (the C1 `kinds` / `focus` messages) over the live socket. A control with no
+    /// socket (the test fakes) ignores it.
+    func send(_ text: String)
+    /// The app moved to / from the background: only there does the controller give up reconnecting.
+    func setBackground(_ background: Bool)
+}
+
+extension MantaEventStreamControl {
+    func send(_ text: String) {}
+    func setBackground(_ background: Bool) {}
+}
+
+/// A control whose socket parses frames off the main actor and delivers them already parsed.
+@MainActor
+protocol MantaPreparsedFrameSource: AnyObject {
+    var onFrame: ((MantaStreamFrame) -> Void)? { get set }
 }
 
 extension MantaReconnectController: MantaEventStreamControl {}
+extension MantaReconnectController: MantaPreparsedFrameSource {}
+
+// MARK: - Raw-frame registrations (B6)
+
+/// One raw-frame consumer and the envelope kinds it declares. The socket's `kinds=` subscription is the
+/// union of every registration (plus what the store consumes itself), so what the box sends is derived from
+/// who is listening, never kept by hand.
+@MainActor
+final class MantaRawFrameRegistration {
+    let kinds: Set<String>
+    fileprivate let handler: (MantaStreamFrame) -> Void
+
+    fileprivate init(kinds: Set<String>, handler: @escaping (MantaStreamFrame) -> Void) {
+        self.kinds = kinds
+        self.handler = handler
+    }
+}
+
+/// The subscription the connect URL is built from. A reference type so the controller's URL closure (made
+/// before the store exists) reads the CURRENT union at every connect.
+@MainActor
+final class MantaEventSubscriptionState {
+    var kinds: Set<String> = MantaEventKinds.storeOwned
+}
 
 // MARK: - The store
 
@@ -453,18 +511,27 @@ final class MantaEventStore: ObservableObject {
 
     @Published private(set) var connectionState: MantaConnectionState = .idle
     @Published private(set) var degraded = false
-    @Published private(set) var sessionStates: [String: MantaSessionStreamState] = [:]
+    /// The interpreted per-session state, keyed by sessionId. DELIBERATELY not `@Published`: a streamed chunk
+    /// used to republish this whole dictionary, which redrew every view that observed the store. Views observe
+    /// the per-session stores instead, and everything else reacts to `sessionChanges` / `rowStatusChanges`
+    /// (edges only). Read it directly for the current value.
+    private(set) var sessionStates: [String: MantaSessionStreamState] = [:]
+    /// One value per real change of one session's state, sent AFTER the state is stored. Nothing is sent for a
+    /// frame that changed nothing.
+    let sessionChanges = PassthroughSubject<MantaSessionChange, Never>()
+    /// Fires when what a session-list row shows (running, start, window rollup, pending asks) changes — never
+    /// for streamed text.
+    let rowStatusChanges = PassthroughSubject<Void, Never>()
+    private var rowSignatures: [String: MantaRowSignature] = [:]
     /// Routing stamp of the MOST RECENT stream frame the store applied: which
-    /// session it was for and which `sub` it carried. The `$sessionStates` sink
-    /// fires on any session's change with only the ACCUMULATED snapshot, which
-    /// can't tell a consumer which fields the frame just delivered. This is the
-    /// per-frame delta the single-writer merge (BET-668) feeds off.
+    /// session it was for and which `sub` it carried. A consumer woken by `sessionChanges` can't tell from
+    /// the ACCUMULATED snapshot which fields the frame just delivered; this is the per-frame delta the
+    /// single-writer merge (BET-668) feeds off.
     private(set) var lastStreamFrame: StreamFrameStamp?
 
     /// Bumped on every authoritative running-set apply. A consumer holding
     /// optimistic local running state compares against this to know the box
-    /// has since spoken definitively. Not `@Published` — `sessionStates` is,
-    /// and it is reassigned in the same call, so observers already re-run.
+    /// has since spoken definitively.
     private(set) var runningSetSeq: Int = 0
 
     /// The box's interpreter epoch, announced by the LATEST connection's `runningSet` (nil until it arrives, and on an
@@ -487,12 +554,11 @@ final class MantaEventStore: ObservableObject {
     var resyncHandler: (() -> Void)?
 
     /// Event frames we do NOT understand from the interpreted stream are still
-    /// delivered here (raw `opencode`, `status`, `model-prefs.updated`, …) for
-    /// consumers that want them. S1b only binds to interpreted stream state.
-    /// A MULTICAST list rather than a single closure — `SessionListStore` and
-    /// the `ChatModelPrefs` cache each register once; a single-owner closure
-    /// would let the second clobber the first (BET-1282).
-    private var rawFrameHandlers: [(MantaStreamFrame) -> Void] = []
+    /// delivered here (`status`, `model-prefs.updated`, …) for consumers that want them. A MULTICAST list
+    /// rather than a single closure — `SessionListStore` and the `ChatModelPrefs` cache each register once; a
+    /// single-owner closure would let the second clobber the first (BET-1282). Each registration declares the
+    /// kinds it consumes and only receives those.
+    private var rawFrameHandlers: [MantaRawFrameRegistration] = []
 
     /// Fires once for every `delegate.updated` frame — a background job
     /// started, progressed, finished or was stopped. A `Subject` rather than
@@ -540,14 +606,81 @@ final class MantaEventStore: ObservableObject {
     /// approval store is the safety net for a missed frame.
     let delegateApprovalRequests = PassthroughSubject<ChatCardApproval, Never>()
 
-    /// Register a raw (non-`stream`, non-`runningSet`) frame observer.
-    func addRawFrameHandler(_ handler: @escaping (MantaStreamFrame) -> Void) {
-        rawFrameHandlers.append(handler)
+    /// Register a raw (non-`stream`, non-`runningSet`) frame observer for the envelope `kinds` it consumes.
+    /// The `/events` subscription is the union of every registration, so a kind nobody asks for is never sent
+    /// to this device. A registration made after connect updates the subscription at once. The returned token
+    /// removes the registration again (`removeRawFrameHandler`); most consumers live as long as the app and
+    /// ignore it.
+    @discardableResult
+    func addRawFrameHandler(kinds: Set<String>, _ handler: @escaping (MantaStreamFrame) -> Void) -> MantaRawFrameRegistration {
+        let registration = MantaRawFrameRegistration(kinds: kinds, handler: handler)
+        rawFrameHandlers.append(registration)
+        refreshSubscription()
+        return registration
+    }
+
+    func removeRawFrameHandler(_ registration: MantaRawFrameRegistration) {
+        rawFrameHandlers.removeAll { $0 === registration }
+        refreshSubscription()
+    }
+
+    /// The kinds this device currently asks the box for.
+    var subscribedKinds: Set<String> { subscription.kinds }
+
+    private func refreshSubscription() {
+        let union = MantaEventKinds.union(registrations: rawFrameHandlers.map(\.kinds))
+        guard union != subscription.kinds else { return }
+        subscription.kinds = union
+        if connectionState.name == "connected" { controller.send(MantaEventKinds.kindsMessage(union)) }
+    }
+
+    // MARK: Focus (C1)
+
+    private var focus = MantaFocusSet()
+
+    /// Ask the box for the heavy stream frames (`flush`, `toolOutput`, `messageChanged`) of `sessions`, on behalf
+    /// of `owner` (a chat screen). The message goes out BEFORE the caller fetches the transcript, so no chunk
+    /// can fall between the fetch and the focus taking effect (overlap is absorbed by the dedupe).
+    func setFocus(owner: String, sessions: [String]) {
+        if focus.set(owner: owner, sessions: sessions) { sendFocus() }
+    }
+
+    func clearFocus(owner: String) {
+        if focus.remove(owner: owner) { sendFocus() }
+    }
+
+    /// Drop every owner's focus (the session list is back in front: no chat is open).
+    func clearAllFocus() {
+        let before = focus.sessions
+        focus = MantaFocusSet()
+        if !before.isEmpty { sendFocus() }
+    }
+
+    /// The union currently focused (test seam).
+    var focusedSessions: [String] { focus.sessions }
+
+    private func sendFocus() {
+        guard connectionState.name == "connected" else { return }
+        controller.send(MantaEventKinds.focusMessage(focus.sessions))
+    }
+
+    /// Both messages, after every (re)connect: the URL carried the kinds, but a registration may have landed
+    /// since, and the box starts every connection with no focus.
+    private func sendSubscription() {
+        controller.send(MantaEventKinds.kindsMessage(subscription.kinds))
+        controller.send(MantaEventKinds.focusMessage(focus.sessions))
     }
 
     private let controller: any MantaEventStreamControl
+    private let subscription: MantaEventSubscriptionState
+    /// The clock the background/foreground decisions read (injectable for tests).
+    private let clock: () -> Date
     private var lastFrameAt: Date
+    private var lastStateChangeAt = Date()
     private var watchdog: Timer?
+    /// When the app went to the background, nil while in front.
+    private var backgroundedAt: Date?
+    private var backgroundCloseTask: Task<Void, Never>?
     /// Sessions that have a live observer attached (a `ChatSessionStore` that
     /// has `start()`ed and not yet `stop()`ed). The store clears a session's
     /// accumulated stream chunks when its turn completes while NO observer is
@@ -561,26 +694,43 @@ final class MantaEventStore: ObservableObject {
     init(
         stream: (any MantaEventStreamControl)? = nil,
         tokenProvider: @escaping () -> String? = { KeychainCredentialStore.shared.boxToken },
-        serverProvider: @escaping () -> URL? = { KeychainCredentialStore.shared.serverURL }
+        serverProvider: @escaping () -> URL? = { KeychainCredentialStore.shared.serverURL },
+        clock: @escaping () -> Date = { Date() }
     ) {
         self.lastFrameAt = Date()
-        let controller = stream ?? Self.makeController(tokenProvider: tokenProvider, serverProvider: serverProvider)
+        self.clock = clock
+        let subscription = MantaEventSubscriptionState()
+        self.subscription = subscription
+        let controller = stream ?? Self.makeController(
+            tokenProvider: tokenProvider,
+            serverProvider: serverProvider,
+            kinds: { subscription.kinds }
+        )
         self.controller = controller
         controller.onState = { [weak self] state in self?.handleState(state) }
         controller.onMessage = { [weak self] text in self?.handleFrame(text) }
         controller.onReconnect = { [weak self] in self?.handleReconnect() }
         controller.onConfigError = { _ in }
+        // The real socket parses frames off the main actor; only the decoded value comes here.
+        if let source = controller as? any MantaPreparsedFrameSource {
+            source.onFrame = { [weak self] frame in self?.handleParsedFrame(frame) }
+        }
     }
 
     static func makeController(
         tokenProvider: @escaping () -> String?,
-        serverProvider: @escaping () -> URL?
+        serverProvider: @escaping () -> URL?,
+        kinds: @escaping @MainActor () -> Set<String> = { MantaEventKinds.storeOwned }
     ) -> any MantaEventStreamControl {
         MantaReconnectController(
-            url: { Self.eventsWebSocketURL(from: serverProvider()) },
+            url: { Self.eventsWebSocketURL(from: serverProvider(), kinds: kinds()) },
             makeSocket: { url in
                 MantaURLSessionWebSocket(authHeader: Self.bearer(token: tokenProvider()))
-            }
+            },
+            // Retry from 1 s up to 30 s, with jitter, for as long as the app is in front; the give-up is a
+            // background-only rule.
+            backoff: ExponentialBackoff(base: 1000, max: 30_000),
+            windowAppliesInForeground: false
         )
     }
 
@@ -590,29 +740,59 @@ final class MantaEventStore: ObservableObject {
         startWatchdog()
     }
 
-    /// App foreground / resume: force a reconnect + resync of missed state.
+    /// The app left the foreground. The socket is closed after a short grace (a quick app switch keeps it);
+    /// while it is down the controller's reconnect give-up applies.
+    func enteredBackground() {
+        guard backgroundedAt == nil else { return }
+        backgroundedAt = clock()
+        controller.setBackground(true)
+        backgroundCloseTask?.cancel()
+        backgroundCloseTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(MantaForegroundPolicy.backgroundCloseGraceSeconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.closeForBackground()
+        }
+    }
+
+    func closeForBackground() {
+        guard backgroundedAt != nil else { return }
+        backgroundCloseTask = nil
+        watchdog?.invalidate()
+        watchdog = nil
+        controller.close(reason: MantaCloseReason.background)
+    }
+
+    /// App foreground / resume: bring the stream back and re-fetch missed state.
     ///
-    /// `ensure()` alone is not enough here. A socket the OS tore down while the
-    /// process was suspended can still report itself open, so `ensure()`'s
-    /// "already live" short-circuit leaves the stream permanently silent; and a
-    /// backgrounded app's reconnect timers do not fire, so the controller may
-    /// have burnt its whole reconnect window and closed for good. Whenever the
-    /// stream is not demonstrably healthy — not `connected`, or no frame
-    /// (heartbeats included) for longer than the watchdog's staleness bar — we
-    /// reopen unconditionally rather than trust it.
+    /// After at least the background grace away the socket is ALWAYS reopened — a fresh snapshot replay is
+    /// worth more than trusting a socket the OS may have torn down while the process was suspended. After a
+    /// shorter trip it is reopened unless demonstrably healthy: not `connected`, or no frame (heartbeats
+    /// included) for longer than the watchdog's staleness bar. `ensure()` alone is not enough, since a dead
+    /// socket can still report itself open.
     func resume() {
+        backgroundCloseTask?.cancel()
+        backgroundCloseTask = nil
+        let away = backgroundedAt.map { clock().timeIntervalSince($0) }
+        backgroundedAt = nil
+        controller.setBackground(false)
         let stale = MantaLivenessPolicy.shouldForceReconnect(
             state: connectionState,
             lastFrameAt: lastFrameAt,
             now: Date(),
             staleMs: staleFrameMs
         )
-        if connectionState.name == "connected" && !stale {
+        switch MantaForegroundPolicy.onForeground(
+            awayFor: away,
+            connected: connectionState.name == "connected",
+            stale: stale
+        ) {
+        case .keep:
             controller.markReconnectAndEnsure()
-        } else {
+        case .forceReconnect:
             controller.forceReconnect()
         }
         lastFrameAt = Date()
+        lastStateChangeAt = Date()
         // Timers are suspended with the process; re-arm rather than assume the
         // watchdog survived the trip to the background.
         startWatchdog()
@@ -620,9 +800,11 @@ final class MantaEventStore: ObservableObject {
 
     /// Permanent teardown.
     func stop() {
+        backgroundCloseTask?.cancel()
+        backgroundCloseTask = nil
         watchdog?.invalidate()
         watchdog = nil
-        controller.close(reason: "store stopped")
+        controller.close(reason: MantaCloseReason.storeStopped)
     }
 
     func restart() {
@@ -637,18 +819,38 @@ final class MantaEventStore: ObservableObject {
     // MARK: - Controller callbacks
 
     private func handleState(_ state: MantaConnectionState) {
+        let wasConnected = connectionState.name == "connected"
+        let nowConnected = state.name == "connected"
         // A new connection retires every answer issued before it, and its epoch is unknown until its `runningSet`.
-        if state.name == "connected", connectionState.name != "connected" {
+        if nowConnected, !wasConnected {
             connGen += 1
             connectionEpoch = nil
         }
+        if state.name != connectionState.name { lastStateChangeAt = Date() }
         connectionState = state
-        degraded = controller.hasConnectedOnce && state.isUnreachable
+        // Closing the socket for the background on purpose is not an outage.
+        if case .closed(let reason) = state, reason == MantaCloseReason.background {
+            // keep `degraded` as it was
+        } else {
+            degraded = controller.hasConnectedOnce && state.isUnreachable
+        }
+        if nowConnected, !wasConnected { sendSubscription() }
     }
 
+    /// A frame as text (a control without an off-main parser, and every test fake).
     private func handleFrame(_ text: String) {
         lastFrameAt = Date()
         guard let frame = try? MantaStreamFrame.parse(text) else { return }
+        dispatch(frame)
+    }
+
+    /// A frame the socket already parsed off the main actor.
+    private func handleParsedFrame(_ frame: MantaStreamFrame) {
+        lastFrameAt = Date()
+        dispatch(frame)
+    }
+
+    private func dispatch(_ frame: MantaStreamFrame) {
         if frame.isHeartbeat { return }
         if frame.kind == "runningSet" {
             applyRunningSet(frame)
@@ -669,7 +871,22 @@ final class MantaEventStore: ObservableObject {
             }
             if let accountsEvent = AccountsBusEvent.from(frame) { accountsUpdates.send(accountsEvent) }
             if let handoffEvent = HandoffBusEvent.from(frame: frame) { handoffUpdates.send(handoffEvent) }
-            for handler in rawFrameHandlers { handler(frame) }
+            for registration in rawFrameHandlers where registration.kinds.contains(frame.kind) {
+                registration.handler(frame)
+            }
+        }
+    }
+
+    /// Store one session's changed state and tell whoever cares: the session's own observers always, the
+    /// session list only when a row-visible field moved.
+    private func announce(_ sid: String, sub: String?, state: MantaSessionStreamState) {
+        sessionChanges.send(MantaSessionChange(sessionId: sid, sub: sub))
+        // Streamed text and tool output never change a row.
+        if sub == "flush" || sub == "toolOutput" { return }
+        let signature = MantaRowSignature(state)
+        if rowSignatures[sid] != signature {
+            rowSignatures[sid] = signature
+            rowStatusChanges.send()
         }
     }
 
@@ -677,8 +894,12 @@ final class MantaEventStore: ObservableObject {
     /// Deliberately NOT behind `routeStream`'s `degraded` guard: a client that
     /// discarded frames while unreachable is exactly the client whose running
     /// state needs correcting the moment it hears from the box again.
+    ///
+    /// It is also the start of the box's replay (C4): every session's ask-derived state is cleared here and the
+    /// frames that follow repopulate whatever still asks.
     private func applyRunningSet(_ frame: MantaStreamFrame) {
         guard let p = try? frame.decodedPayload(StreamRunningSetPayload.self) else { return }
+        let before = sessionStates
         sessionStates = MantaStreamRouter.applyingRunningSet(p, to: sessionStates)
         runningSetSeq += 1
         // The connection's epoch: every session's run values of another epoch are dropped, queued writes apply.
@@ -692,6 +913,10 @@ final class MantaEventStore: ObservableObject {
                 }
             }
         }
+        for (sid, state) in sessionStates where before[sid] != state {
+            announce(sid, sub: "runningSet", state: state)
+        }
+        sessionChanges.send(.runningSetApplied)
     }
 
     private func routeStream(_ frame: MantaStreamFrame) {
@@ -705,7 +930,13 @@ final class MantaEventStore: ObservableObject {
         // already-published state while unreachable.
         guard !degraded else { return }
         let sid = frame.sessionId ?? ""
-        var next = MantaStreamRouter.applying(frame, to: sessionStates[sid], epoch: connectionEpoch, connGen: connGen)
+        let sub = frame.sub
+        let heavy = sub == "flush" || sub == "toolOutput"
+        // Take the state OUT of the dictionary so the frame is applied to a uniquely-owned value: appending to
+        // the streamed text is then an in-place append, not a copy of everything streamed so far.
+        var next = sessionStates.removeValue(forKey: sid) ?? MantaSessionStreamState(sessionId: sid)
+        let before: MantaSessionStreamState? = heavy ? nil : next
+        MantaStreamRouter.apply(frame, to: &next, epoch: connectionEpoch, connGen: connGen)
         // A turn that COMPLETED with no observer attached has no one who will
         // retire its accumulated chunks (retirement lives in the observing
         // ChatSessionStore's refetch path). Clear them here so an unopened
@@ -715,8 +946,11 @@ final class MantaEventStore: ObservableObject {
         if next.turnComplete == true, !registeredSessionIDs.contains(sid) {
             next.chunks.removeAll()
         }
+        // A text or tool-output chunk always changes the state; anything else is compared.
+        let changed = heavy || before != next
         sessionStates[sid] = next
-        lastStreamFrame = StreamFrameStamp(sessionId: sid, sub: frame.sub)
+        lastStreamFrame = StreamFrameStamp(sessionId: sid, sub: sub)
+        if changed { announce(sid, sub: sub, state: next) }
     }
 
     /// Fold the run views a canonical transcript answer carries into the session's run values, under the connection
@@ -742,6 +976,7 @@ final class MantaEventStore: ObservableObject {
             state.liveRuns.store = store
             sessionStates[sessionId] = state
             lastStreamFrame = nil
+            announce(sessionId, sub: nil, state: state)
         }
         return current && TranscriptRunStore.hasStaleMembership(messages, minGen: store.minGen, retired: store.retired)
     }
@@ -753,6 +988,7 @@ final class MantaEventStore: ObservableObject {
         state.liveRuns = state.liveRuns.clearingLayout()
         sessionStates[sessionId] = state
         lastStreamFrame = nil
+        announce(sessionId, sub: nil, state: state)
     }
 
     /// Mark a session as having a live observer. Only an observed session keeps
@@ -782,6 +1018,7 @@ final class MantaEventStore: ObservableObject {
             // frame stamp so a consumer doesn't replay the PREVIOUS frame's
             // fields over a newer optimistic value (BET-668 review cycle 2).
             lastStreamFrame = nil
+            announce(sessionId, sub: nil, state: next)
         }
     }
 
@@ -801,11 +1038,20 @@ final class MantaEventStore: ObservableObject {
         watchdog = timer
     }
 
+    /// Runs while connected (a silent socket) AND while not (a stream stuck connecting, or closed for a reason the
+    /// app did not choose): nothing may stay silently dead while the app is in front.
     private func watchdogTick() {
+        guard backgroundedAt == nil else { return }
+        let now = Date()
         if MantaLivenessPolicy.shouldForceReconnect(
             state: connectionState,
             lastFrameAt: lastFrameAt,
-            now: Date(),
+            now: now,
+            staleMs: staleFrameMs
+        ) || MantaLivenessPolicy.shouldRecoverFromDeadState(
+            state: connectionState,
+            since: lastStateChangeAt,
+            now: now,
             staleMs: staleFrameMs
         ) {
             controller.forceReconnect()
@@ -814,12 +1060,16 @@ final class MantaEventStore: ObservableObject {
 
     // MARK: - URL + auth helpers
 
-    static func eventsWebSocketURL(from server: URL?) -> URL? {
+    static func eventsWebSocketURL(from server: URL?, kinds: Set<String>? = nil) -> URL? {
         guard let server else { return nil }
         var comps = URLComponents(url: server, resolvingAgainstBaseURL: false)
         comps?.scheme = server.scheme == "https" ? "wss" : "ws"
         comps?.path = "/events"
         comps?.query = nil
+        // The box ignores a longer list (and then sends everything): omit it rather than send one it would drop.
+        if let kinds, !kinds.isEmpty, kinds.count <= MantaEventKinds.maxEntries {
+            comps?.queryItems = [URLQueryItem(name: "kinds", value: MantaEventKinds.queryValue(kinds))]
+        }
         return comps?.url
     }
 

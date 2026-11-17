@@ -132,6 +132,36 @@ describe("setChatRunning / setChatAttention", () => {
       expect(useStore.getState().status.manta[0].running).toBe(true);
     });
 
+    it("clearBlockingAttention drops ?/! badges only (done and blocked stay); the replayed attention frames re-latch live asks", () => {
+      useStore.setState({
+        status: {
+          manta: {
+            0: { running: true, subagents: 0, attention: true, attentionKind: "question" },
+            1: { running: false, subagents: 0, attention: true, attentionKind: "permission" },
+            2: { running: false, subagents: 0, attention: true, attentionKind: "idle" },
+            3: { running: false, subagents: 0, attention: true, attentionKind: "blocked" },
+            4: { running: false, subagents: 0, attention: false },
+          },
+        },
+      });
+      useStore.getState().clearBlockingAttention();
+      const w = useStore.getState().status.manta;
+      expect(w[0]).toMatchObject({ running: true, attention: false, attentionKind: undefined });
+      expect(w[1]).toMatchObject({ attention: false, attentionKind: undefined });
+      expect(w[2]).toMatchObject({ attention: true, attentionKind: "idle" });
+      expect(w[3]).toMatchObject({ attention: true, attentionKind: "blocked" });
+      // The box's replay: runningSet (clear) → attention frame for the ask that is still pending.
+      useStore.getState().setChatAttention("ses_chat", "question");
+      expect(useStore.getState().status.manta[0]).toMatchObject({ attention: true, attentionKind: "question" });
+    });
+
+    it("clearBlockingAttention is a no-op (same state object) when nothing is blocking", () => {
+      useStore.setState({ status: { manta: { 0: { running: false, subagents: 0, attention: true, attentionKind: "idle" } } } });
+      const before = useStore.getState().status;
+      useStore.getState().clearBlockingAttention();
+      expect(useStore.getState().status).toBe(before);
+    });
+
     it("reconcileRunningSet lights listed sessions and clears unlisted ones", () => {
       useStore.getState().setChatRunning("ses_stale", true);
       useStore.getState().reconcileRunningSet(["ses_chat"]);

@@ -142,41 +142,60 @@ export function sessionsWithActiveWork(running, parents, jobs) {
  * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs?: object[], own?: Map<string,{attention?: string|null}>, pendingAsk?: Iterable<string> }} m
  */
 export function runningChildCounts(m) {
+  return descendantSummary(m).counts;
+}
+
+/**
+ * `runningChildCounts` plus, per ancestor, the strongest pending ask among its descendants at any depth
+ * (question beats permission), excluding the ancestor's own ask. A pending-ask session whose kind is unknown (only the
+ * injected live set names it) counts as a permission.
+ * @param {Parameters<typeof runningChildCounts>[0]} m
+ * @returns {{ counts: Map<string, number>, askBelow: Map<string, "question"|"permission"> }}
+ */
+export function descendantSummary(m) {
   const links = new Map(m.parentOf);
   for (const job of m.jobs ?? []) {
     if (!job.childSessionID || job.supersededBy || !job.parentSessionID || job.parentSessionID === job.childSessionID) continue;
     if (!links.has(job.childSessionID) || completionOwnerOf(job) === "manta") links.set(job.childSessionID, job.parentSessionID);
   }
+  const askKind = new Map();
+  for (const [sid, st] of m.own ?? []) if (st?.attention === "question" || st?.attention === "permission") askKind.set(sid, st.attention);
+  for (const sid of m.pendingAsk ?? []) if (!askKind.has(sid)) askKind.set(sid, "permission");
   const active = new Set(m.running);
-  for (const [sid, st] of m.own ?? []) if (st?.attention === "question" || st?.attention === "permission") active.add(sid);
-  for (const sid of m.pendingAsk ?? []) active.add(sid);
+  for (const sid of askKind.keys()) active.add(sid);
   const counts = new Map();
+  const askBelow = new Map();
   for (const a of active) {
     const seen = new Set([a]);
+    const kind = askKind.get(a);
     let cur = links.get(a);
     while (cur && !seen.has(cur)) {
       counts.set(cur, (counts.get(cur) ?? 0) + 1);
+      if (kind && askBelow.get(cur) !== "question") askBelow.set(cur, kind);
       seen.add(cur);
       cur = links.get(cur);
     }
   }
-  return counts;
+  return { counts, askBelow };
 }
 
 /**
  * One session's `windowStatus` payload from the maps. Pure.
  * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs: object[], own: Map<string,{since?: number|null, attention?: string|null}>,
- *           stopped: Set<string>, pendingAsk?: Iterable<string>, activeWork?: Set<string>, childCounts?: Map<string, number> }} m  `activeWork` / `childCounts` may be passed to avoid recomputing them per session
+ *           stopped: Set<string>, pendingAsk?: Iterable<string>, activeWork?: Set<string>, childCounts?: Map<string, number>,
+ *           askBelow?: Map<string, "question"|"permission"> }} m  `activeWork` / `childCounts` / `askBelow` may be passed to avoid recomputing them per session
  */
 export function deriveWindowStatus(m, sessionId) {
   const activeWork = m.activeWork ?? sessionsWithActiveWork(m.running, Object.fromEntries(m.parentOf), m.jobs);
-  const subagents = (m.childCounts ?? runningChildCounts(m)).get(sessionId) ?? 0;
+  const summary = m.childCounts && m.askBelow ? null : descendantSummary(m);
+  const subagents = (m.childCounts ?? summary.counts).get(sessionId) ?? 0;
   const own = m.own.get(sessionId);
   return {
     running: m.running.has(sessionId),
     busy: activeWork.has(sessionId),
     startedAt: m.running.has(sessionId) ? (own?.since ?? null) : null,
     attention: own?.attention === "question" || own?.attention === "permission" ? own.attention : null,
+    attentionBelow: (m.askBelow ?? summary.askBelow).get(sessionId) ?? null,
     subagents,
     stopped: m.stopped.has(sessionId),
   };
@@ -240,7 +259,7 @@ export function taskBlocksOf(assistantRecords) {
   return out;
 }
 
-export const DEFAULT_STATUS = Object.freeze({ running: false, busy: false, startedAt: null, attention: null, subagents: 0, stopped: false });
+export const DEFAULT_STATUS = Object.freeze({ running: false, busy: false, startedAt: null, attention: null, attentionBelow: null, subagents: 0, stopped: false });
 const MAX_EDGES = 5000;
 const MAX_DEPTH = 32;
 const RETRY_MS = [1000, 2000, 5000, 10000];
@@ -436,7 +455,7 @@ export function createSessionStatus(d) {
     }
     const m = { running: runningNodes, parentOf: nodeParent, jobs: [], own: ownNodes, stopped: stoppedNodes, pendingAsk: askNodes };
     m.activeWork = sessionsWithActiveWork(runningNodes, Object.fromEntries(nodeParent), jobsCanon);
-    m.childCounts = runningChildCounts(m);
+    ({ counts: m.childCounts, askBelow: m.askBelow } = descendantSummary(m));
     const out = new Map();
     for (const [node, aliases] of targets) {
       const payload = deriveWindowStatus(m, node);

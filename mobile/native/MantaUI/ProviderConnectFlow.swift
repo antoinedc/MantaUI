@@ -497,6 +497,7 @@ final class ProviderConnectFlow: ObservableObject {
         keyDraft = ""
         codeDraft = ""
         phase = .done
+        accounts.endPtyListening()
         ProviderChange.announce()
         accounts.announce(ProviderConnectCopy.connected(label: status.displayName))
         shouldDismiss = true
@@ -537,6 +538,7 @@ final class ProviderConnectFlow: ObservableObject {
         claudeSession?.stop()
         claudeSession = nil
         installSubscription = nil
+        accounts.endPtyListening()
     }
 
     /// The explicit Cancel / Close: release what the attempt allocated, report a

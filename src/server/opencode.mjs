@@ -1660,11 +1660,14 @@ function extractAssistantText(msgs) {
  *  return []) rather than blanking the card the user is waiting on.
  *  @param {(c: import("@opencode/client").OpenCodeClient, o: { headers: Record<string, string> }) => Promise<any>} read  the client listing
  *  @param {string} label     caller name, for the warning.
+ *  @param {{ strict?: boolean }} [o]  `strict`: a non-OK answer throws instead of reading as "nothing pending"
+ *    (the periodic reconcile must never clear state because opencode answered badly).
  *  @returns {Promise<any[]>}
  */
-async function fetchPendingList(read, label) {
+async function fetchPendingList(read, label, { strict = false } = {}) {
   const body = await ocCall(label, read, {
     onHttpError: (f) => {
+      if (strict) throw plainError(label, f);
       console.warn(`opencode ${label}: non-OK ${f.status} (${f.text}); treating as no pending items`);
       return [];
     },
@@ -1675,11 +1678,13 @@ async function fetchPendingList(read, label) {
 
 /** List pending tool-use permissions (one session's, or every session's), in the PermissionCard's shape.
  *  @param {string} [sessionId]
+ *  @param {{ strict?: boolean }} [opts]
  */
-export async function listPermissions(sessionId) {
+export async function listPermissions(sessionId, opts) {
   const list = await fetchPendingList(
     sessionId ? (c, o) => c.permission.list({ sessionID: sessionId }, o) : (c, o) => c.permission.request.list(undefined, o),
     "listPermissions",
+    opts,
   );
   return list.map(permissionFromV2).filter((p) => !sessionId || p.sessionID === sessionId);
 }
@@ -1702,10 +1707,11 @@ export async function replyPermission({ requestId, reply, sessionId }) {
 /** Pending question forms (the model's `question` tool), in the QuestionRequest shape; the
  *  request `id` is the form id — the key reply/reject take.
  *  @param {string} [sessionId]
+ *  @param {{ strict?: boolean }} [opts]
  */
-export async function listQuestions(sessionId) {
+export async function listQuestions(sessionId, opts) {
   const forms = (
-    await fetchPendingList(sessionId ? (c, o) => c.session.form.list({ sessionID: sessionId }, o) : (c, o) => c.form.list(undefined, o), "listQuestions")
+    await fetchPendingList(sessionId ? (c, o) => c.session.form.list({ sessionID: sessionId }, o) : (c, o) => c.form.list(undefined, o), "listQuestions", opts)
   ).filter(isQuestionForm);
   return forms.map(questionFromForm).filter((q) => !sessionId || q.sessionID === sessionId);
 }
@@ -3403,6 +3409,35 @@ export function createSseFramer() {
 }
 
 /**
+ * Stall detector for the opencode event stream. opencode sends a `: heartbeat` comment every 15 s, so a stream that
+ * is open but silent for long enough is dead (a half-open socket nothing else would ever notice). It is armed only
+ * after a heartbeat has been seen on THIS connection — an opencode that sends none while idle must never trigger a
+ * reconnect loop — and the threshold is the larger of `minMs` and `factor` × the longest heartbeat gap observed.
+ */
+export function createStallMonitor({ now = Date.now, minMs = 90_000, factor = 3 } = {}) {
+  let lastByteAt = now();
+  let lastBeatAt = null;
+  let longestGapMs = 0;
+  return {
+    /** Every decoded piece read off the stream. */
+    onText(text) {
+      const t = now();
+      lastByteAt = t;
+      if (typeof text === "string" && text.includes(": heartbeat")) {
+        if (lastBeatAt != null) longestGapMs = Math.max(longestGapMs, t - lastBeatAt);
+        lastBeatAt = t;
+      }
+    },
+    armed: () => lastBeatAt != null,
+    thresholdMs: () => Math.max(minMs, factor * longestGapMs),
+    silentMs: () => now() - lastByteAt,
+    stalled() {
+      return lastBeatAt != null && now() - lastByteAt > Math.max(minMs, factor * longestGapMs);
+    },
+  };
+}
+
+/**
  * Subscribe to opencode events: ONE global `GET /api/event` stream carries every
  * session of every directory (V2 has no per-directory streams), reconnecting
  * after 1.5 s on any drop. There is no replay: every (re)connect calls
@@ -3413,11 +3448,15 @@ export function createSseFramer() {
  * `opts.onDisconnect()` fires when an established stream drops (events may have
  * been missed until the next `onConnect`).
  *
- * @param {{ onConnect?: (info: { reconnect: boolean }) => void, onDisconnect?: () => void, reconnectMs?: number }} [opts]
+ * A stream that goes silent (see `createStallMonitor`) is aborted, so the normal reconnect + resync runs.
+ *
+ * @param {{ onConnect?: (info: { reconnect: boolean }) => void, onDisconnect?: () => void, reconnectMs?: number,
+ *   stall?: { minMs?: number, factor?: number, checkMs?: number, now?: () => number } }} [opts]
  * @returns {() => void} stop
  */
 export function subscribeEvents(onEvent, opts = {}) {
   const reconnectMs = opts.reconnectMs ?? 1500;
+  const stallCfg = opts.stall ?? {};
   let stopped = false;
   let controller = null;
   let connects = 0;
@@ -3441,11 +3480,21 @@ export function subscribeEvents(onEvent, opts = {}) {
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         const framer = createSseFramer();
+        const stall = createStallMonitor(stallCfg);
+        const ctl = controller;
+        const stallTimer = setInterval(() => {
+          if (!stall.stalled()) return;
+          console.warn(`[opencode-bus] stream STALLED: nothing for ${Math.round(stall.silentMs() / 1000)}s (limit ${Math.round(stall.thresholdMs() / 1000)}s); reconnecting`);
+          ctl.abort();
+        }, stallCfg.checkMs ?? 10_000);
+        stallTimer.unref?.();
         try {
           while (!stopped) {
             const { value, done } = await reader.read();
             if (done) break;
-            for (const data of framer.push(dec.decode(value, { stream: true }))) {
+            const piece = dec.decode(value, { stream: true });
+            stall.onText(piece);
+            for (const data of framer.push(piece)) {
               try {
                 onEvent(JSON.parse(data));
               } catch {
@@ -3454,6 +3503,7 @@ export function subscribeEvents(onEvent, opts = {}) {
             }
           }
         } finally {
+          clearInterval(stallTimer);
           try { reader.releaseLock(); } catch { /* already released */ }
           controller.abort(); // always abort to release the connection
         }

@@ -70,7 +70,7 @@ final class WidgetLiveStore: ObservableObject {
     func bind(eventStore: MantaEventStore) {
         guard !boundEventStore else { return }
         boundEventStore = true
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["widget"]) { [weak self] frame in
             self?.handleFrame(frame)
         }
     }

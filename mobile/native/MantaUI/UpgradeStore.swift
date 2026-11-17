@@ -59,22 +59,28 @@ final class UpgradeStore: ObservableObject {
         guard !bound else { return }
         bound = true
 
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["upgrade"]) { [weak self] frame in
             guard let status = UpgradeStatus.from(frame: frame) else { return }
             Task { @MainActor in self?.apply(status) }
         }
 
+        // A `.sink` closure in a main-actor type is main-actor isolated, and Swift 6
+        // traps at runtime (EXC_BREAKPOINT) when Combine runs it on another thread.
+        // `.mantaBoxUpgrading` is posted from URLSession threads, so every pipeline
+        // here receives on the main queue first.
         eventStore.$connectionState
             .map { $0.name == "connected" }
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] isConnected in
-                Task { @MainActor in self?.connectionChanged(connected: isConnected) }
+                self?.connectionChanged(connected: isConnected)
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .mantaBoxUpgrading)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                Task { @MainActor in self?.noteUpgradeMode() }
+                self?.noteUpgradeMode()
             }
             .store(in: &cancellables)
 
@@ -182,4 +188,15 @@ final class UpgradeStore: ObservableObject {
     // No deinit: the poll task holds `self` weakly and ends as soon as the store
     // is gone, so there is nothing to tear down (and a nonisolated deinit may
     // not touch this main-actor state under Swift 6).
+}
+
+/// Tells the app a data call was refused `503 {upgrade:true}`. Callable from any
+/// thread (the HTTP clients call it from URLSession threads): the notification is
+/// posted from the main actor, so no observer ever runs on a background thread.
+enum UpgradeRefusalNotice {
+    nonisolated static func post() {
+        Task { @MainActor in
+            NotificationCenter.default.post(name: .mantaBoxUpgrading, object: nil)
+        }
+    }
 }

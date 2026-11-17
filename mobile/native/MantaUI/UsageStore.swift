@@ -35,12 +35,19 @@ final class UsageStore: ObservableObject {
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.fetch()
-                if let interval = self?.pollInterval {
-                    try? await Task.sleep(for: .seconds(interval))
-                }
+                // Hold the store only for one fetch, never across the sleep. When
+                // the owner is gone `pollOnce()` is nil and the loop ends; the old
+                // shape skipped the sleep in that case and spun at full speed.
+                guard let interval = await self?.pollOnce() else { return }
+                try? await Task.sleep(for: .seconds(interval))
             }
         }
+    }
+
+    /// One fetch; answers the interval to wait before the next.
+    private func pollOnce() async -> TimeInterval {
+        await fetch()
+        return pollInterval
     }
 
     /// Stop the poll. Cancels the in-flight wait so the screen can disappear

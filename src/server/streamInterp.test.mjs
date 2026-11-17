@@ -4,7 +4,8 @@ import { describeTruncation } from "../shared/streamInterpretation.mjs";
 // end-to-end streams live in streamInterp.golden.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createStreamInterpreter, SHELL_POLL_MS } from "./streamInterp.mjs";
+import { createStreamInterpreter, SHELL_POLL_MS, IN_FLIGHT_MAX_CHARS, IN_FLIGHT_MAX_SESSIONS } from "./streamInterp.mjs";
+import { permissionFromV2, questionFromForm } from "../shared/opencodeV2.mjs";
 
 const SID = "ses_main";
 const MID = "msg_a1";
@@ -176,6 +177,64 @@ test("a delta with no message id or no text emits nothing", () => {
   interp.interpret(ev("session.text.delta", { delta: "x" }));
   interp.interpret(ev("session.text.delta", { assistantMessageID: MID, delta: "" }));
   assert.equal(subs(events, "flush").length, 0);
+});
+
+// ---- in-flight text (replayed to a client that focuses a session mid-segment) ----
+
+test("inFlightText accumulates deltas per part in creation order and returns copies", () => {
+  const { interp } = make();
+  assert.deepEqual(interp.inFlightText(SID), []);
+  interp.interpret(ev("session.reasoning.delta", { assistantMessageID: MID, ordinal: 0, delta: "think" }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "Hel" }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "lo" }));
+  const got = interp.inFlightText(SID);
+  assert.deepEqual(got, [
+    { messageID: MID, partID: `${MID}:reasoning:0`, field: "reasoning", text: "think" },
+    { messageID: MID, partID: `${MID}:text:0`, field: "text", text: "Hello" },
+  ]);
+  got[1].text = "mutated";
+  assert.equal(interp.inFlightText(SID)[1].text, "Hello");
+});
+
+test("inFlightText drops a part on its ended event and keeps the others", () => {
+  const { interp } = make();
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "a" }));
+  interp.interpret(ev("session.reasoning.delta", { assistantMessageID: MID, ordinal: 0, delta: "b" }));
+  interp.interpret(ev("session.text.ended", { assistantMessageID: MID, ordinal: 0, text: "a" }));
+  assert.deepEqual(interp.inFlightText(SID).map((p) => p.partID), [`${MID}:reasoning:0`]);
+  interp.interpret(ev("session.reasoning.ended", { assistantMessageID: MID, ordinal: 0, text: "b" }));
+  assert.deepEqual(interp.inFlightText(SID), []);
+});
+
+test("inFlightText is cleared when the turn ends (any outcome) and when the session is deleted", () => {
+  for (const end of ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"]) {
+    const { interp } = make();
+    interp.interpret(ev("session.execution.started"));
+    interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "partial" }));
+    assert.equal(interp.inFlightText(SID).length, 1, end);
+    interp.interpret(ev(end, { error: { type: "provider.internal", message: "x" } }));
+    assert.deepEqual(interp.inFlightText(SID), [], end);
+  }
+});
+
+test("inFlightText caps each part at IN_FLIGHT_MAX_CHARS and the store at IN_FLIGHT_MAX_SESSIONS (oldest evicted)", () => {
+  const { interp } = make();
+  const big = "x".repeat(IN_FLIGHT_MAX_CHARS - 5);
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: big }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "0123456789" }));
+  interp.interpret(ev("session.text.delta", { assistantMessageID: MID, ordinal: 0, delta: "more" }));
+  const [part] = interp.inFlightText(SID);
+  assert.equal(part.text.length, IN_FLIGHT_MAX_CHARS);
+  assert.ok(part.text.endsWith("01234"));
+
+  const { interp: many } = make();
+  const sid = (i) => `ses_${i}`;
+  for (let i = 0; i < IN_FLIGHT_MAX_SESSIONS + 1; i++) {
+    many.interpret({ id: `evt_cap_${i}_${++n}`, type: "session.text.delta", data: { sessionID: sid(i), assistantMessageID: MID, ordinal: 0, delta: "t" } });
+  }
+  assert.deepEqual(many.inFlightText(sid(0)), [], "the oldest session was evicted");
+  assert.equal(many.inFlightText(sid(1)).length, 1);
+  assert.equal(many.inFlightText(sid(IN_FLIGHT_MAX_SESSIONS)).length, 1);
 });
 
 // ---- steps: stepEnded / truncation / context / cache ----
@@ -586,6 +645,113 @@ test("resync on a session the interpreter never saw does nothing", () => {
   const { interp, events } = make();
   interp.resync("ses_unknown", { running: false });
   assert.equal(events.length, 0);
+});
+
+// C4: a client treats `runningSet` as "replay starts" and clears ask-derived state, so it must stay frame 0 whatever follows.
+test("C4: the connect replay always starts with the runningSet frame, ahead of attention / questions / permissions", () => {
+  const { interp } = make();
+  interp.interpret(ev("session.execution.started"));
+  interp.interpret({ id: "f1", type: "form.created", data: { form: FORM } });
+  interp.interpret({ id: "p1", type: "permission.asked", data: PERM });
+  interp.interpret({ id: "f9", type: "form.created", data: { form: { ...FORM, id: "frm_2", sessionID: "ses_other" } } });
+  const snap = interp.snapshotState();
+  assert.equal(snap[0].kind, "runningSet");
+  assert.equal(snap.filter((f) => f.kind === "runningSet").length, 1);
+  assert.ok(snap.length > 3, "asks follow the runningSet frame");
+  assert.ok(snap.slice(1).every((f) => f.kind !== "runningSet"));
+});
+
+// ---- reconcile (status freshness S1/S2/S4) ----
+
+const readPerm = () => permissionFromV2(PERM);
+const readQuestion = () => questionFromForm(FORM);
+
+test("reconcile seeds a session the interpreter never saw: running + asks, through the normal frames", () => {
+  const { interp, events } = make();
+  const r = interp.reconcile(SID, { running: true, permissions: [readPerm()], questions: [readQuestion()], expectRev: interp.revOf(SID) });
+  assert.equal(r.changed, true);
+  assert.equal(subs(events, "running")[0].payload.running, true);
+  assert.deepEqual(subs(events, "attention").map((e) => e.payload.kind), ["question"]);
+  assert.equal(subs(events, "permissions")[0].payload.permissions[0].id, "per_1");
+  assert.equal(subs(events, "questions")[0].payload.questions[0].requestId, "frm_1");
+  assert.equal(interp.snapshotState()[0].payload.sessions[0].sessionId, SID);
+});
+
+test("reconcile publishes nothing when the interpreter already agrees with opencode", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.execution.started"));
+  interp.interpret({ id: "p1", type: "permission.asked", data: PERM });
+  interp.interpret({ id: "f1", type: "form.created", data: { form: FORM } });
+  events.length = 0;
+  const r = interp.reconcile(SID, { running: true, permissions: [readPerm()], questions: [readQuestion()], expectRev: interp.revOf(SID) });
+  assert.deepEqual(r, { changed: false, stale: false });
+  assert.equal(events.length, 0);
+});
+
+test("reconcile closes a turn / asks opencode no longer has, and a session with nothing to seed stays unknown", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.execution.started"));
+  interp.interpret({ id: "p1", type: "permission.asked", data: PERM });
+  events.length = 0;
+  interp.reconcile(SID, { running: false, permissions: [], questions: [] });
+  assert.equal(subs(events, "running")[0].payload.running, false);
+  assert.deepEqual(subs(events, "permissions")[0].payload.permissions, []);
+  assert.deepEqual(subs(events, "attention").map((e) => e.payload.kind), [null]);
+  assert.equal(subs(events, "transcriptStale").length, 1, "a running change tells clients to refetch");
+  const quiet = make();
+  assert.equal(quiet.interp.reconcile("ses_idle", { running: false, permissions: [], questions: [] }).changed, false);
+  assert.equal(quiet.interp.knownSessionIds().length, 0);
+});
+
+test("reconcile leaves a session alone when an event touched it while the read was in flight", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.execution.started"));
+  const expectRev = interp.revOf(SID);
+  interp.interpret(ev("session.execution.succeeded")); // overtakes the (older) read below
+  events.length = 0;
+  const r = interp.reconcile(SID, { running: true, expectRev });
+  assert.deepEqual(r, { changed: false, stale: true });
+  assert.equal(events.length, 0);
+  // A session that was unknown when the read started and has since seen an event is also left to the stream.
+  const other = make();
+  const unknownRev = other.interp.revOf(SID);
+  assert.equal(unknownRev, -1);
+  other.interp.interpret(ev("session.step.started", { assistantMessageID: MID }));
+  assert.equal(other.interp.reconcile(SID, { running: true, expectRev: unknownRev }).stale, true);
+});
+
+test("reconcile onlyDrop removes stale asks and never adds or starts anything", () => {
+  const { interp, events } = make();
+  interp.interpret({ id: "p1", type: "permission.asked", data: PERM });
+  interp.interpret({ id: "f1", type: "form.created", data: { form: FORM } });
+  events.length = 0;
+  const extra = { ...PERM, id: "per_2" };
+  const r = interp.reconcile(SID, { running: true, permissions: [permissionFromV2(extra)], questions: [], onlyDrop: true });
+  assert.equal(r.changed, true);
+  assert.deepEqual(interp.getState(SID).permissions, [], "per_1 is gone at opencode and per_2 is not adopted");
+  assert.deepEqual(interp.getState(SID).questions, []);
+  assert.equal(interp.getState(SID).running, false, "onlyDrop never starts a turn");
+  assert.equal(subs(events, "running").length, 0);
+  assert.equal(subs(events, "transcriptStale").length, 0);
+  assert.equal(make().interp.reconcile(SID, { permissions: [], questions: [], onlyDrop: true }).changed, false);
+});
+
+test("reconcile: a new ask is adopted only if adopt() allows it; one already held is kept regardless", () => {
+  const { interp } = make();
+  interp.interpret({ id: "p1", type: "permission.asked", data: PERM });
+  const second = permissionFromV2({ ...PERM, id: "per_2" });
+  const seen = [];
+  interp.reconcile(SID, {
+    permissions: [readPerm(), second],
+    adopt: (kind, item) => {
+      seen.push(`${kind}:${item.id}`);
+      return false;
+    },
+  });
+  assert.deepEqual(seen, ["permission:per_2"], "adopt is asked only about asks the interpreter does not hold");
+  assert.deepEqual(interp.getState(SID).permissions.map((x) => x.id), ["per_1"]);
+  interp.reconcile(SID, { permissions: [readPerm(), second], adopt: () => true });
+  assert.deepEqual(interp.getState(SID).permissions.map((x) => x.id).sort(), ["per_1", "per_2"]);
 });
 
 // ---- WS11 D2: stale-cache instant + context against the selected model ----

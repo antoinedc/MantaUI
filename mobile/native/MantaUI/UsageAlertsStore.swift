@@ -86,7 +86,7 @@ final class UsageAlertsStore: ObservableObject {
         guard !boundEventStore else { return }
         boundEventStore = true
         ChatModelCatalog.shared.subscribe(to: eventStore)
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["usage.alert", "usage-stopped.updated"]) { [weak self] frame in
             self?.handle(frame: frame)
         }
         eventStore.$connectionState

@@ -29,7 +29,7 @@ final class TranscriptMediaStore: ObservableObject {
     private var bound = false
     private var cancellables = Set<AnyCancellable>()
     /// The last `running` value seen per session, so the sink only reacts to an
-    /// EDGE, not to every frame that republishes `sessionStates`.
+    /// EDGE, not to every frame of a session.
     private var lastRunning: [String: Bool] = [:]
 
     /// Register as a consumer of `kind: "media"` frames and of every session's
@@ -37,18 +37,18 @@ final class TranscriptMediaStore: ObservableObject {
     func bind(eventStore: MantaEventStore) {
         guard !bound else { return }
         bound = true
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["media"]) { [weak self] frame in
             self?.handleFrame(frame)
         }
-        eventStore.$sessionStates
+        // Only a session's RUNNING edge matters here: nothing else about a session reaches this store.
+        eventStore.sessionChanges
+            .filter(\.touchesRunning)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] states in
-                guard let self else { return }
-                for (sessionID, state) in states {
-                    guard let running = state.running, self.lastRunning[sessionID] != running else { continue }
-                    self.lastRunning[sessionID] = running
-                    self.observeRunning(sessionID: sessionID, running: running)
-                }
+            .sink { [weak self, weak eventStore] change in
+                guard let self, let running = eventStore?.sessionStates[change.sessionId]?.running,
+                      self.lastRunning[change.sessionId] != running else { return }
+                self.lastRunning[change.sessionId] = running
+                self.observeRunning(sessionID: change.sessionId, running: running)
             }
             .store(in: &cancellables)
     }

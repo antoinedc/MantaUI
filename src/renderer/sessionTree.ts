@@ -117,13 +117,36 @@ export function windowsInRailOrder(p: Project): TmuxWindow[] {
   return out;
 }
 
-/** The rail dot / tooltip inputs for a window-less row, from the box's per-session rollup. */
+/** The rail dot / tooltip inputs for a window-less row, from the box's per-session rollup. A row waits on you when its
+ *  own ask or one anywhere beneath it does (`attention ?? attentionBelow`). */
 export function virtualRowStatus(payload: WindowStatusPayload | undefined): WindowStatusUI | undefined {
   if (!payload) return undefined;
+  const waiting = payload.attention ?? payload.attentionBelow ?? null;
   return {
     running: payload.running || payload.busy,
     subagents: payload.subagents,
-    attention: payload.attention != null,
-    attentionKind: payload.attention ?? undefined,
+    attention: waiting != null,
+    attentionKind: waiting ?? undefined,
+  };
+}
+
+/**
+ * A window row's status: its own live status, rolled up with the box's per-session rollup. A chat window also reads as
+ * running while a subagent or background job it started is still working (`busy`, `subagents`), and as waiting on you
+ * when it, or anything beneath it, waits on a question / permission. A blocking ask outranks the soft "done" latch.
+ */
+export function windowRowStatus(own: WindowStatusUI | undefined, rollup: WindowStatusPayload | undefined): WindowStatusUI | undefined {
+  if (!rollup) return own;
+  const running = own?.running === true || rollup.busy;
+  const ownBlocking = own?.attention === true && (own.attentionKind === "question" || own.attentionKind === "permission" || own.attentionKind === "blocked");
+  const waiting = ownBlocking ? null : (rollup.attention ?? rollup.attentionBelow ?? null);
+  if (!running && rollup.subagents === 0 && !own && waiting == null) return own;
+  return {
+    ...(own ?? { attention: false }),
+    running,
+    subagents: rollup.subagents,
+    progressLabel:
+      own?.running || own?.progressLabel?.trim() ? own?.progressLabel : rollup.busy ? "background work" : own?.progressLabel,
+    ...(waiting != null ? { attention: true, attentionKind: waiting } : {}),
   };
 }

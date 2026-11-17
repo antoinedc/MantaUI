@@ -164,18 +164,40 @@ export async function collectPanes(runFn = run) {
 // ---------------------------------------------------------------------------
 
 /**
- * Start the status poller. Returns a stop() function.
+ * Publishes a `status` batch only when it differs from the last one published. Consumers only act on changes, and
+ * a quiet box used to send an identical batch every 2 s to every device. A new /events subscriber gets the last batch
+ * through `snapshot()` (the bus's connect-time replay), so staying quiet never leaves a client without one.
+ */
+export function createStatusPublisher(bus) {
+  let lastSig = null;
+  let last = null;
+  return {
+    /** @returns {boolean} whether the batch was published */
+    publish(batch) {
+      const sig = JSON.stringify(batch);
+      if (sig === lastSig) return false;
+      lastSig = sig;
+      last = batch;
+      bus.publish({ kind: "status", payload: batch });
+      return true;
+    },
+    snapshot: () => (last ? [{ kind: "status", payload: last }] : []),
+  };
+}
+
+/**
+ * Start the status poller. Returns `{ stop, snapshot }`; `snapshot()` is the last published batch as bus events.
  *
  * @param {object} bus       - event bus with .publish({ kind, payload })
  * @param {object} [opts]
  * @param {number} [opts.intervalMs=2000]
- * @returns {{ stop: () => void }}
+ * @returns {{ stop: () => void, snapshot: () => object[] }}
  */
 export function startStatusPoller(bus, { intervalMs = POLL_MS } = {}) {
+  const publisher = createStatusPublisher(bus);
   async function tick() {
     const stdout = await collectPanes();
-    const batch = parseStatus(stdout);
-    bus.publish({ kind: "status", payload: batch });
+    publisher.publish(parseStatus(stdout));
   }
-  return startPoller(tick, { intervalMs, label: "status" });
+  return { ...startPoller(tick, { intervalMs, label: "status" }), snapshot: publisher.snapshot };
 }

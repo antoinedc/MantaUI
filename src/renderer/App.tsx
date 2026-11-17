@@ -1262,6 +1262,8 @@ function Shell() {
       const ids = (payload?.sessions ?? [])
         .map((s) => s?.sessionId)
         .filter((s): s is string => typeof s === "string" && s.length > 0);
+      // `runningSet` opens the box's replay (C4): drop every ?/! badge, the attention frames that follow re-latch the live ones.
+      useStore.getState().clearBlockingAttention();
       useStore.getState().reconcileRunningSet(ids);
       pullWindowStatus();
     });

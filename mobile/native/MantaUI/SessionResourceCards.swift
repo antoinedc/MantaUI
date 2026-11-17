@@ -448,6 +448,7 @@ struct ArtifactsCard: View {
     var onJumpToMessage: ((String) -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     @State private var result: ArtifactsListResult?
@@ -468,7 +469,7 @@ struct ArtifactsCard: View {
     private let api = MantaAPIClient.live()
     /// Poll cadence while presented, so a file the AI drops mid-chat appears without
     /// reopening the card. The box memoizes the derivation, so this is cheap.
-    private static let refreshIntervalNanoseconds: UInt64 = 3_000_000_000
+    private static let refreshIntervalNanoseconds: UInt64 = UInt64(MantaPollPolicy.artifactsSeconds * 1_000_000_000)
 
     var body: some View {
         NavigationStack {
@@ -483,7 +484,9 @@ struct ArtifactsCard: View {
                 .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic),
                             prompt: "Search links & files")
         }
-        .task {
+        // Polls only while the card is presented AND the app is active (one immediate load on return).
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 await load()
                 try? await Task.sleep(nanoseconds: Self.refreshIntervalNanoseconds)

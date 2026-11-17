@@ -90,7 +90,7 @@ final class ChatModelPrefs: ObservableObject {
     func subscribe(to eventStore: MantaEventStore) {
         guard !didSubscribe else { return }
         didSubscribe = true
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["model-prefs.updated"]) { [weak self] frame in
             guard frame.kind == "model-prefs.updated" else { return }
             self?.load()
         }

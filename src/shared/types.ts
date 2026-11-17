@@ -422,6 +422,10 @@ export type WindowStatusPayload = {
   busy: boolean;
   startedAt: number | null;
   attention: "question" | "permission" | null;
+  /** The strongest pending ask (question beats permission) among the row's descendants at any depth (subagents,
+   *  background jobs), excluding its own `attention`. Absent on an older box. A row is "waiting on you" when
+   *  `attention ?? attentionBelow` is non-null. */
+  attentionBelow?: "question" | "permission" | null;
   /** Session tree (b): descendants at ANY depth whose own turn is running or that wait on a question /
    *  permission (an older box: direct children whose own turn is running). */
   subagents: number;
