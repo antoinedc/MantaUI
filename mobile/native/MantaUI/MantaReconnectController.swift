@@ -39,9 +39,15 @@ protocol MantaScheduler {
 protocol MantaWebSocketSession: AnyObject {
     var onOpen: (@MainActor () -> Void)? { get set }
     var onMessage: (@MainActor (String) -> Void)? { get set }
+    /// When set, a text frame is parsed OFF the main actor and delivered here already parsed; a frame that
+    /// fails to parse (and every frame when this is nil) goes to `onMessage` as text instead.
+    var onFrame: (@MainActor (MantaStreamFrame) -> Void)? { get set }
     var onDrop: (@MainActor () -> Void)? { get set }
     var isOpen: Bool { get }
     func connect(to url: URL)
+    /// Send one text message to the box (the C1 `kinds` / `focus` messages). Best effort: a failed send is
+    /// repaired by the next connect, which re-sends both.
+    func send(_ text: String)
     func close()
 }
 
@@ -71,6 +77,7 @@ private final class TimerScheduled: MantaCancelable {
 final class MantaURLSessionWebSocket: NSObject, MantaWebSocketSession, URLSessionWebSocketDelegate {
     var onOpen: (@MainActor () -> Void)?
     var onMessage: (@MainActor (String) -> Void)?
+    var onFrame: (@MainActor (MantaStreamFrame) -> Void)?
     var onDrop: (@MainActor () -> Void)?
 
     private var task: URLSessionWebSocketTask?
@@ -99,11 +106,23 @@ final class MantaURLSessionWebSocket: NSObject, MantaWebSocketSession, URLSessio
         receive()
     }
 
+    func send(_ text: String) {
+        task?.send(.string(text)) { error in
+            if let error { NSLog("[events] send failed: %@", String(describing: error)) }
+        }
+    }
+
     func close() {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         urlSession?.invalidateAndCancel()
         urlSession = nil
+    }
+
+    /// Parse one frame off the main actor. A plain `nonisolated` async function runs on the global executor, so
+    /// the main actor only sees the finished value.
+    nonisolated private static func parseOffMain(_ text: String) async -> MantaStreamFrame? {
+        try? MantaStreamFrame.parse(text)
     }
 
     func urlSession(
@@ -137,7 +156,18 @@ final class MantaURLSessionWebSocket: NSObject, MantaWebSocketSession, URLSessio
                 switch message {
                 case .string(let text):
                     Task { @MainActor [weak self] in
-                        self?.onMessage?(text)
+                        // Frames are handled one at a time, in arrival order: the next read starts after this one
+                        // is delivered, so a slow parse can never reorder the stream.
+                        if self?.onFrame != nil {
+                            let frame = await MantaURLSessionWebSocket.parseOffMain(text)
+                            if let frame, let deliver = self?.onFrame {
+                                deliver(frame)
+                            } else {
+                                self?.onMessage?(text)
+                            }
+                        } else {
+                            self?.onMessage?(text)
+                        }
                         self?.receive()
                     }
                 case .data:
@@ -165,12 +195,19 @@ final class MantaReconnectController {
     var onMessage: ((String) -> Void)?
     /// Called once when `url()` yields nothing usable (no server configured).
     var onConfigError: ((Error) -> Void)?
+    /// Delivers a frame the socket already parsed off the main actor. While nil the socket hands over text
+    /// through `onMessage` (the controller's original contract).
+    var onFrame: ((MantaStreamFrame) -> Void)?
 
     private let url: () -> URL?
     private let makeSocket: (URL) -> any MantaWebSocketSession
     private let backoff: ExponentialBackoff
     private let maxTotalWindowMs: Double
     private let scheduler: any MantaScheduler
+    /// True (the original behaviour) → the reconnect window applies always. False → the app keeps trying for as
+    /// long as it is in the foreground and the window (the give-up) applies only in the background.
+    private let windowAppliesInForeground: Bool
+    private(set) var inBackground = false
 
     private var socket: (any MantaWebSocketSession)?
     private var reconnectCancelable: (any MantaCancelable)?
@@ -183,13 +220,38 @@ final class MantaReconnectController {
         makeSocket: @escaping @MainActor (URL) -> any MantaWebSocketSession,
         backoff: ExponentialBackoff = ExponentialBackoff(),
         maxTotalWindowMs: Double = 10 * 60_000,
-        scheduler: any MantaScheduler = MantaTimerScheduler()
+        scheduler: any MantaScheduler = MantaTimerScheduler(),
+        windowAppliesInForeground: Bool = true
     ) {
         self.url = url
         self.makeSocket = makeSocket
         self.backoff = backoff
         self.maxTotalWindowMs = maxTotalWindowMs
         self.scheduler = scheduler
+        self.windowAppliesInForeground = windowAppliesInForeground
+    }
+
+    /// The app moved to / from the background. Only in the background does the reconnect window (the give-up)
+    /// apply (when configured that way): entering it starts the clock for a stream that is down; returning stops it.
+    func setBackground(_ background: Bool) {
+        guard inBackground != background else { return }
+        inBackground = background
+        if windowAppliesInForeground { return }
+        if background {
+            if _state.name != "connected", _state.name != "closed", reconnectCancelable != nil || _state.name == "connecting" {
+                armDeadline()
+            }
+        } else {
+            deadlineCancelable?.cancel()
+            deadlineCancelable = nil
+        }
+    }
+
+    /// Send a text message to the box over the live socket. Dropped (and repaired by the next connect, which
+    /// re-sends the subscription) while no socket is open.
+    func send(_ text: String) {
+        guard let socket, socket.isOpen else { return }
+        socket.send(text)
     }
 
     var currentState: MantaConnectionState { _state }
@@ -265,6 +327,11 @@ final class MantaReconnectController {
         onMessage?(text)
     }
 
+    private func socketDidReceive(_ sock: any MantaWebSocketSession, frame: MantaStreamFrame) {
+        guard sock === self.socket else { return }
+        onFrame?(frame)
+    }
+
     private func socketDidDrop(_ sock: any MantaWebSocketSession) {
         guard sock === self.socket else { return }
         drop()
@@ -293,6 +360,12 @@ final class MantaReconnectController {
             guard let self, let sock else { return }
             self.socketDidReceive(sock, text: text)
         }
+        if onFrame != nil {
+            sock.onFrame = { [weak self, weak sock] frame in
+                guard let self, let sock else { return }
+                self.socketDidReceive(sock, frame: frame)
+            }
+        }
         sock.onDrop = { [weak self, weak sock] in
             guard let self, let sock else { return }
             self.socketDidDrop(sock)
@@ -320,7 +393,7 @@ final class MantaReconnectController {
     }
 
     private func armDeadline() {
-        guard deadlineCancelable == nil, maxTotalWindowMs > 0 else { return }
+        guard deadlineCancelable == nil, maxTotalWindowMs > 0, windowAppliesInForeground || inBackground else { return }
         deadlineCancelable = scheduler.schedule(after: maxTotalWindowMs) { [weak self] in
             guard let self else { return }
             self.deadlineCancelable = nil

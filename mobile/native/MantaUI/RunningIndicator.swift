@@ -28,6 +28,7 @@ struct RunningIndicator: View {
     /// that cannot present it: the line is then plain text, not a button.
     var onOpenActivity: ((String) -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
 
     /// The rotation the working row cycles, mirroring the desktop SPINNER_VERBS.
     private static let verbs = [
@@ -62,8 +63,13 @@ struct RunningIndicator: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("running-indicator")
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-            now = Date()
+        // The elapsed label ticks only while the app is active (one immediate tick on return).
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                now = Date()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
         }
     }
 

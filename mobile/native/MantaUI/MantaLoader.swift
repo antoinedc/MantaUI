@@ -44,6 +44,7 @@ struct MantaLoader: View {
     @State private var inner = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Whether the loader animates at all. The two counter-rotating rings run
     /// `repeatForever` regardless of the user's accessibility setting; with
@@ -92,12 +93,23 @@ struct MantaLoader: View {
                     .accessibilityLabel(caption)
             }
         }
-        .onAppear {
-            // Reduce Motion on → a static loader (the arcs at rest, no
-            // repeatForever rotation). Off → the usual spin.
-            guard Self.shouldAnimate(reduceMotion: reduceMotion) else { return }
+        .onAppear { setSpinning(scenePhase == .active) }
+        .onDisappear { setSpinning(false) }
+        // Not visible (backgrounded) → stop the repeating animations; back in front → spin again.
+        .onChange(of: scenePhase) { _, phase in setSpinning(phase == .active) }
+    }
+
+    /// Reduce Motion on → a static loader (the arcs at rest, no repeatForever rotation). Otherwise the rings
+    /// spin only while `on`: turning it off replaces the repeating animation with an instant reset.
+    private func setSpinning(_ on: Bool) {
+        if on, Self.shouldAnimate(reduceMotion: reduceMotion) {
             withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { outer = true }
             withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) { inner = true }
+        } else {
+            withAnimation(.linear(duration: 0)) {
+                outer = false
+                inner = false
+            }
         }
     }
 

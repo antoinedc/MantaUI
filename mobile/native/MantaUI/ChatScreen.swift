@@ -36,13 +36,13 @@ func chatLoadingMode(isLoading: Bool) -> ChatLoadingMode {
 }
 
 /// Pure decision behind the branch-freshness poll (BET-747 gap #13). The chat
-/// polls the branch on the desktop's 5s cadence and refreshes on submit, so a
-/// terminal-side `git checkout` reflects within one tick. Extracted at file
+/// polls the branch every 15 s while it is in front and the app is active, and
+/// refreshes on submit, so a terminal-side `git checkout` reflects within one tick. Extracted at file
 /// scope so the tick decision is unit-testable with an injected clock without
 /// rendering a SwiftUI hierarchy.
 enum BranchFreshnessPolicy {
-    /// The desktop's branch-poll cadence.
-    static let pollInterval: TimeInterval = 5
+    /// The branch-poll cadence (the poll runs only while the app is active and the chat is in front).
+    static let pollInterval: TimeInterval = MantaPollPolicy.branchSeconds
 
     /// Whether a tick at `now` warrants a refetch, given `lastFetch`. No prior
     /// fetch always refetches; otherwise a tick refetches once the interval has
@@ -184,6 +184,21 @@ struct ChatScreen: View {
     }
 }
 
+/// The box client of ONE chat screen. `ChatScreenContent.init` runs on every rebuild of the screen, so the client
+/// is created lazily here and kept by a `@StateObject`: the Keychain is read once per screen, not per rebuild or per
+/// `body`. Nothing published, so it never invalidates a view.
+@MainActor
+final class ChatAPIHolder: ObservableObject {
+    private var cached: MantaAPIClient?
+
+    var client: MantaAPIClient {
+        if let cached { return cached }
+        let made = MantaAPIClient.live()
+        cached = made
+        return made
+    }
+}
+
 private struct ChatScreenContent: View {
     let title: String
     let projectName: String
@@ -192,6 +207,8 @@ private struct ChatScreenContent: View {
     let capabilities: BoxCapabilitiesStore
     @Binding var path: NavigationPath
     @StateObject private var store: ChatSessionStore
+    /// The one box client of this screen (see `ChatAPIHolder`).
+    @StateObject private var apiHolder: ChatAPIHolder
     @StateObject private var modelStore: ChatModelStore
     /// Loads `chatAutoAllow` (trust mode) from the box via `config:get` and
     /// persists it over the store's own `config:update` path (BET-748). This is
@@ -332,9 +349,12 @@ private struct ChatScreenContent: View {
     /// Called with the successor's id and the composer carry-over when a handoff
     /// REPLACES this chat, so the wrapper can swap the id (auto-handoff §6.4).
     let onHandedOff: (String, HandoffCarryOver) -> Void
-    /// The box client bound to this session's paired server. Shared by the two
-    /// stores and used by the plan card to build the deterministic plan-page URL.
-    private let api: MantaAPIClient
+    /// The box client bound to this session's paired server. Shared by the stores and used by the plan card to
+    /// build the deterministic plan-page URL. Created once per screen, not per rebuild.
+    private var api: MantaAPIClient { apiHolder.client }
+    /// The navigation depth this screen appeared at: the screen is really gone (popped), not just covered by a
+    /// pushed subagent screen, when the path is shallower than this.
+    @State private var appearDepth = 0
 
     init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, capabilities: BoxCapabilitiesStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
         self.title = title
@@ -355,33 +375,35 @@ private struct ChatScreenContent: View {
             draft: draft
         ))
         self.skippedUploads = carryOver?.skippedUploads ?? 0
-        let api = MantaAPIClient.live()
-        self.api = api
+        // Lazy: nothing is read from the Keychain here. The `StateObject` autoclosures below run once per screen
+        // identity and are the only callers of `holder.client`.
+        let holder = ChatAPIHolder()
+        _apiHolder = StateObject(wrappedValue: holder)
         // The app's one capability reader, shared by the chat store and the job check.
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
-            api: api,
+            api: holder.client,
             widgetLiveStore: WidgetLiveStore.shared,
             capabilities: capabilities
         ))
         _approvalStore = StateObject(wrappedValue: ChatCardApprovalStore(
             sessionId: sessionId,
-            api: api,
+            api: holder.client,
             requests: eventStore.delegateApprovalRequests.eraseToAnyPublisher()
         ))
         _jobOwnership = StateObject(wrappedValue: ChatCardJobOwnershipStore(
             sessionId: sessionId,
-            api: api,
+            api: holder.client,
             capabilities: capabilities
         ))
-        _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
+        _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: holder.client))
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
-        _usageStore = StateObject(wrappedValue: UsageStore(api: api))
-        _accountsStore = StateObject(wrappedValue: AccountsStore(api: api, sessionId: sessionId, eventStore: eventStore))
-        _voicePlayer = StateObject(wrappedValue: VoicePlaybackEngine(api: api))
-        _jobsStore = StateObject(wrappedValue: BackgroundJobsStore(api: api, sessionId: sessionId, eventStore: eventStore))
-        _handoffStore = StateObject(wrappedValue: HandoffStore(sessionId: sessionId, api: api, eventStore: eventStore))
+        _usageStore = StateObject(wrappedValue: UsageStore(api: holder.client))
+        _accountsStore = StateObject(wrappedValue: AccountsStore(api: holder.client, sessionId: sessionId, eventStore: eventStore))
+        _voicePlayer = StateObject(wrappedValue: VoicePlaybackEngine(api: holder.client))
+        _jobsStore = StateObject(wrappedValue: BackgroundJobsStore(api: holder.client, sessionId: sessionId, eventStore: eventStore))
+        _handoffStore = StateObject(wrappedValue: HandoffStore(sessionId: sessionId, api: holder.client, eventStore: eventStore))
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -432,6 +454,7 @@ private struct ChatScreenContent: View {
                 }
             }
             .onAppear {
+                if appearDepth == 0 { appearDepth = path.count }
                 // Three independent fetches, all started together: the
                 // transcript, the model list (previously not fetched until the
                 // picker was opened, so the first open always stalled) and the
@@ -450,7 +473,7 @@ private struct ChatScreenContent: View {
                 Task { await jobsStore.refresh() }
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
                 UsageAlertsStore.shared.activeSessionId = store.sessionId
-                Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
+                Task { try? await api.reportFocus(sessionId: store.sessionId, visible: true) }
                 clearDeliveredNotifications(for: store.sessionId)
                 Task { await resolveWindowAndBranch() }
                 wireChatCards()
@@ -503,13 +526,15 @@ private struct ChatScreenContent: View {
             }
             .onDisappear {
                 store.stop()
+                // Popped (not covered by a pushed subagent screen): this chat no longer needs its heavy frames.
+                if path.count < appearDepth { store.releaseFocus() }
                 usageStore.stop()
                 accountsStore.stop()
                 jobsStore.stopAutoRefresh()
                 MantaPushRouter.shared.visibleSessionID = nil
                 if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }
                 approvalStore.stop()
-                Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
+                Task { try? await api.reportFocus(sessionId: nil, visible: false) }
             }
             // BET-977: the box mirrors opencode's LOCAL plan_enter/plan_exit via
             // the `planMode` frame. Route it into the session's ChatModelStore
@@ -533,9 +558,13 @@ private struct ChatScreenContent: View {
                 }
                 store.updateJobStatuses(byChild: byChild, byID: byID)
             }
-            // 5s branch poll (desktop cadence) so a terminal-side checkout
-            // reflects within one tick (BET-747 gap #13). Cancelled on disappear.
-            .task { await pollBranch() }
+            // 15 s branch poll so a terminal-side checkout reflects within a tick (BET-747 gap #13). It runs only
+            // while the app is active and the screen is in front: `.task` is cancelled when the screen disappears
+            // and the id restarts it (with an immediate tick) when the app becomes active again.
+            .task(id: scenePhase == .active) {
+                guard MantaPollPolicy.shouldRun(sceneActive: scenePhase == .active) else { return }
+                await pollBranch()
+            }
             .task(id: store.cache?.staleAt) { await flipAtStaleAt() }
             // A submit starts a turn optimistically (`send()` sets running), so
             // refreshing the branch on the running edge covers "refresh on
@@ -601,14 +630,19 @@ private struct ChatScreenContent: View {
                 // not visible.
                 switch phase {
                 case .active:
+                    // The 60 s usage / seat polls run only in the foreground (one immediate read on return).
+                    usageStore.start()
+                    accountsStore.setPollingActive(true)
                     Task { await refreshChatCards() }
                     MantaPushRouter.shared.visibleSessionID = store.sessionId
                     UsageAlertsStore.shared.activeSessionId = store.sessionId
-                    Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
+                    Task { try? await api.reportFocus(sessionId: store.sessionId, visible: true) }
                     clearDeliveredNotifications(for: store.sessionId)
                 case .background, .inactive:
+                    usageStore.stop()
+                    accountsStore.setPollingActive(false)
                     if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }
-                    Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
+                    Task { try? await api.reportFocus(sessionId: nil, visible: false) }
                 default:
                     break
                 }
@@ -694,7 +728,7 @@ private struct ChatScreenContent: View {
                     ComposerView(
                         sessionId: store.sessionId,
                         projectName: projectName,
-                        api: MantaAPIClient.live(),
+                        api: api,
                         store: store,
                         modelStore: modelStore,
                         usageStore: usageStore,
@@ -735,7 +769,7 @@ private struct ChatScreenContent: View {
                 route: route,
                 eventStore: eventStore,
                 capabilities: capabilities,
-                api: MantaAPIClient.live(),
+                api: api,
                 tokens: tokens,
                 path: $path
             )
@@ -748,7 +782,7 @@ private struct ChatScreenContent: View {
                 subtitle: agent.subtitle,
                 eventStore: eventStore,
                 capabilities: capabilities,
-                api: MantaAPIClient.live(),
+                api: api,
                 tokens: tokens,
                 path: $path
             )
@@ -1054,8 +1088,7 @@ private struct ChatScreenContent: View {
 
     /// (Re)load the scheduled-task count backing the sheet's live badge.
     private func refreshScheduleCount() async {
-        let api = MantaAPIClient.live()
-        if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
+                if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
             scheduleCount = jobs.count
         }
     }
@@ -1069,7 +1102,7 @@ private struct ChatScreenContent: View {
     /// entered, so the composer shows that mode's remembered model.
     private func seedPlanModeFromBox() {
         Task {
-            guard let agent = try? await MantaAPIClient.live().sessionAgent(sessionId: store.sessionId) else { return }
+            guard let agent = try? await api.sessionAgent(sessionId: store.sessionId) else { return }
             let planNow = agent == "plan"
             modelStore.setPlan(planNow)
         }
@@ -1081,8 +1114,7 @@ private struct ChatScreenContent: View {
     /// `sessionWindow` is known, the branch stays current through `refreshBranch()`
     /// (the 5s poll `pollBranch` + a refresh on submit).
     private func resolveWindowAndBranch() async {
-        let api = MantaAPIClient.live()
-        guard let projects = try? await api.projects(),
+                guard let projects = try? await api.projects(),
               let project = projects.first(where: { $0.tmuxSession == projectName }),
               let window = project.windows.first(where: { $0.opencodeSessionId == store.sessionId })
         else { return }
@@ -1099,7 +1131,7 @@ private struct ChatScreenContent: View {
     /// reflects within one tick; the chat does the same (BET-747 gap #13).
     private func refreshBranch() async {
         guard let cwd = sessionWindow?.cwd, !cwd.isEmpty else { return }
-        if let resolved = try? await MantaAPIClient.live().vcsBranch(directory: cwd) {
+        if let resolved = try? await api.vcsBranch(directory: cwd) {
             await MainActor.run {
                 branch = resolved
                 lastBranchFetch = Date()
@@ -1107,14 +1139,15 @@ private struct ChatScreenContent: View {
         }
     }
 
-    /// The 5s branch poll, matching the desktop's cadence. Cancelled when the
-    /// screen disappears (the `.task` lifecycle hook owns it).
+    /// The branch poll. Ticks at once (a no-op while the last fetch is fresh), then every
+    /// `BranchFreshnessPolicy.pollInterval`. Cancelled when the screen disappears or the app leaves the
+    /// foreground (the `.task` lifecycle hook owns it).
     private func pollBranch() async {
         while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: UInt64(BranchFreshnessPolicy.pollInterval * 1_000_000_000))
             if BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: Date(), lastFetch: lastBranchFetch) {
                 await refreshBranch()
             }
+            try? await Task.sleep(nanoseconds: UInt64(BranchFreshnessPolicy.pollInterval * 1_000_000_000))
         }
     }
 
@@ -1143,7 +1176,7 @@ private struct ChatScreenContent: View {
         }
         let newId: String?
         do {
-            newId = try await MantaAPIClient.live().clearSession(
+            newId = try await api.clearSession(
                 sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
         } catch {
             await MainActor.run { store.actionHint = "Clear failed — the session is still there" }
@@ -1171,7 +1204,7 @@ private struct ChatScreenContent: View {
         }
         let newSessionId: String?
         do {
-            newSessionId = try await MantaAPIClient.live().forkSession(
+            newSessionId = try await api.forkSession(
                 sessionId: store.sessionId, sessionName: w.name,
                 windowName: "\(title)-fork", cwd: w.cwd)
         } catch {
@@ -1245,7 +1278,7 @@ private struct ChatScreenContent: View {
         }
         let expect = SessionCloseExpect(opencodeSessionId: store.sessionId, worktreePath: shownPath ?? w.worktree)
         do {
-            let result = try await MantaAPIClient.live().sessionsClose(
+            let result = try await api.sessionsClose(
                 project: projectName, windowIndex: w.index, dirtyWorktree: dirtyWorktree, deleteConversation: true, expect: expect
             )
             if let ask = result.needsConfirm {
@@ -1975,6 +2008,8 @@ struct ChatSubagentScreen: View {
     @Binding var path: NavigationPath
     /// The run this screen's Activity sheet is showing, if open.
     @State private var activityTarget: ActivityTarget?
+    /// The navigation depth this screen appeared at (popped = the path is shallower than this).
+    @State private var appearDepth = 0
     /// A nested subagent to push once the Activity sheet has finished
     /// dismissing (flushed from the sheet's `onDismiss:`).
     @State private var pendingPush: PendingPush?
@@ -2065,8 +2100,15 @@ struct ChatSubagentScreen: View {
                 onOpenSubagent: { openSubagent($0) }
             )
         }
-        .onAppear { store.start() }
-        .onDisappear { store.stop() }
+        .onAppear {
+            if appearDepth == 0 { appearDepth = path.count }
+            store.start()
+        }
+        .onDisappear {
+            store.stop()
+            // Popped, not covered by a nested subagent screen: its heavy frames are no longer needed.
+            if path.count < appearDepth { store.releaseFocus() }
+        }
     }
 
     /// A nested subagent tapped inside this screen's Activity sheet: dismiss the

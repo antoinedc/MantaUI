@@ -17,11 +17,15 @@ import XCTest
 private final class FakeSocket: MantaWebSocketSession {
     var onOpen: (@MainActor () -> Void)?
     var onMessage: (@MainActor (String) -> Void)?
+    var onFrame: (@MainActor (MantaStreamFrame) -> Void)?
     var onDrop: (@MainActor () -> Void)?
     var isOpen = false
     var connectCount = 0
     var openedURL: URL?
     var closeCount = 0
+    var sent: [String] = []
+
+    func send(_ text: String) { sent.append(text) }
 
     func connect(to url: URL) {
         connectCount += 1
@@ -981,6 +985,115 @@ final class MantaReconnectControllerTests: XCTestCase {
             XCTAssertEqual(scheduler.delay(at: 1), 10 * 60_000)
             scheduler.fire(at: 1)
             XCTAssertEqual(controller.currentState, .closed(reason: "reconnect window exceeded"))
+        }
+    }
+
+    /// The foreground policy (B7): the controller keeps retrying for as long as the app is in front; the
+    /// reconnect window (the give-up) is armed only once the app is in the background.
+    private func makeForegroundController(socket: FakeSocket, scheduler: FakeScheduler) -> MantaReconnectController {
+        MantaReconnectController(
+            url: { URL(string: "wss://0123.boxes.mantaui.com/events") },
+            makeSocket: { _ in socket },
+            backoff: ExponentialBackoff(base: 1000, max: 30_000, jitter: false),
+            maxTotalWindowMs: 10 * 60_000,
+            scheduler: scheduler,
+            windowAppliesInForeground: false
+        )
+    }
+
+    func testTheForegroundNeverGivesUp() async {
+        let socket = FakeSocket()
+        let scheduler = FakeScheduler()
+        let controller = makeForegroundController(socket: socket, scheduler: scheduler)
+        await MainActor.run {
+            controller.ensure()
+            socket.simulateOpen()
+            socket.simulateDrop()
+            XCTAssertEqual(scheduler.count, 1, "only the reconnect timer: no deadline is armed in the foreground")
+            XCTAssertEqual(scheduler.delay(at: 0), 1000)
+            // Eight drops in a row: the backoff climbs to its 30 s cap and the controller is still retrying.
+            for _ in 0..<8 {
+                scheduler.fire(at: scheduler.count - 1)
+                socket.simulateDrop()
+            }
+            XCTAssertEqual(scheduler.delay(at: scheduler.count - 1), 30_000)
+            guard case .reconnecting = controller.currentState else {
+                return XCTFail("expected reconnecting, got \(controller.currentState)")
+            }
+        }
+    }
+
+    func testTheGiveUpStartsWhenTheAppGoesToTheBackgroundAndEndsWhenItReturns() async {
+        let socket = FakeSocket()
+        let scheduler = FakeScheduler()
+        let controller = makeForegroundController(socket: socket, scheduler: scheduler)
+        await MainActor.run {
+            controller.ensure()
+            socket.simulateOpen()
+            socket.simulateDrop()
+            XCTAssertEqual(scheduler.count, 1)
+
+            controller.setBackground(true)
+            XCTAssertEqual(scheduler.count, 2)
+            XCTAssertEqual(scheduler.delay(at: 1), 10 * 60_000)
+            scheduler.fire(at: 1)
+            XCTAssertEqual(controller.currentState, .closed(reason: "reconnect window exceeded"))
+        }
+    }
+
+    func testReturningToTheForegroundCancelsTheGiveUp() async {
+        let socket = FakeSocket()
+        let scheduler = FakeScheduler()
+        let controller = makeForegroundController(socket: socket, scheduler: scheduler)
+        await MainActor.run {
+            controller.ensure()
+            socket.simulateOpen()
+            socket.simulateDrop()
+            controller.setBackground(true)
+            controller.setBackground(false)
+            scheduler.fire(at: 1) // the cancelled deadline does nothing
+            guard case .reconnecting = controller.currentState else {
+                return XCTFail("expected reconnecting, got \(controller.currentState)")
+            }
+        }
+    }
+
+    func testSendReachesTheOpenSocketOnly() async {
+        let socket = FakeSocket()
+        let scheduler = FakeScheduler()
+        let controller = makeForegroundController(socket: socket, scheduler: scheduler)
+        await MainActor.run {
+            controller.send("before")
+            controller.ensure()
+            socket.simulateOpen()
+            controller.send(#"{"type":"focus","sessions":[]}"#)
+            XCTAssertEqual(socket.sent, [#"{"type":"focus","sessions":[]}"#])
+        }
+    }
+
+    func testAParsedFrameIsDeliveredThroughOnFrame() async throws {
+        let socket = FakeSocket()
+        let scheduler = FakeScheduler()
+        let controller = makeForegroundController(socket: socket, scheduler: scheduler)
+        let frame = try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#)
+        await MainActor.run {
+            var delivered: [MantaStreamFrame] = []
+            controller.onFrame = { delivered.append($0) }
+            controller.ensure()
+            XCTAssertNotNil(socket.onFrame, "the socket is asked to parse off the main actor")
+            socket.simulateOpen()
+            socket.onFrame?(frame)
+            XCTAssertEqual(delivered, [frame])
+        }
+    }
+
+    func testWithoutOnFrameTheSocketKeepsDeliveringText() async {
+        let socket = FakeSocket()
+        let scheduler = FakeScheduler()
+        let controller = makeForegroundController(socket: socket, scheduler: scheduler)
+        await MainActor.run {
+            controller.ensure()
+            XCTAssertNil(socket.onFrame)
         }
     }
 

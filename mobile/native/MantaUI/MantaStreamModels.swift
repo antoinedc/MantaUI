@@ -108,74 +108,251 @@ struct MantaStreamFrame: Equatable, Sendable {
     var kind: String
     var sub: String?
     var sessionId: String?
-    var payload: JSONValue?
+    /// The payload's own JSON bytes, cut out of the frame without re-encoding. Typed payloads
+    /// decode straight from these (`decodedPayload`), so a frame is parsed once.
+    var payloadData: Data?
     /// The event's TYPE, resolved once at parse time so consumers never
     /// re-derive it. For RAW opencode events it is `payload.type` (with a
     /// `payload.kind` fallback for older boxes); typed `stream` frames carry
-    /// no payload-level type, so it is nil there and the `sub` drives
-    /// interpretation. This is the SINGLE place the app resolves an event's
-    /// type (BET-1348).
+    /// no payload-level type (it is not resolved for them: nothing reads it),
+    /// so it is nil there and the `sub` drives interpretation. This is the
+    /// SINGLE place the app resolves an event's type (BET-1348).
     var eventType: String?
+
+    init(kind: String, sub: String?, sessionId: String?, payloadData: Data?, eventType: String?) {
+        self.kind = kind
+        self.sub = sub
+        self.sessionId = sessionId
+        self.payloadData = payloadData
+        self.eventType = eventType
+    }
+
+    /// Fixture / test constructor: the payload is encoded once.
+    init(kind: String, sub: String?, sessionId: String?, payload: JSONValue?, eventType: String?) {
+        self.init(
+            kind: kind, sub: sub, sessionId: sessionId,
+            payloadData: payload.flatMap { try? JSONEncoder().encode($0) },
+            eventType: eventType
+        )
+    }
 
     var isHeartbeat: Bool { kind == "heartbeat" }
 
-    /// Decode `payload` into a concrete Decodable type.
-    func decodedPayload<T: Decodable>(_ type: T.Type) throws -> T? {
-        guard let payload else { return nil }
-        let data = try JSONEncoder().encode(payload)
-        return try JSONDecoder().decode(type, from: data)
+    /// The payload as a generic JSON value, decoded on demand (raw consumers only).
+    var payload: JSONValue? {
+        guard let payloadData else { return nil }
+        return try? JSONDecoder().decode(JSONValue.self, from: payloadData)
     }
 
+    /// Decode `payload` into a concrete Decodable type, straight from its bytes.
+    func decodedPayload<T: Decodable>(_ type: T.Type) throws -> T? {
+        guard let payloadData else { return nil }
+        return try JSONDecoder().decode(type, from: payloadData)
+    }
+
+    /// Where the interesting top-level fields of a frame sit, found without decoding it.
+    private struct PayloadProbe: Decodable {
+        var type: String?
+        var kind: String?
+        var sessionID: String?
+        var sessionId: String?
+        var properties: Properties?
+
+        struct Properties: Decodable {
+            var sessionID: String?
+            var sessionId: String?
+
+            private enum CodingKeys: String, CodingKey { case sessionID, sessionId }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                sessionID = ((try? c.decodeIfPresent(String.self, forKey: .sessionID)) ?? nil)
+                sessionId = ((try? c.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil)
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey { case type, kind, sessionID, sessionId, properties }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            type = ((try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil)
+            kind = ((try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil)
+            sessionID = ((try? c.decodeIfPresent(String.self, forKey: .sessionID)) ?? nil)
+            sessionId = ((try? c.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil)
+            properties = ((try? c.decodeIfPresent(Properties.self, forKey: .properties)) ?? nil)
+        }
+    }
+
+    /// Parse one frame ONCE. The envelope fields are cut out by `MantaFrameScanner`; the payload stays as
+    /// bytes. Pure and `Sendable`, so the socket runs it off the main actor.
     static func parse(_ text: String) throws -> MantaStreamFrame {
         let data = Data(text.utf8)
-        let json = try JSONDecoder().decode(JSONValue.self, from: data)
-        guard case .object(let obj) = json else {
+        guard let top = MantaFrameScanner.scan(data) else {
             throw MantaError.transport("event frame not an object")
         }
-        func string(_ key: String) -> String? {
-            if case .string(let s)? = obj[key] { return s }
-            return nil
-        }
-        guard let kind = string("kind") else {
+        guard let kind = MantaFrameScanner.string(top.kind, in: data) else {
             throw MantaError.transport("event frame missing kind")
         }
-        func nonEmpty(_ key: String, in dict: [String: JSONValue]) -> String? {
-            if case .string(let s)? = dict[key], !s.isEmpty { return s }
-            return nil
+        let sub = MantaFrameScanner.string(top.sub, in: data)
+        let envelopeSession = MantaFrameScanner.string(top.sessionId, in: data)
+        let payloadData = top.payload.map { data.subdata(in: $0) }
+
+        var sessionId = envelopeSession
+        var eventType: String?
+        let needsProbe = kind != "stream" || (envelopeSession ?? "").isEmpty
+        if needsProbe, let payloadData,
+           let probe = try? JSONDecoder().decode(PayloadProbe.self, from: payloadData) {
+            // sessionId: envelope key first; when absent or empty, fall back to
+            // `payload.sessionID`, then `payload.sessionId`, then the same two keys
+            // under `payload.properties` (the box nests it there for raw opencode
+            // events). First non-empty wins.
+            if (envelopeSession ?? "").isEmpty {
+                func nonEmpty(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
+                sessionId = nonEmpty(probe.sessionID)
+                    ?? nonEmpty(probe.sessionId)
+                    ?? nonEmpty(probe.properties?.sessionID)
+                    ?? nonEmpty(probe.properties?.sessionId)
+            }
+            // eventType: `payload.type` if a non-empty string, else `payload.kind`.
+            // The envelope `kind` is intentionally LEFT untouched (it stays the
+            // box's frame kind).
+            if let t = probe.type, !t.isEmpty { eventType = t } else if let k = probe.kind, !k.isEmpty { eventType = k }
         }
-        let rawPayload: [String: JSONValue] = {
-            if case .object(let p)? = obj["payload"] { return p }
-            return [:]
-        }()
-        // sessionId: envelope key first; when absent or empty, fall back to
-        // `payload.sessionID`, then `payload.sessionId`, then the same two keys
-        // under `payload.properties` (the box nests it there for raw opencode
-        // events). First non-empty wins.
-        let properties: [String: JSONValue] = {
-            if case .object(let p)? = rawPayload["properties"] { return p }
-            return [:]
-        }()
-        let envelopeSession = string("sessionId")
-        let sessionId: String?
-        if let envelopeSession, !envelopeSession.isEmpty {
-            sessionId = envelopeSession
-        } else {
-            sessionId = nonEmpty("sessionID", in: rawPayload)
-                ?? nonEmpty("sessionId", in: rawPayload)
-                ?? nonEmpty("sessionID", in: properties)
-                ?? nonEmpty("sessionId", in: properties)
-        }
-        // eventType: `payload.type` if a non-empty string, else `payload.kind`.
-        // The envelope `kind` is intentionally LEFT untouched (it stays the
-        // box's frame kind).
-        let eventType = nonEmpty("type", in: rawPayload) ?? nonEmpty("kind", in: rawPayload)
         return MantaStreamFrame(
             kind: kind,
-            sub: string("sub"),
+            sub: sub,
             sessionId: sessionId,
-            payload: obj["payload"],
+            payloadData: payloadData,
             eventType: eventType
         )
+    }
+}
+
+// MARK: - Top-level field scanner
+
+/// Finds the byte ranges of a frame's top-level `kind`, `sub`, `sessionId` and `payload` values without
+/// decoding the rest — the payload (the big part of a frame) is never touched, only skipped.
+enum MantaFrameScanner {
+    struct TopLevel {
+        var kind: Range<Int>?
+        var sub: Range<Int>?
+        var sessionId: Range<Int>?
+        var payload: Range<Int>?
+    }
+
+    /// nil when `data` is not a JSON object (or is cut short).
+    static func scan(_ data: Data) -> TopLevel? {
+        data.withUnsafeBytes { raw -> TopLevel? in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            return scan(bytes)
+        }
+    }
+
+    private static let quote = UInt8(ascii: "\"")
+    private static let backslash = UInt8(ascii: "\\")
+    private static let openBrace = UInt8(ascii: "{")
+    private static let closeBrace = UInt8(ascii: "}")
+    private static let openBracket = UInt8(ascii: "[")
+    private static let closeBracket = UInt8(ascii: "]")
+    private static let colon = UInt8(ascii: ":")
+    private static let comma = UInt8(ascii: ",")
+
+    private static func isSpace(_ b: UInt8) -> Bool { b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D }
+
+    private static func scan(_ b: UnsafeBufferPointer<UInt8>) -> TopLevel? {
+        let n = b.count
+        var i = 0
+        func skipSpace() { while i < n, isSpace(b[i]) { i += 1 } }
+
+        /// `i` is at an opening quote; leaves it after the closing one and returns the content range.
+        func skipString() -> Range<Int>? {
+            guard i < n, b[i] == quote else { return nil }
+            i += 1
+            let start = i
+            while i < n {
+                if b[i] == backslash { i += 2; continue }
+                if b[i] == quote {
+                    let end = i
+                    i += 1
+                    return start..<end
+                }
+                i += 1
+            }
+            return nil
+        }
+
+        /// Skips one JSON value starting at `i` and returns its byte range.
+        func skipValue() -> Range<Int>? {
+            guard i < n else { return nil }
+            let start = i
+            switch b[i] {
+            case quote:
+                guard skipString() != nil else { return nil }
+            case openBrace, openBracket:
+                var depth = 0
+                while i < n {
+                    let c = b[i]
+                    if c == quote {
+                        guard skipString() != nil else { return nil }
+                        continue
+                    }
+                    if c == openBrace || c == openBracket { depth += 1 }
+                    if c == closeBrace || c == closeBracket {
+                        depth -= 1
+                        if depth == 0 { i += 1; return start..<i }
+                    }
+                    i += 1
+                }
+                return nil
+            default:
+                while i < n, b[i] != comma, b[i] != closeBrace, b[i] != closeBracket, !isSpace(b[i]) { i += 1 }
+            }
+            return start..<i
+        }
+
+        skipSpace()
+        guard i < n, b[i] == openBrace else { return nil }
+        i += 1
+        var out = TopLevel()
+        while true {
+            skipSpace()
+            guard i < n else { return nil }
+            if b[i] == closeBrace { return out }
+            guard let key = skipString() else { return nil }
+            skipSpace()
+            guard i < n, b[i] == colon else { return nil }
+            i += 1
+            skipSpace()
+            guard let value = skipValue() else { return nil }
+            // Compare the raw key bytes (a key containing an escape is never one of ours).
+            switch key.count {
+            case 4 where matches(b, key, "kind"): out.kind = value
+            case 3 where matches(b, key, "sub"): out.sub = value
+            case 9 where matches(b, key, "sessionId"): out.sessionId = value
+            case 7 where matches(b, key, "payload"): out.payload = value
+            default: break
+            }
+            skipSpace()
+            guard i < n else { return nil }
+            if b[i] == comma { i += 1; continue }
+            if b[i] == closeBrace { return out }
+            return nil
+        }
+    }
+
+    private static func matches(_ b: UnsafeBufferPointer<UInt8>, _ range: Range<Int>, _ name: StaticString) -> Bool {
+        let bytes = name.utf8Start
+        for offset in 0..<range.count where b[range.lowerBound + offset] != bytes[offset] { return false }
+        return true
+    }
+
+    /// The string a value range holds, or nil when there is none or it is not a string.
+    static func string(_ range: Range<Int>?, in data: Data) -> String? {
+        guard let range, range.count >= 2, data[range.lowerBound] == quote, data[range.upperBound - 1] == quote else { return nil }
+        let slice = data.subdata(in: range)
+        // Fast path: no escapes → the bytes between the quotes ARE the string.
+        if !slice.contains(backslash) {
+            return String(decoding: slice.dropFirst().dropLast(), as: UTF8.self)
+        }
+        return try? JSONDecoder().decode(String.self, from: slice)
     }
 }
 
@@ -220,17 +397,24 @@ struct StreamWindowStatusPayload: Codable, Equatable, Sendable {
     var busy: Bool = false
     var startedAt: Double? = nil
     var attention: String? = nil
+    /// The strongest pending ask (question over permission) among this row's descendants at any depth, excluding its
+    /// own `attention` (C2). nil on an older box. A row is "waiting on you" when `attention ?? attentionBelow` is set.
+    var attentionBelow: String? = nil
     var subagents: Int = 0
     var stopped: Bool = false
 
-    private enum CodingKeys: String, CodingKey { case running, busy, startedAt, attention, subagents, stopped }
+    /// The ask this row shows as "waiting on you": its own, else one beneath it.
+    var waitingAttention: String? { attention ?? attentionBelow }
+
+    private enum CodingKeys: String, CodingKey { case running, busy, startedAt, attention, attentionBelow, subagents, stopped }
 
     init(running: Bool = false, busy: Bool = false, startedAt: Double? = nil, attention: String? = nil,
-         subagents: Int = 0, stopped: Bool = false) {
+         attentionBelow: String? = nil, subagents: Int = 0, stopped: Bool = false) {
         self.running = running
         self.busy = busy
         self.startedAt = startedAt
         self.attention = attention
+        self.attentionBelow = attentionBelow
         self.subagents = subagents
         self.stopped = stopped
     }
@@ -241,6 +425,7 @@ struct StreamWindowStatusPayload: Codable, Equatable, Sendable {
         busy = ((try? c.decodeIfPresent(Bool.self, forKey: .busy)) ?? nil) ?? false
         startedAt = (try? c.decodeIfPresent(Double.self, forKey: .startedAt)) ?? nil
         attention = (try? c.decodeIfPresent(String.self, forKey: .attention)) ?? nil
+        attentionBelow = (try? c.decodeIfPresent(String.self, forKey: .attentionBelow)) ?? nil
         subagents = ((try? c.decodeIfPresent(Int.self, forKey: .subagents)) ?? nil) ?? 0
         stopped = ((try? c.decodeIfPresent(Bool.self, forKey: .stopped)) ?? nil) ?? false
     }

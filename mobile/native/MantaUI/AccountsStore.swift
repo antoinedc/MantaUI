@@ -64,25 +64,62 @@ final class AccountsStore: ObservableObject {
     private let eventStore: MantaEventStore?
 
     /// Output and exit of the ptys the box spawned for a Claude sign-in or CLI
-    /// install (`kind:"pty"` bus frames, published to every `/events`
-    /// subscriber). A sign-in controller subscribes BEFORE it spawns and filters
-    /// on its own `sessionKey`.
-    ///
-    /// The raw-frame handler list has no unsubscribe, and every opened chat makes
-    /// an `AccountsStore`, so the handler is installed on FIRST USE (a sign-in
-    /// subscribing before it spawns), never for a store that only reads seats.
+    /// install (`kind:"pty"` bus frames). The box only sends `pty` to a device that asks for it, and this
+    /// device asks only while a sign-in or install is running: reading this property (a flow subscribes
+    /// BEFORE it spawns) takes a lease on the `pty` kind, and the lease ends with `endPtyListening()`, with
+    /// `stop()`, or on its own after `ptyLeaseSeconds` without pty traffic or a fresh read. A sign-in
+    /// controller filters on its own `sessionKey`. A store that only reads seats never asks for `pty`.
     var ptyEvents: PassthroughSubject<PtyEvent, Never> {
-        if !ptyHandlerInstalled, let eventStore {
-            ptyHandlerInstalled = true
-            eventStore.addRawFrameHandler { [weak self] frame in
-                guard let event = PtyEvent.from(frame) else { return }
-                self?.ptyEventSubject.send(event)
-            }
-        }
+        acquirePtyLease()
         return ptyEventSubject
     }
     private let ptyEventSubject = PassthroughSubject<PtyEvent, Never>()
-    private var ptyHandlerInstalled = false
+    private var ptyRegistration: MantaRawFrameRegistration?
+    private var ptyLeaseTask: Task<Void, Never>?
+    private var ptyLeaseDeadline = Date.distantPast
+    /// How long an idle `pty` lease lasts (a flow reads `ptyEvents` again, or pty output arrives, to extend it).
+    static let ptyLeaseSeconds: TimeInterval = 15 * 60
+
+    /// Whether this store currently asks the box for `pty` frames.
+    var isListeningForPty: Bool { ptyRegistration != nil }
+
+    private func acquirePtyLease() {
+        guard let eventStore else { return }
+        if ptyRegistration == nil {
+            ptyRegistration = eventStore.addRawFrameHandler(kinds: ["pty"]) { [weak self] frame in
+                guard let event = PtyEvent.from(frame) else { return }
+                self?.ptyEventSubject.send(event)
+                self?.renewPtyLease()
+            }
+        }
+        renewPtyLease()
+    }
+
+    private func renewPtyLease() {
+        ptyLeaseDeadline = Date().addingTimeInterval(Self.ptyLeaseSeconds)
+        guard ptyLeaseTask == nil else { return }
+        ptyLeaseTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let deadline = self?.ptyLeaseDeadline else { return }
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining <= 0 {
+                    self?.endPtyListening()
+                    return
+                }
+                try? await Task.sleep(for: .seconds(remaining))
+            }
+        }
+    }
+
+    /// The sign-in / install flow is over: stop asking the box for `pty` frames.
+    func endPtyListening() {
+        ptyLeaseTask?.cancel()
+        ptyLeaseTask = nil
+        if let registration = ptyRegistration, let eventStore {
+            eventStore.removeRawFrameHandler(registration)
+        }
+        ptyRegistration = nil
+    }
 
     /// False when the store was built without an event stream: the Claude
     /// sign-in cannot show its link then, and says so instead of spinning.
@@ -159,6 +196,11 @@ final class AccountsStore: ObservableObject {
                 }
                 .store(in: &subscriptions)
         }
+        startPollLoop()
+    }
+
+    private func startPollLoop() {
+        guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -168,9 +210,22 @@ final class AccountsStore: ObservableObject {
         }
     }
 
+    /// The 60 s poll runs only while the app is active: paused (the bus subscriptions and any pty lease stay)
+    /// when it is not, and resumed with one immediate read on return. A store that has not `start()`ed ignores it.
+    func setPollingActive(_ active: Bool) {
+        guard started else { return }
+        if active {
+            startPollLoop()
+        } else {
+            pollTask?.cancel()
+            pollTask = nil
+        }
+    }
+
     /// Stop reading. Cancels the poll and drops the bus subscriptions so a
     /// screen can disappear without a stale task writing after teardown.
     func stop() {
+        endPtyListening()
         pollTask?.cancel()
         pollTask = nil
         subscriptions.removeAll()

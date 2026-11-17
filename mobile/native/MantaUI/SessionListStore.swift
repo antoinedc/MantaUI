@@ -171,7 +171,7 @@ final class SessionListStore: ObservableObject {
     /// the foreground/reconnect refresh that raced the launch fetch simply
     /// vanished and the list stayed on whatever the first one returned.
     private var refreshQueued = false
-    /// The set of opencode session ids seen running on the last `$sessionStates`
+    /// The set of opencode session ids seen running on the last running-edge
     /// tick (BET-1349). Diffed against the current tick so a turn ENDING —
     /// running→idle — triggers a refresh that re-fetches the authoritative
     /// `time.updated` for the age chip at the exact moment it becomes eligible.
@@ -203,7 +203,9 @@ final class SessionListStore: ObservableObject {
         self.defaults = defaults
         self.recents = defaults.stringArray(forKey: Self.recentsKey) ?? []
         self.loadConfig()
-        self.eventStore.addRawFrameHandler { [weak self] frame in
+        self.eventStore.addRawFrameHandler(
+            kinds: ["progress.updated", "status", "sessions.nesting", "usage-stopped.updated"]
+        ) { [weak self] frame in
             self?.trackProgress(frame: frame)
             self?.trackStatus(frame: frame)
             self?.trackNesting(frame: frame)
@@ -211,15 +213,21 @@ final class SessionListStore: ObservableObject {
         }
         // A turn completing is the moment the age chip becomes eligible
         // (`!running`), and it is precisely when the cached `lastActivity` is
-        // stale. This sink diffs only a small running-id set and touches
-        // published state ONLY on an actual running↔idle edge (`liveActivity`),
-        // so the hot per-frame `$sessionStates` stream cannot re-render the
-        // whole list.
-        self.eventStore.$sessionStates
+        // stale. Only a session's RUNNING edge wakes this (a streamed chunk never does), it diffs a small
+        // running-id set, and touches published state ONLY on an actual running↔idle edge (`liveActivity`).
+        self.eventStore.sessionChanges
+            .filter(\.touchesRunning)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] states in
-                self?.trackRunningTransitions(states)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.trackRunningTransitions(self.eventStore.sessionStates)
             }
+            .store(in: &cancellables)
+        // What a row shows (running, start, rollup, pending asks) changed: the list re-renders. The event store
+        // reports this only on an edge, so it does not follow the stream's per-chunk traffic.
+        self.eventStore.rowStatusChanges
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
 
@@ -459,8 +467,7 @@ final class SessionListStore: ObservableObject {
         // count are the box's rollup (`windowStatus`, WS11 D7). An older box has no rollup: the row shows its own turn.
         var running = (stream?.running == true) || (stream?.windowStatus?.busy == true)
         var subagents = stream?.windowStatus?.subagents ?? 0
-        let attention = !(stream?.questions?.questions.isEmpty ?? true)
-            || !(stream?.permissions?.permissions.isEmpty ?? true)
+        let attention = Self.waiting(stream)
         if isTerminal,
            let project = projects.first(where: { $0.windows.contains(window) }),
            let polled = terminalStatus[Self.terminalKey(project: project.tmuxSession, windowIndex: window.index)] {
@@ -486,6 +493,15 @@ final class SessionListStore: ObservableObject {
         )
     }
 
+    /// Whether a row is "waiting on you": the session's own pending question/permission, or the box's rollup
+    /// `attention ?? attentionBelow` (its own ask, else the strongest ask among its descendants at any depth — C2).
+    static func waiting(_ stream: MantaSessionStreamState?) -> Bool {
+        guard let stream else { return false }
+        return !(stream.questions?.questions.isEmpty ?? true)
+            || !(stream.permissions?.permissions.isEmpty ?? true)
+            || stream.windowStatus?.waitingAttention != nil
+    }
+
     /// The row's live status, whichever kind of row it is.
     func rowStatus(for row: SessionListRow) -> SessionRowStatus {
         switch row {
@@ -501,9 +517,7 @@ final class SessionListStore: ObservableObject {
         let stream = eventStore.sessionStates[sid]
         let subagents = stream?.windowStatus?.subagents ?? 0
         let running = (stream?.running == true) || (stream?.windowStatus?.busy == true)
-        let attention = !(stream?.questions?.questions.isEmpty ?? true)
-            || !(stream?.permissions?.permissions.isEmpty ?? true)
-            || stream?.windowStatus?.attention != nil
+        let attention = Self.waiting(stream)
         return SessionRowStatus(
             running: running || subagents > 0,
             attention: attention,

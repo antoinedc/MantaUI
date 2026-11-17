@@ -472,33 +472,34 @@ final class ChatSessionStore: ObservableObject {
             .sink { [weak self] _ in self?.scheduleRefetch() }
             .store(in: &cancellables)
 
-        // Per-session subscription (BET-672): sink on THIS session's state
-        // alone, filtered to distinct values. The whole-dictionary sink used to
-        // fire on every stream frame of ANY session — including backgrounded
-        // ones — so every flush elsewhere in the box forced a full
-        // `applyStreamState` → `rebuildBlocks` transcript re-map in the open
-        // chat. `MantaSessionStreamState` is value-typed and derives
-        // `Equatable`, so `removeDuplicates()` on the mapped per-session value
-        // emits only when THIS session's state actually changes.
-        eventStore.$sessionStates
+        // Per-session subscription (BET-672): the event store announces a change per SESSION, and only when
+        // that session's state really changed, so a chunk for another session never reaches `applyStreamState`
+        // (that used to force a full transcript re-map in the open chat for every flush anywhere in the box).
+        //
+        // A task row's status also depends on whether its CHILD session is busy: a change to a child this
+        // transcript names (running edges only) re-checks the busy map. `refreshChildRunning` compares first,
+        // so it does nothing unless a child actually changed.
+        //
+        // The seed is the old `@Published` replay: a session that already has state when this store is
+        // built applies it once (`applyStreamState`'s first call is the initial snapshot, not an edge).
+        let seed: AnyPublisher<MantaSessionChange, Never> = eventStore.sessionStates[sessionId] != nil
+            ? Just(MantaSessionChange(sessionId: sessionId, sub: nil)).eraseToAnyPublisher()
+            : Empty<MantaSessionChange, Never>().eraseToAnyPublisher()
+        Publishers.Merge(seed, eventStore.sessionChanges)
             .receive(on: DispatchQueue.main)
-            .compactMap { $0[sessionId] }
-            .removeDuplicates()
-            .sink { [weak self] _ in self?.applyStreamState() }
+            .sink { [weak self] change in
+                guard let self else { return }
+                if change.sessionId == self.sessionId {
+                    self.applyStreamState()
+                } else if change.touchesRunning, change.isGlobal || self.tracksChild(change.sessionId) {
+                    self.refreshChildRunning(self.eventStore.sessionStates)
+                }
+            }
             .store(in: &cancellables)
 
         eventStore.$connectionState
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in self?.handleConnection(state) }
-            .store(in: &cancellables)
-
-        // A task row's status depends on whether its CHILD session is busy, and
-        // the per-session sink above only wakes for THIS session. This one wakes
-        // for any session's state change but does nothing unless a child this
-        // transcript names changed (`refreshChildRunning` compares first).
-        eventStore.$sessionStates
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] states in self?.refreshChildRunning(states) }
             .store(in: &cancellables)
 
         todosExpanded = TodoCardExpansion.shared.isExpanded(sessionId)
@@ -568,6 +569,10 @@ final class ChatSessionStore: ObservableObject {
     /// the initial transcript fetch runs once under the `didRunOnce` guard, so
     /// a subagent push (`stop`) then pop (`start`) does not re-fetch.
     func start() {
+        // FIRST: ask the box for this session's heavy stream frames, before anything fetches its transcript, so no
+        // chunk can fall between the fetch and the focus taking effect (C1 ordering rule). The focus stays until
+        // the screen is really left (`releaseFocus`) — a push to a subagent screen is not leaving.
+        eventStore.setFocus(owner: sessionId, sessions: [sessionId])
         if !didRunOnce {
             didRunOnce = true
             load()
@@ -580,6 +585,11 @@ final class ChatSessionStore: ObservableObject {
         // attached (BET-672): a session it completes with NO observer has its
         // accumulated stream chunks evicted to bound memory.
         eventStore.registerSession(sessionId)
+    }
+
+    /// The screen is really gone (popped, not covered): this session no longer needs its heavy frames.
+    func releaseFocus() {
+        eventStore.clearFocus(owner: sessionId)
     }
 
     func stop() {
@@ -691,7 +701,10 @@ final class ChatSessionStore: ObservableObject {
     private func applyStreamState() {
         guard let s = eventStore.sessionStates[sessionId] else { return }
 
-        inProgressText = s.liveText
+        // `@Published` fires on EVERY assignment, and this runs once per streamed chunk: only publish what
+        // really changed, so a chunk wakes the views that show the streamed text and nothing else.
+        let liveText = s.liveText
+        if inProgressText != liveText { inProgressText = liveText }
 
         // Fields that are copied straight through from the latest frame (the
         // stream is the single writer for these — no optimistic value to
@@ -700,22 +713,24 @@ final class ChatSessionStore: ObservableObject {
         // transcript-derived `opencode:context` fallback (BET-1030) fills the
         // meter for an idle conversation on open, when no such frame has
         // arrived yet.
-        context = s.context ?? transcriptContext
-        if let c = s.cache ?? transcriptCache { cache = c }
+        let nextContext = s.context ?? transcriptContext
+        if context != nextContext { context = nextContext }
+        if let c = s.cache ?? transcriptCache, cache != c { cache = c }
         let truncationChanged = truncation != s.truncation
-        truncation = s.truncation
+        if truncationChanged { truncation = s.truncation }
         // The failure shows until the user dismisses THAT occurrence: a later
         // frame — even an identical payload — has a higher sequence number.
-        sessionError = s.sessionErrorSeq == dismissedSessionErrorSeq ? nil : s.sessionError
+        let nextSessionError = s.sessionErrorSeq == dismissedSessionErrorSeq ? nil : s.sessionError
+        if sessionError != nextSessionError { sessionError = nextSessionError }
         let commandsChanged = applyChatCards(from: s)
-        todos = s.todos
-        subagents = s.subagents
+        if todos != s.todos { todos = s.todos }
+        if subagents != s.subagents { subagents = s.subagents }
         liveChildIDs = Set(s.subagents.map(\.childSessionId))
         updateChildRunning(eventStore.sessionStates)
-        planOn = s.planOn
+        if planOn != s.planOn { planOn = s.planOn }
 
         // Which frame (if any) just changed this session's stream state. The
-        // `$sessionStates` sink fires on every republish, so the stamp only
+        // change notification fires on every republish, so the stamp only
         // counts when it names THIS session; retirement nulls it so a stale
         // frame never replays over optimistic state.
         let stamp = eventStore.lastStreamFrame
@@ -738,7 +753,8 @@ final class ChatSessionStore: ObservableObject {
         if optimisticRunning, (carried.running || s.running == true) {
             optimisticRunning = false
         }
-        running = optimisticRunning ? true : (s.running == true)
+        let nextRunning = optimisticRunning ? true : (s.running == true)
+        if running != nextRunning { running = nextRunning }
 
         // --- questions: the accumulated snapshot's pending questions, filtered
         // against the tombstone set (so an answered/rejected card is held until
@@ -748,7 +764,8 @@ final class ChatSessionStore: ObservableObject {
         if let questionPayload = s.questions {
             let incoming = questionPayload.questions
             locallyAnsweredQuestionIDs.formIntersection(Set(incoming.map(\.id)))
-            questions = incoming.filter { !locallyAnsweredQuestionIDs.contains($0.id) }
+            let visibleQuestions = incoming.filter { !locallyAnsweredQuestionIDs.contains($0.id) }
+            if questions != visibleQuestions { questions = visibleQuestions }
         }
 
         // --- permissions: live updates ride the interpreted stream. Unlike
@@ -764,7 +781,7 @@ final class ChatSessionStore: ObservableObject {
         // it. Edge-triggering on the value has neither failure mode.
         if let p = s.permissions, p != lastAppliedPermissions {
             lastAppliedPermissions = p
-            permissions = p.permissions
+            if permissions != p.permissions { permissions = p.permissions }
         }
 
         // --- the turn lifecycle (`turnComplete` flag + streaming-tail RESET)
@@ -784,7 +801,7 @@ final class ChatSessionStore: ObservableObject {
                 questions: questions
             )
         )
-        turnComplete = merged.turnComplete
+        if turnComplete != merged.turnComplete { turnComplete = merged.turnComplete }
         streamingTailID = merged.streamingTailID
         // Seed a stable tail id whenever a running turn has none — however we
         // learned it is running: a fresh turn edge, a mid-turn session open
@@ -939,6 +956,11 @@ final class ChatSessionStore: ObservableObject {
         return true
     }
 
+    /// Whether `id` is a child session this transcript names (a task row's status depends on it).
+    private func tracksChild(_ id: String) -> Bool {
+        transcriptChildIDs.contains(id) || liveChildIDs.contains(id)
+    }
+
     private func refreshChildRunning(_ states: [String: MantaSessionStreamState]) {
         if updateChildRunning(states) { rebuildBlocks() }
     }
@@ -1063,9 +1085,12 @@ final class ChatSessionStore: ObservableObject {
 
         // Every block's row id is deterministic and shared with its canonical twin (a live prose block is `p<partID>`,
         // a run `run-<id>`), so the handover at the turn boundary updates rows in place — no swap.
-        blocks = liveTranscript + trailing
+        // Republished only when it changed: a frame that moved nothing the transcript draws (a context or todo
+        // update, a repeated state) must not hand the list an identical snapshot to diff.
+        let newBlocks = liveTranscript + trailing
+        if blocks != newBlocks { blocks = newBlocks }
         let newRows = uniqueTranscriptRows(liveTranscript) + uniqueTranscriptRows(trailing)
-        rows = newRows
+        if rows != newRows { rows = newRows }
     }
 
     /// Build the transcript-TAIL block array in the ONE fixed order: system
@@ -1261,7 +1286,8 @@ final class ChatSessionStore: ObservableObject {
                             sessionId: sessionId,
                             covered: Set(loaded.filter { $0.info.time?.completed != nil }.map(\.info.id))
                         )
-                        inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
+                        let liveText = eventStore.sessionStates[sessionId]?.liveText ?? ""
+                        if inProgressText != liveText { inProgressText = liveText }
                     }
                     rebuildBlocks()
                     // A finished turn whose every live block the transcript now draws: the ledger's layout and calls are

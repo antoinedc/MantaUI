@@ -59,7 +59,7 @@ final class ArtifactAgentFileStore: ObservableObject {
     func bind(eventStore: MantaEventStore) {
         guard !bound else { return }
         bound = true
-        eventStore.addRawFrameHandler { [weak self] frame in
+        eventStore.addRawFrameHandler(kinds: ["agentFile"]) { [weak self] frame in
             guard let event = AgentFileEvent.from(frame) else { return }
             self?.receive(event)
         }

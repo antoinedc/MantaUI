@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 // ===========================================================================
@@ -163,7 +164,9 @@ struct MantaAppRoot: View {
         // M-10-2: "Remove server" finished on this phone (its credentials are
         // gone). Tear down the box's stream and state and return to onboarding —
         // never leave the old box's sessions on screen.
-        .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
+        // Receive on the main queue: the notification can be posted from any thread, and this closure is
+        // main-actor isolated (Swift 6 traps when it runs elsewhere).
+        .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved).receive(on: DispatchQueue.main)) { _ in
             store.stop()
             capabilities.resetForBoxChange()
             sessionStore.resetForBoxChange()
@@ -189,6 +192,8 @@ struct MantaAppRoot: View {
         // went stale or blank stayed that way until the app was force-quit —
         // which is precisely the "kill and restart and they're back" symptom.
         .onChange(of: scenePhase) { phase in
+            // Backgrounded: the events socket closes after a short grace and the reconnect give-up starts.
+            if phase == .background, paired { store.enteredBackground() }
             guard phase == .active, paired else { return }
             MantaPushService.applyRegistrationState()
             store.resume()
