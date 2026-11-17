@@ -100,11 +100,6 @@ const DEFAULT_CONFIG = {
   // High. Defaults to Low. Enforcement rides the engine in a later
   // effort-routing issue; the setting persists here.
   ctoTier: "low",
-  // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
-  // the effort dial; the B1 metering that enforces it ships in the economics
-  // issue). The Behavior-card editor + Health "ambient spend today / cap" row
-  // read this.
-  ctoAmbientCap: 2.5,
   // Background work budget (spec 2026-11-17): ONE budget for shared knowledge and the background CTO.
   // `level` (off | light | normal) is the share of a subscription plan's quota windows it may use;
   // `dailyCapUsd` is the cap per local day on pay-per-token keys. Written only through

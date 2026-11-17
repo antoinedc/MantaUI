@@ -73,7 +73,7 @@ function localDayKey(ts) {
 test("ambient spend: with a reading, value renders spend vs cap", async () => {
   const { stats } = await computeHealthStats({
     now: () => NOW,
-    ctoAmbientCap: 2.5,
+    backgroundStatus: async () => ({ dailyCapUsd: 2.5, payg: { usdToday: 0.42, providers: ["openrouter"] }, plans: [] }),
     budgetRead: async () => ({ days: { [localDayKey(NOW)]: { usd: 0.42, calls: 2 } }, updatedMs: NOW }),
   });
   const s = stats.find((x) => x.id === "ambientSpendToday");
@@ -84,12 +84,25 @@ test("ambient spend: with a reading, value renders spend vs cap", async () => {
 test("ambient spend: live meter with a quiet today renders $0.00", async () => {
   const { stats } = await computeHealthStats({
     now: () => NOW,
-    ctoAmbientCap: 2.5,
     budgetRead: async () => ({ days: { [localDayKey(NOW - 3 * DAY)]: { usd: 1.1, calls: 4 } }, updatedMs: NOW - 3 * DAY }),
   });
   const s = stats.find((x) => x.id === "ambientSpendToday");
   assert.equal(s.n, 1);
-  assert.equal(s.value, "$0.00 of $2.50 / day");
+  assert.equal(s.value, "$0.00 of $5.00 / day", "no shared status → the default $5 cap");
+});
+
+test("ambient spend: plan providers read as the share of the window background work used", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    backgroundStatus: async () => ({
+      dailyCapUsd: 5,
+      payg: { usdToday: 0, providers: [] },
+      plans: [{ adapter: "claude", planLabel: "Claude", windows: [{ kind: "weekly", label: "week", bgPct: 2.4 }] }],
+    }),
+  });
+  const s = stats.find((x) => x.id === "ambientSpendToday");
+  assert.equal(s.n, 1);
+  assert.equal(s.value, "Claude: 2% of week");
 });
 
 test("pipeline lag: collecting until summarized segments accrue", async () => {

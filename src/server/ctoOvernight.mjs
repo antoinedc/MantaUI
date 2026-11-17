@@ -428,9 +428,10 @@ export function reconcileOnRestart(prev, input) {
 
 /**
  * λ from the spendable ratio (§11.4): 0 when spendable is fat (≥ half the
- * window), rising linearly to LAMBDA_MAX as spendable → 0. A windowless
- * plan (`spendableFrac: null`, §11.2) has no fractional reserve — λ = 0 and
- * the absolute $ night cap governs instead. An unreadable budget also yields
+ * window), rising linearly to LAMBDA_MAX as spendable → 0. `spendableFrac:
+ * null` means the background budget allows work (spec 2026-11-17 §7.3): no
+ * shadow price, λ = 0 — each dispatch is checked against the budget by the
+ * engine; `0` means it refuses. An unreadable budget also yields
  * 0: a budget read failure must never block the night (graceful).
  */
 export function lambdaFromSpendable(spendable) {
@@ -638,6 +639,35 @@ export function gitOnlyJobRule(project, { fileEditing = true } = {}) {
 }
 
 /**
+ * The model an overnight job is PINNED to (spec 2026-11-17 §17.13). Pinning is what makes the checked provider the
+ * billed one (and turns Auto routing off for the job). The box default model when the user ticked it for subagents,
+ * else the candidate's `modelHint` when ticked, else null — no dispatch, the caller ledgers
+ * `cto.overnight.budget_refused {reason:"no-model"}`. `routable` is the subagent-ticked catalogue
+ * (`listRoutableModels("sub", cfg)`, entries `{providerID, id}`); an empty one approves nothing.
+ *
+ * @param {{ defaultModel?: any, modelHint?: any, routable?: Array<{providerID:string,id:string}> }} [input]
+ *   `defaultModel`/`modelHint`: `{providerID, modelID}` or "provider/model".
+ * @returns {{providerID:string, modelID:string}|null}
+ */
+export function pickOvernightModel({ defaultModel = null, modelHint = null, routable = [] } = {}) {
+  const parse = (m) => {
+    if (typeof m === "string") {
+      const i = m.indexOf("/");
+      return i > 0 && i < m.length - 1 ? { providerID: m.slice(0, i), modelID: m.slice(i + 1) } : null;
+    }
+    const modelID = m?.modelID ?? m?.id;
+    return m && typeof m.providerID === "string" && m.providerID && typeof modelID === "string" && modelID
+      ? { providerID: m.providerID, modelID }
+      : null;
+  };
+  const ticked = (m) => (Array.isArray(routable) ? routable : []).some((r) => r?.providerID === m.providerID && r?.id === m.modelID);
+  for (const candidate of [parse(defaultModel), parse(modelHint)]) {
+    if (candidate && ticked(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
  * §11.2 routing: batch-flagged request-shaped tasks route to a provider's
  * batch pool where the adapter reports one (cheaper, non-competing); agentic
  * tasks always draw on the interactive pool. `providers` maps provider id →
@@ -815,9 +845,11 @@ function defaultOvernightStore() {
  * - `store`  — { load, save } for the window state (default: jsonStore at
  *              statePath("cto/overnight.json"))
  * - `now`    — clock seam
- * - `budget` — async () => ({ spendableFrac, remainingFrac } | null), fed
- *              from ctoBudget's computeSpendable by BET-1419; a throw is
- *              swallowed (budget read failure must never block the night)
+ * - `budget` — async () => ({ spendableFrac } | null): `null` = the background
+ *              budget allows work (select by the scheduler's own limits), `0` =
+ *              it refuses (spec 2026-11-17 §7.3); a throw is swallowed (a
+ *              budget read failure must never block the night — the engine's
+ *              per-dispatch check still fails closed)
  * - `ledger` — optional { append(row) } for the §14.5 activity ledger
  */
 export function createOvernightScheduler({ store = defaultOvernightStore(), now = Date.now, budget = async () => null, ledger = null } = {}) {

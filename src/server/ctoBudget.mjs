@@ -6,9 +6,10 @@
 // What lives here:
 //   - Per-day ambient spend accumulation into budget.json (day rolls at local
 //     midnight — same local-midnight clock as the rollups layer, reused below).
-//   - The independent HARD CAP (`ctoAmbientCap`, default $2.50 / day): a
-//     ceiling on ambient spend that the engine consults BEFORE every ambient
-//     model call, at every tier, regardless of the A12 tier dial.
+//   - (The hard daily cap is gone: ONE shared background-work budget now gates every
+//     ambient and overnight call — src/server/backgroundBudget.mjs, spec 2026-11-17.
+//     The day buckets here stay for the ROI roll and the watchdog's baseline, and are
+//     written with the usd the shared module's `record` returns.)
 //   - THRIFTY mode (§10.6-6 / §12.2): a numbered capability-shed ladder the
 //     engine consults before each work type. Shed in order (1) speculative
 //     candidate generation, (2) probe fan-outs, (3) profile extraction, (4)
@@ -22,11 +23,9 @@
 //     7-day ambient spend (replaces the placeholder constant the watchdog
 //     shipped with).
 //
-// Spend is PRICED from the existing model-ledger/catalogue pricing data via
-// blendedPrice (src/shared/blendedPrice.mjs): the model's `cost` rates blended
-// across the cache-heavy default mix, times the token count. An unpriceable
-// model (no cost data) prices at 0 — honest: we cannot charge what we cannot
-// measure.
+// Spend is PRICED by the shared background budget (one price path for knowledge and the
+// CTO: list price, an unpriced model charged at the dearest priced model of its band);
+// this module only accumulates the usd it is handed.
 
 // ---------------------------------------------------------------------------
 // Reserve & spendable (§11.2, §11.3) — BET-1400
@@ -53,13 +52,12 @@
 // spend that day. Both are recorded as §14.5 ledger rows by the accessor.
 //
 // WINDOWLESS / NO-ADAPTER (§11.2): the reserve math is disabled (there is
-// nothing to reserve) and overnight spend is bounded by an absolute $ budget,
-// `ctoNightCapUsd` (user-set in Behavior, default $5/night). The forecaster
-// still runs to feed the Health card, but produces no reserve.
+// nothing to reserve). The forecaster still runs to feed the Health card, but
+// produces no reserve. What may be SPENT overnight is decided by the shared
+// background budget per dispatch (spec 2026-11-17 §7.3, §17.12), not here.
 
 import { budgetStore, patchStore } from "./ctoStores.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
-import { blendedPrice } from "../shared/blendedPrice.mjs";
 import { effectsForVerdict } from "./ctoVerdicts.mjs";
 import {
   forecastNextDayFraction,
@@ -67,9 +65,6 @@ import {
   trailingDailySeries,
   dailyUsageFractions,
 } from "./ctoForecast.mjs";
-
-export const DEFAULT_NIGHT_CAP_USD = 5;
-export const DEFAULT_AMBIENT_CAP_USD = 2.5;
 
 // The fractile notch ladder — P95 init, P99 ceiling, P90 floor (§11.3).
 export const FRACTILE_LADDER = Object.freeze([0.9, 0.95, 0.99]);
@@ -131,32 +126,22 @@ export function todaySpend(payload, now) {
   return spendForDay(payload, dayKey(now));
 }
 
-// The configured per-day ambient cap; falls back to the default when absent or
-// malformed. `ctoAmbientCap` is the config key (§12.1) — the same key the UI
-// writes. `ctoAmbientCapUsd` is a retired spelling kept as a one-release
-// fallback for stale configs; the canonical key wins when both are present.
-export function ambientCapUsd(cfg) {
-  const c = cfg && typeof cfg === "object" ? cfg.ctoAmbientCap : undefined;
-  if (typeof c === "number" && Number.isFinite(c) && c >= 0) return c;
-  const legacy = cfg && typeof cfg === "object" ? cfg.ctoAmbientCapUsd : undefined;
-  return typeof legacy === "number" && Number.isFinite(legacy) && legacy >= 0
-    ? legacy
-    : DEFAULT_AMBIENT_CAP_USD;
-}
-
-// True once today's spend reaches the cap. Boundary: spends == cap counts as a
-// hit (a call about to push us to the cap is blocked, not allowed through).
-export function isAmbientCapHit(payload, now, capUsd) {
-  return todaySpend(payload, now) >= dollar(capUsd);
-}
-
 // Accumulate a spend/call into the current local day's bucket. Pure.
-export function recordSpend(payload, { now, usd, calls = 1 } = {}) {
+export function recordSpend(payload, { now, usd, calls = 1, ambientPaygUsd = 0 } = {}) {
   const p = normalizeBudget(payload);
   const t = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
   const key = dayKey(t);
   const prev = dayBucket(p, key);
-  const days = { ...p.days, [key]: { usd: dollar(prev.usd) + dollar(usd), calls: num(prev.calls) + ((calls | 0) || 1) } };
+  // `ambientPaygUsd` is the pay-per-token ambient share of `usd` (plan-mode list-price dollars and overnight work are
+  // not in it): the watchdog's baseline reads it, so a plan's fictional dollars never inflate it.
+  const days = {
+    ...p.days,
+    [key]: {
+      usd: dollar(prev.usd) + dollar(usd),
+      calls: num(prev.calls) + ((calls | 0) || 1),
+      ...(dollar(prev.ambientPaygUsd) + dollar(ambientPaygUsd) > 0 ? { ambientPaygUsd: dollar(prev.ambientPaygUsd) + dollar(ambientPaygUsd) } : {}),
+    },
+  };
   // BET-1466: bound the growth inside the only writer that adds buckets.
   // BET-1486: a day bucket is prunable only once no ROI recompute still
   // reads it. The burn history reads exactly BURN_HISTORY_DAYS day-starts
@@ -217,54 +202,19 @@ export function didDayRoll(payload, now) {
 }
 
 // ---------------------------------------------------------------------------
-// Pricing — tokens → USD via the model's own cost data (blendedPrice).
-// ---------------------------------------------------------------------------
-
-/**
- * The USD cost of a turn: blended price per million tokens × tokens / 1e6.
- * `model` may carry `cost` (the catalogue-provided rates); the resolved model
- * is enriched with its cost before it reaches the budget. An unpriceable model
- * (no cost) prices at 0 via blendedPrice's unknown fallback.
- */
-export function priceTokens({ model, tokens, mix } = {}) {
-  const perMillion = blendedPrice(model ?? {}, mix).price;
-  return dollar((num(tokens) / 1_000_000) * perMillion);
-}
-
-/**
- * Tonight's estimated overnight spend, priced from the cto ledger (§11.2): the
- * sum of `priceTokens` over TODAY's `cto.overnight.job_started` rows' estTokens
- * (the prompt-size estimate the engine records at dispatch — §12.1 metering
- * style). Rows from other days, other kinds, or without a usable estTokens are
- * ignored; an unpriceable `modelCost` (null / no cost rates) prices at 0, so
- * the night cap cannot trip from an unknown model — pass a priceable cost.
- */
-export function overnightSpendUsd(rows, { now, modelCost = null } = {}) {
-  const t = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
-  const key = dayKey(t);
-  let total = 0;
-  for (const r of Array.isArray(rows) ? rows : []) {
-    if (r?.kind !== "cto.overnight.job_started") continue;
-    if (typeof r?.ts !== "number" || !Number.isFinite(r.ts) || dayKey(r.ts) !== key) continue;
-    const toks = Number(r?.estTokens);
-    if (!Number.isFinite(toks) || toks <= 0) continue;
-    total += priceTokens({ model: { cost: modelCost }, tokens: toks });
-  }
-  return dollar(total);
-}
-
-// ---------------------------------------------------------------------------
 // Expected hourly burn — A2 watchdog figure (§13.3 / BET-1385 placeholder).
 // ---------------------------------------------------------------------------
 
 /**
  * The expected ambient $/hour — the baseline the A2 watchdog compares the
  * measured per-hour burn against (>2× → auto-thrifty, >4× → auto-pause).
- * Derived from the trailing 7-day spend, divided by ACTIVE days only
+ * Derived from the trailing 7-day PAY-PER-TOKEN ambient spend (`ambientPaygUsd`
+ * of the day buckets — never the plan-mode list-price dollars or overnight work
+ * that share the bucket's `usd`, spec 2026-11-17 §17.15), divided by ACTIVE days only
  * (day-buckets with non-zero spend, × 24) — a blanket 7×24 denominator crushed
  * the baseline toward 0 on a box that spends on only a few days a week
  * (BET-1462 defects 1–2). The result is floored at the cap-equivalent even
- * pace (cap / 24): no history may push the baseline below what the box is
+ * pace (`capUsd` is the shared daily cap; floor = cap / 24): no history may push the baseline below what the box is
  * configured to spend, or a tiny measured burn reads as a huge multiple and
  * trips the watchdog (the 2026-08-31 auto-pause incident).
  */
@@ -275,7 +225,7 @@ export function expectedHourlyBurnUsd(payload, { now, capUsd } = {}) {
   let activeDays = 0;
   let sod = startOfDay(t);
   for (let i = 0; i < BURN_HISTORY_DAYS; i++) {
-    const usd = spendForDay(payload, String(sod));
+    const usd = dollar(dayBucket(payload, String(sod)).ambientPaygUsd);
     if (usd > 0) activeDays += 1;
     total += usd;
     sod -= 24 * HOUR_MS;
@@ -284,16 +234,17 @@ export function expectedHourlyBurnUsd(payload, { now, capUsd } = {}) {
 }
 
 /**
- * The measured ambient $/hour so far today — the watchdog's `getSpendPerHour`.
+ * The measured ambient $/hour so far today — the watchdog's `getSpendPerHour`,
+ * from the shared budget's pay-per-token `cto-ambient` total (`usdToday`).
  * The divisor never drops below one hour: 30 seconds past local midnight a
  * single $0.01 call measures $0.01/hr, not ~$1.20 (BET-1462 defect 3). At the
  * exact midnight instant (0 hours elapsed) the reading is 0.
  */
-export function spendPerHourNow(payload, now) {
+export function burnPerHourUsd(usdToday, now) {
   const t = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
   const h = hoursIntoLocalDay(t);
   if (h <= 0) return 0;
-  return todaySpend(payload, t) / Math.max(1, h);
+  return dollar(usdToday) / Math.max(1, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -366,13 +317,6 @@ export function tierAllows(tier, feature) {
 function clamp01(v) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
-}
-
-/** The configured nightly $ bound for windowless/no-adapter overnight work
- *  (config `ctoNightCapUsd`, default $5/night, §11.2). */
-export function nightCapUsd(cfg) {
-  const c = cfg && typeof cfg === "object" ? cfg.ctoNightCapUsd : undefined;
-  return typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : DEFAULT_NIGHT_CAP_USD;
 }
 
 /** A fresh per-provider reserve-quota state row (stored under `budget.quota`). */
@@ -748,7 +692,6 @@ export function retainPendingHorizon(rows, { cutoff, liveIds = null } = {}) {
 
 export function createCtoBudget({
   store = budgetStore,
-  price = priceTokens,
   now = Date.now,
   // BET-1400 seams (all injectable for sandboxed tests; index.mjs wires the
   // real usage-history + §14.5 ledger):
@@ -757,7 +700,6 @@ export function createCtoBudget({
   buildSeries = (obs, t) => trailingDailySeries(dailyUsageFractions(obs), { now: t, days: RESERVE_FORECAST_DAYS }),
   forecast = ({ series, fractile }) => forecastNextDayFraction({ series, fractile }),
   mapeFn = forecastMape,
-  cfg = () => ({}), // () => config object (ctoNightCapUsd read here)
   ledger = null, // optional { append(row) } — the §14.5 activity ledger
   // BET-1405 ROI seams (§12.4 — all injectable; index.mjs wires the real
   // delegate jobs, the project's git read, verdicts, segments and ledger):
@@ -804,11 +746,13 @@ export function createCtoBudget({
       /* ledger is best-effort — never fail quota evaluation on a ledger write */
     }
   }
-  async function record({ model, tokens, nowMs } = {}) {
+  // The usd is the shared background budget's (`record` returns it): one price path. `ambientPaygUsd` is the
+  // pay-per-token ambient share of it (0 for plan mode / overnight).
+  async function record({ usd: usdIn, ambientPaygUsd = 0, nowMs } = {}) {
     const t = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : now();
-    const usd = price({ model, tokens });
+    const usd = dollar(usdIn);
     try {
-      await patchBudget((payload) => recordSpend(payload, { now: t, usd, calls: 1 }));
+      await patchBudget((payload) => recordSpend(payload, { now: t, usd, calls: 1, ambientPaygUsd }));
       return { usd, dayKey: dayKey(t) };
     } catch {
       // Metering is best-effort: a store failure must never break the model
@@ -827,18 +771,11 @@ export function createCtoBudget({
    *
    * `windowed: false` (a windowless provider or one with no adapter, §11.2)
    * disables the reserve — it returns the same key set as the windowed plan
-   * (`spendableFrac: null`, `reserve: 0`, `mode: 'windowless'`, plus
-   * `nightCapUsd`) and bounds overnight spend by the absolute
-   * `ctoNightCapUsd` budget instead: pass the day's ledger rows via
-   * `overnightRows` and the overnight model's catalogue `cost` via
-   * `overnightModelCost`, and once tonight's estimated overnight spend
-   * (`overnightSpendUsd`) reaches the cap the plan's `spendableFrac` flips to
-   * 0 (the machine's budgetFrac 0 selects nothing further) with
-   * `overnightCapHit: true` — the caller ledgers the cap-hit. An unpriceable
-   * model (no `cost`) estimates $0, so the cap cannot trip — the caller
-   * should pass a priceable cost object. The forecaster still runs (§11.2):
-   * the pct series is built, `mape14` computed (null without usable history)
-   * and persisted in the quota row for the Health card.
+   * (`spendableFrac: null`, `reserve: 0`, `mode: 'windowless'`). What may be
+   * spent overnight is decided per dispatch by the shared background budget
+   * (spec 2026-11-17 §7.3), not by this plan. The forecaster still runs
+   * (§11.2): the pct series is built, `mape14` computed (null without usable
+   * history) and persisted in the quota row for the Health card.
    */
   async function computeSpendable({
     provider,
@@ -847,22 +784,12 @@ export function createCtoBudget({
     windowed = true,
     capHitsSince = 0,
     earnedCleanDays = 0,
-    overnightRows,
-    overnightModelCost = null,
   } = {}) {
     const t = typeof now === "function" ? now() : typeof now === "number" ? now : Date.now();
     if (!windowed) {
-      let conf = {};
-      try {
-        conf = (await cfg()) ?? {};
-      } catch {
-        conf = {};
-      }
-      if (!conf || typeof conf !== "object") conf = {};
       // §11.2: reserve disabled, but the forecaster still runs to feed the
       // Health card — build the same pct-history series the windowed path
-      // uses and persist a quota row carrying `mape14` (reserve stays 0;
-      // overnight spend is bounded by the absolute `ctoNightCapUsd` instead).
+      // uses and persist a quota row carrying `mape14` (reserve stays 0).
       const hist = (await history().catch(() => ({}))) ?? {};
       const obs = hist[historyKey(provider, windowKind)] ?? [];
       const { series, historyDays, maxObserved } = buildSeries(obs, t);
@@ -886,11 +813,6 @@ export function createCtoBudget({
       await ledgerAppend({ kind: "cto.reserve", ts: t, provider, reserve: 0, spendable: null, fractile: quota.fractile, mode: "windowless" });
       // Same key set as the windowed plan below — C3's re-evaluation seam
       // consumes both modes uniformly (null where the concept doesn't apply).
-      // §11.2 absolute $ bound: tonight's estimated overnight spend priced
-      // from the ledger's job_started rows; cap exhausted → spendableFrac 0.
-      const cap = nightCapUsd(conf);
-      const spent = overnightSpendUsd(overnightRows, { now: t, modelCost: overnightModelCost });
-      const capHit = cap > 0 && spent >= cap;
       return {
         provider,
         windowed: false,
@@ -901,13 +823,10 @@ export function createCtoBudget({
         maxObserved,
         historyDays,
         remainingFrac: null,
-        spendableFrac: capHit ? 0 : null,
+        spendableFrac: null,
         point: null,
         sigma: null,
         mape14,
-        overnightSpentUsd: spent,
-        overnightCapHit: capHit,
-        nightCapUsd: cap,
       };
     }
     const hist = (await history().catch(() => ({}))) ?? {};
@@ -1266,8 +1185,6 @@ function validPrRef(ref) {
     record,
     payload: load,
     todayUsd: async () => todaySpend(await load(), now()),
-    isCapHit: async (capUsd) => isAmbientCapHit(await load(), now(), capUsd),
-    spendPerHourUsd: async () => spendPerHourNow(await load(), now()),
     expectedHourlyBurnUsd: async ({ capUsd } = {}) => expectedHourlyBurnUsd(await load(), { now: now(), capUsd }),
     didDayRoll: async () => didDayRoll(await load(), now()),
     computeSpendable,
