@@ -29,6 +29,7 @@ import { ModelLedgerCard } from "./ModelLedgerCard";
 import { OptimizerCard } from "./OptimizerCard";
 import { SummaryModelCard } from "./SummaryModelCard";
 import { KnowledgeCard } from "./settings/KnowledgeCard";
+import { BackgroundWorkCard } from "./settings/BackgroundWorkCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
@@ -530,6 +531,17 @@ export function Settings({
   useEffect(() => {
     if (initialSection && VOICE_SECTIONS.some((s) => s.id === initialSection)) setActiveTab(initialSection);
   }, [initialSection]);
+  // The same request while the modal is open on ANOTHER tab (e.g. Knowledge's "Change" link): App's
+  // section state may already equal the requested one, so retarget from the event itself.
+  useEffect(() => {
+    const onOpen = (ev: Event) => {
+      const section = (ev as CustomEvent<{ section?: string }>).detail?.section;
+      const match = section ? VOICE_SECTIONS.find((s) => s.id === section) : undefined;
+      if (match) setActiveTab(match.id);
+    };
+    window.addEventListener("manta-open-settings", onOpen);
+    return () => window.removeEventListener("manta-open-settings", onOpen);
+  }, []);
   const inSearch = query.trim().length > 0;
   const searchHits = useMemo(() => searchSettings(VOICE_SETTINGS, query, PLATFORM), [query]);
 
@@ -1261,6 +1273,7 @@ export function Settings({
             <ModelsCard />
             <SummaryModelCard />
             <ModelLedgerCard />
+            <BackgroundWorkCard />
             <OptimizerCard />
           </GroupCard>
         </>

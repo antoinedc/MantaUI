@@ -115,59 +115,11 @@ export type TonightBudgetGate = {
   overnightOn?: boolean | null;
 };
 
-// Render-mode selection (§10.5 card 3): the full gauge (night pool, planned
-// tonight, reserve line) renders ONLY at High with Overnight on. Below that,
-// the card shows ambient spend vs cap only — never a gauge for a pool that
-// cannot run (overnight is off, there is no pool to spend).
+// Render-mode selection (§10.5 card 3): the full card (forecast reserve, window
+// notes, accuracy) renders ONLY at High with Overnight on. Below that, the card
+// shows the background budget status only — nothing runs overnight.
 export function tonightBudgetMode(gate: TonightBudgetGate | null): TonightBudgetMode {
   return gate?.tier === "high" && gate?.overnightOn === true ? "full" : "ambient";
-}
-
-export type NightGaugeInput = {
-  nightCapUsd: number;
-  usedTodayUsd: number;
-  plannedTonightUsd: number | null;
-  reserveFrac: number | null;
-};
-
-export type NightGauge = {
-  poolUsd: number;
-  usedUsd: number;
-  plannedUsd: number;
-  reserveLineUsd: number | null;
-  overflow: boolean;
-};
-
-/**
- * The night-pool gauge (§10.5 card 3): axis $0 → `ctoNightCapUsd`; segments
- * [used today][planned tonight] and the reserve line at the fractile — the
- * pool share held back at the binding provider's active reserve (null when no
- * windowed reserve exists). All inputs clamp into the pool; `overflow` flags
- * a used+planned that exceeds it (the gauge never silently truncates).
- */
-export function nightGauge(input: NightGaugeInput): NightGauge {
-  const pool = Math.max(0, Number(input?.nightCapUsd) || 0);
-  const used = Math.max(0, Number(input?.usedTodayUsd) || 0);
-  const planned = input?.plannedTonightUsd != null ? Math.max(0, Number(input.plannedTonightUsd) || 0) : 0;
-  const overflow = used + planned > pool + 1e-9;
-  const usedClamped = Math.min(used, pool);
-  const plannedClamped = Math.min(planned, Math.max(0, pool - usedClamped));
-  const reserveRaw = Number(input?.reserveFrac);
-  const reserveLineUsd =
-    input?.reserveFrac != null && Number.isFinite(reserveRaw) ? Math.max(0, Math.min(1, reserveRaw)) * pool : null;
-  return { poolUsd: pool, usedUsd: usedClamped, plannedUsd: plannedClamped, reserveLineUsd, overflow };
-}
-
-/** Today's spend from the budget payload (the same day buckets the server
- *  meters into; day rolls at the viewer's local midnight). */
-export function budgetTodayUsd(
-  payload: { days?: Record<string, { usd?: number } | undefined> } | null | undefined,
-  now = Date.now(),
-): number {
-  const d = new Date(now);
-  const key = String(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime());
-  const usd = Number(payload?.days?.[key]?.usd);
-  return Number.isFinite(usd) && usd > 0 ? usd : 0;
 }
 
 /** The binding windowed reserve (fraction) — the largest reserve among the

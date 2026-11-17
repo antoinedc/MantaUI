@@ -319,21 +319,18 @@ export type AppConfig = {
   // / High. Defaults to Low. Enforcement (which feature classes run) rides the
   // engine in a later effort-routing issue; the setting itself persists here.
   ctoTier?: "low" | "medium" | "high";
-  // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
-  // the effort dial). Behavior-card editor + Health "ambient spend today / cap"
-  // row. Default 2.5.
-  ctoAmbientCap?: number;
   // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
   // notify). Off by default.
   ctoDigestPush?: boolean;
   // Adaptive CTO (BET-1405): the §11 Overnight-work switch — gates the entire
   // overnight pool; only visible/effective at High (§10.5 card 1). Default off.
   ctoOvernight?: boolean;
-  // Adaptive CTO (BET-1419, §11.2): absolute overnight budget in $ for
-  // windowless providers (no usage-window adapter). Default $5/night (the
-  // budget module's DEFAULT_NIGHT_CAP_USD); once tonight's estimated
-  // overnight spend reaches it, no further overnight jobs are selected.
-  ctoNightCapUsd?: number;
+  // Background work budget (spec 2026-11-17): ONE budget for shared knowledge
+  // and the background CTO. `level` is the share of plan quota windows background
+  // work may use; `dailyCapUsd` (0–100) is the cap on pay-per-token API keys.
+  // The CTO's old ambient/night caps and knowledge's daily cap are retired.
+  // A partial object is merged by the box.
+  backgroundWork?: { level?: "off" | "light" | "normal"; dailyCapUsd?: number };
   // Adaptive CTO (BET-1521, §9.3/§9.4): the autonomy threshold τ (0..1,
   // default 0.7) — act on its own when the candidate's confidence clears this
   // bar. The Settings τ control writes it; the gate + calibration read it.
