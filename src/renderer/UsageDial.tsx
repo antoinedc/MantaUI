@@ -504,7 +504,7 @@ const clampPct = (n: number) => Math.max(0, Math.min(100, n));
 // white dot is how far through its window "now" is (fill ahead of the dot =
 // burning faster than the window). No dot when the position isn't known.
 export function WindowBar({ w, nowMs }: { w: UsageWindow; nowMs: number }) {
-  const empty = w.active === false || windowResetState(w, nowMs) === "resetting";
+  const empty = windowResetState(w, nowMs) === "resetting";
   const progress = windowProgress(w, nowMs);
   return (
     <span
@@ -750,7 +750,7 @@ function SeatRow({
 function SeatWindowCell({ windows, reference, nowMs }: { windows: UsageWindow[]; reference: UsageWindow; nowMs: number }) {
   if (windows.length === 0) return <span className="text-meta text-text-faint">no reading</span>;
   const w = windows.find((b) => b.kind === reference.kind);
-  if (!w || w.active === false) return <span className="text-meta text-text-faint">—</span>;
+  if (!w) return <span className="text-meta text-text-faint">—</span>;
   const state = windowResetState(w, nowMs);
   const blockedBy = usageWindowBlocker(windows, w);
   const hot = state !== "resetting" && (w.tone === "warn" || w.tone === "danger" || w.tone === "over");

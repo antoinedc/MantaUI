@@ -2876,10 +2876,10 @@ export function formatResetTooltip(
 
 /** How far through its window "now" is, 0..1 — the position dot on a usage bar.
  *  From `startedAt` + `resetsAt` when both are known, else `resetsAt` + `spanMs`.
- *  Null (no dot) when it can't be known: stale, inactive, no reset, no span, or
+ *  Null (no dot) when it can't be known: stale, no reset, no span, or
  *  a reset already in the past. */
 export function windowProgress(w: UsageWindow, nowMs: number): number | null {
-  if (w.stale === true || w.active === false) return null;
+  if (w.stale === true) return null;
   const end = w.resetsAt;
   if (end == null || !Number.isFinite(end) || end <= nowMs) return null;
   let p: number;
@@ -2908,7 +2908,10 @@ export function usageTableColumns(
   const seen = new Set(columns.map((w) => w.kind));
   for (const list of [primary, ...others]) {
     for (const w of list ?? []) {
-      if (!w || w.active === false || seen.has(w.kind)) continue;
+      // A window the provider flags as not in force still has a real figure
+      // (Claude's Team scoped caps report usage while `is_active` is false), so
+      // it gets a column; only the dial and the router ignore it.
+      if (!w || seen.has(w.kind)) continue;
       seen.add(w.kind);
       columns.push(w);
     }
