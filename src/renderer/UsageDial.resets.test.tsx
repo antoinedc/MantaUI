@@ -171,7 +171,7 @@ describe("single-seat provider — one highlighted row built from the snapshot",
       windows: [session, weekly, fable, win("weekly_scoped:sonnet", 0, { label: "7d · Sonnet", scope: "Sonnet", active: false })],
     });
     const heads = Array.from(p.querySelectorAll<HTMLElement>("th"));
-    expect(heads.map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly", "Fable"]); // inactive Sonnet: no column
+    expect(heads.map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly", "Fable", "Sonnet"]); // not-in-force Sonnet still has a figure
     expect(heads[3].getAttribute("title")).toBe("7d · Fable — a weekly limit that applies only to this model");
     expect(heads[1].hasAttribute("title")).toBe(false);
     const third = cells(p)[2];
@@ -184,9 +184,8 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     // every window is in a column: nothing under the table
     expect(p.querySelector('[data-testid="usage-extra-windows"]')).toBeNull();
     expect(p.textContent).not.toContain("resets with the");
-    expect(p.textContent).not.toContain("Sonnet");
     expect(p.textContent).not.toContain("not active");
-    expect(p.getAttribute("style") ?? "").toContain("530px"); // 420 + 110 for the third column
+    expect(p.getAttribute("style") ?? "").toContain("640px"); // 420 + 110 for each of the two extra columns
   });
 
   it("two window columns keep the 420px minimum", async () => {
@@ -195,12 +194,12 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     expect(p.className).toContain("min-w-[420px]");
   });
 
-  it("only inactive extra windows: no third column", async () => {
+  it("an extra window the provider flags as not in force still gets its column, with its figure", async () => {
     const p = await open({
       now: T,
       windows: [session, weekly, win("weekly_scoped:sonnet", 0, { label: "7d · Sonnet", scope: "Sonnet", active: false })],
     });
-    expect(Array.from(p.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly"]);
+    expect(Array.from(p.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly", "Sonnet"]);
   });
 });
 
@@ -282,7 +281,7 @@ describe("seat table", () => {
     expect(p.querySelector('[data-seat-id="s3"]')!.textContent!.match(/37%/g)).toHaveLength(1);
   });
 
-  it("a window kind only some seats have: its own column; seats without it (or with it inactive) show a dash", async () => {
+  it("a window kind only some seats have: its own column; seats without it show a dash, a not-in-force one shows its figure", async () => {
     const scoped = (pct: number, extra: Partial<UsageWindow> = {}) =>
       win("weekly_scoped:fable", pct, { label: "7d · Fable", scope: "Fable", resetsAt: NOW + 3 * H, ...extra });
     const v = threeSeatView();
@@ -293,7 +292,7 @@ describe("seat table", () => {
     expect(Array.from(p.querySelectorAll("th")).map((t) => t.textContent)).toEqual(["Seat", "5-hour", "Weekly", "Fable"]);
     const third = (id: string) => Array.from(p.querySelectorAll(`[data-seat-id="${id}"] td`))[3] as HTMLElement;
     expect(third("s1").textContent).toBe("—");
-    expect(third("s3").textContent).toBe("—");
+    expect(third("s3").textContent).toContain("0%");
     expect(third("s2").textContent).toContain("100%");
     expect(third("s2").querySelector("[data-window-kind]")!.getAttribute("data-window-kind")).toBe("weekly_scoped:fable");
     expect(p.getAttribute("style") ?? "").toContain("530px");

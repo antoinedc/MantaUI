@@ -4670,7 +4670,6 @@ describe("usage reset helpers", () => {
     });
     it("is null when the position can't be known", () => {
       expect(windowProgress(win({ resetsAt: now + H, spanMs: 5 * H, stale: true }), now)).toBeNull();
-      expect(windowProgress(win({ resetsAt: now + H, spanMs: 5 * H, active: false }), now)).toBeNull();
       expect(windowProgress(win({ spanMs: 5 * H }), now)).toBeNull(); // no reset
       expect(windowProgress(win({ resetsAt: now + H }), now)).toBeNull(); // no start, no span
       expect(windowProgress(win({ resetsAt: now - 1, spanMs: 5 * H }), now)).toBeNull(); // reset in the past
@@ -4720,9 +4719,9 @@ describe("usage reset helpers", () => {
       expect(kinds(usageTableColumns([session, weekly, fable], [[fable], [fable]]))).toEqual(["session", "weekly", "weekly_scoped:fable"]);
     });
 
-    it("skips inactive windows, even when another row has the kind active", () => {
-      expect(kinds(usageTableColumns([session, weekly, { ...fable, active: false }]))).toEqual(["session", "weekly"]);
-      expect(kinds(usageTableColumns([session, weekly, { ...fable, active: false }], [[fable]]))).toEqual(["session", "weekly", "weekly_scoped:fable"]);
+    it("keeps a window the provider flags as not in force: it still has a real figure", () => {
+      expect(kinds(usageTableColumns([session, weekly, { ...fable, active: false }]))).toEqual(["session", "weekly", "weekly_scoped:fable"]);
+      expect(windowProgress({ ...fable, active: false, resetsAt: Date.now() + 3_600_000, spanMs: 7 * 86_400_000 }, Date.now())).not.toBeNull();
     });
 
     it("orders extra columns by first appearance: the conversation's seat, then the other rows in order", () => {
