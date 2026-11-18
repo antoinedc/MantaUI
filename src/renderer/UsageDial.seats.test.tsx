@@ -130,7 +130,7 @@ describe("UsageDial — three seats, automatic", () => {
     expect(trigger.getAttribute("title")).toContain("Claude · 97% of the 5h across 3 seats");
     const s2bars = popover.querySelector('[data-seat-id="s2"]') as HTMLElement;
     expect(s2bars.querySelector('[data-window-kind="session"]')?.getAttribute("data-blocked")).toBe("true");
-    expect(s2bars.querySelector('[data-window-kind="weekly"]')?.getAttribute("data-blocked")).toBeNull();
+    expect(s2bars.querySelector('[data-window-kind="weekly"]')?.getAttribute("data-blocked")).toBe("true"); // the whole seat is unusable
   });
 
   it("on the blocked seat itself, its 5h cell in the highlighted first row is greyed and says why", async () => {
@@ -140,7 +140,7 @@ describe("UsageDial — three seats, automatic", () => {
     const blocked = popover.querySelector('[data-current="true"] [data-blocked="true"]') as HTMLElement;
     expect(blocked.getAttribute("data-window-kind")).toBe("session");
     expect(blocked.className).toContain("opacity-40");
-    expect(blocked.getAttribute("title")).toBe("Not usable until the 7d limit resets");
+    expect(blocked.getAttribute("title")).toBe("Seat not usable until its weekly limit resets");
   });
 
   it("manual mode on a seat whose 7d is used up: the ring reads full, not 20%", async () => {
