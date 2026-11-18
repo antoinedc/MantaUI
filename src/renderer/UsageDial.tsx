@@ -31,11 +31,11 @@ import {
   selectUsageSnapshot,
   usageDialState,
   usageStale,
-  usageWindowBlocker,
   usageColumnHeader,
   usagePopoverMinWidth,
   usageTableColumns,
   windowProgress,
+  seatCellDisabled,
   windowResetState,
   type UsageDialTone,
 } from "./chatUtils";
@@ -752,14 +752,14 @@ function SeatWindowCell({ windows, reference, nowMs }: { windows: UsageWindow[];
   const w = windows.find((b) => b.kind === reference.kind);
   if (!w) return <span className="text-meta text-text-faint">—</span>;
   const state = windowResetState(w, nowMs);
-  const blockedBy = usageWindowBlocker(windows, w);
+  const { disabled, reason } = seatCellDisabled(windows, w, nowMs);
   const hot = state !== "resetting" && (w.tone === "warn" || w.tone === "danger" || w.tone === "over");
   return (
     <div
       data-window-kind={w.kind}
-      data-blocked={blockedBy ? "true" : undefined}
-      className={blockedBy ? "opacity-40" : undefined}
-      title={blockedBy ? `Not usable until the ${blockedBy.label} limit resets` : undefined}
+      data-blocked={disabled ? "true" : undefined}
+      className={disabled ? "opacity-40" : undefined}
+      title={reason ?? undefined}
     >
       <div className="mb-[5px] flex items-baseline justify-between gap-2">
         <span
@@ -772,8 +772,6 @@ function SeatWindowCell({ windows, reference, nowMs }: { windows: UsageWindow[];
           <ResetTimer resetsAt={w.resetsAt as number} startedAt={w.startedAt} nowMs={nowMs} className="text-meta text-text-muted" />
         ) : state === "resetting" ? (
           <span className="text-meta text-text-faint">resetting…</span>
-        ) : state === "not-started" ? (
-          <span className="text-meta text-text-faint">not started</span>
         ) : null}
       </div>
       <WindowBar w={w} nowMs={nowMs} />

@@ -1,4 +1,4 @@
-// The usage popover's "in 2h20m" countdown, with a tooltip carrying the exact
+// The usage popover's "2h20m" countdown, with a tooltip carrying the exact
 // reset date. Hand-rolled handlers + a portal (not the native `interestfor` /
 // popover="hint" pair): the desktop renderer ships Chromium 126, which has
 // neither. Accessibility follows WCAG 1.4.13 and the interest-triggered-tooltip
@@ -133,7 +133,7 @@ export const ResetTimer = memo(function ResetTimer({
           closeIfIdle();
         }}
       >
-        in {formatResetDistance(resetsAt - nowMs)}
+        {formatResetDistance(resetsAt - nowMs)}
       </span>
       {tip && (
         <span id={descId} role="tooltip" className="sr-only">

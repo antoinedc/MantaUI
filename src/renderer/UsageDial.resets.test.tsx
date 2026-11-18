@@ -100,9 +100,10 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     expect(row.querySelector(".manta-seat-next")).toBeNull();
     const [c5, cw] = cells(p);
     expect(c5.textContent).toContain("62%");
-    expect(c5.textContent).toContain("in 2h20m");
+    // The visible countdown is the bare distance ("2h20m", no "in"); the tooltip keeps "in …".
+    expect(c5.querySelector("[data-reset-timer]")!.textContent).toBe("2h20m");
     expect(cw.textContent).toContain("41%");
-    expect(cw.textContent).toContain("in 1d16h");
+    expect(cw.querySelector("[data-reset-timer]")!.textContent).toBe("1d16h");
     expect(p.textContent).not.toMatch(/\bused\b/);
   });
 
@@ -146,10 +147,10 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     expect((c.querySelector("span.absolute") as HTMLElement).style.width).toBe("0%");
   });
 
-  it("a window that has not started says so; one with usage but no reset time has no countdown", async () => {
+  it("a window that has not started shows just 0% (no label, no dot); one with usage but no reset time has no countdown", async () => {
     const p = await open({ now: T, windows: [win("session", 0), win("weekly", 18)] });
     const [c5, cw] = cells(p);
-    expect(c5.textContent).toContain("not started");
+    expect(c5.textContent).toBe("0%");
     expect(c5.querySelector("[data-window-dot]")).toBeNull();
     expect(cw.textContent).toContain("18%");
     expect(cw.querySelector("[data-reset-timer]")).toBeNull();
@@ -161,7 +162,7 @@ describe("single-seat provider — one highlighted row built from the snapshot",
     const c = cells(p)[0];
     expect(c.getAttribute("data-blocked")).toBe("true");
     expect(c.className).toContain("opacity-40");
-    expect(c.getAttribute("title")).toBe("Not usable until the 7d limit resets");
+    expect(c.getAttribute("title")).toBe("Seat not usable until its weekly limit resets");
   });
 
   it("a model-scoped window is a third column, per seat: scope as the header, the usual cell, no line under the table", async () => {
@@ -250,14 +251,14 @@ describe("seat table", () => {
     const p = await open({ view: v, seatId: "s1" });
     const row = (id: string) => p.querySelector(`[data-seat-id="${id}"]`) as HTMLElement;
 
-    // s2: 5h not started (and greyed: its 7d is used up); weekly full
+    // s2: 5h not started; its 7d is used up, so the whole seat is greyed
     const s2cells = row("s2").querySelectorAll<HTMLElement>("[data-window-kind]");
     expect(s2cells[0].textContent).toContain("0%");
-    expect(s2cells[0].textContent).toContain("not started");
+    expect(s2cells[0].textContent).not.toContain("not started");
     expect(s2cells[0].getAttribute("data-blocked")).toBe("true");
     expect(s2cells[0].className).toContain("opacity-40");
     expect(s2cells[0].querySelector("[data-window-dot]")).toBeNull();
-    expect(s2cells[1].getAttribute("data-blocked")).toBeNull();
+    expect(s2cells[1].getAttribute("data-blocked")).toBe("true");
 
     // s3: both windows mid-reset
     expect(row("s3").textContent).toContain("resetting…");

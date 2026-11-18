@@ -115,6 +115,7 @@ import {
   windowProgress,
   windowNoun,
   usageTableColumns,
+  seatCellDisabled,
   usageColumnHeader,
   usagePopoverMinWidth,
   windowResetState,
@@ -4695,6 +4696,33 @@ describe("usage reset helpers", () => {
       expect(windowResetState(win({ pct: 0 }), now)).toBe("not-started");
       expect(windowResetState(win({ pct: 12 }), now)).toBe("no-reset");
       expect(windowResetState(win({ pct: 12, resetsAt: now + H }), now)).toBe("scheduled");
+    });
+  });
+
+  describe("seatCellDisabled", () => {
+    const now = 1_800_000_000_000;
+    const H = 3_600_000;
+    const w = (kind: string, pct: number, extra: Partial<UsageWindow> = {}): UsageWindow =>
+      ({ kind, label: kind === "session" ? "5h" : "7d", pct, resetsAt: now + H, ...extra }) as UsageWindow;
+    const s5 = w("session", 40);
+    const wk = w("weekly", 60);
+    const fable = w("weekly_scoped:fable", 30, { scope: "Fable", label: "7d · Fable" });
+    it("a used-up account-wide window disables every cell of the seat", () => {
+      const full = w("weekly", 100, { resetsAt: now + 50 * H });
+      const ws = [s5, full, fable];
+      for (const x of ws) expect(seatCellDisabled(ws, x, now)).toEqual({ disabled: true, reason: "Seat not usable until its weekly limit resets" });
+    });
+    it("a used-up model-scoped window disables only its own cell", () => {
+      const fullFable = { ...fable, pct: 100 };
+      const ws = [s5, wk, fullFable];
+      expect(seatCellDisabled(ws, s5, now).disabled).toBe(false);
+      expect(seatCellDisabled(ws, wk, now).disabled).toBe(false);
+      expect(seatCellDisabled(ws, fullFable, now)).toEqual({ disabled: true, reason: "Not usable for Fable until this limit resets" });
+    });
+    it("nothing used up, or a full window whose reset has passed: nothing disabled", () => {
+      expect(seatCellDisabled([s5, wk, fable], s5, now).disabled).toBe(false);
+      const passed = w("session", 100, { resetsAt: now - 1 });
+      expect(seatCellDisabled([passed, wk], wk, now).disabled).toBe(false);
     });
   });
 

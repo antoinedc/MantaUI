@@ -2874,6 +2874,26 @@ export function formatResetTooltip(
   return { title, sub };
 }
 
+/** Whether one cell of the usage seat table is unusable, and why. A seat with an
+ *  account-wide window (no `scope`) used up cannot run anything, so EVERY cell of
+ *  its row is disabled; a used-up model-scoped window (e.g. a Team plan's weekly
+ *  Fable cap) disables only its own cell. A window whose reset has passed is not
+ *  "used up" any more. */
+export function seatCellDisabled(
+  windows: UsageWindow[],
+  w: UsageWindow,
+  nowMs: number,
+): { disabled: boolean; reason: string | null } {
+  const full = (x: UsageWindow) => x.pct >= 100 && windowResetState(x, nowMs) !== "resetting";
+  const blockers = windows.filter((x) => !x.scope && full(x));
+  if (blockers.length > 0) {
+    const last = blockers.reduce((a, b) => ((b.resetsAt ?? 0) > (a.resetsAt ?? 0) ? b : a));
+    return { disabled: true, reason: `Seat not usable until its ${windowNoun(last).toLowerCase()} limit resets` };
+  }
+  if (w.scope && full(w)) return { disabled: true, reason: `Not usable for ${w.scope} until this limit resets` };
+  return { disabled: false, reason: null };
+}
+
 /** How far through its window "now" is, 0..1 — the position dot on a usage bar.
  *  From `startedAt` + `resetsAt` when both are known, else `resetsAt` + `spanMs`.
  *  Null (no dot) when it can't be known: stale, no reset, no span, or
