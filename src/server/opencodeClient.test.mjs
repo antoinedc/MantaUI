@@ -669,6 +669,10 @@ test("upgrade calls: tinyTurn classifies the turn outcome and always deletes its
   r = await run([{ type: "assistant", content: [], error: { type: "provider.auth", message: "bad token", status: 401 } }, { type: "idle", outcome: "failed" }]);
   assert.deepEqual(r.result, { ok: false, kind: "turn", error: "bad token", errorType: "provider.auth", status: 401 });
 
+  // The list is newest first: the newest failure wins over an older one.
+  r = await run([{ type: "idle", outcome: "failed", error: { type: "provider.x", message: "newest" } }, { type: "idle", outcome: "failed", error: { type: "provider.y", message: "oldest" } }]);
+  assert.equal(r.result.error, "newest");
+
   r = await run([{ type: "idle", outcome: "succeeded" }]);
   assert.deepEqual(r.result, { ok: false, kind: "turn", error: "the model returned no text" });
 

@@ -81,9 +81,10 @@ export function createUpgradeV2Calls({ fetchImpl, opencodeUrl, password, home })
         const reply = list.some((m) => m?.type === "assistant" && Array.isArray(m.content) && m.content.some((/** @type {any} */ c) => c?.type === "text" && c.text));
         if (reply) return { ok: true };
         // V2 does not fail the HTTP calls when a turn fails: the reason is on the timeline, either
-        // on the `idle` message (outcome "failed") or on the assistant message itself.
-        const idleError = [...list].reverse().find((m) => m?.type === "idle" && m.outcome === "failed" && m.error)?.error;
-        const assistantError = [...list].reverse().find((m) => m?.type === "assistant" && m.error)?.error;
+        // on the `idle` message (outcome "failed") or on the assistant message itself. The list is
+        // newest first (measured on 2.0.30), so `find` takes the newest.
+        const idleError = list.find((m) => m?.type === "idle" && m.outcome === "failed" && m.error)?.error;
+        const assistantError = list.find((m) => m?.type === "assistant" && m.error)?.error;
         const turnError = idleError ?? assistantError;
         /** @type {{ ok: false, kind: "turn", error: string, errorType?: string, status?: number }} */
         const out = { ok: false, kind: "turn", error: typeof turnError?.message === "string" && turnError.message ? turnError.message : "the model returned no text" };
