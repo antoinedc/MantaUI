@@ -129,6 +129,22 @@ export class UpgradeError extends Error {
   }
 }
 
+/**
+ * The plain sentence for a test turn that ran to its end without an answer (the Claude account, not
+ * the upgrade, is what failed). `result` is `tinyTurn`'s `{ error, errorType?, status? }`.
+ */
+export function describeTestTurnFailure(result) {
+  const { errorType, status } = result ?? {};
+  if (errorType === "provider.auth" || status === 401 || status === 403) {
+    return "The upgrade finished, but Claude rejected this box's sign-in. Sign in to Claude again in Settings.";
+  }
+  if (status === 429) return "The upgrade finished, but Claude's usage limit has been reached. Claude will answer again once the limit resets.";
+  if (errorType === "provider.no-route") return "The upgrade finished, but the Claude model used for the check isn't available on this account.";
+  return `The upgrade finished, but Claude didn't answer a test message (${String(result?.error ?? "no reply").slice(0, 200)}).`;
+}
+
+const LEGACY_NO_TEXT_VERIFY_FAILURE = "The test turn failed: the model returned no text";
+
 function emptySteps() {
   const steps = {};
   for (const id of STEP_IDS) steps[id] = { status: "pending", progress: null };
@@ -136,7 +152,7 @@ function emptySteps() {
 }
 
 function freshState() {
-  return { version: 1, state: "idle", mode: null, v1Db: null, targetDb: null, v1Sessions: null, steps: emptySteps(), error: null };
+  return { version: 1, state: "idle", mode: null, v1Db: null, targetDb: null, v1Sessions: null, steps: emptySteps(), error: null, warning: null };
 }
 
 /** Normalise whatever is on disk into a state object (tolerates old/partial files). */
@@ -266,6 +282,7 @@ export function createUpgradeV2(deps) {
       overall: state.state === "completed" ? 1 : computeOverall(state.steps, state.mode),
       etaSeconds: state.state === "running" && state.steps.migrate.status === "running" ? eta.seconds : null,
       error,
+      warning: state.warning ? { step: state.warning.step, message: state.warning.message } : null,
     };
     // WS11 D3 (X5): the gate's wording, computed from the in-memory state alone.
     return { ...base, view: buildUpgradeView(base) };
@@ -486,7 +503,13 @@ export function createUpgradeV2(deps) {
       if (await deps.hasClaudeLogin()) {
         await setProgress("verify", { label: "Running a test turn" });
         const t = await deps.v2.tinyTurn();
-        if (!t.ok) throw new UpgradeError(`The test turn failed: ${t.error ?? "no reply"}`, { retryable: true });
+        if (!t.ok && t.kind === "api") throw new UpgradeError(`The test turn failed: ${t.error ?? "no reply"}`, { retryable: true });
+        if (!t.ok) {
+          // OpenCode ran a whole turn, so the upgrade works; what failed is the Claude account.
+          const raw = String(t.error ?? "no reply");
+          state.warning = { step: "verify", message: describeTestTurnFailure(t), detail: raw.slice(0, 300) };
+          log(`[upgrade] test turn did not answer (not blocking): ${raw}`);
+        }
       }
     },
 
@@ -525,6 +548,7 @@ export function createUpgradeV2(deps) {
   async function runFromFirstPending() {
     state.state = "running";
     state.error = null;
+    state.warning = null;
     await commit();
     for (const id of STEP_IDS) {
       if (state.steps[id].status === "done") continue;
@@ -564,6 +588,13 @@ export function createUpgradeV2(deps) {
     state.completedAt = now();
     await commit();
     await deps.services.resumeBackground().catch(() => {});
+    if (state.warning && typeof deps.notify === "function") {
+      try {
+        await deps.notify({ title: "Upgrade finished", message: state.warning.message, tag: "upgrade-warning" });
+      } catch (e) {
+        log(`[upgrade] could not send the upgrade warning notification: ${e?.message ?? e}`);
+      }
+    }
   }
 
   function launch(fn) {
@@ -830,6 +861,20 @@ export function createUpgradeV2(deps) {
     return task;
   }
 
+  async function retry() {
+    if (hasReclaim()) return { ok: false, error: RETRY_REFUSED_AFTER_RECLAIM };
+    if (inFlight) return { ok: false, error: reclaiming ? RECLAIM_REASONS.running : "The upgrade is already running." };
+    if (state.state !== "failed") return { ok: false, error: "There is no failed upgrade to retry." };
+    for (const id of STEP_IDS) {
+      if (state.steps[id].status === "failed") {
+        state.steps[id].status = "pending";
+        state.steps[id].error = undefined;
+      }
+    }
+    launch(runFromFirstPending); // flips to "running" synchronously, so the very next GET shows it
+    return { ok: true };
+  }
+
   // -------------------------------------------------------------------- API
 
   return {
@@ -851,6 +896,11 @@ export function createUpgradeV2(deps) {
         launch(runFromFirstPending);
         return { action: "resume" };
       }
+      if (state.state === "failed" && state.error?.step === "verify" && String(state.error.message ?? "").startsWith(LEGACY_NO_TEXT_VERIFY_FAILURE)) {
+        log("[upgrade] retrying a verify failure the new rules no longer block on");
+        const r = await retry(); // exactly what the user pressing Retry runs
+        return { action: r.ok ? "retry" : "none" };
+      }
       if (state.state === "failed" || state.state === "rolled_back") return { action: "none" };
       const prep = await deps.prepare();
       // The password may have just been created by prepare; nothing in manta-server caches it
@@ -863,19 +913,7 @@ export function createUpgradeV2(deps) {
       return { action: "start" };
     },
 
-    async retry() {
-      if (hasReclaim()) return { ok: false, error: RETRY_REFUSED_AFTER_RECLAIM };
-      if (inFlight) return { ok: false, error: reclaiming ? RECLAIM_REASONS.running : "The upgrade is already running." };
-      if (state.state !== "failed") return { ok: false, error: "There is no failed upgrade to retry." };
-      for (const id of STEP_IDS) {
-        if (state.steps[id].status === "failed") {
-          state.steps[id].status = "pending";
-          state.steps[id].error = undefined;
-        }
-      }
-      launch(runFromFirstPending); // flips to "running" synchronously, so the very next GET shows it
-      return { ok: true };
-    },
+    retry,
 
     async rollback() {
       // From the first destructive reclaim step on, the V1 history is (partly) gone: nothing to roll back to.
@@ -1067,6 +1105,7 @@ export function createDefaultDeps({
   // Overridable ONLY for tests, so the reclaim can be pointed at fixture files: any of
   // { binPath, runningPid, openFiles, fs }.
   reclaimIo = {},
+  notify,
   log = (m) => console.log(m),
 } = {}) {
   const statePathFile = migrationStatePath();
@@ -1091,6 +1130,7 @@ export function createDefaultDeps({
     loadState: async () => readJsonSync(statePathFile, null),
     saveState: (s) => writeJsonAtomic(statePathFile, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 }),
     publish,
+    notify,
     log,
     v1DbPath: () => resolveV1DbPath({ env, home }),
     prepare: () => prepareOpencodeV2({ mantaHome, home, env, log, service: opencode }),
