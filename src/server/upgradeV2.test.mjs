@@ -19,6 +19,7 @@ import {
   createUpgradeV2,
   createDefaultDeps,
   decideMode,
+  describeTestTurnFailure,
   isUpgradeExemptPath,
 } from "./upgradeV2.mjs";
 import { V2_PLUGIN_IDS } from "./upgradeV2Prepare.mjs";
@@ -55,6 +56,8 @@ function makeBox(opts = {}) {
   const rec = (name, ...args) => calls.push([name, ...args]);
   let migrateIdx = 0;
   let pluginIdx = 0;
+  let tinyIdx = 0;
+  const notifications = [];
   const turnQueue = [...o.turns];
 
   const deps = {
@@ -139,8 +142,13 @@ function makeBox(opts = {}) {
       },
       tinyTurn: async () => {
         rec("tinyTurn");
+        if (o.tinyTurns) return o.tinyTurns[Math.min(tinyIdx++, o.tinyTurns.length - 1)];
         return o.tinyTurn ?? { ok: true };
       },
+    },
+    notify: async (args) => {
+      notifications.push(args);
+      if (o.notifyThrows) throw new Error("push is down");
     },
     readPreviousRelease: async () => {
       rec("readPrevious");
@@ -151,7 +159,7 @@ function makeBox(opts = {}) {
       return o.reinstallResult ?? {};
     },
   };
-  return { deps, store, calls, events, o, names: () => calls.map((c) => c[0]), resetMigrate: () => (migrateIdx = 0) };
+  return { deps, store, calls, events, notifications, o, names: () => calls.map((c) => c[0]), resetMigrate: () => (migrateIdx = 0) };
 }
 
 /** Boot a machine and wait until it is wedged inside the `stop` step (upgrade mode on). */
@@ -199,7 +207,7 @@ describe("K3 payload", () => {
     const box = makeBox();
     const m = createUpgradeV2(box.deps);
     const s = m.status();
-    assert.deepEqual(Object.keys(s).sort(), ["error", "etaSeconds", "overall", "state", "steps", "view"]);
+    assert.deepEqual(Object.keys(s).sort(), ["error", "etaSeconds", "overall", "state", "steps", "view", "warning"]);
     assert.equal(s.state, "idle");
     assert.equal(s.overall, 0);
     assert.equal(s.etaSeconds, null);
@@ -833,13 +841,17 @@ describe("failure, retry", () => {
     assert.match(m.status().error.message, /30 before, 29 after/);
   });
 
-  test("a failed test turn fails verify; with no Claude login the turn is skipped silently", async () => {
-    const withLogin = makeBox({ claudeLogin: true, tinyTurn: { ok: false, error: "401" } });
+  test("an api failure of the test turn fails verify (retryable); with no Claude login the turn is skipped silently", async () => {
+    const withLogin = makeBox({ claudeLogin: true, tinyTurn: { ok: false, kind: "api", error: "POST /api/session → 500 boom" } });
     const m = createUpgradeV2(withLogin.deps);
     await m.boot();
     await runToIdle(m);
     assert.equal(m.status().state, "failed");
-    assert.match(m.status().error.message, /test turn failed: 401/);
+    assert.equal(m.status().error.step, "verify");
+    assert.equal(m.status().error.retryable, true);
+    assert.equal(m.status().error.message, "The test turn failed: POST /api/session → 500 boom");
+    assert.equal(m.status().warning, null);
+    assert.equal(withLogin.notifications.length, 0);
 
     const noLogin = makeBox({ claudeLogin: false });
     const m2 = createUpgradeV2(noLogin.deps);
@@ -847,6 +859,130 @@ describe("failure, retry", () => {
     await runToIdle(m2);
     assert.equal(m2.status().state, "completed");
     assert.ok(!noLogin.names().includes("tinyTurn"));
+  });
+
+  test("a turn failure (the Claude account) does not block: completed, a warning, ONE notification", async () => {
+    const turn = { ok: false, kind: "turn", error: "token expired", errorType: "provider.auth", status: 401 };
+    const box = makeBox({ claudeLogin: true, tinyTurn: turn });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    const s = m.status();
+    assert.equal(s.state, "completed");
+    assert.equal(s.error, null);
+    assert.deepEqual(s.warning, { step: "verify", message: describeTestTurnFailure(turn) });
+    assert.match(s.warning.message, /Claude rejected this box's sign-in/);
+    assert.equal(box.store.data.warning.detail, "token expired");
+    assert.deepEqual(box.notifications, [{ title: "Upgrade finished", message: s.warning.message, tag: "upgrade-warning" }]);
+  });
+
+  test("a result without a kind is treated as a turn failure", async () => {
+    const box = makeBox({ claudeLogin: true, tinyTurn: { ok: false, error: "401" } });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    assert.match(m.status().warning.message, /didn't answer a test message \(401\)/);
+  });
+
+  test("a throwing notify never fails the upgrade", async () => {
+    const box = makeBox({ claudeLogin: true, tinyTurn: { ok: false, kind: "turn", error: "x" }, notifyThrows: true });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    assert.equal(box.notifications.length, 1);
+  });
+
+  test("a clean completion sends no notification", async () => {
+    const box = makeBox({ claudeLogin: true });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    assert.equal(m.status().warning, null);
+    assert.equal(box.notifications.length, 0);
+  });
+
+  test("a retry clears the previous warning", async () => {
+    const box = makeBox({ claudeLogin: true, tinyTurns: [{ ok: false, kind: "turn", error: "x" }, { ok: true }] });
+    // run 1 completes with a warning; put the stored state at a later failure, then retry it
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.ok(m.status().warning);
+    const st = structuredClone(box.store.data);
+    st.state = "failed";
+    st.error = { step: "cutover", message: "x", retryable: true };
+    st.steps.cutover = { status: "failed", progress: null };
+    box.store.data = st;
+    const m2 = createUpgradeV2(box.deps);
+    assert.deepEqual(await m2.boot(), { action: "none" });
+    assert.ok(m2.status().warning, "a failed state keeps its warning until a run starts");
+    assert.equal((await m2.retry()).ok, true);
+    assert.equal(m2.status().warning, null);
+    await runToIdle(m2);
+    assert.equal(m2.status().state, "completed");
+    assert.equal(m2.status().warning, null);
+  });
+
+  test("boot retries the legacy 'no text' verify failure and completes", async () => {
+    const store = { data: null };
+    const first = makeBox({ store, claudeLogin: true, tinyTurn: { ok: false, kind: "api", error: "the model returned no text" } });
+    const m1 = createUpgradeV2(first.deps);
+    await m1.boot();
+    await runToIdle(m1);
+    assert.equal(m1.status().state, "failed");
+    assert.equal(m1.status().error.message, "The test turn failed: the model returned no text");
+
+    const second = makeBox({ store, claudeLogin: true, tinyTurn: { ok: false, kind: "turn", error: "the model returned no text" } });
+    const m2 = createUpgradeV2(second.deps);
+    const r = await m2.boot();
+    assert.equal(r.action, "retry");
+    await runToIdle(m2);
+    assert.equal(m2.status().state, "completed");
+    assert.ok(m2.status().warning);
+    assert.equal(second.notifications.length, 1);
+  });
+
+  test("boot leaves other failed states alone", async () => {
+    for (const [step, message] of [
+      ["verify", "The test turn failed: POST /api/session → 500 boom"],
+      ["verify", "Manta plugins did not load in OpenCode: manta."],
+      ["migrate", "The test turn failed: the model returned no text"],
+    ]) {
+      const store = { data: null };
+      const first = makeBox({ store, pluginIds: [] });
+      const m1 = createUpgradeV2(first.deps);
+      await m1.boot();
+      await runToIdle(m1);
+      store.data.state = "failed";
+      store.data.error = { step, message, retryable: true };
+      const second = makeBox({ store, claudeLogin: true });
+      const m2 = createUpgradeV2(second.deps);
+      assert.deepEqual(await m2.boot(), { action: "none" }, `${step}: ${message}`);
+      assert.equal(m2.status().state, "failed");
+    }
+  });
+
+  test("describeTestTurnFailure maps the account signals to plain sentences", () => {
+    assert.match(describeTestTurnFailure({ errorType: "provider.auth", error: "x" }), /rejected this box's sign-in/);
+    assert.match(describeTestTurnFailure({ status: 401, error: "x" }), /rejected this box's sign-in/);
+    assert.match(describeTestTurnFailure({ status: 403, error: "x" }), /Sign in to Claude again in Settings/);
+    assert.equal(
+      describeTestTurnFailure({ status: 429, error: "x" }),
+      "The upgrade finished, but Claude's usage limit has been reached. Claude will answer again once the limit resets.",
+    );
+    assert.equal(
+      describeTestTurnFailure({ errorType: "provider.no-route", error: "Model unavailable" }),
+      "The upgrade finished, but the Claude model used for the check isn't available on this account.",
+    );
+    assert.equal(
+      describeTestTurnFailure({ error: "weird" }),
+      "The upgrade finished, but Claude didn't answer a test message (weird).",
+    );
+    const long = describeTestTurnFailure({ error: "y".repeat(500) });
+    assert.equal(long, `The upgrade finished, but Claude didn't answer a test message (${"y".repeat(200)}).`);
   });
 
   test("retry / rollback refuse when there is nothing failed", async () => {

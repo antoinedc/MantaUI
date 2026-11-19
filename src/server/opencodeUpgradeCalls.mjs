@@ -79,9 +79,19 @@ export function createUpgradeV2Calls({ fetchImpl, opencodeUrl, password, home })
         const msgs = await v2Call("GET", `/api/session/${sessionID}/message?limit=20`, (c, o) => c.message.list({ sessionID, limit: 20 }, o));
         const list = /** @type {any[]} */ (msgs?.data ?? []);
         const reply = list.some((m) => m?.type === "assistant" && Array.isArray(m.content) && m.content.some((/** @type {any} */ c) => c?.type === "text" && c.text));
-        return reply ? { ok: true } : { ok: false, error: "the model returned no text" };
+        if (reply) return { ok: true };
+        // V2 does not fail the HTTP calls when a turn fails: the reason is on the timeline, either
+        // on the `idle` message (outcome "failed") or on the assistant message itself.
+        const idleError = [...list].reverse().find((m) => m?.type === "idle" && m.outcome === "failed" && m.error)?.error;
+        const assistantError = [...list].reverse().find((m) => m?.type === "assistant" && m.error)?.error;
+        const turnError = idleError ?? assistantError;
+        /** @type {{ ok: false, kind: "turn", error: string, errorType?: string, status?: number }} */
+        const out = { ok: false, kind: "turn", error: typeof turnError?.message === "string" && turnError.message ? turnError.message : "the model returned no text" };
+        if (typeof turnError?.type === "string" && turnError.type) out.errorType = turnError.type;
+        if (typeof turnError?.status === "number") out.status = turnError.status;
+        return out;
       } catch (e) {
-        return { ok: false, error: String(/** @type {any} */ (e)?.message ?? e) };
+        return { ok: false, kind: "api", error: String(/** @type {any} */ (e)?.message ?? e) };
       } finally {
         const doomed = id;
         if (doomed) await v2Call("DELETE", `/api/session/${doomed}`, (c, o) => c.session.remove({ sessionID: doomed }, o), { ignoreBody: true }).catch(() => {});

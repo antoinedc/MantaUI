@@ -6930,6 +6930,7 @@ const upgradeV2 = createUpgradeV2(
   createUpgradeDeps({
     mantaHome: PROJECT_ROOT,
     publish: (evt) => bus.publish(evt),
+    notify: (args) => push.fireNotify(args),
     services: {
       pauseBackground: async () => {
         for (const k of Object.keys(upgradePausable)) {

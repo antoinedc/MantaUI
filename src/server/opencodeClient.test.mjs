@@ -638,7 +638,46 @@ test("upgrade calls: wire shape, own base URL + per-request password, and the `<
   );
   const failing = createUpgradeV2Calls({ fetchImpl: async () => new Response("x".repeat(500), { status: 500 }), opencodeUrl: "http://127.0.0.1:9999", password: async () => "p", home: "/h" });
   await assert.rejects(() => failing.migrationStatus(), (e) => e.message === `GET /api/experimental/migration/v1 → 500 ${"x".repeat(200)}`);
-  assert.deepEqual(await failing.tinyTurn(), { ok: false, error: `POST /api/session → 500 ${"x".repeat(200)}` });
+  assert.deepEqual(await failing.tinyTurn(), { ok: false, kind: "api", error: `POST /api/session → 500 ${"x".repeat(200)}` });
+});
+
+test("upgrade calls: tinyTurn classifies the turn outcome and always deletes its session", async () => {
+  const run = async (messages, { failOn } = {}) => {
+    const seen = [];
+    const fetchImpl = async (url, init) => {
+      const u = new URL(String(url));
+      seen.push(`${init.method} ${u.pathname}`);
+      if (failOn && u.pathname.endsWith(failOn)) return new Response("nope", { status: 500 });
+      if (u.pathname === "/api/session" && init.method === "POST") return json({ data: { id: "ses_u" } });
+      if (u.pathname.endsWith("/message")) return json({ data: messages, cursor: {} });
+      return new Response(null, { status: 204 });
+    };
+    const calls = createUpgradeV2Calls({ fetchImpl, opencodeUrl: "http://127.0.0.1:9999", password: async () => "p", home: "/h" });
+    return { result: await calls.tinyTurn(), seen };
+  };
+  const text = { type: "assistant", content: [{ type: "text", text: "ok" }] };
+
+  let r = await run([text, { type: "idle", outcome: "succeeded" }]);
+  assert.deepEqual(r.result, { ok: true });
+  assert.ok(r.seen.includes("DELETE /api/session/ses_u"));
+
+  const noRoute = { type: "provider.no-route", message: "Model unavailable: anthropic/claude-nonexistent-9" };
+  r = await run([{ type: "idle", outcome: "failed", error: noRoute }]);
+  assert.deepEqual(r.result, { ok: false, kind: "turn", error: noRoute.message, errorType: "provider.no-route" });
+  assert.ok(r.seen.includes("DELETE /api/session/ses_u"));
+
+  r = await run([{ type: "assistant", content: [], error: { type: "provider.auth", message: "bad token", status: 401 } }, { type: "idle", outcome: "failed" }]);
+  assert.deepEqual(r.result, { ok: false, kind: "turn", error: "bad token", errorType: "provider.auth", status: 401 });
+
+  r = await run([{ type: "idle", outcome: "succeeded" }]);
+  assert.deepEqual(r.result, { ok: false, kind: "turn", error: "the model returned no text" });
+
+  for (const step of ["/prompt", "/wait", "/message"]) {
+    r = await run([text], { failOn: step });
+    assert.equal(r.result.kind, "api", step);
+    assert.match(r.result.error, /→ 500 nope$/, step);
+    assert.ok(r.seen.includes("DELETE /api/session/ses_u"), step);
+  }
 });
 
 // ---------------------------------------------------------------------------
