@@ -8,6 +8,76 @@ User-facing changes per release. Each release names the components it ships:
 Desktop and Server share one version number (`package.json`); iOS has its own
 (`MARKETING_VERSION` in `mobile/native/project.yml`).
 
+## 1.5.0 — Server + Desktop · iOS 1.4.0 — 2026-11-19
+
+<!-- highlights
+headline: What's new in Manta 1.5.0
+items:
+  - title: Shared knowledge
+    icon: sparkles
+    text: Sessions share wikis, past-session search and learned skills, curated for you in the background.
+  - title: Live job progress
+    icon: gauge
+    text: Background jobs show live progress and keep running while they work, with no 30-minute cutoff.
+  - title: Clear usage resets
+    icon: refresh-cw
+    text: The usage popover shows every account's 5-hour and weekly resets in one table.
+-->
+
+Ships: Server `server-v1.5.0`, Desktop `mac-v1.5.0` / `win-v1.5.0`, iOS
+`ios-v1.4.0`, Website `web-v1.5.0` (publishes the server update manifest only).
+Gateway unchanged.
+
+### Shared knowledge
+- **Sessions learn from each other.** A shared knowledge base of wikis (how-tos,
+  decisions, gotchas, your preferences), search over past sessions, short
+  briefings for new sessions, and skills learned from work that went well. A
+  background curator reviews new notes, and every change can be undone from
+  its own Settings section.
+
+### Background work
+- **Jobs run while they work.** Background jobs no longer stop after a fixed
+  30 minutes. They stop after 4 hours, or after 15 minutes with no progress,
+  and can be given more time.
+- **Standard progress.** A job shows its current step, checklist and
+  milestones as it goes, and says "needs a decision" when it is stuck on one.
+- **One budget for background work.** Knowledge and the CTO share one budget
+  that respects your plan's quota, set in its own Settings section, with plain
+  messages when work is paused and a way to run it anyway.
+- **Routines: one up-to-date report.** Unread reports from a routine are folded
+  into the newest run's report instead of piling up.
+- **Results after a handoff.** Results of background work started before a
+  handoff now reach the new session; subagents no longer hand off, and viewer
+  windows close once their session is finished.
+
+### Usage
+- **Clear resets for every account.** The usage popover is one compact table of
+  every Claude account with its 5-hour and weekly resets (countdown, with the
+  exact date on hover), plus model-specific weekly limits as their own column.
+
+### Accounts and sign-in
+- **Claude accounts switch faster and more safely.** Requests pick an account
+  instantly, never fall back to the wrong login, and are resent once on another
+  account when a login is refused.
+- **Codex sign-in works again** on OpenCode 2.0.30: Manta uses the device-code
+  sign-in and waits for it to complete.
+
+### Upgrade
+- **The OpenCode upgrade no longer gets stuck on a Claude account problem.** An
+  expired sign-in or usage limit during the final check no longer stops the
+  upgrade: it finishes and a notification explains the problem in plain words.
+  Servers stuck on this screen finish by themselves after updating.
+
+### iOS
+- **Steadier and lighter on battery.** Fixes a crash on the upgrade notice,
+  receives only the updates for the conversation on screen, and keeps session
+  status in sync after reconnects.
+- **Background job progress**, with a detail sheet.
+
+### Server
+- Session status is re-checked regularly, so a missed update can no longer leave
+  a stuck "running" or "waiting" badge.
+
 ## 1.4.0 — Server + Desktop · iOS 1.3.0 — 2026-11-06
 
 <!-- highlights
