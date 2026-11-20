@@ -548,28 +548,57 @@ workflows:
           SSH="ssh -i ~/.ssh/prod_key -o StrictHostKeyChecking=accept-new"
           HOST="root@91.107.196.2"
           $SSH "$HOST" "mkdir -p $MANTA_FEED_DIR $MANTA_DOWNLOADS_DIR"
-          # Upload feed + binaries to the channel's update directory.
+          # Disk guard (2026-11-19: the web box filled up mid-upload, the feed
+          # was already live, and every Mac was offered an update whose ZIP was
+          # cut off). Refuse to start unless everything we are about to write
+          # fits: each DMG goes to the feed AND the downloads dir (both on one
+          # filesystem), the ZIP only to the feed. The script is streamed over
+          # ssh — the box has no checkout.
+          need=0
+          for f in dist/desktop/*.dmg; do need=$((need + 2 * $(wc -c < "$f"))); done
+          for f in dist/desktop/*.zip; do need=$((need + $(wc -c < "$f"))); done
+          $SSH "$HOST" bash -s -- guard "$need" "$MANTA_FEED_DIR" < scripts/release/prod-disk.sh
+          # Upload one file so it can never sit under its final name half-written:
+          # stream it to <name>.part, check the byte count on the box, then
+          # rename (atomic within one filesystem). Streamed through ssh rather
+          # than scp because the artifact name contains a space ("Manta UI-…")
+          # and scp's handling of a spaced remote destination depends on the
+          # protocol (legacy shell-split vs SFTP).
+          upload_atomic() {
+            f="$1"; dir="$2"; name="$(basename "$f")"; size="$(wc -c < "$f" | tr -d ' ')"
+            $SSH "$HOST" "set -e; cat > '$dir/$name.part'; [ \"\$(wc -c < '$dir/$name.part')\" -eq $size ]; mv -f '$dir/$name.part' '$dir/$name'" < "$f"
+          }
+          # Binaries to the channel's update directory FIRST; the feed that names
+          # them goes up LAST (below), so a failed upload can never leave a live
+          # feed pointing at a missing or truncated file.
           #
           # The ZIP is what electron-updater actually downloads on macOS (see
           # the "installable artifact" guard above) — publishing the feed and
           # the DMG without it is what left auto-update inert. The DMG stays
           # here too: the feed still names it, and the verify step fails if a
           # file the feed names is missing.
-          scp -i ~/.ssh/prod_key dist/desktop/latest-mac.yml "$HOST:$MANTA_FEED_DIR/"
-          scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:$MANTA_FEED_DIR/"
-          scp -i ~/.ssh/prod_key dist/desktop/*.zip "$HOST:$MANTA_FEED_DIR/"
-          # Human-facing downloads + refresh the channel's canonical latest.dmg
+          for f in dist/desktop/*.dmg dist/desktop/*.zip; do upload_atomic "$f" "$MANTA_FEED_DIR"; done
+          # Human-facing downloads (DMGs only).
+          for f in dist/desktop/*.dmg; do upload_atomic "$f" "$MANTA_DOWNLOADS_DIR"; done
+          # The feed goes up LAST, only after every binary it names is in place
+          # under its final name.
+          upload_atomic dist/desktop/latest-mac.yml "$MANTA_FEED_DIR"
+          # Refresh the channel's canonical latest.dmg
           # (arm64 preferred; falls back to whatever single dmg exists).
           # MUST pick the HIGHEST version, not the alphabetically-first —
           # `ls | head -1` returned 0.0.1 once both 0.0.1 and 0.0.4 were in the
           # dir, so Manta-latest.dmg silently served the OLDEST build (BET-252
           # shipped in 0.0.4 but the download link stayed on 0.0.1). Always
           # version-sort and take the tail.
-          scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:$MANTA_DOWNLOADS_DIR/"
           $SSH "$HOST" "cd $MANTA_DOWNLOADS_DIR && \
             latest=\$(ls -1 *arm64*.dmg 2>/dev/null | sort -V | tail -1); \
             [ -z \"\$latest\" ] && latest=\$(ls -1 *.dmg | sort -V | tail -1); \
-            cp -f \"\$latest\" $MANTA_LATEST_DMG && echo \"$MANTA_LATEST_DMG -> \$latest\""
+            cp -f \"\$latest\" $MANTA_LATEST_DMG.part && mv -f $MANTA_LATEST_DMG.part $MANTA_LATEST_DMG && echo \"$MANTA_LATEST_DMG -> \$latest\""
+          # Everything is live: drop installers older than the newest 3 versions
+          # from both dirs (the old ones were never deleted — ~14 GB by 1.5.0).
+          # Only versioned installer files are touched; the feed, the canonical
+          # copy and server tarballs are not.
+          $SSH "$HOST" bash -s -- prune-desktop 3 "$MANTA_FEED_DIR" "$MANTA_DOWNLOADS_DIR" < scripts/release/prod-disk.sh
     artifacts:
       - dist/desktop/*.dmg
       # The auto-update artifact. Kept in the build artifacts (not just on

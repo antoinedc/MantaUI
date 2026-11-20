@@ -24,13 +24,16 @@
 #                  the OLD manifest (and old tarballs) or the NEW manifest
 #                  (with new tarballs already uploaded). Drift between the
 #                  manifest and any arch's tarball is impossible.
-#   3. desktop     if dist/desktop/ has binaries: scp them + the latest-*.yml
-#                  feeds to <host>:/var/www/mantaui/updates/ and the binaries
-#                  to /var/www/mantaui/downloads/, then refresh
-#                  Manta-latest.{dmg,AppImage}. If dist/desktop/ is empty
+#   3. desktop     if dist/desktop/ has binaries: scp them to
+#                  <host>:/var/www/mantaui/updates/ and
+#                  /var/www/mantaui/downloads/, THEN the latest-*.yml feeds to
+#                  updates/ (feeds last, never ahead of the files they name), then
+#                  refresh Manta-latest.{dmg,AppImage}. If dist/desktop/ is empty
 #                  (e.g. mac build runs on a Mac): print the exact one-line
 #                  command the owner runs there and continue — desktop is a
-#                  separate leg, not a release blocker.
+#                  separate leg, not a release blocker. Steps 2 and 3 each start
+#                  with a free-space guard on the box (prod-disk.sh) that aborts
+#                  the upload if it won't fit.
 #   4. server      ssh <host> 'git -C /opt/manta pull && systemctl restart
 #                  manta-server && systemctl is-active manta-server', then
 #                  sync the freshly-pulled scripts/install.sh into the Caddy
@@ -82,6 +85,18 @@ WEBROOT_DIR="/var/www/mantaui"
 RELEASES_DIR="${WEBROOT_DIR}/releases"
 UPDATES_DIR="${WEBROOT_DIR}/updates"
 DOWNLOADS_DIR="${WEBROOT_DIR}/downloads"
+
+# Free-space guard (scripts/release/prod-disk.sh, streamed over ssh — the box has
+# no checkout of it). Refuses to start an upload that won't fit; on 2026-11-19 the
+# web box filled up mid-release with the update feed already live.
+total_bytes() {
+  local n=0 f
+  for f in "$@"; do n=$((n + $(wc -c < "$f"))); done
+  echo "$n"
+}
+disk_guard() {
+  ssh "${PROD_HOST}" bash -s -- guard "$1" "$2" < "${SCRIPT_DIR}/prod-disk.sh"
+}
 
 # Derive the underscore manifest-key form from the hyphen filename form
 # (`linux-x64` → `linux_x64`, `darwin-arm64` → `darwin_arm64`).
@@ -137,6 +152,11 @@ node scripts/release/merge-manifest.mjs \
   --out "${COMBINED_MANIFEST}"
 ok "combined manifest written"
 
+TARBALL_FILES=( "${COMBINED_MANIFEST}" )
+for arch in "${ARCHES[@]}"; do TARBALL_FILES+=( "dist/manta-${VERSION}-${arch}.tar.gz" ); done
+log "Checking free space on ${PROD_HOST}:${RELEASES_DIR}…"
+disk_guard "$(total_bytes "${TARBALL_FILES[@]}")" "${RELEASES_DIR}"
+
 for arch in "${ARCHES[@]}"; do
   log "Uploading dist/manta-${VERSION}-${arch}.tar.gz → ${PROD_HOST}:${RELEASES_DIR}/…"
   scp "dist/manta-${VERSION}-${arch}.tar.gz" "${PROD_HOST}:${RELEASES_DIR}/"
@@ -188,11 +208,23 @@ else
     warn "an update from a DMG. Check the \`zip\` target in electron-builder.yml."
   fi
 
+  # Artifacts are written to the update feed dir AND the downloads dir (one
+  # filesystem), the zips only to the feed dir.
+  log "Checking free space on ${PROD_HOST}:${UPDATES_DIR}…"
+  disk_guard "$(( 2 * $(total_bytes "${ALL_ARTIFACTS[@]}") + $(total_bytes "${MAC_ZIPS[@]}") ))" "${UPDATES_DIR}"
+
+  # Binaries first, the feeds that name them LAST: a failed upload must never
+  # leave a live feed pointing at a missing or truncated file.
   log "Uploading desktop artifacts → ${PROD_HOST}:${UPDATES_DIR}/…"
-  scp "${ALL_ARTIFACTS[@]}" "${MAC_ZIPS[@]}" "${FEEDS[@]}" "${PROD_HOST}:${UPDATES_DIR}/"
+  scp "${ALL_ARTIFACTS[@]}" "${MAC_ZIPS[@]}" "${PROD_HOST}:${UPDATES_DIR}/"
 
   log "Uploading desktop artifacts → ${PROD_HOST}:${DOWNLOADS_DIR}/…"
   scp "${ALL_ARTIFACTS[@]}" "${PROD_HOST}:${DOWNLOADS_DIR}/"
+
+  if [ "${#FEEDS[@]}" -gt 0 ]; then
+    log "Uploading update feeds → ${PROD_HOST}:${UPDATES_DIR}/ (last)…"
+    scp "${FEEDS[@]}" "${PROD_HOST}:${UPDATES_DIR}/"
+  fi
 
   log "Refreshing Manta-latest.* stable copies…"
   if [ -n "${LATEST_DMG}" ]; then

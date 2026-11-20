@@ -272,6 +272,16 @@ jobs:
 
           $SSH "$PROD_HOST" "mkdir -p $RELEASES_DIR"
 
+          # Disk guard: refuse to start an upload that won't fit (2026-11-19 the
+          # web box filled up mid-release). Tarballs are never pruned — a box
+          # rolling back an upgrade re-installs its previous release. The script
+          # is streamed over ssh; the box has no checkout.
+          need=0
+          for f in "dist/manta-${VERSION}-linux-x64.tar.gz" "dist/manta-${VERSION}-linux-arm64.tar.gz" "dist/manta-${VERSION}-darwin-arm64.tar.gz" "dist/manta-${VERSION}.txt"; do
+            need=$((need + $(wc -c < "$f")))
+          done
+          $SSH "$PROD_HOST" bash -s -- guard "$need" "$RELEASES_DIR" < scripts/release/prod-disk.sh
+
           for arch in linux-x64 linux-arm64 darwin-arm64; do
             tarball="dist/manta-${VERSION}-${arch}.tar.gz"
             echo "▸ Uploading ${tarball}"
