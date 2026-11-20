@@ -305,19 +305,41 @@ jobs:
           ssh-keygen -y -f "$SSH_KEY" >/dev/null  # fail red on a malformed key
 
           SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-          SCP="scp -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
           echo "▸ Ensuring $MANTA_DOWNLOADS_DIR + $MANTA_FEED_DIR exist"
           $SSH "$PROD_HOST" "mkdir -p $MANTA_DOWNLOADS_DIR $MANTA_FEED_DIR"
 
+          # Disk guard: each installer is written to the feed dir AND the
+          # downloads dir (one filesystem). Refuse to start if it won't fit —
+          # on 2026-11-19 the web box filled up mid-upload with the feed
+          # already live. The script is streamed over ssh; the box has no
+          # checkout.
+          need=0
+          for f in dist/desktop/*.exe; do need=$((need + 2 * $(wc -c < "$f"))); done
+          $SSH "$PROD_HOST" bash -s -- guard "$need" "$MANTA_FEED_DIR" < scripts/release/prod-disk.sh
+
+          # Upload one file so it can never sit under its final name
+          # half-written: stream it to <name>.part, check the byte count on the
+          # box, then rename (atomic within one filesystem).
+          upload_atomic() {
+            local f="$1" dir="$2" name size
+            name="$(basename "$f")"
+            size="$(wc -c < "$f" | tr -d ' ')"
+            $SSH "$PROD_HOST" "set -e; cat > '$dir/$name.part'; [ \"\$(wc -c < '$dir/$name.part')\" -eq $size ]; mv -f '$dir/$name.part' '$dir/$name'" < "$f"
+          }
+
           # Electron-updater resolves the filename in latest.yml relative to the
           # FEED, so the versioned .exe has to sit next to it. The downloads
-          # copy is the website button target.
-          echo "▸ Uploading latest.yml + versioned .exe to the feed"
-          $SCP dist/desktop/latest.yml "$PROD_HOST:$MANTA_FEED_DIR/latest.yml"
-          $SCP dist/desktop/*.exe "$PROD_HOST:$MANTA_FEED_DIR/"
+          # copy is the website button target. The feed (latest.yml) goes up
+          # LAST, after every binary it names is in place under its final name,
+          # so a failed upload can never leave a live feed pointing at a
+          # missing or truncated file.
+          echo "▸ Uploading versioned .exe to the feed"
+          for f in dist/desktop/*.exe; do upload_atomic "$f" "$MANTA_FEED_DIR"; done
           echo "▸ Uploading versioned .exe to the downloads dir"
-          $SCP dist/desktop/*.exe "$PROD_HOST:$MANTA_DOWNLOADS_DIR/"
+          for f in dist/desktop/*.exe; do upload_atomic "$f" "$MANTA_DOWNLOADS_DIR"; done
+          echo "▸ Uploading latest.yml to the feed (LAST)"
+          upload_atomic dist/desktop/latest.yml "$MANTA_FEED_DIR"
 
           # Refresh the canonical copy to the HIGHEST version present.
           # `sort -V | tail -1`, never `ls | head -1` — alphabetical order once
@@ -326,6 +348,12 @@ jobs:
           # silently pointed at the oldest build.
           echo "▸ Refreshing canonical copy $MANTA_LATEST_EXE (highest version)"
           $SSH "$PROD_HOST" "cd $MANTA_DOWNLOADS_DIR && latest=\$(ls -1 Manta-UI-*-x64.exe | sort -V | tail -1) && cp -f \"\$latest\" $MANTA_LATEST_EXE && echo \"✓ canonical copy: \$latest → $MANTA_LATEST_EXE\""
+
+          # Everything is live: drop installers older than the newest 3
+          # versions from both dirs. Only versioned installer files are
+          # touched; the feed and the canonical copy are not.
+          echo "▸ Pruning old installers (keep newest 3 versions)"
+          $SSH "$PROD_HOST" bash -s -- prune-desktop 3 "$MANTA_FEED_DIR" "$MANTA_DOWNLOADS_DIR" < scripts/release/prod-disk.sh
 
       # Prove the files are really live rather than trusting the scp: 200 on
       # the canonical installer + the feed, and the sha256 of the bytes served
