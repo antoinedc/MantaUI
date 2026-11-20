@@ -347,7 +347,7 @@ jobs:
           # the same warning after it actually happened), so the download link
           # silently pointed at the oldest build.
           echo "▸ Refreshing canonical copy $MANTA_LATEST_EXE (highest version)"
-          $SSH "$PROD_HOST" "cd $MANTA_DOWNLOADS_DIR && latest=\$(ls -1 Manta-UI-*-x64.exe | sort -V | tail -1) && cp -f \"\$latest\" $MANTA_LATEST_EXE && echo \"✓ canonical copy: \$latest → $MANTA_LATEST_EXE\""
+          $SSH "$PROD_HOST" "cd $MANTA_DOWNLOADS_DIR && latest=\$(ls -1 Manta-UI-*-x64.exe | sort -V | tail -1) && cp -f \"\$latest\" $MANTA_LATEST_EXE.part && mv -f $MANTA_LATEST_EXE.part $MANTA_LATEST_EXE && echo \"✓ canonical copy: \$latest → $MANTA_LATEST_EXE\""
 
           # Everything is live: drop installers older than the newest 3
           # versions from both dirs. Only versioned installer files are

@@ -593,7 +593,7 @@ workflows:
           $SSH "$HOST" "cd $MANTA_DOWNLOADS_DIR && \
             latest=\$(ls -1 *arm64*.dmg 2>/dev/null | sort -V | tail -1); \
             [ -z \"\$latest\" ] && latest=\$(ls -1 *.dmg | sort -V | tail -1); \
-            cp -f \"\$latest\" $MANTA_LATEST_DMG && echo \"$MANTA_LATEST_DMG -> \$latest\""
+            cp -f \"\$latest\" $MANTA_LATEST_DMG.part && mv -f $MANTA_LATEST_DMG.part $MANTA_LATEST_DMG && echo \"$MANTA_LATEST_DMG -> \$latest\""
           # Everything is live: drop installers older than the newest 3 versions
           # from both dirs (the old ones were never deleted — ~14 GB by 1.5.0).
           # Only versioned installer files are touched; the feed, the canonical
