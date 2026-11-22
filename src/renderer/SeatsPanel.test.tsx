@@ -201,12 +201,16 @@ describe("SeatsPanel", () => {
     });
     await click(buttonByText(h!, "Add seat to Work"));
     expect(h!.text()).not.toContain("breach");
-    expect(m.api.calls.accountsAddSeat[0][0]).toEqual({ provider: "claude", accountId: "a1" });
+    expect(m.api.calls.accountsAddSeat[0][0]).toEqual({ provider: "claude", accountId: "a1", requestId: expect.any(String) });
   });
 });
 
 describe("AddSeatFlow", () => {
-  async function flow(api: Record<string, unknown>, props: Partial<Parameters<typeof AddSeatFlow>[0]> = {}) {
+  async function flow(
+    api: Record<string, unknown>,
+    props: Partial<Parameters<typeof AddSeatFlow>[0]> = {},
+    mountOpts: { strictMode?: boolean } = {},
+  ) {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const onDone = vi.fn();
     const onCancel = vi.fn();
@@ -216,7 +220,7 @@ describe("AddSeatFlow", () => {
       ...api,
     });
     resetStore({ appToasts: [] } as never);
-    h = mount(<AddSeatFlow provider="codex" accountId="a1" accountLabel="Work" onDone={onDone} onCancel={onCancel} {...props} />);
+    h = mount(<AddSeatFlow provider="codex" accountId="a1" accountLabel="Work" onDone={onDone} onCancel={onCancel} {...props} />, mountOpts);
     await h.flush();
     return { m, onDone, onCancel };
   }
@@ -236,6 +240,78 @@ describe("AddSeatFlow", () => {
     await tick();
     expect(onDone).toHaveBeenCalledWith("Added Seat 2 to OpenAI.");
     expect(h!.container.querySelector("[role=status]")?.textContent).toContain("Added Seat 2");
+  });
+
+  it("R1: under StrictMode the start effect runs twice but both starts carry ONE request id (one sign-in)", async () => {
+    // A box that honours the idempotency key: the same id is the same flow.
+    const flows = new Map<string, string>();
+    const add = vi.fn(async (input: { requestId?: string }) => {
+      if (!flows.has(input.requestId!)) flows.set(input.requestId!, `n${flows.size + 1}`);
+      return { seatId: flows.get(input.requestId!)!, connect: { shape: "oauth-auto", url: "https://login.example", instructions: "code ABCD-1234" } };
+    });
+    const cancel = vi.fn(() => Promise.resolve({ ok: true }));
+    const { m } = await flow({ accountsAddSeat: add, accountsCancelSeat: cancel, accountsSeatStatus: () => Promise.resolve({ state: "pending" }) }, {}, { strictMode: true });
+    expect(add.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(add.mock.calls[0][0].requestId).toEqual(expect.any(String));
+    expect(new Set(add.mock.calls.map((c) => c[0].requestId)).size).toBe(1);
+    expect(flows.size).toBe(1);
+    expect(m.api.calls.accountsCancelSeat).toBeUndefined();
+    expect(h!.text()).toContain("login.example");
+  });
+
+  it("R1: Try again after a failure is a NEW request id", async () => {
+    const add = vi
+      .fn()
+      .mockResolvedValueOnce({ error: "login-failed", message: accountsErrorMessage("login-failed") })
+      .mockResolvedValue({ seatId: "n2", connect: { shape: "oauth-auto", url: "https://login.example", instructions: "" } });
+    await flow({ accountsAddSeat: add, accountsSeatStatus: () => Promise.resolve({ state: "pending" }) });
+    await click(buttonByText(h!, "Try again"));
+    expect(add).toHaveBeenCalledTimes(2);
+    expect(add.mock.calls[1][0].requestId).not.toBe(add.mock.calls[0][0].requestId);
+  });
+
+  it("R2: an answer that arrives after the card was closed is cancelled on the box", async () => {
+    let resolve!: (v: unknown) => void;
+    const cancel = vi.fn(() => Promise.resolve({ ok: true }));
+    await flow({ accountsAddSeat: () => new Promise((r) => (resolve = r)), accountsCancelSeat: cancel });
+    h!.unmount();
+    h = null;
+    await act(async () => {
+      resolve({ seatId: "late1", connect: { shape: "oauth-auto", url: "https://login.example", instructions: "" } });
+      await Promise.resolve();
+    });
+    expect(cancel).toHaveBeenCalledWith({ seatId: "late1" });
+  });
+
+  it("R2: an answer for a start the card has moved past is cancelled; the live start's seat is kept", async () => {
+    const resolvers: Array<(v: unknown) => void> = [];
+    const cancel = vi.fn(() => Promise.resolve({ ok: true }));
+    await flow({
+      accountsAddSeat: () => new Promise((r) => resolvers.push(r)),
+      accountsCancelSeat: cancel,
+      accountsSeatStatus: () => Promise.resolve({ state: "pending" }),
+    });
+    h!.rerender?.(<AddSeatFlow provider="codex" accountId="a2" accountLabel="Other" onDone={() => {}} onCancel={() => {}} />);
+    await h!.flush();
+    expect(resolvers).toHaveLength(2);
+    const connect = { shape: "oauth-auto", url: "https://login.example", instructions: "" };
+    await act(async () => {
+      resolvers[1]({ seatId: "live", connect });
+      resolvers[0]({ seatId: "stale", connect });
+      await Promise.resolve();
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith({ seatId: "stale" });
+  });
+
+  it("R3: while the box is saving the login the card says so (polite status), keeps Cancel, and does not give up", async () => {
+    const { onDone } = await flow({ accountsSeatStatus: () => Promise.resolve({ state: "pending", phase: "finishing" }) });
+    await tick();
+    const status = h!.container.querySelector("[role=status]");
+    expect(status?.textContent).toContain("Login received");
+    expect(h!.text()).not.toContain("login.example");
+    expect(h!.container.querySelector('button[aria-label="Cancel"]')).toBeTruthy();
+    expect(onDone).not.toHaveBeenCalled();
   });
 
   // The Claude sign-in: Submit stays busy ("Saving…") from the moment the code

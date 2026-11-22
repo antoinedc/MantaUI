@@ -21,6 +21,11 @@
 // box could still place. On success the card awaits the list refresh before it
 // reports done, so the new seat is already on screen when the panel closes.
 //
+// One click is one sign-in: the start carries a request id that is stable for
+// the life of this card (it changes only on an explicit retry), so a start the
+// framework runs twice — or a repeated call — resolves to the same flow on the
+// box. A start whose answer arrives after this card moved on is cancelled there.
+//
 // Every press ends in one of the three legal outcomes (AGENTS.md): it does the
 // thing and says so, it fails and says why, or the control is not there.
 // Cancel (and closing the card) tells the box to abort the half-made seat.
@@ -87,7 +92,11 @@ export function AddSeatFlow({
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "starting" });
   const [epoch, setEpoch] = useState(0);
+  // The login arrived and the box is saving the seat (status phase "finishing").
+  const [finishing, setFinishing] = useState(false);
   const mounted = useRef(true);
+  // The current start's request id, kept per (provider, account, retry).
+  const requestRef = useRef<{ key: string; id: string } | null>(null);
   // The half-made seat the box is holding, until the flow settles it.
   const openSeatRef = useRef<string | null>(null);
   // done is reported exactly once, whatever the parent does with onDone's identity.
@@ -118,15 +127,27 @@ export function AddSeatFlow({
     let cancelled = false;
     reportedRef.current = false;
     setPhase({ kind: "starting" });
+    setFinishing(false);
+    const key = `${provider}|${accountId ?? ""}|${epoch}`;
+    if (requestRef.current?.key !== key) requestRef.current = { key, id: crypto.randomUUID() };
+    const requestId = requestRef.current.id;
     (async () => {
       let res;
       try {
-        res = await window.api.accountsAddSeat({ provider, accountId });
+        res = await window.api.accountsAddSeat({ provider, accountId, requestId });
       } catch {
         if (!cancelled) set({ kind: "failed", message: "Couldn't reach the server. Try again." });
         return;
       }
-      if (cancelled) return;
+      if (cancelled) {
+        // This start was superseded (a retry) or the card is gone: its seat is
+        // nobody's. The same request id on a card that is still here is the SAME
+        // flow (a repeated start), which the live start is already showing.
+        if (res && !("error" in res) && (!mounted.current || requestRef.current?.id !== requestId)) {
+          void window.api.accountsCancelSeat({ seatId: res.seatId }).catch(() => {});
+        }
+        return;
+      }
       if (!res || "error" in res) {
         set({ kind: "failed", message: accountsFailureMessage(res && "error" in res ? res : undefined) });
         return;
@@ -183,6 +204,10 @@ export function AddSeatFlow({
         }
         if (!mounted.current) return;
         if (!st || st.state === "pending") {
+          if (st?.phase === "finishing") {
+            setFinishing(true);
+            return; // the login is in: never abandon a seat being saved
+          }
           if (!expired) return;
           // Past the box's own deadline and it still has nothing: only now is
           // the sign-in abandoned (the box dropped it too, or this releases it).
@@ -302,7 +327,13 @@ export function AddSeatFlow({
 
       {phase.kind === "starting" && <div className="text-text-muted">Preparing sign-in…</div>}
 
-      {(phase.kind === "claude" || phase.kind === "device") && (
+      {phase.kind === "device" && finishing && (
+        <div className="text-text-muted" role="status">
+          Login received — saving the seat…
+        </div>
+      )}
+
+      {(phase.kind === "claude" || (phase.kind === "device" && !finishing)) && (
         <SeatSignInBlock
           phase={phase}
           elapsed={elapsed}

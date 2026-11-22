@@ -109,7 +109,7 @@ describe("subscription row Connect, with seats", () => {
     expect(m.api.calls.accountsAddSeat).toBeUndefined();
     await click(buttonByText(h!, "I understand"));
     expect(m.api.calls.accountsAddSeat).toHaveLength(1);
-    expect(m.api.calls.accountsAddSeat[0][0]).toEqual({ provider: "claude", accountId: undefined });
+    expect(m.api.calls.accountsAddSeat[0][0]).toEqual({ provider: "claude", accountId: undefined, requestId: expect.any(String) });
     expect(authActions(providerAuth)).not.toContain("start");
     expect(h!.container.querySelector('[data-testid="add-seat-flow"]')).toBeTruthy();
     expect(h!.text()).toContain("Add a Claude account");
