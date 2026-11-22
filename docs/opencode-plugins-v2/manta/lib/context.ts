@@ -46,5 +46,10 @@ export async function resolveToolContext(
       directory = undefined; // directory is advisory for every tool that reads it
     }
   }
-  return { sessionID: exec.sessionID, messageID: exec.messageID, callID: typeof exec.id === "string" ? exec.id : undefined, directory };
+  return {
+    sessionID: exec.sessionID,
+    messageID: exec.messageID,
+    ...(typeof exec.id === "string" && exec.id ? { callID: exec.id } : {}),
+    directory,
+  };
 }
