@@ -88,10 +88,11 @@ routed by its `description` alone.
 
 **Upgrade collision:** Phase 1 did not reserve `manta`. If `~/.manta/agents/manta/`
 already exists WITHOUT `role: lead`, it stays a normal specialist in every
-respect (compiled, listed once, mentionable, dispatchable by `@manta` and by
-`agent_handoff`, its direct chat is NOT led — it is a specialist's home). There
-is then no valid lead: the lead brief is empty for every session (so no
-automatic handoffs happen), the template is not installed over it, and its
+respect (compiled, listed once, mentionable, dispatchable by a user's
+`@manta`, usable as a routine agent; its direct chat is NOT led — it is a
+specialist's home). There
+is then no valid lead: the lead brief is empty for every session and
+`agent_handoff` refuses every call (§5 step 2), the template is not installed over it, and its
 `AgentInfo.notice` is "Rename this folder to enable the Manta lead". No
 synthetic row. `LEAD_SLUG` is added to the reserved slugs for NEW agents only
 (the create path), never to `isUsableSlug` for existing folders.
@@ -211,8 +212,7 @@ Server (`agents.handoff`), checks in this order, refusals as sentences:
    mapped listing gives assistant messages their `parentID` (the user message
    that started the turn) and `agent`, which a single `getMessage` does not. It
    requires: a message with id `messageID`, role `assistant`, holding a tool
-   part with `tool === "agent_handoff"`, `callID === body.callID`, status not
-   `completed`/`error`. **The part's `state.input` is the source of truth**:
+   part with `tool === "agent_handoff"`, `callID === body.callID`, `state.status === "running"`. **The part's `state.input` is the source of truth**:
    `agent`, `title`, `brief`, `continueJob` must equal the body's (any
    mismatch → refused). It then **consumes** `messageID + callID` (in-memory
    set, LRU 1000): a replay is refused. Not found / unreadable after retries →
@@ -226,7 +226,8 @@ Server (`agents.handoff`), checks in this order, refusals as sentences:
    "unknown" → "Couldn't check this chat; try again"; "not-led" → "Only the
    lead can hand off work".
 3. **Plan mode:** the calling message's agent (from the read in 1) is a plan
-   agent (`"plan"` or `"manta-plan"`, the same predicate as `cto.mjs`) and the
+   agent (`"plan"` or `"manta-plan"`, the same predicate as `cto.mjs`) — or the
+   calling message has no `agent` (unknown mode counts as planning) — and the
    writer test holds — for a NEW handoff the target's effective isolation is
    `worktree`; for `continueJob` the job is validated FIRST (see below) and its
    STORED `isolation` is used → "You're planning; propose
@@ -260,6 +261,9 @@ style). Job records gain persisted `isolation` ("worktree" | "none", agent jobs)
 `requestedBy` ("manta" | absent), `turnKey` (string | absent) and `allowPr`
 (boolean, absent = true).
 - **Turn key:** from step 1 (the calling assistant message's `parentID`).
+- When `admit` is given, the store read inside `jobsLock` uses
+  `loadJobsStrict` (a read/parse failure refuses with "Couldn't read the task
+  list; try again" — never treats it as empty and never saves over it).
 - `admit` runs right after the locked store is loaded and checked, BEFORE
   anything is allocated (worktree, branch, session id): a refused second writer
   leaves no record and no worktree (test it).
