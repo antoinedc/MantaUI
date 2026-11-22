@@ -126,20 +126,24 @@ built-ins (agents stay use-case agnostic).
      omits the section).
   3. `delegate.startJob({ prompt, parentSessionID: sessionId, parentDirectory:
      directory, agent: "agent-<slug>", isolation, model: <agent model or
-     undefined>, name: <first 6 words of text>, agentName, request: text,
-     quietResult: true })`.
+     undefined>, name: <first 6 words of text>, agentName, request: text })`.
+     Before that, `delegateView.assertWritable(sessionId)` like `opencode:prompt`.
   4. Return `{ jobId }`. A start failure throws with the refusal message
      (nothing was recorded, so a retry is safe).
   - The request is NOT posted into the parent session (no synthetic): it lives
     on the job record and is shown on the card. The chat's model never sees the
-    request; it sees the result when it next runs (see §6 `quietResult`).
+    request; the result arrives through the existing result path
+    (`resume: true`), so the chat shows the result card and its model may
+    react to it — accepted for Phase 1.
 - `openChat({ slug })` → `{ tmuxSession, windowIndex }`: reuse the window in
   tmux session `manta-agents` whose `opencodeSessionId` equals the id stored in
   `~/.manta/agents/<slug>/.chat.json` (`tmux.listProjects()` already exposes
   it); otherwise `oc.createSession({ directory: home, agent: "agent-<slug>",
   title: name })`, write `.chat.json`, then `tmux.newWindow({ sessionName:
   "manta-agents", windowName: name, chatMode: true, existingSessionId, cwd:
-  home })` (it creates the tmux session when missing), then
+  home })` — or `tmux.newSession({ name: "manta-agents", cwd: home, windowName:
+  name, chatMode: true, existingSessionId })` when the tmux session doesn't
+  exist (newWindow does not recover from "no tmux server"), then
   `syncState.refreshNow()` as `tmux:new-window` does.
 
 ## 6. Background job changes — `src/server/delegate.mjs`
@@ -152,11 +156,12 @@ built-ins (agents stay use-case agnostic).
   - `"worktree"` → `isolationRequired: true` (fail closed: no worktree ⇒ refuse,
     never fall back to the parent checkout).
   - `"none"` → skip `prepareWorktree`; `executionDirectory = parentDirectory`;
-    the child ruleset adds `edit: deny` (read-only in the user's checkout); the
-    no-worktree prompt drops "Commit your work as you go".
+    the child ruleset is deny-by-default (`"*": "deny"` first) then allows only
+    `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `todowrite`, the
+    `progress_report` tool, and `external_directory` for the agent's own folder
+    (no bash, no edit); the no-worktree prompt drops "Commit your work as you go".
 - `agentName`, `request` — stored on the record, exposed in the job view.
-- `quietResult: true` — `buildResultSynthetic` uses `resume: false` for this job
-  (the result card appears; the chat's model is not woken by it).
+- Result delivery unchanged.
 
 ## 7. Wire — RPC channels (contract for both implementers)
 
