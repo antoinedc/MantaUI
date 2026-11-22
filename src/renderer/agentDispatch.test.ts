@@ -32,8 +32,14 @@ describe("usableAgents", () => {
 describe("pickAgentDispatch", () => {
   it("is null without a package-agent mention (the normal send path)", () => {
     expect(pickAgentDispatch("just a question", [], AGENTS)).toBeNull();
-    expect(pickAgentDispatch("ask @dev", [], AGENTS)).toBeNull(); // typed, never picked
+    expect(pickAgentDispatch("mail me at a@dev.io", [], AGENTS)).toBeNull(); // not a mention token
     expect(pickAgentDispatch("ask @dev", [m("dev")], null)).toBeNull(); // agents not loaded
+  });
+
+  it("dispatches a hand-typed @slug that was never picked from the popup", () => {
+    expect(pickAgentDispatch("ask @dev to fix it", [], AGENTS)).toEqual({ slug: "dev" });
+    expect(pickAgentDispatch("@dev and @reviewer", [], AGENTS)).toEqual({ error: ONE_AGENT_ERROR });
+    expect(pickAgentDispatch("@broken do it", [], AGENTS)).toBeNull();
   });
 
   it("is null for an opencode agent mention (build/plan keep their own path)", () => {

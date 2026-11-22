@@ -31,10 +31,14 @@ export function pickAgentDispatch(
   agents: ReadonlyArray<AgentInfo> | null | undefined,
 ): AgentDispatchPick {
   const slugs = new Set(usableAgents(agents).map((a) => a.slug));
-  if (slugs.size === 0 || mentions.length === 0) return null;
+  if (slugs.size === 0) return null;
   const hit = new Set<string>();
   for (const m of resolveAgentMentions(text, mentions as AgentMention[])) {
     if (slugs.has(m.name)) hit.add(m.name);
+  }
+  // A hand-typed "@slug" (not picked from the popup) counts too.
+  for (const m of text.matchAll(/(?:^|\s)@([a-z][a-z0-9-]{0,30})(?![a-z0-9-])/g)) {
+    if (slugs.has(m[1])) hit.add(m[1]);
   }
   if (hit.size === 0) return null;
   if (hit.size > 1) return { error: ONE_AGENT_ERROR };
