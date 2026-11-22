@@ -1,6 +1,6 @@
 # Agents — Phase 2: Manta leads every chat and hands work off automatically
 
-Status: revised after Astra review round 1 (2026-11-22); round 2 pending. Owner: Antoine.
+Status: revised after Astra review rounds 1 and 2 (2026-11-22). Owner: Antoine.
 Builds on Phase 1 (`2026-11-22-agents-phase1.md`, merged). **Speed rule from the
 user: ship the smallest usable version fast; edge cases become follow-ups.**
 Research basis: Anthropic multi-agent research system (2025-06), Cognition
@@ -19,7 +19,9 @@ Bannerman (voska.org Multica) Chief of Staff + `multi-agent-orchestration` skill
 2. **Automatic handoff.** When a turn is real work that matches a specialist
    (e.g. "redesign the homepage head tags" → SEO; "implement the share card" →
    Dev), Manta calls the new `agent_handoff` tool with a self-contained brief.
-   No confirmation. The task card appears ("Dev · <task>", "Manta asked: <title>"),
+   No confirmation from Manta's side; a code-editing handoff still follows the
+   box trust setting like `delegate` (trust mode off → the usual one-click
+   approval card, §5). The task card appears ("Dev · <task>", "Manta asked: <title>"),
    Manta says one line ("Handed to Dev: …"), and the turn ends. When the result
    arrives (existing result path, which wakes the parent), Manta checks it
    against the brief's "done when" and reports: the specialist's full report
@@ -55,22 +57,27 @@ color: "#7C5CFF"
 
 `agent.md` frontmatter gains three optional keys (parser in `agents.mjs`):
 
-- `role: "lead" | "specialist"` — default `specialist`. Exactly one lead: the
-  package with slug `manta` (constant `LEAD_SLUG` in `src/shared/agentsShared.mjs`,
-  new; renderer and server import it — the one place to rename). Any other
-  package declaring `role: lead` is listed with `error: "Only the built-in Manta can lead"`.
+- `role: "lead" | "specialist"` — default `specialist`. **The valid lead** is
+  the package whose slug is `LEAD_SLUG` (`"manta"`, constant in
+  `src/shared/agentsShared.mjs`, new; renderer and server import it — the one
+  place to rename) AND whose frontmatter says `role: lead`. Any other package
+  declaring `role: lead` is listed with `error: "Only the built-in Manta can lead"`.
+  Everywhere below, "the lead" means the valid lead; every lead-specific
+  behaviour (not compiled, not dispatchable, lead row, not-led exception in §3,
+  lead brief) keys on `role === "lead"` of a valid package, never on the slug alone.
 - `use_when: string` (≤ 200 chars) — "Use when …" routing line.
 - `not_for: string` (≤ 200 chars) — "Not for …" routing line.
 
 `AgentInfo` gains `role: "lead" | "specialist"`, `useWhen: string | null`,
-`notFor: string | null`.
+`notFor: string | null`, `notice: string | null` (a non-error hint shown under
+the row, §2 upgrade collision).
 
 The lead package is **not compiled** into an OpenCode agent block (its sync
 entry is skipped; an existing `agent-manta` key in `.installed.json` is removed
 by the normal sync). It is never a dispatch target: `agents:dispatch` and
-`agent_handoff` refuse `slug === LEAD_SLUG` ("Manta already leads this chat").
-The renderer excludes `role === "lead"` from the `@` typeahead and
-`pickAgentDispatch`.
+`agent_handoff` refuse a target whose `role === "lead"` ("Manta already leads
+this chat"). The renderer excludes `role === "lead"` from the `@` typeahead,
+`pickAgentDispatch` and new-session suggestions.
 
 Dev template (`agentTemplates/dev/agent.md`) gains (QUOTED YAML values; a test
 parses every shipped template)
@@ -80,11 +87,14 @@ only; existing Dev folders keep their file). An agent without `use_when` is
 routed by its `description` alone.
 
 **Upgrade collision:** Phase 1 did not reserve `manta`. If `~/.manta/agents/manta/`
-already exists WITHOUT `role: lead`, it stays a normal specialist (compiled,
-mentionable, untouched); the lead is then absent: the lead brief is empty and
-`agents:list` returns a synthetic lead entry with
-`error: "Rename your agent folder 'manta' to enable the Manta lead"`.
-`LEAD_SLUG` is added to the reserved slugs for NEW agents only.
+already exists WITHOUT `role: lead`, it stays a normal specialist in every
+respect (compiled, listed once, mentionable, dispatchable by `@manta` and by
+`agent_handoff`, its direct chat is NOT led — it is a specialist's home). There
+is then no valid lead: the lead brief is empty for every session (so no
+automatic handoffs happen), the template is not installed over it, and its
+`AgentInfo.notice` is "Rename this folder to enable the Manta lead". No
+synthetic row. `LEAD_SLUG` is added to the reserved slugs for NEW agents only
+(the create path), never to `isUsableSlug` for existing folders.
 
 ## 3. Which sessions are led (server decides)
 
@@ -96,11 +106,18 @@ mentionable, untouched); the lead is then absent: the lead brief is empty and
 - it is not marked internal (`isMarkedInternal` from
   `src/server/internalSessionMarker.mjs`: routine runs, forge PR-description and
   knowledge-trial sessions are all stamped);
-- it is not a Manta job child or under one (the existing durable managed-job
-  check used by `src/server/knowledge/integration.mjs`, i.e. `delegate.ownsSession`);
-- it is not the CTO conversation (`isCtoSession`);
-- its directory is not inside `~/.manta/agents/<slug>/` for a slug other than
-  `manta` (specialists' direct chats are not led).
+- it is not the child session of a Manta-owned job record of ANY status — the
+  durable check `createIsManagedSession` from
+  `src/server/knowledge/integration.mjs` (not the in-memory
+  `liveness.ownsSession`, which only knows running jobs). Jobs nest only through
+  `parentID` (rejected above) or as a job's root child (this check), so no tree
+  walk is needed. It must read the store with a **strict** loader: new
+  `loadJobsStrict()` in `delegate.mjs` returns `[]` only for a missing file
+  (ENOENT) and THROWS on any other read or parse failure (today's `loadJobs`
+  returns `[]` for both). A throw → "unknown";
+- it is not the CTO conversation (`isCtoSession`; a failure → "unknown");
+- its directory is not inside `~/.manta/agents/<slug>/` unless that package is
+  the valid lead (specialists' direct chats are not led).
 
 Plan mode is still led (the brief tells Manta not to hand off code changes
 while planning).
@@ -170,52 +187,99 @@ your team's agents (listed under 'Your team'). It runs in the background in its
 own session (code-editing agents get their own branch). Returns immediately;
 the result arrives later as a separate message — do not guess it."
 
-`POST /api/agents/handoff {sessionID, agent, title, brief, continueJob?}` →
-(`sessionID` comes from the tool execution context; the launch directory is read
-from the session record via `oc.readSession`, never from the body)
+`POST /api/agents/handoff {sessionID, messageID, callID?, agent, title, brief, continueJob?}` →
+(`sessionID`, `messageID` and `callID` come from the tool execution context —
+the assistant message making the call and the execute context's `id`, when
+present; the launch directory is read from the
+session record via `oc.readSession`, never from the body)
 `{ ok: true, jobId, agentName }` or `{ ok: false, error }` (HTTP 200 for
 refusals so the tool relays the sentence; class-2). The tool returns:
 - ok: `Handed to <agentName> (job <jobId>). Its result will arrive as a later message; tell the user in one line and stop.`
 - refused: `Not handed off: <error>`.
 
-Server (`agents.handoff`), refusals as sentences:
-- `classifySession(sessionID) !== "led"` → "Only the lead can hand off work".
-- **plan mode:** the session's current agent is a plan agent (`isPlanAgent`,
-  read from the session record) and the target edits code → "You're planning;
-  propose the change instead of handing it off".
-- unknown / invalid agent, or `LEAD_SLUG` → as dispatch.
-- empty `brief` or `title` → "Write a brief and a title".
-- **single writer + turn cap are evaluated INSIDE the delegate job-registration
-  lock** (new optional `startJob` input `admit(jobs) → string | null`, run under
-  `jobsLock` before the record is written; a returned string refuses with it).
-  Job records gain a persisted `isolation` ("worktree" | "none") for agent jobs.
-  - single writer: target isolation is `worktree` and a `running` job with this
-    `parentSessionID` and `isolation: "worktree"` exists → "<Agent> is already
-    changing code for this chat (<job name>); wait for its result".
-  - turn cap: ≥ 3 jobs with this `parentSessionID`, `requestedBy: "manta"` and
-    `createdAt` ≥ the parent's newest user message time (read before the lock
-    from `oc.listMessages(sessionId, {limit: 30})`; on read failure skip) →
-    "Too many handoffs for one request; finish or ask the user".
-  - Tests cover two concurrent handoffs (only one writer starts).
-- `autonomy.decide("handoff") !== "auto"` → "Handing off needs the user's go-ahead" (unreachable with the Phase 2 policy; the seam for Phase 3).
-**Approval follows the box's trust setting**, exactly like the generic
-`delegate` tool: a code-editing handoff goes through `startJobWithApproval`
-semantics (trust mode ON → starts at once; OFF → the existing approval card,
-one click). Read-only handoffs never need approval.
-**No pull requests:** handoff jobs get a prompt override replacing the
-"You may open a draft pull request" sentence with "Do not open pull requests;
-the lead and the user decide what ships" (new `startJob` input `allowPr: false`).
-**continueJob:** when set, the job must be this parent's finished job of the
-same agent (else "That task can't be continued from here"); the brief is sent
-as a new round on that job's session/branch through the existing
-`delegate_send` path (`sendToJob`), under the same single-writer check.
-Otherwise it reuses the Phase 1 dispatch path with: prompt = `brief`, then the seat
-brief, then the recent-conversation excerpt (same builders as `dispatch`);
-`request: title`, `requestedBy: "manta"`, `name: requestTitle(title)`; the
-same isolation fallback (non-git → none). Job record gains `requestedBy`
-(exposed in the job view like `agentName`).
+Server (`agents.handoff`), checks in this order, refusals as sentences:
 
-`agents:dispatch` (user `@agent`) is unchanged except refusing `LEAD_SLUG`.
+1. **Live invocation (caller binding).** The box bearer is box-wide, so the body
+   alone proves nothing. The server reads the calling message with
+   `oc.getMessage(sessionID, messageID)` (up to 3 tries, 200 ms apart, in case
+   the tool part is not persisted yet) and requires: it belongs to `sessionID`,
+   role `assistant`, and holds a tool part with `tool === "agent_handoff"`,
+   status not `completed`/`error`, whose input `agent` and `title` equal the
+   body's (and whose `callID` equals the body's when one was sent). It then **consumes** the matched part (`messageID` + the part's `callID`) (in-memory set,
+   LRU 1000): a second request for the same part is refused. Unreadable →
+   "Couldn't verify this handoff; try again". Mismatch / no such part /
+   consumed → "Only the lead can hand off work". (Implementer: confirm on the
+   pinned binary that the running tool part is visible at execute time — the
+   plugin-pack e2e harness can show it. If it is not, STOP and report; do not
+   weaken the check.)
+2. `classifySession(sessionID)`: "unknown" → "Couldn't check this chat; try
+   again"; "not-led" → "Only the lead can hand off work".
+3. **Plan mode:** the calling message's agent (from the message read in 1) is a
+   plan agent (`"plan"` or `"manta-plan"`, the same predicate as `cto.mjs`) and
+   the target's effective isolation is `worktree` → "You're planning; propose
+   the change instead of handing it off". Checked before any approval card.
+4. Unknown / invalid agent → as dispatch; target `role === "lead"` → "Manta
+   already leads this chat".
+5. Empty `brief` or `title` → "Write a brief and a title".
+6. `autonomy.decide("handoff") !== "auto"` → "Handing off needs the user's
+   go-ahead" (unreachable with the Phase 2 policy; the seam for Phase 3).
+
+**Effective isolation** is resolved once, before approval and admission, with
+the Phase 1 rule (agent's `isolation`, `worktree` falls back to `none` in a
+non-git folder). It decides "writer" (worktree) vs "read-only" (none).
+
+**Approval follows the box's trust setting**, like the generic `delegate` tool:
+- Writer: call `delegate.startJobWithApproval` with server-defined
+  `tools = WORKTREE_AGENT_GRANTS` (new export in `delegate.mjs`: the grant list
+  `buildWorktreeAgentRuleset` already uses, which then builds from it) and
+  `trustMode` read server-side from config (`chatAutoAllow`), never from the
+  body. Trust on → starts at once. Off → the existing approval card; decline /
+  timeout → `{ok:false, error:"The user declined the handoff"}`; the approved
+  (possibly narrowed) grants become the job's ruleset exactly as for `delegate`.
+- Read-only: `delegate.startJob` with no `permission` (the existing
+  deny-by-default read-only ruleset applies). Never an approval card.
+
+**Admission (single writer + turn cap)** runs INSIDE the delegate
+job-registration lock, through a new optional input `admit(jobs) → string | null`
+accepted by BOTH `startJob` and `continueJob` and run under `jobsLock` right
+before the record is written (a returned string refuses with it, HTTP-200
+style). Job records gain persisted `isolation` ("worktree" | "none", agent jobs),
+`requestedBy` ("manta" | absent), `turnKey` (string | absent) and `allowPr`
+(boolean, absent = true).
+- **Turn key:** the calling assistant message's `parentID` (the user message
+  that started the turn) from the read in step 1, else `messageID`.
+- **Single writer:** the new job is a writer and a job with this
+  `parentSessionID`, `isolation: "worktree"` and status `running` exists →
+  "<Agent> is already changing code for this chat (<job name>); wait for its
+  result". (Governs handoffs only; a user's own `@agent`, resume or delegate is
+  not limited.)
+- **Turn cap:** ≥ 3 jobs with this `parentSessionID`, `requestedBy: "manta"`
+  and the same `turnKey` (any status, continuations included) → "Too many
+  handoffs for one request; finish or ask the user".
+- Tests: two concurrent writer handoffs → one starts; four concurrent read-only
+  handoffs in one turn → three start.
+
+**No pull requests:** handoff jobs (new and continued) carry `allowPr: false`;
+the job prompt then replaces the "You may open a draft pull request" sentence
+with "Do not open pull requests; the lead and the user decide what ships".
+`resumeJob` and `continueJob` honour the persisted flag when they rebuild
+prompts. This is an instruction, not an enforcement (the shell grants are
+unchanged) — say so in a code comment.
+
+**continueJob:** when set, the job must be this parent's finished job of the
+same agent with `requestedBy: "manta"` (else "That task can't be continued from
+here"). The server calls `delegate.continueJob(id, {prompt: brief, sessionID,
+admit, name: requestTitle(title), request: title, requestedBy: "manta",
+turnKey})` — `continueJob` gains those optional fields and writes them on the
+successor (else it inherits the old ones). Admission uses the STORED job's
+`isolation`. The approval card does not reappear for a continuation (the
+session keeps its approved ruleset).
+
+**New handoff** otherwise reuses the Phase 1 dispatch builders: prompt =
+`brief`, then the seat brief, then the recent-conversation excerpt; `request:
+title`, `requestedBy: "manta"`, `turnKey`, `name: requestTitle(title)`,
+`agentName`. The job view exposes `requestedBy` like `agentName`.
+`agents:dispatch` (user `@agent`) is unchanged except refusing a target with `role === "lead"`.
 
 ## 6. Autonomy seam — `src/server/autonomy.mjs` (new, pure)
 
@@ -253,10 +317,10 @@ user's settings; nothing else changes.
 
 ## 8. Routines run as an agent
 
-- Routine input/record gain `agent: string | null` (slug). Types live in
-  `src/shared/routines.ts` (`Routine`, `RoutineInput`), committed by the
-  orchestrator. On update: omitted = unchanged, `null` = clear (also in the AI
-  tool schema). Validation on
+- Types (in `src/shared/routines.ts`, committed by the orchestrator):
+  `Routine.agent: string | null` (slug; `null` = none, also for old records),
+  `RoutineInput.agent?: string | null`. On update: omitted = unchanged,
+  `null` = clear. The AI tool schema's `agent` is optional and nullable. Validation on
   create/update: null/absent ok; unknown slug, invalid agent, or `LEAD_SLUG`
   → error "No agent named @<slug>". `routineWire` exposes it.
 - Run start (`routines.mjs` session create): when `agent` is set and the agent
@@ -265,8 +329,12 @@ user's settings; nothing else changes.
   routine directory's project (`registry.identify`) when present. If the agent
   became invalid since, run without it and add one line to the run prompt:
   "(Agent @<slug> is unavailable; running as the default agent.)".
-  The crash-recovery resend (`routines.mjs` ~1579) must reuse the same prepared
-  opening prompt (seat brief included), not rebuild it without the brief.
+  The run record persists the resolved `agentKey` (string | null) and the
+  prepared opening text (server-only fields, stripped by `runWire`) BEFORE the
+  session is created; the crash-recovery resend (`routines.mjs` ~1588) uses
+  those persisted values, never a rebuild from the current routine or brief.
+  Test: recovery after the routine's agent or the seat brief changed still
+  sends the original opening.
   Access (`read`/`edit`) and worktree rules stay the routine's, not the agent's.
 - AI tools (`tools/routines.ts` `routine_create` / `routine_update`): optional
   `agent` string arg passed through.
@@ -276,9 +344,12 @@ user's settings; nothing else changes.
 
 ## 9. Renderer (small)
 
-- `AgentsSection.tsx`: the lead row first with a "lead" tag (existing `Tag`
-  primitive); click opens its direct chat (`agents:open-chat`; server: for the
-  lead, `createSession` with NO agent — the default agent, led by the hook).
+- `AgentsSection.tsx`: the valid lead's row (`role === "lead"`, no `error`)
+  first with a "lead" tag (existing `Tag` primitive); click opens its direct
+  chat (`agents:open-chat`; server: for the lead, `createSession` with NO
+  agent — the default agent, led by the hook). Rows stay keyed by slug (one row
+  per package; no synthetic rows). A row with `notice` shows it as a muted hint
+  line, like `error` but not styled as an error.
 - Typeahead / `pickAgentDispatch`: ignore `role === "lead"`.
 - Cards: when a job has `requestedBy === "manta"`, the request line reads
   `Manta asked: <request>` (the lead's display name from `usePackageAgents`,
@@ -313,15 +384,26 @@ changes; not part of `npm test`.
 ## 12. Tests (heavy suites on Freestyle)
 
 - `agents.test.mjs`: frontmatter `role/use_when/not_for` (valid, too long,
-  second lead → error); lead not compiled and removed from `.installed.json`;
-  `isLeadSession` truth table; `buildLeadBrief` content + byte stability
-  (same input → same text; sort order); handoff refusals (not lead, lead
-  target, single writer, turn cap, empty brief) and success input to
-  `startJob` (`request`, `requestedBy`, prompt order); dispatch refuses lead;
-  `openChat` for the lead creates a session without `agent`.
+  second lead → error); every shipped template parses; lead not compiled and
+  removed from `.installed.json`; upgrade collision (`manta` folder without
+  `role: lead` stays a dispatchable specialist with `notice`, brief empty);
+  `classifySession` truth table incl. a finished managed job's child, an
+  unreadable jobs store → "unknown", and a cold liveness index;
+  `buildLeadBrief` content + byte stability (same input → same text; sort
+  order) + a roster fixture with multi-line, fence-looking descriptions staying
+  inside the JSON block; handoff: invocation binding (missing part, mismatched
+  input, replay → refused), plan mode before approval, trust off → approval
+  card / decline, trust on → no card, read-only never asks, single writer and
+  turn cap under concurrency, `continueJob` admission + new title, `allowPr`
+  persisted; dispatch refuses the lead; `openChat` for the lead creates a
+  session without `agent`.
 - `autonomy.test.mjs`: decide defaults, unknown kind → ask, render stable.
-- `routines.test.mjs`: agent validation; run passes `agent-<slug>` + brief;
-  invalid-since agent falls back with the note.
+- `routines.test.mjs`: agent validation, set + clear (`null`); run passes
+  `agent-<slug>` + brief; invalid-since agent falls back with the note;
+  recovery resend uses the persisted opening.
+- `delegate.test.mjs`: `loadJobsStrict` (missing → [], corrupt → throws);
+  `admit` on `startJob` and `continueJob`; `allowPr:false` prompt on start,
+  continue and resume.
 - Plugin: `lead.ts` unit tests with injected fetch (cache, empty, error →
   nothing, compaction forget); `tools/agents.ts` relays ok/refused text;
   `plugin-pack.test.mjs` updated if it lists tools.
@@ -340,6 +422,6 @@ changes; not part of `npm test`.
   `hooks/useTypeahead.ts`, `BackgroundCards.tsx`, `backgroundRun.ts`,
   `RoutineEditor.tsx` (+ routines list file), `NewSessionScreen.tsx` (lead
   excluded from suggestions), renderer tests, demo stubs.
-- **Orchestrator commits first:** `src/shared/types.ts` (`AgentInfo` fields,
-  `DelegateJob` fields), `src/shared/routines.ts` (routine `agent`),
+- **Orchestrator commits first:** `src/shared/types.ts` (`AgentInfo` fields
+  incl. `notice`, `DelegateJob` `agentName?`/`request?`/`requestedBy?`), `src/shared/routines.ts` (routine `agent`),
   `src/shared/agentsShared.mjs` (`LEAD_SLUG`).
