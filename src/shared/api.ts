@@ -40,6 +40,9 @@ import type {
   DelegateJob,
   DelegateApproval,
   DelegateJobForSession,
+  AgentInfo,
+  AgentCreateInput,
+  AgentDispatchInput,
   DelegateApprovalTool,
   DesktopNotifyPayload,
   OpencodeAgent,
@@ -1978,6 +1981,11 @@ export interface Api {
   // WS02: is this session a read-only background job, and the bar's copy (the box decides).
   delegateJobForSession(sessionId: string): Promise<DelegateJobForSession>;
   delegateDecline(id: string): Promise<{ ok: boolean }>;
+  // Agents, Phase 1.
+  agentsList(): Promise<AgentInfo[]>;
+  agentsCreate(input: AgentCreateInput): Promise<AgentInfo>;
+  agentsDispatch(input: AgentDispatchInput): Promise<{ jobId: string }>;
+  agentsOpenChat(input: { slug: string }): Promise<{ tmuxSession: string; windowIndex: number }>;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
   // status/activity changes (created, running, finished, stopped, deleted). The
   // sidebar subscribes so a new job nests under its parent within ~1s instead

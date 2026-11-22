@@ -24,6 +24,8 @@ import {
   continueJob,
   normalizeJobRuleset,
   buildJobPrompt,
+  buildReadOnlyAgentRuleset,
+  listJobs,
   MAX_RUNNING_JOBS,
   CAP_ERROR,
 } from "./delegate.mjs";
@@ -287,6 +289,101 @@ test("C1 startJob: a non-repository job (no worktree) is NOT moved", async () =>
   assert.equal(w.calls.window[0].worktreePath, undefined);
   assert.equal(w.calls.send.length, 1);
   assert.doesNotMatch(w.calls.send[0].text, /isolated git worktree/);
+});
+
+// ---- agent jobs (agents phase 1): `agent`, `isolation`, `agentName`, `request` ----
+
+const READ_ONLY_KEYS = ["read", "glob", "grep", "list", "webfetch", "websearch", "todowrite", "progress_report", "external_directory"];
+
+test("agent job, isolation none: no worktree, no move, the agent reaches create AND send, a read-only ruleset, no commit advice", async () => {
+  const w = world();
+  const id = await start(w, {
+    agent: "agent-scout",
+    isolation: "none",
+    agentDir: "/home/x/.manta/agents/scout",
+    agentName: "Scout",
+    request: "@scout what does the parser do?",
+  });
+  const job = w.job(id);
+  assert.deepEqual(w.calls.addWorktree, [], "no worktree is even attempted");
+  assert.deepEqual(w.calls.move, [], "created at the parent's folder, never moved");
+  assert.equal(job.worktree, null);
+  assert.equal(job.executionDirectory, REPO);
+  assert.equal(w.calls.window[0].cwd, REPO);
+  assert.equal(w.calls.window[0].worktreePath, undefined);
+  assert.equal(w.calls.create[0].agent, "agent-scout");
+  assert.equal(w.calls.send[0].agent, "agent-scout");
+  assert.equal(job.agent, "agent-scout");
+  assert.equal(job.agentName, "Scout");
+  assert.equal(job.request, "@scout what does the parser do?");
+
+  const rules = w.calls.create[0].permission;
+  assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" }, "deny by default, FIRST (last match wins)");
+  assert.deepEqual(rules.at(-1), { permission: "question", pattern: "*", action: "deny" });
+  const allowed = rules.filter((r) => r.action === "allow").map((r) => r.permission);
+  assert.deepEqual([...new Set(allowed)].sort(), [...READ_ONLY_KEYS].sort());
+  assert.ok(!allowed.includes("bash") && !allowed.includes("edit"), "no bash, no edit");
+  assert.ok(rules.some((r) => r.permission === "external_directory" && r.pattern === "/home/x/.manta/agents/scout/**" && r.action === "allow"));
+
+  const text = w.calls.send[0].text;
+  assert.doesNotMatch(text, /Commit your work/);
+  assert.doesNotMatch(text, /isolated git worktree/);
+  assert.match(text, /cannot edit files or run commands/);
+  assert.match(text, /progress_report/);
+});
+
+test("agent job, isolation worktree: fails closed with no repository (nothing created), otherwise a worktree, the agent and an editing ruleset", async () => {
+  const none = world({ git: false });
+  const res = await startJob(input({ agent: "agent-dev", isolation: "worktree" }), none.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "worktree_failed");
+  assert.deepEqual([none.calls.create, none.calls.move, none.calls.window, none.calls.send].map((c) => c.length), [0, 0, 0, 0]);
+  assert.equal(none.jobs.length, 0);
+
+  const w = world();
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", agentName: "Dev", request: "fix it" });
+  const job = w.job(id);
+  assert.equal(job.worktree, WT);
+  assert.equal(w.calls.create[0].agent, "agent-dev");
+  assert.deepEqual(w.calls.move, [{ sid: job.childSessionID, directory: WT }]);
+  const rules = w.calls.create[0].permission;
+  assert.equal(rules[0].action, "deny");
+  assert.ok(rules.some((r) => r.permission === "bash" && r.action === "allow"));
+  assert.ok(rules.some((r) => r.permission === "edit" && r.action === "allow"));
+  assert.ok(rules.some((r) => r.permission === "progress_report" && r.action === "allow"));
+  assert.match(w.calls.send[0].text, /Commit your work as you go/);
+  assert.match(w.calls.send[0].text, new RegExp(`isolated git worktree at ${WT}`));
+});
+
+test("agent job: a caller-supplied permission ruleset wins; plain jobs are unchanged (build agent, no agentName / request)", async () => {
+  const w = world();
+  const custom = [{ permission: "*", pattern: "**", action: "deny" }, { permission: "read", pattern: "**", action: "allow" }];
+  await start(w, { agent: "agent-x", isolation: "none", permission: custom });
+  assert.deepEqual(w.calls.create[0].permission, [...custom, { permission: "question", pattern: "*", action: "deny" }]);
+
+  const plain = world();
+  const id = await start(plain);
+  const job = plain.job(id);
+  assert.equal(job.agent, "build");
+  assert.ok(!("agentName" in job) && !("request" in job));
+  assert.match(plain.calls.send[0].text, /Commit your work as you go/);
+});
+
+test("agent job: agentName and request reach the client through listJobs", async () => {
+  const w = world();
+  await start(w, { agent: "agent-scout", isolation: "none", agentName: "Scout", request: "look into X" });
+  const [row] = await listJobs({ sessionID: PARENT }, { load: w.deps.load, readProgress: async () => null });
+  assert.equal(row.agentName, "Scout");
+  assert.equal(row.request, "look into X");
+  assert.equal(row.agent, "agent-scout");
+});
+
+test("buildReadOnlyAgentRuleset: no agent folder grant without agentDir; the folder grant is a glob under it", () => {
+  const bare = buildReadOnlyAgentRuleset({ home: "/h" });
+  assert.ok(!bare.some((r) => r.permission === "external_directory" && r.pattern.includes(".manta")));
+  assert.ok(bare.some((r) => r.permission === "external_directory" && r.pattern === "/h/.local/share/opencode/tool-output/*"));
+  const withDir = buildReadOnlyAgentRuleset({ home: "/h", agentDir: "/h/.manta/agents/a/" });
+  assert.deepEqual(withDir.at(-1), { permission: "external_directory", pattern: "/h/.manta/agents/a/**", action: "allow" });
 });
 
 test("C1 startJob: isolationRequired + a worktree failure refuses BEFORE anything is created", async () => {

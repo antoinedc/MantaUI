@@ -1348,6 +1348,11 @@ export const httpApi: Api = {
   // P6: focus (or re-create) a background job's chat window and say where it is.
   delegateOpenSession: (input) => rpc(IPC.delegateOpenSession, input),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
+  // Agents, Phase 1: the box's agent packages, a task for one, its direct chat.
+  agentsList: () => rpc(IPC.agentsList),
+  agentsCreate: (input) => rpc(IPC.agentsCreate, input),
+  agentsDispatch: (input) => rpc(IPC.agentsDispatch, input),
+  agentsOpenChat: (input) => rpc(IPC.agentsOpenChat, input),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
   // pending-approvals for the viewed parent session and shows ONE card.
   delegatePendingApprovals: (sessionId) =>

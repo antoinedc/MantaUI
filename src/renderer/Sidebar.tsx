@@ -42,6 +42,8 @@ import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
+import { AgentsSection } from "./AgentsSection";
+import { AGENTS_TMUX_SESSION } from "./agentDispatch";
 import { shouldShowStoppedMarker, unarmedStoppedCount } from "./usageResume";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
@@ -127,6 +129,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   // destructure re-renders the whole sidebar tree (and the App render that
   // hosts it) on EVERY store write, incl. each streaming transcript splice.
   const projects = useStore((s) => s.projects);
+  // The agents' own tmux session ("manta-agents") holds their direct chats; it
+  // stays in the store so selecting one works, but is not a workspace to list.
+  const workspaceProjects = useMemo(
+    () => projects.filter((p) => p.tmuxSession !== AGENTS_TMUX_SESSION),
+    [projects],
+  );
   const activeProjectName = useStore((s) => s.activeProjectName);
   const activeWindowByProject = useStore((s) => s.activeWindowByProject);
   const status = useStore((s) => s.status);
@@ -416,7 +424,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const navKeys = useMemo(() => {
     const keys: string[] = [];
     for (const r of pinnedRows) keys.push(`pin:${r.pinId}`);
-    for (const p of projects) {
+    for (const p of workspaceProjects) {
       keys.push(`group:${p.tmuxSession}`);
       if (collapsed.has(p.tmuxSession)) continue;
       for (const g of rail.groups.get(p.tmuxSession) ?? []) {
@@ -431,7 +439,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       }
     }
     return keys;
-  }, [pinnedRows, projects, collapsed, rail]);
+  }, [pinnedRows, workspaceProjects, collapsed, rail]);
 
   // Opening a window-less row: the box makes (or finds) its window, then we select it. One open per row at a time.
   const openingRef = useRef(new Set<string>());
@@ -466,6 +474,17 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       openingRef.current.delete(id);
       setOpening(new Set(openingRef.current));
     }
+  };
+
+  // An agent's direct chat: the box made (or found) its window; re-list the tree
+  // (the window may be new), select it, or say why it isn't there.
+  const openAgentWindow = async (tmuxSession: string, windowIndex: number) => {
+    await refresh();
+    const target = useStore
+      .getState()
+      .projects.find((x) => x.tmuxSession === tmuxSession && x.windows.some((w) => w.index === windowIndex));
+    if (!target) throw new Error("its chat window did not appear — try again");
+    await activateWindow(target, windowIndex);
   };
 
   // Reset focus if it falls off the list.
@@ -839,6 +858,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             )}
           </button>
         </div>
+        <AgentsSection onOpenWindow={openAgentWindow} />
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts whose mode is "new-project" live directly beneath
             the New workspace row that created them — they belong to no project.
@@ -863,7 +883,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           </div>
         )}
 
-        {projects.length === 0 && (
+        {workspaceProjects.length === 0 && (
           <div className="px-2 py-3 text-meta text-text-faint">
             No projects yet. Click + or press {MOD_KEY}N.
           </div>
@@ -924,7 +944,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           </div>
         )}
 
-        {projects.map((p) => {
+        {workspaceProjects.map((p) => {
           const isCollapsed = collapsed.has(p.tmuxSession);
           const activeWinIdx = activeWindowByProject[p.tmuxSession];
           const isProjectActive = activeProjectName === p.tmuxSession;

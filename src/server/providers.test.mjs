@@ -1055,6 +1055,16 @@ describe("readAgentBlocks", () => {
     const result = readAgentBlocks(cfg);
     assert.deepEqual(result, []);
   });
+
+  it("ignores agent-package blocks (agent-*), even when they carry a model", () => {
+    const cfg = {
+      agent: {
+        fast: { model: "anthropic/claude-haiku-4", description: "Fast", mode: "subagent" },
+        "agent-dev": { model: "anthropic/claude-sonnet-5-5", description: "Dev", mode: "all" },
+      },
+    };
+    assert.deepEqual(readAgentBlocks(cfg).map((a) => a.name), ["fast"]);
+  });
 });
 
 describe("getSubagents", () => {
@@ -1189,6 +1199,20 @@ describe("syncSubagents", () => {
     );
     assert.deepEqual(calls, [{ upsert: [], remove: ["opus"] }]);
     assert.deepEqual(readAgentBlocks(cfg).map(a => a.name), ["opus"]);
+  });
+
+  it("never removes or counts an agent-package block that shares a model", async () => {
+    const calls = [];
+    const cfg = { agent: { "agent-dev": { model: "anthropic/claude-opus-4", mode: "all" } } };
+    await syncSubagents(
+      { models: [opus], deactivated: ["anthropic/claude-opus-4"] },
+      async () => cfg,
+      async ops => { calls.push(ops); return { ok: true }; },
+    );
+    assert.deepEqual(calls, []);
+    const r = await syncSubagents({ models: [opus] }, async () => cfg, async ops => { calls.push(ops); return { ok: true }; });
+    assert.equal(calls[0].upsert[0].name, "opus");
+    assert.ok(r.every((a) => !a.name.startsWith("agent-")));
   });
 
   it("registers a worker even when a primary role already uses its model", async () => {

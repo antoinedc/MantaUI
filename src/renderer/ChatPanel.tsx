@@ -123,6 +123,8 @@ import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, ScheduledJob, VoiceNoteRecord } from "../shared/types";
 import { planBusySend, shouldClearDraft } from "./inboxState";
+import { pickAgentDispatch } from "./agentDispatch";
+import { usePackageAgents } from "./packageAgents";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
 import {
@@ -1621,6 +1623,12 @@ export function ChatPanel({
   // order the user sent them), but none waits for the previous one's round
   // trip before showing: each appears in the pending card at once.
   const busyChainRef = useRef<Promise<void>>(Promise.resolve());
+  // The box's agent packages, read at submit time (via the ref, so submit does not
+  // re-rotate when the list refreshes), and one "@agent" dispatch in flight at a time.
+  const { agents: packageAgents } = usePackageAgents();
+  const packageAgentsRef = useRef(packageAgents);
+  packageAgentsRef.current = packageAgents;
+  const agentDispatchBusyRef = useRef(false);
   const sendWhileBusy = useCallback(async (args: {
     text: string;
     /** The composer text being submitted; null when the text came from an override (voice, /clear bridge), so there is no composer draft to clear. */
@@ -1795,6 +1803,38 @@ export function ChatPanel({
     const typed = (textOverride ?? input).trim();
     const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
+    // "@agent …" (Agents Phase 1): the request becomes a task for that agent,
+    // NOT a prompt to this chat's model. Decided before the busy branch and
+    // before any optimistic row, so none of those paths ever sees it. Slash
+    // commands keep their own paths.
+    if (!splitSlashText(text)) {
+      const pick = pickAgentDispatch(text, agentMentions, packageAgentsRef.current);
+      if (pick && "error" in pick) {
+        setSendError(pick.error);
+        return;
+      }
+      if (pick) {
+        if (agentDispatchBusyRef.current) return;
+        agentDispatchBusyRef.current = true;
+        setSendError(null);
+        try {
+          await window.api.agentsDispatch({ sessionId, directory: cwd ?? "", slug: pick.slug, text });
+          appendPromptHistory(tmuxSession, windowIndex, text);
+          setHistoryEpoch((e) => e + 1);
+          // Clear only what was submitted: newer text the user typed meanwhile stays.
+          if (textOverride === undefined && shouldClearDraft(input, inputRef.current?.value ?? "")) {
+            setInput("");
+            setAgentMentions([]);
+          }
+        } catch (e) {
+          // Not started: the draft stays, the reason is shown.
+          setSendError(`Couldn't start the task: ${String((e as Error)?.message ?? e)}`);
+        } finally {
+          agentDispatchBusyRef.current = false;
+        }
+        return;
+      }
+    }
     // Resolve the agent at SUBMIT time (not queue time) — a mode flipped
     // mid-turn must apply to the turn that actually runs (BET-949). Only send
     // it when plan is genuinely available AND on.
@@ -2078,7 +2118,7 @@ export function ChatPanel({
     // (clear/fork/compact) are read via their ref mirror below (declared after
     // submit in this file — the established commandsRef pattern) so submit
     // always sees their current value without them re-rotating this callback.
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted, sendWhileBusy, sendBackgroundCommand, unsupportedAttachmentsMessage]);
+  }, [input, running, sessionId, cwd, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted, sendWhileBusy, sendBackgroundCommand, unsupportedAttachmentsMessage]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array

@@ -2070,6 +2070,8 @@ export type PlanToggleState = {
   available: boolean;
   on: boolean;
   loading?: boolean;
+  /** The chip is not rendered at all (an agent's direct chat: its agent is fixed). */
+  hidden?: boolean;
   agent?: string;
   title: string;
 };

@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "../ChatPanel";
 import { refreshAgentCatalog } from "../agentCatalog";
+import { resetPackageAgentsForTest } from "../packageAgents";
 import {
   installMockApi,
   resetStore,
@@ -27,6 +28,17 @@ const PROPS = {
   cwd: "/home/dev/projects/x",
   isActive: true,
 };
+
+async function typeInto(textarea: HTMLTextAreaElement, text: string) {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(textarea, text);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.selectionStart = text.length;
+    textarea.selectionEnd = text.length;
+    textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
+  });
+}
 
 describe("useTypeahead via ChatPanel", () => {
   let h: Harness | null = null;
@@ -55,18 +67,7 @@ describe("useTypeahead via ChatPanel", () => {
     const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
 
-    // Type "/" into the textarea
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(textarea, "/");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      textarea.selectionStart = 1;
-      textarea.selectionEnd = 1;
-      textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
-    });
+    await typeInto(textarea, "/");
     await h.flush();
 
     // The typeahead popup should be visible (it renders as a div with class)
@@ -82,18 +83,7 @@ describe("useTypeahead via ChatPanel", () => {
     const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
 
-    // Type "@" into the textarea
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(textarea, "@");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      textarea.selectionStart = 1;
-      textarea.selectionEnd = 1;
-      textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
-    });
+    await typeInto(textarea, "@");
     await h.flush();
 
     // The typeahead popup should be visible
@@ -249,5 +239,149 @@ describe("useTypeahead via ChatPanel", () => {
     const ran = api.calls.opencodeRunCommand ?? [];
     expect(ran).toHaveLength(1);
     expect((ran[0][0] as { command: string }).command).toBe("review");
+  });
+});
+
+// ---- package agents (Agents Phase 1) --------------------------------------
+describe("package agents via ChatPanel", () => {
+  let h: Harness | null = null;
+  const DEV = {
+    slug: "dev",
+    name: "Dev",
+    description: "Writes and fixes code",
+    isolation: "worktree" as const,
+    model: null,
+    color: null,
+    builtIn: true,
+  };
+  const BAD = { ...DEV, slug: "bad", name: "Bad", builtIn: false, error: "no agent.md" };
+
+  beforeEach(() => {
+    resetStore();
+  });
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const ta = () => h!.container.querySelector("textarea") as HTMLTextAreaElement;
+  async function typeText(text: string) {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(ta(), text);
+      ta().selectionStart = text.length;
+      ta().selectionEnd = text.length;
+      ta().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await h!.flush();
+  }
+  async function press(key: string) {
+    await act(async () => {
+      ta().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+    await h!.flush();
+  }
+  const rowFor = (label: string) =>
+    Array.from(h!.container.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(label)) as
+      | HTMLButtonElement
+      | undefined;
+
+  async function setup(extra: Record<string, unknown> = {}) {
+    const { api } = installMockApi({
+      agentsList: () => Promise.resolve([DEV, BAD]),
+      agentsDispatch: () => Promise.resolve({ jobId: "job1" }),
+      opencodeReferences: () => Promise.resolve([{ name: "docs", description: "d" }]),
+      opencodeModels: () =>
+        Promise.resolve([{ id: "m", providerID: "p", name: "M", limit: { context: 1000, output: 100 } }]),
+      ...extra,
+    });
+    resetPackageAgentsForTest();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await h.flush();
+    // Boxed: the mock api is a Proxy that answers `then`, so returning it directly hangs.
+    return { api };
+  }
+
+  async function pickDev() {
+    await typeText("@");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    await h!.flush();
+    const row = rowFor("@dev");
+    expect(row).toBeTruthy();
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(ta().value).toBe("@dev ");
+  }
+
+  it("a plain @ lists valid package agents ahead of references and files; invalid ones are not offered", async () => {
+    await setup();
+    await typeText("@");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    await h!.flush();
+    const text = h!.text();
+    expect(text).toContain("@dev");
+    expect(text).toContain("@docs");
+    expect(text).not.toContain("@bad");
+    expect(text.indexOf("@dev")).toBeLessThan(text.indexOf("@docs"));
+  });
+
+  it("@@ lists package agents too", async () => {
+    await setup();
+    await typeText("@@");
+    expect(h!.text()).toContain("@dev");
+  });
+
+  it("Enter on a fully typed @dev completes the mention instead of sending", async () => {
+    const { api } = await setup();
+    await typeText("@dev");
+    await press("Enter");
+    expect(ta().value).toBe("@dev ");
+    expect(api.calls.agentsDispatch ?? []).toHaveLength(0);
+    expect(api.calls.opencodePrompt ?? []).toHaveLength(0);
+  });
+
+  it("sends a picked @dev message as a task for the agent, never as a prompt, and clears the composer", async () => {
+    const { api } = await setup();
+    await pickDev();
+    await typeText("@dev fix the login bug");
+    await press("Enter");
+    const calls = api.calls.agentsDispatch ?? [];
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toEqual({
+      sessionId: "ses_test",
+      directory: "/home/dev/projects/x",
+      slug: "dev",
+      text: "@dev fix the login bug",
+    });
+    expect(api.calls.opencodePrompt ?? []).toHaveLength(0);
+    expect(ta().value).toBe("");
+  });
+
+  it("keeps the draft and shows the reason when the task can't start", async () => {
+    const { api } = await setup({ agentsDispatch: () => Promise.reject(new Error("5 background jobs are already running")) });
+    await pickDev();
+    await typeText("@dev fix it");
+    await press("Enter");
+    expect((api.calls.agentsDispatch ?? []).length).toBe(1);
+    expect(ta().value).toBe("@dev fix it");
+    expect(h!.text()).toContain("5 background jobs are already running");
+    expect(api.calls.opencodePrompt ?? []).toHaveLength(0);
+  });
+
+  it("a message without a picked package agent goes to the chat as usual", async () => {
+    const { api } = await setup();
+    await typeText("fix the login bug");
+    await press("Enter");
+    expect(api.calls.agentsDispatch ?? []).toHaveLength(0);
+    expect(api.calls.opencodePrompt ?? []).toHaveLength(1);
   });
 });

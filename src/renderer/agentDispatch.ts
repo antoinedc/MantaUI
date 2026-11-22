@@ -1,0 +1,61 @@
+// Pure logic for "@agent" mentions in a project chat (Agents Phase 1, spec §8).
+// No React: unit-tested in agentDispatch.test.ts.
+
+import type { AgentInfo } from "../shared/types";
+import { resolveAgentMentions, type AgentMention } from "./chatShared";
+
+/** The tmux session that holds every agent's direct chat window (never listed as a workspace). */
+export const AGENTS_TMUX_SESSION = "manta-agents";
+
+/** The OpenCode agent key a package agent is compiled to (server side). Used to hide them from the opencode-agent list. */
+export const PACKAGE_AGENT_PREFIX = "agent-";
+
+export const ONE_AGENT_ERROR = "Mention one agent per message for now";
+
+/** An agent a message can be dispatched to: its package parsed. */
+export function usableAgents(agents: ReadonlyArray<AgentInfo> | null | undefined): AgentInfo[] {
+  return (agents ?? []).filter((a) => !a.error);
+}
+
+export type AgentDispatchPick = null | { slug: string } | { error: string };
+
+/**
+ * Does this message go to a package agent? `null` = no (the normal send path).
+ * Mentions are resolved against the text actually being sent, so a token the
+ * user deleted after picking it never dispatches. More than one distinct
+ * package agent is refused (Phase 1: one agent per message).
+ */
+export function pickAgentDispatch(
+  text: string,
+  mentions: ReadonlyArray<AgentMention>,
+  agents: ReadonlyArray<AgentInfo> | null | undefined,
+): AgentDispatchPick {
+  const slugs = new Set(usableAgents(agents).map((a) => a.slug));
+  if (slugs.size === 0) return null;
+  const hit = new Set<string>();
+  for (const m of resolveAgentMentions(text, mentions as AgentMention[])) {
+    if (slugs.has(m.name)) hit.add(m.name);
+  }
+  // A hand-typed "@slug" (not picked from the popup) counts too.
+  for (const m of text.matchAll(/(?:^|\s)@([a-z][a-z0-9-]{0,30})(?![a-z0-9-])/g)) {
+    if (slugs.has(m[1])) hit.add(m[1]);
+  }
+  if (hit.size === 0) return null;
+  if (hit.size > 1) return { error: ONE_AGENT_ERROR };
+  return { slug: [...hit][0] };
+}
+
+/** The display name for an `agent-<slug>` OpenCode agent id (a result card's `agent`), else null when it is not a package agent. */
+export function packageAgentDisplayName(
+  opencodeAgent: string | undefined,
+  agents: ReadonlyArray<AgentInfo> | null | undefined,
+): string | null {
+  if (!opencodeAgent || !opencodeAgent.startsWith(PACKAGE_AGENT_PREFIX)) return null;
+  const slug = opencodeAgent.slice(PACKAGE_AGENT_PREFIX.length);
+  return (agents ?? []).find((a) => a.slug === slug)?.name ?? slug;
+}
+
+/** Initial letter + colour for an agent row (the agent's own colour, else a neutral). */
+export function agentInitial(a: Pick<AgentInfo, "name" | "slug">): string {
+  return (a.name || a.slug).trim().charAt(0).toUpperCase() || "?";
+}

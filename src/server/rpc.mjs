@@ -580,6 +580,8 @@ export function buildHandlers({
   // WS02 (SF-4): the box's reading of background-job records (read-only refusal,
   // job view, list labels, approve rule check). Null when not wired (tests).
   delegateView = null,
+  // Agents engine (src/server/agents.mjs). Null when not wired (tests): the `agents:*` channels then answer a sentence.
+  agents = null,
   progress,
   voiceNotes,
   contextLimitFor = () => null,
@@ -989,6 +991,22 @@ export function buildHandlers({
   const needRoutines = () => {
     if (!routines) throw Object.assign(new Error("Routines aren't available on this box yet."), { rpcStatus: 503 });
     return routines;
+  };
+
+  // Agents: a refusal that already carries an HTTP status (an AgentError, a read-only job) passes through; anything
+  // else is logged and answered with a safe sentence — an fs error here would put a file path on the user's screen.
+  const needAgents = () => {
+    if (!agents) throw Object.assign(new Error("Agents aren't available on this box yet."), { rpcStatus: 503 });
+    return agents;
+  };
+  const agentsCall = async (route, fn) => {
+    try {
+      return await fn(needAgents());
+    } catch (e) {
+      if (typeof e?.rpcStatus === "number") throw e;
+      console.warn(`[agents] ${route} failed:`, e?.message ?? e);
+      throw Object.assign(new Error("Something went wrong on the box — try again."), { rpcStatus: 500 });
+    }
   };
 
   const handlers = {
@@ -2832,6 +2850,17 @@ export function buildHandlers({
 
     // ---- shared knowledge (src/server/knowledge/; spec docs/superpowers/specs/2026-11-16-shared-knowledge.md §11.6) ----
     ...buildKnowledgeChannels(knowledge),
+
+    // ---- agents, Phase 1 (src/server/agents.mjs; wire types AgentInfo & co in src/shared/types.ts) ----
+    "agents:list": () => agentsCall("list", (a) => a.list()),
+    "agents:create": (input) => agentsCall("create", (a) => a.create(input)),
+    "agents:dispatch": (input) =>
+      agentsCall("dispatch", async (a) => {
+        // the chat's own folder when the client did not send it
+        const directory = input?.directory || (await sessionDirectoryOrUndefined(input?.sessionId)) || "";
+        return a.dispatch({ ...input, directory });
+      }),
+    "agents:open-chat": (input) => agentsCall("open-chat", (a) => a.openChat(input)),
 
     // ---- routines (manta-server owned; src/server/routines.mjs, spec §5.1) ----
     // Args/returns are the pinned wire contract in src/shared/routines.ts. A refusal is a

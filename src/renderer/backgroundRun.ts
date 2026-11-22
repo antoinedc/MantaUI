@@ -47,6 +47,9 @@ export type BackgroundJob = {
   completionOwner?: "manta" | "opencode";
   launchState?: "creating" | "submitting" | "running" | "uncertain";
   completionDelivery?: "pending" | "delivered" | "abandoned" | null;
+  /** Set when the job is a task for a named agent (Agents Phase 1): its display name and the user's request. */
+  agentName?: string;
+  request?: string;
 };
 
 /** P5: the shared `Api`'s run-command input (it carries `background`) and result (`void | { jobId }`). */
@@ -133,11 +136,20 @@ export function splitSlashText(text: string): { name: string; args: string } | n
 
 // `createdAt` is the job's start time: it anchors the card in the transcript
 // after the message that was current when the job started (anchorBackgroundCards).
+type CardBase = {
+  key: string;
+  jobId: string;
+  name: string;
+  createdAt: number;
+  /** A task for a named agent (Agents Phase 1): the label and the user's request, quoted on the card. */
+  agentName?: string;
+  request?: string;
+};
 export type BackgroundCard =
-  | { kind: "running"; key: string; jobId: string; name: string; createdAt: number; paused: boolean }
-  | { kind: "uncertain"; key: string; jobId: string; name: string; createdAt: number }
-  | { kind: "failed"; key: string; jobId: string; name: string; createdAt: number; error: string }
-  | { kind: "settling"; key: string; jobId: string; name: string; createdAt: number };
+  | ({ kind: "running"; paused: boolean } & CardBase)
+  | ({ kind: "uncertain" } & CardBase)
+  | ({ kind: "failed"; error: string } & CardBase)
+  | ({ kind: "settling" } & CardBase);
 
 export function isBackgroundResultPart(p: OpencodePart): p is BackgroundResultPart {
   return p.type === "background-result";
@@ -211,7 +223,14 @@ export function deriveBackgroundCards(
   for (const job of mine) {
     if (finished.jobIds.has(job.id)) continue;
     if (job.childSessionID && finished.childIds.has(job.childSessionID)) continue;
-    const base = { key: job.id, jobId: job.id, name: job.name, createdAt: job.createdAt };
+    const base: CardBase = {
+      key: job.id,
+      jobId: job.id,
+      name: job.name,
+      createdAt: job.createdAt,
+      ...(job.agentName ? { agentName: job.agentName } : {}),
+      ...(job.request ? { request: job.request } : {}),
+    };
     if (LIVE.has(job.status)) {
       cards.push(
         job.launchState === "uncertain"
@@ -294,6 +313,19 @@ export function resultStateLabel(state: string, endedBlocked?: boolean): string 
 /** The card's name: the command ("/review HEAD~1") when known, else the agent, else a plain label. */
 export function resultTitle(part: Pick<BackgroundResultPart, "name" | "agent">): string {
   return part.name || (part.agent ? `${part.agent} subagent` : "Background session");
+}
+
+/**
+ * The finished card's title. A task for a package agent (`part.agent` is
+ * `agent-<slug>`) is titled with the agent's display name, followed by the task
+ * name; everything else keeps `resultTitle`.
+ */
+export function resultTitleFor(
+  part: Pick<BackgroundResultPart, "name" | "agent">,
+  agentDisplayName: string | null,
+): string {
+  if (!agentDisplayName) return resultTitle(part);
+  return part.name ? `${agentDisplayName} · ${part.name}` : agentDisplayName;
 }
 
 // ===== Open session =====

@@ -68,6 +68,7 @@ import {
   writePlanSaved,
 } from "../chatShared";
 import { resolvePlanToggle, shouldClearMissingModel, type PlanToggleState } from "../chatUtils";
+import { AGENTS_TMUX_SESSION } from "../agentDispatch";
 import { isPlanAgent } from "../../shared/planMode.mjs";
 import { useAgentCatalog } from "../agentCatalog";
 import { useComposerAttachments } from "./useComposerAttachments";
@@ -508,7 +509,16 @@ export function useComposerController(config: ComposerControllerConfig): Compose
   // ===== Per-session plan mode (BET-949) =====
   const [planOn, setPlanOn] = useState<boolean>(() => readPlanSaved(sessionId));
   const { agents } = useAgentCatalog();
-  const plan = useMemo(() => resolvePlanToggle(agents, planOn), [agents, planOn]);
+  // An agent's direct chat has a fixed OpenCode agent (`agent-<slug>`): the
+  // plan toggle would reset the session's agent to `build`, so it is not offered.
+  const isAgentChat = historyScope.tmuxSession === AGENTS_TMUX_SESSION;
+  const plan = useMemo<PlanToggleState>(
+    () =>
+      isAgentChat
+        ? { available: false, on: false, hidden: true, title: "" }
+        : resolvePlanToggle(agents, planOn),
+    [agents, planOn, isAgentChat],
+  );
   const togglePlan = useCallback(() => {
     const next = !planOn;
     setPlanOn(next);
@@ -621,6 +631,8 @@ export function useComposerController(config: ComposerControllerConfig): Compose
     if (typeahead.mode === "agent") return false;
     const idx = Math.min(typeahead.selectedIdx, typeaheadRows.length - 1);
     const row = typeaheadRows[idx];
+    // Same for an agent row offered on a plain `@` (a package agent).
+    if (row.kind === "agent") return false;
     return input.trim() === row.primary;
   }, [typeahead, typeaheadRows, input]);
 
