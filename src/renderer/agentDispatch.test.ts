@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import type { AgentInfo } from "../shared/types";
 import {
   agentMentionQuery,
+  leadAgent,
+  leadDisplayName,
+  routineAgents,
   matchAgents,
   insertAgentMention,
   agentInitial,
@@ -19,11 +22,44 @@ const agent = (slug: string, over: Partial<AgentInfo> = {}): AgentInfo => ({
   model: null,
   color: null,
   builtIn: false,
+  role: "specialist",
+  useWhen: null,
+  notFor: null,
+  notice: null,
   ...over,
 });
 const m = (name: string) => ({ id: `m-${name}`, name });
 
 const AGENTS = [agent("dev", { isolation: "worktree", builtIn: true }), agent("reviewer"), agent("broken", { error: "bad agent.md" })];
+
+const MANTA = agent("manta", { name: "Manta", role: "lead" });
+
+describe("the lead (Agents Phase 2)", () => {
+  const withLead = [MANTA, ...AGENTS];
+  it("is never offered as a dispatch target, in the typeahead helpers or by a typed @manta", () => {
+    expect(usableAgents(withLead).map((a) => a.slug)).toEqual(["dev", "reviewer"]);
+    expect(matchAgents(withLead, "ma")).toEqual([]);
+    expect(pickAgentDispatch("@manta do it", [], withLead)).toBeNull();
+    expect(pickAgentDispatch("@dev do it", [], withLead)).toEqual({ slug: "dev" });
+  });
+  it("a legacy specialist named manta stays dispatchable", () => {
+    const legacy = agent("manta", { notice: "Rename this folder to enable the Manta lead" });
+    expect(pickAgentDispatch("@manta hi", [], [legacy])).toEqual({ slug: "manta" });
+  });
+  it("leadAgent needs role lead and no error; leadDisplayName falls back to Manta", () => {
+    expect(leadAgent(withLead)?.slug).toBe("manta");
+    expect(leadAgent([agent("manta", { role: "lead", error: "Only the built-in Manta can lead" })])).toBeNull();
+    expect(leadAgent(null)).toBeNull();
+    expect(leadDisplayName(withLead)).toBe("Manta");
+    expect(leadDisplayName([agent("manta", { role: "lead", name: "Boss" })])).toBe("Boss");
+    expect(leadDisplayName(null)).toBe("Manta");
+    expect(leadDisplayName(AGENTS)).toBe("Manta");
+  });
+  it("routineAgents are the valid specialists only", () => {
+    expect(routineAgents([MANTA, ...AGENTS]).map((a) => a.slug)).toEqual(["dev", "reviewer"]);
+    expect(routineAgents(null)).toEqual([]);
+  });
+});
 
 describe("usableAgents", () => {
   it("drops agents that failed to parse and tolerates no list", () => {

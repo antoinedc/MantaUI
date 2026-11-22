@@ -346,4 +346,14 @@ describe("rolling updates — what the list and the pane say", () => {
     expect(draftFromRoutine({ ...(routine as object), rollUp: false } as never).rollUp).toBe(false);
     expect(draftFromRoutine(routine).rollUp).toBe(true);
   });
+
+  it("the draft carries the routine's agent: none by default and for old records, null clears", () => {
+    const base = { name: "n", prompt: "p", directory: "/x" };
+    expect(emptyDraft().agent).toBeNull();
+    expect(draftToInput({ ...emptyDraft("/x"), ...base }).agent).toBeNull();
+    expect(draftToInput({ ...emptyDraft("/x"), ...base, agent: "dev" }).agent).toBe("dev");
+    const routine = { name: "n", prompt: "p", icon: "chart", directory: "/x", model: null, cron: "0 9 * * *", access: "read", notify: "findings" } as never;
+    expect(draftFromRoutine(routine).agent).toBeNull();
+    expect(draftFromRoutine({ ...(routine as object), agent: "seo" } as never).agent).toBe("seo");
+  });
 });

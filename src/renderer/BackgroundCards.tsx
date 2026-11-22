@@ -18,7 +18,7 @@
 import { memo, useCallback, useId, useState } from "react";
 import { useStore } from "./store";
 import { usePackageAgents } from "./packageAgents";
-import { packageAgentDisplayName } from "./agentDispatch";
+import { leadDisplayName, packageAgentDisplayName } from "./agentDispatch";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
 import {
@@ -134,6 +134,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
   const { view, box } = useJobView(card);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
+  const { agents: packageAgents } = usePackageAgents();
   const failed = card.kind === "failed";
   const spinning = card.kind === "starting" || (card.kind === "running" && !card.paused);
   // A task for a named agent reads "<Agent> · <task>" with the request quoted
@@ -223,7 +224,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
       </div>
       {card.request && (
         <div className="mt-1 truncate text-text-muted" title={card.request} data-testid="background-request">
-          “{card.request}”
+          {card.requestedBy === "manta" ? `${leadDisplayName(packageAgents)} asked: ${card.request}` : `“${card.request}”`}
         </div>
       )}
       {content && (

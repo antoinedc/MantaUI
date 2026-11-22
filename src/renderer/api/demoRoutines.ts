@@ -153,6 +153,7 @@ function routine(over: Partial<Routine> & Pick<Routine, "id" | "name" | "cron" |
     model: null,
     notify: "findings",
     rollUp: true,
+    agent: null,
     enabled: true,
     destination: { type: "new-session" },
     catchUpHours: 6,
@@ -689,6 +690,7 @@ export function createRoutinesStore() {
       model: input.model ?? null,
       notify: input.notify ?? "findings",
       rollUp: input.rollUp ?? true,
+      agent: input.agent ?? null,
       enabled: input.enabled ?? true,
       createdFrom: input.createdFrom ?? null,
       createdAt: ROUTINES_T0,
@@ -743,6 +745,7 @@ export function createRoutinesStore() {
         ...(patch.model !== undefined ? { model: patch.model } : {}),
         ...(patch.notify !== undefined ? { notify: patch.notify } : {}),
         ...(patch.rollUp !== undefined ? { rollUp: patch.rollUp } : {}),
+        ...(patch.agent !== undefined ? { agent: patch.agent } : {}),
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
         updatedAt: ROUTINES_T0,
       };

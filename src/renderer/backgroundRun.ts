@@ -50,6 +50,8 @@ export type BackgroundJob = {
   /** Set when the job is a task for a named agent (Agents Phase 1): its display name and the user's request. */
   agentName?: string;
   request?: string;
+  /** Agents Phase 2: "manta" when the lead handed the work off (the request is then the handoff title). */
+  requestedBy?: "manta";
 };
 
 /** P5: the shared `Api`'s run-command input (it carries `background`) and result (`void | { jobId }`). */
@@ -144,6 +146,8 @@ type CardBase = {
   /** A task for a named agent (Agents Phase 1): the label and the user's request, quoted on the card. */
   agentName?: string;
   request?: string;
+  /** Agents Phase 2: the lead handed this work off — the request line reads "<Lead> asked: …". */
+  requestedBy?: "manta";
 };
 export type BackgroundCard =
   | ({ kind: "starting" } & CardBase)
@@ -231,6 +235,7 @@ export function deriveBackgroundCards(
       createdAt: job.createdAt,
       ...(job.agentName ? { agentName: job.agentName } : {}),
       ...(job.request ? { request: job.request } : {}),
+      ...(job.requestedBy === "manta" ? { requestedBy: "manta" as const } : {}),
     };
     if (LIVE.has(job.status)) {
       cards.push(

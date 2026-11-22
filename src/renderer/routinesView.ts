@@ -593,6 +593,8 @@ export interface RoutineDraft {
   access: Routine["access"];
   notify: RoutineNotify;
   rollUp: boolean;
+  /** Slug of the agent runs use (Agents Phase 2); null = none. */
+  agent: string | null;
 }
 
 export function emptyDraft(directory = ""): RoutineDraft {
@@ -606,6 +608,7 @@ export function emptyDraft(directory = ""): RoutineDraft {
     access: "read",
     notify: "findings",
     rollUp: true,
+    agent: null,
   };
 }
 
@@ -620,6 +623,7 @@ export function draftFromRoutine(r: Routine): RoutineDraft {
     access: r.access,
     notify: r.notify,
     rollUp: r.rollUp !== false,
+    agent: r.agent ?? null,
   };
 }
 
@@ -653,6 +657,7 @@ export function draftToInput(d: RoutineDraft): RoutineInput {
     model: d.model,
     notify: d.notify,
     rollUp: d.rollUp,
+    agent: d.agent,
   };
 }
 
