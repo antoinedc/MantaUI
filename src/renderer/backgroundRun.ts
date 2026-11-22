@@ -260,7 +260,16 @@ export function withPendingAgentCards(
   pending: ReadonlyArray<PendingAgentTask>,
   jobIds: ReadonlySet<string>,
 ): BackgroundCard[] {
-  const waiting = pending.filter((p) => !p.jobId || !jobIds.has(p.jobId));
+  // The box lists the job a few seconds BEFORE its answer gives us the id, so a
+  // card already carrying this request also takes over (each claims one).
+  const unclaimed = cards.filter((c) => c.kind !== "starting" && c.request).map((c) => c.request);
+  const waiting = pending.filter((p) => {
+    if (p.jobId && jobIds.has(p.jobId)) return false;
+    const i = unclaimed.indexOf(p.request);
+    if (i === -1) return true;
+    unclaimed.splice(i, 1);
+    return false;
+  });
   if (waiting.length === 0) return cards;
   return [
     ...cards,
