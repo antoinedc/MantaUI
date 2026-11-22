@@ -19,6 +19,19 @@ const DEV = {
   model: null,
   color: "#5A88FF",
   builtIn: true,
+  role: "specialist" as const,
+  useWhen: null,
+  notFor: null,
+  notice: null,
+};
+const MANTA = {
+  ...DEV,
+  slug: "manta",
+  name: "Manta",
+  description: "Leads the chat",
+  isolation: "none" as const,
+  color: "#7C5CFF",
+  role: "lead" as const,
 };
 const BAD = { ...DEV, slug: "bad", name: "Bad", color: null, builtIn: false, error: "agent.md has no description" };
 
@@ -91,6 +104,39 @@ describe("AgentsSection", () => {
     expect(rows()[0].title).toBe("Writes and fixes code");
     expect(rows()[1].disabled).toBe(true);
     expect(rows()[1].title).toContain("agent.md has no description");
+  });
+
+  it("the valid lead is listed first with a lead tag, whatever the box's order; other rows have none", async () => {
+    await setup({ agentsList: () => Promise.resolve([DEV, MANTA, BAD]) });
+    expect(rows().map((r) => r.dataset.slug)).toEqual(["manta", "dev", "bad"]);
+    expect(rows()[0].textContent).toContain("lead");
+    expect(rows()[1].textContent).not.toContain("lead");
+    expect(rows()[2].textContent).not.toContain("lead");
+  });
+
+  it("clicking the lead opens its direct chat like any other row", async () => {
+    const { api } = await setup({ agentsList: () => Promise.resolve([DEV, MANTA]) });
+    await click(rows()[0]);
+    expect(api.calls.agentsOpenChat[0][0]).toEqual({ slug: "manta" });
+    expect(onOpenWindow).toHaveBeenCalledWith("manta-agents", 0);
+  });
+
+  it("a second package declaring role lead (errored) is an ordinary invalid row, not the lead", async () => {
+    const fake = { ...DEV, slug: "boss", name: "Boss", role: "lead" as const, error: "Only the built-in Manta can lead" };
+    await setup({ agentsList: () => Promise.resolve([DEV, fake]) });
+    expect(rows().map((r) => r.dataset.slug)).toEqual(["dev", "boss"]);
+    expect(rows()[1].disabled).toBe(true);
+    expect(rows()[1].textContent).not.toContain("lead");
+  });
+
+  it("a notice shows as a muted hint under its row, not as an error", async () => {
+    const legacy = { ...DEV, slug: "manta", name: "Manta", notice: "Rename this folder to enable the Manta lead" };
+    await setup({ agentsList: () => Promise.resolve([legacy, DEV]) });
+    const hint = h!.container.querySelector('[data-testid="agent-notice"]')!;
+    expect(hint.textContent).toBe("Rename this folder to enable the Manta lead");
+    expect(hint.className).not.toContain("danger");
+    expect(rows()[0].getAttribute("aria-describedby")).toBe(hint.id);
+    expect(rows()[0].disabled).toBe(false);
   });
 
   it("clicking an agent opens its chat window", async () => {

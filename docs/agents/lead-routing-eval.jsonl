@@ -1,0 +1,30 @@
+{"message": "What's the difference between a worktree and a branch?", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Explain how the retry logic in the upload client works.", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Thanks, that looks good.", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "What does the `reserve` function in routines do?", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Make a plan for moving the settings page to the new layout, but don't change anything yet.", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Rename the variable `tmp` to `draft` in this file.", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Which test command should I run for just the server code?", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Summarize what we decided about the pricing page so far.", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Is it safe to bump the node version in the Dockerfile? Just give me your opinion.", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Can you read src/server/agents.mjs and tell me where the roster is built?", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Implement the share card for the project page: a button that copies a link and shows a toast, with tests.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "The login test is flaky on CI and fails about one run in five. Find the cause and fix it.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Refactor the notification module so the desktop and mobile routes share one decision function, and keep all tests green.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Add a GET /api/health/deep endpoint that checks the database and the queue, with tests, and update the docs page.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Upgrade vitest to the latest major and fix everything that breaks.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Write unit tests for the cron parser covering month boundaries and DST changes.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Migrate the config loader from JSON files to YAML, including the existing user files, and make the tests pass.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Fix the bug where the sidebar badge stays red after a permission is answered. Add a regression test.", "team": ["dev", "seo"], "expect": "handoff:dev"}
+{"message": "Audit the head tags on the homepage and the pricing page: titles, descriptions, canonicals, Open Graph.", "team": ["dev", "seo"], "expect": "handoff:seo"}
+{"message": "Check whether our sitemap.xml and robots.txt block anything they shouldn't.", "team": ["dev", "seo"], "expect": "handoff:seo"}
+{"message": "Find pages with duplicate or missing titles across the marketing site and list them.", "team": ["dev", "seo"], "expect": "handoff:seo"}
+{"message": "Review the blog posts from this month for search intent and internal linking, and recommend what to change.", "team": ["dev", "seo"], "expect": "handoff:seo"}
+{"message": "Look at our landing pages and tell me which ones hurt our Core Web Vitals the most.", "team": ["dev", "seo"], "expect": "handoff:seo"}
+{"message": "Deploy this to production now.", "team": ["dev", "seo"], "expect": "ask"}
+{"message": "Delete the old production database backups to free up space.", "team": ["dev", "seo"], "expect": "ask"}
+{"message": "Merge it and cut the release.", "team": ["dev", "seo"], "expect": "ask"}
+{"message": "Publish the draft post and email it to the whole list.", "team": ["dev", "seo"], "expect": "ask"}
+{"message": "Implement the share card for the project page: a button that copies a link and shows a toast, with tests.", "team": [], "expect": "answer"}
+{"message": "Audit the head tags on the homepage.", "team": ["dev"], "expect": "answer"}
+{"message": "Fix the flaky login test on CI and add a regression test.", "team": [], "expect": "answer"}

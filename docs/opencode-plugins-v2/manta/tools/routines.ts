@@ -12,6 +12,10 @@ const ICONS = ["calendar-clock", "chart", "bug", "alert", "package", "book", "ta
 const ROLL_UP_HELP =
   "true (default): while the user hasn't read the last report, each run receives the unread reports and its report replaces them, so the user reads one up-to-date report. false: every run adds its own report.";
 
+const AGENT_HELP =
+  "Optional: the slug of one of the user's agents (e.g. \"seo\") whose role the runs take; each run also gets that agent's brief for the folder's project. Omit for none. On update, null clears it.";
+const agentSchema = (): Record<string, unknown> => ({ type: ["string", "null"], description: AGENT_HELP });
+
 const when = (ms: unknown): string =>
   typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toLocaleString() : "not scheduled";
 
@@ -48,8 +52,9 @@ export const tools: ToolDef[] = [
         icon: oneOf(ICONS, "Glyph shown on the Routines page (default calendar-clock)."),
         memory: str("Facts from this conversation the first run should start knowing (baselines, conventions). Under 60 lines."),
         rollUp: bool(ROLL_UP_HELP),
+        agent: agentSchema(),
       },
-      ["access", "notify", "icon", "memory", "rollUp"],
+      ["access", "notify", "icon", "memory", "rollUp", "agent"],
     ),
     async execute(args, context) {
       const result = await call("POST", "/api/routines", {
@@ -61,6 +66,7 @@ export const tools: ToolDef[] = [
         ...(args.icon ? { icon: args.icon } : {}),
         ...(args.memory ? { memory: args.memory } : {}),
         ...(typeof args.rollUp === "boolean" ? { rollUp: args.rollUp } : {}),
+        ...(typeof args.agent === "string" && args.agent ? { agent: args.agent } : {}),
         sessionID: context.sessionID,
         directory: context.directory,
       });
@@ -100,8 +106,9 @@ export const tools: ToolDef[] = [
         icon: oneOf(ICONS, "Glyph shown on the Routines page."),
         enabled: bool("false pauses the routine, true resumes it."),
         rollUp: bool(ROLL_UP_HELP),
+        agent: agentSchema(),
       },
-      ["name", "prompt", "cron", "access", "notify", "icon", "enabled", "rollUp"],
+      ["name", "prompt", "cron", "access", "notify", "icon", "enabled", "rollUp", "agent"],
     ),
     async execute(args) {
       const { id, ...patch } = args;

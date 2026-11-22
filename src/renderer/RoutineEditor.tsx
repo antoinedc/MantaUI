@@ -13,7 +13,7 @@ import type { OpencodeModel } from "../shared/types";
 import { Button } from "./Button";
 import { Callout } from "./Callout";
 import { Chip, ChipGroup } from "./Chip";
-import { Field } from "./Field";
+import { Field, INPUT_BASE, LABEL_CLS } from "./Field";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { ModelMenu } from "./ModelMenu";
 import { Modal } from "./Modal";
@@ -48,6 +48,8 @@ import {
   type ScheduleKind,
 } from "./routinesView";
 import { nowMs } from "./clock";
+import { routineAgents } from "./agentDispatch";
+import { usePackageAgents } from "./packageAgents";
 import { useStore } from "./store";
 
 function groupModels(models: OpencodeModel[] | null): Array<[string, OpencodeModel[]]> | null {
@@ -93,6 +95,8 @@ export function RoutineEditor({ open, routine, tz, onClose, onSaved, onTestRun }
   const [models, setModels] = useState<OpencodeModel[] | null>(null);
   const [busy, setBusy] = useState<"save" | "test" | null>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const { agents: packageAgents } = usePackageAgents();
+  const agentOptions = routineAgents(packageAgents);
 
   // Load the model list when the modal first opens (the picker and the label need it).
   const modelsRequested = useRef(false);
@@ -238,6 +242,30 @@ export function RoutineEditor({ open, routine, tz, onClose, onSaved, onTestRun }
               />
             </LabelledBlock>
           </div>
+          {(agentOptions.length > 0 || draft.agent) && (
+            <div className="space-y-1">
+              <label htmlFor="routine-agent" className={LABEL_CLS}>
+                Agent
+              </label>
+              <select
+                id="routine-agent"
+                value={draft.agent ?? ""}
+                onChange={(e) => patch({ agent: e.target.value || null })}
+                className={`${INPUT_BASE} px-4 py-3`}
+              >
+                <option value="">None</option>
+                {draft.agent && !agentOptions.some((a) => a.slug === draft.agent) && (
+                  <option value={draft.agent}>@{draft.agent} (unavailable)</option>
+                )}
+                {agentOptions.map((a) => (
+                  <option key={a.slug} value={a.slug}>
+                    {a.name || a.slug}
+                  </option>
+                ))}
+              </select>
+              <div className="text-meta text-text-faint">Each run takes on this agent's role and the project's brief.</div>
+            </div>
+          )}
           <LabelledBlock label="When" error={err("schedule")} help={scheduleHelp(cron, tz, nowMs())}>
             <div className="flex flex-col gap-3">
               <ChipGroup<ScheduleKind> label="Schedule" value={sched.kind} options={SCHEDULE_KINDS} onChange={setKind} />

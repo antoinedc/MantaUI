@@ -137,6 +137,17 @@ describe("agent task cards (Agents Phase 1)", () => {
     expect(card).toMatchObject({ kind: "running", agentName: "Dev", request: "fix the login bug please" });
   });
 
+  it("carries requestedBy 'manta' onto the card, and only that value", () => {
+    const [handoff] = deriveBackgroundCards(
+      [job({ agentName: "Dev", request: "Fix login", requestedBy: "manta" })],
+      "ses_p",
+      none,
+    );
+    expect(handoff).toMatchObject({ requestedBy: "manta", request: "Fix login" });
+    const [mention] = deriveBackgroundCards([job({ agentName: "Dev", request: "@dev fix" })], "ses_p", none);
+    expect(Object.keys(mention)).not.toContain("requestedBy");
+  });
+
   it("leaves a plain job's card exactly as before (no agent keys)", () => {
     const [card] = deriveBackgroundCards([job()], "ses_p", none);
     expect(Object.keys(card)).not.toContain("agentName");

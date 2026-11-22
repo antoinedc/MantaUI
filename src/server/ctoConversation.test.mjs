@@ -945,3 +945,16 @@ test("a binding write landing DURING the getBinding read invalidates the cache (
     "a rebind during the read window must invalidate the cache — the live session is still the conversation",
   );
 });
+
+test("isConversationSessionStrict: true for the bound session, false for another, THROWS when the binding can't be read", async () => {
+  const t = compose({});
+  await dispatch(t.handlers, "cto:conversation-open", []);
+  assert.equal(await t.svc.isConversationSessionStrict("ses_cto1"), true);
+  assert.equal(await t.svc.isConversationSessionStrict("ses_other"), false);
+  t.binding.getBinding = async () => {
+    throw new Error("binding file unreadable");
+  };
+  await assert.rejects(() => t.svc.isConversationSessionStrict("ses_other"), /unreadable/);
+  // the fail-open sibling is unchanged
+  assert.equal(await t.svc.isConversationSession("ses_other"), false);
+});

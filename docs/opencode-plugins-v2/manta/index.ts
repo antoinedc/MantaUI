@@ -8,6 +8,7 @@
 
 import { Plugin } from "@opencode/plugin";
 import { installBriefing } from "./lib/briefing.ts";
+import { createDefaultLead } from "./lib/lead.ts";
 import { resolveToolContext, type ExecuteContextLike } from "./lib/context.ts";
 import { allTools } from "./tools/index.ts";
 
@@ -39,12 +40,22 @@ export default Plugin.define({
       }
     });
 
-    // Shared-knowledge briefing (spec 2026-11-16-shared-knowledge §7.1): appended to
-    // the system prompt by the `context` hook. Fail-open — never blocks the tools.
+    // System-prompt additions, ONE `context` hook composing both appenders in a fixed order: the lead brief (Agents
+    // Phase 2: Manta leads a chat the box says is led) first, then the shared-knowledge briefing (spec
+    // 2026-11-16-shared-knowledge §7.1). Each fails open independently — never blocks the tools.
     try {
-      if (typeof ctx?.session?.hook === "function") await installBriefing(ctx);
+      if (typeof ctx?.session?.hook === "function") {
+        const lead = createDefaultLead();
+        let briefing: { onContext(event: any): Promise<void> } | null = null;
+        await ctx.session.hook("context", async (event: any) => {
+          await lead.onContext(event).catch(() => {});
+          await briefing?.onContext(event).catch(() => {});
+        });
+        // the briefing owns the compaction hook and the event stream; the lead listens to the same stream
+        briefing = await installBriefing(ctx, {}, { contextHook: false, onEvent: (ev: any) => lead.onEvent(ev) });
+      }
     } catch {
-      /* no briefing for this instance */
+      /* no briefing / lead brief for this instance */
     }
   },
 });

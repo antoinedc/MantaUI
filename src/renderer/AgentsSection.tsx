@@ -6,13 +6,14 @@
 // is an error toast, a failed create is an inline alert in the dialog, an invalid
 // agent's row is disabled with its error as the tooltip.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import type { AgentInfo } from "../shared/types";
 import { IconButton } from "./IconButton";
 import { Button } from "./Button";
 import { useStore } from "./store";
-import { agentInitial } from "./agentDispatch";
+import { agentInitial, leadAgent } from "./agentDispatch";
+import { Tag } from "./Tag";
 import { refreshPackageAgents, usePackageAgents } from "./packageAgents";
 
 const ROW_CLASS =
@@ -31,28 +32,44 @@ function AgentRow({
   onOpen: () => void;
 }) {
   const invalid = !!agent.error;
+  const isLead = agent.role === "lead" && !invalid;
+  const noticeId = useId();
+  const showNotice = !!agent.notice;
   return (
-    <button
-      type="button"
-      data-rail-row=""
-      data-testid="agent-row"
-      data-slug={agent.slug}
-      disabled={invalid || opening}
-      onClick={onOpen}
-      title={invalid ? `${agent.name || agent.slug}: ${agent.error}` : agent.description || agent.name}
-      className={`${ROW_CLASS} ${invalid ? "opacity-50 cursor-not-allowed" : "hover:bg-fill-hover"}`}
-    >
-      <span
-        aria-hidden="true"
-        className="flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-sm bg-fill-hover text-micro font-semibold text-text"
-        style={agent.color ? { backgroundColor: agent.color, color: "#fff" } : undefined}
+    <>
+      <button
+        type="button"
+        data-rail-row=""
+        data-testid="agent-row"
+        data-slug={agent.slug}
+        disabled={invalid || opening}
+        onClick={onOpen}
+        aria-describedby={showNotice ? noticeId : undefined}
+        title={invalid ? `${agent.name || agent.slug}: ${agent.error}` : agent.description || agent.name}
+        className={`${ROW_CLASS} ${invalid ? "opacity-50 cursor-not-allowed" : "hover:bg-fill-hover"}`}
       >
-        {agentInitial(agent)}
-      </span>
-      <span className="flex-1 min-w-0 truncate text-label font-medium text-text">{agent.name || agent.slug}</span>
-      {opening && <span className="shrink-0 text-micro text-text-faint">Opening…</span>}
-      {invalid && <span className="shrink-0 text-micro text-danger">invalid</span>}
-    </button>
+        <span
+          aria-hidden="true"
+          className="flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-sm bg-fill-hover text-micro font-semibold text-text"
+          style={agent.color ? { backgroundColor: agent.color, color: "#fff" } : undefined}
+        >
+          {agentInitial(agent)}
+        </span>
+        <span className="flex-1 min-w-0 truncate text-label font-medium text-text">{agent.name || agent.slug}</span>
+        {isLead && (
+          <Tag size="sm" tone="accent" title="Leads every chat and hands work to the other agents">
+            lead
+          </Tag>
+        )}
+        {opening && <span className="shrink-0 text-micro text-text-faint">Opening…</span>}
+        {invalid && <span className="shrink-0 text-micro text-danger">invalid</span>}
+      </button>
+      {showNotice && (
+        <p id={noticeId} data-testid="agent-notice" className="m-0 px-[var(--row-px)] pb-1 text-micro text-text-faint">
+          {agent.notice}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -167,6 +184,10 @@ export function AgentsSection({
   // A box without the feature (or the demo transport) has no agents to show.
   if (!agents || agents.length === 0) return null;
 
+  // The valid lead first, then the rest in the box's order (one row per package, no synthetic rows).
+  const lead = leadAgent(agents);
+  const ordered = lead ? [lead, ...agents.filter((a) => a !== lead)] : agents;
+
   const open = async (agent: AgentInfo) => {
     if (openingSlug) return;
     setOpeningSlug(agent.slug);
@@ -190,7 +211,7 @@ export function AgentsSection({
         <IconButton icon={<Plus />} label="New agent" title="New agent" onClick={() => setCreating(true)} />
       </div>
       <div className="space-y-px">
-        {agents.map((a) => (
+        {ordered.map((a) => (
           <AgentRow key={a.slug} agent={a} opening={openingSlug === a.slug} onOpen={() => void open(a)} />
         ))}
       </div>

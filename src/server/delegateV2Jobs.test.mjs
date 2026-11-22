@@ -22,6 +22,10 @@ import {
   createDelegateEngine,
   extendJob,
   continueJob,
+  loadJobsStrict,
+  ADMIT_STORE_ERROR,
+  WORKTREE_AGENT_GRANTS,
+  buildWorktreeAgentRuleset,
   normalizeJobRuleset,
   buildJobPrompt,
   buildReadOnlyAgentRuleset,
@@ -29,6 +33,9 @@ import {
   MAX_RUNNING_JOBS,
   CAP_ERROR,
 } from "./delegate.mjs";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { createJobLiveness } from "./jobLiveness.mjs";
 import { createJobViews } from "./jobViews.mjs";
 
@@ -2245,4 +2252,185 @@ test("completion text: Reason (+ last status) for an ended job, milestones, and 
   assert.equal(t, '[background job "n" failed]\nReason: stalled — no progress for 15 minutes\nLast status: building\nMilestones:\n- m1\n- m2\n\nError: stalled — no progress for 15 minutes');
   assert.equal(buildCompletionText({ name: "n", status: "done", result: "ok" }), '[background job "n" done]\n\nok');
   assert.ok(!buildCompletionText({ ...base, error: "stalled — no progress for 15 minutes (last: building)" }).includes("Last status:"), "already in the reason");
+});
+
+// ---------------------------------------------------------------------------
+// Agents Phase 2: strict store, admission, lead markers, no-PR prompts
+// ---------------------------------------------------------------------------
+
+test("loadJobsStrict: a missing file is an empty list; a corrupt or shapeless file THROWS; a good file loads", async () => {
+  const dir = await mkdtemp(joinPath(tmpdir(), "jobs-strict-"));
+  try {
+    assert.deepEqual(await loadJobsStrict(joinPath(dir, "none.json")), []);
+    await writeFile(joinPath(dir, "bad.json"), "{ not json");
+    await assert.rejects(loadJobsStrict(joinPath(dir, "bad.json")), SyntaxError);
+    await writeFile(joinPath(dir, "shape.json"), JSON.stringify({ jobs: "nope" }));
+    await assert.rejects(loadJobsStrict(joinPath(dir, "shape.json")), /no jobs list/);
+    await writeFile(joinPath(dir, "ok.json"), JSON.stringify({ jobs: [{ id: "a" }] }));
+    assert.deepEqual(await loadJobsStrict(joinPath(dir, "ok.json")), [{ id: "a" }]);
+    // a directory where the file should be is a read failure, not "missing"
+    await assert.rejects(loadJobsStrict(dir), /EISDIR/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("WORKTREE_AGENT_GRANTS: the one grant list the worktree ruleset is built from", () => {
+  assert.ok(Object.isFrozen(WORKTREE_AGENT_GRANTS));
+  assert.deepEqual(buildWorktreeAgentRuleset({ home: "/h" }), buildWorktreeAgentRuleset({ home: "/h" }));
+  const rules = buildWorktreeAgentRuleset({ home: "/h" });
+  for (const g of WORKTREE_AGENT_GRANTS) assert.ok(rules.some((r) => r.action === "allow" && r.pattern === g.pattern), g.permission);
+});
+
+test("admit on startJob: runs under the lock, sees the stored jobs, and a refusal leaves NO record, worktree, session or window", async () => {
+  const w = world({ jobs: [{ id: "run00001", name: "other", status: "running", engine: "v2", completionOwner: "manta", parentSessionID: PARENT, isolation: "worktree", childSessionID: "ses_other", origin: "delegate" }] });
+  let seen = null;
+  const res = await startJob(input({ agent: "agent-dev", isolation: "worktree", admit: (jobs) => ((seen = jobs.map((j) => j.id)), "Dev is already changing code for this chat (other); wait for its result") }), w.deps);
+  assert.deepEqual(res, { ok: false, error: "Dev is already changing code for this chat (other); wait for its result" });
+  assert.deepEqual(seen, ["run00001"]);
+  assert.deepEqual(w.calls.addWorktree, [], "refused before a worktree was allocated");
+  assert.deepEqual([w.calls.create, w.calls.move, w.calls.window, w.calls.send, w.calls.rmWorktree].map((c) => c.length), [0, 0, 0, 0, 0]);
+  assert.equal(w.jobs.length, 1, "no record was written");
+});
+
+test("admit on startJob: a throwing check refuses; an unreadable store refuses and is never saved over", async () => {
+  const w = world();
+  const threw = await startJob(input({ admit: () => { throw new Error("boom"); } }), w.deps);
+  assert.equal(threw.ok, false);
+  assert.match(threw.error, /boom/);
+  assert.equal(w.jobs.length, 0);
+
+  const saves = [];
+  const bad = world();
+  bad.deps.loadStrict = async () => { throw new Error("jobs store unreadable"); };
+  bad.deps.save = async (j) => saves.push(j);
+  const res = await startJob(input({ admit: () => null }), bad.deps);
+  assert.deepEqual(res, { ok: false, error: ADMIT_STORE_ERROR });
+  assert.deepEqual(saves, [], "nothing saved");
+  assert.deepEqual(bad.calls.addWorktree, []);
+});
+
+test("admit on startJob: two concurrent writers through the real lock → exactly one starts", async () => {
+  const w = world();
+  const admit = (jobs) => (jobs.some((j) => j.parentSessionID === PARENT && j.isolation === "worktree" && j.status === "running") ? "a writer is already running" : null);
+  const [a, b] = await Promise.all([
+    startJob(input({ name: "first", agent: "agent-dev", isolation: "worktree", admit }), w.deps),
+    startJob(input({ name: "second", agent: "agent-dev", isolation: "worktree", admit }), w.deps),
+  ]);
+  assert.deepEqual([a.ok, b.ok].sort(), [false, true]);
+  assert.equal(w.jobs.length, 1);
+  assert.equal(w.calls.addWorktree.length, 1, "the loser never allocated a worktree");
+});
+
+test("the lead's markers: isolation, requestedBy, turnKey and allowPr are persisted; absent for a plain job", async () => {
+  const w = world();
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", turnKey: "msg_user1", allowPr: false, agentName: "Dev", request: "Fix login" });
+  const job = w.job(id);
+  assert.equal(job.isolation, "worktree");
+  assert.equal(job.requestedBy, "manta");
+  assert.equal(job.turnKey, "msg_user1");
+  assert.equal(job.allowPr, false);
+  const [row] = await listJobs({ sessionID: PARENT }, { load: w.deps.load, readProgress: async () => null });
+  assert.equal(row.requestedBy, "manta", "reaches the client like agentName");
+  assert.equal(row.request, "Fix login");
+
+  const plain = world();
+  const pid = await start(plain);
+  for (const k of ["isolation", "requestedBy", "turnKey", "allowPr"]) assert.equal(k in plain.job(pid), false, k);
+  const ro = world();
+  const rid = await start(ro, { agent: "agent-seo", isolation: "none" });
+  assert.equal(ro.job(rid).isolation, "none");
+  assert.equal("allowPr" in ro.job(rid), false, "absent = allowed");
+});
+
+test("buildJobPrompt: allowPr:false replaces the pull-request sentence (a worktree job); the default is unchanged", () => {
+  const base = { prompt: "do it", worktree: "/wt", branch: "job/x" };
+  const yes = buildJobPrompt(base);
+  assert.match(yes, /You may open a draft pull\nrequest for it/);
+  const no = buildJobPrompt({ ...base, allowPr: false });
+  assert.doesNotMatch(no, /draft pull/);
+  assert.match(no, /Do not open pull requests; the lead and the user decide what ships\./);
+  assert.match(no, /never merge, never force-push|Never merge, never force-push/);
+  assert.equal(buildJobPrompt({ ...base, allowPr: true }), yes);
+});
+
+test("allowPr:false on start: the opening prompt the child gets has no pull-request permission", async () => {
+  const w = world();
+  await start(w, { agent: "agent-dev", isolation: "worktree", allowPr: false });
+  assert.doesNotMatch(w.calls.send[0].text, /draft pull/);
+  assert.match(w.calls.send[0].text, /Do not open pull requests/);
+  const open = world();
+  await start(open, { agent: "agent-dev", isolation: "worktree" });
+  assert.match(open.calls.send[0].text, /draft pull/);
+});
+
+test("allowPr:false on resume: the resumed job's prompt still has no pull-request permission", async () => {
+  const w = world();
+  const id = await pausedJob(w, { agent: "agent-dev", isolation: "worktree", allowPr: false });
+  w.calls.send.length = 0;
+  assert.equal((await resumeJob(id, w.deps)).ok, true);
+  assert.doesNotMatch(w.calls.send[0].text, /draft pull/);
+  assert.match(w.calls.send[0].text, /Do not open pull requests/);
+  const open = world();
+  const oid = await pausedJob(open, { agent: "agent-dev", isolation: "worktree" });
+  open.calls.send.length = 0;
+  await resumeJob(oid, open.deps);
+  assert.match(open.calls.send[0].text, /draft pull/);
+});
+
+async function finishedLeadJob(extra = {}) {
+  const w = liveWorld();
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", turnKey: "msg_u1", allowPr: false, agentName: "Dev", request: "Fix login", ...extra });
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  return { w, id };
+}
+
+test("continueJob with admit: the check sees the live store and the STORED job; a refusal leaves the old record untouched", async () => {
+  const { w, id } = await finishedLeadJob();
+  let seen = null;
+  const refused = await continueJob(id, { prompt: "round two", sessionID: PARENT, admit: (jobs, old) => ((seen = { ids: jobs.map((j) => j.id), old: old.id, isolation: old.isolation }), "too many") }, w.deps);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error, "too many");
+  assert.deepEqual(seen, { ids: [id], old: id, isolation: "worktree" });
+  assert.equal(w.jobs.length, 1, "no successor record");
+  assert.equal(w.job(id).supersededBy, undefined, "the old record is still the live one");
+});
+
+test("continueJob with admit: an unreadable store refuses and saves nothing", async () => {
+  const { w, id } = await finishedLeadJob();
+  const saves = [];
+  w.deps.loadStrict = async () => { throw new Error("unreadable"); };
+  const realSave = w.deps.save;
+  w.deps.save = async (j) => (saves.push(j), realSave(j));
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT, admit: () => null }, w.deps);
+  assert.deepEqual(res, { ok: false, status: 500, error: ADMIT_STORE_ERROR });
+  assert.deepEqual(saves, []);
+});
+
+test("continueJob: the lead's fields land on the successor (title, request, requestedBy, turnKey, allowPr); without them it inherits", async () => {
+  const { w, id } = await finishedLeadJob();
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT, admit: () => null, name: "Fix signup page", request: "Fix signup page", requestedBy: "manta", turnKey: "msg_u2", allowPr: false }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const next = res.job;
+  assert.equal(next.name, "fix-signup-page");
+  assert.equal(next.request, "Fix signup page");
+  assert.equal(next.requestedBy, "manta");
+  assert.equal(next.turnKey, "msg_u2");
+  assert.equal(next.allowPr, false);
+  assert.equal(next.isolation, "worktree", "the stored isolation carries over");
+  assert.equal(next.agentName, "Dev");
+  assert.equal(next.continues, id);
+  assert.equal(next.prompt, "round two");
+
+  // a continuation that names nothing inherits the old record's values
+  const { w: w2, id: id2 } = await finishedLeadJob();
+  const plain = await continueJob(id2, { prompt: "again", sessionID: PARENT }, w2.deps);
+  assert.equal(plain.ok, true);
+  assert.equal(plain.job.requestedBy, "manta");
+  assert.equal(plain.job.turnKey, "msg_u1");
+  assert.equal(plain.job.request, "Fix login");
+  assert.equal(plain.job.allowPr, false);
 });

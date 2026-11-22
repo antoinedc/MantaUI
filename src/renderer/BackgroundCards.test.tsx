@@ -10,7 +10,8 @@ import { act } from "react";
 import type { DelegateJob, DelegateJobProgressView } from "../shared/types";
 import { BackgroundResultCard, BackgroundRunCards } from "./BackgroundCards";
 import type { BackgroundCard, BackgroundResultPart } from "./backgroundRun";
-import { mount, resetStore, type Harness } from "./testHarness";
+import { installMockApi, mount, resetStore, type Harness } from "./testHarness";
+import { resetPackageAgentsForTest } from "./packageAgents";
 
 const T0 = 1_800_000_000_000;
 const MIN = 60_000;
@@ -95,6 +96,47 @@ afterEach(() => {
   h = null;
   vi.useRealTimers();
   resetStore({ jobs: {}, jobSkew: {} });
+});
+
+describe("request line (Agents Phase 2)", () => {
+  const lead = {
+    slug: "manta",
+    name: "Boss",
+    description: "Leads",
+    isolation: "none" as const,
+    model: null,
+    color: null,
+    builtIn: true,
+    role: "lead" as const,
+    useWhen: null,
+    notFor: null,
+    notice: null,
+  };
+
+  it("a lead handoff reads '<Lead> asked: <request>', with the lead's name from the agent list", async () => {
+    installMockApi({ agentsList: () => Promise.resolve([lead]) });
+    resetPackageAgentsForTest();
+    show(job(), runCard({ agentName: "Dev", request: "Fix the login bug", requestedBy: "manta" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(text('[data-testid="background-request"]')).toBe("Boss asked: Fix the login bug");
+  });
+
+  it("falls back to 'Manta' before the agent list loads or when the box has no lead", () => {
+    installMockApi({ agentsList: () => new Promise(() => {}) });
+    resetPackageAgentsForTest();
+    show(job(), runCard({ agentName: "Dev", request: "Fix the login bug", requestedBy: "manta" }));
+    expect(text('[data-testid="background-request"]')).toBe("Manta asked: Fix the login bug");
+  });
+
+  it("a user's own @mention keeps the quoted request", () => {
+    installMockApi({ agentsList: () => Promise.resolve([lead]) });
+    resetPackageAgentsForTest();
+    show(job(), runCard({ agentName: "Dev", request: "@dev fix it" }));
+    expect(text('[data-testid="background-request"]')).toBe("“@dev fix it”");
+  });
 });
 
 describe("RunCard with a progress view", () => {

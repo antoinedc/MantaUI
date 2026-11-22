@@ -30,6 +30,8 @@ export interface PluginContextLike {
 export interface ExecuteContextLike {
   sessionID: string;
   messageID?: string;
+  /** The tool call's own id (the V2 execute context's `id`); `agent_handoff` is verified against it. */
+  id?: string;
 }
 
 export async function resolveToolContext(
@@ -44,5 +46,10 @@ export async function resolveToolContext(
       directory = undefined; // directory is advisory for every tool that reads it
     }
   }
-  return { sessionID: exec.sessionID, messageID: exec.messageID, directory };
+  return {
+    sessionID: exec.sessionID,
+    messageID: exec.messageID,
+    ...(typeof exec.id === "string" && exec.id ? { callID: exec.id } : {}),
+    directory,
+  };
 }

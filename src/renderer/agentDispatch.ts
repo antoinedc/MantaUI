@@ -12,9 +12,25 @@ export const PACKAGE_AGENT_PREFIX = "agent-";
 
 export const ONE_AGENT_ERROR = "Mention one agent per message for now";
 
-/** An agent a message can be dispatched to: its package parsed. */
+/** An agent a message can be dispatched to: its package parsed, and not the lead (Manta already leads every chat). */
 export function usableAgents(agents: ReadonlyArray<AgentInfo> | null | undefined): AgentInfo[] {
-  return (agents ?? []).filter((a) => !a.error);
+  return (agents ?? []).filter((a) => !a.error && a.role !== "lead");
+}
+
+/** The valid lead (Agents Phase 2): a parsed package whose role is "lead". Null when the box has none. */
+export function leadAgent(agents: ReadonlyArray<AgentInfo> | null | undefined): AgentInfo | null {
+  return (agents ?? []).find((a) => a.role === "lead" && !a.error) ?? null;
+}
+
+/** The lead's display name for "<Lead> asked: …" lines; "Manta" until the list loads or when the box has no lead. */
+export function leadDisplayName(agents: ReadonlyArray<AgentInfo> | null | undefined): string {
+  const lead = leadAgent(agents);
+  return lead?.name || lead?.slug || "Manta";
+}
+
+/** The agents a routine can run as (Agents Phase 2): valid specialists. */
+export function routineAgents(agents: ReadonlyArray<AgentInfo> | null | undefined): AgentInfo[] {
+  return (agents ?? []).filter((a) => !a.error && a.role === "specialist");
 }
 
 export type AgentDispatchPick = null | { slug: string } | { error: string };

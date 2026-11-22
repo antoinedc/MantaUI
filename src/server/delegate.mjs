@@ -32,6 +32,7 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
@@ -159,6 +160,23 @@ export async function loadJobs(path = STORE_PATH) {
   return Array.isArray(parsed?.jobs) ? parsed.jobs : [];
 }
 
+/**
+ * Like `loadJobs`, but `[]` only for a MISSING file: any other read or parse failure throws. The lead's checks
+ * (is this chat led? is a second writer allowed?) must never read an unreadable store as an empty one.
+ */
+export async function loadJobsStrict(path = STORE_PATH) {
+  let text;
+  try {
+    text = await readFile(path, "utf-8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    throw e;
+  }
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed?.jobs)) throw new Error("the jobs store has no jobs list");
+  return parsed.jobs;
+}
+
 export async function saveJobs(jobs, path = STORE_PATH) {
   await writeJsonAtomic(path, JSON.stringify({ jobs }, null, 2));
   ownerIndexCache.delete(path); // every in-process write drops the index (an mtime can repeat within one clock tick)
@@ -187,7 +205,7 @@ function genId() {
  * omitted entirely when `worktree` is null (parent cwd was not a repo). Do not
  * add anything else and do not make it configurable.
  */
-export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, readOnly = false }) {
+export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, readOnly = false, allowPr = true }) {
   const head = String(prompt ?? "").trim();
   const factsSection =
     facts && String(facts).trim().length > 0
@@ -226,9 +244,14 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, rea
     "You are running as a background job. The user is not watching this session and\n" +
     "cannot see your intermediate output — only your final message is reported back.\n\n" +
     `You are working in an isolated git worktree at ${worktree}, on branch ${branch}.\n` +
-    "Commit your work to that branch before you finish. You may open a draft pull\n" +
-    "request for it (never a non-draft one without a human confirming), but you may\n" +
-    "never merge, never force-push, and never touch any other checkout.\n\n" +
+    "Commit your work to that branch before you finish. " +
+    (allowPr
+      ? "You may open a draft pull\n" +
+        "request for it (never a non-draft one without a human confirming), but you may\n" +
+        "never merge, never force-push, and never touch any other checkout.\n\n"
+      : // An instruction, not an enforcement: the shell grants are unchanged, so a job could still run `gh pr create`.
+        "Do not open pull requests; the lead and the user decide what ships.\n" +
+        "Never merge, never force-push, and never touch any other checkout.\n\n") +
     budget +
     "When you are done, end with a short summary of what you changed and why." +
     factsSection
@@ -442,19 +465,18 @@ export function buildReadOnlyAgentRuleset({ agentDir, home = homedir() } = {}) {
  * The ruleset of an agent job in its own worktree (`isolation: "worktree"`): it edits code, so the same grants the
  * forge-triggered implementation jobs get, plus the progress tool.
  */
+export const WORKTREE_AGENT_GRANTS = Object.freeze([
+  Object.freeze({ permission: "bash", pattern: "**" }),
+  Object.freeze({ permission: "write", pattern: "**" }),
+  Object.freeze({ permission: "edit", pattern: "**" }),
+  Object.freeze({ permission: "read", pattern: "**" }),
+  Object.freeze({ permission: "webfetch", pattern: "**" }),
+  Object.freeze({ permission: "websearch", pattern: "**" }),
+  Object.freeze({ permission: "progress_report", pattern: "*" }),
+]);
+
 export function buildWorktreeAgentRuleset({ home = homedir() } = {}) {
-  return buildPermissionRuleset(
-    [
-      { permission: "bash", pattern: "**" },
-      { permission: "write", pattern: "**" },
-      { permission: "edit", pattern: "**" },
-      { permission: "read", pattern: "**" },
-      { permission: "webfetch", pattern: "**" },
-      { permission: "websearch", pattern: "**" },
-      { permission: "progress_report", pattern: "*" },
-    ],
-    { home },
-  );
+  return buildPermissionRuleset(WORKTREE_AGENT_GRANTS.map((g) => ({ ...g })), { home });
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
@@ -1068,6 +1090,22 @@ function launchRefusal(jobs, parentSessionID) {
     return { ok: false, error: CAP_ERROR };
   }
   return null;
+}
+
+export const ADMIT_STORE_ERROR = "Couldn't read the task list; try again";
+
+// The store read of a registration that carries an `admit` check: strict (an unreadable store is a refusal, never an
+// empty list that gets saved over). A test-injected `load` is used as given; production has none and reads strictly.
+const admitLoader = (deps) => deps.loadStrict ?? (deps.load ? deps.load : loadJobsStrict);
+
+// Run the caller's admission check under the jobs lock. A string refuses with it; a throw is a refusal too.
+async function runAdmit(admit, jobs, ...extra) {
+  try {
+    const refusal = await admit(jobs, ...extra);
+    return typeof refusal === "string" && refusal ? refusal : null;
+  } catch (e) {
+    return `Couldn't check the task list: ${String(e?.message ?? e)}`;
+  }
 }
 
 // The job name — an explicit `name` (e.g. the work item's objective, so CTO
@@ -2191,6 +2229,7 @@ export async function resumeJob(id, deps = {}) {
           prompt: await buildResumePrompt(peek, deps, peek.childSessionID),
           worktree: peek.worktree,
           branch: peek.branch,
+          allowPr: peek.allowPr !== false,
         }),
       };
     }
@@ -3780,9 +3819,19 @@ function continueRefusal(jobs, id, { prompt, sessionID }, deps) {
  * @returns {Promise<{ok:true, job:object, uncertain?:true}|{ok:false, status:number, error:string}>}
  */
 export async function continueJob(id, input, deps = {}) {
-  const { load = loadJobs, save = saveJobs, publish, now = () => Date.now() } = deps;
+  const { load: baseLoad = loadJobs, save = saveJobs, publish, now = () => Date.now() } = deps;
+  const admit = typeof input?.admit === "function" ? input.admit : null;
+  // with an admission check the store is read strictly: an unreadable one refuses (and is never saved over)
+  const load = admit ? admitLoader(deps) : baseLoad;
   const args = { prompt: input?.prompt, sessionID: input?.sessionID };
-  const peeked = continueRefusal((await load()) ?? [], id, args, deps);
+  let peekJobs;
+  try {
+    peekJobs = (await load()) ?? [];
+  } catch (e) {
+    if (admit) return { ok: false, status: 500, error: ADMIT_STORE_ERROR };
+    throw e;
+  }
+  const peeked = continueRefusal(peekJobs, id, args, deps);
   if (!peeked.ok) return peeked;
   const child = peeked.job.childSessionID;
   if (!child) return { ok: false, status: 409, error: "that job has no session to continue" };
@@ -3809,11 +3858,21 @@ export async function continueJob(id, input, deps = {}) {
 
     // The record write: re-check everything against the LIVE store, then append the successor.
     const reg = await jobsLock.runExclusive(async () => {
-      const jobs = (await load()) ?? [];
+      let jobs;
+      try {
+        jobs = (await load()) ?? [];
+      } catch (e) {
+        if (admit) return { ok: false, status: 500, error: ADMIT_STORE_ERROR };
+        throw e;
+      }
       const recheck = continueRefusal(jobs, id, args, deps);
       if (!recheck.ok) return recheck;
       if (jobs.filter(countsTowardCap).length >= MAX_RUNNING_JOBS) return { ok: false, status: 409, error: CAP_ERROR };
       const old = recheck.job;
+      if (admit) {
+        const refusal = await runAdmit(admit, jobs, old);
+        if (refusal) return { ok: false, status: 409, error: refusal };
+      }
       const t = now();
       const { supersededBy: _s, cleanupReason: _c, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
@@ -3825,6 +3884,12 @@ export async function continueJob(id, input, deps = {}) {
         attempt: (old.attempt ?? 1) + 1,
         continues: old.id,
         prompt: followUp,
+        // a lead handoff's fix round: the new title, who asked, and the turn it counts against (else inherited)
+        ...(typeof input?.name === "string" && input.name.trim() ? { name: jobNameFor({ name: input.name }, followUp) } : {}),
+        ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
+        ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
+        ...(typeof input?.turnKey === "string" && input.turnKey ? { turnKey: input.turnKey } : {}),
+        ...(input?.allowPr === false ? { allowPr: false } : {}),
         status: "running",
         createdAt: t,
         startedAt: t,
@@ -4207,9 +4272,21 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
   }
 
   const reg = await jobsLock.runExclusive(async () => {
-    const jobs = await load();
+    let jobs;
+    try {
+      jobs = await (typeof input?.admit === "function" ? admitLoader(deps) : load)();
+    } catch (e) {
+      if (typeof input?.admit === "function") return { ok: false, error: ADMIT_STORE_ERROR };
+      throw e;
+    }
     const refused = launchRefusal(jobs, parentSessionID);
     if (refused) return refused;
+    // The caller's admission check (agent handoffs: single writer, per-turn cap) runs BEFORE anything is allocated, so a
+    // refusal leaves no record, worktree, branch or session id behind.
+    if (typeof input?.admit === "function") {
+      const refusal = await runAdmit(input.admit, jobs);
+      if (refusal) return { ok: false, error: refusal };
+    }
     const name = jobNameFor(input, prompt);
 
     // Which workspace hosts the window — resolved before anything is created.
@@ -4266,6 +4343,11 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       permission: jobPermission,
       ...(typeof input?.agentName === "string" && input.agentName ? { agentName: input.agentName } : {}),
       ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
+      // what admission reads later: where the agent works, who asked, in which user turn, and whether it may open a PR
+      ...(input?.isolation === "worktree" || input?.isolation === "none" ? { isolation: input.isolation } : {}),
+      ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
+      ...(typeof input?.turnKey === "string" && input.turnKey ? { turnKey: input.turnKey } : {}),
+      ...(input?.allowPr === false ? { allowPr: false } : {}),
       // Background work budget (spec 2026-11-17 §17.14): set for overnight dispatches (`actor:"cto"` alone does not
       // identify them). The cursor is what has already been booked against the shared budget.
       budgetWorkType: typeof input?.budgetWorkType === "string" && input.budgetWorkType ? input.budgetWorkType : null,
@@ -4291,7 +4373,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       // what the launch sends, persisted so a reconcile can finish a launch this
       // process never got to (and a resume reuses the first attempt's model)
       launch: {
-        text: buildJobPrompt({ prompt, worktree, branch, ceilingMs, readOnly }),
+        text: buildJobPrompt({ prompt, worktree, branch, ceilingMs, readOnly, allowPr: input?.allowPr !== false }),
         model: launchModel,
         messageId: mintMessageId(),
       },
@@ -5523,6 +5605,8 @@ export function createDelegateEngine(baseDeps) {
     jobViews,
     /** The raw job records (no progress reads) — the cheap read behind the read-only-job guard. */
     loadRecords: async () => (await (deps.load ?? loadJobs)()) ?? [],
+    /** The raw job records, throwing when the store can't be read (a missing file is `[]`) — the lead's checks use it. */
+    loadRecordsStrict: async () => (await admitLoader(deps)()) ?? [],
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
     approvals,

@@ -860,6 +860,9 @@ const routinesEngine = createRoutinesEngine({
     git: (args) => tmux.run("git", args),
   },
   push,
+  // Agents Phase 2: a routine can run as an agent. The agents engine is created further down, so it is read at call time
+  // (an async wrapper: a call before it exists is a rejection the routine handles, never a synchronous throw).
+  agents: { routineAgent: async (slug, directory) => agentsEngine.routineAgent(slug, directory) },
   publish: (evt) => bus.publish(evt),
   config: () => local.configGet(),
   generateText: (a) => oc.generateText(a),
@@ -2565,6 +2568,10 @@ const agentsEngine = createAgentsEngine({
   registry: { identify: async (directory) => (await knowledgeEngine.registry?.identify(directory)) ?? null },
   delegateView,
   isCtoSession: (sid) => ctoConversation.isConversationSession(sid),
+  // Phase 2 (the lead): "is this chat led?" must never read an unreadable store as "no" — both readers THROW instead
+  isCtoSessionStrict: (sid) => ctoConversation.isConversationSessionStrict(sid),
+  isManagedSession: createKnowledgeIsManagedSession({ loadJobs: () => delegateEngine.loadRecordsStrict(), completionOwnerOf: delegateCompletionOwnerOf }),
+  configGet: () => local.configGet(), // the box trust setting for a handoff is read here, never from the request
   syncState,
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
@@ -4892,6 +4899,39 @@ const handleRequest = async (req, res) => {
         return;
       }
       // class-2 (BET-1460): routine_* opencode tools — relays the message to the model (the UI reads via /rpc).
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Agents, Phase 2 (the lead) ----------
+  // GET  /api/agents/lead-brief?sessionID=  → {text} (empty when the chat is not led / there is no lead); 503 {error}
+  //                                           when the chat can't be classified right now (the plugin retries, caches nothing)
+  // POST /api/agents/handoff  body {sessionID, messageID, callID?, agent, title, brief, continueJob?}
+  //                                         → {ok:true, jobId, agentName} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
+  // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engine: src/server/agents.mjs.
+  if (path === "/api/agents/lead-brief" || path === "/api/agents/handoff") {
+    try {
+      if (path === "/api/agents/lead-brief") {
+        if (req.method !== "GET") {
+          respondJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const r = await agentsEngine.leadBrief(url.searchParams.get("sessionID") || "");
+        if (r.status === "unknown") {
+          respondJson(res, 503, { error: "couldn't classify this chat right now" });
+          return;
+        }
+        respondJson(res, 200, { text: r.text });
+        return;
+      }
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      respondJson(res, 200, await agentsEngine.handoff((await readJsonBody(req)) ?? {}));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (lead brief hook, agent_handoff tool) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

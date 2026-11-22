@@ -283,50 +283,60 @@ export function createCtoConversationService({
   // an unreadable store means the whole conversation runtime is already
   // failing loudly everywhere else. Reads are stamp-cached when a `stamp` dep
   // is wired (one stat per classification instead of read+parse).
+  // The binding read behind both classifications (stamp-cached). THROWS when the binding can't be read.
+  async function readBoundIds() {
+    // A stamp (stat) failure is a CACHE problem, not a classification
+    // problem: degrading the CTO session to "ordinary" would raw-send past
+    // the queue (worse than the pre-cache behavior). safeStamp() maps any
+    // stamp error to null = cache miss; the real binding read decides.
+    const current = await safeStamp();
+    if (current !== null && current === classificationCache.stamp) {
+      return {
+        currentSessionId: classificationCache.currentSessionId,
+        previousSessionIds: classificationCache.previousSessionIds,
+      };
+    }
+    const bound = await binding.getBinding();
+    // Cache under the PRE-READ stamp only. Re-stamping AFTER the read
+    // would store pre-write data under a post-write stamp when a binding
+    // write lands in the read window — a stale hit that classifies the
+    // LIVE session as ordinary until the next write (50/50 bypass). The
+    // pre-read stamp makes any write that landed during the read
+    // invalidate on the very next classification; a failed pre-read
+    // stamps nothing (always-miss is always correct).
+    if (typeof stamp === "function" && typeof current === "string") {
+      classificationCache = {
+        stamp: current,
+        currentSessionId: bound.currentSessionId ?? null,
+        previousSessionIds: Array.isArray(bound.previousSessionIds) ? [...bound.previousSessionIds] : [],
+      };
+    }
+    return bound;
+  }
+
+  const isBoundSession = (bound, sessionId) =>
+    bound.currentSessionId === sessionId ||
+    (Array.isArray(bound.previousSessionIds) && bound.previousSessionIds.includes(sessionId));
+
   async function isConversationSession(sessionId) {
     if (typeof sessionId !== "string" || sessionId.length === 0) return false;
     let bound;
     try {
-      // A stamp (stat) failure is a CACHE problem, not a classification
-      // problem: degrading the CTO session to "ordinary" would raw-send past
-      // the queue (worse than the pre-cache behavior). safeStamp() maps any
-      // stamp error to null = cache miss; the real binding read decides.
-      const current = await safeStamp();
-      if (current !== null && current === classificationCache.stamp) {
-        bound = {
-          currentSessionId: classificationCache.currentSessionId,
-          previousSessionIds: classificationCache.previousSessionIds,
-        };
-      }
-      if (!bound) {
-        bound = await binding.getBinding();
-        // Cache under the PRE-READ stamp only. Re-stamping AFTER the read
-        // would store pre-write data under a post-write stamp when a binding
-        // write lands in the read window — a stale hit that classifies the
-        // LIVE session as ordinary until the next write (50/50 bypass). The
-        // pre-read stamp makes any write that landed during the read
-        // invalidate on the very next classification; a failed pre-read
-        // stamps nothing (always-miss is always correct).
-        if (typeof stamp === "function" && typeof current === "string") {
-          classificationCache = {
-            stamp: current,
-            currentSessionId: bound.currentSessionId ?? null,
-            previousSessionIds: Array.isArray(bound.previousSessionIds)
-              ? [...bound.previousSessionIds]
-              : [],
-          };
-        }
-      }
+      bound = await readBoundIds();
     } catch (e) {
       console.warn(
         `[cto-conversation] binding unreadable; treating session ${sessionId} as ordinary: ${describeErr(e)}`,
       );
       return false;
     }
-    return (
-      bound.currentSessionId === sessionId ||
-      (Array.isArray(bound.previousSessionIds) && bound.previousSessionIds.includes(sessionId))
-    );
+    return isBoundSession(bound, sessionId);
+  }
+
+  // Agents Phase 2: the same classification, but an unreadable binding THROWS instead of reading as "ordinary" —
+  // the lead brief must not be handed to the CTO conversation because a file was momentarily unreadable.
+  async function isConversationSessionStrict(sessionId) {
+    if (typeof sessionId !== "string" || sessionId.length === 0) return false;
+    return isBoundSession(await readBoundIds(), sessionId);
   }
 
   // -- seam: direct sends (`opencode:prompt`) at the conversation session ----
@@ -443,6 +453,7 @@ export function createCtoConversationService({
     submit,
     interrupt,
     isConversationSession,
+    isConversationSessionStrict,
     admitDirect,
     admitCommand,
     redirectDelivery,

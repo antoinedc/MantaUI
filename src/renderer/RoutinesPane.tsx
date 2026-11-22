@@ -16,6 +16,7 @@ import { Eyebrow } from "./Eyebrow";
 import { Pill } from "./Pill";
 import { StatusDot } from "./StatusDot";
 import { Toggle } from "./Toggle";
+import { usePackageAgents } from "./packageAgents";
 import {
   Box,
   OutcomePill,
@@ -459,6 +460,10 @@ function RoutineRow({
   const inChat = routine.destination.type === "session";
   const paused = !routine.enabled && !inChat;
   const dim = paused || inChat ? "text-text-quiet" : "";
+  const { agents: packageAgents } = usePackageAgents();
+  const agentName = routine.agent
+    ? (packageAgents?.find((a) => a.slug === routine.agent)?.name || routine.agent)
+    : null;
   const next =
     inChat || paused || lastRun?.status === "needs_input" ? "—" : nextLabel(routine.nextRunAt, now);
   const view = inChat ? IN_A_CHAT : lastRun ? outcomeView(lastRun, waitingPos) : null;
@@ -476,7 +481,10 @@ function RoutineRow({
         <RoutineGlyph icon={routine.icon} />
         <span className="min-w-0">
           <span className={`block truncate text-body font-semibold ${dim || "text-text"}`}>{routine.name}</span>
-          <span className="block text-meta font-mono text-text-quiet">{projectLabel(routine)}</span>
+          <span className="block truncate text-meta font-mono text-text-quiet">
+            {projectLabel(routine)}
+            {agentName && <span className="font-sans" data-testid="routine-agent"> · {agentName}</span>}
+          </span>
         </span>
       </div>
       <div>

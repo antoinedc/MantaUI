@@ -20,6 +20,7 @@ import { ShowMore } from "./RoutinesParts";
 import { ScheduledTasksCard } from "./PanelCards";
 import type { ScheduledJob } from "../shared/types";
 import { useStore } from "./store";
+import { resetPackageAgentsForTest } from "./packageAgents";
 import { pinDemoClock } from "./clock";
 import type { RoutinesSummary } from "../shared/routines";
 
@@ -116,6 +117,27 @@ describe("Routines", () => {
     expect(row?.textContent).not.toMatch(/findings|nothing new|done/i);
   });
 
+  it("a routine that runs as an agent shows '· <Agent>' in its row (the slug if the agent is gone)", async () => {
+    const withAgent = {
+      ...summary,
+      routines: summary.routines.map((r, i) => (i === 0 ? { ...r, agent: "dev" } : i === 1 ? { ...r, agent: "ghost" } : r)),
+    };
+    resetPackageAgentsForTest();
+    mountPane(
+      { summary: withAgent },
+      {
+        agentsList: () =>
+          Promise.resolve([
+            { slug: "dev", name: "Dev", description: "d", isolation: "worktree", model: null, color: null, builtIn: true, role: "specialist", useWhen: null, notFor: null, notice: null },
+          ]),
+      },
+    );
+    await h!.flush();
+    await h!.flush();
+    const tags = [...h!.container.querySelectorAll('[data-testid="routine-agent"]')].map((e) => e.textContent);
+    expect(tags).toEqual([" · Dev", " · ghost"]);
+  });
+
   it("Mark all read calls the box, reloads and says how many it marked", async () => {
     const routinesMarkRead = vi.fn(() => Promise.resolve({ updated: 3 }));
     const p = mountPane({}, { routinesMarkRead });
@@ -187,6 +209,101 @@ describe("Routines", () => {
         expect.objectContaining({ name: "Digest", prompt: "Summarize yesterday", cron: "30 8 * * 1-5", access: "read", notify: "findings", rollUp: true, directory: "/home/dev/projects/ronda" }),
       );
       expect(props.onSaved).toHaveBeenCalled();
+    });
+
+    describe("the Agent picker (Agents Phase 2)", () => {
+      const agent = (slug: string, over: Record<string, unknown> = {}) => ({
+        slug,
+        name: slug[0].toUpperCase() + slug.slice(1),
+        description: `${slug} agent`,
+        isolation: "none" as const,
+        model: null,
+        color: null,
+        builtIn: false,
+        role: "specialist" as const,
+        useWhen: null,
+        notFor: null,
+        notice: null,
+        ...over,
+      });
+      const AGENTS = [
+        agent("manta", { role: "lead" }),
+        agent("dev", { isolation: "worktree" }),
+        agent("seo"),
+        agent("broken", { error: "agent.md has no description" }),
+      ];
+      const select = () => document.body.querySelector("#routine-agent") as HTMLSelectElement | null;
+      async function choose(el: HTMLSelectElement, value: string) {
+        await act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value);
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      }
+      async function fill() {
+        await type(field("routine-name"), "Digest");
+        await type(field("routine-prompt"), "Summarize yesterday");
+      }
+
+      beforeEach(() => resetPackageAgentsForTest());
+
+      it("offers None plus the valid specialists only (no lead, no broken package), labelled", async () => {
+        mountEditor({ agentsList: () => Promise.resolve(AGENTS) });
+        await h!.flush();
+        await h!.flush();
+        const el = select()!;
+        expect(el.labels?.[0]?.textContent).toBe("Agent");
+        expect([...el.options].map((o) => o.value)).toEqual(["", "dev", "seo"]);
+        expect([...el.options].map((o) => o.textContent)).toEqual(["None", "Dev", "Seo"]);
+        expect(el.value).toBe("");
+      });
+
+      it("a new routine saves None as agent null, and a pick as its slug", async () => {
+        const routinesCreate = vi.fn((input: unknown) => Promise.resolve({ id: "11112222", name: "Digest", ...(input as object) }));
+        mountEditor({ routinesCreate, agentsList: () => Promise.resolve(AGENTS) });
+        await h!.flush();
+        await h!.flush();
+        await fill();
+        await click(h!, docButton("Create routine") ?? null);
+        expect(routinesCreate).toHaveBeenLastCalledWith(expect.objectContaining({ agent: null }));
+        h!.unmount();
+        mountEditor({ routinesCreate, agentsList: () => Promise.resolve(AGENTS) });
+        await h!.flush();
+        await h!.flush();
+        await fill();
+        await choose(select()!, "dev");
+        await click(h!, docButton("Create routine") ?? null);
+        expect(routinesCreate).toHaveBeenLastCalledWith(expect.objectContaining({ agent: "dev" }));
+      });
+
+      it("editing opens on the routine's agent; choosing None clears it with null", async () => {
+        const routinesUpdate = vi.fn((_id: string, input: unknown) => Promise.resolve({ id: "a1b2c3d4", name: "Digest", ...(input as object) }));
+        installMockApi({ routinesUpdate, agentsList: () => Promise.resolve(AGENTS) });
+        const routine = { ...summary.routines[0], agent: "seo" };
+        h = mount(<RoutineEditor open routine={routine} tz="Europe/Paris" onClose={vi.fn()} onSaved={vi.fn()} onTestRun={vi.fn()} />);
+        await h.flush();
+        await h.flush();
+        expect(select()!.value).toBe("seo");
+        await choose(select()!, "");
+        await click(h!, docButton("Save") ?? null);
+        expect(routinesUpdate).toHaveBeenCalledWith("a1b2c3d4", expect.objectContaining({ agent: null }));
+      });
+
+      it("a routine whose agent is gone keeps showing it (unavailable) instead of silently dropping it", async () => {
+        installMockApi({ agentsList: () => Promise.resolve(AGENTS) });
+        const routine = { ...summary.routines[0], agent: "ghost" };
+        h = mount(<RoutineEditor open routine={routine} tz="Europe/Paris" onClose={vi.fn()} onSaved={vi.fn()} onTestRun={vi.fn()} />);
+        await h.flush();
+        await h.flush();
+        expect(select()!.value).toBe("ghost");
+        expect(select()!.selectedOptions[0].textContent).toBe("@ghost (unavailable)");
+      });
+
+      it("a box with no specialists shows no picker (nothing to choose)", async () => {
+        mountEditor({ agentsList: () => Promise.resolve([AGENTS[0]]) });
+        await h!.flush();
+        await h!.flush();
+        expect(select()).toBeNull();
+      });
     });
 
     it("'If the last report is still unread' defaults to Update it, and the choice goes to the box", async () => {
