@@ -1010,12 +1010,25 @@ export function createRoutinesEngine(deps) {
   async function update(id, patch) {
     const t = now();
     const fields = cleanInput(patch ?? {}, { partial: true, isDirectory, now: t });
-    // omitted = unchanged, null = clear
-    const agentPatch = patch?.agent === undefined ? {} : { agent: await checkAgent(patch.agent) };
+    // omitted = unchanged, null = clear. Re-saving the routine's CURRENT agent is always accepted, even when that agent
+    // has become unavailable since (the run then falls back with a note): editing another field must not be blocked.
+    let agentPatch = {};
+    let agentError = null;
+    if (patch?.agent !== undefined) {
+      try {
+        agentPatch = { agent: await checkAgent(patch.agent) };
+      } catch (e) {
+        agentError = e;
+      }
+    }
     const projs = await projects();
     const routine = await txn(async (store, touch) => {
       const r = store.routines.find((x) => x.id === id);
       if (!r) throw bad("That routine no longer exists.", 404);
+      if (agentError) {
+        const same = typeof patch.agent === "string" && patch.agent.trim().replace(/^@/, "").toLowerCase() === r.agent;
+        if (!same) throw agentError;
+      }
       const { memory, ...rest } = fields;
       Object.assign(r, rest, agentPatch);
       if (memory !== undefined) {

@@ -1977,6 +1977,17 @@ test("agent: update — omitted leaves it, null clears it, a slug sets it", asyn
   assert.equal(w.routine(r.id).agent, null);
 });
 
+test("agent: re-saving the current agent after it became unavailable is accepted; switching to an unknown one is not", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" });
+  const r = await w.make({ agent: "seo" });
+  w.agentsDb.delete("seo");
+  const saved = await w.engine.update(r.id, { name: "Renamed", agent: "seo" });
+  assert.equal(saved.agent, "seo");
+  assert.equal(saved.name, "Renamed");
+  await assert.rejects(w.engine.update(r.id, { agent: "nobody" }), /No agent named @nobody/);
+});
+
 test("agent: an old stored routine (no agent field) reads as null", async () => {
   const w = makeWorld();
   const r = await w.make();
