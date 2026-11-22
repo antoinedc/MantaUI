@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse, modify, applyEdits } from "jsonc-parser";
-import { reconcileSubagents } from "../shared/subagentSync.mjs";
+import { reconcileSubagents, AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { reloadOpencodeConfig, listOpencodeModels } from "./opencodeAdmin.mjs";
 import { invalidateProvidersCache } from "./opencode.mjs";
 import { statePath, uploadRoot } from "../shared/paths.mjs";
@@ -392,6 +392,7 @@ export function upsertAgentBlock(cfg, input) {
 export function readAgentBlocks(cfg) {
   const agents = getAgentMap(cfg);
   return Object.entries(agents)
+    .filter(([name]) => !name.startsWith(AGENT_PACKAGE_PREFIX))
     .filter(([, block]) => block.mode !== "primary" && typeof block.model === "string" && block.model)
     .map(([name, block]) => ({
       name,

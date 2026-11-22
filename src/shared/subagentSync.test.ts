@@ -43,6 +43,11 @@ describe("deriveSubagentName", () => {
     expect(a).toBe(b);
   });
 
+  it("never yields a name starting with the reserved agent- prefix", () => {
+    expect(deriveSubagentName("x", "agent-smith", new Set())).toBe("m-agent-smith");
+    expect(deriveSubagentName("x", "agent-smith", new Set(["m-agent-smith"]))).toBe("m-agent-smith-2");
+  });
+
   it("accepts an array as well as a Set for taken", () => {
     expect(deriveSubagentName("anthropic", "claude-haiku-4", ["haiku"])).toBe("haiku-2");
   });

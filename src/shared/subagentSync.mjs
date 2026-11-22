@@ -13,6 +13,10 @@
 
 import { describeModel, familyKey, isDeprecated } from "./modelGuide.mjs";
 
+// opencode agent keys of agent packages (~/.manta/agents/<slug>) are
+// "agent-<slug>". Model-subagent sync neither reads, writes nor generates them.
+export const AGENT_PACKAGE_PREFIX = "agent-";
+
 // Lowercase, non-alphanumeric → "-", collapse repeats, trim leading/trailing
 // "-". Fallback naming for models whose family isn't in the catalog.
 function slugify(s) {
@@ -43,8 +47,10 @@ export function deriveSubagentName(providerID, modelID, taken) {
   const takenSet = new Set(
     [...(taken instanceof Set ? taken : (taken ?? []))].map((n) => String(n).toLowerCase()),
   );
-  const base =
+  let base =
     familyKey(modelID) || slugify(modelID) || slugify(providerID) || "model";
+  // "agent-" is reserved for user-visible agent packages (src/server/agents.mjs).
+  if (base.startsWith(AGENT_PACKAGE_PREFIX)) base = `m-${base}`;
   let name = base;
   let n = 2;
   while (takenSet.has(name.toLowerCase())) {

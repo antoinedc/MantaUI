@@ -187,17 +187,19 @@ function genId() {
  * omitted entirely when `worktree` is null (parent cwd was not a repo). Do not
  * add anything else and do not make it configurable.
  */
-export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs }) {
+export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, readOnly = false }) {
   const head = String(prompt ?? "").trim();
   const factsSection =
     facts && String(facts).trim().length > 0
       ? "\n\n---\nRelevant project context (from the CTO blackboard):\n" + String(facts).trim() + "\n"
       : "";
   const limit = formatDuration(Number.isFinite(ceilingMs) && ceilingMs > 0 ? ceilingMs : DEFAULT_CEILING_MS);
+  // A read-only job (an agent with isolation "none") changes nothing, so there is nothing to commit.
   const budget =
     `Time: this job is stopped after ${limit} of work (and earlier if it makes no\n` +
-    "progress for 15 minutes). Commit your work as you go so nothing is lost if it\n" +
-    "is stopped.\n\n" +
+    (readOnly
+      ? "progress for 15 minutes).\n\n"
+      : "progress for 15 minutes). Commit your work as you go so nothing is lost if it\n" + "is stopped.\n\n") +
     "Progress: keep your todo list current — it is shown to the user as your\n" +
     "progress. At each plan step call progress_report with a one-line label; when\n" +
     "you find or finish something the user would want to know, add it as a\n" +
@@ -210,8 +212,11 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs }) {
       "\n\n---\n" +
       "You are running as a background job. The user is not watching this session and\n" +
       "cannot see your intermediate output — only your final message is reported back.\n\n" +
+      (readOnly ? "You can read and search, but you cannot edit files or run commands.\n\n" : "") +
       budget +
-      "When you are done, end with a short summary of what you changed and why." +
+      (readOnly
+        ? "When you are done, end with your answer: a short summary of what you found and recommend."
+        : "When you are done, end with a short summary of what you changed and why.") +
       factsSection
     );
   }
@@ -408,6 +413,48 @@ export function normalizeJobRuleset(rules) {
     (r) => !(r?.permission === "question" && r?.pattern === "*" && r?.action === "deny"),
   );
   return [...list, { permission: "question", pattern: "*", action: "deny" }];
+}
+
+/**
+ * The ruleset of an agent job that works in the chat's own folder (`isolation: "none"`): deny by default, then
+ * only read-side tools, the todo list, progress reports and the agent's own folder (its skills / briefs). No bash,
+ * no edit. The catch-all deny is FIRST (last match wins). Pure.
+ */
+export function buildReadOnlyAgentRuleset({ agentDir, home = homedir() } = {}) {
+  const allow = (permission, pattern = "**") => ({ permission, pattern, action: "allow" });
+  const rules = [
+    { permission: "*", pattern: "**", action: "deny" },
+    allow("read"),
+    allow("glob"),
+    allow("grep"),
+    allow("list"),
+    allow("webfetch"),
+    allow("websearch"),
+    allow("todowrite", "*"),
+    allow("progress_report", "*"),
+    allow("external_directory", `${home}/.local/share/opencode/tool-output/*`),
+  ];
+  if (agentDir) rules.push(allow("external_directory", `${String(agentDir).replace(/\/+$/, "")}/**`));
+  return rules;
+}
+
+/**
+ * The ruleset of an agent job in its own worktree (`isolation: "worktree"`): it edits code, so the same grants the
+ * forge-triggered implementation jobs get, plus the progress tool.
+ */
+export function buildWorktreeAgentRuleset({ home = homedir() } = {}) {
+  return buildPermissionRuleset(
+    [
+      { permission: "bash", pattern: "**" },
+      { permission: "write", pattern: "**" },
+      { permission: "edit", pattern: "**" },
+      { permission: "read", pattern: "**" },
+      { permission: "webfetch", pattern: "**" },
+      { permission: "websearch", pattern: "**" },
+      { permission: "progress_report", pattern: "*" },
+    ],
+    { home },
+  );
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
@@ -1048,7 +1095,7 @@ async function prepareWorktree({ input, name, parentDirectory }, deps) {
     branch = wt.branch;
     cwd = wt.path;
   } catch (e) {
-    if (input?.isolationRequired) {
+    if (input?.isolationRequired || input?.isolation === "worktree") {
       return {
         refusal: {
           ok: false,
@@ -4173,9 +4220,23 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       tmuxSession = owner.tmuxSession;
     }
 
-    const wt = await prepareWorktree({ input, name, parentDirectory }, deps);
+    // An agent with isolation "none" works read-only in the parent's own folder: no worktree is made at all.
+    const readOnly = input?.isolation === "none";
+    const wt = readOnly
+      ? { worktree: null, branch: null, baseSha: null, cwd: parentDirectory }
+      : await prepareWorktree({ input, name, parentDirectory }, deps);
     if (wt.refusal) return wt.refusal;
     const { worktree, branch, baseSha } = wt;
+    // The opencode agent the child runs: an agent package's `agent-<slug>`, else the default.
+    const jobAgent = typeof input?.agent === "string" && input.agent.trim() ? input.agent.trim() : V2_JOB_AGENT;
+    // An agent job brings its own ruleset unless the caller supplied one.
+    const jobPermission =
+      input?.permission ??
+      (readOnly
+        ? buildReadOnlyAgentRuleset({ agentDir: input?.agentDir })
+        : input?.isolation === "worktree"
+          ? buildWorktreeAgentRuleset()
+          : null);
     // THE execution directory, resolved once and persisted: the worktree, or the
     // parent's own directory when none could be made and isolation isn't required.
     const executionDirectory = worktree ?? parentDirectory;
@@ -4202,7 +4263,9 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       actor: input?.actor ?? "user",
       correlation: input?.correlation ?? null,
       sweepAllowanceMs: input?.sweepAllowanceMs ?? null,
-      permission: input?.permission ?? null,
+      permission: jobPermission,
+      ...(typeof input?.agentName === "string" && input.agentName ? { agentName: input.agentName } : {}),
+      ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
       // Background work budget (spec 2026-11-17 §17.14): set for overnight dispatches (`actor:"cto"` alone does not
       // identify them). The cursor is what has already been booked against the shared budget.
       budgetWorkType: typeof input?.budgetWorkType === "string" && input.budgetWorkType ? input.budgetWorkType : null,
@@ -4223,12 +4286,12 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       // minted once per JOB: a resume keeps it, so the job's one result has one id
       completionMessageId: mintMessageId(),
       completionDelivery: null,
-      agent: V2_JOB_AGENT,
+      agent: jobAgent,
       executionDirectory,
       // what the launch sends, persisted so a reconcile can finish a launch this
       // process never got to (and a resume reuses the first attempt's model)
       launch: {
-        text: buildJobPrompt({ prompt, worktree, branch, ceilingMs }),
+        text: buildJobPrompt({ prompt, worktree, branch, ceilingMs, readOnly }),
         model: launchModel,
         messageId: mintMessageId(),
       },

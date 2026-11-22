@@ -123,7 +123,7 @@ import {
 } from "./voiceNotes.mjs";
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
-import { runServerSelfUpdate, restartOpencode } from "./opencodeAdmin.mjs";
+import { runServerSelfUpdate, restartOpencode, reloadOpencodeConfig } from "./opencodeAdmin.mjs";
 import { createBoxTimeZone, readRunningOpencodeTz, restartOpencodeService } from "./boxTimeZone.mjs";
 import { createOpencodeService } from "./upgradeV2Service.mjs";
 // `loadJobs` backs the tool-scan schedules surface (toolsGetSurfaces, W10/
@@ -255,9 +255,11 @@ import { createHandoffHandler } from "./handoffRoute.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
+import { createAgentsEngine } from "./agents.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
+  editConfig as editOpencodeConfig,
   startCtoAgentRecovery,
   materializeCtoPrompt,
   createCtoDoctrineRestarter,
@@ -2551,8 +2553,25 @@ const stopTuner = startPoller(async () => {
 // eslint-disable-next-line no-unused-vars
 void stopTuner;
 
+// Agents, Phase 1 (src/server/agents.mjs): named agents you can @mention. Built-ins are installed and every valid agent
+// is compiled into opencode.jsonc at boot; a failure is logged and never blocks startup (`agents:list` retries).
+const agentsEngine = createAgentsEngine({
+  editConfig: (edits) => editOpencodeConfig(edits),
+  reload: () => reloadOpencodeConfig(),
+  oc,
+  delegate: delegateEngine,
+  tmux,
+  // the registry exists only once the knowledge layer has opened its store: read it at call time
+  registry: { identify: async (directory) => (await knowledgeEngine.registry?.identify(directory)) ?? null },
+  delegateView,
+  isCtoSession: (sid) => ctoConversation.isConversationSession(sid),
+  syncState,
+});
+void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
+
 rpcHandlers = buildHandlers({
   usageCalibration,
+  agents: agentsEngine,
   routines: routinesEngine,
   knowledge: knowledgeEngine,
   backgroundBudget,
