@@ -115,7 +115,11 @@ synthetic row. `LEAD_SLUG` is added to the reserved slugs for NEW agents only
   `loadJobsStrict()` in `delegate.mjs` returns `[]` only for a missing file
   (ENOENT) and THROWS on any other read or parse failure (today's `loadJobs`
   returns `[]` for both). A throw → "unknown";
-- it is not the CTO conversation (`isCtoSession`; a failure → "unknown");
+- it is not the CTO conversation: a new strict lookup
+  `ctoConversation.isConversationSessionStrict(sid)` covering the current and
+  previous CTO session ids, which THROWS when the binding can't be read (→
+  "unknown"); the existing fail-open `isConversationSession` stays as is for
+  other callers;
 - its directory is not inside `~/.manta/agents/<slug>/` unless that package is
   the valid lead (specialists' direct chats are not led).
 
@@ -200,23 +204,32 @@ refusals so the tool relays the sentence; class-2). The tool returns:
 Server (`agents.handoff`), checks in this order, refusals as sentences:
 
 1. **Live invocation (caller binding).** The box bearer is box-wide, so the body
-   alone proves nothing. The server reads the calling message with
-   `oc.getMessage(sessionID, messageID)` (up to 3 tries, 200 ms apart, in case
-   the tool part is not persisted yet) and requires: it belongs to `sessionID`,
-   role `assistant`, and holds a tool part with `tool === "agent_handoff"`,
-   status not `completed`/`error`, whose input `agent` and `title` equal the
-   body's (and whose `callID` equals the body's when one was sent). It then **consumes** the matched part (`messageID` + the part's `callID`) (in-memory set,
-   LRU 1000): a second request for the same part is refused. Unreadable →
-   "Couldn't verify this handoff; try again". Mismatch / no such part /
-   consumed → "Only the lead can hand off work". (Implementer: confirm on the
-   pinned binary that the running tool part is visible at execute time — the
-   plugin-pack e2e harness can show it. If it is not, STOP and report; do not
-   weaken the check.)
-2. `classifySession(sessionID)`: "unknown" → "Couldn't check this chat; try
-   again"; "not-led" → "Only the lead can hand off work".
-3. **Plan mode:** the calling message's agent (from the message read in 1) is a
-   plan agent (`"plan"` or `"manta-plan"`, the same predicate as `cto.mjs`) and
-   the target's effective isolation is `worktree` → "You're planning; propose
+   alone proves nothing. The plugin forwards the execute context's `id` as
+   `callID` (`lib/context.ts` `resolveToolContext` keeps it; today it drops it).
+   The server reads the session with `oc.listMessages(sessionID, {limit: 200})`
+   (up to 3 tries, 200 ms apart, in case the part is not persisted yet) — the
+   mapped listing gives assistant messages their `parentID` (the user message
+   that started the turn) and `agent`, which a single `getMessage` does not. It
+   requires: a message with id `messageID`, role `assistant`, holding a tool
+   part with `tool === "agent_handoff"`, `callID === body.callID`, status not
+   `completed`/`error`. **The part's `state.input` is the source of truth**:
+   `agent`, `title`, `brief`, `continueJob` must equal the body's (any
+   mismatch → refused). It then **consumes** `messageID + callID` (in-memory
+   set, LRU 1000): a replay is refused. Not found / unreadable after retries →
+   "Couldn't verify this handoff; try again"; mismatch / consumed → "Only the
+   lead can hand off work". Its `parentID` is the **turn key** (absent → the
+   same "couldn't verify" refusal; never fall back to `messageID`). Implementer:
+   confirm on the pinned binary (plugin-pack e2e harness) that the running part
+   is visible at execute time; if not, STOP and report — do not weaken the check.
+2. No valid lead package → "Only the lead can hand off work" (the tool stays
+   registered even when the brief is empty). `classifySession(sessionID)`:
+   "unknown" → "Couldn't check this chat; try again"; "not-led" → "Only the
+   lead can hand off work".
+3. **Plan mode:** the calling message's agent (from the read in 1) is a plan
+   agent (`"plan"` or `"manta-plan"`, the same predicate as `cto.mjs`) and the
+   writer test holds — for a NEW handoff the target's effective isolation is
+   `worktree`; for `continueJob` the job is validated FIRST (see below) and its
+   STORED `isolation` is used → "You're planning; propose
    the change instead of handing it off". Checked before any approval card.
 4. Unknown / invalid agent → as dispatch; target `role === "lead"` → "Manta
    already leads this chat".
@@ -246,8 +259,10 @@ before the record is written (a returned string refuses with it, HTTP-200
 style). Job records gain persisted `isolation` ("worktree" | "none", agent jobs),
 `requestedBy` ("manta" | absent), `turnKey` (string | absent) and `allowPr`
 (boolean, absent = true).
-- **Turn key:** the calling assistant message's `parentID` (the user message
-  that started the turn) from the read in step 1, else `messageID`.
+- **Turn key:** from step 1 (the calling assistant message's `parentID`).
+- `admit` runs right after the locked store is loaded and checked, BEFORE
+  anything is allocated (worktree, branch, session id): a refused second writer
+  leaves no record and no worktree (test it).
 - **Single writer:** the new job is a writer and a job with this
   `parentSessionID`, `isolation: "worktree"` and status `running` exists →
   "<Agent> is already changing code for this chat (<job name>); wait for its
@@ -256,8 +271,9 @@ style). Job records gain persisted `isolation` ("worktree" | "none", agent jobs)
 - **Turn cap:** ≥ 3 jobs with this `parentSessionID`, `requestedBy: "manta"`
   and the same `turnKey` (any status, continuations included) → "Too many
   handoffs for one request; finish or ask the user".
-- Tests: two concurrent writer handoffs → one starts; four concurrent read-only
-  handoffs in one turn → three start.
+- Tests: two concurrent writer handoffs → one starts; four read-only handoffs
+  after one user message, made from four DIFFERENT assistant messages → three
+  start.
 
 **No pull requests:** handoff jobs (new and continued) carry `allowPr: false`;
 the job prompt then replaces the "You may open a draft pull request" sentence
@@ -266,9 +282,10 @@ with "Do not open pull requests; the lead and the user decide what ships".
 prompts. This is an instruction, not an enforcement (the shell grants are
 unchanged) — say so in a code comment.
 
-**continueJob:** when set, the job must be this parent's finished job of the
-same agent with `requestedBy: "manta"` (else "That task can't be continued from
-here"). The server calls `delegate.continueJob(id, {prompt: brief, sessionID,
+**continueJob:** when set, this is validated right after step 2 and before
+steps 3–6: the job must be this parent's finished job of the same agent with
+`requestedBy: "manta"` (else "That task can't be continued from here"); its
+stored `isolation` then drives the plan gate and admission. The server calls `delegate.continueJob(id, {prompt: brief, sessionID,
 admit, name: requestTitle(title), request: title, requestedBy: "manta",
 turnKey})` — `continueJob` gains those optional fields and writes them on the
 successor (else it inherits the old ones). Admission uses the STORED job's
@@ -321,8 +338,9 @@ user's settings; nothing else changes.
   `Routine.agent: string | null` (slug; `null` = none, also for old records),
   `RoutineInput.agent?: string | null`. On update: omitted = unchanged,
   `null` = clear. The AI tool schema's `agent` is optional and nullable. Validation on
-  create/update: null/absent ok; unknown slug, invalid agent, or `LEAD_SLUG`
-  → error "No agent named @<slug>". `routineWire` exposes it.
+  create/update: null/absent ok; unknown slug, invalid agent, or a package
+  with `role === "lead"` → error "No agent named @<slug>" (a legacy `manta`
+  specialist is a valid target). `routineWire` exposes it.
 - Run start (`routines.mjs` session create): when `agent` is set and the agent
   is valid, pass `agent: "agent-<slug>"` to `oc.createSession` and to
   `sendPrompt`; prefix the run prompt with the agent's seat brief for the
