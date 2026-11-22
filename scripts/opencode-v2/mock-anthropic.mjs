@@ -83,7 +83,8 @@ export function decide(body) {
   return { kind: "text", text: parts.length ? parts.join(" ") : "ok" };
 }
 
-export async function startMockAnthropic({ delayMs = 0, log = () => {} } = {}) {
+// `decideFn(body)` replaces the built-in script (same return shape as `decide`) for a probe that needs its own model.
+export async function startMockAnthropic({ delayMs = 0, log = () => {}, decideFn = decide } = {}) {
   const requests = [];
   const state = { delayMs };
   let n = 0;
@@ -101,7 +102,7 @@ export async function startMockAnthropic({ delayMs = 0, log = () => {} } = {}) {
       res.end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: `mock: ${req.method} ${req.url}` } }));
       return;
     }
-    const d = decide(body);
+    const d = decideFn(body);
     requests.push({ at: Date.now(), body, decision: d });
     log(`[mock] request ${requests.length} → ${d.kind === "tool" ? `tool ${d.name}` : `text "${d.text}"`}`);
     const id = `msg_mock${++n}`;

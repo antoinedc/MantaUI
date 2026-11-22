@@ -68,10 +68,11 @@ function lruSet(max: number) {
   };
 }
 
-function remember<V>(map: Map<string, V>, key: string, value: V): void {
+/** Set `key` as the most recently used entry; the least recently used one is forgotten past `max`. */
+export function remember<V>(map: Map<string, V>, key: string, value: V, max: number = MAX_TRACKED): void {
   map.delete(key);
   map.set(key, value);
-  if (map.size > MAX_TRACKED) map.delete(map.keys().next().value as string);
+  if (map.size > max) map.delete(map.keys().next().value as string);
 }
 
 function countAssistants(messages: unknown): number {
@@ -81,7 +82,8 @@ function countAssistants(messages: unknown): number {
   return n;
 }
 
-function append(system: any[], text: string): void {
+/** Append `text` as one more system block (once: an identical block already there is left alone). */
+export function append(system: any[], text: string): void {
   if (system.some((b) => b?.text === text)) return;
   system.push({ type: "text", text });
 }
@@ -295,8 +297,15 @@ export function createBriefing(deps: BriefingDeps) {
   };
 }
 
+export interface InstallOptions {
+  /** Register the `context` hook here (default). The plugin entry sets false and composes one hook over several appenders. */
+  contextHook?: boolean;
+  /** Called for every event of the plugin's event stream, after the briefing's own handling. Never throws into the stream. */
+  onEvent?(ev: any): void;
+}
+
 /** Wire the briefing into a plugin context: the two hooks + the session event stream. */
-export async function installBriefing(ctx: any, overrides: Partial<BriefingDeps> = {}) {
+export async function installBriefing(ctx: any, overrides: Partial<BriefingDeps> = {}, options: InstallOptions = {}) {
   const learned = new Map<string, string>();
   const directory = async (sessionID: string): Promise<string | undefined> => {
     const own = ctx?.location?.directory;
@@ -319,7 +328,7 @@ export async function installBriefing(ctx: any, overrides: Partial<BriefingDeps>
     ...overrides,
   });
 
-  await ctx.session.hook("context", (event: any) => briefing.onContext(event));
+  if (options.contextHook !== false) await ctx.session.hook("context", (event: any) => briefing.onContext(event));
   await ctx.session.hook("compaction", (event: any) => briefing.onCompaction(event));
 
   // The prefetch is an optimisation: without the stream the hook still fetches within its wait.
@@ -331,6 +340,11 @@ export async function installBriefing(ctx: any, overrides: Partial<BriefingDeps>
         briefing.setEventsLive(true);
         const mine = ctx?.location?.directory;
         for await (const ev of stream) {
+          try {
+            options.onEvent?.(ev);
+          } catch {
+            /* a listener must never break the stream */
+          }
           if (ev?.type === "session.created") {
             const d = ev?.data?.location?.directory;
             if (typeof mine === "string" && mine !== "" && typeof d === "string" && d !== "" && d !== mine) continue;

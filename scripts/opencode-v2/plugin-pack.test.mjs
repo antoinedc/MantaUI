@@ -63,8 +63,8 @@ after(async () => {
   await v2Tree.cleanup();
 });
 
-// Tools that never had a V1 file: V2 introduced them (routines: spec 2026-10-30; knowledge: spec 2026-11-16).
-const V2_ONLY = ["handoff", "knowledge_note", "knowledge_read", "knowledge_search", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "session_link", "session_unlink", "todo_write"];
+// Tools that never had a V1 file: V2 introduced them (routines: spec 2026-10-30; knowledge: spec 2026-11-16; agent_handoff: agents phase 2).
+const V2_ONLY = ["agent_handoff", "handoff", "knowledge_note", "knowledge_read", "knowledge_search", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "session_link", "session_unlink", "todo_write"];
 
 describe("tool inventory", () => {
   test("V1 inventory is the 46 tools the spec names", async () => {

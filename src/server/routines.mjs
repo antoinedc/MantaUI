@@ -64,7 +64,9 @@ const isLive = (run) => run?.status === "running" || run?.status === "needs_inpu
 // `unreadPrompt` is the rendered "reports you haven't read" section (built once at reserve, so a
 // resend after a crash sends the identical prompt); `terminalNotified` dedups the terminal
 // notification per phase (notifiedAt keeps its UI meaning even after a needs_input ping).
-const RUN_SERVER_ONLY = ["abortReason", "erroredWith", "erroredAt", "queuedBehind", "submittedAt", "phaseSince", "unreadPrompt", "terminalNotified"];
+// `agentKey` / `openingText` (Agents Phase 2): the OpenCode agent the run's session was created with and the exact opening
+// prompt it was sent, persisted BEFORE the session exists so a crash-resend repeats the original, not a rebuild.
+const RUN_SERVER_ONLY = ["abortReason", "erroredWith", "erroredAt", "queuedBehind", "submittedAt", "phaseSince", "unreadPrompt", "terminalNotified", "agentKey", "openingText"];
 const ROUTINE_SERVER_ONLY = ["disabledBy"];
 
 export class RoutineError extends Error {
@@ -148,6 +150,17 @@ export function buildRunPrompt(routine, memory, run) {
     "- memory: the COMPLETE updated notes for the next run (baselines, what you are watching, what to ignore; under 60 lines). Omit it to keep the notes unchanged.",
     "Ask the user a question only if you cannot continue without an answer.",
   ].join("\n");
+}
+
+/**
+ * The text a run's session is opened with: the run prompt, prefixed with the agent's brief for the routine's project
+ * when it has one, or with a one-line note when the routine's agent has become unavailable. Pure.
+ */
+export function buildOpeningText(runPrompt, { seat = "", unavailable = null } = {}) {
+  let out = runPrompt;
+  if (seat) out = `Your brief for this project:\n${seat}\n\n---\n\n${out}`;
+  if (unavailable) out = `(Agent @${unavailable} is unavailable; running as the default agent.)\n\n${out}`;
+  return out;
 }
 
 export const UNREAD_BLOCK_BUDGET = 24_000;
@@ -575,7 +588,7 @@ function normalizeStore(raw) {
   const store = raw && typeof raw === "object" ? raw : {};
   return {
     version: 1,
-    routines: (Array.isArray(store.routines) ? store.routines : []).map((r) => ({ ...r, rollUp: r.rollUp !== false })),
+    routines: (Array.isArray(store.routines) ? store.routines : []).map((r) => ({ ...r, rollUp: r.rollUp !== false, agent: typeof r.agent === "string" && r.agent ? r.agent : null })),
     runs: (Array.isArray(store.runs) ? store.runs : []).map((r) => ({ unreadAtStart: [], folds: [], foldedInto: null, reportRev: 0, unreadPrompt: "", terminalNotified: false, ...r })),
   };
 }
@@ -624,6 +637,7 @@ const byQueued = (a, b) => a.queuedAt - b.queuedAt || (a.id < b.id ? -1 : a.id >
  * @param {() => Promise<object>} [deps.config]
  * @param {(a: {instruction: string, signal?: AbortSignal}) => Promise<string>} [deps.generateText]
  * @param {object} [deps.schedule] listJobs, createJob, deleteJob (the follow-up store, §8)
+ * @param {object} [deps.agents]   { routineAgent(slug, directory?) → { key, seat } | null } — Agents Phase 2: a routine can run as an agent
  */
 export function createRoutinesEngine(deps) {
   const {
@@ -640,6 +654,7 @@ export function createRoutinesEngine(deps) {
     publish = () => {},
     config = async () => ({}),
     generateText = async () => "",
+    agents = null,
     schedule = { listJobs: async () => [], createJob: async () => ({ ok: false, error: "follow-ups are unavailable" }), deleteJob: async () => ({ ok: true, deleted: false }) },
     log = (...a) => console.warn(...a),
     // Auto-handoff: the live session a follow-up's (possibly replaced) session id now fires into.
@@ -791,6 +806,8 @@ export function createRoutinesEngine(deps) {
       reportRev: 0,
       unreadPrompt: "",
       terminalNotified: false,
+      agentKey: null,
+      openingText: null,
     };
     store.runs.push(run);
     return run;
@@ -940,9 +957,21 @@ export function createRoutinesEngine(deps) {
   }
 
   // ---- CRUD ------------------------------------------------------------------
+  /** A routine's agent: null (none) or the slug of a valid specialist; anything else is a sentence. */
+  async function checkAgent(value) {
+    if (value === null) return null;
+    if (typeof value !== "string") throw bad("Pick an agent from the list.");
+    const slug = value.trim().replace(/^@/, "").toLowerCase();
+    if (!slug) return null;
+    const found = agents ? await agents.routineAgent(slug, "").catch(() => null) : null;
+    if (!found) throw bad(`No agent named @${slug}`);
+    return slug;
+  }
+
   async function create(input, { runtimeSessionID } = {}) {
     const t = now();
     const fields = cleanInput({ ...input, ...(input?.createdFrom === undefined && runtimeSessionID ? { createdFrom: { sessionID: runtimeSessionID } } : {}) }, { partial: false, isDirectory, now: t });
+    const agent = input?.agent === undefined ? null : await checkAgent(input.agent);
     const projs = await projects();
     const routine = await txn(async (store, touch) => {
       let id = newId(4);
@@ -968,6 +997,7 @@ export function createRoutinesEngine(deps) {
         createdFrom: rest.createdFrom ?? null,
         nextRunAt: enabled ? nextOccurrence(rest.cron, t) : null,
         memoryUpdatedByRunId: null,
+        agent,
       };
       if (memory) await writeMemory(id, memory);
       store.routines.push(r);
@@ -980,12 +1010,14 @@ export function createRoutinesEngine(deps) {
   async function update(id, patch) {
     const t = now();
     const fields = cleanInput(patch ?? {}, { partial: true, isDirectory, now: t });
+    // omitted = unchanged, null = clear
+    const agentPatch = patch?.agent === undefined ? {} : { agent: await checkAgent(patch.agent) };
     const projs = await projects();
     const routine = await txn(async (store, touch) => {
       const r = store.routines.find((x) => x.id === id);
       if (!r) throw bad("That routine no longer exists.", 404);
       const { memory, ...rest } = fields;
-      Object.assign(r, rest);
+      Object.assign(r, rest, agentPatch);
       if (memory !== undefined) {
         await writeMemory(id, memory);
         r.memoryUpdatedByRunId = null;
@@ -1270,12 +1302,32 @@ export function createRoutinesEngine(deps) {
         }
       }
       const model = routine.model ?? undefined;
+      // The agent and the opening text are decided once and written down BEFORE the session exists: a crash-resend
+      // sends exactly this, whatever the routine, the agent or the project brief say by then.
+      let agentKey = null;
+      let seat = "";
+      let unavailable = null;
+      if (routine.agent) {
+        const found = agents ? await agents.routineAgent(routine.agent, routine.directory).catch(() => null) : null;
+        if (found) {
+          agentKey = found.key;
+          seat = found.seat ?? "";
+        } else {
+          unavailable = routine.agent;
+        }
+      }
+      const openingText = buildOpeningText(buildRunPrompt(routine, run.memoryAtStart, run), { seat, unavailable });
+      if (!(await patchRun(run.id, { agentKey, openingText }))) {
+        if (worktree) await removeWorktreeIfClean(worktree);
+        return;
+      }
       try {
         await oc.createSession({
           id: run.sessionID,
           directory: cwd,
           title: `Routine · ${routine.name} · ${fmtTitleStamp(run.startedAt)}`,
           ...(model ? { model } : {}),
+          ...(agentKey ? { agent: agentKey } : {}),
           permission: buildRoutineRuleset(routine.access),
           metadata: withInternalMarker({ manta: { routineId: routine.id, runId: run.id } }),
         });
@@ -1287,7 +1339,7 @@ export function createRoutinesEngine(deps) {
       }
       sessionCreated = true;
       try {
-        await oc.sendPrompt({ sessionId: run.sessionID, text: buildRunPrompt(routine, run.memoryAtStart, run), ...(model ? { model } : {}) });
+        await oc.sendPrompt({ sessionId: run.sessionID, text: openingText, ...(model ? { model } : {}), ...(agentKey ? { agent: agentKey } : {}) });
       } catch (e) {
         if (isDefiniteRefusal(e)) throw e;
         const users = await oc.listRawTimeline(run.sessionID, { type: "user" }).catch(() => []);
@@ -1423,7 +1475,7 @@ export function createRoutinesEngine(deps) {
         if (!run.report && !run.reprompted) {
           run.reprompted = true;
           touch({ routineId: run.routineId, runId });
-          return { reprompt: true, sessionID: run.sessionID, model: routine?.model ?? null };
+          return { reprompt: true, sessionID: run.sessionID, model: routine?.model ?? null, agentKey: run.agentKey ?? null };
         }
         if (!run.report) {
           ctx.report = synthesizeReport(lastAssistantText(messages));
@@ -1444,7 +1496,7 @@ export function createRoutinesEngine(deps) {
     if (!decided) return;
     if (decided.reprompt) {
       try {
-        await oc.sendPrompt({ sessionId: decided.sessionID, text: REPROMPT_TEXT, ...(decided.model ? { model: decided.model } : {}) });
+        await oc.sendPrompt({ sessionId: decided.sessionID, text: REPROMPT_TEXT, ...(decided.model ? { model: decided.model } : {}), ...(decided.agentKey ? { agent: decided.agentKey } : {}) });
       } catch (e) {
         log(`[routines] re-prompt of run ${runId} failed:`, e?.message ?? e);
         await settleRun(runId, { outcome }, { retried: true });
@@ -1585,7 +1637,13 @@ export function createRoutinesEngine(deps) {
         const routine = store.routines.find((r) => r.id === run.routineId);
         if (!routine) return;
         try {
-          await oc.sendPrompt({ sessionId: run.sessionID, text: buildRunPrompt(routine, run.memoryAtStart, run), ...(routine.model ? { model: routine.model } : {}) });
+          // the original opening (and agent) when the run recorded them; older runs have none and are rebuilt as before
+          await oc.sendPrompt({
+            sessionId: run.sessionID,
+            text: typeof run.openingText === "string" && run.openingText ? run.openingText : buildRunPrompt(routine, run.memoryAtStart, run),
+            ...(routine.model ? { model: routine.model } : {}),
+            ...(run.agentKey ? { agent: run.agentKey } : {}),
+          });
           await patchRun(runId, { submittedAt: now() });
         } catch (e) {
           await terminate(runId, "failed", humanError(e), { startup: null });

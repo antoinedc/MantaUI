@@ -13,6 +13,8 @@ export type JsonSchema = Record<string, unknown>;
 export interface ToolContext {
   sessionID: string;
   messageID?: string;
+  /** The tool call's id (V2 execute context `id`), when the runtime provides one. */
+  callID?: string;
   directory?: string;
 }
 

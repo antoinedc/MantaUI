@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   createRoutinesEngine,
   startRoutinesPoller,
+  buildOpeningText,
   buildRunPrompt,
   buildRoutineRuleset,
   validateRoutineCron,
@@ -63,6 +64,9 @@ function makeWorld({ concurrency = 2 } = {}) {
     generated: "",
     timers: [],
     logs: [],
+    // Agents Phase 2: slug → { key, seat } for a valid specialist; the lead and unknown / broken packages are simply absent
+    agentsDb: new Map(),
+    agentLookups: [],
   };
   const oc = {
     createSession: async (input) => {
@@ -168,6 +172,12 @@ function makeWorld({ concurrency = 2 } = {}) {
       return w.generated;
     },
     schedule,
+    agents: {
+      routineAgent: async (slug, directory) => {
+        w.agentLookups.push({ slug, directory });
+        return w.agentsDb.get(slug) ?? null;
+      },
+    },
     log: (...a) => w.logs.push(a.join(" ")),
     resolveSession: (sid) => w.replacedBy?.[sid] ?? sid,
     home: "/home/dev",
@@ -1127,7 +1137,7 @@ test("summary: counts, sections, ordering, and the wire shape hides server-only 
   assert.equal(s.now, w.t);
   assert.ok(typeof s.tz === "string" && s.tz.length > 0);
   for (const run of [...s.running, ...s.waiting]) {
-    for (const k of ["abortReason", "erroredWith", "erroredAt", "queuedBehind", "submittedAt", "phaseSince", "unreadPrompt", "terminalNotified"]) assert.equal(k in run, false, k);
+    for (const k of ["abortReason", "erroredWith", "erroredAt", "queuedBehind", "submittedAt", "phaseSince", "unreadPrompt", "terminalNotified", "agentKey", "openingText"]) assert.equal(k in run, false, k);
     assert.equal(run.memoryAtStart, "", "elided in lists");
   }
   assert.ok(b);
@@ -1928,4 +1938,111 @@ test("get(findingsOnly) leaves replaced runs out and keeps resolved updates", as
   assert.deepEqual(all.runs.map((x) => x.id), [b.id, a.id]);
   assert.deepEqual(all.runs[1].foldedInto, { id: b.id, seq: 2 });
   assert.deepEqual(all.runs[0].folds, [{ id: a.id, seq: 1 }]);
+});
+
+// ---------------------------------------------------------------------------
+// Agents Phase 2: a routine can run as an agent
+// ---------------------------------------------------------------------------
+
+test("agent: create without one is null; a valid slug is stored; @ and case are tolerated; wire exposes it", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" });
+  assert.equal((await w.make()).agent, null);
+  const r = await w.make({ agent: "@SEO" });
+  assert.equal(r.agent, "seo");
+  assert.equal(w.routine(r.id).agent, "seo");
+  assert.equal((await w.make({ agent: null })).agent, null);
+  assert.equal((await w.make({ agent: "" })).agent, null);
+});
+
+test("agent: unknown, broken, lead and non-string values are refused with a sentence (create and update)", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" }); // `manta` (the lead) and `broken` are not in the db: routineAgent says null
+  await assert.rejects(w.make({ agent: "nobody" }), /No agent named @nobody/);
+  await assert.rejects(w.make({ agent: "manta" }), /No agent named @manta/);
+  await assert.rejects(w.make({ agent: 42 }), /Pick an agent/);
+  const r = await w.make({ agent: "seo" });
+  await assert.rejects(w.engine.update(r.id, { agent: "manta" }), /No agent named @manta/);
+  assert.equal(w.routine(r.id).agent, "seo", "a refused update changes nothing");
+});
+
+test("agent: update — omitted leaves it, null clears it, a slug sets it", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" });
+  w.agentsDb.set("dev", { key: "agent-dev", seat: "" });
+  const r = await w.make({ agent: "seo" });
+  assert.equal((await w.engine.update(r.id, { name: "Renamed" })).agent, "seo", "omitted = unchanged");
+  assert.equal((await w.engine.update(r.id, { agent: "dev" })).agent, "dev");
+  assert.equal((await w.engine.update(r.id, { agent: null })).agent, null, "null = clear");
+  assert.equal(w.routine(r.id).agent, null);
+});
+
+test("agent: an old stored routine (no agent field) reads as null", async () => {
+  const w = makeWorld();
+  const r = await w.make();
+  delete w.store.routines.find((x) => x.id === r.id).agent;
+  assert.equal((await w.engine.update(r.id, { name: "Same" })).agent, null);
+});
+
+test("agent: a run creates its session on agent-<slug> and opens with the project brief in front of the run prompt", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "Check hreflang first." });
+  const r = await w.make({ agent: "seo" });
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(r.id)[0];
+  assert.equal(w.created[0].agent, "agent-seo");
+  assert.equal(w.prompts[0].agent, "agent-seo");
+  const expected = buildOpeningText(buildRunPrompt(w.routine(r.id), run.memoryAtStart, run), { seat: "Check hreflang first." });
+  assert.equal(w.prompts[0].text, expected);
+  assert.ok(w.prompts[0].text.startsWith("Your brief for this project:\nCheck hreflang first."));
+  assert.deepEqual(w.agentLookups.at(-1), { slug: "seo", directory: "/proj" }, "the brief is the routine directory's project's");
+  // access and worktree rules stay the routine's, not the agent's
+  assert.deepEqual(w.created[0].permission, buildRoutineRuleset("read"));
+  assert.equal(w.created[0].directory, "/proj");
+  // the run record keeps both, server-only
+  assert.equal(w.run(run.id).agentKey, "agent-seo");
+  assert.equal(w.run(run.id).openingText, expected);
+  assert.equal("agentKey" in runWire(w.run(run.id)) || "openingText" in runWire(w.run(run.id)), false);
+});
+
+test("agent: no agent → no agent key on the session, the opening text is the plain run prompt, and it is still recorded", async () => {
+  const { w, run } = await runningRoutine();
+  assert.equal("agent" in w.created[0], false);
+  assert.equal("agent" in w.prompts[0], false);
+  assert.equal(w.run(run.id).agentKey, null);
+  assert.equal(w.run(run.id).openingText, buildRunPrompt(w.routine(run.routineId), run.memoryAtStart, run));
+});
+
+test("agent: an agent that became invalid since falls back to the default with one note line", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" });
+  const r = await w.make({ agent: "seo" });
+  w.agentsDb.delete("seo"); // deleted / broken / renamed into the lead before the run
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(r.id)[0];
+  assert.equal("agent" in w.created[0], false);
+  assert.ok(w.prompts[0].text.startsWith("(Agent @seo is unavailable; running as the default agent.)\n\n"));
+  assert.equal(w.run(run.id).agentKey, null);
+  assert.equal(w.routine(r.id).agent, "seo", "the routine keeps its setting; only this run fell back");
+});
+
+test("agent: crash recovery re-sends the ORIGINAL opening and agent, even after the agent or the brief changed", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "Original brief." });
+  const r = await w.make({ agent: "seo" });
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(r.id)[0];
+  const original = w.prompts[0].text;
+  assert.match(original, /Original brief\./);
+  // crash between create and send
+  delete w.store.runs.find((x) => x.id === run.id).submittedAt;
+  w.userMessages.set(run.sessionID, []);
+  // everything changes meanwhile: the brief, the agent, the routine's own prompt
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "NEW brief." });
+  await w.engine.update(r.id, { prompt: "A different instruction", agent: null });
+  const before = w.prompts.length;
+  await w.engine.onReconnect();
+  assert.equal(w.prompts.length, before + 1);
+  assert.equal(w.prompts.at(-1).text, original, "the persisted opening, never a rebuild");
+  assert.equal(w.prompts.at(-1).agent, "agent-seo");
 });
