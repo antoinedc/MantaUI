@@ -17,6 +17,8 @@
 
 import { memo, useCallback, useId, useState } from "react";
 import { useStore } from "./store";
+import { usePackageAgents } from "./packageAgents";
+import { packageAgentDisplayName } from "./agentDispatch";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
 import {
@@ -32,7 +34,7 @@ import {
   NEEDS_DECISION_LABEL,
   openJobSession,
   resultStateLabel,
-  resultTitle,
+  resultTitleFor,
   resultTone,
   type BackgroundCard,
   type BackgroundResultPart,
@@ -133,6 +135,9 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const failed = card.kind === "failed";
+  // A task for a named agent reads "<Agent> · <task>" with the request quoted
+  // beneath; the state words stay for the non-running cards.
+  const agentLabel = card.agentName ?? null;
   const text =
     card.kind === "uncertain"
       ? "Couldn't confirm this started — open the session to check"
@@ -142,7 +147,9 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
           ? "Finished in background"
           : card.paused
             ? "Paused in background"
-            : "Running in background";
+            : agentLabel
+              ? agentLabel
+              : "Running in background";
   const content = view ? runCardView(view, box) : null;
   const headline = content
     ? content.needsDecision
@@ -172,7 +179,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
         )}
         <span className="text-text-muted shrink-0">
           {text}
-          {card.kind === "uncertain" ? "" : ":"}
+          {card.kind === "uncertain" ? "" : agentLabel && card.kind === "running" && !card.paused ? " ·" : ":"}
         </span>
         {card.kind !== "uncertain" && (
           <span className="font-mono text-accent-tx truncate min-w-0" title={card.name}>
@@ -211,6 +218,11 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
         )}
         <OpenSessionButton onOpen={() => void open()} busy={busy} />
       </div>
+      {card.request && (
+        <div className="mt-1 truncate text-text-muted" title={card.request} data-testid="background-request">
+          “{card.request}”
+        </div>
+      )}
       {content && (
         <>
           <div
@@ -339,6 +351,9 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   // Parts the box didn't stamp with a jobId (V2-native children, background
   // `task` subagents) are still tracked as job rows, keyed by their child id.
   const jobId = useStore((s) => part.jobId || s.jobs[part.childSessionId]?.id || null);
+  const { agents: packageAgents } = usePackageAgents();
+  const agentTitle = packageAgentDisplayName(part.agent, packageAgents);
+  const title = resultTitleFor(part, agentTitle);
   const { open, busy, error } = useOpenSession(jobId);
   const blocked = part.endedBlocked === true;
   const tone = resultTone(part.state, blocked);
@@ -353,8 +368,8 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
       <div className="flex items-center gap-2 text-meta text-text-muted min-w-0">
         <span aria-hidden="true" className={`w-2 h-2 shrink-0 rounded-full ${TONE_DOT[tone]}`} />
         <b className="font-semibold text-text shrink-0">Background</b>
-        <span className="font-mono text-accent-tx truncate min-w-0" title={resultTitle(part)}>
-          {resultTitle(part)}
+        <span className="font-mono text-accent-tx truncate min-w-0" title={title}>
+          {title}
         </span>
         <span className={"shrink-0" + (blocked ? " text-warn" : "")} data-testid="background-result-state">
           · {resultStateLabel(part.state, blocked)}

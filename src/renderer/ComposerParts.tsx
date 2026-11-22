@@ -684,6 +684,7 @@ export function PlanChip({
   plan: PlanToggleState;
   onToggle: () => void;
 }) {
+  if (plan.hidden) return null;
   return plan.loading ? (
     <span
       className="inline-flex items-center h-[9px] rounded-full bg-border animate-pulse"

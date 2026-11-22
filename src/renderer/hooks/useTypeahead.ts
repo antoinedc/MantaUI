@@ -30,6 +30,8 @@ import {
   MANTA_BUILTIN_NAMES,
 } from "../chatUtils";
 import { useAgentCatalog, refreshAgentCatalog } from "../agentCatalog";
+import { usePackageAgents, refreshPackageAgents } from "../packageAgents";
+import { PACKAGE_AGENT_PREFIX, usableAgents } from "../agentDispatch";
 import type {
   TypeaheadState,
   TypeaheadRow,
@@ -89,6 +91,9 @@ export function useTypeahead(params: {
   // Agents come from the shared box-level catalog (BET-949) — the same single
   // fetch that powers the plan-mode chip. No per-typeahead copy.
   const { agents } = useAgentCatalog();
+  // Package agents (Agents Phase 1): valid ones are offered ahead of files on
+  // `@`, and ahead of the opencode agents on `@@`.
+  const { agents: packageAgentList } = usePackageAgents();
   const [fileResults, setFileResults] = useState<string[]>([]);
   // BET-1023: configured opencode references (@alias). Fetched on the SAME
   // debounced file-search tick (no second debounce/seq guard) and rendered
@@ -174,6 +179,7 @@ export function useTypeahead(params: {
       const t = detectTypeahead(next, caret);
       setTypeahead(t);
       if (t) {
+        if (t.mode !== "command") refreshPackageAgents();
         if (t.mode === "command") void ensureCommands();
         else if (t.mode === "agent" && agents == null) refreshAgentCatalog();
         else if (t.mode === "file") void searchFiles(t.query);
@@ -204,22 +210,39 @@ export function useTypeahead(params: {
       }));
       return [...builtins, ...ocRows].slice(0, 12);
     }
+    const pkgRows: TypeaheadRow[] = usableAgents(packageAgentList)
+      .filter((a) => !q || a.name.toLowerCase().includes(q) || a.slug.includes(q))
+      .map((a) => ({
+        kind: "agent" as const,
+        key: a.slug,
+        primary: `@${a.slug}`,
+        secondary: a.description || a.name,
+      }));
     if (typeahead.mode === "agent") {
-      const all = agents ?? [];
+      // The compiled `agent-<slug>` opencode blocks are the package agents
+      // again — they are listed once, above, under their slug.
+      const pkgSlugs = new Set(pkgRows.map((r) => r.key));
+      const all = (agents ?? []).filter(
+        (a) => !a.name.startsWith(PACKAGE_AGENT_PREFIX) && !pkgSlugs.has(a.name),
+      );
       const filtered = q
         ? all.filter((a) => a.name.toLowerCase().includes(q))
         : all;
-      return filtered.slice(0, 12).map((a) => ({
-        kind: "agent",
-        key: a.name,
-        primary: `@${a.name}`,
-        secondary: a.description,
-      }));
+      return [
+        ...pkgRows,
+        ...filtered.map((a) => ({
+          kind: "agent" as const,
+          key: a.name,
+          primary: `@${a.name}`,
+          secondary: a.description,
+        })),
+      ].slice(0, 12);
     }
     // File mode — if the active model can't take attachments, show a single
     // red "not supported" row.
     if (!currentModelSupportsAttachments) {
       return [
+        ...pkgRows,
         {
           kind: "file",
           key: "",
@@ -240,6 +263,7 @@ export function useTypeahead(params: {
         secondary: r.description,
       }));
     return [
+      ...pkgRows,
       ...refRows,
       ...fileResults.map((p) => ({
         kind: "file" as const,
@@ -252,6 +276,7 @@ export function useTypeahead(params: {
     typeahead,
     commands,
     agents,
+    packageAgentList,
     fileResults,
     references,
     currentModelSupportsAttachments,
@@ -279,7 +304,9 @@ export function useTypeahead(params: {
       setInput(next);
       setTypeahead(null);
 
-      if (mode === "agent") {
+      // Decided by the ROW, not the popup mode: a package agent is offered on a
+      // plain `@` too, and it must record the mention the send path looks for.
+      if (row.kind === "agent") {
         const id = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
         setAgentMentions((prev) => [...prev, { id, name: row.key }]);
       }

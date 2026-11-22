@@ -15,6 +15,7 @@ import {
   parseSlashToken,
   resultStateLabel,
   resultTitle,
+  resultTitleFor,
   resultTone,
   sameBackgroundCards,
   splitSlashText,
@@ -124,6 +125,29 @@ const job = (over: Partial<BackgroundJob> = {}): BackgroundJob => ({
   ...over,
 });
 const none = { jobIds: new Set<string>(), childIds: new Set<string>() };
+
+describe("agent task cards (Agents Phase 1)", () => {
+  it("carries the agent's name and the user's request onto the card", () => {
+    const [card] = deriveBackgroundCards(
+      [job({ agentName: "Dev", request: "fix the login bug please" })],
+      "ses_p",
+      none,
+    );
+    expect(card).toMatchObject({ kind: "running", agentName: "Dev", request: "fix the login bug please" });
+  });
+
+  it("leaves a plain job's card exactly as before (no agent keys)", () => {
+    const [card] = deriveBackgroundCards([job()], "ses_p", none);
+    expect(Object.keys(card)).not.toContain("agentName");
+    expect(Object.keys(card)).not.toContain("request");
+  });
+
+  it("titles the result card with the agent name when the part's agent is a package agent", () => {
+    expect(resultTitleFor({ name: "fix-login", agent: "agent-dev" }, "Dev")).toBe("Dev · fix-login");
+    expect(resultTitleFor({ agent: "agent-dev" }, "Dev")).toBe("Dev");
+    expect(resultTitleFor({ name: "/review x", agent: "build" }, null)).toBe(resultTitle({ name: "/review x", agent: "build" }));
+  });
+});
 
 describe("deriveBackgroundCards (N5)", () => {
   it("a running or paused job of this session gets a running card", () => {
