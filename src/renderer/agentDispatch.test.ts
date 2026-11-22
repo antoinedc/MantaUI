@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import type { AgentInfo } from "../shared/types";
 import {
+  agentMentionQuery,
+  matchAgents,
+  insertAgentMention,
   agentInitial,
   ONE_AGENT_ERROR,
   packageAgentDisplayName,
@@ -83,5 +86,20 @@ describe("agentInitial", () => {
   it("is the first letter of the name, upper-cased", () => {
     expect(agentInitial({ name: "reviewer", slug: "reviewer" })).toBe("R");
     expect(agentInitial({ name: "", slug: "dev" })).toBe("D");
+  });
+});
+
+describe("new-session @agent suggestions", () => {
+  it("finds the partial mention before the caret", () => {
+    expect(agentMentionQuery("ask @se", 7)).toEqual({ query: "se", start: 4 });
+    expect(agentMentionQuery("@", 1)).toEqual({ query: "", start: 0 });
+    expect(agentMentionQuery("mail@se", 7)).toBeNull();
+    expect(agentMentionQuery("@seo done", 9)).toBeNull();
+  });
+  it("matches by slug or name, skipping invalid agents", () => {
+    expect(matchAgents(AGENTS, "d").map((a) => a.slug)).toEqual(["dev"]);
+  });
+  it("inserts the mention with a trailing space", () => {
+    expect(insertAgentMention("ask @se", 4, 7, "seo")).toEqual({ text: "ask @seo ", caret: 9 });
   });
 });

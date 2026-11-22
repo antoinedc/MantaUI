@@ -48,7 +48,7 @@ memory beyond the seat brief, variants, mentions in the CTO conversation
 ---
 name: Dev                 # display name, required, ≤ 40 chars
 description: Writes and fixes code in the current project.   # required, ≤ 200 chars
-isolation: worktree       # "worktree" | "none" (default "none")
+isolation: worktree       # "worktree" | "none" (default "worktree"; a non-git chat folder falls back to "none")
 model: anthropic/claude-sonnet-5-5   # optional "provider/model"; omitted = Auto/default
 color: "#5A88FF"          # optional
 ---
@@ -175,7 +175,7 @@ export interface AgentInfo {
 }
 // IPC
 agentsList: "agents:list"            // () => AgentInfo[]
-agentsCreate: "agents:create"        // ({name, description, isolation}) => AgentInfo
+agentsCreate: "agents:create"        // ({name, description, isolation?}) => AgentInfo (no checkbox in the UI: the default applies)
 agentsDispatch: "agents:dispatch"    // ({sessionId, directory, slug, text}) => {jobId: string}
 agentsOpenChat: "agents:open-chat"   // ({slug}) => {tmuxSession: string, windowIndex: number}
 ```

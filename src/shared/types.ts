@@ -3001,7 +3001,8 @@ export interface AgentInfo {
 export interface AgentCreateInput {
   name: string;
   description: string;
-  isolation: AgentIsolation;
+  /** Omitted = the default (its own branch). */
+  isolation?: AgentIsolation;
 }
 export interface AgentDispatchInput {
   sessionId: string;

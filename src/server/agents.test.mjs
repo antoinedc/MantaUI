@@ -28,7 +28,7 @@ const valid = (extra = "") => `---\nname: Scout\ndescription: Looks things up.\n
 test("parseAgentMd: a valid file, defaults and every optional key", () => {
   const r = parseAgentMd(valid());
   assert.equal(r.ok, true);
-  assert.deepEqual(r.meta, { name: "Scout", description: "Looks things up.", isolation: "none", model: null, color: null });
+  assert.deepEqual(r.meta, { name: "Scout", description: "Looks things up.", isolation: "worktree", model: null, color: null });
   assert.equal(r.body, "You are Scout.");
   const full = parseAgentMd(valid('isolation: worktree\nmodel: anthropic/claude-sonnet-5-5\ncolor: "#5A88FF"\n'));
   assert.deepEqual(full.meta, { name: "Scout", description: "Looks things up.", isolation: "worktree", model: "anthropic/claude-sonnet-5-5", color: "#5A88FF" });
@@ -183,6 +183,7 @@ async function fixture(extra = {}) {
   const engine = createAgentsEngine({
     root,
     templatesDir,
+    isGitRepo: async (dir) => world.gitRepo !== false && dir !== "/not-a-repo",
     editConfig,
     reload,
     log: { warn: () => {} },
@@ -269,7 +270,7 @@ test("list: reserved folders are skipped, an invalid agent is listed with its er
     assert.equal(bySlug.empty.error, "agent.md is missing");
     assert.equal(bySlug.dev.builtIn, true);
     assert.equal(bySlug.dev.error, undefined);
-    assert.deepEqual(bySlug.scout, { slug: "scout", name: "Scout", description: "Looks things up.", isolation: "none", model: null, color: "#112233", builtIn: false });
+    assert.deepEqual(bySlug.scout, { slug: "scout", name: "Scout", description: "Looks things up.", isolation: "worktree", model: null, color: "#112233", builtIn: false });
     assert.ok(f.config.cfg.agent["agent-scout"], "the new valid agent was synced by the list call");
     assert.equal(f.config.cfg.agent["agent-broken"], undefined, "an invalid agent is never compiled");
     assert.equal(f.config.cfg.agent["agent-build"], undefined);
@@ -426,7 +427,29 @@ test("dispatch: no seat file, an unreadable conversation and an unidentifiable p
     const job = f.calls.startJob[0];
     assert.equal(job.prompt, "look this up");
     assert.equal(job.model, "anthropic/claude-sonnet-5-5");
-    assert.equal(job.isolation, "none");
+    assert.equal(job.isolation, "worktree", "no isolation key = its own branch");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("dispatch: an agent that works in its own branch falls back to read-only when the chat's folder is not a git repo", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    await f.engine.dispatch({ sessionId: "ses_p", directory: "/not-a-repo", slug: "dev", text: "@dev look at this" });
+    assert.equal(f.calls.startJob[0].isolation, "none");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("create: no isolation given = its own branch", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    const info = await f.engine.create({ name: "SEO", description: "Audits pages." });
+    assert.equal(info.isolation, "worktree");
   } finally {
     await f.cleanup();
   }

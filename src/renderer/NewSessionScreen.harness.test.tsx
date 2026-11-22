@@ -21,6 +21,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
+import { resetPackageAgentsForTest } from "./packageAgents";
 import { installMockApi, resetStore, mount, type Harness, type MockApi } from "./testHarness";
 import { NewSessionScreen } from "./NewSessionScreen";
 import type { NewSessionDraft, DraftAttachment } from "./store";
@@ -180,6 +181,29 @@ describe("NewSessionScreen composer parity (BET-1088)", () => {
       b.textContent?.includes("main"),
     );
     expect(buttons).toHaveLength(0);
+  });
+
+  it("suggests agents after @ and inserts the picked one", async () => {
+    const dev = { slug: "dev", name: "Dev", description: "Writes code", isolation: "worktree", model: null, color: null, builtIn: true };
+    resetPackageAgentsForTest();
+    mountComposer(composerDraft({ input: "" }), { agentsList: () => Promise.resolve([dev]) });
+    await h!.flush();
+    await h!.flush();
+    const ta = h!.container.querySelector("textarea")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(ta, "@d");
+      ta.selectionStart = ta.selectionEnd = 2;
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await h!.flush();
+    const list = h!.container.querySelector('[data-testid="new-session-agent-suggestions"]');
+    expect(list?.textContent).toContain("@dev");
+    await act(async () => {
+      list!.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await h!.flush();
+    expect(useStore.getState().drafts[0].input).toBe("@dev ");
   });
 
   it("keeps the editable worktree branch input when worktree is wanted in a git repo", async () => {
