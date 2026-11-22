@@ -139,6 +139,8 @@ import {
   collectFinishedKeys,
   deriveBackgroundCards,
   isCardCandidate,
+  withPendingAgentCards,
+  type PendingAgentTask,
   parseSlashToken,
   sameBackgroundCards,
   splitSlashText,
@@ -1628,7 +1630,9 @@ export function ChatPanel({
   const { agents: packageAgents } = usePackageAgents();
   const packageAgentsRef = useRef(packageAgents);
   packageAgentsRef.current = packageAgents;
-  const agentDispatchBusyRef = useRef(false);
+  // "@agent" requests sent from this panel whose job the store doesn't list yet (shown as "starting" cards).
+  const [pendingAgentTasks, setPendingAgentTasks] = useState<PendingAgentTask[]>([]);
+  const pendingAgentSeqRef = useRef(0);
   const sendWhileBusy = useCallback(async (args: {
     text: string;
     /** The composer text being submitted; null when the text came from an override (voice, /clear bridge), so there is no composer draft to clear. */
@@ -1814,23 +1818,33 @@ export function ChatPanel({
         return;
       }
       if (pick) {
-        if (agentDispatchBusyRef.current) return;
-        agentDispatchBusyRef.current = true;
+        // Instant feedback: the card shows and the composer clears now; the box
+        // takes a few seconds to set the task up. A refusal puts the text back.
+        const agentName = packageAgentsRef.current?.find((a) => a.slug === pick.slug)?.name || pick.slug;
+        const key = `pending-agent-${++pendingAgentSeqRef.current}`;
+        const mentionsAtSend = agentMentions;
+        const clearDraft = textOverride === undefined;
         setSendError(null);
+        setPendingAgentTasks((list) => [...list, { key, agentName, request: text, createdAt: Date.now() }]);
+        if (clearDraft) {
+          setInput("");
+          setAgentMentions([]);
+        }
+        appendPromptHistory(tmuxSession, windowIndex, text);
+        setHistoryEpoch((e) => e + 1);
         try {
-          await window.api.agentsDispatch({ sessionId, directory: cwd ?? "", slug: pick.slug, text });
-          appendPromptHistory(tmuxSession, windowIndex, text);
-          setHistoryEpoch((e) => e + 1);
-          // Clear only what was submitted: newer text the user typed meanwhile stays.
-          if (textOverride === undefined && shouldClearDraft(input, inputRef.current?.value ?? "")) {
-            setInput("");
-            setAgentMentions([]);
-          }
+          const { jobId } = await window.api.agentsDispatch({ sessionId, directory: cwd ?? "", slug: pick.slug, text });
+          setPendingAgentTasks((list) => list.map((p) => (p.key === key ? { ...p, jobId } : p)));
+          // Backstop: never leave a "starting" card if the job never reaches the store.
+          setTimeout(() => setPendingAgentTasks((list) => list.filter((p) => p.key !== key)), 15_000);
         } catch (e) {
-          // Not started: the draft stays, the reason is shown.
+          setPendingAgentTasks((list) => list.filter((p) => p.key !== key));
+          // Not started: the text goes back if the composer is still empty, the reason is shown.
+          if (clearDraft) {
+            setInput((cur) => (cur === "" ? text : cur));
+            setAgentMentions((cur) => (cur.length === 0 ? mentionsAtSend : cur));
+          }
           setSendError(`Couldn't start the task: ${String((e as Error)?.message ?? e)}`);
-        } finally {
-          agentDispatchBusyRef.current = false;
         }
         return;
       }
@@ -3233,11 +3247,12 @@ export function ChatPanel({
   const backgroundCardsRef = useRef<BackgroundCard[]>([]);
   const backgroundCards = useMemo<BackgroundCard[]>(() => {
     const mine = jobOwnership ? [] : Object.values(jobs).filter((j) => isCardCandidate(j, sessionId));
-    const next = mine.length === 0 ? [] : deriveBackgroundCards(mine, sessionId, collectFinishedKeys(messages));
+    const derived = mine.length === 0 ? [] : deriveBackgroundCards(mine, sessionId, collectFinishedKeys(messages));
+    const next = withPendingAgentCards(derived, pendingAgentTasks, new Set(Object.values(jobs).map((j) => j.id)));
     if (sameBackgroundCards(backgroundCardsRef.current, next)) return backgroundCardsRef.current;
     backgroundCardsRef.current = next;
     return next;
-  }, [jobs, sessionId, messages, jobOwnership]);
+  }, [jobs, sessionId, messages, jobOwnership, pendingAgentTasks]);
 
   // Server-path handoff cards live in the transcript tail (after the todos), not
   // the pinned stack; memoized on the records so streaming never re-renders them.

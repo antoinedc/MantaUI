@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpencodeMessage } from "../shared/types";
 import { MANTA_BUILTIN_NAMES, computeLiveTurn } from "./chatUtils";
 import {
+  withPendingAgentCards,
   anchorBackgroundCards,
   backgroundBoxVisible,
   backgroundRequested,
@@ -371,5 +372,20 @@ describe("a finished background run is a turn boundary", () => {
     const msgs = [user("u1", 0), asst("a1", 1, 5000), resultMsg("r1", {}), asst("a2", 600_000, 604_000)];
     expect(computeLiveTurn(msgs)).toMatchObject({ startedAt: 600_000, verbSeedId: "a2" });
     expect(computeLiveTurn([user("u1", 0), asst("a1", 1, 5000), resultMsg("r1", {})])).toMatchObject({ startedAt: 10 });
+  });
+});
+
+describe("withPendingAgentCards", () => {
+  const p = { key: "pending-agent-1", agentName: "Dev", request: "@dev fix it", createdAt: 5 };
+  it("adds a starting card for a request whose job isn't listed yet", () => {
+    const out = withPendingAgentCards([], [p], new Set());
+    expect(out).toEqual([
+      { kind: "starting", key: "pending-agent-1", jobId: "", name: "starting…", createdAt: 5, agentName: "Dev", request: "@dev fix it" },
+    ]);
+  });
+  it("drops it once the job is in the store, and returns the same array when nothing is pending", () => {
+    const cards: never[] = [];
+    expect(withPendingAgentCards(cards, [{ ...p, jobId: "j1" }], new Set(["j1"]))).toBe(cards);
+    expect(withPendingAgentCards(cards, [{ ...p, jobId: "j1" }], new Set())).toHaveLength(1);
   });
 });

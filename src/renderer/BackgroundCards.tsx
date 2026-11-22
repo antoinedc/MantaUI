@@ -135,11 +135,14 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const failed = card.kind === "failed";
+  const spinning = card.kind === "starting" || (card.kind === "running" && !card.paused);
   // A task for a named agent reads "<Agent> · <task>" with the request quoted
   // beneath; the state words stay for the non-running cards.
   const agentLabel = card.agentName ?? null;
   const text =
-    card.kind === "uncertain"
+    card.kind === "starting"
+      ? (agentLabel ?? "Starting")
+      : card.kind === "uncertain"
       ? "Couldn't confirm this started — open the session to check"
       : card.kind === "failed"
         ? "Failed to start"
@@ -169,7 +172,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
       data-job-id={card.jobId}
     >
       <div className="flex items-center gap-2 min-w-0">
-        {card.kind === "running" && !card.paused ? (
+        {spinning ? (
           <Spinner />
         ) : (
           <span
@@ -179,7 +182,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
         )}
         <span className="text-text-muted shrink-0">
           {text}
-          {card.kind === "uncertain" ? "" : agentLabel && card.kind === "running" && !card.paused ? " ·" : ":"}
+          {card.kind === "uncertain" ? "" : agentLabel && spinning ? " ·" : ":"}
         </span>
         {card.kind !== "uncertain" && (
           <span className="font-mono text-accent-tx truncate min-w-0" title={card.name}>
@@ -216,7 +219,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
             Details
           </button>
         )}
-        <OpenSessionButton onOpen={() => void open()} busy={busy} />
+        {card.kind !== "starting" && <OpenSessionButton onOpen={() => void open()} busy={busy} />}
       </div>
       {card.request && (
         <div className="mt-1 truncate text-text-muted" title={card.request} data-testid="background-request">

@@ -146,6 +146,7 @@ type CardBase = {
   request?: string;
 };
 export type BackgroundCard =
+  | ({ kind: "starting" } & CardBase)
   | ({ kind: "running"; paused: boolean } & CardBase)
   | ({ kind: "uncertain" } & CardBase)
   | ({ kind: "failed"; error: string } & CardBase)
@@ -244,6 +245,35 @@ export function deriveBackgroundCards(
     }
   }
   return cards;
+}
+
+/** An "@agent" request the user just sent, shown at once while the box starts the task (Agents Phase 1). */
+export type PendingAgentTask = { key: string; agentName: string; request: string; createdAt: number; jobId?: string };
+
+/**
+ * The live cards plus a "starting" card for each pending "@agent" request whose
+ * job the store doesn't list yet, so pressing Enter shows something at once and
+ * the real card takes over in the same place without a gap.
+ */
+export function withPendingAgentCards(
+  cards: BackgroundCard[],
+  pending: ReadonlyArray<PendingAgentTask>,
+  jobIds: ReadonlySet<string>,
+): BackgroundCard[] {
+  const waiting = pending.filter((p) => !p.jobId || !jobIds.has(p.jobId));
+  if (waiting.length === 0) return cards;
+  return [
+    ...cards,
+    ...waiting.map((p) => ({
+      kind: "starting" as const,
+      key: p.key,
+      jobId: "",
+      name: "starting…",
+      createdAt: p.createdAt,
+      agentName: p.agentName,
+      request: p.request,
+    })),
+  ];
 }
 
 /** Same cards, field for field — lets the caller keep a stable reference while a streaming transcript re-derives them. */
