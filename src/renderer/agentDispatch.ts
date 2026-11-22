@@ -59,3 +59,22 @@ export function packageAgentDisplayName(
 export function agentInitial(a: Pick<AgentInfo, "name" | "slug">): string {
   return (a.name || a.slug).trim().charAt(0).toUpperCase() || "?";
 }
+
+/** The partial "@name" being typed just before the caret (e.g. "se" for "ask @se|"), or null. */
+export function agentMentionQuery(text: string, caret: number): { query: string; start: number } | null {
+  const m = /(?:^|\s)@([a-z0-9-]{0,31})$/i.exec(text.slice(0, caret));
+  if (!m) return null;
+  return { query: m[1].toLowerCase(), start: caret - m[1].length - 1 };
+}
+
+/** Agents whose slug or name starts with `query`, in list order. */
+export function matchAgents(agents: ReadonlyArray<AgentInfo> | null | undefined, query: string): AgentInfo[] {
+  return usableAgents(agents).filter((a) => a.slug.startsWith(query) || a.name.toLowerCase().startsWith(query));
+}
+
+/** `text` with the "@query" at `start..caret` replaced by "@slug ", and the new caret. */
+export function insertAgentMention(text: string, start: number, caret: number, slug: string): { text: string; caret: number } {
+  const ins = `@${slug} `;
+  const rest = text.slice(caret).replace(/^\s+/, "");
+  return { text: text.slice(0, start) + ins + rest, caret: start + ins.length };
+}

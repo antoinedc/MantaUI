@@ -54,6 +54,8 @@ import { CloneFromGitHub } from "./CloneFromGitHub";
 import { StatusDot } from "./StatusDot";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder } from "./voice";
+import { usePackageAgents } from "./packageAgents";
+import { agentInitial, agentMentionQuery, insertAgentMention, matchAgents, pickAgentDispatch } from "./agentDispatch";
 import {
   describeRepoRow,
   formatAge,
@@ -190,6 +192,26 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // "@agent" suggestions (Agents Phase 1): the first message can hand the task to an agent.
+  const { agents: packageAgents } = usePackageAgents();
+  const [caret, setCaret] = useState(0);
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const mention = mentionDismissed ? null : agentMentionQuery(draft.input, caret);
+  const mentionMatches = mention ? matchAgents(packageAgents, mention.query) : [];
+  const pickMention = (slug: string) => {
+    if (!mention) return;
+    const next = insertAgentMention(draft.input, mention.start, caret, slug);
+    updateDraft(draftId, { input: next.text });
+    setCaret(next.caret);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(next.caret, next.caret);
+      }
+    });
+  };
   // Hidden picker backing the attach button (BET-1124). The draft has no
   // sessionId yet, so it uses its own input rather than the manta-attach-files
   // bridge (which targets a live session's composer).
@@ -820,6 +842,14 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             return;
           }
         }
+        const pick = pickAgentDispatch(text, [], packageAgents);
+        if (pick && "error" in pick) throw new Error(pick.error);
+        if (pick) {
+          await window.api.agentsDispatch({ sessionId, directory: first.path, slug: pick.slug, text });
+          dismissDraft(draftId);
+          onDone?.();
+          return;
+        }
         await window.api.opencodePrompt(
           sessionId,
           text,
@@ -839,6 +869,24 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionMatches.length > 0) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : -1;
+        setMentionIdx((i) => (i + d + mentionMatches.length) % mentionMatches.length);
+        return;
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        e.preventDefault();
+        pickMention(mentionMatches[Math.min(mentionIdx, mentionMatches.length - 1)].slug);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionDismissed(true);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void submit();
@@ -1056,7 +1104,13 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             ref={inputRef}
             autoFocus
             value={draft.input}
-            onChange={(e) => updateDraft(draftId, { input: e.target.value })}
+            onChange={(e) => {
+              updateDraft(draftId, { input: e.target.value });
+              setCaret(e.target.selectionStart ?? e.target.value.length);
+              setMentionIdx(0);
+              setMentionDismissed(false);
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onKeyDown={onKeyDown}
             placeholder={
               draft.scratch
@@ -1067,6 +1121,34 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             className="w-full bg-transparent border-0 text-prose text-text outline-none resize-none placeholder:text-text-faint"
             spellCheck={false}
           />
+          {mentionMatches.length > 0 && (
+            <div role="listbox" aria-label="Agents" className="mt-2 flex flex-col gap-px" data-testid="new-session-agent-suggestions">
+              {mentionMatches.map((a, i) => (
+                <button
+                  key={a.slug}
+                  type="button"
+                  role="option"
+                  aria-selected={i === mentionIdx}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pickMention(a.slug)}
+                  className={
+                    "flex items-center gap-2 rounded-md px-2 py-1 text-left text-meta " +
+                    (i === mentionIdx ? "bg-bg-elev text-text" : "text-text-muted hover:bg-bg-elev")
+                  }
+                >
+                  <span
+                    aria-hidden="true"
+                    className="flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-sm bg-fill-hover text-micro font-semibold text-text"
+                    style={a.color ? { backgroundColor: a.color, color: "#fff" } : undefined}
+                  >
+                    {agentInitial(a)}
+                  </span>
+                  <span className="font-mono text-text">@{a.slug}</span>
+                  <span className="truncate">{a.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
           </div>
 
           <button
