@@ -204,11 +204,6 @@ function notifyOauthLanded(evt) {
   }
 }
 
-/** The attempt id of the device wait currently tracked for a provider id. */
-export function oauthEpochFor(id) {
-  return _oauthCallbacks.get(id)?.epoch;
-}
-
 /** Test-only: peek the in-flight device-flow callbacks. */
 export function _getOauthCallbacks() {
   return new Map(_oauthCallbacks);
@@ -267,6 +262,7 @@ function startOauthCallback(oc, id, methodIndex) {
       settle({ state: "error", error: "unreachable" }, "unreachable");
       console.warn(`[provider-auth] ${id}: oauth callback threw:`, e?.message ?? e);
     });
+  return epoch;
 }
 
 /**
@@ -369,9 +365,11 @@ export function cancelClaudeLogin(sessionKey, { force = false } = {}) {
  * "start" action): resolve the auth method, start opencode's OAuth, and answer
  * with the connect SHAPE the renderer drives (`claude-login`, `oauth-auto`,
  * `oauth-code`, `api-key`). Extracted so the multi-account "add a Codex seat"
- * flow starts the SAME flow rather than a copy of it.
+ * flow starts the SAME flow rather than a copy of it. `onOauthEpoch(epoch)` is
+ * told the attempt id of the device wait THIS call started (so a caller can own
+ * it without reading the provider's newest attempt afterwards).
  */
-export async function providerAuthStart(oc, id) {
+export async function providerAuthStart(oc, id, { onOauthEpoch } = {}) {
   const entry = subscriptionProviders.findSubscriptionProvider(id);
   if (!entry) {
     console.warn(
@@ -442,7 +440,10 @@ export async function providerAuthStart(oc, id) {
   // oauth-auto (Codex headless): opencode's callback blocks until the
   // user approves on the device page. Fire it detached and let the
   // renderer poll the outcome via `oauth-status`.
-  if (shape === "oauth-auto") startOauthCallback(oc, id, resolved.index);
+  if (shape === "oauth-auto") {
+    const epoch = startOauthCallback(oc, id, resolved.index);
+    onOauthEpoch?.(epoch);
+  }
   return {
     action: "start",
     shape,

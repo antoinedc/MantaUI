@@ -1678,6 +1678,8 @@ export interface Api {
     provider: SeatProviderId;
     accountId?: string;
     label?: string;
+    /** Same id twice = one sign-in (≤ 64 chars). */
+    requestId?: string;
   }): Promise<AddSeatResult>;
   accountsSeatStatus(input: { seatId: string }): Promise<SeatStatusResult>;
   accountsAddSeatConfirm(input: { seatId: string; newAccount: boolean }): Promise<ProviderViewResult>;
