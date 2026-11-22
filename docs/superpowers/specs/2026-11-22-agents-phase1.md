@@ -13,11 +13,11 @@ version fast; edge cases become follow-ups, not blockers.**
    agent's own home folder). Ask "how would you build X?".
 3. In any project chat, type `@` → matching agents appear → pick `@dev` → write
    the request → Enter. The request is **not** sent to the current chat's model.
-   Instead a **task** starts for that agent: the user's message shows in the
-   transcript, a running card appears ("Dev · <task>"), and when the agent is
+   Instead a **task** starts for that agent: a running card appears
+   ("Dev · <task>", with the user's request quoted on it), and when the agent is
    done its result card lands in the same chat. Dev works in its own worktree
-   and branch (it edits code); agents that don't edit code work in the chat's
-   own folder.
+   and branch (it edits code); agents with `isolation: none` work read-only in
+   the chat's own folder. One agent per message in Phase 1.
 4. Click **+** in the Agents section → name + one-line description (+ "edits
    code in its own branch" checkbox) → a new agent exists. Its files are plain
    Markdown under `~/.manta/agents/<slug>/`; editing them (by hand or by asking
@@ -60,6 +60,9 @@ color: "#5A88FF"          # optional
   manta-plan`.
 - An `agent.md` that fails to parse is listed with `error` and is not compiled
   (never crashes the scan).
+- The compiled block also carries `permission: { external_directory:
+  { "<abs agent dir>/**": "allow" } }` so the agent can read its own skills
+  and briefs from any working directory.
 - `.compiled.md` = role prompt + (when `skills/` has entries) a section
   `## Your skills` listing each skill's name, description and absolute
   `SKILL.md` path, with the line "Read a skill's file before doing work it
@@ -80,16 +83,24 @@ reload, no restart):
 } }
 ```
 
-- Key prefix `agent-` marks Manta-owned blocks. Sync = upsert every valid agent,
-  remove every `agent-*` block whose slug no longer has a valid package.
-  No-op diff = no write.
+- Manta-installed blocks are tracked in `~/.manta/agents/.installed.json`
+  (list of opencode keys). Sync = upsert every valid agent; remove only keys in
+  that list whose package is gone/invalid; never touch other blocks (a user's
+  own `agent-foo` survives). No-op diff = no write.
+- **If any `.compiled.md` content changed but the config diff is empty, call
+  `reloadOpencodeConfig()` once** (the prompt file path is constant, so the
+  config writer would otherwise skip the reload and the old prompt stays live).
+- **Model-subagent sync must ignore package agents:** `readAgentBlocks` /
+  `syncSubagents` skip keys starting with `agent-`, and `deriveSubagentName`
+  never produces a name starting with `agent-` (prefix it with `m-` if it would).
 - Sync runs: at boot (after built-ins are installed), after `agents:create`, and
   on every `agents:list` when any `agent.md`/skill mtime changed since the last
   sync (cheap stat scan; no file watcher in Phase 1).
 
 ## 4. Built-in agent
 
-`docs/agents/dev/agent.md` ships in the repo (isolation `worktree`, a short,
+`src/server/agentTemplates/dev/agent.md` ships in the repo (under `src/`, so
+the release tarball packs it) (isolation `worktree`, a short,
 general dev role prompt; no project-specific text). At boot, if
 `~/.manta/agents/dev/` does not exist, copy it there. Never overwrite an
 existing folder (user edits win; template updates reach a box only if the
@@ -106,38 +117,46 @@ built-ins (agents stay use-case agnostic).
   one-paragraph generic role prompt built from the description; sync; returns
   `AgentInfo`.
 - `dispatch({ sessionId, directory, slug, text })` → starts a task:
-  1. Resolve agent (unknown → throw "No agent named @slug").
+  1. Resolve agent (unknown / invalid → throw "No agent named @slug"). Refuse a
+     CTO-conversation parent ("@agent mentions aren't available here").
   2. Build the job prompt: the user's request; then, if present, the seat brief
      for `registry.identify(directory).slug`; then "Recent conversation"
      (last 10 user/assistant text messages of `sessionId`, newest last,
      ≤ 6 000 chars total, read with `oc.listMessages`; a read failure just
      omits the section).
-  3. `oc.postSynthetic(sessionId, { id: <minted>, text, description: "@<slug>",
-     metadata: { source: "agent-request", agent: slug }, delivery: "queue",
-     resume: false })` — the user's message as a visible transcript row that
-     does not wake the chat's model.
-  4. `delegate.startJob({ prompt, parentSessionID: sessionId, parentDirectory:
-     directory, agent: "agent-<slug>", isolation, name: <first 6 words of text>,
-     agentName })`.
-  5. Return `{ jobId }`. A start failure throws with the refusal message.
-- `openChat({ slug })` → `{ tmuxSession, windowIndex }`: tmux session
-  `manta-agents` (created on demand, cwd = this agent's `home/`); reuse the
-  window whose `@manta-agent` option = slug if it exists, else
-  `oc.createSession({ directory: home, agent: "agent-<slug>", title: name })`
-  then `tmux.newWindow({ sessionName: "manta-agents", windowName: name,
-  chatMode: true, existingSessionId, cwd: home })` and set `@manta-agent`.
+  3. `delegate.startJob({ prompt, parentSessionID: sessionId, parentDirectory:
+     directory, agent: "agent-<slug>", isolation, model: <agent model or
+     undefined>, name: <first 6 words of text>, agentName, request: text,
+     quietResult: true })`.
+  4. Return `{ jobId }`. A start failure throws with the refusal message
+     (nothing was recorded, so a retry is safe).
+  - The request is NOT posted into the parent session (no synthetic): it lives
+    on the job record and is shown on the card. The chat's model never sees the
+    request; it sees the result when it next runs (see §6 `quietResult`).
+- `openChat({ slug })` → `{ tmuxSession, windowIndex }`: reuse the window in
+  tmux session `manta-agents` whose `opencodeSessionId` equals the id stored in
+  `~/.manta/agents/<slug>/.chat.json` (`tmux.listProjects()` already exposes
+  it); otherwise `oc.createSession({ directory: home, agent: "agent-<slug>",
+  title: name })`, write `.chat.json`, then `tmux.newWindow({ sessionName:
+  "manta-agents", windowName: name, chatMode: true, existingSessionId, cwd:
+  home })` (it creates the tmux session when missing), then
+  `syncState.refreshNow()` as `tmux:new-window` does.
 
 ## 6. Background job changes — `src/server/delegate.mjs`
 
 `startJob` input gains (all optional, existing callers unchanged):
-- `agent` — OpenCode agent for the child (default stays `"build"`); stored on
-  the job record and passed to `createChildSession`.
-- `isolation: "worktree" | "none"` — `"none"` skips `prepareWorktree`;
-  `executionDirectory = parentDirectory`, no branch.
-- `agentName` — display name, stored on the record and exposed in the job view.
-
-The result path is unchanged (`buildResultSynthetic` already carries
-`metadata.agent`).
+- `agent` — OpenCode agent for the child (default stays `"build"`); set on the
+  job record (replacing the hardcoded `V2_JOB_AGENT` only when given) and so
+  passed to `createChildSession` and the prompt.
+- `isolation: "worktree" | "none"`:
+  - `"worktree"` → `isolationRequired: true` (fail closed: no worktree ⇒ refuse,
+    never fall back to the parent checkout).
+  - `"none"` → skip `prepareWorktree`; `executionDirectory = parentDirectory`;
+    the child ruleset adds `edit: deny` (read-only in the user's checkout); the
+    no-worktree prompt drops "Commit your work as you go".
+- `agentName`, `request` — stored on the record, exposed in the job view.
+- `quietResult: true` — `buildResultSynthetic` uses `resume: false` for this job
+  (the result card appears; the chat's model is not woken by it).
 
 ## 7. Wire — RPC channels (contract for both implementers)
 
@@ -158,35 +177,39 @@ agentsOpenChat: "agents:open-chat"   // ({slug}) => {tmuxSession: string, window
 
 Errors are thrown with a human message (class-1: shown to the user).
 
-Transcript mapping (`src/shared/opencodeV2.mjs` `mapTimeline`): a synthetic
-record with `metadata.source === "agent-request"` maps to an ordinary **user**
-message (one text part = the record's text). Job views (`delegateView` /
-`jobViews`) carry `agentName` when set.
+Job views (`delegateView` / `jobViews`) carry `agentName` and `request` when
+set. No transcript mapping change.
 
 ## 8. Renderer
 
-- **Typeahead** (`useTypeahead.ts` / `agentCatalog.ts`): the agent rows come
-  from `agentsList()` (valid agents only), not `opencodeAgents()`. Typing `@`
-  shows matching agents first, then files; `@@` keeps showing agents only.
-  Picking inserts `@<slug> ` (existing mention bookkeeping).
-- **Send** (`ChatPanel.tsx`): before an idle or busy send, if
-  `resolveAgentMentions` yields mentions whose names are agent slugs (pure
-  helper `pickAgentDispatch(text, mentions, agents)` → `slugs[]`, max 3, tested),
-  call `agentsDispatch` once per slug with the full text and do NOT call
-  `opencodePrompt`. Success → clear the composer (same draft-guard rules as a
-  busy send); failure → keep the draft, show the error. No optimistic row (the
-  synthetic arrives via the normal refetch). Slash commands and the CTO
-  conversation are unaffected.
-- **Cards** (`BackgroundCards.tsx`): when a job has `agentName`, the running
-  card's label reads `<agentName> · <job name>` instead of "Running in
-  background:"; the result card title uses the agent name when
+- **Typeahead** (`useTypeahead.ts`): a NEW package-agent catalog (from
+  `agentsList()`, valid agents only) feeds the mention rows; the existing
+  OpenCode `agentCatalog` stays as is (Plan discovery uses it). Typing `@`
+  shows matching package agents first, then files; `@@` shows agents only.
+  Picking an agent row (decided by `row.kind`, not popup mode) inserts
+  `@<slug> ` and records the mention keyed by slug.
+- **Send** (`ChatPanel.tsx`): intercept ONCE at the top of `submit`, before the
+  busy branch and before any optimistic update. Pure helper
+  `pickAgentDispatch(text, mentions, agents)` → `{ slug } | { error } | null`
+  (tested): null = no package-agent mention (normal path); more than one
+  distinct package agent → `{ error: "Mention one agent per message for now" }`.
+  On `{slug}` call `agentsDispatch({sessionId, directory, slug, text})`; do NOT
+  call `opencodePrompt`. Success → clear the composer (only if it still holds
+  the submitted draft); failure → keep the draft, show the error. Slash
+  commands and the CTO conversation keep their existing paths.
+- **Cards** (`BackgroundCards.tsx`, `backgroundRun.ts`): carry `agentName` and
+  `request` through `deriveBackgroundCards`. When a job has `agentName`, the
+  running card's label reads `<agentName> · <job name>` instead of "Running in
+  background:" and shows the request (one line, ellipsis, full text as title);
+  the result card title uses the agent name when
   `part.agent` starts with `agent-` (look up the slug in the catalog, fall back
   to the slug).
 - **Sidebar** (`Sidebar.tsx`): an **Agents** section above the Workspace list:
   one row per agent (colour dot or initial, name; description as title;
-  running dot if its direct-chat window is running; invalid agents greyed with
-  the error as title). Click → `agentsOpenChat` → refresh projects → select the
-  window. `+` → a small `<dialog>` (name, description, checkbox "Edits code in
+  invalid agents greyed with the error as title). Click → `agentsOpenChat` →
+  refresh projects → select the returned window. The `manta-agents` tmux
+  session is hidden from the Workspace DISPLAY only (it stays in the store so
+  selection works). `+` → a small `<dialog>` (name, description, checkbox "Edits code in
   its own branch") → `agentsCreate`; errors inline. The tmux session
   `manta-agents` is hidden from the Workspace list.
 - **Direct chat**: an ordinary chat-mode window. Plan-mode toggle hidden in
@@ -212,6 +235,7 @@ UI follows Modern Web Guidance `dialog`, `forms`, `accessibility` (native
 | Frontmatter parsing | `yaml` (already a dependency) + a 10-line `---` split | `gray-matter` (adds a dep for a trivial split) |
 | opencode config writes | existing `editConfig` (jsonc-parser) | writing `~/.config/opencode/agents/*.md` (V2 markdown agents) — would bypass the single-writer rule and need its own reload story |
 | Change detection | mtime stat scan on `list()` | `chokidar` / `fs.watch` — not needed at this scale; follow-up if edits feel laggy |
+| Request visibility | job record + card | posting a synthetic into the parent — becomes model input and only shows on delivery |
 | Task execution | existing delegate engine (worktree, liveness, result delivery, cards) | a new runner — duplicate of shipped machinery |
 | Skill loading per agent | prompt index + read tool | V2 `permission.skill` rules — unverified behaviour, not needed for Phase 1 |
 | Dialog | native `<dialog>` | modal library (guide-backed native feature wins) |
@@ -225,16 +249,18 @@ UI follows Modern Web Guidance `dialog`, `forms`, `accessibility` (native
   reuse vs create.
 - `delegate` tests: `isolation:"none"` skips the worktree; `agent` reaches
   `createChildSession`; `agentName` in the view.
-- `opencodeV2` mapping test for `agent-request`.
+- providers: `readAgentBlocks`/`syncSubagents` ignore `agent-*`;
+  `deriveSubagentName` never yields `agent-*`.
 - Renderer: `pickAgentDispatch` unit tests; typeahead ordering test.
 
 ## 12. Implementation split (no shared paths)
 
 - **Server implementer**: `src/server/agents.mjs` + tests, `delegate.mjs`,
   `rpc.mjs` channels, `index.mjs` boot wiring (install built-ins, first sync),
-  `src/shared/opencodeV2.mjs`, job view files, `docs/agents/dev/agent.md`.
+  `providers.mjs` + `src/shared/subagentSync.mjs` (ignore/reserve `agent-*`),
+  job view files, `src/server/agentTemplates/dev/agent.md`.
 - **Renderer implementer**: `useTypeahead.ts`, `agentCatalog.ts`, `ChatPanel.tsx`,
-  `BackgroundCards.tsx`, `Sidebar.tsx` (+ a new `AgentsSection.tsx`),
+  `BackgroundCards.tsx`, `backgroundRun.ts`, `Sidebar.tsx` (+ a new `AgentsSection.tsx`),
   `httpApi.ts`, `demoApi.ts`/`demoCoverage.test.ts`, renderer tests.
 - `src/shared/types.ts` / `src/shared/api.ts` contract additions are committed
   by the orchestrator before dispatch.
