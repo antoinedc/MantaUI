@@ -29,6 +29,17 @@ const PROPS = {
   isActive: true,
 };
 
+async function typeInto(textarea: HTMLTextAreaElement, text: string) {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(textarea, text);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.selectionStart = text.length;
+    textarea.selectionEnd = text.length;
+    textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
+  });
+}
+
 describe("useTypeahead via ChatPanel", () => {
   let h: Harness | null = null;
 
@@ -56,18 +67,7 @@ describe("useTypeahead via ChatPanel", () => {
     const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
 
-    // Type "/" into the textarea
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(textarea, "/");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      textarea.selectionStart = 1;
-      textarea.selectionEnd = 1;
-      textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
-    });
+    await typeInto(textarea, "/");
     await h.flush();
 
     // The typeahead popup should be visible (it renders as a div with class)
@@ -83,18 +83,7 @@ describe("useTypeahead via ChatPanel", () => {
     const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
 
-    // Type "@" into the textarea
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(textarea, "@");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      textarea.selectionStart = 1;
-      textarea.selectionEnd = 1;
-      textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
-    });
+    await typeInto(textarea, "@");
     await h.flush();
 
     // The typeahead popup should be visible

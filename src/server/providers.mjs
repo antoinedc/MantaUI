@@ -508,6 +508,12 @@ export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = re
   return discoverModels(baseURL, key);
 }
 
+function splitOps(ops) {
+  const upserts = ops?.upsert ?? [];
+  const removes = ops?.remove ?? [];
+  return { upserts, removes, empty: upserts.length === 0 && removes.length === 0 };
+}
+
 /**
  * Apply a set of provider mutations. Upserts replace the whole
  * `provider.<id>` block (keeping the keys manta does not manage — headers and
@@ -522,9 +528,8 @@ export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = re
  * source; it is injectable so the suite never needs a live opencode.
  */
 export async function setProviders(ops, deps = {}) {
-  const upserts = ops?.upsert ?? [];
-  const removes = ops?.remove ?? [];
-  if (upserts.length === 0 && removes.length === 0) return { ok: true };
+  const { upserts, removes, empty } = splitOps(ops);
+  if (empty) return { ok: true };
 
   const r = await editConfig((cfg) => {
     const edits = [];
@@ -665,9 +670,8 @@ export async function getSubagents(readConfig = readRemoteConfig) {
  * turn on the box).
  */
 export async function setSubagents(ops, deps = {}) {
-  const upserts = ops?.upsert ?? [];
-  const removes = ops?.remove ?? [];
-  if (upserts.length === 0 && removes.length === 0) return { ok: true };
+  const { upserts, removes, empty } = splitOps(ops);
+  if (empty) return { ok: true };
   const r = await editConfig((cfg) => {
     const edits = [];
     for (const input of upserts) {
@@ -1251,17 +1255,21 @@ export async function materializeCtoPrompt(deps = {}) {
  * @param {() => Promise<{ok: boolean, reloaded?: boolean, error?: string}>} [deps.reload]
  * @returns {Promise<{ok: boolean, fellBack: boolean, path: string, reloaded: boolean, error?: string}>}
  */
+async function reloadAfterDoctrine(reload, log) {
+  try {
+    const r = await reload();
+    if (!r?.ok) log.warn?.("[cto-doctrine] config reload after doctrine change failed:", r?.error);
+    return r?.ok === true && r.reloaded !== false;
+  } catch (e) {
+    log.warn?.("[cto-doctrine] config reload after doctrine change threw:", e);
+    return false;
+  }
+}
+
 export async function refreshCtoDoctrine(deps = {}) {
   const { reload = reloadOpencodeConfig, log = console, ...materializeDeps } = deps;
   const result = await materializeCtoPrompt({ ...materializeDeps, log });
-  let reloaded = false;
-  try {
-    const r = await reload();
-    reloaded = r?.ok === true && r.reloaded !== false;
-    if (!r?.ok) log.warn?.("[cto-doctrine] config reload after doctrine change failed:", r?.error);
-  } catch (e) {
-    log.warn?.("[cto-doctrine] config reload after doctrine change threw:", e);
-  }
+  const reloaded = await reloadAfterDoctrine(reload, log);
   return { ...result, reloaded };
 }
 
@@ -1291,14 +1299,7 @@ export function createCtoDoctrineRestarter(deps = {}) {
     // if the reload fails (the new prompt then applies at the next reload/start).
     const result = await materializeCtoPrompt({ ...materializeDeps, style, houseRules, log });
     if (!result.ok) log.warn?.("[cto-doctrine] materialize failed; reloading config anyway");
-    let reloaded = false;
-    try {
-      const r = await reload();
-      reloaded = r?.ok === true && r.reloaded !== false;
-      if (!r?.ok) log.warn?.("[cto-doctrine] config reload after doctrine change failed:", r?.error);
-    } catch (e) {
-      log.warn?.("[cto-doctrine] config reload after doctrine change threw:", e);
-    }
+    const reloaded = await reloadAfterDoctrine(reload, log);
     return { ...result, reloaded, pending: false };
   }
 
