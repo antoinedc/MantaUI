@@ -2011,6 +2011,12 @@ export const IPC = {
   delegateJobForSession: "delegate:job-for-session", // ({ sessionId }) → DelegateJobForSession — is this session a read-only background job, and the bar's copy
   delegateDecline: "delegate:decline", // (id) → { ok: boolean }
 
+  // ---- Agents, Phase 1 (spec docs/superpowers/specs/2026-11-22-agents-phase1.md) ----
+  agentsList: "agents:list", // () → AgentInfo[]
+  agentsCreate: "agents:create", // (AgentCreateInput) → AgentInfo; throws with a human message
+  agentsDispatch: "agents:dispatch", // (AgentDispatchInput) → { jobId }; throws with a human message
+  agentsOpenChat: "agents:open-chat", // ({ slug }) → { tmuxSession, windowIndex }; throws with a human message
+
   // ---- APNs native-push registration (BET-181) ----
   // iOS Capacitor app registers its APNs device token so the server can
   // fan out native pushes alongside Web Push (VAPID). Server-side store
@@ -2979,6 +2985,30 @@ export type DelegateJobView = {
   parent: { sessionId: string; name: string; project: string; windowIndex: number } | null;
 };
 export type DelegateJobForSession = { readOnly: false } | { readOnly: true; job: DelegateJobView };
+
+// Agents, Phase 1 — a named agent package under ~/.manta/agents/<slug>/.
+export type AgentIsolation = "worktree" | "none";
+export interface AgentInfo {
+  slug: string;
+  name: string;
+  description: string;
+  isolation: AgentIsolation;
+  model: string | null; // "provider/model" or null (Auto/default)
+  color: string | null;
+  builtIn: boolean;
+  error?: string; // set ⇒ the package failed to parse and the agent is not usable
+}
+export interface AgentCreateInput {
+  name: string;
+  description: string;
+  isolation: AgentIsolation;
+}
+export interface AgentDispatchInput {
+  sessionId: string;
+  directory: string;
+  slug: string;
+  text: string;
+}
 
 // A pre-flight approval requested by a `delegate` call when trust mode is OFF
 // and the model declared `tools` (BET-418 §A). The renderer shows ONE card
