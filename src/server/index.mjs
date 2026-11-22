@@ -91,7 +91,6 @@ import {
   startClaudeLogin,
   cancelClaudeLogin,
   onProviderOauthLanded,
-  oauthEpochFor,
 } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createStatusReconciler } from "./statusReconcile.mjs";
@@ -1010,8 +1009,11 @@ const accountsManager = createAccountsManager({
     },
   },
   codex: {
-    startConnect: () => providerAuthStart(oc, "openai"),
-    oauthEpoch: () => oauthEpochFor("openai"),
+    startConnect: async () => {
+      let epoch;
+      const connect = await providerAuthStart(oc, "openai", { onOauthEpoch: (e) => (epoch = e) });
+      return epoch === undefined ? connect : { ...connect, epoch };
+    },
     readLive: () => oc.readLiveCodexEntry(),
     restoreEntry: (entry) => oc.setProviderAuthEntry("openai", entry),
   },

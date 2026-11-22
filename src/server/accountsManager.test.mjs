@@ -28,7 +28,7 @@ function fakeFetch(table) {
   };
 }
 
-async function rig({ codex = false, claude = true } = {}) {
+async function rig({ codex = false, claude = true, managerExtra = {} } = {}) {
   const root = await mkdtemp(join(tmpdir(), "acct-mgr-"));
   const paths = {
     storePath: join(root, "state", "accounts.json"),
@@ -66,8 +66,10 @@ async function rig({ codex = false, claude = true } = {}) {
     log: quiet,
   });
 
-  const calls = { claudeStart: [], claudeCancel: [], restore: [], codexStart: 0, usage: 0 };
-  const state = { restoreOk: true, codexShape: "oauth-auto", epoch: 7 };
+  const calls = { claudeStart: [], claudeCancel: [], restore: [], codexStart: 0, usage: 0, maxConcurrentStarts: 0 };
+  // `mint`: every start gets its own attempt id (like the real flow); `gate`: a promise the
+  // restore of the previous live login waits for (a slow placement); `startDelayMs`: a slow start.
+  const state = { restoreOk: true, codexShape: "oauth-auto", epoch: 7, mint: false, minted: 10, gate: null, startDelayMs: 0, startsRunning: 0 };
   const mgr = createAccountsManager({
     accounts,
     seatAssigner,
@@ -83,12 +85,18 @@ async function rig({ codex = false, claude = true } = {}) {
     codex: {
       startConnect: async () => {
         calls.codexStart++;
-        return { action: "start", shape: state.codexShape, url: "https://auth.example/device", methodIndex: 0 };
+        calls.maxConcurrentStarts = Math.max(calls.maxConcurrentStarts, ++state.startsRunning);
+        try {
+          if (state.startDelayMs) await new Promise((r) => setTimeout(r, state.startDelayMs));
+          return { action: "start", shape: state.codexShape, url: "https://auth.example/device", methodIndex: 0, epoch: state.mint ? ++state.minted : state.epoch };
+        } finally {
+          state.startsRunning--;
+        }
       },
-      oauthEpoch: () => state.epoch,
       readLive: () => readCodexEntryFile(paths.codexAuthPath),
       restoreEntry: async (entry) => {
         calls.restore.push(entry.access);
+        if (state.gate) await state.gate;
         if (!state.restoreOk) return { ok: false };
         await writeFile(paths.codexAuthPath, JSON.stringify({ openai: entry }));
         return { ok: true };
@@ -101,6 +109,7 @@ async function rig({ codex = false, claude = true } = {}) {
     },
     log: quiet,
     timings: state.timings,
+    ...managerExtra,
   });
   return {
     root,
@@ -764,6 +773,163 @@ test("add-seat (codex): starting a second add supersedes the first (opencode has
     assert.notEqual(a.seatId, b.seatId);
     assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: a.seatId }), { state: "failed", error: "login-failed", message: "The sign-in failed — the code may have been wrong or expired. Try again." });
     assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: b.seatId }), { state: "pending" });
+  } finally {
+    await r.cleanup();
+  }
+});
+
+// ---- add seat: Codex reliability (spec 2026-11-22-codex-seat-signin-reliability) ----
+
+const until = async (cond) => {
+  for (let i = 0; i < 200 && !(await cond()); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(await cond(), "condition was not met in time");
+};
+
+test("add-seat (codex) S1: two concurrent adds never overlap — distinct seats, one device wait each, the first superseded", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    r.state.mint = true;
+    r.state.startDelayMs = 20;
+    const [a, b] = await Promise.all([ch(r, "accounts:add-seat", { provider: "codex" }), ch(r, "accounts:add-seat", { provider: "codex" })]);
+    assert.notEqual(a.seatId, b.seatId);
+    assert.equal(r.calls.codexStart, 2);
+    assert.equal(r.calls.maxConcurrentStarts, 1, "the starts were serialized");
+    assert.equal((await ch(r, "accounts:seat-status", { seatId: a.seatId })).state, "failed", "the earlier add was superseded");
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: b.seatId }), { state: "pending" });
+    assert.equal(a.connect.epoch, undefined, "the epoch never reaches the client");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("add-seat (codex) S3: the same requestId twice is ONE sign-in (concurrent or later), a new one starts a new sign-in", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    r.state.mint = true;
+    r.state.startDelayMs = 10;
+    const [a, b] = await Promise.all([
+      ch(r, "accounts:add-seat", { provider: "codex", requestId: "req-1" }),
+      ch(r, "accounts:add-seat", { provider: "codex", requestId: "req-1" }),
+    ]);
+    assert.deepEqual(a, b);
+    assert.equal(r.calls.codexStart, 1);
+    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "codex", requestId: "req-1" }), a, "still pending → same answer");
+    assert.equal(r.calls.codexStart, 1);
+    const c = await ch(r, "accounts:add-seat", { provider: "codex", requestId: "req-2" });
+    assert.notEqual(c.seatId, a.seatId);
+    assert.equal(r.calls.codexStart, 2);
+    // a cancelled flow's id can be used again for a fresh sign-in
+    await ch(r, "accounts:cancel-seat", { seatId: c.seatId });
+    await ch(r, "accounts:add-seat", { provider: "codex", requestId: "req-2" });
+    assert.equal(r.calls.codexStart, 3);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("add-seat (codex) S2: the record owns the epoch ITS start minted, whatever starts after it", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    r.state.mint = true;
+    const { seatId } = await ch(r, "accounts:add-seat", { provider: "codex" });
+    assert.equal(r.mgr._pending().get(seatId).epoch, 11);
+    r.state.minted = 20; // another start (the connect card, a retry) moved the provider's newest attempt on
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 11 });
+    assert.equal((await ch(r, "accounts:seat-status", { seatId })).state, "ok");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("add-seat (codex) S4: an approved code of a superseded add is used for the newer pending add — and that add's own late approval is guarded", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    r.state.mint = true;
+    const a = await ch(r, "accounts:add-seat", { provider: "codex" }); // epoch 11
+    const b = await ch(r, "accounts:add-seat", { provider: "codex" }); // epoch 12 supersedes 11
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 11 });
+    const st = await ch(r, "accounts:seat-status", { seatId: b.seatId });
+    assert.equal(st.state, "ok", "the newer add got the login");
+    assert.equal((await ch(r, "accounts:seat-status", { seatId: a.seatId })).state, "failed");
+    assert.equal(JSON.parse(await readFile(r.paths.codexAuthPath, "utf-8")).openai.access, "cx-A", "the previous live login is back");
+    const saved = JSON.parse(await readFile(join(r.paths.seatsRoot, "codex", b.seatId, "auth.json"), "utf-8"));
+    assert.equal(saved.openai.access, "cx-B");
+    // The newer add's own device wait is abandoned now: approving it must not swap the live login.
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-C", "gpt-C") }));
+    await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 12 });
+    assert.equal(JSON.parse(await readFile(r.paths.codexAuthPath, "utf-8")).openai.access, "cx-A");
+    assert.equal(allSeats((await r.accounts.getStore()).providers.codex).length, 2);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("add-seat (codex) S5/S7: a cancel during a slow placement deletes nothing — the seat ends ok with its credentials, and the status says 'finishing'", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    const { seatId } = await ch(r, "accounts:add-seat", { provider: "codex" });
+    let release;
+    r.state.gate = new Promise((res) => (release = res));
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    const landing = r.mgr.onProviderLoginLanded({ id: "openai", epoch: 7 });
+    await until(() => r.calls.restore.length === 1); // inside giveBackLive
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "pending", phase: "finishing" });
+    assert.deepEqual(await ch(r, "accounts:cancel-seat", { seatId }), { ok: true });
+    await r.mgr.tick(); // the sweep stands back from a flow being placed too
+    assert.equal(await r.exists(join(r.paths.seatsRoot, "codex", seatId, "auth.json")), true, "the directory survived the cancel");
+    release();
+    await landing;
+    const st = await ch(r, "accounts:seat-status", { seatId });
+    assert.equal(st.state, "ok");
+    assert.equal(JSON.parse(await readFile(join(r.paths.seatsRoot, "codex", seatId, "auth.json"), "utf-8")).openai.access, "cx-B");
+    assert.ok(allSeats((await r.accounts.getStore()).providers.codex).some((s) => s.id === seatId));
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("add-seat (codex) S5: a new add during a slow placement waits for it — the placing flow is not superseded and its directory stays", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    r.state.mint = true;
+    const a = await ch(r, "accounts:add-seat", { provider: "codex" }); // epoch 11
+    let release;
+    r.state.gate = new Promise((res) => (release = res));
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    const landing = r.mgr.onProviderLoginLanded({ id: "openai", epoch: 11 });
+    await until(() => r.calls.restore.length === 1);
+    const second = ch(r, "accounts:add-seat", { provider: "codex" });
+    await new Promise((res) => setTimeout(res, 30));
+    assert.equal(r.calls.codexStart, 1, "the second add has not started its sign-in yet");
+    release();
+    await landing;
+    const b = await second;
+    assert.equal((await ch(r, "accounts:seat-status", { seatId: a.seatId })).state, "ok");
+    assert.notEqual(b.seatId, a.seatId);
+    assert.equal(r.mgr._pending().get(b.seatId).prev.access, "cx-A", "the new add borrowed the slot AFTER the previous login was given back");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("add-seat (codex) S5/S6: a placement whose credential file is gone lists nothing, and a cancel made meanwhile is then honoured", async () => {
+  const r = await rig({ codex: true, claude: false, managerExtra: { fileExists: async () => false } });
+  try {
+    const { seatId } = await ch(r, "accounts:add-seat", { provider: "codex" });
+    let release;
+    r.state.gate = new Promise((res) => (release = res));
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    const landing = r.mgr.onProviderLoginLanded({ id: "openai", epoch: 7 });
+    await until(() => r.calls.restore.length === 1);
+    await ch(r, "accounts:cancel-seat", { seatId });
+    release();
+    await landing;
+    assert.equal(allSeats((await r.accounts.getStore()).providers.codex).length, 1, "no seat without credentials was listed");
+    assert.equal(r.mgr._pending().has(seatId), false, "the cancel was honoured once the placement failed");
+    assert.equal((await ch(r, "accounts:seat-status", { seatId })).state, "failed");
+    assert.equal(await r.exists(join(r.paths.seatsRoot, "codex", seatId)), false);
   } finally {
     await r.cleanup();
   }

@@ -50,7 +50,8 @@
 import { withErrorMessage, seatSignInFailureMessage, resignFailureMessage } from "./accountsCopy.mjs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { Mutex } from "async-mutex";
 import { leastLoadedSeat } from "../shared/seatChoice.mjs";
 import {
   ACCOUNT_PROVIDERS,
@@ -110,8 +111,8 @@ const isNonEmptyString = (v) => typeof v === "string" && v.length > 0;
  *   cancel: (sessionKey: string) => void,
  * }} deps.claudeLogin  the existing claude-login flow, pointed at a seat directory
  * @param {{
- *   startConnect: () => Promise<object>,
- *   oauthEpoch: () => number|undefined,
+ *   startConnect: () => Promise<object>,  the connect answer; for an `oauth-auto` wait it also carries `epoch`,
+ *     the attempt id of the device wait THIS call started (never read afterwards from a global)
  *   readLive: () => Promise<object|null>,  the LIVE login as a V1-shaped entry (active credential)
  *   restoreEntry: (entry: object) => Promise<{ok: boolean}>,
  * }} deps.codex  opencode's OpenAI OAuth flow + its auth store
@@ -132,6 +133,7 @@ export function createAccountsManager({
   readCodexEntry = readCodexEntryFile,
   fsOps = { mkdir, chmod, writeFile },
   readFileText = (path) => readFile(path, "utf-8"),
+  fileExists = (path) => stat(path).then(() => true, () => false),
   newFlowId = () => randomUUID(),
   // Run one usage poll now (the usage poller's tick). Fired after a seat landed
   // or was re-signed so its bars appear without waiting for the next interval.
@@ -156,7 +158,8 @@ export function createAccountsManager({
    *   label: string|null, startedAt: number, state: "pending"|"ok"|"failed",
    *   error?: string, orgName?: string|null, identity?: object|null, parked?: boolean,
    *   finishedAt?: number, sessionKey?: string, credsSeenAt?: number,
-   *   epoch?: number, prev?: object|null, processing?: boolean
+   *   epoch?: number, prev?: object|null, processing?: boolean, landing?: Promise<void>|null,
+   *   cancelRequested?: boolean, requestId?: string, connect?: object
    * }>}
    */
   const pending = new Map();
@@ -171,10 +174,12 @@ export function createAccountsManager({
    *   startedAt: number, state: "pending"|"ok"|"failed", error?: string,
    *   expectedEmail?: string|null, gotEmail?: string|null, finishedAt?: number,
    *   sessionKey?: string, credsSeenAt?: number, epoch?: number, prev?: object|null,
-   *   processing?: boolean
+   *   processing?: boolean, landing?: Promise<void>|null
    * }>}
    */
   const resigns = new Map();
+  /** One add / re-sign at a time per provider: seat ids and device waits must never interleave. */
+  const providerLocks = { claude: new Mutex(), codex: new Mutex() };
   /** flowId → in-flight Claude re-sign resolution (single-flight, like `resolving`). */
   const resignResolving = new Map();
 
@@ -310,7 +315,7 @@ export function createAccountsManager({
       if (rec.state === "pending") {
         if (rec.provider === "claude") {
           await resolveFlow(rec);
-        } else if (at - rec.startedAt > t.loginTimeoutMs) {
+        } else if (at - rec.startedAt > t.loginTimeoutMs && !rec.processing) {
           rememberCodexGuard(rec);
           await failFlow(rec, "login-failed");
         }
@@ -327,7 +332,7 @@ export function createAccountsManager({
       if (rec.state === "pending") {
         if (rec.provider === "claude") {
           await resolveResign(rec);
-        } else if (at - rec.startedAt > t.loginTimeoutMs) {
+        } else if (at - rec.startedAt > t.loginTimeoutMs && !rec.processing) {
           rememberCodexGuard(rec);
           await failResign(rec, "login-failed");
         }
@@ -343,8 +348,10 @@ export function createAccountsManager({
    *  failed(different-org, parked). */
   async function placeFlow(rec, identity, { skipOrgCheck = false, accountId = rec.accountId } = {}) {
     let planned = null;
+    let credentialsMissing = false;
     const defaultAccountLabel = rec.provider === "claude" ? "Claude" : "ChatGPT";
-    const res = await accounts.mutate(rec.provider, (state) => {
+    const credentialFile = join(rec.dir, rec.provider === "claude" ? ".credentials.json" : "auth.json");
+    const res = await accounts.mutate(rec.provider, async (state) => {
       const plan = planSeatPlacement({
         state,
         provider: rec.provider,
@@ -353,6 +360,12 @@ export function createAccountsManager({
       });
       if (plan.kind !== "place") {
         planned = plan;
+        return null;
+      }
+      // A seat is never listed without its login: checked inside the store lock,
+      // right before the write, so nothing can delete the file in between.
+      if (!(await fileExists(credentialFile))) {
+        credentialsMissing = true;
         return null;
       }
       const seat = {
@@ -369,7 +382,10 @@ export function createAccountsManager({
       finishOk(rec);
       return;
     }
-    if (planned?.kind === "duplicate") {
+    if (credentialsMissing) {
+      log.warn?.(`[accounts] not listing ${rec.seatId}: its credential file is gone`);
+      await failFlow(rec, "login-failed");
+    } else if (planned?.kind === "duplicate") {
       await failFlow(rec, "duplicate-login");
     } else if (planned?.kind === "different-org") {
       rec.identity = identity;
@@ -502,36 +518,66 @@ export function createAccountsManager({
     return { entry, identity };
   }
 
-  /** opencode stored a new login while a Codex add-seat was waiting. */
-  async function processCodexLanding(rec) {
-    if (rec.state !== "pending" || rec.processing) return;
+  /**
+   * opencode stored a new login while a Codex add-seat was waiting. While it runs
+   * the record is `processing`: nothing may delete its directory (cancel, supersede
+   * and the timeout sweep all stand back), and the status reports "finishing". A
+   * placement that succeeds wins — the user approved the login — and a cancel that
+   * arrived meanwhile only counts if the placement then fails.
+   * `landedEpoch` differs from the record's own when the login belongs to an
+   * older add the user abandoned (S4): it is used here, and the record's own wait
+   * is then watched like any abandoned one.
+   */
+  function processCodexLanding(rec, { landedEpoch } = {}) {
+    if (rec.state !== "pending" || rec.processing) return Promise.resolve();
     rec.processing = true;
-    try {
-      const login = await readLandedCodexLogin(rec);
-      if (!login) {
+    const run = (async () => {
+      try {
+        const t0 = Date.now();
+        const login = await readLandedCodexLogin(rec);
+        if (!login) {
+          await failFlow(rec, "login-failed");
+          return;
+        }
+        const { entry, identity } = login;
+        // 1. The new login is kept in its seat directory BEFORE anything else.
+        await writeSeatAuth(rec.dir, entry);
+        const t1 = Date.now();
+        // 2. The previous live login goes back — unless the "new" login is the
+        //    SAME account (a duplicate): then the fresh entry is the better one to
+        //    keep live, and the old tokens may even have been rotated out.
+        await giveBackLive(rec.prev, identity.accountUuid);
+        const t2 = Date.now();
+        // 3. The new login becomes a seat (or is refused as a duplicate).
+        await placeFlow(rec, identity);
+        // Step timings, so a slow placement shows WHERE it was slow.
+        log.log?.(`[accounts] codex placement ${rec.seatId}: ${rec.state} — read+save ${t1 - t0}ms, give back live ${t2 - t1}ms, place ${Date.now() - t2}ms`);
+        if (landedEpoch !== undefined && rec.epoch !== undefined && landedEpoch !== rec.epoch) {
+          guards.push({ prev: rec.prev, epoch: rec.epoch, addSeat: true, until: now() + t.guardTtlMs });
+        }
+      } catch (e) {
+        log.warn?.("[accounts] finishing a Codex sign-in failed:", e?.message ?? e);
         await failFlow(rec, "login-failed");
-        return;
+      } finally {
+        rec.processing = false;
+        rec.landing = null;
+        if (rec.cancelRequested && rec.state !== "ok") pending.delete(rec.seatId);
       }
-      const { entry, identity } = login;
-      // 1. The new login is kept in its seat directory BEFORE anything else.
-      await writeSeatAuth(rec.dir, entry);
-      // 2. The previous live login goes back — unless the "new" login is the
-      //    SAME account (a duplicate): then the fresh entry is the better one to
-      //    keep live, and the old tokens may even have been rotated out.
-      await giveBackLive(rec.prev, identity.accountUuid);
-      // 3. The new login becomes a seat (or is refused as a duplicate).
-      await placeFlow(rec, identity);
-    } catch (e) {
-      log.warn?.("[accounts] finishing a Codex sign-in failed:", e?.message ?? e);
-      await failFlow(rec, "login-failed");
-    } finally {
-      rec.processing = false;
-    }
+    })();
+    rec.landing = run;
+    return run;
+  }
+
+  /** Let every Codex landing under way finish (a new sign-in must read the live
+   *  login AFTER the previous one was given back, never in the middle of it). */
+  async function settleCodexLandings() {
+    const runs = [...pending.values(), ...resigns.values()].filter((r) => r.provider === "codex" && r.landing).map((r) => r.landing);
+    await Promise.allSettled(runs);
   }
 
   function rememberCodexGuard(rec) {
     if (rec.provider !== "codex" || !rec.prev) return;
-    guards.push({ prev: rec.prev, epoch: rec.epoch, until: now() + t.guardTtlMs });
+    guards.push({ prev: rec.prev, epoch: rec.epoch, addSeat: !rec.flowId, until: now() + t.guardTtlMs });
   }
 
   /** An ABANDONED wait landed after all: put the live login back if it changed hands. */
@@ -561,6 +607,19 @@ export function createAccountsManager({
       return;
     }
     const at = now();
+    // The code approved belongs to an add the user abandoned (superseded by a
+    // newer one, or cancelled), while a newer add is still waiting: the intent is
+    // "add a seat", so that login is the newer add's. With no successor the
+    // guard below puts the previous login back as before.
+    if (epoch !== undefined) {
+      const gi = guards.findIndex((x) => x.addSeat && x.until > at && x.epoch === epoch);
+      const successor = [...pending.values()].find((r) => r.provider === "codex" && r.state === "pending" && !r.processing);
+      if (gi >= 0 && successor) {
+        guards.splice(gi, 1);
+        await processCodexLanding(successor, { landedEpoch: epoch });
+        return;
+      }
+    }
     const g = guards.find((x) => x.until > at && (epoch === undefined || x.epoch === undefined || x.epoch === epoch));
     if (g) {
       guards.splice(guards.indexOf(g), 1);
@@ -576,13 +635,13 @@ export function createAccountsManager({
    *  any older pending one. */
   async function supersedeCodexWaits() {
     for (const old of [...pending.values()]) {
-      if (old.provider === "codex" && old.state === "pending") {
+      if (old.provider === "codex" && old.state === "pending" && !old.processing) {
         rememberCodexGuard(old);
         await failFlow(old, "login-failed");
       }
     }
     for (const old of [...resigns.values()]) {
-      if (old.provider === "codex" && old.state === "pending") {
+      if (old.provider === "codex" && old.state === "pending" && !old.processing) {
         rememberCodexGuard(old);
         await failResign(old, "login-failed");
       }
@@ -720,36 +779,41 @@ export function createAccountsManager({
   }
 
   /** opencode stored a new login while a Codex re-sign was waiting. */
-  async function processCodexResignLanding(rec) {
-    if (rec.state !== "pending" || rec.processing) return;
+  function processCodexResignLanding(rec) {
+    if (rec.state !== "pending" || rec.processing) return Promise.resolve();
     rec.processing = true;
-    try {
-      const login = await readLandedCodexLogin(rec);
-      if (!login) {
+    const run = (async () => {
+      try {
+        const login = await readLandedCodexLogin(rec);
+        if (!login) {
+          await failResign(rec, "login-failed");
+          return;
+        }
+        const { entry, identity } = login;
+        const store = await accounts.getStore();
+        const seat = findSeat(store.providers.codex, (x) => x.id === rec.seatId)?.seat ?? null;
+        const verdict = seat ? compareAccount("codex", seat, identity) : "missing";
+        // The seat gets the new login ONLY when it is proven to be the same account
+        // — and gets it BEFORE the borrowed slot is given back, so it is never lost.
+        const landed = verdict === "same" && (await applyResignLogin(rec, identity, JSON.stringify({ openai: entry })));
+        await giveBackLive(rec.prev, identity.accountUuid);
+        if (landed) {
+          await finishResignOk(rec);
+        } else if (verdict === "different") {
+          await failResign(rec, "different-account", { expectedEmail: seat.email ?? null, gotEmail: null });
+        } else {
+          await failResign(rec, "login-failed");
+        }
+      } catch (e) {
+        log.warn?.("[accounts] finishing a Codex re-sign failed:", e?.message ?? e);
         await failResign(rec, "login-failed");
-        return;
+      } finally {
+        rec.processing = false;
+        rec.landing = null;
       }
-      const { entry, identity } = login;
-      const store = await accounts.getStore();
-      const seat = findSeat(store.providers.codex, (x) => x.id === rec.seatId)?.seat ?? null;
-      const verdict = seat ? compareAccount("codex", seat, identity) : "missing";
-      // The seat gets the new login ONLY when it is proven to be the same account
-      // — and gets it BEFORE the borrowed slot is given back, so it is never lost.
-      const landed = verdict === "same" && (await applyResignLogin(rec, identity, JSON.stringify({ openai: entry })));
-      await giveBackLive(rec.prev, identity.accountUuid);
-      if (landed) {
-        await finishResignOk(rec);
-      } else if (verdict === "different") {
-        await failResign(rec, "different-account", { expectedEmail: seat.email ?? null, gotEmail: null });
-      } else {
-        await failResign(rec, "login-failed");
-      }
-    } catch (e) {
-      log.warn?.("[accounts] finishing a Codex re-sign failed:", e?.message ?? e);
-      await failResign(rec, "login-failed");
-    } finally {
-      rec.processing = false;
-    }
+    })();
+    rec.landing = run;
+    return run;
   }
 
   // -------------------------------------------------------------------------
@@ -846,24 +910,33 @@ export function createAccountsManager({
     return requireView(provider);
   }
 
-  async function addSeat({ provider, accountId, label } = {}) {
+  async function addSeat({ provider, accountId, label, requestId } = {}) {
     requireProvider(provider);
-    await sweep();
-    let cleanedLabel = null;
-    if (label !== undefined && label !== null && label !== "") {
-      cleanedLabel = cleanLabel(label);
-      if (!cleanedLabel) throw new AccountsError("invalid-label");
-    }
-    const store = await accounts.getStore();
-    if (accountId !== undefined && accountId !== null) {
-      if (!store.providers[provider].accounts.some((a) => a.id === accountId)) throw new AccountsError("unknown-seat");
-    }
-    return provider === "claude"
-      ? addClaudeSeat({ accountId: accountId ?? null, label: cleanedLabel })
-      : addCodexSeat({ accountId: accountId ?? null, label: cleanedLabel });
+    return providerLocks[provider].runExclusive(async () => {
+      await sweep();
+      // The same request twice (a double-invoked effect, a retried call) is ONE sign-in.
+      const key = typeof requestId === "string" && requestId.length > 0 && requestId.length <= 64 ? requestId : null;
+      if (key) {
+        const same = [...pending.values()].find(
+          (r) => r.requestId === key && r.provider === provider && (r.state === "pending" || r.state === "ok"),
+        );
+        if (same) return { seatId: same.seatId, connect: same.connect };
+      }
+      let cleanedLabel = null;
+      if (label !== undefined && label !== null && label !== "") {
+        cleanedLabel = cleanLabel(label);
+        if (!cleanedLabel) throw new AccountsError("invalid-label");
+      }
+      const store = await accounts.getStore();
+      if (accountId !== undefined && accountId !== null) {
+        if (!store.providers[provider].accounts.some((a) => a.id === accountId)) throw new AccountsError("unknown-seat");
+      }
+      const args = { accountId: accountId ?? null, label: cleanedLabel, requestId: key ?? undefined };
+      return provider === "claude" ? addClaudeSeat(args) : addCodexSeat(args);
+    });
   }
 
-  async function addClaudeSeat({ accountId, label }) {
+  async function addClaudeSeat({ accountId, label, requestId }) {
     const seatId = nextId("seat", [...(await accounts.takenSeatIds("claude")), ...pending.keys()]);
     const dir = accounts.seatDir("claude", seatId);
     accounts.reserveSeat("claude", seatId);
@@ -886,11 +959,15 @@ export function createAccountsManager({
       startedAt: now(),
       state: "pending",
       sessionKey: connect?.sessionKey,
+      requestId,
+      connect,
     });
     return { seatId, connect };
   }
 
-  async function addCodexSeat({ accountId, label }) {
+  async function addCodexSeat({ accountId, label, requestId }) {
+    // A login being placed must be given back BEFORE the live slot is read again.
+    await settleCodexLandings();
     // Make sure the live login's own seat copy is fresh BEFORE we borrow the slot.
     await accounts.seatStates("codex");
     const prev = await codex.readLive();
@@ -899,16 +976,18 @@ export function createAccountsManager({
     const seatId = nextId("seat", [...(await accounts.takenSeatIds("codex")), ...pending.keys()]);
     const dir = accounts.seatDir("codex", seatId);
     accounts.reserveSeat("codex", seatId);
-    let connect;
+    let started;
     try {
-      connect = await codex.startConnect();
+      started = await codex.startConnect();
     } catch (e) {
       log.warn?.("[accounts] starting a Codex seat sign-in failed:", e?.message ?? e);
     }
-    if (!isObj(connect) || connect.shape === "api-key" || !connect.shape) {
+    if (!isObj(started) || started.shape === "api-key" || !started.shape) {
       accounts.releaseSeat("codex", seatId);
       throw new AccountsError("login-failed");
     }
+    // The epoch belongs to the wait THIS call started; it never reaches the client.
+    const { epoch, ...connect } = started;
     pending.set(seatId, {
       seatId,
       provider: "codex",
@@ -918,7 +997,9 @@ export function createAccountsManager({
       startedAt: now(),
       state: "pending",
       prev,
-      epoch: connect.shape === "oauth-auto" ? codex.oauthEpoch() : undefined,
+      epoch: connect.shape === "oauth-auto" ? epoch : undefined,
+      requestId,
+      connect,
     });
     return { seatId, connect };
   }
@@ -937,7 +1018,7 @@ export function createAccountsManager({
       return { state: "failed", error: "login-failed" };
     }
     await resolveFlow(rec);
-    if (rec.state === "pending") return { state: "pending" };
+    if (rec.state === "pending") return rec.processing ? { state: "pending", phase: "finishing" } : { state: "pending" };
     if (rec.state === "ok") {
       const seat = findSeatView(await providerView(rec.provider), seatId);
       return seat ? { state: "ok", seat } : { state: "failed", error: "login-failed" };
@@ -985,6 +1066,12 @@ export function createAccountsManager({
       pending.delete(seatId);
       return { ok: true };
     }
+    // A login being placed is never torn down: the user approved it. The cancel is
+    // remembered and only counts if the placement then fails.
+    if (rec.state === "pending" && rec.provider === "codex" && rec.processing) {
+      rec.cancelRequested = true;
+      return { ok: true };
+    }
     if (rec.state === "pending" && rec.provider === "codex") rememberCodexGuard(rec);
     rec.parked = false;
     await failFlow(rec, "login-failed");
@@ -995,21 +1082,23 @@ export function createAccountsManager({
   async function resignSeat({ provider, seatId } = {}) {
     requireProvider(provider);
     if (!isNonEmptyString(seatId)) throw new AccountsError("unknown-seat");
-    await sweep();
-    const states = await accounts.seatStates(provider);
-    const entry = states?.seats.find((x) => x.seatId === seatId);
-    if (!entry) throw new AccountsError("unknown-seat");
-    // The box's own live login is refreshed by opencode / the CLI itself; signing
-    // it in again is out of scope here (a directory copy would just be re-mirrored).
-    if (entry.live) throw new AccountsError("live-seat");
-    // One flow per seat: an earlier one is ended first.
-    for (const old of [...resigns.values()]) {
-      if (old.provider === provider && old.seatId === seatId && old.state === "pending") {
-        if (provider === "codex") rememberCodexGuard(old);
-        await failResign(old, "login-failed");
+    return providerLocks[provider].runExclusive(async () => {
+      await sweep();
+      const states = await accounts.seatStates(provider);
+      const entry = states?.seats.find((x) => x.seatId === seatId);
+      if (!entry) throw new AccountsError("unknown-seat");
+      // The box's own live login is refreshed by opencode / the CLI itself; signing
+      // it in again is out of scope here (a directory copy would just be re-mirrored).
+      if (entry.live) throw new AccountsError("live-seat");
+      // One flow per seat: an earlier one is ended first.
+      for (const old of [...resigns.values()]) {
+        if (old.provider === provider && old.seatId === seatId && old.state === "pending") {
+          if (provider === "codex") rememberCodexGuard(old);
+          await failResign(old, "login-failed");
+        }
       }
-    }
-    return provider === "claude" ? resignClaudeSeat(seatId) : resignCodexSeat(seatId);
+      return provider === "claude" ? resignClaudeSeat(seatId) : resignCodexSeat(seatId);
+    });
   }
 
   async function resignClaudeSeat(seatId) {
@@ -1039,17 +1128,19 @@ export function createAccountsManager({
   }
 
   async function resignCodexSeat(seatId) {
+    await settleCodexLandings();
     // Make sure the live login's own seat copy is fresh BEFORE we borrow the slot.
     await accounts.seatStates("codex");
     const prev = await codex.readLive();
     await supersedeCodexWaits();
-    let connect;
+    let started;
     try {
-      connect = await codex.startConnect();
+      started = await codex.startConnect();
     } catch (e) {
       log.warn?.("[accounts] starting a Codex seat re-sign failed:", e?.message ?? e);
     }
-    if (!isObj(connect) || connect.shape === "api-key" || !connect.shape) throw new AccountsError("login-failed");
+    if (!isObj(started) || started.shape === "api-key" || !started.shape) throw new AccountsError("login-failed");
+    const { epoch, ...connect } = started;
     const flowId = newFlowId();
     resigns.set(flowId, {
       flowId,
@@ -1059,7 +1150,7 @@ export function createAccountsManager({
       startedAt: now(),
       state: "pending",
       prev,
-      epoch: connect.shape === "oauth-auto" ? codex.oauthEpoch() : undefined,
+      epoch: connect.shape === "oauth-auto" ? epoch : undefined,
     });
     return { flowId, connect };
   }
@@ -1101,7 +1192,7 @@ export function createAccountsManager({
     if (!rec) return { ok: true };
     // A landing already under way finishes first: cancelling never leaves a
     // half-applied seat. (If it succeeded the seat is simply re-signed.)
-    const landing = resignResolving.get(flowId);
+    const landing = resignResolving.get(flowId) ?? rec.landing;
     if (landing) await landing;
     if (rec.state === "pending") {
       if (rec.provider === "codex") rememberCodexGuard(rec);

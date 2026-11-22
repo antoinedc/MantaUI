@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildHandlers, startClaudeLogin, cancelClaudeLogin, onProviderOauthLanded, _getClaudeLoginSessions, _resetClaudeLoginSessions, _resetOauthCallbacks } from "./rpc.mjs";
+import { buildHandlers, providerAuthStart, startClaudeLogin, cancelClaudeLogin, onProviderOauthLanded, _getClaudeLoginSessions, _resetClaudeLoginSessions, _resetOauthCallbacks } from "./rpc.mjs";
 import { pollClaudeLogin, setProviderAuthEntry, _setOcTransport } from "./opencode.mjs";
 import { spawn as ptySpawn, _setSpawnShellPty, kill as ptyKill, spawnShellPty } from "./pty.mjs";
 
@@ -311,6 +311,16 @@ test("onProviderOauthLanded: fires with the wait's epoch when a device wait appr
   } finally {
     off();
   }
+});
+
+test("providerAuthStart: each start reports the attempt id of the device wait IT started", async () => {
+  _resetOauthCallbacks();
+  const d = oauthAutoDeps(() => new Promise(() => {}));
+  const seen = [];
+  await providerAuthStart(d.oc, "openai", { onOauthEpoch: (e) => seen.push(e) });
+  await providerAuthStart(d.oc, "openai", { onOauthEpoch: (e) => seen.push(e) });
+  await providerAuthStart(d.oc, "openai");
+  assert.deepEqual(seen, [1, 2]);
 });
 
 test("a listener that throws or rejects never breaks the oauth flow", async () => {

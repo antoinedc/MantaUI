@@ -1709,7 +1709,7 @@ export const IPC = {
   accountsSetMode: "accounts:set-mode", // ({provider, mode}) → ProviderView | {error}
   accountsSetActive: "accounts:set-active", // ({provider, seatId}) → ProviderView | {error}
   accountsRename: "accounts:rename", // ({provider, kind, id, label}) → ProviderView | {error}
-  accountsAddSeat: "accounts:add-seat", // ({provider, accountId?, label?}) → {seatId, connect} | {error}
+  accountsAddSeat: "accounts:add-seat", // ({provider, accountId?, label?, requestId?}) → {seatId, connect} | {error}
   accountsSeatStatus: "accounts:seat-status", // ({seatId}) → SeatStatusResult
   accountsAddSeatConfirm: "accounts:add-seat-confirm", // ({seatId, newAccount}) → ProviderView | {error}
   accountsCancelSeat: "accounts:cancel-seat", // ({seatId}) → {ok:true}
@@ -2703,6 +2703,8 @@ export type AddSeatResult = { seatId: string; connect: SeatConnect } | { error: 
 
 export type SeatStatusResult = {
   state: "pending" | "ok" | "failed";
+  /** pending only: the login arrived and the box is saving the seat. */
+  phase?: "finishing";
   error?: "duplicate-login" | "login-failed" | "different-org";
   seat?: SeatView;
   /** The org the new login belongs to (different-org). */
