@@ -327,9 +327,9 @@ export function AddSeatFlow({
 
       {phase.kind === "starting" && <div className="text-text-muted">Preparing sign-in…</div>}
 
-      {phase.kind === "device" && finishing && (
-        <div className="text-text-muted" role="status">
-          Login received — saving the seat…
+      {phase.kind === "device" && (
+        <div className="text-text-muted empty:hidden" role="status">
+          {finishing ? "Login received — saving the seat…" : ""}
         </div>
       )}
 
