@@ -366,6 +366,19 @@ describe("package agents via ChatPanel", () => {
     expect(ta().value).toBe("");
   });
 
+  it("shows a starting card and clears the composer before the box answers", async () => {
+    let resolve: (v: { jobId: string }) => void = () => {};
+    await setup({ agentsDispatch: () => new Promise((r) => (resolve = r)) });
+    await pickDev();
+    await typeText("@dev fix the login bug");
+    await press("Enter");
+    expect(ta().value).toBe("");
+    const card = h!.container.querySelector('[data-testid="background-card"][data-kind="starting"]');
+    expect(card?.textContent).toContain("Dev");
+    expect(card?.textContent).toContain("@dev fix the login bug");
+    await act(async () => resolve({ jobId: "job1" }));
+  });
+
   it("keeps the draft and shows the reason when the task can't start", async () => {
     const { api } = await setup({ agentsDispatch: () => Promise.reject(new Error("5 background jobs are already running")) });
     await pickDev();

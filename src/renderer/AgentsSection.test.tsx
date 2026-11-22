@@ -5,7 +5,7 @@
 // inline alert says why not.
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { AgentsSection } from "./AgentsSection";
 import { resetPackageAgentsForTest } from "./packageAgents";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
@@ -32,7 +32,8 @@ beforeAll(() => {
   proto.close = function (this: HTMLDialogElement) {
     if (!this.hasAttribute("open")) return;
     this.removeAttribute("open");
-    this.dispatchEvent(new Event("close"));
+    // Chromium queues the close event as a task; it does not fire synchronously.
+    setTimeout(() => this.dispatchEvent(new Event("close")), 0);
   };
 });
 
@@ -49,14 +50,15 @@ describe("AgentsSection", () => {
     h = null;
   });
 
-  async function setup(extra: Record<string, unknown> = {}) {
+  async function setup(extra: Record<string, unknown> = {}, strict = false) {
     const { api } = installMockApi({
       agentsList: () => Promise.resolve([DEV, BAD]),
       agentsOpenChat: () => Promise.resolve({ tmuxSession: "manta-agents", windowIndex: 0 }),
       ...extra,
     });
     resetPackageAgentsForTest();
-    h = mount(<AgentsSection onOpenWindow={onOpenWindow} />);
+    const section = <AgentsSection onOpenWindow={onOpenWindow} />;
+    h = mount(strict ? <StrictMode>{section}</StrictMode> : section);
     await h.flush();
     await h.flush();
     // Boxed: the mock api is a Proxy that answers `then`, so returning it directly hangs.
@@ -123,6 +125,16 @@ describe("AgentsSection", () => {
     await h!.flush();
     expect(api.calls.agentsCreate[0][0]).toEqual({ name: "Reviewer", description: "Reviews PRs", isolation: "worktree" });
     expect(h!.container.querySelector("dialog")).toBeNull();
+  });
+
+  it("+ keeps the dialog open under StrictMode (double-run effects)", async () => {
+    await setup({}, true);
+    await click(h!.container.querySelector('button[aria-label="New agent"]')!);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    await h!.flush();
+    expect(h!.container.querySelector("dialog")?.hasAttribute("open")).toBe(true);
   });
 
   it("a refused create stays open with the reason inline", async () => {

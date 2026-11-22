@@ -68,12 +68,12 @@ function CreateAgentDialog({ onClose, onCreated }: { onClose: () => void; onCrea
   useEffect(() => {
     const d = dialogRef.current;
     if (!d) return;
-    d.showModal();
+    // No close() in a cleanup: under StrictMode the effect runs twice, and a
+    // cleanup close() queues a "close" event that lands after the reopen and
+    // unmounts the dialog. Unmounting removes it from the top layer anyway.
+    if (!d.open) d.showModal();
     // showModal() focuses the first focusable control; the name field is the one we want.
     nameRef.current?.focus();
-    return () => {
-      if (d.open) d.close();
-    };
   }, []);
 
   const submit = async (e: React.FormEvent) => {
