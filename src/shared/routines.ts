@@ -28,6 +28,7 @@ export interface Routine {
   createdFrom: { sessionID: string } | null; // chat it was created in (for §8.2 default)
   nextRunAt: number | null; // null when disabled or destination is a session
   memoryUpdatedByRunId: string | null;
+  agent: string | null; // Agents Phase 2: slug of the agent runs use; null = none (also old records)
 }
 
 export type RunStatus = "queued" | "running" | "needs_input" | "done" | "failed" | "timed_out" | "cancelled" | "skipped";
@@ -129,6 +130,7 @@ export interface RoutineInput {
   memory?: string;
   createdFrom?: { sessionID: string } | null;
   enabled?: boolean; // default true
+  agent?: string | null; // update: omitted = unchanged, null = clear
 }
 
 export type RoutineMoveTarget = { type: "origin" } | { type: "new" } | { type: "session"; sessionID: string };

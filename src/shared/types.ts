@@ -2875,6 +2875,10 @@ export type DelegateCompletionOwner = "manta" | "opencode";
 export type DelegateCompletionDelivery = "pending" | "delivered" | "abandoned";
 export type DelegateJob = {
   id: string; // 8-char hex
+  // Agents: set on jobs started for an agent (@mention or lead handoff).
+  agentName?: string; // the agent's display name
+  request?: string; // the user's request (@mention) or the handoff title
+  requestedBy?: "manta"; // present when the lead handed the work off
   name: string; // slug of the first 4 words of the prompt
   prompt: string;
   model: string | null;
@@ -2997,6 +3001,11 @@ export interface AgentInfo {
   color: string | null;
   builtIn: boolean;
   error?: string; // set ⇒ the package failed to parse and the agent is not usable
+  // Agents Phase 2: "lead" only for the valid lead package (slug LEAD_SLUG + `role: lead`).
+  role: "lead" | "specialist";
+  useWhen: string | null; // "Use when …" routing line (≤ 200 chars)
+  notFor: string | null; // "Not for …" routing line (≤ 200 chars)
+  notice: string | null; // non-error hint shown under the row (e.g. the `manta` upgrade collision)
 }
 export interface AgentCreateInput {
   name: string;
