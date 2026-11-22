@@ -10,6 +10,7 @@
 // opencode or tmux.
 
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
 import fsPromises from "node:fs/promises";
 import YAML from "yaml";
@@ -74,12 +75,27 @@ export function parseAgentMd(text) {
   const description = str(data.description);
   if (!description) return { ok: false, error: "agent.md needs a description" };
   if (description.length > DESCRIPTION_MAX) return { ok: false, error: `The description is longer than ${DESCRIPTION_MAX} characters` };
-  const isolation = data.isolation == null ? "none" : str(data.isolation);
+  const isolation = data.isolation == null ? DEFAULT_ISOLATION : str(data.isolation);
   if (!ISOLATIONS.includes(isolation)) return { ok: false, error: 'isolation must be "worktree" or "none"' };
   const model = data.model == null ? null : str(data.model);
   if (model !== null && !/^[^/\s]+\/\S+$/.test(model)) return { ok: false, error: 'model must look like "provider/model"' };
   const color = data.color == null ? null : str(data.color) || null;
   return { ok: true, meta: { name, description, isolation, model, color }, body: parts.body };
+}
+
+/**
+ * Where an agent works unless its agent.md says otherwise: its own branch (a
+ * worktree), so it can never touch the user's checkout. A chat folder that is
+ * not a git repository falls back to read-only work in that folder.
+ */
+export const DEFAULT_ISOLATION = "worktree";
+
+function defaultIsGitRepo(dir) {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", dir, "rev-parse", "--is-inside-work-tree"], { timeout: 5000 }, (err, out) =>
+      resolve(!err && String(out).trim() === "true"),
+    );
+  });
 }
 
 /** The `agent.md` text for a freshly created agent. */
@@ -91,7 +107,7 @@ export function buildAgentMd({ name, description, isolation }) {
     "Do the task you are given carefully and end to end. Read what you need before you act, keep the work focused on " +
     "what was asked, and say plainly what you did, what you found and anything you are unsure about. " +
     (edits
-      ? "You work in your own branch: commit as you go, and never merge."
+      ? "You work in your own branch: if you change files, commit as you go, and never merge."
       : "You can read and search but you cannot change files; give your answer in your final message.");
   return `---\n${front}\n---\n${body}\n`;
 }
@@ -252,6 +268,7 @@ export function createAgentsEngine({
   delegateView = null,
   isCtoSession = null,
   syncState = null,
+  isGitRepo = defaultIsGitRepo,
   log = console,
 } = {}) {
   const syncLock = createMutex();
@@ -432,7 +449,7 @@ export function createAgentsEngine({
   async function create(input) {
     const name = String(input?.name ?? "").trim();
     const description = String(input?.description ?? "").trim();
-    const isolation = input?.isolation == null ? "none" : input.isolation;
+    const isolation = input?.isolation == null ? DEFAULT_ISOLATION : input.isolation;
     if (!name) throw new AgentError("Give the agent a name");
     if (name.length > NAME_MAX) throw new AgentError(`The name can be at most ${NAME_MAX} characters`);
     if (/[\r\n]/.test(name)) throw new AgentError("The name must be on one line");
@@ -499,7 +516,7 @@ export function createAgentsEngine({
       parentDirectory: directory,
       agent: agentKey(slug),
       agentDir: agent.dir,
-      isolation: agent.meta.isolation,
+      isolation: agent.meta.isolation === "worktree" && !(await isGitRepo(directory)) ? "none" : agent.meta.isolation,
       ...(agent.meta.model ? { model: agent.meta.model } : {}),
       name: requestTitle(text, slug),
       agentName: agent.meta.name,

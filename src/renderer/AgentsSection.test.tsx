@@ -118,12 +118,11 @@ describe("AgentsSection", () => {
     expect(dialog.getAttribute("aria-labelledby")).toBe("new-agent-title");
     await setValue(h!.container.querySelector<HTMLInputElement>("#new-agent-name")!, "Reviewer");
     await setValue(h!.container.querySelector<HTMLInputElement>("#new-agent-description")!, "Reviews PRs");
-    await click(h!.container.querySelector('input[type="checkbox"]')!);
     await act(async () => {
       h!.container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
     await h!.flush();
-    expect(api.calls.agentsCreate[0][0]).toEqual({ name: "Reviewer", description: "Reviews PRs", isolation: "worktree" });
+    expect(api.calls.agentsCreate[0][0]).toEqual({ name: "Reviewer", description: "Reviews PRs" });
     expect(h!.container.querySelector("dialog")).toBeNull();
   });
 

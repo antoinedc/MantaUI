@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
-import type { AgentInfo, AgentIsolation } from "../shared/types";
+import type { AgentInfo } from "../shared/types";
 import { IconButton } from "./IconButton";
 import { Button } from "./Button";
 import { useStore } from "./store";
@@ -61,7 +61,6 @@ function CreateAgentDialog({ onClose, onCreated }: { onClose: () => void; onCrea
   const nameRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [edits, setEdits] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,8 +81,7 @@ function CreateAgentDialog({ onClose, onCreated }: { onClose: () => void; onCrea
     setBusy(true);
     setError(null);
     try {
-      const isolation: AgentIsolation = edits ? "worktree" : "none";
-      await window.api.agentsCreate({ name: name.trim(), description: description.trim(), isolation });
+      await window.api.agentsCreate({ name: name.trim(), description: description.trim() });
       onCreated();
       dialogRef.current?.close();
     } catch (err) {
@@ -137,10 +135,6 @@ function CreateAgentDialog({ onClose, onCreated }: { onClose: () => void; onCrea
             className={FIELD_CLASS}
           />
         </div>
-        <label className="flex items-center gap-2 text-meta text-text-muted">
-          <input type="checkbox" checked={edits} onChange={(e) => setEdits(e.target.checked)} />
-          Edits code in its own branch
-        </label>
         {error && (
           <p role="alert" className="m-0 text-meta text-danger break-words" data-testid="new-agent-error">
             {error}
