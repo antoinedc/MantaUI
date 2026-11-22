@@ -383,6 +383,13 @@ describe("withPendingAgentCards", () => {
       { kind: "starting", key: "pending-agent-1", jobId: "", name: "starting…", createdAt: 5, agentName: "Dev", request: "@dev fix it" },
     ]);
   });
+  it("drops it when the job's card shows before the box answered with the id", () => {
+    const live = [{ kind: "running" as const, paused: false, key: "j1", jobId: "j1", name: "fix-it", createdAt: 6, agentName: "Dev", request: "@dev fix it" }];
+    expect(withPendingAgentCards(live, [p], new Set(["j1"]))).toBe(live);
+    // one live card claims one pending request only
+    expect(withPendingAgentCards(live, [p, { ...p, key: "pending-agent-2" }], new Set(["j1"]))).toHaveLength(2);
+  });
+
   it("drops it once the job is in the store, and returns the same array when nothing is pending", () => {
     const cards: never[] = [];
     expect(withPendingAgentCards(cards, [{ ...p, jobId: "j1" }], new Set(["j1"]))).toBe(cards);
