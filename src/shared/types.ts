@@ -3042,6 +3042,43 @@ export interface AutonomyAction {
   /** "agent" = from the task's own "Actions from your list" section; absent = from a recorded command (Phase 3c). */
   source?: "agent";
 }
+// Agents Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md §2.1): Manta creates / edits agents.
+export interface AgentDraftCreate {
+  name: string;
+  description: string;
+  isolation: "worktree" | "none";
+  instructions: string;
+  useWhen?: string | null;
+  notFor?: string | null;
+  model?: string | null;
+  color?: string | null;
+}
+/** Update: at least one field; omitted = unchanged; null = clear (nullable fields only). */
+export type AgentDraftUpdate = Partial<AgentDraftCreate>;
+/** `failed` = the file was written but activating it (sync / config reload) failed; Retry only re-activates. */
+export type AgentChangeState = "applied" | "pending" | "discarded" | "undone" | "expired" | "conflict" | "failed";
+export interface AgentChange {
+  id: string;
+  kind: "create" | "update";
+  slug: string | null;
+  agentName: string;
+  sessionID: string;
+  messageID: string;
+  callID: string;
+  state: AgentChangeState;
+  needsClick: boolean;
+  reason: "ask" | "lead" | "isolation" | null;
+  before: string | null;
+  after: string;
+  createdAt: number;
+  decidedAt: number | null;
+  error: string | null;
+}
+export interface AgentChangeEvent {
+  id: string;
+  sessionID: string;
+  slug: string | null;
+}
 export interface AgentCreateInput {
   name: string;
   description: string;
