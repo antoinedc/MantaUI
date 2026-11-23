@@ -528,28 +528,66 @@ export function sourcesForScan(sources) {
 
 export const renderSources = (list) => list.map((s) => `--- ${s.path} ---\n${s.text}`).join("\n");
 
-/** `{entries}` from a model answer, or null: JSON (optionally in one fenced block), ≤ 80 objects with a known kind and string fields. */
-export function parseScanOutput(text) {
-  const s = String(text ?? "");
-  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(s);
-  let v = null;
-  for (const c of [fence?.[1], s]) {
-    if (c === undefined) continue;
-    const a = c.indexOf("{");
-    const b = c.lastIndexOf("}");
-    if (a < 0 || b <= a) continue;
-    try {
-      v = JSON.parse(c.slice(a, b + 1));
-      break;
-    } catch {
-      /* next */
+const SCAN_MAX_ENTRIES = 80;
+const SCAN_MAX_CANDIDATES = 40;
+
+// The balanced JSON value (object or array) that starts at `s[start]`, string-aware, or null when it never closes.
+function balancedAt(s, start) {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inString) {
+      if (c === "\\") i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{" || c === "[") depth++;
+    else if ((c === "}" || c === "]") && --depth === 0) return s.slice(start, i + 1);
+  }
+  return null;
+}
+
+// the entries list of a parsed JSON value: `{entries: [...]}`, or a bare array of objects; otherwise null
+const entriesOf = (v) => (Array.isArray(v?.entries) ? v.entries : Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === "object") ? v : null);
+
+// the first entries list found in `text`: inside a fenced block, or anywhere in the prose around it
+function findEntriesList(text) {
+  const blocks = [...text.matchAll(/```[a-z]*\s*([\s\S]*?)```/gi)].map((m) => m[1]);
+  let tried = 0;
+  for (const block of [...blocks, text]) {
+    for (const open of block.matchAll(/[{[]/g)) {
+      if (tried >= SCAN_MAX_CANDIDATES) break;
+      const piece = balancedAt(block, open.index);
+      if (piece === null) continue;
+      tried++;
+      try {
+        const list = entriesOf(JSON.parse(piece));
+        if (list) return list;
+      } catch {
+        /* not JSON: look at the next opening bracket */
+      }
     }
   }
-  if (!v || !Array.isArray(v.entries) || v.entries.length > 80) return null;
-  for (const e of v.entries) {
-    if (!e || typeof e !== "object" || !TASK_KINDS.includes(e.kind) || typeof e.command !== "string" || typeof e.what !== "string" || typeof e.file !== "string") return null;
+  return null;
+}
+
+/**
+ * `{ entries, dropped }` from a model answer, or null when it holds no JSON entries list at all (the only invalid answer).
+ * Tolerant per entry: JSON may sit in a fenced block or in prose, a bare array counts, and an entry that is not an
+ * object, has an unknown kind or has no command string is dropped (counted in `dropped`) while the others are kept; a
+ * missing `what` / `file` becomes "" (the file check and `validateEntry` decide what is kept). At most 80 entries are
+ * read; the rest count as dropped.
+ */
+export function parseScanOutput(text) {
+  const list = findEntriesList(String(text ?? ""));
+  if (!list) return null;
+  const entries = [];
+  for (const e of list.slice(0, SCAN_MAX_ENTRIES)) {
+    const kind = typeof e?.kind === "string" ? e.kind.trim().toLowerCase().replace(/[\s-]+/g, "_") : "";
+    if (!TASK_KINDS.includes(kind) || typeof e.command !== "string") continue;
+    entries.push({ kind, command: e.command.trim(), what: typeof e.what === "string" ? e.what : "", file: typeof e.file === "string" ? e.file.trim() : "" });
   }
-  return { entries: v.entries };
+  return { entries, dropped: list.length - entries.length };
 }
 
 // does the cited file really mention what the command runs? (spec §6.6 step 3)
@@ -824,29 +862,43 @@ export function createProjectActions(deps = {}) {
     ];
     if (typeof k.runKnowledge !== "function") return stop("failed", "no model runner is wired");
     let res;
+    let rejected = null; // why the runner's answer check said no (the runner itself only says "schema-invalid")
+    const validate = async (out) => {
+      if (out?.ok === false) return false;
+      if (parseScanOutput(out?.text) !== null) return true;
+      rejected = `no JSON entries list in the answer, ${String(out?.text ?? "").length} characters`;
+      return false;
+    };
     try {
       res = await k.runKnowledge({
         taskClass: "knowledge-actions",
         workType: "knowledge-actions",
         context,
         directory: "~",
-        deps: { validate: async (out) => out?.ok !== false && parseScanOutput(out?.text) !== null, reportCost: makeReportCost(k.budget, slug) },
+        deps: { validate, reportCost: makeReportCost(k.budget, slug) },
       });
     } catch (e) {
       return stop("failed", `the model call threw (${clip(String(e?.message ?? e), 120)})`);
     }
     if (res && res.ok === false) {
-      const detail = [res.code, res.reason].filter((x) => typeof x === "string").join(" / ");
+      const detail = [res.code, res.reason, res.code === "schema-invalid" ? rejected : null].filter((x) => typeof x === "string").join(" / ");
       return stop("failed", `the model call was refused or failed (${clip(detail || "no reason given", 120)})`);
     }
     const parsed = res ? parseScanOutput(res.text) : null;
-    if (!parsed) return stop("failed", "the model's answer was not the expected JSON");
+    if (!parsed) return stop("failed", `no JSON entries list in the model's answer (${String(res?.text ?? "").length} characters)`);
     const fromModel = [];
+    let badCommand = 0;
+    let notGrounded = 0;
     for (const raw of parsed.entries) {
       const v = validateEntry(raw);
-      if (v && grounded(v, snap.sources)) fromModel.push(v);
+      if (!v) badCommand++;
+      else if (!grounded(v, snap.sources)) notGrounded++;
+      else fromModel.push(v);
     }
-    if (parsed.entries.length > 0 && fromModel.length === 0) return stop("failed", "none of the model's entries matched the files it cited");
+    const listed = parsed.entries.length + parsed.dropped;
+    if (listed > 0 && fromModel.length === 0) {
+      return stop("failed", `${listed} entries, 0 valid after checking (${parsed.dropped} malformed, ${badCommand} with a command outside the allowed form, ${notGrounded} not found in the file they cite)`);
+    }
     const all = [];
     const seen = new Set();
     for (const e of [...fromModel, ...nameBasedEntries(snap.sources)]) {
@@ -861,7 +913,7 @@ export function createProjectActions(deps = {}) {
     for (const e of all) (byKind[e.kind] ??= []).push(e);
     const rel = pageRel(slug);
     let status = "written";
-    let why = `${all.length} entr${all.length === 1 ? "y" : "ies"} written to the page`;
+    let why = `${all.length} entr${all.length === 1 ? "y" : "ies"} written to the page (${fromModel.length} of the model's ${listed} kept)`;
     try {
       await k.store.withLock(async (tx) => {
         if (!(await flagsOn(k))) {
