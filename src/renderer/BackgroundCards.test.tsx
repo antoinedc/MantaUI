@@ -363,9 +363,58 @@ describe("finished result card", () => {
 
   it("shows no such lines when the part carries none (or an empty list)", () => {
     resetStore({});
-    h = mount(<BackgroundResultCard part={part({ toldActions: [], blockedActions: undefined })} />);
+    h = mount(<BackgroundResultCard part={part({ toldActions: [], blockedActions: undefined, exceededActions: [] })} />);
     expect(q('[data-testid="background-result-told"]')).toBeNull();
     expect(q('[data-testid="background-result-blocked"]')).toBeNull();
+    expect(q('[data-testid="background-result-exceeded"]')).toBeNull();
+    h.unmount();
+    h = mount(<BackgroundResultCard part={part()} />);
+    expect(q('[data-testid="background-result-exceeded"]')).toBeNull();
+  });
+
+  it("shows 'Despite your settings' first, in the warning tone, with a marker per source", () => {
+    resetStore({});
+    h = mount(
+      <BackgroundResultCard
+        part={part({
+          toldActions: [{ kind: "deploy", summary: "fly deploy" }],
+          blockedActions: [{ kind: "merge", level: "ask", summary: "gh pr merge" }],
+          exceededActions: [
+            { kind: "deploy", level: "ask", summary: "scripts/deploy-web.sh", source: "agent" },
+            { kind: "delete_data", level: "never", summary: "aws s3 rm" },
+          ],
+        })}
+      />,
+    );
+    const el = q('[data-testid="background-result-exceeded"]')!;
+    expect(el.textContent).toBe(
+      "Despite your settings: scripts/deploy-web.sh (needs your go-ahead; agent says it did this), " +
+        "aws s3 rm (not allowed; matched in a completed command, outcome not checked)",
+    );
+    expect(el.className).toContain("text-warn");
+    const order = Array.from(
+      h.container.querySelectorAll(
+        '[data-testid="background-result-exceeded"], [data-testid="background-result-told"], [data-testid="background-result-blocked"]',
+      ),
+    ).map((n) => n.getAttribute("data-testid"));
+    expect(order).toEqual(["background-result-exceeded", "background-result-told", "background-result-blocked"]);
+  });
+
+  it("marks agent-reported entries in the told and blocked lines", () => {
+    resetStore({});
+    h = mount(
+      <BackgroundResultCard
+        part={part({
+          toldActions: [
+            { kind: "deploy", summary: "fly deploy", source: "agent" },
+            { kind: "publish", summary: "serve_page" },
+          ],
+          blockedActions: [{ kind: "merge", level: "never", summary: "gh pr merge", source: "agent" }],
+        })}
+      />,
+    );
+    expect(text('[data-testid="background-result-told"]')).toBe("Told you: fly deploy (agent's report), serve_page");
+    expect(text('[data-testid="background-result-blocked"]')).toBe("Blocked: gh pr merge (not allowed) (agent's report)");
   });
 
   it("an ordinary completed result still reads 'done' (green); failures show their reason text", () => {

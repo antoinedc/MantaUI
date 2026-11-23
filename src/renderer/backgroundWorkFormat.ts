@@ -295,6 +295,7 @@ const WORK_LABELS: Record<string, string> = {
   "knowledge-corrections": "Weekly corrections pass",
   "knowledge-tidy": "Weekly tidy",
   "knowledge-trial": "Skill trial",
+  "knowledge-actions": "Project action pages",
   "cto-overnight": "Overnight work",
   "cto-backfill": "History backfill",
 };
@@ -402,6 +403,7 @@ export const KNOWLEDGE_WORK_TYPES: readonly string[] = [
   "knowledge-corrections",
   "knowledge-tidy",
   "knowledge-trial",
+  "knowledge-actions",
 ];
 export const CTO_WORK_TYPES: readonly string[] = ["cto-ambient", "cto-overnight", "cto-backfill"];
 

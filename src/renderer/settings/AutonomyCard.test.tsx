@@ -86,7 +86,13 @@ describe("AutonomyCard", () => {
     expect(Array.from(select("edit_code").options).map((o) => o.value)).toEqual(["auto", "never"]);
     expect(Array.from(select("deploy").options).map((o) => o.text)).toEqual(["Auto", "Tell me", "Ask", "Never"]);
     expect(h!.text()).toContain("Changes apply to new chats");
-    expect(h!.text()).toContain("not a determined agent");
+    expect(h!.text()).toContain(
+      "What your agents may do on their own. Manta and the agents it hands work to are instructed to follow this: each action is " +
+        "explained to them, they are told to stop when unsure, and every task is asked to report what it did or was blocked from. " +
+        "Blocking only catches obvious commands, such as gh pr merge, fly deploy or the deploy scripts listed on a project's " +
+        '"Actions in this project" page; an agent that goes another way can get around it. Changes apply to new chats.',
+    );
+    expect(Array.from(h!.container.querySelectorAll("p code")).map((c) => c.textContent)).toEqual(["gh pr merge", "fly deploy"]);
   });
 
   it("switching the mode saves {mode, overrides:{}} and the rows follow the box's answer", async () => {

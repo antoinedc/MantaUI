@@ -33,19 +33,42 @@ export type BackgroundResultPart = OpencodePart & {
   /** Agents Phase 3: what the task did that the user asked to be told about, and what the autonomy settings blocked. */
   toldActions?: AutonomyAction[];
   blockedActions?: AutonomyAction[];
+  /** Agents Phase 3c: Ask/Never actions the task reported doing, or whose command ran. */
+  exceededActions?: AutonomyAction[];
 };
+
+const usableActions = (actions: readonly AutonomyAction[] | undefined): AutonomyAction[] =>
+  (Array.isArray(actions) ? actions : []).filter((a) => a && typeof a.summary === "string" && a.summary);
+
+const AGENT_REPORT = " (agent's report)";
+const agentMark = (a: AutonomyAction): string => (a.source === "agent" ? AGENT_REPORT : "");
 
 /** "Told you: fly deploy, serve_page" from the part's own list (never parsed from text); null when there is none. */
 export function describeToldActions(actions: readonly AutonomyAction[] | undefined): string | null {
-  const list = (Array.isArray(actions) ? actions : []).filter((a) => a && typeof a.summary === "string" && a.summary);
-  return list.length ? `Told you: ${list.map((a) => a.summary).join(", ")}` : null;
+  const list = usableActions(actions);
+  return list.length ? `Told you: ${list.map((a) => `${a.summary}${agentMark(a)}`).join(", ")}` : null;
 }
 
 /** "Blocked: fly deploy (needs your go-ahead), gh pr merge (not allowed)"; null when there is none. */
 export function describeBlockedActions(actions: readonly AutonomyAction[] | undefined): string | null {
-  const list = (Array.isArray(actions) ? actions : []).filter((a) => a && typeof a.summary === "string" && a.summary);
+  const list = usableActions(actions);
   if (!list.length) return null;
-  return `Blocked: ${list.map((a) => `${a.summary} (${a.level === "ask" ? "needs your go-ahead" : "not allowed"})`).join(", ")}`;
+  return `Blocked: ${list.map((a) => `${a.summary} (${a.level === "ask" ? "needs your go-ahead" : "not allowed"})${agentMark(a)}`).join(", ")}`;
+}
+
+/**
+ * "Despite your settings: fly deploy (needs your go-ahead; agent says it did this), …"; null when there is none.
+ * An agent-reported entry says so; any other came from a completed command, which is not proof the action happened.
+ */
+export function describeExceededActions(actions: readonly AutonomyAction[] | undefined): string | null {
+  const list = usableActions(actions);
+  if (!list.length) return null;
+  const entry = (a: AutonomyAction): string => {
+    const level = a.level === "ask" ? "needs your go-ahead" : "not allowed";
+    const marker = a.source === "agent" ? "agent says it did this" : "matched in a completed command, outcome not checked";
+    return `${a.summary} (${level}; ${marker})`;
+  };
+  return `Despite your settings: ${list.map(entry).join(", ")}`;
 }
 
 /** P4: the job-record fields the cards read (all optional — absent on old records). */

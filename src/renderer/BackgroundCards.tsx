@@ -34,6 +34,7 @@ import {
   NEEDS_DECISION_LABEL,
   openJobSession,
   describeBlockedActions,
+  describeExceededActions,
   describeToldActions,
   resultStateLabel,
   resultTitleFor,
@@ -364,6 +365,7 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   const blocked = part.endedBlocked === true;
   const tone = resultTone(part.state, blocked);
   const text = (part.text ?? "").trim();
+  const exceeded = describeExceededActions(part.exceededActions);
   const told = describeToldActions(part.toldActions);
   const blockedLine = describeBlockedActions(part.blockedActions);
   return (
@@ -385,6 +387,11 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         {jobId && <OpenSessionButton onOpen={() => void open()} busy={busy} arrow className="ml-auto" />}
       </div>
       {text && <ClampedResultText text={text} />}
+      {exceeded && (
+        <p className="m-0 mt-1 text-meta text-warn break-words" data-testid="background-result-exceeded">
+          {exceeded}
+        </p>
+      )}
       {told && (
         <p className="m-0 mt-1 text-meta text-text-faint break-words" data-testid="background-result-told">
           {told}
