@@ -34,6 +34,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
@@ -72,6 +73,21 @@ import {
   withLivenessDefaults,
 } from "./jobProgressView.mjs";
 import { createJobViews } from "./jobViews.mjs";
+import {
+  jobRules,
+  policyKey,
+  normalizePolicy,
+  decide as decideAutonomy,
+  taskPromptSection,
+  extractActions,
+  actionLines,
+  isInsideMantaFolders,
+  SETTINGS_UNREADABLE,
+  CODE_OFF,
+  POLICY_CHANGED,
+  LEGACY_TASK,
+  MANTA_FOLDER,
+} from "./autonomy.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -205,7 +221,7 @@ function genId() {
  * omitted entirely when `worktree` is null (parent cwd was not a repo). Do not
  * add anything else and do not make it configurable.
  */
-export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, readOnly = false, allowPr = true }) {
+export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, readOnly = false, allowPr = true, autonomy = "" }) {
   const head = String(prompt ?? "").trim();
   const factsSection =
     facts && String(facts).trim().length > 0
@@ -224,6 +240,8 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, rea
     "milestone. You cannot ask the user questions from here: if you need a decision,\n" +
     'call progress_report with state "blocked" and a label saying what you need, then\n' +
     "end your turn with the question.\n\n";
+  // a specialist's task (Agents Phase 3): what needs the user's go-ahead and what is not allowed
+  const autonomySection = typeof autonomy === "string" && autonomy.trim() ? `${autonomy.trim()}\n\n` : "";
   if (!worktree) {
     return (
       head +
@@ -231,6 +249,7 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, rea
       "You are running as a background job. The user is not watching this session and\n" +
       "cannot see your intermediate output — only your final message is reported back.\n\n" +
       (readOnly ? "You can read and search, but you cannot edit files or run commands.\n\n" : "") +
+      autonomySection +
       budget +
       (readOnly
         ? "When you are done, end with your answer: a short summary of what you found and recommend."
@@ -252,6 +271,7 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, rea
       : // An instruction, not an enforcement: the shell grants are unchanged, so a job could still run `gh pr create`.
         "Do not open pull requests; the lead and the user decide what ships.\n" +
         "Never merge, never force-push, and never touch any other checkout.\n\n") +
+    autonomySection +
     budget +
     "When you are done, end with a short summary of what you changed and why." +
     factsSection
@@ -286,6 +306,8 @@ export function buildCompletionText(job) {
     lines.push("Milestones:");
     for (const m of milestones) lines.push(`- ${m.text}`);
   }
+  // a specialist's actions the user asked to hear about / that its autonomy settings blocked (spec Phase 3 §5)
+  lines.push(...actionLines({ toldActions: job?.toldActions, blockedActions: job?.blockedActions }));
   lines.push("");
   if (status === "failed" || status === "stopped") {
     lines.push(`Error: ${job?.error ?? ""}`);
@@ -534,8 +556,8 @@ export function resolveForgeOwner(projects, parentDirectory) {
 // ---------------------------------------------------------------------------
 
 // A record written before the session tree may still carry the retired `displayParentID`: nothing reads it, and
-// it is never sent on.
-function toWireRecord({ displayParentID: _retired, ...rest }) {
+// it is never sent on. `basePermission` is the specialist task's ruleset before autonomy (kept to recompute it on a resume).
+function toWireRecord({ displayParentID: _retired, basePermission: _base, ...rest }) {
   return rest;
 }
 
@@ -2223,13 +2245,32 @@ export async function resumeJob(id, deps = {}) {
   {
     const peek = (await load()).find((j) => j.id === id);
     if (peek?.status === "paused") {
+      // A specialist's task (Agents Phase 3 §4): the resumed child is a FRESH session, so it gets the CURRENT settings —
+      // the final ruleset is recomputed from the base it started with. A task from before the settings existed has no
+      // base to recompute from.
+      let autonomy = null;
+      if (isLegacySpecialist(peek)) return { ok: false, error: LEGACY_TASK };
+      if (peek.specialist === true) {
+        const current = await currentAutonomyPolicy(deps);
+        if (!current.ok) return { ok: false, error: current.error };
+        if (isWriterJob(peek) && decideAutonomy("edit_code", current.policy) === "never") return { ok: false, error: CODE_OFF };
+        const base = Array.isArray(peek.basePermission) ? peek.basePermission : [];
+        autonomy = {
+          key: policyKey(current.policy),
+          policy: normalizePolicy(current.policy),
+          permission: normalizeJobRuleset([...base, ...jobRules(current.policy, { home: deps.home ?? homedir(), agentDir: peek.agentDir ?? null })]),
+          text: taskPromptSection(current.policy),
+        };
+      }
       preparedResume = {
         childId: peek.childSessionID,
+        autonomy,
         text: buildJobPrompt({
           prompt: await buildResumePrompt(peek, deps, peek.childSessionID),
           worktree: peek.worktree,
           branch: peek.branch,
           allowPr: peek.allowPr !== false,
+          autonomy: autonomy?.text ?? "",
         }),
       };
     }
@@ -2807,9 +2848,20 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   // exactly one terminal write.
   let result = null;
   let filesChanged = null;
+  let actions = null; // a specialist's told / blocked actions (Agents Phase 3 §5), read from this attempt's transcript
+  const wantsActions = job.specialist === true && !!job.childSessionID && typeof listMessages === "function" && !(interrupted && job.pauseRequested);
+  if (wantsActions && status !== "done") {
+    try {
+      actions = actionsOf(job, await listMessages(job.childSessionID), deps);
+    } catch (e) {
+      console.warn("[delegate] reading the actions of a finished task failed:", e?.message ?? e);
+    }
+  }
   if (status === "done" && job.childSessionID) {
     try {
-      result = await lastAssistantText(listMessages ? await listMessages(job.childSessionID) : []);
+      const messages = listMessages ? await listMessages(job.childSessionID) : [];
+      result = await lastAssistantText(messages);
+      if (wantsActions) actions = actionsOf(job, messages, deps);
     } catch (e) {
       console.warn("[delegate] listMessages failed:", e?.message ?? e);
     }
@@ -2869,6 +2921,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       pauseRequested: false,
       endedBlocked,
       endReason: outcome.status === "failed" ? endReason : null,
+      ...(actions ? { toldActions: actions.toldActions, blockedActions: actions.blockedActions } : {}),
       completionMessageId: manta ? (live.completionMessageId ?? mintMessageId()) : (live.completionMessageId ?? null),
       completionDelivery: manta ? "pending" : null,
     };
@@ -2908,6 +2961,17 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   if (updated.completionDelivery === "pending") await deliverJobResult(updated.id, deps);
   await finishV2Cleanup(updated, deps, { held: resourcesHeld });
   return { ok: true, status: endedAs };
+}
+
+// A specialist task's told / blocked actions, judged against the policy THIS attempt ran under.
+function actionsOf(job, messages, deps) {
+  return extractActions({
+    messages,
+    afterMessageId: job.launch?.messageId ?? null,
+    continuation: !!job.launch?.continuation,
+    policy: job.autonomyPolicy,
+    home: deps.home ?? homedir(),
+  });
 }
 
 // What a finished V2 job leaves behind: nothing in the sidebar. Its window is
@@ -2967,7 +3031,13 @@ export function buildResultSynthetic(job) {
       childID: job.childSessionID,
       agent: job.agent ?? null,
       state: STATE_FOR_STATUS[job.status] ?? job.status,
-      manta: { jobId: job.id, name: job.name, ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}) },
+      manta: {
+        jobId: job.id,
+        name: job.name,
+        ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
+        ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
+        ...(Array.isArray(job.blockedActions) && job.blockedActions.length > 0 ? { blockedActions: job.blockedActions } : {}),
+      },
     },
     delivery: "queue",
     resume: true,
@@ -3838,6 +3908,15 @@ export async function continueJob(id, input, deps = {}) {
   const followUp = String(args.prompt).trim();
 
   return withSessionResources(child, async () => {
+    // A specialist's task keeps the permissions it was created with (OpenCode installs them at creation), so another
+    // round only runs under the very settings that started it (Agents Phase 3 §4).
+    if (peeked.job.specialist === true || isLegacySpecialist(peeked.job)) {
+      if (isLegacySpecialist(peeked.job)) return { ok: false, status: 409, error: LEGACY_TASK };
+      const current = await currentAutonomyPolicy(deps);
+      if (!current.ok) return { ok: false, status: 500, error: current.error };
+      if (policyKey(current.policy) !== peeked.job.autonomyKey) return { ok: false, status: 409, error: POLICY_CHANGED };
+      if (isWriterJob(peeked.job) && decideAutonomy("edit_code", current.policy) === "never") return { ok: false, status: 409, error: CODE_OFF };
+    }
     // Who else is driving the session, and does it still exist? (async reads, so outside the store lock)
     let active;
     try {
@@ -3874,7 +3953,8 @@ export async function continueJob(id, input, deps = {}) {
         if (refusal) return { ok: false, status: 409, error: refusal };
       }
       const t = now();
-      const { supersededBy: _s, cleanupReason: _c, ...inherited } = old;
+      // (a successor starts with no told / blocked actions of its own: the previous round's stay on the previous record)
+      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
       const job = {
         ...inherited,
@@ -4255,6 +4335,41 @@ function livenessFieldsAtLaunch(ceilingMs) {
 // child created under a parent would otherwise be free to inherit a plan-mode one.
 const V2_JOB_AGENT = "build";
 
+// ---- a specialist's task: autonomy settings (Agents Phase 3) ----------------
+
+const isWriterJob = (job) => (job?.isolation ?? (job?.worktree ? "worktree" : "none")) === "worktree";
+// a Phase 1/2 specialist job: no autonomy snapshot, but it carries an agent's name and runs an `agent-<slug>` opencode agent
+const isLegacySpecialist = (job) => job?.specialist !== true && !!job?.agentName && typeof job?.agent === "string" && job.agent.startsWith("agent-");
+
+// The user's CURRENT autonomy settings through the injected reader. Fails closed: no reader, or one that throws, is a refusal.
+async function currentAutonomyPolicy(deps) {
+  if (typeof deps.autonomyPolicy !== "function") return { ok: false, error: SETTINGS_UNREADABLE };
+  try {
+    return { ok: true, policy: await deps.autonomyPolicy() };
+  } catch {
+    return { ok: false, error: SETTINGS_UNREADABLE };
+  }
+}
+
+// A new specialist job: `input.autonomy.load()` then `check(policy)`, at the last moment before anything is created.
+async function loadStartPolicy(input, deps) {
+  const a = input?.autonomy;
+  if (!a || typeof a.load !== "function") return { ok: false, error: SETTINGS_UNREADABLE };
+  let policy;
+  try {
+    policy = await a.load();
+  } catch {
+    return { ok: false, error: SETTINGS_UNREADABLE };
+  }
+  let refusal = null;
+  try {
+    refusal = typeof a.check === "function" ? a.check(policy) : null;
+  } catch {
+    refusal = SETTINGS_UNREADABLE;
+  }
+  return refusal ? { ok: false, error: String(refusal) } : { ok: true, policy };
+}
+
 /**
  * Register a delegate job and launch it (spec C1 steps 1–5).
  *
@@ -4269,6 +4384,18 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
   const { load = loadJobs, save = saveJobs, publish, listProjects, gitRemoveWorktree, now = () => Date.now() } = deps;
   for (const dep of ["createChildSession", "moveSession", "sendChildPrompt", "newWindow", "listProjects"]) {
     if (typeof deps[dep] !== "function") return { ok: false, error: `background jobs are not wired in this server (${dep} is missing)` };
+  }
+
+  // A specialist's task (Agents Phase 3): the policy is read NOW — after any approval wait, before anything is
+  // created — and that one object feeds the rules, the prompt and the snapshot below.
+  const specialist = input?.specialist === true;
+  const home = deps.home ?? homedir();
+  let autonomyNow = null;
+  if (specialist) {
+    const loaded = await loadStartPolicy(input, deps);
+    if (!loaded.ok) return loaded;
+    autonomyNow = loaded.policy;
+    if (isInsideMantaFolders(resolvePath(String(parentDirectory ?? "")), home)) return { ok: false, error: MANTA_FOLDER };
   }
 
   const reg = await jobsLock.runExclusive(async () => {
@@ -4304,16 +4431,32 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       : await prepareWorktree({ input, name, parentDirectory }, deps);
     if (wt.refusal) return wt.refusal;
     const { worktree, branch, baseSha } = wt;
+    if (specialist && worktree && isInsideMantaFolders(resolvePath(worktree), home)) {
+      if (gitRemoveWorktree) {
+        try {
+          await gitRemoveWorktree({ path: worktree, force: false });
+        } catch {
+          /* best-effort; the refusal is the headline */
+        }
+      }
+      return { ok: false, error: MANTA_FOLDER };
+    }
     // The opencode agent the child runs: an agent package's `agent-<slug>`, else the default.
     const jobAgent = typeof input?.agent === "string" && input.agent.trim() ? input.agent.trim() : V2_JOB_AGENT;
     // An agent job brings its own ruleset unless the caller supplied one.
-    const jobPermission =
+    const basePermission =
       input?.permission ??
       (readOnly
         ? buildReadOnlyAgentRuleset({ agentDir: input?.agentDir })
         : input?.isolation === "worktree"
           ? buildWorktreeAgentRuleset()
           : null);
+    // A specialist's autonomy denies are appended ONCE, last, after the base selection (caller ruleset → approval-resolved
+    // grants → read-only / worktree default); the base itself is kept so a resume can recompute the final ruleset.
+    const agentDir = typeof input?.agentDir === "string" && input.agentDir ? input.agentDir : null;
+    const jobPermission = specialist
+      ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir })])
+      : basePermission;
     // THE execution directory, resolved once and persisted: the worktree, or the
     // parent's own directory when none could be made and isolation isn't required.
     const executionDirectory = worktree ?? parentDirectory;
@@ -4341,6 +4484,15 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       correlation: input?.correlation ?? null,
       sweepAllowanceMs: input?.sweepAllowanceMs ?? null,
       permission: jobPermission,
+      ...(specialist
+        ? {
+            specialist: true,
+            basePermission: basePermission ?? null,
+            autonomyKey: policyKey(autonomyNow),
+            autonomyPolicy: normalizePolicy(autonomyNow),
+            ...(agentDir ? { agentDir } : {}),
+          }
+        : {}),
       ...(typeof input?.agentName === "string" && input.agentName ? { agentName: input.agentName } : {}),
       ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
       // what admission reads later: where the agent works, who asked, in which user turn, and whether it may open a PR
@@ -4373,7 +4525,15 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       // what the launch sends, persisted so a reconcile can finish a launch this
       // process never got to (and a resume reuses the first attempt's model)
       launch: {
-        text: buildJobPrompt({ prompt, worktree, branch, ceilingMs, readOnly, allowPr: input?.allowPr !== false }),
+        text: buildJobPrompt({
+          prompt,
+          worktree,
+          branch,
+          ceilingMs,
+          readOnly,
+          allowPr: input?.allowPr !== false,
+          autonomy: specialist ? taskPromptSection(autonomyNow) : "",
+        }),
         model: launchModel,
         messageId: mintMessageId(),
       },
@@ -4645,6 +4805,11 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     ceilingWarnedFor: null,
     endReason: null,
     jobProgress: { ...prior.jobProgress, modelState: null },
+    // a specialist's task resumes under the CURRENT settings (recomputed in resumeJob); its previous attempt's told /
+    // blocked actions are cleared with the new attempt
+    ...(prepared.autonomy
+      ? { permission: prepared.autonomy.permission, autonomyKey: prepared.autonomy.key, autonomyPolicy: prepared.autonomy.policy, toldActions: undefined, blockedActions: undefined }
+      : {}),
     status: "running",
     tmuxSession,
     childSessionID: mintSessionId(),
@@ -4679,6 +4844,9 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
         endReason: prior.endReason,
         jobProgress: prior.jobProgress,
         launch: job.launch ? { ...job.launch, restore: undefined } : null,
+        ...(prepared.autonomy
+          ? { permission: job.permission, autonomyKey: job.autonomyKey, autonomyPolicy: job.autonomyPolicy, toldActions: job.toldActions, blockedActions: job.blockedActions }
+          : {}),
       },
     },
   };

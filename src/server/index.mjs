@@ -256,6 +256,7 @@ import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine } from "./agents.mjs";
+import { effectivePolicy } from "./autonomy.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
@@ -1394,7 +1395,12 @@ const backgroundBudget = createBackgroundBudget({
 // created earlier in module scope); until then it is a no-op, and a routing
 // failure never breaks the job's own terminal transition.
 let workOutcomeSink = null;
+// Agents Phase 3 (src/server/autonomy.mjs): the user's CURRENT autonomy policy, read strictly from `~/.manta/config.json`
+// (throws when the file can't be read or parsed, so the caller refuses instead of guessing). Shared by the delegate
+// engine (a specialist's task: start / continue / resume) and the agents engine (lead brief, handoff, dispatch).
+const autonomyPolicy = async () => effectivePolicy(await local.readAgentAutonomyStrict());
 const delegateEngine = createDelegateEngine({
+  autonomyPolicy,
   publish: (evt) => bus.publish(evt),
   deliver: (args) => promptDelivery.deliver(args),
   listProjects: () => tmux.listProjects(),
@@ -2572,6 +2578,8 @@ const agentsEngine = createAgentsEngine({
   isCtoSessionStrict: (sid) => ctoConversation.isConversationSessionStrict(sid),
   isManagedSession: createKnowledgeIsManagedSession({ loadJobs: () => delegateEngine.loadRecordsStrict(), completionOwnerOf: delegateCompletionOwnerOf }),
   configGet: () => local.configGet(), // the box trust setting for a handoff is read here, never from the request
+  // Phase 3: every autonomy decision reads the user's settings strictly from disk; an unreadable file throws and refuses
+  autonomyPolicy,
   syncState,
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
@@ -4919,7 +4927,8 @@ const handleRequest = async (req, res) => {
         }
         const r = await agentsEngine.leadBrief(url.searchParams.get("sessionID") || "");
         if (r.status === "unknown") {
-          respondJson(res, 503, { error: "couldn't classify this chat right now" });
+          // `autonomy`: the chat is led but the user's settings couldn't be read — the plugin then holds Manta back for the turn
+          respondJson(res, 503, r.reason === "autonomy" ? { error: "couldn't read the autonomy settings right now", autonomy: "unreadable" } : { error: "couldn't classify this chat right now" });
           return;
         }
         respondJson(res, 200, { text: r.text });

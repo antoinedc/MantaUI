@@ -20,7 +20,7 @@ import { LEAD_SLUG } from "../shared/agentsShared.mjs";
 import { createMutex } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
 import { WORKTREE_AGENT_GRANTS, CAP_ERROR } from "./delegate.mjs";
-import * as autonomyPolicy from "./autonomy.mjs";
+import * as autonomy from "./autonomy.mjs";
 
 export const AGENTS_TMUX_SESSION = "manta-agents";
 export const SLUG_RE = /^[a-z][a-z0-9-]{0,30}$/;
@@ -278,13 +278,13 @@ const MECHANICS = [
  *
  * @param {{ body: string, roster: object[], policy?: object }} input  `roster`: AgentInfo of the valid specialists
  */
-export function buildLeadBrief({ body, roster, policy = autonomyPolicy.DEFAULT_POLICY }) {
+export function buildLeadBrief({ body, roster, policy = autonomy.DEFAULT_POLICY }) {
   const sorted = [...roster].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   const team =
     sorted.length === 0
       ? "You have no specialists yet; do the work yourself."
       : `${TEAM_INTRO}\n\n\`\`\`json\n${JSON.stringify(sorted.map(rosterEntry), null, 2).replace(/`/g, "\\u0060")}\n\`\`\``;
-  return [String(body ?? "").trim(), `## Your team\n\n${team}`, autonomyPolicy.renderPolicy(policy), MECHANICS].filter(Boolean).join("\n\n") + "\n";
+  return [String(body ?? "").trim(), `## Your team\n\n${team}`, autonomy.renderPolicy(policy), MECHANICS].filter(Boolean).join("\n\n") + "\n";
 }
 
 const isPlanName = (name) => name === "plan" || name === "manta-plan";
@@ -340,7 +340,7 @@ async function readJsonOptional(fs, path) {
  * @param {(sessionId:string)=>Promise<boolean>} [deps.isCtoSessionStrict]  throws when the CTO binding can't be read
  * @param {(sessionId:string)=>Promise<boolean>} [deps.isManagedSession]    the child of a Manta-owned job record of ANY status; throws on an unreadable store
  * @param {()=>Promise<{chatAutoAllow?:boolean}>} [deps.configGet]           the box trust setting is read here, never from a request
- * @param {object} [deps.policy]        the autonomy policy (Phase 3 plugs the user's settings in)
+ * @param {()=>Promise<object>} [deps.autonomyPolicy]  the user's CURRENT autonomy policy `{kind: level}`, read strictly (throws when the settings can't be read)
  * @param {object} [deps.syncState]     { refreshNow() }
  */
 export function createAgentsEngine({
@@ -358,7 +358,7 @@ export function createAgentsEngine({
   isCtoSessionStrict = null,
   isManagedSession = null,
   configGet = null,
-  policy = autonomyPolicy.DEFAULT_POLICY,
+  autonomyPolicy = async () => autonomy.DEFAULT_POLICY,
   syncState = null,
   isGitRepo = defaultIsGitRepo,
   retryDelayMs = 200,
@@ -629,6 +629,33 @@ export function createAgentsEngine({
     return agent.meta.isolation === "worktree" && !(await isGitRepo(directory)) ? "none" : agent.meta.isolation;
   }
 
+  // ---- autonomy (Phase 3): the settings are read strictly, per decision; a read failure refuses ----
+
+  /** The sentence refusing a task under the CURRENT settings, or null. `handoff`: Manta's own automatic handoff. */
+  async function autonomyRefusal({ writer, handoff: isHandoff = false }) {
+    let policy;
+    try {
+      policy = await autonomyPolicy();
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the autonomy settings: ${e?.message ?? e}`);
+      return autonomy.SETTINGS_UNREADABLE;
+    }
+    return autonomyCheck(policy, { writer, handoff: isHandoff });
+  }
+
+  const autonomyCheck = (policy, { writer, handoff: isHandoff }) => {
+    if (isHandoff && autonomy.decide("handoff", policy) === "never") return autonomy.HANDOFF_OFF;
+    if (writer && autonomy.decide("edit_code", policy) === "never") return autonomy.CODE_OFF;
+    return null;
+  };
+
+  // What marks a job a specialist's and hands the delegate engine the same checks, to run at the last moment (after
+  // any approval wait): the engine reads the settings again and feeds that ONE policy to the rules, prompt and snapshot.
+  const specialistAutonomy = ({ writer, handoff: isHandoff = false }) => ({
+    specialist: true,
+    autonomy: { load: () => autonomyPolicy(), check: (policy) => autonomyCheck(policy, { writer, handoff: isHandoff }) },
+  });
+
   async function dispatch(input) {
     const sessionId = typeof input?.sessionId === "string" ? input.sessionId : "";
     const directory = typeof input?.directory === "string" ? input.directory : "";
@@ -643,6 +670,11 @@ export function createAgentsEngine({
     if (!directory) throw new AgentError("This chat has no folder to start the task in");
     await delegateView?.assertWritable(sessionId);
 
+    const isolation = await effectiveIsolation(agent, directory);
+    // the user's own @mention: only "Code changes: Never" can refuse it (handoff governs Manta's automatic ones)
+    const refusal = await autonomyRefusal({ writer: isolation === "worktree" });
+    if (refusal) throw new AgentError(refusal);
+
     const seat = await seatFor(agent, directory);
     const excerpt = await excerptFor(sessionId);
 
@@ -652,11 +684,12 @@ export function createAgentsEngine({
       parentDirectory: directory,
       agent: agentKey(slug),
       agentDir: agent.dir,
-      isolation: await effectiveIsolation(agent, directory),
+      isolation,
       ...(agent.meta.model ? { model: agent.meta.model } : {}),
       name: requestTitle(text, slug),
       agentName: agent.meta.name,
       request: text,
+      ...specialistAutonomy({ writer: isolation === "worktree" }),
     });
     if (!res?.ok) throw new AgentError(res?.error || "The task couldn't be started");
     return { jobId: res.job.id };
@@ -721,7 +754,7 @@ export function createAgentsEngine({
     return (await classify(sessionID, await leadEntry())).kind;
   }
 
-  /** `{ status: "ok", text }` (empty when the chat is not led or there is no lead) or `{ status: "unknown" }` (retry). */
+  /** `{ status: "ok", text }` (empty when the chat is not led or there is no lead) or `{ status: "unknown" }` (retry; `reason: "autonomy"` when the settings couldn't be read). */
   async function leadBrief(sessionID) {
     const { entries } = await scan();
     const lead = entries.find((e) => !e.info.error && e.info.role === "lead") ?? null;
@@ -730,6 +763,15 @@ export function createAgentsEngine({
     if (kind === "unknown") return { status: "unknown" };
     if (kind === "not-led") return { status: "ok", text: "" };
     const roster = entries.filter((e) => !e.info.error && e.info.role !== "lead").map((e) => e.info);
+    // the settings decide what Manta may do: an unreadable file is "try again" (the plugin then holds Manta back for the
+    // turn), never a guess
+    let policy;
+    try {
+      policy = await autonomyPolicy();
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the autonomy settings for the lead brief: ${e?.message ?? e}`);
+      return { status: "unknown", reason: "autonomy" };
+    }
     return { status: "ok", text: buildLeadBrief({ body: lead.body, roster, policy }) };
   }
 
@@ -836,8 +878,10 @@ export function createAgentsEngine({
     // 5. something to hand over
     if (!b.brief.trim() || !b.title.trim()) return refuse("Write a brief and a title");
 
-    // 6. the autonomy seam (always "auto" under the Phase 2 policy)
-    if (autonomyPolicy.decide("handoff", policy) !== "auto") return refuse("Handing off needs the user's go-ahead");
+    // 6. the user's autonomy settings (read now): "Hand off: Never" and "Code changes: Never" refuse; "Ask" is Manta's own
+    // instruction (the server has no proof of a "yes" given in the chat)
+    const blockedByAutonomy = await autonomyRefusal({ writer, handoff: true });
+    if (blockedByAutonomy) return refuse(blockedByAutonomy);
 
     const title = b.title.trim().slice(0, 80);
     const name = requestTitle(title, slug);
@@ -887,6 +931,7 @@ export function createAgentsEngine({
       // An instruction, not an enforcement: the job's shell grants are unchanged.
       allowPr: false,
       admit,
+      ...specialistAutonomy({ writer: writerIfNew, handoff: true }),
     };
     let res;
     if (writerIfNew) {
