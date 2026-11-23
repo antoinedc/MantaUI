@@ -329,6 +329,9 @@ const MAX_DIR_ENTRIES = 2000;
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 const COLLECT_DEADLINE_MS = 1500;
+// The model scan reads the files in the background, not inside a task's 2 s start-up budget; a busy server (event loop
+// stalled for seconds while a task starts) must not make that read "partial" and so silently skip the scan.
+const SCAN_COLLECT_DEADLINE_MS = 30_000;
 
 const defaultFs = () => ({ realpath: fsp.realpath, opendir: fsp.opendir, lstat: fsp.lstat, openPath: createFilePath().openPath, now: Date.now });
 
@@ -355,24 +358,31 @@ async function listDir(fs, dir) {
 }
 
 /**
- * `{ sources: [{path, content}], partial, hash }` for a project root. Selection is deterministic (sorted, capped groups);
- * a partial collection (budget, deadline or an I/O error other than "missing") has no hash.
+ * `{ sources: [{path, content}], partial, why, hash }` for a project root. Selection is deterministic (sorted, capped groups);
+ * a partial collection (budget, deadline or an I/O error other than "missing") has no hash and says why
+ * (`"root" | "io" | "deadline" | "bytes"`; null when complete). `fsOverride.deadlineMs` replaces the 1.5 s read deadline.
  */
 export async function collectSources(root, fsOverride = {}) {
   const fs = { ...defaultFs(), ...fsOverride };
+  const deadlineMs = fs.deadlineMs ?? COLLECT_DEADLINE_MS;
   const started = fs.now();
   let rootReal;
   try {
     rootReal = await fs.realpath(root);
   } catch {
-    return { sources: [], partial: true, hash: null };
+    return { sources: [], partial: true, why: "root", hash: null };
   }
   let partial = false;
+  let why = null;
+  const markPartial = (reason) => {
+    partial = true;
+    why ??= reason;
+  };
   const safeList = async (rel) => {
     try {
       return await listDir(fs, rel ? join(rootReal, rel) : rootReal);
     } catch {
-      partial = true;
+      markPartial("io");
       return null;
     }
   };
@@ -390,7 +400,7 @@ export async function collectSources(root, fsOverride = {}) {
       try {
         if ((await fs.lstat(join(rootReal, top, d, "package.json"))).isFile()) pkgs.push(`${top}/${d}/package.json`);
       } catch (e) {
-        if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") partial = true;
+        if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") markPartial("io");
       }
     }
   }
@@ -409,13 +419,13 @@ export async function collectSources(root, fsOverride = {}) {
   let total = 0;
   outer: for (const group of groups) {
     for (const rel of group) {
-      if (fs.now() - started > COLLECT_DEADLINE_MS) {
-        partial = true;
+      if (fs.now() - started > deadlineMs) {
+        markPartial("deadline");
         break outer;
       }
       const opened = await fs.openPath(join(rootReal, rel));
       if (!opened.ok) {
-        if (opened.reason !== "missing" && opened.reason !== "not-file") partial = true;
+        if (opened.reason !== "missing" && opened.reason !== "not-file") markPartial("io");
         continue;
       }
       try {
@@ -423,7 +433,7 @@ export async function collectSources(root, fsOverride = {}) {
         const size = opened.stat.size;
         if (size > MAX_FILE_BYTES) continue;
         if (total + size > MAX_TOTAL_BYTES) {
-          partial = true;
+          markPartial("bytes");
           break outer;
         }
         const { buffer, bytesRead } = await opened.handle.read(Buffer.alloc(size), 0, size, 0);
@@ -432,7 +442,7 @@ export async function collectSources(root, fsOverride = {}) {
         total += bytesRead;
         sources.push({ path: rel, content: buf.toString("utf8") });
       } catch {
-        partial = true;
+        markPartial("io");
       } finally {
         await opened.handle.close().catch(() => {});
       }
@@ -444,7 +454,7 @@ export async function collectSources(root, fsOverride = {}) {
     for (const s of [...sources].sort((a, b) => byPath(a.path, b.path))) h.update(`${s.path}\0${s.content}\0`);
     hash = h.digest("hex");
   }
-  return { sources, partial, hash };
+  return { sources, partial, why, hash };
 }
 
 const NAME_RE = /(^|[^a-z])(deploy|release|publish|ship|rollout|promote)([^a-z]|$)/i;
@@ -603,7 +613,7 @@ export function knowledgeSeam(getEngine) {
 /**
  * deps: `knowledge()` → `{ store, registry, settings, budget, runKnowledge }` | null (resolved at call time),
  * `gitMainWorktree(dir)` → path | null, `scanner` `{redact(text)}`, `fs` (see collectSources), `now`, `log`, `minRescanMs`,
- * `failBackoffMs`, `deadlineMs`.
+ * `failBackoffMs`, `deadlineMs`, `scanCollectMs`.
  */
 export function createProjectActions(deps = {}) {
   const now = deps.now ?? Date.now;
@@ -611,6 +621,7 @@ export function createProjectActions(deps = {}) {
   const minRescanMs = deps.minRescanMs ?? 30 * 60_000;
   const failBackoffMs = deps.failBackoffMs ?? 60 * 60_000;
   const deadlineMs = deps.deadlineMs ?? 2000;
+  const scanCollectMs = deps.scanCollectMs ?? SCAN_COLLECT_DEADLINE_MS;
   const collecting = new Map(); // root → in-flight collection (one serves concurrent tasks)
   const namedCache = new Map(); // root → the last SCREENED name-based entries
   const scans = new Map(); // slug → in-flight promise
@@ -667,10 +678,14 @@ export function createProjectActions(deps = {}) {
     let merged = [...named];
     let slug = null;
     const k = knowledgeOf();
-    if (k && (await flagsOn(k))) {
+    if (!k) log("[actions] no page read or scan: shared knowledge is not available");
+    else if (!(await flagsOn(k))) log("[actions] no page read or scan: shared knowledge is off");
+    else {
       try {
         const id = await k.registry.identify(root);
-        if (id && id.canonicalId !== "box") {
+        if (!id) log("[actions] no page read or scan: the project could not be identified");
+        else if (id.canonicalId === "box") log("[actions] no page read or scan: the folder is not in a project");
+        else {
           slug = id.slug;
           const text = await k.store.read(pageRel(slug));
           const page = text === null ? null : parseActionsPage(text);
@@ -678,7 +693,13 @@ export function createProjectActions(deps = {}) {
             const have = new Set(merged.map(entryKey));
             for (const e of page.entries) if (!have.has(entryKey(e))) merged.push(e);
           }
-          if (snap.hash && snap.sources.length > 0 && (!page || page.sourcesHash !== snap.hash)) void scheduleScan(slug, root, snap).catch(() => {});
+          // A partial read (a busy server ran past this task's short read deadline) has no hash to compare, so it can
+          // not prove the page current: the scan re-reads the files with its own, longer deadline.
+          const current = page && snap.hash && page.sourcesHash === snap.hash;
+          if (!current) {
+            if (!snap.partial && snap.sources.length === 0) log("[actions] no scan: no project files to read");
+            else void scheduleScan(slug, root, snap).catch(() => {});
+          }
         }
       } catch (e) {
         log("[actions] reading the project page failed:", e?.message ?? e);
@@ -735,16 +756,28 @@ export function createProjectActions(deps = {}) {
   function scheduleScan(slug, root, snap) {
     const t = now();
     const a = attempts.get(slug);
-    if (scans.has(slug)) return scans.get(slug);
-    if (a && ((a.startedAt && t - a.startedAt < minRescanMs) || (a.failedAt && t - a.failedAt < failBackoffMs))) return Promise.resolve("skipped");
+    if (scans.has(slug)) {
+      log("[actions] scan not started: one is already running for this project");
+      return scans.get(slug);
+    }
+    if (a?.startedAt && t - a.startedAt < minRescanMs) {
+      log("[actions] scan not started: the last attempt was less than 30 minutes ago");
+      return Promise.resolve("skipped");
+    }
+    if (a?.failedAt && t - a.failedAt < failBackoffMs) {
+      log("[actions] scan not started: the last attempt failed less than an hour ago");
+      return Promise.resolve("skipped");
+    }
     attempts.set(slug, { ...(a ?? {}), startedAt: t });
     const p = doScan(slug, root, snap)
       .catch((e) => {
-        log("[actions] scan failed:", e?.message ?? e);
+        log("[actions] scan failed:", clip(String(e?.message ?? e), 120));
         return "failed";
       })
       .then((status) => {
         if (status === "failed") attempts.set(slug, { ...(attempts.get(slug) ?? {}), failedAt: now() });
+        // nothing was attempted (knowledge off): the next task may try straight away
+        else if (status === "off") attempts.set(slug, { ...(attempts.get(slug) ?? {}), startedAt: 0 });
         return status;
       })
       .finally(() => scans.delete(slug));
@@ -752,26 +785,44 @@ export function createProjectActions(deps = {}) {
     return p;
   }
 
+  // one short line per way a scan ends without a written page: the reason only, never file text or a command
+  const stop = (status, why) => {
+    log(`[actions] scan ${status}: ${why}`);
+    return status;
+  };
+
   async function doScan(slug, root, snap) {
     const k = knowledgeOf();
-    if (!k || !(await flagsOn(k))) return "off";
+    if (!k) return stop("off", "shared knowledge is not available");
+    if (!(await flagsOn(k))) return stop("off", "shared knowledge is off");
+    // The task's own read has a short deadline and gives up on a busy server; the scan reads the files again, in the
+    // background, with a long one, and compares with the page itself.
+    if (snap.partial || !snap.hash) {
+      const again = await collectSources(root, { ...deps.fs, deadlineMs: scanCollectMs });
+      if (again.partial) return stop("partial", `the project's files could not be read completely (${again.why ?? "unknown"})`);
+      snap = again;
+      const text = await k.store.read(pageRel(slug));
+      if (text !== null && parseActionsPage(text).sourcesHash === snap.hash) return stop("current", "the page already matches the project's files");
+    }
+    if (snap.sources.length === 0) return stop("empty", "no project files to read");
     // the sources, redacted; a source whose PATH is flagged is left out entirely (of the request and of the page's file list)
     const cleanPaths = new Set();
     for (const s of snap.sources) {
       const pr = await deps.scanner.redact(s.path);
-      if (pr.unavailable) return "failed";
+      if (pr.unavailable) return stop("failed", "the secret scanner is unavailable");
       if (pr.redacted === 0) cleanPaths.add(s.path);
     }
     const sent = [];
     for (const s of sourcesForScan(snap.sources.filter((x) => cleanPaths.has(x.path)))) {
       const cr = await deps.scanner.redact(s.text);
-      if (cr.unavailable) return "failed";
+      if (cr.unavailable) return stop("failed", "the secret scanner is unavailable");
       sent.push({ path: s.path, text: cr.text });
     }
     const context = [
       { priority: 100, text: SCAN_INSTRUCTION },
       { priority: 90, text: renderSources(sent) },
     ];
+    if (typeof k.runKnowledge !== "function") return stop("failed", "no model runner is wired");
     let res;
     try {
       res = await k.runKnowledge({
@@ -781,24 +832,28 @@ export function createProjectActions(deps = {}) {
         directory: "~",
         deps: { validate: async (out) => out?.ok !== false && parseScanOutput(out?.text) !== null, reportCost: makeReportCost(k.budget, slug) },
       });
-    } catch {
-      return "failed";
+    } catch (e) {
+      return stop("failed", `the model call threw (${clip(String(e?.message ?? e), 120)})`);
     }
-    const parsed = res && res.ok !== false ? parseScanOutput(res.text) : null;
-    if (!parsed) return "failed";
+    if (res && res.ok === false) {
+      const detail = [res.code, res.reason].filter((x) => typeof x === "string").join(" / ");
+      return stop("failed", `the model call was refused or failed (${clip(detail || "no reason given", 120)})`);
+    }
+    const parsed = res ? parseScanOutput(res.text) : null;
+    if (!parsed) return stop("failed", "the model's answer was not the expected JSON");
     const fromModel = [];
     for (const raw of parsed.entries) {
       const v = validateEntry(raw);
       if (v && grounded(v, snap.sources)) fromModel.push(v);
     }
-    if (parsed.entries.length > 0 && fromModel.length === 0) return "failed";
+    if (parsed.entries.length > 0 && fromModel.length === 0) return stop("failed", "none of the model's entries matched the files it cited");
     const all = [];
     const seen = new Set();
     for (const e of [...fromModel, ...nameBasedEntries(snap.sources)]) {
       if (seen.has(entryKey(e))) continue;
       seen.add(entryKey(e));
       const verdict = await screen(e);
-      if (verdict === "unavailable") return "failed";
+      if (verdict === "unavailable") return stop("failed", "the secret scanner is unavailable");
       if (verdict === "clean") all.push(e);
       else log(`[actions] dropped a ${e.kind} entry that looked like a secret`);
     }
@@ -806,15 +861,17 @@ export function createProjectActions(deps = {}) {
     for (const e of all) (byKind[e.kind] ??= []).push(e);
     const rel = pageRel(slug);
     let status = "written";
+    let why = `${all.length} entr${all.length === 1 ? "y" : "ies"} written to the page`;
     try {
       await k.store.withLock(async (tx) => {
         if (!(await flagsOn(k))) {
           status = "off";
+          why = "shared knowledge was turned off while it ran";
           return;
         }
         if ((await tx.dirty()).includes(rel)) {
-          log("[actions] the actions page has hand edits in progress; scan skipped");
           status = "skipped";
+          why = "the actions page has hand edits in progress";
           return;
         }
         const current = await tx.read(rel);
@@ -823,16 +880,17 @@ export function createProjectActions(deps = {}) {
         const make = (scannedAt) => applyScan(current, { byKind, sourcesHash: snap.hash, scannedAt, files, log });
         if (current !== null && typeof prevAt === "string" && make(prevAt) === current) {
           status = "unchanged";
+          why = "the page already says the same";
           return;
         }
         const next = make(new Date(now()).toISOString());
         await tx.commit({ path: rel, content: next, message: "Update the actions page" });
       });
     } catch (e) {
-      log("[actions] writing the actions page failed:", e?.message ?? e);
+      log("[actions] writing the actions page failed:", clip(String(e?.message ?? e), 120));
       return "failed";
     }
-    return status;
+    return stop(status, why);
   }
 
   /** Resolves when no scan is in flight (tests, shutdown). */
