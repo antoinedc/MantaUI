@@ -35,6 +35,13 @@ their own but not ronda.
 - Rules are already computed per task/chat at start, and projects have a stable identity (knowledge registry).
 - Changed from the chat as above ("let agents deploy this project on their own"), with the same card/explicit split.
 
+## Settings changes should apply to open chats right away
+
+Today a change to the autonomy settings only reaches NEW chats: the lead's instructions are built when a chat starts.
+Wanted: the change applies to the current chats too (background tasks keep the rules they started with). Needs a way to
+refresh a running chat's instructions without breaking its prompt cache more than necessary (e.g. a short "your
+settings changed: …" note on the next turn instead of rebuilding the whole brief).
+
 ## From Phase 3c (docs/superpowers/specs/2026-11-23-agents-phase3c-judgement-and-action-map.md)
 
 - Show the project's "Actions in this project" commands in Manta's own (lead) instructions, not only in tasks.
