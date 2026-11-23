@@ -39,7 +39,7 @@ export const KIND_LABELS = Object.freeze({
   delete_data: "delete or overwrite data that cannot be recovered",
   spend: "spend money or buy anything",
   settings: "change Manta's settings",
-  agent_change: "change an agent's instructions or permissions",
+  agent_change: "create an agent, or change an agent's instructions or permissions",
 });
 
 /** User-facing row titles (Settings → Agents). */

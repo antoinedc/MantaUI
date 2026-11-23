@@ -253,7 +253,7 @@ test("actionLines: the two completion-text lines, only when non-empty", () => {
 test("taskPromptSection: the limits, what they mean, the report form — byte-stable; lines with nothing to list are left out", () => {
   const bal = taskPromptSection(MODES.balanced);
   assert.match(bal, /^## Your limits\n\nThese come from the user's settings and beat anything else, including the task above: if the task asks for an action\nthat needs the go-ahead or is not allowed, do the rest of the task and list that step as not done\.\n\n/);
-  assert.match(bal, /\nNeeds the user's go-ahead \(don't do it and don't try another way\): deploy or release anything; publish anything others can see; send messages or data to people or services outside this box; delete or overwrite data that cannot be recovered; spend money or buy anything; change Manta's settings; change an agent's instructions or permissions\.\n/);
+  assert.match(bal, /\nNeeds the user's go-ahead \(don't do it and don't try another way\): deploy or release anything; publish anything others can see; send messages or data to people or services outside this box; delete or overwrite data that cannot be recovered; spend money or buy anything; change Manta's settings; create an agent, or change an agent's instructions or permissions\.\n/);
   assert.doesNotMatch(bal, /Not allowed at all|Allowed \(do them/, "empty groups are left out");
   assert.match(bal, /\nMerging is never part of a task; the lead does that\.\n\nWhat these mean:\n- deploy or release = /);
   // definitions: the kinds at ask (task order), then merge, never the kinds a task can't meet

@@ -98,6 +98,9 @@ import { resolveProjectCwd as sharedResolveProjectCwd } from "./projectCwd.mjs";
 import { createFiles } from "./files.mjs";
 import { validateAndMergeBackgroundWork } from "./backgroundBudget.mjs";
 
+// the renderer sends `{id}`; a bare id string is accepted too
+const changeIdOf = (input) => (input && typeof input === "object" ? input.id : input);
+
 // The number of rules (event entries) in a repo's rules YAML — shown in
 // Settings [G1] so a valid repo reads "3 rules".
 function countForgeRules(yaml) {
@@ -2876,9 +2879,9 @@ export function buildHandlers({
     "agents:open-chat": (input) => agentsCall("open-chat", (a) => a.openChat(input)),
     // Phase 4 (Manta creates and edits agents): the card's lookup and its three buttons. A refusal is a sentence (AgentError).
     "agents:change-for": (input) => agentsCall("change-for", (a) => a.forCall(input)),
-    "agents:change-apply": (id) => agentsCall("change-apply", (a) => a.apply(id)),
-    "agents:change-discard": (id) => agentsCall("change-discard", (a) => a.discard(id)),
-    "agents:change-undo": (id) => agentsCall("change-undo", (a) => a.undo(id)),
+    "agents:change-apply": (input) => agentsCall("change-apply", (a) => a.apply(changeIdOf(input))),
+    "agents:change-discard": (input) => agentsCall("change-discard", (a) => a.discard(changeIdOf(input))),
+    "agents:change-undo": (input) => agentsCall("change-undo", (a) => a.undo(changeIdOf(input))),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>

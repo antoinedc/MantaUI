@@ -140,12 +140,16 @@ test("agents:change-* channels call the engine; a refusal sentence passes throug
     assert.deepEqual(await handlers["agents:change-for"]({ sessionID: "s", messageID: "m", callID: "c" }), { id: "ach_1" });
     assert.deepEqual(await handlers["agents:change-apply"]("ach_1"), { id: "ach_1", state: "applied" });
     assert.deepEqual(await handlers["agents:change-discard"]("ach_1"), { id: "ach_1", state: "discarded" });
+    // what the renderer actually sends: `{ id }`
+    assert.deepEqual(await handlers["agents:change-apply"]({ id: "ach_1" }), { id: "ach_1", state: "applied" });
+    await assert.rejects(handlers["agents:change-undo"]({ id: "gone" }), /no longer available/);
     await assert.rejects(handlers["agents:change-undo"]("gone"), /no longer available/);
     await assert.rejects(handlers["agents:change-undo"]("x"), (e) => e.rpcStatus === 500 && !/EACCES|home/.test(e.message));
   } finally {
     console.warn = warn;
   }
-  assert.deepEqual(seen.map((s) => s[0]), ["for", "apply", "discard", "undo", "undo"]);
+  assert.deepEqual(seen.map((s) => s[0]), ["for", "apply", "discard", "apply", "undo", "undo", "undo"]);
+  assert.ok(seen.filter((s) => s[0] !== "for").every((s) => typeof s[1] === "string"), "the engine always gets a bare id");
 });
 
 test("the file explorer's fs:* channels are registered", () => {
