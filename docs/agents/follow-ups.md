@@ -56,6 +56,15 @@ The command matcher splits on `;`, `&&`, `|`, newlines without respecting quotes
 test fixture) can read as a command. Fix: quote-aware splitting (a small shell tokenizer, e.g. shell-quote), and only
 count a segment that actually starts a command.
 
+## Handoff gaps (seen live in a ronda chat, 2026-11-23)
+
+- **Silent read-only fallback.** When the chat's folder isn't a git project (e.g. a broken linked checkout), a writing
+  agent like Dev is quietly switched to read-only. Neither Manta nor the user is told, so the task fails late. Fix: the
+  handoff says so plainly, or refuses with the reason ("this folder isn't a git project, so Dev can't change files here").
+- **No way to point a handoff at another folder.** A task only sees the chat's own folder; work Manta prepared in a
+  separate checkout/worktree was unreachable. Fix: let a handoff name a target project/folder (checked to be a real
+  project, never Manta's own folders).
+
 ## From Phase 3c (docs/superpowers/specs/2026-11-23-agents-phase3c-judgement-and-action-map.md)
 
 - Show the project's "Actions in this project" commands in Manta's own (lead) instructions, not only in tasks.
