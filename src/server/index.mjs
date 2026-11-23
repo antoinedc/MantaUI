@@ -257,6 +257,8 @@ import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine } from "./agents.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
+import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
+import { parseMainWorktree } from "./knowledge/identity.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
@@ -1399,8 +1401,22 @@ let workOutcomeSink = null;
 // (throws when the file can't be read or parsed, so the caller refuses instead of guessing). Shared by the delegate
 // engine (a specialist's task: start / continue / resume) and the agents engine (lead brief, handoff, dispatch).
 const autonomyPolicy = async () => effectivePolicy(await local.readAgentAutonomyStrict());
+// Agents Phase 3c (src/server/projectActions.mjs): the project's own "Actions in this project" commands for a specialist's
+// task. The knowledge engine is built much further down, so every part of it is read at call time (a call before it exists
+// answers "no knowledge", never throws).
+const projectActions = createProjectActions({
+  ...knowledgeSeam(() => knowledgeEngine),
+  gitMainWorktree: async (dir) => {
+    try {
+      return parseMainWorktree((await tmux.run("git", ["-C", dir, "worktree", "list", "--porcelain"]))?.stdout);
+    } catch {
+      return null;
+    }
+  },
+});
 const delegateEngine = createDelegateEngine({
   autonomyPolicy,
+  projectActions,
   publish: (evt) => bus.publish(evt),
   deliver: (args) => promptDelivery.deliver(args),
   listProjects: () => tmux.listProjects(),

@@ -28,6 +28,7 @@ import {
   KNOWLEDGE_WORK_TYPES,
   CTO_WORK_TYPES,
   waitingBatchText,
+  workTypeLabel,
 } from "./backgroundWorkFormat";
 
 // Tue 17 Nov 2026 12:00 UTC; every instant below is read back in UTC so the suite doesn't depend on the machine.
@@ -304,6 +305,8 @@ describe("fallback, waiting batch jobs and batch refusals", () => {
     expect(waitingBatchText("knowledge-tidy")).toBe("Weekly tidy waiting for a quiet moment");
     expect(waitingBatchText("cto-overnight")).toBe("Overnight work waiting for a quiet moment");
     expect(waitingBatchText("something-new")).toBe("Something new waiting for a quiet moment");
+    expect(workTypeLabel("knowledge-actions")).toBe("Project action pages");
+    expect(waitingBatchText("knowledge-actions")).toBe("Project action pages waiting for a quiet moment");
   });
   it("larger jobs that used their share (§17.20)", () => {
     expect(batchPausedCopy(paused({ reason: "level-cap", windowKey: "claude:weekly", value: 3 }), ctx())).toBe(

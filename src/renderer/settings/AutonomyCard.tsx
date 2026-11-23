@@ -175,10 +175,11 @@ export function AutonomyCard() {
       <Card header={heading}>
         <div className="space-y-5" aria-busy={saving || undefined}>
           <p id={helpId} className="m-0 text-meta text-text-faint max-w-[62ch]">
-            What your agents may do on their own. Manta follows this in every chat, and the background tasks it hands to your agents
-            are blocked from "Ask" and "Never" actions. The blocking matches known commands (for example <code>gh pr merge</code> or{" "}
-            <code>fly deploy</code>); an agent that goes out of its way, such as through a script, can get around it. It stops honest
-            mistakes, not a determined agent. Changes apply to new chats.
+            What your agents may do on their own. Manta and the agents it hands work to are instructed to follow this: each action is
+            explained to them, they are told to stop when unsure, and every task is asked to report what it did or was blocked from.
+            Blocking only catches obvious commands, such as <code>gh pr merge</code>, <code>fly deploy</code> or the deploy scripts
+            listed on a project's "Actions in this project" page; an agent that goes another way can get around it. Changes apply to
+            new chats.
           </p>
 
           <div className="space-y-1" data-testid="autonomy-mode">

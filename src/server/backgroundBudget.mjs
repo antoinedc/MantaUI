@@ -62,6 +62,7 @@ export const WORK_CLASS = Object.freeze({
   "curator-rules": CLASS.CONTINUOUS,
   "curator-skills": CLASS.CONTINUOUS,
   "knowledge-corrections": CLASS.BATCH,
+  "knowledge-actions": CLASS.CONTINUOUS,
   "knowledge-tidy": CLASS.BATCH,
   "knowledge-trial": CLASS.BATCH,
   "cto-ambient": CLASS.CONTINUOUS,
@@ -73,6 +74,7 @@ export const WORK_TYPES = Object.freeze(Object.keys(WORK_CLASS));
 export const WORK_BANDS = Object.freeze({
   "knowledge-capture": "fast",
   "knowledge-corrections": "fast",
+  "knowledge-actions": "fast",
   "knowledge-tidy": "fast",
   "knowledge-trial": "balanced",
   "curator-notes": "balanced",

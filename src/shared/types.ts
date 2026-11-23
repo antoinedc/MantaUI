@@ -3039,6 +3039,8 @@ export interface AutonomyAction {
   kind: AutonomyKind | "protected";
   level?: "ask" | "never";
   summary: string;
+  /** "agent" = from the task's own "Actions from your list" section; absent = from a recorded command (Phase 3c). */
+  source?: "agent";
 }
 export interface AgentCreateInput {
   name: string;
@@ -3269,6 +3271,8 @@ export type OpencodeBackgroundResultPart = {
   // Agents Phase 3: a specialist task's "Tell me" actions and actions blocked by the autonomy settings (absent = none).
   toldActions?: AutonomyAction[];
   blockedActions?: AutonomyAction[];
+  // Phase 3c: Ask/Never actions the task reported doing, or whose command matched in a completed call (absent = none).
+  exceededActions?: AutonomyAction[];
 };
 
 /** A truncation as the BOX words it (canonical `view.truncation` and the live `truncation` frame carry the same). */

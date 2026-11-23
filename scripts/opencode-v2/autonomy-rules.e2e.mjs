@@ -26,6 +26,7 @@ import { startMockAnthropic } from "./mock-anthropic.mjs";
 import { jobRules, DENIAL_TEXT_RE } from "../../src/server/autonomy.mjs";
 import { buildReadOnlyAgentRuleset, buildWorktreeAgentRuleset, normalizeJobRuleset } from "../../src/server/delegate.mjs";
 import { MODES } from "../../src/shared/autonomyShared.mjs";
+import { projectPatterns, validateEntry } from "../../src/server/projectActions.mjs";
 
 const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "docs", "opencode-plugins-v2", "manta");
 const results = [];
@@ -71,7 +72,7 @@ try {
   const marker = join(base, "marker.log");
   await mkdir(bin, { recursive: true });
   await writeFile(marker, "");
-  for (const name of ["gh", "fly", "sendmail"]) {
+  for (const name of ["gh", "fly", "sendmail", "make"]) {
     await writeFile(join(bin, name), `#!/bin/sh\necho "${name} $*" >> ${marker}\n`);
     await chmod(join(bin, name), 0o755);
   }
@@ -106,10 +107,10 @@ try {
 
   const agentDir = join(home, ".manta/agents/dev");
   /** Run SCRIPT in a fresh job-like session; returns the finished tool parts in call order. `ro`: the read-only agent base. */
-  async function run(script, policy, { ro = false, grant = [] } = {}) {
+  async function run(script, policy, { ro = false, grant = [], projectPatterns: pp = [] } = {}) {
     SCRIPT = script;
     const baseRules = [...(ro ? buildReadOnlyAgentRuleset({ agentDir, home }) : buildWorktreeAgentRuleset({ home })), ...grant.map((permission) => ({ permission, pattern: "*", action: "allow" }))];
-    const rules = normalizeJobRuleset([...baseRules, ...jobRules(policy, { home, agentDir })]);
+    const rules = normalizeJobRuleset([...baseRules, ...jobRules(policy, { home, agentDir, projectPatterns: pp })]);
     const sess = await oc.createSession({ directory: cwd, agent: "build", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, permission: rules, title: "probe" });
     await api("POST", `/api/session/${sess.id}/prompt`, { text: "go" });
     await Promise.race([api("POST", `/api/experimental/session/${sess.id}/wait`), new Promise((_, rej) => setTimeout(() => rej(new Error("turn timed out")), 90_000))]);
@@ -222,6 +223,42 @@ try {
   const tellOffered = offered.filter((n) => /serve_page$/.test(n));
   console.log(`  [info] serve_page at Tell → offered: ${j(tellOffered)}; call: ${outcome(tellParts[0])}`);
   check("…and at Tell it is offered and runs (the dead fake server answers, no denial)", tellOffered.length === 1 && tellParts.length === 1 && !denied(tellParts[0]), outcome(tellParts[0]));
+
+  // ===== the project's own commands (Phase 3c) =====
+  await mkdir(join(cwd, "scripts"), { recursive: true });
+  await writeFile(join(cwd, "scripts/deploy-web.sh"), `#!/bin/sh\necho "deploy-web.sh $*" >> ${marker}\n`);
+  await chmod(join(cwd, "scripts/deploy-web.sh"), 0o755);
+  const page = [
+    validateEntry({ kind: "deploy", command: "scripts/deploy-web.sh", what: "uploads the site", file: "scripts/deploy-web.sh" }),
+    validateEntry({ kind: "deploy", command: "make ship", what: "ships", file: "Makefile" }),
+  ];
+  const pp = projectPatterns(page);
+  const pparts = await run(
+    [
+      bash("./scripts/deploy-web.sh"), //                0 the page's script: blocked
+      bash("bash scripts/deploy-web.sh --prod"), //      1 another spelling: blocked
+      bash("cd x && ./scripts/deploy-web.sh"), //        2 as a subcommand: blocked
+      bash("cat scripts/deploy-web.sh"), //              3 reading it: runs
+      bash("make ship"), //                              4 the page's make target: blocked
+      bash("make shipping-report"), //                   5 a neighbouring target: runs
+      bash("echo ok; make ship ENV=prod"), //            6 after ';': blocked
+    ],
+    balanced,
+    { projectPatterns: pp },
+  );
+  const plog = await ran();
+  pparts.forEach((p, i) => console.log(`  [info] page #${i} ${p.state?.input?.command} → ${outcome(p)}`));
+  check("`./scripts/deploy-web.sh` (a command on the project's page, deploy=Ask) is blocked with no side effect", denied(pparts[0]) && !plog.some((l) => l.startsWith("deploy-web.sh")), `${outcome(pparts[0])} ${j(plog)}`);
+  check("`bash scripts/deploy-web.sh --prod` is blocked too", denied(pparts[1]) && !plog.some((l) => l.includes("--prod")), `${outcome(pparts[1])} ${j(plog)}`);
+  check("`cd x && ./scripts/deploy-web.sh` (a subcommand) is blocked", denied(pparts[2]), outcome(pparts[2]));
+  check("`cat scripts/deploy-web.sh` still runs (reading is not the action)", pparts[3]?.state?.status === "completed" && String(pparts[3].state.output).includes("deploy-web.sh"), outcome(pparts[3]));
+  check("`make ship` (an entry) is blocked with no side effect", denied(pparts[4]) && !plog.includes("make ship"), `${outcome(pparts[4])} ${j(plog)}`);
+  check("`make shipping-report` runs (an entry never matches a longer word)", pparts[5]?.state?.status === "completed" && !denied(pparts[5]), outcome(pparts[5]));
+  check("`echo ok; make ship ENV=prod` is blocked", denied(pparts[6]) && !plog.some((l) => l.startsWith("make ship ENV")), `${outcome(pparts[6])} ${j(plog)}`);
+  // the same page at Tell blocks nothing (only ask / never), and nothing on a page can allow anything
+  const tellPage = await run([bash("./scripts/deploy-web.sh --tell"), bash("make ship")], { ...MODES.autonomous }, { projectPatterns: pp });
+  const tlog = await ran();
+  check("at Tell the page's commands run (only Ask / Never block)", !denied(tellPage[0]) && tlog.includes("deploy-web.sh --tell") && tlog.includes("make ship"), `${outcome(tellPage[0])} ${j(tlog)}`);
 } catch (e) {
   check("probe ran to completion", false, e?.stack ?? String(e));
 } finally {

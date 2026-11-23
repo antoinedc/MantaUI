@@ -443,6 +443,39 @@ test("mapTimeline: a specialist's told / blocked actions ride the result's manta
   }
 });
 
+test("mapTimeline: the action lists are strict — kind must be an action kind or 'protected', `source` survives only as \"agent\", an exceeded entry needs an ask / never level", () => {
+  const part = (manta) =>
+    mapTimeline(
+      [{ id: "msg_t", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", manta }, text: '[background job "x" done]\n\nok' }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  const p = part({
+    jobId: "job1",
+    toldActions: [{ kind: "deploy", summary: "fly deploy", source: "agent" }, { kind: "launch_missiles", summary: "bad kind" }, { kind: "publish", summary: "x", source: "user" }, { kind: "edit_code", summary: "ok kind" }],
+    blockedActions: [{ kind: "protected", level: "never", summary: "Manta settings or credentials" }, { kind: "merge", level: "ask", summary: "m", source: "agent" }, { kind: "nonsense", level: "ask", summary: "z" }],
+    exceededActions: [
+      { kind: "deploy", level: "ask", summary: "fly deploy" },
+      { kind: "spend", level: "never", summary: "a VM", source: "agent", extra: "dropped" },
+      { kind: "publish", summary: "no level" },
+      { kind: "send_external", level: "weird", summary: "bad level" },
+      { kind: "launch_missiles", level: "ask", summary: "bad kind" },
+      { kind: "protected", level: "never", summary: "p" },
+      { kind: "delete_data", level: "ask" },
+    ],
+  });
+  assert.deepEqual(p.toldActions, [{ kind: "deploy", summary: "fly deploy", source: "agent" }, { kind: "publish", summary: "x" }, { kind: "edit_code", summary: "ok kind" }]);
+  assert.deepEqual(p.blockedActions, [{ kind: "protected", level: "never", summary: "Manta settings or credentials" }, { kind: "merge", level: "ask", summary: "m", source: "agent" }]);
+  assert.deepEqual(p.exceededActions, [
+    { kind: "deploy", level: "ask", summary: "fly deploy" },
+    { kind: "spend", level: "never", summary: "a VM", source: "agent" },
+    { kind: "protected", level: "never", summary: "p" },
+  ]);
+  assert.equal(part({ jobId: "job1", exceededActions: Array.from({ length: 14 }, (_, i) => ({ kind: "deploy", level: "ask", summary: `s${i}` })) }).exceededActions.length, 10);
+  for (const none of [{ jobId: "job1" }, { jobId: "job1", exceededActions: [] }, { jobId: "job1", exceededActions: "x" }, { jobId: "job1", exceededActions: [{ kind: "deploy", summary: "no level" }] }]) {
+    assert.equal("exceededActions" in part(none), false, JSON.stringify(none));
+  }
+});
+
 test("mapTimeline: a Manta-posted result's card text drops the '[background job …]' header + its blank line only", () => {
   const part = (text, manta = { jobId: "job1" }) =>
     mapTimeline(

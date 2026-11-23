@@ -9,3 +9,6 @@ export declare const KIND_LABELS: Readonly<Record<AutonomyKind, string>>;
 export declare const KIND_TITLES: Readonly<Record<AutonomyKind, string>>;
 export declare const LEVEL_TITLES: Readonly<Record<AutonomyLevel, string>>;
 export declare const MODE_TITLES: Readonly<Record<AutonomyMode, string>>;
+export declare const KIND_DEFINITIONS: Readonly<Record<AutonomyKind, string>>;
+export declare const KIND_WORDS: Readonly<Partial<Record<AutonomyKind, string>>>;
+export declare const SELF_REPORT_HEADING: string;

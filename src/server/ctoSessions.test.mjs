@@ -522,6 +522,7 @@ test("knowledge task classes: tiers, budgets, timeouts, strictness", () => {
   const rows = {
     "knowledge-capture": ["nano", 8000, 90_000, undefined],
     "knowledge-corrections": ["nano", 8000, 90_000, undefined],
+    "knowledge-actions": ["nano", 16000, 120_000, undefined],
     "curator-notes": ["mid", 12000, 180_000, undefined],
     "curator-rules": ["deep", 24000, 300_000, true],
     "curator-skills": ["deep", 24000, 300_000, true],
@@ -594,7 +595,7 @@ test("runEphemeral works with the CTO engine off and reports cost for every know
   const reported = [];
   const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-k"); return { text: "twelve chars", sid: "sid-k" }; } };
   const es = fakeEngineState();
-  for (const taskClass of ["knowledge-capture", "knowledge-corrections", "curator-notes", "curator-rules", "curator-skills"]) {
+  for (const taskClass of ["knowledge-capture", "knowledge-corrections", "knowledge-actions", "curator-notes", "curator-rules", "curator-skills"]) {
     const out = await runEphemeral({
       taskClass,
       context: [{ priority: 1, text: "some input" }],
@@ -604,9 +605,9 @@ test("runEphemeral works with the CTO engine off and reports cost for every know
     assert.equal(out.text, "twelve chars", taskClass);
   }
   assert.deepEqual(reported.map((r) => r.taskClass), [
-    "knowledge-capture", "knowledge-corrections", "curator-notes", "curator-rules", "curator-skills",
+    "knowledge-capture", "knowledge-corrections", "knowledge-actions", "curator-notes", "curator-rules", "curator-skills",
   ]);
-  assert.deepEqual(reported.map((r) => r.tier), ["nano", "nano", "mid", "deep", "deep"]);
+  assert.deepEqual(reported.map((r) => r.tier), ["nano", "nano", "nano", "mid", "deep", "deep"]);
   for (const r of reported) {
     assert.deepEqual(r.model, OPUS);
     assert.ok(r.tokens > 0);

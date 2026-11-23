@@ -17,6 +17,7 @@ import {
   BATCH_SHARE,
   MAX_DAILY_CAP_USD,
   WORK_CLASS,
+  WORK_BANDS,
   FALLBACK_RATES,
 } from "./backgroundBudget.mjs";
 
@@ -360,6 +361,8 @@ test("every refusal carries the work class; unknown work types are refused as un
   const rows = r.logs.filter((l) => l.type === "refused");
   assert.deepEqual(rows.map((x) => [x.workType, x.reason, x.class]).sort(), [["cto-overnight", "off", "batch"], ["nonsense", "unavailable", "continuous"]]);
   assert.equal(WORK_CLASS["curator-notes"], "continuous");
+  assert.equal(WORK_CLASS["knowledge-actions"], "continuous");
+  assert.equal(WORK_BANDS["knowledge-actions"], "fast");
   assert.equal(WORK_CLASS["knowledge-trial"], "batch");
 });
 
