@@ -42,6 +42,20 @@ Wanted: the change applies to the current chats too (background tasks keep the r
 refresh a running chat's instructions without breaking its prompt cache more than necessary (e.g. a short "your
 settings changed: …" note on the next turn instead of rebuilding the whole brief).
 
+Seen live (2026-11-23, plugin-builder chat): after the settings were switched to Autonomous and OpenCode restarted, the
+chat HAD the new rules but still refused to deploy, staying consistent with its own earlier "deploys are turned off"
+replies, until the user insisted. Planned fix: on a settings change, each open led chat gets a one-time note on its next
+turn ("your autonomy settings changed at HH:MM: deploy is now Tell me; what you said earlier about these limits is out
+of date"), appended rather than rebuilding the brief (cheap for the prompt cache). Test: refuse → change setting → ask
+again in the same chat → it acts.
+
+## The result's action matcher doesn't understand quotes
+
+Seen live: a Dev task that only edited code and ran tests was reported as "Done without asking: deploy — fly deploy".
+The command matcher splits on `;`, `&&`, `|`, newlines without respecting quotes, so text inside a quoted string (e.g. a
+test fixture) can read as a command. Fix: quote-aware splitting (a small shell tokenizer, e.g. shell-quote), and only
+count a segment that actually starts a command.
+
 ## From Phase 3c (docs/superpowers/specs/2026-11-23-agents-phase3c-judgement-and-action-map.md)
 
 - Show the project's "Actions in this project" commands in Manta's own (lead) instructions, not only in tasks.
