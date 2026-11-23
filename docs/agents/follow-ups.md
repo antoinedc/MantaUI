@@ -17,6 +17,24 @@ Direction discussed (2026-11-23), not decided:
 - Open decision: does "Allow this once" exist for Never too, or only for Ask (Never stays a hard wall, lifting it means
   changing the setting)?
 
+### Refinement (user, 2026-11-23): an explicit request needs no card
+
+- The card is only for a block the user didn't ask about: "build this and deploy" when deploy is Never/Ask (the user may
+  not know the setting exists) — Manta offers the card.
+- When the user explicitly asks to change a permission ("let agents deploy on their own for this project"), Manta applies
+  it directly and confirms in one line (with undo) — asking again on a card makes no sense.
+- Safety: Manta must not be able to do this because a file or web page asked. Idea: the change tool applies directly only
+  when the request quotes the user's own latest message (the box knows which messages the user typed) and that message
+  is about changing a permission; anything else falls back to the card.
+
+## Per-project autonomy settings
+
+Today one set of settings (mode + overrides) applies to every project. Wanted: e.g. agents may deploy plugin-builder on
+their own but not ronda.
+- Layers: box settings, then the project's overrides (last wins). A chat outside any project uses the box settings.
+- Rules are already computed per task/chat at start, and projects have a stable identity (knowledge registry).
+- Changed from the chat as above ("let agents deploy this project on their own"), with the same card/explicit split.
+
 ## From Phase 3c (docs/superpowers/specs/2026-11-23-agents-phase3c-judgement-and-action-map.md)
 
 - Show the project's "Actions in this project" commands in Manta's own (lead) instructions, not only in tasks.
