@@ -368,6 +368,16 @@ function envelopeAttr(text, name) {
   return m ? m[1] : undefined;
 }
 
+// A specialist task's told / blocked actions (Agents Phase 3 §5): `{ kind, level?, summary }`, at most 10; anything else dropped.
+function actionList(v) {
+  if (!Array.isArray(v)) return undefined;
+  const out = v
+    .filter((a) => a && typeof a === "object" && typeof a.kind === "string" && typeof a.summary === "string")
+    .slice(0, 10)
+    .map((a) => ({ kind: a.kind, ...(a.level === "ask" || a.level === "never" ? { level: a.level } : {}), summary: a.summary }));
+  return out.length > 0 ? out : undefined;
+}
+
 function mapBackgroundResult(m, { sessionID }) {
   const md = m.metadata;
   const childSessionId =
@@ -406,6 +416,9 @@ function mapBackgroundResult(m, { sessionID }) {
         agent: typeof md.agent === "string" && md.agent ? md.agent : undefined,
         // the job ended while waiting on a decision (spec 2026-11-14 A5); absent means false
         endedBlocked: manta.endedBlocked === true ? true : undefined,
+        // Agents Phase 3: what the user asked to be told about, and what the autonomy settings blocked (absent = none)
+        toldActions: actionList(manta.toldActions),
+        blockedActions: actionList(manta.blockedActions),
         text,
       }),
     ],

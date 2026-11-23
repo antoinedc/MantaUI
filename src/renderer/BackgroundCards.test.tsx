@@ -339,6 +339,35 @@ describe("finished result card", () => {
     expect(q(".bg-ok")).toBeNull();
   });
 
+  it("lists what the task did on the user's say-so and what the autonomy settings blocked, from the part's own fields", () => {
+    resetStore({});
+    h = mount(
+      <BackgroundResultCard
+        part={part({
+          toldActions: [
+            { kind: "deploy", summary: "fly deploy" },
+            { kind: "publish", summary: "serve_page" },
+          ],
+          blockedActions: [
+            { kind: "merge", level: "ask", summary: "gh pr merge" },
+            { kind: "protected", level: "never", summary: "Manta settings or credentials" },
+          ],
+        })}
+      />,
+    );
+    expect(text('[data-testid="background-result-told"]')).toBe("Told you: fly deploy, serve_page");
+    expect(text('[data-testid="background-result-blocked"]')).toBe(
+      "Blocked: gh pr merge (needs your go-ahead), Manta settings or credentials (not allowed)",
+    );
+  });
+
+  it("shows no such lines when the part carries none (or an empty list)", () => {
+    resetStore({});
+    h = mount(<BackgroundResultCard part={part({ toldActions: [], blockedActions: undefined })} />);
+    expect(q('[data-testid="background-result-told"]')).toBeNull();
+    expect(q('[data-testid="background-result-blocked"]')).toBeNull();
+  });
+
   it("an ordinary completed result still reads 'done' (green); failures show their reason text", () => {
     resetStore({});
     h = mount(<BackgroundResultCard part={part()} />);

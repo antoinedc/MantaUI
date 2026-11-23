@@ -4,6 +4,7 @@
 import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
 import { buildKnowledgeChannels } from "./knowledge/routes.mjs";
 import { describeInboxCancel, describeInboxSetDelivery } from "./inboxCopy.mjs";
+import { settingsOf as autonomySettingsOf, validateAutonomyInput, SETTINGS_UNREADABLE } from "./autonomy.mjs";
 import { backgroundCommandNames as defaultBackgroundCommandNames } from "./commandBackground.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1006,6 +1007,18 @@ export function buildHandlers({
       if (typeof e?.rpcStatus === "number") throw e;
       console.warn(`[agents] ${route} failed:`, e?.message ?? e);
       throw Object.assign(new Error("Something went wrong on the box — try again."), { rpcStatus: 500 });
+    }
+  };
+
+  // Autonomy settings (Agents Phase 3): the user's own answers, read strictly from disk and written through the one
+  // config writer. A refusal with a status passes through; anything else is a safe sentence (no path on the screen).
+  const autonomyCall = async (route, fn) => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (typeof e?.rpcStatus === "number") throw e;
+      console.warn(`[agents] autonomy ${route} failed:`, e?.message ?? e);
+      throw Object.assign(new Error(SETTINGS_UNREADABLE), { rpcStatus: 500 });
     }
   };
 
@@ -2861,6 +2874,14 @@ export function buildHandlers({
         return a.dispatch({ ...input, directory });
       }),
     "agents:open-chat": (input) => agentsCall("open-chat", (a) => a.openChat(input)),
+    // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
+    "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
+    "agents:autonomy-set": (input) =>
+      autonomyCall("set", async () => {
+        const block = validateAutonomyInput(input);
+        const cfg = await local.configUpdate({ agentAutonomy: block });
+        return autonomySettingsOf(cfg?.agentAutonomy);
+      }),
 
     // ---- routines (manta-server owned; src/server/routines.mjs, spec §5.1) ----
     // Args/returns are the pinned wire contract in src/shared/routines.ts. A refusal is a

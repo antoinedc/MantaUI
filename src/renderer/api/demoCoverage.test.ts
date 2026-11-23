@@ -51,6 +51,8 @@ export const DEMO_UNIMPLEMENTED = [
   "accountsSetActive",
   "accountsSetMode",
   "agentPullFile",
+  "agentsAutonomyGet",
+  "agentsAutonomySet",
   "agentsCreate",
   "agentsDispatch",
   "agentsList",

@@ -175,6 +175,24 @@ export async function configGet() {
   return getConfig();
 }
 
+/**
+ * The user's autonomy settings (`agentAutonomy`) read STRICTLY from disk for an enforcement decision (Agents Phase 3 §2):
+ * never the in-memory cache, which falls back to defaults when the file is bad. A missing file, or a file without the
+ * key, is `undefined` (Balanced); a file that can't be read or parsed THROWS, so the caller refuses instead of guessing.
+ */
+export async function readAgentAutonomyStrict(path = CONFIG_PATH) {
+  let text;
+  try {
+    text = await readFile(path, "utf-8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return undefined;
+    throw e;
+  }
+  const parsed = JSON.parse(text);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("config.json is not an object");
+  return parsed.agentAutonomy;
+}
+
 // configUpdate(patch) — merge patch, persist, return full config. Dotted keys
 // (e.g. "cto.enabled") are written as nested paths so the schemas that address
 // nested config (`cto.*`) land where the server reads them. Flat keys merge as

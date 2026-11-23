@@ -418,6 +418,31 @@ test("mapTimeline: endedBlocked rides the result's manta metadata onto the part 
   assert.equal("endedBlocked" in part({ jobId: "job1", endedBlocked: false }), false);
 });
 
+test("mapTimeline: a specialist's told / blocked actions ride the result's manta metadata onto the part (valid entries only, at most 10); absent when none", () => {
+  const part = (manta) =>
+    mapTimeline(
+      [{ id: "msg_t", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", manta }, text: '[background job "x" done]\n\nok' }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  const p = part({
+    jobId: "job1",
+    toldActions: [{ kind: "deploy", summary: "fly deploy" }, { kind: 3, summary: "bad" }, "nope"],
+    blockedActions: [{ kind: "merge", level: "never", summary: "gh pr merge" }, { kind: "deploy", level: "ask", summary: "fly deploy", extra: "dropped" }, { kind: "publish", level: "weird", summary: "gh gist create" }],
+  });
+  assert.deepEqual(p.toldActions, [{ kind: "deploy", summary: "fly deploy" }]);
+  assert.deepEqual(p.blockedActions, [
+    { kind: "merge", level: "never", summary: "gh pr merge" },
+    { kind: "deploy", level: "ask", summary: "fly deploy" },
+    { kind: "publish", summary: "gh gist create" },
+  ]);
+  assert.equal(part({ jobId: "job1", toldActions: Array.from({ length: 14 }, (_, i) => ({ kind: "deploy", summary: `s${i}` })) }).toldActions.length, 10);
+  for (const none of [{ jobId: "job1" }, { jobId: "job1", toldActions: [], blockedActions: "x" }]) {
+    const q = part(none);
+    assert.equal("toldActions" in q, false);
+    assert.equal("blockedActions" in q, false);
+  }
+});
+
 test("mapTimeline: a Manta-posted result's card text drops the '[background job …]' header + its blank line only", () => {
   const part = (text, manta = { jobId: "job1" }) =>
     mapTimeline(

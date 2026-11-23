@@ -335,6 +335,9 @@ export type AppConfig = {
   // default 0.7) — act on its own when the candidate's confidence clears this
   // bar. The Settings τ control writes it; the gate + calibration read it.
   ctoAutonomyThreshold?: number;
+  // Agents Phase 3: autonomy settings (spec 2026-11-23-agents-phase3-autonomy.md). Read/written through
+  // agents:autonomy-get / agents:autonomy-set only.
+  agentAutonomy?: AgentAutonomy;
   // On-call CTO operating doctrine (BET-1164 follow-up, docs/opencode/skills/
   // cto/prompt.md + src/server/ctoDoctrine.mjs): the preset governing the
   // on-call CTO agent's tone/initiative/reporting — never its read-only
@@ -2016,6 +2019,9 @@ export const IPC = {
   agentsCreate: "agents:create", // (AgentCreateInput) → AgentInfo; throws with a human message
   agentsDispatch: "agents:dispatch", // (AgentDispatchInput) → { jobId }; throws with a human message
   agentsOpenChat: "agents:open-chat", // ({ slug }) → { tmuxSession, windowIndex }; throws with a human message
+  // ---- Agents, Phase 3 (spec docs/superpowers/specs/2026-11-23-agents-phase3-autonomy.md) ----
+  agentsAutonomyGet: "agents:autonomy-get", // () → AutonomySettings; an older box rejects "unknown rpc channel"
+  agentsAutonomySet: "agents:autonomy-set", // (AgentAutonomy) → AutonomySettings; throws with a human message
 
   // ---- APNs native-push registration (BET-181) ----
   // iOS Capacitor app registers its APNs device token so the server can
@@ -3007,6 +3013,33 @@ export interface AgentInfo {
   notFor: string | null; // "Not for …" routing line (≤ 200 chars)
   notice: string | null; // non-error hint shown under the row (e.g. the `manta` upgrade collision)
 }
+// Agents Phase 3: autonomy settings.
+export type AutonomyLevel = "auto" | "tell" | "ask" | "never";
+export type AutonomyMode = "cautious" | "balanced" | "autonomous";
+export type AutonomyKind =
+  | "edit_code"
+  | "handoff"
+  | "merge"
+  | "deploy"
+  | "publish"
+  | "send_external"
+  | "delete_data"
+  | "spend"
+  | "settings"
+  | "agent_change";
+export interface AgentAutonomy {
+  mode: AutonomyMode;
+  overrides: Partial<Record<AutonomyKind, AutonomyLevel>>;
+}
+export interface AutonomySettings extends AgentAutonomy {
+  effective: Record<AutonomyKind, AutonomyLevel>;
+}
+/** An action a specialist's task did ("told") or was blocked from ("blocked"). `summary` is a fixed label, never user arguments. */
+export interface AutonomyAction {
+  kind: AutonomyKind | "protected";
+  level?: "ask" | "never";
+  summary: string;
+}
 export interface AgentCreateInput {
   name: string;
   description: string;
@@ -3233,6 +3266,9 @@ export type OpencodeBackgroundResultPart = {
   // The job ended while its model state was "blocked" (spec 2026-11-14 A5):
   // shown as "Needs a decision". Absent → false.
   endedBlocked?: boolean;
+  // Agents Phase 3: a specialist task's "Tell me" actions and actions blocked by the autonomy settings (absent = none).
+  toldActions?: AutonomyAction[];
+  blockedActions?: AutonomyAction[];
 };
 
 /** A truncation as the BOX words it (canonical `view.truncation` and the live `truncation` frame carry the same). */

@@ -1,0 +1,11 @@
+import type { AutonomyKind, AutonomyLevel, AutonomyMode } from "./types";
+export declare const LEVELS: readonly AutonomyLevel[];
+export declare const ACTION_KINDS: readonly AutonomyKind[];
+export declare const BINARY_KINDS: readonly AutonomyKind[];
+export declare const MODES: Readonly<Record<AutonomyMode, Readonly<Record<AutonomyKind, AutonomyLevel>>>>;
+export declare const MODE_NAMES: readonly AutonomyMode[];
+export declare const DEFAULT_MODE: AutonomyMode;
+export declare const KIND_LABELS: Readonly<Record<AutonomyKind, string>>;
+export declare const KIND_TITLES: Readonly<Record<AutonomyKind, string>>;
+export declare const LEVEL_TITLES: Readonly<Record<AutonomyLevel, string>>;
+export declare const MODE_TITLES: Readonly<Record<AutonomyMode, string>>;

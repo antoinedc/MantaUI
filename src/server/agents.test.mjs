@@ -1,5 +1,6 @@
 // Agents, Phase 1 (src/server/agents.mjs): file format, slugs, compile, config sync, create, dispatch, open-chat.
 // A real temp folder stands in for ~/.manta/agents; opencode config, opencode, tmux and delegate are fakes.
+import { MODES } from "../shared/autonomyShared.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, copyFile } from "node:fs/promises";
@@ -1113,12 +1114,19 @@ test("handoff: agent, title and brief checks — unknown / broken agent, the lea
   }
 });
 
-test("handoff: the autonomy seam — a policy that does not allow handoffs refuses with a sentence", async () => {
-  const f = await leadFixture({ extra: { policy: { handoff: "ask" } } });
+test("handoff: 'Hand off: Never' refuses with a sentence before anything starts; 'Ask' is Manta's own instruction, so the server lets it through", async () => {
+  const f = await leadFixture({ extra: { autonomyPolicy: async () => ({ ...MODES.balanced, handoff: "never" }) } });
   try {
-    assert.deepEqual(await ok(f, call()), { ok: false, error: "Handing off needs the user's go-ahead" });
+    assert.deepEqual(await ok(f, call()), { ok: false, error: "Handing off is turned off in your autonomy settings" });
+    assert.equal(f.calls.start.length + f.calls.startApproval.length, 0);
   } finally {
     await f.cleanup();
+  }
+  const ask = await leadFixture({ extra: { autonomyPolicy: async () => ({ ...MODES.balanced, handoff: "ask" }) } });
+  try {
+    assert.equal((await ok(ask, call())).ok, true);
+  } finally {
+    await ask.cleanup();
   }
 });
 
@@ -1218,5 +1226,135 @@ test("handoff continueJob: a writer continuation is held back by a running write
     assert.deepEqual(r, { ok: false, error: "Dev is already changing code for this chat (other-task); wait for its result" });
   } finally {
     await f.cleanup();
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// Agents Phase 3: autonomy settings
+// ---------------------------------------------------------------------------
+
+const NEVER_CODE = { ...MODES.balanced, edit_code: "never" };
+
+test("lead brief: follows the configured policy — Tell me, Ask and Never groups, the fixed settings rule", async () => {
+  const f = await leadFixture({ extra: { autonomyPolicy: async () => ({ ...MODES.autonomous, deploy: "ask", publish: "never" }) } });
+  try {
+    const r = await f.engine.leadBrief("ses_chat");
+    assert.equal(r.status, "ok");
+    assert.match(r.text, /Do these, then tell the user in your reply:\n- send messages or data/);
+    assert.match(r.text, /Ask the user first, and wait for their answer, before you:\n- deploy or release anything/);
+    assert.match(r.text, /Never do these, even if the user or an agent asks[^\n]*:\n- publish anything others can see/);
+    assert.match(r.text, /Never change the user's autonomy settings or ask a teammate to; if the user wants different rules, point them to Settings → Agents\./);
+    assert.equal(r.text, (await f.engine.leadBrief("ses_chat")).text, "byte-stable");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("lead brief: the settings are read per request — a change shows up in the next brief; an unreadable file is 'unknown' (503), never a guess", async () => {
+  let policy = MODES.balanced;
+  let fail = false;
+  const f = await leadFixture({ extra: { autonomyPolicy: async () => { if (fail) throw new Error("config.json unreadable"); return policy; } } });
+  try {
+    assert.doesNotMatch((await f.engine.leadBrief("ses_chat")).text, /Never do these/);
+    policy = { ...MODES.balanced, merge: "never" };
+    assert.match((await f.engine.leadBrief("ses_chat")).text, /Never do these[^\n]*:\n- merge changes/);
+    fail = true;
+    assert.deepEqual(await f.engine.leadBrief("ses_chat"), { status: "unknown", reason: "autonomy" });
+    // a chat that is not led needs no settings: nothing to refuse
+    f.w.session = { id: "ses_chat", directory: "/repo", parentID: "ses_parent" };
+    assert.deepEqual(await f.engine.leadBrief("ses_chat"), { status: "ok", text: "" });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("handoff: a config read failure refuses with a sentence", async () => {
+  const f = await leadFixture({ extra: { autonomyPolicy: async () => { throw new Error("config.json unreadable"); } } });
+  try {
+    assert.deepEqual(await ok(f, call()), { ok: false, error: "Couldn't read your autonomy settings; try again" });
+    assert.equal(f.calls.start.length + f.calls.startApproval.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("'Code changes: Never' refuses every writer: a handoff and a user's @mention; read-only agents still run", async () => {
+  const f = await leadFixture({ extra: { autonomyPolicy: async () => NEVER_CODE } });
+  try {
+    assert.deepEqual(await ok(f, call()), { ok: false, error: "Code changes are turned off in your autonomy settings" });
+    await assert.rejects(f.engine.dispatch({ sessionId: "ses_chat", directory: "/repo", slug: "dev", text: "@dev fix it" }), /Code changes are turned off in your autonomy settings/);
+    assert.equal(f.calls.start.length + f.calls.startApproval.length + f.calls.startJob.length, 0);
+    // a read-only specialist (isolation none) is unaffected
+    await mkdir(join(f.root, "scout"), { recursive: true });
+    await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
+    await f.engine.list();
+    const r = await f.engine.handoff(await (async () => { const b = call({ agent: "scout", callID: "c9", messageID: "m9" }); f.w.messages = transcript(b, { messageID: "m9" }); return b; })());
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(f.calls.start.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("'Code changes: Never' also refuses a continuation of a writer's task", async () => {
+  const f = await leadFixture({ extra: { autonomyPolicy: async () => NEVER_CODE } });
+  try {
+    f.w.records = [{ id: "job9", status: "done", parentSessionID: "ses_chat", requestedBy: "manta", agent: "agent-dev", isolation: "worktree", agentName: "Dev" }];
+    assert.deepEqual(await ok(f, call({ continueJob: "job9" })), { ok: false, error: "Code changes are turned off in your autonomy settings" });
+    assert.equal(f.calls.cont.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("every task the engine starts is a specialist's, with the autonomy hook (load + check) the delegate engine runs at the last moment", async () => {
+  const f = await leadFixture();
+  try {
+    await ok(f, call());
+    const job = f.calls.startApproval[0];
+    assert.equal(job.specialist, true);
+    assert.equal(typeof job.autonomy.load, "function");
+    assert.deepEqual(await job.autonomy.load(), MODES.balanced);
+    // the check re-applies Hand off: Never and Code changes: Never (this task is a writer's handoff)
+    assert.equal(job.autonomy.check(MODES.balanced), null);
+    assert.equal(job.autonomy.check({ ...MODES.balanced, handoff: "never" }), "Handing off is turned off in your autonomy settings");
+    assert.equal(job.autonomy.check(NEVER_CODE), "Code changes are turned off in your autonomy settings");
+    // a read-only handoff is not a writer
+    await mkdir(join(f.root, "scout"), { recursive: true });
+    await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
+    await f.engine.list();
+    const b = call({ agent: "scout", callID: "c2", messageID: "m2" });
+    f.w.messages = transcript(b, { messageID: "m2" });
+    await f.engine.handoff(b);
+    const ro = f.calls.start.at(-1);
+    assert.equal(ro.specialist, true);
+    assert.equal(ro.autonomy.check(NEVER_CODE), null);
+    assert.equal(ro.autonomy.check({ ...MODES.balanced, handoff: "never" }), "Handing off is turned off in your autonomy settings");
+  } finally {
+    await f.cleanup();
+  }
+  // a user's @mention: Hand off: Never does NOT apply (handoff governs only Manta's automatic handoffs)
+  const g = await fixture({ autonomyPolicy: async () => ({ ...MODES.balanced, handoff: "never" }) });
+  try {
+    await g.engine.init();
+    await g.engine.dispatch({ sessionId: "ses_p", directory: "/repo", slug: "dev", text: "@dev fix it" });
+    const job = g.calls.startJob[0];
+    assert.equal(job.specialist, true);
+    assert.equal(job.autonomy.check({ ...MODES.balanced, handoff: "never" }), null);
+    assert.equal(job.autonomy.check(NEVER_CODE), "Code changes are turned off in your autonomy settings");
+  } finally {
+    await g.cleanup();
+  }
+});
+
+test("dispatch: a settings read failure refuses before anything starts", async () => {
+  const g = await fixture({ autonomyPolicy: async () => { throw new Error("config.json unreadable"); } });
+  try {
+    await g.engine.init();
+    await assert.rejects(g.engine.dispatch({ sessionId: "ses_p", directory: "/repo", slug: "dev", text: "@dev fix it" }), /Couldn't read your autonomy settings; try again/);
+    assert.equal(g.calls.startJob.length, 0);
+  } finally {
+    await g.cleanup();
   }
 });

@@ -37,6 +37,9 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { createJobLiveness } from "./jobLiveness.mjs";
+import { MODES } from "../shared/autonomyShared.mjs";
+import { jobRules, policyKey, normalizePolicy, effectivePolicy, CODE_OFF, POLICY_CHANGED, LEGACY_TASK, MANTA_FOLDER, SETTINGS_UNREADABLE } from "./autonomy.mjs";
+import { buildResultSynthetic } from "./delegate.mjs";
 import { createJobViews } from "./jobViews.mjs";
 
 const T0 = 1_700_000_000_000;
@@ -198,6 +201,9 @@ function world({ jobs: seed = [], git = true } = {}) {
     job: (id) => jobs.find((j) => j.id === id),
     say(sid, text) {
       messages.set(sid, [{ info: { role: "assistant" }, parts: [{ type: "text", text }] }]);
+    },
+    setMessages(sid, list) {
+      messages.set(sid, list);
     },
     // a child that ended with `outcome`
     finish(sid, outcome, idleAt = state.now) {
@@ -2380,7 +2386,8 @@ test("allowPr:false on resume: the resumed job's prompt still has no pull-reques
 
 async function finishedLeadJob(extra = {}) {
   const w = liveWorld();
-  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", turnKey: "msg_u1", allowPr: false, agentName: "Dev", request: "Fix login", ...extra });
+  w.deps.autonomyPolicy = async () => MODES.balanced;
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", turnKey: "msg_u1", allowPr: false, agentName: "Dev", request: "Fix login", specialist: true, autonomy: { load: async () => MODES.balanced, check: () => null }, ...extra });
   const child = w.job(id).childSessionID;
   w.finish(child, "succeeded", T0 + 1);
   await w.engine.observeRaw(raw("session.execution.succeeded", child));
@@ -2433,4 +2440,270 @@ test("continueJob: the lead's fields land on the successor (title, request, requ
   assert.equal(plain.job.turnKey, "msg_u1");
   assert.equal(plain.job.request, "Fix login");
   assert.equal(plain.job.allowPr, false);
+});
+
+
+// ---------------------------------------------------------------------------
+// Agents Phase 3: a specialist's task follows the user's autonomy settings
+// ---------------------------------------------------------------------------
+
+const HOME = "/home/test";
+const BAL = { ...MODES.balanced };
+const AUT = { ...MODES.autonomous };
+const NEVER_CODE = { ...MODES.balanced, edit_code: "never" };
+const specialistWorld = (policy = BAL) => {
+  const w = liveWorld();
+  w.deps.home = HOME;
+  w.state.policy = policy;
+  w.deps.autonomyPolicy = async () => w.state.policy;
+  return w;
+};
+const autonomyInput = (w, extra = {}) => ({
+  agent: "agent-dev",
+  isolation: "worktree",
+  agentName: "Dev",
+  agentDir: `${HOME}/.manta/agents/dev`,
+  specialist: true,
+  autonomy: { load: async () => w.state.policy, check: () => null },
+  ...extra,
+});
+const q = { permission: "question", pattern: "*", action: "deny" };
+
+test("autonomy: a specialist's denies are appended ONCE after the base, then the question deny; the base, key and policy are persisted", async () => {
+  const w = specialistWorld();
+  const id = await start(w, autonomyInput(w));
+  const job = w.job(id);
+  const base = buildWorktreeAgentRuleset();
+  const rules = jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev` });
+  assert.deepEqual(job.basePermission, base);
+  assert.deepEqual(job.permission, [...base, ...rules, q]);
+  assert.deepEqual(w.calls.create[0].permission, job.permission, "the child is created with the final ruleset");
+  assert.equal(job.permission.filter((r) => r.permission === "question").length, 1);
+  assert.equal(job.specialist, true);
+  assert.equal(job.autonomyKey, policyKey(BAL));
+  assert.deepEqual(job.autonomyPolicy, normalizePolicy(BAL));
+  assert.equal(job.agentDir, `${HOME}/.manta/agents/dev`);
+  assert.match(job.launch.text, /Some actions need the user's go-ahead: deploy or release anything/);
+  assert.match(job.launch.text, /Merging is never part of a task/);
+  // …and the prompt's autonomy section sits after the worktree paragraph, before the time budget
+  assert.ok(job.launch.text.indexOf("Some actions need") > job.launch.text.indexOf("never touch any other checkout") || job.launch.text.indexOf("Some actions need") > job.launch.text.indexOf("Do not open pull requests"));
+  assert.ok(job.launch.text.indexOf("Some actions need") < job.launch.text.indexOf("Time: this job is stopped"));
+});
+
+test("autonomy: a caller-supplied (approval-resolved) base is kept and the denies come after it; a plain job is untouched", async () => {
+  const w = specialistWorld();
+  const caller = [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }];
+  const id = await start(w, autonomyInput(w, { permission: caller }));
+  assert.deepEqual(w.job(id).basePermission, caller);
+  assert.deepEqual(w.job(id).permission, [...caller, ...jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev` }), q]);
+  const plain = world();
+  const pid = await start(plain, { agent: "agent-dev", isolation: "worktree", agentName: "Dev" });
+  for (const k of ["specialist", "basePermission", "autonomyKey", "autonomyPolicy"]) assert.equal(k in plain.job(pid), false, k);
+  assert.deepEqual(plain.job(pid).permission, buildWorktreeAgentRuleset());
+});
+
+test("autonomy: the settings are read at the last moment; a read failure or a failing check refuses before anything is created", async () => {
+  const w = specialistWorld();
+  const unreadable = await startJob(input(autonomyInput(w, { autonomy: { load: async () => { throw new Error("bad json"); }, check: () => null } })), w.deps);
+  assert.deepEqual(unreadable, { ok: false, error: SETTINGS_UNREADABLE });
+  const refused = await startJob(input(autonomyInput(w, { autonomy: { load: async () => NEVER_CODE, check: (p) => (p.edit_code === "never" ? CODE_OFF : null) } })), w.deps);
+  assert.deepEqual(refused, { ok: false, error: CODE_OFF });
+  const missing = await startJob(input({ ...autonomyInput(w), autonomy: undefined }), w.deps);
+  assert.equal(missing.ok, false, "a specialist job with no autonomy hook fails closed");
+  assert.equal(w.jobs.length, 0);
+  assert.deepEqual(w.calls.addWorktree, []);
+  assert.deepEqual(w.calls.create, []);
+});
+
+test("autonomy: startJobWithApproval reads the settings AFTER the approval wait, and the denies follow the edited grants", async () => {
+  const w = specialistWorld(BAL);
+  let loads = 0;
+  const engine = createDelegateEngine(w.deps);
+  const started = engine.startJobWithApproval(
+    input({
+      ...autonomyInput(w, { autonomy: { load: async () => (loads++, w.state.policy), check: () => null } }),
+      trustMode: false,
+      tools: [{ permission: "bash", pattern: "**" }],
+    }),
+  );
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(loads, 0, "nothing read while the user is still deciding");
+  const [pending] = engine.listPendingApprovals(PARENT);
+  assert.ok(pending, "the approval card is up");
+  w.state.policy = AUT; // the user changed the settings while the card was open
+  const edited = [{ permission: "read", pattern: "**" }];
+  engine.approve(pending.id, edited);
+  const res = await started;
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(loads, 1);
+  const job = w.job(res.job.id);
+  assert.equal(job.autonomyKey, policyKey(AUT), "the settings in force AFTER the wait");
+  assert.deepEqual(job.permission.slice(-1), [q]);
+  assert.ok(job.permission.some((r) => r.permission === "read" && r.action === "allow"), "the edited grants are the base");
+  assert.ok(!job.permission.some((r) => r.permission === "bash" && r.pattern === "**" && r.action === "allow"), "the grants the user removed are gone");
+  const baseLen = job.basePermission.length;
+  assert.deepEqual(job.permission.slice(0, baseLen), job.basePermission);
+});
+
+test("autonomy: a task can't run inside Manta's own folders (parent folder, or a worktree made there)", async () => {
+  const w = specialistWorld();
+  const inManta = await startJob(input(autonomyInput(w, { parentDirectory: `${HOME}/.manta/agents/manta/home` })), w.deps);
+  assert.deepEqual(inManta, { ok: false, error: MANTA_FOLDER });
+  assert.deepEqual(w.calls.addWorktree, []);
+  const onConfig = await startJob(input(autonomyInput(w, { parentDirectory: `${HOME}/.config/opencode/x` })), w.deps);
+  assert.equal(onConfig.error, MANTA_FOLDER);
+
+  const wt = specialistWorld();
+  wt.deps.gitAddWorktree = async ({ name }) => ({ path: `${HOME}/.manta/wt/${name}`, branch: `job/${name}` });
+  const made = await startJob(input(autonomyInput(wt)), wt.deps);
+  assert.deepEqual(made, { ok: false, error: MANTA_FOLDER });
+  assert.deepEqual(wt.calls.rmWorktree.map((r) => r.path), [`${HOME}/.manta/wt/fix-the-bug`], "the worktree it made is taken back");
+  assert.equal(wt.jobs.length, 0);
+  // a generic job is not subject to it
+  const plain = specialistWorld();
+  assert.equal((await startJob(input({ parentDirectory: `${HOME}/.manta/x` }), plain.deps)).ok, true);
+});
+
+async function finishedSpecialist(w, extra = {}) {
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1", allowPr: false, request: "Fix login", ...extra }));
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  return id;
+}
+
+test("autonomy continue: refused when the settings changed since the task started, or for a writer under 'Code changes: Never'; allowed under the same settings", async () => {
+  const w = specialistWorld();
+  const id = await finishedSpecialist(w);
+  w.state.policy = AUT;
+  const changed = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
+  assert.deepEqual(changed, { ok: false, status: 409, error: POLICY_CHANGED });
+  assert.equal(w.job(id).supersededBy, undefined);
+
+  w.state.policy = BAL;
+  w.jobs.find((j) => j.id === id).autonomyKey = policyKey(NEVER_CODE); // a task that started under "never"…
+  w.state.policy = NEVER_CODE; // …and still is
+  const writer = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
+  assert.deepEqual(writer, { ok: false, status: 409, error: CODE_OFF });
+
+  const ok = specialistWorld();
+  const oid = await finishedSpecialist(ok);
+  const res = await continueJob(oid, { prompt: "again", sessionID: PARENT }, ok.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.job.autonomyKey, policyKey(BAL), "the successor carries the snapshot of the session's permissions");
+  assert.deepEqual(res.job.permission, ok.job(oid).permission);
+
+  const unreadable = specialistWorld();
+  const uid = await finishedSpecialist(unreadable);
+  unreadable.deps.autonomyPolicy = async () => { throw new Error("unreadable"); };
+  const r = await continueJob(uid, { prompt: "again", sessionID: PARENT }, unreadable.deps);
+  assert.deepEqual(r, { ok: false, status: 500, error: SETTINGS_UNREADABLE });
+});
+
+test("autonomy continue/resume: a Phase 1/2 specialist job (no snapshot) is refused; a generic job is not", async () => {
+  const w = specialistWorld();
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", agentName: "Dev", requestedBy: "manta" });
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const legacy = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
+  assert.deepEqual(legacy, { ok: false, status: 409, error: LEGACY_TASK });
+
+  const paused = specialistWorld();
+  const pid = await pausedJob(paused, { agent: "agent-dev", isolation: "worktree", agentName: "Dev" });
+  assert.deepEqual(await resumeJob(pid, paused.deps), { ok: false, error: LEGACY_TASK });
+  assert.equal(paused.job(pid).status, "paused", "it stays paused");
+
+  const generic = specialistWorld();
+  const gid = await finishedLeadJobLike(generic);
+  assert.equal((await continueJob(gid, { prompt: "again", sessionID: PARENT }, generic.deps)).ok, true);
+});
+
+async function finishedLeadJobLike(w) {
+  const id = await start(w, { agent: "build" });
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  return id;
+}
+
+test("autonomy resume: a fresh child under the CURRENT settings — the ruleset is recomputed from the base; a writer under 'Never' is refused", async () => {
+  const w = specialistWorld(BAL);
+  const id = await pausedJob(w, autonomyInput(w));
+  const before = structuredClone(w.job(id));
+  w.state.policy = AUT;
+  w.calls.create.length = w.calls.send.length = 0;
+  const res = await resumeJob(id, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const job = w.job(id);
+  assert.deepEqual(job.permission, normalizeJobRuleset([...before.basePermission, ...jobRules(AUT, { home: HOME, agentDir: `${HOME}/.manta/agents/dev` })]));
+  assert.notDeepEqual(job.permission, before.permission);
+  assert.equal(job.autonomyKey, policyKey(AUT));
+  assert.deepEqual(job.autonomyPolicy, normalizePolicy(AUT));
+  assert.deepEqual(w.calls.create[0].permission, job.permission, "the new child gets the recomputed ruleset");
+  assert.deepEqual(job.basePermission, before.basePermission);
+  assert.doesNotMatch(w.calls.send[0].text, /Some actions need the user's go-ahead: deploy or release anything/, "deploy is Tell now, so it is no longer an 'ask' in the prompt");
+  assert.match(w.calls.send[0].text, /Merging is never part of a task/);
+
+  const refused = specialistWorld(BAL);
+  const rid = await pausedJob(refused, autonomyInput(refused));
+  refused.state.policy = NEVER_CODE;
+  assert.deepEqual(await resumeJob(rid, refused.deps), { ok: false, error: CODE_OFF });
+  assert.equal(refused.job(rid).status, "paused");
+});
+
+const toolPart = (tool, input, status = "completed", error) => ({ type: "tool", tool, state: { status, input, ...(error ? { error } : {}), output: "" } });
+const msgs = (launchId, ...parts) => [
+  { info: { id: launchId, role: "user" }, parts: [{ type: "text", text: "go" }] },
+  { info: { id: "msg_a1", role: "assistant" }, parts: [...parts, { type: "text", text: "All done." }] },
+];
+
+test("autonomy result: 'Tell me' and blocked actions are read from THIS attempt's transcript, kept on the record, and reach the result's text and metadata", async () => {
+  const w = specialistWorld(AUT); // deploy / publish are "Tell me" here
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const job = w.job(id);
+  w.setMessages(job.childSessionID, msgs(
+    job.launch.messageId,
+    toolPart("bash", { command: "cd app && fly deploy --app secret-name" }),
+    toolPart("bash", { command: "gh pr merge 12" }, "error", "Permission denied: shell"),
+    toolPart("bash", { command: "ls nope" }, "error", "ls: cannot access"), // an ordinary failure is never "blocked"
+  ));
+  w.finish(job.childSessionID, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", job.childSessionID));
+  const done = w.job(id);
+  assert.deepEqual(done.toldActions, [{ kind: "deploy", summary: "fly deploy" }]);
+  assert.deepEqual(done.blockedActions, [{ kind: "merge", level: "never", summary: "gh pr merge" }]);
+  const syn = [...w.records.values()][0].body;
+  assert.deepEqual(syn.metadata.manta.toldActions, done.toldActions);
+  assert.deepEqual(syn.metadata.manta.blockedActions, done.blockedActions);
+  assert.match(syn.text, /Done without asking \(the user asked to be told\): deploy — fly deploy\n/);
+  assert.match(syn.text, /Blocked by the user's autonomy settings: merge — gh pr merge \(never\) \(ask = needs the user's go-ahead, never = not allowed\)/);
+  assert.ok(!JSON.stringify(syn).includes("secret-name"), "user arguments never appear");
+});
+
+test("autonomy result: a continuation reads only its own round; nothing to report omits the fields", async () => {
+  const w = specialistWorld(AUT);
+  const id = await finishedSpecialist(w);
+  const first = w.job(id);
+  const child = first.childSessionID;
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const next = w.job(res.job.id);
+  assert.equal(next.toldActions, undefined, "not inherited");
+  w.setMessages(child, [
+    { info: { id: first.launch.messageId, role: "user" }, parts: [] },
+    { info: { id: "msg_old", role: "assistant" }, parts: [toolPart("bash", { command: "fly deploy" })] }, // round one
+    { info: { id: next.launch.messageId, role: "user" }, parts: [] },
+    { info: { id: "msg_new", role: "assistant" }, parts: [toolPart("bash", { command: "npm publish" })] }, // round two
+  ]);
+  w.finish(child, "succeeded", T0 + 2);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.deepEqual(w.job(next.id).toldActions, [{ kind: "deploy", summary: "npm publish" }]);
+
+  const quiet = specialistWorld(BAL);
+  const qid = await finishedSpecialist(quiet);
+  const body = buildResultSynthetic(quiet.job(qid));
+  assert.equal("toldActions" in body.metadata.manta, false);
+  assert.equal("blockedActions" in body.metadata.manta, false);
+  assert.doesNotMatch(body.text, /Done without asking|Blocked by the user's autonomy/);
 });

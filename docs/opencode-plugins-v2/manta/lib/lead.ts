@@ -7,6 +7,9 @@
 //   context hook → cached text for the session? append it (byte-stable for the prompt cache).
 //                  else GET /api/agents/lead-brief?sessionID= (timeout 1.5 s), cache the answer — an empty text too —
 //                  and append it when non-empty.
+//   a 503 that says the user's autonomy settings couldn't be read (`autonomy: "unreadable"`) → cache NOTHING, but append a
+//   fixed fallback block for this turn: Manta must not act on rules it couldn't load (Agents Phase 3 §3). A settings
+//   change reaches a chat on a new chat or after a compaction (the cache is per session).
 //   anything else (503 "couldn't classify", a transport error, a bad body) → cache NOTHING and append nothing: the next
 //   request asks again. Never throws, never delays a request beyond the timeout.
 //   session.compacted / session.deleted → forget, so the next request refetches (a roster change shows up then).
@@ -15,6 +18,9 @@ import { append, remember } from "./briefing.ts";
 import { authHeaders, serverUrl } from "./server.ts";
 
 export const LEAD_TIMEOUT_MS = 1500;
+export const AUTONOMY_FALLBACK =
+  "Your lead settings couldn't be loaded for this turn. Don't hand off work, and don't merge, deploy, publish, send anything outside this box, delete data or spend money this turn.";
+const FALLBACK = Symbol("autonomy-unreadable");
 const MAX_TRACKED = 500;
 
 type FetchFn = (input: string, init?: Record<string, unknown>) => Promise<{ ok: boolean; status: number; json(): Promise<any> }>;
@@ -29,17 +35,28 @@ export interface LeadDeps {
 export function createLead(deps: LeadDeps) {
   const timeoutMs = deps.timeoutMs ?? LEAD_TIMEOUT_MS;
   const cache = new Map<string, string>(); // sessionID → the brief ("" = deliberately not led)
-  const inflight = new Map<string, Promise<string | null>>();
+  const inflight = new Map<string, Promise<string | typeof FALLBACK | null>>();
   let forgets = 0; // bumped by every forget: an answer fetched across one is not cached (it may be stale)
 
-  async function fetchText(sessionID: string): Promise<string | null> {
+  async function fetchText(sessionID: string): Promise<string | typeof FALLBACK | null> {
     try {
       const res = await deps.fetch(`${deps.base()}/api/agents/lead-brief?${new URLSearchParams({ sessionID })}`, {
         method: "GET",
         headers: deps.headers(),
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!res.ok) return null; // 503 = the box couldn't classify the chat right now: ask again next time
+      if (!res.ok) {
+        // 503 = the box couldn't classify the chat right now: ask again next time. One that names the autonomy settings
+        // means the chat IS led but its rules couldn't be read: the turn gets the fallback block instead
+        if (res.status === 503) {
+          try {
+            if ((await res.json())?.autonomy === "unreadable") return FALLBACK;
+          } catch {
+            /* an unreadable body is an ordinary 503 */
+          }
+        }
+        return null;
+      }
       const json = await res.json();
       return typeof json?.text === "string" ? json.text : null;
     } catch {
@@ -73,6 +90,10 @@ export function createLead(deps: LeadDeps) {
           }
           const got = await p;
           if (got === null) return; // nothing cached, nothing appended
+          if (got === FALLBACK) {
+            append(system, AUTONOMY_FALLBACK); // this turn only: nothing is cached, the next request asks again
+            return;
+          }
           // a compaction / deletion that landed while we were asking may have made this answer stale: use it, don't keep it
           if (forgets === before) remember(cache, sessionID, got, MAX_TRACKED);
           text = got;

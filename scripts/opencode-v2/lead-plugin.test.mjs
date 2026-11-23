@@ -24,7 +24,7 @@ process.env.MANTA_BOX_TOKEN = TOKEN;
 const tree = await transpileTree(MANTA_DIR, { rewrite: stub });
 after(() => tree.cleanup());
 const imp = (rel) => import(pathToFileURL(join(tree.dir, rel)).href);
-const { createLead } = await imp("lib/lead.mjs");
+const { createLead, AUTONOMY_FALLBACK } = await imp("lib/lead.mjs");
 const { resolveToolContext } = await imp("lib/context.mjs");
 const { allTools } = await imp("tools/index.mjs");
 const pluginDef = (await imp("index.mjs")).default;
@@ -98,6 +98,28 @@ describe("lead brief: fetch, cache, fail open", () => {
     await lead.onContext(e);
     assert.deepEqual(e.system, [IDENTITY]);
     assert.equal(srv.calls.length, 1, "asked once, not on every request");
+  });
+
+  test("a 503 that says the autonomy settings couldn't be read appends the fixed fallback for that turn and caches nothing", async () => {
+    let n = 0;
+    const { srv, lead } = leadWith({
+      "GET /api/agents/lead-brief": () => (++n === 1 ? { status: 503, body: { error: "couldn't read the autonomy settings right now", autonomy: "unreadable" } } : { body: { text: LEAD } }),
+    });
+    const a = ev("ses_a");
+    await lead.onContext(a);
+    assert.deepEqual(texts(a.system), [IDENTITY.text, AUTONOMY_FALLBACK]);
+    assert.match(AUTONOMY_FALLBACK, /^Your lead settings couldn't be loaded for this turn\. Don't hand off work, and don't merge, deploy, publish, send anything outside this box, delete data or spend money this turn\.$/);
+    const b = ev("ses_a");
+    await lead.onContext(b);
+    assert.deepEqual(texts(b.system), [IDENTITY.text, LEAD], "the next request asked again and got the real brief");
+    assert.equal(srv.calls.length, 2);
+  });
+
+  test("an ordinary 503 (couldn't classify) appends nothing — the fallback is only for unreadable settings", async () => {
+    const { lead } = leadWith({ "GET /api/agents/lead-brief": () => ({ status: 503, body: { error: "couldn't classify this chat right now" } }) });
+    const a = ev("ses_a");
+    await lead.onContext(a);
+    assert.deepEqual(a.system, [IDENTITY]);
   });
 
   test("a 503 caches nothing: the next request asks again and gets the brief", async () => {
