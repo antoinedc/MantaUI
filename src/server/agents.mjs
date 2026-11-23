@@ -19,7 +19,7 @@ import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG } from "../shared/agentsShared.mjs";
 import { createMutex } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
-import { WORKTREE_AGENT_GRANTS } from "./delegate.mjs";
+import { WORKTREE_AGENT_GRANTS, CAP_ERROR } from "./delegate.mjs";
 import * as autonomyPolicy from "./autonomy.mjs";
 
 export const AGENTS_TMUX_SESSION = "manta-agents";
@@ -35,6 +35,10 @@ const ROLES = ["lead", "specialist"];
 export const NOT_LEAD_ERROR = "Only the built-in Manta can lead";
 export const COLLISION_NOTICE = "Rename this folder to enable the Manta lead";
 export const LEAD_REFUSAL = "Manta already leads this chat";
+// The delegate cap's own sentence tells a generic caller to "do this work yourself"; the lead must not.
+export const HANDOFF_BUSY =
+  "All background slots on this box are busy right now. Do not retry and do not do the work yourself: tell the user, and offer to hand it off again once a running task finishes.";
+const handoffError = (error, fallback) => (error === CAP_ERROR ? HANDOFF_BUSY : error || fallback);
 const CONSUMED_MAX = 1000; // handoff invocations remembered, so a replayed tool call is refused
 const EXCERPT_FETCH = 60; // messages read to find EXCERPT_MESSAGES with text in them
 
@@ -861,7 +865,7 @@ export function createAgentsEngine({
         turnKey,
         allowPr: false,
       });
-      if (!res?.ok) return refuse(res?.error || "The task couldn't be continued");
+      if (!res?.ok) return refuse(handoffError(res?.error, "The task couldn't be continued"));
       return { ok: true, jobId: res.job.id, agentName: agent.meta.name };
     }
 
@@ -899,7 +903,7 @@ export function createAgentsEngine({
     } else {
       res = await delegate.startJob(job);
     }
-    if (!res?.ok) return refuse(res?.error || "The task couldn't be started");
+    if (!res?.ok) return refuse(handoffError(res?.error, "The task couldn't be started"));
     return { ok: true, jobId: res.job.id, agentName: agent.meta.name };
   }
 

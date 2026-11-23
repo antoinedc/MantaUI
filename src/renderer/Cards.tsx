@@ -629,7 +629,7 @@ export function PlanCard({
 
   // Actions, in order: [Build here] [Delegate ▾] [Open page].
   const splitTitle = atDelegateCap
-    ? "Too many background jobs running (5)"
+    ? "Too many background jobs running (10)"
     : "Start a background job in its own worktree";
   const actions = (
     <>
