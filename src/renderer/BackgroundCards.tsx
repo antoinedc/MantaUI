@@ -33,6 +33,8 @@ import {
   backgroundApi,
   NEEDS_DECISION_LABEL,
   openJobSession,
+  describeBlockedActions,
+  describeToldActions,
   resultStateLabel,
   resultTitleFor,
   resultTone,
@@ -362,6 +364,8 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   const blocked = part.endedBlocked === true;
   const tone = resultTone(part.state, blocked);
   const text = (part.text ?? "").trim();
+  const told = describeToldActions(part.toldActions);
+  const blockedLine = describeBlockedActions(part.blockedActions);
   return (
     <div
       className="rounded-lg border border-border bg-bg-soft px-3 py-2"
@@ -381,6 +385,16 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         {jobId && <OpenSessionButton onOpen={() => void open()} busy={busy} arrow className="ml-auto" />}
       </div>
       {text && <ClampedResultText text={text} />}
+      {told && (
+        <p className="m-0 mt-1 text-meta text-text-faint break-words" data-testid="background-result-told">
+          {told}
+        </p>
+      )}
+      {blockedLine && (
+        <p className="m-0 mt-1 text-meta text-text-faint break-words" data-testid="background-result-blocked">
+          {blockedLine}
+        </p>
+      )}
       {error && <ErrorLine message={error} />}
     </div>
   );

@@ -305,6 +305,21 @@ describe("Settings — schema-driven toasts are error-only (BET-1055)", () => {
     expect(useStore.getState().appToasts).toHaveLength(0);
   });
 
+  it("the Sessions tab carries the Agents autonomy card when the box has the channels", async () => {
+    const { api } = installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      launchersList: () => Promise.resolve([]),
+      configUpdate: () => Promise.resolve({}),
+      agentsAutonomyGet: () => Promise.resolve({ mode: "balanced", overrides: {}, effective: { edit_code: "auto", handoff: "auto", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask" } }),
+    });
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="autonomy-card"]')).toBeTruthy();
+    expect(api.calls.agentsAutonomyGet ?? []).toHaveLength(1);
+  });
+
   it("exactly one error toast with the disclosure when configUpdate fails", async () => {
     const { api } = stubApi(() => Promise.reject(new Error("boom")));
     h = mount(<Settings onClose={() => {}} initialSection="sessions" />);

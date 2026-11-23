@@ -31,6 +31,7 @@ import { OptimizerCard } from "./OptimizerCard";
 import { SummaryModelCard } from "./SummaryModelCard";
 import { KnowledgeCard } from "./settings/KnowledgeCard";
 import { BackgroundWorkCard } from "./settings/BackgroundWorkCard";
+import { AutonomyCard } from "./settings/AutonomyCard";
 import { openBackgroundWorkSettings } from "./useBackgroundStatus";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
@@ -1296,6 +1297,7 @@ export function Settings({
         </GroupCard>
       );
     }
+    if (section === "sessions") return <AutonomyCard />;
     if (section === "extensions") {
       return (
         <>

@@ -12,7 +12,7 @@
 // P1, P3–P6); the RPC-facing ones come straight from the shared `Api`.
 
 import type { Api } from "../shared/api";
-import type { OpencodeMessage, OpencodePart } from "../shared/types";
+import type { AutonomyAction, OpencodeMessage, OpencodePart } from "../shared/types";
 
 // ===== Contract types (P1, P3–P6) =====
 
@@ -30,7 +30,23 @@ export type BackgroundResultPart = OpencodePart & {
   text: string;
   /** The job ended while its model state was "blocked": shown as "Needs a decision" (spec 2026-11-14 A5). */
   endedBlocked?: boolean;
+  /** Agents Phase 3: what the task did that the user asked to be told about, and what the autonomy settings blocked. */
+  toldActions?: AutonomyAction[];
+  blockedActions?: AutonomyAction[];
 };
+
+/** "Told you: fly deploy, serve_page" from the part's own list (never parsed from text); null when there is none. */
+export function describeToldActions(actions: readonly AutonomyAction[] | undefined): string | null {
+  const list = (Array.isArray(actions) ? actions : []).filter((a) => a && typeof a.summary === "string" && a.summary);
+  return list.length ? `Told you: ${list.map((a) => a.summary).join(", ")}` : null;
+}
+
+/** "Blocked: fly deploy (needs your go-ahead), gh pr merge (not allowed)"; null when there is none. */
+export function describeBlockedActions(actions: readonly AutonomyAction[] | undefined): string | null {
+  const list = (Array.isArray(actions) ? actions : []).filter((a) => a && typeof a.summary === "string" && a.summary);
+  if (!list.length) return null;
+  return `Blocked: ${list.map((a) => `${a.summary} (${a.level === "ask" ? "needs your go-ahead" : "not allowed"})`).join(", ")}`;
+}
 
 /** P4: the job-record fields the cards read (all optional — absent on old records). */
 export type BackgroundJob = {

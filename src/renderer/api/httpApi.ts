@@ -1353,6 +1353,8 @@ export const httpApi: Api = {
   agentsCreate: (input) => rpc(IPC.agentsCreate, input),
   agentsDispatch: (input) => rpc(IPC.agentsDispatch, input),
   agentsOpenChat: (input) => rpc(IPC.agentsOpenChat, input),
+  agentsAutonomyGet: () => rpc(IPC.agentsAutonomyGet),
+  agentsAutonomySet: (input) => rpc(IPC.agentsAutonomySet, input),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
   // pending-approvals for the viewed parent session and shows ONE card.
   delegatePendingApprovals: (sessionId) =>
