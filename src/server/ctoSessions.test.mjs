@@ -547,6 +547,51 @@ test("knowledge task classes: tiers, budgets, timeouts, strictness", () => {
   }
 });
 
+test("only the project-actions scan asks for the cheapest endpoint of its band", () => {
+  const cheapest = Object.keys(TASK_CLASSES).filter((name) => getTaskClass(name).cheapest === true);
+  assert.deepEqual(cheapest, ["knowledge-actions"]);
+});
+
+test("the project-actions scan runs on an agent that answers the instruction, with its tools denied; every other class keeps the primitive's defaults", async () => {
+  // opencode's default one-shot agent (`title`) answers every prompt with a thread title, which is no answer to a JSON request.
+  const seen = {};
+  const oc = { async runEphemeralSession(opts) { seen[opts.title] = opts; return { text: "ok", sid: "s" }; } };
+  const deps = { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => OPUS };
+  for (const taskClass of Object.keys(TASK_CLASSES).filter((c) => !getTaskClass(c).resolutionOnly && c !== "spawn")) await runEphemeral({ taskClass, deps });
+  for (const [title, opts] of Object.entries(seen)) {
+    if (title === `${KNOWLEDGE_TITLE_PREFIX}knowledge-actions`) assert.deepEqual([opts.agent, opts.denyTools], ["general", true]);
+    else assert.deepEqual(["agent" in opts, "denyTools" in opts], [false, false], title);
+  }
+  assert.ok(seen[`${KNOWLEDGE_TITLE_PREFIX}knowledge-actions`], "the scan class ran");
+  assert.ok(Object.keys(seen).length > 5);
+});
+
+test("a `cheapest` class is routed with the economy ordering whatever preset the user runs; the others keep the user's preset", async () => {
+  const seen = [];
+  const route = fakeRoute({ model: OPUS }, seen);
+  const cfg = async () => ({ modelRouting: { preset: "performance" } });
+  const resolve = (taskClass) => defaultResolveModel({ taskClass, tier: getTaskClass(taskClass).tier, meta: getTaskClass(taskClass), configGet: cfg }, { listModels: async () => [], route });
+  await resolve("knowledge-actions");
+  await resolve("knowledge-capture");
+  assert.equal(seen[0].policy.preset, "economy");
+  assert.equal(seen[0].policy.perAgent["cto:knowledge-actions"], "fast", "still the class's own band");
+  assert.equal(seen[1].policy.preset, "performance", "an ordinary nano class is untouched");
+  assert.equal(seen[1].policy.perAgent["cto:knowledge-capture"], "fast");
+});
+
+test("real router: the project-actions scan takes the cheapest model of the fast band, not its highest-quality one", async () => {
+  // Two fast-band models of equal family quality: the plan's own (alphabetically first, expensive) and a cheap mini. Under
+  // the quality ordering the tie falls to the key; the scan must land on the cheap one.
+  const dear = _normalizeProviderModel("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 8, output: 40, cache: { read: 0.8, write: 10 } } }));
+  const cheap = _normalizeProviderModel("openai", "gpt-4o-mini", rawProviderModel({ id: "gpt-4o-mini", cost: { input: 0.15, output: 0.6, cache: { read: 0.07, write: 0.15 } } }));
+  const route = (args) => chooseSubagentModel({ ...args, services: routingServicesFor(args.catalog) });
+  const pick = (taskClass) => defaultResolveModel(
+    { taskClass, tier: getTaskClass(taskClass).tier, meta: getTaskClass(taskClass), configGet: async () => ({ modelRouting: { preset: "balanced" } }) },
+    { listModels: async () => [dear, cheap], route },
+  );
+  assert.equal((await pick("knowledge-actions")).modelID, "gpt-4o-mini");
+});
+
 test("deep maps to the deep router band and never escalates", () => {
   assert.equal(TIER_TO_ROUTER_TIER.deep, "deep");
   assert.equal(escalateTier("deep"), null);

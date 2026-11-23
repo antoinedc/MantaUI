@@ -1422,6 +1422,9 @@ export async function runThrowawayAgent({ instruction, model }) {
   return generateText({ instruction, model });
 }
 
+// The session ruleset of a tool-less one-shot (V2 spelling; the last matching rule wins, so this beats the agent's own allows).
+const DENY_ALL_TOOLS = Object.freeze([Object.freeze({ action: "*", resource: "*", effect: "deny" })]);
+
 /**
  * The THROWAWAY-SESSION synchronous mechanism: create a hidden session in
  * `directory`, prompt it (optionally on a given agent with a routed model)
@@ -1451,12 +1454,14 @@ export async function runThrowawayAgent({ instruction, model }) {
  *   onCreated       async (sid) => {} — called after create, before prompt
  *   trackCreation   internal-session provenance recorder (default: beginInternalSession)
  *   operation       operation label for the §4.1 record (default: the title tag)
+ *   denyTools       create the session with every tool denied (last match wins), for a one-shot whose prompt carries
+ *                   untrusted text and which must only answer — it can then run on an agent that has tools
  *   probe           W8 (BET-1536): mark the operation record AND its provider attempt as
  *                   probe evidence — recorded separately, never production evidence
  *                   (excluded from register statistics; no operation_outcome row)
  *   attempts        §4 recorder injection (default: the real endpoint-attempts store)
  *
- * @param {{ directory: string, instruction: string, agent?: string, model?: any, title?: string, pollIntervalMs?: number, maxAttempts?: number, onCreated?: (sid: string) => any, trackCreation?: () => any, operation?: string, probe?: boolean, attempts?: any }} a
+ * @param {{ directory: string, instruction: string, agent?: string, model?: any, title?: string, pollIntervalMs?: number, maxAttempts?: number, onCreated?: (sid: string) => any, trackCreation?: () => any, operation?: string, probe?: boolean, attempts?: any, denyTools?: boolean }} a
  * @returns {Promise<any>} `{ text, sid, ok, code, … }` — the result the caller reads
  */
 export async function runSynchronousSession({
@@ -1472,6 +1477,7 @@ export async function runSynchronousSession({
   operation,
   probe = false,
   attempts = endpointAttempts,
+  denyTools = false,
 }) {
   const absDir = expandTilde(directory);
 
@@ -1533,7 +1539,7 @@ export async function runSynchronousSession({
     // previously escaped the function with no finish(), no cleanup and no record.
     finishCreation = trackCreation();
     let createRefused = false;
-    const created = await ocCall("createSession", (c, o) => c.session.create({ location: { directory: absDir }, title, metadata: withInternalMarker() }, o), {
+    const created = await ocCall("createSession", (c, o) => c.session.create({ location: { directory: absDir }, title, metadata: withInternalMarker(), ...(denyTools ? { permissions: DENY_ALL_TOOLS } : {}) }, o), {
       signal: AbortSignal.timeout(10_000),
       onHttpError: () => {
         createRefused = true;

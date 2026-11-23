@@ -50,8 +50,16 @@ export const TASK_CLASSES = Object.freeze({
   // resolve a model for the caller's own session and are never run here.
   "knowledge-capture": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
   "knowledge-corrections": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
-  // Agents Phase 3c: the one-shot scan that lists which commands of a project trigger each autonomy action
-  "knowledge-actions": Object.freeze({ tier: "nano", contextBudget: 16000, timeoutMs: 120_000, titlePrefix: K }),
+  // Agents Phase 3c: the one-shot scan that lists which commands of a project trigger each autonomy action.
+  // `cheapest` orders the band by price (the router's economy ordering) instead of by quality: a plain read-and-list
+  // job needs no more than the cheapest model of its band (live: the quality ordering put Opus 5.5 — the top of a
+  // "fast" band that its benchmark percentile only just fits — on it).
+  // `agent` is the opencode agent the one-shot session runs on. Left unset, runSynchronousSession uses the `title` agent,
+  // whose own system prompt ("You output ONLY a thread title") turns every answer into a title — measured live on the
+  // scan: the reply to the full instruction was "Classifying deploy and send-external commands in project scripts". The
+  // other internal agent without tools, `summary`, writes a summary of the conversation instead ("I made no changes…").
+  // `general` has no system prompt of its own; `denyTools` takes its tools away, since the prompt carries project files.
+  "knowledge-actions": Object.freeze({ tier: "nano", contextBudget: 16000, timeoutMs: 120_000, titlePrefix: K, cheapest: true, agent: "general", denyTools: true }),
   "knowledge-trial": Object.freeze({ tier: "mid", resolutionOnly: true }),
   "curator-notes": Object.freeze({ tier: "mid", contextBudget: 12000, timeoutMs: 180_000, titlePrefix: K }),
   "curator-rules": Object.freeze({ tier: "deep", contextBudget: 24000, timeoutMs: 300_000, strict: true, titlePrefix: K }),
@@ -481,6 +489,9 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
       res = await oc.runEphemeralSession({
         directory,
         title: `${meta.titlePrefix ?? CTO_TITLE_PREFIX}${taskClass}`,
+        // Only a class that names an agent overrides the primitive's own default (the `title` agent).
+        ...(meta.agent ? { agent: meta.agent } : {}),
+        ...(meta.denyTools === true ? { denyTools: true } : {}),
         // Per-class wait (only classes that declare one; the others keep the
         // primitive's own default).
         ...(meta.timeoutMs
@@ -650,8 +661,11 @@ export async function defaultResolveModel(
   const policy = (cfg && cfg.modelRouting) || {};
   const agent = `cto:${taskClass}`;
   // Force the class tier; never let the user's own perAgent/preset override it.
+  // A `cheapest` class also forces the economy ordering (within the band the cheapest endpoint wins, where the other
+  // presets put the highest-quality one first), whatever preset the user runs.
   const forcedPolicy = {
     ...policy,
+    ...(meta?.cheapest === true ? { preset: "economy" } : {}),
     perAgent: { ...(policy.perAgent ?? {}), [agent]: TIER_TO_ROUTER_TIER[tier] },
   };
 
