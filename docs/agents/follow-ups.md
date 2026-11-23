@@ -65,6 +65,16 @@ count a segment that actually starts a command.
   separate checkout/worktree was unreachable. Fix: let a handoff name a target project/folder (checked to be a real
   project, never Manta's own folders).
 
+## Other background model calls may still run on opencode's title writer
+
+Found while fixing the project actions scan: a one-shot background model call that doesn't name an agent runs on
+opencode's `title` agent, whose own instructions are "output ONLY a thread title". The scan got "Classifying deploy
+commands in project scripts" back instead of its JSON, on every model. The scan now names an agent
+(`general`, tools denied). The other background classes (capture, corrections, curator, digest, gatekeeper, triage…)
+still use the default — check which of them need a real answer and give them the same treatment. Related: the router's
+quality-first ordering put Opus 5.5 at the top of the "fast" band (its benchmark percentile just fits it); only the scan
+asks for the cheapest model of its band.
+
 ## From Phase 3c (docs/superpowers/specs/2026-11-23-agents-phase3c-judgement-and-action-map.md)
 
 - Show the project's "Actions in this project" commands in Manta's own (lead) instructions, not only in tasks.

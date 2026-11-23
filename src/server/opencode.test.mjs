@@ -1933,6 +1933,25 @@ test("headless primitive records provenance before prompt and returns safe struc
   assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
 });
 
+test("headless primitive: denyTools creates the session with every tool denied; without it the create body carries no ruleset", async () => {
+  const { runSynchronousSession } = await import("./opencode.mjs");
+  const created = [];
+  for (const denyTools of [true, false]) {
+    await withMockFetch(async (url, opts) => {
+      const u = String(url);
+      if (opts?.method === "DELETE") return new Response(null, { status: 204 });
+      if (u.endsWith("/prompt")) return new Response("no", { status: 503 });
+      if (opts?.method === "POST" && u.endsWith("/api/session")) created.push(JSON.parse(String(opts.body)));
+      return json({ data: { id: `deny-${denyTools}` } });
+    }, async () => {
+      await runSynchronousSession({ directory: "/work", instruction: "x", agent: "general", denyTools, pollIntervalMs: 0, maxAttempts: 1 });
+    });
+  }
+  assert.equal(created.length, 2);
+  assert.deepEqual(created[0].permissions, [{ action: "*", resource: "*", effect: "deny" }]);
+  assert.equal("permissions" in created[1], false);
+});
+
 for (const final of ["complete", "error"]) {
   test(`headless primitive waits through partial text before terminal ${final}`, async () => {
     const { runSynchronousSession } = await import("./opencode.mjs");

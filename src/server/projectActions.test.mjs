@@ -613,9 +613,10 @@ test("actions log: every way a task or a scan ends without a written page says w
 // `runKnowledge` wired to the REAL task runner (runEphemeral: model resolution, answer check, one-tier cascade) with only the
 // model session faked — what production's `createKnowledgeRunner` hands the scan.
 function realRunner(replies) {
-  const seen = { tiers: [], sessions: 0 };
+  const seen = { tiers: [], agents: [], sessions: 0 };
   const oc = {
-    async runEphemeralSession() {
+    async runEphemeralSession({ agent }) {
+      seen.agents.push(agent);
       const reply = replies[Math.min(seen.sessions++, replies.length - 1)];
       return typeof reply === "string" ? { text: reply, sid: "s" } : { sid: "s", ...reply };
     },
@@ -654,7 +655,7 @@ test("scan through the real task runner: a reply with prose around it and some i
   const r = await rig({ files: SHIP, run });
   await r.pa.forTask({ directory: r.projectDir });
   await settle(r);
-  assert.deepEqual(seen, { tiers: ["nano"], sessions: 1 }, "one model call, no cascade");
+  assert.deepEqual(seen, { tiers: ["nano"], agents: ["general"], sessions: 1 }, "one model call (on an agent that answers, not the title writer), no cascade");
   const commands = parseActionsPage(await r.store.read(PAGE)).entries.map((e) => e.command);
   assert.ok(commands.includes("fly deploy"), "the valid, grounded entry is kept");
   assert.ok(!commands.includes("rsync -av dist/ root@prod:/var/www"));
@@ -667,7 +668,7 @@ test("scan through the real task runner: an answer with no JSON fails after the 
   const r = await rig({ files: SHIP, run });
   await r.pa.forTask({ directory: r.projectDir });
   await settle(r);
-  assert.deepEqual(seen, { tiers: ["nano", "mid"], sessions: 2 });
+  assert.deepEqual(seen, { tiers: ["nano", "mid"], agents: ["general", "general"], sessions: 2 });
   assert.equal(await r.store.read(PAGE), null, "nothing written");
   const failed = r.logs.filter((l) => /scan failed/.test(l));
   assert.equal(failed.length, 1, r.logs.join("\n"));

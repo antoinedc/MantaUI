@@ -552,6 +552,20 @@ test("only the project-actions scan asks for the cheapest endpoint of its band",
   assert.deepEqual(cheapest, ["knowledge-actions"]);
 });
 
+test("the project-actions scan runs on an agent that answers the instruction, with its tools denied; every other class keeps the primitive's defaults", async () => {
+  // opencode's default one-shot agent (`title`) answers every prompt with a thread title, which is no answer to a JSON request.
+  const seen = {};
+  const oc = { async runEphemeralSession(opts) { seen[opts.title] = opts; return { text: "ok", sid: "s" }; } };
+  const deps = { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => OPUS };
+  for (const taskClass of Object.keys(TASK_CLASSES).filter((c) => !getTaskClass(c).resolutionOnly && c !== "spawn")) await runEphemeral({ taskClass, deps });
+  for (const [title, opts] of Object.entries(seen)) {
+    if (title === `${KNOWLEDGE_TITLE_PREFIX}knowledge-actions`) assert.deepEqual([opts.agent, opts.denyTools], ["general", true]);
+    else assert.deepEqual(["agent" in opts, "denyTools" in opts], [false, false], title);
+  }
+  assert.ok(seen[`${KNOWLEDGE_TITLE_PREFIX}knowledge-actions`], "the scan class ran");
+  assert.ok(Object.keys(seen).length > 5);
+});
+
 test("a `cheapest` class is routed with the economy ordering whatever preset the user runs; the others keep the user's preset", async () => {
   const seen = [];
   const route = fakeRoute({ model: OPUS }, seen);
