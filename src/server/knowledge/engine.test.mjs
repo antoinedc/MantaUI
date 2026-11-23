@@ -46,6 +46,24 @@ test("start creates the git store and state, reports `on`, and the engine does n
   await engine.stop();
 });
 
+test("the foundation handles other modules read (store, registry, budget, scanner, …) are null before start and set after; null again when it can't start", async () => {
+  const handles = ["store", "registry", "budget", "scanner", "state", "sessionMap", "queue"];
+  const { engine } = await rig();
+  for (const h of handles) assert.equal(engine[h], null, `${h} before start`);
+  assert.equal(typeof engine.settings.effective, "function", "settings and deps exist from the start");
+  assert.equal(engine.deps.runEphemeral, undefined);
+  await engine.start();
+  for (const h of handles) assert.ok(engine[h], `${h} after start`);
+  assert.equal(typeof engine.store.withLock, "function");
+  assert.equal(typeof engine.registry.identify, "function");
+  assert.equal(typeof engine.budget.record, "function");
+  assert.equal(typeof engine.scanner.redact, "function");
+  await engine.stop();
+  const off = await rig({ over: { importSqlite: async () => { throw new Error("no sqlite"); } } });
+  await off.engine.start();
+  for (const h of handles) assert.equal(off.engine[h], null, `${h} when it can't start`);
+});
+
 test("without node:sqlite the subsystem is off and says why; tools answer 503 disabled; briefing is empty; settings still work", async () => {
   const { engine, updates } = await rig({ over: { importSqlite: async () => { throw new Error("no sqlite"); } } });
   const s = await engine.start();

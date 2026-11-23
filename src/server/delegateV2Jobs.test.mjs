@@ -38,8 +38,9 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { createJobLiveness } from "./jobLiveness.mjs";
 import { MODES } from "../shared/autonomyShared.mjs";
-import { jobRules, policyKey, normalizePolicy, effectivePolicy, CODE_OFF, POLICY_CHANGED, LEGACY_TASK, MANTA_FOLDER, SETTINGS_UNREADABLE } from "./autonomy.mjs";
+import { jobRules, policyKey, normalizePolicy, effectivePolicy, taskPromptSection, taskFooter, CODE_OFF, POLICY_CHANGED, LEGACY_TASK, MANTA_FOLDER, SETTINGS_UNREADABLE } from "./autonomy.mjs";
 import { buildResultSynthetic } from "./delegate.mjs";
+import { MAX_ENTRIES_ERROR, projectPatterns, validateEntry } from "./projectActions.mjs";
 import { createJobViews } from "./jobViews.mjs";
 
 const T0 = 1_700_000_000_000;
@@ -2483,11 +2484,16 @@ test("autonomy: a specialist's denies are appended ONCE after the base, then the
   assert.equal(job.autonomyKey, policyKey(BAL));
   assert.deepEqual(job.autonomyPolicy, normalizePolicy(BAL));
   assert.equal(job.agentDir, `${HOME}/.manta/agents/dev`);
-  assert.match(job.launch.text, /Some actions need the user's go-ahead: deploy or release anything/);
+  assert.match(job.launch.text, /Needs the user's go-ahead \(don't do it and don't try another way\): deploy or release anything/);
   assert.match(job.launch.text, /Merging is never part of a task/);
+  assert.equal(job.launch.text.includes(taskPromptSection(BAL)), true, "the section is the pure one, with no project entries");
   // …and the prompt's autonomy section sits after the worktree paragraph, before the time budget
-  assert.ok(job.launch.text.indexOf("Some actions need") > job.launch.text.indexOf("never touch any other checkout") || job.launch.text.indexOf("Some actions need") > job.launch.text.indexOf("Do not open pull requests"));
-  assert.ok(job.launch.text.indexOf("Some actions need") < job.launch.text.indexOf("Time: this job is stopped"));
+  assert.ok(job.launch.text.indexOf("## Your limits") > job.launch.text.indexOf("never touch any other checkout") || job.launch.text.indexOf("## Your limits") > job.launch.text.indexOf("Do not open pull requests"));
+  assert.ok(job.launch.text.indexOf("## Your limits") < job.launch.text.indexOf("Time: this job is stopped"));
+  // a specialist's endings send the question and the summary to its final message, before the report section
+  assert.match(job.launch.text, /put the question in your final message, before the "Actions from your list" section\./);
+  assert.match(job.launch.text, /When you are done, write a short summary of what you changed and why\./);
+  assert.deepEqual(job.projectPatterns, [], "no page entries: an empty snapshot");
 });
 
 test("autonomy: a caller-supplied (approval-resolved) base is kept and the denies come after it; a plain job is untouched", async () => {
@@ -2642,7 +2648,8 @@ test("autonomy resume: a fresh child under the CURRENT settings — the ruleset 
   assert.deepEqual(job.autonomyPolicy, normalizePolicy(AUT));
   assert.deepEqual(w.calls.create[0].permission, job.permission, "the new child gets the recomputed ruleset");
   assert.deepEqual(job.basePermission, before.basePermission);
-  assert.doesNotMatch(w.calls.send[0].text, /Some actions need the user's go-ahead: deploy or release anything/, "deploy is Tell now, so it is no longer an 'ask' in the prompt");
+  assert.doesNotMatch(w.calls.send[0].text, /Needs the user's go-ahead \(don't do it and don't try another way\): deploy or release anything/, "deploy is Tell now, so it is no longer an 'ask' in the prompt");
+  assert.match(w.calls.send[0].text, /Allowed, but list them in your report: deploy or release anything/);
   assert.match(w.calls.send[0].text, /Merging is never part of a task/);
 
   const refused = specialistWorld(BAL);
@@ -2706,4 +2713,282 @@ test("autonomy result: a continuation reads only its own round; nothing to repor
   assert.equal("toldActions" in body.metadata.manta, false);
   assert.equal("blockedActions" in body.metadata.manta, false);
   assert.doesNotMatch(body.text, /Done without asking|Blocked by the user's autonomy/);
+});
+
+
+// ---------------------------------------------------------------------------
+// Agents Phase 3c: the project's own commands, the report section, what got through
+// ---------------------------------------------------------------------------
+
+const pageEntry = (kind, command, file = null) => validateEntry({ kind, command, what: "x", file });
+const PAGE_A = [pageEntry("deploy", "scripts/deploy-web.sh", "scripts/deploy-web.sh"), pageEntry("publish", "make ship")];
+const PAGE_B = [pageEntry("deploy", "make release", "Makefile")];
+// the project's commands for every task started in the world, and the directories it was asked about
+const withPage = (w, entries = PAGE_A, promptEntries = entries) => {
+  w.state.asked = [];
+  w.deps.projectActions = {
+    forTask: async ({ directory }) => {
+      w.state.asked.push(directory);
+      return { entries: w.state.pageEntries ?? entries, promptEntries: w.state.pagePrompt ?? w.state.pageEntries ?? promptEntries };
+    },
+  };
+  return w;
+};
+const DIR = `${HOME}/.manta/agents/dev`;
+const bashDenies = (rules) => rules.filter((r) => r.permission === "bash" && r.action === "deny").map((r) => r.pattern);
+
+test("project actions: a specialist's START takes its denies and its prompt section from the page (read once, for the parent's folder); the snapshot is stored", async () => {
+  const w = withPage(specialistWorld(BAL));
+  const id = await start(w, autonomyInput(w));
+  const job = w.job(id);
+  const pp = projectPatterns(PAGE_A);
+  assert.deepEqual(w.state.asked, [REPO]);
+  assert.deepEqual(job.projectPatterns, pp);
+  assert.deepEqual(job.permission, [...job.basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, projectPatterns: pp }), q]);
+  assert.deepEqual(w.calls.create[0].permission, job.permission);
+  const denies = bashDenies(w.calls.create[0].permission);
+  for (const p of ["scripts/deploy-web.sh", "./scripts/deploy-web.sh", "bash scripts/deploy-web.sh", "make ship", "make ship *"]) assert.ok(denies.includes(p), p);
+  assert.ok(job.permission.every((r) => r.action === "deny" || !String(r.pattern).includes("deploy-web")), "a page never produces an allow");
+  assert.equal(job.launch.text.includes(taskPromptSection(BAL, PAGE_A)), true);
+  assert.match(job.launch.text, /- deploy or release anything: `scripts\/deploy-web\.sh` \(scripts\/deploy-web\.sh\)\n- publish anything others can see: `make ship`\n\nYour final message:/);
+
+  // Tell: nothing is blocked, but the section still tells the task
+  const t = withPage(specialistWorld(AUT));
+  const tid = await start(t, autonomyInput(t));
+  assert.ok(!bashDenies(t.job(tid).permission).includes("make ship"));
+  assert.ok(!bashDenies(t.job(tid).permission).includes("scripts/deploy-web.sh"));
+  assert.deepEqual(t.job(tid).projectPatterns, pp, "every entry is kept (Tell commands are still attributed)");
+  assert.match(t.job(tid).launch.text, /`scripts\/deploy-web\.sh`/);
+
+  // the rules and the prompt come from the entries the page gave: prompt entries may be fewer (unscreened ones are rules only)
+  const rulesOnly = withPage(specialistWorld(BAL), PAGE_A, []);
+  const rid = await start(rulesOnly, autonomyInput(rulesOnly));
+  assert.ok(bashDenies(rulesOnly.job(rid).permission).includes("make ship"));
+  assert.doesNotMatch(rulesOnly.job(rid).launch.text, /In this project, these commands also count/);
+
+  // a generic job never asks the page
+  const plain = withPage(world());
+  await start(plain, { agent: "build" });
+  assert.deepEqual(plain.state.asked, []);
+});
+
+test("project actions: a reader that rejects, throws or answers nonsense is no project rules — the task still starts", async () => {
+  for (const forTask of [async () => { throw new Error("boom"); }, () => { throw new Error("sync boom"); }, async () => null, async () => ({ entries: "x", promptEntries: 5 })]) {
+    const w = specialistWorld(BAL);
+    w.deps.projectActions = { forTask };
+    const id = await start(w, autonomyInput(w));
+    assert.deepEqual(w.job(id).projectPatterns, []);
+    assert.deepEqual(w.job(id).permission, [...w.job(id).basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR }), q]);
+    assert.doesNotMatch(w.job(id).launch.text, /In this project, these commands also count/);
+  }
+  const noReader = specialistWorld(BAL);
+  assert.equal((await startJob(input(autonomyInput(noReader)), noReader.deps)).ok, true, "no reader wired at all");
+});
+
+test("project actions: more than 100 commands refuses the start and the resume with the page's sentence, creating nothing", async () => {
+  const many = Array.from({ length: 101 }, (_, i) => pageEntry("deploy", `scripts/deploy-${i}.sh`));
+  const w = withPage(specialistWorld(BAL), many);
+  const res = await startJob(input(autonomyInput(w)), w.deps);
+  assert.deepEqual(res, { ok: false, error: MAX_ENTRIES_ERROR });
+  assert.equal(w.jobs.length, 0);
+  assert.deepEqual(w.calls.addWorktree, []);
+  assert.deepEqual(w.calls.create, []);
+
+  const r = withPage(specialistWorld(BAL));
+  const id = await pausedJob(r, autonomyInput(r));
+  r.state.pageEntries = many;
+  r.calls.create.length = 0;
+  assert.deepEqual(await resumeJob(id, r.deps), { ok: false, error: MAX_ENTRIES_ERROR });
+  assert.equal(r.job(id).status, "paused");
+  assert.deepEqual(r.calls.create, []);
+});
+
+test("project actions: a RESUME (fresh child) reads the page again — new denies, new section, new snapshot; a refused resume restores the old snapshot", async () => {
+  const w = withPage(specialistWorld(BAL));
+  const id = await pausedJob(w, autonomyInput(w));
+  const before = structuredClone(w.job(id));
+  assert.deepEqual(before.projectPatterns, projectPatterns(PAGE_A));
+  w.state.pageEntries = PAGE_B;
+  w.state.asked.length = 0;
+  w.calls.create.length = w.calls.send.length = 0;
+
+  w.fail.create = httpErr(400);
+  assert.equal((await resumeJob(id, w.deps)).ok, false);
+  assert.deepEqual(w.job(id).projectPatterns, before.projectPatterns, "a refused resume puts the paused job back as it was");
+  assert.deepEqual(w.job(id).permission, before.permission);
+  w.fail.create = null;
+
+  const res = await resumeJob(id, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const job = w.job(id);
+  assert.deepEqual(w.state.asked, [REPO, REPO], "asked for each resume attempt, for the parent's folder");
+  assert.deepEqual(job.projectPatterns, projectPatterns(PAGE_B));
+  assert.deepEqual(job.permission, normalizeJobRuleset([...before.basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, projectPatterns: projectPatterns(PAGE_B) })]));
+  assert.deepEqual(w.calls.create.at(-1).permission, job.permission);
+  assert.ok(bashDenies(job.permission).includes("make release") && !bashDenies(job.permission).includes("make ship"));
+  assert.match(w.calls.send.at(-1).text, /`make release` \(Makefile\)/);
+  assert.match(w.calls.send.at(-1).text, /put the question in your final message, before the "Actions from your list" section\./);
+  assert.match(w.calls.send.at(-1).text, /When you are done, write a short summary/);
+  assert.equal("projectPatterns" in res.job || "selfReport" in res.job || "basePermission" in res.job, false, "never on the wire");
+});
+
+test("project actions: a CONTINUATION keeps the record's snapshot (no new lookup) and reminds the child of the report section", async () => {
+  const w = withPage(specialistWorld(BAL));
+  const id = await finishedSpecialist(w);
+  const first = w.job(id);
+  assert.deepEqual(first.projectPatterns, projectPatterns(PAGE_A));
+  w.state.pageEntries = Array.from({ length: 150 }, (_, i) => pageEntry("deploy", `scripts/x-${i}.sh`)); // a page that would refuse a start
+  w.state.asked.length = 0;
+  w.calls.send.length = 0;
+  const res = await continueJob(id, { prompt: "round two: tidy up", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(w.state.asked, [], "no new lookup");
+  const next = w.job(res.job.id);
+  assert.deepEqual(next.projectPatterns, first.projectPatterns, "the snapshot is carried over");
+  assert.deepEqual(next.permission, first.permission);
+  assert.equal(next.prompt, "round two: tidy up", "the record keeps the user's text");
+  const sent = w.calls.send.at(-1).text;
+  assert.equal(sent, `round two: tidy up\n\n${taskFooter(first.autonomyPolicy)}`);
+  assert.match(sent, /## Actions from your list\n- Did: <action>/);
+  assert.match(sent, /<action> is one of: deploy, publish, send, delete, spend, settings, agent change, merge\.$/);
+  // a generic job's follow-up is the text, untouched
+  const g = specialistWorld(BAL);
+  const gid = await finishedLeadJobLike(g);
+  g.calls.send.length = 0;
+  await continueJob(gid, { prompt: "again", sessionID: PARENT }, g.deps);
+  assert.equal(g.calls.send.at(-1).text, "again");
+});
+
+const reportText = (...lines) => `All done.\n\n## Actions from your list\n${lines.join("\n")}`;
+const finishWith = async (w, id, messages) => {
+  const child = w.job(id).childSessionID;
+  w.setMessages(child, messages);
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  return w.job(id);
+};
+const turn = (launchId, parts, text) => [
+  { info: { id: launchId, role: "user" }, parts: [{ type: "text", text: "go" }] },
+  { info: { id: `msg_${launchId}`, role: "assistant" }, parts: [...parts, ...(text === undefined ? [] : [{ type: "text", text }])] },
+];
+
+test("project actions: what got through (a command at Ask / Never, or the agent's own 'Did') is kept on the record, put first in the result and on its metadata; a report beats no report", async () => {
+  const w = withPage(specialistWorld(BAL));
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const job0 = w.job(id);
+  const done = await finishWith(
+    w,
+    id,
+    turn(job0.launch.messageId, [toolPart("bash", { command: "./scripts/deploy-web.sh --prod" }), toolPart("bash", { command: "fly deploy --app z" })], reportText("- Did: deploy — pushed the site by hand", "- Did: spend — started a VM", "- Blocked: send — needed to email the client")),
+  );
+  assert.equal(done.selfReport, "present");
+  assert.deepEqual(done.exceededActions, [
+    { kind: "deploy", level: "ask", summary: "scripts/deploy-web.sh" },
+    { kind: "deploy", level: "ask", summary: "fly deploy" },
+    { kind: "spend", level: "ask", summary: "started a VM", source: "agent" },
+  ]);
+  assert.deepEqual(done.blockedActions, [{ kind: "send_external", level: "ask", summary: "needed to email the client", source: "agent" }]);
+  const syn = [...w.records.values()][0].body;
+  assert.deepEqual(syn.metadata.manta.exceededActions, done.exceededActions);
+  assert.equal("selfReport" in syn.metadata.manta, false, "the report state only drives a line of text");
+  const lines = syn.text.split("\n");
+  const exceededAt = lines.findIndex((l) => l.startsWith("Despite the user's autonomy settings: "));
+  const blockedAt = lines.findIndex((l) => l.startsWith("Blocked by the user's autonomy settings"));
+  assert.ok(exceededAt >= 0 && blockedAt > exceededAt, "exceeded comes first");
+  assert.match(lines[exceededAt], /deploy — scripts\/deploy-web\.sh \(ask\) \(matched in a completed command; outcome not checked\); deploy — fly deploy \(ask\) \(matched in a completed command; outcome not checked\); spend — started a VM \(ask\) \(agent's report: did it\)/);
+  assert.match(lines[blockedAt], /send external — needed to email the client \(ask\) \(agent's report\)/);
+  assert.doesNotMatch(syn.text, /did not include/);
+  assert.ok(!syn.text.includes("--prod"), "a command's arguments never appear");
+  assert.equal(JSON.stringify(syn.metadata).includes("--prod"), false);
+});
+
+test("project actions: a specialist's result without the section says so (done only); a failed task is not called out; a generic job never is", async () => {
+  const w = specialistWorld(BAL);
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const done = await finishWith(w, id, turn(w.job(id).launch.messageId, [], "Fixed it."));
+  assert.equal(done.selfReport, "missing");
+  assert.match(buildCompletionText(done), /\nThe task did not include its "Actions from your list" section\.\n/);
+
+  const none = specialistWorld(BAL);
+  const nid = await start(none, autonomyInput(none, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const quiet = await finishWith(none, nid, turn(none.job(nid).launch.messageId, [], reportText("- None")));
+  assert.equal(quiet.selfReport, "none");
+  assert.deepEqual(quiet.exceededActions, []);
+  assert.doesNotMatch(buildCompletionText(quiet), /did not include|Despite/);
+  assert.equal("exceededActions" in buildResultSynthetic(quiet).metadata.manta, false, "nothing to report omits the field");
+
+  const failed = specialistWorld(BAL);
+  const fid = await start(failed, autonomyInput(failed));
+  failed.setMessages(failed.job(fid).childSessionID, turn(failed.job(fid).launch.messageId, [toolPart("bash", { command: "fly deploy" })], "Hit an error."));
+  await finishV2Job(failed.job(fid), "failed", "boom", failed.deps);
+  assert.equal(failed.job(fid).selfReport, "missing", "a failed attempt has no final text to read");
+  assert.deepEqual(failed.job(fid).exceededActions, [{ kind: "deploy", level: "ask", summary: "fly deploy" }], "…but a command that ran is still seen");
+  assert.doesNotMatch(buildCompletionText(failed.job(fid)), /did not include/);
+  assert.match(buildCompletionText(failed.job(fid)), /Despite the user's autonomy settings: deploy — fly deploy/);
+
+  const generic = specialistWorld(BAL);
+  const gid = await finishedLeadJobLike(generic);
+  assert.equal("selfReport" in generic.job(gid), false);
+  assert.doesNotMatch(buildCompletionText(generic.job(gid)), /did not include/);
+});
+
+test("project actions: the result text is THIS attempt's — a continuation that wrote no new final text has none (never round one's report)", async () => {
+  const w = specialistWorld(BAL);
+  const id = await finishedSpecialist(w);
+  const first = w.job(id);
+  const child = first.childSessionID;
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const next = w.job(res.job.id);
+  assert.equal(next.exceededActions, undefined, "not inherited");
+  assert.equal(next.selfReport, undefined, "not inherited");
+  const roundOne = turn(first.launch.messageId, [], reportText("- Did: spend — round one VM"));
+  const roundTwo = [{ info: { id: next.launch.messageId, role: "user" }, parts: [] }, { info: { id: "msg_two", role: "assistant" }, parts: [toolPart("bash", { command: "npm test" })] }];
+  const after = await finishWith(w, next.id, [...roundOne, ...roundTwo]);
+  assert.equal(after.selfReport, "missing");
+  assert.deepEqual(after.exceededActions, []);
+  assert.equal(after.result, "All done.\n\n## Actions from your list\n- Did: spend — round one VM", "(the result text itself is unchanged behaviour)");
+  assert.match(buildCompletionText(after), /did not include its "Actions from your list" section/);
+
+  // …and a round that does report is read from its own text only
+  const w2 = specialistWorld(BAL);
+  const id2 = await finishedSpecialist(w2);
+  const first2 = w2.job(id2);
+  const res2 = await continueJob(id2, { prompt: "round two", sessionID: PARENT }, w2.deps);
+  const next2 = w2.job(res2.job.id);
+  const done2 = await finishWith(w2, next2.id, [
+    ...turn(first2.launch.messageId, [], reportText("- Did: spend — round one VM")),
+    { info: { id: next2.launch.messageId, role: "user" }, parts: [] },
+    { info: { id: "msg_two", role: "assistant" }, parts: [{ type: "text", text: reportText("- Did: publish — round two gist", "- Blocked: delete — a table") }] },
+  ]);
+  assert.equal(done2.selfReport, "present");
+  assert.deepEqual(done2.exceededActions.map((a) => a.summary), ["round two gist"]);
+  assert.deepEqual(done2.blockedActions.map((a) => a.summary), ["a table"]);
+  void child;
+});
+
+test("project actions: projectPatterns, selfReport and the base ruleset stay on the box — never in a start, continue, resume or list response", async () => {
+  const w = withPage(specialistWorld(BAL));
+  const res = await startJob(input(autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" })), w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const secrets = ["projectPatterns", "selfReport", "basePermission"];
+  const clean = (v, label) => {
+    const text = JSON.stringify(v);
+    for (const k of secrets) assert.equal(text.includes(`"${k}"`), false, `${label}: ${k}`);
+  };
+  clean(res, "start");
+  const id = res.job.id;
+  assert.ok(w.job(id).projectPatterns.length > 0 && w.job(id).basePermission, "…while the record keeps them");
+  const done = await finishWith(w, id, turn(w.job(id).launch.messageId, [], "ok"));
+  assert.equal(done.selfReport, "missing");
+  clean(await listJobs({ sessionID: PARENT }, { load: w.deps.load }), "list");
+  const cont = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
+  assert.equal(cont.ok, true, JSON.stringify(cont));
+  clean(cont, "continue");
+  const eng = createDelegateEngine(w.deps);
+  clean(await eng.listJobs({ sessionID: PARENT }), "engine list");
+
+  const p = withPage(specialistWorld(BAL));
+  const pid = await pausedJob(p, autonomyInput(p));
+  clean(await resumeJob(pid, p.deps), "resume");
 });

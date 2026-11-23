@@ -50,6 +50,8 @@ export const TASK_CLASSES = Object.freeze({
   // resolve a model for the caller's own session and are never run here.
   "knowledge-capture": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
   "knowledge-corrections": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
+  // Agents Phase 3c: the one-shot scan that lists which commands of a project trigger each autonomy action
+  "knowledge-actions": Object.freeze({ tier: "nano", contextBudget: 16000, timeoutMs: 120_000, titlePrefix: K }),
   "knowledge-trial": Object.freeze({ tier: "mid", resolutionOnly: true }),
   "curator-notes": Object.freeze({ tier: "mid", contextBudget: 12000, timeoutMs: 180_000, titlePrefix: K }),
   "curator-rules": Object.freeze({ tier: "deep", contextBudget: 24000, timeoutMs: 300_000, strict: true, titlePrefix: K }),

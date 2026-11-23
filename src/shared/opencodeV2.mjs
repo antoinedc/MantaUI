@@ -18,6 +18,8 @@
 //     filePath); subagent input `agent` (was subagent_type);
 //   * errors are `{type, message, status?}`, not V1's `{name, data}`.
 
+import { ACTION_KINDS } from "./autonomyShared.mjs";
+
 // ===== tool names / inputs =====
 
 const TOOL_NAME_FROM_V2 = { shell: "bash", subagent: "task" };
@@ -368,13 +370,21 @@ function envelopeAttr(text, name) {
   return m ? m[1] : undefined;
 }
 
-// A specialist task's told / blocked actions (Agents Phase 3 §5): `{ kind, level?, summary }`, at most 10; anything else dropped.
-function actionList(v) {
+// A specialist task's told / blocked / exceeded actions (Agents Phase 3 §5, Phase 3c): `{ kind, level?, summary, source? }`, at most
+// 10. `kind` is an action kind or "protected"; `source` is kept only when it is "agent"; `needLevel` (the exceeded list) drops an
+// entry without a valid ask / never level. Anything else is dropped.
+function actionList(v, { needLevel = false } = {}) {
   if (!Array.isArray(v)) return undefined;
   const out = v
-    .filter((a) => a && typeof a === "object" && typeof a.kind === "string" && typeof a.summary === "string")
+    .filter((a) => a && typeof a === "object" && typeof a.summary === "string" && (a.kind === "protected" || ACTION_KINDS.includes(a.kind)))
+    .filter((a) => !needLevel || a.level === "ask" || a.level === "never")
     .slice(0, 10)
-    .map((a) => ({ kind: a.kind, ...(a.level === "ask" || a.level === "never" ? { level: a.level } : {}), summary: a.summary }));
+    .map((a) => ({
+      kind: a.kind,
+      ...(a.level === "ask" || a.level === "never" ? { level: a.level } : {}),
+      summary: a.summary,
+      ...(a.source === "agent" ? { source: "agent" } : {}),
+    }));
   return out.length > 0 ? out : undefined;
 }
 
@@ -419,6 +429,7 @@ function mapBackgroundResult(m, { sessionID }) {
         // Agents Phase 3: what the user asked to be told about, and what the autonomy settings blocked (absent = none)
         toldActions: actionList(manta.toldActions),
         blockedActions: actionList(manta.blockedActions),
+        exceededActions: actionList(manta.exceededActions, { needLevel: true }),
         text,
       }),
     ],

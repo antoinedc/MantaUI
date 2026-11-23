@@ -21,6 +21,7 @@ import { effectiveFor } from "./settings.mjs";
 import { feedsShared } from "./sharing.mjs";
 import { createTombstones } from "./tombstones.mjs";
 import { parsePage, updateFrontMatter } from "./pages.mjs";
+import { entriesFromSection, insertEntries, kindOfHeading, parseActionsPage } from "../projectActions.mjs";
 import { createUndo } from "./undo.mjs";
 import { createTidy, createDowngradeCleanup } from "./tidy.mjs";
 
@@ -44,7 +45,7 @@ Each decision is one of:
   With "section", content is the new body of that section only; without it, content is the whole page body. Edit an existing page when one fits; otherwise start a new page in the right place.
 - {"type":"drop","reason":"<why the note isn't worth keeping>","evidence":[]}
 
-Where things go (project pages live under projects/<slug>/): overview.md (with a "## Briefing" section of at most 60 lines: what the project is, how it is laid out, the few things every session must know), run-and-test.md, release-and-rollback.md, runbooks/<name>.md (step by step procedures), decisions/<name>.md, gotchas.md, access.md (names of accounts and services only, never secrets), how-the-user-works-here.md. A project that shares its knowledge may also feed user/how-i-work.md, user/people-and-accounts.md (names only) and commons/howto/<name>.md (generic how-tos with the project specifics removed).
+Where things go (project pages live under projects/<slug>/): overview.md (with a "## Briefing" section of at most 60 lines: what the project is, how it is laid out, the few things every session must know), run-and-test.md, release-and-rollback.md, runbooks/<name>.md (step by step procedures), decisions/<name>.md, gotchas.md, access.md (names of accounts and services only, never secrets), how-the-user-works-here.md, actions.md (which commands in this project trigger each autonomy action; one line per command, "- \`command\` — what (file)", under the action's heading; add one when a note shows a command deploys, publishes, sends, deletes or spends; never remove or change a line, and never write between the manta:actions:scan markers). A project that shares its knowledge may also feed user/how-i-work.md, user/people-and-accounts.md (names only) and commons/howto/<name>.md (generic how-tos with the project specifics removed).
 
 Rules:
 - Every page.edit needs at least one evidence ref, copied exactly from the notes. Never invent refs.
@@ -277,6 +278,9 @@ export function createCurator(kc) {
     const last = current === null ? null : await tx.lastCommitFor(rel);
     const seen = vctx.bases?.has(rel) ? vctx.bases.get(rel) : null;
     if (last !== seen && last !== (touched.get(rel) ?? null)) return { status: "stale", rel };
+    // The project's actions page is insert-only for the curator (Phase 3c): whatever it proposed, only the NEW valid command
+    // lines are added, each at the end of its action's section, outside the scan markers. Nothing is ever removed or changed.
+    if (ACTIONS_PAGE_RE.test(rel)) return applyActionsPage(tx, d, current, rel, batchId, touched);
     const userSet = current === null ? new Set() : await blame.userLines(rel);
     if (userSet === null) return { status: "skipped", reason: "It couldn't be told which lines on that page you wrote, so it was left alone." };
     let built;
@@ -294,6 +298,28 @@ export function createCurator(kc) {
       const c = await tx.commit({
         path: rel,
         content: built.source,
+        message: describeDecision(d, { created: current === null }),
+        body: `${d.reason}\n\nRefs: ${d.evidence.map((e) => e.ref).join(" ")}`,
+        trailers: { "Manta-Decision": d.id, "Manta-Batch": batchId },
+      });
+      if (!c.changed) return { status: "dropped", reason: "The page already says this." };
+      touched.set(rel, c.sha);
+      return { status: "applied", sha: c.sha, rel, created: current === null };
+    });
+  }
+
+  async function applyActionsPage(tx, d, current, rel, batchId, touched) {
+    let proposed;
+    if (d.target.section) {
+      const kind = kindOfHeading(d.target.section);
+      proposed = kind ? entriesFromSection(d.content, kind) : [];
+    } else proposed = parseActionsPage(d.content).entries;
+    const ins = insertEntries(current, proposed);
+    if (ins.added === 0) return { status: "dropped", reason: "Nothing new for the actions page." };
+    return wrapCommit(async () => {
+      const c = await tx.commit({
+        path: rel,
+        content: ins.source,
         message: describeDecision(d, { created: current === null }),
         body: `${d.reason}\n\nRefs: ${d.evidence.map((e) => e.ref).join(" ")}`,
         trailers: { "Manta-Decision": d.id, "Manta-Batch": batchId },
@@ -818,6 +844,7 @@ export function createCurator(kc) {
 }
 
 const RULES_PATH_RE = /^projects\/([^/]+)\/rules\.md$/;
+const ACTIONS_PAGE_RE = /^projects\/[^/]+\/actions\.md$/;
 
 /**
  * The store folder is writable by every process of the box user, so what the store commits "as the user" is
