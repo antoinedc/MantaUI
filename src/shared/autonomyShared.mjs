@@ -39,7 +39,7 @@ export const KIND_LABELS = Object.freeze({
   delete_data: "delete or overwrite data that cannot be recovered",
   spend: "spend money or buy anything",
   settings: "change Manta's settings",
-  agent_change: "change an agent's instructions or permissions",
+  agent_change: "create an agent, or change an agent's instructions or permissions",
 });
 
 /** User-facing row titles (Settings → Agents). */
@@ -74,7 +74,7 @@ export const KIND_DEFINITIONS = Object.freeze({
     "delete data = removing or overwriting what git cannot bring back: databases and tables, production data, files outside the project, remote branches, tags and releases, cloud storage.",
   spend: "spend money = anything that costs money: buying, subscriptions, starting paid servers or VMs, raising a plan or quota.",
   settings: "change Manta's settings = Manta's own configuration, sign-in, secrets or the OpenCode configuration.",
-  agent_change: "change an agent = editing any agent's instructions, model, tools or permissions, including your own.",
+  agent_change: "change an agent = creating an agent or editing any agent's instructions, model, tools or permissions, including your own.",
 });
 
 /** The word a specialist writes for each kind in its "Actions from your list" section (Phase 3c). */

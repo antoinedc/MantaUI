@@ -527,3 +527,60 @@ describe("a canonical rebuild", () => {
     expect(labelOf(m, "A")).toBe("frame");
   });
 });
+
+describe("Manta's agent_change card (Agents Phase 4)", () => {
+  /** Stamp a part with the run id the box would give it (what the box does is the server's test; this is the shape). */
+  const inRun = (part: OpencodePart, runId: string): OpencodePart => ({ ...part, view: { runId } }) as OpencodePart;
+  const change = (status = "completed") => tool("agent_change", { action: "create", draft: {} }, status);
+
+  it("draws as a block of its own and never joins a collapsed run", () => {
+    const card = change();
+    const l = layoutTranscript(V([user("u"), asst("m1", [text("On it."), card])]), OPTS);
+    const blocks = l.blocksByMessage.get("m1")!;
+    expect(blocks.map((b) => b.kind)).toEqual(["part", "part"]);
+    expect(toolsOf(blocks)).toHaveLength(0);
+    expect(blocks.some((b) => b.kind === "part" && b.part.id === card.id)).toBe(true);
+  });
+
+  it("keeps read → card → read in order, with the card outside both groups", () => {
+    const r1 = inRun(tool("read", { filePath: "a" }), "run-1");
+    const card = inRun(change(), "run-card");
+    const r2 = inRun(tool("read", { filePath: "b" }), "run-2");
+    const l = layoutTranscript([user("u"), asst("m1", [r1, card, r2])], OPTS);
+    const blocks = l.blocksByMessage.get("m1")!;
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "part", "tools"]);
+    expect((blocks[1] as { part: OpencodePart }).part).toBe(card);
+    expect(ids(toolsOf(blocks)[0])).toEqual([r1.id]);
+    expect(ids(toolsOf(blocks)[1])).toEqual([r2.id]);
+  });
+
+  it("is never folded into a group even if the box stamped it with a run id (an older box)", () => {
+    const r1 = inRun(tool("read", { filePath: "a" }), "run-1");
+    const card = inRun(change(), "run-1");
+    const l = layoutTranscript([user("u"), asst("m1", [r1, card])], OPTS);
+    const blocks = l.blocksByMessage.get("m1")!;
+    expect(ids(toolsOf(blocks)[0])).toEqual([r1.id]);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "part"]);
+  });
+
+  it("while the call is still running it is a card, not the working line's trailing run", () => {
+    const l = layoutTranscript(V([user("u"), asst("m1", [change("running")])]), { ...OPTS, running: true });
+    expect(l.trailing).toBeNull();
+    expect(l.blocksByMessage.get("m1")!.map((b) => b.kind)).toEqual(["part"]);
+  });
+
+  it("stays outside the group after a reload (no run stamps at all)", () => {
+    const r1 = tool("read", { filePath: "a" });
+    const card = change();
+    const r2 = tool("read", { filePath: "b" });
+    const l = layoutTranscript([user("u"), asst("m1", [r1, card, r2])], OPTS);
+    expect(l.blocksByMessage.get("m1")!.map((b) => b.kind)).toEqual(["part", "part", "part"]);
+  });
+
+  it("with the box's own run stamps, no run group holds the card", () => {
+    const card = change();
+    const l = layoutTranscript(V([user("u"), asst("m1", [tool("read", { filePath: "a" }), card, tool("bash", { command: "ls" })])]), OPTS);
+    for (const g of toolsOf(l.blocksByMessage.get("m1"))) expect(ids(g)).not.toContain(card.id);
+    expect(l.blocksByMessage.get("m1")!.some((b) => b.kind === "part" && b.part.id === card.id)).toBe(true);
+  });
+});

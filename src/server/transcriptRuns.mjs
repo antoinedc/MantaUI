@@ -232,7 +232,10 @@ export function summarizeParts(parts) {
 
 const HANDOFF_TOOL_RE = /^(?:manta[_-])?handoff$/i;
 export const isHandoffToolPart = (p) => p?.type === "tool" && HANDOFF_TOOL_RE.test(String(p.tool ?? ""));
-const isToolPart = (p) => p?.type === "tool" && !isHandoffToolPart(p);
+// Phase 4: the `agent_change` card is a boundary like a handoff — never folded into a run, and it ends the one it follows.
+const AGENT_CHANGE_TOOL_RE = /^(?:manta[_-])?agent_change$/i;
+export const isAgentChangeToolPart = (p) => p?.type === "tool" && AGENT_CHANGE_TOOL_RE.test(String(p.tool ?? ""));
+const isToolPart = (p) => p?.type === "tool" && !isHandoffToolPart(p) && !isAgentChangeToolPart(p);
 const isTodoWrite = (p) => p?.type === "tool" && (p.tool === "todowrite" || p.tool === "todo_write");
 
 /** An assistant message's parts that DRAW (text must be non-synthetic, non-ignored, non-empty; step markers and todo writes never). */
@@ -427,7 +430,7 @@ export function computeRuns(messages, { startSeq = 0 } = {}) {
     }
     const id = message?.info?.id;
     for (const part of visibleAssistantParts(message)) {
-      if (isHandoffToolPart(part)) {
+      if (isHandoffToolPart(part) || isAgentChangeToolPart(part)) {
         end();
         continue;
       }

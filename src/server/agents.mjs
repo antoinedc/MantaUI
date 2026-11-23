@@ -12,12 +12,14 @@
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { join, resolve as resolvePath } from "node:path";
+import { randomBytes } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import fsPromises from "node:fs/promises";
 import YAML from "yaml";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG } from "../shared/agentsShared.mjs";
-import { createMutex } from "./jsonStore.mjs";
+import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
 import { WORKTREE_AGENT_GRANTS, CAP_ERROR } from "./delegate.mjs";
 import * as autonomy from "./autonomy.mjs";
@@ -45,6 +47,25 @@ const EXCERPT_FETCH = 60; // messages read to find EXCERPT_MESSAGES with text in
 const COMPILED_FILE = ".compiled.md";
 const INSTALLED_FILE = ".installed.json";
 const CHAT_FILE = ".chat.json";
+const CHANGES_FILE = ".changes.json";
+
+// Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md): Manta creates and edits agents.
+export const INSTRUCTIONS_MAX = 12_000;
+export const CHANGE_PENDING_MS = 24 * 60 * 60 * 1000; // a proposal nobody clicked expires
+export const CHANGE_KEEP_MS = 7 * 24 * 60 * 60 * 1000; // finished records are kept a week
+export const CHANGE_MAX = 200;
+export const AGENT_CHANGE_OFF = "Changing agents is turned off in your autonomy settings";
+export const CHANGE_NOT_LEAD = "Only the lead can create or change agents";
+export const CHANGE_GONE = "This change is no longer available";
+const CHANGE_COULDNT_CHECK = "Couldn't check this chat; try again";
+const CHANGE_PLAN_MODE = "You're in plan mode: don't create or change agents now; propose the change instead";
+const MODELS_UNAVAILABLE = "Couldn't check the models; try again";
+const DRAFT_KEYS = ["name", "description", "isolation", "instructions", "useWhen", "notFor", "model", "color"];
+const NULLABLE_DRAFT_KEYS = ["useWhen", "notFor", "model", "color"];
+const LEAD_EDITABLE = ["name", "description", "color", "instructions"];
+const FRONTMATTER_KEY = { name: "name", description: "description", isolation: "isolation", useWhen: "use_when", notFor: "not_for", model: "model", color: "color" };
+const DRAFT_LABEL = { name: "The name", description: "The description", isolation: "isolation", instructions: "The instructions", useWhen: "use when", notFor: "not for", model: "model", color: "The color" };
+const TERMINAL_STATES = new Set(["discarded", "undone", "expired", "conflict"]);
 
 /** A refusal whose message is a sentence meant for the person at the screen (HTTP 400 on /rpc). */
 export class AgentError extends Error {
@@ -162,6 +183,155 @@ export function slugForName(name, taken = new Set()) {
   return slug;
 }
 
+const oneLine = (v) => !/[\r\n\u2028\u2029]/.test(v);
+
+/**
+ * Check a draft from `agent_change` (spec §2.2). `{ fields }` with every present field trimmed (`null` = clear) or
+ * `{ error }` (a sentence). `approved`: the Sub-approved model keys (`provider/model`), needed only when a model is named.
+ * `lead`: the target is the lead, whose model / isolation / routing lines are fixed.
+ */
+export function checkDraft(draft, { create, lead = false, approved = null } = {}) {
+  const bad = (error) => ({ error });
+  if (!draft || typeof draft !== "object" || Array.isArray(draft)) return bad("The draft is missing");
+  for (const k of Object.keys(draft)) {
+    if (k === "role") return bad("An agent's role can't be set here");
+    if (!DRAFT_KEYS.includes(k)) return bad(`Unknown field "${k}" in the draft`);
+  }
+  const fields = {};
+  for (const k of DRAFT_KEYS) {
+    if (!Object.hasOwn(draft, k)) continue;
+    const v = draft[k];
+    const label = DRAFT_LABEL[k];
+    if (v === null) {
+      if (!NULLABLE_DRAFT_KEYS.includes(k)) return bad(`${label} can't be cleared`);
+      fields[k] = null;
+      continue;
+    }
+    if (typeof v !== "string") return bad(`${label} must be text`);
+    const t = v.trim();
+    if (t === "" && NULLABLE_DRAFT_KEYS.includes(k)) {
+      fields[k] = null;
+      continue;
+    }
+    if (t === "") return bad(k === "instructions" ? "Write the agent's instructions" : `${label} can't be empty`);
+    const max = { name: NAME_MAX, description: DESCRIPTION_MAX, useWhen: ROUTING_MAX, notFor: ROUTING_MAX, instructions: INSTRUCTIONS_MAX }[k];
+    if (max && t.length > max) return bad(`${label} can be at most ${max.toLocaleString("en-US")} characters`);
+    if (k !== "instructions" && !oneLine(t)) return bad(`${label} must be on one line`);
+    if (k === "isolation" && !ISOLATIONS.includes(t)) return bad('isolation must be "worktree" or "none"');
+    if (k === "color" && !/^#[0-9A-Fa-f]{6}$/.test(t)) return bad("The color must look like #5A88FF");
+    fields[k] = t;
+  }
+  if (typeof fields.model === "string") {
+    const list = Array.isArray(approved) ? approved : [];
+    if (!list.includes(fields.model)) {
+      const some = [...list].sort().slice(0, 8);
+      return bad(`${fields.model} isn't an approved model; pick one of ${some.join(", ")}${list.length > some.length ? ", …" : ""}`);
+    }
+  }
+  if (lead) {
+    const refused = Object.keys(fields).find((k) => !LEAD_EDITABLE.includes(k));
+    if (refused) return bad(`Manta's ${DRAFT_LABEL[refused].replace(/^The /, "")} can't be changed here; only its name, description, color and instructions can`);
+  }
+  if (create) {
+    for (const k of ["name", "description", "isolation", "instructions"]) {
+      if (typeof fields[k] !== "string") return bad(k === "name" ? "Give the agent a name" : k === "description" ? "Give the agent a one-line description" : k === "isolation" ? 'Say whether it works in its own branch: isolation is "worktree" or "none"' : "Write the agent's instructions");
+    }
+    for (const k of NULLABLE_DRAFT_KEYS) if (fields[k] === null) delete fields[k];
+  } else if (Object.keys(fields).length === 0) {
+    return bad("Nothing to change: the draft names no field");
+  }
+  return { fields };
+}
+
+// the fields a parsed agent.md must carry for a draft (an absent one stays whatever the base has)
+function expectedMeta(base, fields) {
+  const meta = { ...base };
+  for (const k of Object.keys(FRONTMATTER_KEY)) if (Object.hasOwn(fields, k)) meta[k] = fields[k];
+  return meta;
+}
+
+const sameMeta = (a, b) => Object.keys(FRONTMATTER_KEY).every((k) => (a[k] ?? null) === (b[k] ?? null)) && a.role === b.role;
+
+/** The `agent.md` of a NEW agent from checked create fields; `{ ok, after, meta }` or `{ ok:false, error }`. */
+export function buildCreateMd(fields) {
+  const front = YAML.stringify(
+    {
+      name: fields.name,
+      description: fields.description,
+      isolation: fields.isolation,
+      ...(fields.useWhen ? { use_when: fields.useWhen } : {}),
+      ...(fields.notFor ? { not_for: fields.notFor } : {}),
+      ...(fields.model ? { model: fields.model } : {}),
+      ...(fields.color ? { color: fields.color } : {}),
+    },
+    { lineWidth: 0 },
+  ).trimEnd();
+  const after = `---\n${front}\n---\n${fields.instructions}\n`;
+  const parsed = parseAgentMd(after);
+  const intended = expectedMeta({ role: "specialist" }, fields);
+  if (!parsed.ok || !sameMeta(parsed.meta, intended) || parsed.body !== fields.instructions) {
+    return { ok: false, error: "The agent couldn't be written safely; simplify the text and try again" };
+  }
+  return { ok: true, after, meta: parsed.meta };
+}
+
+/**
+ * Edit an existing `agent.md`: only the keys named in `fields` change (the `yaml` Document API keeps unknown keys and
+ * comments); the body is replaced only when `instructions` is given. `{ ok, after, meta, base }` or `{ ok:false, error }`.
+ */
+export function editAgentMd(before, fields, name = "The agent") {
+  const unsafe = { ok: false, error: `${name}'s file can't be edited safely; fix it by hand` };
+  const base = parseAgentMd(before);
+  if (!base.ok) return unsafe;
+  const m = /^(\uFEFF?---[ \t]*\r?\n)([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))([\s\S]*)$/.exec(before);
+  if (!m) return unsafe;
+  const doc = YAML.parseDocument(m[2]);
+  if (doc.errors.length > 0 || !YAML.isMap(doc.contents)) return unsafe;
+  for (const [field, key] of Object.entries(FRONTMATTER_KEY)) {
+    if (!Object.hasOwn(fields, field)) continue;
+    const v = fields[field];
+    if (v === null) {
+      if (doc.has(key)) doc.delete(key);
+    } else if (doc.get(key) !== v) {
+      doc.set(key, v);
+    }
+  }
+  const front = doc.toString({ lineWidth: 0 }).replace(/\n+$/, "");
+  const after = typeof fields.instructions === "string" ? `${m[1]}${front}\n---\n${fields.instructions}\n` : `${m[1]}${front}${m[3]}${m[4]}`;
+  const parsed = parseAgentMd(after);
+  const wantBody = typeof fields.instructions === "string" ? fields.instructions : base.body;
+  if (!parsed.ok || !sameMeta(parsed.meta, expectedMeta(base.meta, fields)) || parsed.body !== wantBody) {
+    return { ok: false, error: `The change to ${name} couldn't be written safely; simplify the text and try again` };
+  }
+  return { ok: true, after, meta: parsed.meta, base: base.meta };
+}
+
+/** Does the running tool call's input equal what the tool posted? Exact field presence: an omitted field is not null. */
+function changeInputMatches(given, b) {
+  for (const k of ["action", "agent", "draft"]) {
+    const a = Object.hasOwn(given, k);
+    if (a !== Object.hasOwn(b.raw, k)) return false;
+    if (a && !isDeepStrictEqual(given[k], b.raw[k])) return false;
+  }
+  return true;
+}
+
+// What verifyInvocation checks per tool: the tool's name, the two refusal sentences and the input comparison.
+const HANDOFF_VERIFY = {
+  tool: "agent_handoff",
+  couldnt: "Couldn't verify this handoff; try again",
+  notLead: "Only the lead can hand off work",
+  needTurn: true,
+  matches: (given, b) => ["agent", "title", "brief", "continueJob"].every((k) => same(given[k], b[k])),
+};
+const CHANGE_VERIFY = {
+  tool: "agent_change",
+  couldnt: "Couldn't verify this change; try again",
+  notLead: CHANGE_NOT_LEAD,
+  needTurn: false,
+  matches: changeInputMatches,
+};
+
 /** `.compiled.md`: the role prompt plus, when there are skills, an index the agent reads through the read tool. */
 export function compileAgentPrompt({ body, skills = [] }) {
   let out = String(body ?? "").trim();
@@ -269,6 +439,7 @@ const MECHANICS = [
   "- For a teammate's work use `agent_handoff`, not the generic `delegate` tool; if a handoff is refused, do not retry it through `delegate`.",
   "- To send a fix round to a specialist's finished task (same branch), pass `continueJob: <jobId>`.",
   "- In plan mode, don't hand off code changes; propose them.",
+  "- To create an agent or change one (including yourself), call `agent_change` directly; don't ask first in words — the user approves on the card when their settings require it. Draft complete, specific instructions in the style of the existing agents (how it works, what it never does); make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
 ].join("\n");
 
 /**
@@ -342,6 +513,8 @@ async function readJsonOptional(fs, path) {
  * @param {()=>Promise<{chatAutoAllow?:boolean}>} [deps.configGet]           the box trust setting is read here, never from a request
  * @param {()=>Promise<object>} [deps.autonomyPolicy]  the user's CURRENT autonomy policy `{kind: level}`, read strictly (throws when the settings can't be read)
  * @param {object} [deps.syncState]     { refreshNow() }
+ * @param {(p:{id:string,sessionID:string,slug:string|null})=>void} [deps.publish]  the `agentChange` hint, called after a change record is persisted
+ * @param {()=>Promise<string[]>} [deps.listApprovedModels]  the Sub-approved models as `provider/model` keys; throws (or is empty) when they can't be checked
  */
 export function createAgentsEngine({
   root = statePath("agents"),
@@ -360,6 +533,9 @@ export function createAgentsEngine({
   configGet = null,
   autonomyPolicy = async () => autonomy.DEFAULT_POLICY,
   syncState = null,
+  publish = () => {},
+  listApprovedModels = null,
+  now = Date.now,
   isGitRepo = defaultIsGitRepo,
   retryDelayMs = 200,
   log = console,
@@ -482,51 +658,57 @@ export function createAgentsEngine({
 
   /** Compile every valid agent into `.compiled.md` and the OpenCode config. Throws a sentence on failure. */
   function sync() {
-    return syncLock.runExclusive(async () => {
-      const { entries, stamp } = await scan();
-      // the lead is not an OpenCode agent: it is a prompt appended to the default agent (an old `agent-manta` block
-      // is removed below, like any block of a package that is gone)
-      const valid = entries.filter((e) => !e.info.error && e.info.role !== "lead");
-      let compiledChanged = false;
-      for (const e of valid) {
-        const compiled = compileAgentPrompt({ body: e.body, skills: e.skills });
-        const file = join(e.dir, COMPILED_FILE);
-        if ((await readOptional(fs, file)) !== compiled) {
-          await fs.writeFile(file, compiled, "utf-8");
-          compiledChanged = true;
-        }
-      }
-      const desired = new Map(valid.map((e) => [agentKey(e.slug), buildAgentBlock({ dir: e.dir, meta: e.meta })]));
-      const installedDoc = await readJsonOptional(fs, join(root, INSTALLED_FILE));
-      const installed = Array.isArray(installedDoc) ? installedDoc.filter((k) => typeof k === "string" && k.startsWith(AGENT_PACKAGE_PREFIX)) : [];
+    return syncLock.runExclusive(() => syncLocked());
+  }
 
-      const r = await editConfig((cfg) => {
-        const edits = [];
-        for (const [key, block] of desired) {
-          const existing = cfg?.agent?.[key];
-          if (existing === undefined || canon(existing) !== canon(block)) edits.push({ path: ["agent", key], value: block });
-        }
-        // only what Manta installed earlier and whose package is gone — never someone else's block
-        for (const key of installed) {
-          if (!desired.has(key) && cfg?.agent?.[key] !== undefined) edits.push({ path: ["agent", key], value: undefined });
-        }
-        return edits;
-      });
-      if (!r.ok) throw new AgentError(`Couldn't update the agents in OpenCode: ${r.error ?? "unknown error"}`);
-      // The prompt file's path never changes, so an edited prompt alone leaves the config untouched and would never
-      // be reloaded by the writer.
-      if (!r.changed && compiledChanged) {
-        const rr = await reload();
-        if (!rr?.ok) throw new AgentError(`Couldn't reload OpenCode after an agent changed: ${rr?.error ?? "unknown error"}`);
+  /**
+   * The body of `sync`; the caller holds `syncLock`. `forceReload`: reload OpenCode even when no file or config block
+   * changed (a retry after an activation failed: the config is already written but the reload was rejected).
+   */
+  async function syncLocked({ forceReload = false } = {}) {
+    const { entries, stamp } = await scan();
+    // the lead is not an OpenCode agent: it is a prompt appended to the default agent (an old `agent-manta` block
+    // is removed below, like any block of a package that is gone)
+    const valid = entries.filter((e) => !e.info.error && e.info.role !== "lead");
+    let compiledChanged = false;
+    for (const e of valid) {
+      const compiled = compileAgentPrompt({ body: e.body, skills: e.skills });
+      const file = join(e.dir, COMPILED_FILE);
+      if ((await readOptional(fs, file)) !== compiled) {
+        await fs.writeFile(file, compiled, "utf-8");
+        compiledChanged = true;
       }
-      const next = [...desired.keys()];
-      if (canon([...installed].sort()) !== canon([...next].sort()) || installedDoc === null) {
-        await fs.mkdir(root, { recursive: true });
-        await fs.writeFile(join(root, INSTALLED_FILE), `${JSON.stringify(next, null, 2)}\n`, "utf-8");
+    }
+    const desired = new Map(valid.map((e) => [agentKey(e.slug), buildAgentBlock({ dir: e.dir, meta: e.meta })]));
+    const installedDoc = await readJsonOptional(fs, join(root, INSTALLED_FILE));
+    const installed = Array.isArray(installedDoc) ? installedDoc.filter((k) => typeof k === "string" && k.startsWith(AGENT_PACKAGE_PREFIX)) : [];
+
+    const r = await editConfig((cfg) => {
+      const edits = [];
+      for (const [key, block] of desired) {
+        const existing = cfg?.agent?.[key];
+        if (existing === undefined || canon(existing) !== canon(block)) edits.push({ path: ["agent", key], value: block });
       }
-      lastStamp = stamp;
-      return { entries };
+      // only what Manta installed earlier and whose package is gone — never someone else's block
+      for (const key of installed) {
+        if (!desired.has(key) && cfg?.agent?.[key] !== undefined) edits.push({ path: ["agent", key], value: undefined });
+      }
+      return edits;
     });
+    if (!r.ok) throw new AgentError(`Couldn't update the agents in OpenCode: ${r.error ?? "unknown error"}`);
+    // The prompt file's path never changes, so an edited prompt alone leaves the config untouched and would never
+    // be reloaded by the writer.
+    if (!r.changed && (compiledChanged || forceReload)) {
+      const rr = await reload();
+      if (!rr?.ok) throw new AgentError(`Couldn't reload OpenCode after an agent changed: ${rr?.error ?? "unknown error"}`);
+    }
+    const next = [...desired.keys()];
+    if (canon([...installed].sort()) !== canon([...next].sort()) || installedDoc === null) {
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(join(root, INSTALLED_FILE), `${JSON.stringify(next, null, 2)}\n`, "utf-8");
+    }
+    lastStamp = stamp;
+    return { entries };
   }
 
   /** Copy the built-in agents that this box does not have yet. Never overwrites a folder (user edits win). */
@@ -780,9 +962,9 @@ export function createAgentsEngine({
    * message and requires the running tool part with this callID whose input equals the body — the box bearer is
    * box-wide, so the body alone proves nothing. Returns `{ turnKey, callerAgent }` or `{ refused }`.
    */
-  async function verifyInvocation(b) {
-    const COULDNT = "Couldn't verify this handoff; try again";
-    const NOT_LEAD = "Only the lead can hand off work";
+  async function verifyInvocation(b, spec = HANDOFF_VERIFY) {
+    const COULDNT = spec.couldnt;
+    const NOT_LEAD = spec.notLead;
     if (!b.sessionID || !b.messageID || !b.callID) return { refused: NOT_LEAD };
     let found = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -794,7 +976,7 @@ export function createAgentsEngine({
         continue;
       }
       const msg = (Array.isArray(messages) ? messages : []).find((m) => m?.info?.id === b.messageID && m?.info?.role === "assistant");
-      const part = (Array.isArray(msg?.parts) ? msg.parts : []).find((p) => p?.type === "tool" && p.tool === "agent_handoff" && p.callID === b.callID);
+      const part = (Array.isArray(msg?.parts) ? msg.parts : []).find((p) => p?.type === "tool" && p.tool === spec.tool && p.callID === b.callID);
       if (msg && part) {
         found = { msg, part };
         if (part.state?.status === "running") break; // the live call
@@ -803,13 +985,11 @@ export function createAgentsEngine({
     if (!found) return { refused: COULDNT };
     const { msg, part } = found;
     if (part.state?.status !== "running") return { refused: NOT_LEAD };
-    const given = part.state?.input ?? {};
-    for (const k of ["agent", "title", "brief", "continueJob"]) {
-      if (!same(given[k], b[k])) return { refused: NOT_LEAD };
-    }
+    const given = part.state?.input && typeof part.state.input === "object" ? part.state.input : {};
+    if (!spec.matches(given, b)) return { refused: NOT_LEAD };
     if (!consume(`${b.messageID}:${b.callID}`)) return { refused: NOT_LEAD };
     const turnKey = typeof msg.info.parentID === "string" && msg.info.parentID ? msg.info.parentID : null;
-    if (!turnKey) return { refused: COULDNT }; // never fall back to the message id: that would make every message its own turn
+    if (spec.needTurn && !turnKey) return { refused: COULDNT }; // never fall back to the message id: that would make every message its own turn
     return { turnKey, callerAgent: typeof msg.info.agent === "string" ? msg.info.agent : "" };
   }
 
@@ -952,6 +1132,421 @@ export function createAgentsEngine({
     return { ok: true, jobId: res.job.id, agentName: agent.meta.name };
   }
 
+  // -------------------------------------------------------------------------
+  // Manta creates and edits agents (Phase 4, spec 2026-11-23-agents-phase4-architect.md)
+  // -------------------------------------------------------------------------
+
+  const changesPath = join(root, CHANGES_FILE);
+  const storeLock = createMutex(); // guards the JSON file only; operations on a record hold syncLock (below)
+  const plainRecord = (r) => !!r && typeof r === "object" && typeof r.id === "string" && typeof r.sessionID === "string";
+  const clone = (r) => structuredClone(r);
+  const isExpired = (r) => r.state === "pending" && now() - r.createdAt > CHANGE_PENDING_MS;
+
+  async function readChanges() {
+    const doc = await readJsonOptional(fs, changesPath);
+    return Array.isArray(doc?.changes) ? doc.changes.filter(plainRecord) : [];
+  }
+
+  // pending ones nobody clicked in time become `expired`; finished ones go after a week; the cap drops the oldest finished first
+  function pruneChanges(list) {
+    const t = now();
+    let out = list.map((r) => (isExpired(r) ? { ...r, state: "expired", decidedAt: r.createdAt + CHANGE_PENDING_MS } : r));
+    out = out.filter((r) => !(TERMINAL_STATES.has(r.state) && t - (r.decidedAt ?? r.createdAt) > CHANGE_KEEP_MS));
+    if (out.length > CHANGE_MAX) {
+      const rank = (r) => (TERMINAL_STATES.has(r.state) ? 0 : 1);
+      const drop = new Set([...out].sort((a, b) => rank(a) - rank(b) || a.createdAt - b.createdAt).slice(0, out.length - CHANGE_MAX).map((r) => r.id));
+      out = out.filter((r) => !drop.has(r.id));
+    }
+    return out;
+  }
+
+  function saveRecord(rec) {
+    return storeLock.runExclusive(async () => {
+      const list = await readChanges();
+      const i = list.findIndex((r) => r.id === rec.id);
+      if (i >= 0) list[i] = clone(rec);
+      else list.push(clone(rec));
+      await writeJsonAtomic(changesPath, `${JSON.stringify({ version: 1, changes: pruneChanges(list) }, null, 2)}\n`);
+    });
+  }
+
+  function publishChange(rec) {
+    try {
+      publish({ id: rec.id, sessionID: rec.sessionID, slug: rec.slug ?? null });
+    } catch (e) {
+      log.warn?.(`[agents] couldn't publish a change: ${e?.message ?? e}`);
+    }
+  }
+
+  /** The change record the lead's tool call `{sessionID, messageID, callID}` made, or null. A stale proposal reads as expired. */
+  async function forCall(input) {
+    const key = (k) => (typeof input?.[k] === "string" ? input[k] : "");
+    const [sessionID, messageID, callID] = [key("sessionID"), key("messageID"), key("callID")];
+    if (!sessionID || !messageID || !callID) return null;
+    const rec = (await readChanges()).filter((r) => r.sessionID === sessionID && r.messageID === messageID && r.callID === callID).at(-1);
+    if (!rec) return null;
+    return clone(isExpired(rec) ? { ...rec, state: "expired", decidedAt: rec.createdAt + CHANGE_PENDING_MS } : rec);
+  }
+
+  /** `{ dir, file, entry }` of a real agent folder directly under a real agents root — null when anything about it is not what a scan found. */
+  async function resolveTarget(slug) {
+    try {
+      const rootStat = await fs.lstat(root);
+      if (!rootStat.isDirectory()) return null; // lstat: a symlinked root is not a directory
+      if (typeof slug !== "string" || !SLUG_RE.test(slug)) return null;
+      const { entries } = await scan();
+      const entry = entries.find((e) => e.slug === slug);
+      if (!entry) return null;
+      const file = join(entry.dir, "agent.md");
+      if (!(await fs.lstat(entry.dir)).isDirectory() || !(await fs.lstat(file)).isFile()) return null;
+      if ((await fs.realpath(entry.dir)) !== join(await fs.realpath(root), slug)) return null;
+      return { dir: entry.dir, file, entry };
+    } catch {
+      return null;
+    }
+  }
+
+  async function writeFileAtomic(path, text) {
+    const tmp = `${path}.tmp-${randomBytes(4).toString("hex")}`;
+    try {
+      await fs.writeFile(tmp, text, "utf-8");
+      await fs.rename(tmp, path);
+    } catch (e) {
+      await fs.rm(tmp, { force: true }).catch(() => {});
+      throw e;
+    }
+  }
+
+  const writeFailed = (e) => {
+    log.warn?.(`[agents] couldn't write a change: ${e?.message ?? e}`);
+    return new AgentError("Couldn't write the agent file; try again");
+  };
+
+  function markConflict(rec, error) {
+    rec.state = "conflict";
+    rec.error = error;
+    rec.decidedAt = now();
+    return rec;
+  }
+  const changedSince = (rec) => `${rec.agentName} changed since this was proposed; ask Manta again`;
+
+  /** Run the activation (compile + config + reload); the file is already written. */
+  async function activateLocked(rec, opts) {
+    try {
+      await syncLocked(opts);
+      rec.state = "applied";
+      rec.error = null;
+    } catch (e) {
+      rec.state = "failed";
+      rec.error = `${rec.agentName} was written but couldn't be activated: ${String(e?.message ?? e)}`;
+    }
+    rec.decidedAt = now();
+    return rec;
+  }
+
+  /** A retry: nothing is rewritten or reclaimed; the file must still be exactly what was written, then it is activated again. */
+  async function reactivateLocked(rec) {
+    const target = await resolveTarget(rec.slug);
+    if (!target) return markConflict(rec, changedSince(rec));
+    if ((await readOptional(fs, target.file)) !== rec.after) return markConflict(rec, changedSince(rec));
+    return activateLocked(rec, { forceReload: true });
+  }
+
+  /** The write behind Create / Apply and behind an automatic change. The caller holds `syncLock`. May throw an AgentError (nothing written). */
+  async function writeChangeLocked(rec) {
+    if (rec.kind === "create") {
+      if (rec.slug) return reactivateLocked(rec);
+      try {
+        await fs.mkdir(root, { recursive: true });
+      } catch (e) {
+        throw writeFailed(e);
+      }
+      if (!(await fs.lstat(root)).isDirectory()) return markConflict(rec, "The agents folder isn't a regular folder; fix it by hand");
+      const meta = parseAgentMd(rec.after).meta;
+      const taken = new Set(await fs.readdir(root));
+      let slug = slugForName(meta.name, taken);
+      // mkdir without `recursive` is the claim: two creates racing for one slug cannot both win it
+      for (;;) {
+        try {
+          await fs.mkdir(join(root, slug));
+          break;
+        } catch (e) {
+          if (e?.code !== "EEXIST") throw writeFailed(e);
+          taken.add(slug);
+          slug = slugForName(meta.name, taken);
+        }
+      }
+      const dir = join(root, slug);
+      try {
+        await writeFileAtomic(join(dir, "agent.md"), rec.after);
+        await fs.mkdir(join(dir, "home"), { recursive: true });
+      } catch (e) {
+        for (const undo of [() => fs.rm(join(dir, "agent.md"), { force: true }), () => fs.rmdir(join(dir, "home")), () => fs.rmdir(dir)]) await undo().catch(() => {});
+        throw writeFailed(e);
+      }
+      rec.slug = slug;
+      await saveRecord(rec); // the claimed slug is on the record before anything can fail
+      return activateLocked(rec);
+    }
+    const target = await resolveTarget(rec.slug);
+    if (!target) return markConflict(rec, changedSince(rec));
+    if ((await readOptional(fs, target.file)) !== rec.before) return markConflict(rec, changedSince(rec));
+    try {
+      await writeFileAtomic(target.file, rec.after);
+    } catch (e) {
+      throw writeFailed(e);
+    }
+    return activateLocked(rec);
+  }
+
+  /** Undo of an applied change. The caller holds `syncLock`. A refusal that changes nothing throws an AgentError. */
+  async function undoLocked(rec) {
+    const finish = async () => {
+      rec.state = "undone";
+      rec.error = null;
+      rec.decidedAt = now();
+      try {
+        await syncLocked();
+      } catch (e) {
+        rec.error = `Undone, but OpenCode wasn't updated yet: ${String(e?.message ?? e)}`;
+      }
+      return rec;
+    };
+    const target = await resolveTarget(rec.slug);
+    if (rec.kind === "update") {
+      if (!target) return markConflict(rec, `${rec.agentName} changed since; undo it by hand`);
+      if ((await readOptional(fs, target.file)) !== rec.after) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
+      try {
+        await writeFileAtomic(target.file, rec.before);
+      } catch (e) {
+        throw writeFailed(e);
+      }
+      return finish();
+    }
+    if (!target) return markConflict(rec, `${rec.agentName} changed since; delete it by hand`);
+    const compiled = join(target.dir, COMPILED_FILE);
+    const compiledStat = await fs.lstat(compiled).catch(() => null);
+    if (compiledStat && !compiledStat.isFile()) return markConflict(rec, `${rec.agentName} changed since; delete it by hand`);
+    const USED = "It has been used since; delete it by hand";
+    // the folder may hold only what creating it made: agent.md as written, the compiled prompt and an empty home/
+    let removeHome = false;
+    let sawAgentMd = false;
+    for (const e of await fs.readdir(target.dir, { withFileTypes: true })) {
+      if (e.name === "agent.md" && e.isFile()) sawAgentMd = true;
+      else if (e.name === COMPILED_FILE && e.isFile()) continue;
+      else if (e.name === "home" && e.isDirectory() && (await fs.readdir(join(target.dir, "home"))).length === 0) removeHome = true;
+      else throw new AgentError(USED);
+    }
+    if (!sawAgentMd || (await readOptional(fs, target.file)) !== rec.after) throw new AgentError(USED);
+    try {
+      await fs.unlink(target.file); // exactly these files and dirs; never a recursive delete
+      if (compiledStat) await fs.unlink(compiled);
+      if (removeHome) await fs.rmdir(join(target.dir, "home"));
+      await fs.rmdir(target.dir);
+    } catch (e) {
+      throw writeFailed(e);
+    }
+    return finish();
+  }
+
+  /** The user's CURRENT "Change an agent" level, read now: unreadable or Never refuses with a sentence (thrown). */
+  async function requireChangeAllowed() {
+    let policy;
+    try {
+      policy = await autonomyPolicy();
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the autonomy settings: ${e?.message ?? e}`);
+      throw new AgentError(autonomy.SETTINGS_UNREADABLE);
+    }
+    if (autonomy.decide("agent_change", policy) === "never") throw new AgentError(AGENT_CHANGE_OFF);
+  }
+
+  /**
+   * One operation on a record: a FRESH read through the last write inside the one `syncLock` (so Apply/Apply,
+   * Apply/Discard and Undo/Undo can never both act), then the `agentChange` hint once the record is persisted.
+   * `fn(record)` returns true when it changed the record.
+   */
+  async function operate(id, fn) {
+    if (typeof id !== "string" || !id) throw new AgentError(CHANGE_GONE);
+    let out;
+    await syncLock.runExclusive(async () => {
+      const rec = (await readChanges()).find((r) => r.id === id);
+      if (!rec) throw new AgentError(CHANGE_GONE);
+      const changed = await fn(rec);
+      if (changed) await saveRecord(rec);
+      out = { rec, changed };
+    });
+    if (out.changed) publishChange(out.rec);
+    return clone(out.rec);
+  }
+
+  function expire(rec) {
+    rec.state = "expired";
+    rec.error = "This proposal expired; ask Manta again";
+    rec.decidedAt = now();
+    return true;
+  }
+
+  function applyChange(id) {
+    return operate(id, async (rec) => {
+      if (rec.state === "pending") {
+        if (isExpired(rec)) return expire(rec);
+        await requireChangeAllowed();
+        await writeChangeLocked(rec);
+        return true;
+      }
+      if (rec.state === "failed") {
+        await reactivateLocked(rec);
+        return true;
+      }
+      return false; // any other state: a second click, or a stale one from another device, changes nothing
+    });
+  }
+
+  function discardChange(id) {
+    return operate(id, async (rec) => {
+      if (rec.state !== "pending") return false;
+      if (isExpired(rec)) return expire(rec);
+      rec.state = "discarded";
+      rec.decidedAt = now();
+      return true;
+    });
+  }
+
+  function undoChange(id) {
+    return operate(id, async (rec) => {
+      if (rec.state !== "applied") return false;
+      await undoLocked(rec);
+      return true;
+    });
+  }
+
+  /** What an `agent_change` call would write, or `{ error }`. The caller holds `syncLock`. */
+  async function planChange({ action, agent, draft, approved }) {
+    if (action === "create") {
+      const checked = checkDraft(draft, { create: true, approved });
+      if (checked.error) return checked;
+      try {
+        slugForName(checked.fields.name, new Set()); // a reserved name is refused now, not at the click
+      } catch (e) {
+        return { error: e.message };
+      }
+      const built = buildCreateMd(checked.fields);
+      if (!built.ok) return { error: built.error };
+      return { kind: "create", slug: null, agentName: built.meta.name, before: null, after: built.after, lead: false, raisesIsolation: false };
+    }
+    const slug = String(agent ?? "").replace(/^@/, "").trim().toLowerCase();
+    if (!slug) return { error: 'Say which agent to change: pass its slug as "agent"' };
+    const target = await resolveTarget(slug);
+    if (!target) return { error: (await find(slug)) ? `@${slug} can't be edited safely; fix it by hand` : `No agent named @${slug}` };
+    if (target.entry.info.error) return { error: `${target.entry.info.name}'s file has an error (${target.entry.info.error}); fix it by hand` };
+    const lead = target.entry.info.role === "lead";
+    const checked = checkDraft(draft, { create: false, lead, approved });
+    if (checked.error) return checked;
+    const before = await readOptional(fs, target.file);
+    if (before == null) return { error: `@${slug} can't be edited safely; fix it by hand` };
+    const edited = editAgentMd(before, checked.fields, target.entry.info.name);
+    if (!edited.ok) return { error: edited.error };
+    if (edited.after === before) return { error: `Nothing would change: ${edited.meta.name} already looks like that` };
+    return {
+      kind: "update",
+      slug,
+      agentName: edited.meta.name,
+      before,
+      after: edited.after,
+      lead,
+      raisesIsolation: checked.fields.isolation === "worktree" && edited.base.isolation === "none",
+    };
+  }
+
+  /**
+   * `agent_change` (spec §2.4): the lead creates or edits an agent. Returns `{ ok:true, change }` (applied or waiting for
+   * the user's click) or `{ ok:false, error, change? }` — a refusal is a sentence for the tool to relay; only unexpected
+   * failures throw.
+   */
+  async function change(input) {
+    const str = (k) => (typeof input?.[k] === "string" ? input[k] : "");
+    const raw = {};
+    for (const k of ["action", "agent", "draft"]) if (input && typeof input === "object" && Object.hasOwn(input, k)) raw[k] = input[k];
+    const b = { sessionID: str("sessionID"), messageID: str("messageID"), callID: str("callID"), raw };
+    const refuse = (error) => ({ ok: false, error });
+
+    // 1. the caller binding: this is the lead's own live call
+    const verified = await verifyInvocation(b, CHANGE_VERIFY);
+    if (verified.refused) return refuse(verified.refused);
+
+    // 2. a valid lead, and this chat is led
+    const lead = await leadEntry();
+    if (!lead) return refuse(CHANGE_NOT_LEAD);
+    const classified = await classify(b.sessionID, lead);
+    if (classified.kind === "unknown") return refuse(CHANGE_COULDNT_CHECK);
+    if (classified.kind === "not-led") return refuse(CHANGE_NOT_LEAD);
+
+    // 3. plan mode (an unknown mode counts as planning)
+    if (!verified.callerAgent || isPlanName(verified.callerAgent)) return refuse(CHANGE_PLAN_MODE);
+
+    // 4. the user's autonomy settings, read now
+    let policy;
+    try {
+      policy = await autonomyPolicy();
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the autonomy settings: ${e?.message ?? e}`);
+      return refuse(autonomy.SETTINGS_UNREADABLE);
+    }
+    const level = autonomy.decide("agent_change", policy);
+    if (level === "never") return refuse(AGENT_CHANGE_OFF);
+
+    const action = typeof raw.action === "string" ? raw.action : "";
+    if (action !== "create" && action !== "update") return refuse('action must be "create" or "update"');
+    let approved = null;
+    if (typeof raw.draft?.model === "string" && raw.draft.model.trim()) {
+      try {
+        approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
+      } catch (e) {
+        log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
+      }
+      if (!Array.isArray(approved) || approved.length === 0) return refuse(MODELS_UNAVAILABLE);
+    }
+
+    // 5. plan, record and (unless it needs a click) write — all under the one lock
+    let rec;
+    try {
+      const outcome = await syncLock.runExclusive(async () => {
+        const plan = await planChange({ action, agent: raw.agent, draft: raw.draft, approved });
+        if (plan.error) return { error: plan.error };
+        const reason = plan.lead ? "lead" : plan.raisesIsolation ? "isolation" : level === "ask" ? "ask" : null;
+        const made = {
+          id: `ach_${randomBytes(8).toString("hex")}`,
+          kind: plan.kind,
+          slug: plan.slug,
+          agentName: plan.agentName,
+          sessionID: b.sessionID,
+          messageID: b.messageID,
+          callID: b.callID,
+          state: "pending",
+          needsClick: reason !== null,
+          reason,
+          before: plan.before,
+          after: plan.after,
+          createdAt: now(),
+          decidedAt: null,
+          error: null,
+        };
+        if (!made.needsClick) await writeChangeLocked(made);
+        await saveRecord(made);
+        return { rec: made };
+      });
+      if (outcome.error) return refuse(outcome.error);
+      rec = outcome.rec;
+    } catch (e) {
+      if (e instanceof AgentError) return refuse(e.message);
+      throw e;
+    }
+    publishChange(rec);
+    if (rec.state === "applied" || rec.state === "pending") return { ok: true, change: clone(rec) };
+    return { ok: false, error: rec.error ?? "The change wasn't made", change: clone(rec) };
+  }
+
   function openChat(input) {
     const slug = typeof input?.slug === "string" ? input.slug : "";
     return chatLock.runExclusive(async () => {
@@ -991,5 +1586,24 @@ export function createAgentsEngine({
     });
   }
 
-  return { init, installBuiltIns, sync, list, create, dispatch, openChat, handoff, leadBrief, classifySession, routineAgent, scan, root };
+  return {
+    init,
+    installBuiltIns,
+    sync,
+    list,
+    create,
+    dispatch,
+    openChat,
+    handoff,
+    leadBrief,
+    classifySession,
+    routineAgent,
+    scan,
+    root,
+    change,
+    forCall,
+    apply: applyChange,
+    discard: discardChange,
+    undo: undoChange,
+  };
 }

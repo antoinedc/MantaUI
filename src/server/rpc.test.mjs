@@ -123,6 +123,35 @@ test("opencode:models asks listModels in strict mode, so an unreadable catalogue
   assert.deepEqual(seen, [{ strict: true }]);
 });
 
+test("agents:change-* channels call the engine; a refusal sentence passes through, anything else is a safe sentence", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  const refusal = Object.assign(new Error("This change is no longer available"), { rpcStatus: 400 });
+  deps.agents = {
+    forCall: async (i) => (seen.push(["for", i]), { id: "ach_1" }),
+    apply: async (id) => (seen.push(["apply", id]), { id, state: "applied" }),
+    discard: async (id) => (seen.push(["discard", id]), { id, state: "discarded" }),
+    undo: async (id) => { seen.push(["undo", id]); throw id === "gone" ? refusal : new Error("/home/dev/.manta/agents/x: EACCES"); },
+  };
+  const handlers = buildHandlers(deps);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.deepEqual(await handlers["agents:change-for"]({ sessionID: "s", messageID: "m", callID: "c" }), { id: "ach_1" });
+    assert.deepEqual(await handlers["agents:change-apply"]("ach_1"), { id: "ach_1", state: "applied" });
+    assert.deepEqual(await handlers["agents:change-discard"]("ach_1"), { id: "ach_1", state: "discarded" });
+    // what the renderer actually sends: `{ id }`
+    assert.deepEqual(await handlers["agents:change-apply"]({ id: "ach_1" }), { id: "ach_1", state: "applied" });
+    await assert.rejects(handlers["agents:change-undo"]({ id: "gone" }), /no longer available/);
+    await assert.rejects(handlers["agents:change-undo"]("gone"), /no longer available/);
+    await assert.rejects(handlers["agents:change-undo"]("x"), (e) => e.rpcStatus === 500 && !/EACCES|home/.test(e.message));
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(seen.map((s) => s[0]), ["for", "apply", "discard", "apply", "undo", "undo", "undo"]);
+  assert.ok(seen.filter((s) => s[0] !== "for").every((s) => typeof s[1] === "string"), "the engine always gets a bare id");
+});
+
 test("the file explorer's fs:* channels are registered", () => {
   const handlers = buildHandlers(makeDeps([]).deps);
   for (const channel of ["fs:resolve-paths", "fs:list", "fs:git-status"]) {

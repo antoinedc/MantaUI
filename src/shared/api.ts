@@ -44,6 +44,8 @@ import type {
   DelegateJobForSession,
   AgentInfo,
   AgentCreateInput,
+  AgentChange,
+  AgentChangeEvent,
   AgentDispatchInput,
   DelegateApprovalTool,
   DesktopNotifyPayload,
@@ -1990,6 +1992,13 @@ export interface Api {
   agentsCreate(input: AgentCreateInput): Promise<AgentInfo>;
   agentsDispatch(input: AgentDispatchInput): Promise<{ jobId: string }>;
   agentsOpenChat(input: { slug: string }): Promise<{ tmuxSession: string; windowIndex: number }>;
+  // Agents, Phase 4: Manta's proposed / applied agent changes (the card). Errors are thrown sentences.
+  agentsChangeFor(input: { sessionID: string; messageID: string; callID: string }): Promise<AgentChange | null>;
+  agentsChangeApply(id: string): Promise<AgentChange>;
+  agentsChangeDiscard(id: string): Promise<AgentChange>;
+  agentsChangeUndo(id: string): Promise<AgentChange>;
+  /** Bus kind `agentChange`, published after every persisted transition (a hint: refetch). */
+  onAgentChange(cb: (p: AgentChangeEvent) => void): () => void;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
   // status/activity changes (created, running, finished, stopped, deleted). The
   // sidebar subscribes so a new job nests under its parent within ~1s instead

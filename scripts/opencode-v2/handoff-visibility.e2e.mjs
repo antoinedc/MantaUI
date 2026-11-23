@@ -12,10 +12,15 @@
 // input; the calling assistant message has `parentID` (the turn key) and `agent`; the part is no longer `running`
 // once the call has returned (so a replay of the same call cannot match).
 //
+// Agents Phase 4 adds `agent_change` to the same run: its input carries a NESTED `draft` object, and the server's binding
+// check compares it field by field, so the running part must expose that object as the model sent it (an object, not a
+// string; `agent` absent, not null).
+//
 // SAFETY: sandbox only (sandbox.mjs: own port, random password, own HOME/XDG). The live opencode (:4096) and
 // manta-server (:8787) are never contacted.
 
 import { createServer } from "node:http";
+import { isDeepStrictEqual } from "node:util";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureBinary } from "./fetch-binary.mjs";
@@ -26,6 +31,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = join(HERE, "..", "..", "docs", "opencode-plugins-v2", "manta");
 const TOKEN = "ef12".repeat(8);
 const INPUT = { agent: "dev", title: "Fix login", brief: "Fix the flaky login test. Done when green." };
+const CHANGE_INPUT = {
+  action: "create",
+  draft: { name: "Reviewer", description: "Reviews code.", isolation: "none", instructions: "You review code.\nYou never edit files.", model: null },
+};
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -34,17 +43,20 @@ const check = (name, ok, detail = "") => {
 };
 const j = (v) => JSON.stringify(v);
 
-// the scripted "model": one agent_handoff call, then a closing line
+// the scripted "model": one agent_handoff call, then one agent_change call, then a closing line
 const decideFn = (body) => {
-  const answered = (body.messages ?? []).some((m) => Array.isArray(m.content) && m.content.some((c) => c.type === "tool_result"));
-  const tool = (body.tools ?? []).map((t) => t.name).find((n) => /agent_handoff$/.test(n));
-  if (!answered && tool) return { kind: "tool", name: tool, input: INPUT };
+  const answered = (body.messages ?? []).flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((c) => c.type === "tool_result").length;
+  const names = (body.tools ?? []).map((t) => t.name);
+  const handoff = names.find((n) => /agent_handoff$/.test(n));
+  const change = names.find((n) => /agent_change$/.test(n));
+  if (answered === 0 && handoff) return { kind: "tool", name: handoff, input: INPUT };
+  if (answered === 1 && change) return { kind: "tool", name: change, input: CHANGE_INPUT };
   return { kind: "text", text: "Handed off." };
 };
 
 let sb;
 let box; // the fake manta-server
-const seen = { handoff: [], reads: [] };
+const seen = { handoff: [], reads: [], change: [], changeReads: [] };
 const mock = await startMockAnthropic({ decideFn });
 const oc = await import("../../src/server/opencode.mjs");
 
@@ -66,6 +78,12 @@ box = createServer(async (req, res) => {
     const messages = await oc.listMessages(body.sessionID, { limit: 200 });
     seen.reads.push({ at: "execute", messages });
     return send(200, { ok: true, jobId: "job00001", agentName: "Dev" });
+  }
+  if (url.pathname === "/api/agents/change") {
+    const body = JSON.parse(raw);
+    seen.change.push(body);
+    seen.changeReads.push(await oc.listMessages(body.sessionID, { limit: 200 }));
+    return send(200, { ok: true, change: { state: "applied", kind: "create", agentName: "Reviewer", slug: "reviewer" } });
   }
   send(404, { error: `no route ${url.pathname}` });
 });
@@ -113,6 +131,22 @@ try {
   const donePart = after.flatMap((m) => m.parts ?? []).find((p) => p.type === "tool" && p.tool === "agent_handoff" && p.callID === body.callID);
   check("after the call returned the part is no longer `running` (a replay cannot match it)", !!donePart && donePart.state.status !== "running", j(donePart?.state?.status));
   check("the tool's result text reached the model", mock.requests.some((r) => JSON.stringify(r.body.messages).includes("Handed to Dev (job job00001)")), "");
+
+  // ---- agent_change: the nested draft ----
+  check("agent_change posted to the box once", seen.change.length === 1, j(seen.change));
+  const cbody = seen.change[0] ?? {};
+  check("the plugin forwarded the call identity and the model's arguments", cbody.sessionID === sessionID && typeof cbody.callID === "string" && cbody.callID !== "" && typeof cbody.messageID === "string" && cbody.action === "create", j(cbody));
+  check("the posted draft is the model's nested object, field for field", isDeepStrictEqual(cbody.draft, CHANGE_INPUT.draft), j(cbody.draft));
+  check("`agent` was not sent (omitted stays omitted)", !Object.hasOwn(cbody, "agent"), j(cbody));
+  const cmsg = (seen.changeReads[0] ?? []).find((m) => m?.info?.id === cbody.messageID);
+  const cpart = (cmsg?.parts ?? []).find((p) => p.type === "tool" && p.tool === "agent_change" && p.callID === cbody.callID);
+  check("AT EXECUTE TIME the agent_change part is visible and still `running`", cpart?.state?.status === "running", j(cmsg?.parts));
+  check("…its input carries the nested draft as an OBJECT, equal to what the tool posted", !!cpart && typeof cpart.state.input.draft === "object" && isDeepStrictEqual(cpart.state.input.draft, cbody.draft), j(cpart?.state?.input));
+  check("…with exactly the model's keys (action + draft: no agent, nothing added)", !!cpart && isDeepStrictEqual(Object.keys(cpart.state.input).sort(), ["action", "draft"]), j(cpart?.state?.input));
+  check("…and `null` stays null (omitted is not null)", !!cpart && cpart.state.input.draft.model === null && Object.hasOwn(cpart.state.input.draft, "model"), j(cpart?.state?.input));
+  const cafter = (await oc.listMessages(sessionID, { limit: 200 })).flatMap((m) => m.parts ?? []).find((p) => p.type === "tool" && p.tool === "agent_change" && p.callID === cbody.callID);
+  check("after the call returned the agent_change part is no longer `running`", !!cafter && cafter.state.status !== "running", j(cafter?.state?.status));
+  check("the agent_change result text reached the model", mock.requests.some((r) => JSON.stringify(r.body.messages).includes("Created Reviewer (@reviewer)")), "");
 } catch (e) {
   check("probe ran to completion", false, e?.stack ?? String(e));
 } finally {

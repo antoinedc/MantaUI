@@ -82,6 +82,16 @@ test("a handoff tool ends the run and stands alone (no run of its own)", () => {
   assert.equal(partRun.has("h"), false);
 });
 
+test("an agent_change tool (the Phase 4 card) ends the run and stands alone: read → card → read is two runs", () => {
+  const { walker, partRun } = computeRuns([asst("a", [tool("t1"), tool("c", "agent_change"), tool("t2")]), asst("b", [tool("c2", "manta_agent_change", "running"), tool("t3")])]);
+  assert.deepEqual([...walker.order], ["t1", "t2", "t3"]);
+  assert.equal(partRun.has("c"), false);
+  assert.equal(partRun.has("c2"), false);
+  assert.equal(walker.runs.get("t1").closed, true);
+  assert.equal(walker.runs.get("t2").closed, true, "the second card closed the run between");
+  assert.deepEqual(walker.runs.get("t2").parts.map((p) => p.id), ["t2"]);
+});
+
 test("reasoning is transparent but starts a SEGMENT: ids are the first part of each segment", () => {
   const { walker } = computeRuns([asst("a", [tool("A"), { type: "reasoning", id: "r", text: "hm" }, tool("B"), tool("C")])]);
   const run = walker.runs.get("A");

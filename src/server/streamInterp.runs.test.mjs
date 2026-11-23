@@ -206,6 +206,20 @@ test("(4) a tool → a hidden synthetic-only inbox message across two executions
   assert.equal(live.runs.get("A").calls, 2);
 });
 
+test("(14) an agent_change card is a run boundary live and canonical: read → card → read is two runs, in order", async () => {
+  const { live, canon } = await parity([
+    { k: "user", id: "u1", text: "make me an agent" },
+    { k: "tool", msg: "a1", id: "R1" },
+    { k: "tool", msg: "a1", id: "C1", name: "agent_change", input: { action: "create", draft: { name: "Reviewer" } }, output: "Created Reviewer (@reviewer)." },
+    { k: "tool", msg: "a2", id: "R2" },
+  ], "script 14");
+  assert.deepEqual([...live.runs.keys()].sort(), ["R1", "R2"]);
+  assert.deepEqual(live.layout.map((e) => `${e.kind}:${e.id}`), ["run:R1", "run:R2"], "the card is no run: the ledger leaves it to the transcript");
+  assert.equal(live.runs.get("R1").calls, 1);
+  assert.equal(canon.get("R2").calls, 1);
+  assert.equal(live.closed.has("R1"), true, "the card closed the first run");
+});
+
 test("(11) segment layout: A → R → B is [run(A,A), reasoning R, run(A,B)] live and in the canonical walk", async () => {
   const { live } = await parity([
     { k: "user", id: "u1", text: "go" },
