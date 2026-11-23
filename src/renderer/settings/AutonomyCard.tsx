@@ -7,12 +7,14 @@
 // The card exists only when the box has the channels: it renders nothing until `agentsAutonomyGet` succeeds, nothing
 // at all for an older box ("unknown rpc channel"), and an inline error with Retry for any other failure.
 //
-// Native elements throughout (modern-web-guidance `forms`): the mode is a fieldset of real radio buttons, each row's
-// answer a native <select>, the table a real <table>, results announced in a status/alert region.
+// Native elements where the repo has no primitive (modern-web-guidance `forms`): each row's answer is a native <select>,
+// the table a real <table>, results announced in a status/alert region. The mode uses the repo's Segmented primitive
+// (the chrome-ownership gate forbids a second segmented look).
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "../Button";
 import { Card } from "../Card";
+import { Segmented } from "../Segmented";
 import { Tag } from "../Tag";
 import {
   ACTION_KINDS,
@@ -29,6 +31,7 @@ import type { AgentAutonomy, AutonomyKind, AutonomyLevel, AutonomyMode, Autonomy
 type Notice = { tone: "ok" | "error"; text: string };
 type Load = { kind: "loading" } | { kind: "unsupported" } | { kind: "error"; message: string } | { kind: "ready"; settings: AutonomySettings };
 
+const MODE_OPTIONS = MODE_NAMES.map((id) => ({ id, label: MODE_TITLES[id] }));
 const NOTICE_CLS = { ok: "text-ok", error: "text-danger" } as const;
 const SAVED_TEXT = "Saved. Changes apply to new chats.";
 
@@ -178,26 +181,10 @@ export function AutonomyCard() {
             mistakes, not a determined agent. Changes apply to new chats.
           </p>
 
-          <fieldset className="m-0 min-w-0 border-0 p-0" aria-describedby={helpId}>
-            <legend className="mb-1 block p-0 text-micro font-semibold uppercase text-text-muted">Mode</legend>
-            <div className="inline-flex shrink-0 rounded-md border border-border-subtle bg-inset p-1" data-testid="autonomy-mode">
-              {MODE_NAMES.map((m) => (
-                <label key={m} className="relative cursor-pointer">
-                  <input
-                    type="radio"
-                    name={`${groupId}-mode`}
-                    value={m}
-                    checked={view.mode === m}
-                    onChange={() => pickMode(m)}
-                    className="peer absolute opacity-0 [clip-path:inset(50%)] w-px h-px m-0"
-                  />
-                  <span className="inline-flex items-center rounded-sm px-3 py-1 text-meta font-medium text-text-faint hover:text-text peer-checked:bg-raised peer-checked:text-text peer-checked:shadow-sm peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-accent">
-                    {MODE_TITLES[m]}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
+          <div className="space-y-1" data-testid="autonomy-mode">
+            <span className="block text-micro font-semibold uppercase text-text-muted">Mode</span>
+            <Segmented label="Mode" options={MODE_OPTIONS} value={view.mode} onChange={pickMode} hook="manta-autonomy-mode" />
+          </div>
 
           <table className="w-full border-collapse text-left" data-testid="autonomy-table">
             <caption className="sr-only">What your agents do for each kind of action</caption>

@@ -6,8 +6,8 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { act } from "react";
-import { ACTION_KINDS, MODES } from "../../shared/autonomyShared.mjs";
-import type { AgentAutonomy, AutonomyKind, AutonomyLevel, AutonomySettings } from "../../shared/types";
+import { ACTION_KINDS, MODES, MODE_TITLES } from "../../shared/autonomyShared.mjs";
+import type { AgentAutonomy, AutonomyKind, AutonomyLevel, AutonomyMode, AutonomySettings } from "../../shared/types";
 import { buttonByText, mountWithMockApi, type Harness, type MockApi } from "../testHarness";
 import { AutonomyCard, blockForRow, effectiveOf, isAutonomySettings, levelsFor } from "./AutonomyCard";
 
@@ -53,7 +53,9 @@ describe("AutonomyCard", () => {
   }
   const q = <T extends HTMLElement>(sel: string) => h!.container.querySelector(sel) as T | null;
   const select = (kind: AutonomyKind) => q<HTMLSelectElement>(`select[name="${kind}"]`)!;
-  const radio = (mode: string) => q<HTMLInputElement>(`input[type="radio"][value="${mode}"]`)!;
+  const modeButton = (mode: string) =>
+    Array.from(q('[role="group"][aria-label="Mode"]')!.querySelectorAll("button")).find((b) => b.textContent === MODE_TITLES[mode as AutonomyMode])!;
+  const modePressed = (mode: string) => modeButton(mode).getAttribute("aria-pressed") === "true";
   const customKinds = () => Array.from(h!.container.querySelectorAll("tr[data-custom]")).map((r) => r.getAttribute("data-kind"));
   const lastSet = (): AgentAutonomy => {
     const calls = api.calls.agentsAutonomySet;
@@ -69,7 +71,7 @@ describe("AutonomyCard", () => {
   }
   async function pickMode(mode: string) {
     await act(async () => {
-      radio(mode).click();
+      modeButton(mode).click();
     });
     await h!.flush();
   }
@@ -78,7 +80,7 @@ describe("AutonomyCard", () => {
     await open();
     expect(h!.container.querySelectorAll("tbody tr")).toHaveLength(ACTION_KINDS.length);
     for (const k of ACTION_KINDS) expect(select(k).value).toBe(MODES.balanced[k]);
-    expect(radio("balanced").checked).toBe(true);
+    expect(modePressed("balanced")).toBe(true);
     expect(customKinds()).toEqual([]);
     expect(buttonByText(h!, "Reset rows to mode")).toBeNull();
     expect(Array.from(select("edit_code").options).map((o) => o.value)).toEqual(["auto", "never"]);
@@ -92,7 +94,7 @@ describe("AutonomyCard", () => {
     expect(customKinds()).toEqual(["deploy"]);
     await pickMode("autonomous");
     expect(lastSet()).toEqual({ mode: "autonomous", overrides: {} });
-    expect(radio("autonomous").checked).toBe(true);
+    expect(modePressed("autonomous")).toBe(true);
     for (const k of ACTION_KINDS) expect(select(k).value).toBe(MODES.autonomous[k]);
     expect(customKinds()).toEqual([]);
     expect(h!.text()).toContain("Saved. Changes apply to new chats.");
@@ -133,8 +135,8 @@ describe("AutonomyCard", () => {
     expect(select("deploy").value).toBe("ask");
     expect(customKinds()).toEqual([]);
     await pickMode("autonomous");
-    expect(radio("balanced").checked).toBe(true);
-    expect(radio("autonomous").checked).toBe(false);
+    expect(modePressed("balanced")).toBe(true);
+    expect(modePressed("autonomous")).toBe(false);
     expect(select("merge").value).toBe("ask");
   });
 
