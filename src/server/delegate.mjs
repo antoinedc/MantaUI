@@ -118,11 +118,11 @@ export const withSessionLock = (sid, fn) => withSessionResources(sid, fn);
 
 // Max concurrently `running` jobs, counted box-wide. There is no `queued`
 // state — a job either starts immediately or is refused by the cap.
-export const MAX_RUNNING_JOBS = 5;
+export const MAX_RUNNING_JOBS = 10;
 // Cap-refusal copy, spelled exactly for the UI/REST consumer and pinned by
 // delegate.test.mjs.
 export const CAP_ERROR =
-  "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
+  "too many background jobs running (10). Do not retry — either wait for one to finish, or do this work yourself.";
 // A Manta-owned segment that runs past its `ceilingMs` (default 4 h, spec 2026-11-14 A3) → `failed`, endReason
 // "time-limit". A job that makes no progress for 15 minutes is ended as stalled (jobLiveness.judgeStall).
 const EXTEND_MAX_CEILING_MS = 12 * 60 * 60_000;

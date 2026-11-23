@@ -20,7 +20,9 @@ import {
   createAgentsEngine,
   AgentError,
   EXCERPT_MAX_CHARS,
+  HANDOFF_BUSY,
 } from "./agents.mjs";
+import { CAP_ERROR } from "./delegate.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const valid = (extra = "") => `---\nname: Scout\ndescription: Looks things up.\n${extra}---\nYou are Scout.\n`;
@@ -1063,6 +1065,18 @@ test("handoff: a writer follows the trust setting — on starts at once with the
     f.w.declined = true;
     const b3 = call({ callID: "c3", messageID: "m3" });
     assert.deepEqual(await ok(f, b3), { ok: false, error: "The user declined the handoff" });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("handoff: a full box is relayed as 'tell the user', never 'do this work yourself'", async () => {
+  const f = await leadFixture({ delegateOver: { startJobWithApproval: async () => ({ ok: false, error: CAP_ERROR }) } });
+  try {
+    f.w.trust = true;
+    const res = await ok(f, call());
+    assert.deepEqual(res, { ok: false, error: HANDOFF_BUSY });
+    assert.ok(!/yourself/.test(res.error.replace("do not do the work yourself", "")));
   } finally {
     await f.cleanup();
   }

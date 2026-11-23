@@ -46,7 +46,7 @@ export const tools: ToolDef[] = [
       "a row in the sidebar and can open or stop it. Use it whenever the work",
       "doesn't block what you do next and it edits files: implementing a feature or",
       "fix, a refactor, a test-suite run-and-fix, an investigation that must not",
-      "touch your checkout. Split independent pieces into parallel jobs (up to five",
+      "touch your checkout. Split independent pieces into parallel jobs (up to ten",
       "at once); each one is a full model session, so don't start jobs whose result",
       "you won't use. Prefer it over driving opencode sessions yourself (scripts",
       "calling opencode's HTTP API, wait-for-idle scripts, sleep/poll loops, tmux):",

@@ -2898,9 +2898,9 @@ test("P6 schedulingClass: persists on create/revise; anything else is refused (c
 });
 
 test("U19: a background dispatch YIELDS to the interactive reserve with an explicit durable reason; interactive dispatch never yields; no competitor, no yield", async () => {
-  // Four foreign running jobs → 1 available slot (MAX_RUNNING_JOBS 5). The
+  // MAX_RUNNING_JOBS - 1 foreign running jobs → 1 available slot. The
   // reserve is 1, so the free slot is INSIDE the reserve band.
-  const base = { jobs: [1, 2, 3, 4].map((n) => foreignRunningJob(`foreign-${n}`)) };
+  const base = { jobs: Array.from({ length: MAX_RUNNING_JOBS - 1 }, (_, i) => foreignRunningJob(`foreign-${i + 1}`)) };
   // (a) background work + a dispatchable interactive competitor → yield.
   const yielded = makeWorkControl({ ...base });
   const bg = await seedReadyWork(yielded.control, { id: "p6-bg-yield" });

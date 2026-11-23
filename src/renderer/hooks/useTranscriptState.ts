@@ -167,6 +167,7 @@ export function useTranscriptState(params: {
   // childRefetchTimers are managed by the ChatPanel caller (see scheduleChildRefetch param).
   const wantQuestionScroll = useRef(false);
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unmountedRef = useRef(false);
 
   // Apply one box-flushed delta (stream.flush) into the transcript
   // (BET-551 / §17). The box detects flush boundaries and emits the flushed
@@ -192,6 +193,9 @@ export function useTranscriptState(params: {
   }, []);
 
   const scheduleRefetch = useCallback(() => {
+    // A late caller (a fetch answer that schedules "one more", see below) must not arm a timer after unmount: it would
+    // fire against a torn-down environment.
+    if (unmountedRef.current) return;
     if (!isActiveRef.current) {
       refetchOwedWhileInactive.current = true;
       return;
@@ -431,7 +435,9 @@ export function useTranscriptState(params: {
   // unmounted component. The session-change effect above only covers splice
   // timers on sessionId CHANGE, not the final unmount.
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
+      unmountedRef.current = true;
       if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
       for (const t of spliceTimers.current.values()) clearTimeout(t);
       spliceTimers.current.clear();

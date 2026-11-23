@@ -112,7 +112,7 @@ function harness(initialJobs = [], fixedNow = 1_700_000_000_000) {
 }
 
 const CAP_ERROR =
-  "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
+  "too many background jobs running (10). Do not retry — either wait for one to finish, or do this work yourself.";
 
 // BET-1236: the router gated a candidate on description completeness
 // (autoEligibility). The routing-era tests must feed it the routing context

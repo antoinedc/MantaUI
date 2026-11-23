@@ -32,7 +32,7 @@ import {
 const T0 = 1_700_000_000_000;
 const PARENT = "ses_parent";
 const CAP_ERROR =
-  "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
+  "too many background jobs running (10). Do not retry — either wait for one to finish, or do this work yourself.";
 
 const httpErr = (status, message = `opencode ${status}`) => Object.assign(new Error(message), { status });
 const netErr = () => new Error("fetch failed");

@@ -3097,14 +3097,14 @@ export function ChatPanel({
     () => readSavedDelegateModel(delegateProjectKey),
     [delegateProjectKey],
   );
-  // Hard cap of five concurrent background jobs, box-wide (MAX_RUNNING_JOBS in
+  // Hard cap of ten concurrent background jobs, box-wide (MAX_RUNNING_JOBS in
   // src/server/delegate.mjs). At the cap the split control is disabled with a
   // title saying so, rather than accepting the click and failing after.
   const runningDelegates = useMemo(
     () => Object.values(jobs).filter((j) => j.status === "running").length,
     [jobs],
   );
-  const atDelegateCap = runningDelegates >= 5;
+  const atDelegateCap = runningDelegates >= 10;
 
   const rememberDelegateModel = useCallback(
     (m: ModelSelection | null) => writeSavedDelegateModel(delegateProjectKey, m),
