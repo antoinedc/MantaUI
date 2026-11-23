@@ -347,6 +347,70 @@ describe("agent_handoff tool", () => {
   });
 });
 
+describe("agent_change tool", () => {
+  const tool = allTools.find((t) => t.name === "agent_change");
+  const CTX = { sessionID: "ses_t1", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
+  function server(status, body) {
+    const calls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ method: init.method, path: new URL(String(url)).pathname, headers: { ...init.headers }, body: init.body ? JSON.parse(init.body) : undefined });
+      if (status === "throw") throw new Error("ECONNREFUSED");
+      return new Response(JSON.stringify(body), { status });
+    };
+    return calls;
+  }
+  const draft = { name: "Reviewer", description: "Reviews code.", isolation: "none", instructions: "Review." };
+  const applied = (kind) => ({ ok: true, change: { state: "applied", kind, agentName: "Reviewer", slug: "reviewer" } });
+
+  test("registered with the pinned input: action and draft required, the optional agent LAST, a strict nested draft", () => {
+    assert.ok(tool);
+    assert.deepEqual(Object.keys(tool.input.properties), ["action", "draft", "agent"]);
+    assert.deepEqual([...tool.input.required].sort(), ["action", "draft"]);
+    assert.equal(tool.input.additionalProperties, false);
+    assert.deepEqual(tool.input.properties.action.enum, ["create", "update"]);
+    const d = tool.input.properties.draft;
+    assert.equal(d.additionalProperties, false);
+    assert.deepEqual(Object.keys(d.properties), ["name", "description", "isolation", "instructions", "useWhen", "notFor", "model", "color"]);
+    assert.equal(d.required, undefined, "an update names only the fields that change");
+    assert.deepEqual(d.properties.isolation.enum, ["worktree", "none"]);
+    for (const k of ["useWhen", "notFor", "model", "color"]) assert.deepEqual(d.properties[k].type, ["string", "null"]);
+    assert.match(tool.description, /only in a chat you lead/);
+  });
+
+  test("posts the call identity and the arguments exactly as the model gave them (agent only when given)", async () => {
+    let calls = server(200, applied("create"));
+    await tool.execute({ action: "create", draft }, CTX);
+    assert.equal(calls[0].method, "POST");
+    assert.equal(calls[0].path, "/api/agents/change");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_t1", messageID: "msg_1", callID: "call_9", action: "create", draft });
+    assert.equal(calls[0].headers.authorization, `Bearer ${TOKEN}`);
+    calls = server(200, applied("update"));
+    await tool.execute({ action: "update", agent: "dev", draft: { description: "x", model: null } }, CTX);
+    assert.deepEqual(calls[0].body, { sessionID: "ses_t1", messageID: "msg_1", callID: "call_9", action: "update", agent: "dev", draft: { description: "x", model: null } });
+  });
+
+  test("one pinned sentence per outcome", async () => {
+    server(200, applied("create"));
+    assert.equal(await tool.execute({ action: "create", draft }, CTX), "Created Reviewer (@reviewer). It is ready: you can hand work to @reviewer now. The user sees a card with Undo.");
+    server(200, applied("update"));
+    assert.equal(await tool.execute({ action: "update", agent: "reviewer", draft: { description: "x" } }, CTX), "Updated Reviewer (@reviewer). The user sees the change on a card with Undo.");
+    server(200, { ok: true, change: { state: "pending", kind: "create" } });
+    assert.equal(await tool.execute({ action: "create", draft }, CTX), "Proposed. The user sees a card to create it; nothing is written until they click. Tell them in one line and stop; don't claim it is done.");
+    server(200, { ok: true, change: { state: "pending", kind: "update" } });
+    assert.match(await tool.execute({ action: "update", agent: "dev", draft: { description: "x" } }, CTX), /^Proposed\. The user sees a card to apply it; nothing is written/);
+    server(200, { ok: false, error: "Changing agents is turned off in your autonomy settings" });
+    assert.equal(await tool.execute({ action: "create", draft }, CTX), "Not changed: Changing agents is turned off in your autonomy settings");
+    server(200, { ok: false, error: "Reviewer was written but couldn't be activated: boom", change: { state: "failed" } });
+    assert.equal(await tool.execute({ action: "create", draft }, CTX), "Reviewer was written but couldn't be activated: boom The user sees a card with Retry.");
+    server(500, { error: "kaboom" });
+    assert.equal(await tool.execute({ action: "create", draft }, CTX), "Not changed: kaboom");
+    server("throw");
+    assert.match(await tool.execute({ action: "create", draft }, CTX), /^Not changed: /);
+    server(200, {});
+    assert.equal(await tool.execute({ action: "create", draft }, CTX), "Not changed: the change was refused");
+  });
+});
+
 describe("routine tools: agent", () => {
   const create = allTools.find((t) => t.name === "routine_create");
   const update = allTools.find((t) => t.name === "routine_update");

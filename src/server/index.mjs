@@ -2597,6 +2597,22 @@ const agentsEngine = createAgentsEngine({
   // Phase 3: every autonomy decision reads the user's settings strictly from disk; an unreadable file throws and refuses
   autonomyPolicy,
   syncState,
+  // Phase 4 (Manta creates and edits agents): a pinned model must be one the user approved for subagents (the check
+  // delegate applies to an explicit model); an unreadable catalogue throws so the change is refused, never guessed
+  listApprovedModels: async () => {
+    let failed = null;
+    const approved = await oc.listRoutableModels("sub", await local.configGet(), async () => {
+      try {
+        return await oc.listModels({}, { strict: true });
+      } catch (e) {
+        failed = e;
+        throw e;
+      }
+    });
+    if (failed) throw failed;
+    return approved.map((m) => `${m.providerID}/${m.id}`);
+  },
+  publish: (payload) => bus.publish({ kind: "agentChange", payload }),
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
 
@@ -4934,7 +4950,9 @@ const handleRequest = async (req, res) => {
   // POST /api/agents/handoff  body {sessionID, messageID, callID?, agent, title, brief, continueJob?}
   //                                         → {ok:true, jobId, agentName} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engine: src/server/agents.mjs.
-  if (path === "/api/agents/lead-brief" || path === "/api/agents/handoff") {
+  // POST /api/agents/change   body {sessionID, messageID, callID, action, agent?, draft}  (Phase 4: `agent_change`)
+  //                                         → {ok:true, change} | {ok:false, error, change?} (a refusal is HTTP 200, like a handoff)
+  if (path === "/api/agents/lead-brief" || path === "/api/agents/handoff" || path === "/api/agents/change") {
     try {
       if (path === "/api/agents/lead-brief") {
         if (req.method !== "GET") {
@@ -4954,9 +4972,10 @@ const handleRequest = async (req, res) => {
         respondJson(res, 405, { error: "method not allowed" });
         return;
       }
-      respondJson(res, 200, await agentsEngine.handoff((await readJsonBody(req)) ?? {}));
+      const body = (await readJsonBody(req)) ?? {};
+      respondJson(res, 200, await (path === "/api/agents/change" ? agentsEngine.change(body) : agentsEngine.handoff(body)));
     } catch (e) {
-      // class-2 (BET-1460): the manta plugin (lead brief hook, agent_handoff tool) — relays the message to the model.
+      // class-2 (BET-1460): the manta plugin (lead brief hook, agent_handoff / agent_change tools) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

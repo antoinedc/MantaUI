@@ -64,7 +64,7 @@ import {
 import { createSeenIdFilter } from "./seenIds.mjs";
 import { activityTarget, activityTimeoutMs } from "./jobLiveness.mjs";
 import { createRunLedger } from "./runLedger.mjs";
-import { isDelegateTool, isHandoffToolPart } from "./transcriptRuns.mjs";
+import { isDelegateTool, isHandoffToolPart, isAgentChangeToolPart } from "./transcriptRuns.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
 import { randomUUID } from "node:crypto";
 
@@ -326,7 +326,7 @@ export function createStreamInterpreter({
         ...(tool.output && isDelegateTool(tool.name) ? { output: tool.output } : {}),
       },
     };
-    runLedger.onTool(sid, part, { childSessionId: tool.childSessionId, handoff: isHandoffToolPart(part) });
+    runLedger.onTool(sid, part, { childSessionId: tool.childSessionId, handoff: isHandoffToolPart(part) || isAgentChangeToolPart(part) });
   }
 
   // messageChanged: "the canonical copy of this message changed — refetch it".

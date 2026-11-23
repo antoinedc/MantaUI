@@ -3,7 +3,8 @@
 import { MODES } from "../shared/autonomyShared.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, copyFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, rename, copyFile, symlink } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,9 +20,15 @@ import {
   buildDispatchPrompt,
   requestTitle,
   createAgentsEngine,
+  checkDraft,
+  editAgentMd,
+  buildCreateMd,
   AgentError,
   EXCERPT_MAX_CHARS,
   HANDOFF_BUSY,
+  AGENT_CHANGE_OFF,
+  CHANGE_PENDING_MS,
+  CHANGE_MAX,
 } from "./agents.mjs";
 import { CAP_ERROR } from "./delegate.mjs";
 
@@ -1356,5 +1363,671 @@ test("dispatch: a settings read failure refuses before anything starts", async (
     assert.equal(g.calls.startJob.length, 0);
   } finally {
     await g.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: Manta creates and edits agents (agent_change)
+// ---------------------------------------------------------------------------
+
+test("buildLeadBrief: the mechanics tell the lead to call agent_change directly (byte-stable line)", () => {
+  const a = buildLeadBrief({ body: "B", roster: [] });
+  assert.ok(a.includes("- To create an agent or change one (including yourself), call `agent_change` directly; don't ask first in words — the user approves on the card when their settings require it."));
+  assert.ok(a.includes("leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created."));
+  assert.equal(a, buildLeadBrief({ body: "B", roster: [] }));
+});
+
+test("checkDraft: field rules — lengths, one line, colour, isolation, unknown and role keys, model approval", () => {
+  const good = { name: "Reviewer", description: "Reviews code.", isolation: "none", instructions: "  Review.  " };
+  const bad = (draft, re, opts = { create: true }) => {
+    const r = checkDraft(draft, opts);
+    assert.ok(r.error, `expected an error for ${JSON.stringify(draft)}`);
+    assert.match(r.error, re);
+  };
+  const r = checkDraft({ ...good, useWhen: "  ", model: null }, { create: true });
+  assert.deepEqual(r.fields, { name: "Reviewer", description: "Reviews code.", isolation: "none", instructions: "Review." }, "trimmed; empty / null optional fields are dropped on create");
+  bad({ ...good, name: "x".repeat(41) }, /40/);
+  bad({ ...good, name: "two\nlines" }, /one line/);
+  bad({ ...good, description: "two\nlines" }, /one line/);
+  bad({ ...good, description: "x".repeat(201) }, /200/);
+  bad({ ...good, useWhen: "a\nb" }, /one line/);
+  bad({ ...good, notFor: "x".repeat(201) }, /200/);
+  bad({ ...good, isolation: "sandbox" }, /worktree/);
+  bad({ ...good, color: "red" }, /#5A88FF/);
+  bad({ ...good, color: "#12345" }, /#5A88FF/);
+  bad({ ...good, instructions: "   " }, /instructions/);
+  bad({ ...good, instructions: "x".repeat(12_001) }, /12,000/);
+  bad({ ...good, role: "lead" }, /role/);
+  bad({ ...good, mood: "calm" }, /Unknown field "mood"/);
+  bad({ ...good, name: 5 }, /text/);
+  bad({ ...good, name: null }, /can't be cleared/);
+  bad({ description: "d", isolation: "none", instructions: "i" }, /name/);
+  bad({ name: "n", isolation: "none", instructions: "i" }, /description/);
+  bad({ name: "n", description: "d", instructions: "i" }, /isolation/);
+  bad({ name: "n", description: "d", isolation: "none" }, /instructions/);
+  bad(null, /draft/);
+  bad({ ...good, model: "x/y" }, /x\/y isn't an approved model; pick one of a\/b, c\/d/, { create: true, approved: ["c/d", "a/b"] });
+  assert.equal(checkDraft({ ...good, model: "a/b" }, { create: true, approved: ["a/b"] }).fields.model, "a/b");
+  // update: partial; null clears only the nullable ones; the lead keeps its model, isolation and routing lines
+  assert.deepEqual(checkDraft({ description: "New", model: null, useWhen: "" }, { create: false }).fields, { description: "New", model: null, useWhen: null });
+  bad({}, /Nothing to change/, { create: false });
+  bad({ isolation: null }, /can't be cleared/, { create: false });
+  bad({ model: "a/b" }, /Manta's model can't be changed here/, { create: false, lead: true, approved: ["a/b"] });
+  bad({ isolation: "none" }, /Manta's isolation can't be changed here/, { create: false, lead: true });
+  bad({ useWhen: "x" }, /Manta's use when can't be changed here/, { create: false, lead: true });
+  assert.deepEqual(checkDraft({ name: "M2", description: "d", color: "#7C5CFF", instructions: "i" }, { create: false, lead: true }).fields, { name: "M2", description: "d", color: "#7C5CFF", instructions: "i" });
+});
+
+test("buildCreateMd / editAgentMd: the bytes round-trip through the parser; an edit keeps unknown keys, comments and the body", () => {
+  const made = buildCreateMd({ name: "Docs: Writer", description: "Writes docs: clear ones.", isolation: "none", instructions: "Line one.\n\n---\nLine two.", color: "#5A88FF", useWhen: "When docs change." });
+  assert.equal(made.ok, true);
+  const back = parseAgentMd(made.after);
+  assert.equal(back.ok, true);
+  assert.deepEqual(back.meta, { name: "Docs: Writer", description: "Writes docs: clear ones.", isolation: "none", model: null, color: "#5A88FF", role: "specialist", useWhen: "When docs change.", notFor: null });
+  assert.equal(back.body, "Line one.\n\n---\nLine two.");
+
+  const original = "---\n# my note\nname: Scout\ndescription: Looks things up.\nisolation: none\ncustom_key: keep me # why\nmodel: anthropic/claude-sonnet-5-5\n---\nBody here.\n";
+  const d = editAgentMd(original, { description: "New text." }, "Scout");
+  assert.equal(d.ok, true);
+  assert.equal(d.after, original.replace("description: Looks things up.", "description: New text."), "only the touched value changed");
+  const m = editAgentMd(original, { model: null, useWhen: "Use for lookups.", instructions: "Fresh body." }, "Scout");
+  assert.equal(m.ok, true);
+  assert.ok(m.after.includes("# my note") && m.after.includes("custom_key: keep me # why") && !m.after.includes("model:"));
+  assert.ok(m.after.endsWith("---\nFresh body.\n"));
+  assert.equal(parseAgentMd(m.after).meta.useWhen, "Use for lookups.");
+  // the same value again changes nothing at all
+  assert.equal(editAgentMd(original, { name: "Scout" }, "Scout").after, original);
+  // a file that can't be parsed as a document is refused, never rewritten
+  assert.match(editAgentMd("no frontmatter", { name: "X" }, "Scout").error, /Scout's file can't be edited safely; fix it by hand/);
+  assert.match(editAgentMd("---\nname: [oops\n---\nx", { name: "X" }, "Scout").error, /can't be edited safely/);
+});
+
+const APPROVED = ["anthropic/claude-sonnet-5-5", "openai/gpt-6-sol"];
+const DRAFT = { name: "Reviewer", description: "Reviews code.", isolation: "none", instructions: "You review code.\nYou never edit files." };
+let changeSeq = 0;
+// a request body the tool would post; each call gets its own message and call ids unless given
+const chg = (over = {}) => {
+  const n = ++changeSeq;
+  return { sessionID: "ses_chat", messageID: `msg_c${n}`, callID: `callc${n}`, action: "create", draft: { ...DRAFT }, ...over };
+};
+const changeInput = (b) => ({ action: b.action, ...(Object.hasOwn(b, "agent") ? { agent: b.agent } : {}), draft: b.draft });
+const changeTranscript = (b, { status = "running", agent = "build", parentID = "msg_user1", input } = {}) => [
+  { info: { id: parentID, role: "user" }, parts: [] },
+  { info: { id: b.messageID, role: "assistant", parentID, ...(agent === null ? {} : { agent }) }, parts: [{ type: "tool", tool: "agent_change", callID: b.callID, state: { status, input: input ?? changeInput(b) } }] },
+];
+const run = async (f, b, over) => {
+  f.w.messages = changeTranscript(b, over);
+  return f.engine.change(b);
+};
+
+async function changeFixture({ level = "auto", extra = {} } = {}) {
+  const w2 = { level, policyThrows: false, approved: APPROVED, approvedThrows: false, clock: 1_700_000_000_000, pubs: [] };
+  let root = null;
+  const f = await leadFixture({
+    extra: {
+      autonomyPolicy: async () => {
+        if (w2.policyThrows) throw new Error("config.json unreadable");
+        return { ...MODES.balanced, agent_change: w2.level };
+      },
+      listApprovedModels: async () => {
+        if (w2.approvedThrows) throw new Error("models down");
+        return w2.approved;
+      },
+      now: () => w2.clock,
+      publish: (p) => {
+        let state = null;
+        try {
+          state = JSON.parse(readFileSync(join(root, ".changes.json"), "utf-8")).changes.find((r) => r.id === p.id)?.state ?? null;
+        } catch {
+          /* no store yet */
+        }
+        w2.pubs.push({ ...p, state });
+      },
+      ...extra,
+    },
+  });
+  root = f.root;
+  return { ...f, w2 };
+}
+const folders = async (f) => (await readdir(f.root, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+const NOT_LEAD_CHANGE = { ok: false, error: "Only the lead can create or change agents" };
+const COULDNT_VERIFY = { ok: false, error: "Couldn't verify this change; try again" };
+
+test("agent_change binding: call id, message, running part, every nested field, single use", async () => {
+  const f = await changeFixture();
+  try {
+    const b = chg();
+    f.w.messages = changeTranscript(b);
+    assert.deepEqual(await f.engine.change({ ...b, callID: "" }), NOT_LEAD_CHANGE);
+    // the part is another call / the message is absent / it is a user message / a different tool's part
+    f.w.messages = changeTranscript({ ...b, callID: "other" });
+    assert.deepEqual(await f.engine.change(b), COULDNT_VERIFY);
+    f.w.messages = [];
+    assert.deepEqual(await f.engine.change(b), COULDNT_VERIFY);
+    f.w.messages = [{ info: { id: b.messageID, role: "user" }, parts: [] }];
+    assert.deepEqual(await f.engine.change(b), COULDNT_VERIFY);
+    const handoffPart = changeTranscript(b);
+    handoffPart[1].parts[0].tool = "agent_handoff";
+    f.w.messages = handoffPart;
+    assert.deepEqual(await f.engine.change(b), COULDNT_VERIFY);
+    // a part that is not running
+    assert.deepEqual(await run(f, b, { status: "completed" }), NOT_LEAD_CHANGE);
+    // the real input differs from the body: a changed nested field, a missing / extra key, null vs omitted
+    const real = changeInput(b);
+    for (const input of [
+      { ...real, draft: { ...DRAFT, instructions: "something else" } },
+      { ...real, draft: { ...DRAFT, color: "#112233" } },
+      { ...real, draft: { name: DRAFT.name, description: DRAFT.description, isolation: DRAFT.isolation } },
+      { ...real, action: "update" },
+      { ...real, agent: "dev" },
+      { ...real, agent: null },
+      { action: "create" },
+    ]) assert.deepEqual(await run(f, b, { input }), NOT_LEAD_CHANGE, JSON.stringify(input));
+    assert.deepEqual(await run(f, { ...b, agent: null }, { input: real }), NOT_LEAD_CHANGE, "omitted is not null (the body has agent: null, the call has none)");
+    assert.deepEqual(await run(f, b, { input: { ...real, agent: null } }), NOT_LEAD_CHANGE, "omitted is not null (the call has agent: null, the body has none)");
+    assert.deepEqual(await folders(f), ["dev", "manta"], "nothing was written through any of that");
+
+    // the genuine call works once; a replay of the same message + call is refused
+    const first = await run(f, b);
+    assert.equal(first.ok, true, first.error);
+    assert.deepEqual(await run(f, b), NOT_LEAD_CHANGE);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: only a led chat in a build-style mode — not-led, specialist chat, managed child, unknown, plan mode", async () => {
+  const f = await changeFixture();
+  try {
+    f.w.managed = true;
+    assert.deepEqual(await run(f, chg()), NOT_LEAD_CHANGE);
+    f.w.managed = false;
+    f.w.ctoStrict = true;
+    assert.deepEqual(await run(f, chg()), NOT_LEAD_CHANGE);
+    f.w.ctoStrict = false;
+    const keep = f.w.session;
+    f.w.session = { id: "ses_chat", directory: join(f.root, "dev", "home") }; // a specialist's own chat
+    assert.deepEqual(await run(f, chg()), NOT_LEAD_CHANGE);
+    f.w.session = { ...keep, parentID: "ses_parent" }; // a subagent
+    assert.deepEqual(await run(f, chg()), NOT_LEAD_CHANGE);
+    f.w.session = keep;
+    f.w.readState = "unknown";
+    assert.deepEqual(await run(f, chg()), { ok: false, error: "Couldn't check this chat; try again" });
+    f.w.readState = "found";
+    f.w.managedThrows = true;
+    assert.deepEqual(await run(f, chg()), { ok: false, error: "Couldn't check this chat; try again" });
+    f.w.managedThrows = false;
+    for (const agent of ["plan", "manta-plan", null]) {
+      const r = await run(f, chg(), { agent });
+      assert.equal(r.ok, false);
+      assert.match(r.error, /plan mode/);
+    }
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+    assert.equal((await run(f, chg())).ok, true, "and the led chat in build mode works");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change levels: Auto / Tell apply at once; Ask proposes and writes nothing; Never refuses and records nothing", async () => {
+  for (const level of ["auto", "tell"]) {
+    const f = await changeFixture({ level });
+    try {
+      const r = await run(f, chg());
+      assert.equal(r.ok, true, r.error);
+      assert.equal(r.change.state, "applied");
+      assert.equal(r.change.needsClick, false);
+      assert.equal(r.change.reason, null);
+      assert.equal(r.change.slug, "reviewer");
+      assert.equal(r.change.kind, "create");
+      assert.equal(r.change.agentName, "Reviewer");
+      assert.equal(r.change.before, null);
+      const file = await readFile(join(f.root, "reviewer", "agent.md"), "utf-8");
+      assert.equal(file, r.change.after, "the record holds the exact bytes written");
+      assert.ok((await stat(join(f.root, "reviewer", "home"))).isDirectory());
+      assert.equal(await readFile(join(f.root, "reviewer", ".compiled.md"), "utf-8"), "You review code.\nYou never edit files.\n");
+      assert.equal(f.config.cfg.agent["agent-reviewer"].description, "Reviews code.");
+      assert.match(r.change.id, /^ach_[0-9a-f]{16}$/);
+    } finally {
+      await f.cleanup();
+    }
+  }
+  const ask = await changeFixture({ level: "ask" });
+  try {
+    const b = chg();
+    const r = await run(ask, b);
+    assert.equal(r.ok, true);
+    assert.equal(r.change.state, "pending");
+    assert.equal(r.change.needsClick, true);
+    assert.equal(r.change.reason, "ask");
+    assert.equal(r.change.slug, null, "no slug is claimed before the click");
+    assert.deepEqual(await folders(ask), ["dev", "manta"]);
+    assert.equal(ask.config.cfg.agent["agent-reviewer"], undefined);
+    assert.deepEqual(await ask.engine.forCall(b), r.change);
+    assert.equal(await ask.engine.forCall({ ...b, callID: "nope" }), null);
+  } finally {
+    await ask.cleanup();
+  }
+  const never = await changeFixture({ level: "never" });
+  try {
+    const b = chg();
+    assert.deepEqual(await run(never, b), { ok: false, error: AGENT_CHANGE_OFF });
+    assert.equal(await never.engine.forCall(b), null);
+    assert.deepEqual(await folders(never), ["dev", "manta"]);
+  } finally {
+    await never.cleanup();
+  }
+  const broken = await changeFixture();
+  try {
+    broken.w2.policyThrows = true;
+    assert.deepEqual(await run(broken, chg()), { ok: false, error: "Couldn't read your autonomy settings; try again" });
+  } finally {
+    await broken.cleanup();
+  }
+});
+
+test("agent_change: power changes always need a click — the lead itself, and a read-only agent turned into one that edits code", async () => {
+  const f = await changeFixture({ level: "auto" });
+  try {
+    const lead = await run(f, chg({ action: "update", agent: "manta", draft: { instructions: "You are Manta, but terser." } }));
+    assert.equal(lead.ok, true, lead.error);
+    assert.equal(lead.change.state, "pending");
+    assert.equal(lead.change.needsClick, true);
+    assert.equal(lead.change.reason, "lead");
+    assert.ok(!(await readFile(join(f.root, "manta", "agent.md"), "utf-8")).includes("terser"), "nothing is written before the click");
+
+    await mkdir(join(f.root, "scout"));
+    await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
+    await f.engine.list();
+    const raise = await run(f, chg({ action: "update", agent: "scout", draft: { isolation: "worktree" } }));
+    assert.equal(raise.change.state, "pending");
+    assert.equal(raise.change.reason, "isolation");
+    // the other direction, and a harmless edit, follow the level
+    const lower = await run(f, chg({ action: "update", agent: "dev", draft: { isolation: "none" } }));
+    assert.equal(lower.change.state, "applied");
+    // a NEW agent that edits code follows the level too
+    const fresh = await run(f, chg({ draft: { ...DRAFT, name: "Builder", isolation: "worktree" } }));
+    assert.equal(fresh.change.state, "applied");
+    f.w2.level = "ask";
+    const freshAsk = await run(f, chg({ draft: { ...DRAFT, name: "Builder Two", isolation: "worktree" } }));
+    assert.equal(freshAsk.change.reason, "ask");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: models must be Sub-approved; lead model / isolation, a role and a reserved name are refused", async () => {
+  const f = await changeFixture();
+  try {
+    const refused = async (b, re) => {
+      const r = await run(f, b);
+      assert.equal(r.ok, false);
+      assert.match(r.error, re);
+      assert.equal(await f.engine.forCall(b), null, "a refusal leaves no record");
+    };
+    await refused(chg({ draft: { ...DRAFT, model: "x/unknown" } }), /x\/unknown isn't an approved model; pick one of anthropic\/claude-sonnet-5-5, openai\/gpt-6-sol/);
+    f.w2.approvedThrows = true;
+    await refused(chg({ draft: { ...DRAFT, model: "openai/gpt-6-sol" } }), /^Couldn't check the models; try again$/);
+    f.w2.approvedThrows = false;
+    f.w2.approved = [];
+    await refused(chg({ draft: { ...DRAFT, model: "openai/gpt-6-sol" } }), /^Couldn't check the models; try again$/);
+    f.w2.approved = APPROVED;
+    await refused(chg({ action: "update", agent: "manta", draft: { model: "openai/gpt-6-sol" } }), /Manta's model can't be changed here/);
+    await refused(chg({ action: "update", agent: "manta", draft: { isolation: "worktree" } }), /Manta's isolation can't be changed here/);
+    await refused(chg({ action: "update", agent: "dev", draft: { role: "lead" } }), /role can't be set/);
+    await refused(chg({ draft: { ...DRAFT, role: "lead" } }), /role can't be set/);
+    await refused(chg({ draft: { ...DRAFT, name: "Manta" } }), /reserved/);
+    await refused(chg({ draft: { ...DRAFT, name: "Build" } }), /reserved/);
+    await refused(chg({ draft: { ...DRAFT, color: "red" } }), /#5A88FF/);
+    await refused(chg({ draft: { ...DRAFT, name: "Two\nLines" } }), /one line/);
+    await refused(chg({ action: "update", agent: "nobody", draft: { description: "x" } }), /No agent named @nobody/);
+    await refused(chg({ action: "update", draft: { description: "x" } }), /which agent/);
+    await refused(chg({ action: "update", agent: "dev", draft: {} }), /Nothing to change/);
+    await refused(chg({ action: "delete", draft: {} }), /"create" or "update"/);
+    await refused(chg({ action: "update", agent: "dev", draft: { description: "Writes code." } }), /Nothing would change/);
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+
+    // an approved model is pinned; an update that omits `model` keeps the pin
+    const made = await run(f, chg({ draft: { ...DRAFT, model: "openai/gpt-6-sol" } }));
+    assert.equal(made.ok, true, made.error);
+    assert.equal(f.config.cfg.agent["agent-reviewer"].model, "openai/gpt-6-sol");
+    const touched = await run(f, chg({ action: "update", agent: "reviewer", draft: { description: "Reviews code carefully." } }));
+    assert.equal(touched.change.state, "applied");
+    assert.equal(parseAgentMd(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8")).meta.model, "openai/gpt-6-sol");
+    const cleared = await run(f, chg({ action: "update", agent: "reviewer", draft: { model: null } }));
+    assert.equal(cleared.change.state, "applied");
+    assert.equal(parseAgentMd(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8")).meta.model, null);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change update: unknown keys, comments and the body survive; a symlinked agent.md or folder is refused", async () => {
+  const f = await changeFixture();
+  try {
+    const original = "---\n# my note\nname: Scout\ndescription: Looks things up.\nisolation: none\ncustom_key: keep me # why\nmodel: anthropic/claude-sonnet-5-5\n---\nBody here.\n";
+    await mkdir(join(f.root, "scout"));
+    await writeFile(join(f.root, "scout", "agent.md"), original);
+    const r = await run(f, chg({ action: "update", agent: "@Scout", draft: { description: "Finds things." } }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.change.before, original);
+    assert.equal(await readFile(join(f.root, "scout", "agent.md"), "utf-8"), original.replace("Looks things up.", "Finds things."));
+    assert.equal(f.config.cfg.agent["agent-scout"].description, "Finds things.");
+    assert.equal(f.config.cfg.agent["agent-scout"].model, "anthropic/claude-sonnet-5-5", "the pin is kept");
+
+    // a symlinked agent.md
+    await mkdir(join(f.base, "elsewhere"));
+    await writeFile(join(f.base, "elsewhere", "agent.md"), "---\nname: Linked\ndescription: d\n---\nx\n");
+    await mkdir(join(f.root, "linked"));
+    await symlink(join(f.base, "elsewhere", "agent.md"), join(f.root, "linked", "agent.md"));
+    const s = await run(f, chg({ action: "update", agent: "linked", draft: { description: "changed" } }));
+    assert.equal(s.ok, false);
+    assert.match(s.error, /can't be edited safely/);
+    // a symlinked folder is not even an agent
+    await symlink(join(f.base, "elsewhere"), join(f.root, "folderlink"));
+    const t = await run(f, chg({ action: "update", agent: "folderlink", draft: { description: "changed" } }));
+    assert.equal(t.ok, false);
+    assert.equal(await readFile(join(f.base, "elsewhere", "agent.md"), "utf-8"), "---\nname: Linked\ndescription: d\n---\nx\n", "nothing was written through either link");
+    // a file with an error is refused with its reason
+    await mkdir(join(f.root, "broken"));
+    await writeFile(join(f.root, "broken", "agent.md"), "no frontmatter");
+    const u = await run(f, chg({ action: "update", agent: "broken", draft: { description: "x" } }));
+    assert.match(u.error, /has an error \(agent\.md must start with a --- frontmatter block\); fix it by hand/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: Create / Discard / Undo state machine, with a hint published after each persisted transition", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const b = chg();
+    const r = await run(f, b);
+    const id = r.change.id;
+    assert.deepEqual(f.w2.pubs.map((p) => [p.id, p.sessionID, p.slug, p.state]), [[id, "ses_chat", null, "pending"]], "the hint comes after the record is persisted");
+
+    // Create (Apply) from an empty target
+    const applied = await f.engine.apply(id);
+    assert.equal(applied.state, "applied");
+    assert.equal(applied.slug, "reviewer");
+    assert.equal(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8"), applied.after);
+    assert.equal(f.w2.pubs.at(-1).state, "applied");
+    assert.equal(f.w2.pubs.at(-1).slug, "reviewer");
+
+    // a second click (or a stale one from another device) is a no-op and publishes nothing
+    const pubs = f.w2.pubs.length;
+    assert.deepEqual(await f.engine.apply(id), applied);
+    assert.deepEqual(await f.engine.discard(id), applied);
+    assert.equal(f.w2.pubs.length, pubs);
+
+    // Undo removes exactly what the create made, and the installed config block
+    const undone = await f.engine.undo(id);
+    assert.equal(undone.state, "undone");
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+    assert.equal(f.config.cfg.agent["agent-reviewer"], undefined, "the config block is gone");
+    assert.equal(f.w2.pubs.at(-1).state, "undone");
+    assert.deepEqual(await f.engine.undo(id), undone, "a second undo is a no-op");
+    assert.deepEqual(await f.engine.apply(id), undone, "an undone proposal can't be applied");
+
+    // Discard: nothing is ever written
+    const d = await run(f, chg());
+    const discarded = await f.engine.discard(d.change.id);
+    assert.equal(discarded.state, "discarded");
+    assert.deepEqual(await f.engine.apply(d.change.id), discarded);
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+
+    // an unknown id is a sentence
+    await assert.rejects(f.engine.apply("ach_0000000000000000"), /no longer available/);
+    await assert.rejects(f.engine.undo(""), /no longer available/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change update: Apply writes the edit, Undo restores the exact earlier bytes and config", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const before = await readFile(join(f.root, "dev", "agent.md"), "utf-8");
+    const r = await run(f, chg({ action: "update", agent: "dev", draft: { description: "Writes careful code.", instructions: "Dev prompt, v2." } }));
+    assert.equal(r.change.state, "pending");
+    assert.equal(r.change.slug, "dev");
+    assert.equal(r.change.before, before);
+    assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), before, "unchanged until the click");
+    const applied = await f.engine.apply(r.change.id);
+    assert.equal(applied.state, "applied");
+    assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), r.change.after);
+    assert.equal(await readFile(join(f.root, "dev", ".compiled.md"), "utf-8"), "Dev prompt, v2.\n");
+    assert.equal(f.config.cfg.agent["agent-dev"].description, "Writes careful code.");
+    const undone = await f.engine.undo(r.change.id);
+    assert.equal(undone.state, "undone");
+    assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), before);
+    assert.equal(await readFile(join(f.root, "dev", ".compiled.md"), "utf-8"), "Dev prompt.\n");
+    assert.equal(f.config.cfg.agent["agent-dev"].description, "Writes code.");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: simultaneous Apply/Apply and Apply/Discard can never both act", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const a = (await run(f, chg())).change.id;
+    const both = await Promise.all([f.engine.apply(a), f.engine.apply(a)]);
+    assert.deepEqual(both.map((r) => r.state), ["applied", "applied"]);
+    assert.deepEqual(await folders(f), ["dev", "manta", "reviewer"], "one folder, not reviewer-2");
+    assert.equal(f.w2.pubs.filter((p) => p.id === a && p.state === "applied").length, 1, "one transition, one hint");
+
+    const b = (await run(f, chg({ draft: { ...DRAFT, name: "Auditor" } }))).change.id;
+    const [x, y] = await Promise.all([f.engine.apply(b), f.engine.discard(b)]);
+    assert.equal(x.state, y.state, "both callers see the same outcome");
+    assert.ok(["applied", "discarded"].includes(x.state));
+    assert.equal((await folders(f)).includes("auditor"), x.state === "applied");
+    const [u1, u2] = await Promise.all([f.engine.undo(a), f.engine.undo(a)]);
+    assert.deepEqual([u1.state, u2.state], ["undone", "undone"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: a hand edit is a conflict — before an Apply, and before an Undo of an automatic change", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const r = await run(f, chg({ action: "update", agent: "dev", draft: { description: "Writes careful code." } }));
+    const edited = "---\nname: Dev\ndescription: Hand edit.\nisolation: worktree\n---\nMine.\n";
+    await writeFile(join(f.root, "dev", "agent.md"), edited);
+    const c = await f.engine.apply(r.change.id);
+    assert.equal(c.state, "conflict");
+    assert.match(c.error, /Dev changed since this was proposed; ask Manta again/);
+    assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), edited, "the hand edit is untouched");
+    assert.deepEqual(await f.engine.apply(r.change.id), c, "and a conflict stays one");
+
+    // an automatic change that was then edited by hand can't be undone over the edit
+    f.w2.level = "auto";
+    const auto = await run(f, chg({ action: "update", agent: "dev", draft: { description: "Auto edit." } }));
+    assert.equal(auto.change.state, "applied");
+    const again = "---\nname: Dev\ndescription: Edited again.\nisolation: worktree\n---\nMine.\n";
+    await writeFile(join(f.root, "dev", "agent.md"), again);
+    const u = await f.engine.undo(auto.change.id);
+    assert.equal(u.state, "conflict");
+    assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), again);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: a folder replaced by a symlink between the proposal and the click is a conflict — nothing written or removed", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const r = await run(f, chg({ action: "update", agent: "dev", draft: { description: "Writes careful code." } }));
+    const original = await readFile(join(f.root, "dev", "agent.md"), "utf-8");
+    await rm(join(f.root, "dev", ".compiled.md"), { force: true });
+    await mkdir(join(f.base, "real-dev"));
+    await writeFile(join(f.base, "real-dev", "agent.md"), original);
+    await rm(join(f.root, "dev"), { recursive: true });
+    await symlink(join(f.base, "real-dev"), join(f.root, "dev"));
+    const c = await f.engine.apply(r.change.id);
+    assert.equal(c.state, "conflict");
+    assert.equal(await readFile(join(f.base, "real-dev", "agent.md"), "utf-8"), original);
+
+    // the same for the undo of a created agent: the symlink target keeps every file
+    const made = await run(f, chg());
+    await f.engine.apply(made.change.id);
+    await rename(join(f.root, "reviewer"), join(f.base, "real-reviewer"));
+    await symlink(join(f.base, "real-reviewer"), join(f.root, "reviewer"));
+    const u = await f.engine.undo(made.change.id);
+    assert.equal(u.state, "conflict");
+    assert.deepEqual((await readdir(join(f.base, "real-reviewer"))).sort(), [".compiled.md", "agent.md", "home"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: an undo of a created agent is refused once its folder was used — and a symlinked compiled prompt is a conflict", async () => {
+  const f = await changeFixture({ level: "auto" });
+  try {
+    const refused = async (touch, re) => {
+      const r = await run(f, chg({ draft: { ...DRAFT, name: `Used ${++changeSeq}` } }));
+      const dir = join(f.root, r.change.slug);
+      await touch(dir);
+      await assert.rejects(f.engine.undo(r.change.id), re);
+      assert.equal((await f.engine.forCall(r.change)).state, "applied", "the record still says applied");
+      const kept = await readdir(dir);
+      assert.ok(kept.includes("agent.md"), "nothing was removed");
+      return { r, dir };
+    };
+    await refused((dir) => writeFile(join(dir, ".chat.json"), "{}"), /It has been used since; delete it by hand/);
+    await refused((dir) => writeFile(join(dir, "home", "notes.md"), "x"), /It has been used since; delete it by hand/);
+    await refused((dir) => mkdir(join(dir, "seats")), /It has been used since/);
+    await refused((dir) => writeFile(join(dir, "agent.md"), "---\nname: X\ndescription: d\n---\nedited\n"), /It has been used since/);
+    const r = await run(f, chg({ draft: { ...DRAFT, name: "Linked Prompt" } }));
+    const dir = join(f.root, r.change.slug);
+    await rm(join(dir, ".compiled.md"));
+    await writeFile(join(f.base, "outside.md"), "x");
+    await symlink(join(f.base, "outside.md"), join(dir, ".compiled.md"));
+    assert.equal((await f.engine.undo(r.change.id)).state, "conflict");
+    assert.ok((await readdir(dir)).includes("agent.md"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: an activation failure keeps the file (state failed); Retry re-activates without rewriting, a hand edit between attempts is a conflict", async () => {
+  const cfg = { agent: {} };
+  const st = { rejectReload: false, reloadOk: false, reloadCalls: 0 };
+  const editConfig = async (fn) => {
+    const edits = await fn(cfg);
+    for (const e of edits) {
+      const [, key] = e.path;
+      if (e.value === undefined) delete cfg.agent[key];
+      else cfg.agent[key] = structuredClone(e.value);
+    }
+    if (edits.length > 0 && st.rejectReload) return { ok: false, changed: true, reloaded: false, error: "reload rejected" };
+    return { ok: true, changed: edits.length > 0, reloaded: edits.length > 0 };
+  };
+  const reload = async () => {
+    st.reloadCalls++;
+    return st.reloadOk ? { ok: true, reloaded: true } : { ok: false, error: "still rejected" };
+  };
+  const f = await changeFixture({ extra: { editConfig, reload } });
+  try {
+    st.rejectReload = true;
+    const r = await run(f, chg());
+    assert.equal(r.ok, false);
+    assert.equal(r.change.state, "failed");
+    assert.match(r.error, /Reviewer was written but couldn't be activated: Couldn't update the agents in OpenCode: reload rejected/);
+    assert.equal(r.change.slug, "reviewer");
+    const bytes = await readFile(join(f.root, "reviewer", "agent.md"), "utf-8");
+    assert.equal(bytes, r.change.after, "the file stays");
+    assert.equal((await f.engine.forCall(r.change)).state, "failed");
+
+    // Retry: the config block is already there, so only a forced reload can activate it — and it is rejected again
+    const again = await f.engine.apply(r.change.id);
+    assert.equal(again.state, "failed");
+    assert.match(again.error, /Couldn't reload OpenCode after an agent changed: still rejected/);
+    assert.equal(st.reloadCalls, 1, "the reload ran although no file or block changed");
+    // then it works
+    st.reloadOk = true;
+    const ok2 = await f.engine.apply(r.change.id);
+    assert.equal(ok2.state, "applied");
+    assert.equal(st.reloadCalls, 2);
+    assert.deepEqual(await folders(f), ["dev", "manta", "reviewer"], "never reclaimed under another slug");
+    assert.equal(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8"), bytes, "never rewritten");
+
+    // a hand edit between the failure and the retry
+    st.reloadOk = false;
+    st.rejectReload = false;
+    const failing = await run(f, chg({ action: "update", agent: "reviewer", draft: { description: "Edits later." } }));
+    assert.equal(failing.change.state, "applied");
+    st.rejectReload = true;
+    const f2 = await run(f, chg({ action: "update", agent: "reviewer", draft: { description: "Edits again." } }));
+    assert.equal(f2.change.state, "failed");
+    const edited = (await readFile(join(f.root, "reviewer", "agent.md"), "utf-8")).replace("Edits again.", "By hand.");
+    await writeFile(join(f.root, "reviewer", "agent.md"), edited);
+    const c = await f.engine.apply(f2.change.id);
+    assert.equal(c.state, "conflict");
+    assert.equal(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8"), edited);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: a proposal expires after a day (read and click); an unreadable or Never policy at the click refuses without writing", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const a = await run(f, chg());
+    f.w2.clock += CHANGE_PENDING_MS + 1;
+    assert.equal((await f.engine.forCall(a.change)).state, "expired", "stale at read");
+    const x = await f.engine.apply(a.change.id);
+    assert.equal(x.state, "expired");
+    assert.match(x.error, /expired/);
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+    assert.equal(f.w2.pubs.at(-1).state, "expired");
+    const b = await run(f, chg());
+    f.w2.clock += CHANGE_PENDING_MS + 1;
+    assert.equal((await f.engine.discard(b.change.id)).state, "expired");
+
+    const c = await run(f, chg());
+    f.w2.policyThrows = true;
+    await assert.rejects(f.engine.apply(c.change.id), /Couldn't read your autonomy settings; try again/);
+    f.w2.policyThrows = false;
+    f.w2.level = "never";
+    await assert.rejects(f.engine.apply(c.change.id), new RegExp(AGENT_CHANGE_OFF));
+    assert.equal((await f.engine.forCall(c.change)).state, "pending", "still waiting");
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+    f.w2.level = "ask";
+    assert.equal((await f.engine.apply(c.change.id)).state, "applied");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change store: at most 200 records, finished ones go after a week", async () => {
+  const f = await changeFixture({ level: "ask" });
+  try {
+    const old = await run(f, chg());
+    await f.engine.discard(old.change.id);
+    f.w2.clock += 8 * 24 * 60 * 60 * 1000;
+    const fresh = await run(f, chg());
+    assert.equal(await f.engine.forCall(old.change), null, "a week-old finished record is pruned");
+    assert.equal((await f.engine.forCall(fresh.change)).state, "pending");
+    for (let i = 0; i < CHANGE_MAX + 5; i++) await run(f, chg());
+    const stored = JSON.parse(readFileSync(join(f.root, ".changes.json"), "utf-8")).changes;
+    assert.equal(stored.length, CHANGE_MAX);
+    assert.equal(await f.engine.forCall(fresh.change), null, "the oldest went first");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agents:create is unchanged: name / description / isolation only, no change record", async () => {
+  const f = await changeFixture();
+  try {
+    const made = await f.engine.create({ name: "Plain", description: "Does plain things.", isolation: "none" });
+    assert.equal(made.slug, "plain");
+    assert.match(await readFile(join(f.root, "plain", "agent.md"), "utf-8"), /^---\nname: Plain\ndescription: Does plain things\.\nisolation: none\n---\nYou are Plain\./);
+    assert.deepEqual((await readdir(f.root)).filter((n) => n === ".changes.json"), []);
+    assert.equal(f.w2.pubs.length, 0);
+  } finally {
+    await f.cleanup();
   }
 });

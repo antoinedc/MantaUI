@@ -9,8 +9,10 @@
 //
 // For each case in docs/agents/lead-routing-eval.jsonl ({message, team, expect}) the model is shown the real lead brief
 // (the lead's own instructions + the roster of `team` + the autonomy rules + the handoff mechanics) and the user's
-// message, and answers with JSON {action: "answer" | "handoff" | "ask", agent?}. A one-shot text generation: no tools run,
-// nothing is changed. Prints accuracy, MISSED handoffs (should have handed off, did not) and NEEDLESS handoffs.
+// message, and answers with JSON {action: "answer" | "handoff" | "ask" | "agent_change", agent?, change?}. A one-shot
+// text generation: no tools run, nothing is changed. Prints accuracy, MISSED handoffs (should have handed off, did not)
+// and NEEDLESS handoffs, and the same two counts for agent_change (Phase 4: creating / editing an agent).
+// A case's `expect` is "answer", "ask", "handoff:<slug>", "agent_change:create" or "agent_change:update:<slug>".
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -54,7 +56,7 @@ const briefFor = (team) => buildLeadBrief({ body: lead.body, roster: team.map(te
 
 if (flag("--print-brief") !== undefined) {
   console.log(briefFor(flag("--print-brief").split(",").filter(Boolean)));
-  process.exit(failedCalls > 0 ? 1 : 0);
+  process.exit(0);
 }
 
 const oc = await import("../../src/server/opencode.mjs");
@@ -98,7 +100,8 @@ const instruction = (team, message) =>
     '- "answer": you answer, do the work yourself (questions, explanations, plans, small reads, small edits, or nothing on your team fits).',
     '- "handoff": you call agent_handoff for the one teammate it matches (give "agent": its slug without the @).',
     '- "ask": you must ask the user before doing anything.',
-    'Reply with ONLY a JSON object, e.g. {"action":"handoff","agent":"dev"} — no other text.',
+    '- "agent_change": you call agent_change, to create a new agent (give "change":"create") or to edit an existing one, yourself included (give "change":"update" and "agent": its slug without the @).',
+    'Reply with ONLY a JSON object, e.g. {"action":"handoff","agent":"dev"} or {"action":"agent_change","change":"create"} — no other text.',
   ].join("\n");
 
 function parseDecision(text) {
@@ -106,8 +109,12 @@ function parseDecision(text) {
   if (!m) return null;
   try {
     const d = JSON.parse(m[0]);
-    if (!["answer", "handoff", "ask"].includes(d?.action)) return null;
-    return { action: d.action, agent: typeof d.agent === "string" ? d.agent.replace(/^@/, "").toLowerCase() : undefined };
+    if (!["answer", "handoff", "ask", "agent_change"].includes(d?.action)) return null;
+    return {
+      action: d.action,
+      agent: typeof d.agent === "string" ? d.agent.replace(/^@/, "").toLowerCase() : undefined,
+      change: d.change === "create" || d.change === "update" ? d.change : undefined,
+    };
   } catch {
     return null;
   }
@@ -135,10 +142,17 @@ async function worker() {
 }
 await Promise.all(Array.from({ length: Math.min(CONCURRENCY, cases.length) }, worker));
 
-const label = (d) => (d ? (d.action === "handoff" ? `handoff:${d.agent ?? "?"}` : d.action) : "unparseable");
+const label = (d) => {
+  if (!d) return "unparseable";
+  if (d.action === "handoff") return `handoff:${d.agent ?? "?"}`;
+  if (d.action === "agent_change") return d.change === "update" ? `agent_change:update:${d.agent ?? "?"}` : `agent_change:${d.change ?? "?"}`;
+  return d.action;
+};
 let correct = 0;
 const missed = [];
 const needless = [];
+const missedChange = [];
+const needlessChange = [];
 const other = [];
 for (const r of rows) {
   const got = label(r.got);
@@ -146,8 +160,10 @@ for (const r of rows) {
   if (ok) correct++;
   else if (r.c.expect.startsWith("handoff:") && !got.startsWith("handoff:")) missed.push(r);
   else if (!r.c.expect.startsWith("handoff:") && got.startsWith("handoff:")) needless.push(r);
+  else if (r.c.expect.startsWith("agent_change:") && !got.startsWith("agent_change:")) missedChange.push(r);
+  else if (!r.c.expect.startsWith("agent_change:") && got.startsWith("agent_change:")) needlessChange.push(r);
   else other.push(r);
-  console.log(`${ok ? "  ok  " : " MISS "} expect ${r.c.expect.padEnd(11)} got ${got.padEnd(11)} ${r.c.message.slice(0, 80)}${r.error ? `  [error: ${r.error}]` : ""}`);
+  console.log(`${ok ? "  ok  " : " MISS "} expect ${r.c.expect.padEnd(24)} got ${got.padEnd(24)} ${r.c.message.slice(0, 80)}${r.error ? `  [error: ${r.error}]` : ""}`);
 }
 const pct = (n) => `${Math.round((n / cases.length) * 100)}%`;
 const failedCalls = rows.filter((r) => r.error).length;
@@ -157,5 +173,7 @@ if (failedCalls > 0) {
 console.log(`\naccuracy: ${correct}/${cases.length} (${pct(correct)})`);
 console.log(`missed handoffs (should hand off, did not): ${missed.length}`);
 console.log(`needless handoffs (handed off when none was expected): ${needless.length}`);
-console.log(`other mismatches (wrong agent for a handoff, ask vs answer): ${other.length}`);
+console.log(`missed agent changes (should create / edit an agent, did not): ${missedChange.length}`);
+console.log(`needless agent changes (created / edited an agent when none was asked): ${needlessChange.length}`);
+console.log(`other mismatches (wrong agent for a handoff, ask vs answer, create vs update): ${other.length}`);
 process.exit(failedCalls > 0 ? 1 : 0);

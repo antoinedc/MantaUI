@@ -2874,6 +2874,11 @@ export function buildHandlers({
         return a.dispatch({ ...input, directory });
       }),
     "agents:open-chat": (input) => agentsCall("open-chat", (a) => a.openChat(input)),
+    // Phase 4 (Manta creates and edits agents): the card's lookup and its three buttons. A refusal is a sentence (AgentError).
+    "agents:change-for": (input) => agentsCall("change-for", (a) => a.forCall(input)),
+    "agents:change-apply": (id) => agentsCall("change-apply", (a) => a.apply(id)),
+    "agents:change-discard": (id) => agentsCall("change-discard", (a) => a.discard(id)),
+    "agents:change-undo": (id) => agentsCall("change-undo", (a) => a.undo(id)),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>

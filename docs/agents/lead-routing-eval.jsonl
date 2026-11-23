@@ -28,3 +28,7 @@
 {"message": "Implement the share card for the project page: a button that copies a link and shows a toast, with tests.", "team": [], "expect": "answer"}
 {"message": "Audit the head tags on the homepage.", "team": ["dev"], "expect": "answer"}
 {"message": "Fix the flaky login test on CI and add a regression test.", "team": [], "expect": "answer"}
+{"message": "Make me an agent that reviews pull requests for security problems. It should only read and report, never change code.", "team": ["dev", "seo"], "expect": "agent_change:create"}
+{"message": "Change Dev so that it always writes a failing test first before it fixes a bug.", "team": ["dev", "seo"], "expect": "agent_change:update:dev"}
+{"message": "Which of my agents is best for checking the sitemap, and what is it set up to do?", "team": ["dev", "seo"], "expect": "answer"}
+{"message": "Have the SEO agent look at the pricing page title and meta description and tell me what to change.", "team": ["dev", "seo"], "expect": "handoff:seo"}
