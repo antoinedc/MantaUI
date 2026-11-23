@@ -2649,7 +2649,7 @@ test("autonomy resume: a fresh child under the CURRENT settings — the ruleset 
   assert.deepEqual(w.calls.create[0].permission, job.permission, "the new child gets the recomputed ruleset");
   assert.deepEqual(job.basePermission, before.basePermission);
   assert.doesNotMatch(w.calls.send[0].text, /Needs the user's go-ahead \(don't do it and don't try another way\): deploy or release anything/, "deploy is Tell now, so it is no longer an 'ask' in the prompt");
-  assert.match(w.calls.send[0].text, /Allowed, but list them in your report: deploy or release anything/);
+  assert.match(w.calls.send[0].text, /Allowed \(do them when the task needs them\), but list them in your report: deploy or release anything/);
   assert.match(w.calls.send[0].text, /Merging is never part of a task/);
 
   const refused = specialistWorld(BAL);

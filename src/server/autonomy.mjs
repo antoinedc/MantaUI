@@ -438,7 +438,7 @@ export function taskPromptSection(policy, projectEntries = []) {
   ];
   if (ask.length > 0) limits.push(`Needs the user's go-ahead (don't do it and don't try another way): ${ask.join("; ")}.`);
   if (never.length > 0) limits.push(`Not allowed at all (don't try another way): ${never.join("; ")}.`);
-  if (tell.length > 0) limits.push(`Allowed, but list them in your report: ${tell.join("; ")}.`);
+  if (tell.length > 0) limits.push(`Allowed (do them when the task needs them), but list them in your report: ${tell.join("; ")}.`);
   limits.push("Merging is never part of a task; the lead does that.", "");
   const meant = [...TASK_KINDS.filter((k) => decide(k, policy) !== "auto"), "merge"];
   limits.push(

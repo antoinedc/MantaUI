@@ -120,7 +120,7 @@ that needs the go-ahead or is not allowed, do the rest of the task and list that
 
 Needs the user's go-ahead (don't do it and don't try another way): <ask labels joined "; ">.
 Not allowed at all (don't try another way): <never labels>.
-Allowed, but list them in your report: <tell labels>.
+Allowed (do them when the task needs them), but list them in your report: <tell labels>.
 Merging is never part of a task; the lead does that.
 
 What these mean:

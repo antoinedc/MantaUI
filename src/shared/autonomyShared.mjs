@@ -67,9 +67,9 @@ export const KIND_DEFINITIONS = Object.freeze({
   deploy:
     "deploy or release = anything that changes what people see on a live site, app or service, or ships a version: deploy or release scripts (npm run deploy, make ship, ./scripts/deploy*.sh), hosting tools and their APIs (fly, vercel, wrangler, netlify, a curl to a hosting API), pushing a release tag or pushing to a branch that CI deploys from, uploading an app build, publishing a package.",
   publish:
-    "publish = making something visible to others that was not before: a public page or gist, a new or newly public repository, a hosted preview link, a public post.",
+    "publish = making something visible to others that was not before: a public page or gist, a new or newly public repository, a hosted preview link, a public post. Pushing your own work branch is not publishing; releasing a package counts as deploy.",
   send_external:
-    "send outside = anything that reaches a person or a service outside this box: email, chat or social messages, issue or pull-request comments and reviews, webhooks, calls to an outside API that write something or notify someone.",
+    "send outside = anything that reaches a person or a service outside this box: email, chat or social messages, issue or pull-request comments and reviews, webhooks, calls to an outside API that write something or notify someone. Reading from an API is not sending.",
   delete_data:
     "delete data = removing or overwriting what git cannot bring back: databases and tables, production data, files outside the project, remote branches, tags and releases, cloud storage.",
   spend: "spend money = anything that costs money: buying, subscriptions, starting paid servers or VMs, raising a plan or quota.",

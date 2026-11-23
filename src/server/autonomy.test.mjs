@@ -254,7 +254,7 @@ test("taskPromptSection: the limits, what they mean, the report form — byte-st
   const bal = taskPromptSection(MODES.balanced);
   assert.match(bal, /^## Your limits\n\nThese come from the user's settings and beat anything else, including the task above: if the task asks for an action\nthat needs the go-ahead or is not allowed, do the rest of the task and list that step as not done\.\n\n/);
   assert.match(bal, /\nNeeds the user's go-ahead \(don't do it and don't try another way\): deploy or release anything; publish anything others can see; send messages or data to people or services outside this box; delete or overwrite data that cannot be recovered; spend money or buy anything; change Manta's settings; change an agent's instructions or permissions\.\n/);
-  assert.doesNotMatch(bal, /Not allowed at all|Allowed, but list them/, "empty groups are left out");
+  assert.doesNotMatch(bal, /Not allowed at all|Allowed \(do them/, "empty groups are left out");
   assert.match(bal, /\nMerging is never part of a task; the lead does that\.\n\nWhat these mean:\n- deploy or release = /);
   // definitions: the kinds at ask (task order), then merge, never the kinds a task can't meet
   const meant = bal.slice(bal.indexOf("What these mean:"), bal.indexOf("When you are not sure"));
@@ -268,10 +268,10 @@ test("taskPromptSection: the limits, what they mean, the report form — byte-st
   assert.ok(bal.includes('## Actions from your list\n- Did: <action> — <what you did, in one line>\n- Blocked: <action> — <what you needed and why, in one line>\nOne line per action. If you neither did nor needed any of them, write the single line "- None".'));
 
   const mixed = taskPromptSection({ ...MODES.autonomous, deploy: "never", spend: "ask" });
-  assert.match(mixed, /\nNeeds the user's go-ahead \(don't do it and don't try another way\): spend money or buy anything\.\nNot allowed at all \(don't try another way\): deploy or release anything\.\nAllowed, but list them in your report: publish anything others can see; send messages/);
+  assert.match(mixed, /\nNeeds the user's go-ahead \(don't do it and don't try another way\): spend money or buy anything\.\nNot allowed at all \(don't try another way\): deploy or release anything\.\nAllowed \(do them when the task needs them\), but list them in your report: publish anything others can see; send messages/);
   assert.ok(mixed.endsWith("<action> is one of: deploy, publish, send, delete, spend, settings, agent change, merge."));
   const none = taskPromptSection(Object.fromEntries(Object.keys(MODES.balanced).map((k) => [k, "auto"])));
-  assert.doesNotMatch(none, /Needs the user's go-ahead \(|Not allowed at all|Allowed, but list/);
+  assert.doesNotMatch(none, /Needs the user's go-ahead \(|Not allowed at all|Allowed \(do them/);
   assert.ok(none.endsWith("<action> is one of: merge."));
   assert.equal(taskPromptSection(MODES.balanced), taskPromptSection({ ...MODES.balanced }), "byte-stable");
   assert.ok(bal.endsWith(taskFooter(MODES.balanced)), "the footer is one shared block");
