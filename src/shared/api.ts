@@ -38,6 +38,8 @@ import type {
   AuthClaimInput,
   AuthPairResult,
   DelegateJob,
+  AgentAutonomy,
+  AutonomySettings,
   DelegateApproval,
   DelegateJobForSession,
   AgentInfo,
@@ -1983,6 +1985,8 @@ export interface Api {
   delegateDecline(id: string): Promise<{ ok: boolean }>;
   // Agents, Phase 1.
   agentsList(): Promise<AgentInfo[]>;
+  agentsAutonomyGet(): Promise<AutonomySettings>;
+  agentsAutonomySet(input: AgentAutonomy): Promise<AutonomySettings>;
   agentsCreate(input: AgentCreateInput): Promise<AgentInfo>;
   agentsDispatch(input: AgentDispatchInput): Promise<{ jobId: string }>;
   agentsOpenChat(input: { slug: string }): Promise<{ tmuxSession: string; windowIndex: number }>;
