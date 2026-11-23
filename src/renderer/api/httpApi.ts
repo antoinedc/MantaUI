@@ -444,7 +444,8 @@ type Kind =
   | "runningSet"
   | "sync"
   | "ctoState"
-  | "routines.updated";
+  | "routines.updated"
+  | "agentChange";
 
 // Stream-kind listeners receive the DERIVED envelope `{sub, sessionId, payload}`
 // (see dispatchFrame), not just `payload` — the bus event carries the extra
@@ -478,6 +479,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   sync: new Set(),
   ctoState: new Set(),
   "routines.updated": new Set(),
+  agentChange: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -1355,6 +1357,13 @@ export const httpApi: Api = {
   agentsOpenChat: (input) => rpc(IPC.agentsOpenChat, input),
   agentsAutonomyGet: () => rpc(IPC.agentsAutonomyGet),
   agentsAutonomySet: (input) => rpc(IPC.agentsAutonomySet, input),
+  // Agents Phase 4: Manta's proposed / applied agent changes (the chat card). A refusal is a thrown sentence.
+  agentsChangeFor: (input) => rpc("agents:change-for", input),
+  agentsChangeApply: (id) => rpc("agents:change-apply", { id }),
+  agentsChangeDiscard: (id) => rpc("agents:change-discard", { id }),
+  agentsChangeUndo: (id) => rpc("agents:change-undo", { id }),
+  // The box publishes `agentChange` ({id, sessionID, slug}) after every persisted change transition: a hint, refetch.
+  onAgentChange: (cb) => on<{ id: string; sessionID: string; slug: string | null }>("agentChange", cb),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
   // pending-approvals for the viewed parent session and shows ONE card.
   delegatePendingApprovals: (sessionId) =>

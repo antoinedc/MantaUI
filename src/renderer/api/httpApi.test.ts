@@ -809,3 +809,63 @@ describe("dispatchFrame records the run epoch (WS11 D11)", () => {
     expect(useStore.getState().runEpoch.epoch).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Agents Phase 4: the agent-change channels and the `agentChange` bus kind
+// ---------------------------------------------------------------------------
+
+describe("httpApi agent-change channels", () => {
+  beforeEach(() => {
+    mockLocalStorage["manta_server"] = "https://example.com";
+    mockLocalStorage["manta_token"] = HEX32;
+  });
+
+  const ok = (result: unknown) => async () =>
+    new Response(JSON.stringify({ result }), { status: 200, headers: { "content-type": "application/json" } });
+
+  const calls: Array<{ name: string; call: () => Promise<unknown>; channel: string; args: unknown[] }> = [
+    {
+      name: "agentsChangeFor",
+      call: () => httpApi.agentsChangeFor({ sessionID: "ses_1", messageID: "msg_1", callID: "call_1" }),
+      channel: "agents:change-for",
+      args: [{ sessionID: "ses_1", messageID: "msg_1", callID: "call_1" }],
+    },
+    { name: "agentsChangeApply", call: () => httpApi.agentsChangeApply("ach_1"), channel: "agents:change-apply", args: [{ id: "ach_1" }] },
+    { name: "agentsChangeDiscard", call: () => httpApi.agentsChangeDiscard("ach_1"), channel: "agents:change-discard", args: [{ id: "ach_1" }] },
+    { name: "agentsChangeUndo", call: () => httpApi.agentsChangeUndo("ach_1"), channel: "agents:change-undo", args: [{ id: "ach_1" }] },
+  ];
+
+  for (const c of calls) {
+    it(`${c.name} posts to ${c.channel} and resolves with the record`, async () => {
+      const fetchMock = stubFetch().mockImplementation(ok({ id: "ach_1", state: "applied" }));
+      await expect(c.call()).resolves.toEqual({ id: "ach_1", state: "applied" });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`https://example.com/rpc/${encodeURIComponent(c.channel)}`);
+      expect(JSON.parse(String(init.body))).toEqual({ args: c.args });
+    });
+
+    it(`${c.name} throws the box's sentence on a refusal`, async () => {
+      stubFetch().mockImplementation(
+        async () => new Response(JSON.stringify({ error: "Changing agents is turned off in your autonomy settings" }), { status: 400 }),
+      );
+      await expect(c.call()).rejects.toThrow("Changing agents is turned off in your autonomy settings");
+    });
+  }
+
+  it("agentsChangeFor passes a missing record through as null", async () => {
+    stubFetch().mockImplementation(ok(null));
+    await expect(httpApi.agentsChangeFor({ sessionID: "s", messageID: "m", callID: "c" })).resolves.toBeNull();
+  });
+
+  it("onAgentChange delivers an agentChange frame's payload and stops after unsubscribe", () => {
+    const cb = vi.fn();
+    const unsub = httpApi.onAgentChange(cb);
+    const frame = JSON.stringify({ kind: "agentChange", payload: { id: "ach_1", sessionID: "ses_1", slug: "reviewer" } });
+    dispatchFrame(frame);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb.mock.calls[0][0]).toEqual({ id: "ach_1", sessionID: "ses_1", slug: "reviewer" });
+    unsub();
+    dispatchFrame(frame);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+});

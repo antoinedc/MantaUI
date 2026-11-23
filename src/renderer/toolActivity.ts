@@ -11,6 +11,7 @@
 
 import type { OpencodeMessage, OpencodePart, PartView, RunRef, RunSegmentView, RunSummaryView, RunView } from "../shared/types";
 import { isRenderableMessage, visibleAssistantParts } from "./chatUtils";
+import { isAgentChangePart } from "./agentChange";
 import { isHandoffToolPart } from "./handoff";
 import { routineToolKind } from "./routineToolParts";
 
@@ -156,7 +157,9 @@ export type TranscriptLayout = {
 };
 
 const partView = (p: OpencodePart): PartView | undefined => (p as { view?: PartView }).view;
-const isRunPart = (p: OpencodePart): boolean => (p.type === "tool" && !isHandoffToolPart(p) && routineToolKind(p) == null) || p.type === "patch";
+// A handoff card, a completed routine card and Manta's agent-change card each draw as a block of their own: never part of a run.
+const isRunPart = (p: OpencodePart): boolean =>
+  (p.type === "tool" && !isHandoffToolPart(p) && !isAgentChangePart(p) && routineToolKind(p) == null) || p.type === "patch";
 const FALLBACK_VIEW: RunSummaryView = { label: "Tool activity", calls: 0, failed: 0, tone: "ok", live: null };
 
 /**

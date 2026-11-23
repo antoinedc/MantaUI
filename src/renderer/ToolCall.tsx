@@ -44,6 +44,8 @@ import { HandoffToolCard } from "./HandoffParts";
 import { isHandoffToolPart } from "./handoff";
 import { RoutineToolCard } from "./RoutineRunParts";
 import { routineToolKind } from "./routineToolParts";
+import { AgentChangeCard } from "./AgentChangeCard";
+import { isAgentChangePart } from "./agentChange";
 
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
 // right-hand meta (`.tool-h .r`). `+N` in ok, `−N` in danger, each omitted
@@ -233,6 +235,7 @@ const PatchCard = memo(function PatchCard({ part }: { part: OpencodePart }) {
 // Add a new tool: write a `<ToolnameBody>` function, add a case in the switch.
 // Falls back to GenericBody when the tool is unrecognized.
 
+// Manta's `agent_change` call is a card drawn from the box's record (Agents Phase 4), not a generic tool card.
 export const ToolCall = memo(function ToolCall({
   part,
   verbose,
@@ -241,6 +244,19 @@ export const ToolCall = memo(function ToolCall({
   part: OpencodePart;
   verbose: boolean;
   // Initial disclosure state. Only read on mount; the user's clicks own it after.
+  defaultExpanded?: boolean;
+}) {
+  if (isAgentChangePart(part)) return <AgentChangeCard part={part} />;
+  return <StandardToolCall part={part} verbose={verbose} defaultExpanded={defaultExpanded} />;
+});
+
+const StandardToolCall = memo(function StandardToolCall({
+  part,
+  verbose,
+  defaultExpanded = false,
+}: {
+  part: OpencodePart;
+  verbose: boolean;
   defaultExpanded?: boolean;
 }) {
   const rawTool = String((part as Record<string, unknown>).tool ?? "tool");
