@@ -58,3 +58,35 @@ export const KIND_TITLES = Object.freeze({
 
 export const LEVEL_TITLES = Object.freeze({ auto: "Auto", tell: "Tell me", ask: "Ask", never: "Never" });
 export const MODE_TITLES = Object.freeze({ cautious: "Cautious", balanced: "Balanced", autonomous: "Autonomous" });
+
+/** What each kind means, by its EFFECT, with examples (Phase 3c). Model-facing: lead brief, task prompt, page scan. */
+export const KIND_DEFINITIONS = Object.freeze({
+  edit_code: "change code = edit files in a project, on a branch other than the main one.",
+  handoff: "hand off = give a piece of work to one of your team's agents.",
+  merge: "merge = anything that puts changes on the main/default branch: merging a pull request, pushing to main or master, fast-forwarding them.",
+  deploy:
+    "deploy or release = anything that changes what people see on a live site, app or service, or ships a version: deploy or release scripts (npm run deploy, make ship, ./scripts/deploy*.sh), hosting tools and their APIs (fly, vercel, wrangler, netlify, a curl to a hosting API), pushing a release tag or pushing to a branch that CI deploys from, uploading an app build, publishing a package.",
+  publish:
+    "publish = making something visible to others that was not before: a public page or gist, a new or newly public repository, a hosted preview link, a public post.",
+  send_external:
+    "send outside = anything that reaches a person or a service outside this box: email, chat or social messages, issue or pull-request comments and reviews, webhooks, calls to an outside API that write something or notify someone.",
+  delete_data:
+    "delete data = removing or overwriting what git cannot bring back: databases and tables, production data, files outside the project, remote branches, tags and releases, cloud storage.",
+  spend: "spend money = anything that costs money: buying, subscriptions, starting paid servers or VMs, raising a plan or quota.",
+  settings: "change Manta's settings = Manta's own configuration, sign-in, secrets or the OpenCode configuration.",
+  agent_change: "change an agent = editing any agent's instructions, model, tools or permissions, including your own.",
+});
+
+/** The word a specialist writes for each kind in its "Actions from your list" section (Phase 3c). */
+export const KIND_WORDS = Object.freeze({
+  merge: "merge",
+  deploy: "deploy",
+  publish: "publish",
+  send_external: "send",
+  delete_data: "delete",
+  spend: "spend",
+  settings: "settings",
+  agent_change: "agent change",
+});
+
+export const SELF_REPORT_HEADING = "Actions from your list";
