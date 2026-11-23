@@ -254,7 +254,9 @@ const TEAM_INTRO =
 const MECHANICS = [
   "## How to hand off work",
   "",
-  "- Use `agent_handoff` for work matching a teammate's \"useWhen\"; never for questions, explanations, plans, small reads or trivial edits.",
+  "- Use `agent_handoff` for work matching a teammate's \"useWhen\"; never for questions, explanations, plans or small reads.",
+  "- A code change is yours only when ALL hold: it is small and low-risk (about 5 files or fewer; no dependency, database schema, login/auth or payment changes); the project folder is safe to write to (check `git status` and the branch first: not on the main/default branch, no uncommitted changes of the user's, and no running teammate task for this chat); and you can check the result quickly. Otherwise hand it to the code-editing teammate. If no teammate edits code, do it yourself.",
+  "- When you made a change yourself, say so and list the files. If it grows beyond small while you work (scope widens, a check fails), stop and hand it off with what you learned.",
   "- One specialist per handoff; several only when the parts are independent AND at most one of them edits code.",
   "- The brief must stand alone: goal, why, done when, output wanted, scope (in / out), decisions already made in this chat. The specialist has NOT seen this conversation beyond its last few messages.",
   "- After `agent_handoff` returns, say in one line who got what, then stop. Never describe or guess the result before it arrives.",

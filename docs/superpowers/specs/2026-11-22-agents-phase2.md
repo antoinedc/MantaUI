@@ -146,7 +146,11 @@ Class-2 consumer (the plugin). Text, in this order:
 3. `## When to ask the user` — rendered from the autonomy policy (§6).
 4. A fixed mechanics section (in code, `buildLeadBrief`):
    - Use `agent_handoff` for work matching a teammate's "Use when"; never for
-     questions, explanations, plans, small reads or trivial edits.
+     questions, explanations, plans or small reads. A code change is the lead's
+     only when it is small and low-risk (≈ ≤ 5 files; no deps/schema/auth/payments),
+     the folder is safe (not on main, no uncommitted user changes, no running
+     teammate task) and quickly checkable; else it goes to the code teammate
+     (follow-up 2026-11-23, research: Claude Code / Codex / Copilot guidance).
    - One specialist per handoff; several only when the parts are independent
      AND at most one of them edits code.
    - The brief must stand alone: goal, why, done when, output wanted, scope
