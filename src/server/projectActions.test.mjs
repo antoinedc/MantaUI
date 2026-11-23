@@ -433,7 +433,7 @@ test("parseScanOutput: JSON (bare or fenced) with ≤ 80 known-kind entries of s
 const SLUG = "proj-0123456789";
 const PAGE = `projects/${SLUG}/actions.md`;
 
-async function rig({ files = {}, flags = { enabled: true, observeOnly: false }, run, identify, secrets = [SECRET], redact, scannerOff = false, deadlineMs, knowledgeOff = false } = {}) {
+async function rig({ files = {}, flags = { enabled: true, observeOnly: false }, run, identify, secrets = [SECRET], redact, scannerOff = false, deadlineMs, knowledgeOff = false, fs, scanCollectMs } = {}) {
   const projectDir = await tmpDir("actions-project-");
   await put(projectDir, files);
   const storeDir = await tmpDir("actions-store-");
@@ -465,7 +465,7 @@ async function rig({ files = {}, flags = { enabled: true, observeOnly: false }, 
     },
   };
   const logs = [];
-  const pa = createProjectActions({ knowledge, scanner, gitMainWorktree: async (d) => d, now: () => clock.t, log: (...a) => logs.push(a.join(" ")), deadlineMs });
+  const pa = createProjectActions({ knowledge, scanner, gitMainWorktree: async (d) => d, now: () => clock.t, log: (...a) => logs.push(a.join(" ")), deadlineMs, fs, scanCollectMs });
   return { pa, projectDir, store, storeDir, clock, calls, state, logs, scanner };
 }
 const answer = (entries) => async () => ({ text: JSON.stringify({ entries }) });
@@ -527,6 +527,69 @@ test("forTask: a missing or stale page schedules ONE scan; the scan writes the p
   assert.ok(later.entries.some((e) => e.command === "git push origin production"));
   await settle(r);
   assert.equal(r.calls.run.length, 0);
+});
+
+test("scheduleScan: a task whose own file read ran past its deadline (a busy server) still gets its scan, from a longer background read", async () => {
+  // The task path reads with a 1.5 s deadline. Every clock reading here is 700 ms later than the last, so that read is
+  // partial (no hash) — what a stalled event loop at task start looked like on the box. It used to mean: no scan, no log.
+  let t = 0;
+  const r = await rig({ files: SHIP, run: answer([{ kind: "deploy", command: "make ship", what: "x", file: "Makefile" }]), fs: { now: () => (t += 700) } });
+  const got = await r.pa.forTask({ directory: r.projectDir });
+  assert.ok(got.entries.length > 0, "the task still gets the rules the partial read found");
+  await settle(r);
+  assert.equal(r.calls.run.length, 1, "the model was asked");
+  const page = await r.store.read(PAGE);
+  assert.ok(page, "the page was written");
+  assert.match(page, /sourcesHash: [0-9a-f]{64}/, "from a complete read");
+  assert.ok(parseActionsPage(page).entries.some((e) => e.command === "make ship"));
+  assert.ok(r.logs.some((l) => /scan written/.test(l)));
+  // the page is now current: a later (equally slow) task asks nothing
+  r.calls.run.length = 0;
+  r.clock.t += 2 * 60 * 60_000;
+  await r.pa.forTask({ directory: r.projectDir });
+  await settle(r);
+  assert.equal(r.calls.run.length, 0);
+  assert.ok(r.logs.some((l) => /scan current/.test(l)), "…and says why");
+});
+
+test("scheduleScan: when even the long background read is partial, nothing is asked and the log says why", async () => {
+  let t = 0;
+  const r = await rig({ files: SHIP, run: answer([]), fs: { now: () => (t += 700) }, scanCollectMs: 1000 });
+  await r.pa.forTask({ directory: r.projectDir });
+  await settle(r);
+  assert.equal(r.calls.run.length, 0);
+  assert.ok(r.logs.some((l) => /scan partial: .*\(deadline\)/.test(l)), r.logs.join("\n"));
+});
+
+test("actions log: every way a task or a scan ends without a written page says why in one [actions] line, with no file text or command", async () => {
+  const lines = async (opts, { settleFirst = true } = {}) => {
+    const r = await rig({ files: SHIP, run: answer([]), ...opts });
+    await r.pa.forTask({ directory: r.projectDir });
+    if (settleFirst) await settle(r);
+    return r;
+  };
+  const only = (r, re) => r.logs.filter((l) => re.test(l));
+  assert.equal(only(await lines({ knowledgeOff: true }), /not available/).length, 1);
+  assert.equal(only(await lines({ flags: { enabled: false, observeOnly: false } }), /knowledge is off/).length, 1);
+  assert.equal(only(await lines({ identify: async () => null }), /could not be identified/).length, 1);
+  assert.equal(only(await lines({ identify: async () => ({ slug: "box", canonicalId: "box" }) }), /not in a project/).length, 1);
+  assert.equal(only(await lines({ files: { "notes.txt": "x" } }), /no project files/).length, 1);
+  assert.equal(only(await lines({ scannerOff: true }), /scan failed: the secret scanner is unavailable/).length, 1);
+  assert.equal(only(await lines({ run: async () => ({ text: "nope" }) }), /not the expected JSON/).length, 1);
+  assert.equal(only(await lines({ run: async () => ({ ok: false, code: "budget", reason: "usd-cap" }) }), /refused or failed \(budget \/ usd-cap\)/).length, 1);
+  assert.equal(only(await lines({ run: async () => { throw new Error("boom"); } }), /model call threw \(boom\)/).length, 1);
+  assert.equal(only(await lines({ run: answer([{ kind: "deploy", command: "make ship", what: "x", file: "package.json" }]) }), /none of the model's entries/).length, 1);
+  assert.equal(only(await lines({ run: (a) => (a.deps.reportCost, { ok: false }) }), /refused or failed \(no reason given\)/).length, 1);
+  // an in-flight scan and the rate limit
+  const r = await lines({ run: answer([]) });
+  assert.ok(only(r, /scan written/).length === 1);
+  r.clock.t += 5 * 60_000;
+  await writeFile(join(r.projectDir, "Makefile"), "ship:\n\tfly deploy --now\n");
+  await r.pa.forTask({ directory: r.projectDir });
+  await settle(r);
+  assert.equal(only(r, /last attempt was less than 30 minutes ago/).length, 1);
+  // nothing logged anywhere contains a command or a file's text
+  for (const l of r.logs) assert.ok(!/make ship|fly deploy|rsync/.test(l), l);
 });
 
 test("scheduleScan: success → file change → refusal → retry after the backoff succeeds; rate limits are per slug and in memory", async () => {
