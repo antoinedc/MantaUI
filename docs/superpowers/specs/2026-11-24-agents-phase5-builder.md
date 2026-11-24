@@ -285,9 +285,10 @@ What the server controls is what the **model** controls, which is only the query
   3. Named credential fields must be **only** a reference, with an optional fixed scheme word before it (`Bearer`,
      `Token`, `Basic`). This covers headers named `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key` or
      `*-Token`, and env names containing `TOKEN`, `KEY`, `SECRET` or `PASSWORD`.
-  4. Every remaining literal is run through the existing knowledge secret scanner (`scanText` in
-     `src/server/knowledge/secretScan.mjs`, which detects known token formats and PEM blocks). That covers argv
-     elements, the URL (path and every query parameter), and header and env values. Any hit is refused.
+  4. Every remaining literal is run through the existing knowledge secret scanner (`src/server/knowledge/secretScan.mjs`:
+     secretlint's recommended preset, plus an exact match against the values in Manta's secret store). That covers
+     argv elements, the URL (path and every query parameter), and header and env values. Any hit, or the scanner being
+     unavailable (it fails closed), is refused.
   5. URL query parameters named like credentials (`key`, `api_key`, `apikey`, `token`, `access_token`, `secret`,
      `password`, `auth`) are refused. So are argv elements that follow or contain a credential-like option
      (`--token`, `--api-key`, `--password`, `--secret`, `-p`), as `--token=x` or as `--token x`.
@@ -568,7 +569,7 @@ export interface ArchitectSource { id: string; name: string; description: string
 | Reddit / X access | a port of agent-reach's public route (MIT): Exa hosted search scoped by `site:` + the Jina reader | agent-reach itself (Python CLI + a managed browser: can't ship on every box, and its browser fails on headless boxes, as on this one); Reddit's JSON API (403 from data-centre IPs, measured); the X API (paid); scraping x.com (needs JavaScript) |
 | arXiv | the arXiv API + `fast-xml-parser` 5.12.1 (MIT, 2026-11, ~118M/week, 6 deps) | regex over Atom: brittle; xml2js: callback API, slower; the arxiv Python client: wrong runtime |
 | Extra sources | argv-template command / URL template definitions in the agent file | a plugin system per source: too much for "answer a query"; MCP servers as sources: a good later step, but most private tools (like `yc`) ship as CLIs; an OS sandbox (bubblewrap, sandbox-exec) for command sources: Linux/macOS split and extra installs, for programs the user already trusts to run |
-| Credential-literal detection | the existing `scanText` (`src/server/knowledge/secretScan.mjs`) plus field and option name rules | a new entropy detector: false positives on ordinary values (media types); secretlint / gitleaks rules: gitleaks already runs in CI on the repo, not on runtime input, and its Go binary isn't on boxes |
+| Credential-literal detection | the existing knowledge secret scanner (secretlint 14 recommended preset + exact match against stored secrets) plus field and option name rules | a new entropy detector: false positives on ordinary values (media types); gitleaks: runs in CI on the repo, and its Go binary isn't on boxes |
 | Exa response handling | a bounded port (~30 lines: JSON or SSE `data:` lines) | @modelcontextprotocol/sdk (official, but a large dependency for one JSON-RPC call); eventsource-parser (small, but the response is a single short burst, not a live stream) |
 | HN | the public Algolia API through the same transport | scraping news.ycombinator.com |
 | Proposal envelope validation | handwritten checks (~40 lines) next to the Phase 4 `checkDraft`, which stays authoritative; the plugin's JSON schema also validates shape | zod 4 / ajv 8: not server dependencies; one small envelope doesn't justify one, and a second validator would split the draft rules |
