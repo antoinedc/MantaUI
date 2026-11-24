@@ -82,3 +82,19 @@ asks for the cheapest model of its band.
 - Specialists filing notes to the knowledge base themselves (today they have no `knowledge_note` grant).
 - Host-based rules ("any command containing api.netlify.com").
 - Test the approval card path with trust mode off.
+
+## From the "background tasks can't use secrets" fix (2026-11-24)
+
+The fix itself lets a task USE the secret files it was handed (shared ones and its own session's folder). What is still
+missing around it:
+
+- **Ask for a missing secret in the chat.** When a task needs a secret that isn't stored, the user gets a card in the
+  chat (name + why), adds it on the card, and the task resumes on its own. Today the task ends "needs a decision" and
+  Manta has to send a new round.
+- **Settings changes go through Manta.** A task that needs a Manta settings change says so; Manta asks the user, or does
+  it itself when the autonomy rows allow. Tasks never touch settings directly.
+- **Two new autonomy rows: "Change Manta itself" and "Let an agent edit code"** (default Ask, settable to Tell me /
+  Auto). They replace the hard-coded always-click rules in `agent_change` (the `reason` "lead" / "isolation" in
+  `src/server/agents.mjs`), so a fully automatic setup is possible.
+- **New Manta tools need an OpenCode restart.** Plugin code only loads when OpenCode starts. Investigate live plugin
+  reload, or route new tools through one generic server-routed tool.

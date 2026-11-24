@@ -1096,6 +1096,17 @@ peers/notify. Key facts:
   0600): shared → `<key>`, session → `sessions/<sessionID>/<key>`. `deleteSecret`
   also removes the materialized file so a deleted secret can't be re-read off
   disk.
+- **Specialists' background tasks may USE a handed secret, nothing else under `~/.manta-secrets`.**
+  `jobRules` (`src/server/autonomy.mjs`, last match wins) opens, for bash and for OpenCode's per-folder
+  `external_directory` check, the shared files and the task's OWN session folder
+  (`sessions/<child session id>/`, so the child id is minted BEFORE its rules, also on resume). Still denied:
+  other sessions' and the `projects/` folders, `..` / `//` / `./` detours, any write (edit/write tools and shell
+  redirects / `rm` / `mv` / `cp` / `tee`…), and every file tool — a `read` would put the value in the transcript, so
+  use `$(cat <path>)`. Those allows sit BEFORE the other protected / merge / kind denies, so a command that also
+  touches `~/.manta/secrets.json`, `auth.json`, a merge or an Ask-level action still ends on a deny. Command-text
+  matching is best effort (`cat <own> <other>` in ONE command is allowed). `matchKinds` evaluates the same rules, so
+  a task that used its secret is not reported as touching "Manta settings or credentials". Probe:
+  `scripts/opencode-v2/autonomy-rules.e2e.mjs`.
 - **UI card**: `SecretsCard` in `ChatPanel.tsx` (pinned card above the composer,
   modeled on `ScheduledTasksCard` → renders desktop AND mobile, no mobile-CSS
   edits). Opened by the `🔑 secrets` button in `SessionToolbar` (desktop) or the
