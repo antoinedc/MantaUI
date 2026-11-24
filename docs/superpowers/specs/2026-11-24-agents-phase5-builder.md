@@ -278,13 +278,19 @@ What the server controls is what the **model** controls, which is only the query
   - A source with any `{secret:…}` header follows **no** redirects: a redirect is a failure.
   - A source without secrets may follow only **same-origin** https redirects (≤ 5, each re-filtered). A cross-origin
     redirect is a failure.
-- **No literal credentials.**
-  - A header named `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key` or `*-Token`, and any env entry
-    whose name contains `TOKEN`, `KEY`, `SECRET` or `PASSWORD`, must contain a `{secret:…}` reference.
-  - Any header or env value with a token-looking literal (≥ 20 chars of `[A-Za-z0-9_\-./+=]`) is refused too.
-  - The refusal happens in `checkDraft`, BEFORE a change record exists, and never echoes the value: "Put this value
-    in Secrets and use {secret:NAME}".
-  - The lead brief says to ask the user to add the value in the Secrets card, never in chat.
+- **No literal credentials, anywhere in a source.** `checkDraft` runs this check BEFORE a change record exists, and never
+  echoes the value. Refusal: "Put this value in Secrets and use {secret:NAME} in a header or env value".
+  1. `{secret:NAME}` references are parsed out first. A long secret name is fine.
+  2. `{secret:…}` is allowed only in `env` and `headers` values. In argv or the URL it is refused.
+  3. Named credential fields must be **only** a reference, with an optional fixed scheme word before it (`Bearer`,
+     `Token`, `Basic`). This covers headers named `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key` or
+     `*-Token`, and env names containing `TOKEN`, `KEY`, `SECRET` or `PASSWORD`.
+  4. Every remaining literal is run through the existing knowledge secret scanner (`scanText` in
+     `src/server/knowledge/secretScan.mjs`, which detects known token formats and PEM blocks). That covers argv
+     elements, the URL (path and every query parameter), and header and env values. Any hit is refused.
+  5. URL query parameters named like credentials (`key`, `api_key`, `apikey`, `token`, `access_token`, `secret`,
+     `password`, `auth`) are refused. So are argv elements that follow or contain a credential-like option
+     (`--token`, `--api-key`, `--password`, `--secret`, `-p`), as `--token=x` or as `--token x`.
 - **Secrets (`{secret:NAME}`):**
   - Allowed only inside `env` and `headers` values.
   - Resolved from Manta's **shared** secrets only, never a session- or project-scoped one, so a source always gets the
@@ -562,6 +568,7 @@ export interface ArchitectSource { id: string; name: string; description: string
 | Reddit / X access | a port of agent-reach's public route (MIT): Exa hosted search scoped by `site:` + the Jina reader | agent-reach itself (Python CLI + a managed browser: can't ship on every box, and its browser fails on headless boxes, as on this one); Reddit's JSON API (403 from data-centre IPs, measured); the X API (paid); scraping x.com (needs JavaScript) |
 | arXiv | the arXiv API + `fast-xml-parser` 5.12.1 (MIT, 2026-11, ~118M/week, 6 deps) | regex over Atom: brittle; xml2js: callback API, slower; the arxiv Python client: wrong runtime |
 | Extra sources | argv-template command / URL template definitions in the agent file | a plugin system per source: too much for "answer a query"; MCP servers as sources: a good later step, but most private tools (like `yc`) ship as CLIs; an OS sandbox (bubblewrap, sandbox-exec) for command sources: Linux/macOS split and extra installs, for programs the user already trusts to run |
+| Credential-literal detection | the existing `scanText` (`src/server/knowledge/secretScan.mjs`) plus field and option name rules | a new entropy detector: false positives on ordinary values (media types); secretlint / gitleaks rules: gitleaks already runs in CI on the repo, not on runtime input, and its Go binary isn't on boxes |
 | Exa response handling | a bounded port (~30 lines: JSON or SSE `data:` lines) | @modelcontextprotocol/sdk (official, but a large dependency for one JSON-RPC call); eventsource-parser (small, but the response is a single short burst, not a live stream) |
 | HN | the public Algolia API through the same transport | scraping news.ycombinator.com |
 | Proposal envelope validation | handwritten checks (~40 lines) next to the Phase 4 `checkDraft`, which stays authoritative; the plugin's JSON schema also validates shape | zod 4 / ajv 8: not server dependencies; one small envelope doesn't justify one, and a second validator would split the draft rules |
@@ -605,7 +612,10 @@ export interface ArchitectSource { id: string; name: string; description: string
       never returned; timeout; size cap;
     - url: https only; same-origin redirect followed without secrets; a cross-origin redirect → no request to the second
       origin; any redirect with secrets fails; forbidden headers;
-    - literal credentials refused in `checkDraft` with no change record stored and no echo;
+    - literal credentials refused in `checkDraft`, with no change record stored and no echo. Locations: header, env, argv
+      option (`--token x`, `--token=x`), URL query parameter (`api_key=`), a scanner-detected token in argv/path; a
+      named field with a reference plus extra text;
+    - accepted: a long reference name, `Bearer {secret:X}`, `Accept: application/problem+json`;
     - secrets: shared scope only (two projects with the same name → the shared one or a failure); missing → fail
       closed; values redacted in stored and returned output;
     - a private result with no URL → verified evidence → card with no quote or link;
