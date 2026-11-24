@@ -36,7 +36,8 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
-import { SPECIALIST_RESEARCH_TOOLS } from "../shared/researchTools.mjs";
+import { SPECIALIST_TASK_TOOLS } from "../shared/researchTools.mjs";
+import { askUserLines } from "./askUser.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
   readProgressRecord as defaultReadProgress,
@@ -331,6 +332,8 @@ export function buildCompletionText(job) {
   } else {
     lines.push(String(job?.result ?? ""));
   }
+  // a task that asked the user (`ask_user`): the question, written by the server (the lead puts it to the user, never answers it)
+  if (status === "done" && job?.endedBlocked === true && job?.askUser) lines.push("", ...askUserLines(job.askUser));
   // an Architect task: what the server did with each proposal, written by the server (the lead relays it, never guesses it)
   const outcome = Array.isArray(job?.architectOutcome) ? job.architectOutcome.filter((l) => typeof l === "string" && l) : [];
   if (outcome.length > 0) lines.push("", ...outcome);
@@ -498,7 +501,7 @@ export function buildReadOnlyAgentRuleset({ agentDir, home = homedir() } = {}) {
     allow("todowrite", "*"),
     allow("progress_report", "*"),
     // the research tools and the shared research library: every agent checks what is already known before outside work
-    ...SPECIALIST_RESEARCH_TOOLS.map((t) => allow(t, "*")),
+    ...SPECIALIST_TASK_TOOLS.map((t) => allow(t, "*")),
     allow("external_directory", `${home}/.local/share/opencode/tool-output/*`),
   ];
   if (agentDir) rules.push(allow("external_directory", `${String(agentDir).replace(/\/+$/, "")}/**`));
@@ -512,7 +515,7 @@ export function buildReadOnlyAgentRuleset({ agentDir, home = homedir() } = {}) {
  */
 export function withResearchToolAllows(rules) {
   const list = Array.isArray(rules) ? rules : [];
-  const missing = SPECIALIST_RESEARCH_TOOLS.filter((t) => !list.some((r) => r?.permission === t && r.pattern === "*" && r.action === "allow"));
+  const missing = SPECIALIST_TASK_TOOLS.filter((t) => !list.some((r) => r?.permission === t && r.pattern === "*" && r.action === "allow"));
   if (missing.length === 0) return list;
   const adds = missing.map((t) => ({ permission: t, pattern: "*", action: "allow" }));
   const first = list[0];
@@ -522,7 +525,7 @@ export function withResearchToolAllows(rules) {
 
 // The tools the Architect's task may call, besides reading and searching (Agents Phase 5A §4.2).
 const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch"];
-const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_RESEARCH_TOOLS, "agent_propose"];
+const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, "agent_propose"];
 
 /**
  * The ruleset of the Architect's task, built for launch AND resume by this one function (spec §4.2). Last match wins, so:
@@ -3019,7 +3022,8 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
     if (interrupted) outcome = live.stopRequested ? { status: "stopped", error: "stopped by user" } : { status: "failed", error: error || "interrupted" };
 
     const manta = completionOwnerOf(live) === "manta";
-    const endedBlocked = outcome.status === "done" && live.jobProgress?.modelState === "blocked";
+    // a task that stored a question with `ask_user` ends "needs a decision" whatever it reported afterwards
+    const endedBlocked = outcome.status === "done" && (live.jobProgress?.modelState === "blocked" || !!live.askUser);
     const fold = foldAtBoundary(live, deps, endedAt, {
       terminal: { status: outcome.status, endedBlocked },
       filesChanged: outcome.status === "done" ? filesChanged : undefined,
@@ -3165,6 +3169,7 @@ export function buildResultSynthetic(job) {
         jobId: job.id,
         name: job.name,
         ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
+        ...(job.status === "done" && job.endedBlocked === true && job.askUser ? { askUser: askUserWire(job.askUser) } : {}),
         ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
         ...(Array.isArray(job.blockedActions) && job.blockedActions.length > 0 ? { blockedActions: job.blockedActions } : {}),
         ...(Array.isArray(job.exceededActions) && job.exceededActions.length > 0 ? { exceededActions: job.exceededActions } : {}),
@@ -4090,7 +4095,7 @@ async function continueJobRecord(id, input, deps) {
       const t = now();
       // (a successor starts with no told / blocked / exceeded actions or self-report of its own: the previous round's stay on
       // the previous record; the project patterns are inherited — the child keeps the permissions OpenCode gave it at creation)
-      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, ...inherited } = old;
+      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, askUser: _a, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
       const job = {
         ...inherited,
@@ -4977,6 +4982,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     ceilingWarnedFor: null,
     endReason: null,
     jobProgress: { ...prior.jobProgress, modelState: null },
+    askUser: undefined, // the question the previous attempt ended with is answered by resuming
     // a specialist's task resumes under the CURRENT settings (recomputed in resumeJob); its previous attempt's told /
     // blocked actions are cleared with the new attempt
     ...(prepared.autonomy
@@ -5351,6 +5357,16 @@ async function withBudget(fn, ms) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The question of an `ask_user` task as the result's metadata carries it (what the lead needs; no timestamp). */
+function askUserWire(ask) {
+  return { question: ask.question, options: ask.options, recommended: ask.recommended ?? null, why: ask.why ?? "", concern: ask.concern === true };
+}
+
+/** Store the question of a RUNNING task (`ask_user`) and mark it blocked: it ends "needs a decision". null when it is not running. */
+function recordAskUser(id, ask, deps) {
+  return mutateJobProgress(id, deps, (job) => ({ askUser: ask, jobProgress: { ...job.jobProgress, modelState: "blocked" } }));
 }
 
 /** A guarded patch of a RUNNING record's progress fields under the jobs lock; publishes (throttled) when it wrote. */
@@ -5951,6 +5967,8 @@ export function createDelegateEngine(baseDeps) {
       );
       return { applied: !!job };
     },
+    /** `ask_user`: the question of a running task, stored on its record; the task ends "needs a decision". null when it is not running. */
+    recordAskUser: (id, ask) => recordAskUser(id, ask, deps),
     /** A running, Manta-owned `delegate` job's own session or one below it: no question or permission can wait there (A5). */
     ownsSession: (sessionId) => liveness.ownsSession(sessionId),
     /** The pump's backstop: answer a question / permission ask in an owned session with a rejection (queued for a retry on failure). */

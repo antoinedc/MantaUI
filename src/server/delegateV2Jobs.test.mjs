@@ -44,6 +44,7 @@ import { jobRules, policyKey, normalizePolicy, effectivePolicy, taskPromptSectio
 import { buildResultSynthetic } from "./delegate.mjs";
 import { MAX_ENTRIES_ERROR, projectPatterns, validateEntry } from "./projectActions.mjs";
 import { createJobViews } from "./jobViews.mjs";
+import { askUserLines, ASK_USER_HEADER } from "./askUser.mjs";
 
 const T0 = 1_700_000_000_000;
 const PARENT = "ses_parent";
@@ -309,7 +310,7 @@ test("C1 startJob: a non-repository job (no worktree) is NOT moved", async () =>
 
 // ---- agent jobs (agents phase 1): `agent`, `isolation`, `agentName`, `request` ----
 
-const READ_ONLY_KEYS = ["read", "glob", "grep", "list", "webfetch", "websearch", "todowrite", "progress_report", "external_directory", "research_fetch", "research_read", "research_search", "research_library_find", "research_library_save"];
+const READ_ONLY_KEYS = ["read", "glob", "grep", "list", "webfetch", "websearch", "todowrite", "progress_report", "external_directory", "research_fetch", "research_read", "research_search", "research_library_find", "research_library_save", "ask_user"];
 
 test("agent job, isolation none: no worktree, no move, the agent reaches create AND send, a read-only ruleset, no commit advice", async () => {
   const w = world();
@@ -2509,7 +2510,7 @@ test("autonomy: a caller-supplied (approval-resolved) base is kept and the denie
   const withResearch = withResearchToolAllows(caller);
   assert.deepEqual(withResearch.slice(0, 1), caller.slice(0, 1));
   assert.deepEqual(withResearch.slice(-1), caller.slice(-1));
-  assert.equal(withResearch.length, caller.length + 5);
+  assert.equal(withResearch.length, caller.length + 6);
   assert.deepEqual(w.job(id).basePermission, withResearch);
   assert.deepEqual(w.job(id).permission, [...withResearch, ...jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: w.job(id).childSessionID }), q]);
   const plain = world();
@@ -3204,4 +3205,103 @@ test("research tools: the Architect's ruleset also allows the library tools, and
   assert.ok(ruleAt(rules, "agent_propose", "*", "allow") > 0);
   const lastAllow = rules.map((r) => r.action).lastIndexOf("allow");
   for (const t of ["bash", "edit", "write", "patch", "webfetch"]) assert.ok(ruleAt(rules, t, "*", "deny") > lastAllow, t);
+});
+
+// ---------------------------------------------------------------------------
+// ask_user (docs/superpowers/specs/2026-11-24-ask-user-tool.md): a task that asks ends as "needs a decision" with the question stored
+// ---------------------------------------------------------------------------
+const ASK = {
+  question: "Create @pricing-copy as its own agent?",
+  options: [
+    { label: "Add it to @conversion-cro", description: "One agent keeps the pricing rules." },
+    { label: "Create @pricing-copy", description: "A separate agent, as asked." },
+  ],
+  recommended: 0,
+  why: "Library entry 'agent design', 2 days old.",
+  concern: true,
+  at: T0,
+};
+
+test("ask_user tool: every specialist ruleset allows it under the catch-all deny; the Architect's too; so does an edited grant list", () => {
+  for (const rules of [buildReadOnlyAgentRuleset({ home: "/h" }), buildWorktreeAgentRuleset({ home: "/h" }), buildArchitectRuleset({ policy: BAL, agentDir: ARCH_DIR, home: HOME, sessionID: "ses_child1" })]) {
+    assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" });
+    assert.ok(ruleAt(rules, "ask_user", "*", "allow") > 0, "allowed under the deny");
+  }
+  const edited = withResearchToolAllows([{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }]);
+  assert.ok(ruleAt(edited, "ask_user", "*", "allow") > 0);
+});
+
+test("ask_user tool: a launched specialist task (read-only, worktree, approval-edited grants) carries the permission, and the base is persisted with it", async () => {
+  const ro = specialistWorld();
+  const roId = await start(ro, autonomyInput(ro, { isolation: "none" }));
+  assert.ok(ruleAt(ro.job(roId).permission, "ask_user", "*", "allow") > 0);
+  assert.ok(ruleAt(ro.job(roId).basePermission, "ask_user", "*", "allow") > 0);
+  const wt = specialistWorld();
+  const wtId = await start(wt, autonomyInput(wt));
+  assert.ok(ruleAt(wt.job(wtId).permission, "ask_user", "*", "allow") > 0);
+  const edited = specialistWorld();
+  const edId = await start(edited, autonomyInput(edited, { permission: [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }] }));
+  assert.ok(ruleAt(edited.job(edId).permission, "ask_user", "*", "allow") > 0);
+});
+
+test("ask_user: recording the question marks the running task blocked and stores it; a task that is not running stores nothing", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  assert.ok(await w.engine.recordAskUser(id, ASK));
+  assert.deepEqual(w.job(id).askUser, ASK);
+  assert.equal(w.job(id).jobProgress.modelState, "blocked");
+  assert.equal(await w.engine.recordAskUser("nope", ASK), null);
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 9);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(await w.engine.recordAskUser(id, { ...ASK, question: "later?" }), null, "an ended task keeps the question it ended with");
+  assert.equal(w.job(id).askUser.question, ASK.question);
+});
+
+test("ask_user: a task that asked ends `needs a decision` even if it carried on working; the result has the server-written block and the metadata carries the question", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  await w.engine.recordAskUser(id, ASK);
+  // the model reports "working" again after asking: the stored question still decides
+  await w.engine.reportJobProgress({ sessionID: child, input: { label: "carrying on" }, record: { state: "working" } });
+  w.say(child, "I asked; waiting.");
+  w.finish(child, "succeeded", T0 + 9);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const j = w.job(id);
+  assert.equal(j.status, "done");
+  assert.equal(j.endedBlocked, true);
+  const body = w.calls.synth[0].body;
+  assert.match(body.text, /^\[background job "[^"]+" needs a decision\]/);
+  for (const line of askUserLines(ASK)) assert.ok(body.text.includes(line), line);
+  assert.ok(body.text.indexOf("I asked; waiting.") < body.text.indexOf(ASK_USER_HEADER), "the block follows the agent's own text");
+  assert.deepEqual(body.metadata.manta.askUser, { question: ASK.question, options: ASK.options, recommended: 0, why: ASK.why, concern: true });
+});
+
+test("ask_user: a task that failed or was stopped carries no question block; a plain done task has none", async () => {
+  const done = liveWorld();
+  const doneId = await start(done);
+  const dc = done.job(doneId).childSessionID;
+  done.say(dc, "all good");
+  done.finish(dc, "succeeded", T0 + 9);
+  await done.engine.observeRaw(raw("session.execution.succeeded", dc));
+  assert.ok(!done.calls.synth[0].body.text.includes(ASK_USER_HEADER));
+  assert.equal("askUser" in done.calls.synth[0].body.metadata.manta, false);
+  assert.ok(!buildCompletionText({ name: "n", status: "failed", error: "boom", askUser: ASK, endedBlocked: false }).includes(ASK_USER_HEADER));
+  assert.ok(buildCompletionText({ name: "n", status: "done", result: "r", askUser: ASK, endedBlocked: true }).includes(ASK_USER_HEADER));
+});
+
+test("ask_user: the next round (continueJob) starts with no question and no blocked state", async () => {
+  const w = liveWorld();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  await w.engine.recordAskUser(id, ASK);
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  const res = await continueJob(id, { prompt: "the user chose option 1", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.job.askUser, undefined);
+  assert.equal(res.job.endedBlocked, false);
+  assert.equal(res.job.jobProgress.modelState ?? null, null);
 });

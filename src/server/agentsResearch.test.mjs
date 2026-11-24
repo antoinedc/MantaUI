@@ -13,7 +13,7 @@ const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url
 
 // ---- the binding ----
 
-const KEYS = { research_fetch: ["url"], research_read: ["sourceId", "offset"], research_search: ["source", "query"], research_library_find: ["query"], research_library_save: ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"] };
+const KEYS = { research_fetch: ["url"], research_read: ["sourceId", "offset"], research_search: ["source", "query"], research_library_find: ["query"], research_library_save: ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"], ask_user: ["question", "options", "recommended", "why", "concern"] };
 
 let n = 0;
 async function world({ jobs, registry } = {}) {
@@ -46,7 +46,7 @@ function call(w, tool, args, { agent = "agent-seo", status = "running", input } 
   return b;
 }
 
-const sample = { research_fetch: { url: "https://example.com/" }, research_read: { sourceId: "src_0123456789abcdef" }, research_search: { source: "hn", query: "agents" }, research_library_find: { query: "pricing" }, research_library_save: { topic: "A topic", summary: "s", findings: [{ claim: "c" }], shelfLifeDays: 30, shelfLifeWhy: "w", shelfLifeVerified: true, scope: "global" } };
+const sample = { research_fetch: { url: "https://example.com/" }, research_read: { sourceId: "src_0123456789abcdef" }, research_search: { source: "hn", query: "agents" }, research_library_find: { query: "pricing" }, research_library_save: { topic: "A topic", summary: "s", findings: [{ claim: "c" }], shelfLifeDays: 30, shelfLifeWhy: "w", shelfLifeVerified: true, scope: "global" }, ask_user: { question: "Create it?", options: [{ label: "a", description: "b" }, { label: "c", description: "d" }], recommended: 0, why: "w", concern: true } };
 
 test("a specialist's running task may call every research and library tool; the answer names the agent, the project and that it is not the Architect", async () => {
   const f = await world();
@@ -59,7 +59,36 @@ test("a specialist's running task may call every research and library tool; the 
       assert.equal(r.agent, "seo");
       assert.equal(r.architect, false);
       assert.equal(r.project, "site");
+      assert.equal(r.jobId, "job1", "the running task the call belongs to");
     }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("ask_user binds like the research tools: the running specialist task only — not another agent's, a finished or foreign task, a replayed or altered call; the Architect with its stamp", async () => {
+  const f = await world();
+  try {
+    const args = sample.ask_user;
+    assert.equal((await f.engine.bindResearcher(call(f.w, "ask_user", args), "ask_user")).refused, undefined);
+    for (const [opts, mutate] of [[{ agent: "build" }], [{ agent: "agent-dev" }], [{}, () => (f.w.jobs[0].status = "done")], [{ status: "completed" }], [{ input: { ...args, question: "Another?" } }]]) {
+      f.w.jobs[0].status = "running";
+      const b = call(f.w, "ask_user", args, opts);
+      mutate?.();
+      assert.ok((await f.engine.bindResearcher(b, "ask_user")).refused, JSON.stringify(opts));
+    }
+    f.w.jobs[0].status = "running";
+    const b = call(f.w, "ask_user", args);
+    assert.equal((await f.engine.bindResearcher(b, "ask_user")).refused, undefined);
+    assert.ok((await f.engine.bindResearcher(b, "ask_user")).refused, "a call is used once");
+    f.w.jobs[0].agent = "agent-architect";
+    const stamped = call(f.w, "ask_user", args, { agent: "agent-architect" });
+    assert.match((await f.engine.bindResearcher(stamped, "ask_user")).refused, /task from Manta/, "the Architect without its stamp is refused");
+    f.w.jobs[0].architect = { rootJobId: "job1", attempt: 1, mode: "build" };
+    const arch = call(f.w, "ask_user", args, { agent: "agent-architect" });
+    const r = await f.engine.bindResearcher(arch, "ask_user");
+    assert.equal(r.refused, undefined);
+    assert.equal(r.architect, true);
   } finally {
     await f.cleanup();
   }

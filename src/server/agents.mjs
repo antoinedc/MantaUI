@@ -2106,6 +2106,8 @@ export function createAgentsEngine({
     research_search: ARCHITECT_TOOL_KEYS.research_search,
     research_library_find: ["query"],
     research_library_save: ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"],
+    // the generic way for a task to put a question to the user (src/server/askUser.mjs)
+    ask_user: ["question", "options", "recommended", "why", "concern"],
   };
   const NOT_RESEARCHER = "Only an agent working on a task from Manta can use this tool";
 
@@ -2146,7 +2148,7 @@ export function createAgentsEngine({
     const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
     const architect = slug === ARCHITECT_SLUG;
     if (architect && !(job.architect && typeof job.architect === "object")) return { refused: NOT_RESEARCHER };
-    return { childSessionID: b.sessionID, agent: slug, architect, project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
+    return { childSessionID: b.sessionID, jobId: job.id, agent: slug, architect, project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
   }
 
   const wsNorm = (t) => String(t ?? "").replace(/\s+/g, " ").trim();
