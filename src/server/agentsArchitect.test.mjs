@@ -764,6 +764,7 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
   }
   const i = await proposeFixture();
   try {
+    await heldFor(i);
     assert.deepEqual(await i.engine.outcomeLinesForJob("job1"), ["Outcome: @dev has not been released yet; trust the card, not this message."], "still held");
     assert.deepEqual(await i.engine.outcomeLinesForJob("nope"), []);
   } finally {

@@ -1430,7 +1430,7 @@ const delegateEngine = createDelegateEngine({
     if (workOutcomeSink) await workOutcomeSink(job);
   },
   onJobEnded: async (job) => {
-    if (architectJobEndedSink) await architectJobEndedSink(job);
+    return architectJobEndedSink ? await architectJobEndedSink(job) : undefined;
   },
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
@@ -2632,7 +2632,10 @@ const agentsEngine = createAgentsEngine({
   publish: (payload) => bus.publish({ kind: "agentChange", payload }),
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
-architectJobEndedSink = () => agentsEngine.reconcile();
+architectJobEndedSink = async (job) => {
+  await agentsEngine.reconcile(); // release first: the Outcome lines describe the records as released
+  return { outcome: await agentsEngine.outcomeLinesForJob(job.id) };
+};
 // held proposals whose round ended while nobody was looking (a stop, a crash, a restart) are released every minute; the
 // research store drops what is older than 30 days or over its cap every five
 startPoller(() => agentsEngine.reconcile(), { intervalMs: 60_000, label: "agents-reconcile", immediate: false });

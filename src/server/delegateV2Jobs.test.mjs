@@ -3134,7 +3134,11 @@ test("Architect jobs tell the agents engine when they end — finished, failed o
 
 test("Architect outcome: what the agents engine returns when the job ends is in the result posted to the parent", async () => {
   const w = specialistWorld();
-  w.deps.onJobEnded = async () => ({ outcome: ["Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card."] });
+  let hookFails = false; // the engine keeps the deps it first saw, so the hook itself switches behaviour
+  w.deps.onJobEnded = async () => {
+    if (hookFails) throw new Error("boom");
+    return { outcome: ["Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card."] };
+  };
   const id = await start(w, archInput(w));
   const child = w.job(id).childSessionID;
   w.finish(child, "succeeded", T0 + 1);
@@ -3147,10 +3151,8 @@ test("Architect outcome: what the agents engine returns when the job ends is in 
   await stopJob(stopped, w.deps);
   assert.ok(w.calls.synth.at(-1).body.text.includes("Outcome: @cro"));
   // an ending hook that fails or returns nothing adds no line and still delivers
-  w.deps.onJobEnded = async () => {
-    throw new Error("boom");
-  };
-  const third = await start(w, archInput(w));
+  hookFails = true;
+  const third = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
   w.finish(w.job(third).childSessionID, "succeeded", T0 + 3);
   await w.engine.observeRaw(raw("session.execution.succeeded", w.job(third).childSessionID));
   assert.equal(w.calls.synth.length, 3);
