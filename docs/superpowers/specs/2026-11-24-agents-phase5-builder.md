@@ -287,8 +287,12 @@ What the server controls is what the **model** controls, which is only the query
      `*-Token`, and env names containing `TOKEN`, `KEY`, `SECRET` or `PASSWORD`.
   4. Every remaining literal is run through the existing knowledge secret scanner (`src/server/knowledge/secretScan.mjs`:
      secretlint's recommended preset, plus an exact match against the values in Manta's secret store). That covers
-     argv elements, the URL (path and every query parameter), and header and env values. Any hit, or the scanner being
-     unavailable (it fails closed), is refused.
+     argv elements, the URL (path and every query parameter), and header and env values. Any hit is refused, and so is
+     the scanner being unavailable (it fails closed).
+     - For this check, the stored values come from a **strict** secrets read: a missing store counts as empty, but a
+       read, parse or schema error refuses the draft.
+     - Detection in free literals covers recognized token formats and stored values of 8+ characters. Named credential
+       fields (rule 3) always require a reference, whatever their length.
   5. URL query parameters named like credentials (`key`, `api_key`, `apikey`, `token`, `access_token`, `secret`,
      `password`, `auth`) are refused. So are argv elements that follow or contain a credential-like option
      (`--token`, `--api-key`, `--password`, `--secret`, `-p`), as `--token=x` or as `--token x`.
@@ -616,6 +620,7 @@ export interface ArchitectSource { id: string; name: string; description: string
     - literal credentials refused in `checkDraft`, with no change record stored and no echo. Locations: header, env, argv
       option (`--token x`, `--token=x`), URL query parameter (`api_key=`), a scanner-detected token in argv/path; a
       named field with a reference plus extra text;
+    - an unreadable or malformed secrets store → refused, no record (secretlint available);
     - accepted: a long reference name, `Bearer {secret:X}`, `Accept: application/problem+json`;
     - secrets: shared scope only (two projects with the same name → the shared one or a failure); missing → fail
       closed; values redacted in stored and returned output;
