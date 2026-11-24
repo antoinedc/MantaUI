@@ -1,5 +1,6 @@
 import {
   IPC,
+  type AgentChangeEvent,
   type AgentFileReady,
   type AuthPairResult,
   type DelegateJob,
@@ -1363,8 +1364,8 @@ export const httpApi: Api = {
   agentsChangeDiscard: (id) => rpc("agents:change-discard", { id }),
   agentsChangeUndo: (id) => rpc("agents:change-undo", { id }),
   agentsChangesForJob: (jobId) => rpc("agents:changes-for-job", { jobId }),
-  // The box publishes `agentChange` ({id, sessionID, slug}) after every persisted change transition: a hint, refetch.
-  onAgentChange: (cb) => on<{ id: string; sessionID: string; slug: string | null }>("agentChange", cb),
+  // The box publishes `agentChange` ({id, sessionID, slug, origin}) after every persisted change transition: a hint, refetch.
+  onAgentChange: (cb) => on<AgentChangeEvent>("agentChange", cb),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
   // pending-approvals for the viewed parent session and shows ONE card.
   delegatePendingApprovals: (sessionId) =>

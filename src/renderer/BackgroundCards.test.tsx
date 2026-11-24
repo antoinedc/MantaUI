@@ -429,3 +429,131 @@ describe("finished result card", () => {
     expect(q(".bg-danger")).not.toBeNull();
   });
 });
+
+describe("an Architect job's result card (Agents Phase 5A)", () => {
+  const part = (over: Partial<BackgroundResultPart> = {}): BackgroundResultPart =>
+    ({
+      id: "p1",
+      messageID: "m1",
+      sessionID: "ses_p",
+      type: "background-result",
+      childSessionId: "ses_c1",
+      jobId: "job1",
+      state: "completed",
+      name: "Make an SEO agent",
+      agent: "agent-architect",
+      text: "Proposed one change.",
+      ...over,
+    }) as BackgroundResultPart;
+  const rec = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    kind: "update" as const,
+    slug: "dev",
+    agentName: "Dev",
+    sessionID: "ses_p",
+    messageID: "",
+    callID: "",
+    state: "pending" as const,
+    needsClick: true,
+    reason: "ask" as const,
+    before: "---\nname: Dev\ndescription: d\nisolation: none\n---\nA\n",
+    after: "---\nname: Dev\ndescription: d\nisolation: none\n---\nA\nB\n",
+    createdAt: 1,
+    decidedAt: null,
+    error: null,
+    origin: { kind: "job" as const, jobId: "job1", rootJobId: "job1", attempt: 1 },
+    mode: "build" as const,
+    releasedAt: 1,
+    decidedBy: null,
+    summary: `Summary ${id}`,
+    evidence: [],
+    admission: [],
+    ...over,
+  });
+  let records: ReturnType<typeof rec>[];
+  type Hint = { id: string; sessionID: string; slug: string | null; origin: unknown };
+  // every subscriber (the package-agent list listens too), each unsubscribed on unmount
+  const listeners = new Set<(p: Hint) => void>();
+  const hint = (p: Hint) => listeners.forEach((fn) => fn(p));
+  const open = (over: Record<string, unknown> = {}, p = part()) => {
+    const { api, bus } = installMockApi({
+      agentsChangesForJob: () => Promise.resolve(records),
+      onAgentChange: (cb: (p: Hint) => void) => {
+        listeners.add(cb);
+        return () => listeners.delete(cb);
+      },
+      ...over,
+    });
+    resetStore({});
+    h = mount(<BackgroundResultCard part={p} />);
+    return { api, bus };
+  };
+  beforeEach(() => {
+    records = [rec("ach_a"), rec("ach_b", { state: "held", needsClick: false, reason: null })];
+    listeners.clear();
+  });
+
+  it("lists the job's records under the result, fetched by the delegate job id", async () => {
+    const { api } = open();
+    await h!.flush();
+    expect(api.calls.agentsChangesForJob).toEqual([["job1"]]);
+    const cards = h!.container.querySelectorAll('[data-testid="agent-change-card"]');
+    expect(cards).toHaveLength(2);
+    expect(h!.container.textContent).toContain("Summary ach_a");
+    expect(h!.container.textContent).toContain("Summary ach_b");
+    expect(q('[data-testid="agent-change-list"]')).toBeTruthy();
+  });
+
+  it("refetches on an event whose origin names this job, and on a reconnect; ignores another job's", async () => {
+    const { api, bus } = open();
+    await h!.flush();
+    records = [rec("ach_a", { state: "applied", slug: "dev" }), rec("ach_b")];
+    await act(async () => hint({ id: "ach_x", sessionID: "ses_p", slug: null, origin: { kind: "job", jobId: "other", rootJobId: "other", attempt: 1 } }));
+    await h!.flush();
+    expect(api.calls.agentsChangesForJob).toHaveLength(1);
+    await act(async () => hint({ id: "ach_a", sessionID: "ses_p", slug: "dev", origin: { kind: "chat" } }));
+    await h!.flush();
+    expect(api.calls.agentsChangesForJob).toHaveLength(1);
+    await act(async () => hint({ id: "ach_a", sessionID: "ses_p", slug: "dev", origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 } }));
+    await h!.flush();
+    expect(api.calls.agentsChangesForJob).toHaveLength(2);
+    expect(Array.from(h!.container.querySelectorAll('[data-testid="agent-change-chip"]')).map((e) => e.textContent)).toEqual(["Updated", "Waiting for you"]);
+    records = [rec("ach_a", { state: "undone" })];
+    await act(async () => bus.emitStream({ sub: "resync", sessionId: "", payload: {} }));
+    await h!.flush();
+    expect(api.calls.agentsChangesForJob).toHaveLength(3);
+    expect(h!.container.querySelectorAll('[data-testid="agent-change-card"]')).toHaveLength(1);
+  });
+
+  it("a press on a listed record updates just that record", async () => {
+    open({ agentsChangeApply: () => Promise.resolve(rec("ach_a", { state: "applied", slug: "dev" })) });
+    await h!.flush();
+    const apply = Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Apply") as HTMLButtonElement;
+    await act(async () => apply.click());
+    await h!.flush();
+    expect(Array.from(h!.container.querySelectorAll('[data-testid="agent-change-chip"]')).map((e) => e.textContent)).toEqual(["Updated", "Architect still working"]);
+  });
+
+  it("says so when the list can't be read, with a way to try again", async () => {
+    let fail = true;
+    open({ agentsChangesForJob: () => (fail ? Promise.reject(new Error("HTTP 500")) : Promise.resolve(records)) });
+    await h!.flush();
+    expect(q('[data-testid="agent-change-list-error"]')!.textContent).toContain("Couldn't load the Architect's proposals: HTTP 500");
+    fail = false;
+    const retry = Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Try again") as HTMLButtonElement;
+    await act(async () => retry.click());
+    await h!.flush();
+    expect(h!.container.querySelectorAll('[data-testid="agent-change-card"]')).toHaveLength(2);
+  });
+
+  it("other jobs' result cards read no records at all; an Architect result with no job id has nothing to ask for", async () => {
+    const { api } = open({}, part({ agent: "agent-dev" }));
+    await h!.flush();
+    expect(api.calls.agentsChangesForJob).toBeUndefined();
+    expect(q('[data-testid="agent-change-list"]')).toBeNull();
+    h!.unmount();
+    const second = open({}, part({ jobId: undefined }));
+    await h!.flush();
+    expect(second.api.calls.agentsChangesForJob).toBeUndefined();
+  });
+});

@@ -2,6 +2,7 @@
 // No React: unit-tested in agentDispatch.test.ts.
 
 import type { AgentInfo } from "../shared/types";
+import { ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
 import { resolveAgentMentions, type AgentMention } from "./chatShared";
 
 /** The tmux session that holds every agent's direct chat window (never listed as a workspace). */
@@ -10,11 +11,14 @@ export const AGENTS_TMUX_SESSION = "manta-agents";
 /** The OpenCode agent key a package agent is compiled to (server side). Used to hide them from the opencode-agent list. */
 export const PACKAGE_AGENT_PREFIX = "agent-";
 
+/** The OpenCode agent key of the Architect: its tasks' result cards list the changes it proposed. */
+export const ARCHITECT_AGENT_KEY = `${PACKAGE_AGENT_PREFIX}${ARCHITECT_SLUG}`;
+
 export const ONE_AGENT_ERROR = "Mention one agent per message for now";
 
-/** An agent a message can be dispatched to: its package parsed, and not the lead (Manta already leads every chat). */
+/** An agent a message can be dispatched to: a team agent (parsed, and not the lead: Manta already leads every chat). The Architect is one. */
 export function usableAgents(agents: ReadonlyArray<AgentInfo> | null | undefined): AgentInfo[] {
-  return (agents ?? []).filter((a) => !a.error && a.role !== "lead");
+  return (agents ?? []).filter(isTeamAgent);
 }
 
 /** The valid lead (Agents Phase 2): a parsed package whose role is "lead". Null when the box has none. */

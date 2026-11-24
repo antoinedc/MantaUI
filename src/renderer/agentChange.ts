@@ -6,7 +6,15 @@
 
 import { diffLines } from "diff";
 import { parse as parseYaml } from "yaml";
-import type { AgentChange, AgentChangeState } from "../shared/types";
+import type { AgentChange, AgentChangeAdmission, AgentChangeEvidence, AgentChangeState } from "../shared/types";
+import { ARCHITECT_SLUG } from "../shared/agentsShared.mjs";
+import {
+  describeSource,
+  diffSources,
+  sourcesOfAgentMd,
+  PRIVATE_SENTENCE,
+  PRIVATE_TO_PUBLIC_SENTENCE,
+} from "../shared/architectSources.mjs";
 
 const AGENT_CHANGE_TOOL_RE = /^(?:manta[_-])?agent_change$/i;
 
@@ -37,6 +45,10 @@ export type ChipTone = "neutral" | "accent" | "warn" | "ok";
 
 export function agentChangeChip(change: Pick<AgentChange, "state" | "kind">): { label: string; tone: ChipTone } {
   switch (change.state) {
+    case "held":
+      return { label: "Architect still working", tone: "neutral" };
+    case "applying":
+      return { label: "Applying…", tone: "accent" };
     case "applied":
       return { label: change.kind === "create" ? "Created" : "Updated", tone: "ok" };
     case "pending":
@@ -63,12 +75,15 @@ export function agentChangeReason(change: Pick<AgentChange, "needsClick" | "reas
   if (!change.needsClick) return null;
   if (change.reason === "lead") return "This changes Manta's own instructions";
   if (change.reason === "isolation") return `This lets ${change.agentName} edit code`;
+  if (change.reason === "core") return "This changes the Architect itself";
+  if (change.reason === "unfinished") return "The task didn't finish — review before applying";
+  if (change.reason === "plan") return "Proposed while planning or outside a hand-off — review before applying";
   return null;
 }
 
 export type AgentChangeAction = "apply" | "discard" | "undo";
 
-/** Buttons a state offers: pending → apply + discard; applied → undo; failed → retry (= apply); else none. */
+/** Buttons a state offers: pending → apply + discard; applied → undo; failed → retry (= apply); else none (held and applying included). */
 export function agentChangeActions(state: AgentChangeState): AgentChangeAction[] {
   switch (state) {
     case "pending":
@@ -192,4 +207,64 @@ export function diffRows(before: string, after: string): DiffRow[] {
     for (const text of seg.lines.slice(n - tail)) rows.push({ kind: "same", text });
   });
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5A: what an Architect proposal adds to the card
+// ---------------------------------------------------------------------------
+
+export function verdictLabel(verdict: AgentChangeAdmission["verdict"]): string {
+  return verdict === "general" ? "General" : verdict === "scoped" ? "Scoped" : "Excluded";
+}
+
+export interface EvidenceLine {
+  claim: string;
+  quote: string | null;
+  url: string | null;
+  isPrivate: boolean;
+}
+
+/** The evidence rows of a card: a private source shows only its claim; a link that isn't http(s) is never offered. */
+export function evidenceLines(evidence: ReadonlyArray<AgentChangeEvidence> | null | undefined): EvidenceLine[] {
+  return (evidence ?? []).map((e) => {
+    const safe = !e.private && typeof e.url === "string" && /^https?:\/\//i.test(e.url) ? e.url : null;
+    return { claim: e.claim, quote: e.private ? null : e.quote, url: e.private ? null : safe, isPrivate: e.private === true };
+  });
+}
+
+export interface SourceBlock {
+  id: string;
+  name: string;
+  change: "added" | "changed" | "removed";
+  /** The full argv with {query} marked, or the address template. */
+  runs: string;
+  /** "Runs … on this box …" or "Calls <host>". */
+  line: string;
+  secrets: string[];
+  /** The private-source sentence (null for a public one and for a removed source). */
+  note: string | null;
+  /** "Private → Public: …" on a changed source that was private. */
+  warning: string | null;
+}
+
+/** Is this record a change to the Architect itself (the only agent that has extra sources)? */
+export const isArchitectChange = (change: Pick<AgentChange, "kind" | "slug">): boolean => change.kind === "update" && change.slug === ARCHITECT_SLUG;
+
+/** One block per added, changed or removed extra source between two agent.md texts; empty when nothing about them changes. */
+export function architectSourceBlocks(before: string | null | undefined, after: string | null | undefined): SourceBlock[] {
+  if (typeof before !== "string" || typeof after !== "string") return [];
+  const rows = diffSources(sourcesOfAgentMd(before).sources, sourcesOfAgentMd(after).sources);
+  return rows.map((row) => {
+    const d = describeSource(row.source);
+    return {
+      id: d.id,
+      name: d.name,
+      change: row.change,
+      runs: d.runs,
+      line: d.line,
+      secrets: d.secrets,
+      note: row.change !== "removed" && d.private ? PRIVATE_SENTENCE : null,
+      warning: row.privateToPublic ? PRIVATE_TO_PUBLIC_SENTENCE : null,
+    };
+  });
 }

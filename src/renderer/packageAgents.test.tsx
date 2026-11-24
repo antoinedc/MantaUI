@@ -59,7 +59,7 @@ describe("package agents cache", () => {
     expect(slugs(h!)).toBe("dev");
     expect(api.calls.agentsList).toHaveLength(1);
     list = [agent("dev"), agent("reviewer")];
-    await act(async () => hint!({ id: "ach_1", sessionID: "ses_1", slug: "reviewer" }));
+    await act(async () => hint!({ id: "ach_1", sessionID: "ses_1", slug: "reviewer", origin: { kind: "chat" } }));
     await h!.flush();
     expect(api.calls.agentsList).toHaveLength(2);
     expect(slugs(h!)).toBe("dev,reviewer");
@@ -79,7 +79,7 @@ describe("package agents cache", () => {
     open({ agentsList: () => new Promise<AgentInfo[]>((r) => resolvers.push(r)) });
     await h!.flush();
     expect(resolvers).toHaveLength(1);
-    await act(async () => hint!({ id: "ach_1", sessionID: "ses_1", slug: "reviewer" }));
+    await act(async () => hint!({ id: "ach_1", sessionID: "ses_1", slug: "reviewer", origin: { kind: "chat" } }));
     expect(resolvers).toHaveLength(1); // not started twice
     await act(async () => resolvers[0]([agent("dev")])); // the read that predates the change
     await h!.flush();

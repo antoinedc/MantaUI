@@ -833,6 +833,7 @@ describe("httpApi agent-change channels", () => {
     { name: "agentsChangeApply", call: () => httpApi.agentsChangeApply("ach_1"), channel: "agents:change-apply", args: [{ id: "ach_1" }] },
     { name: "agentsChangeDiscard", call: () => httpApi.agentsChangeDiscard("ach_1"), channel: "agents:change-discard", args: [{ id: "ach_1" }] },
     { name: "agentsChangeUndo", call: () => httpApi.agentsChangeUndo("ach_1"), channel: "agents:change-undo", args: [{ id: "ach_1" }] },
+    { name: "agentsChangesForJob", call: () => httpApi.agentsChangesForJob("job_1"), channel: "agents:changes-for-job", args: [{ jobId: "job_1" }] },
   ];
 
   for (const c of calls) {
@@ -860,10 +861,10 @@ describe("httpApi agent-change channels", () => {
   it("onAgentChange delivers an agentChange frame's payload and stops after unsubscribe", () => {
     const cb = vi.fn();
     const unsub = httpApi.onAgentChange(cb);
-    const frame = JSON.stringify({ kind: "agentChange", payload: { id: "ach_1", sessionID: "ses_1", slug: "reviewer" } });
+    const frame = JSON.stringify({ kind: "agentChange", payload: { id: "ach_1", sessionID: "ses_1", slug: "reviewer", origin: { kind: "job", jobId: "j1", rootJobId: "j1", attempt: 1 } } });
     dispatchFrame(frame);
     expect(cb).toHaveBeenCalledTimes(1);
-    expect(cb.mock.calls[0][0]).toEqual({ id: "ach_1", sessionID: "ses_1", slug: "reviewer" });
+    expect(cb.mock.calls[0][0]).toEqual({ id: "ach_1", sessionID: "ses_1", slug: "reviewer", origin: { kind: "job", jobId: "j1", rootJobId: "j1", attempt: 1 } });
     unsub();
     dispatchFrame(frame);
     expect(cb).toHaveBeenCalledTimes(1);

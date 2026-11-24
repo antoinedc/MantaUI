@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import type { AgentChange, AgentChangeEvent, OpencodePart } from "../shared/types";
-import { AgentChangeCard } from "./AgentChangeCard";
+import { AgentChangeCard, AgentChangeView } from "./AgentChangeCard";
 import { ToolCall } from "./ToolCall";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "./testHarness";
 
@@ -29,6 +29,13 @@ const change = (over: Partial<AgentChange> = {}): AgentChange => ({
   createdAt: 1,
   decidedAt: null,
   error: null,
+  origin: { kind: "chat" },
+  mode: null,
+  releasedAt: 1,
+  decidedBy: null,
+  summary: null,
+  evidence: [],
+  admission: [],
   ...over,
 });
 
@@ -331,7 +338,7 @@ describe("AgentChangeCard", () => {
       open({}, part("running"));
       await h!.flush();
       current = change();
-      await act(async () => hint!({ id: "ach_0123456789abcdef", sessionID: "ses_1", slug: null }));
+      await act(async () => hint!({ id: "ach_0123456789abcdef", sessionID: "ses_1", slug: null, origin: { kind: "chat" } }));
       await h!.flush();
       expect(api.calls.agentsChangeFor).toHaveLength(1);
       expect(chip(h!)).toBe("Waiting for you");
@@ -342,7 +349,7 @@ describe("AgentChangeCard", () => {
       current = null;
       open({}, part("running"));
       await h!.flush();
-      await act(async () => hint!({ id: "ach_other", sessionID: "ses_other", slug: null }));
+      await act(async () => hint!({ id: "ach_other", sessionID: "ses_other", slug: null, origin: { kind: "chat" } }));
       await h!.flush();
       expect(api.calls.agentsChangeFor).toBeUndefined();
     });
@@ -351,11 +358,11 @@ describe("AgentChangeCard", () => {
       open();
       await h!.flush();
       expect(api.calls.agentsChangeFor).toHaveLength(1);
-      await act(async () => hint!({ id: "ach_other", sessionID: "ses_1", slug: null }));
+      await act(async () => hint!({ id: "ach_other", sessionID: "ses_1", slug: null, origin: { kind: "chat" } }));
       await h!.flush();
       expect(api.calls.agentsChangeFor).toHaveLength(1);
       current = change({ state: "applied", slug: "reviewer" });
-      await act(async () => hint!({ id: "ach_0123456789abcdef", sessionID: "ses_1", slug: "reviewer" }));
+      await act(async () => hint!({ id: "ach_0123456789abcdef", sessionID: "ses_1", slug: "reviewer", origin: { kind: "chat" } }));
       await h!.flush();
       expect(api.calls.agentsChangeFor).toHaveLength(2);
       expect(chip(h!)).toBe("Created");
@@ -390,7 +397,7 @@ describe("AgentChangeCard", () => {
       const resolvers: Array<(c: AgentChange | null) => void> = [];
       open({ agentsChangeFor: () => new Promise<AgentChange | null>((r) => resolvers.push(r)) });
       await h!.flush();
-      await act(async () => hint!({ id: "ach_0123456789abcdef", sessionID: "ses_1", slug: null }));
+      await act(async () => hint!({ id: "ach_0123456789abcdef", sessionID: "ses_1", slug: null, origin: { kind: "chat" } }));
       expect(resolvers).toHaveLength(2);
       await act(async () => resolvers[1](change({ state: "applied", slug: "reviewer" })));
       await act(async () => resolvers[0](change({ state: "pending" })));
@@ -413,5 +420,191 @@ describe("AgentChangeCard", () => {
     await h.flush();
     expect(q(h, "agent-change-card")).toBeTruthy();
     expect(h.text()).not.toContain("AgentChange");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5A: AgentChangeView, the record-driven card (summary, evidence, rules considered, held, applying, sources)
+// ---------------------------------------------------------------------------
+
+describe("AgentChangeView", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  beforeEach(() => resetStore());
+
+  const proposal = (over: Partial<AgentChange> = {}): AgentChange =>
+    change({
+      kind: "update",
+      slug: "dev",
+      agentName: "Dev",
+      before: "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\n",
+      after: "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\nRun the tests.\n",
+      origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
+      mode: "build",
+      summary: "Dev should always run the tests before finishing.",
+      evidence: [
+        { claim: "Short specific rules help", quote: "Short, specific rules beat long checklists", url: "https://example.com/study", private: false },
+        { claim: "A founder agreed", quote: null, url: null, private: true },
+      ],
+      admission: [
+        { rule: "Run the tests", verdict: "general", why: "Backed by the study" },
+        { rule: "Write a haiku", verdict: "excluded", why: "Weak" },
+      ],
+      ...over,
+    });
+  const mountView = (c: AgentChange, extra: Record<string, unknown> = {}) => {
+    const { api } = installMockApi(extra);
+    const seen: AgentChange[] = [];
+    h = mount(<AgentChangeView change={c} onChange={(n) => seen.push(n)} />);
+    return { api, seen };
+  };
+
+  it("shows the Architect's summary first, then the diff", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const summary = q(h!, "agent-change-summary")!;
+    expect(summary.textContent).toBe("Dev should always run the tests before finishing.");
+    const card = q(h!, "agent-change-card")!;
+    expect(card.textContent!.indexOf("Dev should always run")).toBeLessThan(card.textContent!.indexOf("Run the tests."));
+  });
+
+  it("evidence is a native details: the claim, then the quote and link — or 'Private source' with no quote and no link", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const ev = q(h!, "agent-change-evidence") as HTMLDetailsElement;
+    expect(ev.tagName).toBe("DETAILS");
+    expect(ev.open).toBe(false);
+    expect(ev.querySelector("summary")!.textContent).toBe("Evidence (2)");
+    const items = Array.from(ev.querySelectorAll('[data-testid="agent-change-evidence-item"]'));
+    expect(items).toHaveLength(2);
+    expect(items[0].textContent).toContain("Short specific rules help");
+    expect(items[0].querySelector("blockquote")!.textContent).toBe("Short, specific rules beat long checklists");
+    const link = items[0].querySelector("a") as HTMLAnchorElement;
+    expect(link.href).toBe("https://example.com/study");
+    expect(items[1].textContent).toContain("A founder agreed");
+    expect(items[1].textContent).toContain("Private source");
+    expect(items[1].querySelector("blockquote")).toBeNull();
+    expect(items[1].querySelector("a")).toBeNull();
+  });
+
+  it("an evidence link opens through the app and says so when it can't (a control always answers)", async () => {
+    const { api } = mountView(proposal(), { openExternal: () => Promise.reject(new Error("no browser")) });
+    await h!.flush();
+    const link = q(h!, "agent-change-evidence")!.querySelector("a") as HTMLAnchorElement;
+    await press(h!, link);
+    expect(api.calls.openExternal).toEqual([["https://example.com/study"]]);
+    expect(q(h!, "agent-change-link-error")!.textContent).toMatch(/Couldn't open the link/);
+    expect(q(h!, "agent-change-link-error")!.getAttribute("role")).toBe("alert");
+  });
+
+  it("rules considered: a native details with a verdict chip and the why per rule", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const rules = q(h!, "agent-change-admission") as HTMLDetailsElement;
+    expect(rules.tagName).toBe("DETAILS");
+    expect(rules.querySelector("summary")!.textContent).toBe("Rules considered (2)");
+    const rows = Array.from(rules.querySelectorAll('[data-testid="agent-change-admission-item"]'));
+    expect(rows.map((r) => r.getAttribute("data-verdict"))).toEqual(["general", "excluded"]);
+    expect(rows[0].textContent).toContain("General");
+    expect(rows[0].textContent).toContain("Run the tests");
+    expect(rows[1].textContent).toContain("Excluded");
+    expect(rows[1].textContent).toContain("Weak");
+  });
+
+  it("a plain chat change has no summary, evidence or rules sections", async () => {
+    mountView(change());
+    await h!.flush();
+    for (const id of ["agent-change-summary", "agent-change-evidence", "agent-change-admission"]) expect(q(h!, id)).toBeNull();
+  });
+
+  it("reason lines: the Architect itself, an unfinished task, a plan or a mention", async () => {
+    for (const [reason, text] of [
+      ["core", "This changes the Architect itself"],
+      ["unfinished", "The task didn't finish — review before applying"],
+      ["plan", "Proposed while planning or outside a hand-off — review before applying"],
+    ] as const) {
+      mountView(proposal({ reason, needsClick: true, state: "pending" }));
+      await h!.flush();
+      expect(q(h!, "agent-change-reason")!.textContent).toBe(text);
+      h!.unmount();
+    }
+    h = null;
+  });
+
+  it("held: 'The Architect is still working', a chip, no buttons — and the evidence is already readable", async () => {
+    mountView(proposal({ state: "held", needsClick: false, reason: null }));
+    await h!.flush();
+    expect(chip(h!)).toBe("Architect still working");
+    expect(q(h!, "agent-change-held")!.textContent).toBe("The Architect is still working");
+    expect(buttons(h!)).toHaveLength(0);
+    expect(q(h!, "agent-change-evidence")).toBeTruthy();
+  });
+
+  it("applying: a spinner with a name and no buttons", async () => {
+    mountView(proposal({ state: "applying", needsClick: false, reason: null }));
+    await h!.flush();
+    expect(chip(h!)).toBe("Applying…");
+    const spin = q(h!, "agent-change-applying")!;
+    expect(spin.textContent).toContain("Applying");
+    expect(spin.querySelector("[aria-hidden='true']")).toBeTruthy();
+    expect(buttons(h!)).toHaveLength(0);
+  });
+
+  it("its buttons behave as the tool-part card's: Apply awaits the box and hands the new record to onChange", async () => {
+    const applied = proposal({ state: "applied", decidedBy: "click" });
+    const { api, seen } = mountView(proposal({ state: "pending", needsClick: true, reason: "plan" }), { agentsChangeApply: () => Promise.resolve(applied) });
+    await h!.flush();
+    await press(h!, byText(h!, "Apply"));
+    expect(api.calls.agentsChangeApply).toEqual([["ach_0123456789abcdef"]]);
+    expect(seen).toEqual([applied]);
+    expect(q(h!, "agent-change-notice")).toBeNull();
+  });
+
+  describe("an update of the Architect: one block per added or changed source", () => {
+    const arch = (extra = "") => `---\nname: Architect\ndescription: Builds agents.\nrole: architect\nisolation: none\n${extra}---\nBody.\n`;
+    const SRC = `sources:\n  - id: bookface\n    name: YC Bookface\n    description: Private forum.\n    command: [yc, search, "{query}", --type, posts]\n    env:\n      YC_TOKEN: "{secret:YC_TOKEN}"\n`;
+    const archChange = (before: string, after: string): AgentChange =>
+      change({ kind: "update", slug: "architect", agentName: "Architect", before, after, reason: "core", needsClick: true });
+
+    it("shows the argv with {query} marked, the secret names and the private sentence", async () => {
+      mountView(archChange(arch(), arch(SRC)));
+      await h!.flush();
+      const block = q(h!, "agent-change-source")!;
+      expect(block.getAttribute("data-change")).toBe("added");
+      expect(block.textContent).toContain("YC Bookface");
+      expect(block.textContent).toContain("yc search {query} --type posts");
+      expect(block.textContent).toContain("Runs yc search {query} --type posts on this box with your account's access");
+      expect(block.textContent).toContain("YC_TOKEN");
+      expect(block.textContent).toContain("Private: results go to the AI model and its local transcript");
+      expect(q(h!, "agent-change-source-warning")).toBeNull();
+      expect(byText(h!, "Apply")).toBeTruthy();
+    });
+
+    it("a private → public change carries the warning", async () => {
+      mountView(archChange(arch(SRC), arch(SRC + "    private: false\n")));
+      await h!.flush();
+      expect(q(h!, "agent-change-source")!.getAttribute("data-change")).toBe("changed");
+      expect(q(h!, "agent-change-source-warning")!.textContent).toBe("Private → Public: future evidence may show quotes and links");
+    });
+
+    it("a url source says which site it calls; a change that leaves the sources alone shows no block", async () => {
+      const url = `sources:\n  - id: internal\n    name: Internal\n    description: Ours.\n    private: false\n    url: "https://search.example.com/api?q={query}"\n`;
+      mountView(archChange(arch(), arch(url)));
+      await h!.flush();
+      expect(q(h!, "agent-change-source")!.textContent).toContain("Calls search.example.com");
+      h!.unmount();
+      mountView(archChange(arch(url), arch(url).replace("Builds agents.", "Builds agents well.")));
+      await h!.flush();
+      expect(q(h!, "agent-change-source")).toBeNull();
+    });
+
+    it("another agent's change never shows source blocks", async () => {
+      mountView(change({ kind: "update", slug: "dev", agentName: "Dev", before: arch(), after: arch(SRC) }));
+      await h!.flush();
+      expect(q(h!, "agent-change-source")).toBeNull();
+    });
   });
 });

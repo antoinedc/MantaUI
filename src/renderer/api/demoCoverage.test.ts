@@ -57,6 +57,7 @@ export const DEMO_UNIMPLEMENTED = [
   "agentsChangeDiscard",
   "agentsChangeFor",
   "agentsChangeUndo",
+  "agentsChangesForJob",
   "agentsCreate",
   "agentsDispatch",
   "agentsList",

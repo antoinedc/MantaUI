@@ -114,6 +114,22 @@ describe("AgentsSection", () => {
     expect(rows()[2].textContent).not.toContain("lead");
   });
 
+  it("the Architect is listed with no Chat action: it works through tasks, so the row is not a button and nothing opens", async () => {
+    const ARCH = { ...DEV, slug: "architect", name: "Architect", description: "Builds agents", isolation: "none" as const, role: "architect" as const };
+    const { api } = await setup({ agentsList: () => Promise.resolve([DEV, ARCH]) });
+    const all = Array.from(h!.container.querySelectorAll<HTMLElement>('[data-testid="agent-row"]'));
+    expect(all.map((r) => r.dataset.slug)).toEqual(["dev", "architect"]);
+    const row = all[1];
+    expect(row.tagName).not.toBe("BUTTON");
+    expect(row.textContent).toContain("Architect");
+    expect(row.textContent).toContain("via Manta");
+    expect(row.title).toMatch(/Ask Manta/);
+    await click(row);
+    expect(api.calls.agentsOpenChat).toBeUndefined();
+    // the others are unchanged
+    expect(all[0].tagName).toBe("BUTTON");
+  });
+
   it("clicking the lead opens its direct chat like any other row", async () => {
     const { api } = await setup({ agentsList: () => Promise.resolve([DEV, MANTA]) });
     await click(rows()[0]);
