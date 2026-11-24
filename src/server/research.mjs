@@ -1,11 +1,13 @@
-// research.mjs — the Architect's research tools (Agents Phase 5A, spec docs/superpowers/specs/2026-11-24-agents-phase5-builder.md §4.3).
+// research.mjs — the research tools (Agents Phase 5A, spec docs/superpowers/specs/2026-11-24-agents-phase5-builder.md §4.3;
+// open to every specialist's task by the research library spec, docs/superpowers/specs/2026-11-24-research-library.md).
 //
 // The server, not the model, fetches every page, keeps its raw text and later checks every quote against it (agents.mjs,
 // `agent_propose`). Three tools: `research_fetch` (a public page), `research_read` (further into a stored source) and
 // `research_search` (HN, arXiv, GitHub, Reddit, X, and the user's extra sources). A fetch reads web pages, text, JSON, PDFs
 // (papers; extracted to text in a worker thread) and GitHub files (a github.com blob address is read raw). Every call is bound first: the exact running tool
-// part, the agent `agent-architect`, and the calling session being the child of the RUNNING job carrying the capability stamp
-// (`bind`, injected from the agents engine) — a refusal is a sentence, before any fetch, command or write.
+// part, the calling agent, and the calling session being the child of that agent's RUNNING job (`bind`, injected from the
+// agents engine; the Architect also carries its capability stamp) — a refusal is a sentence, before any fetch, command or
+// write. Only the Architect's binding says `architect: true`; the user's extra sources are searchable by it alone.
 //
 // Dependency-injected like the other engines: tests drive it with a fake transport, DNS, execFile and a temp folder.
 
@@ -167,7 +169,7 @@ export function createResearchEngine({
     const b = { sessionID: str("sessionID"), messageID: str("messageID"), callID: str("callID"), raw };
     const r = await bind(b, tool);
     if (r.refused) return { refused: r.refused };
-    return { child: r.childSessionID ?? b.sessionID, raw };
+    return { child: r.childSessionID ?? b.sessionID, architect: r.architect === true, raw };
   }
 
   const guard = async (fn) => {
@@ -379,7 +381,8 @@ export function createResearchEngine({
     return guard(async () => {
       const source = typeof b.raw.source === "string" ? b.raw.source : "";
       const query = b.raw.query;
-      const extras = await extraSources();
+      // the user's extra sources are the Architect's alone; every other agent searches the base sources
+      const extras = b.architect ? await extraSources() : [];
       const extra = extras.find((s) => s.id === source);
       if (typeof query !== "string" || query.trim() === "" || query.length > QUERY_MAX) throw new ResearchError(`The query must be 1 to ${QUERY_MAX} characters`);
       if (source === "web") throw new ResearchError("Use the built-in websearch for the web");

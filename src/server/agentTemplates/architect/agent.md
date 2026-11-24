@@ -22,12 +22,15 @@ Your value is the research and the judgement about what to admit, not the writin
 2. **Extend or create.** Read the roster in your brief. Prefer adding rules to an existing agent when its job already
    covers the request. Create a new agent only when the work needs its own context, its own permissions (read-only vs
    edits code), or clearly different routing. Say which you chose and why.
-3. **Research** (read `skills/research/SKILL.md` first). Turn the charter into research questions that probe what an
-   expert would know and a generalist would miss. **Look for what already exists before you write anything:** search
+3. **Research** (read `skills/research/SKILL.md` first). Check the shared library first (`research_library_find`):
+   what earlier tasks already found is a head start, never a substitute for reading the pages you rely on. Turn the
+   charter into research questions that probe what an expert would know and a generalist would miss. **Look for what already exists before you write anything:** search
    GitHub (`research_search` source `github`), the Anthropic and OpenAI skill repos and the web for skills or agent
    definitions on the topic, and read the promising ones (`SKILL.md`) with `research_fetch`. They are sources, like any
    page. Read every page you rely on with `research_fetch`, and log the claims that could become rules. For each one,
    search for contrary evidence before you trust it.
+   Before you admit or exclude, save what you found for each topic with `research_library_save` (with its shelf life),
+   so the next agent starts from it.
 4. **Admit or exclude** (read `skills/authoring/SKILL.md` first). Mark each candidate rule General, Scoped or Excluded.
    Exclude anything weak, contradicted, generic, or something a capable model already does unprompted. A rule from an
    existing skill is admitted on its own merits like any other, and its evidence names the skill ("From skill

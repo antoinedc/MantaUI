@@ -318,3 +318,23 @@ test("withResearchGuidance appends the block once, after the task text", () => {
   assert.ok(out.endsWith(`${RESEARCH_GUIDANCE.trim()}\n`) || out.includes(RESEARCH_GUIDANCE.trim()));
   assert.equal(withResearchGuidance(out), out, "idempotent");
 });
+
+// ---- the Architect's templates ----
+
+import { fileURLToPath } from "node:url";
+const TEMPLATES = fileURLToPath(new URL("./agentTemplates/architect", import.meta.url));
+
+test("the Architect saves its build research into the library, and the authoring skill leaves research guidance to the server", async () => {
+  const main = await readFile(join(TEMPLATES, "agent.md"), "utf-8");
+  assert.ok(main.trimEnd().split("\n").length <= 150, "the main file stays within 150 lines");
+  assert.match(main, /research_library_find/);
+  assert.match(main, /research_library_save/);
+  const research = await readFile(join(TEMPLATES, "skills", "research", "SKILL.md"), "utf-8");
+  assert.match(research, /## The research library/);
+  assert.match(research, /research_library_save/);
+  assert.match(research, /shelf life/i);
+  assert.match(research, /fetch again|re-?fetch/i, "a library entry is a lead: quotes for a proposal come from pages fetched in this task");
+  const authoring = await readFile(join(TEMPLATES, "skills", "authoring", "SKILL.md"), "utf-8");
+  assert.match(authoring, /research section/i);
+  assert.match(authoring, /every\s+agent's task prompt/i);
+});

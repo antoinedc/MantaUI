@@ -26,6 +26,8 @@ import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
 import { WORKTREE_AGENT_GRANTS, CAP_ERROR } from "./delegate.mjs";
+import { withResearchGuidance } from "./researchLibrary.mjs";
+import { SPECIALIST_RESEARCH_TOOLS } from "../shared/researchTools.mjs";
 import * as autonomy from "./autonomy.mjs";
 import { loadSecretsStrict } from "./secrets.mjs";
 import { createSecretScanner, MIN_SECRET_LENGTH } from "./knowledge/secretScan.mjs";
@@ -388,7 +390,7 @@ export function compileAgentPrompt({ body, skills = [] }) {
 // What the Architect may do when OpenCode invokes it natively (its own agent picker, a `task` call naming it) and no job
 // stamp vouches for the call: read and search, nothing else. The catch-all deny is FIRST (insertion order is rule order,
 // last match wins; proved on the pinned binary by scripts/opencode-v2/autonomy-rules.e2e.mjs).
-const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch", "todowrite", "progress_report", "research_fetch", "research_read", "research_search", "agent_propose"];
+const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch", "todowrite", "progress_report", ...SPECIALIST_RESEARCH_TOOLS, "agent_propose"];
 export function ARCHITECT_BLOCK_PERMISSION(dir, home = homedir()) {
   return {
     "*": "deny",
@@ -1074,7 +1076,7 @@ export function createAgentsEngine({
     const architect = isArchitect(agent);
 
     const res = await delegate.startJob({
-      prompt: buildDispatchPrompt({ text, seat, excerpt }) + (architect ? await architectContextFor(text) : ""),
+      prompt: withResearchGuidance(buildDispatchPrompt({ text, seat, excerpt })) + (architect ? await architectContextFor(text) : ""),
       parentSessionID: sessionId,
       parentDirectory: directory,
       agent: agentKey(slug),
@@ -1318,7 +1320,7 @@ export function createAgentsEngine({
     const seat = await seatFor(agent, directory);
     const excerpt = await excerptFor(b.sessionID);
     const job = {
-      prompt: buildDispatchPrompt({ text: b.brief.trim(), seat, excerpt }) + (architect ? await architectContextFor(b.brief) : ""),
+      prompt: withResearchGuidance(buildDispatchPrompt({ text: b.brief.trim(), seat, excerpt })) + (architect ? await architectContextFor(b.brief) : ""),
       parentSessionID: b.sessionID,
       parentDirectory: directory,
       agent: agentKey(slug),
@@ -2097,6 +2099,56 @@ export function createAgentsEngine({
     return { job, stamp: job.architect, childSessionID: b.sessionID };
   }
 
+  // The research and library tools (research library spec §3): every specialist's running task, and the Architect's.
+  const RESEARCHER_TOOL_KEYS = {
+    research_fetch: ARCHITECT_TOOL_KEYS.research_fetch,
+    research_read: ARCHITECT_TOOL_KEYS.research_read,
+    research_search: ARCHITECT_TOOL_KEYS.research_search,
+    research_library_find: ["query"],
+    research_library_save: ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"],
+  };
+  const NOT_RESEARCHER = "Only an agent working on a task from Manta can use this tool";
+
+  /** The project a task belongs to, as a library scope key: the registry project owning its folder, else the folder. */
+  async function projectKeyOf(directory) {
+    try {
+      const project = await registry?.identify(directory);
+      if (project?.slug && /^[a-z0-9-]+$/.test(project.slug)) return project.slug;
+    } catch (e) {
+      log.warn?.(`[agents] project lookup failed: ${e?.message ?? e}`);
+    }
+    return `dir:${directory}`;
+  }
+
+  /**
+   * The binding of every research and library tool: the exact running tool part and its arguments, the calling assistant
+   * message's agent being an agent package (`agent-<slug>`), and the calling session being the child of the RUNNING
+   * specialist job of that very agent (the Architect also needs its capability stamp). `{ childSessionID, agent, architect,
+   * project }` or `{ refused }` (a sentence). Nothing is read, fetched or written before this passes.
+   */
+  async function bindResearcher(b, tool) {
+    const keys = RESEARCHER_TOOL_KEYS[tool];
+    if (!keys) return { refused: NOT_RESEARCHER };
+    const spec = { tool, couldnt: ARCHITECT_COULDNT_CHECK, notLead: NOT_RESEARCHER, needTurn: false, matches: keyedInputMatches(keys) };
+    const verified = await verifyInvocation(b, spec);
+    if (verified.refused) return { refused: verified.refused };
+    const caller = verified.callerAgent;
+    if (!caller.startsWith(AGENT_PACKAGE_PREFIX) || !SLUG_RE.test(caller.slice(AGENT_PACKAGE_PREFIX.length))) return { refused: NOT_RESEARCHER };
+    let jobs;
+    try {
+      jobs = (await delegate.loadRecordsStrict?.()) ?? null;
+    } catch {
+      jobs = null;
+    }
+    if (!Array.isArray(jobs)) return { refused: ARCHITECT_COULDNT_CHECK };
+    const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.specialist === true && j.agent === caller);
+    if (!job) return { refused: NOT_RESEARCHER };
+    const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
+    const architect = slug === ARCHITECT_SLUG;
+    if (architect && !(job.architect && typeof job.architect === "object")) return { refused: NOT_RESEARCHER };
+    return { childSessionID: b.sessionID, agent: slug, architect, project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
+  }
+
   const wsNorm = (t) => String(t ?? "").replace(/\s+/g, " ").trim();
   const VERDICTS = ["general", "scoped", "excluded"];
   const PROPOSALS_PER_TASK = 3;
@@ -2539,6 +2591,7 @@ export function createAgentsEngine({
     outcomeLinesForJob,
     propose,
     bindArchitect,
+    bindResearcher,
     reconcile,
     recover,
     apply: applyChange,
