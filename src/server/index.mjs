@@ -258,7 +258,6 @@ import { createCtoConversationService, authorizeCtoProjectMutation } from "./cto
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
 import { createResearchEngine } from "./research.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
-import { createAskUser } from "./askUser.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
 import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
 import { parseMainWorktree } from "./knowledge/identity.mjs";
@@ -2604,11 +2603,6 @@ const researchLibrary = createResearchLibrary({
   bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
   getSource: (child, id) => researchEngine.getSource(child, id),
 });
-// ask_user (docs/superpowers/specs/2026-11-24-ask-user-tool.md): bound like the research tools, then stored on the running task's record.
-const askUser = createAskUser({
-  bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
-  record: (jobId, ask) => delegateEngine.recordAskUser(jobId, ask),
-});
 const agentsEngine = createAgentsEngine({
   research: researchEngine,
   editConfig: (edits) => editOpencodeConfig(edits),
@@ -4149,11 +4143,12 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     }
   }
   // A background job cannot wait on a person (spec 2026-11-14 A5): a question form raised in one of its sessions is
-  // rejected here and never interpreted, published or pushed. (The model learns why from its opening prompt.)
+  // never interpreted, published or pushed. A specialist's task asking in its own session has it captured as the decision
+  // (the task ends "needs a decision", spec 2026-11-24-ask-user-tool.md); any other is rejected. (The model learns why from its opening prompt.)
   if (raw?.type === "form.created" && isQuestionForm(raw.data?.form) && delegateEngine.ownsSession(raw.data.form.sessionID)) {
     void delegateEngine
-      .rejectAsk({ kind: "question", requestId: raw.data.form.id, sessionId: raw.data.form.sessionID })
-      .catch((e) => console.warn("[delegate] rejecting a background job's question failed:", e?.message ?? e));
+      .handleQuestion(raw.data.form)
+      .catch((e) => console.warn("[delegate] handling a background job's question failed:", e?.message ?? e));
     return;
   }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
@@ -5023,10 +5018,9 @@ const handleRequest = async (req, res) => {
   // POST /api/agents/propose   body {sessionID, messageID, callID, action, draft, summary, evidence, admission, agent?, baseHash?}
   // POST /api/research/{fetch,read,search}  body {sessionID, messageID, callID, ...the tool's arguments}
   // POST /api/research-library/{find,save}  the same shape (every specialist's task; src/server/researchLibrary.mjs)
-  // POST /api/ask-user                      the same shape: {question, options, recommended?, why?, concern?} (src/server/askUser.mjs)
   //                                         → {ok:true, ...} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engines: src/server/agents.mjs, src/server/research.mjs.
-  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save" || path === "/api/ask-user") {
+  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save") {
     try {
       if (req.method !== "POST") {
         respondJson(res, 405, { error: "method not allowed" });
@@ -5036,9 +5030,7 @@ const handleRequest = async (req, res) => {
       const result =
         path === "/api/agents/propose"
           ? await agentsEngine.propose(body)
-          : path === "/api/ask-user"
-            ? await askUser.ask(body)
-            : path.startsWith("/api/research-library/")
+          : path.startsWith("/api/research-library/")
             ? await researchLibrary[path.slice("/api/research-library/".length)](body)
             : await researchEngine[path.slice("/api/research/".length)](body);
       respondJson(res, 200, result);

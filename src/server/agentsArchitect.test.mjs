@@ -84,7 +84,7 @@ test("the Architect template stays short and tells it to look for existing skill
   assert.match(skill, /anthropics\/skills/);
 });
 
-test("the Architect templates carry no agent-design opinions (research and the library decide those) and tell it to use ask_user when the request and the roster conflict", async () => {
+test("the Architect templates carry no agent-design opinions (research and the library decide those) and tell it to ask with the question tool when the request and the roster conflict", async () => {
   const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
   const main = await read("agent.md");
   const authoring = await read("skills", "authoring", "SKILL.md");
@@ -116,10 +116,11 @@ test("the Architect templates carry no agent-design opinions (research and the l
   assert.match(main, /at least 3 independent sources/);
   assert.match(authoring, /admission/i);
   assert.match(authoring, /isolation/);
-  // one short process line: compare the request with the roster in light of the research; ask_user on a conflict
-  assert.equal(main.split("`ask_user`").length - 1, 1, "named once");
+  // one short process line: compare the request with the roster in light of the research; the question tool on a conflict
+  assert.equal(main.split("question tool").length - 1, 1, "named once");
+  assert.ok(!all.includes("ask_user"));
   const step = main.match(/\n\d+\. \*\*Compare\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0].replace(/\s+/g, " ") ?? "";
-  assert.match(step, /`ask_user`/);
+  assert.match(step, /ask the user with the question tool, with your recommendation and what you found/);
   assert.match(step, /roster/);
   assert.match(step, /research/);
   assert.match(step, /conflict/);

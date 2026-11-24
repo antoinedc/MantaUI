@@ -32,7 +32,7 @@ import {
 } from "./agents.mjs";
 import { withResearchGuidance } from "./researchLibrary.mjs";
 import { CAP_ERROR } from "./delegate.mjs";
-import { ASK_USER_MARKER } from "./askUser.mjs";
+import { DECISION_MARKER } from "./taskDecision.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const valid = (extra = "") => `---\nname: Scout\ndescription: Looks things up.\n${extra}---\nYou are Scout.\n`;
@@ -1383,7 +1383,7 @@ test("buildLeadBrief: the mechanics send a new agent to @architect and keep agen
 
 test("buildLeadBrief: a result carrying a question block is put to the user in one question call, recommended first, concern stated, never answered for them; the answer goes back with continueJob", () => {
   const a = buildLeadBrief({ body: "B", roster: [] });
-  const line = a.split("\n").find((l) => l.includes(ASK_USER_MARKER));
+  const line = a.split("\n").find((l) => l.includes(DECISION_MARKER));
   assert.ok(line, "a bullet about the question block");
   assert.ok(line.startsWith("- "));
   assert.match(line, /ONE question call/);
@@ -1394,7 +1394,7 @@ test("buildLeadBrief: a result carrying a question block is put to the user in o
   assert.match(line, /never answer it (on the user's behalf|for the user)/i);
   assert.match(line, /continueJob: <jobId>/);
   assert.match(line, /same task/);
-  assert.equal(a.split(ASK_USER_MARKER).length - 1, 1, "stated once");
+  assert.equal(a.split(DECISION_MARKER).length - 1, 1, "stated once");
   assert.equal(a, buildLeadBrief({ body: "B", roster: [] }), "byte-stable");
   assert.match(readFileSync(join(REAL_TEMPLATES, "manta", "agent.md"), "utf-8"), /question block from the teammate.*never answer it for them/);
 });

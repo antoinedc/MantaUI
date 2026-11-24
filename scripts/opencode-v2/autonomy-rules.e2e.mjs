@@ -139,7 +139,7 @@ try {
     SCRIPT = script;
     const baseRules = [...(ro ? buildReadOnlyAgentRuleset({ agentDir, home }) : buildWorktreeAgentRuleset({ home })), ...grant.map((permission) => ({ permission, pattern: "*", action: "allow" }))];
     // the child's id is minted up front (as the delegate engine does) so its rules can name its own secrets folder
-    const rules = normalizeJobRuleset([...baseRules, ...jobRules(policy, { home, agentDir, projectPatterns: pp, sessionID: sessionId })]);
+    const rules = normalizeJobRuleset([...baseRules, ...jobRules(policy, { home, agentDir, projectPatterns: pp, sessionID: sessionId })], { allowQuestion: true });
     const sess = await oc.createSession({ id: sessionId, directory: cwd, agent: "build", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, permission: rules, title: "probe" });
     await api("POST", `/api/session/${sess.id}/prompt`, { text: "go" });
     await Promise.race([api("POST", `/api/experimental/session/${sess.id}/wait`), new Promise((_, rej) => setTimeout(() => rej(new Error("turn timed out")), 90_000))]);
@@ -337,7 +337,7 @@ try {
   async function archCall(call, { agent = "agent-architect", job = true } = {}) {
     SCRIPT = [call];
     const sessionId = mintSessionId();
-    const rules = job ? normalizeJobRuleset(buildArchitectRuleset({ policy: balanced, agentDir: ARCH_DIR, home, projectPatterns: [], sessionID: sessionId })) : undefined;
+    const rules = job ? normalizeJobRuleset(buildArchitectRuleset({ policy: balanced, agentDir: ARCH_DIR, home, projectPatterns: [], sessionID: sessionId }), { allowQuestion: true }) : undefined;
     const sess = await oc.createSession({ id: sessionId, directory: cwd, agent, model: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, ...(rules ? { permission: rules } : {}), title: "architect probe" });
     await api("POST", `/api/session/${sess.id}/prompt`, { text: "go" });
     await Promise.race([api("POST", `/api/experimental/session/${sess.id}/wait`), new Promise((_, rej) => setTimeout(() => rej(new Error("turn timed out")), 90_000))]);

@@ -603,13 +603,13 @@ test("matchKinds with project patterns: whole command and each part of a compoun
   assert.deepEqual(matchKinds(bashPart("make ship"), { home: HOME }), [], "without the page's patterns nothing matches");
 });
 
-test("buildJobPrompt: a specialist's endings put the question and the summary before its report section; every other job is unchanged", () => {
+test("buildJobPrompt: a specialist's prompt sends a decision to the question tool and its summary before its report section; every other job is unchanged", () => {
   const base = { prompt: "do it", worktree: "/wt", branch: "job/x", ceilingMs: 60_000, autonomy: "## Your limits\nx" };
   const plain = buildJobPrompt(base);
   const spec = buildJobPrompt({ ...base, specialist: true });
   assert.match(plain, /then\nend your turn with the question\./);
   assert.match(plain, /When you are done, end with a short summary of what you changed and why\./);
-  assert.match(spec, /then\nput the question in your final message, before the "Actions from your list" section\./);
+  assert.match(spec, /use the\nquestion tool\. It ends your task and the lead puts the question to the user, so put\nwhat you found and what you recommend in the question itself\./);
   assert.match(spec, /When you are done, write a short summary of what you changed and why\./);
   assert.doesNotMatch(spec, /end your turn with the question|end with a short summary/);
   assert.equal(buildJobPrompt({ ...base, specialist: false }), plain);

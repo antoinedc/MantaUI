@@ -153,20 +153,29 @@ Spec: `docs/superpowers/specs/2026-11-24-research-library.md`. Not in the first 
 - **Event-driven staleness.** Entries go stale by date only; a change-log feed (a core update, a platform release) could
   mark entries stale early.
 
-## `ask_user` — follow-ups (first version shipped 2026-11-24)
+## A specialist's question (the `question` tool) — follow-ups (shipped 2026-11-24)
 
-Spec: `docs/superpowers/specs/2026-11-24-ask-user-tool.md`. Not in the first version:
+Spec: `docs/superpowers/specs/2026-11-24-ask-user-tool.md` (the first version was a custom `ask_user` tool, replaced the same day).
+Not in this version:
 
 - **No question card.** The result card shows the server-written block as text; a card with the options as buttons (and the
   answer sent back to the task) is the natural next step.
+- **No recommended / why / concern fields.** The standard tool has none, so a recommendation lives in the question text.
+  Parsing it out (or a structured convention in the text) would let the lead put the recommended option first without reading prose.
+- **The question's header and the "type your own answer" flag are dropped.** The block lists the options only.
 - **Built-in agents on existing boxes keep their old files.** Templates are copied once, so the Architect and Manta files of
   a box that already has them keep the old wording until the planned built-in self-update; the lead brief text, the task
-  guidance and the tool itself arrive with the server release.
-- **A task that asked after it proposed.** An Architect that calls `ask_user` after `agent_propose` ends "needs a decision",
-  so its proposals wait (reason: the task didn't finish cleanly) until the continued round finishes.
+  guidance and the rulesets arrive with the server release.
+- **Tasks created before this release keep their `question` deny**, so they can't ask; a resumed one gets the new rules.
+- **A question that was already pending across a restart is rejected, not captured.** The reconstruction and the sweep reject
+  any ask they find pending in a job's sessions; capturing needs the form, which they don't read.
+- **A subagent's question is still denied**, so a task whose subagent needs a decision gets a rejection, not a card.
+- **A task that asked after it proposed.** An Architect that asks after `agent_propose` ends "needs a decision", so its
+  proposals wait (reason: the task didn't finish cleanly) until the continued round finishes.
 - **Only the lead continues the task.** The answer goes back via `continueJob`, so it needs the lead's own chat; a task
-  started another way (a routine, an agent's own chat) can't ask yet. A question nobody answers just stays on the finished task.
-- **One question per task.** A second `ask_user` in the same task replaces the first; a task that needs several decisions
-  should ask them in one call or across rounds.
-- **A task that asked and kept working.** The tool tells the model to stop; the server only makes the question decide the
-  outcome, it doesn't interrupt the turn.
+  started another way can't usefully ask. A question nobody answers stays on the finished task.
+- **One decision per task round.** A second question in the same round replaces the first; a task that needs several decisions
+  should put them in one question call (a form holds several questions) or ask across rounds.
+- **The interrupt can cut the last message short.** If the model had started writing after calling the tool, that partial text
+  is the task's result before the block. If the interrupt itself fails, the task ends when its own turn does (the stored decision
+  still decides the outcome).

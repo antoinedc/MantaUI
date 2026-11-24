@@ -8,5 +8,5 @@ export const RESEARCH_TOOLS = Object.freeze(["research_fetch", "research_read", 
 export const LIBRARY_TOOLS = Object.freeze(["research_library_find", "research_library_save"]);
 /** What a specialist task's ruleset allows (permission pattern `*`). */
 export const SPECIALIST_RESEARCH_TOOLS = Object.freeze([...RESEARCH_TOOLS, ...LIBRARY_TOOLS]);
-/** What every specialist task's ruleset allows: the research tools, the library, and `ask_user` (spec docs/superpowers/specs/2026-11-24-ask-user-tool.md). */
-export const SPECIALIST_TASK_TOOLS = Object.freeze([...SPECIALIST_RESEARCH_TOOLS, "ask_user"]);
+/** What every specialist task's ruleset allows: the research tools, the library, and OpenCode's standard `question` tool (spec docs/superpowers/specs/2026-11-24-ask-user-tool.md). */
+export const SPECIALIST_TASK_TOOLS = Object.freeze([...SPECIALIST_RESEARCH_TOOLS, "question"]);
