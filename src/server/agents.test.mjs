@@ -577,7 +577,7 @@ test("parseAgentMd: role, use_when and not_for — valid, trimmed, too long, wro
 
 test("every shipped template parses; the lead one is role lead, Dev carries its routing lines", async () => {
   const dirs = (await readdir(REAL_TEMPLATES, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
-  assert.deepEqual(dirs.sort(), ["dev", "manta"]);
+  assert.deepEqual(dirs.sort(), ["architect", "dev", "manta"]);
   for (const d of dirs) {
     const r = parseAgentMd(await readFile(join(REAL_TEMPLATES, d, "agent.md"), "utf-8"));
     assert.equal(r.ok, true, `${d}: ${r.error}`);
