@@ -24,7 +24,7 @@ import { ensureBinary } from "./fetch-binary.mjs";
 import { startSandbox } from "./sandbox.mjs";
 import { startMockAnthropic } from "./mock-anthropic.mjs";
 import { jobRules, DENIAL_TEXT_RE } from "../../src/server/autonomy.mjs";
-import { buildReadOnlyAgentRuleset, buildWorktreeAgentRuleset, normalizeJobRuleset } from "../../src/server/delegate.mjs";
+import { buildReadOnlyAgentRuleset, buildWorktreeAgentRuleset, normalizeJobRuleset, mintSessionId } from "../../src/server/delegate.mjs";
 import { MODES } from "../../src/shared/autonomyShared.mjs";
 import { projectPatterns, validateEntry } from "../../src/server/projectActions.mjs";
 
@@ -54,6 +54,10 @@ const decideFn = (body) => {
   if (!name) return { kind: "text", text: `no tool ${call.re}` };
   return { kind: "tool", name, input: call.input };
 };
+
+// the secrets fixture (a task may USE a shared secret and its OWN session's folder, nothing else under ~/.manta-secrets)
+const OWN_ID = mintSessionId();
+const OTHER_ID = mintSessionId();
 
 const mock = await startMockAnthropic({ decideFn });
 const oc = await import("../../src/server/opencode.mjs");
@@ -89,6 +93,9 @@ try {
       { path: "home/.manta/agents/dev/skills/x/SKILL.md", content: "AGENT-FOLDER-OK\n" },
       { path: "home/.manta/notes.txt", content: "OTHER-MANTA-FILE\n" },
       { path: "home/.config/opencode/probe.jsonc", content: '{"fixture":"FIXTURE-SECRET"}\n' },
+      { path: "home/.manta-secrets/SHARED_KEY", content: "SHARED-SECRET-VALUE\n" },
+      { path: `home/.manta-secrets/sessions/${OWN_ID}/OWN_KEY`, content: "OWN-SECRET-VALUE\n" },
+      { path: `home/.manta-secrets/sessions/${OTHER_ID}/OTHER_KEY`, content: "OTHER-SECRET-VALUE\n" },
     ],
   });
   process.env.MANTA_OPENCODE_PASSWORD = sb.password;
@@ -107,11 +114,12 @@ try {
 
   const agentDir = join(home, ".manta/agents/dev");
   /** Run SCRIPT in a fresh job-like session; returns the finished tool parts in call order. `ro`: the read-only agent base. */
-  async function run(script, policy, { ro = false, grant = [], projectPatterns: pp = [] } = {}) {
+  async function run(script, policy, { ro = false, grant = [], projectPatterns: pp = [], sessionId = mintSessionId() } = {}) {
     SCRIPT = script;
     const baseRules = [...(ro ? buildReadOnlyAgentRuleset({ agentDir, home }) : buildWorktreeAgentRuleset({ home })), ...grant.map((permission) => ({ permission, pattern: "*", action: "allow" }))];
-    const rules = normalizeJobRuleset([...baseRules, ...jobRules(policy, { home, agentDir, projectPatterns: pp })]);
-    const sess = await oc.createSession({ directory: cwd, agent: "build", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, permission: rules, title: "probe" });
+    // the child's id is minted up front (as the delegate engine does) so its rules can name its own secrets folder
+    const rules = normalizeJobRuleset([...baseRules, ...jobRules(policy, { home, agentDir, projectPatterns: pp, sessionID: sessionId })]);
+    const sess = await oc.createSession({ id: sessionId, directory: cwd, agent: "build", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, permission: rules, title: "probe" });
     await api("POST", `/api/session/${sess.id}/prompt`, { text: "go" });
     await Promise.race([api("POST", `/api/experimental/session/${sess.id}/wait`), new Promise((_, rej) => setTimeout(() => rej(new Error("turn timed out")), 90_000))]);
     const msgs = await oc.listMessages(sess.id, { limit: 200 });
@@ -259,6 +267,48 @@ try {
   const tellPage = await run([bash("./scripts/deploy-web.sh --tell"), bash("make ship")], { ...MODES.autonomous }, { projectPatterns: pp });
   const tlog = await ran();
   check("at Tell the page's commands run (only Ask / Never block)", !denied(tellPage[0]) && tlog.includes("deploy-web.sh --tell") && tlog.includes("make ship"), `${outcome(tellPage[0])} ${j(tlog)}`);
+
+  // ===== secrets a task was handed (secret_provide): use them by reference; never the rest of the store =====
+  const S = `${home}/.manta-secrets`;
+  const sec = await run(
+    [
+      bash(`cat ${S}/SHARED_KEY`), //                                          0 a shared secret: used
+      bash(`echo "used:$(cat ${S}/SHARED_KEY)" | wc -c`), //                   1 by reference, inside a substitution + a pipeline
+      bash(`cat ${S}/sessions/${OWN_ID}/OWN_KEY`), //                          2 this task's own session folder
+      bash(`cat ${S}/sessions/${OTHER_ID}/OTHER_KEY`), //                      3 another session's: denied
+      bash(`cd x && cat ${S}/sessions/${OTHER_ID}/OTHER_KEY`), //              4 …as a subcommand
+      bash(`ls ${S}/sessions`), //                                             5 listing the sessions: denied
+      bash(`echo overwritten > ${S}/SHARED_KEY`), //                           6 a write: denied
+      bash(`rm ${S}/SHARED_KEY`), //                                           7 a delete: denied
+      bash(`cd x && rm ${S}/sessions/${OWN_ID}/OWN_KEY`), //                   8 …as a subcommand, in its own folder
+      file(/^write$/i, { path: `${S}/SHARED_KEY`, content: "OVERWRITTEN" }), // 9 the write tool: denied
+      file(/^read$/i, { path: `${S}/SHARED_KEY` }), //                         10 the read tool: denied (the value would land in the transcript)
+      bash(`cat ${S}/SHARED_KEY ${home}/.manta/auth.json`), //                 11 next to a protected file: denied
+      bash(`cat ${S}/sessions/${OWN_ID}/../${OTHER_ID}/OTHER_KEY`), //         12 climbing out of its own folder: denied
+      bash(`ls ${S}`), //                                                      13 the bare store folder: denied
+      bash(`cat ${home}/.manta/auth.json`), //                                 14 the protected files are still denied
+    ],
+    balanced,
+    { sessionId: OWN_ID },
+  );
+  sec.forEach((p, i) => console.log(`  [info] secrets #${i} ${p.tool} ${String(p.state?.input?.command ?? p.state?.input?.path).replace(home, "~")} → ${outcome(p)}`));
+  const out = (p) => String(p?.state?.output ?? "");
+  const leakedOther = (p) => out(p).includes("OTHER-SECRET-VALUE") || out(p).includes("FIXTURE-SECRET");
+  check("a task can `cat` a shared secret file it was handed", sec[0]?.state?.status === "completed" && out(sec[0]).includes("SHARED-SECRET-VALUE"), outcome(sec[0]));
+  check("…and use it by reference (`$(cat …)` inside a command and a pipeline)", sec[1]?.state?.status === "completed" && /\d/.test(out(sec[1])), outcome(sec[1]));
+  check("a task can read the secrets in its OWN session's folder", sec[2]?.state?.status === "completed" && out(sec[2]).includes("OWN-SECRET-VALUE"), outcome(sec[2]));
+  check("another session's secret file is denied and not read", denied(sec[3]) && !leakedOther(sec[3]), outcome(sec[3]));
+  check("…also as a subcommand", denied(sec[4]) && !leakedOther(sec[4]), outcome(sec[4]));
+  check("listing the sessions folder is denied", denied(sec[5]), outcome(sec[5]));
+  check("a shell write to a secret file is denied and the file is unchanged", denied(sec[6]) && (await readFile(`${S}/SHARED_KEY`, "utf8")).includes("SHARED-SECRET-VALUE"), outcome(sec[6]));
+  check("a shell delete of a secret file is denied and the file is still there", denied(sec[7]) && (await readFile(`${S}/SHARED_KEY`, "utf8")).includes("SHARED-SECRET-VALUE"), outcome(sec[7]));
+  check("…also as a subcommand in its own folder", denied(sec[8]) && (await readFile(`${S}/sessions/${OWN_ID}/OWN_KEY`, "utf8")).includes("OWN-SECRET-VALUE"), outcome(sec[8]));
+  check("the write tool on a secret file is denied", denied(sec[9]) && (await readFile(`${S}/SHARED_KEY`, "utf8")).includes("SHARED-SECRET-VALUE"), outcome(sec[9]));
+  check("the read tool on a secret file is denied (use `$(cat …)`; the value must not land in the transcript)", denied(sec[10]) && !out(sec[10]).includes("SHARED-SECRET-VALUE"), outcome(sec[10]));
+  check("a secret next to a protected Manta file is still denied", denied(sec[11]) && !leakedOther(sec[11]), outcome(sec[11]));
+  check("climbing out of its own folder with `..` is denied", denied(sec[12]) && !leakedOther(sec[12]), outcome(sec[12]));
+  check("the bare ~/.manta-secrets folder is denied", denied(sec[13]), outcome(sec[13]));
+  check("Manta's protected files are still denied", denied(sec[14]) && !leakedOther(sec[14]), outcome(sec[14]));
 } catch (e) {
   check("probe ran to completion", false, e?.stack ?? String(e));
 } finally {
