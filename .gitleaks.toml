@@ -74,6 +74,10 @@ paths = [
   '''src/gateway/apns\.test\.mjs''',
   '''mobile-rn/src/pure/__tests__/claim\.test\.ts''',
   '''src/renderer/api/demoFixture\.ts''',                   # demo-mode sample data
+  # Agents Phase 5A: fake credential literals the extra-source checks must refuse / redact
+  # ("lit-key-123456", "tok-123456789"). Audited 2026-11-24.
+  '''src/server/agentsArchitect\.test\.mjs''',
+  '''src/server/research\.test\.mjs''',
 
   # --- Anthropic beta-flag names ("interleaved-thinking-2025-05-14" etc.) trip
   # generic-api-key next to a `BETAS` identifier. Public header values, audited
