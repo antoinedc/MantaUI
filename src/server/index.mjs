@@ -255,7 +255,8 @@ import { createHandoffHandler } from "./handoffRoute.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
-import { createAgentsEngine } from "./agents.mjs";
+import { createAgentsEngine, isArchitect } from "./agents.mjs";
+import { createResearchEngine } from "./research.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
 import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
 import { parseMainWorktree } from "./knowledge/identity.mjs";
@@ -1397,6 +1398,9 @@ const backgroundBudget = createBackgroundBudget({
 // created earlier in module scope); until then it is a no-op, and a routing
 // failure never breaks the job's own terminal transition.
 let workOutcomeSink = null;
+// Agents Phase 5A: an Architect job reached a final state (finished, failed, stopped) — its held proposals are released.
+// Assigned once the agents engine exists (it is built much further down); until then a no-op.
+let architectJobEndedSink = null;
 // Agents Phase 3 (src/server/autonomy.mjs): the user's CURRENT autonomy policy, read strictly from `~/.manta/config.json`
 // (throws when the file can't be read or parsed, so the caller refuses instead of guessing). Shared by the delegate
 // engine (a specialist's task: start / continue / resume) and the agents engine (lead brief, handoff, dispatch).
@@ -1424,6 +1428,9 @@ const delegateEngine = createDelegateEngine({
   killWindow: (input) => tmux.killWindow(input),
   onJobTerminal: async (job) => {
     if (workOutcomeSink) await workOutcomeSink(job);
+  },
+  onJobEnded: async (job) => {
+    if (architectJobEndedSink) await architectJobEndedSink(job);
   },
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
@@ -2580,7 +2587,17 @@ void stopTuner;
 
 // Agents, Phase 1 (src/server/agents.mjs): named agents you can @mention. Built-ins are installed and every valid agent
 // is compiled into opencode.jsonc at boot; a failure is logged and never blocks startup (`agents:list` retries).
+// Agents Phase 5A (src/server/research.mjs): the Architect's research tools. Every call is bound by the agents engine (the
+// exact running tool part, the agent, the stamped running job), which is built just below — read at call time.
+const researchEngine = createResearchEngine({
+  bind: (b, tool) => agentsEngine.bindArchitect(b, tool),
+  extraSources: async () => {
+    const { entries } = await agentsEngine.scan();
+    return entries.find(isArchitect)?.meta.sources ?? [];
+  },
+});
 const agentsEngine = createAgentsEngine({
+  research: researchEngine,
   editConfig: (edits) => editOpencodeConfig(edits),
   reload: () => reloadOpencodeConfig(),
   oc,
@@ -2615,6 +2632,11 @@ const agentsEngine = createAgentsEngine({
   publish: (payload) => bus.publish({ kind: "agentChange", payload }),
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
+architectJobEndedSink = () => agentsEngine.reconcile();
+// held proposals whose round ended while nobody was looking (a stop, a crash, a restart) are released every minute; the
+// research store drops what is older than 30 days or over its cap every five
+startPoller(() => agentsEngine.reconcile(), { intervalMs: 60_000, label: "agents-reconcile", immediate: false });
+startPoller(() => researchEngine.sweep(), { intervalMs: 5 * 60_000, label: "research-sweep", immediate: false });
 
 rpcHandlers = buildHandlers({
   usageCalibration,
@@ -4976,6 +4998,30 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, await (path === "/api/agents/change" ? agentsEngine.change(body) : agentsEngine.handoff(body)));
     } catch (e) {
       // class-2 (BET-1460): the manta plugin (lead brief hook, agent_handoff / agent_change tools) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Agents Phase 5A (the Architect) ----------
+  // POST /api/agents/propose   body {sessionID, messageID, callID, action, draft, summary, evidence, admission, agent?, baseHash?}
+  // POST /api/research/{fetch,read,search}  body {sessionID, messageID, callID, ...the tool's arguments}
+  //                                         → {ok:true, ...} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
+  // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engines: src/server/agents.mjs, src/server/research.mjs.
+  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = (await readJsonBody(req)) ?? {};
+      const result =
+        path === "/api/agents/propose"
+          ? await agentsEngine.propose(body)
+          : await researchEngine[path.slice("/api/research/".length)](body);
+      respondJson(res, 200, result);
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (agent_propose / research_* tools) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
