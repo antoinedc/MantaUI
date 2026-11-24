@@ -30,6 +30,7 @@ import {
   CHANGE_PENDING_MS,
   CHANGE_MAX,
 } from "./agents.mjs";
+import { withResearchGuidance } from "./researchLibrary.mjs";
 import { CAP_ERROR } from "./delegate.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
@@ -439,7 +440,7 @@ test("dispatch: no seat file, an unreadable conversation and an unidentifiable p
     };
     await f.engine.dispatch({ sessionId: "ses_p", directory: "/repo", slug: "scout", text: "look this up" });
     const job = f.calls.startJob[0];
-    assert.equal(job.prompt, "look this up");
+    assert.equal(job.prompt, withResearchGuidance("look this up"), "no brief and no conversation sections; the research guidance is the only addition");
     assert.equal(job.model, "anthropic/claude-sonnet-5-5");
     assert.equal(job.isolation, "worktree", "no isolation key = its own branch");
   } finally {

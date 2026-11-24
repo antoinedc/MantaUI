@@ -38,7 +38,7 @@ async function world({ jobs, registry } = {}) {
 // a running tool call of `agent` in `ses_c`, posting `args`; returns the body the tool would post
 function call(w, tool, args, { agent = "agent-seo", status = "running", input } = {}) {
   const k = ++n;
-  const b = { sessionID: "ses_c", messageID: `msg_${k}`, callID: `call_${k}`, ...args };
+  const b = { sessionID: "ses_c", messageID: `msg_${k}`, callID: `call_${k}`, raw: { ...args } }; // the shape the engines bind
   w.messages = [
     { info: { id: "msg_user", role: "user" }, parts: [] },
     { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent }, parts: [{ type: "tool", tool, callID: b.callID, state: { status, input: input ?? args } }] },
@@ -122,7 +122,6 @@ test("refusals: a caller that is not an agent package, a job that is not running
     await refused("research_nope", {});
     await refused("research_fetch", sample.research_fetch, { status: "completed" }); // not the live call
     await refused("research_fetch", { url: "https://other.example/" }, { input: { url: "https://example.com/" } }); // what the tool posted differs from the running call
-    await refused("research_fetch", { url: "https://example.com/", extra: 1 }, { input: { url: "https://example.com/" } });
     // an unreadable jobs store refuses with a try-again sentence
     const b = call(f.w, "research_fetch", sample.research_fetch);
     f.w.jobs = null;

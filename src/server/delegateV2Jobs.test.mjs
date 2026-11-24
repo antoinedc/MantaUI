@@ -30,6 +30,7 @@ import {
   buildJobPrompt,
   buildReadOnlyAgentRuleset,
   buildArchitectRuleset,
+  withResearchToolAllows,
   listJobs,
   MAX_RUNNING_JOBS,
   CAP_ERROR,
@@ -308,7 +309,7 @@ test("C1 startJob: a non-repository job (no worktree) is NOT moved", async () =>
 
 // ---- agent jobs (agents phase 1): `agent`, `isolation`, `agentName`, `request` ----
 
-const READ_ONLY_KEYS = ["read", "glob", "grep", "list", "webfetch", "websearch", "todowrite", "progress_report", "external_directory"];
+const READ_ONLY_KEYS = ["read", "glob", "grep", "list", "webfetch", "websearch", "todowrite", "progress_report", "external_directory", "research_fetch", "research_read", "research_search", "research_library_find", "research_library_save"];
 
 test("agent job, isolation none: no worktree, no move, the agent reaches create AND send, a read-only ruleset, no commit advice", async () => {
   const w = world();
@@ -2504,8 +2505,13 @@ test("autonomy: a caller-supplied (approval-resolved) base is kept and the denie
   const w = specialistWorld();
   const caller = [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }];
   const id = await start(w, autonomyInput(w, { permission: caller }));
-  assert.deepEqual(w.job(id).basePermission, caller);
-  assert.deepEqual(w.job(id).permission, [...caller, ...jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: w.job(id).childSessionID }), q]);
+  // research and the library ride along, right under the leading deny (they are not a file or shell permission)
+  const withResearch = withResearchToolAllows(caller);
+  assert.deepEqual(withResearch.slice(0, 1), caller.slice(0, 1));
+  assert.deepEqual(withResearch.slice(-1), caller.slice(-1));
+  assert.equal(withResearch.length, caller.length + 5);
+  assert.deepEqual(w.job(id).basePermission, withResearch);
+  assert.deepEqual(w.job(id).permission, [...withResearch, ...jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: w.job(id).childSessionID }), q]);
   const plain = world();
   const pid = await start(plain, { agent: "agent-dev", isolation: "worktree", agentName: "Dev" });
   for (const k of ["specialist", "basePermission", "autonomyKey", "autonomyPolicy"]) assert.equal(k in plain.job(pid), false, k);
