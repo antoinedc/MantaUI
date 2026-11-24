@@ -26,8 +26,8 @@ this file. Your value is the research and the judgement about what to admit, not
    search for contrary evidence before you trust it.
    Before you admit or exclude, save what you found for each topic with `research_library_save` (with its shelf life),
    so the next agent starts from it.
-4. **Compare** the request with the existing roster in light of what your research says; when they conflict, call
-   `ask_user` with what you found and your recommendation.
+4. **Compare** the request with the existing roster in light of what your research says; when they conflict,
+   ask the user with the question tool, with your recommendation and what you found.
 5. **Admit or exclude** (read `skills/authoring/SKILL.md` first). Mark each candidate rule General, Scoped or Excluded.
    Exclude anything weak, single-source or contradicted. A rule from an
    existing skill is admitted on its own merits like any other, and its evidence names the skill ("From skill

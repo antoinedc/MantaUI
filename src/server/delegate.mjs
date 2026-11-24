@@ -37,7 +37,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { SPECIALIST_TASK_TOOLS } from "../shared/researchTools.mjs";
-import { askUserLines } from "./askUser.mjs";
+import { decisionLines, decisionFromForm } from "./taskDecision.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
   readProgressRecord as defaultReadProgress,
@@ -241,11 +241,13 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, rea
     "Progress: keep your todo list current — it is shown to the user as your\n" +
     "progress. At each plan step call progress_report with a one-line label; when\n" +
     "you find or finish something the user would want to know, add it as a\n" +
-    "milestone. You cannot ask the user questions from here: if you need a decision,\n" +
-    'call progress_report with state "blocked" and a label saying what you need, then\n' +
     (specialist
-      ? 'put the question in your final message, before the "Actions from your list" section.\n\n'
-      : "end your turn with the question.\n\n");
+      ? "milestone. You cannot wait for an answer: if you need the user to decide, use the\n" +
+        "question tool. It ends your task and the lead puts the question to the user, so put\n" +
+        "what you found and what you recommend in the question itself.\n\n"
+      : "milestone. You cannot ask the user questions from here: if you need a decision,\n" +
+        'call progress_report with state "blocked" and a label saying what you need, then\n' +
+        "end your turn with the question.\n\n");
   // a specialist's task (Agents Phase 3): what needs the user's go-ahead and what is not allowed
   const autonomySection = typeof autonomy === "string" && autonomy.trim() ? `${autonomy.trim()}\n\n` : "";
   if (!worktree) {
@@ -323,7 +325,8 @@ export function buildCompletionText(job) {
       toldActions: job?.toldActions,
       blockedActions: job?.blockedActions,
       exceededActions: job?.exceededActions,
-      selfReport: job?.specialist === true && status === "done" ? job?.selfReport : undefined,
+      // (a task that asked the user was interrupted: it owes no report of its own)
+      selfReport: job?.specialist === true && status === "done" && !job?.decision ? job?.selfReport : undefined,
     }),
   );
   lines.push("");
@@ -332,8 +335,8 @@ export function buildCompletionText(job) {
   } else {
     lines.push(String(job?.result ?? ""));
   }
-  // a task that asked the user (`ask_user`): the question, written by the server (the lead puts it to the user, never answers it)
-  if (status === "done" && job?.endedBlocked === true && job?.askUser) lines.push("", ...askUserLines(job.askUser));
+  // a task that asked the user (the question tool): the question, written by the server (the lead puts it to the user, never answers it)
+  if (status === "done" && job?.endedBlocked === true && job?.decision) lines.push("", ...decisionLines(job.decision));
   // an Architect task: what the server did with each proposal, written by the server (the lead relays it, never guesses it)
   const outcome = Array.isArray(job?.architectOutcome) ? job.architectOutcome.filter((l) => typeof l === "string" && l) : [];
   if (outcome.length > 0) lines.push("", ...outcome);
@@ -474,13 +477,15 @@ export function buildPermissionRuleset(tools, { home = homedir() } = {}) {
 
 /**
  * The ruleset EVERY Manta-owned job child is created with (spec 2026-11-14 A5): a job cannot wait on a person, so a
- * trailing `question` deny is always present (last-match-wins keeps it above any grant). Idempotent.
+ * trailing `question` deny is present (last-match-wins keeps it above any grant). Idempotent. A specialist's task
+ * (`allowQuestion`) is the one exception: it may use the standard `question` tool (its ruleset allows it); the server captures
+ * the question and ends the task as "needs a decision" (`handleQuestion`), so it never waits on a person either.
  */
-export function normalizeJobRuleset(rules) {
+export function normalizeJobRuleset(rules, { allowQuestion = false } = {}) {
   const list = (Array.isArray(rules) ? rules : []).filter(
     (r) => !(r?.permission === "question" && r?.pattern === "*" && r?.action === "deny"),
   );
-  return [...list, { permission: "question", pattern: "*", action: "deny" }];
+  return allowQuestion ? list : [...list, { permission: "question", pattern: "*", action: "deny" }];
 }
 
 /**
@@ -2362,8 +2367,8 @@ export async function resumeJob(id, deps = {}) {
           projectPatterns: pp,
           // the Architect's ruleset comes from its own builder on resume too: nothing survives from the old attempt but the stamp
           permission: peek.architect
-            ? normalizeJobRuleset(buildArchitectRuleset({ policy: current.policy, agentDir: peek.agentDir ?? null, home: homeDir, projectPatterns: pp, sessionID: nextChildId }))
-            : normalizeJobRuleset([...base, ...jobRules(current.policy, { home: homeDir, agentDir: peek.agentDir ?? null, projectPatterns: pp, sessionID: nextChildId })]),
+            ? normalizeJobRuleset(buildArchitectRuleset({ policy: current.policy, agentDir: peek.agentDir ?? null, home: homeDir, projectPatterns: pp, sessionID: nextChildId }), { allowQuestion: true })
+            : normalizeJobRuleset([...base, ...jobRules(current.policy, { home: homeDir, agentDir: peek.agentDir ?? null, projectPatterns: pp, sessionID: nextChildId })], { allowQuestion: true }),
           text: taskPromptSection(current.policy, project.promptEntries),
         };
       }
@@ -3022,8 +3027,8 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
     if (interrupted) outcome = live.stopRequested ? { status: "stopped", error: "stopped by user" } : { status: "failed", error: error || "interrupted" };
 
     const manta = completionOwnerOf(live) === "manta";
-    // a task that stored a question with `ask_user` ends "needs a decision" whatever it reported afterwards
-    const endedBlocked = outcome.status === "done" && (live.jobProgress?.modelState === "blocked" || !!live.askUser);
+    // a task whose question was captured (the decision) ends "needs a decision" whatever it reported afterwards
+    const endedBlocked = outcome.status === "done" && (live.jobProgress?.modelState === "blocked" || !!live.decision);
     const fold = foldAtBoundary(live, deps, endedAt, {
       terminal: { status: outcome.status, endedBlocked },
       filesChanged: outcome.status === "done" ? filesChanged : undefined,
@@ -3169,7 +3174,7 @@ export function buildResultSynthetic(job) {
         jobId: job.id,
         name: job.name,
         ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
-        ...(job.status === "done" && job.endedBlocked === true && job.askUser ? { askUser: askUserWire(job.askUser) } : {}),
+        ...(job.status === "done" && job.endedBlocked === true && job.decision ? { decision: { questions: job.decision.questions } } : {}),
         ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
         ...(Array.isArray(job.blockedActions) && job.blockedActions.length > 0 ? { blockedActions: job.blockedActions } : {}),
         ...(Array.isArray(job.exceededActions) && job.exceededActions.length > 0 ? { exceededActions: job.exceededActions } : {}),
@@ -3634,8 +3639,15 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
       return { settled: false, reason: "reply-pending" };
     }
   }
-  const t = outcomeToTerminal(outcome, { error: hint?.error });
+  let t = outcomeToTerminal(outcome, { error: hint?.error });
   if (!t) return { settled: false, reason: "no-outcome" };
+  // The turn of a task whose question was captured was interrupted ON PURPOSE: that is "needs a decision" (done), not a failure.
+  // A user's stop or pause still wins.
+  let interrupted = outcome === "interrupted";
+  if (interrupted && manta && !job.stopRequested && !job.pauseRequested && (await hasDecision(job, deps))) {
+    t = { status: "done", error: null };
+    interrupted = false;
+  }
   // A session opencode runs reports its own result to its parent: the real error / result text lives there. Read
   // only when needed: a failed run with no raw error now, a done run only if the child yields no text of its own.
   let resultFallback = null;
@@ -3664,9 +3676,20 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   if (job.launchState !== "running") {
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
   }
-  await finishV2Job(job, t.status, t.error, deps, { interrupted: outcome === "interrupted", resultFallback });
+  await finishV2Job(job, t.status, t.error, deps, { interrupted, resultFallback });
   if (!manta) relayResultFromRetiredParent(job, deps);
   return { settled: true, status: t.status };
+}
+
+/** Does the LIVE record hold a captured decision (the snapshot a caller settles from may predate it)? */
+async function hasDecision(job, deps) {
+  if (job.decision) return true;
+  try {
+    const live = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === job.id);
+    return !!live?.decision && !live.stopRequested && !live.pauseRequested;
+  } catch {
+    return false;
+  }
 }
 
 const resuming = new Set();
@@ -4095,7 +4118,7 @@ async function continueJobRecord(id, input, deps) {
       const t = now();
       // (a successor starts with no told / blocked / exceeded actions or self-report of its own: the previous round's stay on
       // the previous record; the project patterns are inherited — the child keeps the permissions OpenCode gave it at creation)
-      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, askUser: _a, ...inherited } = old;
+      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, decision: _d, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
       const job = {
         ...inherited,
@@ -4625,9 +4648,9 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     // The child session's id is minted before its rules: the rules name the secrets folder of exactly this session.
     const childSessionID = mintSessionId();
     const jobPermission = architect
-      ? normalizeJobRuleset(buildArchitectRuleset({ policy: autonomyNow, agentDir, home, projectPatterns: projectPatternsNow, sessionID: childSessionID }))
+      ? normalizeJobRuleset(buildArchitectRuleset({ policy: autonomyNow, agentDir, home, projectPatterns: projectPatternsNow, sessionID: childSessionID }), { allowQuestion: true })
       : specialist
-        ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir, projectPatterns: projectPatternsNow, sessionID: childSessionID })])
+        ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir, projectPatterns: projectPatternsNow, sessionID: childSessionID })], { allowQuestion: true })
         : basePermission;
     // THE execution directory, resolved once and persisted: the worktree, or the
     // parent's own directory when none could be made and isolation isn't required.
@@ -4792,8 +4815,8 @@ async function launchDelegate(job, deps) {
       title: job.name,
       agent: job.agent,
       model: job.launch.model ?? undefined,
-      // a job can never wait on a person: its ruleset always ends with a `question` deny
-      permission: normalizeJobRuleset(job.permission),
+      // a job can never wait on a person: its ruleset ends with a `question` deny (a specialist's task may ask: the server captures it)
+      permission: normalizeJobRuleset(job.permission, { allowQuestion: job.specialist === true }),
     });
   } catch (e) {
     if (isDefiniteRefusal(e)) {
@@ -4982,7 +5005,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     ceilingWarnedFor: null,
     endReason: null,
     jobProgress: { ...prior.jobProgress, modelState: null },
-    askUser: undefined, // the question the previous attempt ended with is answered by resuming
+    decision: undefined, // the question the previous attempt ended with is answered by resuming
     // a specialist's task resumes under the CURRENT settings (recomputed in resumeJob); its previous attempt's told /
     // blocked actions are cleared with the new attempt
     ...(prepared.autonomy
@@ -5359,14 +5382,40 @@ async function withBudget(fn, ms) {
   }
 }
 
-/** The question of an `ask_user` task as the result's metadata carries it (what the lead needs; no timestamp). */
-function askUserWire(ask) {
-  return { question: ask.question, options: ask.options, recommended: ask.recommended ?? null, why: ask.why ?? "", concern: ask.concern === true };
+/** Store the decision of a RUNNING task and mark it blocked: it ends "needs a decision". null when it is not running. */
+function recordDecision(id, decision, deps) {
+  return mutateJobProgress(id, deps, (job) => ({ decision, jobProgress: { ...job.jobProgress, modelState: "blocked" } }));
 }
 
-/** Store the question of a RUNNING task (`ask_user`) and mark it blocked: it ends "needs a decision". null when it is not running. */
-function recordAskUser(id, ask, deps) {
-  return mutateJobProgress(id, deps, (job) => ({ askUser: ask, jobProgress: { ...job.jobProgress, modelState: "blocked" } }));
+/**
+ * A question form raised in a Manta-owned job's session (the pump's A5 backstop). A specialist's task asking in its OWN session
+ * is captured: the question becomes the stored decision, the turn is interrupted (the task ends "needs a decision" through
+ * its raw `interrupted` outcome, `settleV2Job`) and the form is rejected so nothing stays pending. Anything else — a subagent's
+ * question, a plain delegate job's, a form with no question — is rejected exactly as before. `{ captured }`.
+ */
+async function handleQuestion(form, deps) {
+  const sessionId = form?.sessionID;
+  const ask = { kind: "question", requestId: form?.id, sessionId };
+  const jobId = deps.liveness?.jobIdOf(sessionId) ?? null;
+  const live = jobId ? deps.liveness.get(jobId) : null;
+  let decision = null;
+  if (live && live.root === sessionId) {
+    const rec = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === jobId);
+    if (rec && rec.status === "running" && rec.specialist === true && completionOwnerOf(rec) === "manta") {
+      const d = decisionFromForm(form, (deps.now ?? (() => Date.now()))());
+      if (d && (await recordDecision(jobId, d, deps))) decision = d;
+    }
+  }
+  if (decision && typeof deps.abortSession === "function") {
+    try {
+      await deps.abortSession(sessionId);
+    } catch (e) {
+      // the task then ends when its own turn does: the stored decision still decides the outcome
+      console.warn(`[delegate] interrupting ${jobId} after its question failed:`, e?.message ?? e);
+    }
+  }
+  await rejectAsk(ask, deps);
+  return { captured: decision !== null };
 }
 
 /** A guarded patch of a RUNNING record's progress fields under the jobs lock; publishes (throttled) when it wrote. */
@@ -5967,8 +6016,8 @@ export function createDelegateEngine(baseDeps) {
       );
       return { applied: !!job };
     },
-    /** `ask_user`: the question of a running task, stored on its record; the task ends "needs a decision". null when it is not running. */
-    recordAskUser: (id, ask) => recordAskUser(id, ask, deps),
+    /** A question form raised in a Manta-owned job's session: captured as the decision for a specialist's own task, rejected otherwise. */
+    handleQuestion: (form) => handleQuestion(form, deps),
     /** A running, Manta-owned `delegate` job's own session or one below it: no question or permission can wait there (A5). */
     ownsSession: (sessionId) => liveness.ownsSession(sessionId),
     /** The pump's backstop: answer a question / permission ask in an owned session with a rejection (queued for a retry on failure). */
