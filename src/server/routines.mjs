@@ -964,6 +964,7 @@ export function createRoutinesEngine(deps) {
     const slug = value.trim().replace(/^@/, "").toLowerCase();
     if (!slug) return null;
     const found = agents ? await agents.routineAgent(slug, "").catch(() => null) : null;
+    if (found?.refused) throw bad(found.refused); // e.g. the Architect works through tasks only, for now
     if (!found) throw bad(`No agent named @${slug}`);
     return slug;
   }
@@ -1322,6 +1323,8 @@ export function createRoutinesEngine(deps) {
       let unavailable = null;
       if (routine.agent) {
         const found = agents ? await agents.routineAgent(routine.agent, routine.directory).catch(() => null) : null;
+        // a saved agent that is now refused (the Architect) fails the run: no session, no fallback to another agent
+        if (found?.refused) throw new Error(found.refused);
         if (found) {
           agentKey = found.key;
           seat = found.seat ?? "";
