@@ -3008,7 +3008,7 @@ export interface AgentInfo {
   builtIn: boolean;
   error?: string; // set ⇒ the package failed to parse and the agent is not usable
   // Agents Phase 2: "lead" only for the valid lead package (slug LEAD_SLUG + `role: lead`).
-  role: "lead" | "specialist";
+  role: AgentRole;
   useWhen: string | null; // "Use when …" routing line (≤ 200 chars)
   notFor: string | null; // "Not for …" routing line (≤ 200 chars)
   notice: string | null; // non-error hint shown under the row (e.g. the `manta` upgrade collision)
@@ -3042,6 +3042,35 @@ export interface AutonomyAction {
   /** "agent" = from the task's own "Actions from your list" section; absent = from a recorded command (Phase 3c). */
   source?: "agent";
 }
+// Agents Phase 5A (docs/superpowers/specs/2026-11-24-agents-phase5-builder.md §6): the Architect.
+export type AgentRole = "lead" | "architect" | "specialist";
+/** An extra research source in the Architect's frontmatter (§4.3a). Exactly one of `command` / `url`. */
+export interface ArchitectSource {
+  id: string;
+  name: string;
+  description: string;
+  /** Default true. */
+  private?: boolean;
+  command?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+}
+export type AgentChangeOrigin =
+  | { kind: "chat" }
+  | { kind: "job"; jobId: string; rootJobId: string; attempt: number };
+export interface AgentChangeEvidence {
+  claim: string;
+  /** null for a private source. */
+  quote: string | null;
+  url: string | null;
+  private: boolean;
+}
+export interface AgentChangeAdmission {
+  rule: string;
+  verdict: "general" | "scoped" | "excluded";
+  why: string;
+}
 // Agents Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md §2.1): Manta creates / edits agents.
 export interface AgentDraftCreate {
   name: string;
@@ -3052,11 +3081,14 @@ export interface AgentDraftCreate {
   notFor?: string | null;
   model?: string | null;
   color?: string | null;
+  /** Phase 5A: accepted only on an update of the Architect (always a click). */
+  sources?: ArchitectSource[] | null;
 }
 /** Update: at least one field; omitted = unchanged; null = clear (nullable fields only). */
 export type AgentDraftUpdate = Partial<AgentDraftCreate>;
 /** `failed` = the file was written but activating it (sync / config reload) failed; Retry only re-activates. */
-export type AgentChangeState = "applied" | "pending" | "discarded" | "undone" | "expired" | "conflict" | "failed";
+/** `held` = proposed by the Architect, waiting for its task to end; `applying` = being written (crash journal). */
+export type AgentChangeState = "held" | "applying" | "applied" | "pending" | "discarded" | "undone" | "expired" | "conflict" | "failed";
 export interface AgentChange {
   id: string;
   kind: "create" | "update";
@@ -3067,17 +3099,27 @@ export interface AgentChange {
   callID: string;
   state: AgentChangeState;
   needsClick: boolean;
-  reason: "ask" | "lead" | "isolation" | null;
+  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | null;
   before: string | null;
   after: string;
   createdAt: number;
   decidedAt: number | null;
   error: string | null;
+  // Phase 5A. Records written before 5A read as origin {kind:"chat"}, mode null, releasedAt = createdAt,
+  // decidedBy null, summary null, empty arrays.
+  origin: AgentChangeOrigin;
+  mode: "build" | "plan" | "unknown" | null;
+  releasedAt: number | null;
+  decidedBy: "auto" | "click" | null;
+  summary: string | null;
+  evidence: AgentChangeEvidence[];
+  admission: AgentChangeAdmission[];
 }
 export interface AgentChangeEvent {
   id: string;
   sessionID: string;
   slug: string | null;
+  origin: AgentChangeOrigin;
 }
 export interface AgentCreateInput {
   name: string;

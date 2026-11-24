@@ -1362,6 +1362,7 @@ export const httpApi: Api = {
   agentsChangeApply: (id) => rpc("agents:change-apply", { id }),
   agentsChangeDiscard: (id) => rpc("agents:change-discard", { id }),
   agentsChangeUndo: (id) => rpc("agents:change-undo", { id }),
+  agentsChangesForJob: (jobId) => rpc("agents:changes-for-job", { jobId }),
   // The box publishes `agentChange` ({id, sessionID, slug}) after every persisted change transition: a hint, refetch.
   onAgentChange: (cb) => on<{ id: string; sessionID: string; slug: string | null }>("agentChange", cb),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls

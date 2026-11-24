@@ -1997,6 +1997,8 @@ export interface Api {
   agentsChangeApply(id: string): Promise<AgentChange>;
   agentsChangeDiscard(id: string): Promise<AgentChange>;
   agentsChangeUndo(id: string): Promise<AgentChange>;
+  /** Phase 5A: the records an Architect job proposed (its delegate job id, never the child session id). */
+  agentsChangesForJob(jobId: string): Promise<AgentChange[]>;
   /** Bus kind `agentChange`, published after every persisted transition (a hint: refetch). */
   onAgentChange(cb: (p: AgentChangeEvent) => void): () => void;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
