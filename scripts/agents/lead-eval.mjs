@@ -13,6 +13,8 @@
 // text generation: no tools run, nothing is changed. Prints accuracy, MISSED handoffs (should have handed off, did not)
 // and NEEDLESS handoffs, and the same two counts for agent_change (Phase 4: creating / editing an agent).
 // A case's `expect` is "answer", "ask", "handoff:<slug>", "agent_change:create" or "agent_change:update:<slug>".
+// Agents Phase 5A: with "architect" in a case's team, a new agent goes to it ("handoff:architect") once the charter is agreed
+// (a request that lacks the charter's essentials is "ask"); a small edit the user dictates stays an `agent_change`.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -31,10 +33,10 @@ const flag = (name) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 
-// The fixed team: the shipped Dev, and a read-only SEO agent like the one a user would create.
+// The fixed team: the shipped Dev and Architect, and a read-only SEO agent like the one a user would create.
 function teamInfo(slug) {
-  if (slug === "dev") {
-    const p = parseAgentMd(readFileSync(join(TEMPLATES, "dev", "agent.md"), "utf-8"));
+  if (slug === "dev" || slug === "architect") {
+    const p = parseAgentMd(readFileSync(join(TEMPLATES, slug, "agent.md"), "utf-8"));
     return { slug, ...p.meta };
   }
   if (slug === "seo") {
