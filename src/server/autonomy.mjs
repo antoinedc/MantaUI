@@ -145,9 +145,11 @@ const SECRET_WRITERS = ["rm", "mv", "cp", "tee", "touch", "chmod", "chown", "ln"
  * `[action, glob][]`. These come BEFORE every other bash rule, so a command that also touches a protected file, a merge or
  * an Ask-level action still ends on that deny.
  */
-function secretsBashRules(sessionID) {
+function secretsBashRules(sessionID, noSecrets = false) {
   const sid = validSessionID(sessionID);
   const f = SECRETS_NAME;
+  // no handed-secret exception at all: every command that names the folder is denied
+  if (noSecrets) return [["deny", `*${f}*`]];
   const rules = [
     ["deny", `*${f}*`],
     ["allow", `*${f}/*`],
@@ -273,7 +275,7 @@ function protectedPaths(home) {
  *   `~/.manta-secrets`, never a write there, and never through a file tool. See `secretsBashRules` for the order.
  * Nothing else is ever granted.
  */
-export function jobRules(policy, { home, agentDir, projectPatterns = [], sessionID } = {}) {
+export function jobRules(policy, { home, agentDir, projectPatterns = [], sessionID, noSecrets = false } = {}) {
   const rules = [];
   const deny = (permission, pattern) => rules.push({ permission, pattern, action: "deny" });
   const allow = (permission, pattern) => rules.push({ permission, pattern, action: "allow" });
@@ -289,17 +291,18 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [], session
   // …and for a command, OpenCode asks `external_directory` for the FOLDER of each path argument (`<dir>/*`)
   deny("external_directory", secretsTree);
   deny("external_directory", `${secretsTree}/**`);
-  allow("external_directory", `${secretsTree}/*`);
+  // `noSecrets` (the Architect's task): NO handed-secret exception of any kind — the folder stays fully denied
+  if (!noSecrets) allow("external_directory", `${secretsTree}/*`);
   for (const sub of ["sessions", "projects"]) {
     deny("external_directory", `${secretsTree}/${sub}`);
     deny("external_directory", `${secretsTree}/${sub}/*`);
   }
-  const ownSession = validSessionID(sessionID);
+  const ownSession = noSecrets ? null : validSessionID(sessionID);
   if (ownSession) {
     allow("external_directory", `${secretsTree}/sessions/${ownSession}`);
     allow("external_directory", `${secretsTree}/sessions/${ownSession}/*`);
   }
-  for (const [action, pattern] of secretsBashRules(sessionID)) rules.push({ permission: "bash", pattern, action });
+  for (const [action, pattern] of secretsBashRules(sessionID, noSecrets)) rules.push({ permission: "bash", pattern, action });
   // (the folder is denied for writes — edit/write above, a shell write in secretsBashRules; a command that deletes or moves
   // a file asks external_directory like a read, so those are the bash rules' job)
 

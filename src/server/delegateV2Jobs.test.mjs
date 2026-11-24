@@ -29,6 +29,7 @@ import {
   normalizeJobRuleset,
   buildJobPrompt,
   buildReadOnlyAgentRuleset,
+  buildArchitectRuleset,
   listJobs,
   MAX_RUNNING_JOBS,
   CAP_ERROR,
@@ -3017,4 +3018,97 @@ test("project actions: projectPatterns, selfReport and the base ruleset stay on 
   const p = withPage(specialistWorld(BAL));
   const pid = await pausedJob(p, autonomyInput(p));
   clean(await resumeJob(pid, p.deps), "resume");
+});
+
+// ---------------------------------------------------------------------------
+// Agents Phase 5A: the Architect's task — capability stamp and ruleset
+// ---------------------------------------------------------------------------
+
+const ARCH_DIR = `${HOME}/.manta/agents/architect`;
+const archInput = (w, extra = {}) =>
+  autonomyInput(w, { agent: "agent-architect", isolation: "none", agentName: "Architect", agentDir: ARCH_DIR, architect: { mode: "build" }, requestedBy: "manta", turnKey: "msg_u1", allowPr: false, request: "Make an agent", ...extra });
+const ruleAt = (rules, permission, pattern, action) => rules.findIndex((r) => r.permission === permission && r.pattern === pattern && r.action === action);
+
+test("Architect launch: stamped {rootJobId = its own id, attempt 1, mode}; the ruleset is deny-first, allows, jobRules(noSecrets), explicit denies, question deny", async () => {
+  const w = specialistWorld();
+  const id = await start(w, archInput(w));
+  const job = w.job(id);
+  assert.deepEqual(job.architect, { rootJobId: id, attempt: 1, mode: "build" });
+  const rules = job.permission;
+  assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" });
+  assert.deepEqual(rules.at(-1), q);
+  for (const t of ["research_fetch", "research_read", "research_search", "agent_propose", "todowrite", "progress_report"]) assert.ok(ruleAt(rules, t, "*", "allow") > 0, t);
+  for (const t of ["read", "glob", "grep", "list", "websearch"]) assert.ok(ruleAt(rules, t, "**", "allow") > 0, t);
+  assert.ok(ruleAt(rules, "external_directory", `${ARCH_DIR}/**`, "allow") > 0);
+  assert.ok(ruleAt(rules, "external_directory", `${HOME}/.local/share/opencode/tool-output/*`, "allow") > 0);
+  // the explicit denies come LAST (after every allow, jobRules included), so no earlier allow can win
+  const lastAllow = rules.map((r) => r.action).lastIndexOf("allow");
+  for (const t of ["bash", "edit", "write", "patch", "webfetch"]) {
+    for (const p of ["*", "**"]) assert.ok(ruleAt(rules, t, p, "deny") > lastAllow, `${t} ${p}`);
+  }
+  assert.deepEqual(rules, normalizeJobRuleset(buildArchitectRulesetFor(job, BAL)));
+  assert.deepEqual(w.calls.create[0].permission, rules, "the child is created with exactly this ruleset");
+  // an unstamped specialist is untouched; a non-specialist can't carry the stamp
+  const dev = specialistWorld();
+  const did = await start(dev, autonomyInput(dev));
+  assert.equal("architect" in dev.job(did), false);
+  const plain = world();
+  const pid = await start(plain, { agent: "agent-architect", isolation: "none", architect: { mode: "build" } });
+  assert.equal("architect" in plain.job(pid), false, "the stamp needs a specialist launch");
+});
+const buildArchitectRulesetFor = (job, policy) => buildArchitectRuleset({ policy, agentDir: ARCH_DIR, home: HOME, projectPatterns: [], sessionID: job.childSessionID });
+
+test("Architect ruleset: no bash allow survives (secret patterns included), nothing under ~/.manta-secrets is allowed to ANY tool, edit / write / webfetch are denied", () => {
+  const rules = buildArchitectRuleset({ policy: BAL, agentDir: ARCH_DIR, home: HOME, sessionID: "ses_child1" });
+  assert.equal(rules.some((r) => r.permission === "bash" && r.action === "allow"), false);
+  const secretsAllows = rules.filter((r) => r.action === "allow" && r.pattern.includes(".manta-secrets"));
+  assert.deepEqual(secretsAllows, [], "no handed-secret exception of any kind");
+  for (const p of ["read", "glob", "grep", "list", "edit", "write"]) {
+    assert.ok(ruleAt(rules, p, `${HOME}/.manta-secrets`, "deny") > 0, p);
+    assert.ok(ruleAt(rules, p, `${HOME}/.manta-secrets/**`, "deny") > 0, p);
+  }
+  assert.ok(ruleAt(rules, "external_directory", `${HOME}/.manta-secrets/**`, "deny") > 0);
+  for (const t of ["edit", "write", "patch", "webfetch", "bash"]) assert.ok(ruleAt(rules, t, "*", "deny") >= 0, t);
+  // a normal specialist still gets its handed-secret exceptions: the option is the only difference
+  assert.ok(jobRules(BAL, { home: HOME, agentDir: ARCH_DIR, sessionID: "ses_child1" }).some((r) => r.action === "allow" && r.pattern.includes(".manta-secrets")));
+  const noSecrets = jobRules(BAL, { home: HOME, agentDir: ARCH_DIR, sessionID: "ses_child1", noSecrets: true });
+  assert.deepEqual(noSecrets.filter((r) => r.action === "allow" && r.pattern.includes(".manta-secrets")), []);
+  assert.deepEqual(noSecrets.filter((r) => r.permission === "bash" && r.action === "allow"), []);
+  assert.ok(noSecrets.some((r) => r.permission === "bash" && r.pattern === "*.manta-secrets*" && r.action === "deny"));
+});
+
+test("Architect resume: a fresh child, the ruleset from the SAME builder under the current settings, the stamp keeps its root and the round's mode is unknown", async () => {
+  const w = specialistWorld(BAL);
+  const id = await pausedJob(w, archInput(w));
+  const before = structuredClone(w.job(id));
+  assert.equal(before.architect.mode, "build");
+  w.state.policy = AUT;
+  const res = await resumeJob(id, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const job = w.job(id);
+  assert.deepEqual(job.architect, { rootJobId: id, attempt: 2, mode: "unknown" });
+  assert.equal(job.attempt, 2);
+  assert.deepEqual(job.permission, normalizeJobRuleset(buildArchitectRuleset({ policy: AUT, agentDir: ARCH_DIR, home: HOME, projectPatterns: [], sessionID: job.childSessionID })));
+  assert.ok(job.permission.every((r) => !(r.permission === "bash" && r.action === "allow")));
+  assert.ok(!job.permission.some((r) => r.pattern.includes(before.childSessionID)));
+});
+
+test("Architect continuation: the root is copied from the predecessor (it survives pruning), attempt follows, the mode comes from the verified call — else unknown", async () => {
+  const w = specialistWorld();
+  const id = await finishedSpecialist(w, archInput(w));
+  const first = await continueJob(id, { prompt: "again", sessionID: PARENT, architect: { mode: "plan" } }, w.deps);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.deepEqual(first.job.architect, { rootJobId: id, attempt: 2, mode: "plan" });
+  const child = first.job.childSessionID;
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const second = await continueJob(first.job.id, { prompt: "and again", sessionID: PARENT }, w.deps); // no verified call
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.deepEqual(second.job.architect, { rootJobId: id, attempt: 3, mode: "unknown" });
+  assert.equal(second.job.continues, first.job.id);
+  // a continuation of an ordinary specialist task never gains a stamp
+  const dev = specialistWorld();
+  const did = await finishedSpecialist(dev);
+  const cont = await continueJob(did, { prompt: "again", sessionID: PARENT, architect: { mode: "build" } }, dev.deps);
+  assert.equal("architect" in cont.job, false);
 });

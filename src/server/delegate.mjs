@@ -499,6 +499,34 @@ export function buildReadOnlyAgentRuleset({ agentDir, home = homedir() } = {}) {
   return rules;
 }
 
+// The tools the Architect's task may call, besides reading and searching (Agents Phase 5A §4.2).
+const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch"];
+const ARCHITECT_PLUGIN_TOOLS = ["research_fetch", "research_read", "research_search", "agent_propose"];
+
+/**
+ * The ruleset of the Architect's task, built for launch AND resume by this one function (spec §4.2). Last match wins, so:
+ * a catch-all deny FIRST; then only the allows (read-side tools, the todo list, progress reports, the four Architect tools,
+ * and `external_directory` for the agent's own folder and the tool-output folder); then `jobRules` with `noSecrets` (the
+ * protected files and ALL handed-secret exceptions omitted, so `~/.manta-secrets` stays fully denied, even to read, glob and
+ * grep); last, explicit denies for bash, edit, write, patch and webfetch. Pure.
+ */
+export function buildArchitectRuleset({ policy, agentDir = null, home = homedir(), projectPatterns = [], sessionID } = {}) {
+  const allow = (permission, pattern = "**") => ({ permission, pattern, action: "allow" });
+  const deny = (permission, pattern) => ({ permission, pattern, action: "deny" });
+  const rules = [
+    { permission: "*", pattern: "**", action: "deny" },
+    ...ARCHITECT_TOOL_ALLOWS.map((p) => allow(p)),
+    allow("todowrite", "*"),
+    allow("progress_report", "*"),
+    ...ARCHITECT_PLUGIN_TOOLS.map((p) => allow(p, "*")),
+    allow("external_directory", `${home}/.local/share/opencode/tool-output/*`),
+  ];
+  if (agentDir) rules.push(allow("external_directory", `${String(agentDir).replace(/\/+$/, "")}/**`));
+  rules.push(...jobRules(policy, { home, agentDir, projectPatterns, sessionID, noSecrets: true }));
+  for (const permission of ["bash", "edit", "write", "patch", "webfetch"]) rules.push(deny(permission, "*"), deny(permission, "**"));
+  return rules;
+}
+
 /**
  * The ruleset of an agent job in its own worktree (`isolation: "worktree"`): it edits code, so the same grants the
  * forge-triggered implementation jobs get, plus the progress tool.
@@ -2287,11 +2315,15 @@ export async function resumeJob(id, deps = {}) {
         const project = await projectActionsFor(deps, peek.parentDirectory);
         const pp = buildProjectPatterns(project.entries);
         if (pp.error) return { ok: false, error: pp.error };
+        const homeDir = deps.home ?? homedir();
         autonomy = {
           key: policyKey(current.policy),
           policy: normalizePolicy(current.policy),
           projectPatterns: pp,
-          permission: normalizeJobRuleset([...base, ...jobRules(current.policy, { home: deps.home ?? homedir(), agentDir: peek.agentDir ?? null, projectPatterns: pp, sessionID: nextChildId })]),
+          // the Architect's ruleset comes from its own builder on resume too: nothing survives from the old attempt but the stamp
+          permission: peek.architect
+            ? normalizeJobRuleset(buildArchitectRuleset({ policy: current.policy, agentDir: peek.agentDir ?? null, home: homeDir, projectPatterns: pp, sessionID: nextChildId }))
+            : normalizeJobRuleset([...base, ...jobRules(current.policy, { home: homeDir, agentDir: peek.agentDir ?? null, projectPatterns: pp, sessionID: nextChildId })]),
           text: taskPromptSection(current.policy, project.promptEntries),
         };
       }
@@ -4054,6 +4086,8 @@ async function continueJobRecord(id, input, deps) {
         launchState: "creating",
         submittedAt: null,
         windowIndex: null,
+        // the Architect's stamp follows the round: the root is copied, the round's own mode is the verified lead call's (else unknown)
+        ...(old.architect ? { architect: { rootJobId: old.architect.rootJobId ?? old.id, attempt: (old.attempt ?? 1) + 1, mode: architectModeOf(input?.architect?.mode) } } : {}),
         // a specialist's follow-up also carries the footer again: a task from before it was introduced never saw it
         launch: { text: old.specialist === true ? `${followUp}\n\n${taskFooter(old.autonomyPolicy)}` : followUp, messageId: mintMessageId(), model: null, continuation: true },
       };
@@ -4398,6 +4432,8 @@ function livenessFieldsAtLaunch(ceilingMs) {
 // child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
 // use) and reports ONE result through N7, whatever route it takes to a terminal state.
 
+const architectModeOf = (mode) => (mode === "build" || mode === "plan" ? mode : "unknown");
+
 // The agent every delegate child runs. Today's jobs always ran the default agent; a
 // child created under a parent would otherwise be free to inherit a plan-mode one.
 const V2_JOB_AGENT = "build";
@@ -4526,9 +4562,14 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     // The opencode agent the child runs: an agent package's `agent-<slug>`, else the default.
     const jobAgent = typeof input?.agent === "string" && input.agent.trim() ? input.agent.trim() : V2_JOB_AGENT;
     // An agent job brings its own ruleset unless the caller supplied one.
+    // The Architect's task (Agents Phase 5A): only the agents engine passes `architect`; no other caller builds this input.
+    const architectMode = specialist && input?.architect && typeof input.architect === "object" ? input.architect.mode : undefined;
+    const architect = architectMode !== undefined;
     const basePermission =
       input?.permission ??
-      (readOnly
+      (architect
+        ? null // the Architect's whole ruleset comes from buildArchitectRuleset (here and on every resume)
+        : readOnly
         ? buildReadOnlyAgentRuleset({ agentDir: input?.agentDir })
         : input?.isolation === "worktree"
           ? buildWorktreeAgentRuleset()
@@ -4538,9 +4579,11 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     const agentDir = typeof input?.agentDir === "string" && input.agentDir ? input.agentDir : null;
     // The child session's id is minted before its rules: the rules name the secrets folder of exactly this session.
     const childSessionID = mintSessionId();
-    const jobPermission = specialist
-      ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir, projectPatterns: projectPatternsNow, sessionID: childSessionID })])
-      : basePermission;
+    const jobPermission = architect
+      ? normalizeJobRuleset(buildArchitectRuleset({ policy: autonomyNow, agentDir, home, projectPatterns: projectPatternsNow, sessionID: childSessionID }))
+      : specialist
+        ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir, projectPatterns: projectPatternsNow, sessionID: childSessionID })])
+        : basePermission;
     // THE execution directory, resolved once and persisted: the worktree, or the
     // parent's own directory when none could be made and isolation isn't required.
     const executionDirectory = worktree ?? parentDirectory;
@@ -4548,8 +4591,9 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     const t = now();
     const launchModel = toDeliverModel(effectiveModel);
     const ceilingMs = initialCeilingMs({ sweepAllowanceMs: input?.sweepAllowanceMs, maxDurationMinutes: input?.maxDurationMinutes });
+    const jobId = genId();
     const job = {
-      id: genId(),
+      id: jobId,
       name,
       prompt,
       model: requestedModel ?? null,
@@ -4578,6 +4622,8 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
             ...(agentDir ? { agentDir } : {}),
           }
         : {}),
+      // the capability stamp (§4.2): the first job's own id is the root every continuation copies
+      ...(architect ? { architect: { rootJobId: jobId, attempt: 1, mode: architectModeOf(architectMode) } } : {}),
       ...(typeof input?.agentName === "string" && input.agentName ? { agentName: input.agentName } : {}),
       ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
       // what admission reads later: where the agent works, who asked, in which user turn, and whether it may open a PR
@@ -4909,6 +4955,8 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     tmuxSession,
     childSessionID: prepared.nextChildId ?? mintSessionId(),
     attempt: (job.attempt ?? 1) + 1,
+    // a resume has no verified lead call of its own: the round's mode is unknown, whatever the first round's was
+    ...(job.architect ? { architect: { rootJobId: job.architect.rootJobId ?? job.id, attempt: (job.attempt ?? 1) + 1, mode: "unknown" } } : {}),
     windowIndex: null,
     pauseRequested: false,
     pausedAt: null,
@@ -4933,6 +4981,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
         startedAt: job.startedAt ?? null,
         submittedAt: job.submittedAt ?? null,
         launchState: job.launchState ?? "running",
+        ...(job.architect ? { architect: job.architect } : {}),
         ceilingMs: prior.ceilingMs,
         extensions: prior.extensions,
         ceilingWarnedFor: prior.ceilingWarnedFor,
