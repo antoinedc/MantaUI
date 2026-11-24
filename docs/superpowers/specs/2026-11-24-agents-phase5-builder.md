@@ -206,66 +206,94 @@ Anything else is refused with a sentence, before any fetch, CLI call or write.
   - Calls the arXiv API (`export.arxiv.org/api/query`, Atom, parsed with `fast-xml-parser`).
   - Returns title, authors, date, abstract URL and a 300-char summary.
   - Abstracts and the HTML papers on arxiv.org are read with `research_fetch`.
-- **`"reddit"` and `"x"`** are ported from the agent-reach skill's public route (MIT; credited in the file header).
+- **`"reddit"` and `"x"`** are ported from the agent-reach skill's public route (MIT; the copyright and permission
+  notice ship in `src/server/research/THIRD_PARTY.md` and the file header).
   - **Search:** a web search scoped with `site:reddit.com` / `site:x.com OR site:twitter.com`, through Exa's free hosted
     search endpoint (`mcp.exa.ai`, JSON-RPC, no key). Results outside the scope are dropped.
   - **Read:** `research_fetch` on a reddit or x.com URL goes through the Jina reader (`r.jina.ai/<url>`), which renders
     pages a plain request can't (reddit blocks data-centre requests; x.com needs JavaScript).
+    - Before any call to Jina, the URL is canonicalised and checked: https; host `reddit.com` / `www.reddit.com` /
+      `old.reddit.com` with path `/r/<sub>/comments/<id>…`, or `x.com` / `twitter.com` with path
+      `/<user>/status/<id>`; no userinfo, query or fragment.
+    - Anything else is refused with zero provider calls.
+    - Exa is used only for search, never to read a page.
   - Login walls and anti-bot pages are detected and refused ("X/Reddit didn't return readable content"), with the
     agent-reach rules.
   - No browser and no login: logged-in reading is out of scope.
   - When Exa is rate-limited, the tool says so, and the Architect falls back to the built-in `websearch` with `site:`.
+- **Exa responses** are parsed by a small bounded port of agent-reach's handling: JSON or `text/event-stream`
+  `data:` lines, last message wins, provider tool errors and quota errors told apart from empty results. Tests cover
+  both formats.
 - **`"web"`** is not a `research_search` source: the Architect uses the built-in `websearch` for discovery.
 - **Extra sources** (`source: "<id>"` of a source in the Architect's `sources:`), defined in §4.3a.
 
 ### 4.3a Extra sources
 
-Extra sources live in the Architect's own `agent.md` frontmatter. The change card diff shows them, and a change to the
-Architect always needs a click.
+Extra sources live in the Architect's own `agent.md` frontmatter. Only the user adds them, through a change card that
+always needs a click.
 
 ```yaml
 sources:
-  - id: bookface                 # [a-z][a-z0-9-]{0,29}; not a base id (hn, arxiv, reddit, x, web)
+  - id: bookface                 # [a-z][a-z0-9-]{0,29}; unique; not a base id (hn, arxiv, reddit, x, web)
     name: YC Bookface
-    description: "Private YC founder forum: practitioners' posts. Search with short topical queries."  # ≤ 300, shown to the Architect
-    private: true                # quotes and links from it never stored on records or shown on cards
+    description: "Private YC founder forum: practitioners' posts. Short topical queries."  # ≤ 300, shown to the Architect
+    private: true                # default true; false only if the user says the source is public
     command: ["yc", "search", "{query}", "--type", "posts", "--json", "--limit", "15"]
-    # or instead of command:
-    # url: "https://search.example.com/api?q={query}"
-    # headers: { Authorization: "Bearer {secret:EXAMPLE_TOKEN}" }
-    env: { YC_TOKEN: "{secret:YC_TOKEN}" }          # optional, command only
+    env: { YC_TOKEN: "{secret:YC_TOKEN}" }       # optional, command only
+  - id: internal-search
+    name: Internal search
+    description: "…"
+    url: "https://search.example.com/api/v1/search?q={query}&limit=20"
+    headers: { Authorization: "Bearer {secret:EXAMPLE_TOKEN}" }
 ```
 
-- **Limits:** at most 10 sources. Exactly one of `command` / `url`.
-- **`command`:**
-  - An argv array. `{query}` must appear exactly once, as a whole element or inside one; it is replaced by the query
-    text as that single argument.
-  - The first element is a bare name looked up on `PATH` plus `~/.local/bin` and `~/.<name>/bin` (the usual installer
-    places), or an absolute path.
-  - Run with `execFile` (no shell), cwd `~/.manta/agents/architect/home`, timeout 60 s, output ≤ 2 MiB.
-  - The environment is minimal: `PATH`, `HOME`, `LANG`, plus `env` entries.
-- **`url`:**
-  - http(s) only; `{query}` is URL-encoded.
-  - Fetched through the same SSRF-guarded transport as `research_fetch`. An extra source can't reach the box's private
-    addresses either.
-- **`{secret:NAME}`:**
-  - Allowed only in `env` values and `headers` values.
-  - Resolved by the server from Manta's secret store (Phase 3) at run time, never shown to the model.
-  - The server removes any occurrence of a resolved value from the output before storing it.
-- **Output:** stored as one source (`private` from the definition) and returned like `research_fetch`. JSON is
-  pretty-printed; anything else is decoded as UTF-8 text.
-- **Validation:**
-  - Invalid entries are skipped, and the Architect's row shows a notice naming them; the agent itself stays valid.
-  - `agent_change` gains a draft key `sources` (an array as above) that is accepted only when the target is the
-    Architect. `checkDraft` validates it, and secret names must exist.
-  - Proposals can't touch `sources`: `agent_propose` refuses the key. Adding a source is the user's act, through Manta.
-- **The card** marks each added or changed source: "Runs `yc` on this box", or "Calls search.example.com". Secret names
-  are shown; values never are.
+**Trust model.** A command source is trusted like a plugin: the user picks the program and approves it on a card. The
+program runs with the user's rights, exactly as it would in their terminal.
 
-**Store:**
-- Server-owned; the Architect cannot write it.
-- Kept 30 days.
-- Capped at 200 MB box-wide by deleting the oldest sessions first, in the existing 5-minute sweep.
+What the server controls is what the **model** controls, which is only the query text:
+- **`command`:**
+  - The first element is fixed: a bare name looked up on `PATH`, `~/.local/bin` or `~/.<name>/bin`, or an absolute
+    path. `{query}` may not appear in it.
+  - `{query}` appears exactly once, and only as a whole element (not glued to an option). It is replaced by the query as
+    that single argument.
+  - A query that starts with `-` is refused, so the model can't turn the argument into an option. The query is also
+    ≤ 200 chars with no control characters.
+  - Run with `execFile` (no shell), cwd `~/.manta/agents/architect/home`, a minimal environment (`PATH`, `HOME`, `LANG`,
+    plus `env`), timeout 60 s, stdout ≤ 2 MiB.
+  - stderr is never returned. A failure is the fixed sentence "The source failed (exit N)".
+- **`url`:**
+  - A literal `https://` origin and path, with no userinfo. `{query}` appears exactly once, as the whole value of one
+    query parameter, and is URL-encoded.
+  - Headers may not set `Host`, `Cookie`, `Forwarded` or `X-Forwarded-*`.
+  - Requests go through the SSRF-guarded transport.
+  - A source with any `{secret:…}` header follows **no** redirects: a redirect is a failure.
+  - A source without secrets may follow redirects (≤ 5), each re-filtered, and never re-sends its headers to another
+    origin.
+- **Secrets (`{secret:NAME}`):**
+  - Allowed only inside `env` and `headers` values.
+  - Resolved from Manta's **shared** secrets only, never a session- or project-scoped one, so a source always gets the
+    same credential whatever job runs it.
+  - A missing secret fails closed: "The source's secret NAME is missing".
+  - Values go only to the configured program or origin, never into the prompt or into `agent.md`.
+  - Redaction is a backstop, not a guarantee: before storing or returning anything, the server replaces every
+    occurrence of each resolved value in the output with `[secret]`. A program could still print a transformed
+    credential; the trust model above covers that.
+  - The card warns when a header or env value contains a long literal that looks like a token: "Put this in Secrets
+    instead".
+- **Output** is stored as one source (`private` from the definition), the evidence for whatever it supports. It is
+  paged only with `research_read(sourceId, offset)`. Links found inside private output are not fetched by the server on
+  its own; if the Architect fetches one, that fetch is a new public source.
+- **Validation:**
+  - At most 10 sources. Exactly one of `command` / `url`. Unique ids.
+  - YAML aliases and anchors in frontmatter are refused for the whole file.
+  - Invalid entries are skipped, and the Architect's row shows a notice naming them.
+  - `agent_change` accepts a draft key `sources` only on an **update** whose target is the validated Architect (role +
+    slug). That update always needs a click.
+  - `agent_propose` refuses the key. Planning any proposal also compares the validated sources before and after, and
+    refuses any difference, including an indirect one through preserved YAML.
+- **The card** (§7) lists each added or changed source: "Runs `yc` on this box" or "Calls search.example.com", the
+  secret names it uses, and "Private: results go to the AI model and its local transcript, and may be repeated in what
+  the Architect writes or searches; only the quote and link on cards are hidden".
 
 ### 4.4 `agent_propose`
 
@@ -433,19 +461,16 @@ create an agent. Both become:
   Undo, and the card shows the exact bytes and the evidence.
 - A quote check proves a quote came from a fetched page, not that the page is honest.
 
-**Extra sources** run what the user configured.
-- A command source runs a program on the box with the user's rights, and its query is chosen by the model.
-  - It runs with no shell, a minimal environment and a timeout.
-  - Every addition or change needs the user's click on a card that names the program.
-  - Proposals can't add sources.
-- Results of a `private` source go to the AI model and the Architect's local transcript, and can be paraphrased in what
-  it proposes and in later web searches.
-  - **Enforced:** their quotes and links are never stored in a record's evidence or shown in a card's evidence list.
-  - **Not enforced:** model-written text can paraphrase them.
-  - The research skill says to paraphrase private material and never to put it in public searches. That's an
-    instruction, not a boundary.
-- **Third parties:** Reddit/X search queries go to Exa, and Reddit/X page reads go to Jina. Both are named in the
-  Architect's description and in the research skill.
+**Extra sources** run what the user configured (§4.3a trust model).
+- A command source runs a user-approved program with the user's rights; the model only picks the query.
+  - Query injection is closed: a fixed program, the query as one non-option argument, no shell.
+  - The program itself isn't sandboxed. That is the user's trust decision, made on a card that names the program.
+- URL sources reach only their literal https origin. Credentials are never sent across a redirect.
+- Secrets come only from the shared store, are injected only into the approved program or origin, and are redacted from
+  output as a backstop.
+- Private results go to the AI model and the local transcript, and can be repeated in model-written text and searches.
+  Only the structured quote and link are guaranteed hidden, and the card says so.
+- **Third parties:** Reddit/X search queries go to Exa; Reddit/X post reads go to Jina, after the URL is checked.
 
 **SSRF:** a filtering agent on every connection, redirects re-filtered, one deadline and one byte cap.
 
@@ -479,7 +504,7 @@ export type AgentChangeState = "held" | "applying" | "applied" | "pending" | "di
 target is the Architect.
 
 ```ts
-export interface ArchitectSource { id: string; name: string; description: string; private?: boolean;
+export interface ArchitectSource { id: string; name: string; description: string; private?: boolean /* default true */;
   command?: string[]; url?: string; headers?: Record<string, string>; env?: Record<string, string> }
 ```
 
@@ -489,7 +514,7 @@ export interface ArchitectSource { id: string; name: string; description: string
   behaviour. The tool-part card keeps its lookup and renders the view. Additions:
   - When `summary` is set, show it first.
   - Then native `<details>` sections:
-    - "Evidence (n)": the claim, plus the quote and link, or "Private source (<name>)".
+    - "Evidence (n)": the claim, plus the quote and link, or "Private source" for a private one.
     - "Rules considered (n)": a verdict chip and the why.
   - Reason lines:
     - `core`: "This changes the Architect itself".
@@ -502,8 +527,10 @@ export interface ArchitectSource { id: string; name: string; description: string
   - Renders one `AgentChangeView` per record below the result.
 - **Team list:** the `@` picker and the sidebar include the Architect through `isTeamAgent`. The sidebar's "Chat" action
   is hidden for it in 5A.
-- **The change card for the Architect:** under the diff, one line per added or changed source: "Runs `<program>` on
-  this box" or "Calls <host>", plus the secret names it uses.
+- **The change card for the Architect:** under the diff, one block per added or changed source, next to Apply:
+  - "Runs `<program>` on this box" or "Calls <host>".
+  - The secret names it uses, plus the token-looking-literal warning (§4.3a).
+  - For a private source, the privacy sentence from §4.3a.
 - Follow modern-web-guidance (`html`, `forms`, `accessibility`).
 
 ## 8. Libraries considered
@@ -515,7 +542,8 @@ export interface ArchitectSource { id: string; name: string; description: string
 | SSRF-safe HTTP | `request-filtering-agent` 3.3.1 (MIT, 2026-11, ~410k/week, 1 dep) on `node:http(s)` | native `fetch`: can't take an `http.Agent` (the library's docs say so); ssrf-req-filter 1.1.1 (last release 2024-05); hand-rolled DNS + ipaddr.js checks: miss rebinding between lookup and connect |
 | Reddit / X access | a port of agent-reach's public route (MIT): Exa hosted search scoped by `site:` + the Jina reader | agent-reach itself (Python CLI + a managed browser: can't ship on every box, and its browser fails on headless boxes, as on this one); Reddit's JSON API (403 from data-centre IPs, measured); the X API (paid); scraping x.com (needs JavaScript) |
 | arXiv | the arXiv API + `fast-xml-parser` 5.12.1 (MIT, 2026-11, ~118M/week, 6 deps) | regex over Atom: brittle; xml2js: callback API, slower; the arxiv Python client: wrong runtime |
-| Extra sources | argv-template command / URL template definitions in the agent file | a plugin system per source: too much for "answer a query"; MCP servers as sources: a good later step, but most private tools (like `yc`) ship as CLIs |
+| Extra sources | argv-template command / URL template definitions in the agent file | a plugin system per source: too much for "answer a query"; MCP servers as sources: a good later step, but most private tools (like `yc`) ship as CLIs; an OS sandbox (bubblewrap, sandbox-exec) for command sources: Linux/macOS split and extra installs, for programs the user already trusts to run |
+| Exa response handling | a bounded port (~30 lines: JSON or SSE `data:` lines) | @modelcontextprotocol/sdk (official, but a large dependency for one JSON-RPC call); eventsource-parser (small, but the response is a single short burst, not a live stream) |
 | HN | the public Algolia API through the same transport | scraping news.ycombinator.com |
 | Proposal envelope validation | handwritten checks (~40 lines) next to the Phase 4 `checkDraft`, which stays authoritative; the plugin's JSON schema also validates shape | zod 4 / ajv 8: not server dependencies; one small envelope doesn't justify one, and a second validator would split the draft rules |
 | Store | JSON via `writeJsonAtomic` + `createMutex` | SQLite (`node:sqlite`, already used read-only for OpenCode's DB): atomic record updates, but not atomic together with the agent files, so the `applying` journal + claim marker is needed either way; JSON keeps one store format with Phase 4 |
@@ -552,13 +580,19 @@ export interface ArchitectSource { id: string; name: string; description: string
   - Per-session isolation; the 30-day / 200 MB sweep.
   - arXiv parsing; Reddit/X scoping, anti-bot/login-wall refusal and the Exa rate-limit sentence (injected transport).
   - Extra sources:
-    - validation: one of command/url, `{query}` once, id rules, max 10, secret names exist;
-    - command: argv with no shell (a query containing `; rm -rf ~` is one argument), minimal env, timeout, size cap;
-    - url: SSRF guard;
-    - secret values substituted and stripped from the output;
-    - `private` honoured on evidence;
-    - `agent_propose` refuses `sources`;
-    - `agent_change` accepts `sources` only for the Architect, as a click.
+    - validation: one of command/url, `{query}` once (not in argv[0], whole element / one query value), unique ids, max
+      10, aliases refused, `private` defaults to true;
+    - command: a query starting with `-` is refused; no shell (`; rm -rf ~` stays one argument); minimal env; stderr
+      never returned; timeout; size cap;
+    - url: https only; a second origin receives no request (redirect spy); credentials are never sent across a redirect;
+      forbidden headers;
+    - secrets: shared scope only (two projects with the same name → the shared one or a failure); missing → fail
+      closed; values redacted in stored and returned output;
+    - a private result with no URL → verified evidence → card with no quote or link;
+    - `agent_propose` refuses `sources`, and a proposal that would change sources indirectly is refused;
+    - `agent_change` accepts `sources` only on an update of the validated Architect, as a click.
+  - Jina routing: out-of-scope, credentialed or query-carrying URLs → zero provider calls; Exa never reads a page; Exa
+    JSON and SSE responses, a tool error and a quota error.
   - Binding refusals before any I/O.
   - DNS and `execFile` are injected; nothing reaches the internet.
 - **`delegate` / `autonomy` / `routines` tests:**
