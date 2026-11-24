@@ -117,17 +117,57 @@ export function renderPolicy(policy = DEFAULT_POLICY) {
 
 // Files that hold Manta's settings, its sign-in token and the OpenCode config.
 const PROTECTED_FILES = ["auth.json", "devices.json", "secrets.json", "config.json", "opencode-password"];
-const PROTECTED_BASH = [
+const PROTECTED_BASH_OTHER = [
   ".manta/auth.json",
   ".manta/devices.json",
   ".manta/secrets.json",
   ".manta/config.json",
   "opencode-password",
-  ".manta-secrets",
   ".config/opencode",
   "127.0.0.1:8787",
   "localhost:8787",
 ];
+
+// The materialized secret files (`secret_provide`, src/server/secrets.mjs): shared → ~/.manta-secrets/<key>, session →
+// ~/.manta-secrets/sessions/<sessionID>/<key>, project → ~/.manta-secrets/projects/<project>/<key>. A task may USE the
+// shared ones and its OWN session's folder (`$(cat <path>)` in a command); it never writes there, never reads another
+// session's or a project's folder, and never reads them through a file tool (the value would land in the transcript).
+const SECRETS_NAME = ".manta-secrets";
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const validSessionID = (id) => (typeof id === "string" && SESSION_ID_RE.test(id) ? id : null);
+// commands that change a file; matched at the start of a command (OpenCode matches each simple command of a compound one)
+const SECRET_WRITERS = ["rm", "mv", "cp", "tee", "touch", "chmod", "chown", "ln", "truncate", "dd", "install", "shred", "mkdir", "sed -i"];
+
+/**
+ * The bash rules for the secrets folder, in order — OpenCode resolves last match wins, so each line narrows the one
+ * before it: everything denied; anything under the folder allowed; the `sessions` and `projects` folders denied again;
+ * the caller's own session folder allowed; then the ways to reach another folder or to change a file denied last.
+ * `[action, glob][]`. These come BEFORE every other bash rule, so a command that also touches a protected file, a merge or
+ * an Ask-level action still ends on that deny.
+ */
+function secretsBashRules(sessionID) {
+  const sid = validSessionID(sessionID);
+  const f = SECRETS_NAME;
+  const rules = [
+    ["deny", `*${f}*`],
+    ["allow", `*${f}/*`],
+    ["deny", `*${f}/sessions*`],
+    ["deny", `*${f}/projects*`],
+  ];
+  if (sid) rules.push(["allow", `*${f}/sessions/${sid}/*`]);
+  rules.push(
+    // a path that climbs out of its folder or hides a folder behind `//` or `./`
+    ["deny", `*${f}*/..*`],
+    ["deny", `*${f}*/./*`],
+    ["deny", `*${f}//*`],
+    ["deny", `*${f}/sessions//*`],
+    // a write: a redirect into it, or a command that changes files
+    ["deny", `*>*${f}*`],
+    ...SECRET_WRITERS.map((w) => ["deny", `${w} *${f}*`]),
+  );
+  return rules;
+}
+
 export const PROTECTED_SUMMARY = "Manta settings or credentials";
 const FILE_PERMISSIONS = ["read", "glob", "grep", "list", "edit", "write"];
 
@@ -223,20 +263,51 @@ function protectedPaths(home) {
  * The rules appended LAST to a specialist job's ruleset (OpenCode resolves last match wins): `{ permission, pattern,
  * action: "deny" }`. Paths are absolute, resolved from `home`.
  *
- * The one exception is the agent's own folder (`agentDir`, when it is under `~/.manta`): OpenCode's check for a search
- * or a read outside the working folder names the FOLDER (`~/.manta/*`), never the file, so protecting the files in it
- * means denying the whole of `~/.manta` for `external_directory` — and the agent's skills and project briefs, which
- * it always had, are allowed back after that. Nothing else is ever granted.
+ * Two things are granted back after the denies (OpenCode: last match wins):
+ * - the agent's own folder (`agentDir`, when it is under `~/.manta`): OpenCode's check for a search or a read outside
+ *   the working folder names the FOLDER (`~/.manta/*`), never the file, so protecting the files in it means denying the
+ *   whole of `~/.manta` for `external_directory` — and the agent's skills and project briefs, which it always had, are
+ *   allowed back after that. That allow is always the LAST rule.
+ * - the secret files the task was handed (`secret_provide`): it may USE the shared ones and the ones in its OWN
+ *   session's folder (`sessionID`, the child session's id) from a command — `$(cat <path>)`. Never the rest of
+ *   `~/.manta-secrets`, never a write there, and never through a file tool. See `secretsBashRules` for the order.
+ * Nothing else is ever granted.
  */
-export function jobRules(policy, { home, agentDir, projectPatterns = [] } = {}) {
+export function jobRules(policy, { home, agentDir, projectPatterns = [], sessionID } = {}) {
   const rules = [];
   const deny = (permission, pattern) => rules.push({ permission, pattern, action: "deny" });
+  const allow = (permission, pattern) => rules.push({ permission, pattern, action: "allow" });
   const { files, trees, writeTrees } = protectedPaths(home);
+  const secretsTree = join(home, SECRETS_NAME);
+
+  // the secrets folder (see above). The file tools never reach it: a read would put the value into the transcript and
+  // a write would change the store.
+  for (const permission of FILE_PERMISSIONS) {
+    deny(permission, secretsTree);
+    deny(permission, `${secretsTree}/**`);
+  }
+  // …and for a command, OpenCode asks `external_directory` for the FOLDER of each path argument (`<dir>/*`)
+  deny("external_directory", secretsTree);
+  deny("external_directory", `${secretsTree}/**`);
+  allow("external_directory", `${secretsTree}/*`);
+  for (const sub of ["sessions", "projects"]) {
+    deny("external_directory", `${secretsTree}/${sub}`);
+    deny("external_directory", `${secretsTree}/${sub}/*`);
+  }
+  const ownSession = validSessionID(sessionID);
+  if (ownSession) {
+    allow("external_directory", `${secretsTree}/sessions/${ownSession}`);
+    allow("external_directory", `${secretsTree}/sessions/${ownSession}/*`);
+  }
+  for (const [action, pattern] of secretsBashRules(sessionID)) rules.push({ permission: "bash", pattern, action });
+  // (the folder is denied for writes — edit/write above, a shell write in secretsBashRules; a command that deletes or moves
+  // a file asks external_directory like a read, so those are the bash rules' job)
 
   // protected: Manta's own settings, its sign-in token and the OpenCode config
+  const openTrees = trees.filter((t) => t !== secretsTree);
   for (const permission of [...FILE_PERMISSIONS, "external_directory"]) {
     for (const f of files) deny(permission, f);
-    for (const t of trees) {
+    for (const t of openTrees) {
       deny(permission, t);
       deny(permission, `${t}/**`);
     }
@@ -248,7 +319,7 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [] } = {}) 
   for (const t of writeTrees) deny("external_directory", `${t}/*`);
   const agentFolder = typeof agentDir === "string" ? agentDir.replace(/\/+$/, "") : "";
   const keepAgentFolder = agentFolder && writeTrees.some((t) => agentFolder.startsWith(`${t}/`));
-  for (const fragment of PROTECTED_BASH) deny("bash", `*${fragment}*`);
+  for (const fragment of PROTECTED_BASH_OTHER) deny("bash", `*${fragment}*`);
 
   // merge: always
   for (const [pattern] of MERGE_PATTERNS) deny("bash", pattern);
@@ -299,12 +370,25 @@ function matchBash(pattern, command, segments) {
   return re.test(command.trim()) || segments.some((s) => re.test(s));
 }
 
+// Does a command (or one of its parts) end on a deny from the secrets-folder rules? The same rules, evaluated the way
+// OpenCode does (last match wins), so what the task is told is "blocked" is what the rules actually stop.
+function touchesProtectedSecret(command, segments, sessionID) {
+  const rules = secretsBashRules(sessionID);
+  const denies = (text) => {
+    if (!text.includes(SECRETS_NAME)) return false;
+    let action = "allow";
+    for (const [a, pattern] of rules) if (globRe(pattern).test(text)) action = a;
+    return action === "deny";
+  };
+  return denies(command.trim()) || segments.some(denies);
+}
+
 /**
  * The kinds a FINISHED tool call matches — `{ kind, summary }[]`, `kind` an action kind or `"protected"`. A bash command
  * is matched per part of a compound command; a tool by its name; a file tool by its path. `summary` is a FIXED label
  * (the matched pattern's command words, the tool name, or "Manta settings or credentials"), never the arguments.
  */
-export function matchKinds(toolPart, { home = "", projectPatterns = [] } = {}) {
+export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionID } = {}) {
   const tool = String(toolPart?.tool ?? "");
   const input = toolPart?.state?.input ?? {};
   const found = [];
@@ -315,7 +399,8 @@ export function matchKinds(toolPart, { home = "", projectPatterns = [] } = {}) {
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return found;
     const segments = commandSegments(command);
-    if (PROTECTED_BASH.some((f) => command.includes(f))) add("protected", PROTECTED_SUMMARY);
+    // (a secret file the task may use — a shared one, one in its own session's folder — is not "Manta settings or credentials")
+    if (PROTECTED_BASH_OTHER.some((f) => command.includes(f)) || touchesProtectedSecret(command, segments, sessionID)) add("protected", PROTECTED_SUMMARY);
     for (const [pattern, label] of MERGE_PATTERNS) if (matchBash(pattern, command, segments)) add("merge", label);
     for (const kind of ACTION_KINDS) {
       for (const [pattern, label] of KIND_PATTERNS[kind]?.bash ?? []) if (matchBash(pattern, command, segments)) add(kind, label);
@@ -539,7 +624,7 @@ export function parseSelfReport(text) {
  * - `selfReport`: "present" | "none" | "missing".
  * Entries are `{ kind, level?, summary, source? }` with a FIXED summary for commands, at most 10 each, de-duplicated.
  */
-export function extractActions({ messages, afterMessageId, continuation = false, policy, home = "", projectPatterns = [], resultText = null }) {
+export function extractActions({ messages, afterMessageId, continuation = false, policy, home = "", projectPatterns = [], resultText = null, sessionID }) {
   const list = Array.isArray(messages) ? messages : [];
   let from = 0;
   if (afterMessageId) {
@@ -561,7 +646,7 @@ export function extractActions({ messages, afterMessageId, continuation = false,
       if (part?.type !== "tool") continue;
       const status = part.state?.status;
       if (status !== "completed" && status !== "error") continue;
-      const matches = matchKinds(part, { home, projectPatterns });
+      const matches = matchKinds(part, { home, projectPatterns, sessionID });
       if (matches.length === 0) continue;
       if (status === "completed") {
         for (const { kind, summary } of matches) {

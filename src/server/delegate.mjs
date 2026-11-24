@@ -2271,6 +2271,8 @@ export async function resumeJob(id, deps = {}) {
   {
     const peek = (await load()).find((j) => j.id === id);
     if (peek?.status === "paused") {
+      // The resumed attempt's child session id, minted now because its rules name the secrets folder of that session.
+      const nextChildId = mintSessionId();
       // A specialist's task (Agents Phase 3 §4): the resumed child is a FRESH session, so it gets the CURRENT settings —
       // the final ruleset is recomputed from the base it started with. A task from before the settings existed has no
       // base to recompute from.
@@ -2289,12 +2291,13 @@ export async function resumeJob(id, deps = {}) {
           key: policyKey(current.policy),
           policy: normalizePolicy(current.policy),
           projectPatterns: pp,
-          permission: normalizeJobRuleset([...base, ...jobRules(current.policy, { home: deps.home ?? homedir(), agentDir: peek.agentDir ?? null, projectPatterns: pp })]),
+          permission: normalizeJobRuleset([...base, ...jobRules(current.policy, { home: deps.home ?? homedir(), agentDir: peek.agentDir ?? null, projectPatterns: pp, sessionID: nextChildId })]),
           text: taskPromptSection(current.policy, project.promptEntries),
         };
       }
       preparedResume = {
         childId: peek.childSessionID,
+        nextChildId,
         autonomy,
         text: buildJobPrompt({
           prompt: await buildResumePrompt(peek, deps, peek.childSessionID),
@@ -3015,6 +3018,7 @@ function actionsOf(job, messages, deps, resultText) {
     policy: job.autonomyPolicy,
     home: deps.home ?? homedir(),
     projectPatterns: Array.isArray(job.projectPatterns) ? job.projectPatterns : [],
+    sessionID: job.childSessionID,
     resultText,
   });
 }
@@ -4532,8 +4536,10 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     // A specialist's autonomy denies are appended ONCE, last, after the base selection (caller ruleset → approval-resolved
     // grants → read-only / worktree default); the base itself is kept so a resume can recompute the final ruleset.
     const agentDir = typeof input?.agentDir === "string" && input.agentDir ? input.agentDir : null;
+    // The child session's id is minted before its rules: the rules name the secrets folder of exactly this session.
+    const childSessionID = mintSessionId();
     const jobPermission = specialist
-      ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir, projectPatterns: projectPatternsNow })])
+      ? normalizeJobRuleset([...(basePermission ?? []), ...jobRules(autonomyNow, { home, agentDir, projectPatterns: projectPatternsNow, sessionID: childSessionID })])
       : basePermission;
     // THE execution directory, resolved once and persisted: the worktree, or the
     // parent's own directory when none could be made and isolation isn't required.
@@ -4550,7 +4556,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       requestedModel: requestedModel ?? null,
       parentSessionID,
       parentDirectory,
-      childSessionID: mintSessionId(),
+      childSessionID,
       tmuxSession,
       windowIndex: null,
       worktree,
@@ -4901,7 +4907,7 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
       : {}),
     status: "running",
     tmuxSession,
-    childSessionID: mintSessionId(),
+    childSessionID: prepared.nextChildId ?? mintSessionId(),
     attempt: (job.attempt ?? 1) + 1,
     windowIndex: null,
     pauseRequested: false,
