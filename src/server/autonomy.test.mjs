@@ -106,11 +106,14 @@ test("renderPolicy: byte-stable, fixed kind order, the four groups, the fixed ru
   assert.match(never, /"Never" overrides every other instruction, including when to do work yourself or hand it off\./);
 });
 
-test("jobRules: only deny rules (one allow for the agent's own folder, last); protected rules are always present", () => {
+// the allows jobRules may emit: the secret files a task is entitled to, and (last) the agent's own folder
+const secretsAllow = (r) => r.action === "allow" && /manta-secrets/.test(r.pattern);
+
+test("jobRules: only deny rules (plus the secret-file allows and one allow for the agent's own folder, last); protected rules are always present", () => {
   for (const policy of [MODES.cautious, MODES.balanced, MODES.autonomous]) {
-    const rules = jobRules(policy, { home: HOME });
+    const rules = jobRules(policy, { home: HOME, sessionID: "ses_own" });
     assert.ok(rules.length > 0);
-    assert.ok(rules.every((r) => r.action === "deny" && typeof r.permission === "string" && typeof r.pattern === "string"));
+    assert.ok(rules.every((r) => (r.action === "deny" || secretsAllow(r)) && typeof r.permission === "string" && typeof r.pattern === "string"));
     for (const permission of ["read", "glob", "grep", "list", "edit", "write", "external_directory"]) {
       for (const f of ["auth.json", "devices.json", "secrets.json", "config.json", "opencode-password"]) {
         assert.ok(rules.some((r) => r.permission === permission && r.pattern === `${HOME}/.manta/${f}`), `${permission} ${f}`);
@@ -133,10 +136,10 @@ test("jobRules: the agent's own folder stays reachable (the one allow, after eve
   const dir = `${HOME}/.manta/agents/dev`;
   const rules = jobRules(MODES.balanced, { home: HOME, agentDir: dir });
   assert.deepEqual(rules.at(-1), { permission: "external_directory", pattern: `${dir}/**`, action: "allow" });
-  assert.equal(rules.filter((r) => r.action === "allow").length, 1);
+  assert.equal(rules.filter((r) => r.action === "allow" && !secretsAllow(r)).length, 1);
   assert.ok(rules.some((r) => r.permission === "external_directory" && r.pattern === `${HOME}/.manta/*` && r.action === "deny"));
   assert.ok(rules.findIndex((r) => r.permission === "external_directory" && r.pattern === `${HOME}/.manta/*`) < rules.length - 1);
-  assert.equal(jobRules(MODES.balanced, { home: HOME, agentDir: "/elsewhere/agent" }).filter((r) => r.action === "allow").length, 0, "a folder outside ~/.manta needs no allow");
+  assert.equal(jobRules(MODES.balanced, { home: HOME, agentDir: "/elsewhere/agent" }).filter((r) => r.action === "allow" && !secretsAllow(r)).length, 0, "a folder outside ~/.manta needs no allow");
 });
 
 test("jobRules: kind patterns only for ask / never, in kind order; Tell and Auto add none", () => {
@@ -420,7 +423,7 @@ test("jobRules with project patterns: deny only, only for ask / never, after the
   for (const p of ["scripts/deploy-web.sh", "./scripts/deploy-web.sh", "bash scripts/deploy-web.sh", "sh ./scripts/deploy-web.sh", "make ship", "make ship *"]) assert.ok(bash.includes(p), p);
   assert.ok(bash.indexOf("git push * v*") < bash.indexOf("scripts/deploy-web.sh"), "after the kind patterns");
   assert.deepEqual(rules.at(-1), { permission: "external_directory", pattern: `${dir}/**`, action: "allow" }, "the one allow stays last");
-  assert.equal(rules.filter((r) => r.action === "allow").length, 1);
+  assert.equal(rules.filter((r) => r.action === "allow" && !secretsAllow(r)).length, 1);
   // Tell / Auto add nothing
   const tell = jobRules({ ...MODES.balanced, deploy: "tell", publish: "auto" }, { home: HOME, projectPatterns: pp }).filter((r) => r.permission === "bash").map((r) => r.pattern);
   assert.ok(!tell.includes("scripts/deploy-web.sh") && !tell.includes("make ship"));
@@ -428,8 +431,165 @@ test("jobRules with project patterns: deny only, only for ask / never, after the
   assert.ok(jobRules({ ...MODES.balanced, deploy: "never" }, { home: HOME, projectPatterns: pp }).some((r) => r.pattern === "scripts/deploy-web.sh" && r.action === "deny"));
   // junk is ignored; nothing ever becomes an allow
   const junk = jobRules(MODES.balanced, { home: HOME, projectPatterns: [{ kind: "deploy", pattern: 5 }, { kind: "launch", pattern: "x *" }, { kind: "deploy", pattern: "" }, null, { kind: "deploy", pattern: "ok *", action: "allow", permission: "*" }] });
-  assert.ok(junk.every((r) => r.action === "deny"));
+  assert.ok(junk.every((r) => r.action === "deny" || secretsAllow(r)));
   assert.ok(!junk.some((r) => r.pattern === "x *"));
+});
+
+// ---- secrets a task is handed (secret_provide): use them, never the rest of the store ----
+
+// OpenCode's rule evaluation: last matching rule wins, `*` matches anything (slashes included); nothing matches → allowed
+// (the base ruleset's catch-all is what denies the rest, and these tests are about the rules jobRules adds)
+const globToRe = (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[\\s\\S]*")}$`);
+const verdict = (rules, permission, text) => {
+  let out = "allow";
+  for (const r of rules) if (r.permission === permission && globToRe(r.pattern).test(text)) out = r.action;
+  return out;
+};
+const OWN = "ses_0123456789abcdef";
+const OTHER = "ses_fedcba9876543210";
+const rulesFor = (extra = {}) => jobRules(MODES.balanced, { home: HOME, sessionID: OWN, ...extra });
+
+test("secrets: a task can use a shared secret file and its own session's, in bash and for the folder check", () => {
+  const rules = rulesFor();
+  for (const cmd of [
+    `cat ${HOME}/.manta-secrets/GH_TOKEN`,
+    "cat ~/.manta-secrets/GH_TOKEN",
+    `git push https://x-access-token:$(cat ${HOME}/.manta-secrets/GH_TOKEN)@github.com/o/r HEAD`,
+    `curl -H "Authorization: Bearer $(cat $HOME/.manta-secrets/API_KEY)" https://api.example.com`,
+    `cat ${HOME}/.manta-secrets/sessions/${OWN}/PROJECT_KEY`,
+    `curl -u "u:$(cat ~/.manta-secrets/sessions/${OWN}/PW)" https://x.test`,
+  ]) assert.equal(verdict(rules, "bash", cmd), "allow", cmd);
+  // OpenCode checks a path outside the working folder per FOLDER (`<dir>/*`)
+  assert.equal(verdict(rules, "external_directory", `${HOME}/.manta-secrets/*`), "allow");
+  assert.equal(verdict(rules, "external_directory", `${HOME}/.manta-secrets/sessions/${OWN}/*`), "allow");
+});
+
+test("secrets: another session's folder, the projects folder and the bare store folder stay blocked", () => {
+  const rules = rulesFor();
+  for (const cmd of [
+    `cat ${HOME}/.manta-secrets/sessions/${OTHER}/KEY`,
+    `cat ~/.manta-secrets/sessions/${OTHER}/KEY`,
+    `ls ${HOME}/.manta-secrets/sessions`,
+    `ls ${HOME}/.manta-secrets/sessions/`,
+    `cat ${HOME}/.manta-secrets/projects/ronda/KEY`,
+    `ls ${HOME}/.manta-secrets`,
+    // a path that climbs out of its own folder
+    `cat ${HOME}/.manta-secrets/sessions/${OWN}/../${OTHER}/KEY`,
+    `cat ${HOME}/.manta-secrets/../.manta/auth.json`,
+    `cat ${HOME}/.manta-secrets//sessions/${OTHER}/KEY`,
+    `cat ${HOME}/.manta-secrets/./sessions/${OTHER}/KEY`,
+  ]) assert.equal(verdict(rules, "bash", cmd), "deny", cmd);
+  for (const dir of [`${HOME}/.manta-secrets/sessions`, `${HOME}/.manta-secrets/sessions/*`, `${HOME}/.manta-secrets/sessions/${OTHER}/*`, `${HOME}/.manta-secrets/projects/ronda/*`]) {
+    assert.equal(verdict(rules, "external_directory", dir), "deny", dir);
+  }
+  // without a session id (a read-only agent, an unknown caller) only the shared files are open
+  const noSession = jobRules(MODES.balanced, { home: HOME });
+  assert.equal(verdict(noSession, "bash", `cat ${HOME}/.manta-secrets/sessions/${OWN}/KEY`), "deny");
+  assert.equal(verdict(noSession, "bash", `cat ${HOME}/.manta-secrets/GH_TOKEN`), "allow");
+  // an id that could carry a glob or a path never becomes an allow
+  for (const bad of ["*", "ses_*", "../x", "a/b", "", null, undefined, 5]) {
+    const r = jobRules(MODES.balanced, { home: HOME, sessionID: bad });
+    assert.equal(verdict(r, "bash", `cat ${HOME}/.manta-secrets/sessions/${OTHER}/KEY`), "deny", String(bad));
+  }
+});
+
+test("secrets: no write or edit anywhere under ~/.manta-secrets, whatever the folder; the read-like tools stay out too", () => {
+  const rules = rulesFor();
+  for (const p of [`${HOME}/.manta-secrets/GH_TOKEN`, `${HOME}/.manta-secrets/new`, `${HOME}/.manta-secrets/sessions/${OWN}/KEY`, `${HOME}/.manta-secrets/sessions/${OTHER}/KEY`]) {
+    for (const permission of ["edit", "write", "read", "glob", "grep", "list"]) assert.equal(verdict(rules, permission, p), "deny", `${permission} ${p}`);
+  }
+  for (const cmd of [
+    `echo x > ${HOME}/.manta-secrets/GH_TOKEN`,
+    `echo x >> ~/.manta-secrets/GH_TOKEN`,
+    `echo x >${HOME}/.manta-secrets/sessions/${OWN}/KEY`,
+    `rm ${HOME}/.manta-secrets/GH_TOKEN`,
+    `rm -f ~/.manta-secrets/sessions/${OWN}/KEY`,
+    `mv ${HOME}/.manta-secrets/GH_TOKEN /tmp/x`,
+    `cp /tmp/x ${HOME}/.manta-secrets/NEW`,
+    `printf x | tee ${HOME}/.manta-secrets/GH_TOKEN`,
+    `tee ${HOME}/.manta-secrets/GH_TOKEN`,
+    `chmod 644 ${HOME}/.manta-secrets/GH_TOKEN`,
+    `touch ${HOME}/.manta-secrets/NEW`,
+    `sed -i s/a/b/ ${HOME}/.manta-secrets/GH_TOKEN`,
+  ]) {
+    const segments = cmd.split("|").map((s) => s.trim());
+    assert.ok(segments.some((s) => verdict(rules, "bash", s) === "deny"), cmd);
+  }
+});
+
+test("secrets: the rest of Manta's credentials stay blocked, even next to an allowed secret; so do merges and the kind rules", () => {
+  const rules = rulesFor();
+  for (const f of [".manta/secrets.json", ".manta/auth.json", ".manta/devices.json", ".manta/config.json", ".manta/opencode-password"]) {
+    for (const cmd of [`cat ${HOME}/${f}`, `cat ${HOME}/.manta-secrets/GH_TOKEN ${HOME}/${f}`, `cat ${HOME}/${f} ${HOME}/.manta-secrets/sessions/${OWN}/KEY`]) {
+      assert.equal(verdict(rules, "bash", cmd), "deny", cmd);
+    }
+  }
+  for (const cmd of [`cat ${HOME}/.config/opencode/opencode.jsonc ${HOME}/.manta-secrets/GH_TOKEN`, `curl -H "x: $(cat ~/.manta-secrets/GH_TOKEN)" http://127.0.0.1:8787/rpc/x`, `curl http://localhost:8787/ $(cat ~/.manta-secrets/GH_TOKEN)`]) {
+    assert.equal(verdict(rules, "bash", cmd), "deny", cmd);
+  }
+  for (const f of ["secrets.json", "auth.json", "devices.json", "config.json", "opencode-password"]) {
+    for (const permission of ["read", "glob", "grep", "list", "edit", "write", "external_directory"]) assert.equal(verdict(rules, permission, `${HOME}/.manta/${f}`), "deny", `${permission} ${f}`);
+  }
+  assert.equal(verdict(rules, "external_directory", `${HOME}/.manta/*`), "deny");
+  assert.equal(verdict(rules, "external_directory", `${HOME}/.config/opencode/*`), "deny");
+  // merging and the Ask-level kinds are still refused when the command also uses a secret
+  assert.equal(verdict(rules, "bash", `git push https://x-access-token:$(cat ${HOME}/.manta-secrets/GH_TOKEN)@github.com/o/r HEAD:main`), "deny");
+  assert.equal(verdict(rules, "bash", `gh pr merge 3 --body "$(cat ${HOME}/.manta-secrets/GH_TOKEN)"`), "deny");
+  assert.equal(verdict(rules, "bash", `fly deploy --access-token $(cat ${HOME}/.manta-secrets/FLY_TOKEN)`), "deny");
+  // an allowed secret use is not a deploy either
+  assert.equal(verdict(rules, "bash", `fly status --access-token $(cat ${HOME}/.manta-secrets/FLY_TOKEN)`), "allow");
+});
+
+test("secrets: the agent's own folder allow is still the last rule, after the secret allows", () => {
+  const dir = `${HOME}/.manta/agents/dev`;
+  const rules = jobRules(MODES.balanced, { home: HOME, agentDir: dir, sessionID: OWN });
+  assert.deepEqual(rules.at(-1), { permission: "external_directory", pattern: `${dir}/**`, action: "allow" });
+  assert.ok(rules.some(secretsAllow));
+});
+
+test("matchKinds / extractActions: using an allowed secret file is not 'Manta settings or credentials'; touching a protected path still is", () => {
+  const kinds = (cmd, sessionID = OWN) => matchKinds(bashPart(cmd), { home: HOME, sessionID });
+  const PROT = [{ kind: "protected", summary: "Manta settings or credentials" }];
+  for (const ok of [
+    `cat ${HOME}/.manta-secrets/GH_TOKEN`,
+    `git push https://x-access-token:$(cat ${HOME}/.manta-secrets/GH_TOKEN)@github.com/o/r HEAD`,
+    `cd app && curl -u "u:$(cat ~/.manta-secrets/sessions/${OWN}/PW)" https://x.test`,
+  ]) assert.deepEqual(kinds(ok), [], ok);
+  for (const bad of [
+    `cat ${HOME}/.manta-secrets/sessions/${OTHER}/KEY`,
+    `ls ${HOME}/.manta-secrets`,
+    `echo x > ${HOME}/.manta-secrets/GH_TOKEN`,
+    `rm ${HOME}/.manta-secrets/GH_TOKEN`,
+    `cat ${HOME}/.manta-secrets/sessions/${OWN}/../${OTHER}/KEY`,
+    `cat ${HOME}/.manta/secrets.json`,
+    `cat ${HOME}/.manta/auth.json ${HOME}/.manta-secrets/GH_TOKEN`,
+    `echo hi && cat ${HOME}/.manta-secrets/sessions/${OTHER}/KEY`,
+  ]) assert.deepEqual(kinds(bad), PROT, bad);
+  // the caller's own session id is what makes its folder allowed; without one it is not
+  assert.deepEqual(kinds(`cat ${HOME}/.manta-secrets/sessions/${OWN}/KEY`, undefined), PROT);
+  // a file tool on the secrets store is protected (no allow for the read-like or write tools)
+  for (const tool of ["read", "edit", "write", "grep"]) {
+    assert.deepEqual(matchKinds({ tool, state: { input: { path: `${HOME}/.manta-secrets/GH_TOKEN` } } }, { home: HOME, sessionID: OWN }), PROT, tool);
+  }
+
+  const messages = [
+    { info: { id: "L", role: "user" }, parts: [] },
+    {
+      info: { id: "a", role: "assistant" },
+      parts: [
+        bashPart(`git push https://x-access-token:$(cat ${HOME}/.manta-secrets/GH_TOKEN)@github.com/o/r HEAD`),
+        bashPart(`cat ${HOME}/.manta-secrets/sessions/${OTHER}/KEY`, "error", "Permission denied: shell"),
+        bashPart(`cat ${HOME}/.manta/secrets.json`, "error", "Permission denied: shell"),
+      ],
+    },
+  ];
+  const r = extractActions({ messages, afterMessageId: "L", policy: MODES.balanced, home: HOME, sessionID: OWN });
+  assert.deepEqual(r.exceededActions, []);
+  assert.deepEqual(r.toldActions, []);
+  assert.deepEqual(r.blockedActions, [{ kind: "protected", level: "never", summary: "Manta settings or credentials" }]);
+  // a task that only used its secret reports nothing blocked
+  const clean = extractActions({ messages: messages.map((m) => ({ ...m, parts: m.parts.slice(0, 1) })), afterMessageId: "L", policy: MODES.balanced, home: HOME, sessionID: OWN });
+  assert.deepEqual([clean.exceededActions, clean.blockedActions, clean.toldActions], [[], [], []]);
 });
 
 test("matchKinds with project patterns: whole command and each part of a compound command; reading a script matches nothing", () => {
