@@ -106,6 +106,8 @@ export const tools: ToolDef[] = [
     name: "agent_change",
     description: [
       "Create a new agent or change one of your team's agents (including yourself) — only in a chat you lead.",
+      "For a new agent or a substantial rework, agree a short charter with the user (job, trigger, never-do, edits code or not), then hand it to @architect.",
+      "Use agent_change yourself for small edits the user dictates, or when @architect isn't on the team.",
       "Call it directly; don't ask first in words: the user approves on a card when their settings require it.",
       "Create needs a complete draft (name, description, isolation, instructions); update takes only the fields that change.",
     ].join(" "),
