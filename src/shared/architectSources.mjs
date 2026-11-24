@@ -24,7 +24,6 @@ const CREDENTIAL_PARAMS = ["key", "api_key", "apikey", "token", "access_token", 
 const CREDENTIAL_OPTION_RE = /^(?:--token|--api-key|--apikey|--password|--passwd|--secret|-p)(?:=[\s\S]*)?$/i;
 export const CREDENTIAL_HINT = "Put this value in Secrets and use {secret:NAME} in a header or env value";
 
-// eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f\u2028\u2029]/;
 
 const isPlain = (v) => !!v && typeof v === "object" && !Array.isArray(v);
