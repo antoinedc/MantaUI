@@ -186,11 +186,17 @@ Anything else is refused with a sentence, before any fetch, CLI call or write.
 - **Limits:**
   - http(s) only.
   - Redirects are followed manually, ≤ 5, each hop with a new filtered request.
-  - One 20 s deadline and one streamed 2 MiB decoded-byte cap, both across all hops.
+  - One 20 s deadline and one streamed 2 MiB decoded-byte cap, both across all hops. An answer whose content type is
+    `application/pdf` gets a 10 MiB cap instead (papers are bigger than pages).
 - **Content types:**
   - `text/html` goes through `html-to-text`, with links kept inline.
   - `text/plain`, `text/markdown` and JSON are kept as is.
   - HN item JSON from `hn.algolia.com/api/v1/items/<id>` is rendered as indented "author: comment" text.
+  - `application/pdf` is extracted to text with `unpdf` inside a worker thread (30 s limit, terminated when over). A PDF
+    with no text layer (a scan) is refused: "This PDF has no text layer (it looks like a scan), so it can't be read…";
+    a damaged or password-protected one: "That PDF couldn't be read…".
+  - A `github.com/<owner>/<repo>/blob/<ref>/<path>` address is read from `raw.githubusercontent.com` (query and
+    fragment dropped); the source keeps the address the model gave as its `url`.
   - Anything else is refused: "This kind of file can't be read yet".
 - **Stored** as an immutable source `{id: "src_<16 hex>", url, finalUrl, title, fetchedAt, private: false, text}` in
   `~/.manta/research/<childSessionID>/`.
@@ -206,6 +212,16 @@ Anything else is refused with a sentence, before any fetch, CLI call or write.
   - Calls the arXiv API (`export.arxiv.org/api/query`, Atom, parsed with `fast-xml-parser`).
   - Returns title, authors, date, abstract URL and a 300-char summary.
   - Abstracts and the HTML papers on arxiv.org are read with `research_fetch`.
+- **`"github"`:**
+  - The GitHub REST search API (`api.github.com`), through the same guarded transport, unauthenticated.
+  - Repository search for `<query> skill in:name,description,topics,readme`: name, url, stars, last push, licence,
+    description. These are leads: the model reads a skill's `SKILL.md` or README with `research_fetch` and treats it as
+    data (it can carry malicious instructions), as evidence for individual rules, never as an install.
+  - With a **shared** `GITHUB_TOKEN` secret the same call also searches code for `<query> filename:SKILL.md` (GitHub
+    refuses unauthenticated code search). The token is sent to `api.github.com` only, no redirect is followed, and a
+    token GitHub refuses falls back to no token. Without a token a note says code search was skipped. A secrets store
+    that can't be read is the same as no token.
+  - The rate limit (10 searches a minute unauthenticated) is a fixed sentence pointing at `websearch` with `site:`.
 - **`"reddit"` and `"x"`** are ported from the agent-reach skill's public route (MIT; the copyright and permission
   notice ship in `src/server/research/THIRD_PARTY.md` and the file header).
   - **Search:** a web search scoped with `site:reddit.com` / `site:x.com OR site:twitter.com`, through Exa's free hosted
@@ -243,7 +259,7 @@ always needs a click.
 
 ```yaml
 sources:
-  - id: bookface                 # [a-z][a-z0-9-]{0,29}; unique; not a base id (hn, arxiv, reddit, x, web)
+  - id: bookface                 # [a-z][a-z0-9-]{0,29}; unique; not a base id (hn, arxiv, reddit, x, github, web)
     name: YC Bookface
     description: "Private YC founder forum: practitioners' posts. Short topical queries."  # ≤ 300, shown to the Architect
     private: true                # default true; false only if the user says the source is public
@@ -576,6 +592,8 @@ export interface ArchitectSource { id: string; name: string; description: string
 | Credential-literal detection | the existing knowledge secret scanner (secretlint 14 recommended preset + exact match against stored secrets) plus field and option name rules | a new entropy detector: false positives on ordinary values (media types); gitleaks: runs in CI on the repo, and its Go binary isn't on boxes |
 | Exa response handling | a bounded port (~30 lines: JSON or SSE `data:` lines) | @modelcontextprotocol/sdk (official, but a large dependency for one JSON-RPC call); eventsource-parser (small, but the response is a single short burst, not a live stream) |
 | HN | the public Algolia API through the same transport | scraping news.ycombinator.com |
+| PDF → text | `unpdf` 2.2.2 (MIT, 2026-11-23, ~13M/week, 0 dependencies, Node ≥ 24 = the box runtime), a serverless build of Mozilla's pdf.js, run in a worker thread with a 30 s limit | pdfjs-dist 6.5.438 (Apache-2.0, ~62M/week, 38 MB unpacked: the same engine, but we would write the Node loader and text-merge ourselves); pdf-parse 2.4.5 (last release 2025-10, pulls pdfjs-dist 5 and a native canvas package); shelling out to `pdftotext` (poppler isn't on every box) |
+| GitHub search | the GitHub REST search API through the same transport | `@octokit/rest` (a client plus its plugins for two GET calls); the `gh` CLI (not on every box, needs a login); scraping github.com search (needs JavaScript and a login for code) |
 | Proposal envelope validation | handwritten checks (~40 lines) next to the Phase 4 `checkDraft`, which stays authoritative; the plugin's JSON schema also validates shape | zod 4 / ajv 8: not server dependencies; one small envelope doesn't justify one, and a second validator would split the draft rules |
 | Store | JSON via `writeJsonAtomic` + `createMutex` | SQLite (`node:sqlite`, already used read-only for OpenCode's DB): atomic record updates, but not atomic together with the agent files, so the `applying` journal + claim marker is needed either way; JSON keeps one store format with Phase 4 |
 | Crash-safe package write | the change store as a write-ahead journal (`applying`), an exclusive `mkdir` claim + a `.claim` ownership marker, shared by every apply | the existing atomic single-file write: covers one file, not a folder plus its record; transactional filesystem libraries: none maintained for Node with folder semantics |

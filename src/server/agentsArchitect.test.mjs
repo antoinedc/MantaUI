@@ -68,6 +68,21 @@ test("the Architect template parses as role architect with no model pin; ARCHITE
   assert.match(r.meta.useWhen, /Creating a new agent/);
 });
 
+test("the Architect template stays short and tells it to look for existing skills, use 3 independent sources, fetch PDFs and write for the user", async () => {
+  const main = await readFile(join(REAL_TEMPLATES, "architect", "agent.md"), "utf-8");
+  assert.ok(main.trimEnd().split("\n").length <= 150, "the main file stays within 150 lines");
+  assert.match(main, /research_search.*source `github`/s);
+  assert.match(main, /at least 3 independent sources/);
+  assert.match(main, /fetch the PDF itself/);
+  assert.match(main, /Never copy a whole skill/);
+  assert.match(main, /malicious instructions/);
+  assert.match(main, /the card below/);
+  const skill = await readFile(join(REAL_TEMPLATES, "architect", "skills", "research", "SKILL.md"), "utf-8");
+  assert.match(skill, /## Existing skills first/);
+  assert.match(skill, /## Independent sources/);
+  assert.match(skill, /anthropics\/skills/);
+});
+
 test("only the folder `architect` with role architect is the Architect; another folder claiming it is an error row", async () => {
   const f = await archFixture();
   try {

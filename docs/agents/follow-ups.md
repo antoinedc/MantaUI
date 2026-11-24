@@ -98,3 +98,23 @@ missing around it:
   `src/server/agents.mjs`), so a fully automatic setup is possible.
 - **New Manta tools need an OpenCode restart.** Plugin code only loads when OpenCode starts. Investigate live plugin
   reload, or route new tools through one generic server-routed tool.
+
+## From the Architect quick round (PDF reading, GitHub skill search, 2026-11-24)
+
+- **Existing boxes keep their old Architect.** `installBuiltIns` never overwrites an existing folder, so a box's
+  `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) does not get the new instructions by itself.
+  Phase 5B's built-in update feature should compare the shipped template with the installed one (and keep the user's
+  edits). Until then the files are copied by hand.
+- **PDF text is raw pdf.js text.** Two-column papers can interleave columns, hyphenated line breaks split words, and
+  tables flatten. A quote that spans a column or hyphen break won't match; the model has to quote a single-column span.
+  Possible later: join hyphenated line endings before storing.
+- **No page or text-size cap for PDFs** beyond the 10 MiB file cap and the 30 s extraction limit; a very large paper
+  stores a very large source (the 200 MB store cap still applies).
+- **PDFs served as `application/octet-stream`** (some sites do this) are still refused as "can't be read yet"; sniffing
+  the `%PDF-` header would fix it but the transport picks the 10 MiB cap from the content type.
+- **GitHub blob addresses with a branch name containing `/`** (`blob/feature/x/path`) convert wrongly; the model can use
+  the raw address instead.
+- **GitHub search is repositories only without a `GITHUB_TOKEN`** (GitHub refuses unauthenticated code search) and has
+  a 10-searches-a-minute limit. Adding a `GITHUB_TOKEN` shared secret enables the SKILL.md code search.
+- **Whole-skill adoption is deliberately not built.** If it is wanted later, it should always need the user's click and
+  show every file; skills are read as evidence only today.
