@@ -1396,6 +1396,7 @@ test("buildLeadBrief: a result carrying a question block is put to the user in o
   assert.match(line, /same task/);
   assert.equal(a.split(ASK_USER_MARKER).length - 1, 1, "stated once");
   assert.equal(a, buildLeadBrief({ body: "B", roster: [] }), "byte-stable");
+  assert.match(readFileSync(join(REAL_TEMPLATES, "manta", "agent.md"), "utf-8"), /question block from the teammate.*never answer it for them/);
 });
 
 test("checkDraft: field rules — lengths, one line, colour, isolation, unknown and role keys, model approval", () => {

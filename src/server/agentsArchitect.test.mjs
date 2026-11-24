@@ -117,11 +117,13 @@ test("the Architect templates carry no agent-design opinions (research and the l
   assert.match(authoring, /admission/i);
   assert.match(authoring, /isolation/);
   // one short process line: compare the request with the roster in light of the research; ask_user on a conflict
-  const askLines = main.split("\n").filter((l) => l.includes("`ask_user`"));
-  assert.equal(askLines.length, 1);
-  assert.match(askLines[0], /roster/);
-  assert.match(askLines[0], /research/);
-  assert.match(askLines[0], /conflict/);
+  assert.equal(main.split("`ask_user`").length - 1, 1, "named once");
+  const step = main.match(/\n\d+\. \*\*Compare\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0].replace(/\s+/g, " ") ?? "";
+  assert.match(step, /`ask_user`/);
+  assert.match(step, /roster/);
+  assert.match(step, /research/);
+  assert.match(step, /conflict/);
+  assert.ok(step.length < 400, "one short line");
   assert.ok(!all.includes("Needs a decision:"), "the old 'end your result with Needs a decision:' hack is replaced by the tool");
 });
 

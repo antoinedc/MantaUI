@@ -152,3 +152,21 @@ Spec: `docs/superpowers/specs/2026-11-24-research-library.md`. Not in the first 
   a hit rate).
 - **Event-driven staleness.** Entries go stale by date only; a change-log feed (a core update, a platform release) could
   mark entries stale early.
+
+## `ask_user` — follow-ups (first version shipped 2026-11-24)
+
+Spec: `docs/superpowers/specs/2026-11-24-ask-user-tool.md`. Not in the first version:
+
+- **No question card.** The result card shows the server-written block as text; a card with the options as buttons (and the
+  answer sent back to the task) is the natural next step.
+- **Built-in agents on existing boxes keep their old files.** Templates are copied once, so the Architect and Manta files of
+  a box that already has them keep the old wording until the planned built-in self-update; the lead brief text, the task
+  guidance and the tool itself arrive with the server release.
+- **A task that asked after it proposed.** An Architect that calls `ask_user` after `agent_propose` ends "needs a decision",
+  so its proposals wait (reason: the task didn't finish cleanly) until the continued round finishes.
+- **Only the lead continues the task.** The answer goes back via `continueJob`, so it needs the lead's own chat; a task
+  started another way (a routine, an agent's own chat) can't ask yet. A question nobody answers just stays on the finished task.
+- **One question per task.** A second `ask_user` in the same task replaces the first; a task that needs several decisions
+  should ask them in one call or across rounds.
+- **A task that asked and kept working.** The tool tells the model to stop; the server only makes the question decide the
+  outcome, it doesn't interrupt the turn.
