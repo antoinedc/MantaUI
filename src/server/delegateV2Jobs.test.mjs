@@ -3158,3 +3158,44 @@ test("Architect outcome: what the agents engine returns when the job ends is in 
   assert.equal(w.calls.synth.length, 3);
   assert.ok(!w.calls.synth.at(-1).body.text.includes("Outcome:"));
 });
+
+// ---------------------------------------------------------------------------
+// the research library (docs/superpowers/specs/2026-11-24-research-library.md): every specialist may research
+// ---------------------------------------------------------------------------
+const RESEARCH_TOOLS = ["research_fetch", "research_read", "research_search", "research_library_find", "research_library_save"];
+const hasResearch = (rules) => RESEARCH_TOOLS.every((t) => rules.some((r) => r.permission === t && r.pattern === "*" && r.action === "allow"));
+
+test("research tools: the read-only and worktree rulesets allow research and the library, after the catch-all deny", () => {
+  for (const rules of [buildReadOnlyAgentRuleset({ home: "/h" }), buildWorktreeAgentRuleset({ home: "/h" })]) {
+    assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" });
+    assert.ok(hasResearch(rules));
+    for (const t of RESEARCH_TOOLS) assert.ok(ruleAt(rules, t, "*", "allow") > 0, `${t} sits under the deny`);
+    assert.equal(rules.some((r) => r.permission === "agent_propose"), false, "agent_propose stays the Architect's");
+  }
+});
+
+test("research tools: a launched specialist job — read-only, worktree, or with an approval-edited grant list — carries them; the base is persisted with them", async () => {
+  const ro = specialistWorld();
+  const roId = await start(ro, autonomyInput(ro, { isolation: "none" }));
+  assert.ok(hasResearch(ro.job(roId).permission));
+  assert.ok(hasResearch(ro.job(roId).basePermission));
+  const wt = specialistWorld();
+  const wtId = await start(wt, autonomyInput(wt));
+  assert.ok(hasResearch(wt.job(wtId).permission));
+  // the approval card's edited grants arrive as `permission` (startJobWithApproval): research still rides along, under the deny
+  const edited = specialistWorld();
+  const edId = await start(edited, autonomyInput(edited, { permission: [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }] }));
+  const rules = edited.job(edId).permission;
+  assert.ok(hasResearch(rules));
+  assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" });
+  assert.ok(ruleAt(rules, "bash", "**", "allow") > 0);
+  assert.deepEqual(rules.at(-1), q);
+});
+
+test("research tools: the Architect's ruleset also allows the library tools, and still denies bash, edit and webfetch last", () => {
+  const rules = buildArchitectRuleset({ policy: BAL, agentDir: ARCH_DIR, home: HOME, sessionID: "ses_child1" });
+  assert.ok(hasResearch(rules));
+  assert.ok(ruleAt(rules, "agent_propose", "*", "allow") > 0);
+  const lastAllow = rules.map((r) => r.action).lastIndexOf("allow");
+  for (const t of ["bash", "edit", "write", "patch", "webfetch"]) assert.ok(ruleAt(rules, t, "*", "deny") > lastAllow, t);
+});

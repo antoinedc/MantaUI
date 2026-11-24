@@ -18,7 +18,7 @@ const reply = (status, headers, body) => {
   return { status, headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])), body: buf, bytes: buf.length };
 };
 
-async function fixture({ routes = {}, bound = true, extras = [], secrets = [], exec, now } = {}) {
+async function fixture({ routes = {}, bound = true, architect = true, extras = [], secrets = [], exec, now } = {}) {
   const base = await mkdtemp(join(tmpdir(), "research-test-"));
   const calls = [];
   const hop = async (req) => {
@@ -31,7 +31,7 @@ async function fixture({ routes = {}, bound = true, extras = [], secrets = [], e
   const engine = createResearchEngine({
     bind: async (b, tool) => {
       binds.push({ b, tool });
-      return bound === true ? { childSessionID: b.sessionID } : { refused: bound };
+      return bound === true ? { childSessionID: b.sessionID, architect } : { refused: bound };
     },
     root: join(base, "research"),
     agentHome: join(base, "home"),
@@ -800,5 +800,52 @@ test("store sweep: sessions untouched for 30 days go; over the cap the OLDEST se
     assert.equal((await readFile(join(f.root, "ses_b", "src_0000000000000001.json"), "utf-8")).length, 1000);
   } finally {
     await f.cleanup();
+  }
+});
+
+// ---- every specialist may research; the extra sources stay the Architect's ----
+
+test("a specialist (not the Architect) can fetch, read and search the base sources, but never an extra source: it isn't offered and nothing runs", async () => {
+  let ran = 0;
+  const f = await fixture({
+    architect: false,
+    extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }],
+    exec: async () => ((ran += 1), { stdout: "secret forum text" }),
+    routes: {
+      "https://example.com/": reply(200, { "content-type": "text/html" }, html("<p>Hello</p>")),
+      "https://hn.algolia.com/api/v1/search?query=agents&tags=story&hitsPerPage=10": reply(200, { "content-type": "application/json" }, JSON.stringify({ hits: [{ title: "T", url: "https://t.example", points: 3, num_comments: 1, objectID: "1" }] })),
+    },
+  });
+  try {
+    const page = await f.engine.fetch(call({ url: "https://example.com/" }));
+    assert.equal(page.ok, true);
+    assert.equal((await f.engine.read(call({ sourceId: page.sourceId }))).ok, true);
+    assert.equal((await f.engine.search(call({ source: "hn", query: "agents" }))).ok, true);
+    const extra = await f.engine.search(call({ source: "bookface", query: "agents" }));
+    assert.equal(extra.ok, false);
+    assert.match(extra.error, /Unknown source "bookface"\. Available: hn, arxiv, reddit, x, github$/);
+    assert.equal(ran, 0, "the extra source's command never ran");
+    assert.deepEqual(f.binds.map((b) => b.tool), ["research_fetch", "research_read", "research_search", "research_search"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a binding that does not say the caller is the Architect never reaches an extra source", async () => {
+  let ran = 0;
+  const base = await mkdtemp(join(tmpdir(), "research-test-"));
+  try {
+    const engine = createResearchEngine({
+      bind: async (b) => ({ childSessionID: b.sessionID }),
+      root: join(base, "research"),
+      extraSources: async () => [{ id: "bf", name: "n", description: "d", command: ["yc", "{query}"], private: true }],
+      exec: async () => ((ran += 1), { stdout: "x" }),
+      log: { warn: () => {} },
+    });
+    const r = await engine.search(call({ source: "bf", query: "agents" }));
+    assert.equal(r.ok, false);
+    assert.equal(ran, 0);
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });
