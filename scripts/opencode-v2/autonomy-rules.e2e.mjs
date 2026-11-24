@@ -15,6 +15,12 @@
 // one, and cannot read another session's, write or delete any, or read one with the read tool. Also records the exact error text the model receives
 // (the string src/server/autonomy.mjs matches to call a tool failure "blocked").
 //
+// Agents Phase 5A (the Architect), same binary: with the REAL `buildArchitectRuleset` a task can call `research_fetch`, and
+// bash (including `cat ~/.manta-secrets/x`), write, edit, webfetch and a plugin tool outside its allow list are refused,
+// secrets stay denied even to read / search; and with only the COMPILED agent block (`buildAgentBlock`, a native unstamped
+// invocation) it can read but not run commands or call plugin tools — which proves that the order of rules inside `permission`
+// is rule order on this binary (the catch-all deny first), the property the engine relies on.
+//
 // SAFETY: sandbox only (sandbox.mjs: own port, random password, own HOME/XDG). The live opencode (:4096) and
 // manta-server (:8787) are never contacted.
 
@@ -25,7 +31,8 @@ import { ensureBinary } from "./fetch-binary.mjs";
 import { startSandbox } from "./sandbox.mjs";
 import { startMockAnthropic } from "./mock-anthropic.mjs";
 import { jobRules, DENIAL_TEXT_RE } from "../../src/server/autonomy.mjs";
-import { buildReadOnlyAgentRuleset, buildWorktreeAgentRuleset, normalizeJobRuleset, mintSessionId } from "../../src/server/delegate.mjs";
+import { buildReadOnlyAgentRuleset, buildWorktreeAgentRuleset, buildArchitectRuleset, normalizeJobRuleset, mintSessionId } from "../../src/server/delegate.mjs";
+import { buildAgentBlock } from "../../src/server/agents.mjs";
 import { MODES } from "../../src/shared/autonomyShared.mjs";
 import { projectPatterns, validateEntry } from "../../src/server/projectActions.mjs";
 
@@ -83,21 +90,34 @@ try {
   }
   process.env.PATH = `${bin}:${process.env.PATH}`;
 
+  // the Architect's compiled agent blocks are written into the sandbox config once its root is known (`onRoot`)
+  const sbConfig = { provider: { anthropic: { options: { baseURL: `${mock.url}/v1`, apiKey: "mock" } } }, agent: {} };
+  const sbFiles = [
+    { path: "home/.manta/auth.json", content: '{"token":"FIXTURE-SECRET"}\n' },
+    { path: "home/.manta/config.json", content: '{"fixture":"FIXTURE-SECRET"}\n' },
+    { path: "home/.manta/agents/dev/skills/x/SKILL.md", content: "AGENT-FOLDER-OK\n" },
+    { path: "home/.manta/notes.txt", content: "OTHER-MANTA-FILE\n" },
+    { path: "home/.config/opencode/probe.jsonc", content: '{"fixture":"FIXTURE-SECRET"}\n' },
+    { path: "home/.manta-secrets/SHARED_KEY", content: "SHARED-SECRET-VALUE\n" },
+    { path: `home/.manta-secrets/sessions/${OWN_ID}/OWN_KEY`, content: "OWN-SECRET-VALUE\n" },
+    { path: `home/.manta-secrets/sessions/${OTHER_ID}/OTHER_KEY`, content: "OTHER-SECRET-VALUE\n" },
+  ];
   sb = await startSandbox({
     binary: await ensureBinary({ log: (m) => console.log(`[binary] ${m}`) }),
-    config: { provider: { anthropic: { options: { baseURL: `${mock.url}/v1`, apiKey: "mock" } } } },
+    config: sbConfig,
+    onRoot: (root) => {
+      const sbHome = join(root, "home");
+      const meta = { description: "Architect probe", model: null, role: "architect" };
+      const real = buildAgentBlock({ dir: join(sbHome, ".manta/agents/architect"), meta, home: sbHome });
+      sbConfig.agent["agent-architect"] = { ...real, prompt: "You are the Architect probe." };
+      // the SAME rules with the catch-all deny moved LAST: if rule order did not matter on this binary these two would behave alike
+      const { "*": star, ...rest } = real.permission;
+      sbConfig.agent["agent-architect-reordered"] = { ...real, prompt: "You are the reordered probe.", permission: { ...rest, "*": star } };
+      sbFiles.push({ path: "home/.manta/agents/architect/skills/x/SKILL.md", content: "ARCH-FOLDER-OK\n" });
+    },
     plugins: [PLUGIN_DIR],
     env: { ANTHROPIC_API_KEY: "mock", MANTA_SERVER_URL: "http://127.0.0.1:9", MANTA_BOX_TOKEN: "ef12".repeat(8) },
-    files: [
-      { path: "home/.manta/auth.json", content: '{"token":"FIXTURE-SECRET"}\n' },
-      { path: "home/.manta/config.json", content: '{"fixture":"FIXTURE-SECRET"}\n' },
-      { path: "home/.manta/agents/dev/skills/x/SKILL.md", content: "AGENT-FOLDER-OK\n" },
-      { path: "home/.manta/notes.txt", content: "OTHER-MANTA-FILE\n" },
-      { path: "home/.config/opencode/probe.jsonc", content: '{"fixture":"FIXTURE-SECRET"}\n' },
-      { path: "home/.manta-secrets/SHARED_KEY", content: "SHARED-SECRET-VALUE\n" },
-      { path: `home/.manta-secrets/sessions/${OWN_ID}/OWN_KEY`, content: "OWN-SECRET-VALUE\n" },
-      { path: `home/.manta-secrets/sessions/${OTHER_ID}/OTHER_KEY`, content: "OTHER-SECRET-VALUE\n" },
-    ],
+    files: sbFiles, // (onRoot adds the Architect's skill file to this same array before anything is written)
   });
   process.env.MANTA_OPENCODE_PASSWORD = sb.password;
   oc._setApiBase(sb.url);
@@ -310,6 +330,59 @@ try {
   check("climbing out of its own folder with `..` is denied", denied(sec[12]) && !leakedOther(sec[12]), outcome(sec[12]));
   check("the bare ~/.manta-secrets folder is denied", denied(sec[13]), outcome(sec[13]));
   check("Manta's protected files are still denied", denied(sec[14]) && !leakedOther(sec[14]), outcome(sec[14]));
+
+  // ===== the Architect (Agents Phase 5A): its job ruleset, and the compiled block on its own =====
+  const ARCH_DIR = join(home, ".manta/agents/architect");
+  /** One scripted call in a fresh session on `agent`; the rules are the job's (or none: a native, unstamped invocation). */
+  async function archCall(call, { agent = "agent-architect", job = true } = {}) {
+    SCRIPT = [call];
+    const sessionId = mintSessionId();
+    const rules = job ? normalizeJobRuleset(buildArchitectRuleset({ policy: balanced, agentDir: ARCH_DIR, home, projectPatterns: [], sessionID: sessionId })) : undefined;
+    const sess = await oc.createSession({ id: sessionId, directory: cwd, agent, model: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, ...(rules ? { permission: rules } : {}), title: "architect probe" });
+    await api("POST", `/api/session/${sess.id}/prompt`, { text: "go" });
+    await Promise.race([api("POST", `/api/experimental/session/${sess.id}/wait`), new Promise((_, rej) => setTimeout(() => rej(new Error("turn timed out")), 90_000))]);
+    const msgs = await oc.listMessages(sess.id, { limit: 200 });
+    const part = msgs.flatMap((m) => m.parts ?? []).find((p) => p.type === "tool");
+    return { part, offered: [...offered], toolFor: (re) => offered.find((n) => re.test(n)) };
+  }
+  // a tool the rules take away is either never offered to the model or its call is denied — never run
+  const stopped = (r, re) => !r.toolFor(re) || denied(r.part);
+  const S2 = `${home}/.manta-secrets`;
+
+  const aBash = await archCall(bash("echo hi >> /tmp/architect-probe-ran"));
+  check("Architect job: bash is refused", stopped(aBash, /^(bash|shell)$/i), outcome(aBash.part));
+  const aSecret = await archCall(bash(`cat ${S2}/SHARED_KEY`));
+  check("Architect job: `cat ~/.manta-secrets/SHARED_KEY` is refused, and no value is read", stopped(aSecret, /^(bash|shell)$/i) && !String(aSecret.part?.state?.output ?? "").includes("SHARED-SECRET-VALUE"), outcome(aSecret.part));
+  const aWrite = await archCall(file(/^write$/i, { path: join(cwd, "architect-wrote.txt"), content: "x" }));
+  check("Architect job: write is refused and no file appears", stopped(aWrite, /^write$/i) && !(await readFile(join(cwd, "architect-wrote.txt"), "utf8").then(() => true, () => false)), outcome(aWrite.part));
+  const aEdit = await archCall(file(/^edit$/i, { filePath: join(cwd, "deploy.sh"), oldString: "deploy", newString: "x" }));
+  check("Architect job: edit is refused and the file is unchanged", stopped(aEdit, /^edit$/i) && (await readFile(join(cwd, "deploy.sh"), "utf8")).includes("echo deploy"), outcome(aEdit.part));
+  const aWebfetch = await archCall(file(/^webfetch$/i, { url: "https://example.com/", format: "text" }));
+  check("Architect job: webfetch is refused (it reads through research_fetch)", stopped(aWebfetch, /^webfetch$/i), outcome(aWebfetch.part));
+  const aServe = await archCall(file(/serve_page$/, { subdomain: "probe", filePath: join(cwd, "deploy.sh") }));
+  check("Architect job: a plugin tool outside its allow list (serve_page) is refused", stopped(aServe, /serve_page$/), outcome(aServe.part));
+  const aSecRead = await archCall(file(/^read$/i, { path: `${S2}/SHARED_KEY` }));
+  check("Architect job: ~/.manta-secrets is denied even to read", denied(aSecRead.part) && !String(aSecRead.part?.state?.output ?? "").includes("SHARED-SECRET-VALUE"), outcome(aSecRead.part));
+  const aGrep = await archCall(file(/^grep$/i, { pattern: "SHARED", path: S2 }));
+  check("…and to search", !String(aGrep.part?.state?.output ?? "").includes("SHARED-SECRET-VALUE") && (stopped(aGrep, /^grep$/i) || denied(aGrep.part) || /No files found|0 match/i.test(String(aGrep.part?.state?.output ?? ""))), outcome(aGrep.part));
+  const aOwn = await archCall(file(/^read$/i, { path: join(ARCH_DIR, "skills/x/SKILL.md") }));
+  check("Architect job: its own folder (skills) stays readable", aOwn.part?.state?.status === "completed" && String(aOwn.part.state.output).includes("ARCH-FOLDER-OK"), outcome(aOwn.part));
+  const aFetch = await archCall(file(/research_fetch$/, { url: "https://example.com/" }));
+  console.log(`  [info] research_fetch (dead manta-server) → offered: ${j(aFetch.offered.filter((n) => /research_/.test(n)))}; call: ${outcome(aFetch.part)}`);
+  check("Architect job: research_fetch is offered and callable (the tool answers; the rules do not deny it)", !!aFetch.toolFor(/research_fetch$/) && aFetch.part?.state?.status === "completed" && !denied(aFetch.part), outcome(aFetch.part));
+  const aProp = await archCall(file(/agent_propose$/, { action: "create", draft: {}, summary: "s", evidence: [], admission: [] }));
+  check("Architect job: agent_propose is offered (the server decides whether the call is its own)", !!aProp.toolFor(/agent_propose$/) && !denied(aProp.part), outcome(aProp.part));
+
+  // the compiled block alone: a native invocation (OpenCode's own picker, a `task` naming it) with NO job ruleset
+  const nBash = await archCall(bash("echo native"), { job: false });
+  check("native Architect (compiled block only): bash is refused", stopped(nBash, /^(bash|shell)$/i), outcome(nBash.part));
+  const nServe = await archCall(file(/serve_page$/, { subdomain: "probe", filePath: join(cwd, "deploy.sh") }), { job: false });
+  check("native Architect: a plugin tool outside the block's allow list is refused", stopped(nServe, /serve_page$/), outcome(nServe.part));
+  const nRead = await archCall(file(/^read$/i, { path: join(cwd, "deploy.sh") }), { job: false });
+  check("native Architect: it can still read", nRead.part?.state?.status === "completed" && String(nRead.part.state.output).includes("echo deploy"), outcome(nRead.part));
+  const nRev = await archCall(file(/^read$/i, { path: join(cwd, "deploy.sh") }), { agent: "agent-architect-reordered", job: false });
+  console.log(`  [info] same rules, catch-all deny LAST → read offered: ${!!nRev.toolFor(/^read$/i)}; ${outcome(nRev.part)}`);
+  check("rule ORDER inside `permission` matters on this binary: with the catch-all deny last, even read is refused", stopped(nRev, /^read$/i), outcome(nRev.part));
 } catch (e) {
   check("probe ran to completion", false, e?.stack ?? String(e));
 } finally {

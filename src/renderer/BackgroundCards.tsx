@@ -18,7 +18,8 @@
 import { memo, useCallback, useId, useState } from "react";
 import { useStore } from "./store";
 import { usePackageAgents } from "./packageAgents";
-import { leadDisplayName, packageAgentDisplayName } from "./agentDispatch";
+import { ARCHITECT_AGENT_KEY, leadDisplayName, packageAgentDisplayName } from "./agentDispatch";
+import { ArchitectChanges } from "./ArchitectChanges";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
 import {
@@ -403,6 +404,8 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         </p>
       )}
       {error && <ErrorLine message={error} />}
+      {/* Phase 5A: what an Architect task proposed, as cards (by this job's id) */}
+      {jobId && part.agent === ARCHITECT_AGENT_KEY && <ArchitectChanges jobId={jobId} />}
     </div>
   );
 });

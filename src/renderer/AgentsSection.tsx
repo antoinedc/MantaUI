@@ -35,6 +35,38 @@ function AgentRow({
   const isLead = agent.role === "lead" && !invalid;
   const noticeId = useId();
   const showNotice = !!agent.notice;
+  // The Architect works through tasks only (Phase 5A): there is no direct chat to open, so its row is a label, not a button
+  if (agent.role === "architect" && !invalid) {
+    return (
+      <>
+        <div
+          data-rail-row=""
+          data-testid="agent-row"
+          data-slug={agent.slug}
+          aria-describedby={showNotice ? noticeId : undefined}
+          title={`${agent.description || agent.name} Ask Manta to build or improve an agent; the Architect does it as a task.`}
+          className={`${ROW_CLASS} cursor-default`}
+        >
+          <span
+            aria-hidden="true"
+            className="flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-sm bg-fill-hover text-micro font-semibold text-text"
+            style={agent.color ? { backgroundColor: agent.color, color: "#fff" } : undefined}
+          >
+            {agentInitial(agent)}
+          </span>
+          <span className="flex-1 min-w-0 truncate text-label font-medium text-text">{agent.name || agent.slug}</span>
+          <Tag size="sm" title="Works through tasks Manta hands it; ask Manta to build or improve an agent">
+            via Manta
+          </Tag>
+        </div>
+        {showNotice && (
+          <p id={noticeId} data-testid="agent-notice" className="m-0 px-[var(--row-px)] pb-1 text-micro text-text-faint">
+            {agent.notice}
+          </p>
+        )}
+      </>
+    );
+  }
   return (
     <>
       <button

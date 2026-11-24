@@ -2879,6 +2879,8 @@ export function buildHandlers({
     "agents:open-chat": (input) => agentsCall("open-chat", (a) => a.openChat(input)),
     // Phase 4 (Manta creates and edits agents): the card's lookup and its three buttons. A refusal is a sentence (AgentError).
     "agents:change-for": (input) => agentsCall("change-for", (a) => a.forCall(input)),
+    // Phase 5A: the records an Architect job proposed — by the delegate job id shown on the result card
+    "agents:changes-for-job": (input) => agentsCall("changes-for-job", (a) => a.changesForJob(input)),
     "agents:change-apply": (input) => agentsCall("change-apply", (a) => a.apply(changeIdOf(input))),
     "agents:change-discard": (input) => agentsCall("change-discard", (a) => a.discard(changeIdOf(input))),
     "agents:change-undo": (input) => agentsCall("change-undo", (a) => a.undo(changeIdOf(input))),

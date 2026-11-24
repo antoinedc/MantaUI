@@ -577,7 +577,7 @@ test("parseAgentMd: role, use_when and not_for — valid, trimmed, too long, wro
 
 test("every shipped template parses; the lead one is role lead, Dev carries its routing lines", async () => {
   const dirs = (await readdir(REAL_TEMPLATES, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
-  assert.deepEqual(dirs.sort(), ["dev", "manta"]);
+  assert.deepEqual(dirs.sort(), ["architect", "dev", "manta"]);
   for (const d of dirs) {
     const r = parseAgentMd(await readFile(join(REAL_TEMPLATES, d, "agent.md"), "utf-8"));
     assert.equal(r.ok, true, `${d}: ${r.error}`);
@@ -1370,9 +1370,9 @@ test("dispatch: a settings read failure refuses before anything starts", async (
 // Phase 4: Manta creates and edits agents (agent_change)
 // ---------------------------------------------------------------------------
 
-test("buildLeadBrief: the mechanics tell the lead to call agent_change directly (byte-stable line)", () => {
+test("buildLeadBrief: the mechanics send a new agent to @architect and keep agent_change for small dictated edits (byte-stable line)", () => {
   const a = buildLeadBrief({ body: "B", roster: [] });
-  assert.ok(a.includes("- To create an agent or change one (including yourself), call `agent_change` directly; don't ask first in words — the user approves on the card when their settings require it."));
+  assert.ok(a.includes("- For a new agent or a substantial rework, agree a short charter with the user (job, trigger, never-do, edits code or not), then hand it to @architect. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words — the user approves on the card when their settings require it."));
   assert.ok(a.includes("leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created."));
   assert.equal(a, buildLeadBrief({ body: "B", roster: [] }));
 });

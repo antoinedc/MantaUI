@@ -4,6 +4,10 @@
 // change, with the buttons its state allows. Every press awaits the box and says what happened — a new chip, a short
 // line, or the box's own sentence when it refuses (AGENTS.md "never stub a control").
 //
+// Phase 5A: the record-driven part is `AgentChangeView` (exported), so an Architect job's result card can draw the records
+// its task proposed — the same buttons and behaviour, plus the Architect's summary, its evidence and the rules it
+// considered, the held / applying states, and the source blocks of a change to the Architect itself.
+//
 // Freshness: the card subscribes to the `agentChange` bus kind BEFORE its first read, fetches the record by the call's
 // tuple when the tool part settles, on every hint for it and after a reconnect. A read that lands after a newer one
 // (or after the user's own press) never rolls the card back.
@@ -22,9 +26,13 @@ import {
   agentChangeOutcome,
   agentChangeReason,
   agentChangeTitle,
+  architectSourceBlocks,
   DIFF_COLLAPSE_ROWS,
   diffRows,
+  evidenceLines,
+  isArchitectChange,
   parseAgentMdView,
+  verdictLabel,
   type AgentChangeAction,
   type DiffRow,
 } from "./agentChange";
@@ -128,17 +136,149 @@ function UpdateView({ change }: { change: AgentChange }) {
   );
 }
 
-function RecordView({
-  change,
-  busy,
-  notice,
-  onPress,
-}: {
-  change: AgentChange;
-  busy: AgentChangeAction | null;
-  notice: Notice | null;
-  onPress: (action: AgentChangeAction) => void;
-}) {
+function Spinner() {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block w-2.5 h-2.5 shrink-0 rounded-full border-2 border-accent/35 border-t-accent-tx animate-spin motion-reduce:animate-none"
+    />
+  );
+}
+
+/** An evidence link: opens through the app (a plain anchor would be swallowed by the window handler), and says so when it can't. */
+function EvidenceLink({ url, onError }: { url: string; onError: (message: string) => void }) {
+  return (
+    <a
+      href={url}
+      rel="noopener noreferrer"
+      className="text-accent-tx hover:underline break-all"
+      onClick={(e) => {
+        e.preventDefault();
+        Promise.resolve(window.api.openExternal(url)).catch(() => onError("Couldn't open the link. The address is shown above to copy."));
+      }}
+    >
+      {url}
+    </a>
+  );
+}
+
+function EvidenceSection({ change }: { change: AgentChange }) {
+  const lines = evidenceLines(change.evidence);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  if (lines.length === 0) return null;
+  return (
+    <details data-testid="agent-change-evidence">
+      <summary className="cursor-pointer text-text-muted">Evidence ({lines.length})</summary>
+      <ul className="m-0 mt-2 list-none p-0 flex flex-col gap-2">
+        {lines.map((e, i) => (
+          <li key={i} className="flex flex-col gap-1 break-words" data-testid="agent-change-evidence-item">
+            <span className="text-text">{e.claim}</span>
+            {e.isPrivate ? (
+              <span className="text-text-faint">Private source</span>
+            ) : (
+              <>
+                {e.quote && <blockquote className="m-0 border-l-2 border-border pl-2 text-text-muted">{e.quote}</blockquote>}
+                {e.url && <EvidenceLink url={e.url} onError={setLinkError} />}
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+      {linkError && (
+        <div role="alert" className="mt-1 text-danger break-words" data-testid="agent-change-link-error">
+          {linkError}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function AdmissionSection({ change }: { change: AgentChange }) {
+  const rules = change.admission ?? [];
+  if (rules.length === 0) return null;
+  return (
+    <details data-testid="agent-change-admission">
+      <summary className="cursor-pointer text-text-muted">Rules considered ({rules.length})</summary>
+      <ul className="m-0 mt-2 list-none p-0 flex flex-col gap-2">
+        {rules.map((r, i) => (
+          <li key={i} className="flex flex-col gap-1 break-words" data-testid="agent-change-admission-item" data-verdict={r.verdict}>
+            <span className="flex items-baseline gap-2 min-w-0">
+              <Pill tone={r.verdict === "excluded" ? "neutral" : r.verdict === "general" ? "ok" : "accent"}>{verdictLabel(r.verdict)}</Pill>
+              <span className="text-text">{r.rule}</span>
+            </span>
+            <span className="text-text-muted">{r.why}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/** Under the diff of a change to the Architect: what each added, changed or removed extra source does, and what it can reach. */
+function SourceBlocks({ change }: { change: AgentChange }) {
+  const blocks = isArchitectChange(change) ? architectSourceBlocks(change.before, change.after) : [];
+  if (blocks.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2" data-testid="agent-change-sources">
+      {blocks.map((b) => (
+        <div key={b.id} className="rounded-md bg-bg px-3 py-2 flex flex-col gap-1 break-words" data-testid="agent-change-source" data-change={b.change}>
+          <div className="text-text font-medium">
+            {b.change === "added" ? "New source" : b.change === "changed" ? "Changed source" : "Removed source"}: {b.name}
+          </div>
+          <code className="font-mono text-text-muted whitespace-pre-wrap break-all">{b.runs}</code>
+          {b.change !== "removed" && <div className="text-text-muted">{b.line}</div>}
+          {b.secrets.length > 0 && <div className="text-text-muted">Uses the secret{b.secrets.length === 1 ? "" : "s"}: {b.secrets.join(", ")}</div>}
+          {b.note && <div className="text-text-faint">{b.note}</div>}
+          {b.warning && (
+            <div className="text-warn" data-testid="agent-change-source-warning">
+              {b.warning}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The card for one change record, drawn from the record alone. Its buttons call the box and await the answer; the new
+ * record goes to `onChange` (the owner of the record replaces it), and the line saying what happened shows here.
+ */
+export function AgentChangeView({ change, onChange }: { change: AgentChange; onChange: (next: AgentChange) => void }) {
+  const [busy, setBusy] = useState<AgentChangeAction | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const press = async (action: AgentChangeAction) => {
+    if (busy) return;
+    setBusy(action);
+    setNotice(null);
+    try {
+      const next =
+        action === "apply"
+          ? await window.api.agentsChangeApply(change.id)
+          : action === "discard"
+            ? await window.api.agentsChangeDiscard(change.id)
+            : await window.api.agentsChangeUndo(change.id);
+      if (!alive.current) return;
+      if (!next) throw new Error("The box didn't answer. Check the card again in a moment.");
+      onChange(next);
+      const outcome = agentChangeOutcome(action, next);
+      // The new chip says it; add the short line only when it ended where the press aimed (a refusal says why instead).
+      setNotice(next.state === outcome.state ? { tone: "ok", text: outcome.text, state: next.state } : null);
+    } catch (e) {
+      if (alive.current) setNotice({ tone: "error", text: errText(e), state: change.state });
+    } finally {
+      if (alive.current) setBusy(null);
+    }
+  };
+
   const chip = agentChangeChip(change);
   const reason = agentChangeReason(change);
   const actions = agentChangeActions(change.state);
@@ -178,7 +318,7 @@ function RecordView({
                   tone={action === "apply" && change.state === "pending" ? "primary" : "default"}
                   loading={busy === action}
                   disabled={anyBusy}
-                  onClick={() => onPress(action)}
+                  onClick={() => void press(action)}
                 >
                   {agentChangeButtonLabel(action, change, busy === action)}
                 </Button>
@@ -188,12 +328,31 @@ function RecordView({
         }
       >
         <div className="flex flex-col gap-2">
+          {change.summary && (
+            <p className="m-0 text-text break-words" data-testid="agent-change-summary">
+              {change.summary}
+            </p>
+          )}
           {reason && (
             <div className="text-warn" data-testid="agent-change-reason">
               {reason}
             </div>
           )}
+          {change.state === "held" && (
+            <div className="text-text-muted" data-testid="agent-change-held">
+              The Architect is still working
+            </div>
+          )}
+          {change.state === "applying" && (
+            <div className="flex items-center gap-2 text-text-muted" data-testid="agent-change-applying">
+              <Spinner />
+              <span>Applying…</span>
+            </div>
+          )}
+          <EvidenceSection change={change} />
+          <AdmissionSection change={change} />
           {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
+          <SourceBlocks change={change} />
           {sentence && change.state !== "applied" && (
             <div className="text-warn break-words" role={needsAttention ? "alert" : undefined} data-testid="agent-change-error">
               {sentence}
@@ -231,8 +390,6 @@ export const AgentChangeCard = memo(function AgentChangeCard({ part }: { part: O
   const [record, setRecord] = useState<AgentChange | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<AgentChangeAction | null>(null);
-  const [notice, setNotice] = useState<Notice | null>(null);
 
   const recordRef = useRef<AgentChange | null>(null);
   recordRef.current = record;
@@ -300,32 +457,8 @@ export const AgentChangeCard = memo(function AgentChangeCard({ part }: { part: O
     void fetchRecord();
   }, [settled, fetchRecord]);
 
-  const press = async (action: AgentChangeAction) => {
-    const have = recordRef.current;
-    if (!have || busy) return;
-    setBusy(action);
-    setNotice(null);
-    try {
-      const next =
-        action === "apply"
-          ? await window.api.agentsChangeApply(have.id)
-          : action === "discard"
-            ? await window.api.agentsChangeDiscard(have.id)
-            : await window.api.agentsChangeUndo(have.id);
-      if (!alive.current) return;
-      if (!next) throw new Error("The box didn't answer. Check the card again in a moment.");
-      take(next, ++tickets.current.issued, true);
-      const outcome = agentChangeOutcome(action, next);
-      // The new chip says it; add the short line only when it ended where the press aimed (a refusal says why instead).
-      setNotice(next.state === outcome.state ? { tone: "ok", text: outcome.text, state: next.state } : null);
-    } catch (e) {
-      if (alive.current) setNotice({ tone: "error", text: errText(e), state: have.state });
-    } finally {
-      if (alive.current) setBusy(null);
-    }
-  };
-
-  if (record) return <RecordView change={record} busy={busy} notice={notice} onPress={(a) => void press(a)} />;
+  // a press result always lands (it is the newest word on the record), whatever read is still in flight
+  if (record) return <AgentChangeView change={record} onChange={(next) => take(next, ++tickets.current.issued, true)} />;
 
   if (!settled) {
     return (

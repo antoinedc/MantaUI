@@ -1,5 +1,5 @@
 // Every Manta tool, in a stable order. One file per V1 tool file
-// (docs/opencode-tools/*.ts) plus the V2-only todo.ts, handoff.ts, knowledge.ts and agents.ts.
+// (docs/opencode-tools/*.ts) plus the V2-only todo.ts, handoff.ts, knowledge.ts, agents.ts and research.ts.
 
 import type { ToolDef } from "../lib/types.ts";
 import { tools as agents } from "./agents.ts";
@@ -17,6 +17,7 @@ import { tools as peers } from "./peers.ts";
 import { tools as planRender } from "./plan-render.ts";
 import { tools as plugins } from "./plugins.ts";
 import { tools as progress } from "./progress.ts";
+import { tools as research } from "./research.ts";
 import { tools as resourceSnapshot } from "./resource-snapshot.ts";
 import { tools as routines } from "./routines.ts";
 import { tools as schedule } from "./schedule.ts";
@@ -45,6 +46,7 @@ export const allTools: ToolDef[] = [
   ...planRender,
   ...plugins,
   ...progress,
+  ...research,
   ...resourceSnapshot,
   ...routines,
   ...schedule,

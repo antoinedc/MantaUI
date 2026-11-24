@@ -8,9 +8,12 @@ import {
   agentChangeOutcome,
   agentChangeReason,
   agentChangeTitle,
+  architectSourceBlocks,
   diffRows,
+  evidenceLines,
   isAgentChangePart,
   parseAgentMdView,
+  verdictLabel,
 } from "./agentChange";
 
 describe("isAgentChangePart", () => {
@@ -150,5 +153,84 @@ describe("diffRows", () => {
     const small = diffRows(numbered(7), numbered(7, { 1: "X", 7: "Y" }));
     // 5 unchanged lines: 2 + 2 + 1 → shown whole rather than as a gap of 1
     expect(small.some((r) => r.kind === "gap")).toBe(false);
+  });
+});
+
+describe("Phase 5A: held and applying, the new reasons", () => {
+  it("names held and applying; neither offers a button", () => {
+    expect(agentChangeChip({ state: "held", kind: "update" })).toEqual({ label: "Architect still working", tone: "neutral" });
+    expect(agentChangeChip({ state: "applying", kind: "create" })).toEqual({ label: "Applying…", tone: "accent" });
+    expect(agentChangeActions("held")).toEqual([]);
+    expect(agentChangeActions("applying")).toEqual([]);
+  });
+
+  it("says why a proposal needs a click: the Architect itself, an unfinished task, a plan or a mention", () => {
+    expect(agentChangeReason({ needsClick: true, reason: "core", agentName: "Architect" })).toBe("This changes the Architect itself");
+    expect(agentChangeReason({ needsClick: true, reason: "unfinished", agentName: "Dev" })).toBe("The task didn't finish — review before applying");
+    expect(agentChangeReason({ needsClick: true, reason: "plan", agentName: "Dev" })).toBe("Proposed while planning or outside a hand-off — review before applying");
+    expect(agentChangeReason({ needsClick: true, reason: "ask", agentName: "Dev" })).toBeNull();
+  });
+
+  it("labels verdicts for the rules-considered list", () => {
+    expect(verdictLabel("general")).toBe("General");
+    expect(verdictLabel("scoped")).toBe("Scoped");
+    expect(verdictLabel("excluded")).toBe("Excluded");
+  });
+
+  it("evidenceLines: a public item keeps its quote and link; a private one says so and shows only the claim", () => {
+    expect(
+      evidenceLines([
+        { claim: "Short rules help", quote: "Short rules beat long ones", url: "https://example.com/a", private: false },
+        { claim: "A founder said so", quote: null, url: null, private: true },
+      ]),
+    ).toEqual([
+      { claim: "Short rules help", quote: "Short rules beat long ones", url: "https://example.com/a", isPrivate: false },
+      { claim: "A founder said so", quote: null, url: null, isPrivate: true },
+    ]);
+  });
+
+  it("evidenceLines never trusts a link that is not http(s)", () => {
+    const [row] = evidenceLines([{ claim: "c", quote: "q", url: "javascript:alert(1)", private: false }]);
+    expect(row.url).toBeNull();
+  });
+});
+
+describe("architectSourceBlocks (the Architect card's source blocks)", () => {
+  const md = (extra = "") => `---\nname: Architect\ndescription: Builds agents.\nrole: architect\nisolation: none\n${extra}---\nBody.\n`;
+  const BF = `sources:\n  - id: bookface\n    name: YC Bookface\n    description: Private forum.\n    command: [yc, search, "{query}", --type, posts]\n    env:\n      YC_TOKEN: "{secret:YC_TOKEN}"\n`;
+  const URLSRC = `sources:\n  - id: internal\n    name: Internal\n    description: Ours.\n    private: false\n    url: "https://search.example.com/api?q={query}"\n`;
+
+  it("an added command source shows the argv with {query} marked, the secret names and the private sentence", () => {
+    const [b] = architectSourceBlocks(md(), md(BF));
+    expect(b.change).toBe("added");
+    expect(b.runs).toBe("yc search {query} --type posts");
+    expect(b.line).toMatch(/^Runs yc search \{query\} --type posts on this box with your account's access\./);
+    expect(b.secrets).toEqual(["YC_TOKEN"]);
+    expect(b.note).toMatch(/^Private: results go to the AI model and its local transcript/);
+    expect(b.warning).toBeNull();
+  });
+
+  it("a url source names the host; a public one has no privacy sentence", () => {
+    const [b] = architectSourceBlocks(md(), md(URLSRC));
+    expect(b.line).toBe("Calls search.example.com");
+    expect(b.note).toBeNull();
+  });
+
+  it("private → public is a warning on the changed source", () => {
+    const privateUrl = URLSRC.replace("    private: false\n", "");
+    const [b] = architectSourceBlocks(md(privateUrl), md(URLSRC));
+    expect(b.change).toBe("changed");
+    expect(b.warning).toBe("Private → Public: future evidence may show quotes and links");
+  });
+
+  it("nothing changed, or no sources at all, is an empty list; a removed source is listed", () => {
+    expect(architectSourceBlocks(md(BF), md(BF))).toEqual([]);
+    expect(architectSourceBlocks(md(), md())).toEqual([]);
+    expect(architectSourceBlocks(md(BF), md())[0].change).toBe("removed");
+  });
+
+  it("text that can't be read has no blocks", () => {
+    expect(architectSourceBlocks(null, "no frontmatter")).toEqual([]);
+    expect(architectSourceBlocks("x", null as never)).toEqual([]);
   });
 });

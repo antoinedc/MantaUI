@@ -1966,6 +1966,22 @@ test("agent: unknown, broken, lead and non-string values are refused with a sent
   assert.equal(w.routine(r.id).agent, "seo", "a refused update changes nothing");
 });
 
+test("agent: the Architect can't run routines yet — refused when saving, and at launch the run fails before any session is made, with no fallback", async () => {
+  const w = makeWorld();
+  w.agentsDb.set("architect", { refused: "The Architect can't run routines yet" });
+  await assert.rejects(w.make({ agent: "architect" }), /The Architect can't run routines yet/);
+  // a routine saved earlier with an agent that is NOW the Architect: the run fails, and nothing is created or sent
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" });
+  const r = await w.make({ agent: "seo" });
+  w.agentsDb.set("seo", { refused: "The Architect can't run routines yet" });
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(r.id)[0];
+  assert.equal(run.status, "failed");
+  assert.match(run.error ?? run.summary ?? "", /The Architect can't run routines yet/);
+  assert.deepEqual(w.created, [], "no session was created");
+  assert.deepEqual(w.prompts, [], "nothing was sent to the default agent either");
+});
+
 test("agent: update — omitted leaves it, null clears it, a slug sets it", async () => {
   const w = makeWorld();
   w.agentsDb.set("seo", { key: "agent-seo", seat: "" });

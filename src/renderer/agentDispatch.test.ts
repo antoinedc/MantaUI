@@ -139,3 +139,19 @@ describe("new-session @agent suggestions", () => {
     expect(insertAgentMention("ask @se", 4, 7, "seo")).toEqual({ text: "ask @seo ", caret: 9 });
   });
 });
+
+describe("the Architect (Agents Phase 5A)", () => {
+  const ARCH = agent("architect", { name: "Architect", role: "architect" });
+  const all = [MANTA, ARCH, ...AGENTS];
+  it("is a team agent: offered in the @ picker and dispatchable, next to the others; the lead still isn't", () => {
+    expect(usableAgents(all).map((a) => a.slug)).toEqual(["architect", "dev", "reviewer"]);
+    expect(matchAgents(all, "arch").map((a) => a.slug)).toEqual(["architect"]);
+    expect(pickAgentDispatch("@architect make me an agent", [], all)).toEqual({ slug: "architect" });
+  });
+  it("is never a routine agent (it works through tasks only, for now)", () => {
+    expect(routineAgents(all).map((a) => a.slug)).toEqual(["dev", "reviewer"]);
+  });
+  it("an invalid Architect row is not a team agent", () => {
+    expect(usableAgents([agent("architect", { role: "specialist", error: "Only the built-in Architect can have this role" })])).toEqual([]);
+  });
+});
