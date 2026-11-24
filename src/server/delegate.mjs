@@ -330,6 +330,9 @@ export function buildCompletionText(job) {
   } else {
     lines.push(String(job?.result ?? ""));
   }
+  // an Architect task: what the server did with each proposal, written by the server (the lead relays it, never guesses it)
+  const outcome = Array.isArray(job?.architectOutcome) ? job.architectOutcome.filter((l) => typeof l === "string" && l) : [];
+  if (outcome.length > 0) lines.push("", ...outcome);
   return lines.join("\n");
 }
 
@@ -1995,11 +1998,15 @@ async function withRunningJob(id, deps, fn, { allowPaused = false } = {}) {
 }
 
 // A job reached a final state (finished, failed, timed out or stopped by the user): the agents engine releases the
-// proposals its Architect round held. Never breaks the job's own transition.
+// proposals its Architect round held and answers with one Outcome line per proposal; those lines are stored on the record
+// BEFORE the result is built and delivered to the parent, so the parent is told what really happened. Never breaks the
+// job's own transition.
 async function notifyJobEnded(job, deps) {
   if (typeof deps.onJobEnded !== "function" || !job?.architect) return;
   try {
-    await deps.onJobEnded(job);
+    const ended = await deps.onJobEnded(job);
+    const outcome = Array.isArray(ended?.outcome) ? ended.outcome.filter((l) => typeof l === "string" && l) : [];
+    if (outcome.length > 0) await patchJob(job.id, { architectOutcome: outcome }, deps);
   } catch (e) {
     console.warn(`[delegate] onJobEnded failed for ${job.id}:`, e?.message ?? e);
   }

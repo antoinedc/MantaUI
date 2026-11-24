@@ -13,6 +13,7 @@ import {
   isArchitect,
   buildArchitectContext,
   ARCHITECT_BLOCK_PERMISSION,
+  describeProposalOutcome,
 } from "./agents.mjs";
 import { ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
 
@@ -716,6 +717,74 @@ test("release precedence 8: Auto and Tell me apply — the file, the config, dec
       await f.cleanup();
     }
   }
+});
+
+test("Outcome line: applied automatically says it is live with the user's setting and that undo is on the card", async () => {
+  for (const [level, title] of [["auto", "Auto"], ["tell", "Tell me"]]) {
+    const f = await proposeFixture({ level });
+    try {
+      await heldFor(f);
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      const lines = await f.engine.outcomeLinesForJob("job1");
+      assert.deepEqual(lines, [`Outcome: @dev was updated and is live (your setting: ${title}). Undo is on the card.`]);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("Outcome line: a create names the new agent; pending says it waits for a click and why; Never says it was discarded", async () => {
+  const f = await proposeFixture({ level: "ask" });
+  try {
+    await heldFor(f);
+    endJob(f, { status: "done" });
+    await f.engine.reconcile();
+    assert.deepEqual(await f.engine.outcomeLinesForJob("job1"), ["Outcome: @dev is waiting for your click on the card (reason: your setting for changing agents is Ask)."]);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await proposeFixture();
+  try {
+    await heldFor(g);
+    endJob(g, { status: "failed" });
+    await g.engine.reconcile();
+    assert.deepEqual(await g.engine.outcomeLinesForJob("job1"), ["Outcome: @dev is waiting for your click on the card (reason: the task didn't finish cleanly)."]);
+  } finally {
+    await g.cleanup();
+  }
+  const h = await proposeFixture({ level: "never" });
+  try {
+    await heldFor(h);
+    endJob(h, { status: "done" });
+    await h.engine.reconcile();
+    assert.deepEqual(await h.engine.outcomeLinesForJob("job1"), ["Outcome: @dev was discarded — changing agents is turned off."]);
+  } finally {
+    await h.cleanup();
+  }
+  const i = await proposeFixture();
+  try {
+    await heldFor(i);
+    assert.deepEqual(await i.engine.outcomeLinesForJob("job1"), ["Outcome: @dev has not been released yet; trust the card, not this message."], "still held");
+    assert.deepEqual(await i.engine.outcomeLinesForJob("nope"), []);
+  } finally {
+    await i.cleanup();
+  }
+});
+
+test("describeProposalOutcome: every pending reason, a failed write, a create, a click-applied change", () => {
+  const base = { slug: "cro", kind: "update", state: "pending", reason: "ask", error: null, decidedBy: null };
+  const d = (over, level = "tell") => describeProposalOutcome({ ...base, ...over }, level);
+  assert.match(d({ reason: "plan" }), /waiting for your click on the card \(reason: it was proposed in plan mode\)/);
+  assert.match(d({ reason: "lead" }), /reason: it changes the lead agent/);
+  assert.match(d({ reason: "core" }), /reason: it changes the Architect itself/);
+  assert.match(d({ reason: "isolation" }), /reason: it widens what the agent may touch/);
+  assert.match(d({ reason: "ask", error: "disk full" }), /couldn't be written \(disk full\); retry it from the card/);
+  assert.equal(d({ state: "applied", kind: "create", slug: "cro", decidedBy: "auto" }), "Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card.");
+  assert.equal(d({ state: "applied", decidedBy: "click" }), "Outcome: @cro was updated and is live (you approved it). Undo is on the card.");
+  assert.equal(d({ state: "undone" }), "Outcome: @cro was undone.");
+  assert.equal(d({ state: "expired" }), "Outcome: @cro expired before anyone clicked; it was not applied.");
+  assert.match(d({ kind: "create", slug: null, agentName: "CRO Helper", state: "discarded" }), /^Outcome: CRO Helper was discarded/);
 });
 
 test("release: a click on a pending proposal applies it as `click`; the window runs from release, not creation", async () => {

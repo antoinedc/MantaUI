@@ -21,6 +21,7 @@ import YAML from "yaml";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG, ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
+import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
 import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals, CREDENTIAL_HINT } from "../shared/architectSources.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
@@ -502,8 +503,53 @@ const MECHANICS = [
   "- For a teammate's work use `agent_handoff`, not the generic `delegate` tool; if a handoff is refused, do not retry it through `delegate`.",
   "- To send a fix round to a specialist's finished task (same branch), pass `continueJob: <jobId>`.",
   "- In plan mode, don't hand off code changes; propose them.",
-  "- For a new agent or a substantial rework, agree a short charter with the user (job, trigger, never-do, edits code or not), then hand it to @architect. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words — the user approves on the card when their settings require it. Draft complete, specific instructions in the style of the existing agents (how it works, what it never does); make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
+  "- For a new agent or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards. Draft complete, specific instructions in the style of the existing agents (how it works, what it never does); make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
+  "- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card.",
 ].join("\n");
+
+const OUTCOME_WAIT_REASONS = {
+  plan: "it was proposed in plan mode",
+  lead: "it changes the lead agent",
+  core: "it changes the Architect itself",
+  isolation: "it widens what the agent may touch",
+  unfinished: "the task didn't finish cleanly",
+};
+
+/**
+ * The one fixed sentence the server writes into an Architect task's result for each proposal, so the lead relays what
+ * actually happened instead of guessing it. Pure and deterministic. `level`: the user's CURRENT agent-change level
+ * (`auto` | `tell` | `ask` | `never`) or null when unreadable.
+ */
+export function describeProposalOutcome(rec, level = null) {
+  const who = rec?.slug ? `@${rec.slug}` : rec?.agentName || "the proposed agent";
+  const out = (text) => `Outcome: ${who} ${text}`;
+  switch (rec?.state) {
+    case "applied": {
+      const verb = rec.kind === "create" ? "created" : "updated";
+      const by = rec.decidedBy === "auto" ? (LEVEL_TITLES[level] ? ` (your setting: ${LEVEL_TITLES[level]})` : "") : rec.decidedBy === "click" ? " (you approved it)" : "";
+      return out(`was ${verb} and is live${by}. Undo is on the card.`);
+    }
+    case "pending": {
+      const reason = rec.error
+        ? `the change couldn't be written (${rec.error}); retry it from the card`
+        : rec.reason === "ask"
+          ? `your setting for changing agents is ${LEVEL_TITLES.ask}`
+          : (OUTCOME_WAIT_REASONS[rec.reason] ?? "it needs your approval");
+      return out(`is waiting for your click on the card (reason: ${reason}).`);
+    }
+    case "discarded":
+      return out(rec.error === AGENT_CHANGE_OFF ? "was discarded — changing agents is turned off." : "was discarded.");
+    case "undone":
+      return out("was undone.");
+    case "expired":
+      return out("expired before anyone clicked; it was not applied.");
+    case "held":
+    case "applying":
+      return out("has not been released yet; trust the card, not this message.");
+    default:
+      return out("could not be applied; see the card.");
+  }
+}
 
 /**
  * The text appended to the system prompt of a led chat (spec §4): the lead's own instructions, the roster as ONE
@@ -1468,6 +1514,22 @@ export function createAgentsEngine({
     if (!jobId) return [];
     const list = (await readChanges()).filter((r) => r.origin?.kind === "job" && r.origin.jobId === jobId);
     return list.sort((a, b) => a.createdAt - b.createdAt).map((r) => wire(isExpired(r) ? expiredCopy(r) : r));
+  }
+
+  /**
+   * The Outcome lines for an Architect task's result (one per proposal, oldest first), from the records as they are NOW.
+   * Call after `reconcile()` so a released proposal reads as released. `[]` when the task proposed nothing.
+   */
+  async function outcomeLinesForJob(jobId) {
+    const recs = await changesForJob(jobId);
+    if (recs.length === 0) return [];
+    let level = null;
+    try {
+      level = autonomy.decide("agent_change", await autonomyPolicy());
+    } catch {
+      level = null;
+    }
+    return recs.map((r) => describeProposalOutcome(r, level));
   }
 
   /** `{ dir, file, entry }` of a real agent folder directly under a real agents root — null when anything about it is not what a scan found. */
@@ -2474,6 +2536,7 @@ export function createAgentsEngine({
     change,
     forCall,
     changesForJob,
+    outcomeLinesForJob,
     propose,
     bindArchitect,
     reconcile,

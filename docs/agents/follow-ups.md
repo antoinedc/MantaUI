@@ -118,3 +118,11 @@ missing around it:
   a 10-searches-a-minute limit. Adding a `GITHUB_TOKEN` shared secret enables the SKILL.md code search.
 - **Whole-skill adoption is deliberately not built.** If it is wanted later, it should always need the user's click and
   show every file; skills are read as evidence only today.
+- **Outcome lines are written when the task ends.** A proposal that is clicked, undone or that expires later is not
+  re-reported; Manta only knows the state at delivery. The lead brief tells it to trust only the `Outcome:` line.
+- **A resumed Architect round** (`continueJob`) reports only the records of its own task; the earlier round's records
+  were reported in its own result.
+- **The Outcome line names no summary or reason text beyond a fixed phrase**; a long list of proposals gives one line
+  each (at most 5 per task).
+- **`agent_change` (Manta's own tool) still says "nothing is written until they click"** on its Proposed reply; it is
+  only returned when the card waits, so it is right, but it does not mention the user's level.
