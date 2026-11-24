@@ -227,6 +227,15 @@ Anything else is refused with a sentence, before any fetch, CLI call or write.
 - **`"web"`** is not a `research_search` source: the Architect uses the built-in `websearch` for discovery.
 - **Extra sources** (`source: "<id>"` of a source in the Architect's `sources:`), defined in §4.3a.
 
+**Store (every source, public and private):**
+- Server-owned; the Architect can't write it.
+- Kept 30 days.
+- Capped at 200 MB box-wide: the oldest sessions are deleted first, in the existing 5-minute sweep.
+
+**Provider endpoints are reserved.** Generic `research_fetch`, and every redirect hop of it, refuses `r.jina.ai`,
+`mcp.exa.ai` and `s.jina.ai` with "Use research_search / a Reddit or X post URL instead". Only the dedicated adapter
+builds a Jina request, from validated post components.
+
 ### 4.3a Extra sources
 
 Extra sources live in the Architect's own `agent.md` frontmatter. Only the user adds them, through a change card that
@@ -267,8 +276,15 @@ What the server controls is what the **model** controls, which is only the query
   - Headers may not set `Host`, `Cookie`, `Forwarded` or `X-Forwarded-*`.
   - Requests go through the SSRF-guarded transport.
   - A source with any `{secret:…}` header follows **no** redirects: a redirect is a failure.
-  - A source without secrets may follow redirects (≤ 5), each re-filtered, and never re-sends its headers to another
-    origin.
+  - A source without secrets may follow only **same-origin** https redirects (≤ 5, each re-filtered). A cross-origin
+    redirect is a failure.
+- **No literal credentials.**
+  - A header named `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key` or `*-Token`, and any env entry
+    whose name contains `TOKEN`, `KEY`, `SECRET` or `PASSWORD`, must contain a `{secret:…}` reference.
+  - Any header or env value with a token-looking literal (≥ 20 chars of `[A-Za-z0-9_\-./+=]`) is refused too.
+  - The refusal happens in `checkDraft`, BEFORE a change record exists, and never echoes the value: "Put this value
+    in Secrets and use {secret:NAME}".
+  - The lead brief says to ask the user to add the value in the Secrets card, never in chat.
 - **Secrets (`{secret:NAME}`):**
   - Allowed only inside `env` and `headers` values.
   - Resolved from Manta's **shared** secrets only, never a session- or project-scoped one, so a source always gets the
@@ -278,8 +294,6 @@ What the server controls is what the **model** controls, which is only the query
   - Redaction is a backstop, not a guarantee: before storing or returning anything, the server replaces every
     occurrence of each resolved value in the output with `[secret]`. A program could still print a transformed
     credential; the trust model above covers that.
-  - The card warns when a header or env value contains a long literal that looks like a token: "Put this in Secrets
-    instead".
 - **Output** is stored as one source (`private` from the definition), the evidence for whatever it supports. It is
   paged only with `research_read(sourceId, offset)`. Links found inside private output are not fetched by the server on
   its own; if the Architect fetches one, that fetch is a new public source.
@@ -291,9 +305,13 @@ What the server controls is what the **model** controls, which is only the query
     slug). That update always needs a click.
   - `agent_propose` refuses the key. Planning any proposal also compares the validated sources before and after, and
     refuses any difference, including an indirect one through preserved YAML.
-- **The card** (§7) lists each added or changed source: "Runs `yc` on this box" or "Calls search.example.com", the
-  secret names it uses, and "Private: results go to the AI model and its local transcript, and may be repeated in what
-  the Architect writes or searches; only the quote and link on cards are hidden".
+- **The card** (§7) lists each added or changed source:
+  - "Runs `yc search {query} --type posts …` on this box with your account's access. Manta passes the query as one
+    argument, without a shell; the program decides what it means." Or "Calls search.example.com".
+  - The secret names it uses.
+  - For a private source: "Private: results go to the AI model and its local transcript, and may be repeated in what the
+    Architect writes or searches; only the quote and link on cards are hidden".
+  - For a private → public change: "Private → Public: future evidence may show quotes and links".
 
 ### 4.4 `agent_propose`
 
@@ -463,9 +481,10 @@ create an agent. Both become:
 
 **Extra sources** run what the user configured (§4.3a trust model).
 - A command source runs a user-approved program with the user's rights; the model only picks the query.
-  - Query injection is closed: a fixed program, the query as one non-option argument, no shell.
+  - Manta passes the query as one argument, without a shell, and never as an option (a leading `-` is refused). The
+    approved program decides what that argument means.
   - The program itself isn't sandboxed. That is the user's trust decision, made on a card that names the program.
-- URL sources reach only their literal https origin. Credentials are never sent across a redirect.
+- URL sources reach only their literal https origin: same-origin redirects only, none at all when secrets are used.
 - Secrets come only from the shared store, are injected only into the approved program or origin, and are redacted from
   output as a backstop.
 - Private results go to the AI model and the local transcript, and can be repeated in model-written text and searches.
@@ -528,9 +547,9 @@ export interface ArchitectSource { id: string; name: string; description: string
 - **Team list:** the `@` picker and the sidebar include the Architect through `isTeamAgent`. The sidebar's "Chat" action
   is hidden for it in 5A.
 - **The change card for the Architect:** under the diff, one block per added or changed source, next to Apply:
-  - "Runs `<program>` on this box" or "Calls <host>".
-  - The secret names it uses, plus the token-looking-literal warning (§4.3a).
-  - For a private source, the privacy sentence from §4.3a.
+  - The full argv with `{query}` marked, or the host.
+  - The secret names it uses.
+  - The privacy sentence, or the private → public warning (§4.3a).
 - Follow modern-web-guidance (`html`, `forms`, `accessibility`).
 
 ## 8. Libraries considered
@@ -584,15 +603,17 @@ export interface ArchitectSource { id: string; name: string; description: string
       10, aliases refused, `private` defaults to true;
     - command: a query starting with `-` is refused; no shell (`; rm -rf ~` stays one argument); minimal env; stderr
       never returned; timeout; size cap;
-    - url: https only; a second origin receives no request (redirect spy); credentials are never sent across a redirect;
-      forbidden headers;
+    - url: https only; same-origin redirect followed without secrets; a cross-origin redirect → no request to the second
+      origin; any redirect with secrets fails; forbidden headers;
+    - literal credentials refused in `checkDraft` with no change record stored and no echo;
     - secrets: shared scope only (two projects with the same name → the shared one or a failure); missing → fail
       closed; values redacted in stored and returned output;
     - a private result with no URL → verified evidence → card with no quote or link;
     - `agent_propose` refuses `sources`, and a proposal that would change sources indirectly is refused;
     - `agent_change` accepts `sources` only on an update of the validated Architect, as a click.
-  - Jina routing: out-of-scope, credentialed or query-carrying URLs → zero provider calls; Exa never reads a page; Exa
-    JSON and SSE responses, a tool error and a quota error.
+  - Jina routing: out-of-scope, credentialed or query-carrying URLs → zero provider calls. A direct `r.jina.ai` /
+    `mcp.exa.ai` URL, or a redirect to one, in `research_fetch` → zero provider calls. Exa never reads a page. Exa JSON
+    and SSE responses, a tool error and a quota error.
   - Binding refusals before any I/O.
   - DNS and `execFile` are injected; nothing reaches the internet.
 - **`delegate` / `autonomy` / `routines` tests:**
@@ -628,7 +649,7 @@ export interface ArchitectSource { id: string; name: string; description: string
   - The view: summary, evidence (public and private), admission, held, applying, reasons.
   - The result-card list and its refetch by job id.
   - Picker and sidebar; no Chat action.
-  - The Settings switch's visibility.
+  - The Architect card's source blocks: argv/host, secret names, the private sentence, the private → public warning.
 - **Lead eval**, 3 cases:
   - "make me an agent that…" → charter, then handoff to `@architect`.
   - "change Dev's model to X" → `agent_change`.
@@ -657,6 +678,6 @@ export interface ArchitectSource { id: string; name: string; description: string
   - `AgentChangeView` / `AgentChangeCard.tsx`.
   - The background result card.
   - `isTeamAgent` in `agentDispatch.ts`, the sidebar and the picker.
-  - The Settings → Agents switch.
+  - The Architect card's source blocks.
   - `api/httpApi.ts`.
   - Tests for all of the above.
