@@ -11,7 +11,8 @@
 // Asserts (spec §4 Probe): a deny pattern blocks the plain command AND the same command as a subcommand
 // (`cd x && gh pr merge 3`), with no side effect; a neighbouring allowed command runs; protected fixture files (a
 // sandboxed fake home) are denied for a direct read, a search (grep, glob) and a write, and `cat` of one through the
-// shell; the specialist's own agent folder stays readable. Also records the exact error text the model receives
+// shell; the specialist's own agent folder stays readable; a task can `cat` a shared secret file and its own session's
+// one, and cannot read another session's, write or delete any, or read one with the read tool. Also records the exact error text the model receives
 // (the string src/server/autonomy.mjs matches to call a tool failure "blocked").
 //
 // SAFETY: sandbox only (sandbox.mjs: own port, random password, own HOME/XDG). The live opencode (:4096) and

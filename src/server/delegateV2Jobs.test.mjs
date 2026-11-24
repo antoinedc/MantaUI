@@ -2475,8 +2475,11 @@ test("autonomy: a specialist's denies are appended ONCE after the base, then the
   const id = await start(w, autonomyInput(w));
   const job = w.job(id);
   const base = buildWorktreeAgentRuleset();
-  const rules = jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev` });
+  const rules = jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: job.childSessionID });
   assert.deepEqual(job.basePermission, base);
+  // the rules name THIS child's secrets folder (and nobody else's): the child id was minted before its ruleset
+  assert.ok(rules.some((r) => r.action === "allow" && r.pattern.includes(`/.manta-secrets/sessions/${job.childSessionID}/`)));
+  assert.equal(w.calls.create[0].id, job.childSessionID);
   assert.deepEqual(job.permission, [...base, ...rules, q]);
   assert.deepEqual(w.calls.create[0].permission, job.permission, "the child is created with the final ruleset");
   assert.equal(job.permission.filter((r) => r.permission === "question").length, 1);
@@ -2501,7 +2504,7 @@ test("autonomy: a caller-supplied (approval-resolved) base is kept and the denie
   const caller = [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }];
   const id = await start(w, autonomyInput(w, { permission: caller }));
   assert.deepEqual(w.job(id).basePermission, caller);
-  assert.deepEqual(w.job(id).permission, [...caller, ...jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev` }), q]);
+  assert.deepEqual(w.job(id).permission, [...caller, ...jobRules(BAL, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: w.job(id).childSessionID }), q]);
   const plain = world();
   const pid = await start(plain, { agent: "agent-dev", isolation: "worktree", agentName: "Dev" });
   for (const k of ["specialist", "basePermission", "autonomyKey", "autonomyPolicy"]) assert.equal(k in plain.job(pid), false, k);
@@ -2642,8 +2645,12 @@ test("autonomy resume: a fresh child under the CURRENT settings — the ruleset 
   const res = await resumeJob(id, w.deps);
   assert.equal(res.ok, true, JSON.stringify(res));
   const job = w.job(id);
-  assert.deepEqual(job.permission, normalizeJobRuleset([...before.basePermission, ...jobRules(AUT, { home: HOME, agentDir: `${HOME}/.manta/agents/dev` })]));
+  assert.deepEqual(job.permission, normalizeJobRuleset([...before.basePermission, ...jobRules(AUT, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: job.childSessionID })]));
   assert.notDeepEqual(job.permission, before.permission);
+  // the resumed attempt is a NEW child: its rules open its own secrets folder, not the previous attempt's
+  assert.notEqual(job.childSessionID, before.childSessionID);
+  assert.ok(job.permission.some((r) => r.action === "allow" && r.pattern.includes(`/sessions/${job.childSessionID}/`)));
+  assert.ok(!job.permission.some((r) => r.pattern.includes(before.childSessionID)));
   assert.equal(job.autonomyKey, policyKey(AUT));
   assert.deepEqual(job.autonomyPolicy, normalizePolicy(AUT));
   assert.deepEqual(w.calls.create[0].permission, job.permission, "the new child gets the recomputed ruleset");
@@ -2686,6 +2693,25 @@ test("autonomy result: 'Tell me' and blocked actions are read from THIS attempt'
   assert.match(syn.text, /Done without asking \(the user asked to be told\): deploy — fly deploy\n/);
   assert.match(syn.text, /Blocked by the user's autonomy settings: merge — gh pr merge \(never\) \(ask = needs the user's go-ahead, never = not allowed\)/);
   assert.ok(!JSON.stringify(syn).includes("secret-name"), "user arguments never appear");
+});
+
+test("autonomy result: using a secret file the task was handed is not reported; another session's folder and Manta's own files still are", async () => {
+  const w = specialistWorld(BAL);
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const job = w.job(id);
+  const own = `${HOME}/.manta-secrets/sessions/${job.childSessionID}/KEY`;
+  const other = `${HOME}/.manta-secrets/sessions/ses_someoneelse/KEY`;
+  w.setMessages(job.childSessionID, msgs(
+    job.launch.messageId,
+    toolPart("bash", { command: `git push https://x-access-token:$(cat ${HOME}/.manta-secrets/GH_TOKEN)@github.com/o/r HEAD` }),
+    toolPart("bash", { command: `curl -u "u:$(cat ${own})" https://x.test` }),
+    toolPart("bash", { command: `cat ${other}` }, "error", "Permission denied: shell"),
+  ));
+  w.finish(job.childSessionID, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", job.childSessionID));
+  const done = w.job(id);
+  assert.deepEqual(done.blockedActions, [{ kind: "protected", level: "never", summary: "Manta settings or credentials" }], "only the other session's folder");
+  assert.deepEqual(done.exceededActions ?? [], []);
 });
 
 test("autonomy result: a continuation reads only its own round; nothing to report omits the fields", async () => {
@@ -2744,7 +2770,7 @@ test("project actions: a specialist's START takes its denies and its prompt sect
   const pp = projectPatterns(PAGE_A);
   assert.deepEqual(w.state.asked, [REPO]);
   assert.deepEqual(job.projectPatterns, pp);
-  assert.deepEqual(job.permission, [...job.basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, projectPatterns: pp }), q]);
+  assert.deepEqual(job.permission, [...job.basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, projectPatterns: pp, sessionID: job.childSessionID }), q]);
   assert.deepEqual(w.calls.create[0].permission, job.permission);
   const denies = bashDenies(w.calls.create[0].permission);
   for (const p of ["scripts/deploy-web.sh", "./scripts/deploy-web.sh", "bash scripts/deploy-web.sh", "make ship", "make ship *"]) assert.ok(denies.includes(p), p);
@@ -2778,7 +2804,7 @@ test("project actions: a reader that rejects, throws or answers nonsense is no p
     w.deps.projectActions = { forTask };
     const id = await start(w, autonomyInput(w));
     assert.deepEqual(w.job(id).projectPatterns, []);
-    assert.deepEqual(w.job(id).permission, [...w.job(id).basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR }), q]);
+    assert.deepEqual(w.job(id).permission, [...w.job(id).basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, sessionID: w.job(id).childSessionID }), q]);
     assert.doesNotMatch(w.job(id).launch.text, /In this project, these commands also count/);
   }
   const noReader = specialistWorld(BAL);
@@ -2823,7 +2849,7 @@ test("project actions: a RESUME (fresh child) reads the page again — new denie
   const job = w.job(id);
   assert.deepEqual(w.state.asked, [REPO, REPO], "asked for each resume attempt, for the parent's folder");
   assert.deepEqual(job.projectPatterns, projectPatterns(PAGE_B));
-  assert.deepEqual(job.permission, normalizeJobRuleset([...before.basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, projectPatterns: projectPatterns(PAGE_B) })]));
+  assert.deepEqual(job.permission, normalizeJobRuleset([...before.basePermission, ...jobRules(BAL, { home: HOME, agentDir: DIR, projectPatterns: projectPatterns(PAGE_B), sessionID: job.childSessionID })]));
   assert.deepEqual(w.calls.create.at(-1).permission, job.permission);
   assert.ok(bashDenies(job.permission).includes("make release") && !bashDenies(job.permission).includes("make ship"));
   assert.match(w.calls.send.at(-1).text, /`make release` \(Makefile\)/);

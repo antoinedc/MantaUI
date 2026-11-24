@@ -566,7 +566,7 @@ test("matchKinds / extractActions: using an allowed secret file is not 'Manta se
     `echo hi && cat ${HOME}/.manta-secrets/sessions/${OTHER}/KEY`,
   ]) assert.deepEqual(kinds(bad), PROT, bad);
   // the caller's own session id is what makes its folder allowed; without one it is not
-  assert.deepEqual(kinds(`cat ${HOME}/.manta-secrets/sessions/${OWN}/KEY`, undefined), PROT);
+  assert.deepEqual(kinds(`cat ${HOME}/.manta-secrets/sessions/${OWN}/KEY`, null), PROT);
   // a file tool on the secrets store is protected (no allow for the read-like or write tools)
   for (const tool of ["read", "edit", "write", "grep"]) {
     assert.deepEqual(matchKinds({ tool, state: { input: { path: `${HOME}/.manta-secrets/GH_TOKEN` } } }, { home: HOME, sessionID: OWN }), PROT, tool);
