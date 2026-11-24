@@ -1090,3 +1090,172 @@ test("an activation failure keeps the folder claimed (state failed, protected fr
     await f.cleanup();
   }
 });
+
+// ---- extra sources through agent_change ----
+
+async function sourcesFixture({ scanner, secretsStore = [] } = {}) {
+  const w = { messages: [], clock: 1_700_000_000_000, pubs: [] };
+  const f = await archFixture({
+    extra: {
+      retryDelayMs: 0,
+      now: () => w.clock,
+      autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: "auto" }),
+      publish: (p) => w.pubs.push(p),
+      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }), listMessages: async () => w.messages },
+      delegate: { loadRecordsStrict: async () => [] },
+      isManagedSession: async () => false,
+      isCtoSessionStrict: async () => false,
+      loadSecretsStrict: async () => {
+        if (secretsStore === "throw") throw new Error("unreadable");
+        return secretsStore;
+      },
+      createScanner: scanner ?? (() => ({ scan: async () => ({ clean: true, unavailable: false, hits: [] }) })),
+    },
+  });
+  await f.engine.init();
+  let n = 0;
+  const change = async (draft, { action = "update", agent = "architect" } = {}) => {
+    n++;
+    const b = { sessionID: "ses_chat", messageID: `msg_s${n}`, callID: `call_s${n}`, action, ...(agent ? { agent } : {}), draft };
+    f.w = w;
+    w.messages = [
+      { info: { id: "msg_user", role: "user" }, parts: [] },
+      { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent: "build" }, parts: [{ type: "tool", tool: "agent_change", callID: b.callID, state: { status: "running", input: { action: b.action, ...(agent ? { agent } : {}), draft } } }] },
+    ];
+    return f.engine.change(b);
+  };
+  return { ...f, w, change };
+}
+const BOOKFACE = { id: "bookface", name: "YC Bookface", description: "Private YC founder forum.", command: ["yc", "search", "{query}", "--type", "posts"], env: { YC_TOKEN: "{secret:YC_TOKEN}" } };
+const storeIds = async (f) => (await store(f).catch(() => ({ changes: [] }))).changes.length;
+
+test("agent_change: sources are accepted only on an UPDATE of the validated Architect — and then always need a click", async () => {
+  const f = await sourcesFixture();
+  try {
+    const r = await f.change({ sources: [BOOKFACE] });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.change.state, "pending");
+    assert.equal(r.change.needsClick, true);
+    assert.equal(r.change.reason, "core");
+    const archBefore = await readFile(join(f.root, "architect", "agent.md"), "utf-8");
+    assert.ok(!archBefore.includes("bookface"), "nothing written before the click");
+    const applied = await f.engine.apply(r.change.id);
+    assert.equal(applied.state, "applied", applied.error);
+    const entry = (await f.engine.scan()).entries.find((e) => e.slug === "architect");
+    assert.deepEqual(entry.meta.sources.map((s) => s.id), ["bookface"]);
+    assert.equal(entry.meta.sources[0].private, true, "private defaults to true");
+    assert.match(await readFile(join(f.root, "architect", "agent.md"), "utf-8"), /Private YC founder forum/);
+    // clearing them is an update too
+    const cleared = await f.change({ sources: null });
+    assert.equal(cleared.change.needsClick, true);
+    // elsewhere: a create, a specialist, the lead
+    assert.match((await f.change({ name: "N", description: "d", isolation: "none", instructions: "x", sources: [BOOKFACE] }, { action: "create", agent: null })).error, /only be set on the Architect/);
+    assert.match((await f.change({ sources: [BOOKFACE] }, { agent: "dev" })).error, /only be set on the Architect/);
+    assert.match((await f.change({ sources: [BOOKFACE] }, { agent: "manta" })).error, /can't be changed here|only be set on the Architect/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change sources: an invalid shape is refused with a sentence and no record is made", async () => {
+  const f = await sourcesFixture();
+  try {
+    for (const [src, re] of [
+      [{ ...BOOKFACE, command: ["yc", "search"] }, /exactly once/],
+      [{ ...BOOKFACE, id: "hn" }, /built-in/],
+      [{ ...BOOKFACE, url: "https://x.example.com/?q={query}" }, /exactly one/],
+    ]) {
+      const r = await f.change({ sources: [src] });
+      assert.equal(r.ok, false);
+      assert.match(r.error, re);
+    }
+    assert.equal((await f.change({ sources: Array.from({ length: 11 }, (_, i) => ({ ...BOOKFACE, id: `s${i}` })) })).ok, false);
+    assert.equal(await storeIds(f), 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change sources: a literal credential is refused BEFORE a record exists and is never echoed — header, env, argv option, URL parameter, scanner hit, stored value", async () => {
+  const stored = [{ key: "OLD", scope: "shared", value: "stored-secret-value-123" }];
+  const scanner = ({ secretValues }) => ({
+    scan: async (text) => {
+      const hit = /ghp_[A-Za-z0-9]{10,}/.test(text) || secretValues().some((v) => text.includes(v));
+      return { clean: !hit, unavailable: false, hits: hit ? [{}] : [] };
+    },
+  });
+  const f = await sourcesFixture({ scanner, secretsStore: stored });
+  try {
+    const URLSRC = { id: "internal", name: "Internal", description: "d", url: "https://search.example.com/api?q={query}" };
+    const cases = [
+      ["header", { ...URLSRC, headers: { Authorization: "Bearer sk-literal-abcdef123456" } }, "sk-literal-abcdef123456"],
+      ["header with extra text", { ...URLSRC, headers: { Authorization: "Bearer {secret:T} and more" } }, "and more"],
+      ["env", { ...BOOKFACE, env: { YC_TOKEN: "literal-value-98765" } }, "literal-value-98765"],
+      ["argv option", { ...BOOKFACE, command: ["yc", "{query}", "--token", "abc-literal-123"] }, "abc-literal-123"],
+      ["argv option=", { ...BOOKFACE, command: ["yc", "{query}", "--token=abc-literal-123"] }, "abc-literal-123"],
+      ["url parameter", { ...URLSRC, url: "https://search.example.com/api?q={query}&api_key=lit-key-123456" }, "lit-key-123456"],
+      ["token format in argv", { ...BOOKFACE, env: undefined, command: ["yc", "{query}", "ghp_abcdefghij1234567890"] }, "ghp_abcdefghij1234567890"],
+      ["token format in the url path", { ...URLSRC, url: "https://search.example.com/ghp_abcdefghij1234567890/api?q={query}" }, "ghp_abcdefghij1234567890"],
+      ["a stored value in a free header", { ...URLSRC, headers: { "X-Note": "stored-secret-value-123" } }, "stored-secret-value-123"],
+    ];
+    for (const [name, src, secret] of cases) {
+      const r = await f.change({ sources: [src] });
+      assert.equal(r.ok, false, name);
+      assert.match(r.error, /Secrets/, name);
+      assert.ok(!JSON.stringify(r).includes(secret), `${name}: the value is never echoed`);
+    }
+    assert.equal(await storeIds(f), 0, "no record for any of them");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change sources: references and ordinary header values are accepted; an unreadable secrets store or an unavailable scanner REFUSES", async () => {
+  const f = await sourcesFixture();
+  try {
+    const good = await f.change({
+      sources: [
+        { id: "a", name: "A", description: "d", url: "https://search.example.com/api?q={query}", headers: { Authorization: "Bearer {secret:A_VERY_LONG_SECRET_NAME_WITH_MANY_CHARS_0123456789}", Accept: "application/problem+json" } },
+        { id: "b", name: "B", description: "d", command: ["yc", "search", "{query}", "--limit", "15"], env: { YC_TOKEN: "{secret:YC_TOKEN}" } },
+      ],
+    });
+    assert.equal(good.ok, true, good.error);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await sourcesFixture({ secretsStore: "throw" });
+  try {
+    const r = await g.change({ sources: [{ id: "b", name: "B", description: "d", command: ["yc", "{query}"] }] });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /Couldn't check the sources for credentials/);
+    assert.equal(await storeIds(g), 0);
+  } finally {
+    await g.cleanup();
+  }
+  const h = await sourcesFixture({ scanner: () => ({ scan: async () => ({ clean: false, unavailable: true, hits: [] }) }) });
+  try {
+    const r = await h.change({ sources: [{ id: "b", name: "B", description: "d", command: ["yc", "{query}", "--type", "posts"] }] });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /Couldn't check the sources for credentials/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("an Architect change that keeps its sources untouched leaves the YAML intact; hand-written invalid sources are skipped with a notice", async () => {
+  const f = await sourcesFixture();
+  try {
+    const r = await f.change({ sources: [BOOKFACE] });
+    await f.engine.apply(r.change.id);
+    const before = await readFile(join(f.root, "architect", "agent.md"), "utf-8");
+    const r2 = await f.change({ description: "Builds agents from research, with extra sources." });
+    assert.equal(r2.ok, true, r2.error);
+    await f.engine.apply(r2.change.id);
+    const after = await readFile(join(f.root, "architect", "agent.md"), "utf-8");
+    assert.ok(after.includes("Private YC founder forum"));
+    assert.equal(after.split("sources:")[1], before.split("sources:")[1], "the sources block is byte-identical");
+    assert.deepEqual((await f.engine.scan()).entries.find((e) => e.slug === "architect").meta.sources.map((s) => s.id), ["bookface"]);
+  } finally {
+    await f.cleanup();
+  }
+});
