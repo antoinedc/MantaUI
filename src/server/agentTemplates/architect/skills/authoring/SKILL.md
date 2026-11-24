@@ -20,8 +20,8 @@ What the file is made of; how to write it well is for your research to decide.
   each), `isolation` (`none` = read-only; `worktree` = edits code on its own branch). Leave `model` empty unless the
   charter names one.
 - **Body:** the agent's instructions, without frontmatter.
-- **The research guidance is already in every task prompt.** Manta adds the generic research-library guidance to every
-  agent's task; don't write it into the file.
+- **No research section.** Manta adds the generic research-library guidance to every
+  agent's task prompt; don't write a research section into the file.
 - **Hard limits** are better as isolation than as prose: an agent that must not edit code is `isolation: none`.
 
 ## Routing
