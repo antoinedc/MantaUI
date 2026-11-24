@@ -3112,3 +3112,22 @@ test("Architect continuation: the root is copied from the predecessor (it surviv
   const cont = await continueJob(did, { prompt: "again", sessionID: PARENT, architect: { mode: "build" } }, dev.deps);
   assert.equal("architect" in cont.job, false);
 });
+
+test("Architect jobs tell the agents engine when they end — finished, failed or stopped — and no other job does", async () => {
+  const w = specialistWorld();
+  const ended = [];
+  w.deps.onJobEnded = async (job) => ended.push({ id: job.id, status: job.status });
+  const done = await start(w, archInput(w));
+  const child = w.job(done).childSessionID;
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const stopped = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  await stopJob(stopped, w.deps);
+  const failed = await start(w, archInput(w));
+  w.finish(w.job(failed).childSessionID, "failed", T0 + 2);
+  await w.engine.observeRaw(raw("session.execution.failed", w.job(failed).childSessionID));
+  assert.deepEqual(ended.map((e) => e.status).sort(), ["done", "failed", "stopped"]);
+  const dev = await start(w, autonomyInput(w));
+  await stopJob(dev, w.deps);
+  assert.equal(ended.length, 3, "an ordinary specialist job doesn't notify");
+});

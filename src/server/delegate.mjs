@@ -1994,6 +1994,17 @@ async function withRunningJob(id, deps, fn, { allowPaused = false } = {}) {
   });
 }
 
+// A job reached a final state (finished, failed, timed out or stopped by the user): the agents engine releases the
+// proposals its Architect round held. Never breaks the job's own transition.
+async function notifyJobEnded(job, deps) {
+  if (typeof deps.onJobEnded !== "function" || !job?.architect) return;
+  try {
+    await deps.onJobEnded(job);
+  } catch (e) {
+    console.warn(`[delegate] onJobEnded failed for ${job.id}:`, e?.message ?? e);
+  }
+}
+
 /**
  * stopJob interrupts the child session with oc.abortSession, marks the job
  * `stopped` in ONE terminal write (result-delivery fields included), posts its
@@ -2049,6 +2060,7 @@ export async function stopJob(id, deps = {}, { error: stopError } = {}) {
     return { ok: true, deliver: manta, stopped: updated };
   }, { allowPaused: true });
   if (stopped?.stopped) {
+    await notifyJobEnded(stopped.stopped, deps);
     if (stopped.deliver) await deliverJobResult(id, deps);
     await finishV2Cleanup(stopped.stopped, deps);
     return { ok: true };
@@ -3027,6 +3039,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       console.warn(`[delegate] onJobTerminal failed for ${updated.id}:`, e?.message ?? e);
     }
   }
+  await notifyJobEnded(updated, deps);
   if (updated.childSessionID) {
     try {
       await clearProgress(updated.childSessionID);
