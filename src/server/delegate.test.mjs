@@ -196,6 +196,14 @@ test("buildCompletionText done with a worktree", () => {
   ].join("\n"));
 });
 
+test("buildCompletionText appends the Architect's outcome lines after the result", () => {
+  const done = buildCompletionText({ name: "t", status: "done", result: "proposed it", architectOutcome: ["Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card."] });
+  assert.equal(done, ['[background job "t" done]', "", "proposed it", "", "Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card."].join("\n"));
+  const stopped = buildCompletionText({ name: "t", status: "stopped", error: "stopped by user", architectOutcome: ["Outcome: a", "Outcome: b"] });
+  assert.ok(stopped.endsWith("Error: stopped by user\n\nOutcome: a\nOutcome: b"));
+  assert.equal(buildCompletionText({ name: "t", status: "done", result: "x", architectOutcome: [] }), buildCompletionText({ name: "t", status: "done", result: "x" }));
+});
+
 test("buildCompletionText failed replaces result with Error", () => {
   const text = buildCompletionText({
     name: "fix-login", status: "failed", branch: "b", worktree: "/w",
