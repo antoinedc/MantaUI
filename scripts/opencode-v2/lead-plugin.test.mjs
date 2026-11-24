@@ -376,7 +376,7 @@ describe("agent_change tool", () => {
     for (const k of ["useWhen", "notFor", "model", "color"]) assert.deepEqual(d.properties[k].type, ["string", "null"]);
     assert.match(tool.description, /only in a chat you lead/);
     // Phase 5A (§4.7): a new agent or a substantial rework goes to the Architect; this tool is for small dictated edits
-    assert.match(tool.description, /For a new agent or a substantial rework, write the charter yourself from the request/);
+    assert.match(tool.description, /For a new agent \(even one the user fully specified\) or a substantial rework, write the charter yourself from the request/);
     assert.match(tool.description, /Use agent_change yourself for small edits the user dictates, or when @architect isn't on the team\./);
   });
 

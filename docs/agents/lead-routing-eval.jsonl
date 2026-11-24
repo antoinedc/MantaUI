@@ -33,6 +33,6 @@
 {"message": "Which of my agents is best for checking the sitemap, and what is it set up to do?", "team": ["dev", "seo"], "expect": "answer"}
 {"message": "Have the SEO agent look at the pricing page title and meta description and tell me what to change.", "team": ["dev", "seo"], "expect": "handoff:seo"}
 {"message": "Make me an agent that reviews pull requests for security problems. Hand it a PR link and it reads the diff and reports findings; it should only read and report, never change code. It should be used whenever I ask for a security review.", "team": ["architect", "dev", "seo"], "expect": "handoff:architect"}
-{"message": "I want an agent for our marketing emails.", "team": ["architect", "dev", "seo"], "expect": "ask"}
+{"message": "I want an agent for our marketing emails.", "team": ["architect", "dev", "seo"], "expect": "handoff:architect"}
 {"message": "Change Dev's model to anthropic/claude-sonnet-5-5.", "team": ["architect", "dev", "seo"], "expect": "agent_change:update:dev"}
 {"message": "Research how we're doing on SEO for the pricing and docs pages and tell me the top three fixes.", "team": ["architect", "dev", "seo"], "expect": "handoff:seo"}
