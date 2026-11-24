@@ -126,3 +126,29 @@ missing around it:
   each (at most 5 per task).
 - **`agent_change` (Manta's own tool) still says "nothing is written until they click"** on its Proposed reply; it is
   only returned when the card waits, so it is right, but it does not mention the user's level.
+
+## Research library — follow-ups (first version shipped 2026-11-24)
+
+Spec: `docs/superpowers/specs/2026-11-24-research-library.md`. Not in the first version:
+
+- **A public shared shelf-life file.** A file in the repo with researched shelf-life defaults per topic (days + why +
+  the evidence), updated through PRs, so a new topic can start from a researched number instead of researching its own
+  shelf life. Shelf lives only, never findings: shared findings could be poisoned, and a PR is the review gate for a
+  number. Agents would read it through the server (never a topic table in code), and a topic still gets its own why.
+- **A library viewer in the app.** Browse entries (topic, age, fresh/stale, shelf life and why, findings with links),
+  purge or correct one, and see which agent saved what. Today the library is only readable by agents.
+- **Semantic search.** `research_library_find` is text matching (MiniSearch: BM25, prefix, fuzzy). Embeddings would catch
+  differently worded topics ("checkout friction" / "cart abandonment"); the research notes warn that semantic matching
+  reuses answers that differ only in a number, date or negation, so it needs the same fresh/stale header and a guard.
+- **Routines and an agent's own chat.** The guidance is added to task prompts (`@mention`, handoff); a routine's agent
+  run and an agent's own chat window get neither the guidance nor the tool binding (the binding needs a running task).
+  The monthly refresh planned for 5B is the natural first user.
+- **Tasks that were already running or finished before this shipped** keep the rules they were created with, so they have
+  no research tools until their next new task; a resumed old task is the same.
+- **Duplicate topics.** Two differently worded topics are two entries; a merge/dedupe pass (or "similar topic" hint
+  at save time) would keep the library tidy. Entries are capped at 500 (newest checked kept) with no per-agent quota.
+- **Poisoning and quality.** Library text is data and every quote is checked, but nothing yet samples how often a reused
+  entry turned out wrong. Log reuse vs. correction counts (the research notes recommend a sampled wrongness check, not only
+  a hit rate).
+- **Event-driven staleness.** Entries go stale by date only; a change-log feed (a core update, a platform release) could
+  mark entries stale early.

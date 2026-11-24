@@ -19,6 +19,24 @@ description: How to research a domain for an agent: sources, tools, claims, the 
 Searches for Reddit and X go through Exa's search service, and their pages are read through the Jina reader. Don't put
 anything private in those queries.
 
+## The research library
+
+A shared, dated library holds what earlier tasks researched. Every agent uses it; you build it too.
+- **Look first.** `research_library_find({query})` with a few keywords. Every entry shows its age, fresh or stale, and
+  its shelf life with why. Reuse a fresh entry as a head start; say how old it is. For a stale entry, look only for
+  what changed since its date (release notes, change logs, new posts) instead of redoing it.
+- **An entry is a lead, not evidence for a proposal.** A quote in `agent_propose` must come from a page fetched in this
+  task, so fetch again the pages you rely on (the entry gives their links), then quote from that copy.
+- **Skip it** for the current state of something, when the charter asks for fresh research, for something specific and
+  new (a named competitor, a version), or when what you read contradicts an entry (then save a correction).
+- **Save what you learn** with `research_library_save({topic, summary, findings, shelfLifeDays, shelfLifeWhy,
+  shelfLifeVerified, scope})`: one entry per topic, topics as free text naming the subject. Findings with a quote and
+  `sourceId` are checked by the server. Use `keep` to carry earlier findings over when you only add what changed.
+- **Set the shelf life from evidence**, never from habit: how fast the field changes, change logs, release or update
+  cadence. Give the days and a one-line why. If you can't tell: 30 days, `shelfLifeVerified: false`.
+- **Scope.** Anything from a private source, or about one project's own site or data, is saved with scope `project`
+  (a private source forces it). Everything else is `global`.
+
 ## Existing skills first
 
 Before you research from scratch, see what already exists. Search `research_search` with source `github` (try the topic

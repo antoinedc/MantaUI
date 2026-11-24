@@ -36,6 +36,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { SPECIALIST_RESEARCH_TOOLS } from "../shared/researchTools.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
   readProgressRecord as defaultReadProgress,
@@ -496,15 +497,32 @@ export function buildReadOnlyAgentRuleset({ agentDir, home = homedir() } = {}) {
     allow("websearch"),
     allow("todowrite", "*"),
     allow("progress_report", "*"),
+    // the research tools and the shared research library: every agent checks what is already known before outside work
+    ...SPECIALIST_RESEARCH_TOOLS.map((t) => allow(t, "*")),
     allow("external_directory", `${home}/.local/share/opencode/tool-output/*`),
   ];
   if (agentDir) rules.push(allow("external_directory", `${String(agentDir).replace(/\/+$/, "")}/**`));
   return rules;
 }
 
+/**
+ * `rules` (a specialist task's base ruleset) with the research tools allowed, once, right under the leading catch-all deny
+ * (last match wins). Idempotent. A grant list the user edited on the approval card carries no research tools, so they are
+ * added here: they are not a file or shell permission.
+ */
+export function withResearchToolAllows(rules) {
+  const list = Array.isArray(rules) ? rules : [];
+  const missing = SPECIALIST_RESEARCH_TOOLS.filter((t) => !list.some((r) => r?.permission === t && r.pattern === "*" && r.action === "allow"));
+  if (missing.length === 0) return list;
+  const adds = missing.map((t) => ({ permission: t, pattern: "*", action: "allow" }));
+  const first = list[0];
+  const denyFirst = first?.permission === "*" && first.pattern === "**" && first.action === "deny";
+  return denyFirst ? [first, ...adds, ...list.slice(1)] : [...adds, ...list];
+}
+
 // The tools the Architect's task may call, besides reading and searching (Agents Phase 5A §4.2).
 const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch"];
-const ARCHITECT_PLUGIN_TOOLS = ["research_fetch", "research_read", "research_search", "agent_propose"];
+const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_RESEARCH_TOOLS, "agent_propose"];
 
 /**
  * The ruleset of the Architect's task, built for launch AND resume by this one function (spec §4.2). Last match wins, so:
@@ -545,7 +563,7 @@ export const WORKTREE_AGENT_GRANTS = Object.freeze([
 ]);
 
 export function buildWorktreeAgentRuleset({ home = homedir() } = {}) {
-  return buildPermissionRuleset(WORKTREE_AGENT_GRANTS.map((g) => ({ ...g })), { home });
+  return withResearchToolAllows(buildPermissionRuleset(WORKTREE_AGENT_GRANTS.map((g) => ({ ...g })), { home }));
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
@@ -4585,7 +4603,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     // The Architect's task (Agents Phase 5A): only the agents engine passes `architect`; no other caller builds this input.
     const architectMode = specialist && input?.architect && typeof input.architect === "object" ? input.architect.mode : undefined;
     const architect = architectMode !== undefined;
-    const basePermission =
+    const baseChosen =
       input?.permission ??
       (architect
         ? null // the Architect's whole ruleset comes from buildArchitectRuleset (here and on every resume)
@@ -4594,6 +4612,8 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
         : input?.isolation === "worktree"
           ? buildWorktreeAgentRuleset()
           : null);
+    // every specialist's task may research (also under a grant list edited on the approval card)
+    const basePermission = specialist && !architect && baseChosen ? withResearchToolAllows(baseChosen) : baseChosen;
     // A specialist's autonomy denies are appended ONCE, last, after the base selection (caller ruleset → approval-resolved
     // grants → read-only / worktree default); the base itself is kept so a resume can recompute the final ruleset.
     const agentDir = typeof input?.agentDir === "string" && input.agentDir ? input.agentDir : null;

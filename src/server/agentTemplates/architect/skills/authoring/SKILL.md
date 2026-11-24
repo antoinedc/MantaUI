@@ -26,6 +26,9 @@ one-line why, so the user sees what you left out.
   5. **What to report** — what the final message must contain.
 - **Never include:** overviews of the domain, "you are a world-class expert", long mandatory checklists, rules for
   everything, examples that box the model into one way of working.
+- **No research section.** Don't write a "when to look things up" or domain research section into the agent: every
+  agent's task prompt already carries the generic research-library guidance. Add research rules only when the evidence
+  shows a failure specific to this job (for example, a source the agent must always check).
 - **Hard limits** are better as isolation than as prose: an agent that must not edit code is `isolation: none`.
 
 ## Routing

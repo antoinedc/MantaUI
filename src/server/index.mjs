@@ -257,6 +257,7 @@ import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
 import { createResearchEngine } from "./research.mjs";
+import { createResearchLibrary } from "./researchLibrary.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
 import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
 import { parseMainWorktree } from "./knowledge/identity.mjs";
@@ -2589,12 +2590,18 @@ void stopTuner;
 // is compiled into opencode.jsonc at boot; a failure is logged and never blocks startup (`agents:list` retries).
 // Agents Phase 5A (src/server/research.mjs): the Architect's research tools. Every call is bound by the agents engine (the
 // exact running tool part, the agent, the stamped running job), which is built just below — read at call time.
+// Research library (docs/superpowers/specs/2026-11-24-research-library.md): the research tools are every specialist task's, and
+// the shared, dated library sits on top of them; both bind through `bindResearcher`. The user's extra sources stay the Architect's.
 const researchEngine = createResearchEngine({
-  bind: (b, tool) => agentsEngine.bindArchitect(b, tool),
+  bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
   extraSources: async () => {
     const { entries } = await agentsEngine.scan();
     return entries.find(isArchitect)?.meta.sources ?? [];
   },
+});
+const researchLibrary = createResearchLibrary({
+  bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
+  getSource: (child, id) => researchEngine.getSource(child, id),
 });
 const agentsEngine = createAgentsEngine({
   research: researchEngine,
@@ -5009,9 +5016,10 @@ const handleRequest = async (req, res) => {
   // ---------- Agents Phase 5A (the Architect) ----------
   // POST /api/agents/propose   body {sessionID, messageID, callID, action, draft, summary, evidence, admission, agent?, baseHash?}
   // POST /api/research/{fetch,read,search}  body {sessionID, messageID, callID, ...the tool's arguments}
+  // POST /api/research-library/{find,save}  the same shape (every specialist's task; src/server/researchLibrary.mjs)
   //                                         → {ok:true, ...} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engines: src/server/agents.mjs, src/server/research.mjs.
-  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search") {
+  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save") {
     try {
       if (req.method !== "POST") {
         respondJson(res, 405, { error: "method not allowed" });
@@ -5021,7 +5029,9 @@ const handleRequest = async (req, res) => {
       const result =
         path === "/api/agents/propose"
           ? await agentsEngine.propose(body)
-          : await researchEngine[path.slice("/api/research/".length)](body);
+          : path.startsWith("/api/research-library/")
+            ? await researchLibrary[path.slice("/api/research-library/".length)](body)
+            : await researchEngine[path.slice("/api/research/".length)](body);
       respondJson(res, 200, result);
     } catch (e) {
       // class-2 (BET-1460): the manta plugin (agent_propose / research_* tools) — relays the message to the model.

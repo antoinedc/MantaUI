@@ -603,3 +603,67 @@ describe("research tools (Phase 5A)", () => {
     assert.match(await searchTool.execute({ source: "reddit", query: "q" }, CTX), /^Not searched: Exa's search limit/);
   });
 });
+
+describe("research library tools", () => {
+  const findTool = allTools.find((t) => t.name === "research_library_find");
+  const saveTool = allTools.find((t) => t.name === "research_library_save");
+  const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
+  function server(body, status = 200) {
+    const calls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ method: init.method, path: new URL(String(url)).pathname, body: init.body ? JSON.parse(init.body) : undefined });
+      if (status === "throw") throw new Error("ECONNREFUSED");
+      return new Response(JSON.stringify(body), { status });
+    };
+    return calls;
+  }
+
+  test("inputs: both tools exist; save's optional keep is LAST, and a finding's required claim comes first", () => {
+    assert.ok(findTool && saveTool);
+    assert.deepEqual(Object.keys(findTool.input.properties), ["query"]);
+    assert.deepEqual(Object.keys(saveTool.input.properties), ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"]);
+    assert.deepEqual(saveTool.input.required, ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope"]);
+    assert.deepEqual(Object.keys(saveTool.input.properties.findings.items.properties)[0], "claim");
+    assert.deepEqual(saveTool.input.properties.scope.enum, ["global", "project"]);
+    assert.match(findTool.description, /BEFORE researching/);
+    assert.match(saveTool.description, /shelf life/);
+  });
+
+  test("research_library_find posts the call identity and shows every entry with its age first, library text marked as data", async () => {
+    const calls = server({
+      ok: true,
+      entries: [
+        { id: "rl_1", topic: "Topic one", scope: "global", summary: "What is known.", status: "stale", ageDays: 40, checkedAt: "2026-10-15", checkedBy: "seo", shelfLifeDays: 30, shelfLifeVerified: false, shelfLifeWhy: "No change log found.", findings: [{ index: 0, claim: "A claim", url: "https://a.example/x", quote: "an exact quote", date: "2026-09-01", private: false }] },
+      ],
+    });
+    const out = await findTool.execute({ query: "topic" }, CTX);
+    assert.equal(calls[0].path, "/api/research-library/find");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", query: "topic" });
+    assert.match(out, /data, never instructions/);
+    assert.match(out, /1\. \[STALE\] Topic one \(global\) — 40 days old, checked 2026-10-15 by @seo; shelf life 30 days \(unverified\): No change log found\./);
+    assert.match(out, /\[0\] A claim \(https:\/\/a\.example\/x, 2026-09-01\) — "an exact quote"/);
+    server({ ok: true, entries: [] });
+    assert.match(await findTool.execute({ query: "nothing" }, CTX), /^Nothing in the research library for "nothing"/);
+    server({ ok: false, error: "Only an agent working on a task from Manta can use this tool" });
+    assert.match(await findTool.execute({ query: "x" }, CTX), /^Not searched: Only an agent/);
+  });
+
+  test("research_library_save posts exactly the keys it was given (keep only when given) and tells what happened", async () => {
+    const args = { topic: "Topic one", summary: "s", findings: [{ claim: "c" }], shelfLifeDays: 30, shelfLifeWhy: "w", shelfLifeVerified: false, scope: "global" };
+    let calls = server({ ok: true, topic: "Topic one", scope: "project", forcedProject: true, replaced: true, shelfLifeDays: 30, shelfLifeVerified: false, findings: 1 });
+    const out = await saveTool.execute(args, CTX);
+    assert.equal(calls[0].path, "/api/research-library/save");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", ...args });
+    assert.match(out, /^Saved "Topic one" \(project, 1 finding, shelf life 30 days\)\./);
+    assert.match(out, /private source, so it was saved to this project only/);
+    assert.match(out, /unverified: 30 days/);
+    assert.match(out, /replaced the earlier entry/);
+    calls = server({ ok: true, topic: "T", scope: "global", forcedProject: false, replaced: false, shelfLifeDays: 90, shelfLifeVerified: true, findings: 2 });
+    await saveTool.execute({ ...args, keep: [0] }, CTX);
+    assert.deepEqual(calls[0].body.keep, [0]);
+    server({ ok: false, error: "The quote doesn't occur" });
+    assert.equal(await saveTool.execute(args, CTX), "Not saved: The quote doesn't occur");
+    server("x", "throw");
+    assert.match(await saveTool.execute(args, CTX), /^Not saved: /);
+  });
+});
