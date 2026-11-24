@@ -28,6 +28,7 @@
 // schedule.mjs / servePage.mjs. Store: ~/.manta/secrets.json (0600).
 // Materialized files: ~/.manta-secrets/ (dir 0700, files 0600).
 
+import { readFileSync } from "node:fs";
 import { writeFile, mkdir, chmod, rm } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
@@ -186,6 +187,28 @@ export function materializedPath(entry, dir = SECRETS_DIR) {
 export function loadSecrets(path = STORE_PATH) {
   const parsed = readJsonSync(path, {});
   return Array.isArray(parsed?.secrets) ? parsed.secrets : [];
+}
+
+/**
+ * The stored secrets, read STRICTLY: a missing store is empty, but a read, parse or schema error THROWS. For checks that
+ * must refuse rather than guess (a source definition is scanned for stored values; an unreadable store is not "no secrets").
+ */
+export function loadSecretsStrict(path = STORE_PATH) {
+  let text;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    throw e;
+  }
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.secrets)) throw new Error("the secrets store has an unexpected shape");
+  for (const s of parsed.secrets) {
+    if (!s || typeof s !== "object" || typeof s.key !== "string" || (s.value !== undefined && typeof s.value !== "string")) {
+      throw new Error("the secrets store has an unexpected entry");
+    }
+  }
+  return parsed.secrets;
 }
 
 export async function saveSecrets(secrets, path = STORE_PATH) {
