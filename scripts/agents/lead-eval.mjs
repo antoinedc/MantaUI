@@ -14,7 +14,7 @@
 // and NEEDLESS handoffs, and the same two counts for agent_change (Phase 4: creating / editing an agent).
 // A case's `expect` is "answer", "ask", "handoff:<slug>", "agent_change:create" or "agent_change:update:<slug>".
 // Agents Phase 5A: with "architect" in a case's team, a new agent goes to it ("handoff:architect") once the charter is agreed
-// (a request that lacks the charter's essentials is "ask"); a small edit the user dictates stays an `agent_change`.
+// (since #1727 the lead writes the charter itself, assuming what is missing); a small edit the user dictates stays an `agent_change`.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -103,6 +103,7 @@ const instruction = (team, message) =>
     '- "handoff": you call agent_handoff for the one teammate it matches (give "agent": its slug without the @).',
     '- "ask": you must ask the user before doing anything.',
     '- "agent_change": you call agent_change, to create a new agent (give "change":"create") or to edit an existing one, yourself included (give "change":"update" and "agent": its slug without the @).',
+    "  The agent_change tool's own description, as you see it in a real session: For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request and hand it straight to @architect; never ask the user to review a charter, and ask targeted questions only if something essential is genuinely unclear. Use agent_change yourself for small edits the user dictates, or when @architect isn't on the team.",
     'Reply with ONLY a JSON object, e.g. {"action":"handoff","agent":"dev"} or {"action":"agent_change","change":"create"} — no other text.',
   ].join("\n");
 
