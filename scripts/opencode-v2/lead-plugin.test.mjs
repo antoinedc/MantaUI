@@ -667,3 +667,48 @@ describe("research library tools", () => {
     assert.match(await saveTool.execute(args, CTX), /^Not saved: /);
   });
 });
+
+describe("ask_user tool", () => {
+  const askTool = allTools.find((t) => t.name === "ask_user");
+  const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
+  function server(body, status = 200) {
+    const calls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ method: init.method, path: new URL(String(url)).pathname, body: init.body ? JSON.parse(init.body) : undefined });
+      if (status === "throw") throw new Error("ECONNREFUSED");
+      return new Response(JSON.stringify(body), { status });
+    };
+    return calls;
+  }
+  const args = { question: "Create it?", options: [{ label: "a", description: "b" }, { label: "c", description: "d" }], recommended: 0, why: "w", concern: true };
+
+  test("input: question, options (label + description), then the optional recommended, why, concern — optional keys last", () => {
+    assert.ok(askTool);
+    assert.deepEqual(Object.keys(askTool.input.properties), ["question", "options", "recommended", "why", "concern"]);
+    assert.deepEqual(askTool.input.required, ["question", "options"]);
+    assert.equal(askTool.input.properties.options.minItems, 2);
+    assert.equal(askTool.input.properties.options.maxItems, 4);
+    assert.deepEqual(askTool.input.properties.options.items.required, ["label", "description"]);
+    assert.match(askTool.description, /ends your task/i);
+    assert.match(askTool.description, /needs a decision/);
+  });
+
+  test("posts the call identity and exactly the keys it was given; success tells the task to stop", async () => {
+    const calls = server({ ok: true });
+    const out = await askTool.execute(args, CTX);
+    assert.equal(calls[0].path, "/api/ask-user");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", ...args });
+    assert.match(out, /^Recorded/);
+    assert.match(out, /end your turn now/i);
+    const bare = server({ ok: true });
+    await askTool.execute({ question: args.question, options: args.options }, CTX);
+    assert.deepEqual(Object.keys(bare[0].body).sort(), ["callID", "messageID", "options", "question", "sessionID"]);
+  });
+
+  test("a refusal comes back as a sentence the model can act on, never an error", async () => {
+    server({ ok: false, error: "Give 2 to 4 options" });
+    assert.equal(await askTool.execute(args, CTX), "Not recorded: Give 2 to 4 options");
+    server("x", "throw");
+    assert.match(await askTool.execute(args, CTX), /^Not recorded: /);
+  });
+});

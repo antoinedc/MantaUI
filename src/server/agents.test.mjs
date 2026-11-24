@@ -32,6 +32,7 @@ import {
 } from "./agents.mjs";
 import { withResearchGuidance } from "./researchLibrary.mjs";
 import { CAP_ERROR } from "./delegate.mjs";
+import { ASK_USER_MARKER } from "./askUser.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const valid = (extra = "") => `---\nname: Scout\ndescription: Looks things up.\n${extra}---\nYou are Scout.\n`;
@@ -1378,6 +1379,24 @@ test("buildLeadBrief: the mechanics send a new agent to @architect and keep agen
   assert.ok(a.includes("- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card."));
   assert.ok(a.includes("leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created."));
   assert.equal(a, buildLeadBrief({ body: "B", roster: [] }));
+});
+
+test("buildLeadBrief: a result carrying a question block is put to the user in one question call, recommended first, concern stated, never answered for them; the answer goes back with continueJob", () => {
+  const a = buildLeadBrief({ body: "B", roster: [] });
+  const line = a.split("\n").find((l) => l.includes(ASK_USER_MARKER));
+  assert.ok(line, "a bullet about the question block");
+  assert.ok(line.startsWith("- "));
+  assert.match(line, /ONE question call/);
+  assert.match(line, /all the questions of that turn at once/);
+  assert.match(line, /recommended option first/);
+  assert.match(line, /Concern/);
+  assert.match(line, /plainly/);
+  assert.match(line, /never answer it (on the user's behalf|for the user)/i);
+  assert.match(line, /continueJob: <jobId>/);
+  assert.match(line, /same task/);
+  assert.equal(a.split(ASK_USER_MARKER).length - 1, 1, "stated once");
+  assert.equal(a, buildLeadBrief({ body: "B", roster: [] }), "byte-stable");
+  assert.match(readFileSync(join(REAL_TEMPLATES, "manta", "agent.md"), "utf-8"), /question block from the teammate.*never answer it for them/);
 });
 
 test("checkDraft: field rules — lengths, one line, colour, isolation, unknown and role keys, model approval", () => {

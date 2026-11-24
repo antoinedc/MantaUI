@@ -310,6 +310,13 @@ test("the guidance is short, names the tools and the skip rules, and mentions no
   assert.match(RESEARCH_GUIDANCE, /30 days/);
   assert.match(RESEARCH_GUIDANCE, /age/i);
   assert.doesNotMatch(RESEARCH_GUIDANCE, /\b(seo|cro|conversion|pricing|marketing|ads?)\b/i);
+  // one domain-free line: a request the research says is likely a mistake is put to the user, not silently complied with or changed
+  const askLines = lines.filter((l) => l.includes("`ask_user`"));
+  assert.equal(askLines.length, 1);
+  assert.match(askLines[0], /likely a mistake/);
+  assert.match(askLines[0], /silently comply/);
+  assert.match(askLines[0], /silently change/);
+  assert.match(askLines[0], /recommendation/);
 });
 
 test("withResearchGuidance appends the block once, after the task text", () => {
