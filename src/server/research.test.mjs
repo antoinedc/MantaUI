@@ -288,10 +288,223 @@ test("research_search hn and arxiv: compact results; web is not a source; an unk
     assert.equal(ax.results[0].url, "https://arxiv.org/abs/2602.12670v1");
     assert.ok(ax.results[0].summary.length <= 300);
     assert.match((await f.engine.search(call({ source: "web", query: "q" }))).error, /websearch/);
-    assert.match((await f.engine.search(call({ source: "nope", query: "q" }))).error, /Available: hn, arxiv, reddit, x, bookface/);
+    assert.match((await f.engine.search(call({ source: "nope", query: "q" }))).error, /Available: hn, arxiv, reddit, x, github, bookface/);
     assert.match((await f.engine.search(call({ source: "hn", query: "-x" }))).error, /dash/);
     assert.match((await f.engine.search(call({ source: "hn", query: "x".repeat(201) }))).error, /1 to 200/);
     assert.match((await f.engine.search(call({ source: "hn", query: "" }))).error, /1 to 200/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- PDFs ----
+
+// a one-page PDF with a real xref table; `text === null` makes a page with no text at all (a scan has only an image)
+function makePdf(text) {
+  const stream = text === null ? "" : `BT /F1 12 Tf 20 100 Td (${text}) Tj ET`;
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let out = "%PDF-1.4\n";
+  const offsets = [];
+  objs.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, "latin1");
+}
+
+test("research_fetch reads a PDF: the text is extracted, stored like any source and quotable", async () => {
+  const f = await fixture({ routes: { "https://papers.example.com/kohavi.pdf": reply(200, { "content-type": "application/pdf" }, makePdf("Most online experiments are underpowered and show no real effect.")) } });
+  try {
+    const r = await f.engine.fetch(call({ url: "https://papers.example.com/kohavi.pdf" }));
+    assert.equal(r.ok, true, r.error);
+    assert.match(r.sourceId, /^src_[0-9a-f]{16}$/);
+    assert.match(r.text, /Most online experiments are underpowered and show no real effect\./);
+    const stored = await f.engine.getSource("ses_child", r.sourceId);
+    assert.equal(stored.url, "https://papers.example.com/kohavi.pdf");
+    assert.equal(stored.private, false);
+    assert.match(stored.text, /underpowered/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("research_fetch on a PDF without a text layer (a scan) or one that is damaged says so in one sentence, and stores nothing", async () => {
+  const f = await fixture({
+    routes: {
+      "https://papers.example.com/scan.pdf": reply(200, { "content-type": "application/pdf" }, makePdf(null)),
+      "https://papers.example.com/broken.pdf": reply(200, { "content-type": "application/pdf" }, "this is not a pdf at all"),
+    },
+  });
+  try {
+    const scan = await f.engine.fetch(call({ url: "https://papers.example.com/scan.pdf" }));
+    assert.equal(scan.ok, false);
+    assert.match(scan.error, /no text layer/);
+    assert.match(scan.error, /scan/);
+    const broken = await f.engine.fetch(call({ url: "https://papers.example.com/broken.pdf" }));
+    assert.equal(broken.ok, false);
+    assert.match(broken.error, /PDF couldn't be read/);
+    await assert.rejects(readdir(f.root), /ENOENT/, "nothing stored");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("transport: a PDF may be up to the PDF cap, any other page keeps the 2 MiB cap; the refusal names the cap that applied", async () => {
+  const body = Buffer.alloc(300_000, 1);
+  const s = await serve((req, res) => {
+    res.writeHead(200, { "content-type": req.url === "/a.pdf" ? "application/pdf" : "text/plain" });
+    res.end(body);
+  });
+  try {
+    const hop = testTransport();
+    const opts = { byteCap: 100_000, pdfByteCap: 400_000 };
+    const pdf = await fetchFollowing(hop, `http://127.0.0.1:${s.port}/a.pdf`, opts);
+    assert.equal(pdf.body.length, 300_000);
+    await assert.rejects(fetchFollowing(hop, `http://127.0.0.1:${s.port}/a.txt`, opts), (e) => e.code === "too-large" && /over 98 KiB/.test(e.message));
+    await assert.rejects(fetchFollowing(hop, `http://127.0.0.1:${s.port}/a.pdf`, { byteCap: 100_000, pdfByteCap: 200_000 }), (e) => e.code === "too-large" && /over 195 KiB/.test(e.message));
+  } finally {
+    await s.close();
+  }
+});
+
+// ---- GitHub ----
+
+const ghJson = (obj, headers = {}) => reply(200, { "content-type": "application/json; charset=utf-8", ...headers }, JSON.stringify(obj));
+const repoItem = (over = {}) => ({ full_name: "acme/cro-skill", html_url: "https://github.com/acme/cro-skill", stargazers_count: 1234, pushed_at: "2026-11-02T10:00:00Z", license: { spdx_id: "MIT" }, description: "A skill for landing page reviews", topics: ["agent-skills", "cro"], ...over });
+
+test("research_search github: repositories with name, url, stars, last push, licence and description; unauthenticated, one request, a note says code search needs a token", async () => {
+  const f = await fixture({ routes: { "*": (req) => ghJson({ items: [repoItem(), repoItem({ full_name: "x/y", html_url: "https://github.com/x/y", stargazers_count: 3, license: null, description: null, topics: [] })] }) } });
+  try {
+    const r = await f.engine.search(call({ source: "github", query: "landing page conversion" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.source, "github");
+    assert.deepEqual(r.results[0], { title: "acme/cro-skill", url: "https://github.com/acme/cro-skill", stars: 1234, pushed: "2026-11-02", license: "MIT", description: "A skill for landing page reviews" });
+    assert.deepEqual(r.results[1], { title: "x/y", url: "https://github.com/x/y", stars: 3, pushed: "2026-11-02", license: null, description: null });
+    assert.match(r.note, /code search/i);
+    assert.equal(f.calls.length, 1);
+    const u = new URL(f.calls[0].url);
+    assert.equal(u.origin + u.pathname, "https://api.github.com/search/repositories");
+    assert.match(u.searchParams.get("q"), /^landing page conversion skill/);
+    assert.equal(f.calls[0].headers.Authorization, undefined);
+    assert.match(f.calls[0].headers.Accept, /github/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("research_search github with a shared GITHUB_TOKEN: the token goes to api.github.com only, code search for SKILL.md files is added, and no redirect is followed", async () => {
+  const f = await fixture({
+    secrets: [{ key: "GITHUB_TOKEN", scope: "shared", value: "ghp_secretvalue" }],
+    routes: {
+      "*": (req) => {
+        const u = new URL(req.url);
+        if (u.pathname === "/search/repositories") return ghJson({ items: [repoItem()] });
+        if (u.pathname === "/search/code") return ghJson({ items: [{ name: "SKILL.md", path: "skills/cro/SKILL.md", html_url: "https://github.com/acme/cro-skill/blob/main/skills/cro/SKILL.md", repository: { full_name: "acme/cro-skill", description: "A skill" } }] });
+        throw new Error("unexpected");
+      },
+    },
+  });
+  try {
+    const r = await f.engine.search(call({ source: "github", query: "cro" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.results.length, 2);
+    assert.deepEqual(r.results[1], { title: "acme/cro-skill — skills/cro/SKILL.md", url: "https://github.com/acme/cro-skill/blob/main/skills/cro/SKILL.md", description: "A skill" });
+    assert.equal(r.note, undefined);
+    assert.equal(f.calls.length, 2);
+    for (const c of f.calls) assert.equal(c.headers.Authorization, "Bearer ghp_secretvalue");
+    assert.match(new URL(f.calls[1].url).searchParams.get("q"), /cro filename:SKILL\.md/);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture({ secrets: [{ key: "GITHUB_TOKEN", scope: "shared", value: "ghp_secretvalue" }], routes: { "*": reply(302, { location: "https://evil.example.com/" }, "") } });
+  try {
+    const r = await g.engine.search(call({ source: "github", query: "cro" }));
+    assert.equal(r.ok, false);
+    assert.ok(!JSON.stringify(r).includes("ghp_secretvalue"));
+    assert.equal(g.calls.length, 1, "the redirect target was never asked");
+  } finally {
+    await g.cleanup();
+  }
+});
+
+test("research_search github: a project- or session-scoped GITHUB_TOKEN is ignored; an unreadable secrets store still searches without one; a failing code search keeps the repositories", async () => {
+  const f = await fixture({ secrets: [{ key: "GITHUB_TOKEN", scope: "project", value: "ghp_nope" }], routes: { "*": ghJson({ items: [repoItem()] }) } });
+  try {
+    assert.equal((await f.engine.search(call({ source: "github", query: "cro" }))).ok, true);
+    assert.equal(f.calls[0].headers.Authorization, undefined);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture({ secrets: "throw", routes: { "*": ghJson({ items: [repoItem()] }) } });
+  try {
+    const r = await g.engine.search(call({ source: "github", query: "cro" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(g.calls[0].headers.Authorization, undefined);
+  } finally {
+    await g.cleanup();
+  }
+  const h = await fixture({
+    secrets: [{ key: "GITHUB_TOKEN", scope: "shared", value: "ghp_x" }],
+    routes: { "*": (req) => (new URL(req.url).pathname === "/search/code" ? reply(422, { "content-type": "application/json" }, "{}") : ghJson({ items: [repoItem()] })) },
+  });
+  try {
+    const r = await h.engine.search(call({ source: "github", query: "cro" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.results.length, 1);
+    assert.match(r.note, /code search/i);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("research_search github: the rate limit, a rejected query and an unreadable answer are told apart in fixed sentences; the query is checked first", async () => {
+  const limited = await fixture({ routes: { "*": reply(403, { "x-ratelimit-remaining": "0", "content-type": "application/json" }, '{"message":"API rate limit exceeded"}') } });
+  const rejected = await fixture({ routes: { "*": reply(422, { "content-type": "application/json" }, '{"message":"Validation Failed"}') } });
+  const garbage = await fixture({ routes: { "*": reply(200, { "content-type": "application/json" }, "<html>") } });
+  try {
+    assert.match((await limited.engine.search(call({ source: "github", query: "cro" }))).error, /search limit.*minute/i);
+    assert.match((await rejected.engine.search(call({ source: "github", query: "cro" }))).error, /rejected the search/);
+    assert.match((await garbage.engine.search(call({ source: "github", query: "cro" }))).error, /wasn't understood/);
+    assert.match((await limited.engine.search(call({ source: "github", query: "-x" }))).error, /dash/);
+    assert.equal(limited.calls.length, 1);
+  } finally {
+    await limited.cleanup();
+    await rejected.cleanup();
+    await garbage.cleanup();
+  }
+});
+
+test("research_fetch reads GitHub files raw: a github.com blob address is read from raw.githubusercontent.com, stored as a public source under the original address", async () => {
+  const f = await fixture({
+    routes: {
+      "https://raw.githubusercontent.com/acme/cro-skill/main/skills/cro/SKILL.md": reply(200, { "content-type": "text/plain; charset=utf-8" }, "# CRO\nShow one primary call to action per screen."),
+      "https://raw.githubusercontent.com/acme/cro-skill/main/README.md": reply(200, { "content-type": "text/plain; charset=utf-8" }, "# Readme"),
+      "https://github.com/acme/cro-skill": reply(200, { "content-type": "text/html" }, html("<p>repo page</p>")),
+    },
+  });
+  try {
+    const blob = await f.engine.fetch(call({ url: "https://github.com/acme/cro-skill/blob/main/skills/cro/SKILL.md?plain=1#L3-L9" }));
+    assert.equal(blob.ok, true, blob.error);
+    assert.match(blob.text, /one primary call to action/);
+    assert.equal(f.calls[0].url, "https://raw.githubusercontent.com/acme/cro-skill/main/skills/cro/SKILL.md");
+    const stored = await f.engine.getSource("ses_child", blob.sourceId);
+    assert.equal(stored.url, "https://github.com/acme/cro-skill/blob/main/skills/cro/SKILL.md?plain=1#L3-L9");
+    assert.equal(stored.finalUrl, "https://raw.githubusercontent.com/acme/cro-skill/main/skills/cro/SKILL.md");
+    assert.equal(stored.private, false);
+    // a raw address works as is; the repository page (not a blob) is read as the page it is
+    assert.equal((await f.engine.fetch(call({ url: "https://raw.githubusercontent.com/acme/cro-skill/main/README.md" }))).ok, true);
+    const page = await f.engine.fetch(call({ url: "https://github.com/acme/cro-skill" }));
+    assert.match(page.text, /repo page/);
+    assert.equal(f.calls.at(-1).url, "https://github.com/acme/cro-skill");
   } finally {
     await f.cleanup();
   }

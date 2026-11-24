@@ -78,6 +78,7 @@
     "simple-git": "4.0.2",
     "unified": "^11.0.5",
     "unist-util-visit": "^5.1.0",
+    "unpdf": "^2.2.2",
     "web-push": "^3.6.7",
     "ws": "^8.20.1",
     "yaml": "^2.9.0"

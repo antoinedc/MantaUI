@@ -592,6 +592,13 @@ describe("research tools (Phase 5A)", () => {
     assert.match(await searchTool.execute({ source: "bookface", query: "q" }, CTX), /^Source src_2 — YC Bookface: q/);
     server({ ok: true, source: "hn", results: [] });
     assert.equal(await searchTool.execute({ source: "hn", query: "zzz" }, CTX), "No results from hn.");
+    server({ ok: true, source: "github", results: [{ title: "acme/cro-skill", url: "https://github.com/acme/cro-skill", stars: 1234, pushed: "2026-11-02", license: "MIT", description: "A skill" }, { title: "x/y", url: "https://github.com/x/y", stars: 3, pushed: "2025-01-01", license: null, description: null }], note: "Code search (SKILL.md files) needs a GITHUB_TOKEN shared secret and was skipped." });
+    const gh = await searchTool.execute({ source: "github", query: "cro" }, CTX);
+    assert.match(gh, /1\. acme\/cro-skill \| https:\/\/github\.com\/acme\/cro-skill \| 1234 stars \| pushed 2026-11-02 \| MIT\n {3}A skill/);
+    assert.match(gh, /2\. x\/y \| https:\/\/github\.com\/x\/y \| 3 stars \| pushed 2025-01-01 \| no licence listed/);
+    assert.match(gh, /Code search \(SKILL\.md files\) needs a GITHUB_TOKEN/);
+    assert.match(searchTool.description, /github/);
+    assert.match(fetchTool.description, /PDF/);
     server({ ok: false, error: "Exa's search limit was reached; use the built-in websearch with site: instead" });
     assert.match(await searchTool.execute({ source: "reddit", query: "q" }, CTX), /^Not searched: Exa's search limit/);
   });

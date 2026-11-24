@@ -12,8 +12,13 @@ import { RequestFilteringHttpAgent, RequestFilteringHttpsAgent } from "request-f
 
 export const FETCH_DEADLINE_MS = 20_000;
 export const BYTE_CAP = 2 * 1024 * 1024;
+/** A PDF (a paper) may be bigger than a web page: the cap that applies once the answer's content type says PDF. */
+export const PDF_BYTE_CAP = 10 * 1024 * 1024;
 export const MAX_REDIRECTS = 5;
 const USER_AGENT = "Mozilla/5.0 (compatible; MantaArchitect/1.0; +https://mantaui.com)";
+
+const sizeWords = (bytes) => (bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MiB` : `${Math.round(bytes / 1024)} KiB`);
+const isPdfType = (headers) => String(headers?.["content-type"] ?? "").split(";")[0].trim().toLowerCase() === "application/pdf";
 
 /** A refusal whose message is a sentence for the model (never a stack, never a path). */
 export class ResearchError extends Error {
@@ -41,11 +46,12 @@ const decoderFor = (encoding) => {
 /**
  * Build the production transport. `agentOptions` are passed to the filtering agents (tests only: the default refuses every
  * private address). Returns `hop(request)`: ONE request, no redirect following —
- * `{ url, method?, headers?, body?, deadlineAt, bytesLeft }` → `{ status, headers, body: Buffer, bytes }`.
+ * `{ url, method?, headers?, body?, deadlineAt, bytesLeft, pdfBytesLeft? }` → `{ status, headers, body: Buffer, bytes }`.
+ * `pdfBytesLeft` (when given) replaces `bytesLeft` for an answer whose content type is application/pdf.
  * Throws a ResearchError: "timeout", "too-large" or "blocked/failed".
  */
 export function createGuardedTransport({ agentOptions = {} } = {}) {
-  return function hop({ url, method = "GET", headers = {}, body = null, deadlineAt, bytesLeft }) {
+  return function hop({ url, method = "GET", headers = {}, body = null, deadlineAt, bytesLeft, pdfBytesLeft = null }) {
     return new Promise((resolve, reject) => {
       let target;
       try {
@@ -84,15 +90,16 @@ export function createGuardedTransport({ agentOptions = {} } = {}) {
         (res) => {
           const chunks = [];
           let bytes = 0;
+          const cap = pdfBytesLeft !== null && isPdfType(res.headers) ? pdfBytesLeft : bytesLeft;
           const decoder = decoderFor(res.headers["content-encoding"]);
           const source = decoder ? res.pipe(decoder) : res;
           if (decoder) decoder.on("error", () => finish(reject, new ResearchError("The page couldn't be decoded")));
           source.on("data", (chunk) => {
             bytes += chunk.length;
-            if (bytes > bytesLeft) {
+            if (bytes > cap) {
               req.destroy();
               res.destroy();
-              finish(reject, new ResearchError("The page is too large to read (over 2 MiB)", "too-large"));
+              finish(reject, new ResearchError(`The page is too large to read (over ${sizeWords(cap)})`, "too-large"));
               return;
             }
             chunks.push(chunk);
@@ -121,18 +128,19 @@ const isRedirect = (status) => status === 301 || status === 302 || status === 30
 /**
  * Follow redirects by hand over `hop`. `check(url)` runs on EVERY hop's address (including the first) and returns a sentence
  * to refuse it or null; `onRedirect(from, to)` may refuse a redirect (a sentence) before the next request is made. One
- * deadline and one byte budget span every hop; a redirect response's own body counts against it.
+ * deadline and one byte budget span every hop; a redirect response's own body counts against it. `pdfByteCap` (default none)
+ * is the larger budget for an answer that is a PDF.
  * `{ status, headers, body, finalUrl, redirects }`.
  */
-export async function fetchFollowing(hop, url, { headers = {}, check = () => null, onRedirect = () => null, now = Date.now, maxRedirects = MAX_REDIRECTS, deadlineMs = FETCH_DEADLINE_MS, byteCap = BYTE_CAP } = {}) {
+export async function fetchFollowing(hop, url, { headers = {}, check = () => null, onRedirect = () => null, now = Date.now, maxRedirects = MAX_REDIRECTS, deadlineMs = FETCH_DEADLINE_MS, byteCap = BYTE_CAP, pdfByteCap = null } = {}) {
   const deadlineAt = now() + deadlineMs;
-  let bytesLeft = byteCap;
+  let used = 0;
   let current = url;
   for (let redirects = 0; ; redirects++) {
     const refused = check(current);
     if (refused) throw new ResearchError(refused);
-    const res = await hop({ url: current, headers, deadlineAt, bytesLeft });
-    bytesLeft -= res.bytes ?? res.body.length;
+    const res = await hop({ url: current, headers, deadlineAt, bytesLeft: byteCap - used, pdfBytesLeft: pdfByteCap === null ? null : pdfByteCap - used });
+    used += res.bytes ?? res.body.length;
     if (!isRedirect(res.status)) return { ...res, finalUrl: current, redirects };
     const location = res.headers.location;
     if (!location) return { ...res, finalUrl: current, redirects };

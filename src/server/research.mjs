@@ -2,7 +2,8 @@
 //
 // The server, not the model, fetches every page, keeps its raw text and later checks every quote against it (agents.mjs,
 // `agent_propose`). Three tools: `research_fetch` (a public page), `research_read` (further into a stored source) and
-// `research_search` (HN, arXiv, Reddit, X, and the user's extra sources). Every call is bound first: the exact running tool
+// `research_search` (HN, arXiv, GitHub, Reddit, X, and the user's extra sources). A fetch reads web pages, text, JSON, PDFs
+// (papers; extracted to text in a worker thread) and GitHub files (a github.com blob address is read raw). Every call is bound first: the exact running tool
 // part, the agent `agent-architect`, and the calling session being the child of the RUNNING job carrying the capability stamp
 // (`bind`, injected from the agents engine) — a refusal is a sentence, before any fetch, command or write.
 //
@@ -19,14 +20,15 @@ import { XMLParser } from "fast-xml-parser";
 import { statePath } from "../shared/paths.mjs";
 import { QUERY_MAX } from "../shared/architectSources.mjs";
 import { loadSecretsStrict as defaultLoadSecretsStrict } from "./secrets.mjs";
-import { createGuardedTransport, fetchFollowing, ResearchError, BYTE_CAP, FETCH_DEADLINE_MS } from "./research/transport.mjs";
+import { createGuardedTransport, fetchFollowing, ResearchError, BYTE_CAP, PDF_BYTE_CAP, FETCH_DEADLINE_MS } from "./research/transport.mjs";
+import { extractPdfText } from "./research/pdf.mjs";
 import { RESERVED_HOSTS, RESERVED_SENTENCE, canonicalPost, jinaRead, exaSearch } from "./research/reach.mjs";
 import { runCommandSource, runUrlSource, queryRefusal } from "./research/extra.mjs";
 
 export const WINDOW_CHARS = 40_000;
 export const STORE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 export const STORE_MAX_BYTES = 200 * 1024 * 1024;
-export const BASE_SEARCH_SOURCES = Object.freeze(["hn", "arxiv", "reddit", "x"]);
+export const BASE_SEARCH_SOURCES = Object.freeze(["hn", "arxiv", "reddit", "x", "github"]);
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const SOURCE_ID_RE = /^src_[0-9a-f]{16}$/;
 const UNEXPECTED = "The research tool failed; try again";
@@ -82,6 +84,22 @@ function renderHnItem(item) {
   return lines.join("\n");
 }
 
+const GITHUB_BLOB = /^\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/;
+
+/** The raw-file address of a github.com blob address (`/<owner>/<repo>/blob/<ref>/<path>`), or null. Query and fragment are dropped. */
+export function githubRawUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || (u.hostname !== "github.com" && u.hostname !== "www.github.com")) return null;
+  const m = GITHUB_BLOB.exec(u.pathname);
+  return m ? `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}/${m[4]}` : null;
+}
+
+const GITHUB_API = "https://api.github.com/search/";
 const HN_ITEM_PAGE = /^https:\/\/news\.ycombinator\.com\/item\?id=(\d{1,12})$/;
 
 /**
@@ -102,6 +120,7 @@ export function createResearchEngine({
   extraSources = async () => [],
   loadSecretsStrict = defaultLoadSecretsStrict,
   exec = (file, args, opts) => execFileAsync(file, args, { ...opts, encoding: "utf8" }),
+  extractPdf = extractPdfText,
   agentHome = statePath("agents", "architect", "home"),
   home = homedir(),
   pathEnv = process.env.PATH,
@@ -180,9 +199,13 @@ export function createResearchEngine({
 
   // ---- research_fetch ----
 
-  function contentOf(res, finalUrl) {
+  async function contentOf(res, finalUrl) {
     if (res.status < 200 || res.status >= 300) throw new ResearchError(`The page answered with status ${res.status}`);
     const type = String(res.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    if (type === "application/pdf") {
+      const pdf = await extractPdf(res.body);
+      return { title: pdf.title ?? null, text: pdf.text };
+    }
     const body = decodeBody(res.body, res.headers["content-type"]);
     const host = (() => {
       try {
@@ -224,9 +247,9 @@ export function createResearchEngine({
         rec = await storeSource(b.child, { url, finalUrl: post.url, title: page.title, text: page.text });
       } else {
         const hn = HN_ITEM_PAGE.exec(url);
-        const target = hn ? `https://hn.algolia.com/api/v1/items/${hn[1]}` : url;
-        const res = await fetchFollowing(hop, target, { check: addressRefusal, now });
-        const content = contentOf(res, res.finalUrl);
+        const target = hn ? `https://hn.algolia.com/api/v1/items/${hn[1]}` : (githubRawUrl(url) ?? url);
+        const res = await fetchFollowing(hop, target, { check: addressRefusal, now, pdfByteCap: PDF_BYTE_CAP });
+        const content = await contentOf(res, res.finalUrl);
         rec = await storeSource(b.child, { url, finalUrl: res.finalUrl, title: content.title, text: content.text });
       }
       return { ok: true, ...windowed(rec) };
@@ -276,6 +299,59 @@ export function createResearchEngine({
     }));
   }
 
+  // GitHub's REST search: repositories always (no key needed); code search for SKILL.md files only with a shared GITHUB_TOKEN
+  // (GitHub refuses unauthenticated code search). The token goes to api.github.com only and no redirect is ever followed.
+  async function githubGet(path, params, token) {
+    const url = `${GITHUB_API}${path}?${params}`;
+    const headers = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+    const res = await hop({ url, headers, deadlineAt: now() + FETCH_DEADLINE_MS, bytesLeft: BYTE_CAP });
+    const text = res.body.toString("utf-8");
+    if (res.status === 401 && token) return githubGet(path, params, null); // a stale token must not break the search
+    if (res.status === 429 || (res.status === 403 && (res.headers["x-ratelimit-remaining"] === "0" || res.headers["retry-after"] || /rate limit/i.test(text)))) {
+      throw new ResearchError("GitHub's search limit was reached; wait a minute, or use the built-in websearch with site:github.com");
+    }
+    if (res.status === 422) throw new ResearchError("GitHub rejected the search; simplify the query");
+    if (res.status !== 200) throw new ResearchError(`GitHub answered with status ${res.status}`);
+    try {
+      const json = JSON.parse(text);
+      return Array.isArray(json?.items) ? json.items : [];
+    } catch {
+      throw new ResearchError("GitHub's answer wasn't understood");
+    }
+  }
+
+  async function searchGithub(query) {
+    let token = null;
+    try {
+      token = (await resolveSecrets(["GITHUB_TOKEN"])).get("GITHUB_TOKEN") ?? null; // optional: an unreadable store just means no token
+    } catch {
+      token = null;
+    }
+    const repos = await githubGet("repositories", `q=${encodeURIComponent(`${query} skill in:name,description,topics,readme`)}&per_page=10`, token);
+    const results = repos.slice(0, 10).map((r) => ({
+      title: r.full_name ?? null,
+      url: r.html_url ?? null,
+      stars: r.stargazers_count ?? 0,
+      pushed: String(r.pushed_at ?? "").slice(0, 10),
+      license: r.license?.spdx_id && r.license.spdx_id !== "NOASSERTION" ? r.license.spdx_id : (r.license?.name ?? null),
+      description: r.description ? collapse(r.description).slice(0, 300) : null,
+    }));
+    let note;
+    if (!token) {
+      note = "Code search (SKILL.md files) needs a GITHUB_TOKEN shared secret and was skipped; only repositories were searched.";
+    } else {
+      try {
+        const files = await githubGet("code", `q=${encodeURIComponent(`${query} filename:SKILL.md`)}&per_page=8`, token);
+        for (const f of files.slice(0, 8)) {
+          results.push({ title: `${f.repository?.full_name ?? "?"} — ${f.path ?? f.name ?? "?"}`, url: f.html_url ?? null, description: f.repository?.description ? collapse(f.repository.description).slice(0, 300) : null });
+        }
+      } catch {
+        note = "Code search for SKILL.md files failed; only repositories are listed.";
+      }
+    }
+    return { results, ...(note ? { note } : {}) };
+  }
+
   async function searchExtra(source, query, child) {
     let text;
     let used = new Set();
@@ -315,6 +391,7 @@ export function createResearchEngine({
       if (refused) throw new ResearchError(refused);
       if (source === "hn") return { ok: true, source, results: await searchHn(query) };
       if (source === "arxiv") return { ok: true, source, results: await searchArxiv(query) };
+      if (source === "github") return { ok: true, source, ...(await searchGithub(query)) };
       return { ok: true, source, results: await exaSearch(hop, query, source, { deadlineAt: now() + FETCH_DEADLINE_MS }) };
     });
   }
