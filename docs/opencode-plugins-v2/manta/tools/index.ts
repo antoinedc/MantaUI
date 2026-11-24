@@ -1,8 +1,9 @@
 // Every Manta tool, in a stable order. One file per V1 tool file
-// (docs/opencode-tools/*.ts) plus the V2-only todo.ts, handoff.ts, knowledge.ts, agents.ts and research.ts.
+// (docs/opencode-tools/*.ts) plus the V2-only todo.ts, handoff.ts, knowledge.ts, agents.ts, research.ts and ask-user.ts.
 
 import type { ToolDef } from "../lib/types.ts";
 import { tools as agents } from "./agents.ts";
+import { tools as askUser } from "./ask-user.ts";
 import { tools as ctoFact } from "./cto-fact.ts";
 import { tools as cto } from "./cto.ts";
 import { tools as ctoVerdict } from "./cto-verdict.ts";
@@ -32,6 +33,7 @@ import { tools as widget } from "./widget.ts";
 
 export const allTools: ToolDef[] = [
   ...agents,
+  ...askUser,
   ...ctoFact,
   ...cto,
   ...ctoVerdict,

@@ -84,6 +84,47 @@ test("the Architect template stays short and tells it to look for existing skill
   assert.match(skill, /anthropics\/skills/);
 });
 
+test("the Architect templates carry no agent-design opinions (research and the library decide those) and tell it to use ask_user when the request and the roster conflict", async () => {
+  const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
+  const main = await read("agent.md");
+  const authoring = await read("skills", "authoring", "SKILL.md");
+  const research = await read("skills", "research", "SKILL.md");
+  const all = `${main}\n${authoring}\n${research}`;
+  const opinions = [
+    /Prefer adding rules to an existing agent/i,
+    /Extend or create/i,
+    /Create a new agent only when/i,
+    /better than giving an existing agent/i,
+    /overlap a sibling/i,
+    /must not match/i,
+    /100.150 lines/,
+    /personas?\b/i,
+    /world-class/i,
+    /Prune when improving/i,
+    /beats a rewrite/i,
+    /earns the most/i,
+    /restate good practice/i,
+    /already does/i,
+    /would not (do|follow)/i,
+    /generic skill bundles/i,
+  ];
+  for (const re of opinions) assert.doesNotMatch(all, re, `${re} is an agent-design opinion: research decides it`);
+  // the process, the evidence bar, the tools and the safety mechanics stay
+  assert.match(main, /roster/i);
+  assert.match(main, /research_library_find/);
+  assert.match(main, /agent_propose/);
+  assert.match(main, /at least 3 independent sources/);
+  assert.match(authoring, /admission/i);
+  assert.match(authoring, /isolation/);
+  // one short process line: compare the request with the roster in light of the research; ask_user on a conflict
+  const askLines = main.split("\n").filter((l) => l.includes("`ask_user`"));
+  assert.equal(askLines.length, 1);
+  assert.match(askLines[0], /roster/);
+  assert.match(askLines[0], /research/);
+  assert.match(askLines[0], /conflict/);
+  assert.ok(!all.includes("Needs a decision:"), "the old 'end your result with Needs a decision:' hack is replaced by the tool");
+});
+
 test("only the folder `architect` with role architect is the Architect; another folder claiming it is an error row", async () => {
   const f = await archFixture();
   try {

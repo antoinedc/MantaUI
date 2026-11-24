@@ -258,6 +258,7 @@ import { createCtoConversationService, authorizeCtoProjectMutation } from "./cto
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
 import { createResearchEngine } from "./research.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
+import { createAskUser } from "./askUser.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
 import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
 import { parseMainWorktree } from "./knowledge/identity.mjs";
@@ -2602,6 +2603,11 @@ const researchEngine = createResearchEngine({
 const researchLibrary = createResearchLibrary({
   bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
   getSource: (child, id) => researchEngine.getSource(child, id),
+});
+// ask_user (docs/superpowers/specs/2026-11-24-ask-user-tool.md): bound like the research tools, then stored on the running task's record.
+const askUser = createAskUser({
+  bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
+  record: (jobId, ask) => delegateEngine.recordAskUser(jobId, ask),
 });
 const agentsEngine = createAgentsEngine({
   research: researchEngine,
@@ -5017,9 +5023,10 @@ const handleRequest = async (req, res) => {
   // POST /api/agents/propose   body {sessionID, messageID, callID, action, draft, summary, evidence, admission, agent?, baseHash?}
   // POST /api/research/{fetch,read,search}  body {sessionID, messageID, callID, ...the tool's arguments}
   // POST /api/research-library/{find,save}  the same shape (every specialist's task; src/server/researchLibrary.mjs)
+  // POST /api/ask-user                      the same shape: {question, options, recommended?, why?, concern?} (src/server/askUser.mjs)
   //                                         → {ok:true, ...} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engines: src/server/agents.mjs, src/server/research.mjs.
-  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save") {
+  if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save" || path === "/api/ask-user") {
     try {
       if (req.method !== "POST") {
         respondJson(res, 405, { error: "method not allowed" });
@@ -5029,7 +5036,9 @@ const handleRequest = async (req, res) => {
       const result =
         path === "/api/agents/propose"
           ? await agentsEngine.propose(body)
-          : path.startsWith("/api/research-library/")
+          : path === "/api/ask-user"
+            ? await askUser.ask(body)
+            : path.startsWith("/api/research-library/")
             ? await researchLibrary[path.slice("/api/research-library/".length)](body)
             : await researchEngine[path.slice("/api/research/".length)](body);
       respondJson(res, 200, result);

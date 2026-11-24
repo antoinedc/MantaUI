@@ -9,7 +9,9 @@
 // Dependency-injected like the other engines: tests drive it with a fake binding and a fake record.
 
 export const ASK_USER_TOOL = "ask_user";
-export const ASK_USER_HEADER = "Question for the user (written by the server; the task ended waiting for the user's answer):";
+/** What the lead looks for in a result. */
+export const ASK_USER_MARKER = "Question for the user";
+export const ASK_USER_HEADER = `${ASK_USER_MARKER} (written by the server; the task ended waiting for the user's answer):`;
 
 const QUESTION_MAX = 500;
 const LABEL_MAX = 80;
