@@ -350,7 +350,7 @@ Plugin: `docs/opencode-plugins-v2/manta/tools/agents.ts`. Server: `agents.mjs`.
 { action: "create" | "update", draft: AgentDraft (as agent_change),
   summary: string 1–600, evidence: [{ sourceId, quote 20–300 nonblank, claim 1–300 }] 1–12,
   admission: [{ rule 1–300, verdict: "general"|"scoped"|"excluded", why 1–300 }] 0–40,
-  fitCheck: { researchSays 1–600, matches: boolean, why 1–600 },
+  fitCheck: { researchSays 1–600, matches: boolean, why 1–600, basis: string[] 1–10 (entry ids or exact topics, each ≤ 200) },
   agent?: slug, baseHash?: string }
 ```
 
@@ -362,6 +362,19 @@ the job record carries a lasting `askedUser` mark (set when the question is capt
 This is process only: nothing says which answer is right; that comes from the Architect's research. (Seen in a live run:
 the Architect's own refreshed entry argued against the narrow agent the user asked for, and it created it without asking.)
 The card does not show the fit check yet (see `docs/agents/follow-ups.md`).
+
+**The fit check rests on library entries (2026-11-25).** Silence from the Architect must mean "I researched this properly",
+never "I didn't know enough" (the live run's fit check rested on an agent-setup entry with 2 sources and said it matched).
+So `fitCheck.basis` names the library entries it rests on, at least one per topic researched for the request (the subject,
+and how the agent fits the team). The server resolves each in the task's project scope and refuses when an entry is missing,
+not fresh (a stale one must be refreshed with `research_library_save`), or thin (under 3 independent sources, or one source
+carrying most findings; the same bar as the library's `thin`). Each refusal names the entry and what it lacks. If the user
+was asked in this task (`askedUser`), a thin basis is allowed — they decided knowingly on incomplete evidence — and the
+proposal records `basisThin: true`; a missing or stale entry is never allowed. The proposal stores `basis`
+(`[{id, topic, sourceCount, ageDays}]`) and its Outcome line ends with "Based on: <topic> (N sources, saved D days ago)".
+This enforces the process (enough, fresh evidence was gathered), never the judgement: no agent-design opinion lives on the
+server or in the templates. Not required: that the entry was saved in this task; a fresh, well-founded entry from an earlier
+task is reused as the library intends.
 
 The optional keys go LAST in the actual schema, because of the strict-tool quirk that already applies to
 `agent_change`. A plugin test checks that an update arrives with both keys intact.

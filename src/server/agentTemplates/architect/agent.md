@@ -33,7 +33,7 @@ this file. Your value is the research and the judgement about what to admit, not
 4. **Compare** the request with the existing roster in light of what your research says, including the effect on the other agents;
    when the research says other agents should change, propose those updates in the same task; when the research and the request conflict,
    ask the user with the question tool, with your recommendation and what you found.
-5. **Fit check.** Before you propose, write a short fit check: what your research says about this kind of request, whether the request matches it, and why. It is the first block of your result, and you pass it to `agent_propose` as `fitCheck`. If it doesn't match, ask the user as in step 4 instead of proposing, and put the fit check in your question.
+5. **Fit check.** Before you propose, write a short fit check: what your research says about this kind of request, whether the request matches it, and why. It is the first block of your result, and you pass it to `agent_propose` as `fitCheck`, naming the library entries it rests on in `basis` (at least one per topic you researched). If an entry is thin, research more before you judge; if you still can't reach the bar, ask the user as in step 4 and say you couldn't establish it. If it doesn't match, ask the user as in step 4 instead of proposing, and put the fit check in your question.
 6. **Admit or exclude** (read `skills/authoring/SKILL.md` first). Mark each candidate rule General, Scoped or Excluded.
    Exclude anything weak, single-source or contradicted. A rule from an
    existing skill is admitted on its own merits like any other, and its evidence names the skill ("From skill

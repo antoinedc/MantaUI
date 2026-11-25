@@ -398,5 +398,23 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
     });
   }
 
-  return { find, save, file };
+  // ---- lookup: the server's own read, for checking what a judgement rests on ----
+
+  /**
+   * Resolve references (an entry id, or an exact topic: case and spacing ignored) to entries as the project can see them.
+   * `[{ ref, entry }]` in the order given; `entry` is the find wire shape (age, status, source count, thin) or null. The
+   * same topic in two scopes resolves to the most recently checked one. An unreadable library THROWS (never "missing").
+   * Not a tool: the caller has already been bound by its own engine.
+   */
+  async function lookup({ project, refs }) {
+    const entries = (await load()).filter((e) => visibleTo(e, project));
+    const t = now();
+    return (Array.isArray(refs) ? refs : []).map((ref) => {
+      const key = topicKey(ref);
+      const hit = entries.find((e) => e.id === collapse(ref)) ?? entries.filter((e) => topicKey(e.topic) === key).sort((a, c) => c.checkedAt - a.checkedAt)[0] ?? null;
+      return { ref, entry: hit ? wire(hit, t) : null };
+    });
+  }
+
+  return { find, save, lookup, file };
 }

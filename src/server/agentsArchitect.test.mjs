@@ -154,7 +154,7 @@ test("the Architect writes a fit check before proposing: what its research says,
   assert.match(finish, /begin with the fit check/i);
   // the authoring skill lists the field and the refusal
   const fields = flat(authoring.match(/## `agent_propose` fields[\s\S]*$/)?.[0] ?? "");
-  assert.match(fields, /`fitCheck`: `\{researchSays, matches, why\}`/);
+  assert.match(fields, /`fitCheck`: `\{researchSays, matches, why, basis\}`/);
   assert.match(fields, /no fit check is refused/i);
   assert.match(fields, /`matches` is false, ask the user with the question tool first/i);
   assert.doesNotMatch(authoring, /single agent|prefer (extending|a new agent)/i);
@@ -419,6 +419,13 @@ async function proposeFixture({ level = "auto", extra = {}, templates } = {}) {
     pubs: [],
     sources: { "ses_child:src_a": { text: SOURCE_TEXT, url: "https://example.com/a", finalUrl: "https://example.com/a?x=1", private: false }, "ses_child:src_priv": { text: SOURCE_TEXT, url: null, private: true } },
     approved: ["anthropic/claude-sonnet-5-5"],
+    // the research library as the server reads it for the caller's project: entries by id; a topic matches exactly
+    library: [
+      { id: "rl_subject", topic: "CRO copywriting", scope: "global", ageDays: 2, status: "fresh", shelfLifeDays: 90, sourceCount: 4, thin: false, dominant: false },
+      { id: "rl_team", topic: "How an agent fits the team", scope: "global", ageDays: 5, status: "fresh", shelfLifeDays: 60, sourceCount: 3, thin: false, dominant: false },
+    ],
+    libraryThrows: false,
+    libraryProjects: [],
   };
   const f = await archFixture({
     templates,
@@ -439,6 +446,13 @@ async function proposeFixture({ level = "auto", extra = {}, templates } = {}) {
         },
       },
       research: { getSource: async (child, id) => w.sources[`${child}:${id}`] ?? null },
+      library: {
+        lookup: async ({ project, refs }) => {
+          if (w.libraryThrows) throw new Error("library unreadable");
+          w.libraryProjects.push(project);
+          return refs.map((ref) => ({ ref, entry: w.library.find((e) => e.id === ref || e.topic.toLowerCase() === String(ref).trim().toLowerCase()) ?? null }));
+        },
+      },
       loadSecretsStrict: async () => [],
       createScanner: () => ({ scan: async () => ({ clean: true, unavailable: false, hits: [] }) }),
       ...extra,
@@ -449,7 +463,7 @@ async function proposeFixture({ level = "auto", extra = {}, templates } = {}) {
 }
 
 let seq = 0;
-const FIT_CHECK = { researchSays: "Entry 'agent design' (2 days old) says what it says about requests of this kind.", matches: true, why: "The request is the kind the entry covers." };
+const FIT_CHECK = { researchSays: "Entry 'agent design' (2 days old) says what it says about requests of this kind.", matches: true, why: "The request is the kind the entry covers.", basis: ["rl_subject", "How an agent fits the team"] };
 const DRAFT_UPDATE = { instructions: "You write code.\nYou always run the tests." };
 const proposeBody = (over = {}) => {
   const n = ++seq;
@@ -691,7 +705,7 @@ test("agent_propose needs a fit check: researchSays, matches (a boolean) and why
 test("agent_propose carries the fit check on the proposal (trimmed), and it reaches the wire", async () => {
   const f = await proposeFixture();
   try {
-    const r = await propose(f, { fitCheck: { researchSays: "  Library says A.  ", matches: true, why: "  It matches.  " } });
+    const r = await propose(f, { fitCheck: { researchSays: "  Library says A.  ", matches: true, why: "  It matches.  ", basis: ["rl_subject"] } });
     assert.equal(r.ok, true, r.error);
     assert.deepEqual(r.change.fitCheck, { researchSays: "Library says A.", matches: true, why: "It matches." });
     assert.deepEqual((await store(f)).changes[0].fitCheck, r.change.fitCheck);
@@ -703,7 +717,7 @@ test("agent_propose carries the fit check on the proposal (trimmed), and it reac
 test("agent_propose: a fit check that says the request does not match is refused unless the user was asked first in this task (the question tool ends the task, so the job's record is the evidence)", async () => {
   const f = await proposeFixture();
   try {
-    const mismatch = { researchSays: "The entry says to do B first.", matches: false, why: "The request asks for A instead." };
+    const mismatch = { researchSays: "The entry says to do B first.", matches: false, why: "The request asks for A instead.", basis: ["rl_subject"] };
     const refused = await propose(f, { fitCheck: mismatch });
     assert.equal(refused.ok, false);
     assert.match(refused.error, /ask the user with the question tool first/);
@@ -717,6 +731,151 @@ test("agent_propose: a fit check that says the request does not match is refused
   } finally {
     await f.cleanup();
   }
+});
+
+// ---- the fit check rests on library entries the server checks (process, never judgement) ----
+
+const basisRefusal = async (f, basis, re, why) => {
+  const before = await storeOrEmpty(f);
+  const r = await propose(f, { fitCheck: { ...FIT_CHECK, basis } });
+  assert.equal(r.ok, false, `${why}: ${JSON.stringify(basis)}`);
+  assert.match(r.error, re, why);
+  const after = await storeOrEmpty(f);
+  assert.equal(after.changes?.length ?? 0, before.changes?.length ?? 0, "nothing recorded");
+  assert.equal(after.proposalSlots?.job1 ?? 0, before.proposalSlots?.job1 ?? 0, "no slot used");
+  return r;
+};
+
+test("agent_propose: a fit check with no basis (missing, empty, not strings, blank, too many) is refused with a sentence naming the field", async () => {
+  const f = await proposeFixture();
+  try {
+    const { basis: _b, ...noBasis } = FIT_CHECK;
+    for (const bad of [undefined, null, [], "rl_subject", [1], [" "], [""], ["x".repeat(201)], Array.from({ length: 11 }, (_, i) => `t${i}`), [{ id: "rl_subject" }]]) {
+      const r = await propose(f, { fitCheck: bad === undefined ? noBasis : { ...FIT_CHECK, basis: bad } });
+      assert.equal(r.ok, false, JSON.stringify(bad));
+      assert.match(r.error, /basis/, JSON.stringify(bad));
+      assert.match(r.error, /library/i);
+    }
+    assert.equal((await storeOrEmpty(f)).changes?.length ?? 0, 0);
+    assert.equal((await storeOrEmpty(f)).proposalSlots?.job1 ?? 0, 0, "no slot used");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose: a basis entry that is missing, stale or thin is refused, naming the entry and what it lacks", async () => {
+  const f = await proposeFixture();
+  try {
+    const missing = await basisRefusal(f, ["rl_subject", "Agent setup advice"], /'Agent setup advice'.*isn't in the research library/, "missing");
+    assert.match(missing.error, /research_library_save/);
+    f.w.library.push({ id: "rl_old", topic: "Old advice", scope: "global", ageDays: 120, status: "stale", shelfLifeDays: 90, sourceCount: 5, thin: false, dominant: false });
+    const stale = await basisRefusal(f, ["rl_old"], /'Old advice'.*stale/, "stale");
+    assert.match(stale.error, /120 days/);
+    assert.match(stale.error, /save it again|refresh/i);
+    f.w.library.push({ id: "rl_thin", topic: "Agent setup", scope: "global", ageDays: 1, status: "fresh", shelfLifeDays: 30, sourceCount: 2, thin: true, dominant: false });
+    const thin = await basisRefusal(f, ["rl_subject", "Agent setup"], /The entry 'Agent setup' has 2 independent sources; research more and save it with keep, or ask the user with the question tool that you couldn't establish it/, "thin");
+    assert.doesNotMatch(thin.error, /rl_subject/);
+    f.w.library.push({ id: "rl_dom", topic: "One-voice advice", scope: "global", ageDays: 1, status: "fresh", shelfLifeDays: 30, sourceCount: 4, thin: true, dominant: true });
+    await basisRefusal(f, ["rl_dom"], /'One-voice advice'.*one source carrying most/, "dominant");
+    // the first problem is reported (in the order given), and nothing is written
+    f.w.library.find((e) => e.id === "rl_subject").status = "stale";
+    await basisRefusal(f, ["rl_subject", "rl_thin"], /'CRO copywriting'.*stale/, "order");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose: an unreadable library refuses with a retry sentence; the library is read for the task's project", async () => {
+  const f = await proposeFixture();
+  try {
+    f.w.libraryThrows = true;
+    await basisRefusal(f, ["rl_subject"], /Couldn't check the research library/, "unreadable");
+    f.w.libraryThrows = false;
+    f.w.jobs[0].parentDirectory = "/repo";
+    const ok = await propose(f);
+    assert.equal(ok.ok, true, ok.error);
+    assert.deepEqual(f.w.libraryProjects.at(-1), "dir:/repo");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose: every basis entry fresh and meeting the bar is allowed; the basis (id, topic, source count, age) is stored on the proposal, not as a thin one", async () => {
+  const f = await proposeFixture();
+  try {
+    const r = await propose(f);
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.change.basis, [
+      { id: "rl_subject", topic: "CRO copywriting", sourceCount: 4, ageDays: 2 },
+      { id: "rl_team", topic: "How an agent fits the team", sourceCount: 3, ageDays: 5 },
+    ]);
+    assert.equal(r.change.basisThin, false);
+    assert.deepEqual(r.change.fitCheck, { researchSays: FIT_CHECK.researchSays, matches: true, why: FIT_CHECK.why }, "the fit check itself is unchanged");
+    assert.deepEqual((await store(f)).changes[0].basis, r.change.basis);
+    // an entry given twice (by id and by topic) is stored once
+    const dup = await propose(f, { draft: { instructions: "Another.\nAlways test." }, fitCheck: { ...FIT_CHECK, basis: ["rl_subject", "cro copywriting"] } });
+    assert.equal(dup.ok, true, dup.error);
+    assert.equal(dup.change.basis.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose: a thin basis is allowed once the user was asked in this task, and the proposal says so (basisThin); a missing or stale one never is", async () => {
+  const f = await proposeFixture();
+  try {
+    f.w.library.push({ id: "rl_thin", topic: "Agent setup", scope: "global", ageDays: 1, status: "fresh", shelfLifeDays: 30, sourceCount: 2, thin: true, dominant: false });
+    await basisRefusal(f, ["rl_subject", "rl_thin"], /ask the user with the question tool/, "not asked yet");
+    f.w.jobs[0].askedUser = true;
+    const r = await propose(f, { fitCheck: { ...FIT_CHECK, basis: ["rl_subject", "rl_thin"] } });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.change.basisThin, true);
+    assert.deepEqual(r.change.basis.map((b) => [b.id, b.sourceCount]), [["rl_subject", 4], ["rl_thin", 2]]);
+    await basisRefusal(f, ["rl_nope"], /isn't in the research library/, "missing after asking");
+    f.w.library.push({ id: "rl_old", topic: "Old advice", scope: "global", ageDays: 120, status: "stale", shelfLifeDays: 90, sourceCount: 5, thin: false, dominant: false });
+    await basisRefusal(f, ["rl_old"], /stale/, "stale after asking");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the Outcome line says what the proposal rested on: topic, source count and age; a thin basis says the user decided on incomplete evidence", async () => {
+  const base = { slug: "cro", kind: "update", state: "applied", decidedBy: "click", error: null };
+  const basis = [
+    { id: "rl_a", topic: "CRO copywriting", sourceCount: 4, ageDays: 2 },
+    { id: "rl_b", topic: "How an agent fits the team", sourceCount: 3, ageDays: 0 },
+    { id: "rl_c", topic: "Agent setup", sourceCount: 1, ageDays: 1 },
+  ];
+  assert.equal(describeProposalOutcome({ ...base, basis }, "auto"), "Outcome: @cro was updated and is live (you approved it). Undo is on the card. Based on: CRO copywriting (4 sources, saved 2 days ago); How an agent fits the team (3 sources, saved today); Agent setup (1 source, saved 1 day ago).");
+  assert.match(describeProposalOutcome({ ...base, basis, basisThin: true }, "auto"), /Agent setup \(1 source, saved 1 day ago\)\. The evidence was thin and you were asked, so you decided on incomplete evidence\.$/);
+  assert.equal(describeProposalOutcome({ ...base }, "auto"), "Outcome: @cro was updated and is live (you approved it). Undo is on the card.", "an older record has no basis line");
+  assert.doesNotMatch(describeProposalOutcome({ ...base, state: "pending", reason: "ask", basis }, "auto"), /^Outcome: @cro is waiting for your click on the card \(reason: [^)]*\)\.$/, "it follows every state");
+  assert.match(describeProposalOutcome({ ...base, state: "pending", reason: "ask", basis }, "auto"), /Based on: CRO copywriting/);
+});
+
+test("the Architect's templates: the fit check names the library entries it rests on; a thin one means more research, then asking the user — no conclusions", async () => {
+  const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
+  const main = await read("agent.md");
+  const authoring = await read("skills", "authoring", "SKILL.md");
+  const research = await read("skills", "research", "SKILL.md");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const step = flat(main.match(/\n\d+\. \*\*Fit check\.?\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
+  assert.match(step, /naming the library entries it rests on/i);
+  assert.match(step, /`basis`/);
+  assert.match(step, /thin/i);
+  assert.match(step, /research more/i);
+  assert.match(step, /couldn't establish it/i);
+  assert.ok(step.length < 900, "still one short step");
+  assert.equal(main.split("question tool").length - 1, 1, "the question tool is still named once (step 4)");
+  assert.doesNotMatch(step, /single agent|extend|narrow|split|new agent/i, "no agent-design conclusion");
+  const fields = flat(authoring.match(/## `agent_propose` fields[\s\S]*$/)?.[0] ?? "");
+  assert.match(fields, /`fitCheck`: `\{researchSays, matches, why, basis\}`/);
+  assert.match(fields, /`basis`/);
+  assert.match(fields, /at least one per topic you researched/i);
+  assert.match(fields, /fresh/i);
+  assert.match(fields, /3 independent sources/i);
+  assert.match(fields, /thin/i);
+  assert.match(flat(research), /fit check.*library entr/i);
 });
 
 test("agent_propose: three per root task, counted across continuations; a fourth is refused; slots survive in the store", async () => {
@@ -939,6 +1098,9 @@ test("release precedence 8: Auto and Tell me apply — the file, the config, dec
   }
 });
 
+// every proposal the default fixture makes rests on these two library entries
+const BASED_ON = " Based on: CRO copywriting (4 sources, saved 2 days ago); How an agent fits the team (3 sources, saved 5 days ago).";
+
 test("Outcome line: applied automatically says it is live with the user's setting and that undo is on the card", async () => {
   for (const [level, title] of [["auto", "Auto"], ["tell", "Tell me"]]) {
     const f = await proposeFixture({ level });
@@ -947,7 +1109,7 @@ test("Outcome line: applied automatically says it is live with the user's settin
       endJob(f, { status: "done" });
       await f.engine.reconcile();
       const lines = await f.engine.outcomeLinesForJob("job1");
-      assert.deepEqual(lines, [`Outcome: @dev was updated and is live (your setting: ${title}). Undo is on the card.`]);
+      assert.deepEqual(lines, [`Outcome: @dev was updated and is live (your setting: ${title}). Undo is on the card.${BASED_ON}`]);
     } finally {
       await f.cleanup();
     }
@@ -960,7 +1122,7 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
     await heldFor(f);
     endJob(f, { status: "done" });
     await f.engine.reconcile();
-    assert.deepEqual(await f.engine.outcomeLinesForJob("job1"), ["Outcome: @dev is waiting for your click on the card (reason: your setting for changing agents is Ask)."]);
+    assert.deepEqual(await f.engine.outcomeLinesForJob("job1"), [`Outcome: @dev is waiting for your click on the card (reason: your setting for changing agents is Ask).${BASED_ON}`]);
   } finally {
     await f.cleanup();
   }
@@ -969,7 +1131,7 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
     await heldFor(g);
     endJob(g, { status: "failed" });
     await g.engine.reconcile();
-    assert.deepEqual(await g.engine.outcomeLinesForJob("job1"), ["Outcome: @dev is waiting for your click on the card (reason: the task didn't finish cleanly)."]);
+    assert.deepEqual(await g.engine.outcomeLinesForJob("job1"), [`Outcome: @dev is waiting for your click on the card (reason: the task didn't finish cleanly).${BASED_ON}`]);
   } finally {
     await g.cleanup();
   }
@@ -978,14 +1140,14 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
     await heldFor(h);
     endJob(h, { status: "done" });
     await h.engine.reconcile();
-    assert.deepEqual(await h.engine.outcomeLinesForJob("job1"), ["Outcome: @dev was discarded — changing agents is turned off."]);
+    assert.deepEqual(await h.engine.outcomeLinesForJob("job1"), [`Outcome: @dev was discarded — changing agents is turned off.${BASED_ON}`]);
   } finally {
     await h.cleanup();
   }
   const i = await proposeFixture();
   try {
     await heldFor(i);
-    assert.deepEqual(await i.engine.outcomeLinesForJob("job1"), ["Outcome: @dev has not been released yet; trust the card, not this message."], "still held");
+    assert.deepEqual(await i.engine.outcomeLinesForJob("job1"), [`Outcome: @dev has not been released yet; trust the card, not this message.${BASED_ON}`], "still held");
     assert.deepEqual(await i.engine.outcomeLinesForJob("nope"), []);
   } finally {
     await i.cleanup();

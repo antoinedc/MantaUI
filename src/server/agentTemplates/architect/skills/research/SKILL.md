@@ -70,7 +70,8 @@ Every task has two topics to research: the subject of the agent (its field), and
 including how agents for this kind of job are set up: routing between agents, what happens before and after this agent's
 work, and the effect of the change on the agents around it (whose requests shift, which routing lines stop fitting, gaps
 or double coverage). Look in the library first for each,
-and save each as its own entry with its own shelf life. Neither topic comes with a conclusion: what you decide about the
+and save each as its own entry with its own shelf life. The fit check you write before proposing names these library entries
+as its basis, so each must be fresh and rest on at least 3 independent sources; if one is thin, research more first. Neither topic comes with a conclusion: what you decide about the
 agent and its neighbours follows from what you read.
 
 ## Questions first
