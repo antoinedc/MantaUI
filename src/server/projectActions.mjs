@@ -651,7 +651,7 @@ export function knowledgeSeam(getEngine) {
 /**
  * deps: `knowledge()` → `{ store, registry, settings, budget, runKnowledge }` | null (resolved at call time),
  * `gitMainWorktree(dir)` → path | null, `scanner` `{redact(text)}`, `fs` (see collectSources), `now`, `log`, `minRescanMs`,
- * `failBackoffMs`, `deadlineMs`, `scanCollectMs`.
+ * `failBackoffMs`, `deadlineMs`, `scanCollectMs`, `setTimer`/`clearTimer` (the task deadline's timer; default the global ones — a test seam).
  */
 export function createProjectActions(deps = {}) {
   const now = deps.now ?? Date.now;
@@ -660,6 +660,8 @@ export function createProjectActions(deps = {}) {
   const failBackoffMs = deps.failBackoffMs ?? 60 * 60_000;
   const deadlineMs = deps.deadlineMs ?? 2000;
   const scanCollectMs = deps.scanCollectMs ?? SCAN_COLLECT_DEADLINE_MS;
+  const setTimer = deps.setTimer ?? setTimeout;
+  const clearTimer = deps.clearTimer ?? clearTimeout;
   const collecting = new Map(); // root → in-flight collection (one serves concurrent tasks)
   const namedCache = new Map(); // root → the last SCREENED name-based entries
   const scans = new Map(); // slug → in-flight promise
@@ -766,7 +768,7 @@ export function createProjectActions(deps = {}) {
     const st = { root: null, merged: null, verdicts: new Map() };
     let timer;
     const timeout = new Promise((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), deadlineMs);
+      timer = setTimer(() => resolve("timeout"), deadlineMs);
     });
     let outcome;
     try {
@@ -775,7 +777,7 @@ export function createProjectActions(deps = {}) {
       log("[actions] reading the project's commands failed:", e?.message ?? e);
       outcome = "error";
     } finally {
-      clearTimeout(timer);
+      clearTimer(timer);
     }
     const merged = st.merged;
     if (!merged) {
