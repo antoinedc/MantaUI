@@ -1576,7 +1576,7 @@ test("a failed create whose folder can't be removed keeps its claim and says so 
     await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })], proposalSlots: {} }));
     const failed = await engine.apply("ach_c1");
     assert.equal(failed.state, "failed");
-    assert.match(failed.error, /rolling it back failed/);
+    assert.match(failed.error, /taking it back failed/);
     assert.equal((await store(f)).changes.find((r) => r.id === "ach_c1").claimed, true);
     const row = (await engine.list()).find((a) => a.slug === "seo-reviewer");
     assert.ok(row?.error, "shown with its problem");
@@ -1811,7 +1811,7 @@ for (const order of ["update-first", "create-first"]) {
       const text = lines.join("\n");
       assert.doesNotMatch(text, /was (created|updated) and is live/, "nothing from this task is live");
       assert.match(text, /@dev was rolled back|@dev was not applied/);
-      assert.match(text, /@seo-reviewer could not be activated/);
+      assert.match(text, /SEO Reviewer could not be activated/);
       assert.match(text, /nothing from this task is live/i);
     } finally {
       await f.cleanup();

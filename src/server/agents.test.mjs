@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, rename, copyFile, symlink } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2088,13 +2089,29 @@ test("agent_change: an update whose activation fails restores the previous agent
   }
 });
 
+test("agent_change: a create whose compile step fails (disk error) is rolled back too: no folder, no config entry", async () => {
+  const failing = { ...fsPromises, writeFile: async (p, ...rest) => (String(p).endsWith("/reviewer/.compiled.md") ? Promise.reject(Object.assign(new Error("ENOSPC"), { code: "ENOSPC" })) : fsPromises.writeFile(p, ...rest)) };
+  const f = await changeFixture({ extra: { fs: failing } });
+  try {
+    const r = await run(f, chg());
+    assert.equal(r.ok, false);
+    assert.equal(r.change.state, "failed");
+    assert.match(r.error, /Reviewer couldn't be activated, so nothing was kept: ENOSPC/);
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+    assert.equal(f.config.cfg.agent["agent-reviewer"], undefined);
+    assert.deepEqual((await f.engine.list()).map((a) => a.slug).sort(), ["dev", "manta"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("a folder left by an unfinished create is listed with its problem and counts as existing everywhere: roster, routing notes, new names", async () => {
   const f = await changeFixture();
   try {
     await mkdir(join(f.root, "ghost", "home"), { recursive: true });
     await writeFile(join(f.root, "ghost", "agent.md"), valid("isolation: none\n"));
     await writeFile(join(f.root, "ghost", ".claim"), "ach_gone");
-    await writeFile(join(f.root, "dev", "agent.md"), (await readFile(join(f.root, "dev", "agent.md"), "utf-8")).replace(/^description: .*$/m, "description: Writes code. Not for reviews: see @ghost."));
+    await writeFile(join(f.root, "dev", "agent.md"), (await readFile(join(f.root, "dev", "agent.md"), "utf-8")).replace(/^description: .*$/m, 'description: "Writes code. Not for reviews: see @ghost."'));
     const row = (await f.engine.list()).find((a) => a.slug === "ghost");
     assert.ok(row, "listed, not hidden");
     assert.match(row.error, /interrupted create|didn't finish/);
