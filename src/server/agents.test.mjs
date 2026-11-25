@@ -1381,6 +1381,14 @@ test("buildLeadBrief: the mechanics send a new agent to @architect and keep agen
   assert.equal(a, buildLeadBrief({ body: "B", roster: [] }));
 });
 
+test("buildLeadBrief: the charter states facts and names close agents; the lead never decides how to handle an overlap (the Architect does, from research)", () => {
+  const a = buildLeadBrief({ body: "B", roster: [] });
+  assert.ok(a.includes("name any existing agents whose job looks close, as a fact only; never decide how to handle an overlap (narrow the scope, extend one, or create anyway): that is the Architect's call, and it asks the user if needed."));
+  const tpl = readFileSync(join(REAL_TEMPLATES, "manta", "agent.md"), "utf-8");
+  assert.match(tpl, /names? (any )?existing agents whose job looks close/);
+  assert.match(tpl, /never decide how to handle an overlap/);
+});
+
 test("buildLeadBrief: a result carrying a question block is put to the user in one question call, recommended first, concern stated, never answered for them; the answer goes back with continueJob", () => {
   const a = buildLeadBrief({ body: "B", roster: [] });
   const line = a.split("\n").find((l) => l.includes(DECISION_MARKER));

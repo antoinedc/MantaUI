@@ -128,6 +128,31 @@ test("the Architect templates carry no agent-design opinions (research and the l
   assert.ok(!all.includes("Needs a decision:"), "the old 'end your result with Needs a decision:' hack is replaced by the tool");
 });
 
+test("the Architect researches how to set up agents for this kind of job as well as the subject, library first, one entry each, and decides overlap from that research", async () => {
+  const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
+  const main = await read("agent.md");
+  const research = await read("skills", "research", "SKILL.md");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const step = flat(main.match(/\n\d+\. \*\*Research\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
+  assert.match(step, /two topics/i);
+  assert.match(step, /how to set up agents/i);
+  assert.match(step, /extending an existing one/i);
+  assert.match(step, /scope/i);
+  assert.match(step, /routing/i);
+  assert.match(step, /permissions/i);
+  assert.match(step, /library first/i);
+  assert.match(step, /its own (library )?entry/i);
+  assert.match(step, /its own shelf life/i);
+  // the skill says it too, and still states no conclusion about agent design
+  const skill = flat(research);
+  assert.match(skill, /two topics/i);
+  assert.match(skill, /how to set up agents/i);
+  assert.match(skill, /its own (library )?entry/i);
+  assert.doesNotMatch(skill, /prefer (extending|a new agent)/i);
+  // the compare step is unchanged: the request against the roster, in light of that research
+  assert.match(flat(main), /Compare\*\* the request with the existing roster in light of what your research says/);
+});
+
 test("only the folder `architect` with role architect is the Architect; another folder claiming it is an error row", async () => {
   const f = await archFixture();
   try {
