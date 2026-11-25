@@ -5,7 +5,8 @@ describe('BET-8 E2E Smoke Gate', () => {
     const { execSync } = require('child_process');
     const version = execSync('npx playwright --version', { encoding: 'utf-8' }).trim();
     expect(version).toMatch(/^Version \d+\.\d+\.\d+$/);
-  });
+    // Spawning npx takes more than vitest's 5 s default when the suite runs under full load.
+  }, 60_000);
 
   it('should confirm the e2e test file exists', () => {
     const { existsSync } = require('fs');
