@@ -34,6 +34,7 @@ import {
   CHANGE_MAX,
 } from "./agents.mjs";
 import { withResearchGuidance } from "./researchLibrary.mjs";
+import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 import { CAP_ERROR } from "./delegate.mjs";
 import { DECISION_MARKER } from "./taskDecision.mjs";
 
@@ -170,19 +171,7 @@ async function fixture(extra = {}) {
 
   // a one-file stand-in for opencode.jsonc: applies the writer's edits to a plain object
   const config = { cfg: { agent: { "agent-mine": { mode: "all", description: "someone else's" } } }, edits: [], reloads: 0, failEdit: null, failReload: null };
-  const editConfig = async (fn) => {
-    if (config.failEdit) return { ok: false, changed: false, error: config.failEdit };
-    const edits = typeof fn === "function" ? await fn(config.cfg) : fn;
-    for (const e of edits) {
-      config.edits.push(e);
-      const [, key] = e.path;
-      config.cfg.agent ??= {};
-      if (e.value === undefined) delete config.cfg.agent[key];
-      else config.cfg.agent[key] = structuredClone(e.value);
-    }
-    if (edits.length > 0) config.reloads++; // the writer reloads after a real change
-    return { ok: true, changed: edits.length > 0, reloaded: edits.length > 0 };
-  };
+  const editConfig = fakeConfigWriter(config);
   const reload = async () => {
     config.reloads++;
     return config.failReload ? { ok: false, error: config.failReload } : { ok: true, reloaded: true };

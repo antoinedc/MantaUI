@@ -2040,6 +2040,18 @@ export function createAgentsEngine({
     });
   }
 
+  /** The Sub-approved models a draft that names a model is checked against: `{ approved }` (null when it names none) or `{ error }` (a sentence). */
+  async function approvedModelsFor(draft) {
+    if (typeof draft?.model !== "string" || !draft.model.trim()) return { approved: null };
+    let approved = null;
+    try {
+      approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
+    } catch (e) {
+      log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
+    }
+    return Array.isArray(approved) && approved.length > 0 ? { approved } : { error: MODELS_UNAVAILABLE };
+  }
+
   // ---- extra sources: no credential literals, ever (§4.3a) ----
 
   /** A sentence refusing a source set that holds a credential (or can't be checked), or null. Never echoes the value. */
@@ -2167,15 +2179,9 @@ export function createAgentsEngine({
 
     const action = typeof raw.action === "string" ? raw.action : "";
     if (action !== "create" && action !== "update") return refuse('action must be "create" or "update"');
-    let approved = null;
-    if (typeof raw.draft?.model === "string" && raw.draft.model.trim()) {
-      try {
-        approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
-      } catch (e) {
-        log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
-      }
-      if (!Array.isArray(approved) || approved.length === 0) return refuse(MODELS_UNAVAILABLE);
-    }
+    const models = await approvedModelsFor(raw.draft);
+    if (models.error) return refuse(models.error);
+    const { approved } = models;
 
     // 5. plan, record and (unless it needs a click) write — all under the one lock
     let rec;
@@ -2220,6 +2226,16 @@ export function createAgentsEngine({
   // The Architect's tools (Phase 5A §4.3, §4.4): binding, then `agent_propose`
   // -------------------------------------------------------------------------
 
+  /** The strict jobs list, or null when it can't be read. */
+  async function readJobsStrict() {
+    try {
+      const jobs = (await delegate.loadRecordsStrict?.()) ?? null;
+      return Array.isArray(jobs) ? jobs : null;
+    } catch {
+      return null;
+    }
+  }
+
   const NOT_ARCHITECT = "Only the Architect, working on a task from Manta, can use this tool";
   const ARCHITECT_COULDNT_CHECK = "Couldn't check this task; try again";
 
@@ -2252,13 +2268,8 @@ export function createAgentsEngine({
     const verified = await verifyInvocation(b, spec);
     if (verified.refused) return { refused: verified.refused };
     if (verified.callerAgent !== agentKey(ARCHITECT_SLUG)) return { refused: NOT_ARCHITECT };
-    let jobs;
-    try {
-      jobs = (await delegate.loadRecordsStrict?.()) ?? null;
-    } catch {
-      jobs = null;
-    }
-    if (!Array.isArray(jobs)) return { refused: ARCHITECT_COULDNT_CHECK };
+    const jobs = await readJobsStrict();
+    if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
     const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.architect && typeof j.architect === "object");
     if (!job) return { refused: NOT_ARCHITECT };
     return { job, stamp: job.architect, childSessionID: b.sessionID };
@@ -2299,13 +2310,8 @@ export function createAgentsEngine({
     if (verified.refused) return { refused: verified.refused };
     const caller = verified.callerAgent;
     if (!caller.startsWith(AGENT_PACKAGE_PREFIX) || !SLUG_RE.test(caller.slice(AGENT_PACKAGE_PREFIX.length))) return { refused: NOT_RESEARCHER };
-    let jobs;
-    try {
-      jobs = (await delegate.loadRecordsStrict?.()) ?? null;
-    } catch {
-      jobs = null;
-    }
-    if (!Array.isArray(jobs)) return { refused: ARCHITECT_COULDNT_CHECK };
+    const jobs = await readJobsStrict();
+    if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
     const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.specialist === true && j.agent === caller);
     if (!job) return { refused: NOT_RESEARCHER };
     const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
@@ -2440,15 +2446,9 @@ export function createAgentsEngine({
     if (env.fitCheck.matches === false && job.askedUser !== true) return refuse(FIT_CHECK_ASK_FIRST);
 
     // 3. models
-    let approved = null;
-    if (typeof raw.draft.model === "string" && raw.draft.model.trim()) {
-      try {
-        approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
-      } catch (e) {
-        log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
-      }
-      if (!Array.isArray(approved) || approved.length === 0) return refuse(MODELS_UNAVAILABLE);
-    }
+    const models = await approvedModelsFor(raw.draft);
+    if (models.error) return refuse(models.error);
+    const { approved } = models;
 
     // 4. every quote occurs in the stored text of a source THIS session fetched
     const evidence = [];
@@ -2643,13 +2643,7 @@ export function createAgentsEngine({
       log.warn?.(`[agents] reconcile skipped: ${e?.message ?? e}`);
       return { released: 0 };
     }
-    let jobs = null;
-    try {
-      const read = await delegate.loadRecordsStrict?.();
-      jobs = Array.isArray(read) ? read : null;
-    } catch {
-      jobs = null;
-    }
+    const jobs = await readJobsStrict();
     let policy = null;
     try {
       policy = await autonomyPolicy();
