@@ -1374,11 +1374,65 @@ test("dispatch: a settings read failure refuses before anything starts", async (
 
 test("buildLeadBrief: the mechanics send a new agent to @architect and keep agent_change for small dictated edits (byte-stable line)", () => {
   const a = buildLeadBrief({ body: "B", roster: [] });
-  assert.ok(a.includes("- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards."));
+  assert.ok(a.includes("- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards."));
   assert.ok(!a.includes("the user approves on the card when their settings require it"));
+  assert.ok(!a.includes("Draft complete, specific instructions"));
+  assert.ok(a.includes("write what the user asked for"));
+  assert.ok(a.includes("make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created."));
   assert.ok(a.includes("- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card."));
   assert.ok(a.includes("leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created."));
   assert.equal(a, buildLeadBrief({ body: "B", roster: [] }));
+});
+
+test("buildLeadBrief: the charter states what the user asked and does not decide the design; that is the Architect's call from its research", () => {
+  const a = buildLeadBrief({ body: "B", roster: [] });
+  assert.ok(a.includes("The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed."));
+  assert.ok(!a.includes("whose job looks close"), "which agents look close is itself a design judgement");
+  const tpl = readFileSync(join(REAL_TEMPLATES, "manta", "agent.md"), "utf-8");
+  assert.match(tpl, /charter states what the user asked/);
+  assert.match(tpl, /doesn't decide the design \(scope, overlap, extend vs create\)/);
+  assert.ok(!tpl.includes("whose job looks close"));
+});
+
+// GUARD: no agent-design opinions in the built-in instructions. What good agent design is comes from the Architect's own
+// research and the shared library, so it can update itself; Manta and the Architect carry roles, process and safety only.
+// If this fails, a design opinion came back: delete it (or move the question into the Architect's research), don't edit this list.
+test("guard: no agent-design advice is written into Manta's or the Architect's built-in instructions, the lead brief or the agent_change tool description", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const tools = await readFile(new URL("../../docs/opencode-plugins-v2/manta/tools/agents.ts", import.meta.url), "utf-8");
+  const from = tools.indexOf('name: "agent_change"');
+  const toolDescription = tools.slice(from, tools.indexOf("input: input(", from));
+  assert.ok(from > 0 && toolDescription.length > 200, "found the agent_change description");
+  const read = (...p) => readFile(join(REAL_TEMPLATES, ...p), "utf-8");
+  const surfaces = {
+    "lead brief": buildLeadBrief({ body: "", roster: [] }),
+    "agent_change tool description": toolDescription,
+    "manta/agent.md": await read("manta", "agent.md"),
+    "architect/agent.md": await read("architect", "agent.md"),
+    "architect authoring skill": await read("architect", "skills", "authoring", "SKILL.md"),
+    "architect research skill": await read("architect", "skills", "research", "SKILL.md"),
+  };
+  const denylist = [
+    /prefer (extending|adding rules to an existing agent|a new agent)/i,
+    /extend or create/i,
+    /create a new agent only when/i,
+    /overlap a sibling/i,
+    /narrowly[- ]scoped/i,
+    /narrow(ly)? (to|the scope)/i,
+    /in the style of the existing agents/i,
+    /draft complete, specific instructions/i,
+    /100\s*[-\u2013\u2014]\s*150 lines/,
+    /whose job looks close/i,
+    /personas?\b/i,
+    /world-class/i,
+    /must not match/i,
+    /beats a rewrite/i,
+    /earns the most/i,
+    /generic skill bundles/i,
+  ];
+  for (const [where, text] of Object.entries(surfaces)) {
+    for (const re of denylist) assert.doesNotMatch(text, re, `${where}: ${re} is agent-design advice; it must come from the Architect's research, not from instructions`);
+  }
 });
 
 test("buildLeadBrief: a result carrying a question block is put to the user in one question call, recommended first, concern stated, never answered for them; the answer goes back with continueJob", () => {

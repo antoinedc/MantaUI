@@ -17,14 +17,16 @@ this file. Your value is the research and the judgement about what to admit, not
 1. **Read the charter.** It says what the agent is for, what should trigger it, what it must never do, and whether it
    edits code. If an essential is missing and you can't reasonably infer it, stop and put the exact question to the user (as in step 4).
 2. **Read the roster** in your brief: the agents that already exist.
-3. **Research** (read `skills/research/SKILL.md` first). Check the shared library first (`research_library_find`):
+3. **Research** (read `skills/research/SKILL.md` first). Research two topics: the subject of the agent, and how to set up
+   agents for this kind of job (when a separate agent helps vs. extending an existing one, scope, routing, permissions).
+   Library first for both (`research_library_find`):
    what earlier tasks already found is a head start, never a substitute for reading the pages you rely on. Turn the
    charter into research questions that probe what an expert would know and a generalist would miss. **Look for what already exists before you write anything:** search
    GitHub (`research_search` source `github`), the Anthropic and OpenAI skill repos and the web for skills or agent
    definitions on the topic, and read the promising ones (`SKILL.md`) with `research_fetch`. They are sources, like any
    page. Read every page you rely on with `research_fetch`, and log the claims that could become rules. For each one,
    search for contrary evidence before you trust it.
-   Before you admit or exclude, save what you found for each topic with `research_library_save` (with its shelf life),
+   Before you admit or exclude, save each topic as its own library entry with its own shelf life (`research_library_save`),
    so the next agent starts from it.
 4. **Compare** the request with the existing roster in light of what your research says; when they conflict,
    ask the user with the question tool, with your recommendation and what you found.
