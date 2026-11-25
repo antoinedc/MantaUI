@@ -736,11 +736,13 @@ test("agent_propose: a fit check that says the request does not match is refused
 // ---- the fit check rests on library entries the server checks (process, never judgement) ----
 
 const basisRefusal = async (f, basis, re, why) => {
+  const before = await storeOrEmpty(f);
   const r = await propose(f, { fitCheck: { ...FIT_CHECK, basis } });
   assert.equal(r.ok, false, `${why}: ${JSON.stringify(basis)}`);
   assert.match(r.error, re, why);
-  assert.equal((await storeOrEmpty(f)).changes?.length ?? 0, 0, "nothing recorded");
-  assert.equal((await storeOrEmpty(f)).proposalSlots?.job1 ?? 0, 0, "no slot used");
+  const after = await storeOrEmpty(f);
+  assert.equal(after.changes?.length ?? 0, before.changes?.length ?? 0, "nothing recorded");
+  assert.equal(after.proposalSlots?.job1 ?? 0, before.proposalSlots?.job1 ?? 0, "no slot used");
   return r;
 };
 
@@ -774,7 +776,7 @@ test("agent_propose: a basis entry that is missing, stale or thin is refused, na
     const thin = await basisRefusal(f, ["rl_subject", "Agent setup"], /The entry 'Agent setup' has 2 independent sources; research more and save it with keep, or ask the user with the question tool that you couldn't establish it/, "thin");
     assert.doesNotMatch(thin.error, /rl_subject/);
     f.w.library.push({ id: "rl_dom", topic: "One-voice advice", scope: "global", ageDays: 1, status: "fresh", shelfLifeDays: 30, sourceCount: 4, thin: true, dominant: true });
-    await basisRefusal(f, ["rl_dom"], /'One-voice advice'.*one source carries most/, "dominant");
+    await basisRefusal(f, ["rl_dom"], /'One-voice advice'.*one source carrying most/, "dominant");
     // the first problem is reported (in the order given), and nothing is written
     f.w.library.find((e) => e.id === "rl_subject").status = "stale";
     await basisRefusal(f, ["rl_subject", "rl_thin"], /'CRO copywriting'.*stale/, "order");
@@ -858,7 +860,7 @@ test("the Architect's templates: the fit check names the library entries it rest
   const research = await read("skills", "research", "SKILL.md");
   const flat = (t) => t.replace(/\s+/g, " ");
   const step = flat(main.match(/\n\d+\. \*\*Fit check\.?\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
-  assert.match(step, /names? the library entries it rests on/i);
+  assert.match(step, /naming the library entries it rests on/i);
   assert.match(step, /`basis`/);
   assert.match(step, /thin/i);
   assert.match(step, /research more/i);
@@ -1096,6 +1098,9 @@ test("release precedence 8: Auto and Tell me apply — the file, the config, dec
   }
 });
 
+// every proposal the default fixture makes rests on these two library entries
+const BASED_ON = " Based on: CRO copywriting (4 sources, saved 2 days ago); How an agent fits the team (3 sources, saved 5 days ago).";
+
 test("Outcome line: applied automatically says it is live with the user's setting and that undo is on the card", async () => {
   for (const [level, title] of [["auto", "Auto"], ["tell", "Tell me"]]) {
     const f = await proposeFixture({ level });
@@ -1104,7 +1109,7 @@ test("Outcome line: applied automatically says it is live with the user's settin
       endJob(f, { status: "done" });
       await f.engine.reconcile();
       const lines = await f.engine.outcomeLinesForJob("job1");
-      assert.deepEqual(lines, [`Outcome: @dev was updated and is live (your setting: ${title}). Undo is on the card.`]);
+      assert.deepEqual(lines, [`Outcome: @dev was updated and is live (your setting: ${title}). Undo is on the card.${BASED_ON}`]);
     } finally {
       await f.cleanup();
     }
@@ -1117,7 +1122,7 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
     await heldFor(f);
     endJob(f, { status: "done" });
     await f.engine.reconcile();
-    assert.deepEqual(await f.engine.outcomeLinesForJob("job1"), ["Outcome: @dev is waiting for your click on the card (reason: your setting for changing agents is Ask)."]);
+    assert.deepEqual(await f.engine.outcomeLinesForJob("job1"), [`Outcome: @dev is waiting for your click on the card (reason: your setting for changing agents is Ask).${BASED_ON}`]);
   } finally {
     await f.cleanup();
   }
@@ -1126,7 +1131,7 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
     await heldFor(g);
     endJob(g, { status: "failed" });
     await g.engine.reconcile();
-    assert.deepEqual(await g.engine.outcomeLinesForJob("job1"), ["Outcome: @dev is waiting for your click on the card (reason: the task didn't finish cleanly)."]);
+    assert.deepEqual(await g.engine.outcomeLinesForJob("job1"), [`Outcome: @dev is waiting for your click on the card (reason: the task didn't finish cleanly).${BASED_ON}`]);
   } finally {
     await g.cleanup();
   }
@@ -1135,14 +1140,14 @@ test("Outcome line: a create names the new agent; pending says it waits for a cl
     await heldFor(h);
     endJob(h, { status: "done" });
     await h.engine.reconcile();
-    assert.deepEqual(await h.engine.outcomeLinesForJob("job1"), ["Outcome: @dev was discarded — changing agents is turned off."]);
+    assert.deepEqual(await h.engine.outcomeLinesForJob("job1"), [`Outcome: @dev was discarded — changing agents is turned off.${BASED_ON}`]);
   } finally {
     await h.cleanup();
   }
   const i = await proposeFixture();
   try {
     await heldFor(i);
-    assert.deepEqual(await i.engine.outcomeLinesForJob("job1"), ["Outcome: @dev has not been released yet; trust the card, not this message."], "still held");
+    assert.deepEqual(await i.engine.outcomeLinesForJob("job1"), [`Outcome: @dev has not been released yet; trust the card, not this message.${BASED_ON}`], "still held");
     assert.deepEqual(await i.engine.outcomeLinesForJob("nope"), []);
   } finally {
     await i.cleanup();

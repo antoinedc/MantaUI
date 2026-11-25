@@ -26,7 +26,7 @@ import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
 import { WORKTREE_AGENT_GRANTS, CAP_ERROR } from "./delegate.mjs";
-import { withResearchGuidance } from "./researchLibrary.mjs";
+import { withResearchGuidance, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
 import { DECISION_MARKER } from "./taskDecision.mjs";
 import { SPECIALIST_RESEARCH_TOOLS } from "../shared/researchTools.mjs";
 import * as autonomy from "./autonomy.mjs";
@@ -548,6 +548,16 @@ const MECHANICS = [
   "- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card.",
 ].join("\n");
 
+/** " Based on: <topic> (N sources, saved D days ago); …." — what the fit check rested on, so the user sees it; "" for an older record. */
+function basisSentence(rec) {
+  const basis = Array.isArray(rec?.basis) ? rec.basis : [];
+  if (basis.length === 0) return "";
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const items = basis.map((b) => `${b.topic} (${plural(b.sourceCount, "source")}, saved ${b.ageDays === 0 ? "today" : `${plural(b.ageDays, "day")} ago`})`);
+  const thin = rec.basisThin === true ? " The evidence was thin and you were asked, so you decided on incomplete evidence." : "";
+  return ` Based on: ${items.join("; ")}.${thin}`;
+}
+
 const OUTCOME_WAIT_REASONS = {
   plan: "it was proposed in plan mode",
   lead: "it changes the lead agent",
@@ -563,7 +573,7 @@ const OUTCOME_WAIT_REASONS = {
  */
 export function describeProposalOutcome(rec, level = null) {
   const who = rec?.slug ? `@${rec.slug}` : rec?.agentName || "the proposed agent";
-  const out = (text) => `Outcome: ${who} ${text}`;
+  const out = (text) => `Outcome: ${who} ${text}${basisSentence(rec)}`;
   switch (rec?.state) {
     case "applied": {
       if (rec.error) return out(`is live, but rolling it back failed (${rec.error}); undo it from the card.`);
@@ -720,6 +730,7 @@ async function readJsonOptional(fs, path) {
  * @param {(p:{id:string,sessionID:string,slug:string|null})=>void} [deps.publish]  the `agentChange` hint, called after a change record is persisted
  * @param {()=>Promise<string[]>} [deps.listApprovedModels]  the Sub-approved models as `provider/model` keys; throws (or is empty) when they can't be checked
  * @param {object} [deps.research]      { getSource(childSessionID, sourceId) → {text,url,finalUrl,private}|null } — the Architect's stored sources (Phase 5A)
+ * @param {object} [deps.library]       { lookup({project, refs}) → [{ref, entry|null}] } — the research library, read by the server to check what a fit check rests on
  * @param {(p:{id:string,sessionID:string,slug:string|null,origin:object})=>void} [deps.publish]  (as above; the payload carries the change's origin)
  */
 export function createAgentsEngine({
@@ -742,6 +753,7 @@ export function createAgentsEngine({
   publish = () => {},
   listApprovedModels = null,
   research = null,
+  library = null,
   createScanner = createSecretScanner,
   loadSecretsStrict: loadSecretsStrictDep = loadSecretsStrict,
   now = Date.now,
@@ -1467,6 +1479,8 @@ export function createAgentsEngine({
       evidence: Array.isArray(r.evidence) ? r.evidence : [],
       admission: Array.isArray(r.admission) ? r.admission : [],
       fitCheck: r.fitCheck && typeof r.fitCheck === "object" ? r.fitCheck : null,
+      basis: Array.isArray(r.basis) ? r.basis : [],
+      basisThin: r.basisThin === true,
     };
   }
 
@@ -2203,10 +2217,14 @@ export function createAgentsEngine({
   const PROPOSALS_PER_TASK = 3;
 
   const FIT_CHECK_MISSING =
-    "Add a fit check before proposing: fitCheck {researchSays, matches, why} — what your research says about this kind of request (1 to 600 characters), matches true or false for whether the request matches it, and why (1 to 600 characters)";
+    "Add a fit check before proposing: fitCheck {researchSays, matches, why, basis} — what your research says about this kind of request (1 to 600 characters), matches true or false for whether the request matches it, and why (1 to 600 characters)";
+  const BASIS_MAX = 10;
+  const BASIS_MISSING = `Add the basis of your fit check: fitCheck.basis, 1 to ${BASIS_MAX} research library entries it rests on (entry ids or exact topics, each up to 200 characters), at least one per topic you researched for this request: the subject, and how the agent fits the team`;
+  const LIBRARY_UNAVAILABLE = "Couldn't check the research library; try again";
+  const days = (n) => `${n} day${n === 1 ? "" : "s"}`;
   const FIT_CHECK_ASK_FIRST = "Your fit check says the request doesn't match what your research says; ask the user with the question tool first (options and your recommendation), then propose once they have answered";
 
-  /** The envelope of an `agent_propose` call: `{ ok, summary, evidence, admission, fitCheck }` or `{ error }` (a sentence). */
+  /** The envelope of an `agent_propose` call: `{ ok, summary, evidence, admission, fitCheck, basisRefs }` or `{ error }` (a sentence). */
   function checkEnvelope(raw) {
     const bad = (error) => ({ error });
     const text = (v, min, max) => typeof v === "string" && v.trim().length >= min && v.length <= max;
@@ -2230,7 +2248,48 @@ export function createAgentsEngine({
     }
     const fc = raw.fitCheck;
     if (!fc || typeof fc !== "object" || Array.isArray(fc) || !text(fc.researchSays, 1, 600) || !text(fc.why, 1, 600) || typeof fc.matches !== "boolean") return bad(FIT_CHECK_MISSING);
-    return { ok: true, summary: raw.summary.trim(), evidence, admission, fitCheck: { researchSays: fc.researchSays.trim(), matches: fc.matches, why: fc.why.trim() } };
+    if (!Array.isArray(fc.basis) || fc.basis.length < 1 || fc.basis.length > BASIS_MAX || !fc.basis.every((b) => text(b, 1, 200))) return bad(BASIS_MISSING);
+    return {
+      ok: true,
+      summary: raw.summary.trim(),
+      evidence,
+      admission,
+      fitCheck: { researchSays: fc.researchSays.trim(), matches: fc.matches, why: fc.why.trim() },
+      basisRefs: fc.basis.map((b) => b.trim()),
+    };
+  }
+
+  /**
+   * The process check behind a fit check: every library entry it rests on must exist (for this project), be fresh and meet the
+   * evidence bar. Only the amount and freshness of the evidence is checked, never what it says. A thin entry is allowed once the
+   * user was asked in this task (`askedUser`): they then decided knowingly on incomplete evidence. `{ basis, basisThin }` or `{ error }`.
+   */
+  async function checkBasis(refs, { project, askedUser }) {
+    let found;
+    try {
+      found = typeof library?.lookup === "function" ? await library.lookup({ project, refs }) : null;
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the research library: ${e?.message ?? e}`);
+      found = null;
+    }
+    if (!Array.isArray(found)) return { error: LIBRARY_UNAVAILABLE };
+    const basis = [];
+    let basisThin = false;
+    for (const { ref, entry } of found) {
+      if (!entry) return { error: `The entry '${ref}' isn't in the research library for this project; research it and save it with research_library_save, then name it in the basis` };
+      if (entry.status !== "fresh") {
+        return { error: `The entry '${entry.topic}' is stale (checked ${days(entry.ageDays)} ago, shelf life ${days(entry.shelfLifeDays)}); research what changed and save it again with research_library_save (keep what still holds)` };
+      }
+      if (entry.thin) {
+        if (askedUser !== true) {
+          const lack = entry.sourceCount < THIN_SOURCE_MIN ? `has ${entry.sourceCount} independent source${entry.sourceCount === 1 ? "" : "s"}` : "has one source carrying most of its findings";
+          return { error: `The entry '${entry.topic}' ${lack}; research more and save it with keep, or ask the user with the question tool that you couldn't establish it` };
+        }
+        basisThin = true;
+      }
+      if (!basis.some((b) => b.id === entry.id)) basis.push({ id: entry.id, topic: entry.topic, sourceCount: entry.sourceCount, ageDays: entry.ageDays });
+    }
+    return { basis, basisThin };
   }
 
   /**
@@ -2272,6 +2331,9 @@ export function createAgentsEngine({
     // 2. the envelope
     const env = checkEnvelope(raw);
     if (env.error) return refuse(env.error);
+    // the fit check must rest on library entries that are fresh and well founded (the server checks the evidence, not the judgement)
+    const based = await checkBasis(env.basisRefs, { project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : ""), askedUser: job.askedUser === true });
+    if (based.error) return refuse(based.error);
     // a request that doesn't match the research is put to the user first; asking ends the task, and its record keeps the mark
     if (env.fitCheck.matches === false && job.askedUser !== true) return refuse(FIT_CHECK_ASK_FIRST);
 
@@ -2346,6 +2408,8 @@ export function createAgentsEngine({
           evidence,
           admission: env.admission,
           fitCheck: env.fitCheck,
+          basis: based.basis,
+          basisThin: based.basisThin,
           target: plan.lead ? "lead" : plan.core ? "core" : null,
           raisesIsolation: plan.raisesIsolation === true,
           invocation: { childSessionID: bound.childSessionID, messageID: b.messageID, callID: b.callID, argsHash },

@@ -2605,6 +2605,7 @@ const researchLibrary = createResearchLibrary({
 });
 const agentsEngine = createAgentsEngine({
   research: researchEngine,
+  library: researchLibrary, // the Architect's fit check is checked against the entries it names
   editConfig: (edits) => editOpencodeConfig(edits),
   reload: () => reloadOpencodeConfig(),
   oc,
