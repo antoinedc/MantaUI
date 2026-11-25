@@ -451,7 +451,7 @@ test("parseScanOutput: only an answer with no JSON entries list is invalid; entr
 const SLUG = "proj-0123456789";
 const PAGE = `projects/${SLUG}/actions.md`;
 
-async function rig({ files = {}, flags = { enabled: true, observeOnly: false }, run, identify, secrets = [SECRET], redact, scannerOff = false, deadlineMs, knowledgeOff = false, fs, scanCollectMs } = {}) {
+async function rig({ files = {}, flags = { enabled: true, observeOnly: false }, run, identify, secrets = [SECRET], redact, scannerOff = false, deadlineMs, knowledgeOff = false, fs, scanCollectMs, timers } = {}) {
   const projectDir = await tmpDir("actions-project-");
   await put(projectDir, files);
   const storeDir = await tmpDir("actions-store-");
@@ -483,7 +483,7 @@ async function rig({ files = {}, flags = { enabled: true, observeOnly: false }, 
     },
   };
   const logs = [];
-  const pa = createProjectActions({ knowledge, scanner, gitMainWorktree: async (d) => d, now: () => clock.t, log: (...a) => logs.push(a.join(" ")), deadlineMs, fs, scanCollectMs });
+  const pa = createProjectActions({ knowledge, scanner, gitMainWorktree: async (d) => d, now: () => clock.t, log: (...a) => logs.push(a.join(" ")), deadlineMs, fs, scanCollectMs, ...timers });
   return { pa, projectDir, store, storeDir, clock, calls, state, logs, scanner };
 }
 const answer = (entries) => async () => ({ text: JSON.stringify({ entries }) });
@@ -862,23 +862,48 @@ test("forTask: an unavailable scanner → rules only (no prompt text); a throwin
 });
 
 test("forTask: a timeout before the entries are known answers the last screened name-based result for that root, else nothing; page entries are never served from a cache", async () => {
-  const r = await rig({ files: SHIP, run: answer([]), deadlineMs: 100 });
+  // The task deadline runs on a manual clock: a timeout happens exactly when the test says so, never because the machine was slow.
+  const manualTimers = () => {
+    const pending = new Set();
+    return {
+      setTimer: (fn) => {
+        const t = { fn };
+        pending.add(t);
+        return t;
+      },
+      clearTimer: (t) => pending.delete(t),
+      expire: () => {
+        for (const t of [...pending]) {
+          pending.delete(t);
+          t.fn();
+        }
+      },
+    };
+  };
+  const t1 = manualTimers();
+  const r = await rig({ files: SHIP, run: answer([]), deadlineMs: 100, timers: t1 });
   r.state.identify = async () => new Promise(() => {}); // the knowledge side never answers
-  const slow = await r.pa.forTask({ directory: r.projectDir });
-  assert.equal(slow.entries.length >= 0, true);
-  // 1) never answered at all (first call): the entries computed from names are known before identify, so they are served unscreened… 
-  assert.deepEqual(slow.promptEntries, []);
+  const slowCall = r.pa.forTask({ directory: r.projectDir });
+  t1.expire();
+  // 1) never answered at all (first call): nothing screened is cached, so no prompt entries
+  assert.deepEqual((await slowCall).promptEntries, []);
   // 2) a root whose collection itself stalls and nothing is cached → []
-  const stuck = await rig({ files: SHIP, run: answer([]), deadlineMs: 100 });
-  const pa = createProjectActions({ knowledge: () => null, scanner: stuck.scanner, gitMainWorktree: () => new Promise(() => {}), deadlineMs: 80, log: () => {} });
-  assert.deepEqual(await pa.forTask({ directory: stuck.projectDir }), { entries: [], promptEntries: [] });
-  // 3) a warm cache (a completed call before) is what a stalled root answers
+  const stuck = await rig({ files: SHIP, run: answer([]) });
+  const t2 = manualTimers();
+  const pa = createProjectActions({ knowledge: () => null, scanner: stuck.scanner, gitMainWorktree: () => new Promise(() => {}), deadlineMs: 80, log: () => {}, ...t2 });
+  const stalled = pa.forTask({ directory: stuck.projectDir });
+  t2.expire();
+  assert.deepEqual(await stalled, { entries: [], promptEntries: [] });
+  // 3) a warm cache (a completed call before) is what a stalled root answers. The first call's deadline never fires, so it completes however slow the machine is.
   let stallRoot = false;
-  const warm = createProjectActions({ knowledge: () => null, scanner: stuck.scanner, gitMainWorktree: (d) => (stallRoot ? new Promise(() => {}) : Promise.resolve(d)), deadlineMs: 80, log: () => {} });
+  const t3 = manualTimers();
+  const warm = createProjectActions({ knowledge: () => null, scanner: stuck.scanner, gitMainWorktree: (d) => (stallRoot ? new Promise(() => {}) : Promise.resolve(d)), deadlineMs: 80, log: () => {}, ...t3 });
   const first = await warm.forTask({ directory: stuck.projectDir });
   assert.equal(first.entries.length, 3);
   stallRoot = true;
-  const cached = await warm.forTask({ directory: stuck.projectDir });
+  const cachedCall = warm.forTask({ directory: stuck.projectDir });
+  t3.expire();
+  const cached = await cachedCall;
   assert.deepEqual(cached.entries.map((e) => e.command).sort(), ["make ship", "npm run deploy", "scripts/deploy-web.sh"]);
   assert.deepEqual(cached.promptEntries, []);
 });
