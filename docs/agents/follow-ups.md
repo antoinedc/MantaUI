@@ -179,3 +179,29 @@ Not in this version:
 - **The interrupt can cut the last message short.** If the model had started writing after calling the tool, that partial text
   is the task's result before the block. If the interrupt itself fails, the task ends when its own turn does (the stored decision
   still decides the outcome).
+
+## Routing notes (an agent's routing line mentions an agent that doesn't exist) — follow-ups (2026-11-25)
+
+What exists: on every read, the server scans each valid agent's `use_when`, `not_for` and description for `@slug` mentions
+that name no folder in the agents directory, and writes one fixed line per finding ("Routing note: @a's not_for mentions
+@b, which doesn't exist."). It goes into the lead brief (team section) and into the Architect task's team data. Nothing is
+edited. Because it is computed from the folders on each read, it follows create, update, undo and a hand-made delete without
+hooks into those paths.
+
+Edge cases and not-yet:
+- **An open chat sees a new note only after a new chat or a compaction.** The lead brief is cached per chat, so undoing an
+  agent in a chat does not show Manta the resulting note until then (same limit as any roster change). Fix idea: drop the
+  cached brief when an agent change is applied or undone.
+- **Reserved names are never reported** (`@general`, `@explore`, `@build`, `@plan`… opencode's own agents), and an `@` glued
+  to a word, `.`, `/` or `-` (an email, a URL) is not a mention. A real agent that someone calls by a different `@name` in
+  prose is still reported.
+- **Only `@slug` mentions are checked.** A line that points to a removed agent by its name ("the pricing writer") is not
+  found. Text that isn't a routing line (an agent's instructions body) is not scanned.
+- **A folder with an error still counts as existing**, so a mention of a broken agent is not reported; the broken agent has
+  its own error row.
+- **A create in progress** (its folder is claimed until it is live) doesn't exist yet, so a line that already names it is
+  reported until the create finishes.
+- **At most 10 notes**, then one line with the count of the rest.
+- **The Architect's own proposals aren't checked before they are applied** (a proposal that adds a mention of a missing
+  agent is flagged only after it is live); the Architect is told about existing notes, not warned about new ones.
+- **The planned monthly team review** is where merges and routing fixes beyond "this name doesn't exist" belong.
