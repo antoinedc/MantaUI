@@ -56,7 +56,21 @@ saved. Research stops being repeated task after task, and an agent never hands o
 | Quote verification, source store | existing research engine (`getSource`) | Nothing to adopt; reuse keeps one check. |
 | Freshness (age, fresh/stale) | none: two lines of date arithmetic | A date library for `now - checkedAt > days` is not worth a dependency. |
 | Per-topic shelf-life defaults | none built in (by decision) | A shared public defaults file is a follow-up. |
+| Registrable domain of a source link (evidence bar, §4a) | **tldts 6.1** (MIT, 1 dependency, already in the lockfile via a dev dependency; public-suffix list incl. its private section so `x.github.io` is its own site) | `psl` (older, no private-section flag needed but slower and unmaintained-ish); hand-written "last two labels" (wrong for `co.uk`). |
 | Tool schemas / binding | existing plugin helpers and `verifyInvocation` | — |
+
+## 4a. Evidence bar (thin entries)
+
+One thin entry steered a decision for months, so an entry now carries how well-founded it is. On save the server counts the
+**independent sources** behind the findings: one per registrable domain of the finding's link (subdomains and pages of
+one site are one source; on author-in-path sites such as github.com, one per owner), one per private source, none for a
+finding with no source. It stores `sourceCount` and `thin` (below 3 sources, or one source carrying more than half of all
+the findings). A thin entry is **still saved**. `find` returns both, and the plugin prints the count and, for a thin
+entry, "thin: …, research more before relying on it" with `THIN` in the same bracket as FRESH/STALE, so a thin entry is
+never shown as just fresh. Entries saved before this have no count: it is computed on read from their stored links (the file
+is not rewritten). A refresh (`keep` + new findings) recomputes both. The guidance carries one generic line: a thin entry is
+a lead; add independent sources (and contrary evidence) and save with `keep`. Author is not stored on a finding, so only the
+path-author sites above are told apart by author.
 
 ## 5. Not in this version (see `docs/agents/follow-ups.md`)
 
