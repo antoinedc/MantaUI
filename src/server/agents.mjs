@@ -566,6 +566,7 @@ export function describeProposalOutcome(rec, level = null) {
   const out = (text) => `Outcome: ${who} ${text}`;
   switch (rec?.state) {
     case "applied": {
+      if (rec.error) return out(`is live, but rolling it back failed (${rec.error}); undo it from the card.`);
       const verb = rec.kind === "create" ? "created" : "updated";
       const by = rec.decidedBy === "auto" ? (LEVEL_TITLES[level] ? ` (your setting: ${LEVEL_TITLES[level]})` : "") : rec.decidedBy === "click" ? " (you approved it)" : "";
       return out(`was ${verb} and is live${by}. Undo is on the card.`);
@@ -581,12 +582,18 @@ export function describeProposalOutcome(rec, level = null) {
     case "discarded":
       return out(rec.error === AGENT_CHANGE_OFF ? "was discarded — changing agents is turned off." : "was discarded.");
     case "undone":
-      return out("was undone.");
+      return out(rec.groupAborted ? `was rolled back and is not live (${String(rec.error).replace(/^Rolled back: /, "")}).` : "was undone.");
     case "expired":
       return out("expired before anyone clicked; it was not applied.");
     case "held":
     case "applying":
       return out("has not been released yet; trust the card, not this message.");
+    case "conflict":
+      if (rec.groupAborted) return out(`was not applied (${String(rec.error).replace(/^Not applied: /, "")}).`);
+      return out("could not be applied; see the card.");
+    case "failed":
+      if (rec.groupAborted) return out("could not be activated, so the other proposals of this task were rolled back or not applied: nothing from this task is live. See the card.");
+      return out("could not be applied; see the card.");
     default:
       return out("could not be applied; see the card.");
   }
@@ -2391,6 +2398,76 @@ export function createAgentsEngine({
     return { action: "apply" };
   }
 
+  /** One record of a released group: apply it automatically; true when it ended `applied`. A failed write goes back to a click. */
+  async function applyOneReleased(rec) {
+    rec.releasedAt = now();
+    rec.needsClick = false;
+    rec.reason = null;
+    try {
+      await applyLocked(rec, "auto");
+    } catch (e) {
+      if (!(e instanceof AgentError)) throw e;
+      // the write failed: the user can retry it from the card
+      rec.state = "pending";
+      rec.needsClick = true;
+      rec.reason = "ask";
+      rec.error = e.message;
+    }
+    await saveRecord(rec);
+    return rec.state === "applied";
+  }
+
+  /** Take back an applied record of a group that failed. Marks it rolled back, or says why it couldn't be. */
+  async function rollBackReleased(rec, why) {
+    try {
+      await undoLocked(rec);
+    } catch (e) {
+      rec.error = `Couldn't roll back: ${String(e?.message ?? e)}`;
+    }
+    if (rec.state === "undone") {
+      rec.groupAborted = true;
+      rec.error = `Rolled back: ${why}${rec.error ? ` (${rec.error})` : ""}`;
+    } else if (rec.state === "applied") {
+      rec.error ??= "Couldn't roll back: it changed since";
+    } else {
+      rec.groupAborted = true; // undo found the file changed since and marked it a conflict
+      rec.error = `Rolled back: ${why}; but ${rec.error ?? "it changed since"}`;
+    }
+    await saveRecord(rec).catch((e) => log.warn?.(`[agents] couldn't record a rollback: ${e?.message ?? e}`));
+  }
+
+  /**
+   * Release the proposals of ONE task that are to be applied: all-or-nothing. They are applied in order; the first one that
+   * doesn't end `applied` stops the group, the ones applied before it are rolled back (their `before` is restored and
+   * OpenCode reloaded) and the ones not tried are marked not applied. Every record says why.
+   */
+  async function applyGroupLocked(group) {
+    const done = [];
+    for (let i = 0; i < group.length; i++) {
+      const rec = group[i];
+      if (await applyOneReleased(rec)) {
+        done.push(rec);
+        continue;
+      }
+      if (group.length === 1) return;
+      const why = `${rec.agentName} (from the same task) ${rec.state === "failed" ? "couldn't be activated" : "couldn't be applied"}`;
+      rec.groupAborted = true;
+      await saveRecord(rec);
+      for (const earlier of done.reverse()) await rollBackReleased(earlier, why);
+      for (const rest of group.slice(i + 1)) {
+        rest.state = "conflict";
+        rest.groupAborted = true;
+        rest.error = `Not applied: ${why}. Nothing from this task was kept; ask Manta again`;
+        rest.releasedAt = now();
+        rest.needsClick = false;
+        rest.reason = null;
+        rest.decidedAt = now();
+        await saveRecord(rest);
+      }
+      return;
+    }
+  }
+
   /** The sweep of held records: a strict pass under `syncLock`. Idempotent. */
   async function reconcileLocked() {
     let store;
@@ -2415,10 +2492,17 @@ export function createAgentsEngine({
     }
     const published = [];
     let released = 0;
+    // What would be applied, grouped by the task that proposed it: a task's proposals go live together or not at all.
+    const groups = new Map();
     for (const rec of store.changes.filter((r) => r.state === "held")) {
       const d = decideRelease(rec, { jobs, policy });
       if (d.action === "stay") continue;
       released++;
+      if (d.action === "apply") {
+        const key = rec.origin?.jobId ?? rec.id;
+        groups.set(key, [...(groups.get(key) ?? []), rec]);
+        continue;
+      }
       try {
         if (d.action === "discard") {
           rec.state = "discarded";
@@ -2426,32 +2510,25 @@ export function createAgentsEngine({
           rec.releasedAt = now();
           rec.decidedAt = now();
           await saveRecord(rec);
-        } else if (d.action === "pending") {
+        } else {
           rec.state = "pending";
           rec.needsClick = true;
           rec.reason = d.reason;
           rec.releasedAt = now();
-          await saveRecord(rec);
-        } else {
-          rec.releasedAt = now();
-          rec.needsClick = false;
-          rec.reason = null;
-          try {
-            await applyLocked(rec, "auto");
-          } catch (e) {
-            if (!(e instanceof AgentError)) throw e;
-            // the write failed: the user can retry it from the card
-            rec.state = "pending";
-            rec.needsClick = true;
-            rec.reason = "ask";
-            rec.error = e.message;
-          }
           await saveRecord(rec);
         }
         published.push(rec);
       } catch (e) {
         log.warn?.(`[agents] couldn't release a proposal: ${e?.message ?? e}`);
       }
+    }
+    for (const group of groups.values()) {
+      try {
+        await applyGroupLocked(group);
+      } catch (e) {
+        log.warn?.(`[agents] couldn't release a proposal: ${e?.message ?? e}`);
+      }
+      published.push(...group);
     }
     // a root's slots are dropped only once the jobs store holds no record carrying that root
     if (jobs) {

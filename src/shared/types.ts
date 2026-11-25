@@ -3114,6 +3114,8 @@ export interface AgentChange {
   summary: string | null;
   evidence: AgentChangeEvidence[];
   admission: AgentChangeAdmission[];
+  /** One task's proposals are released all-or-nothing: set on every record of a group that was rolled back, not applied, or failed. `error` says why. */
+  groupAborted?: boolean;
 }
 export interface AgentChangeEvent {
   id: string;

@@ -1612,9 +1612,9 @@ for (const order of ["update-first", "create-first"]) {
       const lines = await f.engine.outcomeLinesForJob("job1");
       assert.equal(lines.length, 2);
       const text = lines.join("\n");
-      assert.doesNotMatch(text, /is live/, "nothing from this task is live");
+      assert.doesNotMatch(text, /was (created|updated) and is live/, "nothing from this task is live");
       assert.match(text, /@dev was rolled back|@dev was not applied/);
-      assert.match(text, /SEO Reviewer could not be activated/);
+      assert.match(text, /@seo-reviewer could not be activated/);
       assert.match(text, /nothing from this task is live/i);
     } finally {
       await f.cleanup();
@@ -1662,8 +1662,8 @@ test("release: proposals of different tasks are independent — one task's failu
 test("describeProposalOutcome: rolled back, not applied, failed and an applied change whose rollback failed", () => {
   const base = { slug: "cro", kind: "update", state: "undone", reason: null, error: "Rolled back: because X", decidedBy: "auto", groupAborted: true };
   const d = (over) => describeProposalOutcome({ ...base, ...over }, "auto");
-  assert.equal(d({}), "Outcome: @cro was rolled back and is not live: Rolled back: because X");
-  assert.equal(d({ state: "conflict", error: "Not applied: because X" }), "Outcome: @cro was not applied: Not applied: because X");
+  assert.equal(d({}), "Outcome: @cro was rolled back and is not live (because X).");
+  assert.equal(d({ state: "conflict", error: "Not applied: because X" }), "Outcome: @cro was not applied (because X).");
   assert.match(d({ state: "failed", slug: null, agentName: "Pricing CTA", error: "boom" }), /^Outcome: Pricing CTA could not be activated.*nothing from this task is live/s);
   assert.match(d({ state: "applied", error: "Couldn't roll back: disk full" }), /is live, but rolling it back failed/);
 });
