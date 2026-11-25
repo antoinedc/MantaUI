@@ -219,19 +219,33 @@ test("append and rotation are serialised: no two file operations overlap, nothin
         active--;
       }
     };
-    const fs = { mkdir: slow(mkdir), chmod: slow(chmod), stat: slow(fsStat), rename: slow(rename), rm: slow(fsRm), appendFile: slow(appendFile) };
-    const log = createSeatAttribution({ dir, now: c.now, log: quiet, maxBytes: 400, keep: 10, fs });
-    for (let i = 0; i < 40; i++) {
+    let calls = 0;
+    const counted = (fn) => slow((...a) => (calls++, fn(...a)));
+    const fs = { mkdir: counted(mkdir), chmod: counted(chmod), stat: counted(fsStat), rename: counted(rename), rm: counted(fsRm), appendFile: counted(appendFile) };
+    // keep is generous: ~105-byte lines at maxBytes 400 is ~3 lines a file, so 40 lines need ~14 files.
+    const log = createSeatAttribution({ dir, now: c.now, log: quiet, maxBytes: 400, keep: 30, fs });
+    // Wait on conditions, never on the clock: how records batch depends on when the
+    // event loop gets to run a drain, which under load is anything. Here the second
+    // record of every pair is made while the first one's drain is mid-flight (it has
+    // made its first file call), and the next pair starts only once both are on disk.
+    const until = async (cond) => {
+      while (!cond()) await new Promise((r) => setImmediate(r));
+    };
+    for (let i = 0; i < 40; i += 2) {
+      const before = calls;
       log.record(req({ session: `s${i}` }));
       c.tick(10);
-      if (i % 7 === 0) await new Promise((r) => setTimeout(r, 3)); // let some drains interleave with new records
+      await until(() => calls > before);
+      log.record(req({ session: `s${i + 1}` }));
+      c.tick(10);
+      await until(() => log.stats().written >= i + 2);
     }
     await log.flush();
     assert.equal(maxActive, 1);
     const files = (await readdir(dir)).sort();
     assert.ok(files.length > 2, `rotated: ${files.join(",")}`);
     assert.ok(files.includes("claude.jsonl") && files.includes("claude.jsonl.1"));
-    const lines = await readAttribution({ dir, provider: "claude", keep: 10 });
+    const lines = await readAttribution({ dir, provider: "claude", keep: 30 });
     assert.deepEqual(lines.map((l) => l.session), Array.from({ length: 40 }, (_, i) => `s${i}`), "every line, once, oldest first");
   });
 });

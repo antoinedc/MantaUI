@@ -4,7 +4,8 @@
 // the stale pill flips from the box's `staleAt` instant with no new frame, and the
 // context percentage is the box's (selected-model) value, never a client recompute.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { act } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatPanel } from "./ChatPanel";
 import { emitStreamAndFlush, installMockApi, mount, resetStore, type Harness } from "./testHarness";
 
@@ -22,14 +23,18 @@ describe("ChatPanel — box-owned cache + context (WS11 D2)", () => {
   afterEach(() => {
     h?.unmount();
     h = null;
+    vi.useRealTimers();
   });
+
+  // Drain the mount's promise chains on the fake clock (the harness's own flush waits on a real timeout).
+  const settle = () => (vi.isFakeTimers() ? act(async () => { await vi.advanceTimersByTimeAsync(0); }) : h!.flush());
 
   async function open(overrides: Record<string, unknown> = {}) {
     const { bus } = installMockApi({ opencodeMessages: () => Promise.resolve([]), ...overrides });
     resetStore({ projects: [{ tmuxSession: "proj", defaultCwd: "/x", windows: [{ index: 1, name: "chat-1", opencodeSessionId: SID }] }] } as never);
     h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-    await h.flush();
+    await settle();
+    await settle();
     return bus;
   }
 
@@ -42,14 +47,18 @@ describe("ChatPanel — box-owned cache + context (WS11 D2)", () => {
   });
 
   it("flips the cold-cache state at the box's staleAt, with no new frame", async () => {
+    // Fake clock: staleAt is "400 ms from now" on a clock that only moves when the test says so,
+    // so a slow machine cannot reach the instant early or late.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const now = Date.now();
     await open({
       opencodeContext: () => Promise.resolve(context(200000, 5)),
       opencodeCache: () => Promise.resolve({ isStale: false, idleMs: 0, staleTokens: 12000, ttlMs: 300000, lastCompleted: now - 100_000, staleAt: now + 400 }),
     });
     expect(h!.container.textContent).not.toContain("cold");
-    await new Promise((r) => setTimeout(r, 700));
-    await h!.flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(h!.container.textContent).not.toContain("cold");
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
     expect(h!.container.textContent).toContain("cold");
   });
 });
