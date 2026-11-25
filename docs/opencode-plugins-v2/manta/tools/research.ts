@@ -48,6 +48,7 @@ const THIN_ADVICE = "research more before relying on it";
 
 // how well-founded an entry is: its source count, and for a thin one why (an older server sends neither field: say nothing)
 function evidenceLine(e: any): string | null {
+  if (e.projectFacts === true) return "project facts (observed in this project, not claims from outside sources)";
   if (typeof e.sourceCount !== "number") return null;
   if (e.thin !== true) return `${sources(e.sourceCount)}`;
   const why = e.sourceCount < 3 ? "fewer than 3 independent sources" : "one source carries more than half the findings";
@@ -62,7 +63,7 @@ function libraryText(query: string, res: any): string {
     // a thin entry is never shown as just fresh (or stale): the flag sits in the same bracket as its freshness
     const head = `${i + 1}. [${String(e.status).toUpperCase()}${e.thin === true ? ", THIN" : ""}] ${e.topic} (${e.scope}) — ${days(e.ageDays)} old, checked ${e.checkedAt}${e.checkedBy ? ` by @${e.checkedBy}` : ""}; shelf life ${days(e.shelfLifeDays)}${e.shelfLifeVerified ? "" : " (unverified)"}: ${e.shelfLifeWhy}`;
     const findings = (e.findings ?? []).map((f: any) => {
-      const where = [f.url, f.date, f.private ? "private source" : null].filter(Boolean).join(", ");
+      const where = [f.url, f.date, f.publisher ? `by ${f.publisher}` : null, f.private ? "private source" : null].filter(Boolean).join(", ");
       return `   [${f.index}] ${f.claim} (${where})${f.quote ? ` — "${f.quote}"` : ""}`;
     });
     const evidence = evidenceLine(e);
@@ -171,6 +172,7 @@ export const tools: ToolDef[] = [
               sourceId: str("The sourceId of the page that supports it (from research_fetch)."),
               quote: str("20 to 300 characters copied EXACTLY from that source; needs sourceId."),
               date: str("YYYY-MM-DD: when the source was published, if you know; default today."),
+              publisher: str("The organisation behind the source, up to 80 characters (e.g. the company that runs several of its own sites). Findings sharing a publisher count as one independent source."),
             },
             ["claim"],
           ),
@@ -205,7 +207,8 @@ export const tools: ToolDef[] = [
       if (res.forcedProject) notes.push("It holds a private source, so it was saved to this project only.");
       if (res.shelfLifeVerified === false) notes.push(`The shelf life is unverified: ${res.shelfLifeDays} days.`);
       if (res.replaced) notes.push("It replaced the earlier entry for this topic.");
-      if (res.thin === true) notes.push(`It is thin: ${sources(res.sourceCount)}, ${THIN_ADVICE}.`);
+      if (res.projectFacts === true) notes.push("It holds only facts observed in this project, so it is shown as project facts, not as sourced research.");
+      else if (res.thin === true) notes.push(`It is thin: ${sources(res.sourceCount)}, ${THIN_ADVICE}.`);
       return `Saved "${res.topic}" (${res.scope}, ${res.findings} finding${res.findings === 1 ? "" : "s"}, shelf life ${res.shelfLifeDays} days).${notes.length ? ` ${notes.join(" ")}` : ""}`;
     },
   },

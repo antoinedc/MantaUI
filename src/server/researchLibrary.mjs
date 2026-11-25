@@ -56,40 +56,108 @@ export function withResearchGuidance(prompt) {
 
 class LibraryError extends Error {}
 
+// One organisation publishes under several domains (and a GitHub owner): they are one source. A fact table, not an
+// opinion: add a row when two domains are known to be one publisher. A key is a registrable domain, or `domain/owner`
+// on the sites where the first path segment is the author. A finding's own `publisher` label can merge further.
+const ORG_ALIASES = {
+  "anthropic.com": "anthropic",
+  "claude.com": "anthropic",
+  "claude.ai": "anthropic",
+  "github.com/anthropics": "anthropic",
+  "openai.com": "openai",
+  "chatgpt.com": "openai",
+  "github.com/openai": "openai",
+  "google.com": "google",
+  "deepmind.google": "google",
+  "googleblog.com": "google",
+  "withgoogle.com": "google",
+  "github.com/google": "google",
+  "microsoft.com": "microsoft",
+  "azure.com": "microsoft",
+  "github.com/microsoft": "microsoft",
+  "meta.com": "meta",
+  "facebook.com": "meta",
+  "fb.com": "meta",
+  "github.com/facebook": "meta",
+  "github.com/facebookresearch": "meta",
+};
+const PUBLISHER_MAX = 80;
+/** A publisher name as a comparable key: case, punctuation and spacing do not matter. */
+const publisherKey = (name) => {
+  const n = String(name ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return n ? `org:${n}` : null;
+};
+
 /**
- * The identity of the source behind one finding, or null when it has none. A public finding is identified by the
+ * The identities of the source behind one finding (none when it has none). A public finding is identified by the
  * registrable domain of its link (`docs.a.com` and `www.a.com` are one source; `x.github.io` is its own site, via the
- * public-suffix list's private section), plus its first path segment on the few sites where that is the author. A private
- * finding stores no link, so its fetched source stands for it.
+ * public-suffix list's private section), plus its first path segment on the few sites where that is the author, with the
+ * domains of one organisation folded into one. A private finding stores no link, so its fetched source stands for it. A
+ * `publisher` label adds a second identity: findings sharing one are one source.
  */
-function sourceKey(f) {
+function sourceKeys(f) {
+  const keys = [];
   if (f?.url) {
     try {
       const u = new URL(f.url);
       const domain = getDomain(u.hostname, { allowPrivateDomains: true }) || u.hostname.toLowerCase();
       const author = AUTHOR_IN_PATH.has(domain) ? u.pathname.split("/").filter(Boolean)[0] : "";
-      return author ? `${domain}/${author.toLowerCase()}` : domain;
+      const base = author ? `${domain}/${author.toLowerCase()}` : domain;
+      const org = ORG_ALIASES[base] ?? ORG_ALIASES[domain];
+      keys.push(org ? `org:${org}` : base);
     } catch {
-      return null;
+      // an unreadable link is no source
     }
+  } else if (f?.private === true && f.sourceId) {
+    keys.push(`private:${f.sourceId}`);
   }
-  return f?.private === true && f.sourceId ? `private:${f.sourceId}` : null;
+  const pub = typeof f?.publisher === "string" ? publisherKey(f.publisher) : null;
+  if (pub) keys.push(pub);
+  return keys;
 }
 
 /**
  * How well-founded a set of findings is: `sourceCount` independent sources, and `thin` when that is below THIN_SOURCE_MIN or
- * one source carries more than half of ALL the findings (a finding with no source counts in the total, never as a source).
+ * one source carries more than half of ALL the outside findings (a finding with no source counts in the total, never as a
+ * source). Two findings are one source when their identities meet (same site or organisation, or the same publisher label;
+ * a label can only merge sources, never split one).
+ *
+ * In a project entry (`projectScope`) a finding with no source at all is a PROJECT FACT: something observed in the project
+ * itself, not a claim resting on an outside source. Facts are left out of the count and the total; an entry made only of
+ * them is `projectFacts` and not thin.
  */
-export function independentSources(findings) {
+export function independentSources(findings, { projectScope = false } = {}) {
   const list = Array.isArray(findings) ? findings : [];
-  const perSource = new Map();
+  const parent = new Map();
+  const find = (k) => {
+    let r = k;
+    while (parent.get(r) !== r) r = parent.get(r);
+    for (let c = k; c !== r; ) {
+      const n = parent.get(c);
+      parent.set(c, r);
+      c = n;
+    }
+    return r;
+  };
+  let facts = 0;
+  const keyed = [];
   for (const f of list) {
-    const key = sourceKey(f);
-    if (key) perSource.set(key, (perSource.get(key) ?? 0) + 1);
+    const keys = sourceKeys(f);
+    if (keys.length === 0 && projectScope && !f?.sourceId) {
+      facts += 1;
+      continue;
+    }
+    for (const k of keys) if (!parent.has(k)) parent.set(k, k);
+    for (const k of keys.slice(1)) parent.set(find(k), find(keys[0]));
+    keyed.push(keys[0] ?? null);
   }
+  const perSource = new Map();
+  for (const k of keyed) if (k) perSource.set(find(k), (perSource.get(find(k)) ?? 0) + 1);
+  const total = keyed.length;
   const sourceCount = perSource.size;
-  const dominant = list.length > 0 && Math.max(0, ...perSource.values()) * 2 > list.length;
-  return { sourceCount, thin: sourceCount < THIN_SOURCE_MIN || dominant, dominant };
+  const projectFacts = facts > 0 && total === 0;
+  const dominant = total > 0 && Math.max(0, ...perSource.values()) * 2 > total;
+  return { sourceCount, thin: projectFacts ? false : sourceCount < THIN_SOURCE_MIN || dominant, dominant, projectFacts };
 }
 
 const collapse = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
@@ -97,6 +165,22 @@ const topicKey = (topic) => collapse(topic).toLowerCase();
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 const sameScope = (a, b) => (a === "global" ? b === "global" : b !== "global" && a?.project === b?.project);
 const visibleTo = (entry, project) => entry.scope === "global" || entry.scope?.project === project;
+
+const claimKey = (claim) => collapse(claim).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const richness = (f) => (f.url ? 2 : 0) + (f.quote ? 1 : 0);
+// two copies of one claim are two findings only when they plainly come from different sources
+const differentSource = (a, b) => (a.url && b.url && a.url !== b.url) || (a.private && b.private && a.sourceId !== b.sourceId);
+/** Each claim once (the same words, ignoring case, spacing and punctuation, from the same or an unknown source); the copy with a link and a quote wins. */
+function dedupeFindings(list) {
+  const out = [];
+  for (const f of list) {
+    const key = claimKey(f.claim);
+    const at = out.findIndex((g) => claimKey(g.claim) === key && !differentSource(g, f));
+    if (at === -1) out.push(f);
+    else if (richness(f) > richness(out[at])) out[at] = f;
+  }
+  return out;
+}
 
 /**
  * @param {object} deps
@@ -154,14 +238,14 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
 
   const wire = (e, t) => {
     const ageMs = Math.max(0, t - e.checkedAt);
-    // an entry saved before the count existed has none stored: it is worked out here, from the findings it already holds
-    const evidence = independentSources(e.findings);
+    // the count is always worked out here from the findings, so a table or rule change reaches entries saved earlier
+    const evidence = independentSources(e.findings, { projectScope: e.scope !== "global" });
     return {
       id: e.id,
       topic: e.topic,
       scope: e.scope === "global" ? "global" : "project",
       summary: e.summary,
-      findings: e.findings.map((f, index) => ({ index, claim: f.claim, url: f.url ?? null, quote: f.quote ?? null, date: f.date, private: f.private === true })),
+      findings: e.findings.map((f, index) => ({ index, claim: f.claim, url: f.url ?? null, quote: f.quote ?? null, date: f.date, private: f.private === true, ...(f.publisher ? { publisher: f.publisher } : {}) })),
       ageDays: Math.floor(ageMs / DAY_MS),
       status: ageMs > e.shelfLifeDays * DAY_MS ? "stale" : "fresh",
       checkedAt: isoDay(e.checkedAt),
@@ -169,9 +253,10 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
       shelfLifeDays: e.shelfLifeDays,
       shelfLifeWhy: e.shelfLifeWhy,
       shelfLifeVerified: e.shelfLifeVerified === true,
-      sourceCount: Number.isInteger(e.sourceCount) ? e.sourceCount : evidence.sourceCount,
-      thin: typeof e.thin === "boolean" ? e.thin : evidence.thin,
+      sourceCount: evidence.sourceCount,
+      thin: evidence.thin,
       dominant: evidence.dominant,
+      projectFacts: evidence.projectFacts,
     };
   };
 
@@ -208,9 +293,11 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
     const date = raw.date === undefined ? today : raw.date;
     if (!isDay(date)) throw new LibraryError("A finding's date must be YYYY-MM-DD (when its source was published, or today)");
     const claim = raw.claim.trim();
+    if (raw.publisher !== undefined && !textOk(raw.publisher, 1, PUBLISHER_MAX)) throw new LibraryError(`A finding's publisher must be 1 to ${PUBLISHER_MAX} characters: the organisation behind the source`);
+    const publisher = raw.publisher === undefined ? {} : { publisher: collapse(raw.publisher) };
     if (raw.sourceId === undefined) {
       if (raw.quote !== undefined) throw new LibraryError("A quote needs the sourceId it was copied from");
-      return { claim, sourceId: null, url: null, quote: null, date, private: false };
+      return { claim, sourceId: null, url: null, quote: null, date, private: false, ...publisher };
     }
     if (typeof raw.sourceId !== "string" || !raw.sourceId) throw new LibraryError("A sourceId must be the id research_fetch gave you");
     let source = null;
@@ -229,8 +316,8 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
       quote = raw.quote.trim();
     }
     // a private source's quote and link are never stored; the link of a public one is the stored source's, never the model's
-    if (source.private === true) return { claim, sourceId: raw.sourceId, url: null, quote: null, date, private: true };
-    return { claim, sourceId: raw.sourceId, url: source.finalUrl || source.url || null, quote, date, private: false };
+    if (source.private === true) return { claim, sourceId: raw.sourceId, url: null, quote: null, date, private: true, ...publisher };
+    return { claim, sourceId: raw.sourceId, url: source.finalUrl || source.url || null, quote, date, private: false, ...publisher };
   }
 
   async function save(input) {
@@ -270,10 +357,10 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
           if (!old || i >= old.findings.length) throw new LibraryError(`keep ${i} is not a finding of the existing entry for this topic and scope`);
           kept.push(old.findings[i]);
         }
-        const findings = [...kept, ...fresh];
+        const findings = dedupeFindings([...kept, ...fresh]);
         if (findings.length < 1) throw new LibraryError("Give at least one finding (or keep one of the earlier ones)");
         if (findings.length > FINDINGS_MAX) throw new LibraryError(`An entry holds at most ${FINDINGS_MAX} findings`);
-        const evidence = independentSources(findings);
+        const evidence = independentSources(findings, { projectScope: scope !== "global" });
         const entry = {
           id: `rl_${randomBytes(6).toString("hex")}`,
           topic,
@@ -305,6 +392,7 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
           sourceCount: evidence.sourceCount,
           thin: evidence.thin,
           dominant: evidence.dominant,
+          projectFacts: evidence.projectFacts,
         };
       });
     });

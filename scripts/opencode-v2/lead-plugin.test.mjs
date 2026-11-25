@@ -624,7 +624,8 @@ describe("research library tools", () => {
     assert.deepEqual(Object.keys(findTool.input.properties), ["query"]);
     assert.deepEqual(Object.keys(saveTool.input.properties), ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"]);
     assert.deepEqual(saveTool.input.required, ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope"]);
-    assert.deepEqual(Object.keys(saveTool.input.properties.findings.items.properties)[0], "claim");
+    assert.deepEqual(Object.keys(saveTool.input.properties.findings.items.properties), ["claim", "sourceId", "quote", "date", "publisher"], "the optional publisher is last");
+    assert.deepEqual(saveTool.input.properties.findings.items.required, ["claim"]);
     assert.deepEqual(saveTool.input.properties.scope.enum, ["global", "project"]);
     assert.match(findTool.description, /BEFORE researching/);
     assert.match(saveTool.description, /shelf life/);
@@ -665,6 +666,31 @@ describe("research library tools", () => {
     out = await findTool.execute({ query: "topic" }, CTX);
     assert.match(out, /\[FRESH\] Topic one/);
     assert.match(out, /3 independent sources/);
+    assert.doesNotMatch(out, /thin/i);
+  });
+
+  test("research_library_find shows an entry of project observations as 'project facts' (not thin, no source count); a mixed one shows its outside sources only", async () => {
+    const entry = (extra) => ({ id: "rl_1", topic: "Pricing page in this repo", scope: "project", summary: "What the repo shows.", status: "fresh", ageDays: 0, checkedAt: "2026-11-24", checkedBy: "architect", shelfLifeDays: 30, shelfLifeVerified: false, shelfLifeWhy: "Code changes.", findings: [], ...extra });
+    server({ ok: true, entries: [entry({ sourceCount: 0, thin: false, projectFacts: true })] });
+    let out = await findTool.execute({ query: "pricing" }, CTX);
+    assert.match(out, /1\. \[FRESH\] Pricing page in this repo/);
+    assert.match(out, /project facts/);
+    assert.doesNotMatch(out, /thin|independent source/i);
+    server({ ok: true, entries: [entry({ sourceCount: 2, thin: true, projectFacts: false })] });
+    out = await findTool.execute({ query: "pricing" }, CTX);
+    assert.match(out, /\[FRESH, THIN\]/);
+    assert.match(out, /2 independent sources — thin: fewer than 3 independent sources/);
+    assert.doesNotMatch(out, /project facts/);
+  });
+
+  test("research_library_find shows a finding's publisher; save sends it and says project facts instead of a source count", async () => {
+    server({ ok: true, entries: [{ id: "rl_1", topic: "T", scope: "global", summary: "s", status: "fresh", ageDays: 0, checkedAt: "2026-11-24", checkedBy: "x", shelfLifeDays: 30, shelfLifeVerified: true, shelfLifeWhy: "w", sourceCount: 3, thin: false, findings: [{ index: 0, claim: "A claim", url: "https://a.example/x", quote: null, date: "2026-11-01", private: false, publisher: "Acme" }] }] });
+    assert.match(await findTool.execute({ query: "t" }, CTX), /\[0\] A claim \(https:\/\/a\.example\/x, 2026-11-01, by Acme\)/);
+    const args = { topic: "Topic one", summary: "s", findings: [{ claim: "c", sourceId: "src_1", publisher: "Acme" }], shelfLifeDays: 30, shelfLifeWhy: "w", shelfLifeVerified: true, scope: "global" };
+    const calls = server({ ok: true, topic: "Topic one", scope: "project", forcedProject: false, replaced: false, shelfLifeDays: 30, shelfLifeVerified: true, findings: 1, sourceCount: 0, thin: false, projectFacts: true });
+    const out = await saveTool.execute(args, CTX);
+    assert.equal(calls[0].body.findings[0].publisher, "Acme");
+    assert.match(out, /project facts/);
     assert.doesNotMatch(out, /thin/i);
   });
 
