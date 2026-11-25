@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildLeadBrief,
+  findDanglingReferences,
+  renderRoutingNotes,
   rosterEntry,
   parseAgentMd,
   slugForName,
@@ -2103,6 +2105,65 @@ test("agents:create is unchanged: name / description / isolation only, no change
     assert.match(await readFile(join(f.root, "plain", "agent.md"), "utf-8"), /^---\nname: Plain\ndescription: Does plain things\.\nisolation: none\n---\nYou are Plain\./);
     assert.deepEqual((await readdir(f.root)).filter((n) => n === ".changes.json"), []);
     assert.equal(f.w2.pubs.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- routing lines that mention an agent that doesn't exist (a fact the server checks, never an edit) ----
+
+const NOTE = (who, field, ...missing) => `Routing note: @${who}'s ${field} mentions ${missing.length === 1 ? `@${missing[0]}, which doesn't exist` : `${missing.slice(0, -1).map((m) => `@${m}`).join(", ")} and @${missing.at(-1)}, which don't exist`}.`;
+const infoOf = (slug, over = {}) => ({ slug, name: slug, description: "d", useWhen: null, notFor: null, ...over });
+
+test("findDanglingReferences: a missing @slug in use_when / not_for / description is found; existing agents, reserved names, emails and broken folders are not", () => {
+  const entries = [
+    { slug: "conversion-cro", info: infoOf("conversion-cro", { notFor: "Pricing-page headline copy rewrites (→ @pricing-copy)." }) },
+    { slug: "dev", info: infoOf("dev", { useWhen: "Code changes; ask @seo first.", description: "Hands page copy to @Copywriter, then mail me@example.com or see @general." }) },
+    { slug: "seo", info: infoOf("seo", { notFor: "Code (→ @dev), @manta and @architect work, or @broken." }) },
+    { slug: "manta", info: infoOf("manta") },
+    { slug: "architect", info: infoOf("architect") },
+    { slug: "broken", info: { slug: "broken", name: "broken", description: "", error: "nope" } },
+  ];
+  const refs = findDanglingReferences(entries);
+  assert.deepEqual(refs, [
+    { agent: "conversion-cro", field: "not_for", missing: ["pricing-copy"] },
+    { agent: "dev", field: "description", missing: ["copywriter"] },
+  ]);
+  assert.deepEqual(renderRoutingNotes(refs), [NOTE("conversion-cro", "not_for", "pricing-copy"), NOTE("dev", "description", "copywriter")]);
+  assert.deepEqual(findDanglingReferences([]), []);
+  assert.deepEqual(renderRoutingNotes([{ agent: "a", field: "use_when", missing: ["x", "y", "z"] }]), ["Routing note: @a's use_when mentions @x, @y and @z, which don't exist."]);
+});
+
+test("leadBrief: a dangling routing line becomes a server-written Routing note in the team section, follows create/update/undo, and the lead is told to offer a fix", async () => {
+  const f = await leadFixture();
+  try {
+    await mkdir(join(f.root, "seo"));
+    await writeFile(join(f.root, "seo", "agent.md"), valid('isolation: none\nnot_for: "Pricing-page copy rewrites (→ @pricing-copy)."\n'));
+    const text = async () => (await f.engine.leadBrief("ses_chat")).text;
+    const a = await text();
+    assert.ok(a.includes(NOTE("seo", "not_for", "pricing-copy")), a);
+    assert.ok(a.indexOf("Routing note:") > a.indexOf("## Your team") && a.indexOf("Routing note:") < a.indexOf("## When to ask the user"), "inside the team section");
+    assert.ok(a.includes('- When a "Routing note" line in your team section says an agent\'s routing line mentions an agent that doesn\'t exist, tell the user in one line and offer to fix it: a small edit they dictate (`agent_change`), or a rework through @architect. Never change an agent until the user says so.'));
+    assert.equal(a, await text(), "byte-stable");
+    // the agent it points to now exists: the note is gone
+    await mkdir(join(f.root, "pricing-copy"));
+    await writeFile(join(f.root, "pricing-copy", "agent.md"), valid("isolation: none\n"));
+    assert.doesNotMatch(await text(), /Routing note:/);
+    // and it is deleted again: the note is back
+    await rm(join(f.root, "pricing-copy"), { recursive: true });
+    assert.ok((await text()).includes(NOTE("seo", "not_for", "pricing-copy")));
+    // nothing is edited by the check
+    assert.match(await readFile(join(f.root, "seo", "agent.md"), "utf-8"), /@pricing-copy/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("leadBrief: with no dangling reference there is no Routing note", async () => {
+  const f = await leadFixture();
+  try {
+    assert.doesNotMatch((await f.engine.leadBrief("ses_chat")).text, /Routing note:\s*@/);
+    assert.doesNotMatch(buildLeadBrief({ body: "B", roster: [] }), /Routing note: @/);
   } finally {
     await f.cleanup();
   }
