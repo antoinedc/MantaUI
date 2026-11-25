@@ -205,3 +205,23 @@ Edge cases and not-yet:
 - **The Architect's own proposals aren't checked before they are applied** (a proposal that adds a mention of a missing
   agent is flagged only after it is live); the Architect is told about existing notes, not warned about new ones.
 - **The planned monthly team review** is where merges and routing fixes beyond "this name doesn't exist" belong.
+
+## The Architect owns every agent change (user request, 2026-11-25)
+
+Problem seen in a live test: undoing an agent from its card (`@pricing-copy-cro`, then `@pricing-cta`) reverted that one
+change only. The routing line the same task had added to `@conversion-cro` ("→ @pricing-copy") stayed, pointed at an agent
+that no longer existed, and biased the next Architect run. Undo, delete and manual edits have no team-wide view; the
+Architect does.
+
+Direction (user): make the Architect the single owner of changes to agents, so every change is checked against the whole
+team and conflicts are resolved when they happen. Two shapes to choose between:
+- **Undo / delete route through the Architect.** The card's Undo (and an agent's Delete) starts an Architect task
+  ("undo this change and keep the team consistent") instead of reverting a file. It proposes the revert plus any neighbour
+  fixes (routing lines that mention the agent) in one go.
+- **Everything through prompts.** No direct edit buttons; every change, including undo, is a request to Manta, which hands
+  it to the Architect.
+
+Open points: what stays instant for safety (a one-click revert must still exist when the Architect is unavailable or a
+change went badly wrong); small edits the user dictates (today Manta applies them with `agent_change`); cost and latency of
+a full Architect run for a trivial undo; how this relates to the routing-note check (#1733), which stays as the
+fact-level safety net.
