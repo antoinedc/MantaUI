@@ -77,6 +77,7 @@
     "remark-rehype": "^11.1.2",
     "request-filtering-agent": "^3.3.1",
     "simple-git": "4.0.2",
+    "tldts": "^6.1.86",
     "unified": "^11.0.5",
     "unist-util-visit": "^5.1.0",
     "unpdf": "^2.2.2",

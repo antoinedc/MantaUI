@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createResearchLibrary, RESEARCH_GUIDANCE, withResearchGuidance, LIBRARY_MAX_ENTRIES } from "./researchLibrary.mjs";
+import { createResearchLibrary, RESEARCH_GUIDANCE, withResearchGuidance, LIBRARY_MAX_ENTRIES, independentSources, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 const T0 = Date.parse("2026-11-24T12:00:00Z");
@@ -296,6 +296,155 @@ test("a damaged library file is not overwritten blindly: save refuses, find answ
   }
 });
 
+// ---- independent sources: the evidence bar of an entry ----
+
+const f_ = (url, extra = {}) => ({ claim: "c", sourceId: url ? `src_${url.length}` : null, url, quote: null, date: "2026-11-24", private: false, ...extra });
+
+test("independentSources counts one source per registrable domain: subdomains and paths of one site are one", () => {
+  const r = independentSources([f_("https://docs.anthropic.com/a"), f_("https://www.anthropic.com/b"), f_("https://anthropic.com/c"), f_("https://example.co.uk/x"), f_("https://blog.example.co.uk/y"), f_("https://other.org/z")]);
+  assert.equal(r.sourceCount, 3);
+  assert.equal(THIN_SOURCE_MIN, 3);
+});
+
+test("independentSources tells apart authors on shared hosts: github owners, user sites on github.io", () => {
+  const r = independentSources([f_("https://github.com/alice/one"), f_("https://github.com/alice/two"), f_("https://github.com/bob/one"), f_("https://carol.github.io/post"), f_("https://dave.github.io/post")]);
+  assert.equal(r.sourceCount, 4, "alice once, bob, carol, dave");
+});
+
+test("independentSources: a private source counts once per source, findings with no source count for nothing, and an unreadable url does not throw", () => {
+  const r = independentSources([
+    f_(null, { sourceId: "src_p1", private: true }),
+    f_(null, { sourceId: "src_p1", private: true }),
+    f_(null, { sourceId: "src_p2", private: true }),
+    f_(null),
+    f_("not a url"),
+    f_("https://a.example/x"),
+  ]);
+  assert.equal(r.sourceCount, 3);
+});
+
+test("independentSources flags thin: fewer than 3 sources, or one source carrying more than half the findings (exactly half is fine)", () => {
+  assert.equal(independentSources([f_("https://a.example/1"), f_("https://b.example/1")]).thin, true, "two sources");
+  assert.equal(independentSources([f_("https://a.example/1"), f_("https://b.example/1"), f_("https://c.example/1")]).thin, false, "three sources, one each");
+  const dominant = independentSources([f_("https://a.example/1"), f_("https://a.example/2"), f_("https://a.example/3"), f_("https://a.example/4"), f_("https://b.example/1"), f_("https://c.example/1")]);
+  assert.equal(dominant.sourceCount, 3);
+  assert.equal(dominant.thin, true, "4 of 6 findings from one source");
+  assert.equal(dominant.dominant, true);
+  const half = independentSources([f_("https://a.example/1"), f_("https://a.example/2"), f_("https://b.example/1"), f_("https://c.example/1")]);
+  assert.equal(half.thin, false, "2 of 4 is exactly half");
+  assert.equal(independentSources([]).thin, true);
+  assert.equal(independentSources([]).sourceCount, 0);
+  // findings without a source still count in the total: 3 sourced findings out of 7 do not make 3 sources "carry" the entry
+  assert.equal(independentSources([f_("https://a.example/1"), f_("https://a.example/2"), f_("https://a.example/3"), f_("https://a.example/4"), f_("https://b.example/1"), f_("https://c.example/1"), f_(null)]).thin, true);
+});
+
+const srcAt = (n, url, text = "Pricing pages that show the price early convert better in most tests.", extra = {}) => ({ id: `src_000000000000000${n}`, url, finalUrl: url, title: "T", private: false, text, ...extra });
+const withSources = (list, child = "ses_a") => Object.fromEntries(list.map((s) => [`${child}:${s.id}`, s]));
+const findingFrom = (s, claim) => ({ claim, sourceId: s.id, quote: "price early convert better" });
+
+test("save stores sourceCount and thin; a thin entry is still saved (two documents of one site = one source)", async () => {
+  const s1 = srcAt(1, "https://docs.example.com/a");
+  const s2 = srcAt(2, "https://www.example.com/b");
+  const f = await fixture({ sources: withSources([s1, s2]) });
+  try {
+    const r = await save(f, { findings: [findingFrom(s1, "A"), findingFrom(s2, "B"), { claim: "C" }] });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.sourceCount, 1);
+    assert.equal(r.thin, true);
+    const [e] = (await f.stored()).entries;
+    assert.equal(e.sourceCount, 1);
+    assert.equal(e.thin, true);
+    assert.equal(e.findings.length, 3, "nothing was rejected");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("save: three independent sources, none dominant, is not thin", async () => {
+  const list = [srcAt(1, "https://a.example/x"), srcAt(2, "https://b.example/x"), srcAt(3, "https://c.example/x")];
+  const f = await fixture({ sources: withSources(list) });
+  try {
+    const r = await save(f, { findings: list.map((s, i) => findingFrom(s, `claim ${i}`)) });
+    assert.equal(r.sourceCount, 3);
+    assert.equal(r.thin, false);
+    assert.equal((await f.stored()).entries[0].thin, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("save: private-source findings count as sources and the entry stays in project scope", async () => {
+  const pub = srcAt(1, "https://a.example/x");
+  const p1 = srcAt(2, null, undefined, { private: true });
+  const p2 = srcAt(3, null, undefined, { private: true });
+  const f = await fixture({ sources: withSources([pub, p1, p2]) });
+  try {
+    const r = await save(f, { scope: "global", findings: [findingFrom(pub, "A"), findingFrom(p1, "B"), findingFrom(p2, "C")] });
+    assert.equal(r.sourceCount, 3);
+    assert.equal(r.thin, false);
+    assert.equal(r.scope, "project");
+    assert.equal(r.forcedProject, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("find carries the source count and thin flag; a thin entry says why, a fully sourced one does not", async () => {
+  const list = [srcAt(1, "https://a.example/x"), srcAt(2, "https://b.example/x"), srcAt(3, "https://c.example/x")];
+  const f = await fixture({ sources: withSources(list) });
+  try {
+    await save(f, { topic: "Thin topic", findings: [findingFrom(list[0], "A"), findingFrom(list[1], "B")] });
+    await save(f, { topic: "Solid topic", findings: list.map((s, i) => findingFrom(s, `c${i}`)) });
+    const thin = (await f.lib.find(call({ query: "thin topic" }))).entries.find((e) => e.topic === "Thin topic");
+    assert.equal(thin.sourceCount, 2);
+    assert.equal(thin.thin, true);
+    assert.equal(thin.status, "fresh", "freshness is reported as before; the plugin never shows it alone");
+    const solid = (await f.lib.find(call({ query: "solid topic" }))).entries.find((e) => e.topic === "Solid topic");
+    assert.equal(solid.sourceCount, 3);
+    assert.equal(solid.thin, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an entry saved before the count existed gets it computed on read from its findings' urls, and the file is not rewritten", async () => {
+  const f = await fixture();
+  try {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    await mkdir(join(f.file, ".."), { recursive: true });
+    const old = {
+      id: "rl_old", topic: "Old topic", scope: "global", summary: "s", shelfLifeDays: 120, shelfLifeWhy: "w", shelfLifeVerified: true, createdAt: T0, checkedAt: T0, checkedBy: "architect",
+      findings: [f_("https://docs.anthropic.com/a"), f_("https://www.anthropic.com/b"), f_("https://anthropic.com/c"), f_("https://anthropic.com/d"), f_("https://anthropic.com/e")],
+    };
+    const text = JSON.stringify({ version: 1, entries: [old] });
+    await writeFile(f.file, text);
+    const [e] = (await f.lib.find(call({ query: "old topic" }))).entries;
+    assert.equal(e.sourceCount, 1);
+    assert.equal(e.thin, true);
+    assert.equal(await readFile(f.file, "utf-8"), text);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a refresh with keep recomputes the count and the flag from kept and new findings together", async () => {
+  const list = [srcAt(1, "https://a.example/x"), srcAt(2, "https://b.example/x"), srcAt(3, "https://c.example/x")];
+  const f = await fixture({ sources: withSources(list) });
+  try {
+    const first = await save(f, { findings: [findingFrom(list[0], "A"), findingFrom(list[1], "B")] });
+    assert.equal(first.thin, true);
+    const second = await save(f, { summary: "Improved.", findings: [findingFrom(list[2], "C")], keep: [0, 1] });
+    assert.equal(second.replaced, true);
+    assert.equal(second.sourceCount, 3);
+    assert.equal(second.thin, false);
+    const [e] = (await f.stored()).entries;
+    assert.equal(e.sourceCount, 3);
+    assert.equal(e.thin, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // ---- the guidance every agent task gets ----
 
 test("the guidance is short, names the tools and the skip rules, and mentions no particular domain", () => {
@@ -318,6 +467,15 @@ test("the guidance is short, names the tools and the skip rules, and mentions no
   assert.match(askLines[0], /silently change/);
   assert.match(askLines[0], /ask the user with the question tool, with your recommendation and what you found/);
   assert.ok(!RESEARCH_GUIDANCE.includes("ask_user"));
+});
+
+test("the guidance has one generic line on thin entries: a lead; add independent sources, look for contrary evidence, save with keep", () => {
+  const thinLines = RESEARCH_GUIDANCE.split("\n").filter((l) => /thin entry/i.test(l));
+  assert.equal(thinLines.length, 1);
+  assert.match(thinLines[0], /A thin entry is a lead/);
+  assert.match(thinLines[0], /independent sources/);
+  assert.match(thinLines[0], /contrary evidence/);
+  assert.match(thinLines[0], /`keep`/);
 });
 
 test("withResearchGuidance appends the block once, after the task text", () => {

@@ -649,6 +649,33 @@ describe("research library tools", () => {
     assert.match(await findTool.execute({ query: "x" }, CTX), /^Not searched: Only an agent/);
   });
 
+  test("research_library_find shows the independent source count; a thin entry is never shown as just fresh and says to research more", async () => {
+    const entry = (extra) => ({ id: "rl_1", topic: "Topic one", scope: "global", summary: "What is known.", status: "fresh", ageDays: 0, checkedAt: "2026-11-24", checkedBy: "architect", shelfLifeDays: 120, shelfLifeVerified: true, shelfLifeWhy: "Moves slowly.", findings: [], ...extra });
+    server({ ok: true, entries: [entry({ sourceCount: 1, thin: true })] });
+    let out = await findTool.execute({ query: "topic" }, CTX);
+    assert.match(out, /1\. \[FRESH, THIN\] Topic one/);
+    assert.match(out, /1 independent source\b/);
+    assert.match(out, /thin: fewer than 3 independent sources, research more before relying on it/);
+    server({ ok: true, entries: [entry({ sourceCount: 4, thin: true, dominant: true })] });
+    out = await findTool.execute({ query: "topic" }, CTX);
+    assert.match(out, /\[FRESH, THIN\]/);
+    assert.match(out, /4 independent sources/);
+    assert.match(out, /thin: one source carries more than half the findings, research more before relying on it/);
+    server({ ok: true, entries: [entry({ sourceCount: 3, thin: false })] });
+    out = await findTool.execute({ query: "topic" }, CTX);
+    assert.match(out, /\[FRESH\] Topic one/);
+    assert.match(out, /3 independent sources/);
+    assert.doesNotMatch(out, /thin/i);
+  });
+
+  test("research_library_save says when the saved entry is thin", async () => {
+    const args = { topic: "Topic one", summary: "s", findings: [{ claim: "c" }], shelfLifeDays: 30, shelfLifeWhy: "w", shelfLifeVerified: true, scope: "global" };
+    server({ ok: true, topic: "Topic one", scope: "global", forcedProject: false, replaced: false, shelfLifeDays: 30, shelfLifeVerified: true, findings: 1, sourceCount: 1, thin: true });
+    assert.match(await saveTool.execute(args, CTX), /thin: 1 independent source\b.*research more/i);
+    server({ ok: true, topic: "Topic one", scope: "global", forcedProject: false, replaced: false, shelfLifeDays: 30, shelfLifeVerified: true, findings: 3, sourceCount: 3, thin: false });
+    assert.doesNotMatch(await saveTool.execute(args, CTX), /thin/i);
+  });
+
   test("research_library_save posts exactly the keys it was given (keep only when given) and tells what happened", async () => {
     const args = { topic: "Topic one", summary: "s", findings: [{ claim: "c" }], shelfLifeDays: 30, shelfLifeWhy: "w", shelfLifeVerified: false, scope: "global" };
     let calls = server({ ok: true, topic: "Topic one", scope: "project", forcedProject: true, replaced: true, shelfLifeDays: 30, shelfLifeVerified: false, findings: 1 });
