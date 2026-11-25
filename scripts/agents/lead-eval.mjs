@@ -103,7 +103,7 @@ const instruction = (team, message) =>
     '- "handoff": you call agent_handoff for the one teammate it matches (give "agent": its slug without the @).',
     '- "ask": you must ask the user before doing anything.',
     '- "agent_change": you call agent_change, to create a new agent (give "change":"create") or to edit an existing one, yourself included (give "change":"update" and "agent": its slug without the @).',
-    "  The agent_change tool's own description, as you see it in a real session: For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request and hand it straight to @architect; never ask the user to review a charter, and ask targeted questions only if something essential is genuinely unclear. Use agent_change yourself for small edits the user dictates, or when @architect isn't on the team.",
+    "  The agent_change tool's own description, as you see it in a real session: For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request and hand it straight to @architect; the charter states what the user asked and doesn't decide the design (scope, overlap, extend vs create), which is the Architect's call; never ask the user to review a charter, and ask targeted questions only if something essential is genuinely unclear. Use agent_change yourself for small edits the user dictates, or when @architect isn't on the team.",
     'Reply with ONLY a JSON object, e.g. {"action":"handoff","agent":"dev"} or {"action":"agent_change","change":"create"} — no other text.',
   ].join("\n");
 
