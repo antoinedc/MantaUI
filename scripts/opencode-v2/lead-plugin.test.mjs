@@ -291,18 +291,21 @@ describe("plugin entry: one composed context hook", () => {
   });
 });
 
+// a fake box: every fetch is recorded in the returned `calls` and answered with `status` and the JSON `body` ("throw" refuses the connection)
+function serveJson(status, body) {
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ method: init.method, path: new URL(String(url)).pathname, headers: { ...init.headers }, body: init.body ? JSON.parse(init.body) : undefined });
+    if (status === "throw") throw new Error("ECONNREFUSED");
+    return new Response(JSON.stringify(body), { status });
+  };
+  return calls;
+}
+
 describe("agent_handoff tool", () => {
   const tool = allTools.find((t) => t.name === "agent_handoff");
   const CTX = { sessionID: "ses_t1", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
-  function server(status, body) {
-    const calls = [];
-    globalThis.fetch = async (url, init = {}) => {
-      calls.push({ method: init.method, path: new URL(String(url)).pathname, headers: { ...init.headers }, body: init.body ? JSON.parse(init.body) : undefined });
-      if (status === "throw") throw new Error("ECONNREFUSED");
-      return new Response(JSON.stringify(body), { status });
-    };
-    return calls;
-  }
+  const server = serveJson;
 
   test("registered with the pinned input: agent, title, brief required; continueJob optional and LAST", () => {
     assert.ok(tool);
@@ -350,15 +353,7 @@ describe("agent_handoff tool", () => {
 describe("agent_change tool", () => {
   const tool = allTools.find((t) => t.name === "agent_change");
   const CTX = { sessionID: "ses_t1", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
-  function server(status, body) {
-    const calls = [];
-    globalThis.fetch = async (url, init = {}) => {
-      calls.push({ method: init.method, path: new URL(String(url)).pathname, headers: { ...init.headers }, body: init.body ? JSON.parse(init.body) : undefined });
-      if (status === "throw") throw new Error("ECONNREFUSED");
-      return new Response(JSON.stringify(body), { status });
-    };
-    return calls;
-  }
+  const server = serveJson;
   const draft = { name: "Reviewer", description: "Reviews code.", isolation: "none", instructions: "Review." };
   const applied = (kind) => ({ ok: true, change: { state: "applied", kind, agentName: "Reviewer", slug: "reviewer" } });
 
@@ -464,15 +459,7 @@ describe("routine tools: agent", () => {
 describe("agent_propose tool (Phase 5A)", () => {
   const tool = allTools.find((t) => t.name === "agent_propose");
   const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
-  function server(status, body) {
-    const calls = [];
-    globalThis.fetch = async (url, init = {}) => {
-      calls.push({ method: init.method, path: new URL(String(url)).pathname, headers: { ...init.headers }, body: init.body ? JSON.parse(init.body) : undefined });
-      if (status === "throw") throw new Error("ECONNREFUSED");
-      return new Response(JSON.stringify(body), { status });
-    };
-    return calls;
-  }
+  const server = serveJson;
   const args = {
     action: "update",
     draft: { instructions: "x" },
@@ -551,15 +538,7 @@ describe("research tools (Phase 5A)", () => {
   const readTool = allTools.find((t) => t.name === "research_read");
   const searchTool = allTools.find((t) => t.name === "research_search");
   const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
-  function server(body, status = 200) {
-    const calls = [];
-    globalThis.fetch = async (url, init = {}) => {
-      calls.push({ method: init.method, path: new URL(String(url)).pathname, body: init.body ? JSON.parse(init.body) : undefined });
-      if (status === "throw") throw new Error("ECONNREFUSED");
-      return new Response(JSON.stringify(body), { status });
-    };
-    return calls;
-  }
+  const server = (body, status = 200) => serveJson(status, body);
 
   test("inputs: research_read's optional offset is LAST; search takes source and query", () => {
     assert.deepEqual(Object.keys(fetchTool.input.properties), ["url"]);
@@ -618,15 +597,7 @@ describe("research library tools", () => {
   const findTool = allTools.find((t) => t.name === "research_library_find");
   const saveTool = allTools.find((t) => t.name === "research_library_save");
   const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
-  function server(body, status = 200) {
-    const calls = [];
-    globalThis.fetch = async (url, init = {}) => {
-      calls.push({ method: init.method, path: new URL(String(url)).pathname, body: init.body ? JSON.parse(init.body) : undefined });
-      if (status === "throw") throw new Error("ECONNREFUSED");
-      return new Response(JSON.stringify(body), { status });
-    };
-    return calls;
-  }
+  const server = (body, status = 200) => serveJson(status, body);
 
   test("inputs: both tools exist; save's optional keep is LAST, and a finding's required claim comes first", () => {
     assert.ok(findTool && saveTool);

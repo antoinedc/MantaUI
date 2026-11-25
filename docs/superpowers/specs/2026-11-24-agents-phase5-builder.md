@@ -443,16 +443,20 @@ writes.
      the record, and retry.
   3. Exclusively create `<dir>/.claim` (`wx`) containing the change id.
   4. Write `agent.md` atomically and create `home/`.
-  5. Activate with `scan({ include: { slug, changeId } })`. Ordinary scans skip any folder holding a `.claim`. This
+  5. Activate with `scan({ include: { slug, changeId } })`. An ordinary scan lists any folder holding a `.claim` as a row with a problem (never a working agent, never hidden), so the agents list, the lead's roster, the Architect's roster, the routing notes and the free-name check agree. This
      scan admits exactly the folder whose `.claim` holds this change id. Activation succeeds only when the config then
      contains `agent-<slug>`.
   6. Save the record as `applied`, with its final `slug`.
   7. Only then remove `.claim`, and re-sync.
-  - If activation fails, the record becomes `failed` with its slug and keeps its `.claim`.
-  - Retry is the existing Phase 4 Retry path, with `include` passed through:
-    - The snapshot must still equal `after`; otherwise `conflict`.
-    - The reload is forced.
-    - A reload that fails again keeps the record `failed`.
+  - If activation fails at any step (compile, config write, reload, installed list), everything the attempt wrote is
+    taken back: the folder (`agent.md`, `.compiled.md`, `home/`, then `.claim`, then the folder), the config blocks and the
+    installed list it changed, restored to what it read first (and OpenCode reloaded by the config writer). The record
+    becomes `failed` with `slug: null` and `claimed: false`: nothing of it is live.
+  - Retry of such a record applies the change again from scratch (the autonomy level is checked again).
+  - If the take-back itself fails (a file can't be removed, the config can't be restored), the record is `failed` with an
+    error saying what is left, keeps its `.claim` (a folder that couldn't be emptied) and is listed as a problem. Retry
+    then only re-activates it (the Phase 4 path, with `include` passed through: the snapshot must still equal `after`,
+    otherwise `conflict`; the reload is forced). Records written before rollbacks existed are retried the same way.
   - A `failed` create that still owns a `.claim` is protected from eviction, like `held` and `applying`.
   - A recovery `conflict` on a claimed folder names the folder path on its card and says how to resolve it by hand
     (check the folder, then delete `.claim`).
@@ -478,8 +482,8 @@ writes.
     - It equals `before` → back to the prior state and re-decide.
     - Anything else → `conflict`.
   - A `.claim` for a record that is `applied` → remove it. A `.claim` whose record is missing from a readable store
-    → leave the folder alone and report it in the agent's notice ("An interrupted create left this folder; check it
-    and delete .claim").
+    → leave the folder alone; every scan lists it with the error "An interrupted create left this folder; check it
+    and delete .claim".
 - **Undo of a create** only removes a folder whose `agent.md` snapshot equals the record's `after` and whose record is
   `applied` (Phase 4 rule, unchanged).
 

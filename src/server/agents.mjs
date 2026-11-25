@@ -62,6 +62,7 @@ const COMPILED_FILE = ".compiled.md";
 const INSTALLED_FILE = ".installed.json";
 const CHAT_FILE = ".chat.json";
 const CHANGES_FILE = ".changes.json";
+const UNFINISHED_CREATE_NOTICE = "An interrupted create left this folder; check it and delete .claim";
 const CLAIM_FILE = ".claim"; // a create in progress owns its folder through this marker (the change id); a reserved name
 const SNAPSHOT_MAX = 64 * 1024;
 
@@ -699,14 +700,17 @@ async function readOptional(fs, path) {
   }
 }
 
-async function readJsonOptional(fs, path) {
-  const text = await readOptional(fs, path);
+function parseJsonOrNull(text) {
   if (text == null) return null;
   try {
     return JSON.parse(text);
   } catch {
     return null;
   }
+}
+
+async function readJsonOptional(fs, path) {
+  return parseJsonOrNull(await readOptional(fs, path));
 }
 
 /**
@@ -820,9 +824,11 @@ export function createAgentsEngine({
   }
 
   /**
-   * Every agent folder under the root, valid or not, plus a stamp that changes when an agent file changes. A folder that
-   * holds a `.claim` (a create in progress, Phase 5A §4.5) is skipped — listed only in `claims` — unless `include` names
-   * this folder and the change id its `.claim` holds.
+   * Every agent folder under the root, valid or not, plus a stamp that changes when an agent file changes. The list, the
+   * lead's roster, the Architect's roster, the routing notes and the free-name check all read this one scan, so they agree.
+   * A folder that holds a `.claim` (a create in progress or left unfinished, Phase 5A §4.5) is a row with a problem — never
+   * a working agent, never hidden — and is also listed in `claims`, unless `include` names this folder and the change id
+   * its `.claim` holds.
    */
   async function scan({ include = null } = {}) {
     let dirs = [];
@@ -838,15 +844,6 @@ export function createAgentsEngine({
     for (const slug of dirs) {
       if (!isUsableSlug(slug)) continue; // reserved / not a valid folder name: skipped, never listed
       const dir = join(root, slug);
-      const claim = await readOptional(fs, join(dir, CLAIM_FILE));
-      if (claim != null) {
-        const changeId = claim.trim();
-        if (!(include && include.slug === slug && include.changeId === changeId)) {
-          claims.push({ slug, changeId });
-          continue;
-        }
-      }
-      const file = join(dir, "agent.md");
       const info = {
         slug,
         name: slug,
@@ -860,6 +857,16 @@ export function createAgentsEngine({
         notFor: null,
         notice: null,
       };
+      const claim = await readOptional(fs, join(dir, CLAIM_FILE));
+      if (claim != null) {
+        const changeId = claim.trim();
+        if (!(include && include.slug === slug && include.changeId === changeId)) {
+          claims.push({ slug, changeId });
+          entries.push({ slug, dir, info: { ...info, error: UNFINISHED_CREATE_NOTICE } });
+          continue;
+        }
+      }
+      const file = join(dir, "agent.md");
       const text = await readOptional(fs, file);
       let mtime = 0;
       try {
@@ -908,8 +915,10 @@ export function createAgentsEngine({
   /**
    * The body of `sync`; the caller holds `syncLock`. `forceReload`: reload OpenCode even when no file or config block
    * changed (a retry after an activation failed: the config is already written but the reload was rejected).
+   * `undo`: a log filled with what this call is about to overwrite — compiled prompts, config blocks, the installed list —
+   * so `rollbackActivationLocked` can put it all back if the call throws half-way.
    */
-  async function syncLocked({ forceReload = false, include = null } = {}) {
+  async function syncLocked({ forceReload = false, include = null, undo = null } = {}) {
     const { entries, stamp } = await scan({ include });
     // the lead is not an OpenCode agent: it is a prompt appended to the default agent (an old `agent-manta` block
     // is removed below, like any block of a package that is gone)
@@ -918,13 +927,16 @@ export function createAgentsEngine({
     for (const e of valid) {
       const compiled = compileAgentPrompt({ body: e.body, skills: e.skills });
       const file = join(e.dir, COMPILED_FILE);
-      if ((await readOptional(fs, file)) !== compiled) {
+      const previous = await readOptional(fs, file);
+      if (previous !== compiled) {
+        undo?.compiled.push({ file, previous });
         await fs.writeFile(file, compiled, "utf-8");
         compiledChanged = true;
       }
     }
     const desired = new Map(valid.map((e) => [agentKey(e.slug), buildAgentBlock({ dir: e.dir, meta: e.meta, home })]));
-    const installedDoc = await readJsonOptional(fs, join(root, INSTALLED_FILE));
+    const installedText = await readOptional(fs, join(root, INSTALLED_FILE));
+    const installedDoc = parseJsonOrNull(installedText);
     const installed = Array.isArray(installedDoc) ? installedDoc.filter((k) => typeof k === "string" && k.startsWith(AGENT_PACKAGE_PREFIX)) : [];
 
     const r = await editConfig((cfg) => {
@@ -937,6 +949,8 @@ export function createAgentsEngine({
       for (const key of installed) {
         if (!desired.has(key) && cfg?.agent?.[key] !== undefined) edits.push({ path: ["agent", key], value: undefined });
       }
+      // the config as it is now, for every block this call is about to change
+      for (const e of edits) undo?.config.push({ path: e.path, value: cfg?.agent?.[e.path[1]] === undefined ? undefined : structuredClone(cfg.agent[e.path[1]]) });
       return edits;
     });
     if (!r.ok) throw new AgentError(`Couldn't update the agents in OpenCode: ${r.error ?? "unknown error"}`);
@@ -949,6 +963,7 @@ export function createAgentsEngine({
     const next = [...desired.keys()];
     if (canon([...installed].sort()) !== canon([...next].sort()) || installedDoc === null) {
       await fs.mkdir(root, { recursive: true });
+      if (undo) undo.installed = { previous: installedText };
       await fs.writeFile(join(root, INSTALLED_FILE), `${JSON.stringify(next, null, 2)}\n`, "utf-8");
     }
     lastStamp = stamp;
@@ -972,7 +987,7 @@ export function createAgentsEngine({
   /** Boot: install the built-ins, then the first sync. Throws on failure (the caller logs; the box still starts). */
   async function init() {
     const installed = await installBuiltIns();
-    // an interrupted write is finished (or undone) BEFORE the first ordinary sync, which skips a claimed folder
+    // an interrupted write is finished (or undone) BEFORE the first ordinary sync, which treats a claimed folder as a problem
     await recover();
     await sync();
     await reconcile();
@@ -989,13 +1004,7 @@ export function createAgentsEngine({
         log.warn?.(`[agents] sync failed: ${e?.message ?? e}`);
       }
     }
-    const rows = entries.map((e) => e.info);
-    // a folder an interrupted create left, with no record of it: shown so it can be checked by hand
-    for (const slug of [...orphanClaims].sort()) {
-      if (rows.some((r) => r.slug === slug)) continue;
-      rows.push({ slug, name: slug, description: "", isolation: "none", model: null, color: null, builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null, error: ORPHAN_CLAIM_NOTICE });
-    }
-    return rows;
+    return entries.map((e) => e.info);
   }
 
   async function find(slug) {
@@ -1648,12 +1657,86 @@ export function createAgentsEngine({
   };
 
   /**
-   * Activate (compile + config + reload); the file is already written. Sets `applied` or `failed`. `include`: a create's
-   * own claimed folder, which an ordinary scan skips.
+   * Take back everything an activation that threw wrote: the config blocks and the installed list it changed, and — for the
+   * agent the record is about — its folder (a create) or its previous agent.md and compiled prompt (an update). Nothing but
+   * what that attempt wrote is touched, and a file someone changed since is left alone. Returns the sentences for whatever
+   * could not be taken back (empty: nothing of the change is left on disk or in the config).
+   */
+  async function rollbackActivationLocked(rec, undo) {
+    const left = [];
+    const attempt = async (what, fn) => {
+      try {
+        await fn();
+        return true;
+      } catch (e) {
+        if (e?.code === "ENOENT") return true;
+        left.push(`${what}: ${String(e?.message ?? e)}`);
+        return false;
+      }
+    };
+    const dir = rec.slug ? folderOf(rec.slug) : null;
+    if (dir && rec.kind === "create") {
+      if ((await claimOf(rec.slug)) !== rec.id) {
+        left.push(`the folder ${dir} isn't this change's any more`);
+      } else {
+        const names = (await fs.readdir(dir, { withFileTypes: true }).catch(() => [])).map((e) => e.name);
+        const extra = names.filter((n) => ![CLAIM_FILE, COMPILED_FILE, "agent.md", "home"].includes(n));
+        if (extra.length > 0 || (names.includes("home") && (await fs.readdir(join(dir, "home")).catch(() => [])).length > 0)) {
+          left.push(`the folder ${dir} holds more than the change wrote`);
+        } else {
+          // the claim goes last, so a folder that can't be emptied is still marked as this change's
+          const steps = [
+            [COMPILED_FILE, () => fs.unlink(join(dir, COMPILED_FILE))],
+            ["agent.md", () => fs.unlink(join(dir, "agent.md"))],
+            ["home", () => fs.rmdir(join(dir, "home"))],
+            [CLAIM_FILE, () => fs.unlink(join(dir, CLAIM_FILE))],
+            ["the folder", () => fs.rmdir(dir)],
+          ];
+          for (const [what, step] of steps) if (!(await attempt(`couldn't remove ${what}`, step))) break;
+          if (left.length === 0) {
+            rec.claimed = false;
+            rec.slug = null;
+            delete rec.intendedSlug;
+          }
+        }
+      }
+    } else if (dir) {
+      const target = await resolveTarget(rec.slug);
+      const snap = target ? await readAgentSnapshot(rec.slug) : null;
+      if (!snap || snap.text !== rec.after) {
+        left.push(`${rec.agentName} was edited since`);
+      } else {
+        if (await attempt("couldn't restore agent.md", () => writeFileAtomic(target.file, rec.before))) {
+          for (const { file, previous } of undo.compiled) {
+            if (file !== join(dir, COMPILED_FILE)) continue;
+            await attempt("couldn't restore the compiled prompt", () => (previous == null ? fs.unlink(file) : writeFileAtomic(file, previous)));
+          }
+        }
+      }
+    }
+    if (undo.installed) {
+      const file = join(root, INSTALLED_FILE);
+      const { previous } = undo.installed;
+      await attempt("couldn't restore the installed list", () => (previous == null ? fs.unlink(file) : writeFileAtomic(file, previous)));
+    }
+    if (undo.config.length > 0) {
+      // only what differs from the saved blocks; the writer reloads OpenCode itself when it changes the file
+      const r = await editConfig((cfg) => undo.config.filter((e) => canon(cfg?.agent?.[e.path[1]]) !== canon(e.value)));
+      if (!r?.ok && !r?.changed) left.push(`the OpenCode config couldn't be restored: ${r?.error ?? "unknown error"}`);
+      else if (!r?.ok) log.warn?.(`[agents] the config was restored, but OpenCode didn't reload it yet: ${r?.error ?? "unknown error"}`);
+    }
+    return left;
+  }
+
+  /**
+   * Activate (compile + config + reload); the file is already written. Sets `applied`, or `failed` after taking back
+   * everything the change wrote (`rollbackActivationLocked`), so a failed record leaves nothing live. `include`: a create's
+   * own claimed folder, which an ordinary scan lists only as a problem.
    */
   async function activateLocked(rec, opts = {}) {
+    const undo = { compiled: [], config: [], installed: null };
     try {
-      const { entries } = await syncLocked(opts);
+      const { entries } = await syncLocked({ ...opts, undo });
       if (rec.kind === "create" && !entries.some((e) => e.slug === rec.slug && !e.info.error)) {
         const row = entries.find((e) => e.slug === rec.slug);
         throw new Error(row?.info.error ? `its file has an error (${row.info.error})` : "the new agent was not found after the sync");
@@ -1661,8 +1744,13 @@ export function createAgentsEngine({
       rec.state = "applied";
       rec.error = null;
     } catch (e) {
+      const why = String(e?.message ?? e);
+      const left = await rollbackActivationLocked(rec, undo).catch((err) => [String(err?.message ?? err)]);
       rec.state = "failed";
-      rec.error = `${rec.agentName} was written but couldn't be activated: ${String(e?.message ?? e)}`;
+      rec.error =
+        left.length === 0
+          ? `${rec.agentName} couldn't be activated, so nothing was kept: ${why}`
+          : `${rec.agentName} couldn't be activated, and taking it back failed (${left.join("; ")}): ${why}`;
     }
     rec.decidedAt = now();
     return rec;
@@ -1687,6 +1775,13 @@ export function createAgentsEngine({
       log.warn?.(`[agents] re-sync after a create failed: ${e?.message ?? e}`);
     }
     return rec;
+  }
+
+  /** Does a failed change still own something on disk: a create its folder, an update its new file? */
+  async function leftOnDisk(rec) {
+    if (rec.kind === "create") return rec.claimed === true;
+    const snap = await readAgentSnapshot(rec.slug);
+    return !snap || snap.text !== rec.before;
   }
 
   /** A retry: nothing is rewritten or reclaimed; the file must still be exactly what was written, then it is activated again. */
@@ -1913,7 +2008,14 @@ export function createAgentsEngine({
         return true;
       }
       if (rec.state === "failed") {
-        await reactivateLocked(rec);
+        // a change that was taken back is applied again from scratch; one that still has its file or folder (a failed
+        // take-back, or a record from before rollbacks) is only activated again
+        if (await leftOnDisk(rec)) await reactivateLocked(rec);
+        else {
+          await requireChangeAllowed();
+          delete rec.groupAborted; // a fresh attempt on its own, whatever the task's other proposals did
+          await applyLocked(rec, "click");
+        }
         return true;
       }
       return false; // any other state (held, applying, applied…): a second click, or a stale one, changes nothing
@@ -1936,6 +2038,18 @@ export function createAgentsEngine({
       await undoLocked(rec);
       return true;
     });
+  }
+
+  /** The Sub-approved models a draft that names a model is checked against: `{ approved }` (null when it names none) or `{ error }` (a sentence). */
+  async function approvedModelsFor(draft) {
+    if (typeof draft?.model !== "string" || !draft.model.trim()) return { approved: null };
+    let approved = null;
+    try {
+      approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
+    } catch (e) {
+      log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
+    }
+    return Array.isArray(approved) && approved.length > 0 ? { approved } : { error: MODELS_UNAVAILABLE };
   }
 
   // ---- extra sources: no credential literals, ever (§4.3a) ----
@@ -2065,15 +2179,9 @@ export function createAgentsEngine({
 
     const action = typeof raw.action === "string" ? raw.action : "";
     if (action !== "create" && action !== "update") return refuse('action must be "create" or "update"');
-    let approved = null;
-    if (typeof raw.draft?.model === "string" && raw.draft.model.trim()) {
-      try {
-        approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
-      } catch (e) {
-        log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
-      }
-      if (!Array.isArray(approved) || approved.length === 0) return refuse(MODELS_UNAVAILABLE);
-    }
+    const models = await approvedModelsFor(raw.draft);
+    if (models.error) return refuse(models.error);
+    const { approved } = models;
 
     // 5. plan, record and (unless it needs a click) write — all under the one lock
     let rec;
@@ -2118,6 +2226,16 @@ export function createAgentsEngine({
   // The Architect's tools (Phase 5A §4.3, §4.4): binding, then `agent_propose`
   // -------------------------------------------------------------------------
 
+  /** The strict jobs list, or null when it can't be read. */
+  async function readJobsStrict() {
+    try {
+      const jobs = (await delegate.loadRecordsStrict?.()) ?? null;
+      return Array.isArray(jobs) ? jobs : null;
+    } catch {
+      return null;
+    }
+  }
+
   const NOT_ARCHITECT = "Only the Architect, working on a task from Manta, can use this tool";
   const ARCHITECT_COULDNT_CHECK = "Couldn't check this task; try again";
 
@@ -2150,13 +2268,8 @@ export function createAgentsEngine({
     const verified = await verifyInvocation(b, spec);
     if (verified.refused) return { refused: verified.refused };
     if (verified.callerAgent !== agentKey(ARCHITECT_SLUG)) return { refused: NOT_ARCHITECT };
-    let jobs;
-    try {
-      jobs = (await delegate.loadRecordsStrict?.()) ?? null;
-    } catch {
-      jobs = null;
-    }
-    if (!Array.isArray(jobs)) return { refused: ARCHITECT_COULDNT_CHECK };
+    const jobs = await readJobsStrict();
+    if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
     const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.architect && typeof j.architect === "object");
     if (!job) return { refused: NOT_ARCHITECT };
     return { job, stamp: job.architect, childSessionID: b.sessionID };
@@ -2197,13 +2310,8 @@ export function createAgentsEngine({
     if (verified.refused) return { refused: verified.refused };
     const caller = verified.callerAgent;
     if (!caller.startsWith(AGENT_PACKAGE_PREFIX) || !SLUG_RE.test(caller.slice(AGENT_PACKAGE_PREFIX.length))) return { refused: NOT_RESEARCHER };
-    let jobs;
-    try {
-      jobs = (await delegate.loadRecordsStrict?.()) ?? null;
-    } catch {
-      jobs = null;
-    }
-    if (!Array.isArray(jobs)) return { refused: ARCHITECT_COULDNT_CHECK };
+    const jobs = await readJobsStrict();
+    if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
     const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.specialist === true && j.agent === caller);
     if (!job) return { refused: NOT_RESEARCHER };
     const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
@@ -2338,15 +2446,9 @@ export function createAgentsEngine({
     if (env.fitCheck.matches === false && job.askedUser !== true) return refuse(FIT_CHECK_ASK_FIRST);
 
     // 3. models
-    let approved = null;
-    if (typeof raw.draft.model === "string" && raw.draft.model.trim()) {
-      try {
-        approved = typeof listApprovedModels === "function" ? await listApprovedModels() : null;
-      } catch (e) {
-        log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
-      }
-      if (!Array.isArray(approved) || approved.length === 0) return refuse(MODELS_UNAVAILABLE);
-    }
+    const models = await approvedModelsFor(raw.draft);
+    if (models.error) return refuse(models.error);
+    const { approved } = models;
 
     // 4. every quote occurs in the stored text of a source THIS session fetched
     const evidence = [];
@@ -2541,13 +2643,7 @@ export function createAgentsEngine({
       log.warn?.(`[agents] reconcile skipped: ${e?.message ?? e}`);
       return { released: 0 };
     }
-    let jobs = null;
-    try {
-      const read = await delegate.loadRecordsStrict?.();
-      jobs = Array.isArray(read) ? read : null;
-    } catch {
-      jobs = null;
-    }
+    const jobs = await readJobsStrict();
     let policy = null;
     try {
       policy = await autonomyPolicy();
@@ -2618,9 +2714,6 @@ export function createAgentsEngine({
   // -------------------------------------------------------------------------
   // Boot recovery of an interrupted write (§4.5)
   // -------------------------------------------------------------------------
-
-  const ORPHAN_CLAIM_NOTICE = "An interrupted create left this folder; check it and delete .claim";
-  const orphanClaims = new Set();
 
   async function recoverOneLocked(rec) {
     if (rec.kind === "update") {
@@ -2709,14 +2802,12 @@ export function createAgentsEngine({
         log.warn?.(`[agents] couldn't recover an interrupted change: ${e?.message ?? e}`);
       }
     }
-    // claims left behind: an applied create's is removed; one whose record is missing is reported on the folder
+    // a claim an applied create left behind is removed; any other claimed folder is listed as a problem by every scan
     const after = await readStore({ strict: true }).catch(() => null);
     const { claims } = await scan();
-    orphanClaims.clear();
     for (const { slug, changeId } of claims) {
       const rec = after?.changes.find((r) => r.id === changeId);
       if (rec && rec.state === "applied") await fs.rm(join(folderOf(slug), CLAIM_FILE), { force: true }).catch(() => {});
-      else if (after && !rec) orphanClaims.add(slug);
     }
   }
 

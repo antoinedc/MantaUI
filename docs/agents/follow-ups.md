@@ -199,8 +199,8 @@ Edge cases and not-yet:
   found. Text that isn't a routing line (an agent's instructions body) is not scanned.
 - **A folder with an error still counts as existing**, so a mention of a broken agent is not reported; the broken agent has
   its own error row.
-- **A create in progress** (its folder is claimed until it is live) doesn't exist yet, so a line that already names it is
-  reported until the create finishes.
+- **A create in progress** (its folder is claimed until it is live) is listed as a row with a problem and counts as existing,
+  so a line that names it is not reported.
 - **At most 10 notes**, then one line with the count of the rest.
 - **The Architect's own proposals aren't checked before they are applied** (a proposal that adds a mention of a missing
   agent is flagged only after it is live); the Architect is told about existing notes, not warned about new ones.
@@ -249,8 +249,8 @@ OpenCode reloaded) and the rest are marked "not applied". Every Outcome line say
   "ask Manta again").
 - **A rollback that can't happen** (the agent's file was edited since, or the folder holds other files) leaves that
   proposal applied with an error naming why; its Outcome line says it is live but the rollback failed.
-- **Half-written config.** A failed create may already have its block in `opencode.jsonc` (written, reload rejected);
-  it is only removed once the agent is created or deleted. Nothing loads it while the folder is claimed.
+- **Failed activation.** The failed proposal itself is taken back too (its folder or previous files, its config block, the
+  installed list); the record ends `failed` with nothing live. If the take-back can't finish, the record says what is left.
 - **UI.** A rolled-back record shows as "Undone" and a not-applied one as "Not applied"; neither has a dedicated chip.
 - **Stale OpenCode locations.** The reload now forgets locations whose folder was deleted (`DELETE /api/debug/location`),
   but nothing prunes them proactively; they accumulate until a reload trips on one. It was written against the 2.0.30

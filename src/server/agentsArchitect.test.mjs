@@ -16,6 +16,7 @@ import {
   describeProposalOutcome,
 } from "./agents.mjs";
 import { ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
+import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const SPECIALIST = "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nYou are Scout.\n";
@@ -27,18 +28,7 @@ export async function archFixture({ extra = {}, templates = ["dev", "manta", "ar
   await mkdir(templatesDir, { recursive: true });
   for (const t of templates) await cp(join(REAL_TEMPLATES, t), join(templatesDir, t), { recursive: true });
   const config = { cfg: { agent: {} }, edits: [], reloads: 0 };
-  const editConfig = async (fn) => {
-    const edits = typeof fn === "function" ? await fn(config.cfg) : fn;
-    for (const e of edits) {
-      config.edits.push(e);
-      const [, key] = e.path;
-      config.cfg.agent ??= {};
-      if (e.value === undefined) delete config.cfg.agent[key];
-      else config.cfg.agent[key] = structuredClone(e.value);
-    }
-    if (edits.length > 0) config.reloads++;
-    return { ok: true, changed: edits.length > 0, reloaded: edits.length > 0 };
-  };
+  const editConfig = fakeConfigWriter(config);
   const make = (over = {}) =>
     createAgentsEngine({
       root,
@@ -57,6 +47,25 @@ export async function archFixture({ extra = {}, templates = ["dev", "manta", "ar
   // `make(over)` builds another engine over the same folder and config: a restart
   return { base, root, templatesDir, engine: make(), make, config, cleanup: () => rm(base, { recursive: true, force: true }) };
 }
+
+// a led chat whose handoffs start fake jobs (recorded in `calls`); `world.msgs` is the chat's transcript
+const handoffFixture = (calls, world) =>
+  archFixture({
+    extra: {
+      retryDelayMs: 0,
+      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }), listMessages: async () => world.msgs },
+      delegate: { startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }), startJobWithApproval: async (i) => (calls.push(i), { ok: true, job: { id: "jw" } }), loadRecordsStrict: async () => [] },
+      isManagedSession: async () => false,
+      isCtoSessionStrict: async () => false,
+      isCtoSession: async () => false,
+      delegateView: { assertWritable: async () => {} },
+    },
+  });
+// the transcript in which the lead's running `agent_handoff` call `b` was made by `agentName` (null: no agent on the message)
+const handoffTranscript = (b, agentName) => [
+  { info: { id: "msg_user", role: "user" }, parts: [] },
+  { info: { id: b.messageID, role: "assistant", parentID: "msg_user", ...(agentName === null ? {} : { agent: agentName }) }, parts: [{ type: "tool", tool: "agent_handoff", callID: b.callID, state: { status: "running", input: { agent: b.agent, title: b.title, brief: b.brief } } }] },
+];
 
 test("the Architect template parses as role architect with no model pin; ARCHITECT_SLUG is architect", async () => {
   const r = parseAgentMd(await readFile(join(REAL_TEMPLATES, "architect", "agent.md"), "utf-8"));
@@ -208,18 +217,8 @@ test("buildArchitectContext: the server's routing facts are listed after the tea
 
 test("an Architect task's brief carries the dangling routing notes, and they follow an undo of the agent they pointed to", async () => {
   const calls = [];
-  const f = await archFixture({
-    extra: {
-      retryDelayMs: 0,
-      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }), listMessages: async () => msgs },
-      delegate: { startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }), startJobWithApproval: async (i) => (calls.push(i), { ok: true, job: { id: "jw" } }), loadRecordsStrict: async () => [] },
-      isManagedSession: async () => false,
-      isCtoSessionStrict: async () => false,
-      isCtoSession: async () => false,
-      delegateView: { assertWritable: async () => {} },
-    },
-  });
-  let msgs = [];
+  const world = { msgs: [] };
+  const f = await handoffFixture(calls, world);
   try {
     await f.engine.init();
     await mkdir(join(f.root, "seo"));
@@ -228,10 +227,7 @@ test("an Architect task's brief carries the dangling routing notes, and they fol
     const hand = () => {
       n++;
       const b = { sessionID: "ses_chat", messageID: `msg_h${n}`, callID: `call_h${n}`, agent: "architect", title: "t", brief: "Make an agent." };
-      msgs = [
-        { info: { id: "msg_user", role: "user" }, parts: [] },
-        { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent: "build" }, parts: [{ type: "tool", tool: "agent_handoff", callID: b.callID, state: { status: "running", input: { agent: b.agent, title: b.title, brief: b.brief } } }] },
-      ];
+      world.msgs = handoffTranscript(b, "build");
       return f.engine.handoff(b);
     };
     assert.equal((await hand()).ok, true);
@@ -501,29 +497,13 @@ const storeOrEmpty = async (f) => store(f).catch((e) => (e?.code === "ENOENT" ? 
 
 test("a handoff to the Architect stamps the job with its round mode; mention = unknown; a specialist named architect gets no stamp", async () => {
   const calls = [];
-  const f = await archFixture({
-    extra: {
-      retryDelayMs: 0,
-      oc: {
-        readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }),
-        listMessages: async () => msgs,
-      },
-      delegate: { startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }), startJobWithApproval: async (i) => (calls.push(i), { ok: true, job: { id: "jw" } }), loadRecordsStrict: async () => [] },
-      isManagedSession: async () => false,
-      isCtoSessionStrict: async () => false,
-      isCtoSession: async () => false,
-      delegateView: { assertWritable: async () => {} },
-    },
-  });
-  let msgs = [];
+  const world = { msgs: [] };
+  const f = await handoffFixture(calls, world);
   try {
     await f.engine.init();
     const hand = (agentName, n) => {
       const b = { sessionID: "ses_chat", messageID: `msg_h${n}`, callID: `call_h${n}`, agent: "architect", title: "Build an SEO agent", brief: "Make an SEO agent. Charter: reads, never edits. @dev exists." };
-      msgs = [
-        { info: { id: "msg_user", role: "user" }, parts: [] },
-        { info: { id: b.messageID, role: "assistant", parentID: "msg_user", ...(agentName === null ? {} : { agent: agentName }) }, parts: [{ type: "tool", tool: "agent_handoff", callID: b.callID, state: { status: "running", input: { agent: b.agent, title: b.title, brief: b.brief } } }] },
-      ];
+      world.msgs = handoffTranscript(b, agentName);
       return f.engine.handoff(b);
     };
     assert.equal((await hand("build", 1)).ok, true);
@@ -1270,6 +1250,14 @@ const applyingCreate = (over = {}) => ({
   ...over,
 });
 const putStore = (f, changes) => writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes, proposalSlots: {} }));
+// the create of SEO Reviewer as a proposal still waiting for its click
+const putPendingCreate = (f) => putStore(f, [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })]);
+// the folder a create claimed (`.claim` holding the change id), with the files it got as far as writing
+const claimFolder = async (f, { id = "ach_c1", agentMd = null, home = false, slug = "seo-reviewer" } = {}) => {
+  await mkdir(join(f.root, slug, ...(home ? ["home"] : [])), { recursive: true });
+  await writeFile(join(f.root, slug, ".claim"), id);
+  if (agentMd !== null) await writeFile(join(f.root, slug, "agent.md"), agentMd);
+};
 const restart = async (f, extra) => {
   const engine = f.make({ now: () => 1_700_000_000_000 + 1000, ...extra });
   await engine.init();
@@ -1315,8 +1303,7 @@ test("recovery, create: after the claim only (no agent.md, no home) → both are
   const f = await archFixture();
   try {
     await f.engine.init();
-    await mkdir(join(f.root, "seo-reviewer"));
-    await writeFile(join(f.root, "seo-reviewer", ".claim"), "ach_c1");
+    await claimFolder(f);
     await putStore(f, [applyingCreate()]);
     await restart(f);
     const r = await state(f, "ach_c1");
@@ -1335,9 +1322,7 @@ test("recovery, create: between agent.md and home/ → home/ is created, nothing
   const f = await archFixture();
   try {
     await f.engine.init();
-    await mkdir(join(f.root, "seo-reviewer"));
-    await writeFile(join(f.root, "seo-reviewer", ".claim"), "ach_c1");
-    await writeFile(join(f.root, "seo-reviewer", "agent.md"), NEW_AGENT);
+    await claimFolder(f, { agentMd: NEW_AGENT });
     await putStore(f, [applyingCreate()]);
     await restart(f);
     assert.equal((await state(f, "ach_c1")).state, "applied");
@@ -1351,16 +1336,14 @@ test("recovery, create: after activation but before the claim was removed → th
   const f = await archFixture();
   try {
     await f.engine.init();
-    await mkdir(join(f.root, "seo-reviewer", "home"), { recursive: true });
-    await writeFile(join(f.root, "seo-reviewer", ".claim"), "ach_c1");
-    await writeFile(join(f.root, "seo-reviewer", "agent.md"), NEW_AGENT);
+    await claimFolder(f, { agentMd: NEW_AGENT, home: true });
     await putStore(f, [applyingCreate()]);
     await restart(f);
     assert.equal((await state(f, "ach_c1")).state, "applied");
     assert.equal(await ok(join(f.root, "seo-reviewer", ".claim")), false);
     assert.ok(f.config.cfg.agent["agent-seo-reviewer"]);
     // and an `applied` record whose claim survived (the removal itself crashed) is cleaned at the next boot
-    await writeFile(join(f.root, "seo-reviewer", ".claim"), "ach_c1");
+    await claimFolder(f);
     await restart(f);
     assert.equal(await ok(join(f.root, "seo-reviewer", ".claim")), false);
   } finally {
@@ -1372,9 +1355,7 @@ test("recovery, create: a user edit to agent.md in a claimed folder is a conflic
   const f = await archFixture();
   try {
     await f.engine.init();
-    await mkdir(join(f.root, "seo-reviewer"));
-    await writeFile(join(f.root, "seo-reviewer", ".claim"), "ach_c1");
-    await writeFile(join(f.root, "seo-reviewer", "agent.md"), NEW_AGENT.replace("never edit", "edit freely"));
+    await claimFolder(f, { agentMd: NEW_AGENT.replace("never edit", "edit freely") });
     await putStore(f, [applyingCreate()]);
     await restart(f);
     const r = await state(f, "ach_c1");
@@ -1385,8 +1366,7 @@ test("recovery, create: a user edit to agent.md in a claimed folder is a conflic
     assert.equal(f.config.cfg.agent["agent-seo-reviewer"], undefined);
     // a component of the wrong type is a conflict too, with nothing written
     await rm(join(f.root, "seo-reviewer"), { recursive: true });
-    await mkdir(join(f.root, "seo-reviewer"));
-    await writeFile(join(f.root, "seo-reviewer", ".claim"), "ach_c2");
+    await claimFolder(f, { id: "ach_c2" });
     await writeFile(join(f.root, "seo-reviewer", "home"), "a file, not a folder");
     await putStore(f, [applyingCreate({ id: "ach_c2" })]);
     await restart(f);
@@ -1444,7 +1424,7 @@ test("recovery, update: the file equals `after` → activated and applied; equal
   }
 });
 
-test("recovery: a claimed folder with no record in a readable store is skipped by scans and reported on the list; ordinary scans never admit it", async () => {
+test("recovery: a claimed folder with no record in a readable store is listed with its problem; ordinary scans never admit it as an agent", async () => {
   const f = await archFixture();
   try {
     await f.engine.init();
@@ -1455,7 +1435,7 @@ test("recovery: a claimed folder with no record in a readable store is skipped b
     const row = (await engine.list()).find((a) => a.slug === "left-over");
     assert.match(row.error, /An interrupted create left this folder; check it and delete \.claim/);
     assert.equal(f.config.cfg.agent["agent-left-over"], undefined, "never activated");
-    assert.equal((await engine.scan()).entries.some((e) => e.slug === "left-over"), false);
+    assert.equal((await engine.scan()).entries.some((e) => e.slug === "left-over" && !e.info.error), false, "never a working agent");
     assert.equal(await ok(join(f.root, "left-over", ".claim")), true, "left for the user");
   } finally {
     await f.cleanup();
@@ -1477,7 +1457,7 @@ test("a create through Apply: the claim exists until activation; the record appl
         return { ok: true, changed: edits.length > 0 };
       },
     });
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })], proposalSlots: {} }));
+    await putPendingCreate(f);
     const done = await wrapped.apply("ach_c1");
     assert.equal(done.state, "applied", done.error);
     assert.equal(done.slug, "seo-reviewer");
@@ -1508,7 +1488,7 @@ test("a create whose chosen slug is taken in the instant before the mkdir takes 
       },
     };
     const engine = f.make({ fs: racing, now: () => f.w.clock, autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: "ask" }) });
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })], proposalSlots: {} }));
+    await putPendingCreate(f);
     const done = await engine.apply("ach_c1");
     assert.equal(done.state, "applied", done.error);
     assert.equal(done.slug, "seo-reviewer-2");
@@ -1519,39 +1499,67 @@ test("a create whose chosen slug is taken in the instant before the mkdir takes 
   }
 });
 
-test("an activation failure keeps the folder claimed (state failed, protected from eviction); Retry passes the claim through and reloads", async () => {
+test("an activation failure of a create rolls everything back (no folder, no claim, no config entry); Retry makes it again from scratch", async () => {
   const f = await proposeFixture({ level: "ask" });
   try {
     let fail = true;
-    let reloads = 0;
     const engine = f.make({
       now: () => f.w.clock,
       autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: "ask" }),
       editConfig: async (fn) => {
-        if (fail) return { ok: false, changed: false, error: "config locked" };
         const edits = typeof fn === "function" ? await fn(f.config.cfg) : fn;
-        for (const e of edits) f.config.cfg.agent[e.path[1]] = structuredClone(e.value);
-        return { ok: true, changed: edits.length > 0 };
+        for (const e of edits) {
+          if (e.value === undefined) delete f.config.cfg.agent[e.path[1]];
+          else f.config.cfg.agent[e.path[1]] = structuredClone(e.value);
+        }
+        return fail && edits.length > 0 ? { ok: false, changed: true, error: "config reload failed (503)" } : { ok: true, changed: edits.length > 0 };
       },
-      reload: async () => (reloads++, { ok: true }),
     });
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })], proposalSlots: {} }));
+    await putPendingCreate(f);
     const failed = await engine.apply("ach_c1");
     assert.equal(failed.state, "failed");
-    assert.equal(await ok(join(f.root, "seo-reviewer", ".claim")), true, "still claimed");
-    // protected: even 300 newer pending records can't evict it
-    const doc = await store(f);
-    const filler = Array.from({ length: 300 }, (_, i) => ({ ...doc.changes[0], id: `fill${i}`, state: "pending", kind: "update", createdAt: f.w.clock + i, releasedAt: f.w.clock + i, claimed: false }));
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ ...doc, changes: [...doc.changes, ...filler] }));
-    await engine.discard("fill0");
-    assert.ok((await store(f)).changes.some((r) => r.id === "ach_c1" && r.state === "failed"));
+    assert.match(failed.error, /SEO Reviewer couldn't be activated, so nothing was kept/);
+    assert.equal(failed.slug, null);
+    assert.equal(await ok(join(f.root, "seo-reviewer")), false, "no folder, so no claim either");
+    assert.equal(f.config.cfg.agent["agent-seo-reviewer"], undefined);
+    assert.equal((await engine.list()).some((a) => a.slug === "seo-reviewer"), false);
+    assert.equal((await store(f)).changes.find((r) => r.id === "ach_c1").claimed, false, "the record owns nothing");
+    // nothing left to protect, so a failed record is evictable like any finished one
     fail = false;
     const retried = await engine.apply("ach_c1");
     assert.equal(retried.state, "applied", retried.error);
+    assert.equal(retried.slug, "seo-reviewer");
     assert.ok(f.config.cfg.agent["agent-seo-reviewer"]);
     assert.equal(await ok(join(f.root, "seo-reviewer", ".claim")), false);
-    // a hand edit between attempts is a conflict naming the folder
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [], proposalSlots: {} }));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a failed create whose folder can't be removed keeps its claim and says so (still protected, still listed as a problem)", async () => {
+  const f = await proposeFixture({ level: "ask" });
+  try {
+    const racing = {
+      ...fsPromises,
+      // the folder can't be emptied: removing the compiled prompt fails
+      unlink: async (p) => {
+        if (String(p).endsWith(".compiled.md")) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        return fsPromises.unlink(p);
+      },
+    };
+    const engine = f.make({
+      fs: racing,
+      now: () => f.w.clock,
+      autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: "ask" }),
+      editConfig: async () => ({ ok: false, changed: false, error: "config locked" }),
+    });
+    await putPendingCreate(f);
+    const failed = await engine.apply("ach_c1");
+    assert.equal(failed.state, "failed");
+    assert.match(failed.error, /taking it back failed/);
+    assert.equal((await store(f)).changes.find((r) => r.id === "ach_c1").claimed, true);
+    const row = (await engine.list()).find((a) => a.slug === "seo-reviewer");
+    assert.ok(row?.error, "shown with its problem");
   } finally {
     await f.cleanup();
   }
@@ -1753,6 +1761,7 @@ for (const order of ["update-first", "create-first"]) {
     const f = await taskFixture();
     try {
       const devBefore = await readFile(join(f.root, "dev", "agent.md"), "utf-8");
+      const devBlock = structuredClone(f.config.cfg.agent["agent-dev"]);
       const makeUpdate = () => heldFor(f);
       const makeCreate = () => heldFor(f, { action: "create", draft: CREATE_DRAFT, agent: undefined, baseHash: null });
       const ids = order === "update-first" ? [await makeUpdate(), await makeCreate()] : [await makeCreate(), await makeUpdate()];
@@ -1766,6 +1775,12 @@ for (const order of ["update-first", "create-first"]) {
       assert.notEqual(update.state, "applied", "the update must not stay live when the create failed");
       assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), devBefore, "Dev's file is back to what it was");
       assert.doesNotMatch(await readFile(join(f.root, "dev", ".compiled.md"), "utf-8"), /always run the tests/, "the compiled prompt is back too");
+      assert.equal(await ok(join(f.root, "seo-reviewer")), false, "the failed create left no folder");
+      assert.equal(f.config.cfg.agent["agent-seo-reviewer"], undefined, "nor a config entry");
+      assert.deepEqual(f.config.cfg.agent["agent-dev"], devBlock, "Dev's config block is what it was");
+      assert.deepEqual(JSON.parse(await readFile(join(f.root, ".installed.json"), "utf-8")).filter((k) => k.includes("seo")), []);
+      assert.equal(create.slug, null);
+      assert.equal(create.claimed, false);
       assert.equal(update.groupAborted, true);
       assert.equal(create.groupAborted, true);
       assert.match(update.error, /SEO Reviewer/, "the reason names the proposal that failed");
@@ -1776,7 +1791,7 @@ for (const order of ["update-first", "create-first"]) {
       const text = lines.join("\n");
       assert.doesNotMatch(text, /was (created|updated) and is live/, "nothing from this task is live");
       assert.match(text, /@dev was rolled back|@dev was not applied/);
-      assert.match(text, /@seo-reviewer could not be activated/);
+      assert.match(text, /SEO Reviewer could not be activated/);
       assert.match(text, /nothing from this task is live/i);
     } finally {
       await f.cleanup();

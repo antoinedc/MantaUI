@@ -173,7 +173,7 @@ model, tools or permissions, including your own." (shared table; the lead eval a
     a native `<details>` (modern-web-guidance `html` / `search-hidden-content`).
   - Update: unified line diff of `before`/`after` (the `diff` package's `diffLines`), collapsed beyond 30 lines.
   - Reason line when `needsClick` for power: "This changes Manta's own instructions" / "This lets <Name> edit code".
-  - Buttons: pending → **Create**/**Apply** + **Discard**; applied → **Undo**; failed → "Written, not activated" +
+  - Buttons: pending → **Create**/**Apply** + **Discard**; applied → **Undo**; failed → "Not activated" (nothing was kept) +
     **Retry** (= apply);
     others none. Each press awaits the call, disables the buttons meanwhile, and shows the outcome (new chip or the
     server's sentence). No record found (pruned, or the tool was refused) → "This change is no longer available" with

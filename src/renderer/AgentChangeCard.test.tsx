@@ -209,11 +209,11 @@ describe("AgentChangeCard", () => {
     expect(buttons(h!)).toHaveLength(0);
   });
 
-  it("a failed record says it was written, not activated, and Retry is the apply channel", async () => {
-    current = change({ state: "failed", slug: "reviewer", error: "Reviewer was written but couldn't be activated: reload failed" });
+  it("a failed record says it was not activated, and Retry is the apply channel", async () => {
+    current = change({ state: "failed", slug: "reviewer", error: "Reviewer couldn't be activated, so nothing was kept: reload failed" });
     open({ agentsChangeApply: () => Promise.resolve(change({ state: "applied", slug: "reviewer" })) });
     await h!.flush();
-    expect(chip(h!)).toBe("Written, not activated");
+    expect(chip(h!)).toBe("Not activated");
     expect(q(h!, "agent-change-error")?.textContent).toContain("couldn't be activated");
     expect(buttons(h!).map((b) => b.textContent)).toEqual(["Retry"]);
     await press(h!, byText(h!, "Retry"));
