@@ -149,7 +149,14 @@ test("quietTroughStartHour: no learned components → the 01:00–07:00 bootstra
   assert.ok(close(startHour, 1), `startHour=${startHour}`);
 });
 
-test("quietTroughWindow: the next concrete occurrence (inside now wins, else tomorrow)", () => {
+test("quietTroughWindow: the next concrete occurrence (inside now wins, else tomorrow)", (t) => {
+  // The function reads the box's local time zone; the expectations below are for a UTC box, whatever machine runs this.
+  const savedTz = process.env.TZ;
+  process.env.TZ = "UTC";
+  t.after(() => {
+    if (savedTz === undefined) delete process.env.TZ;
+    else process.env.TZ = savedTz;
+  });
   // Fixed epoch: 2023-11-14T12:00:00Z, box = UTC.
   const NOON = Date.UTC(2023, 10, 14, 12, 0, 0);
   // Trough 00:00–06:00 box-local (peak antipode from 15h, same tz).

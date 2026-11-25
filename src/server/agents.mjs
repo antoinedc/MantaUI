@@ -1459,6 +1459,7 @@ export function createAgentsEngine({
       summary: r.summary ?? null,
       evidence: Array.isArray(r.evidence) ? r.evidence : [],
       admission: Array.isArray(r.admission) ? r.admission : [],
+      fitCheck: r.fitCheck && typeof r.fitCheck === "object" ? r.fitCheck : null,
     };
   }
 
@@ -2110,7 +2111,7 @@ export function createAgentsEngine({
   };
 
   const ARCHITECT_TOOL_KEYS = {
-    agent_propose: ["action", "draft", "summary", "evidence", "admission", "agent", "baseHash"],
+    agent_propose: ["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"],
     research_fetch: ["url"],
     research_read: ["sourceId", "offset"],
     research_search: ["source", "query"],
@@ -2194,7 +2195,11 @@ export function createAgentsEngine({
   const VERDICTS = ["general", "scoped", "excluded"];
   const PROPOSALS_PER_TASK = 3;
 
-  /** The envelope of an `agent_propose` call: `{ ok, summary, evidence, admission }` or `{ error }` (a sentence). */
+  const FIT_CHECK_MISSING =
+    "Add a fit check before proposing: fitCheck {researchSays, matches, why} — what your research says about this kind of request (1 to 600 characters), matches true or false for whether the request matches it, and why (1 to 600 characters)";
+  const FIT_CHECK_ASK_FIRST = "Your fit check says the request doesn't match what your research says; ask the user with the question tool first (options and your recommendation), then propose once they have answered";
+
+  /** The envelope of an `agent_propose` call: `{ ok, summary, evidence, admission, fitCheck }` or `{ error }` (a sentence). */
   function checkEnvelope(raw) {
     const bad = (error) => ({ error });
     const text = (v, min, max) => typeof v === "string" && v.trim().length >= min && v.length <= max;
@@ -2216,7 +2221,9 @@ export function createAgentsEngine({
       }
       admission.push({ rule: a.rule.trim(), verdict: a.verdict, why: a.why.trim() });
     }
-    return { ok: true, summary: raw.summary.trim(), evidence, admission };
+    const fc = raw.fitCheck;
+    if (!fc || typeof fc !== "object" || Array.isArray(fc) || !text(fc.researchSays, 1, 600) || !text(fc.why, 1, 600) || typeof fc.matches !== "boolean") return bad(FIT_CHECK_MISSING);
+    return { ok: true, summary: raw.summary.trim(), evidence, admission, fitCheck: { researchSays: fc.researchSays.trim(), matches: fc.matches, why: fc.why.trim() } };
   }
 
   /**
@@ -2258,6 +2265,8 @@ export function createAgentsEngine({
     // 2. the envelope
     const env = checkEnvelope(raw);
     if (env.error) return refuse(env.error);
+    // a request that doesn't match the research is put to the user first; asking ends the task, and its record keeps the mark
+    if (env.fitCheck.matches === false && job.askedUser !== true) return refuse(FIT_CHECK_ASK_FIRST);
 
     // 3. models
     let approved = null;
@@ -2329,6 +2338,7 @@ export function createAgentsEngine({
           summary: env.summary,
           evidence,
           admission: env.admission,
+          fitCheck: env.fitCheck,
           target: plan.lead ? "lead" : plan.core ? "core" : null,
           raisesIsolation: plan.raisesIsolation === true,
           invocation: { childSessionID: bound.childSessionID, messageID: b.messageID, callID: b.callID, argsHash },

@@ -3433,6 +3433,20 @@ test("question: the next round (continueJob) starts with no decision and no bloc
   assert.equal(res.job.jobProgress.modelState ?? null, null);
 });
 
+test("question: the job remembers that it asked the user — kept when the next round (continueJob) starts, though the decision itself is cleared", async () => {
+  const w = withQuestionDeps(specialistWorld());
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  assert.ok(!w.job(id).askedUser, "nothing asked yet");
+  const child = w.job(id).childSessionID;
+  await w.engine.handleQuestion(FORM(child));
+  assert.equal(w.job(id).askedUser, true);
+  await w.engine.observeRaw(raw("session.execution.interrupted", child));
+  const res = await continueJob(id, { prompt: "the user chose option 1", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.job.decision, undefined);
+  assert.equal(res.job.askedUser, true, "the next round still knows the user was asked in this task");
+});
+
 test("question: buildCompletionText shows the block only for a finished task that asked; a failed one carries none", () => {
   const decision = decisionFromForm(FORM("ses_x"), 1);
   assert.ok(buildCompletionText({ name: "n", status: "done", result: "r", decision, endedBlocked: true }).includes(DECISION_HEADER));

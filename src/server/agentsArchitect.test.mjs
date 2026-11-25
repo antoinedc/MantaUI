@@ -128,6 +128,38 @@ test("the Architect templates carry no agent-design opinions (research and the l
   assert.ok(!all.includes("Needs a decision:"), "the old 'end your result with Needs a decision:' hack is replaced by the tool");
 });
 
+test("the Architect writes a fit check before proposing: what its research says, whether the request matches, why — the first block of its result, passed to agent_propose, and a mismatch is put to the user instead of proposing", async () => {
+  const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
+  const main = await read("agent.md");
+  const authoring = await read("skills", "authoring", "SKILL.md");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const order = [...main.matchAll(/\n(\d+)\. \*\*([^*]+)\*\*/g)].map((m) => m[2].replace(/\.$/, ""));
+  assert.ok(order.indexOf("Fit check") > order.indexOf("Compare"), "after the compare step");
+  assert.ok(order.indexOf("Fit check") < order.indexOf("Propose"), "before the propose step");
+  const step = flat(main.match(/\n\d+\. \*\*Fit check\.?\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
+  assert.match(step, /before you propose/i);
+  assert.match(step, /what your research says about this kind of request/i);
+  assert.match(step, /whether the request matches/i);
+  assert.match(step, /and why/i);
+  assert.match(step, /first block of your result/i);
+  assert.match(step, /`fitCheck`/);
+  assert.match(step, /doesn't match, ask the user/i);
+  assert.match(step, /instead of proposing/i);
+  assert.ok(step.length < 600, "one short step");
+  // it says nothing about which answer is right: that is the research's call
+  assert.doesNotMatch(step, /single agent|extend|narrow|split|new agent/i);
+  assert.equal(main.split("question tool").length - 1, 1, "the question tool is still named once (step 4)");
+  // the result starts with it
+  const finish = flat(main.match(/\n\d+\. \*\*Finish\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
+  assert.match(finish, /begin with the fit check/i);
+  // the authoring skill lists the field and the refusal
+  const fields = flat(authoring.match(/## `agent_propose` fields[\s\S]*$/)?.[0] ?? "");
+  assert.match(fields, /`fitCheck`: `\{researchSays, matches, why\}`/);
+  assert.match(fields, /no fit check is refused/i);
+  assert.match(fields, /`matches` is false, ask the user with the question tool first/i);
+  assert.doesNotMatch(authoring, /single agent|prefer (extending|a new agent)/i);
+});
+
 test("the Architect researches how this agent fits the team as its second topic, library first, one entry each, and the compare step covers the effect on the other agents", async () => {
   const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
   const main = await read("agent.md");
@@ -417,6 +449,7 @@ async function proposeFixture({ level = "auto", extra = {}, templates } = {}) {
 }
 
 let seq = 0;
+const FIT_CHECK = { researchSays: "Entry 'agent design' (2 days old) says what it says about requests of this kind.", matches: true, why: "The request is the kind the entry covers." };
 const DRAFT_UPDATE = { instructions: "You write code.\nYou always run the tests." };
 const proposeBody = (over = {}) => {
   const n = ++seq;
@@ -430,12 +463,13 @@ const proposeBody = (over = {}) => {
     summary: "Tighten Dev's rules.",
     evidence: [{ sourceId: "src_a", quote: QUOTE, claim: "Short specific rules help" }],
     admission: [{ rule: "Run the tests", verdict: "general", why: "Backed by the study" }],
+    fitCheck: { ...FIT_CHECK },
     baseHash: "SET",
     ...over,
   };
 };
 const proposeTranscript = (b, { agent = AGENT_KEY, status = "running", input } = {}) => {
-  const given = input ?? Object.fromEntries(["action", "draft", "summary", "evidence", "admission", "agent", "baseHash"].filter((k) => Object.hasOwn(b, k)).map((k) => [k, b[k]]));
+  const given = input ?? Object.fromEntries(["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"].filter((k) => Object.hasOwn(b, k)).map((k) => [k, b[k]]));
   return [
     { info: { id: "msg_user", role: "user" }, parts: [] },
     { info: { id: b.messageID, role: "assistant", parentID: "msg_user", ...(agent === null ? {} : { agent }) }, parts: [{ type: "tool", tool: "agent_propose", callID: b.callID, state: { status, input: given } }] },
@@ -449,6 +483,7 @@ const propose = async (f, over = {}, tOver) => {
   return f.engine.propose(b);
 };
 const store = async (f) => JSON.parse(await readFile(join(f.root, ".changes.json"), "utf-8"));
+const storeOrEmpty = async (f) => store(f).catch((e) => (e?.code === "ENOENT" ? { changes: [], proposalSlots: {} } : Promise.reject(e)));
 
 test("a handoff to the Architect stamps the job with its round mode; mention = unknown; a specialist named architect gets no stamp", async () => {
   const calls = [];
@@ -623,6 +658,62 @@ test("agent_propose: a private source's quote and URL are never stored — only 
     assert.deepEqual(r.change.evidence, [{ claim: "A founder said short rules win", quote: null, url: null, private: true }]);
     const raw = await readFile(join(f.root, ".changes.json"), "utf-8");
     assert.ok(!raw.includes(QUOTE), "the quote is nowhere in the store");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose needs a fit check: researchSays, matches (a boolean) and why — refused with a clear sentence when missing or malformed, before any slot is used", async () => {
+  const f = await proposeFixture();
+  try {
+    for (const bad of [undefined, null, "fits", [], {}, { ...FIT_CHECK, researchSays: " " }, { ...FIT_CHECK, researchSays: undefined }, { ...FIT_CHECK, why: "" }, { ...FIT_CHECK, why: undefined }, { ...FIT_CHECK, matches: "yes" }, { ...FIT_CHECK, matches: undefined }, { ...FIT_CHECK, why: "x".repeat(601) }]) {
+      const r = await propose(f, { fitCheck: bad });
+      assert.equal(r.ok, false, JSON.stringify(bad));
+      assert.match(r.error, /fit check/i, JSON.stringify(bad));
+      assert.match(r.error, /researchSays/);
+    }
+    const none = proposeBody({ baseHash: (await f.engine.readAgentSnapshot("dev")).hash });
+    delete none.fitCheck;
+    f.w.messages = proposeTranscript(none);
+    const omitted = await f.engine.propose(none);
+    assert.equal(omitted.ok, false);
+    assert.match(omitted.error, /fit check/i);
+    assert.equal((await storeOrEmpty(f)).changes?.length ?? 0, 0, "nothing was recorded");
+    assert.equal((await storeOrEmpty(f)).proposalSlots?.job1 ?? 0, 0, "no slot was used");
+    const ok = await propose(f);
+    assert.equal(ok.ok, true, ok.error);
+    assert.equal(ok.used, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose carries the fit check on the proposal (trimmed), and it reaches the wire", async () => {
+  const f = await proposeFixture();
+  try {
+    const r = await propose(f, { fitCheck: { researchSays: "  Library says A.  ", matches: true, why: "  It matches.  " } });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.change.fitCheck, { researchSays: "Library says A.", matches: true, why: "It matches." });
+    assert.deepEqual((await store(f)).changes[0].fitCheck, r.change.fitCheck);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose: a fit check that says the request does not match is refused unless the user was asked first in this task (the question tool ends the task, so the job's record is the evidence)", async () => {
+  const f = await proposeFixture();
+  try {
+    const mismatch = { researchSays: "The entry says to do B first.", matches: false, why: "The request asks for A instead." };
+    const refused = await propose(f, { fitCheck: mismatch });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /ask the user with the question tool first/);
+    assert.equal((await storeOrEmpty(f)).changes?.length ?? 0, 0);
+    assert.equal((await storeOrEmpty(f)).proposalSlots?.job1 ?? 0, 0, "no slot used");
+    // after the user was asked (and answered: the next round of the same task inherits the mark), the proposal goes through
+    f.w.jobs[0].askedUser = true;
+    const allowed = await propose(f, { fitCheck: mismatch });
+    assert.equal(allowed.ok, true, allowed.error);
+    assert.equal(allowed.change.fitCheck.matches, false, "the mismatch stays visible on the proposal");
   } finally {
     await f.cleanup();
   }

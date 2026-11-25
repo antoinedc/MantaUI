@@ -153,7 +153,7 @@ export const tools: ToolDef[] = [
     name: "agent_propose",
     description: [
       "Propose a change to the team's agents from your research — only inside a task Manta handed you (you are the Architect).",
-      "Every proposal needs a summary, at least one quote copied exactly from a source you fetched with research_fetch, and your admission table (each candidate rule General, Scoped or Excluded).",
+      "Every proposal needs a summary, at least one quote copied exactly from a source you fetched with research_fetch, your admission table (each candidate rule General, Scoped or Excluded) and your fit check (what your research says about this kind of request, whether the request matches it, and why).",
       "At most 3 per task. The proposal is held until your task ends; then the user's settings decide whether it is applied or waits for their click. Never say it is applied.",
       "An update needs the baseHash of the file you read (from your brief).",
     ].join(" "),
@@ -185,6 +185,15 @@ export const tools: ToolDef[] = [
           ),
           "Up to 40 items: every rule you considered, including the excluded ones. Pass [] if you considered none.",
         ),
+        fitCheck: obj(
+          {
+            researchSays: str("1 to 600 characters: what your research (and the library) says about this kind of request."),
+            matches: { type: "boolean", description: "true if the request as asked matches what your research says; false if it doesn't." },
+            why: str("1 to 600 characters: why it matches or doesn't."),
+          },
+          ["researchSays", "matches", "why"],
+          "Your fit check, written before you propose; it is also the first block of your result. If matches is false, ask the user with the question tool first: this call is refused until you have.",
+        ),
         agent: str('Update only: the slug of the agent to change, e.g. "dev" (the name after the @ in the roster).'),
         baseHash: str("Update only: the hash of the agent file you read, as given in your brief."),
       },
@@ -202,6 +211,7 @@ export const tools: ToolDef[] = [
           summary: args.summary,
           evidence: args.evidence,
           admission: args.admission,
+          fitCheck: args.fitCheck,
           ...(args.agent !== undefined ? { agent: args.agent } : {}),
           ...(args.baseHash !== undefined ? { baseHash: args.baseHash } : {}),
         });

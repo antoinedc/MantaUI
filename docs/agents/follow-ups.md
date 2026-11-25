@@ -225,3 +225,14 @@ Open points: what stays instant for safety (a one-click revert must still exist 
 change went badly wrong); small edits the user dictates (today Manta applies them with `agent_change`); cost and latency of
 a full Architect run for a trivial undo; how this relates to the routing-note check (#1733), which stays as the
 fact-level safety net.
+
+## Show the Architect's fit check on the proposal card (2026-11-25)
+
+`agent_propose` now stores the fit check (`fitCheck: {researchSays, matches, why}`) on every proposal and the wire carries it,
+but `AgentChangeCard` doesn't render it yet; the user sees it only as the first block of the Architect's result. A small
+"Fit check" row (and a visible "asked you first" mark when `matches` is false) would put it where the decision is made.
+
+Known gap of the server check: a mismatch is allowed once the task has asked the user (the job's `askedUser` mark). A NEW
+Architect task started with the user's answer in its brief has no such mark, so it would be refused on a mismatch and has
+to record `matches: true` ("the user confirmed") or ask again. If that shows up in practice, let the lead pass the user's
+confirmation into the new task's stamp.

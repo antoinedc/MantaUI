@@ -41,3 +41,6 @@ Read its current file (in your brief) and its recent failures if given, then pas
 - `summary` (≤ 600): what this changes and why, in plain words for the user.
 - `evidence` (1–12): `{sourceId, quote, claim}` — the quote copied exactly from the fetched text.
 - `admission` (≤ 40): `{rule, verdict, why}` for every candidate, including excluded ones.
+- `fitCheck`: `{researchSays, matches, why}` — your fit check, also the first block of your result: what your research says
+  about this kind of request, whether the request matches it (`matches`, true or false), and why. A proposal with no fit
+  check is refused. When `matches` is false, ask the user with the question tool first; the proposal is refused until you have.
