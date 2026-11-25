@@ -44,7 +44,7 @@ describe("chip, title, reason, buttons", () => {
     expect(agentChangeChip({ state: "applied", kind: "create" }).label).toBe("Created");
     expect(agentChangeChip({ state: "applied", kind: "update" }).label).toBe("Updated");
     expect(agentChangeChip({ state: "pending", kind: "create" }).label).toBe("Waiting for you");
-    expect(agentChangeChip({ state: "failed", kind: "update" }).label).toBe("Written, not activated");
+    expect(agentChangeChip({ state: "failed", kind: "update" }).label).toBe("Not activated");
     expect(agentChangeChip({ state: "conflict", kind: "update" }).label).toBe("Not applied");
     for (const s of ["discarded", "undone", "expired"] as const) expect(agentChangeChip({ state: s, kind: "create" }).tone).toBe("neutral");
   });

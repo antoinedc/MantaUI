@@ -2013,6 +2013,7 @@ export function createAgentsEngine({
         if (await leftOnDisk(rec)) await reactivateLocked(rec);
         else {
           await requireChangeAllowed();
+          delete rec.groupAborted; // a fresh attempt on its own, whatever the task's other proposals did
           await applyLocked(rec, "click");
         }
         return true;

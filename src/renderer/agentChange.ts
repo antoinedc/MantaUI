@@ -62,7 +62,7 @@ export function agentChangeChip(change: Pick<AgentChange, "state" | "kind">): { 
     case "conflict":
       return { label: "Not applied", tone: "warn" };
     case "failed":
-      return { label: "Written, not activated", tone: "warn" };
+      return { label: "Not activated", tone: "warn" };
   }
 }
 
