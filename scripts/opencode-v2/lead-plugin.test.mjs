@@ -479,14 +479,20 @@ describe("agent_propose tool (Phase 5A)", () => {
     summary: "Tighten it.",
     evidence: [{ sourceId: "src_0123456789abcdef", quote: "Short, specific rules beat long generic checklists", claim: "c" }],
     admission: [{ rule: "r", verdict: "general", why: "w" }],
+    fitCheck: { researchSays: "The entry says X.", matches: true, why: "The request is X." },
     agent: "dev",
     baseHash: "abc123abc123",
   };
 
   test("registered with the pinned input: the required keys first, the optional agent and baseHash LAST, a strict draft WITHOUT sources", () => {
     assert.ok(tool);
-    assert.deepEqual(Object.keys(tool.input.properties), ["action", "draft", "summary", "evidence", "admission", "agent", "baseHash"]);
-    assert.deepEqual([...tool.input.required].sort(), ["action", "admission", "draft", "evidence", "summary"]);
+    assert.deepEqual(Object.keys(tool.input.properties), ["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"]);
+    assert.deepEqual([...tool.input.required].sort(), ["action", "admission", "draft", "evidence", "fitCheck", "summary"]);
+    const fc = tool.input.properties.fitCheck;
+    assert.deepEqual(Object.keys(fc.properties), ["researchSays", "matches", "why"]);
+    assert.deepEqual(fc.required, ["researchSays", "matches", "why"]);
+    assert.equal(fc.properties.matches.type, "boolean");
+    assert.equal(fc.additionalProperties, false);
     assert.equal(tool.input.additionalProperties, false);
     const d = tool.input.properties.draft;
     assert.equal(d.additionalProperties, false);
