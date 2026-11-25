@@ -479,7 +479,7 @@ describe("agent_propose tool (Phase 5A)", () => {
     summary: "Tighten it.",
     evidence: [{ sourceId: "src_0123456789abcdef", quote: "Short, specific rules beat long generic checklists", claim: "c" }],
     admission: [{ rule: "r", verdict: "general", why: "w" }],
-    fitCheck: { researchSays: "The entry says X.", matches: true, why: "The request is X." },
+    fitCheck: { researchSays: "The entry says X.", matches: true, why: "The request is X.", basis: ["Agent setup", "rl_0123456789ab"] },
     agent: "dev",
     baseHash: "abc123abc123",
   };
@@ -489,8 +489,11 @@ describe("agent_propose tool (Phase 5A)", () => {
     assert.deepEqual(Object.keys(tool.input.properties), ["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"]);
     assert.deepEqual([...tool.input.required].sort(), ["action", "admission", "draft", "evidence", "fitCheck", "summary"]);
     const fc = tool.input.properties.fitCheck;
-    assert.deepEqual(Object.keys(fc.properties), ["researchSays", "matches", "why"]);
-    assert.deepEqual(fc.required, ["researchSays", "matches", "why"]);
+    assert.deepEqual(Object.keys(fc.properties), ["researchSays", "matches", "why", "basis"]);
+    assert.deepEqual(fc.required, ["researchSays", "matches", "why", "basis"]);
+    assert.equal(fc.properties.basis.type, "array");
+    assert.equal(fc.properties.basis.items.type, "string");
+    assert.match(fc.properties.basis.description, /library/i);
     assert.equal(fc.properties.matches.type, "boolean");
     assert.equal(fc.additionalProperties, false);
     assert.equal(tool.input.additionalProperties, false);

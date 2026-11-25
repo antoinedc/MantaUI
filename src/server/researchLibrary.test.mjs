@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createResearchLibrary, RESEARCH_GUIDANCE, withResearchGuidance, LIBRARY_MAX_ENTRIES, independentSources, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
@@ -625,6 +625,51 @@ test("withResearchGuidance appends the block once, after the task text", () => {
   assert.ok(out.startsWith("Do the thing.\n\n---\n"));
   assert.ok(out.endsWith(`${RESEARCH_GUIDANCE.trim()}\n`) || out.includes(RESEARCH_GUIDANCE.trim()));
   assert.equal(withResearchGuidance(out), out, "idempotent");
+});
+
+// ---- lookup: the server-side read the Architect's fit check is checked against ----
+
+test("lookup resolves each reference by entry id or by exact topic (case and spacing ignored), in the caller's scope, with age, status and source count", async () => {
+  const f = await fixture({ sources: { [`ses_a:${SRC.id}`]: SRC } });
+  try {
+    const saved = await save(f, { topic: "Pricing page layout", shelfLifeDays: 7, shelfLifeWhy: "Moves fast." });
+    await save(f, { scope: "project", topic: "Our own pricing", summary: "Observed." });
+    f.state.clock = T0 + 3 * DAY;
+    const got = await f.lib.lookup({ project: "proj-1", refs: [saved.id, "  pricing PAGE   layout ", "Our own pricing", "No such topic", "rl_nope"] });
+    assert.deepEqual(got.map((g) => g.ref), [saved.id, "  pricing PAGE   layout ", "Our own pricing", "No such topic", "rl_nope"]);
+    assert.equal(got[0].entry.id, saved.id);
+    assert.equal(got[1].entry.id, saved.id, "an exact topic finds it too");
+    assert.equal(got[0].entry.ageDays, 3);
+    assert.equal(got[0].entry.status, "fresh");
+    assert.equal(got[0].entry.sourceCount, 1);
+    assert.equal(got[0].entry.thin, true);
+    assert.equal(got[2].entry.scope, "project");
+    assert.equal(got[3].entry, null);
+    assert.equal(got[4].entry, null);
+    f.state.clock = T0 + 8 * DAY;
+    assert.equal((await f.lib.lookup({ project: "proj-1", refs: [saved.id] }))[0].entry.status, "stale");
+    // another project never sees a project entry
+    const other = await f.lib.lookup({ project: "proj-2", refs: ["Our own pricing", saved.id] });
+    assert.equal(other[0].entry, null);
+    assert.equal(other[1].entry.id, saved.id);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("lookup: the same topic in two scopes resolves to the most recently checked entry visible to the project; an unreadable library throws", async () => {
+  const f = await fixture({ sources: { [`ses_a:${SRC.id}`]: SRC } });
+  try {
+    await save(f, { scope: "global", topic: "Site audit", summary: "General." });
+    f.state.clock = T0 + DAY;
+    await save(f, { scope: "project", topic: "Site audit", summary: "Ours." });
+    assert.equal((await f.lib.lookup({ project: "proj-1", refs: ["Site audit"] }))[0].entry.summary, "Ours.");
+    assert.equal((await f.lib.lookup({ project: "proj-2", refs: ["Site audit"] }))[0].entry.summary, "General.");
+    await writeFile(f.file, "{ not json");
+    await assert.rejects(f.lib.lookup({ project: "proj-1", refs: ["Site audit"] }), /couldn't be read/);
+  } finally {
+    await f.cleanup();
+  }
 });
 
 // ---- the Architect's templates ----
