@@ -1444,7 +1444,7 @@ test("recovery, update: the file equals `after` → activated and applied; equal
   }
 });
 
-test("recovery: a claimed folder with no record in a readable store is skipped by scans and reported on the list; ordinary scans never admit it", async () => {
+test("recovery: a claimed folder with no record in a readable store is listed with its problem; ordinary scans never admit it as an agent", async () => {
   const f = await archFixture();
   try {
     await f.engine.init();
@@ -1455,7 +1455,7 @@ test("recovery: a claimed folder with no record in a readable store is skipped b
     const row = (await engine.list()).find((a) => a.slug === "left-over");
     assert.match(row.error, /An interrupted create left this folder; check it and delete \.claim/);
     assert.equal(f.config.cfg.agent["agent-left-over"], undefined, "never activated");
-    assert.equal((await engine.scan()).entries.some((e) => e.slug === "left-over"), false);
+    assert.equal((await engine.scan()).entries.some((e) => e.slug === "left-over" && !e.info.error), false, "never a working agent");
     assert.equal(await ok(join(f.root, "left-over", ".claim")), true, "left for the user");
   } finally {
     await f.cleanup();
@@ -1519,39 +1519,67 @@ test("a create whose chosen slug is taken in the instant before the mkdir takes 
   }
 });
 
-test("an activation failure keeps the folder claimed (state failed, protected from eviction); Retry passes the claim through and reloads", async () => {
+test("an activation failure of a create rolls everything back (no folder, no claim, no config entry); Retry makes it again from scratch", async () => {
   const f = await proposeFixture({ level: "ask" });
   try {
     let fail = true;
-    let reloads = 0;
     const engine = f.make({
       now: () => f.w.clock,
       autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: "ask" }),
       editConfig: async (fn) => {
-        if (fail) return { ok: false, changed: false, error: "config locked" };
         const edits = typeof fn === "function" ? await fn(f.config.cfg) : fn;
-        for (const e of edits) f.config.cfg.agent[e.path[1]] = structuredClone(e.value);
-        return { ok: true, changed: edits.length > 0 };
+        for (const e of edits) {
+          if (e.value === undefined) delete f.config.cfg.agent[e.path[1]];
+          else f.config.cfg.agent[e.path[1]] = structuredClone(e.value);
+        }
+        return fail && edits.length > 0 ? { ok: false, changed: true, error: "config reload failed (503)" } : { ok: true, changed: edits.length > 0 };
       },
-      reload: async () => (reloads++, { ok: true }),
     });
     await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })], proposalSlots: {} }));
     const failed = await engine.apply("ach_c1");
     assert.equal(failed.state, "failed");
-    assert.equal(await ok(join(f.root, "seo-reviewer", ".claim")), true, "still claimed");
-    // protected: even 300 newer pending records can't evict it
-    const doc = await store(f);
-    const filler = Array.from({ length: 300 }, (_, i) => ({ ...doc.changes[0], id: `fill${i}`, state: "pending", kind: "update", createdAt: f.w.clock + i, releasedAt: f.w.clock + i, claimed: false }));
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ ...doc, changes: [...doc.changes, ...filler] }));
-    await engine.discard("fill0");
-    assert.ok((await store(f)).changes.some((r) => r.id === "ach_c1" && r.state === "failed"));
+    assert.match(failed.error, /SEO Reviewer couldn't be activated, so nothing was kept/);
+    assert.equal(failed.slug, null);
+    assert.equal(await ok(join(f.root, "seo-reviewer")), false, "no folder, so no claim either");
+    assert.equal(f.config.cfg.agent["agent-seo-reviewer"], undefined);
+    assert.equal((await engine.list()).some((a) => a.slug === "seo-reviewer"), false);
+    assert.equal((await store(f)).changes.find((r) => r.id === "ach_c1").claimed, false, "the record owns nothing");
+    // nothing left to protect, so a failed record is evictable like any finished one
     fail = false;
     const retried = await engine.apply("ach_c1");
     assert.equal(retried.state, "applied", retried.error);
+    assert.equal(retried.slug, "seo-reviewer");
     assert.ok(f.config.cfg.agent["agent-seo-reviewer"]);
     assert.equal(await ok(join(f.root, "seo-reviewer", ".claim")), false);
-    // a hand edit between attempts is a conflict naming the folder
-    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [], proposalSlots: {} }));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a failed create whose folder can't be removed keeps its claim and says so (still protected, still listed as a problem)", async () => {
+  const f = await proposeFixture({ level: "ask" });
+  try {
+    const racing = {
+      ...fsPromises,
+      // the folder can't be emptied: removing the compiled prompt fails
+      unlink: async (p) => {
+        if (String(p).endsWith(".compiled.md")) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        return fsPromises.unlink(p);
+      },
+    };
+    const engine = f.make({
+      fs: racing,
+      now: () => f.w.clock,
+      autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: "ask" }),
+      editConfig: async () => ({ ok: false, changed: false, error: "config locked" }),
+    });
+    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [applyingCreate({ state: "pending", prior: undefined, decidedBy: null, intendedSlug: undefined })], proposalSlots: {} }));
+    const failed = await engine.apply("ach_c1");
+    assert.equal(failed.state, "failed");
+    assert.match(failed.error, /rolling it back failed/);
+    assert.equal((await store(f)).changes.find((r) => r.id === "ach_c1").claimed, true);
+    const row = (await engine.list()).find((a) => a.slug === "seo-reviewer");
+    assert.ok(row?.error, "shown with its problem");
   } finally {
     await f.cleanup();
   }
@@ -1753,6 +1781,7 @@ for (const order of ["update-first", "create-first"]) {
     const f = await taskFixture();
     try {
       const devBefore = await readFile(join(f.root, "dev", "agent.md"), "utf-8");
+      const devBlock = structuredClone(f.config.cfg.agent["agent-dev"]);
       const makeUpdate = () => heldFor(f);
       const makeCreate = () => heldFor(f, { action: "create", draft: CREATE_DRAFT, agent: undefined, baseHash: null });
       const ids = order === "update-first" ? [await makeUpdate(), await makeCreate()] : [await makeCreate(), await makeUpdate()];
@@ -1766,6 +1795,12 @@ for (const order of ["update-first", "create-first"]) {
       assert.notEqual(update.state, "applied", "the update must not stay live when the create failed");
       assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), devBefore, "Dev's file is back to what it was");
       assert.doesNotMatch(await readFile(join(f.root, "dev", ".compiled.md"), "utf-8"), /always run the tests/, "the compiled prompt is back too");
+      assert.equal(await ok(join(f.root, "seo-reviewer")), false, "the failed create left no folder");
+      assert.equal(f.config.cfg.agent["agent-seo-reviewer"], undefined, "nor a config entry");
+      assert.deepEqual(f.config.cfg.agent["agent-dev"], devBlock, "Dev's config block is what it was");
+      assert.deepEqual(JSON.parse(await readFile(join(f.root, ".installed.json"), "utf-8")).filter((k) => k.includes("seo")), []);
+      assert.equal(create.slug, null);
+      assert.equal(create.claimed, false);
       assert.equal(update.groupAborted, true);
       assert.equal(create.groupAborted, true);
       assert.match(update.error, /SEO Reviewer/, "the reason names the proposal that failed");

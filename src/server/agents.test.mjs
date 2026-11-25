@@ -1989,11 +1989,12 @@ test("agent_change: an undo of a created agent is refused once its folder was us
   }
 });
 
-test("agent_change: an activation failure keeps the file (state failed); Retry re-activates without rewriting, a hand edit between attempts is a conflict", async () => {
-  const cfg = { agent: {} };
+// a config writer like the real one: the edit is written, then the reload is rejected (ok:false, changed:true)
+function rejectingConfig() {
   const st = { rejectReload: false, reloadOk: false, reloadCalls: 0 };
+  const cfg = { agent: {} };
   const editConfig = async (fn) => {
-    const edits = await fn(cfg);
+    const edits = typeof fn === "function" ? await fn(cfg) : fn;
     for (const e of edits) {
       const [, key] = e.path;
       if (e.value === undefined) delete cfg.agent[key];
@@ -2006,44 +2007,104 @@ test("agent_change: an activation failure keeps the file (state failed); Retry r
     st.reloadCalls++;
     return st.reloadOk ? { ok: true, reloaded: true } : { ok: false, error: "still rejected" };
   };
-  const f = await changeFixture({ extra: { editConfig, reload } });
+  return { st, cfg, editConfig, reload };
+}
+
+test("agent_change: a create whose activation fails is rolled back completely (no folder, no config entry, not listed); Retry makes it from scratch", async () => {
+  const c = rejectingConfig();
+  const f = await changeFixture({ extra: { editConfig: c.editConfig, reload: c.reload } });
   try {
-    st.rejectReload = true;
+    const installedBefore = await readFile(join(f.root, ".installed.json"), "utf-8");
+    c.st.rejectReload = true;
     const r = await run(f, chg());
     assert.equal(r.ok, false);
     assert.equal(r.change.state, "failed");
-    assert.match(r.error, /Reviewer was written but couldn't be activated: Couldn't update the agents in OpenCode: reload rejected/);
-    assert.equal(r.change.slug, "reviewer");
-    const bytes = await readFile(join(f.root, "reviewer", "agent.md"), "utf-8");
-    assert.equal(bytes, r.change.after, "the file stays");
+    assert.match(r.error, /Reviewer couldn't be activated, so nothing was kept: Couldn't update the agents in OpenCode: reload rejected/);
+    assert.equal(r.change.slug, null, "no agent exists");
+    assert.deepEqual(await folders(f), ["dev", "manta"], "the folder is gone");
+    assert.equal(c.cfg.agent["agent-reviewer"], undefined, "the config entry is gone");
+    assert.equal(await readFile(join(f.root, ".installed.json"), "utf-8"), installedBefore);
+    assert.deepEqual((await f.engine.list()).map((a) => a.slug).sort(), ["dev", "manta"]);
     assert.equal((await f.engine.forCall(r.change)).state, "failed");
 
-    // Retry: the config block is already there, so only a forced reload can activate it — and it is rejected again
+    // Retry writes it again (nothing was left to re-activate); rejected again → rolled back again
     const again = await f.engine.apply(r.change.id);
     assert.equal(again.state, "failed");
-    assert.match(again.error, /Couldn't reload OpenCode after an agent changed: still rejected/);
-    assert.equal(st.reloadCalls, 1, "the reload ran although no file or block changed");
-    // then it works
-    st.reloadOk = true;
+    assert.deepEqual(await folders(f), ["dev", "manta"]);
+    assert.equal(c.cfg.agent["agent-reviewer"], undefined);
+    // then it works, under the same name
+    c.st.rejectReload = false;
+    c.st.reloadOk = true;
     const ok2 = await f.engine.apply(r.change.id);
-    assert.equal(ok2.state, "applied");
-    assert.equal(st.reloadCalls, 2);
-    assert.deepEqual(await folders(f), ["dev", "manta", "reviewer"], "never reclaimed under another slug");
-    assert.equal(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8"), bytes, "never rewritten");
+    assert.equal(ok2.state, "applied", ok2.error);
+    assert.equal(ok2.slug, "reviewer");
+    assert.deepEqual(await folders(f), ["dev", "manta", "reviewer"]);
+    assert.ok(c.cfg.agent["agent-reviewer"]);
+    assert.deepEqual((await readdir(join(f.root, "reviewer"))).sort(), [".compiled.md", "agent.md", "home"]);
+  } finally {
+    await f.cleanup();
+  }
+});
 
-    // a hand edit between the failure and the retry
-    st.reloadOk = false;
-    st.rejectReload = false;
-    const failing = await run(f, chg({ action: "update", agent: "reviewer", draft: { description: "Edits later." } }));
-    assert.equal(failing.change.state, "applied");
-    st.rejectReload = true;
+test("agent_change: an update whose activation fails restores the previous agent.md, compiled prompt and config block", async () => {
+  const c = rejectingConfig();
+  const f = await changeFixture({ extra: { editConfig: c.editConfig, reload: c.reload } });
+  try {
+    c.st.reloadOk = true;
+    const made = await run(f, chg());
+    assert.equal(made.change.state, "applied", made.error);
+    const file = join(f.root, "reviewer", "agent.md");
+    const compiled = join(f.root, "reviewer", ".compiled.md");
+    const [md, comp, block] = [await readFile(file, "utf-8"), await readFile(compiled, "utf-8"), structuredClone(c.cfg.agent["agent-reviewer"])];
+
+    c.st.rejectReload = true;
+    c.st.reloadOk = false;
+    const failing = await run(f, chg({ action: "update", agent: "reviewer", draft: { description: "Edits later.", instructions: "You review and report.\nNever edit." } }));
+    assert.equal(failing.change.state, "failed");
+    assert.match(failing.error, /Reviewer couldn't be activated, so nothing was kept: Couldn't update the agents in OpenCode: reload rejected/);
+    assert.equal(await readFile(file, "utf-8"), md, "agent.md is back");
+    assert.equal(await readFile(compiled, "utf-8"), comp, "the compiled prompt is back");
+    assert.deepEqual(c.cfg.agent["agent-reviewer"], block, "the config block is back");
+    assert.equal((await f.engine.list()).find((a) => a.slug === "reviewer").description, "Reviews code.");
+    // Retry re-applies the whole change, never a stale half
+    c.st.rejectReload = false;
+    c.st.reloadOk = true;
+    const ok2 = await f.engine.apply(failing.change.id);
+    assert.equal(ok2.state, "applied", ok2.error);
+    assert.match(await readFile(file, "utf-8"), /Edits later\./);
+    assert.match(await readFile(compiled, "utf-8"), /Never edit\./);
+    // a hand edit between the failure and the retry is a conflict, never overwritten
+    c.st.rejectReload = true;
     const f2 = await run(f, chg({ action: "update", agent: "reviewer", draft: { description: "Edits again." } }));
     assert.equal(f2.change.state, "failed");
-    const edited = (await readFile(join(f.root, "reviewer", "agent.md"), "utf-8")).replace("Edits again.", "By hand.");
-    await writeFile(join(f.root, "reviewer", "agent.md"), edited);
-    const c = await f.engine.apply(f2.change.id);
-    assert.equal(c.state, "conflict");
-    assert.equal(await readFile(join(f.root, "reviewer", "agent.md"), "utf-8"), edited);
+    const edited = (await readFile(file, "utf-8")).replace("Edits later.", "By hand.");
+    await writeFile(file, edited);
+    c.st.rejectReload = false;
+    const conflict = await f.engine.apply(f2.change.id);
+    assert.equal(conflict.state, "conflict");
+    assert.equal(await readFile(file, "utf-8"), edited);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a folder left by an unfinished create is listed with its problem and counts as existing everywhere: roster, routing notes, new names", async () => {
+  const f = await changeFixture();
+  try {
+    await mkdir(join(f.root, "ghost", "home"), { recursive: true });
+    await writeFile(join(f.root, "ghost", "agent.md"), valid("isolation: none\n"));
+    await writeFile(join(f.root, "ghost", ".claim"), "ach_gone");
+    await writeFile(join(f.root, "dev", "agent.md"), (await readFile(join(f.root, "dev", "agent.md"), "utf-8")).replace(/^description: .*$/m, "description: Writes code. Not for reviews: see @ghost."));
+    const row = (await f.engine.list()).find((a) => a.slug === "ghost");
+    assert.ok(row, "listed, not hidden");
+    assert.match(row.error, /interrupted create|didn't finish/);
+    const brief = (await f.engine.leadBrief("ses_chat")).text;
+    assert.deepEqual(JSON.parse(brief.match(/```json\n([\s\S]*?)\n```/)[1]).map((e) => e.agent), ["@dev"], "not a working teammate");
+    assert.doesNotMatch(brief, /@ghost, which doesn't exist/, "it exists: the lead isn't told it doesn't");
+    // the list and the roster agree on what exists: a new agent of that name takes the next free slug
+    const made = await run(f, chg({ draft: { ...DRAFT, name: "Ghost" } }));
+    assert.equal(made.change.state, "applied", made.error);
+    assert.equal(made.change.slug, "ghost-2");
   } finally {
     await f.cleanup();
   }
