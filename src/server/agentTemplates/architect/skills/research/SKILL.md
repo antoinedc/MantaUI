@@ -64,6 +64,13 @@ rules. If you can't reach that, say so in the summary.
    numbers or a concrete failure beats an opinion. Note the date: advice older than a year in a fast field is suspect.
 3. Extra sources from your brief, as their descriptions say.
 
+## Two topics
+
+Every task has two topics to research: the subject of the agent (its field), and how to set up agents for this kind of job
+(when a separate agent helps vs. extending an existing one, scope, routing, permissions). Look in the library first for
+each, and save each as its own entry with its own shelf life. Neither topic comes with a conclusion: what you decide
+about the agent follows from what you read.
+
 ## Questions first
 
 Before searching, write 5–10 questions an expert would ask and a generalist would miss:
