@@ -445,6 +445,148 @@ test("a refresh with keep recomputes the count and the flag from kept and new fi
   }
 });
 
+// ---- one organisation is one source: the alias table and the optional publisher ----
+
+test("independentSources: the domains of one organisation are one source (the built-in alias table), and its GitHub owner too", () => {
+  const r = independentSources([f_("https://www.anthropic.com/engineering/a"), f_("https://docs.claude.com/b"), f_("https://claude.com/blog/c"), f_("https://github.com/anthropics/skills"), f_("https://other.org/z")]);
+  assert.equal(r.sourceCount, 2, "anthropic.com, claude.com and the anthropics GitHub owner are one; other.org is the other");
+  const two = independentSources([f_("https://openai.com/a"), f_("https://platform.openai.com/b"), f_("https://www.anthropic.com/c")]);
+  assert.equal(two.sourceCount, 2, "two vendors stay two");
+  // an unrelated GitHub owner is still its own source
+  assert.equal(independentSources([f_("https://github.com/anthropics/skills"), f_("https://github.com/alice/skills")]).sourceCount, 2);
+});
+
+test("independentSources: a finding's publisher merges sources that share it (and only merges); the same name as an alias org agrees with it", () => {
+  const merged = independentSources([f_("https://a.example/1", { publisher: "Acme Corp" }), f_("https://b.example/1", { publisher: "acme  corp." }), f_("https://c.example/1")]);
+  assert.equal(merged.sourceCount, 2, "a.example and b.example are one publisher");
+  // a publisher label can never split one site into two sources
+  const same = independentSources([f_("https://a.example/1", { publisher: "One" }), f_("https://a.example/2", { publisher: "Two" })]);
+  assert.equal(same.sourceCount, 1);
+  const org = independentSources([f_("https://www.anthropic.com/a"), f_("https://news.example/b", { publisher: "Anthropic" })]);
+  assert.equal(org.sourceCount, 1, "the label 'Anthropic' is the anthropic.com source");
+  // a publisher on a finding with no link still stands for a source of its own
+  assert.equal(independentSources([f_(null, { publisher: "Acme Corp" }), f_("https://a.example/1")]).sourceCount, 2);
+});
+
+test("save stores a finding's publisher and refuses a malformed one; find returns it", async () => {
+  const s1 = srcAt(1, "https://a.example/x");
+  const f = await fixture({ sources: withSources([s1]) });
+  try {
+    const bad = await save(f, { findings: [{ ...findingFrom(s1, "A"), publisher: 7 }] });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /publisher/i);
+    const long = await save(f, { findings: [{ ...findingFrom(s1, "A"), publisher: "x".repeat(81) }] });
+    assert.equal(long.ok, false);
+    const ok = await save(f, { findings: [{ ...findingFrom(s1, "A"), publisher: "  Acme Corp " }] });
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.equal((await f.stored()).entries[0].findings[0].publisher, "Acme Corp");
+    assert.equal((await f.lib.find(call({ query: "pricing" }))).entries[0].findings[0].publisher, "Acme Corp");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("save: anthropic.com and claude.com pages are one source in the stored count (the live case: '3' that was really 2)", async () => {
+  const list = [srcAt(1, "https://www.anthropic.com/a"), srcAt(2, "https://docs.claude.com/b"), srcAt(3, "https://openai.com/c")];
+  const f = await fixture({ sources: withSources(list) });
+  try {
+    const r = await save(f, { findings: list.map((s, i) => findingFrom(s, `claim ${i}`)) });
+    assert.equal(r.sourceCount, 2);
+    assert.equal(r.thin, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- duplicate findings ----
+
+test("save: a refresh that keeps findings and adds the same claims again stores each once, preferring the copy with a link and a quote", async () => {
+  const s1 = srcAt(1, "https://a.example/x");
+  const s2 = srcAt(2, "https://b.example/x");
+  const f = await fixture({ sources: withSources([s1, s2]) });
+  try {
+    await save(f, { findings: [findingFrom(s1, "Early price helps"), findingFrom(s2, "Trust badges help")] });
+    // the copies come back with no link, differently spaced and cased, next to the kept ones
+    const r = await save(f, { findings: [{ claim: "early  price HELPS." }, { claim: "Trust badges help" }, { claim: "A brand new claim" }], keep: [0, 1] });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.findings, 3);
+    const [e] = (await f.stored()).entries;
+    assert.deepEqual(e.findings.map((x) => x.claim), ["Early price helps", "Trust badges help", "A brand new claim"]);
+    assert.equal(e.findings[0].url, "https://a.example/x");
+    assert.ok(e.findings[0].quote, "the kept copy with the quote won");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("save: when the later copy has the link and the earlier one has none, the later copy is the one stored; two sources with one claim stay two", async () => {
+  const s1 = srcAt(1, "https://a.example/x");
+  const s2 = srcAt(2, "https://b.example/x");
+  const s3 = srcAt(3, "https://c.example/x");
+  const f = await fixture({ sources: withSources([s1, s2, s3]) });
+  try {
+    const r = await save(f, { findings: [{ claim: "Early price helps" }, findingFrom(s1, "early price helps"), findingFrom(s2, "Early price helps"), findingFrom(s3, "Other")] });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const [e] = (await f.stored()).entries;
+    assert.equal(e.findings.length, 3, "the link-less copy merged into one of the linked ones; the two linked sources stay");
+    assert.deepEqual(e.findings.map((x) => x.url), ["https://a.example/x", "https://b.example/x", "https://c.example/x"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- project facts ----
+
+const fact = (claim) => ({ claim, sourceId: null, url: null, quote: null, date: "2026-11-24", private: false });
+
+test("independentSources: in a project entry, findings with no source are project facts; all of them → no source count and not thin", () => {
+  const r = independentSources([fact("The pricing page is in app/pricing.tsx"), fact("The CTA says Get started")], { projectScope: true });
+  assert.equal(r.projectFacts, true);
+  assert.equal(r.sourceCount, 0);
+  assert.equal(r.thin, false);
+  // the same findings in a global entry are unsourced claims, as before
+  const g = independentSources([fact("a"), fact("b")]);
+  assert.equal(g.projectFacts, false);
+  assert.equal(g.thin, true);
+});
+
+test("independentSources: a mixed project entry counts only its outside sources — facts never make it thin or dominant, and never rescue it", () => {
+  const facts = [fact("f1"), fact("f2"), fact("f3"), fact("f4"), fact("f5")];
+  const three = independentSources([...facts, f_("https://a.example/1"), f_("https://b.example/1"), f_("https://c.example/1")], { projectScope: true });
+  assert.equal(three.projectFacts, false);
+  assert.equal(three.sourceCount, 3);
+  assert.equal(three.thin, false, "5 facts do not make 3 sources 'dominant'");
+  const two = independentSources([...facts, f_("https://a.example/1"), f_("https://b.example/1")], { projectScope: true });
+  assert.equal(two.sourceCount, 2);
+  assert.equal(two.thin, true, "facts do not count as a source");
+  const dominant = independentSources([...facts, f_("https://a.example/1"), f_("https://a.example/2"), f_("https://a.example/3"), f_("https://b.example/1"), f_("https://c.example/1")], { projectScope: true });
+  assert.equal(dominant.thin, true, "3 of 5 outside findings come from one source");
+});
+
+test("save and find: a project entry of repo observations is 'project facts', not thin; the same findings in a global entry stay thin; an old stored thin flag is not trusted", async () => {
+  const f = await fixture();
+  try {
+    const r = await save(f, { topic: "Pricing page in this repo", scope: "project", findings: [{ claim: "The CTA text lives in app/pricing.tsx" }, { claim: "The header uses the same Get started text" }] });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.projectFacts, true);
+    assert.equal(r.thin, false);
+    const g = await save(f, { topic: "Unsourced global claims", scope: "global", findings: [{ claim: "a" }, { claim: "b" }] });
+    assert.equal(g.projectFacts, false);
+    assert.equal(g.thin, true);
+    const stored = await f.stored();
+    // simulate an entry the earlier version wrote: it stored thin:true for the same facts
+    stored.entries.find((e) => e.topic === "Pricing page in this repo").thin = true;
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(f.file, JSON.stringify(stored));
+    const [e] = (await f.lib.find(call({ query: "pricing page in this repo" }))).entries;
+    assert.equal(e.projectFacts, true);
+    assert.equal(e.thin, false);
+    assert.equal(e.sourceCount, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // ---- the guidance every agent task gets ----
 
 test("the guidance is short, names the tools and the skip rules, and mentions no particular domain", () => {
