@@ -350,8 +350,18 @@ Plugin: `docs/opencode-plugins-v2/manta/tools/agents.ts`. Server: `agents.mjs`.
 { action: "create" | "update", draft: AgentDraft (as agent_change),
   summary: string 1–600, evidence: [{ sourceId, quote 20–300 nonblank, claim 1–300 }] 1–12,
   admission: [{ rule 1–300, verdict: "general"|"scoped"|"excluded", why 1–300 }] 0–40,
+  fitCheck: { researchSays 1–600, matches: boolean, why 1–600 },
   agent?: slug, baseHash?: string }
 ```
+
+**Fit check (2026-11-25).** Before proposing, the Architect writes what its research says about this kind of request,
+whether the request matches it, and why; it is the first block of its result and is stored on the proposal (`fitCheck`).
+`agent_propose` refuses a proposal without one. When `matches` is false it refuses with "ask the user with the question
+tool first" unless the user was already asked in this task. Asking ends the task and clears its decision on resume, so
+the job record carries a lasting `askedUser` mark (set when the question is captured, inherited by every later round).
+This is process only: nothing says which answer is right; that comes from the Architect's research. (Seen in a live run:
+the Architect's own refreshed entry argued against the narrow agent the user asked for, and it created it without asking.)
+The card does not show the fit check yet (see `docs/agents/follow-ups.md`).
 
 The optional keys go LAST in the actual schema, because of the strict-tool quirk that already applies to
 `agent_change`. A plugin test checks that an update arrives with both keys intact.

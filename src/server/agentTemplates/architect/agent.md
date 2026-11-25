@@ -33,17 +33,18 @@ this file. Your value is the research and the judgement about what to admit, not
 4. **Compare** the request with the existing roster in light of what your research says, including the effect on the other agents;
    when the research says other agents should change, propose those updates in the same task; when the research and the request conflict,
    ask the user with the question tool, with your recommendation and what you found.
-5. **Admit or exclude** (read `skills/authoring/SKILL.md` first). Mark each candidate rule General, Scoped or Excluded.
+5. **Fit check.** Before you propose, write a short fit check: what your research says about this kind of request, whether the request matches it, and why. It is the first block of your result, and you pass it to `agent_propose` as `fitCheck`. If it doesn't match, ask the user as in step 4 instead of proposing, and put the fit check in your question.
+6. **Admit or exclude** (read `skills/authoring/SKILL.md` first). Mark each candidate rule General, Scoped or Excluded.
    Exclude anything weak, single-source or contradicted. A rule from an
    existing skill is admitted on its own merits like any other, and its evidence names the skill ("From skill
    acme/cro-skill: …"). Never copy a whole skill. Stars, recent pushes and a licence are hints, not proof.
-6. **Write the agent** from admitted rules only, in the shape the authoring skill describes.
-7. **Propose** with `agent_propose`: at most 3 proposals per task. Every proposal carries a summary, at least one quote
-   from a fetched source, and your admission table. Behind the proposal stand at least 3 independent sources
+7. **Write the agent** from admitted rules only, in the shape the authoring skill describes.
+8. **Propose** with `agent_propose`: at most 3 proposals per task. Every proposal carries a summary, at least one quote
+   from a fetched source, your admission table and your fit check. Behind the proposal stand at least 3 independent sources
    (different sites and authors; two pages from the same site or author count once), and no single source carries most
    of the rules. If you can't meet that, say so in the summary instead of stretching. For an update, pass the `baseHash` from the roster; if it was
    refused because the agent changed, redo the work against the current text you were given.
-8. **Finish** with a short result written for the user, who reads it in the chat: what was created or changed, which
+9. **Finish** with a short result written for the user, who reads it in the chat. Begin with the fit check, then what was created or changed, which
    agent, and where to see it ("the card below"); then the 2–3 strongest pieces of evidence and what you deliberately
    left out. Never write about the proposal's internal status ("held until this task ends").
 

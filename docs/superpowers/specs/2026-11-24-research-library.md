@@ -72,6 +72,23 @@ is not rewritten). A refresh (`keep` + new findings) recomputes both. The guidan
 a lead; add independent sources (and contrary evidence) and save with `keep`. Author is not stored on a finding, so only the
 path-author sites above are told apart by author.
 
+### 4b. Refinements to the evidence bar (2026-11-25)
+
+Found in a live run of the Architect: anthropic.com and claude.com counted as two sources while the entry's own text said
+"two vendor voices"; a refresh with `keep` stored three findings twice; and facts read from the project's own files made
+the entry "thin".
+- **One organisation is one source.** A small built-in alias table (`ORG_ALIASES` in `researchLibrary.mjs`; a fact table,
+  not an opinion: add a row when two domains are known to be one publisher) folds an organisation's domains, and its GitHub
+  owner, into one source. A finding may also carry an optional `publisher`; findings that share one (case, spacing and
+  punctuation ignored) are one source. A label can only merge sources, never split one site into two.
+- **Duplicate findings** are dropped on save: the same claim (ignoring case, spacing and punctuation) from the same or an
+  unknown source is stored once, keeping the copy that has a link (then the one with a quote). Same claim from two sources
+  with different links stays two findings.
+- **Project facts.** In a project-scope entry, a finding with no source at all is a project fact (observed in the project's
+  own files): it is left out of the source count and the dominance rule. An entry made only of project facts shows "project
+  facts" instead of a source count and is never thin; a mixed entry counts only its outside sources. The count is always
+  worked out on read, so the table and these rules reach entries saved earlier.
+
 ## 5. Not in this version (see `docs/agents/follow-ups.md`)
 
 Public shared shelf-life defaults file; a library viewer/purge in the app; semantic search; routines' agent runs and an

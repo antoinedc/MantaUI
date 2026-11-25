@@ -5382,9 +5382,13 @@ async function withBudget(fn, ms) {
   }
 }
 
-/** Store the decision of a RUNNING task and mark it blocked: it ends "needs a decision". null when it is not running. */
+/**
+ * Store the decision of a RUNNING task and mark it blocked: it ends "needs a decision". null when it is not running.
+ * `askedUser` is the lasting mark that the user was asked in this task: the decision itself is cleared when the user's
+ * answer resumes the task, the mark is inherited by every later round.
+ */
 function recordDecision(id, decision, deps) {
-  return mutateJobProgress(id, deps, (job) => ({ decision, jobProgress: { ...job.jobProgress, modelState: "blocked" } }));
+  return mutateJobProgress(id, deps, (job) => ({ decision, askedUser: true, jobProgress: { ...job.jobProgress, modelState: "blocked" } }));
 }
 
 /**
