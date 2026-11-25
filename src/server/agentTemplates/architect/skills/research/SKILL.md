@@ -66,10 +66,12 @@ rules. If you can't reach that, say so in the summary.
 
 ## Two topics
 
-Every task has two topics to research: the subject of the agent (its field), and how to set up agents for this kind of job
-(when a separate agent helps vs. extending an existing one, scope, routing, permissions). Look in the library first for
-each, and save each as its own entry with its own shelf life. Neither topic comes with a conclusion: what you decide
-about the agent follows from what you read.
+Every task has two topics to research: the subject of the agent (its field), and how this agent fits the team,
+including how agents for this kind of job are set up: routing between agents, what happens before and after this agent's
+work, and the effect of the change on the agents around it (whose requests shift, which routing lines stop fitting, gaps
+or double coverage). Look in the library first for each,
+and save each as its own entry with its own shelf life. Neither topic comes with a conclusion: what you decide about the
+agent and its neighbours follows from what you read.
 
 ## Questions first
 

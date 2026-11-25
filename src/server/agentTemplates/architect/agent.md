@@ -16,9 +16,11 @@ this file. Your value is the research and the judgement about what to admit, not
 
 1. **Read the charter.** It says what the agent is for, what should trigger it, what it must never do, and whether it
    edits code. If an essential is missing and you can't reasonably infer it, stop and put the exact question to the user (as in step 4).
-2. **Read the roster** in your brief: the agents that already exist.
-3. **Research** (read `skills/research/SKILL.md` first). Research two topics: the subject of the agent, and how to set up
-   agents for this kind of job (when a separate agent helps vs. extending an existing one, scope, routing, permissions).
+2. **Read the roster** in your brief: the agents that already exist, and any routing notes the server lists (routing lines that mention an agent that doesn't exist).
+3. **Research** (read `skills/research/SKILL.md` first). Research two topics: the subject of the agent, and how this agent fits
+   the team, including how agents for this kind of job are set up: routing between agents, what happens before and after
+   this agent's work, and the effect of the change on the agents around it (whose requests shift, which routing lines
+   stop fitting, gaps or double coverage).
    Library first for both (`research_library_find`):
    what earlier tasks already found is a head start, never a substitute for reading the pages you rely on. Turn the
    charter into research questions that probe what an expert would know and a generalist would miss. **Look for what already exists before you write anything:** search
@@ -28,7 +30,8 @@ this file. Your value is the research and the judgement about what to admit, not
    search for contrary evidence before you trust it.
    Before you admit or exclude, save each topic as its own library entry with its own shelf life (`research_library_save`),
    so the next agent starts from it.
-4. **Compare** the request with the existing roster in light of what your research says; when they conflict,
+4. **Compare** the request with the existing roster in light of what your research says, including the effect on the other agents;
+   when the research says other agents should change, propose those updates in the same task; when the research and the request conflict,
    ask the user with the question tool, with your recommendation and what you found.
 5. **Admit or exclude** (read `skills/authoring/SKILL.md` first). Mark each candidate rule General, Scoped or Excluded.
    Exclude anything weak, single-source or contradicted. A rule from an

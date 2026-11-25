@@ -128,29 +128,89 @@ test("the Architect templates carry no agent-design opinions (research and the l
   assert.ok(!all.includes("Needs a decision:"), "the old 'end your result with Needs a decision:' hack is replaced by the tool");
 });
 
-test("the Architect researches how to set up agents for this kind of job as well as the subject, library first, one entry each, and decides overlap from that research", async () => {
+test("the Architect researches how this agent fits the team as its second topic, library first, one entry each, and the compare step covers the effect on the other agents", async () => {
   const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
   const main = await read("agent.md");
   const research = await read("skills", "research", "SKILL.md");
   const flat = (t) => t.replace(/\s+/g, " ");
   const step = flat(main.match(/\n\d+\. \*\*Research\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
   assert.match(step, /two topics/i);
-  assert.match(step, /how to set up agents/i);
-  assert.match(step, /extending an existing one/i);
-  assert.match(step, /scope/i);
-  assert.match(step, /routing/i);
-  assert.match(step, /permissions/i);
+  assert.match(step, /how this agent fits the team/i);
+  assert.match(step, /routing between agents/i);
+  assert.match(step, /before and after this agent's work/i);
+  assert.match(step, /effect of the change on the agents around it/i);
+  assert.match(step, /whose requests shift/i);
+  assert.match(step, /routing lines stop fitting/i);
+  assert.match(step, /gaps or double coverage/i);
   assert.match(step, /library first/i);
   assert.match(step, /its own (library )?entry/i);
   assert.match(step, /its own shelf life/i);
   // the skill says it too, and still states no conclusion about agent design
-  const skill = flat(research);
-  assert.match(skill, /two topics/i);
-  assert.match(skill, /how to set up agents/i);
+  const skill = flat(research.match(/## Two topics[\s\S]*?(?=\n## )/)?.[0] ?? "");
+  assert.match(skill, /how this agent fits the team/i);
+  assert.match(skill, /routing between agents/i);
+  assert.match(skill, /effect of the change on the agents around it/i);
   assert.match(skill, /its own (library )?entry/i);
+  assert.match(skill, /its own shelf life/i);
   assert.doesNotMatch(skill, /prefer (extending|a new agent)/i);
-  // the compare step is unchanged: the request against the roster, in light of that research
-  assert.match(flat(main), /Compare\*\* the request with the existing roster in light of what your research says/);
+  // the compare step covers the effect on the other agents: proposals for them in the same task, the question tool on a conflict
+  const compare = flat(main.match(/\n\d+\. \*\*Compare\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
+  assert.match(compare, /Compare\*\* the request with the existing roster in light of what your research says/);
+  assert.match(compare, /effect on the other agents/i);
+  assert.match(compare, /propose those (updates|changes) in the same task/i);
+  assert.match(compare, /ask the user with the question tool/);
+  assert.ok(compare.length < 600, "still short");
+  // the routing facts the server lists are part of what it reads
+  assert.match(flat(main.match(/\n2\. \*\*Read the roster\*\*[\s\S]*?(?=\n3\. )/)?.[0] ?? ""), /routing notes/i);
+});
+
+test("buildArchitectContext: the server's routing facts are listed after the team data as facts, not opinions; none → no section", () => {
+  const roster = [{ slug: "seo", name: "SEO", description: "d", useWhen: null, notFor: "→ @pricing-copy", isolation: "none", model: null, hash: "abc123abc123" }];
+  const notes = ["Routing note: @seo's not_for mentions @pricing-copy, which doesn't exist."];
+  const text = buildArchitectContext({ roster, routingNotes: notes });
+  assert.ok(text.indexOf(notes[0]) > text.indexOf("END TEAM DATA"));
+  assert.match(text, /Routing facts checked by the server \(facts, not opinions\):\n- Routing note: @seo's not_for mentions @pricing-copy/);
+  assert.doesNotMatch(buildArchitectContext({ roster }), /Routing facts/);
+  assert.equal(text, buildArchitectContext({ roster, routingNotes: notes }), "deterministic");
+});
+
+test("an Architect task's brief carries the dangling routing notes, and they follow an undo of the agent they pointed to", async () => {
+  const calls = [];
+  const f = await archFixture({
+    extra: {
+      retryDelayMs: 0,
+      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }), listMessages: async () => msgs },
+      delegate: { startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }), startJobWithApproval: async (i) => (calls.push(i), { ok: true, job: { id: "jw" } }), loadRecordsStrict: async () => [] },
+      isManagedSession: async () => false,
+      isCtoSessionStrict: async () => false,
+      isCtoSession: async () => false,
+      delegateView: { assertWritable: async () => {} },
+    },
+  });
+  let msgs = [];
+  try {
+    await f.engine.init();
+    await mkdir(join(f.root, "seo"));
+    await writeFile(join(f.root, "seo", "agent.md"), "---\nname: SEO\ndescription: d\nisolation: none\nnot_for: \"Pricing copy (→ @pricing-copy).\"\n---\nx\n");
+    let n = 0;
+    const hand = () => {
+      n++;
+      const b = { sessionID: "ses_chat", messageID: `msg_h${n}`, callID: `call_h${n}`, agent: "architect", title: "t", brief: "Make an agent." };
+      msgs = [
+        { info: { id: "msg_user", role: "user" }, parts: [] },
+        { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent: "build" }, parts: [{ type: "tool", tool: "agent_handoff", callID: b.callID, state: { status: "running", input: { agent: b.agent, title: b.title, brief: b.brief } } }] },
+      ];
+      return f.engine.handoff(b);
+    };
+    assert.equal((await hand()).ok, true);
+    assert.ok(calls[0].prompt.includes("Routing note: @seo's not_for mentions @pricing-copy, which doesn't exist."), calls[0].prompt);
+    await mkdir(join(f.root, "pricing-copy"));
+    await writeFile(join(f.root, "pricing-copy", "agent.md"), "---\nname: Pricing Copy\ndescription: d\nisolation: none\n---\nx\n");
+    assert.equal((await hand()).ok, true);
+    assert.doesNotMatch(calls[1].prompt, /Routing facts/);
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test("only the folder `architect` with role architect is the Architect; another folder claiming it is an error row", async () => {
