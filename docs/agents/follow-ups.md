@@ -236,3 +236,22 @@ Known gap of the server check: a mismatch is allowed once the task has asked the
 Architect task started with the user's answer in its brief has no such mark, so it would be refused on a mismatch and has
 to record `matches: true` ("the user confirmed") or ask again. If that shows up in practice, let the lead pass the user's
 confirmation into the new task's stamp.
+## All-or-nothing release of a task's proposals: edge cases left open
+
+A task's proposals that would apply automatically are released together (`applyGroupLocked` in `src/server/agents.mjs`):
+the first one that doesn't end applied stops the group, the ones already applied are undone (their `before` is restored,
+OpenCode reloaded) and the rest are marked "not applied". Every Outcome line says which. Known edges:
+- **Mixed groups.** Only the proposals that would auto-apply are grouped. A sibling that waits for a click (plan mode,
+  Ask, lead/core/isolation change) is released as before; it can still be applied later even if the others were rolled back.
+  A routing change that depends on a pending sibling is not tracked.
+- **Retry of the failed one.** The proposal that failed keeps its "Retry" on the card and retries ALONE; the rolled-back
+  siblings are not re-applied. Wanted: a retry of the failed one re-applies its rolled-back siblings too (or the card says
+  "ask Manta again").
+- **A rollback that can't happen** (the agent's file was edited since, or the folder holds other files) leaves that
+  proposal applied with an error naming why; its Outcome line says it is live but the rollback failed.
+- **Half-written config.** A failed create may already have its block in `opencode.jsonc` (written, reload rejected);
+  it is only removed once the agent is created or deleted. Nothing loads it while the folder is claimed.
+- **UI.** A rolled-back record shows as "Undone" and a not-applied one as "Not applied"; neither has a dedicated chip.
+- **Stale OpenCode locations.** The reload now forgets locations whose folder was deleted (`DELETE /api/debug/location`),
+  but nothing prunes them proactively; they accumulate until a reload trips on one. It was written against the 2.0.30
+  client's wire definition and a fake server; run it once against a real box with a deleted worktree.

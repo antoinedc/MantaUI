@@ -20,6 +20,7 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { statePath } from "../shared/paths.mjs";
 import { apiUrl, invalidateProvidersCache, opencodeAuthHeader } from "./opencode.mjs";
@@ -57,46 +58,129 @@ export async function listOpencodeModels({ fetchFn = fetch, timeoutMs = 15_000 }
   return Array.isArray(body?.data) ? body.data : [];
 }
 
+/** How many times one reload may be retried after dropping stale locations. */
+const MAX_STALE_ROUNDS = 5;
+
+/** The folder a "Directory not found" reload error names, or null. Best effort: the location list is the main source. */
+function missingDirectoryOf(detail) {
+  let text = String(detail ?? "");
+  try {
+    const message = JSON.parse(text)?.message;
+    if (typeof message === "string") text = message;
+  } catch {
+    /* not JSON: use the raw text */
+  }
+  if (!/DirectoryNotFound/i.test(text)) return { missing: false, dir: null };
+  const m = /Directory not found: (\/[^\s"\u2026]+)/.exec(text);
+  return { missing: true, dir: m ? m[1] : null };
+}
+
+const dirExistsOnDisk = async (dir) => {
+  try {
+    return (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Ask the running opencode to re-read its config files (`POST /api/location/reload`,
  * 204 on success). Never throws.
  *
- *   { ok:true,  reloaded:true }                — applied live
+ *   { ok:true,  reloaded:true, evicted? }      — applied live
  *   { ok:true,  reloaded:false, reason }       — opencode is not running (connection
  *        refused/timeout): the edit is already on disk and applies at its next
  *        start, so there is nothing stale to report
  *   { ok:false, error }                        — opencode answered with an error:
  *        the live server may still hold the old config, so this is NOT success
  *
- * `fetchFn` is injectable for tests.
+ * The reload covers EVERY location opencode knows (it takes no directory), so one
+ * location whose folder was deleted since (an old worktree) makes it answer 503
+ * "DirectoryNotFoundError" for a change that has nothing to do with that folder.
+ * On exactly that error the stale locations are forgotten (`DELETE
+ * /api/debug/location`, only folders that no longer exist on disk) and the reload is
+ * repeated. The result is `ok:true` only when a reload really succeeded; any other
+ * failure stays `ok:false` with the original error.
+ *
+ * `fetchFn` and `dirExists` are injectable for tests.
  */
-export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000 } = {}) {
-  let res;
+export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000, dirExists = dirExistsOnDisk } = {}) {
+  const evicted = [];
+  let firstError = null;
+  for (let round = 0; round <= MAX_STALE_ROUNDS; round++) {
+    let res;
+    try {
+      const auth = await opencodeAuthHeader();
+      res = await fetchFn(apiUrl("/api/location/reload"), {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
+        body: "{}",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn("[opencodeAdmin] config reload: opencode unreachable:", msg);
+      if (firstError) return { ok: false, error: firstError };
+      return { ok: true, reloaded: false, reason: `opencode unreachable: ${msg}` };
+    }
+    if (res.ok) {
+      invalidateProvidersCache({ restarted: true });
+      return evicted.length > 0 ? { ok: true, reloaded: true, evicted } : { ok: true, reloaded: true };
+    }
+    let detail = "";
+    try {
+      detail = await res.text();
+    } catch {
+      /* ignore read error on the error body */
+    }
+    console.warn(`[opencodeAdmin] config reload failed: ${res.status}`, detail);
+    const error = `opencode config reload failed (${res.status}): ${String(detail ?? "").slice(0, 200)}`;
+    firstError ??= error;
+    const named = missingDirectoryOf(detail);
+    if (!named.missing || round === MAX_STALE_ROUNDS) return { ok: false, error: firstError };
+    const dropped = await evictStaleLocations({ fetchFn, timeoutMs, dirExists, named: named.dir });
+    if (dropped.length === 0) return { ok: false, error: firstError };
+    evicted.push(...dropped);
+  }
+  return { ok: false, error: firstError ?? "opencode config reload failed" };
+}
+
+/**
+ * Forget the locations whose folder no longer exists (`GET`/`DELETE /api/debug/location`). `named`: the folder the
+ * failed reload named, tried even when the list can't be read. Returns the folders that were evicted; a folder that exists
+ * is never touched, and a failed eviction is just left out (the caller's retry then fails the same way and reports it).
+ */
+async function evictStaleLocations({ fetchFn, timeoutMs, dirExists, named }) {
+  const auth = await opencodeAuthHeader();
+  const headers = auth ? { authorization: auth } : {};
+  const candidates = new Set();
   try {
-    const auth = await opencodeAuthHeader();
-    res = await fetchFn(apiUrl("/api/location/reload"), {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
-      body: "{}",
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const res = await fetchFn(apiUrl("/api/debug/location"), { headers, signal: AbortSignal.timeout(timeoutMs) });
+    if (res.ok) {
+      const body = await res.json();
+      for (const row of Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : []) {
+        if (typeof row?.directory === "string" && row.directory) candidates.add(row.directory);
+      }
+    }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn("[opencodeAdmin] config reload: opencode unreachable:", msg);
-    return { ok: true, reloaded: false, reason: `opencode unreachable: ${msg}` };
+    console.warn("[opencodeAdmin] couldn't list opencode locations:", e instanceof Error ? e.message : String(e));
   }
-  if (res.ok) {
-    invalidateProvidersCache({ restarted: true });
-    return { ok: true, reloaded: true };
+  if (named) candidates.add(named);
+  const evicted = [];
+  for (const dir of candidates) {
+    if (await dirExists(dir)) continue;
+    try {
+      const url = new URL(apiUrl("/api/debug/location"));
+      url.searchParams.set("location[directory]", dir);
+      const res = await fetchFn(url.toString(), { method: "DELETE", headers, signal: AbortSignal.timeout(timeoutMs) });
+      if (res.ok) evicted.push(dir);
+      else console.warn(`[opencodeAdmin] couldn't forget stale location ${dir}: ${res.status}`);
+    } catch (e) {
+      console.warn(`[opencodeAdmin] couldn't forget stale location ${dir}:`, e instanceof Error ? e.message : String(e));
+    }
   }
-  let detail = "";
-  try {
-    detail = await res.text();
-  } catch {
-    /* ignore read error on the error body */
-  }
-  console.warn(`[opencodeAdmin] config reload failed: ${res.status}`, detail);
-  return { ok: false, error: `opencode config reload failed (${res.status}): ${String(detail ?? "").slice(0, 200)}` };
+  if (evicted.length > 0) console.warn("[opencodeAdmin] forgot stale opencode locations:", evicted.join(", "));
+  return evicted;
 }
 
 /**

@@ -1563,3 +1563,107 @@ test("an Architect change that keeps its sources untouched leaves the YAML intac
     await f.cleanup();
   }
 });
+
+// ---- all-or-nothing release of one task's proposals ----
+
+const CREATE_DRAFT = { name: "SEO Reviewer", description: "Reviews SEO.", isolation: "none", instructions: "You review SEO.\nYou never edit." };
+// a config writer that fails (like a rejected OpenCode reload) whenever the config would gain the SEO Reviewer's block
+const failingCreateEdit = (config) => async (fn) => {
+  const edits = typeof fn === "function" ? await fn(config.cfg) : fn;
+  config.cfg.agent ??= {};
+  for (const e of edits) {
+    if (e.value === undefined) delete config.cfg.agent[e.path[1]];
+    else config.cfg.agent[e.path[1]] = structuredClone(e.value);
+  }
+  if (edits.some((e) => e.path[1] === "agent-seo-reviewer" && e.value !== undefined)) {
+    return { ok: false, error: "opencode config reload failed (503): DirectoryNotFoundError" };
+  }
+  return { ok: true, changed: edits.length > 0, reloaded: edits.length > 0 };
+};
+const taskFixture = async () => {
+  const config = { cfg: { agent: {} } };
+  const f = await proposeFixture({ extra: { editConfig: failingCreateEdit(config) } });
+  return { ...f, config };
+};
+
+for (const order of ["update-first", "create-first"]) {
+  test(`release is all-or-nothing (${order}): when one proposal of a task can't be activated, the others are not left live and every Outcome line says so`, async () => {
+    const f = await taskFixture();
+    try {
+      const devBefore = await readFile(join(f.root, "dev", "agent.md"), "utf-8");
+      const makeUpdate = () => heldFor(f);
+      const makeCreate = () => heldFor(f, { action: "create", draft: CREATE_DRAFT, agent: undefined, baseHash: null });
+      const ids = order === "update-first" ? [await makeUpdate(), await makeCreate()] : [await makeCreate(), await makeUpdate()];
+      const [updateId, createId] = order === "update-first" ? ids : [ids[1], ids[0]];
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+
+      const update = await rec(f, updateId);
+      const create = await rec(f, createId);
+      assert.equal(create.state, "failed");
+      assert.notEqual(update.state, "applied", "the update must not stay live when the create failed");
+      assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), devBefore, "Dev's file is back to what it was");
+      assert.doesNotMatch(await readFile(join(f.root, "dev", ".compiled.md"), "utf-8"), /always run the tests/, "the compiled prompt is back too");
+      assert.equal(update.groupAborted, true);
+      assert.equal(create.groupAborted, true);
+      assert.match(update.error, /SEO Reviewer/, "the reason names the proposal that failed");
+      assert.match(update.error, /same task/);
+
+      const lines = await f.engine.outcomeLinesForJob("job1");
+      assert.equal(lines.length, 2);
+      const text = lines.join("\n");
+      assert.doesNotMatch(text, /was (created|updated) and is live/, "nothing from this task is live");
+      assert.match(text, /@dev was rolled back|@dev was not applied/);
+      assert.match(text, /@seo-reviewer could not be activated/);
+      assert.match(text, /nothing from this task is live/i);
+    } finally {
+      await f.cleanup();
+    }
+  });
+}
+
+test("release: a task whose proposals all apply is unchanged (both live, no group flag)", async () => {
+  const f = await proposeFixture();
+  try {
+    const a = await heldFor(f);
+    const b = await heldFor(f, { action: "create", draft: CREATE_DRAFT, agent: undefined, baseHash: null });
+    endJob(f, { status: "done" });
+    await f.engine.reconcile();
+    assert.equal((await rec(f, a)).state, "applied");
+    assert.equal((await rec(f, b)).state, "applied");
+    assert.equal((await rec(f, a)).groupAborted, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("release: proposals of different tasks are independent — one task's failure leaves the other's applied", async () => {
+  const config = { cfg: { agent: {} } };
+  const f = await proposeFixture({ extra: { editConfig: failingCreateEdit(config) } });
+  try {
+    const failing = await heldFor(f, { action: "create", draft: CREATE_DRAFT, agent: undefined, baseHash: null });
+    // a second task (its own job) proposes an update to Dev
+    f.w.jobs.push({ id: "job2", childSessionID: "ses_child2", parentSessionID: "ses_chat", status: "running", attempt: 1, architect: { rootJobId: "job2", attempt: 1, mode: "build" } });
+    const hash = (await f.engine.readAgentSnapshot("dev")).hash;
+    const b = { ...proposeBody({ baseHash: hash }), sessionID: "ses_child2" };
+    f.w.messages = proposeTranscript(b);
+    f.w.sources["ses_child2:src_a"] = f.w.sources["ses_child:src_a"];
+    const second = await f.engine.propose(b);
+    assert.equal(second.ok, true, second.error);
+    f.w.jobs = f.w.jobs.map((j) => ({ ...j, status: "done" }));
+    await f.engine.reconcile();
+    assert.equal((await rec(f, failing)).state, "failed");
+    assert.equal((await rec(f, second.change.id)).state, "applied");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("describeProposalOutcome: rolled back, not applied, failed and an applied change whose rollback failed", () => {
+  const base = { slug: "cro", kind: "update", state: "undone", reason: null, error: "Rolled back: because X", decidedBy: "auto", groupAborted: true };
+  const d = (over) => describeProposalOutcome({ ...base, ...over }, "auto");
+  assert.equal(d({}), "Outcome: @cro was rolled back and is not live (because X).");
+  assert.equal(d({ state: "conflict", error: "Not applied: because X" }), "Outcome: @cro was not applied (because X).");
+  assert.match(d({ state: "failed", slug: null, agentName: "Pricing CTA", error: "boom" }), /^Outcome: Pricing CTA could not be activated.*nothing from this task is live/s);
+  assert.match(d({ state: "applied", error: "Couldn't roll back: disk full" }), /is live, but rolling it back failed/);
+});

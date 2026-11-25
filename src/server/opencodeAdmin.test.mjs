@@ -386,6 +386,105 @@ describe("reloadOpencodeConfig", () => {
   });
 });
 
+describe("reloadOpencodeConfig — stale locations", () => {
+  useSandboxedOpencode();
+
+  const STALE = "/home/dev/projects/cantina-gone-worktree";
+  const staleBody = (dir) => JSON.stringify({ _tag: "ServiceUnavailableError", message: `FileSystem.DirectoryNotFoundError: Directory not found: ${dir} …` });
+
+  // A fake opencode: reload fails while any `stale` location is still registered; evicting one forgets it.
+  function fakeOpencode({ stale, known = [], evictStatus = 204, listStatus = 200 }) {
+    const state = { stale: [...stale], known: [...known], calls: [] };
+    const fetchFn = async (url, init = {}) => {
+      const u = new URL(url);
+      const method = init.method ?? "GET";
+      state.calls.push({ method, path: u.pathname, dir: u.searchParams.get("location[directory]") });
+      if (u.pathname === "/api/location/reload") {
+        return state.stale.length === 0 ? new Response(null, { status: 204 }) : new Response(staleBody(state.stale[0]), { status: 503 });
+      }
+      if (u.pathname === "/api/debug/location" && method === "GET") {
+        return listStatus === 200 ? Response.json([...state.stale, ...state.known].map((directory) => ({ directory }))) : new Response("nope", { status: listStatus });
+      }
+      if (u.pathname === "/api/debug/location" && method === "DELETE") {
+        if (evictStatus !== 204) return new Response("nope", { status: evictStatus });
+        const dir = u.searchParams.get("location[directory]");
+        state.stale = state.stale.filter((d) => d !== dir);
+        state.known = state.known.filter((d) => d !== dir);
+        return new Response(null, { status: 204 });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const evicted = () => state.calls.filter((c) => c.method === "DELETE").map((c) => c.dir);
+    return { state, fetchFn, evicted };
+  }
+  const existsOnly = (...dirs) => async (d) => dirs.includes(d);
+
+  it("evicts a deleted folder OpenCode still knows as a location, then reloads — and reports the reload as applied", async () => {
+    const oc = fakeOpencode({ stale: [STALE], known: ["/home/dev/projects/live"] });
+    const r = await reloadOpencodeConfig({ fetchFn: oc.fetchFn, dirExists: existsOnly("/home/dev/projects/live") });
+    assert.equal(r.ok, true);
+    assert.equal(r.reloaded, true);
+    assert.deepEqual(r.evicted, [STALE]);
+    assert.deepEqual(oc.evicted(), [STALE], "a folder that still exists is never evicted");
+    assert.equal(oc.state.calls.filter((c) => c.path === "/api/location/reload").length, 2, "reloaded again after the eviction");
+  });
+
+  it("evicts every stale location, including ones the first error did not name", async () => {
+    const oc = fakeOpencode({ stale: [STALE, "/home/dev/projects/leasebot-routine-1"] });
+    const r = await reloadOpencodeConfig({ fetchFn: oc.fetchFn, dirExists: existsOnly() });
+    assert.equal(r.ok, true);
+    assert.deepEqual([...r.evicted].sort(), [STALE, "/home/dev/projects/leasebot-routine-1"].sort());
+  });
+
+  it("evicts the folder the error names even when the location list is unavailable", async () => {
+    const oc = fakeOpencode({ stale: [STALE], listStatus: 404 });
+    const r = await reloadOpencodeConfig({ fetchFn: oc.fetchFn, dirExists: existsOnly() });
+    assert.equal(r.ok, true);
+    assert.deepEqual(oc.evicted(), [STALE]);
+  });
+
+  it("never evicts a folder that exists on disk: the failure is reported, not hidden", async () => {
+    const oc = fakeOpencode({ stale: [STALE] });
+    const r = await reloadOpencodeConfig({ fetchFn: oc.fetchFn, dirExists: existsOnly(STALE) });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /reload failed \(503\)/);
+    assert.deepEqual(oc.evicted(), []);
+  });
+
+  it("an eviction that fails is ok:false (the agent is not loaded), with the original error", async () => {
+    const oc = fakeOpencode({ stale: [STALE], evictStatus: 500 });
+    const r = await reloadOpencodeConfig({ fetchFn: oc.fetchFn, dirExists: existsOnly() });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /reload failed \(503\)/);
+    assert.match(r.error, /DirectoryNotFoundError/);
+  });
+
+  it("gives up after a bounded number of rounds and says the reload did not happen", async () => {
+    // every reload names a NEW missing folder, forever
+    let n = 0;
+    const fetchFn = async (url, init = {}) => {
+      const u = new URL(url);
+      if (u.pathname === "/api/location/reload") return new Response(staleBody(`/gone/${++n}`), { status: 503 });
+      if (u.pathname === "/api/debug/location" && (init.method ?? "GET") === "GET") return Response.json([]);
+      return new Response(null, { status: 204 });
+    };
+    const r = await reloadOpencodeConfig({ fetchFn, dirExists: existsOnly() });
+    assert.equal(r.ok, false);
+    assert.ok(n <= 12, `bounded (${n} reloads)`);
+  });
+
+  it("another kind of 503 (not a missing folder) never touches the locations", async () => {
+    const calls = [];
+    const fetchFn = async (url, init = {}) => {
+      calls.push(`${init.method ?? "GET"} ${new URL(url).pathname}`);
+      return new Response('{"message":"config invalid"}', { status: 503 });
+    };
+    const r = await reloadOpencodeConfig({ fetchFn, dirExists: existsOnly() });
+    assert.equal(r.ok, false);
+    assert.deepEqual(calls, ["POST /api/location/reload"]);
+  });
+});
+
 describe("listOpencodeModels", () => {
   useSandboxedOpencode();
 
