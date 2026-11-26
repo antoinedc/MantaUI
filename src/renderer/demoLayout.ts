@@ -58,6 +58,9 @@
 //                  state of the parent's job card with the box's progress `view`
 //                  (spec 2026-11-14): steps, no steps, needs a decision, quiet, rich
 //                  details, plan grew.
+// "agents"        — the agent pages (docs/screens/agents): the default shell plus the
+//                  agents on the box, what needs the user, the fleet grid and one
+//                  agent's profile and history, all answered by demoAgents.ts.
 export const DEMO_STATES = [
   "full",
   "empty",
@@ -73,6 +76,7 @@ export const DEMO_STATES = [
   "routines-chat",
   "explorer",
   "background",
+  "agents",
 ] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 

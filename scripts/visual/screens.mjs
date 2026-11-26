@@ -1261,6 +1261,52 @@ export const SCREENS = [
     viewport: BACKGROUND_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
+
+  // ---- Agent screens (docs/screens/agents) -------------------------------
+  // Both rows boot the `agents` demo state (demoAgents.ts) and reach their page with the sidebar's own rows. The mockup's
+  // tab strip is clicked for the matching screen; its region is the page pane (the sidebar and chrome are not under review).
+  {
+    id: "agents-fleet",
+    title: "Fleet page — needs you, recap, agents × projects",
+    url: "/app/index.html?demo&state=agents&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-agents-fleet",
+    region: ".manta-agents-fleet",
+    actions: async (page) => {
+      await page.locator('[data-testid="agents-nav-fleet"]').click();
+      await page.waitForSelector('[data-testid="fleet-grid"]', { state: "visible" });
+      await page.waitForSelector('[data-testid="needs-you-list"]', { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/agents/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-tab="fleet"]');
+    },
+    mockupRegion: 'section[data-screen="fleet"] .pane',
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "agents-profile",
+    title: "Agent profile — header, pending change, tabs (Overview)",
+    url: "/app/index.html?demo&state=agents&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-agents-profile",
+    region: ".manta-agents-profile",
+    actions: async (page) => {
+      await page.locator('[data-testid="agent-row"][data-slug="seo"]').click();
+      await page.waitForSelector('[data-testid="profile-header"]', { state: "visible" });
+      await page.waitForSelector('[data-testid="profile-charter"]', { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/agents/mockup.html",
+    mockupActions: async (page) => {
+      await page.click('[data-tab="profile"]');
+    },
+    mockupRegion: 'section[data-screen="profile"] .pane',
+    viewport: DESKTOP_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */
