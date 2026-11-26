@@ -214,6 +214,15 @@ else
 fi
 if [ -n "$CLIS_CHANGED" ]; then CLIS_CHANGED_FLAG=1; else CLIS_CHANGED_FLAG=0; fi
 
+# Issue #1684: a CLI-only update restarts nothing, so the running opencode would
+# keep claiming the OLD Claude Code version. The plugin re-reads this file per
+# request; refresh it now (manta-server also does at boot / hourly / on upgrade).
+# Guarded like restart_opencode's helper call: a mixed old/new script + lib pair
+# must degrade to "not refreshed", never kill the update.
+if declare -F write_claude_cli_version_file >/dev/null 2>&1; then
+  write_claude_cli_version_file "$STATE_HOME/.manta/claude-cli-version" || true
+fi
+
 # --- Payload-replaced flag (BET-1097) -----------------------------------------
 # Tracks whether this run ACTUALLY swapped the box payload (a git reset --hard
 # that moved HEAD, or a release tarball extraction). Set at the ONE place each

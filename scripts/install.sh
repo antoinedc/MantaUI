@@ -392,7 +392,7 @@ claude_cli_version() {
 # It is also what lets the value ride along in install.sh's inline `curl | bash`
 # fallback, which extracts whole functions.
 manta_claude_cli_version_floor() {
-  printf '%s' "2.1.257"
+  printf '%s' "2.1.293"
 }
 
 # resolve_anthropic_cli_version — echo the Claude Code version the opencode

@@ -312,6 +312,26 @@ test("detector: two concurrent detect() calls perform ONE probe round", async ()
   assert.equal(rootProbes, 1, "cached result must not re-probe");
 });
 
+test("detector: onDetect sees each FRESH probe once (not cache hits) and a throwing observer never breaks detect()", async () => {
+  const byPath = { "/usr/local/bin/claude": "2.1.300" };
+  const deps = detectDeps({
+    installed: Object.keys(byPath),
+    versions: byPath,
+    root: null,
+    spawn: (bin) => fakeSpawnResult({ stdout: byPath[bin] })(),
+  });
+  const seen = [];
+  deps.onDetect = (results) => {
+    seen.push(results.find((r) => r.id === "claude")?.current);
+    throw new Error("observer bug");
+  };
+  const detector = createCliDetector(deps);
+  const first = await detector.detect();
+  await detector.detect();
+  assert.deepEqual(seen, ["2.1.300"], "one call for the probe, none for the cached read");
+  assert.equal(first.find((r) => r.id === "claude")?.current, "2.1.300");
+});
+
 test("detector: invalidate() drops the cache so the next detect re-probes", async () => {
   // After a successful CLI upgrade the server calls cliDetector.invalidate() so
   // the very next server:update-check reflects the new version — clearing the

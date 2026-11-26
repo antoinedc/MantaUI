@@ -816,7 +816,7 @@ ensure_server_kill_policy() {
 # It is also what lets the value ride along in install.sh's inline `curl | bash`
 # fallback, which extracts whole functions.
 manta_claude_cli_version_floor() {
-  printf '%s' "2.1.257"
+  printf '%s' "2.1.293"
 }
 
 # version_gte <a> <b> — return 0 when dotted-numeric version a >= b.
@@ -877,6 +877,41 @@ resolve_anthropic_cli_version() {
   else
     printf '%s' "$floor"
   fi
+}
+
+# write_claude_cli_version_file [file] [version] — keep the LIVE claim file in
+# step with the box's real `claude` CLI. The manta-claude-max plugin re-reads
+# <state home>/.manta/claude-cli-version per request and claims the highest of
+# it, ANTHROPIC_CLI_VERSION and the floor, so a CLI-only update takes effect
+# without restarting opencode (which would end every in-flight turn). The
+# service-env claim above only changes on a restart; this file does not need one.
+# manta-server keeps the same file current at boot / hourly / on CLI upgrade;
+# this covers the window right after self-update upgrades the CLI.
+# Writes only a dotted version and only when it changed (atomic: temp + mv);
+# empty or unrecognised input leaves the file alone. Never fatal.
+# $1 = file, default ${MANTA_STATE_HOME:-$HOME}/.manta/claude-cli-version.
+# $2 = version, default claude_cli_version.
+write_claude_cli_version_file() {
+  local file="${1:-${MANTA_STATE_HOME:-$HOME}/.manta/claude-cli-version}"
+  local version="${2:-$(claude_cli_version)}" current tmp
+  case "$version" in
+    [0-9]*.[0-9]*) ;;
+    *) return 0 ;;
+  esac
+  current="$(cat "$file" 2>/dev/null || true)"
+  if [ "$current" = "$version" ]; then
+    return 0
+  fi
+  tmp="$file.tmp.$$"
+  if mkdir -p "$(dirname "$file")" 2>/dev/null \
+     && printf '%s\n' "$version" > "$tmp" 2>/dev/null \
+     && mv -f "$tmp" "$file" 2>/dev/null; then
+    log "claude CLI version claim file now $version ($file)"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    warn "write_claude_cli_version_file: could not write $file"
+  fi
+  return 0
 }
 
 # ensure_cli_version_text <unit-text> <version> — echo systemd unit text

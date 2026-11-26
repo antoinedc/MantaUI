@@ -1,9 +1,54 @@
 // Constants for the Claude-Code impersonation (mechanisms M3/M4) — copied from
 // opencode-claude-auth@2.2.1 `model-config.js`. They drift whenever Anthropic
-// changes what Claude Code sends (R5); the box's lever is ANTHROPIC_CLI_VERSION.
+// changes what Claude Code sends (R5); the box's levers are ANTHROPIC_CLI_VERSION
+// and the live state file written by manta-server (see cliVersion below).
 
-/** Claude Code version we claim when ANTHROPIC_CLI_VERSION is unset. */
-export const CC_VERSION_FALLBACK = "2.1.280";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Lowest Claude Code version we ever claim. Keep equal to
+ * `manta_claude_cli_version_floor` in scripts/lib/release.sh.
+ */
+export const CC_VERSION_FALLBACK = "2.1.293";
+
+/** Relative to the state home: the box's real `claude --version`, kept current by manta-server. */
+export const CLI_VERSION_FILE = join(".manta", "claude-cli-version");
+
+const VERSION_RE = /^\d+(?:\.\d+){1,3}$/;
+
+/** True when dotted-numeric `a` is strictly newer than `b`. */
+function isNewer(a: string, b: string): boolean {
+  const av = a.split(".").map(Number);
+  const bv = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(av.length, bv.length); i++) {
+    const d = (av[i] ?? 0) - (bv[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+// path -> last read, keyed on mtime so a request costs one stat, not a read.
+const fileCache = new Map<string, { mtimeMs: number; version: string | null }>();
+
+/** The version in the state file, or null for missing / unreadable / garbage. Never throws. */
+function versionFromFile(env: Record<string, string | undefined>): string | null {
+  const home = env.MANTA_STATE_HOME?.trim() || env.HOME?.trim();
+  if (!home) return null;
+  const path = join(home, CLI_VERSION_FILE);
+  try {
+    const { mtimeMs } = statSync(path);
+    const hit = fileCache.get(path);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.version;
+    const text = readFileSync(path, "utf8").trim();
+    const version = VERSION_RE.test(text) ? text : null;
+    fileCache.set(path, { mtimeMs, version });
+    return version;
+  } catch {
+    fileCache.delete(path);
+    return null;
+  }
+}
 
 export const BASE_BETAS: readonly string[] = [
   "claude-code-20250219",
@@ -40,10 +85,17 @@ export function getModelOverride(modelId: string): ModelOverride | null {
   return null;
 }
 
-/** The Claude Code version to claim. Read per call so a changed env takes effect. */
+/**
+ * The Claude Code version to claim: the HIGHEST of the env override, the live state file and
+ * the built-in floor. Read per call, so a `claude update` takes effect on the next request
+ * without restarting opencode (a restart would end every in-flight turn).
+ */
 export function cliVersion(env: Record<string, string | undefined> = process.env): string {
-  const v = env.ANTHROPIC_CLI_VERSION?.trim();
-  return v ? v : CC_VERSION_FALLBACK;
+  let best = CC_VERSION_FALLBACK;
+  for (const candidate of [env.ANTHROPIC_CLI_VERSION?.trim(), versionFromFile(env)]) {
+    if (candidate && VERSION_RE.test(candidate) && isNewer(candidate, best)) best = candidate;
+  }
+  return best;
 }
 
 export function userAgent(env: Record<string, string | undefined> = process.env): string {

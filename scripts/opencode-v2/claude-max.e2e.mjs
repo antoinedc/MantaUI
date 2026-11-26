@@ -32,7 +32,7 @@ const CAPTURE = join(HERE, "harness-capture-plugin.ts");
 const HAIKU = "claude-haiku-5-5";
 const OPUS = "claude-opus-5-5";
 const TOKEN = "ab12".repeat(8); // fake manta-server bearer (not a secret)
-const CLI_VERSION = "2.1.280";
+const CLI_VERSION = "2.1.293"; // = CC_VERSION_FALLBACK, the lowest claim the plugin ever makes
 const STALE_VERSION = "2.1.100";
 const SPEND_CAP_USD = 1.5;
 const BUSY_UTILIZATION = 90; // % of the 5 h window above which an account is not used
@@ -331,8 +331,8 @@ try {
   await cost(sb, sOpt);
   policy.value = { enabled: false };
 
-  // ============================================== 7. stale CLI version gating
-  console.log(`\n[7] stale ANTHROPIC_CLI_VERSION=${STALE_VERSION} is rejected by Anthropic (version gate)`);
+  // ============================================== 7. stale CLI version claim is lifted
+  console.log(`\n[7] stale ANTHROPIC_CLI_VERSION=${STALE_VERSION} is lifted to the floor, so Anthropic's version gate accepts the model`);
   sb2 = await startSandbox({
     binary,
     plugins: [{ src: CLAUDE_MAX, name: "manta-claude-max" }],
@@ -342,10 +342,8 @@ try {
   });
   const sStale = await newSession(sb2, { providerID: "anthropic", id: OPUS });
   const mStale = await turn(sb2, sStale, "Reply with exactly the single word: STALE_OK");
-  const idle = idleOf(mStale);
-  const errText = j(idle?.error ?? "");
-  check("the stale-version turn FAILED", idle?.outcome === "failed", j(mStale.slice(0, 2)));
-  check(`the failure is Anthropic's version gate naming ${STALE_VERSION}`, new RegExp(`${STALE_VERSION.replaceAll(".", "\\.")}.*does not support this model|does not support this model.*${STALE_VERSION.replaceAll(".", "\\.")}`, "s").test(errText), errText);
+  check("the stale-env turn SUCCEEDED (claim lifted to the floor; before #1684 this was rejected as 'does not support this model')", idleOf(mStale)?.outcome === "succeeded" && /STALE_OK/.test(assistantText(mStale)), j(mStale.slice(0, 2)));
+  await cost(sb2, sStale);
   await sb2.stop().catch(() => {});
   sb2 = undefined;
 

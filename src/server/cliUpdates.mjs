@@ -432,6 +432,8 @@ export async function detectClis(deps = {}) {
  * result is cached and why two callers within a probe must not double it.
  *
  * @param {object} [deps] passed through to `detectClis` per detect
+ * @param {(results:Array<object>) => void} [deps.onDetect] called with every
+ *   fresh probe result (never for a cached one); a throw is swallowed.
  * @returns {{ detect: () => Promise<Array<object>> }}
  */
 export function createCliDetector(deps = {}) {
@@ -451,6 +453,11 @@ export function createCliDetector(deps = {}) {
       .then((res) => {
         lastResult = res;
         lastAt = Date.now();
+        try {
+          deps.onDetect?.(res);
+        } catch {
+          /* an observer must never break the probe */
+        }
         return res;
       })
       .finally(() => {
