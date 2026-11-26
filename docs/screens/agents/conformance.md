@@ -4,7 +4,7 @@ Compared with `npm run visual:compare agents-fleet agents-profile agents-profile
 in light and dark (`VISUAL_COLOR_SCHEME=dark`). The mockup (`mockup.html`) is the visual reference. These are the places where what
 gets built differs on purpose.
 
-Last reviewed: 2026-11-26 (62a142ef)
+Last reviewed: 2026-11-26 (2bb27bf8)
 
 ## Deliberate
 
