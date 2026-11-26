@@ -6,12 +6,14 @@
 // Rendered directly (not through ChatPanel): the cards read the job store.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import type { DelegateJob, DelegateJobProgressView } from "../shared/types";
 import { BackgroundResultCard, BackgroundRunCards } from "./BackgroundCards";
 import type { BackgroundCard, BackgroundResultPart } from "./backgroundRun";
 import { installMockApi, mount, resetStore, type Harness } from "./testHarness";
 import { resetPackageAgentsForTest } from "./packageAgents";
+import { resetExplorerStore, shownRightPanel, useTaskPanelJobId } from "./explorer/explorerStore";
 
 const T0 = 1_800_000_000_000;
 const MIN = 60_000;
@@ -555,5 +557,135 @@ describe("an Architect job's result card (Agents Phase 5A)", () => {
     const second = open({}, part({ jobId: undefined }));
     await h!.flush();
     expect(second.api.calls.agentsChangesForJob).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent screens (spec §2.3, §2.5): the question chip, the seat-added line, Details → the task side panel
+// ---------------------------------------------------------------------------
+
+describe("agent task cards (agent screens)", () => {
+  const agentJob = (over: Record<string, unknown> = {}) =>
+    job({ agent: "agent-seo", agentName: "SEO", request: "@seo check the page", rootJobId: "job1", view: view(), ...over });
+  const card = (over: Partial<Extract<BackgroundCard, { kind: "running" }>> = {}) =>
+    runCard({ agentName: "SEO", request: "@seo check the page", ...over });
+  const panelJob = (sessionId: string): string | null => {
+    let seen: string | null = null;
+    function Probe() {
+      seen = useTaskPanelJobId(sessionId);
+      return null;
+    }
+    const el = document.createElement("div");
+    const root = createRoot(el);
+    act(() => root.render(createElement(Probe)));
+    act(() => root.unmount());
+    return seen;
+  };
+  const showWith = (j: DelegateJob, c: BackgroundCard, counts?: ReadonlyMap<string, number>) => {
+    installMockApi({ agentsList: () => Promise.resolve([]) });
+    resetPackageAgentsForTest();
+    resetStore({ jobs: { ses_c1: j }, jobSkew: {} });
+    h = mount(<BackgroundRunCards cards={[c]} openQuestionsByJob={counts} />);
+    return h.container;
+  };
+  beforeEach(() => resetExplorerStore());
+
+  it("shows '· 1 question' when the task's root has one open, and '· 2 questions' for two", () => {
+    showWith(agentJob(), card(), new Map([["job1", 1]]));
+    expect(text('[data-testid="background-questions"]')).toBe("· 1 question");
+    h!.unmount();
+    showWith(agentJob(), card(), new Map([["job1", 2]]));
+    expect(text('[data-testid="background-questions"]')).toBe("· 2 questions");
+  });
+
+  it("keys the count by the task's root, so a follow-up round of the same task still shows it", () => {
+    showWith(agentJob({ id: "job2", rootJobId: "job1" }), card({ jobId: "job2", key: "job2" }), new Map([["job1", 1]]));
+    expect(text('[data-testid="background-questions"]')).toBe("· 1 question");
+  });
+
+  it("shows no chip when this task has none (another task's count is not ours)", () => {
+    showWith(agentJob(), card(), new Map([["other", 3]]));
+    expect(q('[data-testid="background-questions"]')).toBeNull();
+    h!.unmount();
+    showWith(agentJob(), card(), new Map());
+    expect(q('[data-testid="background-questions"]')).toBeNull();
+  });
+
+  it("an older job without rootJobId counts under its own id", () => {
+    showWith(agentJob({ rootJobId: undefined }), card(), new Map([["job1", 1]]));
+    expect(text('[data-testid="background-questions"]')).toBe("· 1 question");
+  });
+
+  it("says where it seated the agent, on its own line outside the quotes, and leaves the request as it was", () => {
+    showWith(agentJob({ seatAdded: { project: "site-aaaaaaaaaa", projectName: "Site" } }), card());
+    expect(text('[data-testid="background-seat-added"]')).toBe("Added @seo to Site");
+    expect(text('[data-testid="background-request"]')).toBe("“@seo check the page”");
+  });
+
+  it("has no seat line when no seat was added", () => {
+    showWith(agentJob(), card());
+    expect(q('[data-testid="background-seat-added"]')).toBeNull();
+  });
+
+  it("Details on an agent task opens the task side panel for that chat instead of expanding inline", () => {
+    showWith(agentJob(), card());
+    act(() => q<HTMLButtonElement>('[data-testid="background-details-toggle"]')!.click());
+    expect(shownRightPanel("ses_p")).toBe("task");
+    expect(panelJob("ses_p")).toBe("job1");
+    expect(q('[data-testid="background-details"]')).toBeNull();
+  });
+
+  it("Details on a task before its first progress view still opens the panel", () => {
+    showWith(agentJob({ view: undefined }), card());
+    act(() => q<HTMLButtonElement>('[data-testid="background-details-toggle"]')!.click());
+    expect(shownRightPanel("ses_p")).toBe("task");
+  });
+
+  it("Details on any other background job still expands inline", () => {
+    showWith(job({ view: view() }), runCard());
+    act(() => q<HTMLButtonElement>('[data-testid="background-details-toggle"]')!.click());
+    expect(q('[data-testid="background-details"]')).not.toBeNull();
+    expect(shownRightPanel("ses_p")).toBe("none");
+    expect(q('[data-testid="background-questions"]')).toBeNull();
+  });
+
+  describe("on the finished card", () => {
+    const part = (over: Partial<BackgroundResultPart> = {}): BackgroundResultPart =>
+      ({
+        id: "p1",
+        messageID: "m1",
+        sessionID: "ses_p",
+        type: "background-result",
+        childSessionId: "ses_c1",
+        jobId: "job1",
+        state: "completed",
+        name: "Check the page",
+        agent: "agent-seo",
+        text: "Done.",
+        ...over,
+      }) as BackgroundResultPart;
+    const showResult = (p: BackgroundResultPart) => {
+      installMockApi({ agentsList: () => Promise.resolve([]), agentsChangesForJob: () => Promise.resolve([]) });
+      resetPackageAgentsForTest();
+      resetStore({});
+      h = mount(<BackgroundResultCard part={p} />);
+    };
+    const detailsButton = () => q<HTMLButtonElement>('[data-testid="background-result-details"]');
+
+    it("an agent task's result has a Details button that opens the panel for its job", () => {
+      showResult(part());
+      expect(detailsButton()?.textContent).toBe("Details");
+      act(() => detailsButton()!.click());
+      expect(shownRightPanel("ses_p")).toBe("task");
+      expect(panelJob("ses_p")).toBe("job1");
+    });
+
+    it("has none on an ordinary background result, or when no job id is known", () => {
+      showResult(part({ agent: "explore" }));
+      expect(detailsButton()).toBeNull();
+      h!.unmount();
+      showResult(part({ jobId: undefined }));
+      expect(detailsButton()).toBeNull();
+    });
   });
 });

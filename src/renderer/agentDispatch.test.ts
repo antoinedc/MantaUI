@@ -12,6 +12,16 @@ import {
   packageAgentDisplayName,
   pickAgentDispatch,
   usableAgents,
+  agentPickerRows,
+  agentSlugOf,
+  isAgentTask,
+  isTaskQuestionId,
+  openQuestionCounts,
+  resolvePickerProject,
+  resolveTaskJob,
+  rootJobOf,
+  taskBriefOf,
+  taskQuestionRequest,
 } from "./agentDispatch";
 
 const agent = (slug: string, over: Partial<AgentInfo> = {}): AgentInfo => ({
@@ -153,5 +163,178 @@ describe("the Architect (Agents Phase 5A)", () => {
   });
   it("an invalid Architect row is not a team agent", () => {
     expect(usableAgents([agent("architect", { role: "specialist", error: "Only the built-in Architect can have this role" })])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent screens: tasks, task questions, the @ picker
+// ---------------------------------------------------------------------------
+
+describe("task identity", () => {
+  it("rootJobOf reads the root the box stamped, then the Architect stamp, then the job's own id", () => {
+    expect(rootJobOf({ id: "j2", rootJobId: "j1" })).toBe("j1");
+    expect(rootJobOf({ id: "j2", architect: { rootJobId: "j0" } })).toBe("j0");
+    expect(rootJobOf({ id: "j2" })).toBe("j2");
+  });
+
+  it("isAgentTask / agentSlugOf follow the agent-<slug> key and nothing else", () => {
+    expect(isAgentTask({ agent: "agent-seo" })).toBe(true);
+    expect(isAgentTask({ agent: "explore" })).toBe(false);
+    expect(isAgentTask({ agent: null })).toBe(false);
+    expect(isAgentTask(undefined)).toBe(false);
+    expect(agentSlugOf("agent-seo")).toBe("seo");
+    expect(agentSlugOf("explore")).toBeNull();
+    expect(agentSlugOf(undefined)).toBeNull();
+  });
+
+  it("resolveTaskJob finds the newest live round of the same task", () => {
+    const jobs = {
+      a: { id: "j1", createdAt: 1, supersededBy: "j2" },
+      b: { id: "j2", rootJobId: "j1", createdAt: 5, attempt: 2 },
+      c: { id: "x", createdAt: 9 },
+    };
+    expect(resolveTaskJob(jobs, "j1")?.id).toBe("j2");
+    expect(resolveTaskJob(jobs, "j2")?.id).toBe("j2");
+    expect(resolveTaskJob(jobs, "x")?.id).toBe("x");
+  });
+
+  it("resolveTaskJob still finds a later round when the first round's record is gone", () => {
+    expect(resolveTaskJob({ b: { id: "j2", rootJobId: "j1", createdAt: 5 } }, "j1")?.id).toBe("j2");
+  });
+
+  it("resolveTaskJob is undefined for no id and for an unknown task", () => {
+    expect(resolveTaskJob({ a: { id: "j1" } }, null)).toBeUndefined();
+    expect(resolveTaskJob({ a: { id: "j1" } }, "nope")).toBeUndefined();
+    expect(resolveTaskJob({}, "j1")).toBeUndefined();
+  });
+
+  it("taskBriefOf is the request as written, without the seat brief and the chat excerpt the box appends", () => {
+    expect(taskBriefOf({ prompt: "Do the thing.\n\n---\nYour brief for this project:\nB\n\n---\nRecent conversation…\nX" })).toBe("Do the thing.");
+    expect(taskBriefOf({ prompt: "Just this" })).toBe("Just this");
+    expect(taskBriefOf({ prompt: "", request: "@seo check" })).toBe("@seo check");
+    expect(taskBriefOf({})).toBe("");
+  });
+});
+
+describe("task questions in the chat", () => {
+  const tq = {
+    id: "tq_ab12",
+    rootJobId: "j1",
+    jobId: "j1",
+    parentSessionID: "ses_p",
+    agentSlug: "seo",
+    agentName: "SEO",
+    project: null,
+    taskName: "Check",
+    questions: [
+      { question: "Which pages?", options: [{ label: "Pricing", description: "d" }], multiple: true },
+      { question: "How deep?", options: [], multiple: false },
+    ],
+    state: "open" as const,
+    askedAt: 1,
+    answeredAt: null,
+    answer: null,
+    delivery: null,
+    delivering: null,
+    error: null,
+  };
+
+  it("is told apart from the session's own questions by its tq_ prefix", () => {
+    expect(isTaskQuestionId("tq_ab12")).toBe(true);
+    expect(isTaskQuestionId("que_1")).toBe(false);
+    expect(isTaskQuestionId("call_9")).toBe(false);
+    expect(isTaskQuestionId(undefined)).toBe(false);
+  });
+
+  it("becomes a question request for the owning chat, headed '<Agent> asks you', free text allowed", () => {
+    const req = taskQuestionRequest(tq);
+    expect(req.id).toBe("tq_ab12");
+    expect(req.sessionID).toBe("ses_p");
+    expect(req.requestId).toBeUndefined();
+    expect(req.questions.map((q) => q.header)).toEqual(["SEO asks you", "SEO asks you"]);
+    expect(req.questions[0]).toMatchObject({ question: "Which pages?", multiple: true, custom: true });
+    expect(req.questions[0].options).toEqual([{ label: "Pricing", description: "d" }]);
+  });
+
+  it("counts open questions per task", () => {
+    const counts = openQuestionCounts([
+      { rootJobId: "j1", state: "open" },
+      { rootJobId: "j1", state: "open" },
+      { rootJobId: "j2", state: "open" },
+      { rootJobId: "j3", state: "answered" },
+    ]);
+    expect(counts.get("j1")).toBe(2);
+    expect(counts.get("j2")).toBe(1);
+    expect(counts.has("j3")).toBe(false);
+  });
+});
+
+describe("the @ picker (agent screens §2.3)", () => {
+  const SITE = { slug: "site-aaaaaaaaaa", name: "Site" };
+  const ARCH = agent("architect", { name: "Architect", role: "architect" });
+  const seo = agent("seo", { name: "SEO", seats: [SITE.slug] });
+  const sales = agent("sales", { name: "Sales", seats: [] });
+  const dev = agent("dev", { name: "Dev" }); // an older box: no seats field
+
+  it("seated-here agents come first, then the rest by name", () => {
+    const rows = agentPickerRows([sales, dev, ARCH, seo], "", SITE);
+    expect(rows.map((r) => r.agent.slug)).toEqual(["seo", "architect", "dev", "sales"]);
+  });
+
+  it("a specialist reads 'seated here' or 'adds to <Project>'", () => {
+    const rows = agentPickerRows([seo, sales, dev], "", SITE);
+    expect(rows.find((r) => r.agent.slug === "seo")?.pill).toBe("seated here");
+    expect(rows.find((r) => r.agent.slug === "sales")?.pill).toBe("adds to Site");
+    expect(rows.find((r) => r.agent.slug === "dev")?.pill).toBe("adds to Site");
+  });
+
+  it("the Architect and the lead have no seats, so no pill", () => {
+    const lead = agent("manta", { name: "Manta", role: "lead" });
+    const rows = agentPickerRows([ARCH, lead, seo], "", SITE);
+    expect(rows.find((r) => r.agent.slug === "architect")?.pill).toBeNull();
+    expect(rows.find((r) => r.agent.slug === "architect")).toBeTruthy(); // it stays in the list
+    // the lead is never a dispatch target, so it is not offered either (usableAgents)
+    expect(rows.find((r) => r.agent.slug === "manta")).toBeUndefined();
+  });
+
+  it("no pill at all when the chat's project is unknown", () => {
+    const rows = agentPickerRows([seo, sales], "", null);
+    expect(rows.map((r) => r.pill)).toEqual([null, null]);
+    expect(rows.map((r) => r.agent.slug)).toEqual(["sales", "seo"]);
+  });
+
+  it("filters by the typed name or slug, keeping the order", () => {
+    expect(agentPickerRows([seo, sales, dev], "se", SITE).map((r) => r.agent.slug)).toEqual(["seo"]);
+    expect(agentPickerRows([seo, sales, dev], "", SITE).length).toBe(3);
+    expect(agentPickerRows([seo, sales, dev], "zzz", SITE)).toEqual([]);
+  });
+
+  it("an invalid agent is not offered", () => {
+    expect(agentPickerRows([agent("broken", { error: "bad" }), seo], "", SITE).map((r) => r.agent.slug)).toEqual(["seo"]);
+  });
+});
+
+describe("resolvePickerProject", () => {
+  const projects = [
+    { slug: "site-aaaaaaaaaa", name: "Site" },
+    { slug: "api-bbbbbbbbbb", name: "API" },
+    { slug: "api-cccccccccc", name: "api" },
+  ];
+
+  it("matches the folder's name to a registry project's name, case-insensitively", () => {
+    expect(resolvePickerProject("/home/dev/projects/site", projects)).toEqual(projects[0]);
+    expect(resolvePickerProject("/home/dev/projects/site/", projects)).toEqual(projects[0]);
+  });
+
+  it("matches the slug's name part too", () => {
+    expect(resolvePickerProject("/w/Site", [{ slug: "site-aaaaaaaaaa", name: "The site" }])).toEqual({ slug: "site-aaaaaaaaaa", name: "The site" });
+  });
+
+  it("is null when nothing matches or more than one project does (never a guess)", () => {
+    expect(resolvePickerProject("/home/dev/projects/other", projects)).toBeNull();
+    expect(resolvePickerProject("/home/dev/projects/api", projects)).toBeNull();
+    expect(resolvePickerProject("", projects)).toBeNull();
+    expect(resolvePickerProject("/x", null)).toBeNull();
+    expect(resolvePickerProject("/x", [])).toBeNull();
   });
 });

@@ -300,3 +300,23 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §5. Code: `src/serve
   recreated (enabled) when the file is valid again, so an "Off" choice does not survive an invalid edit.
 - **Seats are listed by file name only.** A seat file for a project that left the registry still shows (named by its slug) until it is removed.
 - **The fleet's grid reads the jobs store, which keeps finished tasks 7 days or 50 records;** older tasks show as "Idle" (by design).
+
+## Agent screens, R2 renderer (chat, task panel, picker): edge cases left open
+
+Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.3, §2.5, §4.4, §6.2, §6.6. Code: `ChatPanel.tsx`, `BackgroundCards.tsx`,
+`TaskSidePanel.tsx`, `ResearchRows.tsx`, `ComposerParts.tsx`, `agentDispatch.ts`, `newAgentDraft.ts`, `hooks/useTaskQuestions.ts`.
+- **The picker finds the chat's project from its folder name.** The renderer has no folder → registry-project mapping, so
+  `resolvePickerProject` matches the folder's name against `agents:projects` (name equal, or the slug's name part) and only accepts a single
+  match; otherwise the rows carry no seat pill. A worktree folder named differently from its repo gets no pills. A server channel
+  (`agents:project-for {directory}`, answered by `registry.identify`) would make it exact.
+- **The new-chat draft (`NewSessionScreen`) has its own `@` list** (`matchAgents`), without badges, descriptions or seat pills. Only the
+  chat composer's picker (`TypeaheadPopup`) got them.
+- **The lead is not in the picker** (`usableAgents` never offered it: a mention of the lead would not dispatch anything), so "lead first"
+  only takes effect if the lead is ever made pickable. The Architect is listed, without a pill.
+- **A task question's own `error` text is not drawn under the card.** The refusal sentence the call throws goes on the chat's send-error
+  line (spec §4.4); the record's `error` field comes back on the next refetch but nothing renders it.
+- **A task question in a chat with no messages yet is not drawn** (the transcript's empty state only shows background and handoff cards).
+  A task's chat has talked already, so this cannot happen in practice.
+- **"Done · N min" in the task panel is the round's own run time** (`startedAt` → `endedAt` of the shown round), not the whole task across
+  follow-up rounds.
+- **The panel's Details toggle on a run card with no progress `view` still opens the panel,** which then says "No progress reported yet".

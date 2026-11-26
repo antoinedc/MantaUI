@@ -133,6 +133,8 @@ export type TypeaheadRow = {
   key: string;
   primary: string;            // user-visible label, e.g. "@src/foo" or "/init"
   secondary?: string;         // dim caption: command description / agent description
+  // A package agent's row (agent screens §2.3): its badge colour and the seat pill ("seated here" / "adds to Site").
+  agent?: { name: string; slug: string; color: string | null; pill: string | null };
 };
 
 

@@ -814,16 +814,38 @@ describe("dispatchFrame records the run epoch (WS11 D11)", () => {
 // Agents Phase 4: the agent-change channels and the `agentChange` bus kind
 // ---------------------------------------------------------------------------
 
-describe("httpApi agent-change channels", () => {
+type ChannelCall = { name: string; call: () => Promise<unknown>; channel: string; args: unknown[] };
+
+/** One test pair per channel: it posts `{args}` to /rpc/<channel> and resolves with the answer; a refusal throws the box's sentence. */
+function channelTable(calls: ChannelCall[], answerFor: (c: ChannelCall) => unknown, refusal: string) {
   beforeEach(() => {
     mockLocalStorage["manta_server"] = "https://example.com";
     mockLocalStorage["manta_token"] = HEX32;
   });
+  for (const c of calls) {
+    it(`${c.name} posts to ${c.channel} and resolves with the answer`, async () => {
+      const answer = answerFor(c);
+      const fetchMock = stubFetch().mockImplementation(
+        async () => new Response(JSON.stringify({ result: answer }), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+      await expect(c.call()).resolves.toEqual(answer);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`https://example.com/rpc/${encodeURIComponent(c.channel)}`);
+      expect(JSON.parse(String(init.body))).toEqual({ args: c.args });
+    });
 
+    it(`${c.name} throws the box's sentence on a refusal`, async () => {
+      stubFetch().mockImplementation(async () => new Response(JSON.stringify({ error: refusal }), { status: 400 }));
+      await expect(c.call()).rejects.toThrow(refusal);
+    });
+  }
+}
+
+describe("httpApi agent-change channels", () => {
   const ok = (result: unknown) => async () =>
     new Response(JSON.stringify({ result }), { status: 200, headers: { "content-type": "application/json" } });
 
-  const calls: Array<{ name: string; call: () => Promise<unknown>; channel: string; args: unknown[] }> = [
+  const calls: ChannelCall[] = [
     {
       name: "agentsChangeFor",
       call: () => httpApi.agentsChangeFor({ sessionID: "ses_1", messageID: "msg_1", callID: "call_1" }),
@@ -836,22 +858,7 @@ describe("httpApi agent-change channels", () => {
     { name: "agentsChangesForJob", call: () => httpApi.agentsChangesForJob("job_1"), channel: "agents:changes-for-job", args: [{ jobId: "job_1" }] },
   ];
 
-  for (const c of calls) {
-    it(`${c.name} posts to ${c.channel} and resolves with the record`, async () => {
-      const fetchMock = stubFetch().mockImplementation(ok({ id: "ach_1", state: "applied" }));
-      await expect(c.call()).resolves.toEqual({ id: "ach_1", state: "applied" });
-      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe(`https://example.com/rpc/${encodeURIComponent(c.channel)}`);
-      expect(JSON.parse(String(init.body))).toEqual({ args: c.args });
-    });
-
-    it(`${c.name} throws the box's sentence on a refusal`, async () => {
-      stubFetch().mockImplementation(
-        async () => new Response(JSON.stringify({ error: "Changing agents is turned off in your autonomy settings" }), { status: 400 }),
-      );
-      await expect(c.call()).rejects.toThrow("Changing agents is turned off in your autonomy settings");
-    });
-  }
+  channelTable(calls, () => ({ id: "ach_1", state: "applied" }), "Changing agents is turned off in your autonomy settings");
 
   it("agentsChangeFor passes a missing record through as null", async () => {
     stubFetch().mockImplementation(ok(null));
@@ -865,6 +872,77 @@ describe("httpApi agent-change channels", () => {
     dispatchFrame(frame);
     expect(cb).toHaveBeenCalledTimes(1);
     expect(cb.mock.calls[0][0]).toEqual({ id: "ach_1", sessionID: "ses_1", slug: "reviewer", origin: { kind: "job", jobId: "j1", rootJobId: "j1", attempt: 1 } });
+    unsub();
+    dispatchFrame(frame);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent screens (spec docs/superpowers/specs/2026-11-26-agents-screens.md §6.2): one channel per Api member
+// ---------------------------------------------------------------------------
+
+describe("httpApi agent-screens channels", () => {
+  const calls: ChannelCall[] = [
+    { name: "agentsQuestions", call: () => httpApi.agentsQuestions({ sessionID: "ses_1" }), channel: "agents:questions", args: [{ sessionID: "ses_1" }] },
+    { name: "agentsQuestions (all)", call: () => httpApi.agentsQuestions(), channel: "agents:questions", args: [{}] },
+    {
+      name: "agentsQuestionAnswer",
+      call: () => httpApi.agentsQuestionAnswer({ id: "tq_1", answers: [["A"]] }),
+      channel: "agents:question-answer",
+      args: [{ id: "tq_1", answers: [["A"]] }],
+    },
+    { name: "agentsQuestionDismiss", call: () => httpApi.agentsQuestionDismiss({ id: "tq_1" }), channel: "agents:question-dismiss", args: [{ id: "tq_1" }] },
+    { name: "agentsNeedsYou", call: () => httpApi.agentsNeedsYou(), channel: "agents:needs-you", args: [] },
+    { name: "agentsReviewDone", call: () => httpApi.agentsReviewDone({ jobId: "j1" }), channel: "agents:review-done", args: [{ jobId: "j1" }] },
+    { name: "agentsFleet", call: () => httpApi.agentsFleet(), channel: "agents:fleet", args: [] },
+    { name: "agentsFleetSeen", call: () => httpApi.agentsFleetSeen(), channel: "agents:fleet-seen", args: [] },
+    { name: "agentsProfile", call: () => httpApi.agentsProfile({ slug: "seo" }), channel: "agents:profile", args: [{ slug: "seo" }] },
+    { name: "agentsHistory", call: () => httpApi.agentsHistory({ slug: "seo" }), channel: "agents:history", args: [{ slug: "seo" }] },
+    { name: "agentsChangeRestore", call: () => httpApi.agentsChangeRestore({ id: "ach_1" }), channel: "agents:change-restore", args: [{ id: "ach_1" }] },
+    {
+      name: "agentsSeatAdd",
+      call: () => httpApi.agentsSeatAdd({ slug: "seo", project: "site-aaaaaaaaaa", brief: "b" }),
+      channel: "agents:seat-add",
+      args: [{ slug: "seo", project: "site-aaaaaaaaaa", brief: "b" }],
+    },
+    {
+      name: "agentsSeatSet",
+      call: () => httpApi.agentsSeatSet({ slug: "seo", project: "site-aaaaaaaaaa", brief: "b2" }),
+      channel: "agents:seat-set",
+      args: [{ slug: "seo", project: "site-aaaaaaaaaa", brief: "b2" }],
+    },
+    {
+      name: "agentsSeatRemove",
+      call: () => httpApi.agentsSeatRemove({ slug: "seo", project: "site-aaaaaaaaaa" }),
+      channel: "agents:seat-remove",
+      args: [{ slug: "seo", project: "site-aaaaaaaaaa" }],
+    },
+    { name: "agentsRefreshSet", call: () => httpApi.agentsRefreshSet({ slug: "seo", enabled: false }), channel: "agents:refresh-set", args: [{ slug: "seo", enabled: false }] },
+    { name: "agentsTaskResearch", call: () => httpApi.agentsTaskResearch({ jobId: "j1" }), channel: "agents:task-research", args: [{ jobId: "j1" }] },
+    { name: "agentsProjects", call: () => httpApi.agentsProjects(), channel: "agents:projects", args: [] },
+  ];
+
+  channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");
+
+  it("onTaskQuestion delivers a taskQuestion frame's payload and stops after unsubscribe", () => {
+    const cb = vi.fn();
+    const unsub = httpApi.onTaskQuestion(cb);
+    const frame = JSON.stringify({ kind: "taskQuestion", payload: { id: "tq_1", parentSessionID: "ses_1", rootJobId: "j1", state: "open" } });
+    dispatchFrame(frame);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb.mock.calls[0][0]).toEqual({ id: "tq_1", parentSessionID: "ses_1", rootJobId: "j1", state: "open" });
+    unsub();
+    dispatchFrame(frame);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onAgentFleet delivers an agentFleet hint and stops after unsubscribe", () => {
+    const cb = vi.fn();
+    const unsub = httpApi.onAgentFleet(cb);
+    const frame = JSON.stringify({ kind: "agentFleet", payload: {} });
+    dispatchFrame(frame);
+    expect(cb).toHaveBeenCalledTimes(1);
     unsub();
     dispatchFrame(frame);
     expect(cb).toHaveBeenCalledTimes(1);
