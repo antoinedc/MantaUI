@@ -104,6 +104,17 @@ export function cellView(cell: FleetCell | null | undefined): CellView {
   }
 }
 
+/** "Since yesterday 18:40:" — the recap's lead-in; with no earlier visit on record it covers the last day. */
+export function recapLead(since: number | null, now: number): string {
+  if (since == null) return "In the last 24 hours:";
+  const at = new Date(since);
+  const clock = at.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const gap = Math.round((day(new Date(now)) - day(at)) / 86_400_000);
+  const when = gap <= 0 ? "today" : gap === 1 ? "yesterday" : dateLabel(since);
+  return `Since ${when} ${clock}:`;
+}
+
 /** Rows of the grid worth drawing at all: a fleet with no agents says so instead. */
 export const hasFleetRows = (fleet: AgentFleet | null | undefined): boolean => (fleet?.rows.length ?? 0) > 0;
 

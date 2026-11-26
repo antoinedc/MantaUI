@@ -16,6 +16,7 @@ import {
   nextTab,
   planUsagePercent,
   PROFILE_TABS,
+  recapLead,
   reviewPart,
   seatNotesLabel,
   weekPill,
@@ -213,5 +214,16 @@ describe("seats", () => {
     expect(memoryLabel("read")).toBe("read-only");
     expect(memoryLabel("read-write")).toBe("read + write");
     expect(memoryLabel("none")).toBe("no access");
+  });
+});
+
+describe("recapLead", () => {
+  const at = (d: number, h: number, m: number) => new Date(2026, 10, d, h, m).getTime();
+  it("today, yesterday, an older day; and the last day when there is no earlier visit", () => {
+    const now = at(26, 12, 0);
+    expect(recapLead(at(26, 9, 5), now)).toBe("Since today 09:05:");
+    expect(recapLead(at(25, 18, 40), now)).toBe("Since yesterday 18:40:");
+    expect(recapLead(at(12, 7, 0), now)).toBe("Since 12 Nov 07:00:");
+    expect(recapLead(null, now)).toBe("In the last 24 hours:");
   });
 });

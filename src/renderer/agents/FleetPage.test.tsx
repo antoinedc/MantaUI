@@ -79,7 +79,7 @@ describe("FleetPage", () => {
   const onOpenProfile = vi.fn();
 
   beforeEach(() => {
-    resetStore();
+    resetStore({ usage: [], jobs: {}, drafts: [] });
     resetPackageAgentsForTest();
     onOpenProfile.mockClear();
     hint = null;
@@ -119,12 +119,11 @@ describe("FleetPage", () => {
   }
 
   it("shows a skeleton only after 150 ms of waiting, then the page", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let resolve!: (f: AgentFleet) => void;
     await open({}, { agentsFleet: () => new Promise<AgentFleet>((r) => (resolve = r)) });
     expect(q('[data-testid="fleet-skeleton"]')).toBeNull();
     await act(async () => {
-      vi.advanceTimersByTime(200);
+      await new Promise((r) => setTimeout(r, 220));
     });
     expect(q('[data-testid="fleet-skeleton"]')).toBeTruthy();
     await act(async () => {
