@@ -96,7 +96,7 @@ function SeatRow({
         <span className="min-w-0 flex-1 truncate text-body font-semibold text-text">{seat.projectName}</span>
         <span className="shrink-0 whitespace-nowrap text-meta text-text-faint">{seatNotesLabel(seat.notes)}</span>
       </div>
-      <div className="ml-7 mt-1 flex flex-col gap-2">
+      <div className="ml-8 mt-1 flex flex-col gap-2">
         {task && (
           <div className="flex items-center gap-2 text-meta text-text-faint">
             {task.tone !== "idle" && <StatusDot tone={task.tone} />}

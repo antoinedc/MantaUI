@@ -17,14 +17,14 @@
   - tab "Overview" [selected]
   - tab "Research · 4"
   - tab "Seats · 2"
-  - tab "History · 4"
+  - tab "History · 5"
 - tabpanel "Overview":
   - heading "How to use it" [level=3]
   - term: Use it when
   - definition: A page's ranking, markup or AI-search visibility is the question
   - term: Not for
   - definition: Rewriting brand copy, buying links, touching app code
-  - group: Full instructions · 5 lines
+  - group: Full instructions · 6 lines
   - heading "Research it relies on" [level=3]
   - button "All 4 →"
   - list:
@@ -32,7 +32,6 @@
     - listitem: /Structured data for product pages 4 sources · \d+ days old fresh/
     - listitem: /AI crawler access rules 4 sources · \d+ days old stale/
     - listitem: llms.txt adoption 2 sources · 6 days old fresh thin
-  - paragraph: From the shared research library. Thin means fewer than 3 independent sources.
   - complementary "Details":
     - heading "Details" [level=3]
     - term: Model
@@ -49,7 +48,7 @@
       - listitem: /Ronda \d+ notes/
     - button "Manage seats"
     - heading "Access · in the Manta seat" [level=3]
-    - list:
+    - list "Access in the Manta seat":
       - listitem "changed only through change cards": SEO know-how read
       - listitem "shared by all agents": Research library read
       - listitem "shared with other agents in Manta": Manta memory read + write

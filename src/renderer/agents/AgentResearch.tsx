@@ -68,7 +68,7 @@ function EntryRow({ entry, defaultOpen }: { entry: AgentResearchEntry; defaultOp
             <ChevronRight size={12} aria-hidden="true" className="shrink-0 text-text-faint transition-transform group-open:rotate-90 motion-reduce:transition-none" />
             <Summary entry={entry} />
           </summary>
-          <div className="mb-3 ml-7 flex flex-col gap-2 text-meta">
+          <div className="mb-3 ml-8 flex flex-col gap-2 text-meta">
             <ul className="m-0 flex list-none flex-col gap-1 p-0 text-text-muted">
               {(entry.sources ?? []).map((s) => (
                 <li key={s.label}>{s.url ? <SourceLink label={s.label} url={s.url} onError={setLinkError} /> : <span>{s.label}</span>}</li>
