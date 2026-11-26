@@ -366,3 +366,12 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
   item reappear if its branch is still unmerged.
 - **The "thin" research tag is warn-toned everywhere** (the task side panel shares the rows); nobody asked for the panel to differ.
 
+## Profile tabs (proposal A) — edge cases left for later
+
+- **"Next refresh" on the Research pane.** The mockup shows a date; the refresh routine's next run isn't on the profile read. Worth adding once the routines read exposes it.
+- **Page titles for sources.** The library keeps a claim, quote, link and publisher per finding but no page title, so a source row is the publisher or site. A stored title would give the mockup's "site — page name" rows.
+- **Private sources are counted per finding, not per source,** because the library's wire shape doesn't say which private findings share a source.
+- **"Also used by" is derived from applied changes' basis** (the research a change rested on), not from every task that read an entry; an agent that read it without changing anything isn't listed.
+- **Restore for a change shown above the tabs.** A record whose card is above (just applied) has no row to open, so "Restore the version before this" isn't offered for it; its own Undo does the same thing.
+- **Seat briefs are shown whole.** A 4000-character brief makes a tall row; clamp with "Show more" if that turns out to matter.
+

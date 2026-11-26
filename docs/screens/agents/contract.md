@@ -42,9 +42,10 @@ are EXISTING components drawn as they ship; render the component, never copy the
 |---|---|
 | `FleetPage` (`agents/FleetPage.tsx`, R1) | page shell: header pills, Needs you, recap, grid |
 | `NeedsYou` (`agents/NeedsYou.tsx`, R1) | list of `{context line + existing card}`; the context line is the only new markup |
-| `AgentProfile` (`agents/AgentProfile.tsx`, R1) | header, pending card, tablist + panels; the Overview is the main column + the details pane |
-| `AgentHistory` (`agents/AgentHistory.tsx`, R1) | rows (date, who, summary, outcome, actions); expands to `AgentChangeView` |
-| `AgentSeats` (`agents/AgentSeats.tsx`, R1) | seat rows, brief editor (`<textarea>`), add-seat `<select>`, memory map grid |
+| `AgentProfile` (`agents/AgentProfile.tsx`, R1) | header, pending card, tablist + panels; every tab is a `TwoColumn` (content + tinted pane, `agents/ProfileLayout.tsx`) |
+| `AgentResearch` (`agents/AgentResearch.tsx`) | the Research tab: expandable entry rows + the library / health / refresh pane |
+| `AgentHistory` (`agents/AgentHistory.tsx`, R1) | native-disclosure rows (when, who, summary, status + reason); open → `AgentChangeView` (Undo only on the newest live one) + the quiet restore link; `HistoryPane` |
+| `AgentSeats` (`agents/AgentSeats.tsx`, R1) | seat rows (brief, inline access map, Edit brief / Remove seat), brief editor (`<textarea>` + counter), pane: what a seat is + add-seat `<select>` |
 | `TaskSidePanel` (`TaskSidePanel.tsx`, R2) | right-slot panel: top bar + `JobDetails` + `ResearchRows` + brief `<details>` |
 | `ResearchRows` (`ResearchRows.tsx`, R2) | library entry rows (topic, sources · age, fresh/stale/thin `Pill`s); used by the panel and the profile |
 
@@ -69,6 +70,9 @@ are EXISTING components drawn as they ship; render the component, never copy the
 | `.kv` (pane Details) | `grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-label`; `dt` `text-text-faint`, `dd` `text-text text-right` |
 | `.change` (collapsed pending card) | the `Card` chrome (elevated when pending); header = chip, `Architect · summary` (`text-body text-text`, who `font-semibold`), Discard / Apply; native `<details>` fold `text-meta font-medium text-text-faint` ("Show the change · 3 lines · based on 2 sources") |
 | `.rw` rows | `flex items-center gap-2 py-2 border-b border-border-subtle text-label`; right meta `ml-auto text-meta text-text-faint whitespace-nowrap` |
+| `.rows` / `.src` (Research) | `border-t border-border-subtle` list; row `flex min-h-10 items-center gap-3 py-2 border-b border-border-subtle`, native `<details>` (chevron rotates on open); sources `text-meta text-accent-tx` links under the row, indented; "Also used by …" `text-meta text-text-faint` |
+| `.seatrow` | `py-4 border-b border-border-subtle`; name `text-body font-semibold`, notes `text-meta text-text-faint` at the end; brief `text-body text-text` (whole, `whitespace-pre-line`); access map inline (`flex-wrap`); actions: "Edit brief" `text-meta font-medium text-accent-tx`, "Remove seat" a quiet underlined link (`hover:text-danger`) |
+| `.hrow` | `<details>` row, `summary` a `grid-cols-[56px_minmax(0,1fr)_auto] py-3` grid: when `text-label text-text-faint`; who (neutral badge + name `text-label text-text-muted`), summary `text-body text-text`, status line (6px dot + label `text-meta font-medium` in ok / accent / faint / warn, then the reason `text-text-faint`); "Details ›" `text-meta text-text-faint`; opened content indented 68px |
 | `.mem` | rows, not cards: name `text-label text-text` and one tag at the end (`text-meta rounded-xs px-1`: read `bg-fill-active text-text-muted`, read + write `bg-accent-bg text-accent-tx`, no access `text-text-faint`); in the pane no hairlines, in the Seats tab hairline rows with the note inline |
 | research "thin" tag | `Pill tone="warn"` (like stale) |
 | `.hrow` | `grid grid-cols-[52px_1fr_auto] gap-x-3 gap-y-2 py-2 border-b border-border-subtle text-label [content-visibility:auto] [contain-intrinsic-size:auto_64px]` |
@@ -123,9 +127,10 @@ The mockup inlines `src/renderer/tokens.css` verbatim (it predates `--usage-dot*
 - **Fleet:** loading (skeleton rows after 150 ms), error (sentence + Try again), empty Needs you ("Nothing needs you."),
   no agents ("No agents yet" + New agent), older box (channel unknown → "Update the box to see the fleet").
 - **Profile:** loading, error, invalid agent (its `error`, no tabs), lead/Architect (no seats actions, no refresh control, "Works in every project"), pending cards 0..n (collapsed); an agent with no use when / not for ("Nothing written yet…"); refresh Monthly (default) / Off / saving / refused (sentence); narrow page (the pane stacks under the main column). No Tests tab or box.
-- **History row:** applied / undone ("Undone" chip and outcome line) / pending / other states; collapsed / expanded; Restore busy ("Restoring…"), refused (sentence under the row), done (the new
-  record's card appears at the top, expanded).
-- **Seat row:** view / editing / saving / save error / confirm remove.
+- **History row:** live (applied automatically / you approved it) / undone (by you) / waiting (its card is above) / other states, each a coloured dot + label + reason; collapsed / expanded; Restore busy ("Restoring…"), refused (sentence under the row), done (the new
+  record's row appears at the top, expanded).
+- **Research row:** with sources (opens; the first at the start) / without (plain row, counts) / missing ("no longer in the library"); a source link that can't open says so in the row.
+- **Seat row:** view / editing (textarea + "N / 4000") / saving / save error / confirm remove; a lead or Architect has no rows ("Works in every project").
 - **Question card** (unchanged component, no busy/error props): open; while the answer call runs the card stays as is;
   a refusal shows on the chat's existing send-error line (in Needs you: an alert line in the item's context row); after a
   successful answer the refetch removes the card; the milestone in the side panel records it.

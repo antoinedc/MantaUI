@@ -105,16 +105,25 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
       `border-subtle`): **Details** (Model, Works, Built by, Changed), **Seats** (each with its notes, Manage seats → the tab),
       **Access** (the first seat's memory map as rows: read / read + write / no access), **Refresh with new research** (Monthly |
       Off; specialists only, §5.4).
-  - **Research · N:** library entries the agent's applied changes rest on (their `basis`), resolved live through
-    `researchLibrary.lookup` in each seat's project scope: topic, sources, age, fresh / stale, thin (warn tone like stale). "From
-    the shared research library. Thin means fewer than 3 independent sources." Missing entries show "no longer in the library".
-  - **Seats · N:** one row per seat: project, brief (first line), notes count (knowledge pages of that project),
-    current task. Row actions: **Edit brief** (inline `<textarea>`, Save / Cancel), **Remove** (`ConfirmInline`).
-    "Add a seat in another project" (a `<select>` of registry projects without a seat + Add). The memory map of the
-    selected seat (§5.1) below, as rows.
-  - **History · N:** §5.2. It is a tab only — never an Overview block.
-- Type and ink: titles are `text-body font-semibold text-text` (no faint uppercase eyebrows); body and values `text-text`; keys and
-  meta `text-text-faint`; lists are hairline rows, not cards.
+  - **Research · N:** the same two columns. Left: every library entry the agent's applied changes rest on (their `basis`),
+    resolved live through `researchLibrary.lookup` in each seat's project scope, as hairline rows — topic, "N sources · N days
+    old", fresh / stale, thin (warn tone like stale). A row opens (native `<details>`, the first one open) to the entry's public
+    sources — one per publisher or site, each a link when the library holds an http(s) address — a count of private sources
+    ("2 private sources aren't listed"; never listed) and "Also used by <agents>" (other agents still on the box whose applied
+    changes rest on the same entry). A row the box sent no sources for stays a plain row with its counts; a missing one says "no
+    longer in the library". Pane: what the library is in one line, **Health** (Stale, Thin, and Missing only when there is
+    one) and the **refresh control** (Monthly | Off, no note). The Overview keeps its own refresh control with its note.
+  - **Seats · N:** the same two columns. Left: one hairline row per seat — project and notes count, the agent's current task
+    there (quiet, when it has one), the whole brief, that seat's own access map (name + read / read + write / no access tag per
+    memory; the note is the tooltip), and two text actions: **Edit brief** (inline `<textarea>`, Save / Cancel, "N / 4000") and
+    **Remove seat** (a quiet link; asks first with `ConfirmInline`). Pane: **What a seat is** and **Add a seat** (a `<select>` of
+    registry projects without a seat + Add).
+  - **History · N:** the same two columns (§5.2). Left: "Changes, newest first" — a row per change: when, who, what, and the
+    outcome with its reason (Live · applied automatically / you approved it, Undone · by you, Waiting for your click, …). A row
+    is a native disclosure: opened it holds the existing change card and, where it changes something, **Restore the version
+    before this** as a quiet link. Exactly one Apply / Discard on the page (the pending change above the tabs; its row says "see
+    the card above" and has no second card) and exactly one Undo (on the newest live change). Pane: **Summary** (Live, Waiting,
+    Undone counts) and **How changes land** (one sentence). It is a tab only — never an Overview block.
 - The lead and the Architect: Seats tab says "Works in every project"; no seat actions.
 
 ### 2.3 Chat & @mention
@@ -509,7 +518,10 @@ export interface AgentProfile {
   info: AgentInfo; seats: AgentSeat[];
   lastChangedAt: number | null; builtBy: "architect" | "manta" | "user" | "built-in";
   refresh: { enabled: boolean; routineId: string | null };   // enabled defaults to true (provisioned on sync)
-  research: { id: string; topic: string; sourceCount: number | null; ageDays: number | null; status: "fresh" | "stale" | "missing"; thin: boolean }[];
+  research: { id: string; topic: string; sourceCount: number | null; ageDays: number | null; status: "fresh" | "stale" | "missing"; thin: boolean;
+              sources?: { label: string; url: string | null }[];   // public sources (one per publisher/site; url only if http(s)); absent when none
+              privateSources?: number;                             // findings from private sources: counted, never listed
+              usedBy?: string[] }[];                               // other agents (on the box) whose applied changes rest on it
 }
 export interface FleetCell {
   jobId: string; title: string; at: number;

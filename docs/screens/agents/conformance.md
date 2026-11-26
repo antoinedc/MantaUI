@@ -1,10 +1,10 @@
 # Agent screens — deliberate differences from the mockup
 
-Compared with `npm run visual:compare agents-fleet agents-profile` (app left, `mockup.html` right; the profile Overview was reviewed against `profile-overview-mockup.html` too) for the two `agents-*` rows,
+Compared with `npm run visual:compare agents-fleet agents-profile agents-profile-research agents-profile-seats agents-profile-history` (app left, `mockup.html` right; the profile tabs were reviewed against `profile-tabs-mockup.html`, the `agents-profile-research|seats|history` rows, and the Overview against `profile-overview-mockup.html`) for the two `agents-*` rows,
 in light and dark (`VISUAL_COLOR_SCHEME=dark`). The mockup (`mockup.html`) is the visual reference. These are the places where what
 gets built differs on purpose.
 
-Last reviewed: 2026-11-26 (eca4acb8)
+Last reviewed: 2026-11-26 (62a142ef)
 
 ## Deliberate
 
@@ -41,7 +41,7 @@ Last reviewed: 2026-11-26 (eca4acb8)
 14. **Fleet column** is 1120 px wide (the other pages' column is 960) so four project columns and the weekly count fit; the weekly
     count stays pinned at the right edge when more columns make the region scroll.
 15. **Breadcrumb**: the current page is text with `aria-current="page"`, not a link to itself (no control that does nothing).
-16. **Profile Overview** follows the approved layout A (`profile-overview-mockup.html`, not `mockup.html`'s profile screen): "How to
+16. **Profile tabs** follow the approved layout A: Overview (`profile-overview-mockup.html`) and all four tabs (`profile-tabs-mockup.html`, its first button; the B and C proposals in that file were not chosen). They are not `mockup.html`'s profile screen. Overview: "How to
     use it" lists the agent's real use when / not for (the mockup's "Asks first" / "Measures" rows are illustrative copy: there is no
     such data, so no such row), then full instructions folded and the research; the details pane holds details, seats, access and
     refresh. History is a tab only; Tests has no tab and no box until it exists.
@@ -57,6 +57,16 @@ Last reviewed: 2026-11-26 (eca4acb8)
     note under Access ("Know-how changes only through change cards.") is not drawn — each row's note is its tooltip.
 21. **Recap** gained the Manta-handed lines and an Open button on a user-requested failure; "Needs you · <reason>" in a grid cell is the
     same reason the list shows.
+22. **Research tab:** a source row shows the publisher or site as the link and has no page title (the library keeps none); private sources are
+    counted ("N private sources aren't listed" — the library doesn't say which findings share a source, so it counts findings). "Used by" lists
+    other agents whose applied changes rest on the same entry, not every task that read it. The pane has no "Entries" or "Next refresh" row
+    (the tab already counts the entries; the box doesn't say when the refresh runs) and "Missing" appears only when an entry is gone.
+23. **Seats tab:** each seat keeps its current-task line (real data, spec §2.2) under the project name; the mockup has none. Edit brief's
+    buttons read Save / Cancel; Add a seat's button reads "Add" under the pane title "Add a seat".
+24. **History tab:** the pending change's row says "see the card above" and has no Details (a second card would be a second Apply / Discard);
+    the mockup lets it open. The "who" badge is the neutral agent badge for everyone (the mockup tints "You"). Restore sits inside the
+    opened row, as in the mockup, so a change shown above the tabs (just applied) is restored by its own Undo instead. The opened card's chip
+    keeps the card's own word ("Updated") beside the row's "Live".
 
 ## Open
 
