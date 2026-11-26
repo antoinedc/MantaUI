@@ -1,7 +1,7 @@
 // ===== Needs you (agent screens spec §2.1) =====
 //
 // What waits for the user, box-wide: open questions from agent tasks, agent changes waiting for a click, and finished
-// tasks with changes on a branch nobody has opened. Each item is the EXISTING card it belongs to (QuestionCard,
+// tasks that ended needing a decision, or that the user asked for and left a branch that has not landed. Each item is the EXISTING card it belongs to (QuestionCard,
 // AgentChangeView, BackgroundResultCard) under one context line — the only new markup here. Every press ends visibly: a
 // refusal is a role="alert" line in the item's context row, a success is the next read taking the card away (a change keeps
 // its card, in its new state, for as long as the page is open, so "Applied" can be read).
@@ -156,7 +156,8 @@ function ReviewItem({ review, info, projectName, onChanged }: { review: NeedsYou
           <Who>{info?.name || review.agentSlug}</Who>
           {projectName && <Part>{projectName}</Part>}
           <Part>{review.name}</Part>
-          <Part>finished {relativeAgo(nowMs() - review.finishedAt)}</Part>
+          <span className={`truncate ${review.endedBlocked ? "font-medium text-text" : ""}`}>· {review.reason}</span>
+          <Part>{relativeAgo(nowMs() - review.finishedAt)}</Part>
           <span className="ml-auto shrink-0">
             <Button tone="ghost" onClick={() => void done()} loading={busy} title="Mark this as seen: it leaves Needs you">
               {busy ? "Marking done…" : "Done"}

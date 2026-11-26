@@ -7,6 +7,7 @@ import {
   cellView,
   currentSnapshot,
   errText,
+  detailRows,
   factsLine,
   firstLine,
   historyOutcome,
@@ -130,26 +131,46 @@ describe("tabs", () => {
   });
 });
 
-describe("factsLine / firstLine", () => {
+describe("factsLine / detailRows / firstLine", () => {
   const profile = (over: Partial<AgentProfile> = {}): AgentProfile =>
     ({
       info: { slug: "seo", name: "SEO", description: "d", isolation: "none", model: "anthropic/sonnet", color: null, builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null },
-      seats: [],
+      seats: [{}, {}],
       lastChangedAt: Date.UTC(2026, 10, 12, 12),
       builtBy: "architect",
       refresh: { enabled: true, routineId: null },
       research: [],
       ...over,
     }) as AgentProfile;
-  it("built by / last changed / model / isolation", () => {
-    expect(factsLine(profile())).toEqual(["built by Architect", "last changed 12 Nov", "model: anthropic/sonnet", "read-only"]);
+  it("the facts line is who it is: @slug, its role, its seats — nothing the description or the details pane says", () => {
+    expect(factsLine(profile())).toEqual(["@seo", "Specialist", "2 seats"]);
+    expect(factsLine(profile({ seats: [{} as never] }))[2]).toBe("1 seat");
+    expect(factsLine(profile({ seats: [] }))[2]).toBe("No seats yet");
+    const lead = profile();
+    lead.info = { ...lead.info, slug: "manta", role: "lead" };
+    expect(factsLine(lead)).toEqual(["@manta", "Lead", "Works in every project"]);
+    const arch = profile();
+    arch.info = { ...arch.info, slug: "architect", role: "architect" };
+    expect(factsLine(arch)).toEqual(["@architect", "Architect", "Works in every project"]);
   });
-  it("Auto when no model, its own branch for a worktree agent, built in / you / Manta, no change date when never changed", () => {
+  it("the details pane rows: model, works, built by, changed", () => {
+    expect(detailRows(profile())).toEqual([
+      ["Model", "anthropic/sonnet"],
+      ["Works", "Read-only"],
+      ["Built by", "Architect"],
+      ["Changed", "12 Nov"],
+    ]);
+  });
+  it("Auto when no model, edits code for a worktree agent, built in / you / Manta, no Changed row when never changed", () => {
     const p = profile({ lastChangedAt: null, builtBy: "built-in" });
     p.info = { ...p.info, model: null, isolation: "worktree" };
-    expect(factsLine(p)).toEqual(["built in", "model: Auto", "edits code on its own branch"]);
-    expect(factsLine(profile({ builtBy: "user" }))[0]).toBe("built by you");
-    expect(factsLine(profile({ builtBy: "manta" }))[0]).toBe("built by Manta");
+    expect(detailRows(p)).toEqual([
+      ["Model", "Auto"],
+      ["Works", "Edits code"],
+      ["Built by", "Built in"],
+    ]);
+    expect(detailRows(profile({ builtBy: "user" }))[2]).toEqual(["Built by", "You"]);
+    expect(detailRows(profile({ builtBy: "manta" }))[2]).toEqual(["Built by", "Manta"]);
   });
   it("firstLine takes the first non-empty line", () => {
     expect(firstLine("\n\n  Hello there  \nsecond")).toBe("Hello there");
@@ -216,7 +237,7 @@ describe("seats", () => {
     expect(seatNotesLabel(null)).toBe("—");
   });
   it("memory access reads as plain words", () => {
-    expect(memoryLabel("read")).toBe("read-only");
+    expect(memoryLabel("read")).toBe("read");
     expect(memoryLabel("read-write")).toBe("read + write");
     expect(memoryLabel("none")).toBe("no access");
   });

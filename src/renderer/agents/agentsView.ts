@@ -131,6 +131,7 @@ export function reviewPart(r: NeedsYouReview): BackgroundResultPart {
     name: r.name,
     agent: `${PACKAGE_AGENT_PREFIX}${r.agentSlug}`,
     text: r.resultText,
+    ...(r.endedBlocked ? { endedBlocked: true } : {}),
   };
 }
 
