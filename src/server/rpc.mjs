@@ -100,6 +100,7 @@ import { validateAndMergeBackgroundWork } from "./backgroundBudget.mjs";
 
 // the renderer sends `{id}`; a bare id string is accepted too
 const changeIdOf = (input) => (input && typeof input === "object" ? input.id : input);
+const slugOf = (input) => (input && typeof input === "object" ? input.slug : input);
 
 // The number of rules (event entries) in a repo's rules YAML — shown in
 // Settings [G1] so a valid repo reads "3 rules".
@@ -2884,6 +2885,24 @@ export function buildHandlers({
     "agents:change-apply": (input) => agentsCall("change-apply", (a) => a.apply(changeIdOf(input))),
     "agents:change-discard": (input) => agentsCall("change-discard", (a) => a.discard(changeIdOf(input))),
     "agents:change-undo": (input) => agentsCall("change-undo", (a) => a.undo(changeIdOf(input))),
+    // Agent screens (docs/superpowers/specs/2026-11-26-agents-screens.md §6.2). Every channel takes ONE object; a refusal is an
+    // AgentError sentence (HTTP 400), anything unexpected a safe literal — all through agentsCall.
+    "agents:questions": (input) => agentsCall("questions", (a) => a.questions(input)),
+    "agents:question-answer": (input) => agentsCall("question-answer", (a) => a.questionAnswer(input)),
+    "agents:question-dismiss": (input) => agentsCall("question-dismiss", (a) => a.questionDismiss(input)),
+    "agents:needs-you": () => agentsCall("needs-you", (a) => a.needsYou()),
+    "agents:review-done": (input) => agentsCall("review-done", (a) => a.reviewDone(input && typeof input === "object" ? input.jobId : input)),
+    "agents:fleet": () => agentsCall("fleet", (a) => a.fleet()),
+    "agents:fleet-seen": () => agentsCall("fleet-seen", (a) => a.fleetSeen()),
+    "agents:profile": (input) => agentsCall("profile", (a) => a.profile(slugOf(input))),
+    "agents:history": (input) => agentsCall("history", (a) => a.history(slugOf(input))),
+    "agents:change-restore": (input) => agentsCall("change-restore", (a) => a.restore(changeIdOf(input))),
+    "agents:seat-add": (input) => agentsCall("seat-add", (a) => a.seatAdd(input)),
+    "agents:seat-set": (input) => agentsCall("seat-set", (a) => a.seatSet(input)),
+    "agents:seat-remove": (input) => agentsCall("seat-remove", (a) => a.seatRemove(input)),
+    "agents:refresh-set": (input) => agentsCall("refresh-set", (a) => a.refreshSet(input)),
+    "agents:task-research": (input) => agentsCall("task-research", (a) => a.taskResearch(input)),
+    "agents:projects": () => agentsCall("projects", (a) => a.projects()),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>

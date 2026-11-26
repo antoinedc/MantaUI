@@ -152,6 +152,84 @@ test("agents:change-* channels call the engine; a refusal sentence passes throug
   assert.ok(seen.filter((s) => s[0] !== "for").every((s) => typeof s[1] === "string"), "the engine always gets a bare id");
 });
 
+test("agent screens: every agents:* channel of the spec calls the engine with its one object; refusals are sentences, the rest a safe literal", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  const rec = (name, out = { ok: true }) => async (...args) => (seen.push([name, ...args]), out);
+  deps.agents = {
+    questions: rec("questions", []),
+    questionAnswer: rec("questionAnswer", { id: "tq_1" }),
+    questionDismiss: rec("questionDismiss", { id: "tq_1" }),
+    needsYou: rec("needsYou", { count: 0 }),
+    reviewDone: rec("reviewDone"),
+    fleet: rec("fleet", { rows: [] }),
+    fleetSeen: rec("fleetSeen"),
+    profile: rec("profile", { info: {} }),
+    history: rec("history", []),
+    restore: rec("restore", { id: "ach_2" }),
+    seatAdd: rec("seatAdd", { project: "p" }),
+    seatSet: rec("seatSet", { project: "p" }),
+    seatRemove: rec("seatRemove"),
+    refreshSet: rec("refreshSet", { enabled: true, routineId: "r" }),
+    taskResearch: rec("taskResearch", []),
+    projects: rec("projects", []),
+  };
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["agents:questions"]({ sessionID: "s" }), []);
+  assert.deepEqual(await handlers["agents:question-answer"]({ id: "tq_1", answers: [["a"]] }), { id: "tq_1" });
+  await handlers["agents:question-dismiss"]({ id: "tq_1" });
+  assert.deepEqual(await handlers["agents:needs-you"](), { count: 0 });
+  await handlers["agents:review-done"]({ jobId: "job_1" });
+  await handlers["agents:fleet"]();
+  await handlers["agents:fleet-seen"]();
+  await handlers["agents:profile"]({ slug: "dev" });
+  await handlers["agents:history"]({ slug: "dev" });
+  assert.deepEqual(await handlers["agents:change-restore"]({ id: "ach_1" }), { id: "ach_2" });
+  await handlers["agents:seat-add"]({ slug: "dev", project: "p", brief: "b" });
+  await handlers["agents:seat-set"]({ slug: "dev", project: "p", brief: "c" });
+  await handlers["agents:seat-remove"]({ slug: "dev", project: "p" });
+  await handlers["agents:refresh-set"]({ slug: "dev", enabled: true });
+  await handlers["agents:task-research"]({ jobId: "job_1" });
+  await handlers["agents:projects"]();
+  assert.deepEqual(seen, [
+    ["questions", { sessionID: "s" }],
+    ["questionAnswer", { id: "tq_1", answers: [["a"]] }],
+    ["questionDismiss", { id: "tq_1" }],
+    ["needsYou"],
+    ["reviewDone", "job_1"],
+    ["fleet"],
+    ["fleetSeen"],
+    ["profile", "dev"],
+    ["history", "dev"],
+    ["restore", "ach_1"],
+    ["seatAdd", { slug: "dev", project: "p", brief: "b" }],
+    ["seatSet", { slug: "dev", project: "p", brief: "c" }],
+    ["seatRemove", { slug: "dev", project: "p" }],
+    ["refreshSet", { slug: "dev", enabled: true }],
+    ["taskResearch", { jobId: "job_1" }],
+    ["projects"],
+  ]);
+  // a refusal passes through as its sentence; an unexpected failure never shows a path
+  deps.agents.questionAnswer = async () => {
+    throw Object.assign(new Error("Already sending your answer"), { rpcStatus: 400 });
+  };
+  deps.agents.fleet = async () => {
+    throw new Error("/home/dev/.manta/agents/.fleet.json: EACCES");
+  };
+  const again = buildHandlers(deps);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    await assert.rejects(again["agents:question-answer"]({ id: "tq_1" }), (e) => e.rpcStatus === 400 && /Already sending/.test(e.message));
+    await assert.rejects(again["agents:fleet"](), (e) => e.rpcStatus === 500 && !/EACCES|home/.test(e.message));
+  } finally {
+    console.warn = warn;
+  }
+  // an engine that isn't wired answers a sentence, never a stub
+  const none = buildHandlers({ ...deps, agents: null });
+  await assert.rejects(none["agents:fleet"](), (e) => e.rpcStatus === 503);
+});
+
 test("the file explorer's fs:* channels are registered", () => {
   const handlers = buildHandlers(makeDeps([]).deps);
   for (const channel of ["fs:resolve-paths", "fs:list", "fs:git-status"]) {
