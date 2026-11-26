@@ -36,7 +36,7 @@ const EXEMPT = {
   "opencode.mjs": { count: 0, why: "the client itself (definitions only)" },
   "handoff/engine.mjs": { count: 1, why: "the engine's own poster: it posts to targets it already resolved/fenced/claimed" },
   "handoff/wiring.mjs": { count: 2, why: "adapter handing the raw client to the engine" },
-  "delegate.mjs": { count: 2, why: "the opening prompt / command of a child session created seconds earlier — nothing can replace or fence it yet" },
+  "delegate.mjs": { count: 3, why: "the opening prompt / command of a child session created seconds earlier — nothing can replace or fence it yet; and the answer to a task's question steered into the task's RUNNING child (`deliverToTask`): a child with a handoff pending is never steered into (it waits for the round to end, deferSettlement), and the record points at the live child" },
   "rpc.mjs": { count: 5, why: "forge ship-preview's own throwaway session; the user send + command paths each run behind handoff.admitPrompt / handoff.guardCommand (asserted below), the raw fallback is only for an engine-less test build" },
   "index.mjs": { count: 6, why: "CTO conversation admission (a role session, never handed off), a delegate child's opening prompt, the CTO runner's own sessions, and the knowledge skill trial's session client (a headless session the trial creates itself, marked manta.knowledgeTrial and never auto-handed-off)" },
   "routines.mjs": { count: 3, why: "a routine run's own headless session (opening prompt, the one missing-report re-prompt, a crash-recovery resend): created by the engine, marked manta.routineId, and never auto-handed-off (maybeAuto skips it)" },

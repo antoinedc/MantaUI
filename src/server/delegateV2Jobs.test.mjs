@@ -4088,3 +4088,37 @@ test("afterJobEnded: called once for every round that ends — finished, failed,
   assert.deepEqual(order, [["after", pid]]);
   assert.equal(plain.records.size, 1, "the result was still posted");
 });
+
+test("deferred round: a sweep that runs while the answers are being sent leaves the round alone (it would read 'nothing left to send' and post the result of a round whose continuation is on its way)", async () => {
+  const log = [];
+  let release;
+  const gate = new Promise((res) => (release = res));
+  const w = gateWorld(log, { onRoundSettled: async () => { log.push(["settled"]); await gate; return { continued: true }; } });
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.inboxes.set(child, [{ id: "msg_steer", type: "user" }]);
+  w.say(child, "done");
+  w.finish(child, "succeeded", T0 + 5);
+  const finishing = w.engine.observeRaw(raw("session.execution.succeeded", child));
+  for (let i = 0; i < 200 && !log.some((l) => l[0] === "settled"); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(w.job(id).completionDelivery, "deferred");
+  await sweepDelegateJobs(w.deps);
+  assert.equal(log.filter((l) => l[0] === "settled").length, 1, "not sent a second time");
+  assert.equal(w.job(id).completionDelivery, "deferred", "not flipped to pending under the first call");
+  assert.equal(w.calls.synth.length, 0);
+  release();
+  await finishing;
+  assert.equal(w.job(id).completionDelivery, "not-needed");
+  assert.equal(w.calls.synth.length, 0);
+  assert.equal(w.calls.kill.length, 0);
+});
+
+test("deliverToTask: a child with a handoff pending is never steered into — the answer waits for the round to end (continue-pending); a dismissal is just 'none'", async () => {
+  const { w, id, child } = await askerWorld();
+  w.deps.deferSettlement = (sid) => sid === child;
+  const before = w.calls.send.length;
+  assert.deepEqual(await deliverToTask(id, "T", { messageID: "msg_a" }, w.deps), { delivery: "continue-pending" });
+  assert.equal(w.calls.send.length, before, "nothing steered into the child being replaced");
+  assert.equal(w.job(id).continueAfter, true);
+  assert.deepEqual(await deliverToTask(id, "x", { steerOnly: true }, w.deps), { delivery: "none" });
+});

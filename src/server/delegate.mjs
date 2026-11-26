@@ -3208,16 +3208,23 @@ async function runEndingGate(job, deps) {
   });
 }
 
+// Rounds whose answers this process is sending right now: the sweep must not settle one of them a second time (it would read "nothing left to send" and
+// post the result of a round whose continuation is on its way).
+const settlingDeferred = new Set();
+
 /**
  * Step 2c: send every continue-pending answer of the task with ONE continuation. `true`: they are on their way (the round is `not-needed` and must not
  * post or clean up). `false`: refused — the questions are open again (the store did that) and the round goes back to `pending`.
  */
 async function settleDeferred(job, deps) {
   let continued = false;
+  settlingDeferred.add(job.id);
   try {
     continued = (await deps.taskQuestions?.onRoundSettled?.(job))?.continued === true;
   } catch (e) {
     console.warn(`[delegate] sending the answers waiting for ${job.id} failed:`, e?.message ?? e);
+  } finally {
+    settlingDeferred.delete(job.id);
   }
   await patchJob(job.id, { completionDelivery: continued ? "not-needed" : "pending" }, deps, { onlyIf: (j) => j.completionDelivery === "deferred" });
   return continued;
@@ -3242,7 +3249,7 @@ export async function reconcileTaskQuestions(deps = {}) {
         }
       });
     }
-    for (const j of ((await load()) ?? []).filter((x) => isTerminal(x) && x.completionDelivery === "deferred")) {
+    for (const j of ((await load()) ?? []).filter((x) => isTerminal(x) && x.completionDelivery === "deferred" && !settlingDeferred.has(x.id))) {
       if (j.supersededBy) {
         await patchJob(j.id, { completionDelivery: "not-needed" }, deps, { onlyIf: (x) => x.completionDelivery === "deferred" });
         continue;
@@ -4434,6 +4441,13 @@ export async function deliverToTask(rootJobId, text, { messageID, steerOnly = fa
           if (live.status === "paused") return { out: steerOnly ? { delivery: "none" } : { error: TASK_PAUSED } };
           if (live.status === "running") {
             if (live.ending) {
+              if (steerOnly) return { out: { delivery: "none" } };
+              await patchJob(live.id, { continueAfter: true }, deps);
+              return { out: { delivery: "continue-pending" } };
+            }
+            // a child that is being handed off is about to be replaced: a steer would land in the predecessor nobody reads. The round goes on in its
+            // successor (its settlement is deferred until the commit), so the answer waits for the round to end like any other.
+            if (deps.deferSettlement?.(live.childSessionID)) {
               if (steerOnly) return { out: { delivery: "none" } };
               await patchJob(live.id, { continueAfter: true }, deps);
               return { out: { delivery: "continue-pending" } };
