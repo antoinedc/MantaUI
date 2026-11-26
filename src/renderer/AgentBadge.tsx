@@ -1,7 +1,9 @@
 // The agent's colour badge (agent screens contract: `.av`): the agent's initial on its own colour, else a neutral fill.
+// The initial's ink is picked against that colour (`agentInk`): a fixed white can fall under 4.5:1 on a mid-light colour.
 // One size per place it appears — the rail row (14), a panel / picker header (16), a page row (22), a profile header (44).
 
 import { agentInitial } from "./agentDispatch";
+import { agentInk } from "./agentInk";
 
 export type AgentBadgeSize = "rail" | "sm" | "md" | "lg";
 
@@ -19,6 +21,7 @@ export function AgentBadge({
   agent: { name: string; slug: string; color: string | null };
   size?: AgentBadgeSize;
 }) {
+  const ink = agent.color ? agentInk(agent.color) : null;
   return (
     <span
       aria-hidden="true"
@@ -28,7 +31,7 @@ export function AgentBadge({
         SIZE[size] +
         (agent.color ? " text-on-accent" : " bg-fill-hover text-text")
       }
-      style={agent.color ? { backgroundColor: agent.color } : undefined}
+      style={agent.color ? { backgroundColor: agent.color, ...(ink ? { color: ink } : {}) } : undefined}
     >
       {agentInitial(agent)}
     </span>

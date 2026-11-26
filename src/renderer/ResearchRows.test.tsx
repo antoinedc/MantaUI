@@ -50,6 +50,10 @@ describe("ResearchRows", () => {
     expect(b.textContent).toContain("1 source · today");
     expect(b.textContent).toContain("fresh");
     expect(b.textContent).toContain("thin");
+    // "thin" is a caution, so it wears the warn tone (like stale), not the neutral outline next to green "fresh"
+    const thin = [...b.querySelectorAll("span")].find((e) => e.textContent === "thin")!;
+    expect(thin.className).toContain("bg-warn-bg");
+    expect(thin.className).not.toContain("border");
     expect(c.textContent).toContain("3 sources · 1 day old");
   });
 

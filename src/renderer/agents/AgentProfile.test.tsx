@@ -146,10 +146,23 @@ describe("AgentProfile", () => {
       expect(onBack).toHaveBeenCalled();
       const head = q('[data-testid="profile-header"]')!;
       expect(head.textContent).toContain("SEO");
-      expect(head.textContent).toContain("built by Architect");
-      expect(head.textContent).toContain("model: Auto");
-      expect(head.textContent).toContain("read-only");
       expect(head.textContent).toContain("Technical SEO and visibility in AI search.");
+      expect(head.querySelector("h1")!.className).toContain("text-display");
+    });
+
+    it("the facts line says who it is with separators — @slug, role, seats — and repeats nothing the page already says", async () => {
+      await open();
+      const facts = q('[data-testid="profile-facts"]')!;
+      expect([...facts.querySelectorAll("span")].map((x) => x.textContent)).toEqual(["@seo", "Specialist", "2 seats"]);
+      expect(facts.className).toContain("text-text-faint");
+      expect(facts.textContent).not.toMatch(/model|read-only|built by|last changed/i);
+    });
+
+    it("the description is shown once on the whole page", async () => {
+      await open();
+      const text = h!.container.textContent ?? "";
+      expect(text.split("Technical SEO and visibility in AI search.").length - 1).toBe(1);
+      expect(text).not.toContain("Does:");
     });
 
     it("Change via Manta and Mention in a chat open chat drafts, prefilled", async () => {
@@ -204,7 +217,7 @@ describe("AgentProfile", () => {
   });
 
   describe("pending changes", () => {
-    const pending = rec({ id: "p1", state: "pending", decidedAt: null, decidedBy: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check." });
+    const pending = rec({ id: "p1", state: "pending", decidedAt: null, decidedBy: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check.", before: "---\nname: SEO\ndescription: d\nisolation: none\n---\nOld rule.\n", after: AGENT_MD });
     it("one card per pending record, above the tabs, with the card's own Apply", async () => {
       await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]), agentsChangeApply: () => Promise.resolve({ ...pending, state: "applied", decidedAt: NOW, decidedBy: "click" }) });
       const cards = qa('[data-testid="profile-pending"] [data-testid="agent-change-card"]');
@@ -217,6 +230,16 @@ describe("AgentProfile", () => {
       expect(api.calls.agentsHistory.length).toBeGreaterThanOrEqual(2);
     });
 
+    it("is one summary line with Apply and Discard, the change folded under 'Show the change'", async () => {
+      await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]) });
+      const card = q('[data-testid="profile-pending"] [data-testid="agent-change-card"]')!;
+      expect(card.querySelector('[data-testid="agent-change-summary-line"]')?.textContent).toContain("Adds an llms.txt check.");
+      const fold = card.querySelector<HTMLDetailsElement>('[data-testid="agent-change-fold"]')!;
+      expect(fold.open).toBe(false);
+      expect(fold.querySelector("summary")?.textContent).toMatch(/^Show the change · \d+ lines?/);
+      expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Apply", "Discard"]);
+    });
+
     it("none when nothing is pending", async () => {
       await open();
       expect(q('[data-testid="profile-pending"]')).toBeNull();
@@ -224,19 +247,18 @@ describe("AgentProfile", () => {
   });
 
   describe("tabs", () => {
-    it("a tablist with counts; Overview selected, the other panels hidden; Tests is a disabled later tab", async () => {
+    it("a tablist with counts; Overview selected, the other panels hidden; there is no Tests tab until Tests exist", async () => {
       await open();
       const tabs = qa('[role="tab"]');
-      expect(tabs.map((t) => t.textContent)).toEqual(["Overview", "Research · 5", "Seats · 2", "History · 2", "Tests — later"]);
+      expect(tabs.map((t) => t.textContent)).toEqual(["Overview", "Research · 5", "Seats · 2", "History · 2"]);
       expect(tab("Overview").getAttribute("aria-selected")).toBe("true");
       expect(tab("Research").getAttribute("aria-selected")).toBe("false");
       expect(panel("Overview").hidden).toBe(false);
       expect(panel("Research").hidden).toBe(true);
       expect(panel("Seats").hidden).toBe(true);
       expect(panel("History").hidden).toBe(true);
-      const tests = tab("Tests") as HTMLButtonElement;
-      expect(tests.disabled).toBe(true);
-      expect(tests.title).toBe("Trial runs on sample tasks come later");
+      expect(qa('[role="tab"]').some((t) => /tests/i.test(t.textContent ?? ""))).toBe(false);
+      expect(h!.container.textContent).not.toMatch(/Coming later|Tests — later/);
     });
 
     it("a click selects; only the selected tab is in the tab order", async () => {
@@ -270,47 +292,123 @@ describe("AgentProfile", () => {
 
     it("each panel is named by its tab (no aria-controls)", async () => {
       await open();
-      for (const t of qa('[role="tab"]').slice(0, 4)) expect(t.getAttribute("aria-controls")).toBeNull();
+      for (const t of qa('[role="tab"]')) expect(t.getAttribute("aria-controls")).toBeNull();
       expect(qa('[role="tabpanel"]')).toHaveLength(4);
     });
   });
 
   describe("Overview", () => {
-    it("the charter: what it is for, not for, edits code or read-only, model; the instructions folded", async () => {
+    const ov = () => panel("Overview");
+    const pane = () => q('[data-testid="profile-pane"]')!;
+    const group = (id: string) => pane().querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
+
+    it("two columns: 'How to use it' and the research on the left, one details pane on the right", async () => {
       await open();
-      const charter = q('[data-testid="profile-charter"]')!;
-      expect(charter.textContent).toContain("Technical SEO and visibility in AI search.");
-      expect(charter.textContent).toContain("A page's ranking or markup is the question");
-      expect(charter.textContent).toContain("Writing brand copy");
-      expect(charter.textContent).toContain("Read-only");
-      const details = charter.querySelector("details")!;
-      expect(details.textContent).toContain("Instructions");
+      const main = q('[data-testid="profile-main"]')!;
+      expect(main).toBeTruthy();
+      expect(pane().tagName).toBe("ASIDE");
+      expect(pane().getAttribute("aria-label")).toBe("Details");
+      expect(ov().contains(pane())).toBe(true);
+      expect(main.contains(pane())).toBe(false);
+      expect(pane().className).toContain("bg-bg-elev"); // one tinted region
+      expect(pane().className).toContain("sticky");
+      expect(q('[data-testid="profile-overview-grid"]')!.className).toContain("18rem"); // the pane's column: ~288px
+      expect(ov().querySelector('[data-testid="profile-howto"]')).toBeTruthy();
+    });
+
+    it("History is not on the Overview at all (it stays a tab); neither is a Tests box", async () => {
+      await open();
+      expect(ov().querySelector('[data-testid="history-row"]')).toBeNull();
+      expect(ov().textContent).not.toMatch(/All history|Coming later/);
+      expect(ov().textContent).not.toMatch(/\bHistory\b/);
+      expect(panel("History").querySelectorAll('[data-testid="history-row"]')).toHaveLength(2);
+    });
+
+    it("'How to use it' is a definition list of the agent's real fields: use when, not for — nothing invented", async () => {
+      await open();
+      const dl = q('[data-testid="profile-howto"] dl')!;
+      expect([...dl.querySelectorAll("dt")].map((d) => d.textContent)).toEqual(["Use it when", "Not for"]);
+      expect([...dl.querySelectorAll("dd")].map((d) => d.textContent)).toEqual(["A page's ranking or markup is the question", "Writing brand copy"]);
+      expect(ov().textContent).not.toMatch(/Asks first|Measures|Does:/);
+      expect(q('[data-testid="profile-howto"] h3')!.className).toContain("text-body");
+      expect(q('[data-testid="profile-howto"] h3')!.className).toContain("font-semibold");
+      expect(q('[data-testid="profile-howto"] h3')!.className).not.toContain("uppercase");
+    });
+
+    it("an agent with only one of the two shows only that row; with neither it says so instead of an empty list", async () => {
+      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ notFor: null }) })) });
+      expect([...q('[data-testid="profile-howto"] dl')!.querySelectorAll("dt")].map((d) => d.textContent)).toEqual(["Use it when"]);
+      h!.unmount();
+      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ useWhen: null, notFor: null }) })) });
+      expect(q('[data-testid="profile-howto"] dl')).toBeNull();
+      expect(q('[data-testid="profile-howto"]')!.textContent).toContain("Nothing written yet");
+    });
+
+    it("the full instructions are folded under the list, from the agent's own file", async () => {
+      await open();
+      const details = q('[data-testid="profile-howto"] details')!;
+      expect(details.textContent).toContain("Full instructions");
       expect(details.textContent).toContain("Audit pages. Never publish.");
-      expect(details.open).toBe(false);
+      expect((details as HTMLDetailsElement).open).toBe(false);
     });
 
-    it("research (first 4), history (first 3, read-only), seats, the first seat's memory map, Tests later", async () => {
+    it("research it relies on: the first 4 rows as hairline rows, and 'All 5 →' goes to the tab", async () => {
       await open();
-      const ov = panel("Overview");
-      expect(ov.querySelectorAll('[data-testid="research-row"]')).toHaveLength(4);
-      expect(ov.querySelectorAll('[data-testid="history-row"]')).toHaveLength(2);
-      expect(ov.querySelectorAll('[data-testid="history-row"] button')).toHaveLength(0);
-      expect(ov.textContent).toContain("Manta");
-      expect(ov.querySelector('[data-testid="memory-map"]')?.textContent).toContain("Manta seat");
-      expect(ov.textContent).toContain("Coming later");
-    });
-
-    it("'All research' and 'All history' and 'Manage seats' take you to the tab", async () => {
-      await open();
-      const ov = panel("Overview");
-      await click(btn("All research (5)", ov));
+      expect(ov().querySelectorAll('[data-testid="research-row"]')).toHaveLength(4);
+      await click(btn("All 5 →", ov()));
       expect(tab("Research").getAttribute("aria-selected")).toBe("true");
-      await click(tab("Overview"));
-      await click(btn("All history (2)", ov));
-      expect(tab("History").getAttribute("aria-selected")).toBe("true");
-      await click(tab("Overview"));
-      await click(btn("Manage seats", ov));
+    });
+
+    it("the pane's Details: model, works, built by, changed", async () => {
+      await open();
+      const rows = [...group("profile-details").querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
+      expect(rows).toEqual([
+        ["Model", "Auto"],
+        ["Works", "Read-only"],
+        ["Built by", "Architect"],
+        ["Changed", expect.stringMatching(/\d/)],
+      ]);
+    });
+
+    it("the pane's Seats: each seat with its notes, and Manage seats goes to the Seats tab", async () => {
+      await open();
+      const seats = group("profile-seats");
+      expect(seats.textContent).toContain("Manta");
+      expect(seats.textContent).toContain("23 notes");
+      expect(seats.textContent).toContain("Ronda");
+      await click(btn("Manage seats", seats));
       expect(tab("Seats").getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("the pane's Access: the first seat's memory as rows with a tag each", async () => {
+      await open();
+      const access = group("profile-access");
+      expect(access.textContent).toContain("Manta");
+      const rows = [...access.querySelectorAll('[data-testid="memory-row"]')];
+      expect(rows.map((r) => r.textContent)).toEqual([expect.stringContaining("Manta memory")]);
+      expect(rows[0].querySelector("[data-access]")?.textContent).toBe("read + write");
+    });
+
+    it("the pane's Refresh: Monthly / Off (specialists only)", async () => {
+      await open();
+      expect(btn("Monthly", group("profile-refresh"))).toBeTruthy();
+      h!.unmount();
+      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ role: "lead" }), seats: [] })) });
+      expect(q('[data-testid="profile-refresh"]')).toBeNull();
+      expect(pane()).toBeTruthy();
+    });
+
+    it("below ~720px the pane stacks under the main column (a container query on the overview's own width)", async () => {
+      await open();
+      const grid = q('[data-testid="profile-overview-grid"]')!;
+      expect(grid.parentElement!.className).toContain("[container-type:inline-size]");
+      expect(grid.className).toContain("@container(min-width:720px)");
+    });
+
+    it("the lead has no seats to list: it works in every project", async () => {
+      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ role: "lead" }), seats: [] })) });
+      expect(group("profile-seats").textContent).toContain("Works in every project");
+      expect(group("profile-access")).toBeNull();
     });
   });
 

@@ -14,7 +14,7 @@ import type { AgentFleet, AgentProfile, AgentSeat } from "../../shared/types";
 import { Button } from "../Button";
 import { ConfirmInline } from "../ConfirmInline";
 import { StatusDot } from "../StatusDot";
-import { BlockTitle } from "./AgentsParts";
+import { BlockTitle, PaneTitle } from "./AgentsParts";
 import { SEAT_BRIEF_MAX, cellView, errText, firstLine, memoryLabel, seatNotesLabel } from "./agentsView";
 import { useOpenTask } from "./useOpenTask";
 
@@ -23,20 +23,38 @@ type Project = { slug: string; name: string };
 const FIELD =
   "w-full rounded-md border border-border bg-bg px-2 py-2 text-label text-text placeholder:text-text-quiet outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
-/** What the knowledge tools give a task in this seat (`.mem`). */
-export function MemoryMap({ seat }: { seat: AgentSeat | null | undefined }) {
+const ACCESS_TAG: Record<"read" | "read-write" | "none", string> = {
+  "read-write": "bg-accent-bg text-accent-tx",
+  read: "bg-fill-active text-text-muted",
+  none: "text-text-faint",
+};
+
+/**
+ * What the knowledge tools give a task in this seat: one row per memory, its name and one tag (read / read + write / no
+ * access). Rows, not cards — nothing here is clickable. `compact` is the details pane's version: its own quiet title, no
+ * hairlines, the note left to the row's tooltip.
+ */
+export function MemoryMap({ seat, compact = false }: { seat: AgentSeat | null | undefined; compact?: boolean }) {
   if (!seat || seat.memory.length === 0) return null;
   return (
     <div data-testid="memory-map" className="manta-agents-memory">
-      <BlockTitle>What it can read and write ({seat.projectName} seat)</BlockTitle>
-      <div className="grid grid-cols-2 gap-2">
+      {compact ? <PaneTitle sub={`in the ${seat.projectName} seat`}>Access</PaneTitle> : <BlockTitle>What it can read and write ({seat.projectName} seat)</BlockTitle>}
+      <ul className="m-0 flex list-none flex-col p-0">
         {seat.memory.map((m) => (
-          <div key={m.label} className="rounded-md border border-border-subtle px-3 py-2 text-meta text-text-faint">
-            <div className="text-label font-semibold text-text">{m.label}</div>
-            <span className="font-medium text-text-muted">{memoryLabel(m.access)}</span> · {m.note}
-          </div>
+          <li
+            key={m.label}
+            data-testid="memory-row"
+            title={m.note}
+            className={"flex items-center gap-2 text-label " + (compact ? "min-h-7 py-px" : "border-b border-border-subtle py-2")}
+          >
+            <span className="min-w-0 truncate text-text">{m.label}</span>
+            {!compact && <span className="min-w-0 truncate text-meta text-text-faint">{m.note}</span>}
+            <span data-access={m.access} className={`ml-auto shrink-0 whitespace-nowrap rounded-xs px-1 text-meta ${ACCESS_TAG[m.access]}`}>
+              {memoryLabel(m.access)}
+            </span>
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }

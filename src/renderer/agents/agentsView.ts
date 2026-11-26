@@ -13,7 +13,7 @@ import { isUnknownChannelError } from "../chatUtils";
 
 export const FLEET_REFETCH_DEBOUNCE_MS = 1000;
 export const HISTORY_LIMIT = 50;
-export const OVERVIEW_PREVIEW = { research: 4, history: 3 } as const;
+export const OVERVIEW_PREVIEW = { research: 4 } as const;
 export const SEAT_BRIEF_MAX = 4000;
 
 // ---- which page is showing ----
@@ -138,25 +138,36 @@ export function reviewPart(r: NeedsYouReview): BackgroundResultPart {
 // ---- Profile ----
 
 const BUILT_BY: Record<AgentProfile["builtBy"], string> = {
-  architect: "built by Architect",
-  manta: "built by Manta",
-  user: "built by you",
-  "built-in": "built in",
+  architect: "Architect",
+  manta: "Manta",
+  user: "You",
+  "built-in": "Built in",
 };
 
-/** The profile header's facts: built by, last changed, model, isolation. */
+const ROLE_LABEL: Record<AgentProfile["info"]["role"], string> = { lead: "Lead", architect: "Architect", specialist: "Specialist" };
+
+/** The header's one line of who it is: `@seo · Specialist · 2 seats`. What the details pane says (model, works, built by) is not repeated. */
 export function factsLine(profile: AgentProfile): string[] {
-  const facts = [BUILT_BY[profile.builtBy] ?? "built by you"];
-  if (profile.lastChangedAt != null) facts.push(`last changed ${dateLabel(profile.lastChangedAt)}`);
-  facts.push(`model: ${profile.info.model || "Auto"}`);
-  facts.push(profile.info.isolation === "worktree" ? "edits code on its own branch" : "read-only");
-  return facts;
+  const { info, seats } = profile;
+  const where = info.role === "specialist" ? (seats.length === 0 ? "No seats yet" : `${seats.length} ${seats.length === 1 ? "seat" : "seats"}`) : "Works in every project";
+  return [`@${info.slug}`, ROLE_LABEL[info.role] ?? "Specialist", where];
+}
+
+/** The details pane's rows `[key, value]`: model, what it does to code, who built it, when it last changed (left out when never). */
+export function detailRows(profile: AgentProfile): Array<[string, string]> {
+  const rows: Array<[string, string]> = [
+    ["Model", profile.info.model || "Auto"],
+    ["Works", profile.info.isolation === "worktree" ? "Edits code" : "Read-only"],
+    ["Built by", BUILT_BY[profile.builtBy] ?? "You"],
+  ];
+  if (profile.lastChangedAt != null) rows.push(["Changed", dateLabel(profile.lastChangedAt)]);
+  return rows;
 }
 
 export const seatNotesLabel = (notes: number | null): string => (notes == null ? "—" : `${notes} ${notes === 1 ? "note" : "notes"}`);
 
 export function memoryLabel(access: "read" | "read-write" | "none"): string {
-  return access === "read-write" ? "read + write" : access === "read" ? "read-only" : "no access";
+  return access === "read-write" ? "read + write" : access === "read" ? "read" : "no access";
 }
 
 // ---- History (spec §5.2) ----

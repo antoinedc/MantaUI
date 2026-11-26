@@ -171,7 +171,6 @@ describe("AgentSeats", () => {
     const map = () => h!.container.querySelector('[data-testid="memory-map"]')!;
     expect(map().textContent).toContain("Manta seat");
     expect(map().textContent).toContain("SEO know-how");
-    expect(map().textContent).toContain("read-only");
     expect(map().textContent).toContain("read + write");
     expect(map().textContent).toContain("no access");
     await click(rows()[1].querySelector('button[aria-pressed]'));
@@ -180,6 +179,29 @@ describe("AgentSeats", () => {
 });
 
 describe("MemoryMap", () => {
+  const view = (access: "read" | "read-write" | "none") =>
+    seat("manta-aaaaaaaaaa", "Manta", { memory: [{ label: "Research library", access, note: "shared by all agents" }] });
+  const tag = (h: Harness) => h.container.querySelector('[data-testid="memory-row"] [data-access]')!;
+
+  it("is rows, not cards: the name on the left, one tag on the right (read / read + write / no access)", () => {
+    for (const [access, text] of [["read", "read"], ["read-write", "read + write"], ["none", "no access"]] as const) {
+      const h = mount(<MemoryMap seat={view(access)} />);
+      const row = h.container.querySelector('[data-testid="memory-row"]')!;
+      expect(row.textContent).toContain("Research library");
+      expect(tag(h).textContent).toBe(text);
+      expect(tag(h).getAttribute("data-access")).toBe(access);
+      expect(row.className).not.toMatch(/(^|\s)border(\s|$)/); // a hairline row, not a bordered box
+      expect(h.container.querySelector(".grid-cols-2")).toBeNull();
+      h.unmount();
+    }
+  });
+
+  it("what the row's note says is available without crowding the row (as its title)", () => {
+    const h = mount(<MemoryMap seat={view("read")} />);
+    expect(h.container.querySelector('[data-testid="memory-row"]')?.getAttribute("title")).toBe("shared by all agents");
+    h.unmount();
+  });
+
   it("renders nothing for no seat", () => {
     const h = mount(<MemoryMap seat={null} />);
     expect(h.container.querySelector('[data-testid="memory-map"]')).toBeNull();

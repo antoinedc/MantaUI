@@ -8,7 +8,7 @@ describe("colorLuminance", () => {
     expect(colorLuminance("#000000")).toBeCloseTo(0, 3);
     expect(colorLuminance("#fff")).toBeCloseTo(1, 3);
     expect(colorLuminance("rgb(255, 255, 255)")).toBeCloseTo(1, 3);
-    expect(colorLuminance("#336699")).toBeCloseTo(0.1329, 3);
+    expect(colorLuminance("#336699")).toBeCloseTo(0.1251, 3);
     expect(colorLuminance("oklch(100% 0 0)")).toBeCloseTo(1, 2);
     expect(colorLuminance("oklch(0% 0 0)")).toBeCloseTo(0, 2);
     expect(colorLuminance("oklch(62% 0.14 160)")).toBeGreaterThan(0.2); // the demo SEO green: mid-light

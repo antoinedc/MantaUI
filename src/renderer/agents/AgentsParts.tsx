@@ -61,7 +61,21 @@ export function SectionTitle({ id, children, count, sub }: { id?: string; childr
   );
 }
 
-/** The `.blk h3` block title of the profile. */
-export const BlockTitle = ({ children }: { children: ReactNode }) => (
-  <h3 className="m-0 mb-2 text-meta font-semibold uppercase tracking-wider text-text-faint">{children}</h3>
+/**
+ * A section title of the profile's main column: plain ink at body size, never a faint uppercase eyebrow (the title is the
+ * content's label, so it must be at least as readable as the content). `aside` is a control that belongs to the title row.
+ */
+export const BlockTitle = ({ children, aside }: { children: ReactNode; aside?: ReactNode }) => (
+  <div className="mb-2 flex items-baseline gap-2">
+    <h3 className="m-0 text-body font-semibold text-text">{children}</h3>
+    {aside && <span className="ml-auto">{aside}</span>}
+  </div>
+);
+
+/** A title inside the details pane: the pane is the quiet side of the page, so its titles are one step down. */
+export const PaneTitle = ({ children, sub }: { children: ReactNode; sub?: string }) => (
+  <h3 className="m-0 mb-2 text-meta font-semibold text-text-muted">
+    {children}
+    {sub && <span className="font-normal text-text-faint"> · {sub}</span>}
+  </h3>
 );

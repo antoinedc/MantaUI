@@ -138,6 +138,8 @@ export function demoNeedsYou(now: number): NeedsYou {
         filesChanged: 3,
         branch: "agent/dev/0-byte",
         resultText: "Fixed the crash when opening a 0-byte file and added a regression test.",
+        reason: "Branch ready to merge · 3 files",
+        endedBlocked: false,
       },
     ],
     count: 3,
@@ -155,15 +157,15 @@ export function demoFleet(now: number): AgentFleet {
       { slug: "capo-3d4e5f6a7b", name: "Capo" },
     ],
     rows: [
-      { slug: "dev", name: "Dev", color: "oklch(62% 0.14 250)", seats: [], tasksThisWeek: 14, cells: { "manta-0a1b2c3d4e": cell("job-dev1", "Explorer: 0-byte file crash", "working", "6m"), "ronda-1b2c3d4e5f": cell("job-dev2", "Editor undo stack", "done", "ready for review"), "tenanture-2c3d4e5f6a": null, "capo-3d4e5f6a7b": cell("", "Idle", "idle", "last task 3d ago") } },
+      { slug: "dev", name: "Dev", color: "oklch(62% 0.14 250)", seats: [], tasksThisWeek: 14, cells: { "manta-0a1b2c3d4e": cell("job-dev1", "Explorer: 0-byte file crash", "working", "6m"), "ronda-1b2c3d4e5f": cell("job-dev2", "Editor undo stack", "done", "5 files changed"), "tenanture-2c3d4e5f6a": null, "capo-3d4e5f6a7b": cell("", "Idle", "idle", "last task 3d ago") } },
       { slug: "seo", name: "SEO", color: "oklch(62% 0.14 160)", seats: [], tasksThisWeek: 7, cells: { "manta-0a1b2c3d4e": cell("job-seo1", "Pricing + vs-* audit", "working", "4/7 · 1 question"), "ronda-1b2c3d4e5f": cell("job-seo2", "Weekly audit", "done", "11 issues"), "tenanture-2c3d4e5f6a": cell("", "Idle", "idle", "weekly audit Mon"), "capo-3d4e5f6a7b": null } },
-      { slug: "design", name: "Design", color: "oklch(66% 0.14 25)", seats: [], tasksThisWeek: 4, cells: { "manta-0a1b2c3d4e": cell("job-des1", "Hero redesign", "needs-you", ""), "ronda-1b2c3d4e5f": null, "tenanture-2c3d4e5f6a": null, "capo-3d4e5f6a7b": null } },
+      { slug: "design", name: "Design", color: "oklch(66% 0.14 25)", seats: [], tasksThisWeek: 4, cells: { "manta-0a1b2c3d4e": cell("job-des1", "Hero redesign", "needs-you", "Needs a decision"), "ronda-1b2c3d4e5f": null, "tenanture-2c3d4e5f6a": null, "capo-3d4e5f6a7b": null } },
       { slug: "sales", name: "Sales", color: "oklch(64% 0.13 60)", seats: [], tasksThisWeek: 11, cells: { "manta-0a1b2c3d4e": null, "ronda-1b2c3d4e5f": null, "tenanture-2c3d4e5f6a": cell("job-sal1", "Lead research", "working", "1 question"), "capo-3d4e5f6a7b": cell("job-sal2", "Sequence follow-ups", "failed", "Gmail token") } },
     ],
     week: { tasks: 36 },
     recap: {
       since: null,
-      lines: ["Manta handed 9 requests to agents", "Dev finished 2 tasks in Manta", "SEO finished 1 task in Ronda", "Sales failed 1 task", "Architect updated @seo (your setting: Tell me)"],
+      lines: ["Manta handed 9 requests to agents", "Dev finished 3 tasks Manta handed off", "SEO finished 1 task in Ronda", "Sales failed 1 task", "2 branches from Manta-handed tasks still unmerged"],
     },
   };
 }
@@ -208,6 +210,10 @@ export function demoHistory(now: number): AgentChange[] {
       decidedAt: null,
       decidedBy: null,
       summary: "Adds an llms.txt check and drops 2 crawler rules that no longer hold.",
+      evidence: [
+        { claim: "GPTBot and CCBot rules in robots.txt no longer match how the crawlers identify themselves.", quote: null, url: "https://example.com/ai-crawler-access-rules", private: false },
+        { claim: "AI search engines look for llms.txt at the site root.", quote: null, url: "https://example.com/llms-txt", private: false },
+      ],
     }),
     change({ id: "chg_3", before: SEO_V2, after: SEO_V3, createdAt: at(12), decidedAt: at(12), summary: "Added rules for how AI search engines read pages." }),
     change({ id: "chg_2", before: SEO_V1, after: SEO_V2, origin: { kind: "chat" }, decidedBy: "click", createdAt: at(3), decidedAt: at(3), summary: "Asks before changing redirects." }),

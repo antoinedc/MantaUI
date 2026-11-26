@@ -209,6 +209,17 @@ export function diffRows(before: string, after: string): DiffRow[] {
   return rows;
 }
 
+/** How many lines the change adds or removes (the "N lines" of a folded card); 0 for a create or an update with no visible change. */
+export function changedLineCount(change: Pick<AgentChange, "kind" | "before" | "after">): number {
+  if (change.kind === "create") return 0;
+  return diffRows(change.before ?? "", change.after).filter((r) => r.kind === "add" || r.kind === "del").length;
+}
+
+/** Who made the change, for the one-line card: the Architect (a task), you (a restore), else Manta. */
+export function changeAuthor(change: Pick<AgentChange, "origin">): string {
+  return change.origin.kind === "job" ? "Architect" : change.origin.kind === "restore" ? "You" : "Manta";
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5A: what an Architect proposal adds to the card
 // ---------------------------------------------------------------------------

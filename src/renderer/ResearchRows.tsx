@@ -1,5 +1,5 @@
 // The one rendering of research-library entries (agent screens spec §2.5): topic, "N sources · 3 days old", and a fresh /
-// stale pill plus a "thin" pill. Used by the task side panel and by the agent profile's Research tab.
+// stale pill plus a "thin" pill (warn tone, like stale: both are cautions). Used by the task side panel and by the agent profile's Research tab.
 
 import { BookOpen } from "lucide-react";
 import type { AgentResearchEntry } from "../shared/types";
@@ -52,7 +52,7 @@ export function ResearchRows({
               <>
                 {researchMeta(e) && <span>{researchMeta(e)}</span>}
                 <Pill tone={e.status === "stale" ? "warn" : "ok"}>{e.status}</Pill>
-                {e.thin && <Pill tone="neutral" border>thin</Pill>}
+                {e.thin && <Pill tone="warn">thin</Pill>}
               </>
             )}
           </span>

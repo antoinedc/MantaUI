@@ -34,7 +34,7 @@ describe("AgentHistory", () => {
   let api: MockApi;
   const { onChanged, take } = useHarnessLifecycle();
 
-  async function open(records: AgentChange[], props: { preview?: number; cardsAbove?: ReadonlySet<string> } = {}, overrides: Record<string, unknown> = {}) {
+  async function open(records: AgentChange[], props: { cardsAbove?: ReadonlySet<string> } = {}, overrides: Record<string, unknown> = {}) {
     ({ api } = installMockApi(overrides));
     h = take(mount(<AgentHistory records={records} onChanged={onChanged} {...props} />));
     await h.flush();
@@ -117,13 +117,6 @@ describe("AgentHistory", () => {
     expect(rows()[1].querySelector('[role="alert"]')?.textContent).toBe("Already at that version");
     expect(rows()).toHaveLength(3);
     expect(onChanged).not.toHaveBeenCalled();
-  });
-
-  it("a preview shows only the first rows, read-only (no second copy of a card or a button)", async () => {
-    await open(LIST, { preview: 2 });
-    expect(rows()).toHaveLength(2);
-    expect(rows()[0].querySelectorAll("button")).toHaveLength(0);
-    expect(rows()[0].textContent).toContain("Dropped two crawler rules.");
   });
 
   it("a record whose card is shown above the tabs has no second card here", async () => {

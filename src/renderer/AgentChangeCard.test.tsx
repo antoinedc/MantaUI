@@ -607,4 +607,103 @@ describe("AgentChangeView", () => {
       expect(q(h!, "agent-change-source")).toBeNull();
     });
   });
+  describe("collapsed (the profile's pending card)", () => {
+    const UPDATE_BEFORE = "---\nname: SEO\ndescription: d\nisolation: none\n---\nAudit one page.\nAsk before redirects.\n";
+    const UPDATE_AFTER = "---\nname: SEO\ndescription: d\nisolation: none\n---\nAudit one page.\nCheck llms.txt.\n";
+    const pending = (over: Partial<AgentChange> = {}) =>
+      change({ kind: "update", slug: "seo", agentName: "SEO", before: UPDATE_BEFORE, after: UPDATE_AFTER, summary: "Adds an llms.txt check.", origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 }, ...over });
+    const mountCollapsed = (c: AgentChange, onChange: (n: AgentChange) => void = () => undefined, over: Record<string, unknown> = {}) => {
+      ({ api } = installMockApi(over));
+      h = mount(<AgentChangeView change={c} onChange={onChange} collapsed />);
+    };
+
+    it("is one summary line — the chip, who, what, and the same two buttons — with the change folded", async () => {
+      mountCollapsed(pending());
+      await h!.flush();
+      expect(chip(h!)).toBe("Waiting for you");
+      const line = q(h!, "agent-change-summary-line")!;
+      expect(line.textContent).toContain("Architect");
+      expect(line.textContent).toContain("Adds an llms.txt check.");
+      expect(buttons(h!).map((b) => b.textContent)).toEqual(["Apply", "Discard"]); // exactly one of each: no duplicated actions
+      const fold = q(h!, "agent-change-fold") as HTMLDetailsElement;
+      expect(fold.tagName).toBe("DETAILS");
+      expect(fold.open).toBe(false);
+      expect(fold.querySelector("summary")?.textContent).toBe("Show the change · 2 lines");
+      expect(fold.querySelector('[data-testid="agent-change-diff"]')).toBeTruthy(); // the diff lives inside the fold
+      expect(q(h!, "agent-change-summary")).toBeNull(); // the summary is in the line, not repeated above the fold
+    });
+
+    it("says who made the change: the Architect, Manta, or you", async () => {
+      mountCollapsed(pending({ origin: { kind: "chat" } }));
+      await h!.flush();
+      expect(q(h!, "agent-change-summary-line")?.textContent).toContain("Manta");
+      h!.unmount();
+      mountCollapsed(pending({ origin: { kind: "restore", fromChangeId: "x" } }));
+      await h!.flush();
+      expect(q(h!, "agent-change-summary-line")?.textContent).toContain("You");
+    });
+
+    it("without a summary the line says what the change is", async () => {
+      mountCollapsed(pending({ summary: null }));
+      await h!.flush();
+      expect(q(h!, "agent-change-summary-line")?.textContent).toContain("Change to SEO");
+    });
+
+    it("the fold names what the change is based on when it has evidence", async () => {
+      mountCollapsed(
+        pending({
+          evidence: [
+            { claim: "GPTBot honours robots.txt", quote: "q", url: "https://a.example", private: false },
+            { claim: "llms.txt is read by Perplexity", quote: null, url: null, private: true },
+          ],
+        }),
+      );
+      await h!.flush();
+      expect(q(h!, "agent-change-fold")?.querySelector("summary")?.textContent).toBe("Show the change · 2 lines · based on 2 sources");
+      expect(q(h!, "agent-change-evidence")).toBeTruthy();
+    });
+
+    it("a new agent folds its description and instructions", async () => {
+      mountCollapsed(change({ summary: "A reviewer." }));
+      await h!.flush();
+      const fold = q(h!, "agent-change-fold")!;
+      expect(fold.querySelector("summary")?.textContent).toBe("Show the new agent");
+      expect(fold.querySelector('[data-testid="agent-change-create"]')).toBeTruthy();
+    });
+
+    it("what the user must read stays outside the fold: the reason, a refusal, an outcome line", async () => {
+      mountCollapsed(pending({ reason: "isolation", needsClick: true }), () => undefined, { agentsChangeApply: () => Promise.reject(new Error("Changing agents is turned off in your autonomy settings")) });
+      await h!.flush();
+      expect(q(h!, "agent-change-fold")!.contains(q(h!, "agent-change-reason"))).toBe(false);
+      expect(q(h!, "agent-change-reason")?.textContent).toBe("This lets SEO edit code");
+      await press(h!, byText(h!, "Apply"));
+      expect(q(h!, "agent-change-notice")?.textContent).toBe("Changing agents is turned off in your autonomy settings");
+      expect(q(h!, "agent-change-fold")!.contains(q(h!, "agent-change-notice"))).toBe(false);
+    });
+
+    it("Apply and Discard behave exactly as on the full card (one Undo after)", async () => {
+      const applied = pending({ state: "applied", decidedAt: 2, decidedBy: "click" });
+      const seen: AgentChange[] = [];
+      mountCollapsed(pending(), (n) => seen.push(n), { agentsChangeApply: () => Promise.resolve(applied) });
+      await h!.flush();
+      await press(h!, byText(h!, "Apply"));
+      expect(api.calls.agentsChangeApply).toEqual([["ach_0123456789abcdef"]]);
+      expect(seen).toEqual([applied]);
+      h!.unmount();
+      mountCollapsed(applied);
+      await h!.flush();
+      expect(chip(h!)).toBe("Updated");
+      expect(buttons(h!).map((b) => b.textContent)).toEqual(["Undo"]);
+    });
+
+    it("the default card is unchanged: no summary line, no fold", async () => {
+      ({ api } = installMockApi({}));
+      h = mount(<AgentChangeView change={pending()} onChange={() => undefined} />);
+      await h.flush();
+      expect(q(h, "agent-change-summary-line")).toBeNull();
+      expect(q(h, "agent-change-fold")).toBeNull();
+      expect(q(h, "agent-change-summary")?.textContent).toBe("Adds an llms.txt check.");
+      expect(q(h, "agent-change-diff")).toBeTruthy();
+    });
+  });
 });

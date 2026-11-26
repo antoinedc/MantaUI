@@ -18,14 +18,11 @@ const EAGER_ROWS = 3;
 export function AgentHistory({
   records,
   onChanged,
-  preview,
   cardsAbove,
 }: {
   records: ReadonlyArray<AgentChange>;
   /** A record changed (a card press, a restore): the owner reads the profile and history again. */
   onChanged?: (record: AgentChange) => void;
-  /** Read-only first rows (the Overview): no actions, so no second copy of a card or a button. */
-  preview?: number;
   /** Records whose card is shown elsewhere on the page; their rows say so instead of offering a second card. */
   cardsAbove?: ReadonlySet<string>;
 }) {
@@ -40,7 +37,6 @@ export function AgentHistory({
     return [...added.filter((a) => !ids.has(a.id)), ...records].map((r) => overrides.get(r.id) ?? r);
   }, [records, added, overrides]);
   const current = useMemo(() => currentSnapshot(all), [all]);
-  const shown = preview != null ? all.slice(0, preview) : all;
 
   const setError = (id: string, text: string | null) =>
     setErrors((m) => {
@@ -86,7 +82,7 @@ export function AgentHistory({
   return (
     <div className="manta-agents-history flex flex-col">
       <ol className="m-0 flex list-none flex-col p-0" data-testid="history-list">
-        {shown.map((r, i) => {
+        {all.map((r, i) => {
           const above = r.state === "pending" || (cardsAbove?.has(r.id) ?? false);
           const expanded = open.has(r.id);
           const err = errors.get(r.id);
@@ -115,21 +111,19 @@ export function AgentHistory({
                   </div>
                 )}
               </div>
-              {preview == null && (
-                <div className="flex shrink-0 items-start gap-1">
-                  {!above && (
-                    <Button tone="ghost" ariaPressed={expanded} onClick={() => toggle(r.id)}>
-                      {expanded ? "Hide" : "Details"}
-                    </Button>
-                  )}
-                  {canRestore(r, current) && (
-                    <Button tone="ghost" onClick={() => void restore(r)} loading={busy === r.id} disabled={busy != null && busy !== r.id}>
-                      {busy === r.id ? "Restoring…" : "Restore before this"}
-                    </Button>
-                  )}
-                </div>
-              )}
-              {preview == null && expanded && !above && (
+              <div className="flex shrink-0 items-start gap-1">
+                {!above && (
+                  <Button tone="ghost" ariaPressed={expanded} onClick={() => toggle(r.id)}>
+                    {expanded ? "Hide" : "Details"}
+                  </Button>
+                )}
+                {canRestore(r, current) && (
+                  <Button tone="ghost" onClick={() => void restore(r)} loading={busy === r.id} disabled={busy != null && busy !== r.id}>
+                    {busy === r.id ? "Restoring…" : "Restore before this"}
+                  </Button>
+                )}
+              </div>
+              {expanded && !above && (
                 <div className="col-span-3">
                   <AgentChangeView
                     change={r}
@@ -144,7 +138,7 @@ export function AgentHistory({
           );
         })}
       </ol>
-      {preview == null && <Note />}
+      <Note />
     </div>
   );
 }
