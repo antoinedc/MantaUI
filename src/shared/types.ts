@@ -2937,6 +2937,13 @@ export type DelegateJob = {
   // The id the result is posted under (minted once); retrying a post is harmless.
   completionMessageId?: string | null;
   completionDelivery?: DelegateCompletionDelivery | null;
+  // Agent screens (spec §6.1): the first round's job id, shared by continuations. Older records: use
+  // rootJobOf(job) = job.rootJobId ?? job.architect?.rootJobId ?? job.id.
+  rootJobId?: string;
+  // Set when this launch placed the agent in a project it had no seat in.
+  seatAdded?: { project: string; projectName: string };
+  // Never post this job's result (refresh tasks); inherited by continuations.
+  deliverResult?: false;
   // The agent the job's session runs (shown in its result).
   agent?: string | null;
   // The box's reading of the record (delegate:list decoration, WS02): the status
@@ -3012,6 +3019,8 @@ export interface AgentInfo {
   useWhen: string | null; // "Use when …" routing line (≤ 200 chars)
   notFor: string | null; // "Not for …" routing line (≤ 200 chars)
   notice: string | null; // non-error hint shown under the row (e.g. the `manta` upgrade collision)
+  // Agent screens: the projects (registry slugs) the agent is seated in; absent on an older box → treat as [].
+  seats?: string[];
 }
 // Agents Phase 3: autonomy settings.
 export type AutonomyLevel = "auto" | "tell" | "ask" | "never";
@@ -3058,7 +3067,8 @@ export interface ArchitectSource {
 }
 export type AgentChangeOrigin =
   | { kind: "chat" }
-  | { kind: "job"; jobId: string; rootJobId: string; attempt: number };
+  | { kind: "job"; jobId: string; rootJobId: string; attempt: number }
+  | { kind: "restore"; fromChangeId: string };
 export interface AgentChangeEvidence {
   claim: string;
   /** null for a private source. */
@@ -4353,3 +4363,94 @@ export type UsageAlertFrame = {
 export type UsageRemindReply =
   | { ok: true; job?: unknown; fireAt: number }
   | { ok: false; code: string; message: string };
+
+// ---------------------------------------------------------------------------
+// Agent screens (docs/superpowers/specs/2026-11-26-agents-screens.md §6.1)
+// ---------------------------------------------------------------------------
+export type TaskQuestionState = "open" | "answered" | "dismissed" | "failed";
+export interface TaskQuestion {
+  id: string; // "tq_<16 hex>"
+  rootJobId: string; // the task (continuations share it)
+  jobId: string; // the round that asked
+  parentSessionID: string; // the chat that owns the task (where the card shows)
+  agentSlug: string | null;
+  agentName: string;
+  project: string | null; // registry slug of the task's folder
+  taskName: string;
+  questions: { question: string; options: { label: string; description: string }[]; multiple: boolean }[];
+  state: TaskQuestionState;
+  askedAt: number;
+  answeredAt: number | null;
+  answer: string[][] | null; // as the card sent it
+  delivery: "steer" | "continue" | "continue-pending" | null;
+  delivering: { messageID: string; at: number } | null; // claim of an answer in flight
+  error: string | null; // the last refusal, shown under the card
+}
+export interface TaskQuestionEvent {
+  id: string;
+  parentSessionID: string;
+  rootJobId: string;
+  state: TaskQuestionState;
+}
+export interface AgentSeat {
+  project: string;
+  projectName: string;
+  brief: string;
+  addedAt: number;
+  addedBy: "user" | "mention" | "handoff";
+  notes: number | null; // knowledge pages of that project, null when unknown
+  memory: { label: string; access: "read" | "read-write" | "none"; note: string }[];
+}
+export interface AgentResearchEntry {
+  id: string;
+  topic: string;
+  sourceCount: number | null;
+  ageDays: number | null;
+  status: "fresh" | "stale" | "missing";
+  thin: boolean;
+}
+export interface AgentProfile {
+  info: AgentInfo;
+  seats: AgentSeat[];
+  lastChangedAt: number | null;
+  builtBy: "architect" | "manta" | "user" | "built-in";
+  refresh: { enabled: boolean; routineId: string | null }; // enabled defaults to true (provisioned on sync)
+  research: AgentResearchEntry[];
+}
+export interface FleetCell {
+  jobId: string;
+  title: string;
+  at: number;
+  state: "working" | "needs-you" | "done" | "failed" | "idle";
+  detail: string; // "4/7 · 1 question", "11 issues", "Gmail token", "last task 3d ago"
+}
+export interface AgentFleet {
+  asOf: number;
+  projects: { slug: string; name: string }[];
+  rows: {
+    slug: string;
+    name: string;
+    color: string | null;
+    seats: string[];
+    cells: Record<string, FleetCell | null>;
+    tasksThisWeek: number;
+  }[];
+  week: { tasks: number };
+  recap: { since: number | null; lines: string[] };
+}
+export interface NeedsYouReview {
+  jobId: string;
+  agentSlug: string;
+  project: string | null;
+  name: string;
+  finishedAt: number;
+  filesChanged: number;
+  branch: string | null;
+  resultText: string;
+}
+export interface NeedsYou {
+  questions: TaskQuestion[];
+  changes: AgentChange[]; // pending, box-wide
+  reviews: NeedsYouReview[];
+  count: number;
+}
