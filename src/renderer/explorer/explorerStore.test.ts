@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import {
   flushExplorerPersist,
   getAppState,
@@ -8,6 +10,7 @@ import {
   navigateHistory,
   openFile,
   openFileFromTranscript,
+  openTaskPanel,
   parseLayout,
   reportExplorerWidth,
   resetExplorerStore,
@@ -23,9 +26,24 @@ import {
   toggleExpanded,
   toggleExplorer,
   toggleTree,
+  useTaskPanelJobId,
 } from "./explorerStore";
 
 const owner = (sessionId: string, cwd = "/home/u/proj") => ({ sessionId, cwd });
+
+/** `useTaskPanelJobId` outside React: a one-off render that reads the hook. */
+function taskJobId(sessionId: string): string | null {
+  let seen: string | null = null;
+  function Probe() {
+    seen = useTaskPanelJobId(sessionId);
+    return null;
+  }
+  const el = document.createElement("div");
+  const root = createRoot(el);
+  act(() => root.render(createElement(Probe)));
+  act(() => root.unmount());
+  return seen;
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -285,5 +303,76 @@ describe("toggleTree (⌥⌘E)", () => {
     reportExplorerWidth("a", 400);
     expect(toggleTree("a")).toBe(true);
     expect(getExplorerSession("a").layout.treeOpen).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task side panel (agent screens spec §6.6): the third occupant of the right slot
+// ---------------------------------------------------------------------------
+
+describe("task panel in the right slot", () => {
+  it("openTaskPanel shows the panel for that session and remembers the job", () => {
+    openTaskPanel("a", "job_1");
+    expect(shownRightPanel("a")).toBe("task");
+    expect(taskJobId("a")).toBe("job_1");
+    // a second open for another job replaces the first
+    openTaskPanel("a", "job_2");
+    expect(taskJobId("a")).toBe("job_2");
+  });
+
+  it("is per chat: another chat does not show it", () => {
+    openTaskPanel("a", "job_1");
+    expect(shownRightPanel("b")).toBe("none");
+    expect(taskJobId("b")).toBeNull();
+  });
+
+  it("opening it closes the Explorer and Artifacts", () => {
+    setRightPanel("a", "explorer");
+    openTaskPanel("a", "job_1");
+    expect(getExplorerSession("a").layout.open).toBe(false);
+    expect(getExplorerSession("a").expanded).toBe(false);
+    setRightPanel("a", "artifacts");
+    openTaskPanel("a", "job_1");
+    expect(getAppState().artifactsOpen).toBe(false);
+    expect(localStorage.getItem("manta:artifacts:open")).toBe("0");
+    expect(shownRightPanel("a")).toBe("task");
+  });
+
+  it("opening the Explorer or Artifacts closes it and forgets the job", () => {
+    openTaskPanel("a", "job_1");
+    setRightPanel("a", "explorer");
+    expect(shownRightPanel("a")).toBe("explorer");
+    expect(taskJobId("a")).toBeNull();
+    setRightPanel("a", "none");
+    expect(shownRightPanel("a")).toBe("none"); // the task panel does not come back
+
+    openTaskPanel("a", "job_1");
+    setRightPanel("a", "artifacts");
+    expect(shownRightPanel("a")).toBe("artifacts");
+    expect(taskJobId("a")).toBeNull();
+  });
+
+  it("closing it (none) clears the job; toggles and path clicks replace it", () => {
+    openTaskPanel("a", "job_1");
+    setRightPanel("a", "none");
+    expect(shownRightPanel("a")).toBe("none");
+    expect(taskJobId("a")).toBeNull();
+
+    openTaskPanel("a", "job_1");
+    toggleExplorer("a");
+    expect(shownRightPanel("a")).toBe("explorer");
+    openTaskPanel("a", "job_1");
+    toggleArtifacts("a");
+    expect(shownRightPanel("a")).toBe("artifacts");
+    openTaskPanel("a", "job_1");
+    openFile({ kind: "file", abs: "/home/u/proj/a.ts", owner: owner("a") });
+    expect(shownRightPanel("a")).toBe("explorer");
+    expect(taskJobId("a")).toBeNull();
+  });
+
+  it("the reset seam forgets it", () => {
+    openTaskPanel("a", "job_1");
+    resetExplorerStore();
+    expect(shownRightPanel("a")).toBe("none");
   });
 });
