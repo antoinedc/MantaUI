@@ -22,6 +22,47 @@ import { resetPackageAgentsForTest } from "./packageAgents";
 import type { AgentsView } from "./agents/agentsView";
 import type { Project } from "../shared/types";
 
+/** The props every mount of the Sidebar needs and no test here cares about. */
+const BASE_PROPS = {
+  onOpenSettings: () => {},
+  onNewProject: () => {},
+  onNewSessionInProject: () => {},
+  onOpenResumeModal: () => {},
+  onOpenCto: () => {},
+  ctoState: null,
+  onOpenRoutines: () => {},
+  routinesBadge: { needsYou: 0, unread: 0 },
+  agentsView: null,
+  needsYouCount: 0,
+  onOpenAgents: () => {},
+};
+
+/** The one-window project most blocks here seed the store with. */
+const singleWindowProject = () =>
+  proj({
+    tmuxSession: "proj",
+    windows: [{ index: 0, name: "win", active: true, paneCurrentPath: "/x", opencodeSessionId: null }],
+  });
+
+/** Dispatch a keydown on the sidebar's tree, as a user's key press would arrive. */
+function pressOnTree(h: Harness, key: string, init: { metaKey?: boolean; ctrlKey?: boolean } = {}, times = 1) {
+  const tree = h.container.querySelector('[role="tree"]') as HTMLElement;
+  act(() => {
+    for (let i = 0; i < times; i++) tree.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+  });
+}
+
+let h: Harness | null = null;
+afterEach(() => {
+  h?.unmount();
+  h = null;
+});
+
+function mountSidebar(): Harness {
+  h = mount(<Sidebar {...BASE_PROPS} />);
+  return h;
+}
+
 function proj(over: Partial<Project> & { tmuxSession: string }): Project {
   return {
     tmuxSession: over.tmuxSession,
@@ -32,7 +73,6 @@ function proj(over: Partial<Project> & { tmuxSession: string }): Project {
 }
 
 describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block)", () => {
-  let h: Harness | null = null;
 
   beforeEach(() => {
     installMockApi({
@@ -43,43 +83,16 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
     });
     resetStore({
       projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [
-            { index: 0, name: "win", active: true, paneCurrentPath: "/x", opencodeSessionId: null },
-          ],
-        }),
+        singleWindowProject(),
       ],
     });
   });
 
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
-
-  function mountSidebar(): Harness {
-    h = mount(
-      <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
-      />,
-    );
-    return h;
-  }
 
   // Two ArrowDowns: the first lands the roving highlight on the "proj" group
   // header, the second on its one window row ("win:proj:0").
   function focusWindowRow() {
-    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
-    act(() => {
-      tree.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-      tree.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    });
+    pressOnTree(h!, "ArrowDown", {}, 2);
   }
 
   function pinButton(): HTMLButtonElement {
@@ -139,7 +152,6 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
 const CLOSE_CAPS = { apiVersion: () => Promise.resolve({ capabilities: ["sessions-close-1"] } as never) };
 
 describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () => {
-  let h: Harness | null = null;
 
   beforeEach(() => {
     // localStorage persists across tests in this file; clear it so the
@@ -156,50 +168,20 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
       // keeps it across tests otherwise, which would change navKeys ordering.
       pinnedWindows: [],
       projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [
-            { index: 0, name: "win", active: true, paneCurrentPath: "/x", opencodeSessionId: null },
-          ],
-        }),
+        singleWindowProject(),
       ],
     });
   });
 
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
-
-  function mountSidebar(): Harness {
-    h = mount(
-      <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
-      />,
-    );
-    return h;
-  }
 
   function focusWindowRow() {
-    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
-    act(() => {
-      tree.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    });
-    act(() => {
-      tree.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    });
+    // two presses, each in its own act: the roving highlight reads state the first press sets
+    pressOnTree(h!, "ArrowDown");
+    pressOnTree(h!, "ArrowDown");
   }
 
   function keyOnTree(key: string, init: { metaKey?: boolean; ctrlKey?: boolean } = {}) {
-    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
-    act(() => {
-      tree.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
-    });
+    pressOnTree(h!, key, init);
   }
 
   it("bare Backspace/Delete on a focused row does nothing (no confirm)", () => {
@@ -242,7 +224,6 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
 });
 
 describe("Sidebar — project close worktree-cleanup + toast path (killProject, BET-937)", () => {
-  let h: Harness | null = null;
 
   function makeWindow(index: number, worktreePath: string | null) {
     return { index, name: "w" + index, active: index === 0, paneCurrentPath: "/x", opencodeSessionId: null, worktreePath };
@@ -258,30 +239,9 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     refreshCalls = 0;
   });
 
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
-
-  function mountSidebar(): Harness {
-    h = mount(
-      <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
-      />,
-    );
-    return h;
-  }
 
   function keyOnTree(key: string, init: { metaKey?: boolean; ctrlKey?: boolean } = {}) {
-    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
-    act(() => {
-      tree.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
-    });
+    pressOnTree(h!, key, init);
   }
 
   // Home focuses navKeys[0] (the "proj" group header), then ⌘⌫ opens the
@@ -309,32 +269,37 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
       .map((t) => String(t.message));
   }
 
+  function seedClosableProject(worktreeCleanOnClose: boolean, ...windows: ReturnType<typeof makeWindow>[]) {
+    resetStore({
+      worktreeCleanOnClose,
+      appToasts: [],
+      refresh: async () => {
+        refreshCalls++;
+      },
+      projects: [proj({ tmuxSession: "proj", windows })],
+    });
+  }
+
+  /** Press the confirm button and hand back the mock api's recorded calls. */
+  async function confirmClose() {
+    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
+    act(() => confirmCloseProjectButton().click());
+    await h!.flush();
+    return { api }; // boxed: the mock api is a Proxy that answers `then`, so returning it bare would hang
+  }
+
   it("closes a project with two clean worktrees → both removed, no keep-toast", async () => {
     installMockApi({
       ...CLOSE_CAPS,
       gitRemoveWorktree: () => Promise.resolve({ removed: true }),
     });
-    resetStore({
-      worktreeCleanOnClose: true,
-      appToasts: [],
-      refresh: async () => {
-        refreshCalls++;
-      },
-      projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [makeWindow(0, "/wt/a"), makeWindow(1, "/wt/b")],
-        }),
-      ],
-    });
+    seedClosableProject(true, makeWindow(0, "/wt/a"), makeWindow(1, "/wt/b"));
     mountSidebar();
     await openProjectCloseConfirm();
     // Confirm body advertises both worktrees being removed.
     expect(h!.docText()).toContain("2 worktrees will be removed.");
 
-    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
-    act(() => confirmCloseProjectButton().click());
-    await h!.flush();
+    const { api } = await confirmClose();
 
     const calls = api.calls.gitRemoveWorktree ?? [];
     expect(calls).toHaveLength(2);
@@ -352,25 +317,11 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
           args.path === "/wt/dirty" ? { removed: false, reason: "dirty" } : { removed: true },
         ),
     });
-    resetStore({
-      worktreeCleanOnClose: true,
-      appToasts: [],
-      refresh: async () => {
-        refreshCalls++;
-      },
-      projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [makeWindow(0, "/wt/clean"), makeWindow(1, "/wt/dirty")],
-        }),
-      ],
-    });
+    seedClosableProject(true, makeWindow(0, "/wt/clean"), makeWindow(1, "/wt/dirty"));
     mountSidebar();
     await openProjectCloseConfirm();
 
-    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
-    act(() => confirmCloseProjectButton().click());
-    await h!.flush();
+    const { api } = await confirmClose();
 
     // Clean worktree removed, tmux session killed.
     const removeCalls = (api.calls.gitRemoveWorktree ?? []).map((c) => (c[0] as { path: string }).path);
@@ -388,19 +339,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
   it("worktreeCleanOnClose off → no gitRemoveWorktree, no worktree sentence in confirm", async () => {
     installMockApi({
       ...CLOSE_CAPS, ...CLOSE_CAPS });
-    resetStore({
-      worktreeCleanOnClose: false,
-      appToasts: [],
-      refresh: async () => {
-        refreshCalls++;
-      },
-      projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [makeWindow(0, "/wt/a"), makeWindow(1, "/wt/b")],
-        }),
-      ],
-    });
+    seedClosableProject(false, makeWindow(0, "/wt/a"), makeWindow(1, "/wt/b"));
     mountSidebar();
     await openProjectCloseConfirm();
 
@@ -408,9 +347,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     expect(h!.docText()).not.toContain("worktree");
     expect(h!.docText()).toContain('Close “proj”');
 
-    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
-    act(() => confirmCloseProjectButton().click());
-    await h!.flush();
+    const { api } = await confirmClose();
 
     expect(api.calls.gitRemoveWorktree).toBeUndefined();
     expect(api.calls.tmuxKillSession).toEqual([["proj"]]);
@@ -423,25 +360,11 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
       ...CLOSE_CAPS,
       projectMetaDelete: () => Promise.reject(new Error("meta gone")),
     });
-    resetStore({
-      worktreeCleanOnClose: false,
-      appToasts: [],
-      refresh: async () => {
-        refreshCalls++;
-      },
-      projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [makeWindow(0, "/wt/a")],
-        }),
-      ],
-    });
+    seedClosableProject(false, makeWindow(0, "/wt/a"));
     mountSidebar();
     await openProjectCloseConfirm();
 
-    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
-    act(() => confirmCloseProjectButton().click());
-    await h!.flush();
+    const { api } = await confirmClose();
 
     expect(api.calls.projectMetaDelete).toEqual([["proj"]]);
     // The reject is swallowed + surfaced as an error toast, but refresh() still runs.
@@ -603,23 +526,11 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
         },
       ],
       projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [
-            { index: 0, name: "win", active: true, paneCurrentPath: "/x", opencodeSessionId: null },
-          ],
-        }),
+        singleWindowProject(),
       ],
     });
     h = mount(
-      <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
-      />,
+      <Sidebar {...BASE_PROPS} />,
     );
     await h.flush();
 
@@ -668,14 +579,7 @@ describe("Sidebar — nested background job rows (observed, superseded)", () => 
     resetStore({ projects: [proj({ tmuxSession: "proj", windows })], jobs: {}, jobSkew: {} });
     useStore.getState().setJobs(jobs as never);
     h = mount(
-      <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
-      />,
+      <Sidebar {...BASE_PROPS} />,
     );
     return h;
   }
@@ -756,7 +660,7 @@ describe("Sidebar — the box's job nesting and status rollup (WS11 D7)", () => 
   });
   const mountIt = async () => {
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}} />,
+      <Sidebar {...BASE_PROPS} />,
     );
     await h.flush();
   };
@@ -817,18 +721,10 @@ describe("Sidebar — Routines row", () => {
     const onOpenRoutines = vi.fn();
     h = mount(
       <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null}
+        {...BASE_PROPS}
         onOpenRoutines={onOpenRoutines}
         routinesBadge={{ needsYou: props.needsYou ?? 0, unread: props.unread ?? 0 }}
         routinesOpen={props.open}
-        agentsView={null}
-        needsYouCount={0}
-        onOpenAgents={() => {}}
       />,
     );
     return onOpenRoutines;
@@ -872,14 +768,7 @@ describe("Sidebar — agent pages (agent screens spec §1.1)", () => {
     const onOpenAgents = vi.fn();
     h = mount(
       <Sidebar
-        onOpenSettings={() => {}}
-        onNewProject={() => {}}
-        onNewSessionInProject={() => {}}
-        onOpenResumeModal={() => {}}
-        onOpenCto={() => {}}
-        ctoState={null}
-        onOpenRoutines={() => {}}
-        routinesBadge={{ needsYou: 0, unread: 0 }}
+        {...BASE_PROPS}
         agentsView={props.agentsView ?? null}
         needsYouCount={props.needsYouCount ?? 0}
         onOpenAgents={onOpenAgents}

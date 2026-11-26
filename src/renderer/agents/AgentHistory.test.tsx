@@ -3,40 +3,24 @@
 // The profile's History (agent screens spec §5.2): the change records of one agent, undone ones marked, Details expanding a
 // row into the existing change card (the only Undo), Restore before this where it would change something.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { act } from "react";
 import type { AgentChange } from "../../shared/types";
-import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
+import { installMockApi, mount, type Harness, type MockApi } from "../testHarness";
 import { AgentHistory } from "./AgentHistory";
+import { useHarnessLifecycle, buttonIn, changeRecord, clickEl } from "./agentsTestFixtures";
 
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
 
-const rec = (over: Partial<AgentChange> = {}): AgentChange => ({
-  id: "c1",
-  kind: "update",
-  slug: "seo",
-  agentName: "SEO",
-  sessionID: "ses",
-  messageID: "m",
-  callID: "c",
-  state: "applied",
-  needsClick: false,
-  reason: null,
-  before: "V1",
-  after: "V2",
-  createdAt: NOW - 3 * DAY,
-  decidedAt: NOW - 3 * DAY,
-  error: null,
-  origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 },
-  mode: "build",
-  releasedAt: NOW - 3 * DAY,
-  decidedBy: "auto",
-  summary: "Added rules for how AI search engines read pages.",
-  evidence: [],
-  admission: [],
-  ...over,
-});
+const rec = (over: Partial<AgentChange> = {}): AgentChange =>
+  changeRecord({
+    createdAt: NOW - 3 * DAY,
+    decidedAt: NOW - 3 * DAY,
+    releasedAt: NOW - 3 * DAY,
+    summary: "Added rules for how AI search engines read pages.",
+    ...over,
+  });
 
 // newest first, as the box answers
 const LIST = [
@@ -48,31 +32,16 @@ const LIST = [
 describe("AgentHistory", () => {
   let h: Harness | null = null;
   let api: MockApi;
-  const onChanged = vi.fn();
-
-  beforeEach(() => {
-    resetStore();
-    onChanged.mockClear();
-  });
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
+  const { onChanged, take } = useHarnessLifecycle();
 
   async function open(records: AgentChange[], props: { preview?: number; cardsAbove?: ReadonlySet<string> } = {}, overrides: Record<string, unknown> = {}) {
     ({ api } = installMockApi(overrides));
-    h = mount(<AgentHistory records={records} onChanged={onChanged} {...props} />);
+    h = take(mount(<AgentHistory records={records} onChanged={onChanged} {...props} />));
     await h.flush();
   }
   const rows = () => [...h!.container.querySelectorAll<HTMLElement>('[data-testid="history-row"]')];
-  const btn = (scope: ParentNode, text: string) => [...scope.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim().startsWith(text)) as HTMLButtonElement | undefined;
-  async function click(el: Element | null | undefined) {
-    expect(el).toBeTruthy();
-    await act(async () => {
-      (el as HTMLElement).click();
-    });
-    await h!.flush();
-  }
+  const btn = (scope: ParentNode, text: string) => buttonIn(scope, text);
+  const click = (el: Element | null | undefined) => clickEl(h!, el);
 
   it("says so when there are no changes, and always says what the list does not hold", async () => {
     await open([]);

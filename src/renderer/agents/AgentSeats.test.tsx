@@ -3,11 +3,12 @@
 // The profile's Seats (agent screens spec §2.2, §5.1): one row per seat with its brief, notes and current task; Edit brief,
 // Remove (confirmed), Add a seat; the memory map of the selected seat. The lead and the Architect work in every project.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { act } from "react";
 import type { AgentFleet, AgentProfile, AgentSeat } from "../../shared/types";
-import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
+import { installMockApi, mount, type Harness, type MockApi } from "../testHarness";
 import { AgentSeats, MemoryMap } from "./AgentSeats";
+import { useHarnessLifecycle, buttonIn, clickEl } from "./agentsTestFixtures";
 
 const seat = (project: string, name: string, over: Partial<AgentSeat> = {}): AgentSeat => ({
   project,
@@ -51,31 +52,16 @@ const fleetFor = (): AgentFleet => ({
 describe("AgentSeats", () => {
   let h: Harness | null = null;
   let api: MockApi;
-  const onChanged = vi.fn();
-
-  beforeEach(() => {
-    resetStore();
-    onChanged.mockClear();
-  });
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
+  const { onChanged, take } = useHarnessLifecycle();
 
   async function open(p: AgentProfile = profile(), overrides: Record<string, unknown> = {}, props: { fleet?: AgentFleet | null; projects?: typeof PROJECTS | null } = {}) {
     ({ api } = installMockApi(overrides));
-    h = mount(<AgentSeats profile={p} projects={props.projects === undefined ? PROJECTS : props.projects} fleet={props.fleet === undefined ? fleetFor() : props.fleet} onChanged={onChanged} />);
+    h = take(mount(<AgentSeats profile={p} projects={props.projects === undefined ? PROJECTS : props.projects} fleet={props.fleet === undefined ? fleetFor() : props.fleet} onChanged={onChanged} />));
     await h.flush();
   }
   const rows = () => [...h!.container.querySelectorAll<HTMLElement>('[data-testid="seat-row"]')];
-  const btn = (scope: ParentNode, text: string) => [...scope.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
-  async function click(el: Element | null | undefined) {
-    expect(el).toBeTruthy();
-    await act(async () => {
-      (el as HTMLElement).click();
-    });
-    await h!.flush();
-  }
+  const btn = (scope: ParentNode, text: string) => buttonIn(scope, text, true);
+  const click = (el: Element | null | undefined) => clickEl(h!, el);
   async function type(el: HTMLTextAreaElement | HTMLSelectElement, value: string) {
     await act(async () => {
       const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLTextAreaElement.prototype;

@@ -10,6 +10,7 @@ import { resetPackageAgentsForTest } from "../packageAgents";
 import { useStore } from "../store";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
 import { AgentProfile } from "./AgentProfile";
+import { buttonIn, changeRecord, clickEl } from "./agentsTestFixtures";
 
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
@@ -31,31 +32,15 @@ const info = (over: Partial<AgentInfo> = {}): AgentInfo => ({
 
 const AGENT_MD = "---\nname: SEO\ndescription: Technical SEO and visibility in AI search.\nisolation: none\nuse_when: A page's ranking or markup is the question\n---\nAudit pages. Never publish.";
 
-const rec = (over: Partial<AgentChange> = {}): AgentChange => ({
-  id: "c1",
-  kind: "update",
-  slug: "seo",
-  agentName: "SEO",
-  sessionID: "ses",
-  messageID: "m",
-  callID: "c",
-  state: "applied",
-  needsClick: false,
-  reason: null,
-  before: "V1",
-  after: AGENT_MD,
-  createdAt: NOW - 3 * DAY,
-  decidedAt: NOW - 3 * DAY,
-  error: null,
-  origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 },
-  mode: "build",
-  releasedAt: NOW - 3 * DAY,
-  decidedBy: "auto",
-  summary: "Added rules for how AI search engines read pages.",
-  evidence: [],
-  admission: [],
-  ...over,
-});
+const rec = (over: Partial<AgentChange> = {}): AgentChange =>
+  changeRecord({
+    after: AGENT_MD,
+    createdAt: NOW - 3 * DAY,
+    decidedAt: NOW - 3 * DAY,
+    releasedAt: NOW - 3 * DAY,
+    summary: "Added rules for how AI search engines read pages.",
+    ...over,
+  });
 
 const profile = (over: Partial<Profile> = {}): Profile => ({
   info: info(),
@@ -112,14 +97,8 @@ describe("AgentProfile", () => {
   }
   const q = (sel: string) => h!.container.querySelector<HTMLElement>(sel);
   const qa = (sel: string) => [...h!.container.querySelectorAll<HTMLElement>(sel)];
-  const btn = (text: string, scope: ParentNode = h!.container) => [...scope.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
-  async function click(el: Element | null | undefined) {
-    expect(el).toBeTruthy();
-    await act(async () => {
-      (el as HTMLElement).click();
-    });
-    await h!.flush();
-  }
+  const btn = (text: string, scope: ParentNode = h!.container) => buttonIn(scope, text, true);
+  const click = (el: Element | null | undefined) => clickEl(h!, el);
   const tab = (name: string) => qa('[role="tab"]').find((t) => (t.textContent ?? "").startsWith(name))!;
   const panel = (name: string) => qa('[role="tabpanel"]').find((p) => p.getAttribute("aria-labelledby") === tab(name).id)!;
 
