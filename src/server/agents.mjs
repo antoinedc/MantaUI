@@ -3144,12 +3144,9 @@ export function createAgentsEngine({
   async function seatsOf(entry) {
     if (entry.info.role !== "specialist" || isArchitect(entry)) return [];
     const names = await projectNames();
-    const out = [];
-    for (const project of await seatSlugsOf(entry.dir)) {
-      const seat = await seatView(entry, project, names);
-      if (seat) out.push(seat);
-    }
-    return out;
+    // in parallel: each seat's page count may wait up to its own short timeout
+    const seats = await Promise.all((await seatSlugsOf(entry.dir)).map((project) => seatView(entry, project, names)));
+    return seats.filter(Boolean);
   }
 
   async function seatAgent(slug) {
