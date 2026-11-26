@@ -59,3 +59,56 @@ test("decisionLines: several questions are numbered; a multi-select says so; an 
   assert.deepEqual(decisionLines(null), []);
   assert.deepEqual(decisionLines({}), []);
 });
+
+// ---- non-blocking questions (docs/superpowers/specs/2026-11-26-agents-screens.md §4) ----
+import { acceptsFreeText, answerText, dismissText, waitingLine, PLACEHOLDER_ANSWER } from "./taskDecision.mjs";
+
+test("acceptsFreeText: only a non-empty form whose every field lets the user type is a non-blocking question", () => {
+  assert.equal(acceptsFreeText(form([select("a", "Q?", opts("x", "y"))])), true, "no flag reads as custom");
+  assert.equal(acceptsFreeText(form([select("a", "Q?", opts("x"), { custom: true }), select("b", "R?", opts("y"), { custom: true })])), true);
+  assert.equal(acceptsFreeText(form([select("a", "Q?", opts("x"), { custom: false })])), false, "one field that forbids typing");
+  assert.equal(acceptsFreeText(form([select("a", "Q?", opts("x")), select("b", "R?", opts("y"), { custom: false })])), false, "any field that forbids typing");
+  assert.equal(acceptsFreeText(form([])), false, "no fields");
+  assert.equal(acceptsFreeText({ id: "frm_1" }), false, "no fields array");
+  assert.equal(acceptsFreeText(null), false);
+});
+
+test("PLACEHOLDER_ANSWER: the fixed wording the task's tool call returns", () => {
+  assert.equal(
+    PLACEHOLDER_ANSWER,
+    "Not answered yet: the user sees your question and can answer at any time. Keep working on everything that doesn't depend on it; the answer will arrive as a new message from the user. If all remaining work depends on it, finish what you can, say what is left, and end your turn.",
+  );
+});
+
+test("answerText: one question → the pinned sentence; labels and typed text join with a comma", () => {
+  const qs = [{ question: "Create it?", options: [], multiple: false }];
+  assert.equal(answerText(qs, [["Add to @cro"]]), 'Answer from the user to your question "Create it?": Add to @cro');
+  assert.equal(answerText(qs, [["Add to @cro", "but name it pricing"]]), 'Answer from the user to your question "Create it?": Add to @cro, but name it pricing');
+});
+
+test("answerText: several questions → one line each; a question with no answer says so; breaks never start a line; long questions are cut", () => {
+  const qs = [{ question: "First?\nline two", options: [], multiple: false }, { question: "Second?", options: [], multiple: true }];
+  const text = answerText(qs, [["a"], []]);
+  const lines = text.split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], 'Answer from the user to your question "First? line two": a');
+  assert.equal(lines[1], 'Answer from the user to your question "Second?": (no answer given)');
+  const long = answerText([{ question: "q".repeat(900), options: [], multiple: false }], [["x"]]);
+  assert.ok(long.length < 500, "the echoed question is cut");
+  assert.ok(long.includes("…"));
+});
+
+test("dismissText: the pinned sentence, with the question echoed on one line", () => {
+  assert.equal(
+    dismissText({ question: "Create\nit?", options: [], multiple: false }),
+    'The user dismissed your question "Create it?". Decide yourself, or say what is left undecided.',
+  );
+});
+
+test("waitingLine: server-written, names the first question", () => {
+  assert.equal(
+    waitingLine([{ question: "Create it?", options: [], multiple: false }]),
+    'Waiting for the user\'s answer to: "Create it?" (the answer will continue this task).',
+  );
+  assert.equal(waitingLine([]), "");
+});
