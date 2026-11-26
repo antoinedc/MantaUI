@@ -45,7 +45,8 @@ are EXISTING components drawn as they ship; render the component, never copy the
 | `AgentProfile` (`agents/AgentProfile.tsx`, R1) | header, pending cards, tablist + panels |
 | `AgentHistory` (`agents/AgentHistory.tsx`, R1) | rows (date, who, summary, outcome, actions); expands to `AgentChangeView` |
 | `AgentSeats` (`agents/AgentSeats.tsx`, R1) | seat rows, brief editor (`<textarea>`), add-seat `<select>`, memory map grid |
-| `TaskSidePanel` (`TaskSidePanel.tsx`, R2) | right-slot panel: top bar + `JobDetails` + research rows + brief `<details>` |
+| `TaskSidePanel` (`TaskSidePanel.tsx`, R2) | right-slot panel: top bar + `JobDetails` + `ResearchRows` + brief `<details>` |
+| `ResearchRows` (`ResearchRows.tsx`, R2) | library entry rows (topic, sources · age, fresh/stale/thin `Pill`s); used by the panel and the profile |
 
 ## Regions → classes
 
@@ -56,7 +57,7 @@ are EXISTING components drawn as they ship; render the component, never copy the
 | `.ny-ctx` context line | `flex items-center gap-2 text-meta text-text-faint`; name `text-text-muted font-semibold` |
 | `.recap` | `rounded-md bg-fill px-3 py-2 text-label text-text-muted`; lead-in `text-text font-semibold` |
 | `table.mx` | `<table>` `w-full text-meta`; `th` `text-left font-semibold text-text-faint px-2 py-2 border-b border-border`; `td` `px-2 py-2 border-b border-border-subtle align-top`; first column `<th scope="row">` sticky (`sticky left-0 bg-bg`) |
-| `.cell` | `flex flex-col gap-px max-w-52`; title `truncate text-text-muted`; state line `flex items-center gap-2 text-text-faint` with `StatusDot`; empty `text-text-quiet` "—" |
+| `.cell` | `flex flex-col gap-px w-52`; title `truncate text-text-muted`; state line `flex items-center gap-2 text-text-faint` with `StatusDot`; empty `text-text-quiet` "—" |
 | `.phero` | `flex gap-3 items-start`; name `text-title font-semibold`; facts `text-meta text-text-faint flex gap-3 flex-wrap`; description `text-label text-text-muted max-w-[70ch]` |
 | `.av` / `.av.lg` / `.av.sm` | agent badge: `rounded-sm` (`rounded-md` large) filled with `AgentInfo.color`, initials `text-micro font-semibold`, sizes 14 (rail, as today) / 22 / 44 px |
 | `.ptabs` | tablist: `flex gap-5 border-b border-border text-label`; tab `py-2 text-text-faint`, selected `text-text` + 2px `border-b-2 border-accent` drawn on `::after` (the `tabs` guide: a border, not a box-shadow); disabled Tests `text-text-quiet` |
@@ -103,7 +104,7 @@ The mockup inlines `src/renderer/tokens.css` verbatim (it predates `--usage-dot*
 | Name | Value | Where |
 |---|---|---|
 | `TASK_PANEL_WIDTH_PX` | 440 | `TaskSidePanel.tsx` (Artifacts uses 340; the panel carries step text) |
-| `FLEET_CELL_MAX_PX` | 208 (`max-w-52`) | `FleetPage.tsx` |
+| `FLEET_CELL_PX` | 208 (`w-52`) | `FleetPage.tsx` |
 | `HISTORY_LIMIT` | 50 | server + `AgentHistory.tsx` |
 | `OVERVIEW_PREVIEW` | research 4, history 3 | `AgentProfile.tsx` |
 | `FLEET_REFETCH_DEBOUNCE_MS` | 1000 | `FleetPage.tsx` |

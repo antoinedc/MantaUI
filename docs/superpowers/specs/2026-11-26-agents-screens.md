@@ -1,6 +1,7 @@
 # Agents — Phase 6: Agent screens
 
-Status: draft for review (2026-11-26). Owner: Antoine. Builds on Phases 1–5A (`2026-11-22-agents-phase1.md` …
+Status: draft, self-reviewed (2026-11-26; the requested OpenAI review could not run — every OpenAI model on the box
+answered "usage limit reached"; see §12). Owner: Antoine. Builds on Phases 1–5A (`2026-11-22-agents-phase1.md` …
 `2026-11-24-agents-phase5-builder.md`), the question tool (`2026-11-24-ask-user-tool.md`) and the research library
 (`2026-11-24-research-library.md`). Absorbs the old "5B" (history + restore, the refresh routine).
 
@@ -52,8 +53,9 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 - **Needs you** lists, newest first:
   1. open task questions (`QuestionCard`, answered in place — §4);
   2. pending agent changes box-wide, whatever chat or routine made them (`AgentChangeView`);
-  3. finished specialist tasks with changes on a branch that nobody has opened yet (`BackgroundResultCard`, built from
-     the job: its "Open session →" is the existing action; a "Done" ghost button dismisses the item).
+  3. finished specialist tasks with changes on a branch that nobody has opened yet (`BackgroundResultCard`, fed a
+     `BackgroundResultPart` built from the review item by a pure `reviewPart()` in `agents/agentsView.ts`; its "Open
+     session →" is the existing action; a "Done" ghost button in the context line dismisses the item).
 
   Each item sits under one context line: agent badge + name, project, task name, age, and "still working on the rest"
   while the task runs. Count = the sum, also the sidebar badge. Empty → "Nothing needs you."
@@ -70,8 +72,8 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 
 - Breadcrumb `Agents / <Name>`. Header: colour badge, name, facts line (built by / last changed / model / isolation),
   description. Buttons: **Change via Manta** (new chat draft "Change @slug: "), **Chat** (the existing direct chat,
-  `agents:open-chat`; hidden for the Architect, as today), **Mention in a chat** (primary: puts `@slug ` into the
-  active chat's composer, or a new draft when no chat is active).
+  `agents:open-chat`; hidden for the Architect, as today), **Mention in a chat** (primary: a new chat draft prefilled
+  `@slug ` in the agent's first seat's project, else the active project; no reach into an open chat's composer).
 - **Pending change cards** for this agent (`AgentChangeView`, one per pending record) above the tabs.
 - **Tabs** (Overview default; the tab is in the URL-less view state, not persisted):
   - **Overview:** Charter (the agent's description, use when, not for, edits code or read-only, model; instructions in
@@ -184,7 +186,8 @@ delivering the user's real answer later as a message.
   `buildCompletionText` appends, server-written: `Waiting for the user's answer to: "<question>" (the answer will
   continue this task).` The lead brief says not to ask it again.
 - **Race:** an answer steered just as the turn ends may sit unconsumed in the child session's inbox. At settle, the
-  delegate reads `listInbox(child)`; any pending item whose message id is a delivered answer's is cancelled
+  delegate reads `listInbox(child)`; any pending item that is a delivered answer (matched by the minted message id when
+  the item carries it, else by its exact text — S1 checks which on the pinned binary in the e2e first) is cancelled
   (`cancelInboxItem`) and the answer is re-delivered with `continueJob` (the question's delivery becomes "continue").
   A failed read is retried by the 60 s sweep; the question keeps `delivery: "steer-unconfirmed"` until resolved.
 - Records whose job is gone (pruned, deleted) can still be dismissed; answering says "That task no longer exists; ask
@@ -211,6 +214,10 @@ delivering the user's real answer later as a message.
   the task." `RESEARCH_GUIDANCE`'s last line is unchanged.
 
 ### 4.6 Interaction with the Architect's fit check
+
+Owners: S1 sets the mark (delegate record patch, on the finished record BEFORE `continueJob` so the successor inherits it
+through `inherited`, or with `mutateJobProgress` on a running round); S2 adds the refusal in `agent_propose` through
+`taskQuestions.hasOpen(rootJobId)`.
 
 `askedUser` now means "the user answered a question in this task" (set at answer time on the newest round; inherited by
 successors as today). `agent_propose` additionally refuses while the root task has an open question: "Your question to
@@ -376,6 +383,8 @@ export interface NeedsYou {
 | `agentsRefreshSet` | `agents:refresh-set` | `{slug, enabled}` → `AgentProfile["refresh"]` | team agents only |
 | `agentsTaskResearch` | `agents:task-research` | `{jobId}` → `AgentProfile["research"]` | library entries found/saved by the task + its proposals' basis |
 | `agentsProjects` | `agents:projects` | `()` → `{slug, name}[]` | registry projects, for "Add a seat" |
+| `onTaskQuestion` | bus `taskQuestion` | `(cb) → off` | subscription, like `onAgentChange` |
+| `onAgentFleet` | bus `agentFleet` | `(cb) → off` | subscription |
 
 Errors follow the existing `agents:*` style: an `AgentError` sentence thrown → the renderer shows it (class-1 safe
 literals for anything unexpected).
@@ -491,9 +500,13 @@ in `src/shared/api.ts` (signatures only) and channel names.
   (export `JobDetails`, "· N questions", Details → side panel for agent tasks), `src/renderer/TaskSidePanel.tsx` (new),
   `src/renderer/explorer/explorerStore.ts` (`RightPanel` gains `"task"` + the job id), `src/renderer/ComposerParts.tsx` and
   `src/renderer/agentDispatch.ts` (picker), `src/renderer/api/httpApi.ts` (all §6.2 methods + `onTaskQuestion` /
-  `onAgentFleet`), `src/renderer/newAgentDraft.ts` (new: `openNewAgentDraft()` / `openChangeAgentDraft(slug)`, used by R1).
+  `onAgentFleet`), `src/renderer/newAgentDraft.ts` (new: `openNewAgentDraft()`, `openChangeAgentDraft(slug)`,
+  `openMentionDraft(slug, folder)`, used by R1), `src/renderer/ResearchRows.tsx` (new: the topic / sources / age / fresh /
+  thin rows, used by the side panel AND by R1's profile, so there is one rendering of library entries).
 
-Seams: R1 imports `openNewAgentDraft` and `TaskSidePanel` from R2's files by the names above; R2 imports nothing from R1.
+Seams: R1 imports `openNewAgentDraft`, `openChangeAgentDraft`, `openMentionDraft`, `ResearchRows`, `TaskSidePanel` and
+`useShownRightPanel` (now able to return `"task"`) from R2's files by the names above; R2 imports nothing from R1. R2 lands
+those exports first (stubs that render nothing are NOT allowed on `main`; land them in the same PR train or R1 waits).
 S2 wires S1's module by §6.3. Every implementer follows `modern-web-guidance` for UI (R1, R2), the no-stub rule (every
 control reports its outcome), and runs targeted tests while iterating.
 
@@ -504,3 +517,13 @@ installed with user edits — needs a three-way merge); Tests tab (trial runs); 
 deadlines/defaults; VMs; Fleet filters ("All projects" is static); multi-project seats; per-seat model/permission
 overrides; a library browser; a real-model probe of the placeholder wording; Needs-you push notifications per item;
 showing hand edits in History (needs file watching).
+
+## 12. Review log
+
+- **OpenAI review:** requested with `openai/gpt-6-astra`, then `openai/gpt-6-sol` (and `gpt-6-luna` as a probe) through
+  the box's OpenCode; all three refused with "The usage limit has been reached". Re-run it before implementation starts.
+- **Self-review round (Opus), applied:** inbox items may not carry the message id (match by id, else text; verify in the
+  e2e first); `askedUser` owner and timing pinned (set before `continueJob` so the successor inherits it); "Mention in a
+  chat" no longer reaches into another component's composer (a draft instead); one shared `ResearchRows` for the panel
+  and the profile; the review item feeds `BackgroundResultCard` a built part; the bus subscriptions are in the `Api`
+  table; R2's exports land before R1 uses them.
