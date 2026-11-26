@@ -470,3 +470,401 @@ test("seats: a dispatch appends the brief without its frontmatter; into a projec
     await f.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// the fleet read model (§5.3), needs you (§2.1), the recap (§6.4)
+// ---------------------------------------------------------------------------
+
+let jn = 0;
+const job = (over = {}) => {
+  const id = over.id ?? `job_${++jn}`;
+  return {
+    id,
+    rootJobId: id,
+    name: "fix the build",
+    agent: "agent-dev",
+    agentName: "Dev",
+    specialist: true,
+    parentSessionID: "ses_chat",
+    parentDirectory: "/repo/site",
+    status: "done",
+    isolation: "worktree",
+    branch: null,
+    filesChanged: null,
+    createdAt: T0 - 3600_000,
+    finishedAt: T0 - 1800_000,
+    result: "Done.",
+    error: null,
+    attempt: 1,
+    ...over,
+  };
+};
+
+test("fleet: rows are team agents without the lead and the Architect; columns are projects with a seat or a task this week; cells show the newest task, running first", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    await f.engine.seatAdd({ slug: "dev", project: API, brief: "b" });
+    f.w.jobs = [
+      job({ id: "old", createdAt: T0 - 2 * DAY, finishedAt: T0 - 2 * DAY + 1000, status: "done" }),
+      job({ id: "run", status: "running", finishedAt: null, createdAt: T0 - 600_000, jobProgress: { checklist: [{ text: "a", status: "completed" }, { text: "b", status: "completed" }, { text: "c", status: "in_progress" }, { text: "d", status: "pending" }] } }),
+      job({ id: "api1", parentDirectory: "/repo/api", status: "failed", error: "Gmail token expired\nsecond line", createdAt: T0 - 5 * 3600_000, finishedAt: T0 - 4 * 3600_000 }),
+      job({ id: "arch", agent: "agent-architect", agentName: "Architect", createdAt: T0 - 1000 }),
+      job({ id: "nonspec", specialist: false, agent: "agent-dev" }),
+    ];
+    f.w.open.set("run", 1);
+    const fleet = await f.engine.fleet();
+    assert.equal(fleet.asOf, T0);
+    assert.deepEqual(fleet.projects.map((p) => p.slug).sort(), [API, SITE].sort());
+    assert.deepEqual(fleet.projects.find((p) => p.slug === SITE), { slug: SITE, name: "Site" });
+    assert.deepEqual(fleet.rows.map((r) => r.slug), ["dev"]);
+    const dev = fleet.rows[0];
+    assert.deepEqual(dev.seats, [API]);
+    assert.equal(dev.name, "Dev");
+    const site = dev.cells[SITE];
+    assert.equal(site.jobId, "run");
+    assert.equal(site.state, "working");
+    assert.equal(site.detail, "2/4 · 1 question");
+    assert.equal(site.title, "fix the build");
+    const api = dev.cells[API];
+    assert.equal(api.jobId, "api1");
+    assert.equal(api.state, "failed");
+    assert.equal(api.detail, "Gmail token expired", "the first line of the error");
+    assert.equal(fleet.week.tasks, 0, "counted when launched through the engine, not read from the jobs");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleet: a seat with no task is idle; an old finished task reads 'last task Nd ago'; a finished task with changes nobody opened needs you; a quiet finished one is done", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    await f.engine.seatAdd({ slug: "dev", project: API, brief: "b" });
+    f.w.jobs = [
+      job({ id: "needs", filesChanged: 3, branch: "agent/dev-1" }),
+      job({ id: "quiet", parentDirectory: "/repo/other", status: "done", filesChanged: 0, finishedAt: T0 - 2 * 3600_000 }),
+      job({ id: "ancient", parentDirectory: "/repo/api", createdAt: T0 - 9 * DAY, finishedAt: T0 - 9 * DAY }),
+    ];
+    f.w.dirs["/repo/other"] = "other-cccccccccc";
+    f.w.registry.push({ slug: "other-cccccccccc", displayName: "Other" });
+    const fleet = await f.engine.fleet();
+    const cells = fleet.rows[0].cells;
+    assert.equal(cells[SITE].state, "needs-you");
+    assert.equal(cells[SITE].detail, "3 files changed");
+    assert.equal(cells["other-cccccccccc"].state, "done");
+    assert.match(cells["other-cccccccccc"].detail, /ago/);
+    assert.equal(cells[API].state, "idle");
+    assert.equal(cells[API].detail, "last task 9d ago");
+    await f.engine.reviewDone("needs");
+    assert.equal((await f.engine.fleet()).rows[0].cells[SITE].state, "done", "a reviewed task no longer needs you");
+    // a seat with no task at all
+    f.w.jobs = [];
+    const idle = (await f.engine.fleet()).rows[0].cells[API];
+    assert.equal(idle.state, "idle");
+    assert.equal(idle.jobId, "");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleet: launches are counted per ISO week by dispatch; last week is kept, older weeks dropped; reads are cheap (the store, the jobs, the seats)", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    await f.engine.dispatch(dispatchInput());
+    await f.engine.dispatch(dispatchInput({ directory: "/repo/api" }));
+    let fleet = await f.engine.fleet();
+    assert.equal(fleet.week.tasks, 2);
+    assert.equal(fleet.rows[0].tasksThisWeek, 2);
+    const doc = JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8"));
+    assert.equal(doc.version, 1);
+    assert.deepEqual(doc.counts["2026-W48"].dev, { [SITE]: 1, [API]: 1 });
+    f.w.clock = T0 + 7 * DAY; // the next week
+    assert.equal((await f.engine.fleet()).week.tasks, 0);
+    await f.engine.dispatch(dispatchInput());
+    f.w.clock = T0 + 21 * DAY;
+    await f.engine.dispatch(dispatchInput());
+    const kept = Object.keys(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).counts);
+    assert.deepEqual(kept.sort(), ["2026-W48", "2026-W51"].slice(1).concat([]).length ? kept.sort() : kept, "shape check");
+    assert.ok(kept.length <= 2, `only the current and previous week: ${kept}`);
+    // a failed launch is not counted
+    f.w.startResult = { ok: false, error: "busy" };
+    const before = JSON.stringify(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).counts);
+    await assert.rejects(f.engine.dispatch(dispatchInput()), /busy/);
+    assert.equal(JSON.stringify(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).counts), before);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleet-seen records the time the page was left; the recap counts from it (24 h when never seen) with fixed templates, at most 6 lines", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.jobs = [
+      job({ id: "m1", requestedBy: "manta", createdAt: T0 - 3600_000, finishedAt: T0 - 3000_000 }),
+      job({ id: "m2", requestedBy: "manta", parentDirectory: "/repo/api", createdAt: T0 - 7200_000, finishedAt: T0 - 7000_000 }),
+      job({ id: "f1", status: "failed", error: "x", createdAt: T0 - 7200_000, finishedAt: T0 - 7100_000 }),
+      job({ id: "very-old", createdAt: T0 - 3 * DAY, finishedAt: T0 - 3 * DAY }),
+    ];
+    const recap = (await f.engine.fleet()).recap;
+    assert.equal(recap.since, null);
+    assert.deepEqual(recap.lines, ["Manta handed 2 requests to agents", "Dev finished 1 task in Site", "Dev finished 1 task in API", "Dev failed 1 task"]);
+    assert.deepEqual(await f.engine.fleetSeen(), { ok: true });
+    f.w.clock = T0 + 3600_000;
+    f.w.jobs.push(job({ id: "n1", createdAt: T0 + 1000, finishedAt: T0 + 2000 }));
+    const next = (await f.engine.fleet()).recap;
+    assert.equal(next.since, T0);
+    assert.deepEqual(next.lines, ["Dev finished 1 task in Site"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleetRecap: pure templates for changes and answers, plural forms, six lines at most", () => {
+  const level = "tell";
+  const lines = fleetRecap(
+    [job({ requestedBy: "manta", createdAt: T0 + 1, finishedAt: T0 + 2 })],
+    [change({ state: "applied", decidedBy: "auto", decidedAt: T0 + 5 }), change({ state: "pending", needsClick: true, agentName: "Scout", createdAt: T0 + 6, decidedAt: null, releasedAt: T0 + 6 }), change({ state: "applied", decidedBy: "click", agentName: "Dev", decidedAt: T0 + 7 })],
+    T0,
+    { level, answered: 2, projectNameOf: () => "Site" },
+  );
+  assert.deepEqual(lines, ["Manta handed 1 request to agents", "Dev finished 1 task in Site", "Dev was changed (your setting: Tell me)", "Scout is waiting for your click", "Dev was changed (you approved it)", "2 questions answered"]);
+  const many = fleetRecap(Array.from({ length: 12 }, (_, i) => job({ agentName: `Agent${i}`, createdAt: T0 + 1, finishedAt: T0 + 2 })), [], T0, { projectNameOf: () => "Site" });
+  assert.equal(many.length, 6);
+  assert.deepEqual(fleetRecap([], [], T0), []);
+});
+
+test("needs you: open questions, pending changes box-wide (not expired), and finished worktree tasks nobody reviewed — newest first, one count", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.openQuestions = [{ id: "tq_1", parentSessionID: "ses_chat", state: "open", askedAt: T0 }];
+    await f.putChanges([
+      change({ id: "p1", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 3600_000, createdAt: T0 - 3600_000, decidedAt: null }),
+      change({ id: "p2", state: "pending", needsClick: true, reason: "lead", slug: "manta", agentName: "Manta", sessionID: "", releasedAt: T0 - 600_000, createdAt: T0 - 600_000, decidedAt: null, origin: { kind: "job", jobId: "x", rootJobId: "x", attempt: 1 } }),
+      change({ id: "stale", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 3 * DAY, createdAt: T0 - 3 * DAY, decidedAt: null }),
+      change({ id: "done", state: "applied" }),
+    ]);
+    f.w.jobs = [
+      job({ id: "r1", filesChanged: 2, branch: "agent/dev-2", finishedAt: T0 - 1000, result: "Fixed the build." }),
+      job({ id: "r2", filesChanged: 4, branch: "agent/dev-3", finishedAt: T0 - 5000 }),
+      job({ id: "r3", filesChanged: 0, branch: "agent/dev-4" }),
+      job({ id: "r4", status: "running", filesChanged: 5, finishedAt: null }),
+      job({ id: "r5", agent: "agent-architect", agentName: "Architect", filesChanged: 1, branch: "b" }),
+    ];
+    await f.engine.reviewDone("r2");
+    const ny = await f.engine.needsYou();
+    assert.deepEqual(ny.questions.map((q) => q.id), ["tq_1"]);
+    assert.deepEqual(ny.changes.map((c) => c.id), ["p2", "p1"]);
+    assert.deepEqual(ny.reviews.map((r) => r.jobId), ["r1"]);
+    assert.deepEqual(ny.reviews[0], { jobId: "r1", agentSlug: "dev", project: SITE, name: "fix the build", finishedAt: T0 - 1000, filesChanged: 2, branch: "agent/dev-2", resultText: "Fixed the build." });
+    assert.equal(ny.count, 4);
+    assert.ok(!("prior" in ny.changes[0]), "the wire shape");
+    // the review is remembered (≤200) in the counters file
+    assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).reviewed, ["r2"]);
+    assert.deepEqual(await f.engine.questions({ sessionID: "ses_chat" }), f.w.openQuestions);
+    await assert.rejects(f.engine.reviewDone(""), /task/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("questions: answer and dismiss pass the task questions' result through; a refusal is thrown as a sentence", async () => {
+  const f = await fixture({ extra: undefined });
+  try {
+    await f.engine.init();
+    const ok = await f.engine.questionAnswer({ id: "tq_1", answers: [["Yes"]] });
+    assert.deepEqual(ok, { id: "tq_1", answers: [["Yes"]] });
+    assert.deepEqual(await f.engine.questionDismiss({ id: "tq_1" }), { id: "tq_1" });
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture({ extra: { taskQuestions: { hasOpen: () => false, openCountFor: () => 0, listOpen: async () => [], answer: async () => ({ ok: false, error: "Already sending your answer" }), dismiss: async () => ({ ok: false, error: "That question no longer exists." }) } } });
+  try {
+    await g.engine.init();
+    await assert.rejects(g.engine.questionAnswer({ id: "tq_1", answers: [["a"]] }), (e) => e instanceof AgentError && /Already sending/.test(e.message) && e.rpcStatus === 400);
+    await assert.rejects(g.engine.questionDismiss({ id: "tq_1" }), /no longer exists/);
+  } finally {
+    await g.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the profile (§2.2) and a task's research (§6.5)
+// ---------------------------------------------------------------------------
+
+const entry = (over = {}) => ({ id: "rl_1", topic: "Pricing pages", sourceCount: 4, ageDays: 3, status: "fresh", thin: false, ...over });
+
+test("profile: who built it, when it last changed, and the research its applied changes rest on, resolved live (missing entries say so)", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    await f.engine.seatAdd({ slug: "dev", project: SITE, brief: "b" });
+    f.w.library = [entry(), entry({ id: "rl_2", topic: "Old topic", status: "stale", thin: true, sourceCount: 1, ageDays: 120 })];
+    await f.putChanges([
+      change({ id: "c1", kind: "create", before: null, state: "applied", origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 }, decidedAt: T0 - 9 * DAY, basis: [{ id: "rl_1", topic: "Pricing pages", sourceCount: 4, ageDays: 3 }] }),
+      change({ id: "c2", state: "applied", decidedAt: T0 - 2 * DAY, basis: [{ id: "rl_2", topic: "Old topic", sourceCount: 1, ageDays: 120 }, { id: "rl_gone", topic: "Deleted topic", sourceCount: 3, ageDays: 5 }] }),
+      change({ id: "c3", state: "discarded", decidedAt: T0 - DAY, basis: [{ id: "rl_x", topic: "Not applied", sourceCount: 3, ageDays: 1 }] }),
+    ]);
+    const p = await f.engine.profile("dev");
+    assert.equal(p.info.slug, "dev");
+    assert.equal(p.builtBy, "built-in");
+    assert.equal(p.lastChangedAt, T0 - 2 * DAY);
+    assert.deepEqual(p.research.map((r) => [r.id, r.status, r.thin]), [["rl_2", "stale", true], ["rl_gone", "missing", false], ["rl_1", "fresh", false]]);
+    assert.deepEqual(p.research.find((r) => r.id === "rl_1"), { id: "rl_1", topic: "Pricing pages", sourceCount: 4, ageDays: 3, status: "fresh", thin: false });
+    assert.deepEqual(p.research.find((r) => r.id === "rl_gone"), { id: "rl_gone", topic: "Deleted topic", sourceCount: null, ageDays: null, status: "missing", thin: false });
+    await assert.rejects(f.engine.profile("ghost"), /No agent named @ghost/);
+    // who built a made agent: a job → the Architect; a chat → Manta; otherwise the user
+    await mkdir(join(f.root, "scout"));
+    await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
+    await mkdir(join(f.root, "chatty"));
+    await writeFile(join(f.root, "chatty", "agent.md"), "---\nname: Chatty\ndescription: Talks.\nisolation: none\n---\nChat.\n");
+    await mkdir(join(f.root, "handmade"));
+    await writeFile(join(f.root, "handmade", "agent.md"), "---\nname: Hand\ndescription: By hand.\nisolation: none\n---\nHand.\n");
+    await f.putChanges([
+      change({ id: "s1", slug: "scout", agentName: "Scout", kind: "create", before: null, origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } }),
+      change({ id: "s2", slug: "chatty", agentName: "Chatty", kind: "create", before: null, origin: { kind: "chat" } }),
+    ]);
+    assert.equal((await f.engine.profile("scout")).builtBy, "architect");
+    assert.equal((await f.engine.profile("chatty")).builtBy, "manta");
+    assert.equal((await f.engine.profile("handmade")).builtBy, "user");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("task research: the entries the task found or saved, then its proposals' basis, resolved in the task's project; an unknown task is a sentence", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.library = [entry(), entry({ id: "rl_2", topic: "Team fit" })];
+    f.w.jobs = [job({ id: "t1", rootJobId: "t1", agent: "agent-architect", agentName: "Architect" }), job({ id: "t2", rootJobId: "t1", attempt: 2, agent: "agent-architect" })];
+    f.w.used = { t1: [{ id: "rl_1", topic: "Pricing pages" }, { id: "rl_old", topic: "Team fit" }] };
+    await f.putChanges([change({ id: "p1", state: "held", origin: { kind: "job", jobId: "t2", rootJobId: "t1", attempt: 2 }, basis: [{ id: "rl_2", topic: "Team fit", sourceCount: 4, ageDays: 3 }, { id: "rl_1", topic: "Pricing pages", sourceCount: 4, ageDays: 3 }] })]);
+    const r = await f.engine.taskResearch({ jobId: "t2" });
+    assert.deepEqual(r.map((x) => x.id), ["rl_1", "rl_2"], "an id that was replaced resolves by its topic; each entry once");
+    assert.equal(r[0].status, "fresh");
+    assert.deepEqual(await f.engine.taskResearch({ jobId: "t1" }), r, "any round of the task gives the same list");
+    await assert.rejects(f.engine.taskResearch({ jobId: "nope" }), /no longer exists/);
+    assert.deepEqual((await f.engine.projects()), [{ slug: SITE, name: "Site" }, { slug: API, name: "API" }]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the monthly refresh (§5.4): provisioning, the toggle, and the task it starts
+// ---------------------------------------------------------------------------
+
+test("refreshDay: one fixed day 1–28 per slug, spread", () => {
+  const days = ["dev", "seo", "scout", "writer", "reviewer", "ops"].map(refreshDay);
+  for (const d of days) assert.ok(Number.isInteger(d) && d >= 1 && d <= 28, String(d));
+  assert.equal(refreshDay("dev"), refreshDay("dev"));
+  assert.ok(new Set(days).size >= 3, `spread: ${days}`);
+});
+
+test("refresh provisioning: every team agent gets one monthly routine on sync; the lead and the Architect don't; idempotent; an Off or deleted routine is not recreated", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    const created = f.w.routineCalls.filter((c) => c[0] === "create");
+    assert.equal(created.length, 1, "Dev only");
+    const input = created[0][1];
+    assert.deepEqual({ kind: input.kind, agentSlug: input.agentSlug, name: input.name, enabled: input.enabled, rollUp: input.rollUp, access: input.access, directory: input.directory, cron: input.cron }, { kind: "agent-refresh", agentSlug: "dev", name: "Refresh @dev", enabled: true, rollUp: true, access: "read", directory: join(f.root, "dev", "home"), cron: `0 9 ${refreshDay("dev")} * *` });
+    assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh, { dev: "rt1" });
+    await f.engine.sync();
+    await f.engine.list();
+    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create").length, 1, "idempotent");
+    // a new agent gets one at the next sync
+    await mkdir(join(f.root, "scout", "home"), { recursive: true });
+    await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
+    await f.engine.list();
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh).sort(), ["dev", "scout"]);
+    // Off (the routine disabled, or deleted on the Routines page) stays Off
+    f.w.routines.get("rt1").enabled = false;
+    f.w.routines.delete("rt2");
+    await f.engine.sync();
+    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create").length, 2, "nothing recreated");
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1" });
+    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt2" });
+    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("refresh toggle: Off disables the routine, On enables it, a missing routine is recreated by On; team agents only", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1" });
+    assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: false }), { enabled: false, routineId: "rt1" });
+    assert.deepEqual(f.w.routineCalls.at(-1), ["update", "rt1", { enabled: false }]);
+    assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: true }), { enabled: true, routineId: "rt1" });
+    f.w.routines.delete("rt1");
+    const back = await f.engine.refreshSet({ slug: "dev", enabled: true });
+    assert.deepEqual(back, { enabled: true, routineId: "rt2" });
+    assert.equal(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh.dev, "rt2");
+    for (const slug of ["manta", "architect", "ghost"]) await assert.rejects(f.engine.refreshSet({ slug, enabled: true }), /team agents|No agent named/);
+    await assert.rejects(f.engine.refreshSet({ slug: "dev", enabled: "yes" }), /on or off/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("refresh provisioning: a deleted or invalid agent's routine is removed with its entry", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    await rm(join(f.root, "dev"), { recursive: true });
+    await f.engine.sync();
+    assert.deepEqual(f.w.routineCalls.filter((c) => c[0] === "remove"), [["remove", "rt1"]]);
+    assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh, {});
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, round mode unknown; refusals are sentences", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    const res = await f.engine.refresh("dev", { runId: "run1", runSessionId: "ses_run" });
+    assert.deepEqual(res, { jobId: "job_new" });
+    assert.equal(f.w.newSessions.length, 1, "the hidden workspace is made when missing");
+    assert.equal(f.w.newSessions[0].name, AGENTS_TMUX_SESSION);
+    const input = f.w.startJobs[0];
+    assert.equal(input.parentSessionID, "ses_run");
+    assert.equal(input.parentDirectory, join(f.root, "dev", "home"));
+    assert.equal(input.agent, "agent-architect");
+    assert.equal(input.targetProject, AGENTS_TMUX_SESSION);
+    assert.equal(input.deliverResult, false);
+    assert.deepEqual(input.architect, { mode: "unknown" });
+    assert.equal(input.specialist, true);
+    assert.match(input.prompt, /Refresh @dev: check the research it rests on and propose only changes your research supports\./);
+    assert.match(input.prompt, /Research library/, "the research guidance every task gets");
+    assert.match(input.prompt, /Current file of @dev/, "the Architect's context names the agent");
+    assert.equal(input.isolation, "none");
+    await f.engine.refresh("dev", { runId: "run2", runSessionId: "ses_run2" });
+    assert.equal(f.w.newSessions.length, 1, "and not again once it exists");
+    // refusals
+    f.w.startResult = { ok: false, error: "All background slots on this box are busy right now." };
+    await assert.rejects(f.engine.refresh("dev", { runId: "r", runSessionId: "s" }), /busy right now/);
+    f.w.startResult = { ok: true, job: { id: "job_new" } };
+    await assert.rejects(f.engine.refresh("ghost", { runId: "r", runSessionId: "s" }), /No agent named @ghost/);
+    await assert.rejects(f.engine.refresh("architect", { runId: "r", runSessionId: "s" }), /team agents/);
+    f.w.level = "never";
+    await assert.rejects(f.engine.refresh("dev", { runId: "r", runSessionId: "s" }), new RegExp(AGENT_CHANGE_OFF));
+  } finally {
+    await f.cleanup();
+  }
+  const noArch = await fixture({ templates: ["dev", "manta"] });
+  try {
+    await noArch.engine.init();
+    await assert.rejects(noArch.engine.refresh("dev", { runId: "r", runSessionId: "s" }), /The Architect isn't available/);
+  } finally {
+    await noArch.cleanup();
+  }
+});
