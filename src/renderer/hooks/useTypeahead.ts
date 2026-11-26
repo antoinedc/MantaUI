@@ -31,7 +31,7 @@ import {
 } from "../chatUtils";
 import { useAgentCatalog, refreshAgentCatalog } from "../agentCatalog";
 import { usePackageAgents, refreshPackageAgents } from "../packageAgents";
-import { PACKAGE_AGENT_PREFIX, usableAgents } from "../agentDispatch";
+import { PACKAGE_AGENT_PREFIX, agentPickerRows, resolvePickerProject, type PickerProject } from "../agentDispatch";
 import type {
   TypeaheadState,
   TypeaheadRow,
@@ -40,6 +40,9 @@ import type {
 
 // manta-local slash commands are defined once in chatUtils.ts (ChatPanel
 // executes them, useTypeahead autocompletes them).
+
+/** How long the project list is trusted before the picker reads it again. */
+const PROJECTS_STALE_MS = 60_000;
 
 export type Typeahead = {
   // Popup state — null when closed.
@@ -94,6 +97,18 @@ export function useTypeahead(params: {
   // Package agents (Agents Phase 1): valid ones are offered ahead of files on
   // `@`, and ahead of the opencode agents on `@@`.
   const { agents: packageAgentList } = usePackageAgents();
+  // The registry projects, read when the picker opens, to tell "seated here" from "adds to <Project>" (agent screens §2.3).
+  const [projects, setProjects] = useState<PickerProject[]>([]);
+  const projectsAtRef = useRef(0);
+  const loadProjects = useCallback(() => {
+    if (Date.now() - projectsAtRef.current < PROJECTS_STALE_MS) return;
+    projectsAtRef.current = Date.now();
+    Promise.resolve(window.api.agentsProjects?.())
+      .then((list) => setProjects(Array.isArray(list) ? list : []))
+      // an older box has no such channel: the rows simply carry no pill
+      .catch(() => setProjects([]));
+  }, []);
+  const pickerProject = useMemo(() => resolvePickerProject(cwd, projects), [cwd, projects]);
   const [fileResults, setFileResults] = useState<string[]>([]);
   // BET-1023: configured opencode references (@alias). Fetched on the SAME
   // debounced file-search tick (no second debounce/seq guard) and rendered
@@ -179,13 +194,16 @@ export function useTypeahead(params: {
       const t = detectTypeahead(next, caret);
       setTypeahead(t);
       if (t) {
-        if (t.mode !== "command") refreshPackageAgents();
+        if (t.mode !== "command") {
+          refreshPackageAgents();
+          loadProjects();
+        }
         if (t.mode === "command") void ensureCommands();
         else if (t.mode === "agent" && agents == null) refreshAgentCatalog();
         else if (t.mode === "file") void searchFiles(t.query);
       }
     },
-    [detectTypeahead, ensureCommands, agents, searchFiles],
+    [detectTypeahead, ensureCommands, agents, searchFiles, loadProjects],
   );
 
   // Build the active typeahead's filtered result list.
@@ -210,14 +228,13 @@ export function useTypeahead(params: {
       }));
       return [...builtins, ...ocRows].slice(0, 12);
     }
-    const pkgRows: TypeaheadRow[] = usableAgents(packageAgentList)
-      .filter((a) => !q || a.name.toLowerCase().includes(q) || a.slug.includes(q))
-      .map((a) => ({
-        kind: "agent" as const,
-        key: a.slug,
-        primary: `@${a.slug}`,
-        secondary: a.description || a.name,
-      }));
+    const pkgRows: TypeaheadRow[] = agentPickerRows(packageAgentList, q, pickerProject).map(({ agent: a, pill }) => ({
+      kind: "agent" as const,
+      key: a.slug,
+      primary: `@${a.slug}`,
+      secondary: a.description || a.name,
+      agent: { name: a.name, slug: a.slug, color: a.color, pill },
+    }));
     if (typeahead.mode === "agent") {
       // The compiled `agent-<slug>` opencode blocks are the package agents
       // again — they are listed once, above, under their slug.
@@ -277,6 +294,7 @@ export function useTypeahead(params: {
     commands,
     agents,
     packageAgentList,
+    pickerProject,
     fileResults,
     references,
     currentModelSupportsAttachments,

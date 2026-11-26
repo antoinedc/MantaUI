@@ -175,3 +175,52 @@ export function openQuestionCounts(questions: ReadonlyArray<Pick<TaskQuestion, "
   for (const q of questions) if (q.state === "open") counts.set(q.rootJobId, (counts.get(q.rootJobId) ?? 0) + 1);
   return counts;
 }
+
+// ===== The @ picker's agent rows (agent screens spec §2.3) =====
+
+export type PickerProject = { slug: string; name: string };
+export type AgentPickerRow = { agent: AgentInfo; pill: string | null };
+
+const slugName = (name: string): string => {
+  const base = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return base === "" ? "project" : base;
+};
+
+/**
+ * The registry project a chat's folder belongs to, from the folder's own name: a project whose name is that folder name,
+ * or whose slug starts with it (`<name>-<10 hex>`). Only an unambiguous match counts — a wrong "adds to X" is worse than
+ * no pill — so none or several candidates is null.
+ */
+export function resolvePickerProject(cwd: string | null | undefined, projects: ReadonlyArray<PickerProject> | null | undefined): PickerProject | null {
+  const base = (cwd ?? "").split("/").filter(Boolean).pop();
+  if (!base || !projects || projects.length === 0) return null;
+  const want = slugName(base);
+  const hits = projects.filter((p) => p.name.toLowerCase() === base.toLowerCase() || p.slug.replace(/-[0-9a-f]{10}$/, "") === want);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * The agents the picker offers for what has been typed, in order: the lead first (when one is ever offered), agents seated
+ * in this chat's project, then the rest by name. A specialist's pill says "seated here" or "adds to <Project>"; the lead
+ * and the Architect have no seats and so no pill, and with no known project there is none either.
+ */
+export function agentPickerRows(
+  agents: ReadonlyArray<AgentInfo> | null | undefined,
+  query: string,
+  project: PickerProject | null,
+): AgentPickerRow[] {
+  const q = query.toLowerCase();
+  const seated = (a: AgentInfo) => !!project && (a.seats ?? []).includes(project.slug);
+  const rank = (a: AgentInfo) => (a.role === "lead" ? 0 : seated(a) ? 1 : 2);
+  return usableAgents(agents)
+    .filter((a) => !q || a.name.toLowerCase().includes(q) || a.slug.includes(q))
+    .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+    .map((agent) => ({
+      agent,
+      pill: !project || agent.role === "lead" || agent.role === "architect" ? null : seated(agent) ? "seated here" : `adds to ${project.name}`,
+    }));
+}

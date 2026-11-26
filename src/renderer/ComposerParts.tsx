@@ -20,6 +20,8 @@ import { formatClock, VOICE_TAP_HOLD_MS } from "../shared/waveform.mjs";
 import { useSelectedIntoView } from "./PaletteShell";
 import { MeasureColumn } from "./MeasureColumn";
 import { Chip } from "./Chip";
+import { AgentBadge } from "./AgentBadge";
+import { Pill } from "./Pill";
 import type { PlanToggleState } from "./chatUtils";
 
 /**
@@ -425,6 +427,11 @@ export function TypeaheadPopup({
               />
             );
           })}
+          {rows.some((r) => r.agent) && (
+            <div className="border-t border-border-subtle px-2 py-1 text-micro tracking-normal text-text-faint">
+              Seated in this project first · ⏎ mention
+            </div>
+          )}
         </div>
       </MeasureColumn>
     </div>
@@ -452,15 +459,22 @@ function TypeaheadRowButton({
       ref={ref}
       onClick={onSelect}
       onMouseEnter={onHover}
+      {...(row.agent ? { "data-testid": "agent-pick-row", "data-slug": row.key } : {})}
       className={
         "w-full text-left px-2 py-1 flex items-center gap-2 " +
         (active ? "bg-accent-bg text-text" : "text-text-muted hover:bg-bg-soft")
       }
     >
-      <span className="truncate flex-1">{row.primary}</span>
+      {row.agent && <AgentBadge agent={row.agent} size="rail" />}
+      <span className={row.agent ? "shrink-0" : "truncate flex-1"}>{row.primary}</span>
       {row.secondary && (
-        <span className="text-text-faint truncate max-w-[50%] text-label">
+        <span className={"text-text-faint truncate text-label " + (row.agent ? "min-w-0 flex-1" : "max-w-[50%]")}>
           {row.secondary}
+        </span>
+      )}
+      {row.agent?.pill && (
+        <span className="shrink-0" data-testid="agent-pick-pill">
+          <Pill tone={row.agent.pill === "seated here" ? "ok" : "neutral"}>{row.agent.pill}</Pill>
         </span>
       )}
     </button>
