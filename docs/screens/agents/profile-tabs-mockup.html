@@ -1,0 +1,502 @@
+<!doctype html>
+<!-- Approved 2026-11-26: the agent profile's four tabs. Proposal A (the first button; `window.__set("A", "research"|"seats"|"history"|"overview", "light"|"dark")`)
+     is the design; B and C are the proposals that were not chosen and are kept only because the file is one piece. Looks only: the app
+     shows an agent's real use when / not for, sources the library holds, no "Next refresh" (the box doesn't say when). Deviations: conformance.md. -->
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent profile — proposals A · B · C</title>
+<style>
+/* Token values copied from src/renderer/tokens.css (origin/main). No new tokens. */
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;
+  --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-full:999px;
+  --font-sans:"Inter Variable",Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --cto-col-max-w:960px;--motion-fast:120ms;--ease-out:cubic-bezier(0.22,1,0.36,1);
+}
+[data-theme="dark"]{color-scheme:dark;
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-solid:#5A88FF;--on-accent:#0B1020;
+  --ok:#3DD9A4;--warn:#FACC15;--danger:#FF6B7A;--ok-bg:#3DD9A41f;--warn-bg:#FACC151f;--danger-bg:#FF6B7A1f;--accent-bg:#5A88FF1f;
+  --fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);--fill-active:rgba(255,255,255,.10);
+  --diff-add:#12351f;--diff-del:#3a1720;--shadow-sm:0 1px 2px rgb(0 0 0 / .4);
+}
+[data-theme="light"]{color-scheme:light;
+  --canvas:#FAF9F7;--panel:#F2F0EC;--card:#FFFFFF;--raised:#EAE7E1;
+  --border-subtle:#E8E4DD;--border:#DAD5CC;--border-strong:#857C6E;
+  --tx1:#33302B;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;
+  --accent:#2E6BFF;--accent-tx:#1F55D6;--accent-solid:#1F55D6;--on-accent:#FFFFFF;
+  --ok:#0A7A53;--warn:#6E6200;--danger:#BE2F3C;--ok-bg:#0A7A5314;--warn-bg:#6E620014;--danger-bg:#BE2F3C14;--accent-bg:#2E6BFF14;
+  --fill:rgba(26,24,21,.035);--fill-hover:rgba(26,24,21,.06);--fill-active:rgba(26,24,21,.09);
+  --diff-add:#E4F4E9;--diff-del:#FCEAEC;--shadow-sm:0 1px 2px rgb(26 24 21 / .06);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+button,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+p{margin:0}
+/* type roles */
+.t-display{font-size:24px;line-height:1.25}.t-title{font-size:17px;line-height:1.3}.t-prose{font-size:15px;line-height:1.55}
+.t-body{font-size:14px;line-height:1.5}.t-label{font-size:13px;line-height:1.4}.t-meta{font-size:12px;line-height:1.4}
+.semi{font-weight:600}.med{font-weight:500}.reg{font-weight:400}
+.tx1{color:var(--tx1)}.tx2{color:var(--tx2)}.tx3{color:var(--tx3)}
+.grow{min-width:0;flex:1}.nowrap{white-space:nowrap}
+.ico{width:16px;height:16px;flex:none;color:var(--tx3)}.ico.s{width:14px;height:14px}
+
+/* ===== demo chrome (not part of the design) ===== */
+.demo{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-2) var(--sp-4);background:var(--raised);border-bottom:1px solid var(--border);font-size:12px}
+.demo .lbl{color:var(--tx3)}
+.demo .seg{margin-right:var(--sp-2)}
+.demo .note{color:var(--tx2);margin-left:var(--sp-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+
+/* ===== shared atoms ===== */
+.phead{height:44px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4);border-bottom:1px solid var(--border);font-size:13px;font-weight:500}
+.phead .crumb{color:var(--tx3)}.phead .sep{color:var(--tx4)}
+.col{max-width:var(--cto-col-max-w);margin:0 auto;padding:var(--sp-8) var(--sp-6) var(--sp-10)}
+.col.narrow{max-width:784px}
+.hero{display:flex;gap:var(--sp-4);align-items:flex-start}
+.av{width:44px;height:44px;border-radius:var(--r-md);background:#16a36b;color:#fff;display:grid;place-items:center;font-size:15px;font-weight:600;flex:none}
+.av.sm{width:22px;height:22px;border-radius:var(--r-sm);font-size:11px}
+.av.arch{background:var(--fill-active);color:var(--tx1)}
+.hero h1{margin:0}
+.facts{display:flex;flex-wrap:wrap;gap:0 var(--sp-2);margin-top:var(--sp-1)}
+.facts span+span::before{content:"·";margin-right:var(--sp-2);color:var(--tx4)}
+.desc{margin-top:var(--sp-3);max-width:68ch}
+.actions{display:flex;gap:var(--sp-2);margin-left:auto;flex:none}
+.btn{height:32px;padding:0 var(--sp-3);border-radius:var(--r-sm);border:1px solid var(--border);background:var(--card);font-size:13px;font-weight:500;box-shadow:var(--shadow-sm);white-space:nowrap}
+.btn:hover{background:var(--fill-hover)}
+.btn.sm{height:28px;padding:0 var(--sp-2);font-size:12px}
+.btn.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--tx2)}
+.link{font-size:12px;font-weight:500;color:var(--accent-tx);background:none;border:0;padding:0}
+.qlink{font-size:12px;color:var(--tx3);background:none;border:0;padding:0;text-decoration:underline;text-decoration-color:var(--border);text-underline-offset:2px}
+.qlink:hover{color:var(--tx1)}
+.qlink.danger:hover{color:var(--danger)}
+.pill{display:inline-flex;align-items:center;gap:var(--sp-1);border-radius:var(--r-full);padding:1px var(--sp-2);font-size:12px;line-height:1.4;white-space:nowrap}
+.pill.accent{background:var(--accent-bg);color:var(--accent-tx)}.pill.ok{background:var(--ok-bg);color:var(--ok)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.neutral{color:var(--tx2);box-shadow:inset 0 0 0 1px var(--border)}
+.acc{font-size:12px;border-radius:var(--r-xs);padding:0 var(--sp-1);white-space:nowrap}
+.acc.rw{color:var(--accent-tx);background:var(--accent-bg)}.acc.r{color:var(--tx2);background:var(--fill-active)}.acc.no{color:var(--tx3)}
+.seg{display:inline-flex;background:var(--fill-active);border-radius:var(--r-sm);padding:2px;font-size:12px}
+.seg button{border:0;background:none;border-radius:var(--r-xs);padding:3px var(--sp-3);color:var(--tx3)}
+.seg button[aria-pressed="true"]{background:var(--card);color:var(--tx1);font-weight:500;box-shadow:var(--shadow-sm)}
+.chev{width:12px;height:12px;flex:none;transition:transform var(--motion-fast) var(--ease-out)}
+details[open] > summary .chev{transform:rotate(90deg)}
+summary{list-style:none;cursor:pointer}summary::-webkit-details-marker{display:none}
+.tabs{display:flex;gap:var(--sp-5);border-bottom:1px solid var(--border);margin-top:var(--sp-8);font-size:13px}
+.tab{position:relative;padding:var(--sp-2) 0;border:0;background:none;color:var(--tx3)}
+.tab .n{color:var(--tx3);margin-left:var(--sp-1)}
+.tab .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-left:var(--sp-1);vertical-align:middle}
+.tab[aria-selected="true"]{color:var(--tx1);font-weight:500}
+.tab[aria-selected="true"]::after{content:"";position:absolute;inset:auto 0 -1px 0;border-bottom:2px solid var(--accent)}
+.panel{padding-top:var(--sp-6)}
+.h2{display:flex;align-items:baseline;gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.h2 .more{margin-left:auto}
+.sec + .sec{margin-top:var(--sp-8)}
+.dl{display:grid;grid-template-columns:104px minmax(0,1fr);gap:var(--sp-3) var(--sp-4);margin:0}
+.dl dt{font-size:13px;color:var(--tx3);padding-top:1px}
+.dl dd{margin:0;font-size:14px;line-height:1.5}
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--border-subtle)}
+.rows > li{border-bottom:1px solid var(--border-subtle)}
+.row{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-2) 0;min-height:40px}
+.meta{font-size:12px;color:var(--tx3);white-space:nowrap}
+.foot{margin-top:var(--sp-2);font-size:12px;color:var(--tx3)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-2) var(--sp-3);font-size:13px;margin:0}
+.kv dt{color:var(--tx3)}.kv dd{margin:0;text-align:right}
+.plist{list-style:none;margin:0;padding:0;font-size:13px}
+.plist li{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) 0;min-height:28px}
+.plist .r{margin-left:auto}
+pre.instr{margin:var(--sp-2) 0 0;background:var(--fill);border-radius:var(--r-md);padding:var(--sp-3);font-family:var(--font-mono);font-size:12px;line-height:1.55;white-space:pre-wrap;color:var(--tx2)}
+textarea{width:100%;min-height:72px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--card);padding:var(--sp-2) var(--sp-3);font-size:13px;line-height:1.5;resize:vertical}
+textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:1px}
+select{height:32px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--card);padding:0 var(--sp-2);font-size:13px}
+
+/* research row expansion: sources */
+.src summary{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-2) 0;min-height:40px}
+.src .srcs{list-style:none;margin:0 0 var(--sp-3) 28px;padding:0;font-size:12px;color:var(--tx2)}
+.src .srcs li{padding:2px 0;display:flex;gap:var(--sp-2)}
+.src .srcs .d{color:var(--tx3);white-space:nowrap}
+.usedby{font-size:12px;color:var(--tx3);margin:0 0 var(--sp-3) 28px}
+
+/* the existing change card look (AgentChangeView) */
+.cc{border:1px solid var(--border);background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow-sm);padding:var(--sp-3) var(--sp-4)}
+.cc-top{display:flex;align-items:flex-start;gap:var(--sp-3)}
+.cc-ic{width:28px;height:28px;border-radius:var(--r-sm);background:var(--accent-bg);color:var(--accent-tx);display:grid;place-items:center;flex:none}
+.cc-sum{margin-top:var(--sp-3)}
+.cc-ev{display:flex;gap:var(--sp-4);margin-top:var(--sp-2);font-size:12px;color:var(--tx3)}
+.diffbody{margin-top:var(--sp-3);border-radius:var(--r-md);overflow:hidden;font-family:var(--font-mono);font-size:12px;line-height:1.55;border:1px solid var(--border-subtle)}
+.diffbody div{padding:0 var(--sp-3)}
+.diffbody .a{background:var(--diff-add)}.diffbody .d{background:var(--diff-del)}.diffbody .c{color:var(--tx3);background:var(--fill)}
+.cc-act{display:flex;gap:var(--sp-2);margin-top:var(--sp-3)}
+/* A: the one-line collapsed form */
+.cc.line{padding:var(--sp-3) var(--sp-4)}
+.cc.line .row1{display:flex;align-items:center;gap:var(--sp-3)}
+.cc.line details summary{display:inline-flex;align-items:center;gap:var(--sp-1);font-size:12px;color:var(--tx3);font-weight:500;margin-top:var(--sp-2)}
+
+/* history rows */
+.hrow > summary{display:grid;grid-template-columns:56px minmax(0,1fr) auto;gap:var(--sp-1) var(--sp-3);padding:var(--sp-3) 0;align-items:start}
+.hrow .when{font-size:13px;color:var(--tx3);padding-top:1px}
+.hrow .who{display:flex;align-items:center;gap:var(--sp-2);font-size:13px;color:var(--tx2)}
+.hrow .what{font-size:14px;line-height:1.5;margin-top:2px}
+.hrow .out{display:flex;align-items:center;gap:var(--sp-3);margin-top:var(--sp-1)}
+.hrow .tog{font-size:12px;color:var(--tx3);display:flex;align-items:center;gap:var(--sp-1);padding-top:2px;white-space:nowrap}
+.hrow .exp{margin:0 0 var(--sp-3) 68px}
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;white-space:nowrap}
+.st::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.st.live{color:var(--ok)}.st.undone{color:var(--tx3)}.st.wait{color:var(--accent-tx)}
+.st-why{font-size:12px;color:var(--tx3)}
+
+/* seats */
+.seat-brief{font-size:14px;line-height:1.5;margin-top:var(--sp-1)}
+.seat-acc{display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-3);margin-top:var(--sp-2);font-size:12px;color:var(--tx2)}
+.seat-acc span{display:inline-flex;gap:var(--sp-1);align-items:center}
+.addseat{display:flex;gap:var(--sp-2);align-items:center}
+
+/* ===== A: content column + tinted details pane ===== */
+.A .grid{display:grid;grid-template-columns:minmax(0,1fr) 288px;gap:var(--sp-8);align-items:start}
+.A .pane{background:var(--panel);border-radius:var(--r-lg);padding:var(--sp-4);position:sticky;top:56px}
+[data-theme="dark"] .A .pane{box-shadow:inset 0 0 0 1px var(--border-subtle)}
+.A .pane .grp + .grp{margin-top:var(--sp-5);padding-top:var(--sp-4);border-top:1px solid var(--border)}
+[data-theme="dark"] .A .pane .grp + .grp{border-top-color:var(--border-subtle)}
+.A .pane h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--tx2)}
+.A .seatrow{padding:var(--sp-4) 0}
+.A details.instr-d{margin-top:var(--sp-4);border-top:1px solid var(--border-subtle);padding-top:var(--sp-3)}
+.A details.instr-d summary{display:flex;align-items:center;gap:var(--sp-2);font-size:13px;font-weight:500;color:var(--tx2)}
+
+/* ===== B: grouped sections on white cards, one column ===== */
+.B .grp{background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-lg)}
+[data-theme="dark"] .B .grp{border-color:var(--border-subtle)}
+.B .grp + .grp,.B .gh + .grp{margin-top:var(--sp-4)}
+.B .gh{display:flex;align-items:baseline;gap:var(--sp-2);margin:var(--sp-6) 0 var(--sp-2);padding:0 var(--sp-1)}
+.B .gh:first-child{margin-top:0}
+.B .gi{padding:var(--sp-3) var(--sp-4)}
+.B .gi + .gi{border-top:1px solid var(--border-subtle)}
+.B .gi.row{padding-top:var(--sp-2);padding-bottom:var(--sp-2)}
+.B .rows{border-top:0}
+.B .rows > li{padding:0 var(--sp-4)}
+.B .rows > li:last-child{border-bottom:0}
+.B .hrow .exp{margin-left:68px}
+.B .pend{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+.B .gfoot{padding:var(--sp-2) var(--sp-4) var(--sp-3);font-size:12px;color:var(--tx3);border-top:1px solid var(--border-subtle)}
+.B .card-dl{display:grid;grid-template-columns:120px minmax(0,1fr);gap:0;margin:0}
+.B .card-dl > *{padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--border-subtle);margin:0}
+.B .card-dl > :nth-child(-n+2){border-top:0}
+.B .card-dl dt{font-size:13px;color:var(--tx3);padding-top:14px}
+.B .card-dl dd{font-size:14px;line-height:1.5}
+
+/* ===== C: Overview · Activity · Settings, plain sections, stronger type ===== */
+.C .banner{display:flex;align-items:center;gap:var(--sp-3);margin-top:var(--sp-6);padding:var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);border-radius:var(--r-md);background:var(--accent-bg)}
+.C .facts-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-4);padding:var(--sp-4) 0;border-top:1px solid var(--border-subtle);border-bottom:1px solid var(--border-subtle)}
+.C .facts-row dt{font-size:12px;color:var(--tx3)}.C .facts-row dd{margin:2px 0 0;font-size:14px}
+.C .set{display:grid;grid-template-columns:200px minmax(0,1fr);gap:var(--sp-6);padding:var(--sp-6) 0;border-top:1px solid var(--border-subtle)}
+.C .set:first-child{border-top:0;padding-top:0}
+.C .set .lead p{font-size:13px;color:var(--tx3);margin-top:var(--sp-1)}
+.C .seatrow{padding:var(--sp-4) 0}
+.C .seatrow:first-child{padding-top:0}
+</style>
+</head>
+<body>
+<div class="demo" role="toolbar" aria-label="Demo controls">
+  <span class="lbl">Proposal</span>
+  <div class="seg" id="pick">
+    <button type="button" data-p="A">A · Content + pane</button>
+    <button type="button" data-p="B">B · Grouped cards</button>
+    <button type="button" data-p="C">C · Overview · Activity · Settings</button>
+  </div>
+  <span class="lbl">Theme</span>
+  <div class="seg" id="theme"><button type="button" data-t="light">Light</button><button type="button" data-t="dark">Dark</button></div>
+  <span class="note" id="note"></span>
+</div>
+<div id="app"></div>
+
+<script>
+/* ---------- the one agent, shared by all three proposals ---------- */
+const I = {
+  book:'<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>',
+  folder:'<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  bot:'<path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/>',
+  chev:'<path d="m9 18 6-6-6-6"/>', plus:'<path d="M12 5v14M5 12h14"/>', pen:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+};
+const svg = (k, cls='ico') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">${I[k]}</svg>`;
+const chev = () => `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">${I.chev}</svg>`;
+
+const AG = {
+  name:'SEO', slug:'seo', role:'Specialist', model:'Auto', works:'Read-only, doesn’t edit code', builtBy:'Architect', changed:'12 Oct',
+  desc:'Technical SEO and visibility in AI search (ChatGPT, Perplexity, AI Overviews) for marketing sites: audits, structured data, internal links, content briefs.',
+  use:[['Use it when','A page’s ranking, markup or AI-search visibility is the question.'],['Not for','Rewriting brand copy, buying links, touching app code.'],['Asks first','Before changing redirects or robots.txt.'],['Measures','Visibility over many runs — never a single “rank”.']],
+  instructions:`You are the SEO specialist for the marketing sites.
+
+## Scope
+- Audits, structured data, internal links, content briefs.
+- AI-search visibility: llms.txt, crawler access, answer-ready pages.
+
+## Never
+- Rewrite brand copy (propose it instead), buy links, touch app code.
+
+## Ask first
+- Any change to redirects or robots.txt.`,
+  instrLines:38,
+};
+const RES = [
+  {t:'Technical SEO for AI search', n:5, age:'3 days', fresh:true, thin:false, used:'Also used by Conversion',
+   s:[['developers.google.com','AI features and your website'],['openai.com','ChatGPT search for publishers'],['docs.perplexity.ai','PerplexityBot'],['ahrefs.com','AI Overviews study'],['searchengineland.com','Ranking in AI Overviews']]},
+  {t:'Structured data for product pages', n:4, age:'12 days', fresh:true, thin:false, used:'',
+   s:[['developers.google.com','Product structured data'],['schema.org','Product, Offer'],['web.dev','Rich results test'],['moz.com','Schema in practice']]},
+  {t:'AI crawler access rules', n:4, age:'41 days', fresh:false, thin:false, used:'Also used by Security',
+   s:[['platform.openai.com','GPTBot'],['developers.google.com','Google-Extended'],['darkvisitors.com','Agent list'],['cloudflare.com','AI crawler report']]},
+  {t:'llms.txt adoption', n:2, age:'6 days', fresh:true, thin:true, used:'',
+   s:[['llmstxt.org','The /llms.txt file'],['github.com','llms.txt directory']]},
+];
+const LIB = 'The research library is shared by every agent: each entry is a topic the Architect researched, kept with quotes from the pages it read. Fresh means within its shelf life, stale means past it, thin means fewer than 3 independent sources.';
+const SEATS = [
+  {p:'Manta', notes:23, brief:'Marketing site at mantaui.com. Focus on the download and pricing pages; the docs live under /docs.',
+   acc:[['Manta memory','rw'],['SEO know-how','r'],['Research library','r'],['Other projects','no']]},
+  {p:'Ronda', notes:41, brief:'useronda.com landing pages, FR + EN. Hreflang matters; never touch the app subdomain.',
+   acc:[['Ronda memory','rw'],['SEO know-how','r'],['Research library','r'],['Other projects','no']]},
+];
+const ACC_TXT = {rw:'read + write', r:'read', no:'no access'};
+const HIST = [
+  {id:'h1', when:'14 Nov', who:'Architect', arch:true, what:'Adds an llms.txt check and drops 2 crawler rules that no longer hold.', st:'wait', why:'Waiting for your click',
+   basis:'AI crawler access rules (4 sources)', fit:'matches', diff:[['c','··· 41 unchanged lines'],['a','+ Check llms.txt is served at the site root and lists the key pages.'],['d','− Block GPTBot in robots.txt on staging only.'],['d','− Block CCBot everywhere.']]},
+  {id:'h2', when:'12 Oct', who:'Architect', arch:true, what:'Added rules for how AI search engines read pages.', st:'live', why:'Live · applied automatically (your setting: tell me)',
+   basis:'Technical SEO for AI search (5 sources)', fit:'matches', diff:[['c','··· 30 unchanged lines'],['a','+ Prefer short answer paragraphs under each H2.'],['a','+ Check pages render without JavaScript for crawlers.']]},
+  {id:'h3', when:'3 Oct', who:'You, via Manta', what:'Asks before changing redirects.', st:'live', why:'Live · you approved it',
+   basis:'your request in chat', fit:'', diff:[['c','··· 24 unchanged lines'],['a','+ Ask before changing redirects or robots.txt.']]},
+  {id:'h4', when:'21 Sep', who:'Architect', arch:true, what:'Dropped the hreflang check.', st:'undone', why:'Undone by you on 22 Sep',
+   basis:'Structured data for product pages (4 sources)', fit:'partial', diff:[['c','··· 19 unchanged lines'],['d','− Check hreflang pairs on every localised page.']]},
+  {id:'h5', when:'18 Sep', who:'Architect', arch:true, what:'Created SEO.', st:'live', why:'Live · you approved it',
+   basis:'Technical SEO for AI search (5 sources)', fit:'matches', diff:[['a','+ name: SEO'],['a','+ description: Technical SEO and visibility in AI search…'],['a','+ isolation: none']]},
+];
+const PENDING = HIST[0];
+
+/* ---------- shared fragments ---------- */
+const header = () => `
+<section class="hero">
+  <div class="av" aria-hidden="true">S</div>
+  <div class="grow">
+    <h1 class="t-display semi">${AG.name}</h1>
+    <div class="facts t-label tx3"><span>@${AG.slug}</span><span>${AG.role}</span><span>${SEATS.length} seats</span></div>
+    <p class="desc t-prose tx2">${AG.desc}</p>
+  </div>
+  <div class="actions">
+    <button class="btn ghost" type="button">Change via Manta</button>
+    <button class="btn" type="button">Chat</button>
+    <button class="btn primary" type="button">Mention in a chat</button>
+  </div>
+</section>`;
+const diff = (h) => `<div class="diffbody">${h.diff.map(([k,l])=>`<div class="${k}">${l}</div>`).join('')}</div>`;
+const freshPills = (r) => `${r.fresh?'<span class="pill ok">fresh</span>':'<span class="pill warn">stale</span>'}${r.thin?'<span class="pill warn">thin</span>':''}`;
+/* the existing change card (AgentChangeView), full form */
+const changeCard = (h, {actions=true}={}) => `
+<div class="cc">
+  <div class="cc-top">
+    <div class="cc-ic">${svg('bot','ico s')}</div>
+    <div class="grow"><div class="t-label semi">Change to ${AG.name}</div><div class="t-meta tx3">@${AG.slug} · ${h.who} · ${h.when}</div></div>
+    ${h.st==='wait'?'<span class="pill accent">Waiting for you</span>':h.st==='live'?'<span class="pill ok">Live</span>':'<span class="pill neutral">Undone</span>'}
+  </div>
+  <p class="cc-sum t-body">${h.what}</p>
+  <div class="cc-ev"><span>Based on: ${h.basis}</span>${h.fit?`<span>Fit check: ${h.fit}</span>`:''}</div>
+  ${diff(h)}
+  ${actions ? (h.st==='wait'
+     ? '<div class="cc-act"><button class="btn primary sm" type="button">Apply</button><button class="btn sm" type="button">Discard</button></div>'
+     : h.st==='live' && h.id==='h2' ? '<div class="cc-act"><button class="btn sm" type="button">Undo</button></div>' : '') : ''}
+</div>`;
+const stLine = (h) => `<span class="st ${h.st}">${h.st==='wait'?'Waiting for your click':h.st==='live'?'Live':'Undone'}</span><span class="st-why">${h.why.replace(/^(Live|Undone|Waiting for your click)( · )?/,'')}</span>`;
+/* one history row: who/when, summary, outcome, quiet restore; expands to the change card */
+const histRow = (h, opts={}) => `
+<li><details class="hrow" ${opts.open===h.id?'open':''}>
+  <summary>
+    <span class="when">${h.when}</span>
+    <div class="grow">
+      <div class="who">${h.arch?'<span class="av sm arch" aria-hidden="true">A</span>':'<span class="av sm" style="background:var(--accent-solid);color:var(--on-accent)" aria-hidden="true">Y</span>'}${h.who}</div>
+      <div class="what">${h.what}</div>
+      <div class="out">${stLine(h)}</div>
+    </div>
+    <span class="tog">${chev()}Details</span>
+  </summary>
+  <div class="exp">${changeCard(h,{actions: h.st!=='wait' || opts.pendingActions})}
+    ${h.st!=='wait'?'<div style="margin-top:var(--sp-2)"><button class="qlink" type="button">Restore the version before this</button></div>':''}
+  </div>
+</details></li>`;
+const srcRow = (r, i) => `
+<li><details class="src" ${i===0?'open':''}>
+  <summary>${chev()}${svg('book')}<span class="grow t-body">${r.t}</span><span class="meta">${r.n} sources · ${r.age} old</span>${freshPills(r)}</summary>
+  <ul class="srcs">${r.s.map(([d,t])=>`<li><span class="d">${d}</span><span>${t}</span></li>`).join('')}</ul>
+  ${r.used?`<p class="usedby">${r.used}</p>`:''}
+</details></li>`;
+const seatAcc = (s, memOnly) => `<div class="seat-acc">${(memOnly ? s.acc.slice(0,1) : s.acc).map(([k,v])=>`<span>${k} <span class="acc ${v}">${ACC_TXT[v]}</span></span>`).join('')}</div>`;
+const seatBody = (s, i, memOnly) => `
+  <div class="row" style="min-height:0;padding:0">
+    ${svg('folder')}<span class="t-body semi grow">${s.p}</span><span class="meta">${s.notes} notes</span>
+  </div>
+  <div style="margin-left:28px">
+    <div class="brief" data-seat="${i}">
+      <p class="seat-brief">${s.brief}</p>
+    </div>
+    ${seatAcc(s, memOnly)}
+    <div style="display:flex;gap:var(--sp-4);margin-top:var(--sp-3)"><button class="link" type="button" data-edit="${i}">Edit brief</button><button class="qlink danger" type="button">Remove seat</button></div>
+  </div>`;
+const addSeat = () => `<div class="addseat"><select aria-label="Project"><option>Tenanture</option><option>Ethernal</option><option>Capo</option></select><button class="btn" type="button">${'Add a seat'}</button></div>`;
+const refresh = () => `<div class="seg" role="group" aria-label="Refresh with new research"><button type="button" aria-pressed="true">Monthly</button><button type="button" aria-pressed="false">Off</button></div>`;
+const instrDetails = (cls) => `<details class="${cls}"><summary>${chev()}Full instructions <span class="t-meta tx3 reg">· ${AG.instrLines} lines</span></summary><pre class="instr">${AG.instructions}</pre></details>`;
+const counts = () => { const c={live:0,undone:0,wait:0}; HIST.forEach(h=>c[h.st]++); return c; };
+
+/* ---------- Proposal A: content column + tinted details pane, on every tab ---------- */
+const A = {
+  tabs:[['overview','Overview'],['research','Research',RES.length],['seats','Seats',SEATS.length],['history','History',HIST.length]],
+  top: () => `
+<section class="cc line" style="margin-top:var(--sp-6)" aria-label="Change waiting for you">
+  <div class="row1"><span class="pill accent">Waiting for you</span>
+    <div class="grow t-body"><span class="semi">Architect</span> <span class="tx2">· ${PENDING.what}</span></div>
+    <button class="btn" type="button">Discard</button><button class="btn primary" type="button">Apply</button></div>
+  <details><summary>${chev()}Show the change · 3 lines · based on “AI crawler access rules” (4 sources)</summary>${diff(PENDING)}</details>
+</section>`,
+  pane: (groups) => `<aside class="pane">${groups.map(([h,b])=>`<div class="grp"><h3>${h}</h3>${b}</div>`).join('')}</aside>`,
+  details: () => `<dl class="kv"><dt>Model</dt><dd>${AG.model}</dd><dt>Works</dt><dd>Read-only</dd><dt>Built by</dt><dd>${AG.builtBy}</dd><dt>Changed</dt><dd>${AG.changed}</dd></dl>`,
+  overview(){ return `<div class="grid"><div>
+    <section class="sec"><h2 class="h2 t-body semi">How to use it</h2>
+      <dl class="dl">${AG.use.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>${instrDetails('instr-d')}</section>
+    <section class="sec"><h2 class="h2 t-body semi">Research it relies on <button class="link more" data-go="research">All ${RES.length} →</button></h2>
+      <ul class="rows">${RES.map(r=>`<li class="row">${svg('book')}<span class="grow t-body">${r.t}</span><span class="meta">${r.n} sources · ${r.age}</span>${freshPills(r)}</li>`).join('')}</ul></section>
+  </div>${this.pane([
+    ['Details', this.details()],
+    ['Seats', `<ul class="plist">${SEATS.map(s=>`<li>${svg('folder','ico s')}${s.p}<span class="r meta">${s.notes} notes</span></li>`).join('')}</ul><button class="link" style="margin-top:var(--sp-2)" data-go="seats">Manage seats</button>`],
+    ['Access <span class="tx3 reg">· in the Manta seat</span>', `<ul class="plist">${SEATS[0].acc.map(([k,v])=>`<li>${k}<span class="r"><span class="acc ${v}">${ACC_TXT[v]}</span></span></li>`).join('')}</ul>`],
+    ['Refresh with new research', `${refresh()}<p class="foot">Once a month it re-checks its research and proposes changes. They wait for your click.</p>`],
+  ])}</div>`; },
+  research(){ const st=RES.filter(r=>!r.fresh).length, th=RES.filter(r=>r.thin).length;
+    return `<div class="grid"><div>
+    <section class="sec"><h2 class="h2 t-body semi">Research it relies on</h2>
+      <ul class="rows">${RES.map(srcRow).join('')}</ul></section>
+  </div>${this.pane([
+    ['About the library', `<p class="t-label">${LIB}</p>`],
+    ['Health', `<dl class="kv"><dt>Entries</dt><dd>${RES.length}</dd><dt>Stale</dt><dd>${st}</dd><dt>Thin</dt><dd>${th}</dd><dt>Next refresh</dt><dd>1 Dec</dd></dl>`],
+    ['Refresh with new research', refresh()],
+  ])}</div>`; },
+  seats(){ return `<div class="grid"><div>
+    <section class="sec"><h2 class="h2 t-body semi">Seats</h2>
+      <ul class="rows">${SEATS.map((s,i)=>`<li class="seatrow">${seatBody(s,i)}</li>`).join('')}</ul></section>
+  </div>${this.pane([
+    ['What a seat is', `<p class="t-label">A seat lets the agent work in one project. Its brief is read at the start of every task there; its notes are that project’s memory.</p>`],
+    ['Add a seat', addSeat()],
+  ])}</div>`; },
+  history(){ const c=counts(); return `<div class="grid"><div>
+    <section class="sec"><h2 class="h2 t-body semi">Changes, newest first</h2>
+      <ul class="rows">${HIST.map(h=>histRow(h,{open:'h2'})).join('')}</ul></section>
+  </div>${this.pane([
+    ['Summary', `<dl class="kv"><dt>Live</dt><dd>${c.live}</dd><dt>Waiting</dt><dd>${c.wait}</dd><dt>Undone</dt><dd>${c.undone}</dd></dl>`],
+    ['How changes land', `<p class="t-label">The Architect proposes; your setting decides whether a change waits for your click or goes live and tells you. Any live change can be undone, or the agent restored to the version before it.</p>`],
+  ])}</div>`; },
+};
+
+/* ---------- Proposal B: one column of grouped white cards ---------- */
+const B = {
+  tabs:A.tabs,
+  top: () => `
+<div style="margin-top:var(--sp-6)"><div class="grp pend"><div class="gi">
+  <div class="row" style="padding:0;min-height:0"><span class="pill accent">Waiting for you</span><span class="grow t-body"><span class="semi">Architect</span> <span class="tx2">· ${PENDING.what}</span></span></div>
+  <div class="cc-ev"><span>Based on: ${PENDING.basis}</span><span>Fit check: ${PENDING.fit}</span></div>
+  <details><summary style="display:inline-flex;align-items:center;gap:var(--sp-1);font-size:12px;color:var(--tx3);font-weight:500;margin-top:var(--sp-2)">${chev()}Show the change · 3 lines</summary>${diff(PENDING)}</details>
+  <div class="cc-act"><button class="btn primary sm" type="button">Apply</button><button class="btn sm" type="button">Discard</button></div>
+</div></div></div>`,
+  gh: (t, right='') => `<div class="gh"><h2 class="t-body semi" style="margin:0">${t}</h2>${right?`<span style="margin-left:auto">${right}</span>`:''}</div>`,
+  overview(){ return `
+    ${this.gh('About')}
+    <div class="grp"><dl class="card-dl">${AG.use.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}<dt>Model</dt><dd>${AG.model}</dd><dt>Works</dt><dd>${AG.works}</dd></dl>
+      <div class="gfoot">${instrDetails('instr-b').replace('<summary>','<summary style="display:flex;align-items:center;gap:var(--sp-2);font-size:13px;font-weight:500;color:var(--tx2)">')}</div></div>
+    ${this.gh('Research it relies on', `<button class="link" data-go="research">All ${RES.length} →</button>`)}
+    <div class="grp"><ul class="rows">${RES.map(r=>`<li class="row">${svg('book')}<span class="grow t-body">${r.t}</span><span class="meta">${r.n} sources · ${r.age}</span>${freshPills(r)}</li>`).join('')}</ul></div>
+    ${this.gh('Seats & access', `<button class="link" data-go="seats">Manage →</button>`)}
+    <div class="grp">${SEATS.map(s=>`<div class="gi"><div class="row" style="padding:0;min-height:0">${svg('folder')}<span class="t-body med grow">${s.p}</span><span class="meta">${s.notes} notes</span></div><div style="margin-left:28px">${seatAcc(s)}</div></div>`).join('')}</div>
+    ${this.gh('Refresh with new research')}
+    <div class="grp"><div class="gi row" style="gap:var(--sp-4)"><span class="grow t-label tx2">Once a month it re-checks its research and proposes changes. They wait for your click.</span>${refresh()}</div></div>`; },
+  research(){ return `
+    ${this.gh(`Research it relies on <span class="t-meta tx3 reg">· ${RES.length} entries</span>`)}
+    <div class="grp"><ul class="rows">${RES.map(srcRow).join('')}</ul><div class="gfoot">${LIB}</div></div>
+    ${this.gh('Refresh with new research')}
+    <div class="grp"><div class="gi row" style="gap:var(--sp-4)"><span class="grow t-label tx2">Next check on 1 Dec. 1 entry is stale and 1 is thin; the check will try to fix both.</span>${refresh()}</div></div>`; },
+  seats(){ return `
+    ${SEATS.map((s,i)=>`${i===0?this.gh('Seats'):''}<div class="grp"><div class="gi" style="padding:var(--sp-4)">${seatBody(s,i)}</div></div>`).join('')}
+    ${this.gh('Add a seat')}
+    <div class="grp"><div class="gi row" style="gap:var(--sp-4)"><span class="grow t-label tx2">A seat lets the agent work in one more project, with its own brief and memory.</span>${addSeat()}</div></div>`; },
+  history(){ return `
+    ${this.gh('Changes, newest first')}
+    <div class="grp"><ul class="rows">${HIST.map(h=>histRow(h,{open:'h2'})).join('')}</ul></div>`; },
+};
+
+/* ---------- Proposal C: Overview · Activity · Settings ---------- */
+const C = {
+  tabs:[['overview','Overview'],['activity','Activity','dot'],['settings','Settings']],
+  top: () => `
+<div class="banner"><span class="st wait">1 change waits for you</span><span class="grow t-label tx2">Architect · ${PENDING.what}</span><button class="btn sm" type="button" data-go="activity">Review</button></div>`,
+  overview(){ return `
+    <dl class="facts-row"><div><dt>Model</dt><dd>${AG.model}</dd></div><div><dt>Works</dt><dd>Read-only</dd></div><div><dt>Built by</dt><dd>${AG.builtBy}</dd></div><div><dt>Changed</dt><dd>${AG.changed}</dd></div></dl>
+    <section class="sec" style="margin-top:var(--sp-6)"><h2 class="h2 t-title semi">How to use it</h2>
+      <dl class="dl">${AG.use.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></section>
+    <section class="sec"><h2 class="h2 t-title semi">Research it relies on <span class="t-meta tx3 reg">${RES.length} entries</span></h2>
+      <ul class="rows">${RES.map(srcRow).join('')}</ul><p class="foot">${LIB}</p></section>`; },
+  activity(){ return `
+    <section class="sec"><h2 class="h2 t-title semi">Waiting for you</h2>${changeCard(PENDING)}</section>
+    <section class="sec"><h2 class="h2 t-title semi">History <span class="t-meta tx3 reg">newest first</span></h2>
+      <ul class="rows">${HIST.slice(1).map(h=>histRow(h,{open:'h2'})).join('')}</ul></section>`; },
+  settings(){ return `
+    <div class="set"><div class="lead"><h2 class="t-body semi" style="margin:0">Instructions</h2><p>What it does and never does. Change it with “Change via Manta” at the top, so every change is reviewed.</p></div>
+      <div><dl class="dl" style="margin-bottom:var(--sp-3)"><dt>Model</dt><dd>${AG.model}</dd><dt>Works</dt><dd>${AG.works}</dd></dl>${instrDetails('instr-c').replace('<summary>','<summary style="display:flex;align-items:center;gap:var(--sp-2);font-size:13px;font-weight:500;color:var(--tx2)">')}</div></div>
+    <div class="set"><div class="lead"><h2 class="t-body semi" style="margin:0">Seats</h2><p>Projects it works in. The brief is read at the start of every task there.</p></div>
+      <div><ul class="rows" style="border-top:0">${SEATS.map((s,i)=>`<li class="seatrow">${seatBody(s,i,true)}</li>`).join('')}</ul><div style="margin-top:var(--sp-4)">${addSeat()}</div></div></div>
+    <div class="set"><div class="lead"><h2 class="t-body semi" style="margin:0">Shared access</h2><p>What every seat can read. Project memory is per seat, above.</p></div>
+      <div><ul class="plist"><li>SEO know-how<span class="r"><span class="acc r">read</span></span></li><li>Research library<span class="r"><span class="acc r">read</span></span></li><li>Other projects’ memory<span class="r"><span class="acc no">no access</span></span></li></ul><p class="foot">Know-how changes only through change cards.</p></div></div>
+    <div class="set"><div class="lead"><h2 class="t-body semi" style="margin:0">Refresh</h2><p>Re-checks the research it rests on.</p></div>
+      <div>${refresh()}<p class="foot">Once a month it proposes changes from new research. They wait for your click.</p></div></div>`; },
+};
+
+const P = {A,B,C};
+const NOTES = {
+  A:'A — content column + tinted details pane on every tab; pending change as one line.',
+  B:'B — one column of white grouped cards; pending change is its own highlighted card.',
+  C:'C — Overview · Activity · Settings; pending change is a banner, the card lives in Activity.',
+};
+const state = {p:'A', tab:{A:'overview',B:'overview',C:'overview'}, theme:'light'};
+
+function render(){
+  const p = P[state.p], tab = state.tab[state.p];
+  document.documentElement.dataset.theme = state.theme;
+  document.querySelectorAll('#pick button').forEach(b=>b.setAttribute('aria-pressed', String(b.dataset.p===state.p)));
+  document.querySelectorAll('#theme button').forEach(b=>b.setAttribute('aria-pressed', String(b.dataset.t===state.theme)));
+  document.getElementById('note').textContent = NOTES[state.p];
+  document.getElementById('app').innerHTML = `
+  <div class="phead"><span class="crumb">Agents</span><span class="sep">/</span><span class="semi">${AG.name}</span></div>
+  <main class="col ${state.p==='A'?'':'narrow'} ${state.p}" data-proposal="${state.p}">
+    ${header()}
+    ${p.top()}
+    <div class="tabs" role="tablist" aria-label="${AG.name}">
+      ${p.tabs.map(([id,l,n])=>`<button class="tab" role="tab" type="button" data-tab="${id}" aria-selected="${tab===id}">${l}${n==='dot'?'<span class="dot" aria-label="1 waiting"></span>':n?`<span class="n">${n}</span>`:''}</button>`).join('')}
+    </div>
+    <div class="panel" role="tabpanel" data-tabpanel="${tab}">${p[tab]()}</div>
+  </main>`;
+}
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-p],[data-t],[data-tab],[data-go],[data-edit]');
+  if (!t) return;
+  if (t.dataset.p) state.p = t.dataset.p;
+  else if (t.dataset.t) state.theme = t.dataset.t;
+  else if (t.dataset.tab) state.tab[state.p] = t.dataset.tab;
+  else if (t.dataset.go) state.tab[state.p] = t.dataset.go;
+  else if (t.dataset.edit) {
+    const i = +t.dataset.edit, box = document.querySelector(`.brief[data-seat="${i}"]`); t.hidden = true;
+    box.innerHTML = `<textarea aria-label="Brief for ${SEATS[i].p}">${SEATS[i].brief}</textarea>
+      <div style="display:flex;gap:var(--sp-2);margin-top:var(--sp-2)"><button class="btn primary sm" type="button" data-save>Save brief</button><button class="btn sm" type="button" data-cancel>Cancel</button><span class="meta" style="align-self:center">${SEATS[i].brief.length} / 4000</span></div>`;
+    return;
+  }
+  render();
+});
+document.addEventListener('click', (e) => { if (e.target.closest('[data-save],[data-cancel]')) render(); });
+window.__set = (p, tab, theme) => { state.p = p; if (tab) state.tab[p] = tab; if (theme) state.theme = theme; render(); };
+render();
+</script>
+</body>
+</html>

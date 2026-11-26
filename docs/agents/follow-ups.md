@@ -348,3 +348,30 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
   demo state serves the two pages).
 - **Fixed in passing (R2's store): `openTaskPanel` didn't wake the readers of the right slot,** so Details opened nothing until another
   render happened. It emits now (`explorerStore.test.ts`, "opening it wakes what is already rendering the right slot").
+
+## Needs you (rule set P1) — edge cases left for later
+
+- **A merge is not an event.** An item leaves when its branch has landed, but nothing tells the Fleet page that a merge happened:
+  it clears on the next read (a reload, a hint from any other change, or the page being reopened), at most ~30 s after the box's
+  branch check cache expires. A hint on merge (or a periodic refetch while the page is open) would make it instant.
+- **Which branch counts as "landed".** The check asks whether the task's branch tip is already in the project checkout's HEAD or
+  in `origin/HEAD`, or the branch is gone. A branch merged only into some other, non-checked-out branch stays until the user opens the
+  task or marks it done.
+- **A Manta-handed task the user later continues themselves** keeps `requestedBy: "manta"` (a continuation inherits it), so its
+  unmerged branch is a recap line, not an item. Deciding that a user's own follow-up message takes ownership is a product call.
+- **The "still unmerged" recap line** counts every finished Manta-handed task still in the jobs store (7 days / 50), not only those
+  since the last visit; it leaves when the branch lands or the task is opened.
+- **Failures the user asked for** get a recap line with Open; the research's "Retry" chip is not built (retrying is a new request).
+- **`reviewed` is capped at 200 job ids** (oldest dropped): opening or marking done more than that in one stretch lets the oldest
+  item reappear if its branch is still unmerged.
+- **The "thin" research tag is warn-toned everywhere** (the task side panel shares the rows); nobody asked for the panel to differ.
+
+## Profile tabs (proposal A) — edge cases left for later
+
+- **"Next refresh" on the Research pane.** The mockup shows a date; the refresh routine's next run isn't on the profile read. Worth adding once the routines read exposes it.
+- **Page titles for sources.** The library keeps a claim, quote, link and publisher per finding but no page title, so a source row is the publisher or site. A stored title would give the mockup's "site — page name" rows.
+- **Private sources are counted per finding, not per source,** because the library's wire shape doesn't say which private findings share a source.
+- **"Also used by" is derived from applied changes' basis** (the research a change rested on), not from every task that read an entry; an agent that read it without changing anything isn't listed.
+- **Restore for a change shown above the tabs.** A record whose card is above (just applied) has no row to open, so "Restore the version before this" isn't offered for it; its own Undo does the same thing.
+- **Seat briefs are shown whole.** A 4000-character brief makes a tall row; clamp with "Show more" if that turns out to matter.
+

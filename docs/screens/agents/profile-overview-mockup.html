@@ -1,0 +1,260 @@
+<!doctype html>
+<!-- Approved 2026-11-26 (layout A): the agent profile's Overview. Looks only; the "Asks first" and "Measures" rows are illustrative
+     copy from the first mockup — the app lists the agent's real use when / not for. Deviations: conformance.md items 16–20. -->
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent profile — proposal A (content + details pane)</title>
+<style>
+/* Token values copied from src/renderer/tokens.css (origin/main). No new tokens. */
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;
+  --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-full:999px;
+  --font-sans:"Inter Variable",Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --cto-col-max-w:960px;
+  --motion-fast:120ms;--ease-out:cubic-bezier(0.22,1,0.36,1);
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-solid:#5A88FF;--on-accent:#0B1020;
+  --ok:#3DD9A4;--warn:#FACC15;--ok-bg:#3DD9A41f;--warn-bg:#FACC151f;--accent-bg:#5A88FF1f;
+  --fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);--fill-active:rgba(255,255,255,.10);
+  --diff-add:#12351f;--diff-del:#3a1720;
+  --shadow-sm:0 1px 2px rgb(0 0 0 / .4);
+}
+[data-theme="light"]{
+  color-scheme:light;
+  --canvas:#FAF9F7;--panel:#F2F0EC;--card:#FFFFFF;--raised:#EAE7E1;
+  --border-subtle:#E8E4DD;--border:#DAD5CC;--border-strong:#857C6E;
+  --tx1:#33302B;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;
+  --accent:#2E6BFF;--accent-tx:#1F55D6;--accent-solid:#1F55D6;--on-accent:#FFFFFF;
+  --ok:#0A7A53;--warn:#6E6200;--ok-bg:#0A7A5314;--warn-bg:#6E620014;--accent-bg:#2E6BFF14;
+  --fill:rgba(26,24,21,.035);--fill-hover:rgba(26,24,21,.06);--fill-active:rgba(26,24,21,.09);
+  --diff-add:#E4F4E9;--diff-del:#FCEAEC;
+  --shadow-sm:0 1px 2px rgb(26 24 21 / .06);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+/* type roles (tailwind.config.js fontSize) */
+.t-display{font-size:24px;line-height:1.25}
+.t-title{font-size:17px;line-height:1.3}
+.t-prose{font-size:15px;line-height:1.55}
+.t-body{font-size:14px;line-height:1.5}
+.t-label{font-size:13px;line-height:1.4}
+.t-meta{font-size:12px;line-height:1.4}
+.semi{font-weight:600}.med{font-weight:500}
+.tx1{color:var(--tx1)}.tx2{color:var(--tx2)}.tx3{color:var(--tx3)}.tx4{color:var(--tx4)}
+
+/* demo-only theme switch, outside the app frame */
+.demo-switch{position:fixed;right:12px;bottom:12px;z-index:9;border:1px solid var(--border);background:var(--card);border-radius:var(--r-sm);padding:6px 10px;font-size:12px;color:var(--tx2)}
+
+/* pane header bar: AgentsHeader recipe (h-11, border-b) */
+.phead{height:44px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4);border-bottom:1px solid var(--border);font-size:13px;font-weight:500}
+.phead a{color:var(--tx3);text-decoration:none}.phead .sep{color:var(--tx4)}
+.col{max-width:var(--cto-col-max-w);margin:0 auto;padding:var(--sp-8) var(--sp-6) var(--sp-10)}
+
+/* header */
+.hero{display:flex;gap:var(--sp-4);align-items:flex-start}
+.av{width:44px;height:44px;border-radius:var(--r-md);background:#16a36b;color:#fff;display:grid;place-items:center;font-size:15px;font-weight:600;flex:none}
+.hero h1{margin:0}
+.facts{display:flex;flex-wrap:wrap;gap:0 var(--sp-2);margin-top:var(--sp-1)}
+.facts span+span::before{content:"·";margin-right:var(--sp-2);color:var(--tx4)}
+.desc{margin:var(--sp-3) 0 0;max-width:68ch}
+.actions{display:flex;gap:var(--sp-2);margin-left:auto;flex:none}
+.btn{height:32px;padding:0 var(--sp-3);border-radius:var(--r-sm);border:1px solid var(--border);background:var(--card);font-size:13px;font-weight:500;box-shadow:var(--shadow-sm)}
+.btn:hover{background:var(--fill-hover)}
+.btn.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--tx2)}
+
+/* pending change: existing AgentChangeView look, with the diff collapsed */
+.change{margin-top:var(--sp-6);border:1px solid var(--border);background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow-sm);padding:var(--sp-3) var(--sp-4)}
+.change-row{display:flex;align-items:center;gap:var(--sp-3)}
+.pill{display:inline-flex;align-items:center;gap:var(--sp-1);border-radius:var(--r-full);padding:1px var(--sp-2);font-size:12px;line-height:1.4;white-space:nowrap}
+.pill.accent{background:var(--accent-bg);color:var(--accent-tx)}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.neutral{color:var(--tx2);box-shadow:inset 0 0 0 1px var(--border)}
+details.diff{margin-top:var(--sp-2)}
+details.diff summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:var(--sp-1);font-size:12px;color:var(--tx3);font-weight:500}
+details.diff summary::-webkit-details-marker{display:none}
+.chev{width:12px;height:12px;transition:transform var(--motion-fast) var(--ease-out)}
+details[open] > summary .chev{transform:rotate(90deg)}
+.diffbody{margin-top:var(--sp-2);border-radius:var(--r-md);overflow:hidden;font-family:var(--font-mono);font-size:12px;line-height:1.55}
+.diffbody div{padding:0 var(--sp-3)}
+.diffbody .a{background:var(--diff-add)}.diffbody .d{background:var(--diff-del)}
+
+/* tabs: tablist recipe */
+.tabs{display:flex;gap:var(--sp-5);border-bottom:1px solid var(--border);margin-top:var(--sp-8);font-size:13px}
+.tab{position:relative;padding:var(--sp-2) 0;border:0;background:none;color:var(--tx3)}
+.tab .n{color:var(--tx3);margin-left:var(--sp-1)}
+.tab[aria-selected="true"]{color:var(--tx1);font-weight:500}
+.tab[aria-selected="true"]::after{content:"";position:absolute;inset:auto 0 -1px 0;border-bottom:2px solid var(--accent)}
+
+/* overview: main column + details pane */
+.ov{display:grid;grid-template-columns:minmax(0,1fr) 288px;gap:var(--sp-8);padding-top:var(--sp-6);align-items:start}
+.sec + .sec{margin-top:var(--sp-8)}
+.h2{display:flex;align-items:baseline;gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.h2 .more{margin-left:auto;font-size:12px;font-weight:500;color:var(--accent-tx);text-decoration:none}
+.dl{display:grid;grid-template-columns:104px minmax(0,1fr);gap:var(--sp-3) var(--sp-4);margin:0}
+.dl dt{font-size:13px;color:var(--tx3);padding-top:1px}
+.dl dd{margin:0;font-size:14px;line-height:1.5;color:var(--tx1)}
+details.instr{margin-top:var(--sp-4);border-top:1px solid var(--border-subtle);padding-top:var(--sp-3)}
+details.instr summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:var(--sp-2);font-size:13px;font-weight:500;color:var(--tx2)}
+details.instr summary::-webkit-details-marker{display:none}
+details.instr pre{margin:var(--sp-2) 0 0;background:var(--fill);border-radius:var(--r-md);padding:var(--sp-3);font-family:var(--font-mono);font-size:12px;white-space:pre-wrap;color:var(--tx2)}
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--border-subtle)}
+.rows li{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-2) 0;border-bottom:1px solid var(--border-subtle);min-height:40px}
+.rows .ico{width:16px;height:16px;color:var(--tx3);flex:none}
+.rows .grow{min-width:0;flex:1}
+.rows .meta{font-size:12px;color:var(--tx3);white-space:nowrap}
+.foot{margin:var(--sp-2) 0 0;font-size:12px;color:var(--tx3)}
+
+/* the details pane: one tinted region (--panel) groups every fact about the agent */
+.pane{background:var(--panel);border-radius:var(--r-lg);padding:var(--sp-4);position:sticky;top:var(--sp-4)}
+[data-theme="dark"] .pane{box-shadow:inset 0 0 0 1px var(--border-subtle)}
+.pane .grp + .grp{margin-top:var(--sp-5);padding-top:var(--sp-4);border-top:1px solid var(--border)}
+[data-theme="dark"] .pane .grp + .grp{border-top-color:var(--border-subtle)}
+.pane h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--tx2)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:var(--sp-2) var(--sp-3);font-size:13px}
+.kv dt{color:var(--tx3)}.kv dd{margin:0;color:var(--tx1);text-align:right}
+.plist{list-style:none;margin:0;padding:0;font-size:13px}
+.plist li{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) 0;min-height:28px}
+.plist .r{margin-left:auto;font-size:12px;color:var(--tx3)}
+.link{font-size:12px;font-weight:500;color:var(--accent-tx);background:none;border:0;padding:0;margin-top:var(--sp-2)}
+.acc{font-size:12px;border-radius:var(--r-xs);padding:0 var(--sp-1);white-space:nowrap}
+.acc.rw{color:var(--accent-tx);background:var(--accent-bg)}
+.acc.r{color:var(--tx2);background:var(--fill-active)}
+.acc.no{color:var(--tx3)}
+.seg{display:inline-flex;background:var(--fill-active);border-radius:var(--r-sm);padding:2px;font-size:12px}
+.seg button{border:0;background:none;border-radius:var(--r-xs);padding:3px var(--sp-3);color:var(--tx3)}
+.seg button[aria-pressed="true"]{background:var(--card);color:var(--tx1);font-weight:500;box-shadow:var(--shadow-sm)}
+</style>
+</head>
+<body>
+<button class="demo-switch" id="theme" type="button">Toggle theme</button>
+
+<div class="phead"><a href="#">Agents</a><span class="sep">/</span><span class="semi">SEO</span></div>
+
+<main class="col">
+  <!-- 1. Header: who it is, in one glance -->
+  <section class="hero">
+    <div class="av" aria-hidden="true">S</div>
+    <div style="min-width:0;flex:1">
+      <h1 class="t-display semi">SEO</h1>
+      <div class="facts t-label tx3"><span>@seo</span><span>Specialist</span><span>2 seats</span></div>
+      <p class="desc t-prose tx2">Technical SEO and visibility in AI search (ChatGPT, Perplexity, AI Overviews) for marketing sites: audits, structured data, internal links, content briefs.</p>
+    </div>
+    <div class="actions">
+      <button class="btn ghost" type="button">Change via Manta</button>
+      <button class="btn" type="button">Chat</button>
+      <button class="btn primary" type="button">Mention in a chat</button>
+    </div>
+  </section>
+
+  <!-- 2. Pending change: still above the tabs, but the diff starts folded -->
+  <section class="change" aria-label="Change waiting for you">
+    <div class="change-row">
+      <span class="pill accent">Waiting for you</span>
+      <div style="min-width:0;flex:1" class="t-body"><span class="semi">Architect</span> <span class="tx2">· Adds an llms.txt check and drops 2 crawler rules that no longer hold.</span></div>
+      <button class="btn" type="button">Discard</button>
+      <button class="btn primary" type="button">Apply</button>
+    </div>
+    <details class="diff">
+      <summary><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>Show the change · 2 lines · based on “AI crawler access rules” (4 sources)</summary>
+      <div class="diffbody">
+        <div class="a">+ Check llms.txt is served at the site root and lists the key pages.</div>
+        <div class="d">− Block GPTBot in robots.txt on staging only.</div>
+      </div>
+    </details>
+  </section>
+
+  <!-- 3. Tabs: History stays a tab; Tests is not shown until it exists -->
+  <div class="tabs" role="tablist" aria-label="SEO">
+    <button class="tab" role="tab" aria-selected="true">Overview</button>
+    <button class="tab" role="tab" aria-selected="false">Research<span class="n">4</span></button>
+    <button class="tab" role="tab" aria-selected="false">Seats<span class="n">2</span></button>
+    <button class="tab" role="tab" aria-selected="false">History<span class="n">4</span></button>
+  </div>
+
+  <div class="ov" role="tabpanel">
+    <!-- main column: what it is for, what it rests on -->
+    <div>
+      <section class="sec">
+        <h2 class="h2 t-body semi">How to use it</h2>
+        <dl class="dl">
+          <dt>Use it when</dt><dd>A page’s ranking, markup or AI-search visibility is the question.</dd>
+          <dt>Not for</dt><dd>Rewriting brand copy, buying links, touching app code.</dd>
+          <dt>Asks first</dt><dd>Before changing redirects or robots.txt.</dd>
+          <dt>Measures</dt><dd>Visibility over many runs — never a single “rank”.</dd>
+        </dl>
+        <details class="instr">
+          <summary><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>Full instructions <span class="t-meta tx3" style="font-weight:400">· 38 lines</span></summary>
+          <pre>You are the SEO specialist for marketing sites…</pre>
+        </details>
+      </section>
+
+      <section class="sec">
+        <h2 class="h2 t-body semi">Research it relies on <a class="more" href="#">All 4 →</a></h2>
+        <ul class="rows">
+          <li><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg><span class="grow t-body">Technical SEO for AI search</span><span class="meta">5 sources · 3 days</span><span class="pill ok">fresh</span></li>
+          <li><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg><span class="grow t-body">Structured data for product pages</span><span class="meta">4 sources · 12 days</span><span class="pill ok">fresh</span></li>
+          <li><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg><span class="grow t-body">AI crawler access rules</span><span class="meta">4 sources · 41 days</span><span class="pill warn">stale</span></li>
+          <li><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg><span class="grow t-body">llms.txt adoption</span><span class="meta">2 sources · 6 days</span><span class="pill warn">thin</span></li>
+        </ul>
+        <p class="foot">From the shared research library. Thin means fewer than 3 independent sources.</p>
+      </section>
+    </div>
+
+    <!-- details pane: every fact and setting, in one tinted region -->
+    <aside class="pane" aria-label="Details">
+      <div class="grp">
+        <h3>Details</h3>
+        <dl class="kv">
+          <dt>Model</dt><dd>Auto</dd>
+          <dt>Works</dt><dd>Read-only</dd>
+          <dt>Built by</dt><dd>Architect</dd>
+          <dt>Changed</dt><dd>12 Oct</dd>
+        </dl>
+      </div>
+      <div class="grp">
+        <h3>Seats</h3>
+        <ul class="plist">
+          <li><svg class="ico" style="width:14px;height:14px;color:var(--tx3)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>Manta<span class="r">23 notes</span></li>
+          <li><svg class="ico" style="width:14px;height:14px;color:var(--tx3)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>Ronda<span class="r">41 notes</span></li>
+        </ul>
+        <button class="link" type="button">Manage seats</button>
+      </div>
+      <div class="grp">
+        <h3>Access <span class="tx3" style="font-weight:400">· in the Manta seat</span></h3>
+        <ul class="plist">
+          <li>Manta memory<span class="r"><span class="acc rw">read + write</span></span></li>
+          <li>SEO know-how<span class="r"><span class="acc r">read</span></span></li>
+          <li>Research library<span class="r"><span class="acc r">read</span></span></li>
+          <li>Other projects<span class="r"><span class="acc no">no access</span></span></li>
+        </ul>
+        <p class="foot" style="margin-top:var(--sp-1)">Know-how changes only through change cards.</p>
+      </div>
+      <div class="grp">
+        <h3>Refresh with new research</h3>
+        <div class="seg" role="group" aria-label="Refresh"><button type="button" aria-pressed="true">Monthly</button><button type="button" aria-pressed="false">Off</button></div>
+        <p class="foot">Once a month it re-checks its research and proposes changes. They wait for your click.</p>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script>
+  const b = document.getElementById('theme');
+  b.addEventListener('click', () => {
+    const r = document.documentElement; const dark = r.dataset.theme === 'dark';
+    r.dataset.theme = dark ? 'light' : 'dark'; 
+  });
+</script>
+</body>
+</html>

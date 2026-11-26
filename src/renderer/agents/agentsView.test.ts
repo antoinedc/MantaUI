@@ -7,15 +7,19 @@ import {
   cellView,
   currentSnapshot,
   errText,
+  detailRows,
   factsLine,
   firstLine,
-  historyOutcome,
+  historyCounts,
+  historyStatus,
   historyWho,
+  latestLiveId,
   isUnknownChannel,
   memoryLabel,
   nextTab,
   planUsagePercent,
   PROFILE_TABS,
+  researchHealth,
   recapLead,
   reviewPart,
   seatFolder,
@@ -102,12 +106,16 @@ describe("cellView", () => {
 });
 
 describe("reviewPart", () => {
-  const r: NeedsYouReview = { jobId: "job9", agentSlug: "dev", project: "manta", name: "Fix the crash", finishedAt: 5, filesChanged: 3, branch: "agent/dev/x", resultText: "Fixed it." };
+  const r: NeedsYouReview = { jobId: "job9", agentSlug: "dev", project: "manta", name: "Fix the crash", finishedAt: 5, filesChanged: 3, branch: "agent/dev/x", resultText: "Fixed it.", reason: "Branch ready to merge · 3 files" };
   it("builds the finished-card part from the review item, with no chat to open a panel in", () => {
     const p = reviewPart(r);
     expect(p).toMatchObject({ type: "background-result", jobId: "job9", state: "done", name: "Fix the crash", agent: "agent-dev", text: "Fixed it." });
     expect(p.sessionID).toBeUndefined();
     expect(p.childSessionId).toBe("job9");
+    expect(p.endedBlocked).toBeUndefined();
+  });
+  it("carries the decision case onto the card, so it reads 'Needs a decision'", () => {
+    expect(reviewPart({ ...r, reason: "Needs a decision", endedBlocked: true }).endedBlocked).toBe(true);
   });
 });
 
@@ -126,26 +134,46 @@ describe("tabs", () => {
   });
 });
 
-describe("factsLine / firstLine", () => {
+describe("factsLine / detailRows / firstLine", () => {
   const profile = (over: Partial<AgentProfile> = {}): AgentProfile =>
     ({
       info: { slug: "seo", name: "SEO", description: "d", isolation: "none", model: "anthropic/sonnet", color: null, builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null },
-      seats: [],
+      seats: [{}, {}],
       lastChangedAt: Date.UTC(2026, 10, 12, 12),
       builtBy: "architect",
       refresh: { enabled: true, routineId: null },
       research: [],
       ...over,
     }) as AgentProfile;
-  it("built by / last changed / model / isolation", () => {
-    expect(factsLine(profile())).toEqual(["built by Architect", "last changed 12 Nov", "model: anthropic/sonnet", "read-only"]);
+  it("the facts line is who it is: @slug, its role, its seats — nothing the description or the details pane says", () => {
+    expect(factsLine(profile())).toEqual(["@seo", "Specialist", "2 seats"]);
+    expect(factsLine(profile({ seats: [{} as never] }))[2]).toBe("1 seat");
+    expect(factsLine(profile({ seats: [] }))[2]).toBe("No seats yet");
+    const lead = profile();
+    lead.info = { ...lead.info, slug: "manta", role: "lead" };
+    expect(factsLine(lead)).toEqual(["@manta", "Lead", "Works in every project"]);
+    const arch = profile();
+    arch.info = { ...arch.info, slug: "architect", role: "architect" };
+    expect(factsLine(arch)).toEqual(["@architect", "Architect", "Works in every project"]);
   });
-  it("Auto when no model, its own branch for a worktree agent, built in / you / Manta, no change date when never changed", () => {
+  it("the details pane rows: model, works, built by, changed", () => {
+    expect(detailRows(profile())).toEqual([
+      ["Model", "anthropic/sonnet"],
+      ["Works", "Read-only"],
+      ["Built by", "Architect"],
+      ["Changed", "12 Nov"],
+    ]);
+  });
+  it("Auto when no model, edits code for a worktree agent, built in / you / Manta, no Changed row when never changed", () => {
     const p = profile({ lastChangedAt: null, builtBy: "built-in" });
     p.info = { ...p.info, model: null, isolation: "worktree" };
-    expect(factsLine(p)).toEqual(["built in", "model: Auto", "edits code on its own branch"]);
-    expect(factsLine(profile({ builtBy: "user" }))[0]).toBe("built by you");
-    expect(factsLine(profile({ builtBy: "manta" }))[0]).toBe("built by Manta");
+    expect(detailRows(p)).toEqual([
+      ["Model", "Auto"],
+      ["Works", "Edits code"],
+      ["Built by", "Built in"],
+    ]);
+    expect(detailRows(profile({ builtBy: "user" }))[2]).toEqual(["Built by", "You"]);
+    expect(detailRows(profile({ builtBy: "manta" }))[2]).toEqual(["Built by", "Manta"]);
   });
   it("firstLine takes the first non-empty line", () => {
     expect(firstLine("\n\n  Hello there  \nsecond")).toBe("Hello there");
@@ -159,18 +187,36 @@ describe("history rows", () => {
     expect(historyWho(change({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } }))).toBe("Architect");
     expect(historyWho(change({ origin: { kind: "restore", fromChangeId: "x" } }))).toBe("You");
   });
-  it("the outcome line follows every state; an undone row says Undone and by whom", () => {
-    expect(historyOutcome(change({ state: "applied", decidedBy: "click" }))).toBe("Live (you approved it)");
-    expect(historyOutcome(change({ state: "applied", decidedBy: "auto" }))).toBe("Live (applied automatically)");
-    expect(historyOutcome(change({ state: "undone", decidedBy: "click" }))).toBe("Undone by you");
-    expect(historyOutcome(change({ state: "undone", decidedBy: null }))).toBe("Undone");
-    expect(historyOutcome(change({ state: "pending" }))).toBe("Waiting for your click");
-    expect(historyOutcome(change({ state: "discarded" }))).toBe("Discarded");
-    expect(historyOutcome(change({ state: "expired" }))).toBe("Expired");
-    expect(historyOutcome(change({ state: "conflict", error: "File changed since" }))).toBe("Not applied: File changed since");
-    expect(historyOutcome(change({ state: "failed", error: null }))).toBe("Not activated");
-    expect(historyOutcome(change({ state: "held" }))).toBe("Waiting for the Architect to finish");
-    expect(historyOutcome(change({ state: "applying" }))).toBe("Applying…");
+  it("the status is a label with a tone and, where there is one, the reason — live says how it went live, undone by whom", () => {
+    expect(historyStatus(change({ state: "applied", decidedBy: "click" }))).toEqual({ tone: "ok", label: "Live", why: "you approved it" });
+    expect(historyStatus(change({ state: "applied", decidedBy: "auto" }))).toEqual({ tone: "ok", label: "Live", why: "applied automatically" });
+    expect(historyStatus(change({ state: "undone", decidedBy: "click" }))).toEqual({ tone: "faint", label: "Undone", why: "by you" });
+    expect(historyStatus(change({ state: "undone", decidedBy: null }))).toEqual({ tone: "faint", label: "Undone", why: null });
+    expect(historyStatus(change({ state: "pending" }))).toEqual({ tone: "accent", label: "Waiting for your click", why: null });
+    expect(historyStatus(change({ state: "discarded" }))).toEqual({ tone: "faint", label: "Discarded", why: null });
+    expect(historyStatus(change({ state: "expired" }))).toEqual({ tone: "faint", label: "Expired", why: null });
+    expect(historyStatus(change({ state: "conflict", error: "File changed since" }))).toEqual({ tone: "warn", label: "Not applied", why: "File changed since" });
+    expect(historyStatus(change({ state: "failed", error: null }))).toEqual({ tone: "warn", label: "Not activated", why: null });
+    expect(historyStatus(change({ state: "held" }))).toEqual({ tone: "faint", label: "Waiting for the Architect to finish", why: null });
+    expect(historyStatus(change({ state: "applying" }))).toEqual({ tone: "accent", label: "Applying…", why: null });
+  });
+  it("the counts the pane shows: live (applied), waiting (pending), undone", () => {
+    const rows = [change({ state: "applied" }), change({ state: "applied" }), change({ state: "pending" }), change({ state: "undone" }), change({ state: "discarded" }), change({ state: "expired" })];
+    expect(historyCounts(rows)).toEqual({ live: 2, waiting: 1, undone: 1 });
+    expect(historyCounts([])).toEqual({ live: 0, waiting: 0, undone: 0 });
+  });
+  it("the one Undo belongs to the newest live change", () => {
+    const rows = [change({ id: "p", state: "pending", decidedAt: null, createdAt: 900 }), change({ id: "a", state: "applied", decidedAt: 300 }), change({ id: "b", state: "applied", decidedAt: 200 }), change({ id: "u", state: "undone", decidedAt: 400 })];
+    expect(latestLiveId(rows)).toBe("a");
+    expect(latestLiveId([change({ state: "undone" })])).toBeNull();
+  });
+});
+
+describe("researchHealth", () => {
+  const e = (over: Partial<AgentProfile["research"][number]> = {}) => ({ id: "r", topic: "t", sourceCount: 3, ageDays: 1, status: "fresh" as const, thin: false, ...over });
+  it("counts stale, thin and missing entries (a missing one has no age or sources to judge)", () => {
+    expect(researchHealth([e(), e({ status: "stale" }), e({ thin: true }), e({ status: "stale", thin: true }), e({ status: "missing", thin: false, sourceCount: null, ageDays: null })])).toEqual({ stale: 2, thin: 2, missing: 1 });
+    expect(researchHealth([])).toEqual({ stale: 0, thin: 0, missing: 0 });
   });
 });
 
@@ -212,7 +258,7 @@ describe("seats", () => {
     expect(seatNotesLabel(null)).toBe("—");
   });
   it("memory access reads as plain words", () => {
-    expect(memoryLabel("read")).toBe("read-only");
+    expect(memoryLabel("read")).toBe("read");
     expect(memoryLabel("read-write")).toBe("read + write");
     expect(memoryLabel("none")).toBe("no access");
   });

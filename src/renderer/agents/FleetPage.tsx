@@ -89,6 +89,39 @@ function NeedsSection({
   );
 }
 
+/** "Since yesterday 18:40: …" — the server's lines; one about a single task (a failure the user asked for) carries a way to open it. */
+function Recap({ recap }: { recap: AgentFleet["recap"] }) {
+  const { open, busyId, error } = useOpenTask();
+  const jobOf = (line: number) => recap.links?.find((l) => l.line === line)?.jobId;
+  return (
+    <div className="manta-agents-recap rounded-md bg-fill px-3 py-2 text-label text-text-muted" data-testid="fleet-recap">
+      <b className="font-semibold text-text">{recapLead(recap.since, nowMs())}</b>{" "}
+      {recap.lines.map((text, i) => {
+        const jobId = jobOf(i);
+        return (
+          <span key={i}>
+            {i > 0 && " · "}
+            {text}
+            {jobId && (
+              <>
+                {" "}
+                <Button tone="ghost" onClick={() => void open(jobId)} disabled={busyId != null} ariaLabel={`Open: ${text}`} title="Open this task's session">
+                  {busyId === jobId ? "Opening…" : "Open"}
+                </Button>
+              </>
+            )}
+          </span>
+        );
+      })}
+      {error && (
+        <p role="alert" className="m-0 mt-1 break-words text-meta text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Grid({ fleet, onOpenProfile }: { fleet: AgentFleet; onOpenProfile: (slug: string) => void }) {
   const titleId = useId();
   const { open, busyId, error } = useOpenTask();
@@ -265,11 +298,7 @@ export function FleetPage({
             </div>
           ) : data ? (
             <>
-              {data.recap.lines.length > 0 && (
-                <div className="manta-agents-recap rounded-md bg-fill px-3 py-2 text-label text-text-muted" data-testid="fleet-recap">
-                  <b className="font-semibold text-text">{recapLead(data.recap.since, nowMs())}</b> {data.recap.lines.join(" · ")}
-                </div>
-              )}
+              {data.recap.lines.length > 0 && <Recap recap={data.recap} />}
               <Grid fleet={data} onOpenProfile={onOpenProfile} />
             </>
           ) : null}

@@ -211,6 +211,18 @@ describe("FleetPage", () => {
     expect(q('[data-testid="fleet-recap"]')).toBeNull();
   });
 
+  it("a recap line about one task (a failure the user asked for) has a way to open it; a refusal is said on the page", async () => {
+    const recap = { since: null, lines: ["Dev finished 2 tasks Manta handed off", "Dev failed “ship it”"], links: [{ line: 1, jobId: "job7" }] };
+    await open({}, { agentsFleet: () => Promise.resolve(fleet({ recap })), delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task has no window any more" }) });
+    const buttons = [...q('[data-testid="fleet-recap"]')!.querySelectorAll("button")];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Open"]); // only the linked line
+    expect(buttons[0].getAttribute("aria-label")).toBe("Open: Dev failed “ship it”");
+    expect(q('[data-testid="fleet-recap"]')?.textContent).toContain("Dev finished 2 tasks Manta handed off");
+    await click(buttons[0]);
+    expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "job7" }]]);
+    expect(q('[data-testid="fleet-recap"] [role="alert"]')?.textContent).toContain("That task has no window any more");
+  });
+
   it("the grid is a table: a column per project, a row per agent, '—' for no seat, tasks this week last", async () => {
     await open();
     const table = q('[data-testid="fleet-grid"] table')!;

@@ -3065,8 +3065,19 @@ export function buildHandlers({
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
     // P6: where a job's chat window is (re-created, stamped with the child
     // session id, when it was closed) → { ok, tmuxSession, windowIndex } | { ok:false, error }.
-    "delegate:open-session": (input) =>
-      delegate ? delegate.openSession(input?.jobId) : { ok: false, error: "no engine" },
+    // Opening a specialist task's session also counts as looking at it: the agents engine drops it from Needs you.
+    "delegate:open-session": async (input) => {
+      if (!delegate) return { ok: false, error: "no engine" };
+      const res = await delegate.openSession(input?.jobId);
+      if (res?.ok && agents?.openedTask) {
+        try {
+          await agents.openedTask(input?.jobId);
+        } catch (e) {
+          console.warn(`[rpc] couldn't record an opened task: ${e?.message ?? e}`);
+        }
+      }
+      return res;
+    },
     // preload: ipcRenderer.invoke(IPC.delegateDelete, id) → args[0] = id
     "delegate:delete": (id) => (delegate ? delegate.deleteJob(id) : { ok: false, error: "no engine" }),
     // preload: ipcRenderer.invoke(IPC.delegateStart, input) → args[0] = { prompt, sessionID, directory, model? }

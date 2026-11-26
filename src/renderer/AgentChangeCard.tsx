@@ -13,7 +13,7 @@
 // (or after the user's own press) never rolls the card back.
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Bot } from "lucide-react";
+import { Bot, ChevronRight } from "lucide-react";
 import type { AgentChange, OpencodePart } from "../shared/types";
 import { Button } from "./Button";
 import { Card } from "./Card";
@@ -27,6 +27,8 @@ import {
   agentChangeReason,
   agentChangeTitle,
   architectSourceBlocks,
+  changeAuthor,
+  changedLineCount,
   DIFF_COLLAPSE_ROWS,
   diffRows,
   evidenceLines,
@@ -240,11 +242,37 @@ function SourceBlocks({ change }: { change: AgentChange }) {
   );
 }
 
+const plural = (n: number, one: string): string => `${n} ${n === 1 ? one : `${one}s`}`;
+
+/** The fold's label when the card is collapsed: "Show the change · 2 lines · based on 3 sources". */
+function foldLabel(change: AgentChange): string {
+  if (change.kind === "create") return "Show the new agent";
+  const lines = changedLineCount(change);
+  const sources = change.evidence?.length ?? 0;
+  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
+}
+
 /**
  * The card for one change record, drawn from the record alone. Its buttons call the box and await the answer; the new
  * record goes to `onChange` (the owner of the record replaces it), and the line saying what happened shows here.
+ *
+ * `collapsed` (the profile's pending card): ONE summary line — the chip, who and what, and the same buttons — with the change
+ * itself (evidence, rules, the diff or the new agent) folded under "Show the change". What the user must read to decide or to
+ * understand a press (the reason a click is needed, a refusal, the outcome) stays outside the fold. The buttons exist once, in
+ * the order of the line (the primary one last, at the line's end).
  */
-export function AgentChangeView({ change, onChange }: { change: AgentChange; onChange: (next: AgentChange) => void }) {
+export function AgentChangeView({
+  change,
+  onChange,
+  collapsed = false,
+  actions: offered,
+}: {
+  change: AgentChange;
+  onChange: (next: AgentChange) => void;
+  collapsed?: boolean;
+  /** Which of the buttons the state allows to show (default: all). The history shows a card per row and offers each button once on the page. */
+  actions?: ReadonlyArray<AgentChangeAction>;
+}) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const alive = useRef(true);
@@ -281,11 +309,111 @@ export function AgentChangeView({ change, onChange }: { change: AgentChange; onC
 
   const chip = agentChangeChip(change);
   const reason = agentChangeReason(change);
-  const actions = agentChangeActions(change.state);
+  const actions = agentChangeActions(change.state).filter((a) => !offered || offered.includes(a));
   const anyBusy = busy !== null;
   const needsAttention = change.state === "failed" || change.state === "conflict";
   const sentence =
     change.state === "expired" && !change.error ? "This proposal expired. Ask Manta again if you still want it." : change.error;
+
+  const buttons =
+    actions.length === 0
+      ? null
+      : actions.map((action) => (
+          <Button
+            key={action}
+            tone={action === "apply" && change.state === "pending" ? "primary" : "default"}
+            loading={busy === action}
+            disabled={anyBusy}
+            onClick={() => void press(action)}
+          >
+            {agentChangeButtonLabel(action, change, busy === action)}
+          </Button>
+        ));
+
+  // what the user reads to decide, and what says how a press ended
+  const lead = (
+    <>
+      {reason && (
+        <div className="text-warn" data-testid="agent-change-reason">
+          {reason}
+        </div>
+      )}
+      {change.state === "held" && (
+        <div className="text-text-muted" data-testid="agent-change-held">
+          The Architect is still working
+        </div>
+      )}
+      {change.state === "applying" && (
+        <div className="flex items-center gap-2 text-text-muted" data-testid="agent-change-applying">
+          <Spinner />
+          <span>Applying…</span>
+        </div>
+      )}
+    </>
+  );
+  const detail = (
+    <>
+      <EvidenceSection change={change} />
+      <AdmissionSection change={change} />
+      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
+      <SourceBlocks change={change} />
+    </>
+  );
+  const outcome = (
+    <>
+      {sentence && change.state !== "applied" && (
+        <div className="text-warn break-words" role={needsAttention ? "alert" : undefined} data-testid="agent-change-error">
+          {sentence}
+        </div>
+      )}
+      {notice && notice.state === change.state && (
+        <div
+          className={`break-words ${notice.tone === "ok" ? "text-ok" : "text-danger"}`}
+          role={notice.tone === "error" ? "alert" : "status"}
+          data-testid="agent-change-notice"
+        >
+          {notice.text}
+        </div>
+      )}
+    </>
+  );
+  const chipPill = (
+    <Pill tone={chip.tone}>
+      <span data-testid="agent-change-chip">{chip.label}</span>
+    </Pill>
+  );
+
+  if (collapsed) {
+    return (
+      <div className="text-meta" data-testid="agent-change-card" data-state={change.state}>
+        <Card
+          elevated={change.state === "pending"}
+          warn={needsAttention}
+          header={
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
+              {chipPill}
+              <div className="min-w-0 flex-1 basis-64 break-words text-body text-text" data-testid="agent-change-summary-line">
+                <span className="font-semibold">{changeAuthor(change)}</span> · {change.summary || agentChangeTitle(change)}
+              </div>
+              {buttons && <div className="flex shrink-0 items-center gap-2">{[...buttons].reverse()}</div>}
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-2">
+            {lead}
+            {outcome}
+            <details data-testid="agent-change-fold" className="group">
+              <summary className="flex cursor-pointer list-none items-center gap-1 text-meta font-medium text-text-faint hover:text-text [&::-webkit-details-marker]:hidden">
+                <ChevronRight size={12} aria-hidden="true" className="shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" />
+                {foldLabel(change)}
+              </summary>
+              <div className="mt-2 flex flex-col gap-2">{detail}</div>
+            </details>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="text-meta" data-testid="agent-change-card" data-state={change.state}>
@@ -304,28 +432,10 @@ export function AgentChangeView({ change, onChange }: { change: AgentChange; onC
               <div className="text-text font-medium mb-px break-words">{agentChangeTitle(change)}</div>
               {change.slug && <div className="text-text-faint mb-px">@{change.slug}</div>}
             </div>
-            <Pill tone={chip.tone}>
-              <span data-testid="agent-change-chip">{chip.label}</span>
-            </Pill>
+            {chipPill}
           </>
         }
-        actions={
-          actions.length === 0 ? undefined : (
-            <>
-              {actions.map((action) => (
-                <Button
-                  key={action}
-                  tone={action === "apply" && change.state === "pending" ? "primary" : "default"}
-                  loading={busy === action}
-                  disabled={anyBusy}
-                  onClick={() => void press(action)}
-                >
-                  {agentChangeButtonLabel(action, change, busy === action)}
-                </Button>
-              ))}
-            </>
-          )
-        }
+        actions={buttons ?? undefined}
       >
         <div className="flex flex-col gap-2">
           {change.summary && (
@@ -333,40 +443,9 @@ export function AgentChangeView({ change, onChange }: { change: AgentChange; onC
               {change.summary}
             </p>
           )}
-          {reason && (
-            <div className="text-warn" data-testid="agent-change-reason">
-              {reason}
-            </div>
-          )}
-          {change.state === "held" && (
-            <div className="text-text-muted" data-testid="agent-change-held">
-              The Architect is still working
-            </div>
-          )}
-          {change.state === "applying" && (
-            <div className="flex items-center gap-2 text-text-muted" data-testid="agent-change-applying">
-              <Spinner />
-              <span>Applying…</span>
-            </div>
-          )}
-          <EvidenceSection change={change} />
-          <AdmissionSection change={change} />
-          {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
-          <SourceBlocks change={change} />
-          {sentence && change.state !== "applied" && (
-            <div className="text-warn break-words" role={needsAttention ? "alert" : undefined} data-testid="agent-change-error">
-              {sentence}
-            </div>
-          )}
-          {notice && notice.state === change.state && (
-            <div
-              className={`break-words ${notice.tone === "ok" ? "text-ok" : "text-danger"}`}
-              role={notice.tone === "error" ? "alert" : "status"}
-              data-testid="agent-change-notice"
-            >
-              {notice.text}
-            </div>
-          )}
+          {lead}
+          {detail}
+          {outcome}
         </div>
       </Card>
     </div>

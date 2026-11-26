@@ -1,7 +1,10 @@
 // ===== The agent profile (agent screens spec §2.2) =====
 //
-// One agent, one page: a header (name, facts, description, actions), its pending change cards, then the tabs Overview ·
-// Research · Seats · History (Tests comes later). The tabs are the `tabs` guide's hand-written tablist: a button per tab with
+// One agent, one page: a header (name, who-it-is line, description, actions), its pending change (one summary line, the change
+// folded), then the tabs Overview · Research · Seats · History (there is no Tests tab until Tests exist). The Overview is two
+// columns: how to use the agent and the research it rests on, beside one tinted details pane (details, seats, access, refresh)
+// that stacks under the main column when the page is narrow. History is a tab, not an Overview block. Every other tab has the
+// same two columns (Research, Seats, History: proposal A), each with its own pane. The tabs are the `tabs` guide's hand-written tablist: a button per tab with
 // `aria-selected`, a roving tab stop, arrows / Home / End that move AND select (selection follows focus), the selected tab
 // underlined by a border on a pseudo-element, every panel in the markup with `hidden` on all but the selected one. `focusgroup`
 // is not available in the bundled Chromium, so the ~15-line key handler stays (nextTab).
@@ -10,8 +13,8 @@
 // (each seat's current task) and the registry's projects (for Add a seat). The last two are soft: a failed read leaves out what
 // they feed. Every press ends visibly: a draft opens, a window opens, a sentence says why not.
 
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { Folder } from "lucide-react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronRight, Folder } from "lucide-react";
 import type { AgentChange, AgentProfile as Profile } from "../../shared/types";
 import { AgentBadge } from "../AgentBadge";
 import { AgentChangeView } from "../AgentChangeCard";
@@ -20,33 +23,21 @@ import { Button } from "../Button";
 import { openChangeAgentDraft, openMentionDraft } from "../newAgentDraft";
 import { ResearchRows } from "../ResearchRows";
 import { PageColumn } from "../RoutinesParts";
-import { Segmented } from "../Segmented";
 import { useStore } from "../store";
-import { AgentHistory } from "./AgentHistory";
+import { AgentHistory, HistoryPane } from "./AgentHistory";
+import { RefreshControl } from "./AgentRefresh";
+import { AgentResearch } from "./AgentResearch";
 import { AgentSeats, MemoryMap } from "./AgentSeats";
-import { AgentsHeader, BlockTitle, Crumbs } from "./AgentsParts";
-import { OVERVIEW_PREVIEW, PROFILE_TABS, currentSnapshot, errText, factsLine, nextTab, seatFolder, seatNotesLabel, type ProfileTab } from "./agentsView";
+import { AgentsHeader, BlockTitle, Crumbs, LinkButton } from "./AgentsParts";
+import { Pane, PaneBlock, PaneFacts, PaneGroup, TwoColumn } from "./ProfileLayout";
+import { OVERVIEW_PREVIEW, PROFILE_TABS, currentSnapshot, detailRows, errText, factsLine, nextTab, seatFolder, seatNotesLabel, type ProfileTab } from "./agentsView";
 import { useAgentsRead, type AgentsRead } from "./useAgentsRead";
 import { openChatWindow } from "./useOpenTask";
 
 const TAB_CLASS =
   "relative flex-none whitespace-nowrap py-2 text-text-faint hover:text-text aria-selected:text-text " +
   "aria-selected:after:absolute aria-selected:after:inset-x-0 aria-selected:after:bottom-0 aria-selected:after:border-b-2 aria-selected:after:border-accent aria-selected:after:content-[''] " +
-  "disabled:cursor-not-allowed disabled:text-text-quiet disabled:hover:text-text-quiet " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
-
-const Block = ({ title, children, testId }: { title: string; children: ReactNode; testId?: string }) => (
-  <section data-testid={testId}>
-    <BlockTitle>{title}</BlockTitle>
-    {children}
-  </section>
-);
-
-const LinkButton = ({ onClick, children }: { onClick: () => void; children: ReactNode }) => (
-  <button type="button" onClick={onClick} className="mt-2 rounded-sm text-meta font-medium text-accent-tx hover:underline focus-visible:outline-2 focus-visible:outline-accent">
-    {children}
-  </button>
-);
 
 /** A read that may still be loading or have failed — the History tab and the Overview's History block show it the same way. */
 function HistoryState({ history, children }: { history: AgentsRead<AgentChange[]>; children: (records: AgentChange[]) => ReactNode }) {
@@ -66,93 +57,49 @@ function HistoryState({ history, children }: { history: AgentsRead<AgentChange[]
   return <p className="m-0 text-label text-text-faint">{history.unsupported ? "Update the box to see the history." : "Loading…"}</p>;
 }
 
-function RefreshControl({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
-  const slug = profile.info.slug;
-  const [override, setOverride] = useState<boolean | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const busyRef = useRef(false);
-  // Turned off from the Routines page (or on again): the box's word beats an answer we kept.
-  useEffect(() => setOverride(null), [profile.refresh.enabled]);
-  const enabled = override ?? profile.refresh.enabled;
-
-  const set = async (next: "monthly" | "off") => {
-    const want = next === "monthly";
-    if (busyRef.current || want === enabled) return;
-    busyRef.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await window.api.agentsRefreshSet({ slug, enabled: want });
-      setOverride(r.enabled);
-      onChanged();
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Block title="Refresh with new research" testId="profile-refresh">
-      <div className="flex items-center gap-3">
-        <Segmented
-          label="Refresh with new research"
-          options={[
-            { id: "monthly", label: "Monthly" },
-            { id: "off", label: "Off" },
-          ]}
-          value={enabled ? "monthly" : "off"}
-          onChange={(v) => void set(v)}
-        />
-        {busy && <span className="text-meta text-text-faint">Saving…</span>}
-      </div>
-      <p className="m-0 mt-2 text-meta text-text-faint">
-        {enabled ? "Once a month the agent checks the research it rests on and proposes changes. They wait for your click." : "The agent is not refreshed on its own."}
-      </p>
-      {error && (
-        <div role="alert" data-testid="refresh-error" className="mt-1 break-words text-meta text-danger">
-          {error}
-        </div>
-      )}
-    </Block>
-  );
-}
-
-function Charter({ profile, snapshot }: { profile: Profile; snapshot: string | null }) {
+/** "How to use it": a definition list of what the agent's file says about when to reach for it, and the full instructions folded. */
+function HowToUse({ profile, snapshot }: { profile: Profile; snapshot: string | null }) {
   const { info } = profile;
   const instructions = useMemo(() => (snapshot ? parseAgentMdView(snapshot)?.body || null : null), [snapshot]);
-  const Row = ({ k, v }: { k: string; v: string }) => (
-    <li>
-      <b className="font-semibold text-text">{k}</b> {v}
-    </li>
-  );
+  const rows = [
+    ["Use it when", info.useWhen],
+    ["Not for", info.notFor],
+  ].filter((r): r is [string, string] => !!r[1]);
   return (
-    <Block title="Charter" testId="profile-charter">
-      <ul className="m-0 flex list-none flex-col gap-1 p-0 text-label text-text-muted">
-        <Row k="Does:" v={info.description} />
-        {info.useWhen && <Row k="Use when:" v={info.useWhen} />}
-        {info.notFor && <Row k="Not for:" v={info.notFor} />}
-        <Row k="Works:" v={info.isolation === "worktree" ? "edits code on its own branch" : "Read-only, it doesn't edit code"} />
-        <Row k="Model:" v={info.model || "Auto"} />
-      </ul>
+    <section data-testid="profile-howto">
+      <BlockTitle>How to use it</BlockTitle>
+      {rows.length > 0 ? (
+        <dl className="m-0 grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-3">
+          {rows.map(([k, v]) => (
+            <Fragment key={k}>
+              <dt className="pt-px text-label text-text-faint">{k}</dt>
+              <dd className="m-0 break-words text-body text-text">{v}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      ) : (
+        <p className="m-0 text-label text-text-faint">Nothing written yet. Change via Manta can add when to use this agent.</p>
+      )}
       {instructions && (
-        <details className="mt-2">
-          <summary className="cursor-pointer text-meta font-medium text-text-muted">Instructions</summary>
+        <details className="group mt-4 border-t border-border-subtle pt-3">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-label font-medium text-text-muted hover:text-text [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} aria-hidden="true" className="shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" />
+            Full instructions
+            <span className="text-meta font-normal text-text-faint">· {instructions.split("\n").length} lines</span>
+          </summary>
           <pre className="m-0 mt-2 whitespace-pre-wrap break-words rounded-md bg-fill px-3 py-2 text-meta text-text-muted">{instructions}</pre>
         </details>
       )}
-    </Block>
+    </section>
   );
 }
 
-function SeatsPreview({ profile, onManage }: { profile: Profile; onManage: () => void }) {
+function SeatsGroup({ profile, onManage }: { profile: Profile; onManage: () => void }) {
   const everywhere = profile.info.role === "lead" || profile.info.role === "architect";
   return (
-    <Block title="Seats">
+    <PaneGroup title="Seats" testId="profile-seats">
       {everywhere ? (
-        <p className="m-0 text-label text-text-muted">Works in every project.</p>
+        <p className="m-0 text-label text-text">Works in every project.</p>
       ) : (
         <>
           {profile.seats.length === 0 ? (
@@ -160,7 +107,7 @@ function SeatsPreview({ profile, onManage }: { profile: Profile; onManage: () =>
           ) : (
             <ul className="m-0 flex list-none flex-col p-0">
               {profile.seats.map((s) => (
-                <li key={s.project} className="flex items-center gap-2 border-b border-border-subtle py-2 text-label">
+                <li key={s.project} className="flex min-h-7 items-center gap-2 text-label">
                   <Folder size={14} aria-hidden="true" className="shrink-0 text-text-faint" />
                   <span className="min-w-0 truncate text-text">{s.projectName}</span>
                   <span className="ml-auto shrink-0 whitespace-nowrap text-meta text-text-faint">{seatNotesLabel(s.notes)}</span>
@@ -171,7 +118,26 @@ function SeatsPreview({ profile, onManage }: { profile: Profile; onManage: () =>
           <LinkButton onClick={onManage}>Manage seats</LinkButton>
         </>
       )}
-    </Block>
+    </PaneGroup>
+  );
+}
+
+/** The Overview's pane: every fact and setting about the agent in one tinted region. */
+function DetailsPane({ profile, refreshable, onManage, onChanged }: { profile: Profile; refreshable: boolean; onManage: () => void; onChanged: () => void }) {
+  const first = profile.seats[0];
+  return (
+    <Pane label="Details">
+      <PaneGroup title="Details" testId="profile-details">
+        <PaneFacts rows={detailRows(profile)} />
+      </PaneGroup>
+      <SeatsGroup profile={profile} onManage={onManage} />
+      {first && first.memory.length > 0 && (
+        <PaneBlock testId="profile-access">
+          <MemoryMap seat={first} variant="pane" />
+        </PaneBlock>
+      )}
+      {refreshable && <RefreshControl profile={profile} onChanged={onChanged} />}
+    </Pane>
   );
 }
 
@@ -279,22 +245,22 @@ export function AgentProfile({
   };
 
   const header = (
-    <div className="flex items-start gap-3" data-testid="profile-header">
+    <div className="flex items-start gap-4" data-testid="profile-header">
       <AgentBadge size="lg" agent={{ name: info.name, slug: info.slug, color: info.color }} />
       <div className="min-w-0 flex-1">
-        <h1 className="m-0 text-title font-semibold text-text">{info.name || slug}</h1>
+        <h1 className="m-0 text-display font-semibold text-text">{info.name || slug}</h1>
         {!info.error && (
-          <div className="mt-1 flex flex-wrap gap-x-3 text-meta text-text-faint">
+          <div data-testid="profile-facts" className="mt-1 flex flex-wrap text-label text-text-faint [&>span+span]:before:mx-2 [&>span+span]:before:text-text-quiet [&>span+span]:before:[content:'·'_/_'']">
             {factsLine(p).map((f) => (
               <span key={f}>{f}</span>
             ))}
           </div>
         )}
-        <p className="m-0 mt-2 max-w-[70ch] text-label text-text-muted">{info.description}</p>
+        <p className="m-0 mt-3 max-w-[68ch] text-prose text-text">{info.description}</p>
       </div>
       {!info.error && (
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-          <Button tone="default" onClick={() => openChangeAgentDraft(info.slug)} title="Opens a chat with Manta to describe the change">
+          <Button tone="ghost" onClick={() => openChangeAgentDraft(info.slug)} title="Opens a chat with Manta to describe the change">
             Change via Manta
           </Button>
           {!isArchitect && (
@@ -357,35 +323,18 @@ export function AgentProfile({
   };
 
   const overview = (
-    <div className="grid grid-cols-[repeat(auto-fit,minmax(20rem,1fr))] gap-6">
-      <div className="flex min-w-0 flex-col gap-6">
-        <Charter profile={p} snapshot={snapshot} />
-        <Block title="Research it relies on">
-          <ResearchRows entries={p.research} limit={OVERVIEW_PREVIEW.research} emptyText="Nothing yet. The research this agent's changes rest on shows here." />
-          {p.research.length > 0 && <LinkButton onClick={() => setTab("research")}>{`All research (${p.research.length})`}</LinkButton>}
-        </Block>
-        <Block title="History">
-          <HistoryState history={history}>
-            {(rows) => (
-              <>
-                <AgentHistory records={rows} preview={OVERVIEW_PREVIEW.history} />
-                {rows.length > 0 && <LinkButton onClick={() => setTab("history")}>{`All history (${rows.length})`}</LinkButton>}
-              </>
-            )}
-          </HistoryState>
-        </Block>
-      </div>
-      <div className="flex min-w-0 flex-col gap-6">
-        <SeatsPreview profile={p} onManage={() => setTab("seats")} />
-        <MemoryMap seat={p.seats[0]} />
-        {refreshable && <RefreshControl profile={p} onChanged={() => void profile.reload()} />}
-        <Block title="Tests">
-          <div className="rounded-md border border-dashed border-border px-3 py-2 text-meta text-text-faint">
-            <b className="font-semibold">Coming later.</b> Trial runs on sample tasks will show here.
-          </div>
-        </Block>
-      </div>
-    </div>
+    <TwoColumn
+      main={
+        <>
+          <HowToUse profile={p} snapshot={snapshot} />
+          <section data-testid="profile-research-block">
+            <BlockTitle aside={p.research.length > 0 ? <LinkButton spaced={false} onClick={() => setTab("research")}>{`All ${p.research.length} →`}</LinkButton> : undefined}>Research it relies on</BlockTitle>
+            <ResearchRows entries={p.research} limit={OVERVIEW_PREVIEW.research} emptyText="Nothing yet. The research this agent's changes rest on shows here." />
+          </section>
+        </>
+      }
+      pane={<DetailsPane profile={p} refreshable={refreshable} onManage={() => setTab("seats")} onChanged={() => void profile.reload()} />}
+    />
   );
 
   return shell(
@@ -398,6 +347,7 @@ export function AgentProfile({
             <AgentChangeView
               key={c.id}
               change={c}
+              collapsed
               onChange={(next) => {
                 setSettled((m) => new Map(m).set(next.id, next));
                 reloadAll();
@@ -426,17 +376,13 @@ export function AgentProfile({
               {t.text}
             </button>
           ))}
-          <button type="button" role="tab" disabled aria-selected={false} tabIndex={-1} title="Trial runs on sample tasks come later" className={TAB_CLASS}>
-            Tests — later
-          </button>
         </div>
         <div role="tabpanel" aria-labelledby={tabId("overview")} hidden={tab !== "overview"}>
           <div className="pt-4">{overview}</div>
         </div>
         <div role="tabpanel" aria-labelledby={tabId("research")} hidden={tab !== "research"}>
           <div className="pt-4">
-            <ResearchRows entries={p.research} emptyText="Nothing yet. The research this agent's changes rest on shows here." />
-            <p className="m-0 mt-2 text-meta text-text-faint">From the shared research library. Thin means fewer than 3 independent sources.</p>
+            <AgentResearch profile={p} onChanged={() => void profile.reload()} />
           </div>
         </div>
         <div role="tabpanel" aria-labelledby={tabId("seats")} hidden={tab !== "seats"}>
@@ -446,18 +392,23 @@ export function AgentProfile({
         </div>
         <div role="tabpanel" aria-labelledby={tabId("history")} hidden={tab !== "history"}>
           <div className="pt-4">
-            <HistoryState history={history}>
-              {(rows) => (
-                <AgentHistory
-                  records={rows}
-                  cardsAbove={cardIds}
-                  onChanged={() => {
-                    void profile.reload();
-                    void history.reload();
-                  }}
-                />
-              )}
-            </HistoryState>
+            <TwoColumn
+              main={
+                <HistoryState history={history}>
+                  {(rows) => (
+                    <AgentHistory
+                      records={rows}
+                      cardsAbove={cardIds}
+                      onChanged={() => {
+                        void profile.reload();
+                        void history.reload();
+                      }}
+                    />
+                  )}
+                </HistoryState>
+              }
+              pane={<HistoryPane records={history.data ?? null} />}
+            />
           </div>
         </div>
       </div>

@@ -3,7 +3,7 @@
 // Everything the Fleet page and the agent profile decide that has no DOM in it: which page is showing, how a fleet cell
 // reads, what a history row says, whether Restore is offered, how a tab key moves. The components stay thin.
 
-import type { AgentChange, AgentFleet, AgentProfile, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
+import type { AgentChange, AgentFleet, AgentProfile, AgentResearchEntry, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
 import type { BackgroundResultPart } from "../backgroundRun";
 import { PACKAGE_AGENT_PREFIX, resolvePickerProject } from "../agentDispatch";
 import { agentChangeTitle } from "../agentChange";
@@ -13,7 +13,7 @@ import { isUnknownChannelError } from "../chatUtils";
 
 export const FLEET_REFETCH_DEBOUNCE_MS = 1000;
 export const HISTORY_LIMIT = 50;
-export const OVERVIEW_PREVIEW = { research: 4, history: 3 } as const;
+export const OVERVIEW_PREVIEW = { research: 4 } as const;
 export const SEAT_BRIEF_MAX = 4000;
 
 // ---- which page is showing ----
@@ -131,31 +131,43 @@ export function reviewPart(r: NeedsYouReview): BackgroundResultPart {
     name: r.name,
     agent: `${PACKAGE_AGENT_PREFIX}${r.agentSlug}`,
     text: r.resultText,
+    ...(r.endedBlocked ? { endedBlocked: true } : {}),
   };
 }
 
 // ---- Profile ----
 
 const BUILT_BY: Record<AgentProfile["builtBy"], string> = {
-  architect: "built by Architect",
-  manta: "built by Manta",
-  user: "built by you",
-  "built-in": "built in",
+  architect: "Architect",
+  manta: "Manta",
+  user: "You",
+  "built-in": "Built in",
 };
 
-/** The profile header's facts: built by, last changed, model, isolation. */
+const ROLE_LABEL: Record<AgentProfile["info"]["role"], string> = { lead: "Lead", architect: "Architect", specialist: "Specialist" };
+
+/** The header's one line of who it is: `@seo · Specialist · 2 seats`. What the details pane says (model, works, built by) is not repeated. */
 export function factsLine(profile: AgentProfile): string[] {
-  const facts = [BUILT_BY[profile.builtBy] ?? "built by you"];
-  if (profile.lastChangedAt != null) facts.push(`last changed ${dateLabel(profile.lastChangedAt)}`);
-  facts.push(`model: ${profile.info.model || "Auto"}`);
-  facts.push(profile.info.isolation === "worktree" ? "edits code on its own branch" : "read-only");
-  return facts;
+  const { info, seats } = profile;
+  const where = info.role === "specialist" ? (seats.length === 0 ? "No seats yet" : `${seats.length} ${seats.length === 1 ? "seat" : "seats"}`) : "Works in every project";
+  return [`@${info.slug}`, ROLE_LABEL[info.role] ?? "Specialist", where];
+}
+
+/** The details pane's rows `[key, value]`: model, what it does to code, who built it, when it last changed (left out when never). */
+export function detailRows(profile: AgentProfile): Array<[string, string]> {
+  const rows: Array<[string, string]> = [
+    ["Model", profile.info.model || "Auto"],
+    ["Works", profile.info.isolation === "worktree" ? "Edits code" : "Read-only"],
+    ["Built by", BUILT_BY[profile.builtBy] ?? "You"],
+  ];
+  if (profile.lastChangedAt != null) rows.push(["Changed", dateLabel(profile.lastChangedAt)]);
+  return rows;
 }
 
 export const seatNotesLabel = (notes: number | null): string => (notes == null ? "—" : `${notes} ${notes === 1 ? "note" : "notes"}`);
 
 export function memoryLabel(access: "read" | "read-write" | "none"): string {
-  return access === "read-write" ? "read + write" : access === "read" ? "read-only" : "no access";
+  return access === "read-write" ? "read + write" : access === "read" ? "read" : "no access";
 }
 
 // ---- History (spec §5.2) ----
@@ -167,28 +179,59 @@ export function historyWho(change: Pick<AgentChange, "origin">): string {
   return "Manta · for you";
 }
 
-/** The row's outcome line: what became of the change. An undone row says so, and who undid it when known. */
-export function historyOutcome(change: Pick<AgentChange, "state" | "decidedBy" | "error">): string {
+export type StatusTone = "ok" | "accent" | "faint" | "warn";
+
+/**
+ * The row's outcome: a label, its tone and, where there is one, the reason — a live change says how it went live ("you approved
+ * it" / "applied automatically"), an undone one by whom, a refused one why.
+ */
+export function historyStatus(change: Pick<AgentChange, "state" | "decidedBy" | "error">): { tone: StatusTone; label: string; why: string | null } {
   switch (change.state) {
     case "applied":
-      return change.decidedBy === "click" ? "Live (you approved it)" : "Live (applied automatically)";
+      return { tone: "ok", label: "Live", why: change.decidedBy === "click" ? "you approved it" : "applied automatically" };
     case "undone":
-      return change.decidedBy === "click" ? "Undone by you" : "Undone";
+      return { tone: "faint", label: "Undone", why: change.decidedBy === "click" ? "by you" : null };
     case "pending":
-      return "Waiting for your click";
+      return { tone: "accent", label: "Waiting for your click", why: null };
     case "held":
-      return "Waiting for the Architect to finish";
+      return { tone: "faint", label: "Waiting for the Architect to finish", why: null };
     case "applying":
-      return "Applying…";
+      return { tone: "accent", label: "Applying…", why: null };
     case "discarded":
-      return "Discarded";
+      return { tone: "faint", label: "Discarded", why: null };
     case "expired":
-      return "Expired";
+      return { tone: "faint", label: "Expired", why: null };
     case "conflict":
-      return change.error ? `Not applied: ${change.error}` : "Not applied";
+      return { tone: "warn", label: "Not applied", why: change.error || null };
     case "failed":
-      return "Not activated";
+      return { tone: "warn", label: "Not activated", why: null };
   }
+}
+
+/** The history pane's counts: live (applied), waiting (pending), undone. */
+export function historyCounts(records: ReadonlyArray<Pick<AgentChange, "state">>): { live: number; waiting: number; undone: number } {
+  const n = (state: AgentChange["state"]) => records.filter((r) => r.state === state).length;
+  return { live: n("applied"), waiting: n("pending"), undone: n("undone") };
+}
+
+/** The id of the newest live (applied) change — the one whose card carries the page's Undo; null when none is live. */
+export function latestLiveId(records: ReadonlyArray<Pick<AgentChange, "id" | "state" | "decidedAt" | "createdAt">>): string | null {
+  let best: { id: string; at: number } | null = null;
+  for (const r of records) {
+    if (r.state !== "applied") continue;
+    const at = r.decidedAt ?? r.createdAt;
+    if (!best || at > best.at) best = { id: r.id, at };
+  }
+  return best?.id ?? null;
+}
+
+/** The research pane's counts: entries past their shelf life, thin ones (fewer than 3 independent sources), and ones gone from the library. */
+export function researchHealth(entries: ReadonlyArray<Pick<AgentResearchEntry, "status" | "thin">>): { stale: number; thin: number; missing: number } {
+  return {
+    stale: entries.filter((e) => e.status === "stale").length,
+    thin: entries.filter((e) => e.thin).length,
+    missing: entries.filter((e) => e.status === "missing").length,
+  };
 }
 
 /** What the row calls the change: the box's one-line summary, else the card's own title. */

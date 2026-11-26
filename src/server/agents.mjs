@@ -167,26 +167,39 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
  * `jobs`: specialist job records; `changes`: change records; `opts.level`: the user's current "Change an agent" level;
  * `opts.answered`: how many questions the user answered since; `opts.projectNameOf(job)`: the project's name or null.
  */
-export function fleetRecap(jobs, changes, since, { level = null, answered = 0, projectNameOf = () => null } = {}) {
+export function fleetRecap(jobs, changes, since, opts = {}) {
+  return fleetRecapEntries(jobs, changes, since, opts).map((e) => e.text);
+}
+
+/**
+ * `fleetRecap`, each line with the task it is about when there is one to open (`{ text, jobId? }`).
+ * `opts.unmergedHanded`: how many finished Manta-handed tasks still have an unmerged branch (a git question, answered by the caller).
+ * What Needs you does not hold lands here: Manta-handed results, tasks without changes, failures (a failure the user asked for can be opened).
+ */
+export function fleetRecapEntries(jobs, changes, since, { level = null, answered = 0, projectNameOf = () => null, unmergedHanded = 0 } = {}) {
   const lines = [];
-  const handed = (jobs ?? []).filter((j) => j.requestedBy === "manta" && !j.continues && (j.createdAt ?? 0) >= since).length;
-  if (handed > 0) lines.push(`Manta handed ${plural(handed, "request")} to agents`);
+  const add = (text, jobId) => lines.push(jobId ? { text, jobId } : { text });
+  const all = jobs ?? [];
+  const byManta = (j) => j.requestedBy === "manta";
+  const handed = all.filter((j) => byManta(j) && !j.continues && (j.createdAt ?? 0) >= since).length;
+  if (handed > 0) add(`Manta handed ${plural(handed, "request")} to agents`);
   const count = (list, keyOf) => {
     const m = new Map();
     for (const j of list) m.set(keyOf(j), (m.get(keyOf(j)) ?? 0) + 1);
     return m;
   };
-  const finishedJobs = (jobs ?? []).filter((j) => j.status === "done" && (j.finishedAt ?? 0) >= since);
-  const finished = new Map();
-  for (const j of finishedJobs) {
-    const key = `${j.agentName || "An agent"}\u0000${projectNameOf(j) ?? ""}`;
-    finished.set(key, (finished.get(key) ?? 0) + 1);
-  }
+  const agentOf = (j) => j.agentName || "An agent";
+  const finishedJobs = all.filter((j) => j.status === "done" && (j.finishedAt ?? 0) >= since);
+  const finished = count(finishedJobs.filter((j) => !byManta(j)), (j) => `${agentOf(j)}\u0000${projectNameOf(j) ?? ""}`);
   for (const [key, n] of finished) {
     const [agent, project] = key.split("\u0000");
-    lines.push(`${agent} finished ${plural(n, "task")}${project ? ` in ${project}` : ""}`);
+    add(`${agent} finished ${plural(n, "task")}${project ? ` in ${project}` : ""}`);
   }
-  for (const [agent, n] of count((jobs ?? []).filter((j) => j.status === "failed" && (j.finishedAt ?? 0) >= since), (j) => j.agentName || "An agent")) lines.push(`${agent} failed ${plural(n, "task")}`);
+  for (const [agent, n] of count(finishedJobs.filter(byManta), agentOf)) add(`${agent} finished ${plural(n, "task")} Manta handed off`);
+  const failedJobs = all.filter((j) => j.status === "failed" && (j.finishedAt ?? 0) >= since);
+  for (const [agent, n] of count(failedJobs.filter(byManta), agentOf)) add(`${agent} failed ${plural(n, "task")}`);
+  for (const j of failedJobs.filter((x) => !byManta(x))) add(typeof j.name === "string" && j.name ? `${agentOf(j)} failed “${j.name}”` : `${agentOf(j)} failed a task`, j.id);
+  if (unmergedHanded > 0) add(`${plural(unmergedHanded, "branch", "branches")} from ${unmergedHanded === 1 ? "a Manta-handed task" : "Manta-handed tasks"} still unmerged`);
   const changeLines = [];
   for (const r of changes ?? []) {
     if (r.state === "applied" && (r.decidedAt ?? 0) >= since) {
@@ -196,9 +209,43 @@ export function fleetRecap(jobs, changes, since, { level = null, answered = 0, p
       changeLines.push([baseOf(r), `${r.agentName} is waiting for your click`]);
     }
   }
-  for (const [, text] of changeLines.sort((a, b) => a[0] - b[0])) lines.push(text);
-  if (answered > 0) lines.push(`${plural(answered, "question")} answered`);
+  for (const [, text] of changeLines.sort((a, b) => a[0] - b[0])) add(text);
+  if (answered > 0) add(`${plural(answered, "question")} answered`);
   return lines.slice(0, 6);
+}
+
+// ---- is a task's branch still waiting to land? (Needs you, rule set P1) ----
+
+const BRANCH_CHECK_MS = 4000; // one git call
+const BRANCH_DEADLINE_MS = 8000; // the whole answer
+const BRANCH_CACHE_MS = 30_000;
+const BRANCH_CACHE_MAX = 200;
+
+const gitExitCode = (args) =>
+  new Promise((resolve) => {
+    execFile("git", args, { timeout: BRANCH_CHECK_MS }, (err) => resolve(!err ? 0 : typeof err.code === "number" ? err.code : "error"));
+  });
+
+/**
+ * Where a task's branch stands in the repository it was started from: "landed" (the branch is gone, or its tip is already in the
+ * checkout's HEAD or the remote's default branch), "unmerged", or "unknown" (not a repository, git failed or was too slow: no
+ * verdict). Read-only git, bounded; never throws.
+ */
+export async function defaultBranchState({ directory, branch } = {}) {
+  if (typeof directory !== "string" || !directory || typeof branch !== "string" || !branch || branch.startsWith("-") || /[\s\x00-\x1f]/.test(branch)) return "unknown";
+  const ref = `refs/heads/${branch}`;
+  const deadline = Date.now() + BRANCH_DEADLINE_MS;
+  const run = (...args) => (Date.now() > deadline ? "error" : gitExitCode(["-C", directory, ...args]));
+  const exists = await run("show-ref", "--verify", "--quiet", ref);
+  if (exists === 1) return "landed";
+  if (exists !== 0) return "unknown";
+  let answered = false;
+  for (const target of ["HEAD", "refs/remotes/origin/HEAD"]) {
+    const code = await run("merge-base", "--is-ancestor", ref, target);
+    if (code === 0) return "landed";
+    if (code === 1) answered = true;
+  }
+  return answered ? "unmerged" : "unknown";
 }
 
 
@@ -886,6 +933,7 @@ export function createAgentsEngine({
   now = Date.now,
   home = homedir(),
   isGitRepo = defaultIsGitRepo,
+  branchState = defaultBranchState, // ({directory, branch}) → "landed" | "unmerged" | "unknown": is a task's branch still waiting to land
   retryDelayMs = 200,
   log = console,
 } = {}) {
@@ -3398,7 +3446,44 @@ export function createAgentsEngine({
     };
   };
 
-  const isReviewable = (job) => job.specialist === true && job.status === "done" && job.isolation === "worktree" && Number(job.filesChanged) > 0 && slugOfJob(job) !== ARCHITECT_SLUG;
+  // What needs the user (rule set P1, spec §2.1) — one answer for the list and the grid:
+  //   • a finished task that ended "needs a decision" (changes or not), or
+  //   • a finished task the USER asked for (not one Manta handed off) whose branch has commits that have not landed.
+  // Either leaves when the user marks it done or opens the task's session (`reviewed`), or when the branch lands.
+  const hasBranchWork = (job) => job.isolation === "worktree" && typeof job.branch === "string" && job.branch !== "" && Number(job.filesChanged) > 0 && slugOfJob(job) !== ARCHITECT_SLUG;
+  const isBranchCandidate = (job) => job.requestedBy !== "manta" && hasBranchWork(job);
+  const isFinished = (job) => job.specialist === true && job.status === "done";
+
+  const branchCache = new Map(); // "<dir>\0<branch>" → { at, verdict: Promise }
+  /** "landed" | "unmerged" | "unknown", asked of git outside any lock and remembered briefly; a failure is "unknown". */
+  function branchVerdict(job) {
+    const key = `${job.parentDirectory}\u0000${job.branch}`;
+    const hit = branchCache.get(key);
+    if (hit && now() - hit.at < BRANCH_CACHE_MS) return hit.verdict;
+    const verdict = Promise.resolve()
+      .then(() => branchState({ directory: job.parentDirectory, branch: job.branch }))
+      .then((s) => (s === "landed" || s === "unmerged" ? s : "unknown"))
+      .catch((e) => {
+        log.warn?.(`[agents] couldn't check a task's branch: ${e?.message ?? e}`);
+        return "unknown";
+      });
+    branchCache.delete(key); // re-inserted last: the map stays oldest-first
+    branchCache.set(key, { at: now(), verdict });
+    for (const [k, v] of branchCache) {
+      if (branchCache.size <= BRANCH_CACHE_MAX && now() - v.at < BRANCH_CACHE_MS) break;
+      branchCache.delete(k);
+    }
+    return verdict;
+  }
+
+  /** `null` (nothing is waiting on the user) or `{ reason, endedBlocked }` for a finished task. */
+  async function attentionOf(job, reviewed) {
+    if (!isFinished(job) || reviewed.has(job.id)) return null;
+    if (job.endedBlocked === true) return { reason: "Needs a decision", endedBlocked: true };
+    if (!isBranchCandidate(job)) return null;
+    if ((await branchVerdict(job)) === "landed") return null;
+    return { reason: `Branch ready to merge · ${plural(Number(job.filesChanged), "file")}`, endedBlocked: false };
+  }
   const WEEK_MS = 7 * 86_400_000;
   const ago = (ms) => {
     const d = Math.max(0, now() - ms);
@@ -3414,7 +3499,7 @@ export function createAgentsEngine({
     }
   };
 
-  function cellFor(job, reviewed) {
+  function cellFor(job, attention) {
     const at = job.finishedAt ?? job.createdAt ?? 0;
     const base = { jobId: job.id, title: typeof job.name === "string" ? job.name : "", at };
     const questions = openCountOf(job);
@@ -3424,7 +3509,7 @@ export function createAgentsEngine({
       return { ...base, state: "working", detail: parts.length > 0 ? parts.join(" · ") : job.status === "paused" ? "Paused" : "Working" };
     }
     if (questions > 0) return { ...base, state: "needs-you", detail: plural(questions, "question") };
-    if (isReviewable(job) && !reviewed.has(job.id)) return { ...base, state: "needs-you", detail: `${plural(Number(job.filesChanged), "file")} changed` };
+    if (attention) return { ...base, state: "needs-you", detail: attention.reason };
     if (now() - at > WEEK_MS) return { ...base, state: "idle", detail: `last task ${Math.floor((now() - at) / 86_400_000)}d ago` };
     if (job.status === "failed") return { ...base, state: "failed", detail: String(job.error ?? "").split("\n")[0].trim().slice(0, 120) || "Failed" };
     if (job.status === "stopped") return { ...base, state: "failed", detail: "Stopped" };
@@ -3478,13 +3563,17 @@ export function createAgentsEngine({
     for (const [, mine] of cellsByRow) for (const [project, job] of mine) if (now() - (job.finishedAt ?? job.createdAt ?? 0) <= WEEK_MS || job.status === "running" || job.status === "paused") columns.add(project);
     const projects = [...columns].map((slug) => ({ slug, name: names.get(slug) ?? slug })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
+    // what needs the user is decided once per cell's task (git, outside any lock), then the rows are built synchronously
+    const attention = new Map();
+    for (const [, mine] of cellsByRow) for (const [, job] of mine) attention.set(job.id, await attentionOf(job, reviewed));
+
     let total = 0;
     const rows = rowsOf.map((e) => {
       const seats = e.info.seats ?? [];
       const cells = {};
       for (const { slug: project } of projects) {
         const job = cellsByRow.get(e.slug)?.get(project);
-        cells[project] = job ? cellFor(job, reviewed) : seats.includes(project) ? { jobId: "", title: "", at: 0, state: "idle", detail: "no tasks yet" } : null;
+        cells[project] = job ? cellFor(job, attention.get(job.id) ?? null) : seats.includes(project) ? { jobId: "", title: "", at: 0, state: "idle", detail: "no tasks yet" } : null;
       }
       const tasksThisWeek = Object.values(plainObject(week[e.slug])).reduce((a, n) => a + (Number(n) || 0), 0);
       total += tasksThisWeek;
@@ -3494,8 +3583,15 @@ export function createAgentsEngine({
     const since = doc.lastSeenAt ?? t - 86_400_000;
     const dirNames = new Map();
     for (const j of jobs) if (typeof j.parentDirectory === "string" && !dirNames.has(j.parentDirectory)) dirNames.set(j.parentDirectory, names.get(await projectOf(j.parentDirectory)) ?? null);
-    const lines = fleetRecap(jobs, await readChanges(), since, { level: await agentChangeLevel(), answered: await answeredSince(since), projectNameOf: (j) => dirNames.get(j.parentDirectory) ?? null });
-    return { asOf: t, projects, rows, week: { tasks: total }, recap: { since: doc.lastSeenAt, lines } };
+    // branches of finished Manta-handed tasks that have not landed (the user was not asked about them; the recap says so)
+    let unmergedHanded = 0;
+    for (const job of rounds) {
+      if (!isFinished(job) || job.requestedBy !== "manta" || reviewed.has(job.id) || job.endedBlocked === true || !hasBranchWork(job)) continue;
+      if ((await branchVerdict(job)) === "unmerged") unmergedHanded += 1;
+    }
+    const recapEntries = fleetRecapEntries(jobs, await readChanges(), since, { level: await agentChangeLevel(), answered: await answeredSince(since), projectNameOf: (j) => dirNames.get(j.parentDirectory) ?? null, unmergedHanded });
+    const links = recapEntries.flatMap((e, line) => (e.jobId ? [{ line, jobId: e.jobId }] : []));
+    return { asOf: t, projects, rows, week: { tasks: total }, recap: { since: doc.lastSeenAt, lines: recapEntries.map((e) => e.text), ...(links.length > 0 ? { links } : {}) } };
   }
 
   async function fleetSeen() {
@@ -3521,16 +3617,19 @@ export function createAgentsEngine({
     const projectOf = projectCache();
     const reviews = [];
     for (const job of newestRounds(await readSpecialistJobs())) {
-      if (!isReviewable(job) || reviewed.has(job.id)) continue;
+      const attention = await attentionOf(job, reviewed);
+      if (!attention) continue;
       reviews.push({
         jobId: job.id,
         agentSlug: slugOfJob(job),
         project: await projectOf(job.parentDirectory),
         name: typeof job.name === "string" ? job.name : "",
         finishedAt: job.finishedAt ?? job.createdAt ?? 0,
-        filesChanged: Number(job.filesChanged),
+        filesChanged: Number(job.filesChanged) || 0,
         branch: typeof job.branch === "string" ? job.branch : null,
         resultText: typeof job.result === "string" ? job.result.slice(0, 2000) : "",
+        reason: attention.reason,
+        endedBlocked: attention.endedBlocked,
       });
     }
     reviews.sort((a, b) => b.finishedAt - a.finishedAt);
@@ -3543,6 +3642,27 @@ export function createAgentsEngine({
       doc.reviewed = [...doc.reviewed.filter((x) => x !== jobId), jobId].slice(-REVIEWED_MAX);
     });
     fleetChanged();
+    return { ok: true };
+  }
+
+  /** The user opened a task's session: that counts as looking at it, so every round of the task leaves Needs you. Specialist tasks only. */
+  async function openedTask(jobId) {
+    if (typeof jobId !== "string" || !jobId) return { ok: true };
+    const jobs = await readSpecialistJobs();
+    const hit = jobs.find((j) => j.id === jobId);
+    if (!hit) return { ok: true };
+    const root = rootJobOf(hit);
+    const ids = jobs.filter((j) => rootJobOf(j) === root).map((j) => j.id);
+    const known = new Set((await readFleet()).reviewed);
+    if (ids.every((id) => known.has(id))) return { ok: true }; // already looked at: no write per open
+    let changed = false;
+    await mutateFleet((doc) => {
+      const fresh = ids.filter((id) => !doc.reviewed.includes(id));
+      if (fresh.length === 0) return;
+      doc.reviewed = [...doc.reviewed, ...fresh].slice(-REVIEWED_MAX);
+      changed = true;
+    });
+    if (changed) fleetChanged();
     return { ok: true };
   }
 
@@ -3572,6 +3692,41 @@ export function createAgentsEngine({
 
   // ---- the profile and a task's research ----
 
+  const SOURCES_SHOWN = 10;
+  const httpUrl = (value) => {
+    try {
+      const u = new URL(String(value));
+      return u.protocol === "https:" || u.protocol === "http:" ? u : null;
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * The Research tab's list of what an entry rests on, from its findings: one per publisher (or site), the link only when it is
+   * http(s); a finding with neither a publisher nor a usable link is not a source. Private findings are only counted. Absent
+   * keys, not empty ones, when there is nothing to say.
+   */
+  function sourcesOf(findings) {
+    const seen = new Map();
+    let privateSources = 0;
+    for (const f of Array.isArray(findings) ? findings : []) {
+      if (!f || typeof f !== "object") continue;
+      if (f.private === true) {
+        privateSources += 1;
+        continue;
+      }
+      const url = typeof f.url === "string" ? httpUrl(f.url) : null;
+      const publisher = typeof f.publisher === "string" ? f.publisher.trim() : "";
+      const label = publisher || url?.hostname.replace(/^www\./, "") || "";
+      if (!label) continue;
+      const known = seen.get(label.toLowerCase());
+      if (!known) seen.set(label.toLowerCase(), { label, url: url ? url.href : null });
+      else if (!known.url && url) known.url = url.href;
+    }
+    const sources = [...seen.values()].slice(0, SOURCES_SHOWN);
+    return { ...(sources.length > 0 ? { sources } : {}), ...(privateSources > 0 ? { privateSources } : {}) };
+  }
+
   /** Library entries `[{id, topic}]` → live entries; each one by its id, else its topic (an entry saved again has a new id); gone → "missing". */
   async function resolveEntries(items, scopes) {
     const out = [];
@@ -3594,7 +3749,7 @@ export function createAgentsEngine({
         }
       }
       const entry = hit
-        ? { id: hit.id, topic: hit.topic, sourceCount: Number.isInteger(hit.sourceCount) ? hit.sourceCount : null, ageDays: Number.isInteger(hit.ageDays) ? hit.ageDays : null, status: hit.status === "stale" ? "stale" : "fresh", thin: hit.thin === true }
+        ? { id: hit.id, topic: hit.topic, sourceCount: Number.isInteger(hit.sourceCount) ? hit.sourceCount : null, ageDays: Number.isInteger(hit.ageDays) ? hit.ageDays : null, status: hit.status === "stale" ? "stale" : "fresh", thin: hit.thin === true, ...sourcesOf(hit.findings) }
         : { id: item.id, topic: item.topic, sourceCount: null, ageDays: null, status: "missing", thin: false };
       if (seen.has(entry.id)) continue;
       seen.add(entry.id);
@@ -3623,22 +3778,38 @@ export function createAgentsEngine({
     return { enabled: state.exists && state.enabled, routineId: id };
   }
 
+  /** Each entry gains `usedBy`: the other agents (still on the box) whose applied changes rest on it, by name, sorted. */
+  async function withUsedBy(research, ownSlug, changes) {
+    const byKey = new Map(); // entry id or topic → names
+    const names = new Map((await scan()).entries.map((e) => [e.slug, e.info.name || e.slug]));
+    for (const r of changes) {
+      if (r.state !== "applied" || !r.slug || r.slug === ownSlug || !names.has(r.slug)) continue;
+      for (const b of basisItems(r)) for (const key of [b.id, b.topic.trim().toLowerCase()]) if (key) (byKey.get(key) ?? byKey.set(key, new Set()).get(key)).add(names.get(r.slug));
+    }
+    return research.map((e) => {
+      const used = new Set([...(byKey.get(e.id) ?? []), ...(byKey.get(e.topic.trim().toLowerCase()) ?? [])]);
+      return used.size > 0 ? { ...e, usedBy: [...used].sort((a, b) => a.localeCompare(b)) } : e;
+    });
+  }
+
   async function profile(slug) {
     const entry = await find(typeof slug === "string" ? slug : "");
     if (!entry) throw new AgentError(`No agent named @${slug}`);
     const seats = await seatsOf(entry);
-    const records = (await readChanges()).filter((r) => r.slug === entry.slug);
+    const allChanges = await readChanges();
+    const records = allChanges.filter((r) => r.slug === entry.slug);
     const applied = records.filter((r) => r.state === "applied").sort((a, b) => (b.decidedAt ?? b.createdAt) - (a.decidedAt ?? a.createdAt));
     const made = records.filter((r) => r.kind === "create").sort((a, b) => a.createdAt - b.createdAt)[0];
     const builtBy = entry.info.builtIn ? "built-in" : made?.origin?.kind === "job" ? "architect" : made?.origin?.kind === "chat" ? "manta" : "user";
     const items = applied.flatMap(basisItems);
+    const research = await resolveEntries(items, seats.length > 0 ? seats.map((s) => s.project) : [null]);
     return {
       info: entry.info,
       seats,
       lastChangedAt: applied.length > 0 ? (applied[0].decidedAt ?? applied[0].createdAt) : null,
       builtBy,
       refresh: await refreshOf(entry),
-      research: await resolveEntries(items, seats.length > 0 ? seats.map((s) => s.project) : [null]),
+      research: await withUsedBy(research, entry.slug, allChanges),
     };
   }
 
@@ -3863,6 +4034,7 @@ export function createAgentsEngine({
     fleetSeen,
     needsYou,
     reviewDone,
+    openedTask,
     questions,
     questionAnswer,
     questionDismiss,
