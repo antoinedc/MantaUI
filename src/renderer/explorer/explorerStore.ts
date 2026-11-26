@@ -4,9 +4,10 @@
 // app-wide bits are the sidebar-hidden flag, the Markdown view preference and
 // the (global) Artifacts open flag.
 //
-// `setRightPanel` is the ONLY writer of the right-slot state (Explorer vs
-// Artifacts are mutually exclusive): every opener — toggles, ⌘E / ⌘I, path
-// clicks, `manta-open-review` — goes through it.
+// `setRightPanel` is the ONLY writer of the right-slot state (Explorer, Artifacts
+// and the agent task panel are mutually exclusive): every opener — toggles,
+// ⌘E / ⌘I, path clicks, `manta-open-review` — goes through it. The task panel
+// opens through `openTaskPanel`, which also needs the job to show.
 
 import { useSyncExternalStore } from "react";
 import type { FileTarget, MdView, OpenFileRequest } from "./types";
@@ -23,7 +24,7 @@ import {
   treeToggleDisabled,
 } from "./layout";
 
-export type RightPanel = "explorer" | "artifacts" | "none";
+export type RightPanel = "explorer" | "artifacts" | "task" | "none";
 
 export type SessionLayout = {
   open: boolean;
@@ -88,6 +89,8 @@ export function parseLayout(raw: string | null): SessionLayout {
 }
 
 const sessions = new Map<string, ExplorerSession>();
+/** The agent task each chat's task panel shows (in memory only: a reload closes the panel). */
+const taskPanels = new Map<string, string>();
 const listeners = new Set<() => void>();
 let app: AppState | null = null;
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -222,9 +225,10 @@ export function useArtifactsOpen(): boolean {
   return useSyncExternalStore(subscribe, () => loadApp().artifactsOpen);
 }
 
-/** Explorer if this session's Explorer is open; else Artifacts if open; else nothing. */
+/** Explorer if this session's Explorer is open; else its task panel if one is; else Artifacts if open; else nothing. */
 export function shownRightPanel(sessionId: string | null): RightPanel {
   if (sessionId && loadSession(sessionId).layout.open) return "explorer";
+  if (sessionId && taskPanels.has(sessionId)) return "task";
   return loadApp().artifactsOpen ? "artifacts" : "none";
 }
 
@@ -239,7 +243,31 @@ export function isEffectivelyExpanded(s: ExplorerSession): boolean {
 
 // --- right slot ---------------------------------------------------------------
 
+/**
+ * The job this chat's task panel shows; null unless the slot is on "task". It
+ * follows the job across rounds by itself: the panel resolves the newest record
+ * of the same task from the job id it is given.
+ */
+export function useTaskPanelJobId(sessionId: string | null): string | null {
+  return useSyncExternalStore(subscribe, () => (sessionId && shownRightPanel(sessionId) === "task" ? (taskPanels.get(sessionId) ?? null) : null));
+}
+
+/** Show the task panel for `jobId` in this chat's right slot; it closes the Explorer and Artifacts. */
+export function openTaskPanel(sessionId: string, jobId: string): void {
+  if (!sessionId || !jobId) return;
+  taskPanels.set(sessionId, jobId);
+  setRightPanel(sessionId, "task");
+}
+
 export function setRightPanel(sessionId: string | null, which: RightPanel): void {
+  // Anything but the task panel itself takes the slot away from it. "task" without a job to show is a no-op for the
+  // panel (it stays as it was).
+  const hadTask = !!sessionId && taskPanels.has(sessionId);
+  if (which === "task" && !hadTask) return;
+  if (hadTask && which !== "task") {
+    taskPanels.delete(sessionId as string);
+    emit();
+  }
   const nextArtifacts = which === "artifacts";
   if (loadApp().artifactsOpen !== nextArtifacts) {
     writeStorage(ARTIFACTS_OPEN_KEY, nextArtifacts ? "1" : "0");
@@ -444,6 +472,7 @@ export function resetExplorerStore(): void {
   for (const t of persistTimers.values()) clearTimeout(t);
   persistTimers.clear();
   sessions.clear();
+  taskPanels.clear();
   explorerWidths.clear();
   app = null;
   emit();

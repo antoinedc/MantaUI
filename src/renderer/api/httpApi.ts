@@ -2,6 +2,7 @@ import {
   IPC,
   type AgentChangeEvent,
   type AgentFileReady,
+  type TaskQuestionEvent,
   type AuthPairResult,
   type DelegateJob,
   type DelegateApproval,
@@ -446,7 +447,9 @@ type Kind =
   | "sync"
   | "ctoState"
   | "routines.updated"
-  | "agentChange";
+  | "agentChange"
+  | "taskQuestion"
+  | "agentFleet";
 
 // Stream-kind listeners receive the DERIVED envelope `{sub, sessionId, payload}`
 // (see dispatchFrame), not just `payload` — the bus event carries the extra
@@ -481,6 +484,8 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   ctoState: new Set(),
   "routines.updated": new Set(),
   agentChange: new Set(),
+  taskQuestion: new Set(),
+  agentFleet: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -1366,6 +1371,26 @@ export const httpApi: Api = {
   agentsChangesForJob: (jobId) => rpc("agents:changes-for-job", { jobId }),
   // The box publishes `agentChange` ({id, sessionID, slug, origin}) after every persisted change transition: a hint, refetch.
   onAgentChange: (cb) => on<AgentChangeEvent>("agentChange", cb),
+  // Agent screens (spec 2026-11-26-agents-screens §6.2): every channel takes one object; a refusal is a thrown sentence.
+  agentsQuestions: (input) => rpc("agents:questions", input ?? {}),
+  agentsQuestionAnswer: (input) => rpc("agents:question-answer", input),
+  agentsQuestionDismiss: (input) => rpc("agents:question-dismiss", input),
+  agentsNeedsYou: () => rpc("agents:needs-you"),
+  agentsReviewDone: (input) => rpc("agents:review-done", input),
+  agentsFleet: () => rpc("agents:fleet"),
+  agentsFleetSeen: () => rpc("agents:fleet-seen"),
+  agentsProfile: (input) => rpc("agents:profile", input),
+  agentsHistory: (input) => rpc("agents:history", input),
+  agentsChangeRestore: (input) => rpc("agents:change-restore", input),
+  agentsSeatAdd: (input) => rpc("agents:seat-add", input),
+  agentsSeatSet: (input) => rpc("agents:seat-set", input),
+  agentsSeatRemove: (input) => rpc("agents:seat-remove", input),
+  agentsRefreshSet: (input) => rpc("agents:refresh-set", input),
+  agentsTaskResearch: (input) => rpc("agents:task-research", input),
+  agentsProjects: () => rpc("agents:projects"),
+  // The box publishes `taskQuestion` ({id, parentSessionID, rootJobId, state}) and `agentFleet` ({}): hints, refetch.
+  onTaskQuestion: (cb) => on<TaskQuestionEvent>("taskQuestion", cb),
+  onAgentFleet: (cb) => on<unknown>("agentFleet", () => cb()),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
   // pending-approvals for the viewed parent session and shows ONE card.
   delegatePendingApprovals: (sessionId) =>

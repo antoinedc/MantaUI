@@ -46,6 +46,12 @@ import type {
   AgentCreateInput,
   AgentChange,
   AgentChangeEvent,
+  AgentFleet,
+  AgentProfile,
+  AgentSeat,
+  NeedsYou,
+  TaskQuestion,
+  TaskQuestionEvent,
   AgentDispatchInput,
   DelegateApprovalTool,
   DesktopNotifyPayload,
@@ -2001,6 +2007,32 @@ export interface Api {
   agentsChangesForJob(jobId: string): Promise<AgentChange[]>;
   /** Bus kind `agentChange`, published after every persisted transition (a hint: refetch). */
   onAgentChange(cb: (p: AgentChangeEvent) => void): () => void;
+  // Agent screens (docs/superpowers/specs/2026-11-26-agents-screens.md §6.2). Every call takes one object; a refusal is a
+  // thrown sentence. An older box answers "unknown rpc channel" — callers say "update the box".
+  /** Open questions of running tasks: one chat's (`sessionID`) or every chat's (no argument). */
+  agentsQuestions(input?: { sessionID?: string }): Promise<TaskQuestion[]>;
+  agentsQuestionAnswer(input: { id: string; answers: string[][] }): Promise<TaskQuestion>;
+  agentsQuestionDismiss(input: { id: string }): Promise<TaskQuestion>;
+  agentsNeedsYou(): Promise<NeedsYou>;
+  agentsReviewDone(input: { jobId: string }): Promise<{ ok: true }>;
+  agentsFleet(): Promise<AgentFleet>;
+  agentsFleetSeen(): Promise<{ ok: true }>;
+  agentsProfile(input: { slug: string }): Promise<AgentProfile>;
+  /** The agent's change records, newest first, at most 50. */
+  agentsHistory(input: { slug: string }): Promise<AgentChange[]>;
+  agentsChangeRestore(input: { id: string }): Promise<AgentChange>;
+  agentsSeatAdd(input: { slug: string; project: string; brief?: string }): Promise<AgentSeat>;
+  agentsSeatSet(input: { slug: string; project: string; brief: string }): Promise<AgentSeat>;
+  agentsSeatRemove(input: { slug: string; project: string }): Promise<{ ok: true }>;
+  agentsRefreshSet(input: { slug: string; enabled: boolean }): Promise<AgentProfile["refresh"]>;
+  /** The library entries a task found or saved, plus the basis of its proposals. */
+  agentsTaskResearch(input: { jobId: string }): Promise<AgentProfile["research"]>;
+  /** The registry's projects, for "Add a seat". */
+  agentsProjects(): Promise<{ slug: string; name: string }[]>;
+  /** Bus kind `taskQuestion`: a question was asked, answered, dismissed or lost (a hint: refetch). */
+  onTaskQuestion(cb: (p: TaskQuestionEvent) => void): () => void;
+  /** Bus kind `agentFleet`: jobs, changes, seats or questions changed (a hint: refetch, debounced). */
+  onAgentFleet(cb: () => void): () => void;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
   // status/activity changes (created, running, finished, stopped, deleted). The
   // sidebar subscribes so a new job nests under its parent within ~1s instead
