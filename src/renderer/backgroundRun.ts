@@ -85,7 +85,7 @@ export type BackgroundJob = {
   supersededBy?: string | null;
   completionOwner?: "manta" | "opencode";
   launchState?: "creating" | "submitting" | "running" | "uncertain";
-  completionDelivery?: "pending" | "delivered" | "abandoned" | null;
+  completionDelivery?: "pending" | "delivered" | "abandoned" | "deferred" | "not-needed" | null;
   /** Set when the job is a task for a named agent (Agents Phase 1): its display name and the user's request. */
   agentName?: string;
   request?: string;
