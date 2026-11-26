@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { changeAuthor, changedLineCount, diffRows } from "../agentChange.js";
-import { demoFleet, demoHistory, demoNeedsYou } from "./demoAgents.js";
+import { demoFleet, demoHistory, demoNeedsYou, demoProfile } from "./demoAgents.js";
 
 const NOW = Date.UTC(2025, 9, 20, 12);
 
@@ -39,5 +39,24 @@ describe("demoAgents", () => {
     const lines = demoFleet(NOW).recap.lines;
     expect(lines.some((l) => /finished \d+ tasks? Manta handed off$/.test(l))).toBe(true);
     expect(lines.some((l) => /branch(es)? from .*Manta-handed.* still unmerged$/.test(l))).toBe(true);
+  });
+
+  it("the profile's research has sources to open, a private count and a used-by on some entries (the Research tab's rows)", () => {
+    const research = demoProfile("seo").research;
+    expect(research.length).toBeGreaterThanOrEqual(4);
+    expect(research.every((r) => (r.sources?.length ?? 0) > 0)).toBe(true);
+    expect(research.every((r) => (r.sources ?? []).every((s) => s.url === null || /^https:\/\//.test(s.url)))).toBe(true);
+    expect(research.some((r) => (r.usedBy?.length ?? 0) > 0)).toBe(true);
+    expect(research.some((r) => r.status === "stale")).toBe(true);
+    expect(research.some((r) => r.thin)).toBe(true);
+    for (const r of research) expect(r.sources!.length).toBeLessThanOrEqual(r.sourceCount ?? 99);
+  });
+
+  it("the history tells the whole story: waiting, live applied automatically, live approved, undone, created — newest first", () => {
+    const h = demoHistory(NOW);
+    expect(h.map((c) => [c.state, c.decidedBy])).toEqual([["pending", null], ["applied", "auto"], ["applied", "click"], ["undone", "click"], ["applied", "auto"]]);
+    expect(h.at(-1)!.kind).toBe("create");
+    const at = h.map((c) => c.decidedAt ?? c.createdAt);
+    expect([...at].sort((a, b) => b - a)).toEqual(at);
   });
 });

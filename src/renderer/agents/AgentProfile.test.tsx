@@ -299,12 +299,12 @@ describe("AgentProfile", () => {
 
   describe("Overview", () => {
     const ov = () => panel("Overview");
-    const pane = () => q('[data-testid="profile-pane"]')!;
+    const pane = () => ov().querySelector<HTMLElement>('[data-testid="profile-pane"]')!;
     const group = (id: string) => pane().querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
 
     it("two columns: 'How to use it' and the research on the left, one details pane on the right", async () => {
       await open();
-      const main = q('[data-testid="profile-main"]')!;
+      const main = ov().querySelector<HTMLElement>('[data-testid="profile-main"]')!;
       expect(main).toBeTruthy();
       expect(pane().tagName).toBe("ASIDE");
       expect(pane().getAttribute("aria-label")).toBe("Details");
@@ -312,7 +312,7 @@ describe("AgentProfile", () => {
       expect(main.contains(pane())).toBe(false);
       expect(pane().className).toContain("bg-bg-elev"); // one tinted region
       expect(pane().className).toContain("sticky");
-      expect(q('[data-testid="profile-overview-grid"]')!.className).toContain("18rem"); // the pane's column: ~288px
+      expect(ov().querySelector('[data-testid="profile-grid"]')!.className).toContain("18rem"); // the pane's column: ~288px
       expect(ov().querySelector('[data-testid="profile-howto"]')).toBeTruthy();
     });
 
@@ -392,6 +392,7 @@ describe("AgentProfile", () => {
     it("the pane's Refresh: Monthly / Off (specialists only)", async () => {
       await open();
       expect(btn("Monthly", group("profile-refresh"))).toBeTruthy();
+      expect(group("profile-refresh").textContent).toContain("Once a month"); // the Overview's keeps its note
       h!.unmount();
       await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ role: "lead" }), seats: [] })) });
       expect(q('[data-testid="profile-refresh"]')).toBeNull();
@@ -400,7 +401,7 @@ describe("AgentProfile", () => {
 
     it("below ~720px the pane stacks under the main column (a container query on the overview's own width)", async () => {
       await open();
-      const grid = q('[data-testid="profile-overview-grid"]')!;
+      const grid = ov().querySelector('[data-testid="profile-grid"]')!;
       expect(grid.parentElement!.className).toContain("[container-type:inline-size]");
       expect(grid.className).toContain("@container(min-width:720px)");
     });
@@ -441,12 +442,43 @@ describe("AgentProfile", () => {
   });
 
   describe("Research and Seats tabs", () => {
-    it("Research: every entry, with the library note", async () => {
+    it("Research: every entry as an expandable row, and the library's note once, in the pane", async () => {
       await open();
       const p = panel("Research");
-      expect(p.querySelectorAll('[data-testid="research-row"]')).toHaveLength(5);
-      expect(p.textContent).toContain("From the shared research library. Thin means fewer than 3 independent sources.");
+      expect(p.querySelectorAll('[data-testid="research-entry"]')).toHaveLength(5);
+      expect(p.querySelector('[data-testid="profile-pane"]')?.textContent).toContain("Thin means fewer than 3 independent sources".replace("Thin", "thin"));
       expect(p.textContent).toContain("no longer in the library");
+      expect(panel("Overview").textContent).not.toContain("independent sources"); // the Overview doesn't repeat it
+    });
+
+    it("every tab is two columns: its content on the left, its own tinted pane on the right", async () => {
+      await open();
+      for (const name of ["Overview", "Research", "Seats", "History"]) {
+        const p = panel(name);
+        const side = p.querySelector('[data-testid="profile-pane"]');
+        expect(side?.tagName, name).toBe("ASIDE");
+        expect(p.querySelector('[data-testid="profile-main"]')?.contains(side), name).toBe(false);
+        expect(side!.className, name).toContain("bg-bg-elev");
+      }
+      expect(panel("Research").textContent).toContain("Refresh with new research");
+      expect(panel("Seats").textContent).toContain("What a seat is");
+      expect(panel("History").textContent).toContain("How changes land");
+    });
+
+    it("the History pane counts the agent's changes: live, waiting, undone", async () => {
+      await open();
+      const counts = [...panel("History").querySelectorAll('[data-testid="history-summary-counts"] dt')].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
+      expect(counts).toEqual([["Live", "2"], ["Waiting", "0"], ["Undone", "0"]]);
+    });
+
+    it("one Apply / Discard on the page (the pending card) and, with a pending change, History's row for it points up", async () => {
+      const pending = rec({ id: "p1", state: "pending", decidedAt: null, decidedBy: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check." });
+      await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]) });
+      await click(tab("History"));
+      const all = [...h!.container.querySelectorAll("button")].map((b) => b.textContent?.trim());
+      expect(all.filter((t) => t === "Apply")).toHaveLength(1);
+      expect(all.filter((t) => t === "Discard")).toHaveLength(1);
+      expect(panel("History").textContent).toContain("card above");
     });
 
     it("Seats: the rows and the actions (more in AgentSeats' own tests)", async () => {
