@@ -11,14 +11,18 @@
 //     (N4): the result text, its state and "Open session →". The same card
 //     renders V2-native background commands and background `task` subagents.
 //
+// Agent screens: a task for a package agent shows "· N questions" while it waits on the user, says when its dispatch
+// seated the agent in the project, and its Details open the task side panel (TaskSidePanel) instead of expanding inline.
+//
 // "Open session" is an action, so both outcomes are shown on the card itself:
 // the window is selected on success, and a refusal / failure leaves a visible
 // error under the card (AGENTS.md: never stub a control).
 
-import { memo, useCallback, useId, useState } from "react";
+import { createContext, memo, useCallback, useContext, useId, useState } from "react";
 import { useStore } from "./store";
 import { usePackageAgents } from "./packageAgents";
-import { ARCHITECT_AGENT_KEY, leadDisplayName, packageAgentDisplayName } from "./agentDispatch";
+import { ARCHITECT_AGENT_KEY, agentSlugOf, isAgentTask, leadDisplayName, packageAgentDisplayName, rootJobOf } from "./agentDispatch";
+import { openTaskPanel } from "./explorer/explorerStore";
 import { ArchitectChanges } from "./ArchitectChanges";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
@@ -133,9 +137,26 @@ function useJobView(card: BackgroundCard): { view: JobView | undefined; box: num
   return { view, box: boxNow(nowMs(), skew) };
 }
 
-const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
+/**
+ * How many open questions each task has, keyed by its root job id. ChatPanel provides it around the transcript (the cards
+ * are rendered inside Transcript, which doesn't pass props through); `BackgroundRunCards`' own prop wins when given.
+ */
+export const OpenQuestionsByJobContext = createContext<ReadonlyMap<string, number> | null>(null);
+
+const RunCard = memo(function RunCard({
+  card,
+  openQuestionsByJob,
+}: {
+  card: BackgroundCard;
+  openQuestionsByJob: ReadonlyMap<string, number> | null;
+}) {
   const { open, busy, error } = useOpenSession(card.jobId);
   const { view, box } = useJobView(card);
+  const job = useStore((s) => findJobById(s.jobs, card.jobId));
+  const agentTask = isAgentTask(job);
+  const questions = job ? (openQuestionsByJob?.get(rootJobOf(job)) ?? 0) : 0;
+  const seatAdded = job?.seatAdded;
+  const seatSlug = agentSlugOf(job?.agent);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const { agents: packageAgents } = usePackageAgents();
@@ -212,12 +233,17 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
           </span>
         )}
         <span className="text-text-faint shrink-0">·</span>
-        {view && (
+        {questions > 0 && (
+          <span className="shrink-0 whitespace-nowrap text-warn" data-testid="background-questions">
+            · {questions} {questions === 1 ? "question" : "questions"}
+          </span>
+        )}
+        {(view || agentTask) && (
           <button
             type="button"
-            onClick={() => setDetailsOpen((o) => !o)}
-            aria-expanded={detailsOpen}
-            aria-controls={detailsOpen ? detailsId : undefined}
+            onClick={() => (agentTask && job ? openTaskPanel(job.parentSessionID, job.id) : setDetailsOpen((o) => !o))}
+            // An agent task's details open in the chat's side panel, so there is no inline region to expand or control.
+            {...(agentTask ? { title: "Open this task's details" } : { "aria-expanded": detailsOpen, "aria-controls": detailsOpen ? detailsId : undefined })}
             className="shrink-0 whitespace-nowrap text-text-muted hover:text-text hover:underline"
             data-testid="background-details-toggle"
           >
@@ -229,6 +255,11 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
       {card.request && (
         <div className="mt-1 truncate text-text-muted" title={card.request} data-testid="background-request">
           {card.requestedBy === "manta" ? `${leadDisplayName(packageAgents)} asked: ${card.request}` : `“${card.request}”`}
+        </div>
+      )}
+      {seatAdded && seatSlug && (
+        <div className="mt-1 truncate text-text-faint" data-testid="background-seat-added">
+          Added @{seatSlug} to {seatAdded.projectName}
         </div>
       )}
       {content && (
@@ -259,7 +290,7 @@ const RunCard = memo(function RunCard({ card }: { card: BackgroundCard }) {
           </div>
         </>
       )}
-      {view && detailsOpen && <JobDetails id={detailsId} view={view} box={box} />}
+      {view && detailsOpen && !agentTask && <JobDetails id={detailsId} view={view} box={box} />}
       {card.kind === "failed" && (
         <div className="mt-1 text-danger break-words" data-testid="background-failure">
           {card.error}
@@ -341,13 +372,18 @@ export { JobDetails };
 /** The cards under the transcript (N5). Rendered in the transcript tail. */
 export const BackgroundRunCards = memo(function BackgroundRunCards({
   cards,
+  openQuestionsByJob,
 }: {
   cards: ReadonlyArray<BackgroundCard>;
+  /** Open questions per task (root job id); defaults to what the chat provides. */
+  openQuestionsByJob?: ReadonlyMap<string, number>;
 }) {
+  const provided = useContext(OpenQuestionsByJobContext);
+  const counts = openQuestionsByJob ?? provided;
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }} data-testid="background-cards">
       {cards.map((c) => (
-        <RunCard key={c.key} card={c} />
+        <RunCard key={c.key} card={c} openQuestionsByJob={counts} />
       ))}
     </div>
   );
@@ -388,7 +424,23 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         <span className={"shrink-0" + (blocked ? " text-warn" : "")} data-testid="background-result-state">
           · {resultStateLabel(part.state, blocked)}
         </span>
-        {jobId && <OpenSessionButton onOpen={() => void open()} busy={busy} arrow className="ml-auto" />}
+        {jobId && (
+          <span className="ml-auto flex shrink-0 items-center gap-3">
+            {/* An agent task's details live in the chat's side panel (agent screens §2.5) */}
+            {part.sessionID && isAgentTask({ agent: part.agent }) && (
+              <button
+                type="button"
+                onClick={() => openTaskPanel(part.sessionID as string, jobId)}
+                className="shrink-0 whitespace-nowrap text-text-muted hover:text-text hover:underline"
+                title="Open this task's details"
+                data-testid="background-result-details"
+              >
+                Details
+              </button>
+            )}
+            <OpenSessionButton onOpen={() => void open()} busy={busy} arrow />
+          </span>
+        )}
       </div>
       {text && <ClampedResultText text={text} />}
       {exceeded && (
