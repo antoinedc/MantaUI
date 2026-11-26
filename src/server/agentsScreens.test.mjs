@@ -867,3 +867,16 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     await noArch.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// the lead brief (§4.5)
+// ---------------------------------------------------------------------------
+
+import { buildLeadBrief } from "./agents.mjs";
+import { DECISION_MARKER } from "./taskDecision.mjs";
+
+test("lead brief: a teammate's question is shown by the app and never asked again; the old decision-block instruction stays for the fallback", () => {
+  const brief = buildLeadBrief({ body: "You are Manta.", roster: [] });
+  assert.match(brief, /A teammate's question is shown to the user as a card in this chat; never ask it again or answer it\. The server sends the answer to the task\./);
+  assert.match(brief, new RegExp(DECISION_MARKER));
+});

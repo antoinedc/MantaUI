@@ -1844,3 +1844,52 @@ test("describeProposalOutcome: rolled back, not applied, failed and an applied c
   assert.match(d({ state: "failed", slug: null, agentName: "Pricing CTA", error: "boom" }), /^Outcome: Pricing CTA could not be activated.*nothing from this task is live/s);
   assert.match(d({ state: "applied", error: "Couldn't roll back: disk full" }), /is live, but rolling it back failed/);
 });
+
+// ---- agent screens §4.3 / §4.6: an open question of the task holds everything it proposed ----
+
+test("a question of the task still open (or being delivered, or answered but not yet sent) keeps the held proposals waiting for a click, whatever the level and mode", async () => {
+  for (const [name, open] of [["open", true], ["resolved", false]]) {
+    const w = { open };
+    const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => w.open && root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
+    try {
+      const id = await heldFor(f);
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      const r = await rec(f, id);
+      if (open) {
+        assert.equal(r.state, "pending", name);
+        assert.equal(r.reason, "unfinished");
+        assert.equal(r.needsClick, true);
+      } else {
+        assert.equal(r.state, "applied", "with no question open the same task applies at Auto");
+      }
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // the root is the task's, not the round's: a later round of the same task is covered too
+  const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
+  try {
+    const id = await heldFor(f);
+    endJob(f, { status: "done", rootJobId: "job1" });
+    await f.engine.reconcile();
+    assert.equal((await rec(f, id)).reason, "unfinished");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose is refused while the task has a question open, with a process sentence; the slot is not used", async () => {
+  let open = true;
+  const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: () => open, openCountFor: () => 1, listOpen: async () => [] } } });
+  try {
+    const r = await propose(f);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "Your question to the user is still open. Finish what doesn't depend on it; propose after the answer arrives.");
+    assert.equal((await storeOrEmpty(f)).proposalSlots?.job1 ?? 0, 0);
+    open = false;
+    assert.equal((await propose(f)).ok, true, "after the answer it goes through");
+  } finally {
+    await f.cleanup();
+  }
+});

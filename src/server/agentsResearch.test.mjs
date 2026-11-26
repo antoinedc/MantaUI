@@ -208,3 +208,21 @@ test("every agent task prompt ends with the research guidance: @mention, handoff
     await f.cleanup();
   }
 });
+
+test("the binding names the task's root (the first round's id) so what the task relied on can be recorded; older records resolve it too", async () => {
+  const base = { childSessionID: "ses_c", parentSessionID: "ses_chat", parentDirectory: "/repo/site", status: "running", specialist: true, agent: "agent-seo" };
+  const cases = [
+    [{ id: "job2", rootJobId: "job1" }, "job1"], // a continuation carries its task's root
+    [{ id: "job1" }, "job1"], // an older record: its own id
+    [{ id: "job3", architect: { rootJobId: "job0", attempt: 2, mode: "build" }, agent: "agent-seo" }, "job0"], // an older Architect round
+  ];
+  for (const [over, want] of cases) {
+    const f = await world({ jobs: [{ ...base, ...over }] });
+    try {
+      const b = call(f.w, "research_library_find", sample.research_library_find);
+      assert.equal((await f.engine.bindResearcher(b, "research_library_find")).rootJobId, want);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
