@@ -825,20 +825,21 @@ export function rootJobOf(job) {
   return job?.rootJobId ?? job?.architect?.rootJobId ?? job?.id;
 }
 
-/** The newest round of a task: nothing supersedes it (highest attempt as the tie-break). */
-function newestRoundOf(jobs, rootJobId) {
-  const rounds = (Array.isArray(jobs) ? jobs : []).filter((j) => rootJobOf(j) === rootJobId);
-  const live = rounds.filter((j) => !j.supersededBy);
-  const pool = live.length > 0 ? live : rounds;
+/** The newest of some records of one run-chain: one nothing supersedes (else any), highest attempt as the tie-break. */
+function newestOf(records) {
+  const live = records.filter((j) => !j.supersededBy);
+  const pool = live.length > 0 ? live : records;
   return pool.reduce((best, j) => (!best || (j.attempt ?? 1) > (best.attempt ?? 1) || ((j.attempt ?? 1) === (best.attempt ?? 1) && (j.createdAt ?? 0) >= (best.createdAt ?? 0)) ? j : best), null);
+}
+
+/** The newest round of a task. */
+function newestRoundOf(jobs, rootJobId) {
+  return newestOf((Array.isArray(jobs) ? jobs : []).filter((j) => rootJobOf(j) === rootJobId));
 }
 
 /** The newest record for a session: the one nothing supersedes (highest attempt as the tie-break). */
 export function newestRecordFor(jobs, childSessionID) {
-  const all = (Array.isArray(jobs) ? jobs : []).filter((j) => j?.childSessionID === childSessionID);
-  const live = all.filter((j) => !j.supersededBy);
-  const pool = live.length > 0 ? live : all;
-  return pool.reduce((best, j) => (!best || (j.attempt ?? 1) > (best.attempt ?? 1) || ((j.attempt ?? 1) === (best.attempt ?? 1) && (j.createdAt ?? 0) >= (best.createdAt ?? 0)) ? j : best), null);
+  return newestOf((Array.isArray(jobs) ? jobs : []).filter((j) => j?.childSessionID === childSessionID));
 }
 
 /**

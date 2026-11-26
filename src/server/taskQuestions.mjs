@@ -185,6 +185,18 @@ export function createTaskQuestions({
 
   const rootOf = (job) => delegate.rootJobOf(job);
 
+  /** Send the user's word to the task, no lock held. A refusal — a returned sentence or a throw — is `{ failed: true, error }`. */
+  async function sendToTask(rootJobId, text, messageID) {
+    let res;
+    try {
+      res = await delegate.deliverToTask(rootJobId, text, { messageID });
+    } catch (e) {
+      res = { error: `Couldn't send your answer: ${errorText(e)}` };
+    }
+    if (!res || typeof res.error === "string" || !res.delivery) return { failed: true, error: typeof res?.error === "string" ? res.error : "Couldn't send your answer." };
+    return { failed: false, delivery: res.delivery };
+  }
+
   /** The newest round of a task: nothing supersedes it (highest attempt as the tie-break). */
   function newestRound(records, rootJobId) {
     const rounds = records.filter((r) => rootOf(r) === rootJobId);
@@ -326,14 +338,9 @@ export function createTaskQuestions({
     if (claim.refusal) return { ok: false, error: claim.refusal, ...(claim.q ? { question: claim.q } : {}) };
 
     // deliver, no lock held
-    let res;
-    try {
-      res = await delegate.deliverToTask(claim.rootJobId, claim.text, { messageID: claim.messageID });
-    } catch (e) {
-      res = { error: `Couldn't send your answer: ${errorText(e)}` };
-    }
-    const failed = !res || typeof res.error === "string" || !res.delivery;
-    const error = failed ? (typeof res?.error === "string" ? res.error : "Couldn't send your answer.") : null;
+    const sent = await sendToTask(claim.rootJobId, claim.text, claim.messageID);
+    const failed = sent.failed;
+    const error = failed ? sent.error : null;
 
     let recorded;
     try {
@@ -350,7 +357,7 @@ export function createTaskQuestions({
         } else {
           q.state = "answered";
           q.answeredAt = now();
-          q.delivery = res.delivery;
+          q.delivery = sent.delivery;
           q.error = null;
         }
         return { write: true, result: wire(q) };
@@ -502,14 +509,9 @@ export function createTaskQuestions({
     }
     if (!claim) return { continued: false };
 
-    let res;
-    try {
-      res = await delegate.deliverToTask(rootJobId, claim.text, { messageID: claim.messageID });
-    } catch (e) {
-      res = { error: `Couldn't send your answer: ${errorText(e)}` };
-    }
-    const failed = !res || typeof res.error === "string" || !res.delivery;
-    const error = failed ? (typeof res?.error === "string" ? res.error : "Couldn't send your answer.") : null;
+    const sent = await sendToTask(rootJobId, claim.text, claim.messageID);
+    const failed = sent.failed;
+    const error = failed ? sent.error : null;
     let changed = [];
     try {
       changed = await mutate((list) => {
@@ -525,7 +527,7 @@ export function createTaskQuestions({
             q.error = error;
             delete q.sent;
           } else {
-            q.delivery = res.delivery;
+            q.delivery = sent.delivery;
           }
           hit.push(wire(q));
         }
@@ -536,7 +538,7 @@ export function createTaskQuestions({
     }
     for (const q of changed) hint(q);
     if (failed) return { continued: false, error };
-    return { continued: res.delivery === "continue" || res.delivery === "steer" };
+    return { continued: sent.delivery === "continue" || sent.delivery === "steer" };
   }
 
   // ---------------------------------------------------------------------------------------------------------------------

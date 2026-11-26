@@ -131,6 +131,20 @@ async function rig({ jobs = [JOB()] } = {}) {
   };
 }
 
+// an answer whose delivery is held open (`release()` lets it finish): the claim is persisted, the send hasn't returned
+async function inFlight(r) {
+  const { id } = await r.capture();
+  let release = () => {};
+  const gate = new Promise((res) => (release = res));
+  r.out.deliverResult = async () => {
+    await gate;
+    return { delivery: "steer" };
+  };
+  const pending = r.tq.answer(id, [["a"]]);
+  await new Promise((res) => setTimeout(res, 20));
+  return { id, pending, release };
+}
+
 // a question as an earlier run left it in the store
 const stored = (over = {}) => ({
   id: "tq_0123456789abcdef",
@@ -343,15 +357,7 @@ test("answer: records every delivery — steer, continue, continue-pending", asy
 
 test("answer: a second press while the first is being delivered is refused ('Already sending your answer'); after it was answered the record comes back unchanged and nothing is sent", async () => {
   const r = await rig();
-  const { id } = await r.capture();
-  let release;
-  const gate = new Promise((res) => (release = res));
-  r.out.deliverResult = async () => {
-    await gate;
-    return { delivery: "steer" };
-  };
-  const first = r.tq.answer(id, [["a"]]);
-  await new Promise((res) => setTimeout(res, 20));
+  const { id, pending: first, release } = await inFlight(r);
   const second = await r.tq.answer(id, [["b"]]);
   assert.equal(second.ok, false);
   assert.equal(second.error, "Already sending your answer");
@@ -442,14 +448,7 @@ test("dismiss: a finished task (nothing to steer) is fine; a failed steer is rep
 
 test("dismiss: an answer in flight can't be dismissed; an unknown id says so; an answered question comes back unchanged", async () => {
   const r = await rig();
-  const { id } = await r.capture();
-  let release;
-  r.out.deliverResult = async () => {
-    await new Promise((res) => (release = res));
-    return { delivery: "steer" };
-  };
-  const pending = r.tq.answer(id, [["a"]]);
-  await new Promise((res) => setTimeout(res, 20));
+  const { id, pending, release } = await inFlight(r);
   assert.equal((await r.tq.dismiss(id)).error, "Already sending your answer");
   release();
   await pending;
@@ -640,14 +639,7 @@ test("sweep: a claim younger than the grace is left alone (it may be in flight);
 
 test("sweep: an answer in flight that finishes after the sweep cleared its claim is still recorded — the send itself decides", async () => {
   const r = await rig();
-  const { id } = await r.capture();
-  let release;
-  r.out.deliverResult = async () => {
-    await new Promise((res) => (release = res));
-    return { delivery: "steer" };
-  };
-  const pending = r.tq.answer(id, [["a"]]);
-  await new Promise((res) => setTimeout(res, 20));
+  const { id, pending, release } = await inFlight(r);
   r.state.now = T0 + 5 * MIN;
   await r.tq.sweep(); // no trace of the message → cleared
   assert.equal((await r.stored())[0].delivering, null);

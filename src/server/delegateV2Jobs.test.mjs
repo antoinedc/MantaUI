@@ -3463,6 +3463,13 @@ import { createTaskQuestions } from "./taskQuestions.mjs";
 import { deliverToTask, rootJobOf, addJobMilestone, getJob } from "./delegate.mjs";
 import { waitingLine, PLACEHOLDER_ANSWER, TASK_GONE, TASK_PAUSED } from "./taskDecision.mjs";
 
+// a plain job whose child succeeded, settled through the engine
+const finishPlain = async (w, id, at = T0 + 1) => {
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", at);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child));
+};
+
 test("rootJobOf: the first round's id — the field, else the Architect stamp's root, else the record's own id", () => {
   assert.equal(rootJobOf({ id: "a" }), "a");
   assert.equal(rootJobOf({ id: "b", architect: { rootJobId: "a" } }), "a");
@@ -3473,8 +3480,7 @@ test("rootJobId: every launched job carries its own id as the root; continueJob 
   const w = world();
   const id = await start(w);
   assert.equal(w.job(id).rootJobId, id);
-  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
-  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  await finishPlain(w, id);
   const next = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
   assert.equal(next.ok, true, JSON.stringify(next));
   assert.equal(next.job.rootJobId, id, "the continuation shares the root, not its own id");
@@ -3482,8 +3488,7 @@ test("rootJobId: every launched job carries its own id as the root; continueJob 
   const old = world();
   const oid = await start(old);
   delete old.jobs.find((j) => j.id === oid).rootJobId;
-  old.finish(old.job(oid).childSessionID, "succeeded", T0 + 1);
-  await createDelegateEngine(old.deps).observeRaw(raw("session.execution.succeeded", old.job(oid).childSessionID));
+  await finishPlain(old, oid);
   const cont = await continueJob(oid, { prompt: "again", sessionID: PARENT }, old.deps);
   assert.equal(cont.job.rootJobId, oid);
   // resume
@@ -3497,8 +3502,7 @@ test("rootJobId: every launched job carries its own id as the root; continueJob 
 test("continueJob: the successor starts without the previous round's gate marks, seat note or waiting questions — and keeps deliverResult:false; the follow-up can carry its own message id", async () => {
   const w = world();
   const id = await start(w, { deliverResult: false });
-  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
-  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  await finishPlain(w, id);
   Object.assign(w.jobs.find((j) => j.id === id), { ending: true, continueAfter: true, gateFailed: true, seatAdded: { project: "manta", projectName: "Manta" }, waiting: [{ question: "q" }] });
   const res = await continueJob(id, { prompt: "the answer", sessionID: PARENT, messageID: "msg_mine" }, w.deps);
   assert.equal(res.ok, true, JSON.stringify(res));
@@ -3673,13 +3677,15 @@ async function tqWorld() {
   return w;
 }
 const closeTq = (w) => rm(w.tqRoot, { recursive: true, force: true });
+const tqTask = async (extra = {}) => {
+  const w = await tqWorld();
+  const id = await start(w, autonomyInput(w, { isolation: "none", ...extra }));
+  return { w, id, child: w.job(id).childSessionID };
+};
 
 test("question (non-blocking): the question is captured and answered with the placeholder — the turn is NOT interrupted, nothing is rejected, no decision is stored, the task is not blocked — and the milestone says it asked", async () => {
-  const w = await tqWorld();
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  const res = await w.engine.handleQuestion(FORM(child));
-  assert.deepEqual(res, { captured: true });
+  const { w, id, child } = await tqTask();
+  assert.deepEqual(await w.engine.handleQuestion(FORM(child)), { captured: true });
   const j = w.job(id);
   assert.equal(j.decision, undefined);
   assert.notEqual(j.jobProgress.modelState, "blocked");
@@ -3694,9 +3700,7 @@ test("question (non-blocking): the question is captured and answered with the pl
 });
 
 test("question (non-blocking): every case the new path can't take falls back to today's — no free-text field, a failed reply, a 4th open question — a subagent's or a plain job's question is untouched", async () => {
-  const w = await tqWorld();
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
+  const { w, id, child } = await tqTask();
   // no free text
   assert.deepEqual(await w.engine.handleQuestion(FORM(child, { fields: [{ ...FORM(child).fields[0], custom: false }] })), { captured: true });
   assert.ok(w.job(id).decision, "the old path stored the decision");
@@ -3705,16 +3709,14 @@ test("question (non-blocking): every case the new path can't take falls back to 
   assert.deepEqual(w.calls.replied, []);
   assert.equal(w.job(id).askedUser, true);
   // a failed reply
-  const b = await tqWorld();
-  const bid = await start(b, autonomyInput(b, { isolation: "none" }));
+  const { w: b, id: bid } = await tqTask();
   b.fail.reply = new Error("down");
   assert.deepEqual(await b.engine.handleQuestion(FORM(b.job(bid).childSessionID)), { captured: true });
   assert.ok(b.job(bid).decision);
   assert.equal(b.tq.hasOpen(bid), false, "the stored question was taken back");
   assert.equal(b.calls.rejected.length, 1);
   // a 4th open question
-  const c = await tqWorld();
-  const cid = await start(c, autonomyInput(c, { isolation: "none" }));
+  const { w: c, id: cid } = await tqTask();
   for (let i = 0; i < 3; i++) await c.engine.handleQuestion(FORM(c.job(cid).childSessionID, { id: `frm_${i}` }));
   assert.equal(c.calls.abort.length, 0);
   await c.engine.handleQuestion(FORM(c.job(cid).childSessionID, { id: "frm_4" }));
@@ -3729,9 +3731,7 @@ test("question (non-blocking): every case the new path can't take falls back to 
 });
 
 test("question (non-blocking): a task that ends with its question still open ends `done` (not `needs a decision`) and its result says it is waiting for the answer", async () => {
-  const w = await tqWorld();
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
+  const { w, id, child } = await tqTask();
   w.say(child, "Checked the roster. Everything else is done.");
   await w.engine.handleQuestion(FORM(child));
   w.finish(child, "succeeded", T0 + 9);
@@ -3790,17 +3790,27 @@ const gateWorld = (log, over = {}) => {
   return w;
 };
 
+// a specialist's task in a gate world whose child is about to end (`end` ends it, through the engine)
+const gateTask = async (w, { inbox = null, say = true } = {}) => {
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  if (inbox) w.inboxes.set(child, inbox);
+  if (say) w.say(child, "done");
+  const end = async (outcome = "succeeded", extra = {}) => {
+    w.finish(child, outcome, T0 + 5);
+    await w.engine.observeRaw(raw(`session.execution.${outcome}`, child, extra));
+  };
+  return { id, child, end };
+};
+const STEERED = [{ id: "msg_steer", type: "user" }];
+
 test("ending gate: a steered answer left unconsumed in the inbox is cancelled and becomes continue-pending; the round is written `deferred`, the hooks run in the pinned order, then the answers go out in a continuation — no result is posted and the cleanup is skipped", async () => {
   const log = [];
   const w = gateWorld(log);
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.inboxes.set(child, [{ id: "msg_steer", type: "user" }, { id: "msg_other", type: "user" }]);
-  w.say(child, "done");
-  w.finish(child, "succeeded", T0 + 5);
-  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const t = await gateTask(w, { inbox: [...STEERED, { id: "msg_other", type: "user" }] });
+  await t.end();
   assert.deepEqual(log, [["cancel", "msg_steer"], ["mark", ["tq_1"]], ["terminal"], ["after"], ["clear"], ["settled", "deferred"]]);
-  const j = w.job(id);
+  const j = w.job(t.id);
   assert.equal(j.status, "done");
   assert.equal(j.ending, true);
   assert.equal(j.continueAfter, true);
@@ -3813,14 +3823,10 @@ test("ending gate: a steered answer left unconsumed in the inbox is cancelled an
 test("ending gate: a continuation that is refused re-opens nothing here (the store does) — the round falls back to `pending`, its result IS posted and the cleanup runs", async () => {
   const log = [];
   const w = gateWorld(log, { onRoundSettled: async (job) => { log.push(["settled", job.completionDelivery]); return { continued: false, error: "that job's session is busy" }; } });
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.inboxes.set(child, [{ id: "msg_steer", type: "user" }]);
-  w.say(child, "done");
-  w.finish(child, "succeeded", T0 + 5);
-  await w.engine.observeRaw(raw("session.execution.succeeded", child));
-  assert.equal(w.job(id).completionDelivery, "delivered");
-  oneResult(w, id, "completed");
+  const t = await gateTask(w, { inbox: STEERED });
+  await t.end();
+  assert.equal(w.job(t.id).completionDelivery, "delivered");
+  oneResult(w, t.id, "completed");
   assert.equal(w.calls.kill.length, 1, "cleaned up as any finished task");
 });
 
@@ -3829,24 +3835,20 @@ test("ending gate: nothing to do for a task with no steered answer — no inbox 
   const w = gateWorld(log, { pendingSteer: async () => [], hasContinuePending: async () => false });
   let inboxReads = 0;
   w.deps.listInbox = async () => { inboxReads++; return []; };
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.finish(child, "succeeded", T0 + 5);
-  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const t = await gateTask(w, { say: false });
+  await t.end();
   assert.equal(inboxReads, 0);
-  assert.equal(w.job(id).completionDelivery, "delivered");
-  assert.equal(w.job(id).continueAfter, undefined);
-  oneResult(w, id, "completed");
+  assert.equal(w.job(t.id).completionDelivery, "delivered");
+  assert.equal(w.job(t.id).continueAfter, undefined);
+  oneResult(w, t.id, "completed");
 });
 
 test("ending gate: an answer that deliverToTask already marked continue-pending defers the round even when the inbox holds nothing", async () => {
   const log = [];
   const w = gateWorld(log, { pendingSteer: async () => [], hasContinuePending: async () => true });
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.finish(child, "succeeded", T0 + 5);
-  await w.engine.observeRaw(raw("session.execution.succeeded", child));
-  assert.equal(w.job(id).continueAfter, true);
+  const t = await gateTask(w, { say: false });
+  await t.end();
+  assert.equal(w.job(t.id).continueAfter, true);
   assert.deepEqual(log.filter((l) => l[0] === "settled"), [["settled", "deferred"]]);
   assert.equal(w.calls.synth.length, 0);
 });
@@ -3854,14 +3856,12 @@ test("ending gate: an answer that deliverToTask already marked continue-pending 
 test("ending gate: a failed round is never deferred (its failure is reported as always); an answer waiting for it is sent by the question sweep afterwards", async () => {
   const log = [];
   const w = gateWorld(log, { pendingSteer: async () => [], hasContinuePending: async () => true });
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.jobs.find((j) => j.id === id).continueAfter = true; // deliverToTask marked it while it ran
-  w.finish(child, "failed", T0 + 5);
-  await w.engine.observeRaw(raw("session.execution.failed", child, { error: { message: "boom" } }));
-  assert.equal(w.job(id).status, "failed");
-  assert.equal(w.job(id).completionDelivery, "delivered");
-  oneResult(w, id, "failed");
+  const t = await gateTask(w, { say: false });
+  w.jobs.find((j) => j.id === t.id).continueAfter = true; // deliverToTask marked it while it ran
+  await t.end("failed", { error: { message: "boom" } });
+  assert.equal(w.job(t.id).status, "failed");
+  assert.equal(w.job(t.id).completionDelivery, "delivered");
+  oneResult(w, t.id, "failed");
   assert.deepEqual(log.filter((l) => l[0] === "settled"), []);
 });
 
@@ -3869,14 +3869,11 @@ test("ending gate: an inbox read that fails leaves the round `ending` + `gateFai
   const log = [];
   const w = gateWorld(log);
   let inboxDown = true;
-  const item = [{ id: "msg_steer", type: "user" }];
-  w.deps.listInbox = async () => { if (inboxDown) throw new Error("down"); return item; };
+  w.deps.listInbox = async () => { if (inboxDown) throw new Error("down"); return STEERED; };
   w.deps.taskQuestions.sweep = async () => { log.push(["tq-sweep"]); };
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.finish(child, "succeeded", T0 + 5);
-  await w.engine.observeRaw(raw("session.execution.succeeded", child));
-  const j = w.job(id);
+  const t = await gateTask(w, { say: false });
+  await t.end();
+  const j = w.job(t.id);
   assert.equal(j.ending, true);
   assert.equal(j.gateFailed, true);
   assert.equal(j.completionDelivery, "delivered", "the round ended as an ordinary one");
@@ -3884,7 +3881,7 @@ test("ending gate: an inbox read that fails leaves the round `ending` + `gateFai
   inboxDown = false;
   await sweepDelegateJobs(w.deps);
   assert.deepEqual(log.filter((l) => l[0] === "cancel" || l[0] === "mark"), [["cancel", "msg_steer"], ["mark", ["tq_1"]]]);
-  assert.equal(w.job(id).gateFailed, undefined, "retried and settled");
+  assert.equal(w.job(t.id).gateFailed, undefined, "retried and settled");
   assert.ok(log.some((l) => l[0] === "tq-sweep"), "the delegate's sweep runs the question sweep too");
 });
 
@@ -3925,9 +3922,7 @@ test("deferred: a `deferred` round is not an in-flight delivery — continueJob 
 });
 
 test("end to end: an answer steered into a running task that ended without consuming it is cancelled, the round is deferred, ONE continuation carries the answer, and only the continuation's result reaches the chat", async () => {
-  const w = await tqWorld();
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
+  const { w, id, child } = await tqTask();
   await w.engine.handleQuestion(FORM(child));
   const [asked] = await w.tq.listOpen({});
   const answered = await w.tq.answer(asked.id, [["Add to @conversion-cro"]]);
@@ -3970,9 +3965,7 @@ test("end to end: an answer steered into a running task that ended without consu
 });
 
 test("end to end: an answer after the task finished continues it (no steer); the question card clears", async () => {
-  const w = await tqWorld();
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
+  const { w, id, child } = await tqTask();
   await w.engine.handleQuestion(FORM(child));
   w.say(child, "Done.");
   w.finish(child, "succeeded", T0 + 9);
@@ -4031,13 +4024,11 @@ test("deliverResult:false: stopping writes `not-needed` and posts nothing; a fai
 test("deliverResult:false survives continueJob and resume", async () => {
   const w = world();
   const id = await start(w, { deliverResult: false });
-  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
-  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  await finishPlain(w, id);
   const next = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
   assert.equal(next.ok, true, JSON.stringify(next));
   assert.equal(next.job.deliverResult, false);
-  w.finish(next.job.childSessionID, "succeeded", T0 + 4);
-  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", next.job.childSessionID));
+  await finishPlain(w, next.job.id, T0 + 4);
   assert.equal(w.job(next.job.id).completionDelivery, "not-needed");
   assert.deepEqual(results(w), { records: 0, deliveries: 0 });
   const p = world();
@@ -4094,21 +4085,17 @@ test("deferred round: a sweep that runs while the answers are being sent leaves 
   let release;
   const gate = new Promise((res) => (release = res));
   const w = gateWorld(log, { onRoundSettled: async () => { log.push(["settled"]); await gate; return { continued: true }; } });
-  const id = await start(w, autonomyInput(w, { isolation: "none" }));
-  const child = w.job(id).childSessionID;
-  w.inboxes.set(child, [{ id: "msg_steer", type: "user" }]);
-  w.say(child, "done");
-  w.finish(child, "succeeded", T0 + 5);
-  const finishing = w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const t = await gateTask(w, { inbox: STEERED });
+  const finishing = t.end();
   for (let i = 0; i < 200 && !log.some((l) => l[0] === "settled"); i++) await new Promise((r) => setTimeout(r, 5));
-  assert.equal(w.job(id).completionDelivery, "deferred");
+  assert.equal(w.job(t.id).completionDelivery, "deferred");
   await sweepDelegateJobs(w.deps);
   assert.equal(log.filter((l) => l[0] === "settled").length, 1, "not sent a second time");
-  assert.equal(w.job(id).completionDelivery, "deferred", "not flipped to pending under the first call");
+  assert.equal(w.job(t.id).completionDelivery, "deferred", "not flipped to pending under the first call");
   assert.equal(w.calls.synth.length, 0);
   release();
   await finishing;
-  assert.equal(w.job(id).completionDelivery, "not-needed");
+  assert.equal(w.job(t.id).completionDelivery, "not-needed");
   assert.equal(w.calls.synth.length, 0);
   assert.equal(w.calls.kill.length, 0);
 });
