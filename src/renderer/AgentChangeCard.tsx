@@ -261,7 +261,18 @@ function foldLabel(change: AgentChange): string {
  * understand a press (the reason a click is needed, a refusal, the outcome) stays outside the fold. The buttons exist once, in
  * the order of the line (the primary one last, at the line's end).
  */
-export function AgentChangeView({ change, onChange, collapsed = false }: { change: AgentChange; onChange: (next: AgentChange) => void; collapsed?: boolean }) {
+export function AgentChangeView({
+  change,
+  onChange,
+  collapsed = false,
+  actions: offered,
+}: {
+  change: AgentChange;
+  onChange: (next: AgentChange) => void;
+  collapsed?: boolean;
+  /** Which of the buttons the state allows to show (default: all). The history shows a card per row and offers each button once on the page. */
+  actions?: ReadonlyArray<AgentChangeAction>;
+}) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const alive = useRef(true);
@@ -298,7 +309,7 @@ export function AgentChangeView({ change, onChange, collapsed = false }: { chang
 
   const chip = agentChangeChip(change);
   const reason = agentChangeReason(change);
-  const actions = agentChangeActions(change.state);
+  const actions = agentChangeActions(change.state).filter((a) => !offered || offered.includes(a));
   const anyBusy = busy !== null;
   const needsAttention = change.state === "failed" || change.state === "conflict";
   const sentence =

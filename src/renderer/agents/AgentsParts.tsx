@@ -79,3 +79,28 @@ export const PaneTitle = ({ children, sub }: { children: ReactNode; sub?: string
     {sub && <span className="font-normal text-text-faint"> · {sub}</span>}
   </h3>
 );
+
+const LINK_FOCUS = "rounded-sm focus-visible:outline-2 focus-visible:outline-accent";
+
+/** A text action in the accent colour ("All 4 →", "Manage seats", "Edit brief"): a button that reads as a link. */
+export function LinkButton({ onClick, children, spaced = true, disabled = false }: { onClick: () => void; children: ReactNode; spaced?: boolean; disabled?: boolean }) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} className={`${spaced ? "mt-2 " : ""}${LINK_FOCUS} text-meta font-medium text-accent-tx hover:underline disabled:opacity-60`}>
+      {children}
+    </button>
+  );
+}
+
+/** A quiet, underlined text action ("Remove seat", "Restore the version before this"): present, but never the loudest thing on the row. */
+export function QuietLink({ onClick, children, danger = false, disabled = false }: { onClick: () => void; children: ReactNode; danger?: boolean; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`${LINK_FOCUS} text-meta text-text-faint underline decoration-border underline-offset-2 disabled:opacity-60 ${danger ? "hover:text-danger" : "hover:text-text"}`}
+    >
+      {children}
+    </button>
+  );
+}

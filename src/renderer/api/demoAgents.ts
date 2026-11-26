@@ -71,19 +71,21 @@ const question = (now: number): TaskQuestion => ({
 const NEW_AGENT_MD = "---\nname: Pricing CTA Copy\ndescription: Writes and tests the call-to-action text on the pricing page.\nisolation: none\n---\nRewrite the pricing page's call-to-action text. Never change prices or layout.";
 
 const SEO_HEAD = "---\nname: SEO\ndescription: Technical SEO and visibility in AI search for marketing sites.\nisolation: none\n---\n";
-const seoMd = (...rules: string[]): string => `${SEO_HEAD}${rules.map((r) => `- ${r}`).join("\n")}`;
+const seoMd = (...rules: string[]): string => `${SEO_HEAD}${rules.map((r) => `- ${r}`).join("\n")}\n`;
 const SEO_RULES = {
   audit: "Audit one page type at a time and list every finding with its URL.",
+  hreflang: "Check hreflang pairs on every localised page.",
   redirects: "Ask before changing redirects.",
   crawl: "Read how each AI crawler fetches pages before changing robots.txt.",
   gptbot: "Block GPTBot in robots.txt on staging only.",
   ccbot: "Block CCBot in robots.txt on every host.",
   llms: "Check that llms.txt is served at the site root and lists the key pages.",
 };
-const SEO_V1 = seoMd(SEO_RULES.audit);
-const SEO_V2 = seoMd(SEO_RULES.audit, SEO_RULES.redirects);
-const SEO_V3 = seoMd(SEO_RULES.audit, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.gptbot, SEO_RULES.ccbot);
-const SEO_V4 = seoMd(SEO_RULES.audit, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.llms);
+const SEO_V1 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang);
+const SEO_V2 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang, SEO_RULES.redirects);
+const SEO_V3 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.gptbot, SEO_RULES.ccbot);
+const SEO_V4 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.llms);
+const SEO_NO_HREFLANG = seoMd(SEO_RULES.audit); // what the undone change would have made
 
 const change = (over: Partial<AgentChange>): AgentChange => ({
   id: "chg_demo",
@@ -170,10 +172,10 @@ export function demoFleet(now: number): AgentFleet {
   };
 }
 
-const MEMORY = [
+const memoryOf = (projectName: string) => [
   { label: "SEO know-how", access: "read" as const, note: "changed only through change cards" },
   { label: "Research library", access: "read" as const, note: "shared by all agents" },
-  { label: "Manta memory", access: "read-write" as const, note: "shared with other agents in Manta" },
+  { label: `${projectName} memory`, access: "read-write" as const, note: `shared with other agents in ${projectName}` },
   { label: "Other projects' memory", access: "none" as const, note: "only if they share" },
 ];
 
@@ -182,17 +184,71 @@ export function demoProfile(slug: string): AgentProfile {
   return {
     info,
     seats: [
-      { project: "manta-0a1b2c3d4e", projectName: "Manta", brief: "Audit the marketing site and the vs-* comparison pages.", addedAt: at(1), addedBy: "user", notes: 23, memory: MEMORY },
-      { project: "ronda-1b2c3d4e5f", projectName: "Ronda", brief: "Weekly audit of the public pages.", addedAt: at(8), addedBy: "mention", notes: 41, memory: MEMORY },
+      { project: "manta-0a1b2c3d4e", projectName: "Manta", brief: "Audit the marketing site and the vs-* comparison pages.", addedAt: at(1), addedBy: "user", notes: 23, memory: memoryOf("Manta") },
+      { project: "ronda-1b2c3d4e5f", projectName: "Ronda", brief: "Weekly audit of the public pages.", addedAt: at(8), addedBy: "mention", notes: 41, memory: memoryOf("Ronda") },
     ],
     lastChangedAt: at(12),
     builtBy: "architect",
     refresh: { enabled: true, routineId: "rt_demo" },
     research: [
-      { id: "r1", topic: "Technical SEO for AI search", sourceCount: 5, ageDays: 3, status: "fresh", thin: false },
-      { id: "r2", topic: "Structured data for product pages", sourceCount: 4, ageDays: 12, status: "fresh", thin: false },
-      { id: "r3", topic: "AI crawler access rules", sourceCount: 4, ageDays: 41, status: "stale", thin: false },
-      { id: "r4", topic: "llms.txt adoption", sourceCount: 2, ageDays: 6, status: "fresh", thin: true },
+      {
+        id: "r1",
+        topic: "Technical SEO for AI search",
+        sourceCount: 5,
+        ageDays: 3,
+        status: "fresh",
+        thin: false,
+        usedBy: ["Conversion"],
+        sources: [
+          { label: "developers.google.com", url: "https://developers.google.com/search/docs/appearance/ai-features" },
+          { label: "openai.com", url: "https://openai.com/index/chatgpt-search-for-publishers" },
+          { label: "docs.perplexity.ai", url: "https://docs.perplexity.ai/guides/bots" },
+          { label: "ahrefs.com", url: "https://ahrefs.com/blog/ai-overviews" },
+          { label: "searchengineland.com", url: "https://searchengineland.com/ranking-in-ai-overviews" },
+        ],
+      },
+      {
+        id: "r2",
+        topic: "Structured data for product pages",
+        sourceCount: 4,
+        ageDays: 12,
+        status: "fresh",
+        thin: false,
+        sources: [
+          { label: "developers.google.com", url: "https://developers.google.com/search/docs/appearance/structured-data/product" },
+          { label: "schema.org", url: "https://schema.org/Product" },
+          { label: "web.dev", url: "https://web.dev/articles/structured-data" },
+          { label: "moz.com", url: "https://moz.com/learn/seo/schema-structured-data" },
+        ],
+      },
+      {
+        id: "r3",
+        topic: "AI crawler access rules",
+        sourceCount: 4,
+        ageDays: 41,
+        status: "stale",
+        thin: false,
+        usedBy: ["Security"],
+        sources: [
+          { label: "platform.openai.com", url: "https://platform.openai.com/docs/bots" },
+          { label: "developers.google.com", url: "https://developers.google.com/search/docs/crawling-indexing/google-common-crawlers" },
+          { label: "darkvisitors.com", url: "https://darkvisitors.com/agents" },
+          { label: "cloudflare.com", url: "https://blog.cloudflare.com/ai-crawler-report" },
+        ],
+      },
+      {
+        id: "r4",
+        topic: "llms.txt adoption",
+        sourceCount: 2,
+        ageDays: 6,
+        status: "fresh",
+        thin: true,
+        privateSources: 1,
+        sources: [
+          { label: "llmstxt.org", url: "https://llmstxt.org" },
+          { label: "github.com", url: "https://github.com/thedaviddias/llms-txt-hub" },
+        ],
+      },
     ],
   };
 }
@@ -217,6 +273,7 @@ export function demoHistory(now: number): AgentChange[] {
     }),
     change({ id: "chg_3", before: SEO_V2, after: SEO_V3, createdAt: at(12), decidedAt: at(12), summary: "Added rules for how AI search engines read pages." }),
     change({ id: "chg_2", before: SEO_V1, after: SEO_V2, origin: { kind: "chat" }, decidedBy: "click", createdAt: at(3), decidedAt: at(3), summary: "Asks before changing redirects." }),
+    change({ id: "chg_undone", before: SEO_V1, after: SEO_NO_HREFLANG, state: "undone", decidedBy: "click", createdAt: at(2), decidedAt: at(2), summary: "Dropped the hreflang check." }),
     change({ id: "chg_1", kind: "create", before: null, after: SEO_V1, createdAt: at(1), decidedAt: at(1), summary: "Created @seo." }),
   ];
 }

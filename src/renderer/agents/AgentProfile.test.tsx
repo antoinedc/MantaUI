@@ -492,8 +492,8 @@ describe("AgentProfile", () => {
       await open({ agentsSeatRemove: () => Promise.resolve({ ok: true }) });
       const before = api.calls.agentsProfile.length;
       const p = panel("Seats");
-      await click(btn("Remove", p));
       await click(btn("Remove seat", p));
+      await click(btn("Remove seat", p)); // the confirmation
       expect(api.calls.agentsProfile.length).toBe(before + 1);
     });
   });
@@ -515,7 +515,8 @@ describe("AgentProfile", () => {
       const restored = rec({ id: "r1", before: AGENT_MD, after: "V1", origin: { kind: "restore", fromChangeId: "c2" }, decidedBy: "click" });
       await open({ agentsChangeRestore: () => Promise.resolve(restored) });
       const before = api.calls.agentsProfile.length;
-      await click(btn("Restore before this", panel("History")));
+      await click(panel("History").querySelector('[data-id="c2"] summary'));
+      await click(btn("Restore the version before this", panel("History")));
       expect(api.calls.agentsChangeRestore).toEqual([[{ id: "c2" }]]);
       expect(api.calls.agentsProfile.length).toBeGreaterThan(before);
     });

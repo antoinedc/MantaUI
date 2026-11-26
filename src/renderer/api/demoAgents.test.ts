@@ -59,4 +59,16 @@ describe("demoAgents", () => {
     const at = h.map((c) => c.decidedAt ?? c.createdAt);
     expect([...at].sort((a, b) => b - a)).toEqual(at);
   });
+
+  it("the undone change's diff is the one its summary describes: it dropped the hreflang check", () => {
+    const undone = demoHistory(NOW).find((c) => c.state === "undone")!;
+    expect(undone.summary).toBe("Dropped the hreflang check.");
+    const rows = diffRows(undone.before ?? "", undone.after).filter((r) => r.kind === "add" || r.kind === "del");
+    expect(rows).toEqual([{ kind: "del", text: "- Check hreflang pairs on every localised page." }]);
+  });
+
+  it("each seat's access map names its own project's memory", () => {
+    const seats = demoProfile("seo").seats;
+    for (const s of seats) expect(s.memory.map((m) => m.label)).toContain(`${s.projectName} memory`);
+  });
 });

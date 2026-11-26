@@ -4408,6 +4408,12 @@ export interface AgentResearchEntry {
   ageDays: number | null;
   status: "fresh" | "stale" | "missing";
   thin: boolean;
+  // The Research tab's expansion (all absent on an older box, and when there is nothing to say): the public sources the entry rests
+  // on (one per publisher or site; `url` only when it is http(s)), how many findings came from private sources (counted, never
+  // listed — the library doesn't say which findings share a source), and the other agents whose applied changes rest on it.
+  sources?: { label: string; url: string | null }[];
+  privateSources?: number;
+  usedBy?: string[];
 }
 export interface AgentProfile {
   info: AgentInfo;

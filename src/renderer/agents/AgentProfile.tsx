@@ -3,7 +3,8 @@
 // One agent, one page: a header (name, who-it-is line, description, actions), its pending change (one summary line, the change
 // folded), then the tabs Overview · Research · Seats · History (there is no Tests tab until Tests exist). The Overview is two
 // columns: how to use the agent and the research it rests on, beside one tinted details pane (details, seats, access, refresh)
-// that stacks under the main column when the page is narrow. History is a tab, not an Overview block. The tabs are the `tabs` guide's hand-written tablist: a button per tab with
+// that stacks under the main column when the page is narrow. History is a tab, not an Overview block. Every other tab has the
+// same two columns (Research, Seats, History: proposal A), each with its own pane. The tabs are the `tabs` guide's hand-written tablist: a button per tab with
 // `aria-selected`, a roving tab stop, arrows / Home / End that move AND select (selection follows focus), the selected tab
 // underlined by a border on a pseudo-element, every panel in the markup with `hidden` on all but the selected one. `focusgroup`
 // is not available in the bundled Chromium, so the ~15-line key handler stays (nextTab).
@@ -22,11 +23,13 @@ import { Button } from "../Button";
 import { openChangeAgentDraft, openMentionDraft } from "../newAgentDraft";
 import { ResearchRows } from "../ResearchRows";
 import { PageColumn } from "../RoutinesParts";
-import { Segmented } from "../Segmented";
 import { useStore } from "../store";
-import { AgentHistory } from "./AgentHistory";
+import { AgentHistory, HistoryPane } from "./AgentHistory";
+import { RefreshControl } from "./AgentRefresh";
+import { AgentResearch } from "./AgentResearch";
 import { AgentSeats, MemoryMap } from "./AgentSeats";
-import { AgentsHeader, BlockTitle, Crumbs, PaneTitle } from "./AgentsParts";
+import { AgentsHeader, BlockTitle, Crumbs, LinkButton } from "./AgentsParts";
+import { Pane, PaneBlock, PaneFacts, PaneGroup, TwoColumn } from "./ProfileLayout";
 import { OVERVIEW_PREVIEW, PROFILE_TABS, currentSnapshot, detailRows, errText, factsLine, nextTab, seatFolder, seatNotesLabel, type ProfileTab } from "./agentsView";
 import { useAgentsRead, type AgentsRead } from "./useAgentsRead";
 import { openChatWindow } from "./useOpenTask";
@@ -35,12 +38,6 @@ const TAB_CLASS =
   "relative flex-none whitespace-nowrap py-2 text-text-faint hover:text-text aria-selected:text-text " +
   "aria-selected:after:absolute aria-selected:after:inset-x-0 aria-selected:after:bottom-0 aria-selected:after:border-b-2 aria-selected:after:border-accent aria-selected:after:content-[''] " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
-
-const LinkButton = ({ onClick, children, spaced = true }: { onClick: () => void; children: ReactNode; spaced?: boolean }) => (
-  <button type="button" onClick={onClick} className={`${spaced ? "mt-2 " : ""}rounded-sm text-meta font-medium text-accent-tx hover:underline focus-visible:outline-2 focus-visible:outline-accent`}>
-    {children}
-  </button>
-);
 
 /** A read that may still be loading or have failed — the History tab and the Overview's History block show it the same way. */
 function HistoryState({ history, children }: { history: AgentsRead<AgentChange[]>; children: (records: AgentChange[]) => ReactNode }) {
@@ -58,70 +55,6 @@ function HistoryState({ history, children }: { history: AgentsRead<AgentChange[]
     );
   }
   return <p className="m-0 text-label text-text-faint">{history.unsupported ? "Update the box to see the history." : "Loading…"}</p>;
-}
-
-/** One group of the details pane: a hairline above every group but the first, the title one step down from the main column's. */
-function PaneGroup({ testId, title, sub, children }: { testId?: string; title: string; sub?: string; children: ReactNode }) {
-  return (
-    <section data-testid={testId} className="border-t border-border pt-4 first:border-t-0 first:pt-0 [&:not(:first-child)]:mt-5 [[data-theme=dark]_&]:border-border-subtle">
-      <PaneTitle sub={sub}>{title}</PaneTitle>
-      {children}
-    </section>
-  );
-}
-
-function RefreshControl({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
-  const slug = profile.info.slug;
-  const [override, setOverride] = useState<boolean | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const busyRef = useRef(false);
-  // Turned off from the Routines page (or on again): the box's word beats an answer we kept.
-  useEffect(() => setOverride(null), [profile.refresh.enabled]);
-  const enabled = override ?? profile.refresh.enabled;
-
-  const set = async (next: "monthly" | "off") => {
-    const want = next === "monthly";
-    if (busyRef.current || want === enabled) return;
-    busyRef.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await window.api.agentsRefreshSet({ slug, enabled: want });
-      setOverride(r.enabled);
-      onChanged();
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  };
-
-  return (
-    <PaneGroup title="Refresh with new research" testId="profile-refresh">
-      <div className="flex items-center gap-3">
-        <Segmented
-          label="Refresh with new research"
-          options={[
-            { id: "monthly", label: "Monthly" },
-            { id: "off", label: "Off" },
-          ]}
-          value={enabled ? "monthly" : "off"}
-          onChange={(v) => void set(v)}
-        />
-        {busy && <span className="text-meta text-text-faint">Saving…</span>}
-      </div>
-      <p className="m-0 mt-2 text-meta text-text-faint">
-        {enabled ? "Once a month the agent checks the research it rests on and proposes changes. They wait for your click." : "The agent is not refreshed on its own."}
-      </p>
-      {error && (
-        <div role="alert" data-testid="refresh-error" className="mt-1 break-words text-meta text-danger">
-          {error}
-        </div>
-      )}
-    </PaneGroup>
-  );
 }
 
 /** "How to use it": a definition list of what the agent's file says about when to reach for it, and the full instructions folded. */
@@ -189,33 +122,22 @@ function SeatsGroup({ profile, onManage }: { profile: Profile; onManage: () => v
   );
 }
 
-/** The right-hand pane: every fact and setting about the agent in one tinted region. */
+/** The Overview's pane: every fact and setting about the agent in one tinted region. */
 function DetailsPane({ profile, refreshable, onManage, onChanged }: { profile: Profile; refreshable: boolean; onManage: () => void; onChanged: () => void }) {
   const first = profile.seats[0];
   return (
-    <aside
-      aria-label="Details"
-      data-testid="profile-pane"
-      className="manta-agents-details min-w-0 rounded-lg bg-bg-elev p-4 top-4 [@container(min-width:720px)]:sticky [[data-theme=dark]_&]:shadow-[inset_0_0_0_1px_var(--border-subtle)]"
-    >
+    <Pane label="Details">
       <PaneGroup title="Details" testId="profile-details">
-        <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-label">
-          {detailRows(profile).map(([k, v]) => (
-            <Fragment key={k}>
-              <dt className="text-text-faint">{k}</dt>
-              <dd className="m-0 min-w-0 break-words text-right text-text">{v}</dd>
-            </Fragment>
-          ))}
-        </dl>
+        <PaneFacts rows={detailRows(profile)} />
       </PaneGroup>
       <SeatsGroup profile={profile} onManage={onManage} />
       {first && first.memory.length > 0 && (
-        <section data-testid="profile-access" className="border-t border-border pt-4 mt-5 [[data-theme=dark]_&]:border-border-subtle">
-          <MemoryMap seat={first} compact />
-        </section>
+        <PaneBlock testId="profile-access">
+          <MemoryMap seat={first} variant="pane" />
+        </PaneBlock>
       )}
       {refreshable && <RefreshControl profile={profile} onChanged={onChanged} />}
-    </aside>
+    </Pane>
   );
 }
 
@@ -401,19 +323,18 @@ export function AgentProfile({
   };
 
   const overview = (
-    <div className="[container-type:inline-size]">
-      <div data-testid="profile-overview-grid" className="grid grid-cols-1 items-start gap-8 [@container(min-width:720px)]:grid-cols-[minmax(0,1fr)_18rem]">
-        <div data-testid="profile-main" className="flex min-w-0 flex-col gap-8">
+    <TwoColumn
+      main={
+        <>
           <HowToUse profile={p} snapshot={snapshot} />
           <section data-testid="profile-research-block">
             <BlockTitle aside={p.research.length > 0 ? <LinkButton spaced={false} onClick={() => setTab("research")}>{`All ${p.research.length} →`}</LinkButton> : undefined}>Research it relies on</BlockTitle>
             <ResearchRows entries={p.research} limit={OVERVIEW_PREVIEW.research} emptyText="Nothing yet. The research this agent's changes rest on shows here." />
-            {p.research.length > 0 && <p className="m-0 mt-2 text-meta text-text-faint">From the shared research library. Thin means fewer than 3 independent sources.</p>}
           </section>
-        </div>
-        <DetailsPane profile={p} refreshable={refreshable} onManage={() => setTab("seats")} onChanged={() => void profile.reload()} />
-      </div>
-    </div>
+        </>
+      }
+      pane={<DetailsPane profile={p} refreshable={refreshable} onManage={() => setTab("seats")} onChanged={() => void profile.reload()} />}
+    />
   );
 
   return shell(
@@ -461,8 +382,7 @@ export function AgentProfile({
         </div>
         <div role="tabpanel" aria-labelledby={tabId("research")} hidden={tab !== "research"}>
           <div className="pt-4">
-            <ResearchRows entries={p.research} emptyText="Nothing yet. The research this agent's changes rest on shows here." />
-            <p className="m-0 mt-2 text-meta text-text-faint">From the shared research library. Thin means fewer than 3 independent sources.</p>
+            <AgentResearch profile={p} onChanged={() => void profile.reload()} />
           </div>
         </div>
         <div role="tabpanel" aria-labelledby={tabId("seats")} hidden={tab !== "seats"}>
@@ -472,18 +392,23 @@ export function AgentProfile({
         </div>
         <div role="tabpanel" aria-labelledby={tabId("history")} hidden={tab !== "history"}>
           <div className="pt-4">
-            <HistoryState history={history}>
-              {(rows) => (
-                <AgentHistory
-                  records={rows}
-                  cardsAbove={cardIds}
-                  onChanged={() => {
-                    void profile.reload();
-                    void history.reload();
-                  }}
-                />
-              )}
-            </HistoryState>
+            <TwoColumn
+              main={
+                <HistoryState history={history}>
+                  {(rows) => (
+                    <AgentHistory
+                      records={rows}
+                      cardsAbove={cardIds}
+                      onChanged={() => {
+                        void profile.reload();
+                        void history.reload();
+                      }}
+                    />
+                  )}
+                </HistoryState>
+              }
+              pane={<HistoryPane records={history.data ?? null} />}
+            />
           </div>
         </div>
       </div>

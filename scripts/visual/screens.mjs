@@ -1317,6 +1317,44 @@ export const SCREENS = [
     viewport: AGENTS_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
+  // The profile's other tabs (proposal A: the same two columns on every tab), each against the approved tabs mockup.
+  ...[
+    { tab: "research", title: "Agent profile — Research tab (entries with sources, library pane)", wait: '[data-testid="research-entries"]' },
+    { tab: "seats", title: "Agent profile — Seats tab (seats with access, add-a-seat pane)", wait: '[data-testid="seat-list"]' },
+    {
+      tab: "history",
+      title: "Agent profile — History tab (change log, the newest live change open)",
+      wait: '[data-testid="history-list"]',
+      open: '[data-testid="history-row"][data-id="chg_3"] summary',
+      done: '[data-testid="history-row"][data-id="chg_3"] [data-testid="agent-change-card"]',
+    },
+  ].map(({ tab, title, wait, open, done }) => ({
+    id: `agents-profile-${tab}`,
+    title,
+    url: "/app/index.html?demo&state=agents&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-agents-profile",
+    region: ".manta-agents-profile",
+    actions: async (page) => {
+      await page.locator('[data-testid="agent-row"][data-slug="seo"]').click();
+      await page.waitForSelector('[data-testid="profile-header"]', { state: "visible" });
+      await page.getByRole("tab", { name: new RegExp(`^${tab}`, "i") }).click();
+      await page.waitForSelector(wait, { state: "visible" });
+      if (open) {
+        await page.locator(open).click();
+        await page.waitForSelector(done, { state: "visible" });
+      }
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/agents/profile-tabs-mockup.html",
+    mockupActions: async (page) => {
+      await page.evaluate((t) => window.__set("A", t, "light"), tab);
+    },
+    mockupReady: 'main[data-proposal="A"]',
+    mockupRegion: 'main[data-proposal="A"]',
+    viewport: AGENTS_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  })),
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */

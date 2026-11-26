@@ -3,7 +3,7 @@
 // Everything the Fleet page and the agent profile decide that has no DOM in it: which page is showing, how a fleet cell
 // reads, what a history row says, whether Restore is offered, how a tab key moves. The components stay thin.
 
-import type { AgentChange, AgentFleet, AgentProfile, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
+import type { AgentChange, AgentFleet, AgentProfile, AgentResearchEntry, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
 import type { BackgroundResultPart } from "../backgroundRun";
 import { PACKAGE_AGENT_PREFIX, resolvePickerProject } from "../agentDispatch";
 import { agentChangeTitle } from "../agentChange";
@@ -179,28 +179,59 @@ export function historyWho(change: Pick<AgentChange, "origin">): string {
   return "Manta · for you";
 }
 
-/** The row's outcome line: what became of the change. An undone row says so, and who undid it when known. */
-export function historyOutcome(change: Pick<AgentChange, "state" | "decidedBy" | "error">): string {
+export type StatusTone = "ok" | "accent" | "faint" | "warn";
+
+/**
+ * The row's outcome: a label, its tone and, where there is one, the reason — a live change says how it went live ("you approved
+ * it" / "applied automatically"), an undone one by whom, a refused one why.
+ */
+export function historyStatus(change: Pick<AgentChange, "state" | "decidedBy" | "error">): { tone: StatusTone; label: string; why: string | null } {
   switch (change.state) {
     case "applied":
-      return change.decidedBy === "click" ? "Live (you approved it)" : "Live (applied automatically)";
+      return { tone: "ok", label: "Live", why: change.decidedBy === "click" ? "you approved it" : "applied automatically" };
     case "undone":
-      return change.decidedBy === "click" ? "Undone by you" : "Undone";
+      return { tone: "faint", label: "Undone", why: change.decidedBy === "click" ? "by you" : null };
     case "pending":
-      return "Waiting for your click";
+      return { tone: "accent", label: "Waiting for your click", why: null };
     case "held":
-      return "Waiting for the Architect to finish";
+      return { tone: "faint", label: "Waiting for the Architect to finish", why: null };
     case "applying":
-      return "Applying…";
+      return { tone: "accent", label: "Applying…", why: null };
     case "discarded":
-      return "Discarded";
+      return { tone: "faint", label: "Discarded", why: null };
     case "expired":
-      return "Expired";
+      return { tone: "faint", label: "Expired", why: null };
     case "conflict":
-      return change.error ? `Not applied: ${change.error}` : "Not applied";
+      return { tone: "warn", label: "Not applied", why: change.error || null };
     case "failed":
-      return "Not activated";
+      return { tone: "warn", label: "Not activated", why: null };
   }
+}
+
+/** The history pane's counts: live (applied), waiting (pending), undone. */
+export function historyCounts(records: ReadonlyArray<Pick<AgentChange, "state">>): { live: number; waiting: number; undone: number } {
+  const n = (state: AgentChange["state"]) => records.filter((r) => r.state === state).length;
+  return { live: n("applied"), waiting: n("pending"), undone: n("undone") };
+}
+
+/** The id of the newest live (applied) change — the one whose card carries the page's Undo; null when none is live. */
+export function latestLiveId(records: ReadonlyArray<Pick<AgentChange, "id" | "state" | "decidedAt" | "createdAt">>): string | null {
+  let best: { id: string; at: number } | null = null;
+  for (const r of records) {
+    if (r.state !== "applied") continue;
+    const at = r.decidedAt ?? r.createdAt;
+    if (!best || at > best.at) best = { id: r.id, at };
+  }
+  return best?.id ?? null;
+}
+
+/** The research pane's counts: entries past their shelf life, thin ones (fewer than 3 independent sources), and ones gone from the library. */
+export function researchHealth(entries: ReadonlyArray<Pick<AgentResearchEntry, "status" | "thin">>): { stale: number; thin: number; missing: number } {
+  return {
+    stale: entries.filter((e) => e.status === "stale").length,
+    thin: entries.filter((e) => e.thin).length,
+    missing: entries.filter((e) => e.status === "missing").length,
+  };
 }
 
 /** What the row calls the change: the box's one-line summary, else the card's own title. */
