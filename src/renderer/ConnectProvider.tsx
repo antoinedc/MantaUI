@@ -47,6 +47,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { X, Loader2 } from "lucide-react";
 import type { OpencodeProviderAuthRequest } from "../shared/types";
+import { extractClaudeAuthUrl } from "../shared/claudeLoginOutput.mjs";
+import { CLAUDE_CODE_REPROMPT_MESSAGE, isClaudeCodeReprompt } from "./claudeLoginFailure";
 import {
   connectPhaseLabel,
   deviceAuthErrorMessage,
@@ -728,13 +730,24 @@ export function ConnectProvider({
           onUrlDetected={(url) =>
             safeSetPhase({ ...phase, url, inputError: undefined })
           }
+          onCodeReprompt={() =>
+            safeSetPhase({ ...phase, inputError: CLAUDE_CODE_REPROMPT_MESSAGE })
+          }
           onSubmitCode={async (code) => {
             // Feed the code back through the existing pty bus. The
             // server has already attached a sessionKey to a live
             // `claude auth login` process, so the write reaches the
-            // child directly. CR submits (verified by the BET-352 POC).
+            // child directly. CR submits (verified by the BET-352 POC,
+            // and again against CLI 2.1.332 for #1748).
             const trimmed = code.trim();
             if (!trimmed) return;
+            // Clear any prior input error BEFORE the write: the CLI's answer
+            // to a malformed code can arrive ahead of the write's own reply
+            // and must not be wiped. The claude-status poll will surface a
+            // real auth failure (no mtime advance after the next tick).
+            if (phase.inputError) {
+              safeSetPhase({ ...phase, inputError: undefined });
+            }
             try {
               await window.api.ptyWrite(phase.ptySessionKey, trimmed + "\r");
             } catch {
@@ -742,13 +755,6 @@ export function ConnectProvider({
                 ...phase,
                 inputError: "Couldn't reach the server. Try again.",
               });
-              return;
-            }
-            // Clear any prior input error on a successful write. The
-            // claude-status poll will surface a real auth failure (no
-            // mtime advance after the next tick).
-            if (phase.inputError) {
-              safeSetPhase({ ...phase, inputError: undefined });
             }
           }}
         />
@@ -996,8 +1002,9 @@ export const CredentialInput = memo(function CredentialInput({
 // RPC). Per the issue: "Reuse the existing terminal component, not a <pre>"
 // — xterm renders the raw escape sequences the box's `claude auth login`
 // emits, so the user actually sees the same TUI as on a terminal.
-const CLAUDE_URL_RE =
-  /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s\x07\x1b]+/g;
+// The link pattern is shared with the box (src/shared/claudeLoginOutput.mjs): the
+// CLI changed it once (claude.com/cai → claude.ai) and per-side copies drifted.
+const LOGIN_OUTPUT_CAP = 8_000;
 
 export function ClaudeLoginBlock({
   ptySessionKey,
@@ -1006,6 +1013,7 @@ export function ClaudeLoginBlock({
   preExisting,
   inputError,
   onUrlDetected,
+  onCodeReprompt,
   onSubmitCode,
 }: {
   ptySessionKey: string;
@@ -1014,8 +1022,13 @@ export function ClaudeLoginBlock({
   preExisting: boolean;
   inputError: string | undefined;
   onUrlDetected: (url: string) => void;
+  /** The CLI refused the pasted code as malformed and is asking again (it keeps running). */
+  onCodeReprompt?: () => void;
   onSubmitCode: (code: string) => void | Promise<void>;
 }) {
+  const repromptRef = useRef(onCodeReprompt);
+  repromptRef.current = onCodeReprompt;
+
   // Track every pty data chunk to extract the OAuth URL as soon as it
   // appears. The Terminal owns the underlying IPty; we re-subscribe to
   // the pty bus here so the URL appears above the terminal pane the
@@ -1027,16 +1040,28 @@ export function ClaudeLoginBlock({
     const dispose = window.api.onPtyEvent((ev) => {
       if (ev.sessionKey !== ptySessionKey) return;
       if (ev.kind !== "data") return;
-      buffer += ev.data;
-      const m = buffer.match(CLAUDE_URL_RE);
-      if (m && m[0]) {
-        // Strip trailing `)].,;` defensively (terminal soft-wrap can
-        // bleed punctuation into the captured chunk).
-        onUrlDetected(m[0].replace(/[\]).,;]+$/, ""));
-      }
+      buffer = (buffer + ev.data).slice(-LOGIN_OUTPUT_CAP);
+      // `complete`: a link cut off by a chunk boundary is not taken yet.
+      const found = extractClaudeAuthUrl(buffer, { complete: true });
+      if (found) onUrlDetected(found);
     });
     return () => dispose();
   }, [ptySessionKey, url, onUrlDetected]);
+
+  // After a code is pasted the CLI may answer that it is malformed and ask again,
+  // without exiting — nothing else would tell the user. `pending` restarts after
+  // each answer so a second bad paste is noticed too.
+  useEffect(() => {
+    if (!ptySessionKey) return;
+    let pending = "";
+    return window.api.onPtyEvent((ev) => {
+      if (ev.sessionKey !== ptySessionKey || ev.kind !== "data") return;
+      pending = (pending + ev.data).slice(-LOGIN_OUTPUT_CAP);
+      if (!isClaudeCodeReprompt(pending)) return;
+      pending = "";
+      repromptRef.current?.();
+    });
+  }, [ptySessionKey]);
 
   // Defensive teardown: if the parent unmounts the card (×, retry after
   // failure, navigation away) the IPty is reaped by the Terminal's own

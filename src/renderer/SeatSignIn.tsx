@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SeatConnect } from "../shared/types";
 import { formatRemaining } from "./chatUtils";
+import { CLAUDE_CODE_REPROMPT_MESSAGE, describeClaudeLoginFailure } from "./claudeLoginFailure";
 import { ClaudeLoginBlock, WaitingBlockBody } from "./ConnectProvider";
 import { ProcessPanel } from "./ProcessPanel";
 
@@ -79,18 +80,34 @@ export function useSubmitSettle(phase: { kind: string; inputError?: string }): (
   );
 }
 
+/** The sentence a flow shows when the sign-in exits with an error but the CLI
+ *  said nothing usable. */
+export const GENERIC_CODE_FAILURE = "That code didn't work (it may have expired).";
+
+// Enough to hold everything `claude auth login` prints; older bytes are dropped.
+const LOGIN_OUTPUT_CAP = 8_000;
+
 /** A sign-in terminal that EXITS with an error (a wrong or expired code) will
  *  never produce credentials: tell the flow now instead of leaving Submit
  *  spinning until the 15-minute deadline. A clean exit is a successful login —
- *  keep waiting for the box. */
-export function useClaudeLoginExit(sessionKey: string | null, onFailedExit: () => void): void {
+ *  keep waiting for the box.
+ *
+ *  `reason` is what the CLI itself said, made safe (claudeLoginFailure.ts), or
+ *  null when it printed nothing usable. */
+export function useClaudeLoginExit(sessionKey: string | null, onFailedExit: (reason: string | null) => void): void {
   const cbRef = useRef(onFailedExit);
   cbRef.current = onFailedExit;
   useEffect(() => {
     if (!sessionKey) return;
+    let output = "";
     return window.api.onPtyEvent((ev) => {
-      if (ev.sessionKey !== sessionKey || ev.kind !== "exit" || ev.code === 0) return;
-      cbRef.current();
+      if (ev.sessionKey !== sessionKey) return;
+      if (ev.kind === "data") {
+        output = (output + ev.data).slice(-LOGIN_OUTPUT_CAP);
+        return;
+      }
+      if (ev.kind !== "exit" || ev.code === 0) return;
+      cbRef.current(describeClaudeLoginFailure(output));
     });
   }, [sessionKey]);
 }
@@ -119,19 +136,24 @@ export function SeatSignInBlock({
         preExisting={false}
         inputError={phase.inputError}
         onUrlDetected={(url) => onPatch({ url, inputError: undefined })}
+        onCodeReprompt={() => onPatch({ inputError: CLAUDE_CODE_REPROMPT_MESSAGE })}
         onSubmitCode={async (code) => {
           const trimmed = code.trim();
           if (!trimmed) return;
+          // The previous error goes BEFORE the write, and the settle promise is
+          // made before it too: the CLI's answer to a malformed code can arrive
+          // before the write's own reply and must not be wiped or missed.
+          if (phase.inputError) onPatch({ inputError: undefined });
+          const settled = waitForSettle();
           try {
             await window.api.ptyWrite(phase.sessionKey, trimmed + "\r");
-            if (phase.inputError) onPatch({ inputError: undefined });
           } catch {
             onPatch({ inputError: "Couldn't reach the server. Try again." });
             return;
           }
           // Stay "Saving…" until the box has settled the sign-in — the flow's
           // own poll drives the phase, which resolves this.
-          await waitForSettle();
+          await settled;
         }}
       />
     );

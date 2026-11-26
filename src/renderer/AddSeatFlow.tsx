@@ -43,6 +43,7 @@ import {
 import { providerLabel } from "./UsageDial";
 import {
   CLIENT_LIMIT_MS,
+  GENERIC_CODE_FAILURE,
   SEAT_POLL_INTERVAL_MS,
   SERVER_LOGIN_LIMIT_MS,
   SeatSignInBlock,
@@ -254,11 +255,11 @@ export function AddSeatFlow({
   // 15-minute deadline. A clean exit is a successful login — keep waiting for
   // the box to file the seat.
   const sessionKey = phase.kind === "claude" ? phase.sessionKey : null;
-  useClaudeLoginExit(sessionKey, () => {
+  useClaudeLoginExit(sessionKey, (reason) => {
     const open = openSeatRef.current;
     openSeatRef.current = null;
     if (open) void window.api.accountsCancelSeat({ seatId: open }).catch(() => {});
-    set({ kind: "failed", message: "That code didn't work (it may have expired). Start the sign-in again." });
+    set({ kind: "failed", message: `${reason ?? GENERIC_CODE_FAILURE} Start the sign-in again.` });
   });
 
   // done is terminal — report once.

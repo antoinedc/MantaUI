@@ -213,41 +213,11 @@ export function shouldRefreshAhead(creds, now, leadMs = 30 * 60_000) {
 // (`startClaudeLogin`, `pollClaudeLogin`, `claudeLoginWrite`); this file
 // holds the PURE helpers that make those decisions testable.
 
-/**
- * Pattern that matches Claude's OAuth authorize URL specifically. Anchored
- * to the `claude.com/cai/oauth/authorize` path with an OAuth-shape query
- * (client_id, response_type=code, redirect_uri). Exported so a future
- * upstream shape change is one place to fix.
- *
- * Filtering on shape rather than the byte position of the first https:// is
- * load-bearing: the first-launch trust prompt's "Security guide" link is
- * also `https://…`; a regex that latches onto the FIRST URL picks that one
- * and never updates.
- */
-export const CLAUDE_OAUTH_URL_RE =
-  /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s\x07\x1b]+/g;
-
-/**
- * Pull the Claude OAuth authorize URL out of a free-form text chunk (the
- * concatenated stdout of `claude auth login` so far). Returns the FIRST
- * match — the URL stays on screen until the OAuth completes, so the first
- * match IS the live one. Returns null when the chunk has no
- * authorize-URL-shaped substring.
- *
- * Trailing punctuation that occasionally wraps in (`)].,;`) is stripped
- * defensively; the live URL is clean today but terminal soft-wrap and
- * future TUI rewordings may not be.
- *
- * @param {string} chunk   accumulated stdout bytes, decoded to text
- * @returns {string|null}
- */
-export function extractClaudeAuthUrl(chunk) {
-  if (typeof chunk !== "string" || chunk.length === 0) return null;
-  const matches = chunk.match(CLAUDE_OAUTH_URL_RE);
-  if (!matches || matches.length === 0) return null;
-  // Strip trailing `)].,;` that can ride in from parenthetical wraps.
-  return matches[0].replace(/[\]).,;]+$/, "");
-}
+// The OAuth link pattern and its extractor live in src/shared/claudeLoginOutput.mjs
+// (one copy for the box and the renderer — issue #1748: a CLI release changed the
+// link from claude.com/cai/… to claude.ai/… and two hand-kept regexes drifted).
+// Re-exported so existing imports keep working.
+export { CLAUDE_OAUTH_URL_RE, extractClaudeAuthUrl } from "../shared/claudeLoginOutput.mjs";
 
 /**
  * Classify the state of a Claude login attempt given the current credentials

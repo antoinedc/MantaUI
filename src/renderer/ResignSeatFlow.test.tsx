@@ -231,4 +231,27 @@ describe("ResignSeatFlow", () => {
     expect(text()).toContain("Seat 3 was not changed");
     expect(cancel).toHaveBeenCalledWith({ flowId: "f2" });
   });
+
+  it("Claude: a failed exit shows what the CLI said and still says the seat was not changed", async () => {
+    const ptyCbs: Array<(e: unknown) => void> = [];
+    await start({
+      accountsResignSeat: () => Promise.resolve({ flowId: "f2", connect: CLAUDE }),
+      accountsResignCancel: () => Promise.resolve({ ok: true }),
+      ptyWrite: () => Promise.resolve(),
+      onPtyEvent: (cb: (e: unknown) => void) => {
+        ptyCbs.push(cb);
+        return () => {};
+      },
+    });
+    await act(async () => {
+      for (const cb of ptyCbs) {
+        cb({ kind: "data", sessionKey: "claude-login-k", data: "Signing in…\r\nLogin failed: oauth_not_allowed_for_organization\r\n" });
+        cb({ kind: "exit", sessionKey: "claude-login-k", code: 1 });
+      }
+    });
+    await advance(0);
+    expect(text()).toContain("Your organization doesn't allow signing in this way");
+    expect(text()).toContain("Seat 3 was not changed");
+    expect(text()).not.toContain("That code didn't work");
+  });
 });
