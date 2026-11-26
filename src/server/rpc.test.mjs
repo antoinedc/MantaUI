@@ -2464,6 +2464,28 @@ test("delegate:open-session hands the job id to the engine and returns its answe
   assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "x" }), { ok: false, error: "no engine" });
 });
 
+test("delegate:open-session also tells the agents engine the task was opened (it leaves Needs you); a refusal, or an engine that fails, changes nothing", async () => {
+  const opened = [];
+  const { deps } = bgDeps();
+  deps.agents = { openedTask: async (id) => (opened.push(id), { ok: true }) };
+  assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "job00001" }), { ok: true, tmuxSession: "proj", windowIndex: 3 });
+  assert.deepEqual(opened, ["job00001"]);
+  // a refusal is not "opened"
+  deps.delegate.openSession = async () => ({ ok: false, error: "gone" });
+  assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "job00002" }), { ok: false, error: "gone" });
+  assert.deepEqual(opened, ["job00001"]);
+  // the engine failing never fails the open
+  deps.delegate.openSession = async () => ({ ok: true, tmuxSession: "proj", windowIndex: 3 });
+  deps.agents = { openedTask: async () => { throw new Error("fleet file unreadable"); } };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal((await buildHandlers(deps)["delegate:open-session"]({ jobId: "job00003" })).ok, true);
+  } finally {
+    console.warn = warn;
+  }
+});
+
 test("opencode:context measures against the SELECTED model when the resolver knows one (WS11 D2)", async () => {
   const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
   const deps = makeDeps([]).deps;
