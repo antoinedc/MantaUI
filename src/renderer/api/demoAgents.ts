@@ -70,6 +70,21 @@ const question = (now: number): TaskQuestion => ({
 
 const NEW_AGENT_MD = "---\nname: Pricing CTA Copy\ndescription: Writes and tests the call-to-action text on the pricing page.\nisolation: none\n---\nRewrite the pricing page's call-to-action text. Never change prices or layout.";
 
+const SEO_HEAD = "---\nname: SEO\ndescription: Technical SEO and visibility in AI search for marketing sites.\nisolation: none\n---\n";
+const seoMd = (...rules: string[]): string => `${SEO_HEAD}${rules.map((r) => `- ${r}`).join("\n")}`;
+const SEO_RULES = {
+  audit: "Audit one page type at a time and list every finding with its URL.",
+  redirects: "Ask before changing redirects.",
+  crawl: "Read how each AI crawler fetches pages before changing robots.txt.",
+  gptbot: "Block GPTBot in robots.txt on staging only.",
+  ccbot: "Block CCBot in robots.txt on every host.",
+  llms: "Check that llms.txt is served at the site root and lists the key pages.",
+};
+const SEO_V1 = seoMd(SEO_RULES.audit);
+const SEO_V2 = seoMd(SEO_RULES.audit, SEO_RULES.redirects);
+const SEO_V3 = seoMd(SEO_RULES.audit, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.gptbot, SEO_RULES.ccbot);
+const SEO_V4 = seoMd(SEO_RULES.audit, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.llms);
+
 const change = (over: Partial<AgentChange>): AgentChange => ({
   id: "chg_demo",
   kind: "update",
@@ -187,16 +202,16 @@ export function demoHistory(now: number): AgentChange[] {
       state: "pending",
       needsClick: true,
       reason: "ask",
-      before: "V1",
-      after: NEW_AGENT_MD,
+      before: SEO_V3,
+      after: SEO_V4,
       createdAt: now - 12 * MIN,
       decidedAt: null,
       decidedBy: null,
       summary: "Adds an llms.txt check and drops 2 crawler rules that no longer hold.",
     }),
-    change({ id: "chg_3", before: "V2", after: NEW_AGENT_MD, createdAt: at(12), decidedAt: at(12), summary: "Added rules for how AI search engines read pages." }),
-    change({ id: "chg_2", before: "V1", after: "V2", origin: { kind: "chat" }, decidedBy: "click", createdAt: at(3), decidedAt: at(3), summary: "Asks before changing redirects." }),
-    change({ id: "chg_1", kind: "create", before: null, after: "V1", createdAt: at(1), decidedAt: at(1), summary: "Created @seo." }),
+    change({ id: "chg_3", before: SEO_V2, after: SEO_V3, createdAt: at(12), decidedAt: at(12), summary: "Added rules for how AI search engines read pages." }),
+    change({ id: "chg_2", before: SEO_V1, after: SEO_V2, origin: { kind: "chat" }, decidedBy: "click", createdAt: at(3), decidedAt: at(3), summary: "Asks before changing redirects." }),
+    change({ id: "chg_1", kind: "create", before: null, after: SEO_V1, createdAt: at(1), decidedAt: at(1), summary: "Created @seo." }),
   ];
 }
 
