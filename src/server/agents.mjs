@@ -25,7 +25,9 @@ import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
 import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals, CREDENTIAL_HINT } from "../shared/architectSources.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
-import { WORKTREE_AGENT_GRANTS, CAP_ERROR } from "./delegate.mjs";
+import { WORKTREE_AGENT_GRANTS, CAP_ERROR, rootJobOf } from "./delegate.mjs";
+import { stepsOf } from "./jobProgressView.mjs";
+import { readsCommons, modeOrPrivate } from "./knowledge/sharing.mjs";
 import { withResearchGuidance, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
 import { DECISION_MARKER } from "./taskDecision.mjs";
 import { SPECIALIST_RESEARCH_TOOLS } from "../shared/researchTools.mjs";
@@ -84,7 +86,121 @@ export const PROPOSE_NO_SOURCES = "A proposal can't change the Architect's sourc
 const LEAD_EDITABLE = ["name", "description", "color", "instructions"];
 const FRONTMATTER_KEY = { name: "name", description: "description", isolation: "isolation", useWhen: "use_when", notFor: "not_for", model: "model", color: "color" };
 const DRAFT_LABEL = { name: "The name", description: "The description", isolation: "isolation", instructions: "The instructions", useWhen: "use when", notFor: "not for", model: "model", color: "The color", sources: "sources" };
-const TERMINAL_STATES = new Set(["discarded", "undone", "expired", "conflict"]);
+
+// Retention of the change store (agent screens §5.2). Only these states leave by age; `undone` stays so history can show a change and its reversal.
+const AGE_PRUNED = new Set(["discarded", "expired", "conflict"]);
+const baseOf = (r) => r.releasedAt ?? r.createdAt; // a pending record's click window starts when it was released
+const isExpiredAt = (r, t) => r.state === "pending" && t - baseOf(r) > CHANGE_PENDING_MS;
+const expiredCopyOf = (r) => ({ ...r, state: "expired", decidedAt: baseOf(r) + CHANGE_PENDING_MS });
+// held / applying records (and a failed create that still owns its folder) are the journal: never evicted
+const isJournalRecord = (r) => r.state === "held" || r.state === "applying" || (r.state === "failed" && r.kind === "create" && r.claimed === true);
+// at the cap the lowest rank goes first: 0 discarded / expired / conflict / unclaimed failed, 1 undone, 2 applied, 3 pending
+const evictRank = (r) => (r.state === "undone" ? 1 : r.state === "applied" ? 2 : r.state === "pending" ? 3 : 0);
+
+/**
+ * Pure: the change records that survive `t`. Pending ones nobody clicked in time become `expired`; discarded, expired and
+ * conflict records go after a week; over the cap the lowest rank is dropped first, the oldest first within a rank, and NEVER a
+ * journal record.
+ */
+export function pruneChangeRecords(list, t) {
+  let out = list.map((r) => (isExpiredAt(r, t) ? expiredCopyOf(r) : r));
+  out = out.filter((r) => !(AGE_PRUNED.has(r.state) && t - (r.decidedAt ?? r.createdAt) > CHANGE_KEEP_MS));
+  if (out.length > CHANGE_MAX) {
+    const droppable = out.filter((r) => !isJournalRecord(r)).sort((a, b) => evictRank(a) - evictRank(b) || a.createdAt - b.createdAt);
+    const drop = new Set(droppable.slice(0, out.length - CHANGE_MAX).map((r) => r.id));
+    out = out.filter((r) => !drop.has(r.id));
+  }
+  return out;
+}
+
+// ---- seats (agent screens §5.1) ----
+export const SEAT_BRIEF_MAX = 4000;
+const PROJECT_RE = /^[a-z0-9-]+$/;
+const SEAT_ADDED_BY = ["user", "mention", "handoff"];
+const SEAT_UNSAFE = "That seat can't be written safely: its folder or file is a link; fix it by hand";
+
+/** A seat file → `{ brief, addedAt, addedBy }`. Frontmatter counts only when it holds just `added_at` / `added_by`: any other text is the brief as it stands. */
+export function parseSeatText(text, mtimeMs = 0) {
+  const raw = String(text ?? "");
+  const out = { brief: raw.trim(), addedAt: mtimeMs, addedBy: "user" };
+  const parts = splitFrontmatter(raw);
+  if (!parts) return out;
+  let data;
+  try {
+    data = YAML.parse(parts.yaml);
+  } catch {
+    return out;
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return out;
+  const keys = Object.keys(data);
+  if (keys.length === 0 || keys.some((k) => k !== "added_at" && k !== "added_by")) return out;
+  const at = typeof data.added_at === "string" || data.added_at instanceof Date ? Date.parse(String(data.added_at instanceof Date ? data.added_at.toISOString() : data.added_at)) : NaN;
+  return { brief: parts.body, addedAt: Number.isFinite(at) ? at : mtimeMs, addedBy: SEAT_ADDED_BY.includes(data.added_by) ? data.added_by : "user" };
+}
+
+/** The seat file text Manta writes. */
+export const renderSeat = ({ brief, addedAt, addedBy }) => `---\nadded_at: ${new Date(addedAt).toISOString()}\nadded_by: ${addedBy}\n---\n${String(brief ?? "").trim()}\n`;
+
+// ---- the fleet counters and the refresh routine (§5.3, §5.4) ----
+const FLEET_FILE = ".fleet.json";
+const REVIEWED_MAX = 200;
+
+/** `2026-W48` — the ISO week (UTC) of an instant. */
+export function isoWeekKey(ms) {
+  const d = new Date(ms);
+  const day = (d.getUTCDay() + 6) % 7; // Monday = 0
+  const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day + 3));
+  const yearStart = Date.UTC(thursday.getUTCFullYear(), 0, 1);
+  const week = Math.floor((thursday.getTime() - yearStart) / (7 * 86_400_000)) + 1;
+  return `${thursday.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+/** The day of the month (1–28) a slug's monthly refresh runs: spread by a hash of the slug, so agents don't refresh together. */
+export function refreshDay(slug) {
+  return 1 + (createHash("sha256").update(String(slug)).digest().readUInt32BE(0) % 28);
+}
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The "since your last visit" lines of the Fleet page (spec §6.4): fixed templates over what the stores hold, at most six, no model.
+ * `jobs`: specialist job records; `changes`: change records; `opts.level`: the user's current "Change an agent" level;
+ * `opts.answered`: how many questions the user answered since; `opts.projectNameOf(job)`: the project's name or null.
+ */
+export function fleetRecap(jobs, changes, since, { level = null, answered = 0, projectNameOf = () => null } = {}) {
+  const lines = [];
+  const handed = (jobs ?? []).filter((j) => j.requestedBy === "manta" && !j.continues && (j.createdAt ?? 0) >= since).length;
+  if (handed > 0) lines.push(`Manta handed ${plural(handed, "request")} to agents`);
+  const count = (list, keyOf) => {
+    const m = new Map();
+    for (const j of list) m.set(keyOf(j), (m.get(keyOf(j)) ?? 0) + 1);
+    return m;
+  };
+  const finishedJobs = (jobs ?? []).filter((j) => j.status === "done" && (j.finishedAt ?? 0) >= since);
+  const finished = new Map();
+  for (const j of finishedJobs) {
+    const key = `${j.agentName || "An agent"}\u0000${projectNameOf(j) ?? ""}`;
+    finished.set(key, (finished.get(key) ?? 0) + 1);
+  }
+  for (const [key, n] of finished) {
+    const [agent, project] = key.split("\u0000");
+    lines.push(`${agent} finished ${plural(n, "task")}${project ? ` in ${project}` : ""}`);
+  }
+  for (const [agent, n] of count((jobs ?? []).filter((j) => j.status === "failed" && (j.finishedAt ?? 0) >= since), (j) => j.agentName || "An agent")) lines.push(`${agent} failed ${plural(n, "task")}`);
+  const changeLines = [];
+  for (const r of changes ?? []) {
+    if (r.state === "applied" && (r.decidedAt ?? 0) >= since) {
+      const by = r.decidedBy === "click" ? "you approved it" : `your setting: ${LEVEL_TITLES[level] ?? "Auto"}`;
+      changeLines.push([r.decidedAt, `${r.agentName} was changed (${by})`]);
+    } else if (r.state === "pending" && baseOf(r) >= since) {
+      changeLines.push([baseOf(r), `${r.agentName} is waiting for your click`]);
+    }
+  }
+  for (const [, text] of changeLines.sort((a, b) => a[0] - b[0])) lines.push(text);
+  if (answered > 0) lines.push(`${plural(answered, "question")} answered`);
+  return lines.slice(0, 6);
+}
+
 
 /** A refusal whose message is a sentence meant for the person at the screen (HTTP 400 on /rpc). */
 export class AgentError extends Error {
@@ -543,6 +659,7 @@ const MECHANICS = [
   "- For a teammate's work use `agent_handoff`, not the generic `delegate` tool; if a handoff is refused, do not retry it through `delegate`.",
   "- To send a fix round to a specialist's finished task (same branch), pass `continueJob: <jobId>`.",
   `- When a result carries a "${DECISION_MARKER}" block (written by the server), that task ended because it needs the user's decision. Put it to the user yourself in ONE question call, all the questions of that turn at once, with the recommended option first, using the block's options; if it says "Concern:", state that concern plainly. Never answer it on the user's behalf, and don't pick an option because you agree. Once the user answers, send the answer back to the same task with \`agent_handoff\` and \`continueJob: <jobId>\`.`,
+  "- A teammate's question is shown to the user as a card in this chat; never ask it again or answer it. The server sends the answer to the task.",
   "- In plan mode, don't hand off code changes; propose them.",
   "- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards. When you draft an agent yourself, write what the user asked for; make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
   "- When a \"Routing note\" line in your team section says an agent's routing line mentions an agent that doesn't exist, tell the user in one line and offer to fix it: a small edit they dictate (`agent_change`), or a rework through @architect. Never change an agent until the user says so.",
@@ -734,7 +851,7 @@ async function readJsonOptional(fs, path) {
  * @param {(p:{id:string,sessionID:string,slug:string|null})=>void} [deps.publish]  the `agentChange` hint, called after a change record is persisted
  * @param {()=>Promise<string[]>} [deps.listApprovedModels]  the Sub-approved models as `provider/model` keys; throws (or is empty) when they can't be checked
  * @param {object} [deps.research]      { getSource(childSessionID, sourceId) → {text,url,finalUrl,private}|null } — the Architect's stored sources (Phase 5A)
- * @param {object} [deps.library]       { lookup({project, refs}) → [{ref, entry|null}] } — the research library, read by the server to check what a fit check rests on
+ * @param {object} [deps.library]       { lookup({project, refs}) → [{ref, entry|null}], usedBy(rootJobId) } — the research library, read by the server to check what a fit check rests on
  * @param {(p:{id:string,sessionID:string,slug:string|null,origin:object})=>void} [deps.publish]  (as above; the payload carries the change's origin)
  */
 export function createAgentsEngine({
@@ -758,6 +875,12 @@ export function createAgentsEngine({
   listApprovedModels = null,
   research = null,
   library = null,
+  taskQuestions = null, // agent screens: the open questions of tasks (`hasOpen`, `listOpen`, `openCountFor`, `answer`, `dismiss`)
+  countProjectPages = null, // (projectSlug) → knowledge pages of that project (a count only); slow or failing reads as unknown
+  countTimeoutMs = 500,
+  sharingOf = null, // (projectSlug) → "share-and-read" | "read-only" | "private": what a seat's memory scope reads
+  routines = null, // the routines engine: createInternal / update / remove / get — the monthly refresh routines
+  onFleetChanged = () => {}, // a hint that the fleet read model changed (the Fleet page refetches)
   createScanner = createSecretScanner,
   loadSecretsStrict: loadSecretsStrictDep = loadSecretsStrict,
   now = Date.now,
@@ -769,6 +892,7 @@ export function createAgentsEngine({
   const syncLock = createMutex();
   const chatLock = createMutex();
   let lastStamp = null;
+  let lastRefreshKey = null; // the slugs of the agents the refresh routines were last reconciled for
   // handoff invocations already used (messageID + callID): a replayed tool call is refused. Oldest forgotten first.
   const consumed = new Map();
   const consume = (key) => {
@@ -784,6 +908,44 @@ export function createAgentsEngine({
       return new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
     } catch {
       return new Set();
+    }
+  }
+
+  // ---- seats: files under <agent>/seats/, read and written without ever following a link ----
+
+  /** The seat folder of an agent folder, or null when it is absent or not a plain folder. */
+  async function seatsDirOf(dir) {
+    try {
+      const st = await fs.lstat(join(dir, "seats"));
+      return st.isDirectory() ? join(dir, "seats") : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The project slugs an agent is seated in (a `readdir`; hidden names and non-`.md` files are not seats). */
+  async function seatSlugsOf(dir) {
+    const seatsDir = await seatsDirOf(dir);
+    if (!seatsDir) return [];
+    try {
+      return (await fs.readdir(seatsDir)).filter((n) => n.endsWith(".md") && !n.startsWith(".")).map((n) => n.slice(0, -3)).filter((n) => PROJECT_RE.test(n)).sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** `{ text, mtimeMs }` of a seat file, or null — a link (folder or file) is never read. */
+  async function readSeatFile(dir, project) {
+    if (!PROJECT_RE.test(project)) return null;
+    try {
+      const seatsDir = await seatsDirOf(dir);
+      if (!seatsDir) return null;
+      const file = join(seatsDir, `${project}.md`);
+      const st = await fs.lstat(file);
+      if (!st.isFile()) return null;
+      return { text: await fs.readFile(file, "utf-8"), mtimeMs: st.mtimeMs };
+    } catch {
+      return null;
     }
   }
 
@@ -856,6 +1018,7 @@ export function createAgentsEngine({
         useWhen: null,
         notFor: null,
         notice: null,
+        seats: [],
       };
       const claim = await readOptional(fs, join(dir, CLAIM_FILE));
       if (claim != null) {
@@ -902,14 +1065,19 @@ export function createAgentsEngine({
       if (slug === LEAD_SLUG && parsed.meta.role !== "lead") notice = COLLISION_NOTICE;
       else if (slug === ARCHITECT_SLUG && parsed.meta.role !== "architect") notice = ARCHITECT_COLLISION_NOTICE;
       else if (sourceNotes.length > 0) notice = sourceNotes.length === 1 ? sourceNotes[0] : `${sourceNotes[0]} (and ${sourceNotes.length - 1} more)`;
-      entries.push({ slug, dir, meta: parsed.meta, body: parsed.body, skills, info: { ...info, ...publicMeta, notice } });
+      // only a specialist has seats: the lead and the Architect work everywhere
+      const seats = publicMeta.role === "specialist" ? await seatSlugsOf(dir) : [];
+      entries.push({ slug, dir, meta: parsed.meta, body: parsed.body, skills, info: { ...info, ...publicMeta, notice, seats } });
     }
     return { entries, stamp, claims };
   }
 
   /** Compile every valid agent into `.compiled.md` and the OpenCode config. Throws a sentence on failure. */
-  function sync() {
-    return syncLock.runExclusive(() => syncLocked());
+  async function sync() {
+    const out = await syncLock.runExclusive(() => syncLocked());
+    // every team agent has its monthly refresh routine (agent screens §5.4); never a reason for a sync to fail
+    await reconcileRefresh().catch((e) => log.warn?.(`[agents] refresh routines: ${e?.message ?? e}`));
+    return out;
   }
 
   /**
@@ -1003,6 +1171,9 @@ export function createAgentsEngine({
         // the list is still worth showing; the stamp is left stale so the next call tries again
         log.warn?.(`[agents] sync failed: ${e?.message ?? e}`);
       }
+    } else if (teamSlugsKey(entries) !== lastRefreshKey) {
+      // an agent made or removed by a change card: its refresh routine follows
+      await reconcileRefresh().catch((e) => log.warn?.(`[agents] refresh routines: ${e?.message ?? e}`));
     }
     return entries.map((e) => e.info);
   }
@@ -1051,8 +1222,9 @@ export function createAgentsEngine({
   async function seatFor(agent, directory) {
     try {
       const project = await registry?.identify(directory);
-      if (project?.slug && /^[a-z0-9-]+$/.test(project.slug)) {
-        return ((await readOptional(fs, join(agent.dir, "seats", `${project.slug}.md`))) ?? "").trim();
+      if (project?.slug && PROJECT_RE.test(project.slug)) {
+        const file = await readSeatFile(agent.dir, project.slug);
+        return file ? parseSeatText(file.text, file.mtimeMs).brief : "";
       }
     } catch (e) {
       log.warn?.(`[agents] seat brief lookup failed: ${e?.message ?? e}`);
@@ -1140,6 +1312,8 @@ export function createAgentsEngine({
     const refusal = await autonomyRefusal({ writer: isolation === "worktree" });
     if (refusal) throw new AgentError(refusal);
 
+    // a task in a project the agent has no seat in seats it there (said on the task card); the request text is never modified
+    const seated = await ensureSeat(agent, directory, "mention");
     const seat = await seatFor(agent, directory);
     const excerpt = await excerptFor(sessionId);
     const architect = isArchitect(agent);
@@ -1157,9 +1331,14 @@ export function createAgentsEngine({
       request: text,
       // the capability stamp (§4.2): only an Architect launched here carries one; a user's mention is never a build hand-off
       ...(architect ? { architect: { mode: "unknown" } } : {}),
+      ...seatStamp(seated),
       ...specialistAutonomy({ writer: isolation === "worktree" }),
     });
-    if (!res?.ok) throw new AgentError(res?.error || "The task couldn't be started");
+    if (!res?.ok) {
+      await undoSeat(seated);
+      throw new AgentError(res?.error || "The task couldn't be started");
+    }
+    await countLaunch(slug, directory);
     return { jobId: res.job.id };
   }
 
@@ -1386,6 +1565,7 @@ export function createAgentsEngine({
       return { ok: true, jobId: res.job.id, agentName: agent.meta.name };
     }
 
+    const seated = await ensureSeat(agent, directory, "handoff");
     const seat = await seatFor(agent, directory);
     const excerpt = await excerptFor(b.sessionID);
     const job = {
@@ -1405,6 +1585,7 @@ export function createAgentsEngine({
       allowPr: false,
       admit,
       ...(architect ? { architect: { mode: roundMode } } : {}),
+      ...seatStamp(seated),
       ...specialistAutonomy({ writer: writerIfNew, handoff: true }),
     };
     let res;
@@ -1418,11 +1599,18 @@ export function createAgentsEngine({
         trustMode = false; // unreadable settings: ask
       }
       res = await delegate.startJobWithApproval({ ...job, tools: WORKTREE_AGENT_GRANTS.map((g) => ({ ...g })), trustMode });
-      if (!res?.ok && (res?.error === "declined" || res?.error === "approval timed out")) return refuse("The user declined the handoff");
+      if (!res?.ok && (res?.error === "declined" || res?.error === "approval timed out")) {
+        await undoSeat(seated);
+        return refuse("The user declined the handoff");
+      }
     } else {
       res = await delegate.startJob(job);
     }
-    if (!res?.ok) return refuse(handoffError(res?.error, "The task couldn't be started"));
+    if (!res?.ok) {
+      await undoSeat(seated);
+      return refuse(handoffError(res?.error, "The task couldn't be started"));
+    }
+    await countLaunch(slug, directory);
     return { ok: true, jobId: res.job.id, agentName: agent.meta.name };
   }
 
@@ -1469,11 +1657,8 @@ export function createAgentsEngine({
   const storeLock = createMutex(); // guards the JSON file only; operations on a record hold syncLock (below)
   const plainRecord = (r) => !!r && typeof r === "object" && typeof r.id === "string" && typeof r.sessionID === "string";
   const clone = (r) => structuredClone(r);
-  const baseOf = (r) => r.releasedAt ?? r.createdAt; // a pending record's click window starts when it was released
-  const isExpired = (r) => r.state === "pending" && now() - baseOf(r) > CHANGE_PENDING_MS;
-  const expiredCopy = (r) => ({ ...r, state: "expired", decidedAt: baseOf(r) + CHANGE_PENDING_MS });
-  // held / applying records (and a failed create that still owns its folder) are the journal: never evicted
-  const isJournal = (r) => r.state === "held" || r.state === "applying" || (r.state === "failed" && r.kind === "create" && r.claimed === true);
+  const isExpired = (r) => isExpiredAt(r, now());
+  const expiredCopy = expiredCopyOf;
   const STORE_UNREADABLE = "Couldn't read the saved agent changes, so nothing was changed; try again";
 
   // Records written before 5A read as chat-origin, mode null, released at creation, no summary or evidence.
@@ -1529,20 +1714,8 @@ export function createAgentsEngine({
   }
   const readChanges = async (opts) => (await readStore(opts)).changes;
 
-  // pending ones nobody clicked in time become `expired`; finished ones go after a week; the cap drops the oldest finished
-  // first and NEVER a journal record
-  function pruneChanges(list) {
-    const t = now();
-    let out = list.map((r) => (isExpired(r) ? expiredCopy(r) : r));
-    out = out.filter((r) => !(TERMINAL_STATES.has(r.state) && t - (r.decidedAt ?? r.createdAt) > CHANGE_KEEP_MS));
-    if (out.length > CHANGE_MAX) {
-      const rank = (r) => (TERMINAL_STATES.has(r.state) ? 0 : 1);
-      const droppable = out.filter((r) => !isJournal(r));
-      const drop = new Set([...droppable].sort((a, b) => rank(a) - rank(b) || a.createdAt - b.createdAt).slice(0, out.length - CHANGE_MAX).map((r) => r.id));
-      out = out.filter((r) => !drop.has(r.id));
-    }
-    return out;
-  }
+  // retention: see `pruneChangeRecords` (pending → expired, the age set, the cap rank; never a journal record)
+  const pruneChanges = (list) => pruneChangeRecords(list, now());
 
   /** Save one record (strict read first). `slots`: the proposal slots, written in the SAME atomic save as the record. */
   function saveRecord(rec, { slots = null } = {}) {
@@ -2317,7 +2490,8 @@ export function createAgentsEngine({
     const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
     const architect = slug === ARCHITECT_SLUG;
     if (architect && !(job.architect && typeof job.architect === "object")) return { refused: NOT_RESEARCHER };
-    return { childSessionID: b.sessionID, agent: slug, architect, project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
+    // `rootJobId`: the task (every round shares it), so what the task relied on can be recorded per task
+    return { childSessionID: b.sessionID, agent: slug, architect, rootJobId: rootJobOf(job), project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
   }
 
   const wsNorm = (t) => String(t ?? "").replace(/\s+/g, " ").trim();
@@ -2431,6 +2605,7 @@ export function createAgentsEngine({
     const bound = await bindArchitect(b, "agent_propose");
     if (bound.refused) return refuse(bound.refused);
     const { job, stamp } = bound;
+    if (hasOpenQuestion(job)) return refuse("Your question to the user is still open. Finish what doesn't depend on it; propose after the answer arrives.");
     const action = typeof raw.action === "string" ? raw.action : "";
     if (action !== "create" && action !== "update") return refuse('action must be "create" or "update"');
     if (!raw.draft || typeof raw.draft !== "object" || Array.isArray(raw.draft)) return refuse("The draft is missing");
@@ -2537,6 +2712,14 @@ export function createAgentsEngine({
    * Pure: what to do with one held record. `jobs`: the strict jobs list (null = unreadable); `policy`: the autonomy policy
    * (null = unreadable). First match wins. `{ action: "stay" | "discard" | "pending" | "apply", reason?, error? }`.
    */
+  function hasOpenQuestion(job) {
+    try {
+      return taskQuestions?.hasOpen?.(rootJobOf(job)) === true;
+    } catch {
+      return false;
+    }
+  }
+
   function decideRelease(rec, { jobs, policy }) {
     if (!Array.isArray(jobs)) return { action: "stay" }; // an unreadable jobs store leaves everything held
     const origin = rec.origin?.kind === "job" ? rec.origin : null;
@@ -2551,7 +2734,8 @@ export function createAgentsEngine({
     const level = autonomy.decide("agent_change", policy);
     if (level === "never") return { action: "discard", error: AGENT_CHANGE_OFF };
     // 4. the round did not end cleanly (a later round replaced it, it didn't finish, it ended asking a question, or it is gone)
-    if (!job || attempt > origin.attempt || job.status !== "done" || job.endedBlocked === true) return { action: "pending", reason: "unfinished" };
+    // (a question of the task still open, being delivered or answered but not yet sent holds everything it proposed: nothing applies under it)
+    if (!job || attempt > origin.attempt || job.status !== "done" || job.endedBlocked === true || hasOpenQuestion(job)) return { action: "pending", reason: "unfinished" };
     // 5. only a build-mode hand-off releases by level
     if (rec.mode !== "build") return { action: "pending", reason: "plan" };
     // 6. power changes
@@ -2813,6 +2997,797 @@ export function createAgentsEngine({
 
   const recover = () => syncLock.runExclusive(() => recoverLocked());
 
+  // -------------------------------------------------------------------------
+  // Agent screens (docs/superpowers/specs/2026-11-26-agents-screens.md): seats, history + restore, the fleet, needs you,
+  // the profile, a task's research and the monthly refresh. Every read is one small file or one jobs-store read.
+  // -------------------------------------------------------------------------
+
+  const fleetChanged = () => {
+    try {
+      onFleetChanged();
+    } catch (e) {
+      log.warn?.(`[agents] couldn't publish a fleet hint: ${e?.message ?? e}`);
+    }
+  };
+  const isRefreshable = (entry) => !!entry && !entry.info.error && entry.info.role === "specialist" && !isArchitect(entry);
+  const teamSlugsKey = (entries) => entries.filter(isRefreshable).map((e) => e.slug).sort().join(",");
+
+  // ---- the counters file (.fleet.json) ----
+
+  const FLEET_UNREADABLE = "Couldn't read the fleet notes, so nothing was changed; try again";
+  const fleetPath = join(root, FLEET_FILE);
+  const fleetLock = createMutex();
+  const emptyFleet = () => ({ version: 1, counts: {}, lastSeenAt: null, reviewed: [], refresh: {} });
+  const plainObject = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+
+  /** The counters. `strict`: a missing file is empty, an unreadable one THROWS (a write never saves over it). Display reads are loose. */
+  async function readFleet({ strict = false } = {}) {
+    let text;
+    try {
+      text = await fs.readFile(fleetPath, "utf-8");
+    } catch (e) {
+      if (e?.code === "ENOENT" || !strict) return emptyFleet();
+      throw new AgentError(FLEET_UNREADABLE);
+    }
+    let doc = null;
+    try {
+      doc = JSON.parse(text);
+    } catch {
+      doc = null;
+    }
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+      if (strict) throw new AgentError(FLEET_UNREADABLE);
+      return emptyFleet();
+    }
+    return {
+      version: 1,
+      counts: plainObject(doc.counts),
+      lastSeenAt: Number.isFinite(doc.lastSeenAt) ? doc.lastSeenAt : null,
+      reviewed: (Array.isArray(doc.reviewed) ? doc.reviewed : []).filter((x) => typeof x === "string"),
+      refresh: plainObject(doc.refresh),
+    };
+  }
+
+  /** read (strict) → `fn(doc)` edits it → atomic write, all under the counters mutex. */
+  function mutateFleet(fn) {
+    return fleetLock.runExclusive(async () => {
+      const doc = await readFleet({ strict: true });
+      const result = await fn(doc);
+      await writeJsonAtomic(fleetPath, `${JSON.stringify(doc, null, 2)}\n`);
+      return result;
+    });
+  }
+
+  /** A task was launched for `slug` in the project owning `directory`: this week's count (best effort). */
+  async function countLaunch(slug, directory) {
+    try {
+      const project = (await registry?.identify(directory))?.slug;
+      if (!project || !PROJECT_RE.test(project)) return;
+      await mutateFleet((doc) => {
+        const week = isoWeekKey(now());
+        const previous = isoWeekKey(now() - 7 * 86_400_000);
+        const kept = {};
+        for (const key of [previous, week]) if (doc.counts[key]) kept[key] = doc.counts[key];
+        const mine = (kept[week] ??= {});
+        const bySlug = (mine[slug] ??= {});
+        bySlug[project] = (Number(bySlug[project]) || 0) + 1;
+        doc.counts = kept;
+      });
+      fleetChanged();
+    } catch (e) {
+      log.warn?.(`[agents] couldn't count a task: ${e?.message ?? e}`);
+    }
+  }
+
+  // ---- projects ----
+
+  /** The registry's projects `[{slug, name}]` (empty when the registry can't say). */
+  async function registryProjects() {
+    try {
+      const list = (await registry?.list?.()) ?? [];
+      return list
+        .filter((p) => p && typeof p.slug === "string" && PROJECT_RE.test(p.slug))
+        .map((p) => ({ slug: p.slug, name: typeof p.displayName === "string" && p.displayName ? p.displayName : typeof p.name === "string" && p.name ? p.name : p.slug }));
+    } catch (e) {
+      log.warn?.(`[agents] couldn't list the projects: ${e?.message ?? e}`);
+      return [];
+    }
+  }
+  const projectNames = async () => new Map((await registryProjects()).map((p) => [p.slug, p.name]));
+
+  // ---- seats ----
+
+  async function countPages(project) {
+    if (typeof countProjectPages !== "function") return null;
+    let timer;
+    try {
+      const n = await Promise.race([
+        Promise.resolve().then(() => countProjectPages(project)),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("too slow")), countTimeoutMs);
+        }),
+      ]);
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    } catch {
+      return null; // unknown: the screen shows a dash
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** What a task of this agent can read in that project (the knowledge tools' own rule, derived — nothing is enforced here). */
+  async function memoryFor(project) {
+    let mode = "private";
+    try {
+      mode = (await sharingOf?.(project)) ?? "private";
+    } catch {
+      mode = "private"; // fail closed
+    }
+    const reads = readsCommons(modeOrPrivate(mode));
+    return [
+      { label: "This project's wiki", access: "read-write", note: "What Manta has learned about this project" },
+      { label: "Your wiki", access: "read", note: "Readable in every project" },
+      { label: "Commons", access: reads ? "read" : "none", note: reads ? "Shared notes from the projects that share" : "This project doesn't read the commons (its sharing is private)" },
+      { label: "Other projects", access: reads ? "read" : "none", note: reads ? "Only the projects that share" : "This project doesn't read other projects" },
+      { label: "Agent know-how", access: "read", note: "Read-only: changed through change cards" },
+      { label: "Research library", access: "read", note: "Shared with every agent; written only through the research tools" },
+    ];
+  }
+
+  async function seatView(agent, project, names) {
+    const file = await readSeatFile(agent.dir, project);
+    if (!file) return null;
+    const parsed = parseSeatText(file.text, file.mtimeMs);
+    return { project, projectName: names.get(project) ?? project, brief: parsed.brief, addedAt: Math.trunc(parsed.addedAt), addedBy: parsed.addedBy, notes: await countPages(project), memory: await memoryFor(project) };
+  }
+
+  async function seatsOf(entry) {
+    if (entry.info.role !== "specialist" || isArchitect(entry)) return [];
+    const names = await projectNames();
+    const out = [];
+    for (const project of await seatSlugsOf(entry.dir)) {
+      const seat = await seatView(entry, project, names);
+      if (seat) out.push(seat);
+    }
+    return out;
+  }
+
+  async function seatAgent(slug) {
+    const agent = await find(typeof slug === "string" ? slug : "");
+    if (!agent) throw new AgentError(`No agent named @${slug}`);
+    if (agent.info.role !== "specialist" || isArchitect(agent)) throw new AgentError(`${agent.info.name} works in every project; it has no seats`);
+    return agent;
+  }
+
+  async function seatProject(project) {
+    const slug = typeof project === "string" ? project : "";
+    if (!PROJECT_RE.test(slug)) throw new AgentError("No project with that id");
+    const known = await registryProjects();
+    if (typeof registry?.list === "function" && !known.some((p) => p.slug === slug)) throw new AgentError("No project with that id");
+    return { slug, name: known.find((p) => p.slug === slug)?.name ?? slug };
+  }
+
+  function briefOf(value) {
+    if (value == null) return "";
+    if (typeof value !== "string") throw new AgentError("The brief must be text");
+    const brief = value.trim();
+    if (brief.length > SEAT_BRIEF_MAX) throw new AgentError(`The brief can be at most ${SEAT_BRIEF_MAX} characters`);
+    return brief;
+  }
+
+  /** Where a seat file goes: the agent's real folder, a real `seats/` folder (made when `create`), a plain file or none. Links are refused. */
+  async function seatWriteTarget(agent, project, { create = false } = {}) {
+    const target = await resolveTarget(agent.slug);
+    if (!target) throw new AgentError(`@${agent.slug} can't be edited safely; fix it by hand`);
+    const seatsDir = join(target.dir, "seats");
+    try {
+      const st = await fs.lstat(seatsDir).catch((e) => (e?.code === "ENOENT" ? null : Promise.reject(e)));
+      if (st && !st.isDirectory()) throw new AgentError(SEAT_UNSAFE);
+      if (!st && create) await fs.mkdir(seatsDir);
+      const file = join(seatsDir, `${project}.md`);
+      const fst = st || create ? await fs.lstat(file).catch((e) => (e?.code === "ENOENT" ? null : Promise.reject(e))) : null;
+      if (fst && !fst.isFile()) throw new AgentError(SEAT_UNSAFE);
+      return { file, seatsDir, exists: !!fst, mtimeMs: fst?.mtimeMs ?? 0 };
+    } catch (e) {
+      if (e instanceof AgentError) throw e;
+      throw writeFailed(e);
+    }
+  }
+
+  async function writeSeat(file, seat) {
+    try {
+      await writeFileAtomic(file, renderSeat(seat));
+    } catch (e) {
+      throw writeFailed(e);
+    }
+  }
+
+  async function seatAdd(input) {
+    const seat = await syncLock.runExclusive(async () => {
+      const agent = await seatAgent(input?.slug);
+      const project = await seatProject(input?.project);
+      const brief = briefOf(input?.brief);
+      const t = await seatWriteTarget(agent, project.slug, { create: true });
+      if (t.exists) throw new AgentError(`${agent.info.name} already has a seat in ${project.name}; edit its brief instead`);
+      await writeSeat(t.file, { brief, addedAt: now(), addedBy: "user" });
+      return seatView(agent, project.slug, new Map([[project.slug, project.name]]));
+    });
+    fleetChanged();
+    return seat;
+  }
+
+  async function seatSet(input) {
+    const seat = await syncLock.runExclusive(async () => {
+      const agent = await seatAgent(input?.slug);
+      const project = await seatProject(input?.project);
+      const brief = briefOf(input?.brief);
+      const t = await seatWriteTarget(agent, project.slug);
+      if (!t.exists) throw new AgentError(`${agent.info.name} has no seat in ${project.name}`);
+      const current = parseSeatText(await readOptional(fs, t.file), t.mtimeMs);
+      await writeSeat(t.file, { brief, addedAt: current.addedAt, addedBy: current.addedBy });
+      return seatView(agent, project.slug, new Map([[project.slug, project.name]]));
+    });
+    fleetChanged();
+    return seat;
+  }
+
+  async function seatRemove(input) {
+    await syncLock.runExclusive(async () => {
+      const agent = await seatAgent(input?.slug);
+      const project = await seatProject(input?.project);
+      const t = await seatWriteTarget(agent, project.slug);
+      if (!t.exists) throw new AgentError(`${agent.info.name} has no seat in ${project.name}`);
+      const removed = join(t.seatsDir, ".removed");
+      try {
+        const st = await fs.lstat(removed).catch((e) => (e?.code === "ENOENT" ? null : Promise.reject(e)));
+        if (st && !st.isDirectory()) throw new AgentError(SEAT_UNSAFE);
+        if (!st) await fs.mkdir(removed);
+        await fs.rename(t.file, join(removed, `${project.slug}-${now()}.md`)); // moved, never deleted
+      } catch (e) {
+        if (e instanceof AgentError) throw e;
+        throw writeFailed(e);
+      }
+    });
+    fleetChanged();
+    return { ok: true };
+  }
+
+  /**
+   * A task is about to start in `directory`: give the specialist a seat in the project that owns it, when it has none. Returns
+   * `{ project, projectName, created, file }`, or null (no project, the lead / the Architect, or the write failed — never a reason
+   * to refuse the task).
+   */
+  async function ensureSeat(agent, directory, addedBy) {
+    if (agent.info.role !== "specialist" || isArchitect(agent)) return null;
+    try {
+      const project = (await registry?.identify(directory))?.slug;
+      if (!project || !PROJECT_RE.test(project)) return null;
+      return await syncLock.runExclusive(async () => {
+        const t = await seatWriteTarget(agent, project, { create: true });
+        const name = (await projectNames()).get(project) ?? project;
+        if (t.exists) return { project, projectName: name, created: false, file: t.file };
+        await writeSeat(t.file, { brief: "", addedAt: now(), addedBy });
+        return { project, projectName: name, created: true, file: t.file };
+      });
+    } catch (e) {
+      log.warn?.(`[agents] couldn't seat @${agent.slug}: ${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  /** The seat this launch made is taken back when the launch itself was refused. */
+  async function undoSeat(seat) {
+    if (seat?.created) await fs.rm(seat.file, { force: true }).catch(() => {});
+  }
+  const seatStamp = (seat) => (seat?.created ? { seatAdded: { project: seat.project, projectName: seat.projectName } } : {});
+
+  // ---- history + restore ----
+
+  /** The records about one agent, newest first, at most 50. An unclicked proposal reads as expired. */
+  async function history(slug) {
+    if (typeof slug !== "string" || !SLUG_RE.test(slug)) throw new AgentError(`No agent named @${slug}`);
+    const t = now();
+    return (await readChanges())
+      .filter((r) => r.slug === slug)
+      .map((r) => (isExpiredAt(r, t) ? expiredCopyOf(r) : r))
+      .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1))
+      .slice(0, 50)
+      .map(wire);
+  }
+
+  /**
+   * Put an agent back to the version before a recorded change (spec §5.2). The press is the approval. The old file is validated like
+   * any new one before anything is written; a refusal creates no record.
+   */
+  async function restore(id) {
+    let rec;
+    await syncLock.runExclusive(async () => {
+      await requireChangeAllowed();
+      const src = typeof id === "string" && id ? (await readChanges({ strict: true })).find((r) => r.id === id) : null;
+      if (!src) throw new AgentError(CHANGE_GONE);
+      if (src.kind !== "update" || typeof src.before !== "string" || !src.slug) throw new AgentError("Only a change to an existing agent can be restored");
+      if (src.state !== "applied" && src.state !== "undone") throw new AgentError("Only a change that was applied or undone can be restored");
+      const target = await resolveTarget(src.slug);
+      if (!target) throw new AgentError(`@${src.slug} no longer exists`);
+      const snap = await readAgentSnapshot(src.slug);
+      if (!snap) throw new AgentError(`@${src.slug} can't be edited safely; fix it by hand`);
+      if (snap.text === src.before) throw new AgentError("Already at that version");
+      // the old file is old data: it must still be a valid agent file, and an Architect's sources must still be safe
+      const parsed = parseAgentMd(src.before);
+      if (!parsed.ok) throw new AgentError(`That version can't be read any more: ${parsed.error}`);
+      if (src.slug === ARCHITECT_SLUG && parsed.meta.role === "architect") {
+        const notes = parsed.meta.sourceNotes ?? [];
+        if (notes.length > 0) throw new AgentError(`That version can't be read any more: ${notes[0]}`);
+        const refused = await checkSourceCredentials(parsed.meta.sources ?? []);
+        if (refused) throw new AgentError(refused);
+      }
+      rec = normalizeRecord({
+        id: `ach_${randomBytes(8).toString("hex")}`,
+        kind: "update",
+        slug: src.slug,
+        agentName: target.entry.info.name,
+        sessionID: "",
+        messageID: "",
+        callID: "",
+        state: "pending",
+        needsClick: false,
+        reason: null,
+        before: snap.text,
+        after: src.before,
+        createdAt: now(),
+        decidedAt: null,
+        error: null,
+        origin: { kind: "restore", fromChangeId: src.id },
+        summary: "Restored an earlier version",
+      });
+      try {
+        await applyLocked(rec, "click");
+      } catch (e) {
+        // the write failed and nothing was kept: the record says so instead of waiting for a click nobody asked for
+        rec.state = "discarded";
+        rec.error = e instanceof AgentError ? e.message : "Couldn't write the agent file; try again";
+        rec.decidedAt = now();
+        await saveRecord(rec).catch(() => {});
+        throw e;
+      }
+      await saveRecord(rec);
+    });
+    publishChange(rec);
+    fleetChanged();
+    return wire(rec);
+  }
+
+  // ---- reading the stores for the fleet, needs you and the profile ----
+
+  const slugOfJob = (job) => (typeof job?.agent === "string" && job.agent.startsWith(AGENT_PACKAGE_PREFIX) ? job.agent.slice(AGENT_PACKAGE_PREFIX.length) : null);
+
+  /** The specialist jobs (the raw records: no progress reads). An unreadable store is "no tasks", never an error on a display read. */
+  async function readSpecialistJobs() {
+    try {
+      const jobs = (await (delegate.loadRecords ?? delegate.loadRecordsStrict)?.()) ?? [];
+      return Array.isArray(jobs) ? jobs.filter((j) => j && j.specialist === true) : [];
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the tasks: ${e?.message ?? e}`);
+      return [];
+    }
+  }
+
+  /** Per task (root) its newest round. */
+  function newestRounds(jobs) {
+    const byRoot = new Map();
+    for (const j of jobs) {
+      const key = rootJobOf(j);
+      const cur = byRoot.get(key);
+      const better = !cur || (!!cur.supersededBy && !j.supersededBy) || (!!cur.supersededBy === !!j.supersededBy && (j.createdAt ?? 0) >= (cur.createdAt ?? 0));
+      if (better) byRoot.set(key, j);
+    }
+    return [...byRoot.values()];
+  }
+
+  const projectCache = () => {
+    const cache = new Map();
+    return async (dir) => {
+      if (typeof dir !== "string" || !dir) return null;
+      if (!cache.has(dir)) {
+        let slug = null;
+        try {
+          slug = (await registry?.identify(dir))?.slug ?? null;
+        } catch {
+          slug = null;
+        }
+        cache.set(dir, slug && PROJECT_RE.test(slug) ? slug : null);
+      }
+      return cache.get(dir);
+    };
+  };
+
+  const isReviewable = (job) => job.specialist === true && job.status === "done" && job.isolation === "worktree" && Number(job.filesChanged) > 0 && slugOfJob(job) !== ARCHITECT_SLUG;
+  const WEEK_MS = 7 * 86_400_000;
+  const ago = (ms) => {
+    const d = Math.max(0, now() - ms);
+    if (d < 3_600_000) return `${Math.max(1, Math.floor(d / 60_000))}m ago`;
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
+    return `${Math.floor(d / 86_400_000)}d ago`;
+  };
+  const openCountOf = (job) => {
+    try {
+      return Number(taskQuestions?.openCountFor?.(rootJobOf(job))) || 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  function cellFor(job, reviewed) {
+    const at = job.finishedAt ?? job.createdAt ?? 0;
+    const base = { jobId: job.id, title: typeof job.name === "string" ? job.name : "", at };
+    const questions = openCountOf(job);
+    if (job.status === "running" || job.status === "paused") {
+      const steps = stepsOf(job.jobProgress ?? {});
+      const parts = [steps ? `${steps.done}/${steps.total}` : null, questions > 0 ? plural(questions, "question") : null].filter(Boolean);
+      return { ...base, state: "working", detail: parts.length > 0 ? parts.join(" · ") : job.status === "paused" ? "Paused" : "Working" };
+    }
+    if (questions > 0) return { ...base, state: "needs-you", detail: plural(questions, "question") };
+    if (isReviewable(job) && !reviewed.has(job.id)) return { ...base, state: "needs-you", detail: `${plural(Number(job.filesChanged), "file")} changed` };
+    if (now() - at > WEEK_MS) return { ...base, state: "idle", detail: `last task ${Math.floor((now() - at) / 86_400_000)}d ago` };
+    if (job.status === "failed") return { ...base, state: "failed", detail: String(job.error ?? "").split("\n")[0].trim().slice(0, 120) || "Failed" };
+    if (job.status === "stopped") return { ...base, state: "failed", detail: "Stopped" };
+    return { ...base, state: "done", detail: Number(job.filesChanged) > 0 ? `${plural(Number(job.filesChanged), "file")} changed` : ago(at) };
+  }
+
+  async function answeredSince(since) {
+    try {
+      const doc = JSON.parse(await fs.readFile(join(root, ".questions.json"), "utf-8"));
+      return (Array.isArray(doc?.questions) ? doc.questions : []).filter((q) => q?.state === "answered" && (q.answeredAt ?? 0) >= since).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  async function agentChangeLevel() {
+    try {
+      return autonomy.decide("agent_change", await autonomyPolicy());
+    } catch {
+      return null;
+    }
+  }
+
+  /** The Fleet page: agents × projects, this week's counts, and the recap since the last visit. */
+  async function fleet() {
+    const t = now();
+    const { entries } = await scan();
+    const rowsOf = entries.filter(isRefreshable);
+    const names = await projectNames();
+    const jobs = await readSpecialistJobs();
+    const projectOf = projectCache();
+    const doc = await readFleet();
+    const reviewed = new Set(doc.reviewed);
+    const week = doc.counts[isoWeekKey(t)] ?? {};
+
+    const rounds = newestRounds(jobs);
+    const cellsByRow = new Map(); // slug → project → newest cell source
+    for (const job of rounds) {
+      const slug = slugOfJob(job);
+      const project = await projectOf(job.parentDirectory);
+      if (!slug || !project) continue;
+      const mine = cellsByRow.get(slug) ?? new Map();
+      const cur = mine.get(project);
+      const running = (j) => j.status === "running" || j.status === "paused";
+      if (!cur || (running(job) && !running(cur)) || (running(job) === running(cur) && (job.createdAt ?? 0) > (cur.createdAt ?? 0))) mine.set(project, job);
+      cellsByRow.set(slug, mine);
+    }
+
+    const columns = new Set();
+    for (const e of rowsOf) for (const p of e.info.seats ?? []) columns.add(p);
+    for (const [, mine] of cellsByRow) for (const [project, job] of mine) if (now() - (job.finishedAt ?? job.createdAt ?? 0) <= WEEK_MS || job.status === "running" || job.status === "paused") columns.add(project);
+    const projects = [...columns].map((slug) => ({ slug, name: names.get(slug) ?? slug })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+    let total = 0;
+    const rows = rowsOf.map((e) => {
+      const seats = e.info.seats ?? [];
+      const cells = {};
+      for (const { slug: project } of projects) {
+        const job = cellsByRow.get(e.slug)?.get(project);
+        cells[project] = job ? cellFor(job, reviewed) : seats.includes(project) ? { jobId: "", title: "", at: 0, state: "idle", detail: "no tasks yet" } : null;
+      }
+      const tasksThisWeek = Object.values(plainObject(week[e.slug])).reduce((a, n) => a + (Number(n) || 0), 0);
+      total += tasksThisWeek;
+      return { slug: e.slug, name: e.info.name, color: e.info.color ?? null, seats, cells, tasksThisWeek };
+    });
+
+    const since = doc.lastSeenAt ?? t - 86_400_000;
+    const dirNames = new Map();
+    for (const j of jobs) if (typeof j.parentDirectory === "string" && !dirNames.has(j.parentDirectory)) dirNames.set(j.parentDirectory, names.get(await projectOf(j.parentDirectory)) ?? null);
+    const lines = fleetRecap(jobs, await readChanges(), since, { level: await agentChangeLevel(), answered: await answeredSince(since), projectNameOf: (j) => dirNames.get(j.parentDirectory) ?? null });
+    return { asOf: t, projects, rows, week: { tasks: total }, recap: { since: doc.lastSeenAt, lines } };
+  }
+
+  async function fleetSeen() {
+    await mutateFleet((doc) => {
+      doc.lastSeenAt = now();
+    });
+    return { ok: true };
+  }
+
+  async function needsYou() {
+    const t = now();
+    let questions = [];
+    try {
+      questions = (await taskQuestions?.listOpen?.()) ?? [];
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the open questions: ${e?.message ?? e}`);
+    }
+    const changes = (await readChanges())
+      .filter((r) => r.state === "pending" && !isExpiredAt(r, t))
+      .sort((a, b) => baseOf(b) - baseOf(a))
+      .map(wire);
+    const reviewed = new Set((await readFleet()).reviewed);
+    const projectOf = projectCache();
+    const reviews = [];
+    for (const job of newestRounds(await readSpecialistJobs())) {
+      if (!isReviewable(job) || reviewed.has(job.id)) continue;
+      reviews.push({
+        jobId: job.id,
+        agentSlug: slugOfJob(job),
+        project: await projectOf(job.parentDirectory),
+        name: typeof job.name === "string" ? job.name : "",
+        finishedAt: job.finishedAt ?? job.createdAt ?? 0,
+        filesChanged: Number(job.filesChanged),
+        branch: typeof job.branch === "string" ? job.branch : null,
+        resultText: typeof job.result === "string" ? job.result.slice(0, 2000) : "",
+      });
+    }
+    reviews.sort((a, b) => b.finishedAt - a.finishedAt);
+    return { questions, changes, reviews, count: questions.length + changes.length + reviews.length };
+  }
+
+  async function reviewDone(jobId) {
+    if (typeof jobId !== "string" || !jobId) throw new AgentError("Say which task is done");
+    await mutateFleet((doc) => {
+      doc.reviewed = [...doc.reviewed.filter((x) => x !== jobId), jobId].slice(-REVIEWED_MAX);
+    });
+    fleetChanged();
+    return { ok: true };
+  }
+
+  const needTaskQuestions = () => {
+    if (!taskQuestions) throw new AgentError("Questions from tasks aren't available on this box yet");
+    return taskQuestions;
+  };
+  async function questions(input) {
+    if (!taskQuestions) return [];
+    const sessionID = typeof input?.sessionID === "string" && input.sessionID ? input.sessionID : undefined;
+    return taskQuestions.listOpen({ sessionID });
+  }
+  async function questionAnswer(input) {
+    const res = await needTaskQuestions().answer(typeof input?.id === "string" ? input.id : "", input?.answers);
+    if (!res?.ok) throw new AgentError(res?.error || "Couldn't send your answer");
+    return res.question;
+  }
+  async function questionDismiss(input) {
+    const res = await needTaskQuestions().dismiss(typeof input?.id === "string" ? input.id : "");
+    if (!res?.ok) throw new AgentError(res?.error || "Couldn't dismiss the question");
+    return res.question;
+  }
+
+  async function projects() {
+    return registryProjects();
+  }
+
+  // ---- the profile and a task's research ----
+
+  /** Library entries `[{id, topic}]` → live entries; each one by its id, else its topic (an entry saved again has a new id); gone → "missing". */
+  async function resolveEntries(items, scopes) {
+    const out = [];
+    const seen = new Set();
+    for (const item of items) {
+      let hit = null;
+      for (const ref of [item.id, item.topic]) {
+        if (!ref || hit) continue;
+        for (const project of scopes) {
+          let found = null;
+          try {
+            found = (await library?.lookup?.({ project, refs: [ref] }))?.[0]?.entry ?? null;
+          } catch {
+            found = null;
+          }
+          if (found) {
+            hit = found;
+            break;
+          }
+        }
+      }
+      const entry = hit
+        ? { id: hit.id, topic: hit.topic, sourceCount: Number.isInteger(hit.sourceCount) ? hit.sourceCount : null, ageDays: Number.isInteger(hit.ageDays) ? hit.ageDays : null, status: hit.status === "stale" ? "stale" : "fresh", thin: hit.thin === true }
+        : { id: item.id, topic: item.topic, sourceCount: null, ageDays: null, status: "missing", thin: false };
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      out.push(entry);
+    }
+    return out;
+  }
+  const basisItems = (rec) => (Array.isArray(rec?.basis) ? rec.basis : []).filter((b) => b && typeof b.id === "string").map((b) => ({ id: b.id, topic: typeof b.topic === "string" ? b.topic : "" }));
+
+  async function routineState(id) {
+    try {
+      const got = await routines.get(id);
+      const routine = got?.routine ?? got;
+      return { exists: !!routine, enabled: routine?.enabled === true };
+    } catch (e) {
+      if (e?.rpcStatus === 404) return { exists: false, enabled: false };
+      throw new AgentError("Couldn't read the refresh setting; try again");
+    }
+  }
+
+  async function refreshOf(entry) {
+    if (!routines || !isRefreshable(entry)) return { enabled: false, routineId: null };
+    const id = (await readFleet()).refresh[entry.slug];
+    if (!id) return { enabled: true, routineId: null }; // provisioned on the next sync
+    const state = await routineState(id).catch(() => ({ exists: false, enabled: false }));
+    return { enabled: state.exists && state.enabled, routineId: id };
+  }
+
+  async function profile(slug) {
+    const entry = await find(typeof slug === "string" ? slug : "");
+    if (!entry) throw new AgentError(`No agent named @${slug}`);
+    const seats = await seatsOf(entry);
+    const records = (await readChanges()).filter((r) => r.slug === entry.slug);
+    const applied = records.filter((r) => r.state === "applied").sort((a, b) => (b.decidedAt ?? b.createdAt) - (a.decidedAt ?? a.createdAt));
+    const made = records.filter((r) => r.kind === "create").sort((a, b) => a.createdAt - b.createdAt)[0];
+    const builtBy = entry.info.builtIn ? "built-in" : made?.origin?.kind === "job" ? "architect" : made?.origin?.kind === "chat" ? "manta" : "user";
+    const items = applied.flatMap(basisItems);
+    return {
+      info: entry.info,
+      seats,
+      lastChangedAt: applied.length > 0 ? (applied[0].decidedAt ?? applied[0].createdAt) : null,
+      builtBy,
+      refresh: await refreshOf(entry),
+      research: await resolveEntries(items, seats.length > 0 ? seats.map((s) => s.project) : [null]),
+    };
+  }
+
+  async function taskResearch(input) {
+    const jobId = typeof input === "string" ? input : typeof input?.jobId === "string" ? input.jobId : "";
+    const job = jobId ? (await readSpecialistJobs()).find((j) => j.id === jobId) : null;
+    if (!job) throw new AgentError("That task no longer exists");
+    const rootId = rootJobOf(job);
+    let used = [];
+    try {
+      used = (await library?.usedBy?.(rootId)) ?? [];
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read what the task relied on: ${e?.message ?? e}`);
+    }
+    const proposed = (await readChanges()).filter((r) => r.origin?.kind === "job" && r.origin.rootJobId === rootId).flatMap(basisItems);
+    return resolveEntries([...used, ...proposed], [await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "")]);
+  }
+
+  // ---- the monthly refresh (§5.4): one routine per team agent, ON by default ----
+
+  const refreshLock = createMutex();
+  const CHARTER = (slug) => `Refresh @${slug}: check the research it rests on and propose only changes your research supports.`;
+
+  async function makeRefreshRoutine(entry, enabled) {
+    await fs.mkdir(join(entry.dir, "home"), { recursive: true });
+    const made = await routines.createInternal({
+      kind: "agent-refresh",
+      agentSlug: entry.slug,
+      name: `Refresh @${entry.slug}`,
+      cron: `0 9 ${refreshDay(entry.slug)} * *`,
+      enabled,
+      rollUp: true,
+      access: "read",
+      directory: join(entry.dir, "home"),
+    });
+    const id = made?.id ?? made?.routine?.id;
+    if (typeof id !== "string" || !id) throw new Error("the routines engine didn't return an id");
+    await mutateFleet((doc) => {
+      doc.refresh[entry.slug] = id;
+    });
+    return id;
+  }
+
+  /** Every team agent has its refresh routine and nothing else does: made once, never remade, removed with its agent. */
+  function reconcileRefresh() {
+    if (!routines) return Promise.resolve();
+    return refreshLock.runExclusive(async () => {
+      const { entries } = await scan();
+      const team = entries.filter(isRefreshable);
+      const live = new Set(team.map((e) => e.slug));
+      const doc = await readFleet({ strict: true });
+      for (const [slug, id] of Object.entries(doc.refresh)) {
+        if (live.has(slug)) continue;
+        try {
+          await routines.remove(id);
+          await mutateFleet((d) => {
+            delete d.refresh[slug];
+          });
+        } catch (e) {
+          log.warn?.(`[agents] couldn't remove the refresh routine of @${slug}: ${e?.message ?? e}`); // tried again at the next sync
+        }
+      }
+      for (const entry of team) {
+        if (doc.refresh[entry.slug]) continue;
+        try {
+          await makeRefreshRoutine(entry, true);
+        } catch (e) {
+          log.warn?.(`[agents] couldn't make the refresh routine of @${entry.slug}: ${e?.message ?? e}`);
+        }
+      }
+      lastRefreshKey = teamSlugsKey(entries);
+      fleetChanged();
+    });
+  }
+
+  async function refreshSet(input) {
+    if (typeof input?.enabled !== "boolean") throw new AgentError("Refresh must be on or off");
+    if (!routines) throw new AgentError("Refreshing agents isn't available on this box yet");
+    const slug = typeof input?.slug === "string" ? input.slug : "";
+    const entry = await find(slug);
+    if (!entry) throw new AgentError(`No agent named @${slug}`);
+    if (!isRefreshable(entry)) throw new AgentError(`Refresh applies to team agents; ${entry.info.name} isn't one`);
+    const enabled = input.enabled;
+    const out = await refreshLock.runExclusive(async () => {
+      const id = (await readFleet({ strict: true })).refresh[slug];
+      const state = id ? await routineState(id) : { exists: false, enabled: false };
+      if (id && state.exists) {
+        if (state.enabled !== enabled) await routines.update(id, { enabled });
+        return { enabled, routineId: id };
+      }
+      if (id && !enabled) return { enabled: false, routineId: id }; // gone and staying Off
+      return { enabled, routineId: await makeRefreshRoutine(entry, enabled) };
+    });
+    fleetChanged();
+    return out;
+  }
+
+  /** The hidden workspace the refresh tasks live in. */
+  async function ensureAgentsSpace(cwd) {
+    const exists = async () => ((await tmux.listProjects()) ?? []).some((p) => p.tmuxSession === AGENTS_TMUX_SESSION);
+    if (await exists()) return;
+    try {
+      await tmux.newSession({ name: AGENTS_TMUX_SESSION, cwd, windowName: "agents", chatMode: false });
+    } catch (e) {
+      if (!(await exists())) throw new AgentError("Couldn't open the workspace for agent tasks; try again");
+    }
+  }
+
+  /**
+   * The refresh routine's run starts its work here: the Architect's task for one agent, under the run's headless session.
+   * Not the user-facing dispatch (that needs an open chat). Returns `{ jobId }`; a refusal is a sentence.
+   */
+  async function refresh(slug, ctx) {
+    const agent = await find(typeof slug === "string" ? slug : "");
+    if (!agent) throw new AgentError(`No agent named @${slug}`);
+    if (!isRefreshable(agent)) throw new AgentError(`Refresh applies to team agents; ${agent.info.name} isn't one`);
+    await requireChangeAllowed();
+    const architect = (await scan()).entries.find(isArchitect);
+    if (!architect) throw new AgentError("The Architect isn't available");
+    const agentHome = join(agent.dir, "home");
+    await fs.mkdir(agentHome, { recursive: true });
+    await ensureAgentsSpace(agentHome);
+    const charter = CHARTER(agent.slug);
+    // The task runs in the user's home, not in the agent's folder: a task inside Manta's own folders is refused, and the Architect
+    // (read-only) needs no project.
+    const isolation = await effectiveIsolation(architect, home);
+    const res = await delegate.startJob({
+      prompt: withResearchGuidance(buildDispatchPrompt({ text: charter })) + (await architectContextFor(charter)),
+      parentSessionID: ctx?.runSessionId,
+      parentDirectory: home,
+      agent: agentKey(ARCHITECT_SLUG),
+      agentDir: architect.dir,
+      isolation,
+      ...(architect.meta.model ? { model: architect.meta.model } : {}),
+      name: requestTitle(charter, ARCHITECT_SLUG),
+      agentName: architect.meta.name,
+      request: charter,
+      targetProject: AGENTS_TMUX_SESSION,
+      deliverResult: false,
+      architect: { mode: "unknown" },
+      ...specialistAutonomy({ writer: isolation === "worktree" }),
+    });
+    if (!res?.ok) throw new AgentError(res?.error || "The refresh task couldn't be started");
+    return { jobId: res.job.id };
+  }
+
   function openChat(input) {
     const slug = typeof input?.slug === "string" ? input.slug : "";
     return chatLock.runExclusive(async () => {
@@ -2880,5 +3855,23 @@ export function createAgentsEngine({
     apply: applyChange,
     discard: discardChange,
     undo: undoChange,
+    // agent screens
+    history,
+    restore,
+    profile,
+    seatAdd,
+    seatSet,
+    seatRemove,
+    fleet,
+    fleetSeen,
+    needsYou,
+    reviewDone,
+    questions,
+    questionAnswer,
+    questionDismiss,
+    projects,
+    taskResearch,
+    refreshSet,
+    refresh,
   };
 }

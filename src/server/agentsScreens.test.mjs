@@ -45,6 +45,7 @@ async function fixture({ extra = {}, level = "auto", templates = ["dev", "manta"
     pages: { "site-aaaaaaaaaa": 12 },
     sharing: { "site-aaaaaaaaaa": "share-and-read", "api-bbbbbbbbbb": "private" },
     routines: new Map(),
+    routineSeq: 0,
     routineCalls: [],
     library: [],
     used: {},
@@ -95,7 +96,7 @@ async function fixture({ extra = {}, level = "auto", templates = ["dev", "manta"
       routines: {
         createInternal: async (input) => {
           w.routineCalls.push(["create", input]);
-          const id = `rt${w.routines.size + 1}`;
+          const id = `rt${++w.routineSeq}`;
           w.routines.set(id, { id, enabled: true, ...input });
           return w.routines.get(id);
         },
@@ -181,15 +182,13 @@ test(`prune: at the ${CHANGE_MAX} cap the lowest rank goes first (discarded/expi
   const lost = added.map((r) => r.id).filter((id) => !out.includes(id));
   assert.equal(lost.length, 1);
   assert.match(lost[0], /^(discarded|failed|conflict)-/, "a rank-0 record goes first");
-  // far over: every rank-0 record goes before any undone one, every undone one before any applied one
+  // far over: rank 0 goes first, oldest first (the discarded, then the unclaimed failed, then the oldest conflicts); the undone stay
   const many = [...list, ...make("conflict", 50)];
   const left = new Set(pruneChangeRecords(many, T0).map((r) => r.id));
   assert.equal(left.size, CHANGE_MAX);
-  assert.ok(![...left].some((id) => /^(discarded|conflict)-/.test(id) && false));
-  const stillRank0 = [...left].filter((id) => /^(discarded|conflict|failed-)/.test(id) && !id.includes("C-"));
-  const undoneLeft = [...left].filter((id) => id.startsWith("undone-"));
-  assert.equal(stillRank0.length, 0, "all of rank 0 went (the unclaimed failed ones too)");
-  assert.equal(undoneLeft.length, 40, "undone only after rank 0 is gone, and not needed here");
+  assert.ok(![...left].some((id) => id.startsWith("discarded-") || /^failed-/.test(id)), "the discarded and the unclaimed failed ones went first");
+  assert.ok(!left.has("conflict-2") && left.has("conflict-3"), "then the oldest conflicts");
+  assert.equal([...left].filter((id) => id.startsWith("undone-")).length, 40, "undone only after rank 0 is gone");
   for (const j of journal) assert.ok(left.has(j.id), `${j.id} is a journal record`);
   // heavier: evicting into the undone rank takes the OLDEST undone first, then applied
   const heavy = [...make("undone", 120), ...make("applied", 100), ...journal];
@@ -212,7 +211,7 @@ test("history: the agent's own records, every state, newest first, at most 50; c
       change({ id: "a2", state: "undone", createdAt: T0 - 3 * DAY, decidedAt: T0 - 2 * DAY }),
       change({ id: "other", slug: "scout", agentName: "Scout" }),
       change({ id: "c1", kind: "create", before: null, state: "applied", createdAt: T0 - 9 * DAY, decidedAt: T0 - 9 * DAY }),
-      change({ id: "p1", state: "pending", needsClick: true, reason: "ask", createdAt: T0 - 3 * DAY, releasedAt: T0 - 3 * DAY, decidedAt: null }),
+      change({ id: "p1", state: "pending", needsClick: true, reason: "ask", createdAt: T0 - 4 * DAY, releasedAt: T0 - 4 * DAY, decidedAt: null }),
       change({ id: "h1", state: "held", createdAt: T0 - DAY, decidedAt: null }),
     ];
     await f.putChanges(recs);
@@ -304,7 +303,7 @@ test("restore: an Architect version holding a credential in its sources is refus
     const archPath = join(f.root, "architect", "agent.md");
     const current = await readFile(archPath, "utf-8");
     const withSource = (url) => current.replace("isolation: none\n", `isolation: none\nsources:\n  - id: forum\n    name: Forum\n    description: A forum.\n    url: ${url}\n`);
-    const leaky = withSource("https://example.com/search?q={query}&key=hunter2secret");
+    const leaky = withSource("https://example.com/search?q={query}\n    headers:\n      X-Note: hunter2secret");
     assert.notEqual(leaky, current);
     await f.putChanges([change({ id: "leak", slug: "architect", agentName: "Architect", before: leaky, after: current })]);
     await assert.rejects(f.engine.restore("leak"), /seems to hold a credential/);
@@ -317,7 +316,7 @@ test("restore: an Architect version holding a credential in its sources is refus
     assert.equal((await f.store()).changes.length, 1);
     assert.equal(await readFile(archPath, "utf-8"), current);
     // a clean earlier Architect version restores (the user is restoring their own file)
-    const clean = withSource("https://example.com/search?q={query}");
+    const clean = withSource("https://example.com/search?q={query}\n    headers:\n      X-Note: fine");
     await f.putChanges([change({ id: "clean", slug: "architect", agentName: "Architect", before: clean, after: current })]);
     const rec = await f.engine.restore("clean");
     assert.equal(rec.state, "applied");
@@ -426,7 +425,9 @@ test("seats: the notes count is null when the counter is absent, throws or is sl
     await f.engine.init();
     await f.engine.seatAdd({ slug: "dev", project: SITE });
     await f.engine.seatAdd({ slug: "dev", project: API });
-    const [site, api] = (await f.engine.profile("dev")).seats;
+    const seats = (await f.engine.profile("dev")).seats;
+    const site = seats.find((x) => x.project === SITE);
+    const api = seats.find((x) => x.project === API);
     const access = (seat, re) => seat.memory.find((m) => re.test(m.label))?.access;
     assert.equal(access(site, /this project/i), "read-write");
     assert.equal(access(site, /your wiki/i), "read");
@@ -836,7 +837,7 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     assert.equal(f.w.newSessions[0].name, AGENTS_TMUX_SESSION);
     const input = f.w.startJobs[0];
     assert.equal(input.parentSessionID, "ses_run");
-    assert.equal(input.parentDirectory, join(f.root, "dev", "home"));
+    assert.equal(input.parentDirectory, "/h", "the user's home: a task inside Manta's own folders is refused, and the read-only Architect needs no project");
     assert.equal(input.agent, "agent-architect");
     assert.equal(input.targetProject, AGENTS_TMUX_SESSION);
     assert.equal(input.deliverResult, false);
