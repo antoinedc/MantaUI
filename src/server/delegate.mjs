@@ -37,7 +37,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { SPECIALIST_TASK_TOOLS } from "../shared/researchTools.mjs";
-import { decisionLines, decisionFromForm } from "./taskDecision.mjs";
+import { decisionLines, decisionFromForm, waitingLine, TASK_GONE, TASK_PAUSED } from "./taskDecision.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
   readProgressRecord as defaultReadProgress,
@@ -242,9 +242,10 @@ export function buildJobPrompt({ prompt, worktree, branch, facts, ceilingMs, rea
     "progress. At each plan step call progress_report with a one-line label; when\n" +
     "you find or finish something the user would want to know, add it as a\n" +
     (specialist
-      ? "milestone. You cannot wait for an answer: if you need the user to decide, use the\n" +
-        "question tool. It ends your task and the lead puts the question to the user, so put\n" +
-        "what you found and what you recommend in the question itself.\n\n"
+      ? "milestone. If you need the user to decide, use the question tool. It returns at once\n" +
+        "with a note that the question is waiting; keep working on what doesn't depend on the\n" +
+        "answer. The answer arrives later as a message from the user. Put what you found and\n" +
+        'what you recommend in the question itself (mark the option you recommend "(Recommended)").\n\n'
       : "milestone. You cannot ask the user questions from here: if you need a decision,\n" +
         'call progress_report with state "blocked" and a label saying what you need, then\n' +
         "end your turn with the question.\n\n");
@@ -337,6 +338,10 @@ export function buildCompletionText(job) {
   }
   // a task that asked the user (the question tool): the question, written by the server (the lead puts it to the user, never answers it)
   if (status === "done" && job?.endedBlocked === true && job?.decision) lines.push("", ...decisionLines(job.decision));
+  // a task that ended with a question of its own still open: the server says the answer will continue it (the lead never asks it again)
+  if (status === "done" && Array.isArray(job?.waiting) && job.waiting.length > 0) {
+    lines.push("", ...job.waiting.map((q) => waitingLine([q])).filter(Boolean));
+  }
   // an Architect task: what the server did with each proposal, written by the server (the lead relays it, never guesses it)
   const outcome = Array.isArray(job?.architectOutcome) ? job.architectOutcome.filter((l) => typeof l === "string" && l) : [];
   if (outcome.length > 0) lines.push("", ...outcome);
@@ -631,7 +636,8 @@ export function resolveForgeOwner(projects, parentDirectory) {
 // A record written before the session tree may still carry the retired `displayParentID`: nothing reads it, and
 // it is never sent on. `basePermission` is the specialist task's ruleset before autonomy (kept to recompute it on a resume).
 // `projectPatterns` (the project's own block rules) and `selfReport` (only drives a line of the result text) stay on the box too.
-function toWireRecord({ displayParentID: _retired, basePermission: _base, projectPatterns: _pp, selfReport: _sr, ...rest }) {
+// `ending` / `continueAfter` / `gateFailed` are the ending gate's marks (spec 2026-11-26 §4.3): server-only.
+function toWireRecord({ displayParentID: _retired, basePermission: _base, projectPatterns: _pp, selfReport: _sr, ending: _e, continueAfter: _ca, gateFailed: _gf, ...rest }) {
   // (a resume in flight keeps the paused record's own copies in `launch.restore`)
   const restore = rest.launch?.restore;
   if (restore && typeof restore === "object") {
@@ -810,12 +816,30 @@ export async function resolveSessionOwner(sid, deps = {}, { includeSelf = false,
   return { status: "none" };
 }
 
+/**
+ * The task a record belongs to: the first round's job id. Every job stamps `rootJobId` at launch (its own id) and continuations / resumes
+ * copy it; a record from before the field resolves through the Architect's stamp, else its own id. Questions, research usage and the
+ * task side panel are all keyed by it, never by the child session.
+ */
+export function rootJobOf(job) {
+  return job?.rootJobId ?? job?.architect?.rootJobId ?? job?.id;
+}
+
+/** The newest of some records of one run-chain: one nothing supersedes (else any), highest attempt as the tie-break. */
+function newestOf(records) {
+  const live = records.filter((j) => !j.supersededBy);
+  const pool = live.length > 0 ? live : records;
+  return pool.reduce((best, j) => (!best || (j.attempt ?? 1) > (best.attempt ?? 1) || ((j.attempt ?? 1) === (best.attempt ?? 1) && (j.createdAt ?? 0) >= (best.createdAt ?? 0)) ? j : best), null);
+}
+
+/** The newest round of a task. */
+function newestRoundOf(jobs, rootJobId) {
+  return newestOf((Array.isArray(jobs) ? jobs : []).filter((j) => rootJobOf(j) === rootJobId));
+}
+
 /** The newest record for a session: the one nothing supersedes (highest attempt as the tie-break). */
 export function newestRecordFor(jobs, childSessionID) {
-  const all = (Array.isArray(jobs) ? jobs : []).filter((j) => j?.childSessionID === childSessionID);
-  const live = all.filter((j) => !j.supersededBy);
-  const pool = live.length > 0 ? live : all;
-  return pool.reduce((best, j) => (!best || (j.attempt ?? 1) > (best.attempt ?? 1) || ((j.attempt ?? 1) === (best.attempt ?? 1) && (j.createdAt ?? 0) >= (best.createdAt ?? 0)) ? j : best), null);
+  return newestOf((Array.isArray(jobs) ? jobs : []).filter((j) => j?.childSessionID === childSessionID));
 }
 
 /**
@@ -885,8 +909,10 @@ export async function adoptExistingSession(input, deps = {}) {
       // Adoption records work, not windows. Never claim a user-opened holder.
 
       const t = now();
+      const adoptedId = genId();
       const job = {
-        id: genId(),
+        id: adoptedId,
+        rootJobId: adoptedId,
         name,
         prompt,
         model: model ?? null,
@@ -1853,6 +1879,7 @@ export async function sweepDelegateJobs(deps = {}) {
     // posted to its parent. Both are no-ops without their readers injected.
     await reconcileV2Jobs(deps);
     await retryPendingDeliveries(deps);
+    await reconcileTaskQuestions(deps);
 
     const jobs = await load();
     if (jobs.length === 0) return;
@@ -1861,7 +1888,7 @@ export async function sweepDelegateJobs(deps = {}) {
     // Jobs that finished before worktree-less windows were closed on finish still
     // have their window open: close it once (cleanedUp marks it done).
     for (const job of jobs) {
-      if (!isTerminal(job) || job.worktree || job.cleanedUp != null || job.completionDelivery === "pending") continue;
+      if (!isTerminal(job) || job.worktree || job.cleanedUp != null || job.completionDelivery === "pending" || job.completionDelivery === "deferred") continue;
       await withSessionResources(job.childSessionID, async () => {
         // The window of a superseded run belongs to its successor: re-read the LIVE record.
         const live = ((await load()) ?? []).find((j) => j.id === job.id) ?? job;
@@ -1957,7 +1984,7 @@ function applyRetention(jobs, nowMs) {
   // cleanup path; undefined (old records) prunes as before. A record whose
   // result has not been posted to its parent yet is never pruned either.
   // A superseded record's resources belong to its successor: `cleanedUp:false` never keeps it.
-  const keeps = (j) => (j.cleanedUp === false && !j.supersededBy) || j.completionDelivery === "pending";
+  const keeps = (j) => (j.cleanedUp === false && !j.supersededBy) || j.completionDelivery === "pending" || j.completionDelivery === "deferred";
   const isTerm = (j) => j.status === "done" || j.status === "failed" || j.status === "stopped";
   const pruned = new Set();
   for (const j of jobs) {
@@ -2027,14 +2054,28 @@ async function withRunningJob(id, deps, fn, { allowPaused = false } = {}) {
 // proposals its Architect round held and answers with one Outcome line per proposal; those lines are stored on the record
 // BEFORE the result is built and delivered to the parent, so the parent is told what really happened. Never breaks the
 // job's own transition.
+//
+// Then, for EVERY job (not only the Architect's), `afterJobEnded(job)` — the one hook a consumer such as the routines engine uses to settle a run
+// from its task. It runs here, after the Architect's proposals were released, because this is the one place both terminal paths
+// (`finishV2Job` and `stopJob`) go through; `onJobTerminal` is not that place (`stopJob` never calls it, and it runs before the release).
 async function notifyJobEnded(job, deps) {
-  if (typeof deps.onJobEnded !== "function" || !job?.architect) return;
-  try {
-    const ended = await deps.onJobEnded(job);
-    const outcome = Array.isArray(ended?.outcome) ? ended.outcome.filter((l) => typeof l === "string" && l) : [];
-    if (outcome.length > 0) await patchJob(job.id, { architectOutcome: outcome }, deps);
-  } catch (e) {
-    console.warn(`[delegate] onJobEnded failed for ${job.id}:`, e?.message ?? e);
+  if (typeof deps.onJobEnded === "function" && job?.architect) {
+    try {
+      const ended = await deps.onJobEnded(job);
+      const outcome = Array.isArray(ended?.outcome) ? ended.outcome.filter((l) => typeof l === "string" && l) : [];
+      if (outcome.length > 0) await patchJob(job.id, { architectOutcome: outcome }, deps);
+    } catch (e) {
+      console.warn(`[delegate] onJobEnded failed for ${job.id}:`, e?.message ?? e);
+    }
+  }
+  if (typeof deps.afterJobEnded === "function") {
+    try {
+      // (the record as it is now: the Architect's outcome lines are on it)
+      const fresh = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === job.id) ?? job;
+      await deps.afterJobEnded(fresh);
+    } catch (e) {
+      console.warn(`[delegate] afterJobEnded failed for ${job.id}:`, e?.message ?? e);
+    }
   }
 }
 
@@ -2081,7 +2122,7 @@ export async function stopJob(id, deps = {}, { error: stopError } = {}) {
       pauseRequested: false,
       pausedAt: null,
       completionMessageId: manta ? (job.completionMessageId ?? mintMessageId()) : (job.completionMessageId ?? null),
-      completionDelivery: manta ? "pending" : null,
+      completionDelivery: resultDeliveryFor(job, manta),
     };
     jobs[idx] = updated;
     await save(jobs);
@@ -2090,7 +2131,7 @@ export async function stopJob(id, deps = {}, { error: stopError } = {}) {
       kind: "delegate.updated",
       payload: { id: updated.id, status: updated.status, activity: updated.activity },
     });
-    return { ok: true, deliver: manta, stopped: updated };
+    return { ok: true, deliver: updated.completionDelivery === "pending", stopped: updated };
   }, { allowPaused: true });
   if (stopped?.stopped) {
     await notifyJobEnded(stopped.stopped, deps);
@@ -2618,6 +2659,15 @@ export function completionOwnerOf(job) {
   return job?.completionOwner ?? (job?.origin === "subagent" ? "opencode" : "manta");
 }
 
+/**
+ * What a terminal write says about the job's result: not Manta's to post (null), never to be posted (`not-needed`: a refresh task runs under a
+ * headless session nobody reads), or in flight (`pending`). Both terminal writes — `finishV2Job` and `stopJob` — use it.
+ */
+function resultDeliveryFor(job, manta) {
+  if (!manta) return null;
+  return job?.deliverResult === false ? "not-needed" : "pending";
+}
+
 // The running-job index behind `runningJobOwner`: childSessionID → "manta" | "opencode", rebuilt only when the job store
 // file changed (its mtime/size, or any in-process saveJobs) instead of re-reading and parsing the whole store per call —
 // the lookup runs per handoff list, per model request (optimizer policy) and per turn end.
@@ -2997,6 +3047,16 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
     }
   }
 
+  // the questions this task still has waiting for the user (a synchronous read of the question store's picture: nothing under the jobs lock waits on I/O)
+  let waiting = [];
+  if (job.specialist === true && typeof deps.taskQuestions?.waitingFor === "function") {
+    try {
+      waiting = deps.taskQuestions.waitingFor(rootJobOf(job)) ?? [];
+    } catch (e) {
+      console.warn("[delegate] reading a task's waiting questions failed:", e?.message ?? e);
+    }
+  }
+
   let paused = null;
   let guardSkipped = false;
   let segment = null;
@@ -3046,7 +3106,14 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       endReason: outcome.status === "failed" ? endReason : null,
       ...(actions ? { toldActions: actions.toldActions, blockedActions: actions.blockedActions, exceededActions: actions.exceededActions, selfReport: actions.selfReport } : {}),
       completionMessageId: manta ? (live.completionMessageId ?? mintMessageId()) : (live.completionMessageId ?? null),
-      completionDelivery: manta ? "pending" : null,
+      // `deferred`: a finished round that an answer to the task's question will CONTINUE — its result is not posted (the continuation's is the one the
+      // chat gets), and neither is `pending` (so the continuation isn't refused). Only a round that finished well and whose lock this caller
+      // doesn't hold can be deferred (the continuation takes the session's lock itself).
+      completionDelivery:
+        manta && outcome.status === "done" && !resourcesHeld && live.deliverResult !== false && live.continueAfter === true
+          ? "deferred"
+          : resultDeliveryFor(live, manta),
+      ...(outcome.status === "done" && waiting.length > 0 ? { waiting } : {}),
     };
     jobs[idx] = next;
     await save(jobs);
@@ -3082,9 +3149,124 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
     }
   }
   pauseInterrupts.delete(updated.id);
-  if (updated.completionDelivery === "pending") await deliverJobResult(updated.id, deps);
+  let post = updated.completionDelivery === "pending";
+  if (updated.completionDelivery === "deferred") {
+    // the answers go out in ONE continuation: the successor owns the window and worktree, and its result is the one that is posted
+    if (await settleDeferred(updated, deps)) return { ok: true, status: endedAs, continued: true };
+    post = true; // refused: the round reports and cleans up as any other
+  }
+  if (post) await deliverJobResult(updated.id, deps);
   await finishV2Cleanup(updated, deps, { held: resourcesHeld });
   return { ok: true, status: endedAs };
+}
+
+// ---- the ending gate and the deferred round (spec docs/superpowers/specs/2026-11-26-agents-screens.md §4.3) ----
+
+// An inbox item's text, wherever the pinned binary puts it (the e2e prints the shape it saw).
+const inboxItemText = (i) => [i?.text, i?.payload?.text, i?.prompt?.text, i?.payload?.prompt?.text, i?.input?.text].find((t) => typeof t === "string") ?? null;
+const inboxItemIs = (item, steered) => (typeof item?.id === "string" && item.id === steered.messageID) || (inboxItemText(item) !== null && inboxItemText(item) === steered.text);
+
+/**
+ * Take the answers of this task that were steered into its turn but never consumed back out of the child's inbox (each becomes continue-pending in the
+ * question store). Returns whether the task now holds any answer waiting for its round to end. THROWS when the inbox or the store can't be read.
+ * The caller holds `sessionResources(child)`.
+ */
+async function takeBackSteeredAnswers(job, deps) {
+  const tq = deps.taskQuestions;
+  const root = rootJobOf(job);
+  const steered = await tq.pendingSteer(root);
+  if (steered.length > 0) {
+    if (typeof deps.listInbox !== "function") throw new Error("the child's inbox can't be read");
+    const inbox = (await deps.listInbox(job.childSessionID)) ?? [];
+    const cancel = deps.cancelInboxItem ?? deps.oc?.cancelInboxItem;
+    for (const s of steered) {
+      const item = inbox.find((i) => inboxItemIs(i, s));
+      if (!item) continue;
+      if (typeof cancel !== "function") throw new Error("inbox items can't be cancelled");
+      await cancel(job.childSessionID, item.id);
+      await tq.markContinuePending(root, [s.id]);
+    }
+  }
+  return tq.hasContinuePending(root);
+}
+
+/**
+ * Step 1 of the ending gate: `settleV2Job` has decided a specialist's round finished well. Under the session's lock: mark the record `ending` (so nothing
+ * steers into it any more), take back any steered answer still unconsumed in the child's inbox, and mark the record `continueAfter` when the task holds an
+ * answer that is waiting for its round to end. A failed read leaves `ending` set with `gateFailed`: the round finishes as usual and the sweep retries.
+ */
+async function runEndingGate(job, deps) {
+  if (!deps.taskQuestions || !job.childSessionID) return;
+  await withSessionResources(job.childSessionID, async () => {
+    const running = (j) => j.status === "running";
+    if (!(await patchJob(job.id, { ending: true }, deps, { onlyIf: running }))) return;
+    try {
+      if (await takeBackSteeredAnswers(job, deps)) await patchJob(job.id, { continueAfter: true }, deps, { onlyIf: running });
+    } catch (e) {
+      console.warn(`[delegate] the ending gate of ${job.id} could not finish (the sweep will retry):`, e?.message ?? e);
+      await patchJob(job.id, { gateFailed: true }, deps, { onlyIf: running });
+    }
+  });
+}
+
+// Rounds whose answers this process is sending right now: the sweep must not settle one of them a second time (it would read "nothing left to send" and
+// post the result of a round whose continuation is on its way).
+const settlingDeferred = new Set();
+
+/**
+ * Step 2c: send every continue-pending answer of the task with ONE continuation. `true`: they are on their way (the round is `not-needed` and must not
+ * post or clean up). `false`: refused — the questions are open again (the store did that) and the round goes back to `pending`.
+ */
+async function settleDeferred(job, deps) {
+  let continued = false;
+  settlingDeferred.add(job.id);
+  try {
+    continued = (await deps.taskQuestions?.onRoundSettled?.(job))?.continued === true;
+  } catch (e) {
+    console.warn(`[delegate] sending the answers waiting for ${job.id} failed:`, e?.message ?? e);
+  } finally {
+    settlingDeferred.delete(job.id);
+  }
+  await patchJob(job.id, { completionDelivery: continued ? "not-needed" : "pending" }, deps, { onlyIf: (j) => j.completionDelivery === "deferred" });
+  return continued;
+}
+
+/**
+ * Boot and every sweep: what a crash left half done. (1) a round whose gate could not read the inbox is retried; (2) a terminal round left `deferred`
+ * runs steps c and d for itself (a continuation that already exists settles it at once); (3) the question store's own sweep. Never throws.
+ */
+export async function reconcileTaskQuestions(deps = {}) {
+  const tq = deps.taskQuestions;
+  if (!tq) return;
+  const { load = loadJobs } = deps;
+  try {
+    for (const j of ((await load()) ?? []).filter((x) => isTerminal(x) && x.gateFailed === true && !x.supersededBy && completionOwnerOf(x) === "manta")) {
+      await withSessionResources(j.childSessionID, async () => {
+        try {
+          await takeBackSteeredAnswers(j, deps);
+          await patchJob(j.id, { gateFailed: undefined }, deps);
+        } catch (e) {
+          console.warn(`[delegate] retrying the ending gate of ${j.id} failed:`, e?.message ?? e);
+        }
+      });
+    }
+    for (const j of ((await load()) ?? []).filter((x) => isTerminal(x) && x.completionDelivery === "deferred" && !settlingDeferred.has(x.id))) {
+      if (j.supersededBy) {
+        await patchJob(j.id, { completionDelivery: "not-needed" }, deps, { onlyIf: (x) => x.completionDelivery === "deferred" });
+        continue;
+      }
+      if (await settleDeferred(j, deps)) continue;
+      await deliverJobResult(j.id, deps);
+      await finishV2Cleanup(j, deps);
+    }
+  } catch (e) {
+    console.warn("[delegate] reconciling the task questions failed:", e?.message ?? e);
+  }
+  try {
+    await tq.sweep?.();
+  } catch (e) {
+    console.warn("[delegate] the question sweep failed:", e?.message ?? e);
+  }
 }
 
 // A specialist task's told / blocked / exceeded actions, judged against the policy THIS attempt ran under (and the project
@@ -3676,6 +3858,9 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   if (job.launchState !== "running") {
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
   }
+  // A specialist's round that finished well may hold an answer to its own question (steered in, or waiting for the round to end): the gate runs
+  // BEFORE the terminal write so that write can say `deferred` (spec §4.3).
+  if (manta && t.status === "done" && !interrupted && job.specialist === true) await runEndingGate(job, deps);
   await finishV2Job(job, t.status, t.error, deps, { interrupted, resultFallback });
   if (!manta) relayResultFromRetiredParent(job, deps);
   return { settled: true, status: t.status };
@@ -4118,7 +4303,8 @@ async function continueJobRecord(id, input, deps) {
       const t = now();
       // (a successor starts with no told / blocked / exceeded actions or self-report of its own: the previous round's stay on
       // the previous record; the project patterns are inherited — the child keeps the permissions OpenCode gave it at creation)
-      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, decision: _d, ...inherited } = old;
+      // (the ending gate's marks, the seat note and the questions the old round ended waiting on belong to that round alone)
+      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, decision: _d, ending: _en, continueAfter: _ca, gateFailed: _gf, seatAdded: _sa, waiting: _w, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
       const job = {
         ...inherited,
@@ -4127,6 +4313,7 @@ async function continueJobRecord(id, input, deps) {
         id: genId(),
         attempt: (old.attempt ?? 1) + 1,
         continues: old.id,
+        rootJobId: rootJobOf(old),
         prompt: followUp,
         // a lead handoff's fix round: the new title, who asked, and the turn it counts against (else inherited)
         ...(typeof input?.name === "string" && input.name.trim() ? { name: jobNameFor({ name: input.name }, followUp) } : {}),
@@ -4155,7 +4342,8 @@ async function continueJobRecord(id, input, deps) {
         // the Architect's stamp follows the round: the root is copied, the round's own mode is the verified lead call's (else unknown)
         ...(old.architect ? { architect: { rootJobId: old.architect.rootJobId ?? old.id, attempt: (old.attempt ?? 1) + 1, mode: architectModeOf(input?.architect?.mode) } } : {}),
         // a specialist's follow-up also carries the footer again: a task from before it was introduced never saw it
-        launch: { text: old.specialist === true ? `${followUp}\n\n${taskFooter(old.autonomyPolicy)}` : followUp, messageId: mintMessageId(), model: null, continuation: true },
+        // (a caller delivering something it must be able to find again — an answer to a task's question — names the message id)
+        launch: { text: old.specialist === true ? `${followUp}\n\n${taskFooter(old.autonomyPolicy)}` : followUp, messageId: typeof input?.messageID === "string" && input.messageID ? input.messageID : mintMessageId(), model: null, continuation: true },
       };
       inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
       try {
@@ -4208,6 +4396,105 @@ async function continueJobRecord(id, input, deps) {
       inLaunch.delete(job.id);
     }
   });
+}
+
+// ---- deliverToTask: the user's word reaches a task (spec docs/superpowers/specs/2026-11-26-agents-screens.md §4.2) ----
+
+/**
+ * Deliver `text` (a message of the USER's, written by the server: an answer to the task's question, or the news that it was dismissed) to the task whose
+ * first round is `rootJobId`. It first marks the newest round `askedUser` (so a continuation inherits it), then, under the session's lock, reads the LIVE
+ * newest round and decides:
+ *   - running, busy, not `ending` → STEERED into the turn (`{delivery:"steer"}`);
+ *   - running but `ending`, or still idle after one 2 s re-read → `{delivery:"continue-pending"}`: the round ends first and `onRoundSettled` sends it (the
+ *     round is marked `continueAfter`, which its terminal write reads);
+ *   - finished (done / failed / stopped) → `continueJob` (`{delivery:"continue"}`). The lock is RELEASED first: `continueJob` takes it itself and it is not re-entrant;
+ *   - paused / gone → a sentence.
+ * `steerOnly` (a dismissal): never starts a round and never marks the task answered — anything but a steer is `{delivery:"none"}`.
+ * `messageID` is the id the message is sent under, so a crash between sending and recording can be settled from the session.
+ * Never throws; a refusal is `{error: "<sentence>"}`.
+ * @returns {Promise<{delivery: "steer" | "continue" | "continue-pending" | "none"} | {error: string}>}
+ */
+export async function deliverToTask(rootJobId, text, { messageID, steerOnly = false } = {}, deps = {}) {
+  const { load = loadJobs } = deps;
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const what = steerOnly ? "Couldn't tell the task" : "Couldn't send your answer";
+  const steerInto = async (round) => {
+    if (typeof deps.sendChildPrompt !== "function") return { error: `${what}: background jobs are not wired in this server` };
+    try {
+      await deps.sendChildPrompt({ sessionId: round.childSessionID, text, delivery: "steer", ...(messageID ? { messageID } : {}) });
+      return { delivery: "steer" };
+    } catch (e) {
+      return { error: `${what}: ${String(e?.message ?? e)}` };
+    }
+  };
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const peek = newestRoundOf((await load()) ?? [], rootJobId);
+      if (!peek) return { error: TASK_GONE };
+      if (!steerOnly) await patchJob(peek.id, { askedUser: true }, deps);
+
+      const decide = (final) =>
+        withSessionResources(peek.childSessionID, async () => {
+          const live = newestRoundOf((await load()) ?? [], rootJobId);
+          if (!live) return { out: { error: TASK_GONE } };
+          if (live.childSessionID !== peek.childSessionID) return { moved: true }; // a resume swapped the child: lock the new one
+          if (live.status === "paused") return { out: steerOnly ? { delivery: "none" } : { error: TASK_PAUSED } };
+          if (live.status === "running") {
+            if (live.ending) {
+              if (steerOnly) return { out: { delivery: "none" } };
+              await patchJob(live.id, { continueAfter: true }, deps);
+              return { out: { delivery: "continue-pending" } };
+            }
+            // a child that is being handed off is about to be replaced: a steer would land in the predecessor nobody reads. The round goes on in its
+            // successor (its settlement is deferred until the commit), so the answer waits for the round to end like any other.
+            if (deps.deferSettlement?.(live.childSessionID)) {
+              if (steerOnly) return { out: { delivery: "none" } };
+              await patchJob(live.id, { continueAfter: true }, deps);
+              return { out: { delivery: "continue-pending" } };
+            }
+            let busy;
+            try {
+              busy = (await deps.listActiveIds()).includes(live.childSessionID);
+            } catch (e) {
+              return { out: { error: `${what}: couldn't check whether the task is busy (${String(e?.message ?? e)})` } };
+            }
+            if (busy) return { out: await steerInto(live) };
+            if (!final) return { recheck: true };
+            if (steerOnly) return { out: { delivery: "none" } };
+            await patchJob(live.id, { continueAfter: true }, deps);
+            return { out: { delivery: "continue-pending" } };
+          }
+          if (steerOnly) return { out: { delivery: "none" } };
+          return { continueRound: live };
+        });
+
+      let step = await decide(false);
+      if (step.recheck) {
+        await sleep(2000); // (outside the lock: the round may be settling right now)
+        step = await decide(true);
+      }
+      if (step.moved) continue;
+      if (step.out) return step.out;
+      const round = step.continueRound;
+      const res = await continueJob(round.id, { prompt: text, sessionID: round.parentSessionID, requestedBy: "manta", ...(messageID ? { messageID } : {}) }, deps);
+      return res.ok ? { delivery: "continue" } : { error: String(res.error ?? `${what}.`) };
+    }
+    return { error: "The task changed while your answer was being sent; try again." };
+  } catch (e) {
+    return { error: `${what}: ${String(e?.message ?? e)}` };
+  }
+}
+
+/** A milestone on a task's newest round (any state): the server's own notes, "Asked you: …" / "You answered: …". `rootJobId` names the task. */
+export async function addJobMilestone(rootJobId, text, deps = {}) {
+  const { load = loadJobs } = deps;
+  const round = newestRoundOf((await load()) ?? [], rootJobId);
+  if (!round) return false;
+  const at = (deps.now ?? (() => Date.now()))();
+  const next = await patchJob(round.id, (j) => ({ jobProgress: addMilestone(withLivenessDefaults(j).jobProgress, text, at) }), deps);
+  if (next) deps.jobViews?.notify(next.id);
+  return !!next;
 }
 
 // Finish (or end) a continuation a restart / lost response left unresolved. Idempotent; every
@@ -4363,8 +4650,10 @@ export async function startCommandJob(input, deps = {}) {
     const refused = refusal(jobs);
     if (refused) return refused;
     const t = now();
+    const commandId = genId();
     const job = {
-      id: genId(),
+      id: commandId,
+      rootJobId: commandId,
       name,
       prompt: name,
       model: modelString,
@@ -4692,6 +4981,12 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
         : {}),
       // the capability stamp (§4.2): the first job's own id is the root every continuation copies
       ...(architect ? { architect: { rootJobId: jobId, attempt: 1, mode: architectModeOf(architectMode) } } : {}),
+      // the task this round belongs to (agent screens §6.1): its own id for the first round; continuations and resumes copy it
+      rootJobId: jobId,
+      // this launch placed the agent in a project it had no seat in (the run card says so)
+      ...(seatAddedOf(input?.seatAdded) ? { seatAdded: seatAddedOf(input.seatAdded) } : {}),
+      // never post this job's result (a refresh task runs under a headless session nobody reads); inherited by every round
+      ...(input?.deliverResult === false ? { deliverResult: false } : {}),
       ...(typeof input?.agentName === "string" && input.agentName ? { agentName: input.agentName } : {}),
       ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
       // what admission reads later: where the agent works, who asked, in which user turn, and whether it may open a PR
@@ -4763,6 +5058,11 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
   } finally {
     inLaunch.delete(reg.job.id);
   }
+}
+
+/** `{project, projectName}` as the agents engine passes it, or null. */
+function seatAddedOf(v) {
+  return v && typeof v === "object" && typeof v.project === "string" && v.project && typeof v.projectName === "string" ? { project: v.project, projectName: v.projectName } : null;
 }
 
 // The job's record, if it is still the running attempt this launch is for. A stop (or
@@ -5006,6 +5306,10 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
     endReason: null,
     jobProgress: { ...prior.jobProgress, modelState: null },
     decision: undefined, // the question the previous attempt ended with is answered by resuming
+    rootJobId: rootJobOf(job),
+    ending: undefined,
+    continueAfter: undefined,
+    gateFailed: undefined,
     // a specialist's task resumes under the CURRENT settings (recomputed in resumeJob); its previous attempt's told /
     // blocked actions are cleared with the new attempt
     ...(prepared.autonomy
@@ -5406,6 +5710,17 @@ async function handleQuestion(form, deps) {
   if (live && live.root === sessionId) {
     const rec = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === jobId);
     if (rec && rec.status === "running" && rec.specialist === true && completionOwnerOf(rec) === "manta") {
+      // The task's question does not block it (spec 2026-11-26 §4): the form is answered at once with a placeholder and the user's answer arrives
+      // later. A form that forbids typing, a reply that fails or a 4th open question takes today's path below.
+      if (deps.taskQuestions) {
+        let taken = null;
+        try {
+          taken = await deps.taskQuestions.capture(form, rec);
+        } catch (e) {
+          console.warn(`[delegate] capturing the question of ${jobId} failed (taking the old path):`, e?.message ?? e);
+        }
+        if (taken?.captured) return { captured: true };
+      }
       const d = decisionFromForm(form, (deps.now ?? (() => Date.now()))());
       if (d && (await recordDecision(jobId, d, deps))) decision = d;
     }
@@ -5954,6 +6269,16 @@ export function createDelegateEngine(baseDeps) {
     openSession: (id) => openJobSession(id, deps),
     /** `delegate_send`: another round of one of the caller's finished jobs (a NEW record on the same session). */
     continueJob: (id, input) => continueJob(id, input, deps),
+    /** The user's word to a task (an answer, or the news that its question was dismissed), by the task's root id: steered, continued or continue-pending. */
+    deliverToTask: (rootJobId, text, opts) => deliverToTask(rootJobId, text, opts, deps),
+    rootJobOf,
+    /** A milestone on the task's newest round (`rootJobId`). */
+    addJobMilestone: (rootJobId, text) => addJobMilestone(rootJobId, text, deps),
+    /** The question store's engine is created AFTER this one (it needs this engine's functions): hand it over here. */
+    setTaskQuestions: (taskQuestions) => {
+      deps.taskQuestions = taskQuestions;
+    },
+    reconcileTaskQuestions: () => reconcileTaskQuestions(deps),
     stopJob: (id) => stopJob(id, deps),
     deleteJob: (id, opts) => deleteJob(id, deps, opts),
     pauseJob: (id) => pauseJob(id, deps),
@@ -5965,6 +6290,7 @@ export function createDelegateEngine(baseDeps) {
     reconcileV2: async () => {
       await reconcileV2Jobs(deps);
       await retryPendingDeliveries(deps);
+      await reconcileTaskQuestions(deps);
     },
     // Adopt every busy session nothing tracks (see createActiveSessionReconciler). Boot runs it once
     // after reconcileV2, then starts the poller.

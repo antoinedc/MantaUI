@@ -609,7 +609,7 @@ test("buildJobPrompt: a specialist's prompt sends a decision to the question too
   const spec = buildJobPrompt({ ...base, specialist: true });
   assert.match(plain, /then\nend your turn with the question\./);
   assert.match(plain, /When you are done, end with a short summary of what you changed and why\./);
-  assert.match(spec, /use the\nquestion tool\. It ends your task and the lead puts the question to the user, so put\nwhat you found and what you recommend in the question itself\./);
+  assert.match(spec, /If you need the user to decide, use the question tool\. It returns at once\nwith a note that the question is waiting; keep working on what doesn't depend on the\nanswer\. The answer arrives later as a message from the user\. Put what you found and\nwhat you recommend in the question itself \(mark the option you recommend "\(Recommended\)"\)\./);
   assert.match(spec, /When you are done, write a short summary of what you changed and why\./);
   assert.doesNotMatch(spec, /end your turn with the question|end with a short summary/);
   assert.equal(buildJobPrompt({ ...base, specialist: false }), plain);

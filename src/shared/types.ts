@@ -2878,7 +2878,7 @@ export type DelegateLaunchState = "creating" | "submitting" | "running" | "uncer
 // the one result.
 export type DelegateCompletionOwner = "manta" | "opencode";
 // P4: whether Manta's own result post (completionOwner "manta") reached the parent.
-export type DelegateCompletionDelivery = "pending" | "delivered" | "abandoned";
+export type DelegateCompletionDelivery = "pending" | "delivered" | "abandoned" | "deferred" | "not-needed";
 export type DelegateJob = {
   id: string; // 8-char hex
   // Agents: set on jobs started for an agent (@mention or lead handoff).

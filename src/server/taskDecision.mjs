@@ -57,3 +57,62 @@ export function decisionLines(decision) {
   });
   return lines;
 }
+
+// ---------------------------------------------------------------------------
+// Non-blocking questions (docs/superpowers/specs/2026-11-26-agents-screens.md §4). OpenCode's question tool blocks the
+// calling turn until its form is replied to, so a task's question is answered AT ONCE with a placeholder and the user's real
+// answer is delivered later as a message. Everything the task reads here is written by the server; the question text echoed
+// back is the model's own, quoted on one line and cut short.
+// ---------------------------------------------------------------------------
+
+/** What the question tool returns to the task when its question is captured (fixed wording, never model text). */
+export const PLACEHOLDER_ANSWER =
+  "Not answered yet: the user sees your question and can answer at any time. Keep working on everything that doesn't depend on it; the answer will arrive as a new message from the user. If all remaining work depends on it, finish what you can, say what is left, and end your turn.";
+
+const ECHO_MAX = 300;
+const ANSWER_MAX = 4000;
+const echo = (s) => {
+  const one = oneLine(s);
+  return one.length > ECHO_MAX ? `${one.slice(0, ECHO_MAX - 1)}…` : one;
+};
+
+/**
+ * Can the user answer every question of this RAW form in free text? True only for a form with at least one field in which
+ * every field allows it (`custom !== false`, the flag `questionFromForm` reads). A form that forbids typing can't be answered
+ * later by a message, so it takes the old path (the task ends "needs a decision"). Checked on the raw form, before `decisionFromForm`
+ * drops what it doesn't keep.
+ */
+export function acceptsFreeText(form) {
+  const fields = form && typeof form === "object" ? form.fields : null;
+  return Array.isArray(fields) && fields.length > 0 && fields.every((f) => f && typeof f === "object" && f.custom !== false);
+}
+
+/**
+ * The message that delivers the user's answer to the task: one line per question, `answers[i]` being the labels and typed
+ * text the card sent for question i (joined with ", "). Pure.
+ */
+export function answerText(questions, answers) {
+  const qs = Array.isArray(questions) ? questions : [];
+  return qs
+    .map((q, i) => {
+      const picked = (Array.isArray(answers?.[i]) ? answers[i] : []).map((a) => oneLine(a).slice(0, ANSWER_MAX)).filter(Boolean);
+      return `Answer from the user to your question "${echo(q?.question)}": ${picked.length > 0 ? picked.join(", ") : "(no answer given)"}`;
+    })
+    .join("\n");
+}
+
+/** The message sent to a running task when the user dismisses its question. Pure. */
+export function dismissText(question) {
+  return `The user dismissed your question "${echo(question?.question)}". Decide yourself, or say what is left undecided.`;
+}
+
+/** The line a result carries for a task that ended while its question was still open (the answer will continue it). Pure. */
+export function waitingLine(questions) {
+  const first = Array.isArray(questions) ? questions[0] : null;
+  if (!first) return "";
+  return `Waiting for the user's answer to: "${echo(first.question)}" (the answer will continue this task).`;
+}
+
+/** The sentences a delivery to a task answers with when it can't go through (shown to the user as they are). */
+export const TASK_GONE = "That task no longer exists; ask in a chat instead.";
+export const TASK_PAUSED = "This task is paused; resume it first, then answer.";
