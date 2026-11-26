@@ -34,6 +34,10 @@ import { saveToDownloads } from "./downloadFeedback";
 import { GlobalToasts } from "./GlobalToasts";
 import { Settings } from "./Settings";
 import { RoutinesRoot, type RoutinesView } from "./RoutinesRoot";
+import { AgentsRoot } from "./agents/AgentsRoot";
+import type { AgentsView } from "./agents/agentsView";
+import { useAgentsRead } from "./agents/useAgentsRead";
+import { TaskSidePanel } from "./TaskSidePanel";
 import { useRoutinesSummary } from "./routinesData";
 import { CtoPanel } from "./CtoPanel";
 import { SearchPalette } from "./SearchPalette";
@@ -284,14 +288,34 @@ function Shell() {
   const [ctoOpen, setCtoOpenRaw] = useState(false);
   // Routines pane (spec §7): null = closed, else which page. Mutually exclusive with the CTO pane.
   const [routinesView, setRoutinesViewRaw] = useState<RoutinesView>(null);
+  // Agent pages (agent screens spec §1.1): null = closed, else the Fleet page or one agent's profile. One full-pane view at a
+  // time, like the CTO and Routines panes: opening one closes the others.
+  const [agentsView, setAgentsViewRaw] = useState<AgentsView>(null);
   const setCtoOpen = useCallback((open: boolean) => {
     setCtoOpenRaw(open);
-    if (open) setRoutinesViewRaw(null);
+    if (open) {
+      setRoutinesViewRaw(null);
+      setAgentsViewRaw(null);
+    }
   }, []);
   const setRoutinesView = useCallback((v: RoutinesView) => {
     setRoutinesViewRaw(v);
-    if (v) setCtoOpenRaw(false);
+    if (v) {
+      setCtoOpenRaw(false);
+      setAgentsViewRaw(null);
+    }
   }, []);
+  const setAgentsView = useCallback((v: AgentsView) => {
+    setAgentsViewRaw(v);
+    if (v) {
+      setCtoOpenRaw(false);
+      setRoutinesViewRaw(null);
+    }
+  }, []);
+  // What waits for the user, box-wide: one read for the sidebar badge and the Fleet page's Needs you (kept fresh by the box's
+  // hints). A pre-pairing transport has no such method, an older box no such channel: both read as nothing waiting.
+  const needs = useAgentsRead(window.api?.agentsNeedsYou ? () => window.api.agentsNeedsYou() : null, apiGeneration);
+  const needsYouCount = needs.data?.count ?? 0;
   // One summary subscription for the sidebar badge and the pane (it also polls every 60 s).
   const { summary: routinesSummary, error: routinesError, reload: reloadRoutines } = useRoutinesSummary(60_000, apiGeneration);
   const routinesBadge = useMemo(
@@ -352,7 +376,10 @@ function Shell() {
   // Routines pane steps aside; and a chat card's "Open routine" opens the routine's page.
   const activeDraftId = activeDraft?.id ?? null;
   useEffect(() => {
-    if (activeDraftId) setRoutinesViewRaw(null);
+    if (activeDraftId) {
+      setRoutinesViewRaw(null);
+      setAgentsViewRaw(null);
+    }
   }, [activeDraftId]);
   useEffect(() => {
     const onOpen = (e: Event) => {
@@ -808,6 +835,7 @@ function Shell() {
     prevNavSeq.current = navSeq;
     setCtoOpen(false);
     setRoutinesViewRaw(null);
+    setAgentsViewRaw(null);
   }, [navSeq, setCtoOpen]);
 
   // ---- Subscription usage alerts (BET-739, server-first WS09) ----
@@ -1457,7 +1485,7 @@ function Shell() {
 
   // The Explorer's window keys only apply while a chat pane is the visible view.
   const explorerKeysLive =
-    activeChatSessionId != null && mode === "chat" && !ctoOpen && !routinesView && !settingsOpen;
+    activeChatSessionId != null && mode === "chat" && !ctoOpen && !routinesView && !agentsView && !settingsOpen;
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -2112,6 +2140,9 @@ function Shell() {
         onOpenRoutines={() => setRoutinesView({ page: "list" })}
         routinesBadge={routinesBadge}
         routinesOpen={routinesView != null}
+        agentsView={agentsView}
+        needsYouCount={needsYouCount}
+        onOpenAgents={setAgentsView}
       />
       <main className="flex-1 flex flex-col min-w-0">
         {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
@@ -2212,7 +2243,7 @@ function Shell() {
         )}
         {/* The CTO and Routines panes carry their own header; this one would
             stack above it naming the hidden terminal. */}
-        {!isChatPaneActive && !routinesView && !ctoOpen && (
+        {!isChatPaneActive && !routinesView && !agentsView && !ctoOpen && (
         <div
           className="titlebar-drag h-11 border-b border-border flex items-center pr-4 gap-2 min-w-0"
           style={{ paddingLeft: "max(var(--sp-4), var(--pane-inset-x, 0px))" }}
@@ -2344,6 +2375,7 @@ function Shell() {
                 const isActiveThisMode =
                   !ctoOpen &&
                   !routinesView &&
+                  !agentsView &&
                   activeProjectName === m.tmuxSession &&
                   activeWin?.index === m.windowIndex &&
                   mode === (m.modeId === "terminal" ? "terminal" : `tui:${m.modeId}`);
@@ -2373,7 +2405,7 @@ function Shell() {
                 // still has the panel mounted — fork/delete buttons
                 // gracefully no-op then.
                 const owner = resolveSessionOwner(projects, sid);
-                const isActiveChat = !ctoOpen && !routinesView && sid === activeChatSessionId && mode === "chat";
+                const isActiveChat = !ctoOpen && !routinesView && !agentsView && sid === activeChatSessionId && mode === "chat";
                 const ownerWinName = owner
                   ? (projects
                       .find((p) => p.tmuxSession === owner.tmuxSession)
@@ -2430,7 +2462,12 @@ function Shell() {
                   />
                 )}
               </PanelShell>
-              {activeDraft && !ctoOpen && !routinesView && (
+              {/* Agent pages (agent screens spec §2.1, §2.2): the Fleet page or one agent's profile, in the same slot as the
+                  Routines pane. */}
+              <PanelShell key="agents" active={agentsView != null}>
+                {agentsView && <AgentsRoot view={agentsView} setView={setAgentsView} needs={needs} />}
+              </PanelShell>
+              {activeDraft && !ctoOpen && !routinesView && !agentsView && (
                 <div className="absolute inset-0 z-30 bg-bg">
                   <NewSessionScreen draftId={activeDraft.id} />
                 </div>
@@ -2446,12 +2483,16 @@ function Shell() {
           chat pane is required for it to show (there's no panel to open in a
           terminal). The outer shell is already `flex` and <main> is
           `flex-1 min-w-0`, so this needs no layout change. */}
-      {isChatPaneActive && !routinesView && (
+      {isChatPaneActive && !routinesView && !agentsView && (
         <ArtifactsPanel
           sessionId={activeChatSessionId}
           cwd={activeChatCwd}
           open={shownRight === "artifacts"}
         />
+      )}
+      {/* An agent task's details (agent screens spec §2.5): the same right slot, so opening it closes Explorer / Artifacts. */}
+      {isChatPaneActive && !routinesView && !agentsView && shownRight === "task" && (
+        <TaskSidePanel sessionId={activeChatSessionId} />
       )}
       {settingsOpen && (
         <Settings

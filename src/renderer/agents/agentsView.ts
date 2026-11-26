@@ -7,6 +7,7 @@ import type { AgentChange, AgentFleet, AgentProfile, FleetCell, NeedsYouReview, 
 import type { BackgroundResultPart } from "../backgroundRun";
 import { PACKAGE_AGENT_PREFIX, resolvePickerProject } from "../agentDispatch";
 import { agentChangeTitle } from "../agentChange";
+import { isUnknownChannelError } from "../chatUtils";
 
 // ---- constants (contract §Constants) ----
 
@@ -18,7 +19,7 @@ export const SEAT_BRIEF_MAX = 4000;
 // ---- which page is showing ----
 
 /** null = closed. "needs" is the Needs you row: the Fleet page, scrolled to its first section. */
-export type AgentsView = null | { page: "fleet"; focus?: "needs" } | { page: "profile"; slug: string };
+export type AgentsView = null | { page: "fleet"; focus?: "needs"; nonce?: number } | { page: "profile"; slug: string };
 
 export type ProfileTab = "overview" | "research" | "seats" | "history";
 export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
@@ -42,7 +43,7 @@ export function nextTab(current: ProfileTab, key: string, ids: ReadonlyArray<Pro
 // ---- errors ----
 
 /** What an older box answers for a channel it doesn't have (src/server/rpc.mjs). */
-export const isUnknownChannel = (e: unknown): boolean => /unknown rpc channel/i.test(String((e as Error)?.message ?? e ?? ""));
+export const isUnknownChannel = (e: unknown): boolean => isUnknownChannelError(String((e as Error)?.message ?? e ?? ""));
 
 export const errText = (e: unknown, fallback = "Something went wrong."): string => String((e as Error)?.message ?? e ?? "").trim() || fallback;
 

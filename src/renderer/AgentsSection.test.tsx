@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 //
-// The sidebar Agents section (Agents Phase 1): rows, opening a direct chat, and
-// the create dialog. Every press ends visibly: a window opens, a toast or an
-// inline alert says why not.
+// The sidebar Agents section (agent screens spec §1.1): the Needs you and Fleet rows, one row per agent that opens its PROFILE
+// (the direct chat is the profile's Chat button), and New agent, which opens a chat with Manta (no dialog). Every press ends
+// visibly: a page opens, a draft opens.
 
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
-import { act, StrictMode } from "react";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { act } from "react";
 import { AgentsSection } from "./AgentsSection";
+import type { AgentsView } from "./agents/agentsView";
 import { resetPackageAgentsForTest } from "./packageAgents";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
 import { useStore } from "./store";
@@ -35,75 +36,52 @@ const MANTA = {
 };
 const BAD = { ...DEV, slug: "bad", name: "Bad", color: null, builtIn: false, error: "agent.md has no description" };
 
-beforeAll(() => {
-  // jsdom has no <dialog> behaviour; the real thing is Chromium's.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const proto = window.HTMLDialogElement.prototype as any;
-  proto.showModal = function (this: HTMLDialogElement) {
-    this.setAttribute("open", "");
-  };
-  proto.close = function (this: HTMLDialogElement) {
-    if (!this.hasAttribute("open")) return;
-    this.removeAttribute("open");
-    // Chromium queues the close event as a task; it does not fire synchronously.
-    setTimeout(() => this.dispatchEvent(new Event("close")), 0);
-  };
-});
-
 describe("AgentsSection", () => {
   let h: Harness | null = null;
-  const onOpenWindow = vi.fn(() => Promise.resolve());
+  const onOpenView = vi.fn<(v: AgentsView) => void>();
 
   beforeEach(() => {
-    resetStore();
-    onOpenWindow.mockClear();
+    resetStore({ drafts: [], projects: [], activeProjectName: null });
+    onOpenView.mockClear();
   });
   afterEach(() => {
     h?.unmount();
     h = null;
   });
 
-  async function setup(extra: Record<string, unknown> = {}, strict = false) {
-    const { api } = installMockApi({
-      agentsList: () => Promise.resolve([DEV, BAD]),
-      agentsOpenChat: () => Promise.resolve({ tmuxSession: "manta-agents", windowIndex: 0 }),
-      ...extra,
-    });
+  async function setup(extra: Record<string, unknown> = {}, props: { view?: AgentsView; needsCount?: number } = {}) {
+    const { api } = installMockApi({ agentsList: () => Promise.resolve([DEV, BAD]), ...extra });
     resetPackageAgentsForTest();
-    const section = <AgentsSection onOpenWindow={onOpenWindow} />;
-    h = mount(strict ? <StrictMode>{section}</StrictMode> : section);
+    h = mount(<AgentsSection view={props.view ?? null} needsCount={props.needsCount ?? 0} onOpenView={onOpenView} />);
     await h.flush();
     await h.flush();
     // Boxed: the mock api is a Proxy that answers `then`, so returning it directly hangs.
     return { api };
   }
 
-  const rows = () => Array.from(h!.container.querySelectorAll<HTMLButtonElement>('[data-testid="agent-row"]'));
-  const click = async (el: Element) => {
+  const rows = () => Array.from(h!.container.querySelectorAll<HTMLElement>('[data-testid="agent-row"]'));
+  const click = async (el: Element | null | undefined) => {
+    expect(el).toBeTruthy();
     await act(async () => {
-      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      el!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     await h!.flush();
   };
-  const setValue = async (el: HTMLInputElement, value: string) => {
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-      setter?.call(el, value);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-  };
+  const nav = (name: string) => h!.container.querySelector<HTMLButtonElement>(`[data-testid="agents-nav-${name}"]`);
 
   it("renders nothing when the box has no agents (older box / demo)", async () => {
     await setup({ agentsList: () => Promise.resolve(null) });
     expect(h!.container.querySelector('[data-testid="agents-section"]')).toBeNull();
   });
 
-  it("lists agents; an invalid one is disabled with its error as the tooltip", async () => {
+  it("lists agents; an invalid one is marked and carries its error as the tooltip, but still opens (its profile shows the error)", async () => {
     await setup();
     expect(rows().map((r) => r.textContent)).toEqual([expect.stringContaining("Dev"), expect.stringContaining("Bad")]);
     expect(rows()[0].title).toBe("Writes and fixes code");
-    expect(rows()[1].disabled).toBe(true);
     expect(rows()[1].title).toContain("agent.md has no description");
+    expect(rows()[1].textContent).toContain("invalid");
+    await click(rows()[1]);
+    expect(onOpenView).toHaveBeenCalledWith({ page: "profile", slug: "bad" });
   });
 
   it("the valid lead is listed first with a lead tag, whatever the box's order; other rows have none", async () => {
@@ -111,38 +89,30 @@ describe("AgentsSection", () => {
     expect(rows().map((r) => r.dataset.slug)).toEqual(["manta", "dev", "bad"]);
     expect(rows()[0].textContent).toContain("lead");
     expect(rows()[1].textContent).not.toContain("lead");
-    expect(rows()[2].textContent).not.toContain("lead");
   });
 
-  it("the Architect is listed with no Chat action: it works through tasks, so the row is not a button and nothing opens", async () => {
+  it("the Architect is listed with a via-Manta tag and opens its profile like any other agent", async () => {
     const ARCH = { ...DEV, slug: "architect", name: "Architect", description: "Builds agents", isolation: "none" as const, role: "architect" as const };
-    const { api } = await setup({ agentsList: () => Promise.resolve([DEV, ARCH]) });
-    const all = Array.from(h!.container.querySelectorAll<HTMLElement>('[data-testid="agent-row"]'));
-    expect(all.map((r) => r.dataset.slug)).toEqual(["dev", "architect"]);
-    const row = all[1];
-    expect(row.tagName).not.toBe("BUTTON");
-    expect(row.textContent).toContain("Architect");
-    expect(row.textContent).toContain("via Manta");
-    expect(row.title).toMatch(/Ask Manta/);
-    await click(row);
-    expect(api.calls.agentsOpenChat).toBeUndefined();
-    // the others are unchanged
-    expect(all[0].tagName).toBe("BUTTON");
+    await setup({ agentsList: () => Promise.resolve([DEV, ARCH]) });
+    expect(rows().map((r) => r.dataset.slug)).toEqual(["dev", "architect"]);
+    expect(rows()[1].textContent).toContain("via Manta");
+    await click(rows()[1]);
+    expect(onOpenView).toHaveBeenCalledWith({ page: "profile", slug: "architect" });
   });
 
-  it("clicking the lead opens its direct chat like any other row", async () => {
+  it("clicking an agent opens its profile — not its chat", async () => {
     const { api } = await setup({ agentsList: () => Promise.resolve([DEV, MANTA]) });
+    await click(rows()[1]);
+    expect(onOpenView).toHaveBeenCalledWith({ page: "profile", slug: "dev" });
     await click(rows()[0]);
-    expect(api.calls.agentsOpenChat[0][0]).toEqual({ slug: "manta" });
-    expect(onOpenWindow).toHaveBeenCalledWith("manta-agents", 0);
+    expect(onOpenView).toHaveBeenCalledWith({ page: "profile", slug: "manta" });
+    expect(api.calls.agentsOpenChat).toBeUndefined();
   });
 
-  it("a second package declaring role lead (errored) is an ordinary invalid row, not the lead", async () => {
-    const fake = { ...DEV, slug: "boss", name: "Boss", role: "lead" as const, error: "Only the built-in Manta can lead" };
-    await setup({ agentsList: () => Promise.resolve([DEV, fake]) });
-    expect(rows().map((r) => r.dataset.slug)).toEqual(["dev", "boss"]);
-    expect(rows()[1].disabled).toBe(true);
-    expect(rows()[1].textContent).not.toContain("lead");
+  it("the row of the open profile is the selected one", async () => {
+    await setup({}, { view: { page: "profile", slug: "dev" } });
+    expect(rows()[0].getAttribute("aria-current")).toBe("page");
+    expect(rows()[1].getAttribute("aria-current")).toBeNull();
   });
 
   it("a notice shows as a muted hint under its row, not as an error", async () => {
@@ -152,71 +122,59 @@ describe("AgentsSection", () => {
     expect(hint.textContent).toBe("Rename this folder to enable the Manta lead");
     expect(hint.className).not.toContain("danger");
     expect(rows()[0].getAttribute("aria-describedby")).toBe(hint.id);
-    expect(rows()[0].disabled).toBe(false);
   });
 
-  it("clicking an agent opens its chat window", async () => {
-    const { api } = await setup();
-    await click(rows()[0]);
-    expect(api.calls.agentsOpenChat[0][0]).toEqual({ slug: "dev" });
-    expect(onOpenWindow).toHaveBeenCalledWith("manta-agents", 0);
-  });
-
-  it("a failed open is an error toast, not silence", async () => {
-    await setup({ agentsOpenChat: () => Promise.reject(new Error("opencode is not running")) });
-    await click(rows()[0]);
-    expect(onOpenWindow).not.toHaveBeenCalled();
-    const toasts = useStore.getState().appToasts;
-    expect(toasts.at(-1)?.message).toContain("opencode is not running");
-  });
-
-  it("+ opens the create dialog; Create sends the form and closes it", async () => {
-    const { api } = await setup({
-      agentsCreate: (input: { name: string }) => Promise.resolve({ ...DEV, slug: "reviewer", name: input.name, builtIn: false }),
+  describe("Needs you and Fleet", () => {
+    it("two rows above the agents: Needs you with its count, then Fleet", async () => {
+      await setup({}, { needsCount: 3 });
+      const section = h!.container.querySelector('[data-testid="agents-section"]')!;
+      const order = [...section.querySelectorAll('[data-testid^="agents-nav-"], [data-testid="agent-row"]')].map((e) => e.getAttribute("data-testid"));
+      expect(order).toEqual(["agents-nav-needs", "agents-nav-fleet", "agent-row", "agent-row"]);
+      expect(nav("needs")?.textContent).toContain("Needs you");
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"]')?.textContent).toBe("3");
+      expect(nav("needs")?.getAttribute("aria-label")).toBe("Needs you, 3 waiting");
     });
-    await click(h!.container.querySelector('button[aria-label="New agent"]')!);
-    const dialog = h!.container.querySelector("dialog")!;
-    expect(dialog.hasAttribute("open")).toBe(true);
-    expect(dialog.getAttribute("aria-labelledby")).toBe("new-agent-title");
-    await setValue(h!.container.querySelector<HTMLInputElement>("#new-agent-name")!, "Reviewer");
-    await setValue(h!.container.querySelector<HTMLInputElement>("#new-agent-description")!, "Reviews PRs");
-    await act(async () => {
-      h!.container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    it("no badge at zero", async () => {
+      await setup({}, { needsCount: 0 });
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"]')).toBeNull();
+      expect(nav("needs")?.getAttribute("aria-label")).toBe("Needs you");
     });
-    await h!.flush();
-    expect(api.calls.agentsCreate[0][0]).toEqual({ name: "Reviewer", description: "Reviews PRs" });
-    expect(h!.container.querySelector("dialog")).toBeNull();
+
+    it("Needs you opens the Fleet page at its first section (a fresh request each press); Fleet opens it plain", async () => {
+      await setup({}, { needsCount: 1 });
+      await click(nav("needs"));
+      await click(nav("needs"));
+      const calls = onOpenView.mock.calls.map((c) => c[0]);
+      expect(calls[0]).toMatchObject({ page: "fleet", focus: "needs" });
+      expect(calls[1]).toMatchObject({ page: "fleet", focus: "needs" });
+      expect((calls[0] as { nonce: number }).nonce).not.toBe((calls[1] as { nonce: number }).nonce);
+      await click(nav("fleet"));
+      expect(onOpenView).toHaveBeenLastCalledWith({ page: "fleet" });
+    });
+
+    it("the open page's row is selected", async () => {
+      await setup({}, { view: { page: "fleet" } });
+      expect(nav("fleet")?.getAttribute("aria-current")).toBe("page");
+      expect(nav("needs")?.getAttribute("aria-current")).toBeNull();
+      h!.unmount();
+      await setup({}, { view: { page: "fleet", focus: "needs", nonce: 1 } });
+      expect(nav("needs")?.getAttribute("aria-current")).toBe("page");
+      expect(nav("fleet")?.getAttribute("aria-current")).toBeNull();
+    });
   });
 
-  it("+ keeps the dialog open under StrictMode (double-run effects)", async () => {
-    await setup({}, true);
-    await click(h!.container.querySelector('button[aria-label="New agent"]')!);
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 10));
+  describe("New agent", () => {
+    it("is a button that opens a chat with Manta, 'Create an agent that ' typed, in the active project — and no dialog", async () => {
+      resetStore({ drafts: [], projects: [{ tmuxSession: "manta", defaultCwd: "/work/manta", windows: [] } as never], activeProjectName: "manta" });
+      await setup();
+      const button = [...h!.container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "New agent");
+      expect(h!.container.textContent).toContain("opens a chat with Manta to describe it");
+      await click(button);
+      const draft = useStore.getState().drafts.at(-1)!;
+      expect(draft.input).toBe("Create an agent that ");
+      expect(draft.mode).toEqual({ projectName: "manta" });
+      expect(h!.container.querySelector("dialog")).toBeNull();
     });
-    await h!.flush();
-    expect(h!.container.querySelector("dialog")?.hasAttribute("open")).toBe(true);
-  });
-
-  it("a refused create stays open with the reason inline", async () => {
-    await setup({ agentsCreate: () => Promise.reject(new Error("An agent named Dev already exists")) });
-    await click(h!.container.querySelector('button[aria-label="New agent"]')!);
-    await setValue(h!.container.querySelector<HTMLInputElement>("#new-agent-name")!, "Dev");
-    await setValue(h!.container.querySelector<HTMLInputElement>("#new-agent-description")!, "x");
-    await act(async () => {
-      h!.container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
-    await h!.flush();
-    expect(h!.container.querySelector("dialog")).not.toBeNull();
-    expect(h!.container.querySelector('[data-testid="new-agent-error"]')?.textContent).toContain("already exists");
-  });
-
-  it("Cancel closes the dialog without creating", async () => {
-    const { api } = await setup();
-    await click(h!.container.querySelector('button[aria-label="New agent"]')!);
-    const cancel = Array.from(h!.container.querySelectorAll("dialog button")).find((b) => b.textContent === "Cancel")!;
-    await click(cancel);
-    expect(h!.container.querySelector("dialog")).toBeNull();
-    expect(api.calls.agentsCreate ?? []).toHaveLength(0);
   });
 });

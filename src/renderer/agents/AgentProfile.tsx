@@ -338,7 +338,7 @@ export function AgentProfile({
       t.id === "research"
         ? `Research · ${p.research.length}`
         : t.id === "seats"
-          ? refreshable || info.role === "specialist"
+          ? info.role === "specialist"
             ? `Seats · ${p.seats.length}`
             : "Seats"
           : t.id === "history"

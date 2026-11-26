@@ -18,6 +18,8 @@ import { act } from "react";
 import { Sidebar } from "./Sidebar";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
 import { useStore } from "./store";
+import { resetPackageAgentsForTest } from "./packageAgents";
+import type { AgentsView } from "./agents/agentsView";
 import type { Project } from "../shared/types";
 
 function proj(over: Partial<Project> & { tmuxSession: string }): Project {
@@ -64,7 +66,7 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
       />,
     );
     return h;
@@ -177,7 +179,7 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
       />,
     );
     return h;
@@ -269,7 +271,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
       />,
     );
     return h;
@@ -616,7 +618,7 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
       />,
     );
     await h.flush();
@@ -672,7 +674,7 @@ describe("Sidebar — nested background job rows (observed, superseded)", () => 
         onNewSessionInProject={() => {}}
         onOpenResumeModal={() => {}}
         onOpenCto={() => {}}
-        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }}
+        ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}}
       />,
     );
     return h;
@@ -754,7 +756,7 @@ describe("Sidebar — the box's job nesting and status rollup (WS11 D7)", () => 
   });
   const mountIt = async () => {
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} />,
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} onOpenRoutines={() => {}} routinesBadge={{ needsYou: 0, unread: 0 }} agentsView={null} needsYouCount={0} onOpenAgents={() => {}} />,
     );
     await h.flush();
   };
@@ -824,6 +826,9 @@ describe("Sidebar — Routines row", () => {
         onOpenRoutines={onOpenRoutines}
         routinesBadge={{ needsYou: props.needsYou ?? 0, unread: props.unread ?? 0 }}
         routinesOpen={props.open}
+        agentsView={null}
+        needsYouCount={0}
+        onOpenAgents={() => {}}
       />,
     );
     return onOpenRoutines;
@@ -848,5 +853,55 @@ describe("Sidebar — Routines row", () => {
   it("is highlighted while the pane is open", () => {
     mountRow({ open: true });
     expect(row().className).toContain("bg-raised");
+  });
+});
+
+describe("Sidebar — agent pages (agent screens spec §1.1)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const DEV = { slug: "dev", name: "Dev", description: "Writes code", isolation: "worktree", model: null, color: null, builtIn: true, role: "specialist", useWhen: null, notFor: null, notice: null };
+
+  async function mountWith(props: { needsYouCount?: number; agentsView?: AgentsView } = {}) {
+    installMockApi({ agentsList: () => Promise.resolve([DEV]) });
+    resetPackageAgentsForTest();
+    resetStore({ projects: [] });
+    const onOpenAgents = vi.fn();
+    h = mount(
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+        onOpenRoutines={() => {}}
+        routinesBadge={{ needsYou: 0, unread: 0 }}
+        agentsView={props.agentsView ?? null}
+        needsYouCount={props.needsYouCount ?? 0}
+        onOpenAgents={onOpenAgents}
+      />,
+    );
+    await h.flush();
+    await h.flush();
+    return onOpenAgents;
+  }
+
+  it("clicking an agent in the rail opens its profile page", async () => {
+    const open = await mountWith();
+    const row = h!.container.querySelector<HTMLButtonElement>('[data-testid="agent-row"][data-slug="dev"]')!;
+    act(() => row.click());
+    expect(open).toHaveBeenCalledWith({ page: "profile", slug: "dev" });
+  });
+
+  it("the Needs you row carries the box-wide count and opens the Fleet page's first section", async () => {
+    const open = await mountWith({ needsYouCount: 4 });
+    const row = h!.container.querySelector<HTMLButtonElement>('[data-testid="agents-nav-needs"]')!;
+    expect(row.querySelector('[data-testid="agents-needs-badge"]')?.textContent).toBe("4");
+    act(() => row.click());
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ page: "fleet", focus: "needs" }));
   });
 });
