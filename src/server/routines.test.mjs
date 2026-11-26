@@ -67,6 +67,14 @@ function makeWorld({ concurrency = 2 } = {}) {
     // Agents Phase 2: slug → { key, seat } for a valid specialist; the lead and unknown / broken packages are simply absent
     agentsDb: new Map(),
     agentLookups: [],
+    // agent refresh (agent screens §5.4): the delegate job store, the agents engine's refresh, and what the proposals came to
+    jobsDb: new Map(),
+    refreshCalls: [],
+    refreshFail: null,
+    refreshJobStatus: "running",
+    getJobFails: false,
+    changesDb: new Map(),
+    outcomeDb: new Map(),
   };
   const oc = {
     createSession: async (input) => {
@@ -177,6 +185,19 @@ function makeWorld({ concurrency = 2 } = {}) {
         w.agentLookups.push({ slug, directory });
         return w.agentsDb.get(slug) ?? null;
       },
+      refresh: async (slug, ctx) => {
+        w.refreshCalls.push({ slug, ...ctx });
+        if (w.refreshFail) throw new Error(w.refreshFail);
+        const id = `job_r${w.refreshCalls.length}`;
+        w.jobsDb.set(id, { id, status: w.refreshJobStatus, result: null, error: null });
+        return { jobId: id };
+      },
+      changesForJob: async (id) => w.changesDb.get(id) ?? [],
+      outcomeLinesForJob: async (id) => w.outcomeDb.get(id) ?? [],
+    },
+    getJob: async (id) => {
+      if (w.getJobFails) throw new Error("the job store couldn't be read");
+      return w.jobsDb.get(id) ?? null;
     },
     log: (...a) => w.logs.push(a.join(" ")),
     resolveSession: (sid) => w.replacedBy?.[sid] ?? sid,
@@ -2072,4 +2093,189 @@ test("agent: crash recovery re-sends the ORIGINAL opening and agent, even after 
   assert.equal(w.prompts.length, before + 1);
   assert.equal(w.prompts.at(-1).text, original, "the persisted opening, never a rebuild");
   assert.equal(w.prompts.at(-1).agent, "agent-seo");
+});
+
+// ---------------------------------------------------------------------------
+// agent refresh (agent screens §5.4): a routine kind only the agents engine creates; its run is a headless session that is
+// never prompted, a delegate task does the work, and the task's end settles the run
+// ---------------------------------------------------------------------------
+
+const CHARTER = (slug) => `Refresh @${slug}: check the research it rests on and propose only changes your research supports.`;
+
+async function refreshWorld(opts = {}) {
+  const w = makeWorld(opts);
+  w.agentsDb.set("seo", { key: "agent-seo", seat: "" });
+  const routine = await w.engine.createInternal({ kind: "agent-refresh", agentSlug: "seo", name: "Refresh @seo", cron: "0 9 * * *", directory: "/proj", rollUp: true, access: "read" });
+  return { w, routine };
+}
+/** The routine's first run, started by a tick at 09:00:10. */
+async function startedRefresh(opts) {
+  const { w, routine } = await refreshWorld(opts);
+  await w.tickAt(at(9, 0, 10));
+  return { w, routine, run: w.runs(routine.id)[0] };
+}
+
+test("refresh: only the agents engine can make one — the charter is fixed, the agent must be a team agent, no one else may set the kind", async () => {
+  const { w, routine } = await refreshWorld();
+  assert.equal(routine.kind, "agent-refresh");
+  assert.equal(routine.agentSlug, "seo");
+  assert.equal(routine.prompt, CHARTER("seo"), "the prompt is the fixed charter, never user text");
+  assert.equal(routine.agent, null);
+  assert.equal(routine.access, "read");
+  assert.equal(routine.enabled, true);
+  assert.equal(routine.nextRunAt, at(9, 0, 0, 31));
+  // the public paths refuse the kind (the tool and the editor both go through create / update)
+  const base = { name: "x", prompt: "y", directory: "/proj", cron: "0 9 * * *" };
+  await assert.rejects(w.engine.create({ ...base, kind: "agent-refresh", agentSlug: "seo" }), /can't be made here/);
+  await assert.rejects(w.engine.create({ ...base, agentSlug: "seo" }), /can't be made here/);
+  assert.equal((await w.engine.create({ ...base, kind: "prompt" })).kind, undefined, "an ordinary routine has no kind");
+  await assert.rejects(w.engine.update(routine.id, { kind: "prompt" }), /kind can't be changed/);
+  // the agent must be a valid specialist
+  const make = (agentSlug) => w.engine.createInternal({ kind: "agent-refresh", agentSlug, name: "r", cron: "0 9 * * *", directory: "/proj" });
+  await assert.rejects(make("nobody"), /No agent named @nobody/);
+  w.agentsDb.set("architect", { refused: "The Architect can't run routines yet" });
+  await assert.rejects(make("architect"), /Architect/);
+  await assert.rejects(w.engine.createInternal({ kind: "prompt", agentSlug: "seo", name: "r", cron: "0 9 * * *", directory: "/proj" }), /agent-refresh/);
+});
+
+test("refresh: the editor can switch it on or off and move its time, and nothing else; deleting it is allowed", async () => {
+  const { w, routine } = await refreshWorld();
+  const off = await w.engine.update(routine.id, { enabled: false });
+  assert.equal(off.enabled, false);
+  assert.equal(off.nextRunAt, null);
+  assert.equal((await w.engine.update(routine.id, { cron: "30 10 5 * *" })).cron, "30 10 5 * *");
+  for (const patch of [{ prompt: "Do something else" }, { name: "Other" }, { directory: "/other" }, { access: "edit" }, { agent: "seo" }, { model: null }]) {
+    await assert.rejects(w.engine.update(routine.id, patch), /Only the schedule and on\/off/, JSON.stringify(patch));
+  }
+  await assert.rejects(w.engine.moveToChat(routine.id, { type: "new" }), /can't run inside a chat/);
+  assert.deepEqual(await w.engine.remove(routine.id), { deleted: true });
+});
+
+test("refresh: the run creates a headless session with no prompt, starts the agents engine's task under it, and stores the job id with submittedAt", async () => {
+  const { w, routine, run } = await startedRefresh();
+  assert.equal(run.status, "running");
+  assert.equal(run.kind, "agent-refresh");
+  assert.equal(w.created.length, 1);
+  assert.equal(w.created[0].directory, "/proj");
+  assert.equal(w.created[0].metadata.manta.routineId, routine.id);
+  assert.ok(w.created[0].metadata.manta.runId);
+  assert.deepEqual(w.prompts, [], "the headless session is never prompted");
+  assert.deepEqual(w.refreshCalls, [{ slug: "seo", runId: run.id, runSessionId: run.sessionID }]);
+  assert.equal(run.jobId, "job_r1");
+  assert.ok(run.submittedAt != null);
+  assert.equal(w.agentLookups.length, 0, "the routine's own agent is not looked up: the task is the agents engine's");
+});
+
+test("refresh: a refused task (all slots busy, changing agents is off, no Architect) fails the run with that sentence and takes the session back", async () => {
+  const { w, routine } = await refreshWorld();
+  w.refreshFail = "All background slots on this box are busy right now.";
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(routine.id)[0];
+  assert.equal(run.status, "failed");
+  assert.equal(run.error, "All background slots on this box are busy right now.");
+  assert.deepEqual(w.prompts, []);
+  assert.equal(w.deleted.length, 1, "no session is left behind");
+  // the next scheduled slot still comes
+  assert.ok(w.routine(routine.id).nextRunAt > at(9, 0, 10));
+});
+
+test("refresh: the 30-minute timeout never ends a run that has a task (the task has its own ceiling)", async () => {
+  const { w, run } = await startedRefresh();
+  w.t = at(9, 0, 10) + RUN_TIMEOUT_MS + 5 * MIN;
+  await w.engine.sweep();
+  assert.equal(w.run(run.id).status, "running");
+  assert.deepEqual(w.aborted, []);
+});
+
+test("refresh: settleFromJob — a finished task with a proposal waiting is a findings report carrying the task's text and the Outcome lines", async () => {
+  const { w, routine, run } = await startedRefresh();
+  w.changesDb.set(run.jobId, [{ state: "pending" }, { state: "applied" }]);
+  w.outcomeDb.set(run.jobId, ["Outcome: @seo was updated and is live.", "Outcome: @seo is waiting for your click on the card (reason: it was proposed in plan mode)."]);
+  await w.engine.settleFromJob({ id: run.jobId, status: "done", result: "I checked 3 sources." });
+  const r = w.run(run.id);
+  assert.equal(r.status, "done");
+  assert.equal(r.report.outcome, "findings");
+  assert.match(r.report.title, /@seo/);
+  assert.match(r.report.body, /I checked 3 sources\./);
+  assert.match(r.report.body, /Outcome: @seo is waiting for your click/);
+  assert.equal(r.readAt, null, "a report with news waits to be read");
+  assert.deepEqual(w.notes.map((n) => n.routineRunId), [run.id], "and the user is told once");
+  // idempotent: a second call (the sweep's net, the hook) changes nothing
+  await w.engine.settleFromJob({ id: run.jobId, status: "done", result: "I checked 3 sources." });
+  assert.equal(w.notes.length, 1);
+  assert.equal(w.run(run.id).reportRev, 1);
+  assert.equal(w.routine(routine.id).enabled, true);
+});
+
+test("refresh: settleFromJob — nothing proposed is a quiet 'nothing' report; failed and stopped tasks fail the run; another job or a running one does nothing", async () => {
+  const quiet = await startedRefresh();
+  await quiet.w.engine.settleFromJob({ id: quiet.run.jobId, status: "done", result: "Nothing needed changing." });
+  assert.equal(quiet.w.run(quiet.run.id).status, "done");
+  assert.equal(quiet.w.run(quiet.run.id).report.outcome, "nothing");
+  assert.ok(quiet.w.run(quiet.run.id).readAt != null, "a quiet outcome files itself away");
+
+  const failed = await startedRefresh();
+  await failed.w.engine.settleFromJob({ id: failed.run.jobId, status: "failed", error: "the task was cut off" });
+  assert.equal(failed.w.run(failed.run.id).status, "failed");
+  assert.equal(failed.w.run(failed.run.id).error, "the task was cut off");
+
+  const stopped = await startedRefresh();
+  await stopped.w.engine.settleFromJob({ id: stopped.run.jobId, status: "stopped" });
+  assert.equal(stopped.w.run(stopped.run.id).status, "failed");
+  assert.match(stopped.w.run(stopped.run.id).error, /stopped/);
+
+  const other = await startedRefresh();
+  await other.w.engine.settleFromJob({ id: "job_unrelated", status: "done", result: "x" });
+  await other.w.engine.settleFromJob({ id: other.run.jobId, status: "running" });
+  await other.w.engine.settleFromJob(null);
+  assert.equal(other.w.run(other.run.id).status, "running");
+});
+
+test("refresh: a task that ended before its job id was stored settles right after the launch", async () => {
+  const { w, routine } = await refreshWorld();
+  w.refreshJobStatus = "done";
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(routine.id)[0];
+  assert.equal(run.status, "done");
+  assert.equal(run.jobId, "job_r1");
+});
+
+test("refresh: reconcile reads the task first — a running one leaves the run alone (the session is never read, never prompted), a finished one settles it, a missing one fails it, an unreadable store waits", async () => {
+  const { w, run } = await startedRefresh();
+  w.sessions.delete(run.sessionID); // the ordinary rule would fail a run whose session is missing
+  w.active.clear();
+  await w.engine.sweep();
+  assert.equal(w.run(run.id).status, "running", "a running task: nothing else is looked at");
+  assert.deepEqual(w.prompts, []);
+  w.jobsDb.get(run.jobId).status = "paused";
+  await w.engine.onReconnect();
+  assert.equal(w.run(run.id).status, "running");
+  w.getJobFails = true;
+  await w.engine.onReconnect();
+  assert.equal(w.run(run.id).status, "running", "can't read the store: try again later");
+  w.getJobFails = false;
+  w.jobsDb.set(run.jobId, { id: run.jobId, status: "done", result: "Done." });
+  await w.engine.onReconnect();
+  assert.equal(w.run(run.id).status, "done");
+
+  const gone = await startedRefresh();
+  gone.w.jobsDb.delete(gone.run.jobId);
+  await gone.w.engine.onReconnect();
+  assert.equal(gone.w.run(gone.run.id).status, "failed");
+  assert.match(gone.w.run(gone.run.id).error, /no longer on the box/);
+});
+
+test("refresh: a run with no job id (a crash between the session and the task) is never prompted; after 2 minutes it fails", async () => {
+  const { w, run } = await startedRefresh();
+  const stored = w.store.runs.find((r) => r.id === run.id);
+  stored.jobId = null;
+  stored.submittedAt = null;
+  w.t = at(9, 0, 10) + 90_000;
+  await w.engine.onReconnect();
+  assert.equal(w.run(run.id).status, "running", "too early to say");
+  w.t = at(9, 0, 10) + 3 * MIN;
+  await w.engine.onReconnect();
+  assert.equal(w.run(run.id).status, "failed");
+  assert.match(w.run(run.id).error, /box restarted before the refresh could start/);
+  assert.deepEqual(w.prompts, []);
 });
