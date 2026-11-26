@@ -25,7 +25,7 @@ are EXISTING components drawn as they ship; render the component, never copy the
 | Ask confirmation, profile pending change, history expansion, Needs-you change | `AgentChangeView` (`AgentChangeCard.tsx`) | `AgentChange` record |
 | Architect result + its proposals | `BackgroundResultCard` + `ArchitectChanges` (`BackgroundCards.tsx`, `ArchitectChanges.tsx`) | N4 part / job id |
 | Needs-you review item | `BackgroundResultCard` look via the same component, fed from `NeedsYou.reviews` | job |
-| Task run card ("Working · 1 question") | `RunCard` in `BackgroundRunCards` (`BackgroundCards.tsx`) + one chip | job view |
+| Task run card ("Working · 1 question") | `RunCard` in `BackgroundRunCards` (`BackgroundCards.tsx`) + one chip from `openQuestionsByJob`, + the "Added @slug to <Project>" line from `seatAdded` | job view |
 | Side panel "What happened" | `JobDetails` (`BackgroundCards.tsx`, exported as is) | job `view` |
 | Buttons | `Button` tones `primary` / `default` / `ghost`; `IconButton` (Close, "+") | |
 | Chips / tags | `Pill` (`ok` fresh, `warn` stale, `neutral` thin / later), `Tag` (sidebar "via Manta") | |
@@ -65,9 +65,9 @@ are EXISTING components drawn as they ship; render the component, never copy the
 | `.rw` rows | `flex items-center gap-2 py-2 border-b border-border-subtle text-label`; right meta `ml-auto text-meta text-text-faint whitespace-nowrap` |
 | `.mem` | `grid grid-cols-2 gap-2`; cell `rounded-md border border-border-subtle px-3 py-2 text-meta text-text-faint`; title `text-label font-semibold text-text` |
 | `.muted` (Tests later) | `rounded-md border border-dashed border-border px-3 py-2 text-meta text-text-faint` |
-| `.hrow` | `grid grid-cols-[52px_1fr_auto] gap-x-3 gap-y-2 py-2 border-b border-border-subtle text-label`, `content-visibility:auto` |
+| `.hrow` | `grid grid-cols-[52px_1fr_auto] gap-x-3 gap-y-2 py-2 border-b border-border-subtle text-label [content-visibility:auto] [contain-intrinsic-size:auto_64px]` |
 | `.tsp` side panel | fixed-width sibling like `ArtifactsPanel`: `w-[440px] border-l border-border bg-bg-elev flex flex-col`; top bar `h-11 px-4 border-b border-border`; body `overflow-auto px-4 pt-4 pb-6 flex flex-col gap-6` |
-| `.newag` | `Button tone="default"` "New agent" + `text-micro text-text-faint` hint |
+| `.newag` | `Button tone="default"` "New agent" + `text-micro tracking-normal text-text-faint` hint |
 
 ## Icons (lucide-react)
 
@@ -90,7 +90,7 @@ The mockup inlines `src/renderer/tokens.css` verbatim (it predates `--usage-dot*
 | `color-mix(--warn 70%, black)` for "thin" (light) | `text-warn` (light `--warn` is already AA on panel) |
 | `color-mix(--accent …)` tints | `bg-accent-bg`, `border-accent` |
 | per-agent `oklch(…)` hues (`.a-seo` …) | `AgentInfo.color` (agent.md `color`); none → `bg-fill-hover text-text` as today |
-| font sizes 15 / 14 / 13 / 12 / 11 / 10 / 20 px | `prose` / `body` / `label` / `meta` / `micro` / `micro` / `title` |
+| font sizes 15 / 14 / 13 / 12 / 11 / 10 / 20 px | `prose` / `body` / `label` / `meta` / `micro` / `micro` / `title` (`text-micro` carries 0.08em tracking for uppercase labels: add `tracking-normal` wherever it sets lowercase prose — hints, notices, initials) |
 | weights 650 / 550 / 450 | `font-semibold` / `font-medium` / `font-normal` |
 | radii 4 / 6 / 8 / 12 / 99 | `rounded-xs` / `sm` / `md` / `lg` / `full` |
 | spacing 5, 7, 9, 11 px paddings; 14, 18, 22, 28 gaps | nearest steps: 4 / 8 / 8 / 12; 12 / 16 / 24 / 24 |
@@ -119,6 +119,7 @@ The mockup inlines `src/renderer/tokens.css` verbatim (it predates `--usage-dot*
 - **History row:** applied / undone ("Undone" chip and outcome line) / pending / other states; collapsed / expanded; Restore busy ("Restoring…"), refused (sentence under the row), done (the new
   record's card appears at the top, expanded).
 - **Seat row:** view / editing / saving / save error / confirm remove.
-- **Question card:** open / submitting / refused (sentence) — after a successful answer the card disappears (the store
-  hint removes it); the milestone in the side panel records it.
+- **Question card** (unchanged component, no busy/error props): open; while the answer call runs the card stays as is;
+  a refusal shows on the chat's existing send-error line (in Needs you: an alert line in the item's context row); after a
+  successful answer the refetch removes the card; the milestone in the side panel records it.
 - **Side panel:** running / done / failed / job gone ("This task is no longer on the box" + Close).

@@ -98,11 +98,16 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 - The task card shows "· 1 question" while a question is open; its "Details" toggle opens the task side panel for agent
   tasks (other background jobs keep the inline details).
 - **Picker** (`TypeaheadPopup` in `ComposerParts.tsx`, agent rows): badge in the agent's colour, name, description
-  (one line, ellipsis), a right pill: "seated here" or "adds to <Project>"; sort: lead first, then seated here, then the
-  rest by name; footer "Seated in this project first · ⏎ mention". The Architect stays in the list (it is reached by a
-  mention like any agent; mention dispatch gives its round mode "unknown", unchanged).
-- A dispatch into a project where the agent has no seat creates the seat (§5.1); the task card's request line gets
-  " · added @slug to <Project>".
+  (one line, ellipsis), a right pill: "seated here" or "adds to <Project>" for specialists, and **no pill** for the lead
+  and the Architect (they have no seats, §5.1); sort: lead first, then seated here, then the rest by name; footer "Seated
+  in this project first · ⏎ mention". The Architect stays in the list (it is reached by a mention like any agent; mention
+  dispatch gives its round mode "unknown", unchanged).
+- A dispatch into a project where the agent has no seat creates the seat (§5.1) and stamps the job with
+  `seatAdded: { project, projectName }` (§6.1). `RunCard` shows it as its own line under the request, outside the
+  quotes: "Added @slug to <Project>". The request text is never modified.
+- The open-question count on the run card comes from `ChatPanel`'s own `agentsQuestions({sessionID})` state, passed to
+  `BackgroundRunCards` as `openQuestionsByJob: ReadonlyMap<string /* rootJobId */, number>` (both files are R2's); the card
+  shows "· N question(s)" when its job's `rootJobId` has a count > 0. No server view change.
 
 ### 2.4 Create an agent
 
@@ -115,8 +120,10 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 
 ### 2.5 Task side panel (new)
 
-Opened by an agent task card's **Details** (run card and result card). One panel per chat, in the session's right slot
-(the slot the Explorer and Artifacts share; opening it closes them and vice versa). Content, top to bottom:
+Opened by an agent task card's **Details**: the run card's existing Details toggle (agent tasks only) and a new
+**Details** text button on `BackgroundResultCard`, shown only when `part.agent` starts with `agent-` and a job id is known.
+Both call `openTaskPanel(sessionId, jobId)` (§6.6). One panel per chat, in the session's right slot (the slot the
+Explorer and Artifacts share; opening it closes them and vice versa). Content, top to bottom:
 
 - Top bar (h-11): agent badge, "<Agent> · <task name>", state text (Working · N questions / Done · 6 min / Failed),
   Close (the only action).
@@ -127,7 +134,7 @@ Opened by an agent task card's **Details** (run card and result card). One panel
   `basis` of its proposals; "None yet" while empty.
 - **Brief** (collapsed `<details>`): the task's request text as Manta wrote it.
 
-The panel follows the job across rounds (`continueJob` successors: the newest record with the same root).
+The panel follows the job across rounds: it resolves the newest record with the same `rootJobId` (§6.1).
 
 ## 3. Not changed
 
@@ -152,45 +159,70 @@ delivering the user's real answer later as a message.
 
 1. **Capture** (`handleQuestion`, same trigger: a question form in the ROOT session of a RUNNING, Manta-owned specialist
    task):
-   - Map it with `decisionFromForm` (unchanged) and store an **open task question** (§6.1) in the new question store.
+   - Check the RAW form first with the new pure `acceptsFreeText(form)` (`taskDecision.mjs`, S1): true only when
+     `form.fields` is a non-empty array and every field has `custom !== false` (the same flag `questionFromForm` reads,
+     `opencodeV2.mjs`). False → the fallback below. Then map it with `decisionFromForm` (unchanged) and store an **open
+     task question** (§6.1) in the new question store.
    - Reply to the form (`replyQuestion`) with the **placeholder** for every field:
      > `Not answered yet: the user sees your question and can answer at any time. Keep working on everything that
      > doesn't depend on it; the answer will arrive as a new message from the user. If all remaining work depends on it,
      > finish what you can, say what is left, and end your turn.`
    - No interrupt, no `decision`, no `modelState: "blocked"`. Set `askedUser` only when the user **answers** (§4.6).
    - Add the milestone "Asked you: <first question, ≤ 120 chars>". Publish `taskQuestion`.
-   - **Fallback to today's path** (interrupt + "needs a decision") when any field can't take free text
-     (`custom === false`), when the reply fails, or when the task already has 3 open questions (the third limit is a
-     constant, `QUESTIONS_OPEN_MAX = 3`).
+   - **Fallback to today's path** (`recordDecision` + interrupt + reject: "needs a decision") when
+     `acceptsFreeText(form)` is false, when the reply fails (the stored question is then deleted, not left open), or when
+     the task already has `QUESTIONS_OPEN_MAX = 3` open questions.
 2. **The question waits** in the parent chat (question card) and in Needs you. The task keeps running.
-3. **Answer** (`agents:question-answer {id, answers}` → `taskQuestions.answer`):
+3. **Answer** (`agents:question-answer {id, answers}` → `taskQuestions.answer`), in three steps (§4.8 has the lock
+   rules):
+   1. **Claim** (question-store mutex, no I/O): the question must be `open` and have no `delivering`; else return it
+      unchanged ("Already sending your answer" when `delivering` is set). Persist `delivering: { messageID, at }` (a
+      minted `msg_…` id) and the answer. Release the mutex.
+   2. **Deliver** (`deliverToTask(rootJobId, text, { messageID })`, delegate). It first sets `askedUser: true` on the
+      newest round (jobs lock), so a continuation inherits it. Then, under `withSessionResources(child)`, it reads the LIVE
+      newest round with that `rootJobId` and decides; it steers under that lock, but for the continue branch it RELEASES
+      the lock first and then calls `continueJob` (which takes `withSessionResources(child)` itself and re-checks
+      everything; the lock is not re-entrant, so it is never nested):
+      - `running`, not `ending` (§4.3), child in `listActiveIds()` → `sendPrompt({ sessionId: child, text,
+        delivery: "steer", messageID })` → `{ delivery: "steer" }`.
+      - `running` but `ending`, or not active after one 2 s re-read → `{ delivery: "continue-pending" }` (sent by
+        `onRoundSettled`, §4.3).
+      - finished (done / failed / stopped) → `continueJob(roundId, { prompt: text, sessionID: job.parentSessionID,
+        requestedBy: "manta" })` → `{ delivery: "continue" }`, or its refusal → `{ error }`.
+      - `paused` → `{ error: "This task is paused; resume it first, then answer." }`; gone → `{ error: "That task no
+        longer exists; ask in a chat instead." }`.
+   3. **Record** (question-store mutex, no I/O): success → `answered` (answeredAt, delivery), clear `delivering`, add the
+      milestone "You answered: <short answer>", publish. (`askedUser` was set in step 2.) `{ error }` → the question STAYS `open`
+      with `error` set and `delivering` cleared; the RPC throws the sentence.
    - Text sent to the task (server-written, never model text): `Answer from the user to your question "<question>":
      <labels and typed text, joined with ", ">` (one line per question for a multi-question form).
-   - Under the delegate's per-session lock for the task's child session (`withSessionResources`), read the LIVE root's
-     newest round:
-     - **running**, its child session in `listActiveIds()` → `sendPrompt({sessionId: child, text, delivery: "steer",
-       messageID})` with a minted, persisted message id. Delivered "steer".
-     - **finished** (done, failed, stopped) → `continueJob(roundId, {prompt: text, sessionID: job.parentSessionID,
-       requestedBy: "manta"})`. Delivered "continue". A refusal (cap, autonomy changed, session busy, legacy task) is
-       returned to the card as its sentence and the question stays open.
-     - **paused** → refused: "This task is paused; resume it first, then answer."
-     - **running but not active** (between launch and the first turn, or settling) → wait 2 s once and re-read; still
-       not active → treat as finished.
-   - Then mark the question `answered` (answer, answeredAt, delivery), add the milestone "You answered: <short answer>",
-     publish.
+   - **Crash between claim and record:** the boot pass and the 60 s sweep look at questions with `delivering`: if the
+     child session holds a message with that id (`getMessage`) → `answered` (`steer`); a newer round created with that
+     prompt message id → `answered` (`continue`); else clear `delivering` (still `open`; the user can press again).
 4. **Dismiss** (`agents:question-dismiss {id}`): mark `dismissed`; if the task is running and active, steer "The user
    dismissed your question "<question>". Decide yourself, or say what is left undecided." A finished task is left as is.
 
 ### 4.3 The round ends with a question open
 
-- `settleV2Job` is unchanged. A task that ends while one of its questions is open ends `done` (not `endedBlocked`);
-  `buildCompletionText` appends, server-written: `Waiting for the user's answer to: "<question>" (the answer will
-  continue this task).` The lead brief says not to ask it again.
-- **Race:** an answer steered just as the turn ends may sit unconsumed in the child session's inbox. At settle, the
-  delegate reads `listInbox(child)`; any pending item that is a delivered answer (matched by the minted message id when
-  the item carries it, else by its exact text — S1 checks which on the pinned binary in the e2e first) is cancelled
-  (`cancelInboxItem`) and the answer is re-delivered with `continueJob` (the question's delivery becomes "continue").
-  A failed read is retried by the 60 s sweep; the question keeps `delivery: "steer-unconfirmed"` until resolved.
+- A task that ends while one of its questions is open ends `done` (not `endedBlocked`); `buildCompletionText` appends,
+  server-written: `Waiting for the user's answer to: "<question>" (the answer will continue this task).` The lead brief
+  says not to ask it again.
+- **Ending gate (closes the steer race).** When `settleV2Job` has decided a round is terminal, BEFORE `finishV2Job`:
+  1. under `withSessionResources(child)`: patch the record `ending: true` (jobs lock), then `listInbox(child)`; every
+     pending item that is one of our steered answers (matched by message id when the item carries one, else by exact
+     text — S1 checks which on the pinned binary in the e2e first) is cancelled with `cancelInboxItem`, and its question
+     becomes `delivery: "continue-pending"`. Release the lock.
+  2. `finishV2Job` as today (it takes `withSessionResources` only in its own cleanup, after step 1 released it: no
+     nesting).
+  3. After the terminal write and `onJobTerminal`, the delegate calls `taskQuestions.onRoundSettled(job)`, which sends
+     every `continue-pending` answer of that root with `continueJob` (one round; several answers joined into one
+     prompt) and records the outcome as in step 3 of §4.2.
+  An inbox read that fails leaves `ending` set and the questions as they are; the 60 s sweep retries step 1 for `ending`
+  rounds that are terminal with `continue-pending` / `delivering` questions. `deliverToTask` never steers into a round
+  marked `ending`.
+- **Held proposals never release while a question is open.** `decideRelease` (`agents.mjs`) rule 4 gains
+  `|| taskQuestions.hasOpen(rootJobOf(job))` (open, `delivering` or `continue-pending` all count) → `pending`,
+  reason `"unfinished"`. The click then decides; nothing auto-applies under a pending question.
 - Records whose job is gone (pruned, deleted) can still be dismissed; answering says "That task no longer exists; ask
   in a chat instead."
 
@@ -198,8 +230,14 @@ delivering the user's real answer later as a message.
 
 - `ChatPanel` merges `agentsQuestions({sessionID})` into the list it passes to the transcript tail as `QuestionRequest`s:
   `{ id: tq.id, sessionID: tq.parentSessionID, questions: tq.questions.map(q => ({ ...q, header: "<Agent> asks you" })) }`.
-  `onReply` → `agentsQuestionAnswer`, `onReject` (Dismiss) → `agentsQuestionDismiss`; both awaited, a refusal shown as the
-  existing send-error line (never swallowed). Freshness: subscribe to `taskQuestion` before the first read, refetch on a
+  `onReply` / `onReject` are routed by id prefix: `tq_…` → `agentsQuestionAnswer` / `agentsQuestionDismiss`; anything
+  else → the existing `opencodeQuestionReply` / `opencodeQuestionReject`, unchanged. `QuestionCard` stays unchanged and
+  synchronous: `ChatPanel` awaits the call itself, keeps the card mounted, and shows a refusal with the existing
+  send-error line (`setSendError`), never swallowed. The card disappears when the `taskQuestion` hint refetch no longer
+  lists it. The parent chat's Stop / busy-send `rejectPendingQuestions` only sees the session's own questions
+  (`questionsRef` in `useSseBus.ts`), so it never dismisses a task question — intended.
+- In Needs you (R1), the same routing; a refusal shows as a `role="alert"` line in the item's context row (the
+  `NeedsYou` wrapper is new, so it may carry it). Freshness: subscribe to `taskQuestion` before the first read, refetch on a
   hint for this session and on `resync`.
 - The option labels and "(Recommended)" suffix convention are the tool's own; the card already strips the suffix,
   badges and preselects it.
@@ -224,7 +262,19 @@ through `inherited`, or with `mutateJobProgress` on a running round); S2 adds th
 successors as today). `agent_propose` additionally refuses while the root task has an open question: "Your question to
 the user is still open. Finish what doesn't depend on it; propose after the answer arrives." (Process only.)
 
-### 4.7 Honest limits
+### 4.7 Lock discipline (one order, no I/O under the store mutex)
+
+- Lock order, outermost first: `withSessionResources(child)` (delegate) → `jobsLock` (delegate) → question-store mutex.
+  Nothing acquires them in another order, and `withSessionResources(child)` is never re-entered (`continueJob`,
+  `finishV2Job`'s cleanup and the ending gate each take it on their own, never inside each other).
+- The question-store mutex guards only reads and writes of `.questions.json`: never a network call (`sendPrompt`,
+  `continueJob`, `listInbox`, `replyQuestion`) under it.
+- `taskQuestions.capture` runs from the pump (`handleQuestion`): it writes the question (mutex), then replies to the
+  form (no lock), then writes the outcome (mutex).
+- A refusal at any step leaves the question `open` with `error` set; nothing is marked answered before delivery
+  succeeded.
+
+### 4.8 Honest limits
 
 - **The model sees a tool result that is not the answer.** A model may treat the placeholder as an answer or stop
   anyway. The wording is fixed and tested on the pinned binary with a scripted model, not with real models; a real-model
@@ -256,16 +306,22 @@ the user is still open. Finish what doesn't depend on it; propose after the answ
   (empty brief, `added_by` mention / handoff). Lead and Architect never get seats.
 - **Removed** by `agents:seat-remove` (the file is moved to `seats/.removed/<project>-<epoch>.md`, never deleted).
 - `AgentInfo.seats: string[]` (project slugs, from a `readdir` during `scan`).
+- **Notes count** (`AgentSeat.notes`): `createAgentsEngine` gains an optional dependency `countProjectPages(projectSlug)
+  → Promise<number | null>`, wired in `index.mjs` to the knowledge engine's page listing for that project's area
+  (`pages.mjs` area of the project; a count only, no page text). Absent, throwing or slower than 500 ms → `null` ("—").
 - Slug check: `/^[a-z0-9-]+$/` (as `seatFor` today); writes go through `writeFileAtomic` under the agents `syncLock`.
 
 ### 5.2 History + Restore
 
 - **Source:** the change store (`.changes.json`, ≤ 200 records). `agents:history {slug}` = records whose `slug` is the
   agent (creates included once applied), newest first, all states, ≤ 50. One strict-free read of one file: bounded.
-- **Retention change:** `undone` records are kept like `applied` ones: never pruned by age, only by the store's
-  200-record cap. Cap eviction order: discarded / expired / conflict first (oldest first), then `undone` (oldest first),
-  then `applied` (oldest first); journal records (`held`, `applying`, claimed `failed`) are never evicted (unchanged).
-  Discarded / expired still go after 7 days.
+- **Retention change** (`pruneChanges`, exact):
+  - **Age prune** (older than `CHANGE_KEEP_MS` = 7 days since `decidedAt ?? createdAt`): `discarded`, `expired`,
+    `conflict` only. `undone` leaves that set (`TERMINAL_STATES` is split: `AGE_PRUNED = {discarded, expired,
+    conflict}`); `applied`, `undone`, `pending`, `failed` are never age-pruned (as today for the last three).
+  - **Cap eviction** (`CHANGE_MAX` = 200), lowest rank first, oldest first within a rank, never a journal record
+    (`isJournal`: `held`, `applying`, claimed `failed`): rank 0 = `discarded` / `expired` / `conflict` / unclaimed
+    `failed`; 1 = `undone`; 2 = `applied`; 3 = `pending`.
 - **Undone entries are listed** with their change card's "Undone" chip (`agentChangeChip`) and the row's outcome line
   "Undone" (plus who undid it when known: `decidedBy`), so the list shows the change and its reversal.
 - **Row:** date, who (`origin.kind`: `chat` → "Manta" with "for you"; `job` → "Architect"; `restore` → "You"), the
@@ -284,7 +340,11 @@ the user is still open. Finish what doesn't depend on it; propose after the answ
    source.before, sessionID:"", messageID:"", callID:"", reason:null, needsClick:false}` and apply it with
    `applyLocked(rec, "click")` (the user's press is the approval; a lead / Architect target applies the same way because
    the user clicked). Returns the record; its card shows Undo.
-4. A restore that would change the Architect's `sources` is allowed (the user is restoring their own earlier file).
+4. **Re-validate the file before writing** (it is old data): `parseAgentMd(source.before)` must parse (refused: "That
+   version can't be read any more"); for the Architect, its `sources` must pass the §4.3a source validation and
+   `checkSourceCredentials` (fail-closed, as `planChange`); YAML aliases are refused for the whole file, as today.
+   A restore may change the Architect's `sources` only after those checks (the user is restoring their own earlier file).
+   Steps 1–4 run under `syncLock` before the record is created; a refusal creates no record.
 
 ### 5.3 Fleet read model
 
@@ -314,6 +374,28 @@ counters file.
   records the new id).
 - **Agent deleted / invalid / became lead or Architect:** its refresh routine is deleted and its entry removed by the
   same reconcile.
+- **The routine record** (`routines.mjs`, S2): `cleanInput` accepts `kind: "prompt" | "agent-refresh"` (absent =
+  `"prompt"`, unchanged validation). For `"agent-refresh"`: `agentSlug` must be a team agent (`agents.find`, valid, not
+  lead / Architect); `prompt` is set by the engine to the fixed charter (never user text); `directory` = the agent's
+  `~/.manta/agents/<slug>/home` (exists: `installBuiltIns` / create make it; `isDirectory` still checked); `agent` stays
+  null. Only the agents engine creates them (`routines.createInternal`); the `routine_create` tool and the editor refuse
+  `kind`; the editor allows only `enabled` and `cron` on them; deleting is allowed (= Off).
+- **The run** (`startRun`, branch on `kind`): reserve and create the headless run session exactly as today
+  (`oc.createSession` in `directory`, internal marker, `metadata.manta.routineId/runId`), but send **no prompt**. Then call
+  `agents.refresh(slug, { runId, runSessionId })`.
+- **`agents.refresh`** does not use the user-facing `dispatch` (which needs an open chat and a tmux owner). It calls
+  `delegate.startJob` with the same prompt-building as dispatch (`buildDispatchPrompt` + research guidance + Architect
+  context), `parentSessionID: runSessionId`, `parentDirectory: <agent home>`, `targetProject: AGENTS_TMUX_SESSION` (the
+  hidden `manta-agents` tmux session; created if missing with the same helper `openChat` uses), `architect: { mode:
+  "unknown" }`, `deliverResult: false` (new `startJob` input, S1: the record gets `completionDelivery: "not-needed"` and
+  N7 never posts into the headless session, so no model turn runs there). Returns the job id, stored on the run
+  (`run.jobId`, persisted under the routines lock).
+- **Settling the run from the task:** `index.mjs` chains `routines.onJobTerminal(job)` into the delegate's existing
+  `onJobTerminal` hook (after `agents.reconcile`, so released records read as released). For the run with that
+  `jobId`: `terminate(runId, job.status === "done" ? "done" : "failed")` with a synthesized report (`outcome: "findings"`
+  when any proposal is pending, else `"nothing"`; body = the task's result text + `outcomeLinesForJob(job.id)`). The 30
+  minute `RUN_TIMEOUT_MS` sweep skips runs that have a `jobId` (the task has its own 4 h ceiling); on boot a run with a
+  `jobId` whose job is already terminal is settled from the job record.
 - At fire, the routines engine, instead of prompting a model in its run session, calls `agents.refresh(slug, {runId})`,
   which dispatches an Architect task (`dispatch` with the run session as parent; charter text: "Refresh @<slug>: check the
   research it rests on and propose only changes your research supports.") and records the job id on the run. The run
@@ -329,6 +411,12 @@ counters file.
 ### 6.1 Types (`src/shared/types.ts`)
 
 ```ts
+// DelegateJob (src/shared/types.ts + the server record) gains:
+//   rootJobId: string;               // the first round's job id; every job gets it at launch (startJob: its own id),
+//                                    // continueJob / resume copy it (old.rootJobId ?? old.architect?.rootJobId ?? old.id).
+//                                    // Readers of older records use rootJobOf(job) = job.rootJobId ?? job.architect?.rootJobId ?? job.id.
+//   seatAdded?: { project: string; projectName: string };   // set when this launch created the seat
+//   ending?: true;                   // the settle gate is running (§4.3); server-only, stripped from the wire
 export type TaskQuestionState = "open" | "answered" | "dismissed" | "failed";
 export interface TaskQuestion {
   id: string;                       // "tq_<16 hex>"
@@ -342,7 +430,8 @@ export interface TaskQuestion {
   state: TaskQuestionState;
   askedAt: number; answeredAt: number | null;
   answer: string[][] | null;        // as the card sent it
-  delivery: "steer" | "steer-unconfirmed" | "continue" | null;
+  delivery: "steer" | "continue" | "continue-pending" | null;
+  delivering: { messageID: string; at: number } | null;   // claim of an answer in flight (§4.2 step 3)
   error: string | null;             // the last refusal, shown under the card
 }
 export interface AgentSeat {
@@ -417,7 +506,13 @@ changes, seats or questions changed; the Fleet page refetches, debounced 1 s). `
 hasOpen(rootJobId), onRoundSettled(job), sweep() }`. Store: `~/.manta/agents/.questions.json` (`{version:1,
 questions:[]}`, `writeJsonAtomic` + mutex; strict read for mutations; open questions never evicted; others kept 7 days,
 cap 300). `delegate.mjs` (S1) exports `deliverToTask(rootJobId, text, { messageID })` →
-`{ delivery: "steer" | "continue" } | { error }`.
+`{ delivery: "steer" | "continue" | "continue-pending" } | { error }`, `rootJobOf(job)`, and accepts the new `startJob`
+input `deliverResult: false`. It calls `taskQuestions.onRoundSettled(job)` after a terminal write and runs the §4.3
+ending gate. **Everything is keyed by `rootJobId`** (questions, research usage, the side panel, `hasOpen`), never by
+`childSessionID`.
+
+**Research binding (S2):** `bindResearcher` returns `rootJobId: rootJobOf(job)` next to `childSessionID`, and
+`researchLibrary.bound()` forwards `rootJobId: r.rootJobId ?? null`; usage is not recorded when it is null.
 
 The agents engine (S2) receives `taskQuestions` as a dependency and uses only `hasOpen` (for §4.6), `listOpen`
 (Needs you) and `answer`/`dismiss` (rpc pass-through).
@@ -430,9 +525,25 @@ Counted since `lastSeenAt` (or the last 24 h when never seen), at most 6 lines, 
 
 ### 6.5 Task research (S2, `researchLibrary.mjs`)
 
-`find` and `save` record, per bound task (`rootJobId` from the binding), the entry ids returned (top 5) and saved, in
+`find` and `save` record, per bound task (`rootJobId` from the binding, §6.3), the entry ids returned (top 5) and saved, in
 `~/.manta/research-library/used/<rootJobId>.json` (≤ 50 ids, atomic write, swept with entries older than 30 days).
 `agents:task-research` resolves them with `lookup` in the task's project scope, then appends its proposals' `basis`.
+
+### 6.6 Renderer seams (pinned)
+
+`src/renderer/explorer/explorerStore.ts` (R2):
+```ts
+export type RightPanel = "explorer" | "artifacts" | "task" | "none";
+export function openTaskPanel(sessionId: string, jobId: string): void;      // sets the slot to "task" + remembers jobId (in memory)
+export function useTaskPanelJobId(sessionId: string | null): string | null; // null unless the slot is "task"
+// setRightPanel(sessionId, "none" | "explorer" | "artifacts") also clears the remembered job id.
+// useShownRightPanel(sessionId) may now return "task".
+```
+`src/renderer/TaskSidePanel.tsx` (R2): `export function TaskSidePanel({ sessionId }: { sessionId: string }):
+JSX.Element | null` — reads `useTaskPanelJobId`, renders nothing when null, Close = `setRightPanel(sessionId, "none")`.
+R1 mounts it in `App.tsx` beside `ArtifactsPanel`: `{isChatPaneActive && !routinesView && shownRight === "task" &&
+<TaskSidePanel sessionId={activeChatSessionId} />}`.
+`src/renderer/BackgroundCards.tsx` (R2): `BackgroundRunCards({ cards, openQuestionsByJob? })`; `export { JobDetails }`.
 
 ## 7. Security
 
@@ -477,14 +588,19 @@ the code), the recap templates (domain text), the stores (existing pattern).
 CI only** (the required `typecheck-test` job on the PR). **No Freestyle VMs** for this phase. A failing CI test is
 fixed, never waved through.
 
-- **`taskQuestions.test.mjs`** (new): capture stores + replies with the placeholder (fake `replyQuestion`); fallback on
+- **`taskQuestions.test.mjs`** (new): claim → deliver → record ordering (a refusal keeps it `open` with `error`;
+  no network call under the mutex — the fake store mutex asserts it); crash with `delivering` resolved by the sweep both
+  ways; ending gate (steered answer left in the inbox → cancelled, `continue-pending`, continued once after the terminal
+  write; inbox read failure retried); `deliverToTask` never steers into an `ending` round; capture stores + replies with the placeholder (fake `replyQuestion`); fallback on
   `custom:false`, on a reply failure, on the 4th open question; answer → steer when running+active, → `continueJob` when
   finished, refused when paused, sentence returned on a `continueJob` refusal (question stays open); double answer;
   dismiss running vs finished; settle with an unconsumed steered answer → cancelled + continued; store strict-read
   refusal; open questions never evicted.
-- **`delegateV2Jobs.test.mjs`**: `handleQuestion` no longer interrupts on the new path; a task ending with an open
+- **`delegateV2Jobs.test.mjs`**: every launched job has `rootJobId`; `continueJob` and resume copy it; an old
+  record without it resolves via `rootJobOf`; `deliverResult:false` never posts N7; `handleQuestion` no longer interrupts on the new path; a task ending with an open
   question is `done` (not `endedBlocked`) and its completion text carries the waiting line; the fallback path unchanged.
-- **`taskDecision.test.mjs`**: answer-text formatting (single, multi, typed text).
+- **`taskDecision.test.mjs`**: answer-text formatting (single, multi, typed text); `acceptsFreeText` (no fields,
+  one `custom:false` field, all custom).
 - **e2e `scripts/opencode-v2/question-capture.e2e.mjs`** (pinned binary, scripted model): the model's question tool call
   returns the placeholder, the turn continues (a second tool call happens), a steered answer arrives in the same run
   (a user message with the answer text appears before the turn ends), and a finished task is continued by an answer.
@@ -495,13 +611,22 @@ fixed, never waved through.
   kept; at the 200 cap discarded/expired go first, then the oldest `undone`, then the oldest `applied`; journal records
   never evicted); restore (applies with
   `click`, refuses at Never, refuses "already at that version", undo of a restore); fleet (cells from fake jobs, counters,
-  week roll-over, recap templates); needs-you (pending box-wide, reviews minus `reviewed`); `agent_propose` refused with an
+  week roll-over, recap templates); needs-you (pending box-wide, reviews minus `reviewed`); `decideRelease` keeps held proposals `pending`/`unfinished`
+  while the root has an open / delivering / continue-pending question, even at Auto in build mode; restore refuses an
+  unparsable version and an Architect version whose sources hold a credential (no record created); `bindResearcher`
+  returns `rootJobId`; the exact prune set and cap rank (a 201st record evicts in rank order); `countProjectPages`
+  absent → `notes: null`; seat creation stamps `seatAdded`; `agent_propose` refused with an
   open question; `askedUser` set at answer time; the guard test still passes with the new lead / footer text.
 - **`researchLibrary.test.mjs`**: used-ids recorded per root, capped, swept.
-- **`routines.test.mjs`**: an `agent-refresh` routine dispatches the Architect via `agents.refresh` and never prompts the
-  run session; its proposals are `pending` (`plan`) whatever the "Change an agent" level (Auto included); a refused
+- **`routines.test.mjs`**: `cleanInput` accepts `agent-refresh` only from `createInternal`, with a team-agent slug and
+  the agent home dir; the tool / editor can't set `kind`; the run creates the headless session without prompting it,
+  stores `jobId`, is skipped by the 30-min timeout, settles from `onJobTerminal` (done → report with Outcome lines; failed
+  → failed), and a boot with a terminal job settles it; an `agent-refresh` routine dispatches the Architect via
+  `agents.refresh` and never prompts the run session; its proposals are `pending` (`plan`) whatever the "Change an agent" level (Auto included); a refused
   dispatch ends the run `failed` with the sentence.
-- **Renderer**: refresh control shows Monthly by default and Off after the toggle (and reports a refusal); history
+- **Renderer**: question routing by id prefix (task vs session question) and a task refusal on the send-error line;
+  `openQuestionsByJob` count on the run card; Details button on an agent result card opens the panel; "Added @slug to
+  <Project>" line from `seatAdded`; no seat pill on the lead / Architect picker rows; refresh control shows Monthly by default and Off after the toggle (and reports a refusal); history
   shows undone rows; question merge in ChatPanel (reply / dismiss / refusal shown); Fleet page (needs-you groups, empty state,
   grid cells, click opens the session); profile tabs (keyboard: arrows, Home/End; `aria-selected`; hidden panels);
   history row expand renders `AgentChangeView`; restore button visibility; seats edit/remove/add; side panel open/close
@@ -519,9 +644,12 @@ CI result.
 in `src/shared/api.ts` (signatures only) and channel names.
 
 - **S1 — server, questions** (Sonnet 5.5): `src/server/taskQuestions.mjs` (+test, new), `src/server/delegate.mjs`
-  (capture, `deliverToTask`, footer text, completion line, settle inbox check) + `delegateV2Jobs.test.mjs`,
+  (`rootJobId` on every job, `rootJobOf`, `seatAdded` passthrough, `deliverResult:false`, capture, `deliverToTask`, the
+  ending gate, `onRoundSettled` call, footer text, completion line) + `delegateV2Jobs.test.mjs`,
   `src/server/taskDecision.mjs` (+test), `scripts/opencode-v2/question-capture.e2e.mjs`.
-- **S2 — server, agents** (Sonnet 5.5): `src/server/agents.mjs` (seats, history, restore, fleet, needs-you, recap,
+- **S2 — server, agents** (Sonnet 5.5): `src/server/agents.mjs` (seats, `seatAdded`, `bindResearcher.rootJobId`,
+  `decideRelease` open-question rule, `countProjectPages` dep, history + exact prune/rank, restore re-validation, fleet,
+  needs-you, recap,
   refresh provisioning + toggle (§5.4), lead brief, §4.6) + `agents*.test.mjs`, `src/server/researchLibrary.mjs` (+test), `src/server/routines.mjs`
   (+test), `src/server/rpc.mjs` and `src/server/index.mjs` (ALL wiring, including the question channels and bus kinds,
   against §6.3), `docs/opencode-plugins-v2/**` only if a tool text changes (none planned).
@@ -560,3 +688,45 @@ showing hand edits in History (needs file watching).
   chat" no longer reaches into another component's composer (a draft instead); one shared `ResearchRows` for the panel
   and the profile; the review item feeds `BackgroundResultCard` a built part; the bus subscriptions are in the `Api`
   table; R2's exports land before R1 uses them.
+
+### Round 2 — Gemini 4 Argon (OpenCode Go), at 560f6182; verdicts (each checked against the code at `ba05c45e`)
+
+1. **MUST — `rootJobId` only on Architect jobs.** Confirmed (`delegate.mjs` sets `architect.rootJobId` only; plain
+   continuations link by `childSessionID` / `continues`). **Applied:** `rootJobId` is stamped on EVERY job at launch and
+   copied by `continueJob` and resume; `rootJobOf(job)` covers older records; everything is keyed by `rootJobId` (§6.1,
+   §6.3).
+2. **MUST — `bindResearcher` doesn't expose the root.** Confirmed (returns `childSessionID, agent, architect, project`;
+   `bound()` forwards only `child, project, agent`). **Applied** (§6.3, §6.5).
+3. **MUST — fallback can't see `custom`.** Confirmed (`decisionFromForm` keeps question/options/multiple only).
+   **Applied:** pure `acceptsFreeText(form)` on the RAW form before mapping (§4.2).
+4. **MUST — answer/settle ordering, settle lock, release while a question is open.** Confirmed: `settleV2Job` /
+   `finishV2Job` don't take `withSessionResources` (only the cleanup does); `decideRelease` rule 4 would apply a `done`
+   round's held proposals. **Applied:** claim → deliver → record with no I/O under the store mutex and a refusal keeping
+   the question open; crash recovery via `delivering`; the ending gate before `finishV2Job` + `onRoundSettled` after it;
+   `deliverToTask` never steers into an `ending` round and never nests the session lock (`continueJob` takes it itself —
+   a deadlock the review's fix 3 would have caused); `decideRelease` rule 4 holds while a question is open (§4.2, §4.3,
+   §4.7).
+5. **MUST — ChatPanel routing / QuestionCard states.** Confirmed (`QuestionCard` is synchronous, no busy/error props).
+   **Applied:** route by `tq_` prefix, `QuestionCard` stays unchanged, refusals on the send-error line; contract states
+   fixed; the Stop / busy-send rejection only sees the session's own questions, which is intended (§4.4, contract).
+6. **MUST — refresh mechanics in `routines.mjs`.** Confirmed (`cleanInput` needs prompt + an existing directory; dispatch
+   needs a tmux owner via `resolveOwner`; runs settle on their own session's execution and time out at 30 min).
+   **Applied** end to end: `kind` validation and internal-only creation, agent-home directory, a headless session with no
+   prompt, `agents.refresh` → `startJob` with `targetProject: manta-agents` and `deliverResult: false` (so N7 never wakes
+   the headless session — not in the review, found while applying it), `run.jobId`, settle from `onJobTerminal`, timeout
+   skip, boot settle (§5.4).
+7. **MUST — prune set / rank.** Confirmed. **Applied** with the exact sets (§5.2).
+8. **MUST — restore skips validation.** Confirmed (`planChange` parses and credential-checks; `applyLocked` writes
+   `after` as is). **Applied:** parse + source validation + `checkSourceCredentials` before any record (§5.2).
+9. **SHOULD — tokens.** Confirmed (`text-micro` has 0.08em tracking; no `content-visibility` utility). **Applied:**
+   arbitrary property `[content-visibility:auto]` (+ `contain-intrinsic-size`), `tracking-normal` on lowercase micro text
+   (contract).
+10. **SHOULD — seams.** Confirmed (no Details on `BackgroundResultCard`; store exports unpinned). **Applied:** §2.5 and the
+    pinned §6.6 (`RightPanel`, `openTaskPanel`, `useTaskPanelJobId`, `TaskSidePanel({sessionId})`, the App mount line).
+11. **SHOULD — open-question count.** **Applied:** `openQuestionsByJob` from ChatPanel to `BackgroundRunCards`, keyed by
+    `rootJobId` (§2.3, §6.6).
+12. **SHOULD — seat-added line / Architect pill.** **Applied:** `seatAdded` on the job, rendered as its own line; no seat
+    pill for lead / Architect (§2.3, §6.1).
+13. **COULD — notes source.** **Applied** (cheap): injected `countProjectPages`, `null` fallback (§5.1).
+
+No finding was rejected. The OpenAI review (above) remains pending; a second review round is next.
