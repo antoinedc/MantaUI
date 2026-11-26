@@ -125,6 +125,9 @@ import type { OpencodeInboxItem, ScheduledJob, VoiceNoteRecord } from "../shared
 import { planBusySend, shouldClearDraft } from "./inboxState";
 import { pickAgentDispatch } from "./agentDispatch";
 import { usePackageAgents } from "./packageAgents";
+import { isTaskQuestionId, openQuestionCounts, taskQuestionRequest } from "./agentDispatch";
+import { OpenQuestionsByJobContext } from "./BackgroundCards";
+import { useTaskQuestions } from "./hooks/useTaskQuestions";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
 import {
@@ -2290,6 +2293,40 @@ export function ChatPanel({
     [refreshQuestions],
   );
 
+  // Questions from the agent tasks this chat started (agent screens spec §4.4). The task keeps working while one waits:
+  // the card is the unchanged QuestionCard, merged with the session's own questions, and its buttons are routed by the
+  // id prefix to the agents channels. Both calls are awaited; a refusal goes on the same send-error line as every other
+  // chat failure, and the card stays until the box's hint refetch no longer lists it.
+  const { questions: taskQuestions, refresh: refreshTaskQuestions } = useTaskQuestions(sessionId);
+  const taskQuestionRequests = useMemo(() => taskQuestions.map(taskQuestionRequest), [taskQuestions]);
+  const openQuestionsByJob = useMemo(() => openQuestionCounts(taskQuestions), [taskQuestions]);
+
+  const answerAnyQuestion = useCallback(
+    async (q: QuestionRequest, answers: string[][]) => {
+      if (!isTaskQuestionId(q.id)) return replyQuestion(q, answers);
+      try {
+        await window.api.agentsQuestionAnswer({ id: q.id, answers });
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+      }
+      void refreshTaskQuestions();
+    },
+    [replyQuestion, setSendError, refreshTaskQuestions],
+  );
+
+  const dismissAnyQuestion = useCallback(
+    async (q: QuestionRequest) => {
+      if (!isTaskQuestionId(q.id)) return rejectQuestion(q);
+      try {
+        await window.api.agentsQuestionDismiss({ id: q.id });
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+      }
+      void refreshTaskQuestions();
+    },
+    [rejectQuestion, setSendError, refreshTaskQuestions],
+  );
+
   // The active model, model-picker callbacks (selectModel / onSelectAuto /
   // onSelectEffort / undoRouted), the typeahead, the "model not in list" reset,
   // and ensureModels ALL live in useComposerController now — they are composer
@@ -3611,6 +3648,7 @@ export function ChatPanel({
         />
         <VoicePlaybackProvider active={isActive}>
           <ExplorerOwnerProvider owner={explorerOwner}>
+          <OpenQuestionsByJobContext.Provider value={openQuestionsByJob}>
           <Transcript
             messages={shownMessages ?? messages}
             virtuosoRef={virtuosoRef}
@@ -3628,7 +3666,7 @@ export function ChatPanel({
             // BET-418 §D: a job session is read-only — never show its (anyway
             // impossible) question cards. Defensive: a job's pre-flight ruleset
             // means it never generates asks.
-            questions={viewOnly ? [] : questions.filter((q) => q.plan == null)}
+            questions={viewOnly ? [] : [...questions.filter((q) => q.plan == null), ...taskQuestionRequests]}
             turnInfo={turnInfo}
             finishByMessageId={finishByMessageId}
             userCommandInfo={userCommandInfo}
@@ -3637,8 +3675,8 @@ export function ChatPanel({
             widgetsByMessageId={widgetsByMessageId}
             pendingVoiceNote={pendingVoiceNote}
             onRetryVoiceNote={retryVoiceNote}
-            onReplyQuestion={replyQuestion}
-            onRejectQuestion={rejectQuestion}
+            onReplyQuestion={answerAnyQuestion}
+            onRejectQuestion={dismissAnyQuestion}
             planCard={routineRun && hasReportView(routineRun.run) ? <RoutineReportCard /> : planCard}
             backgroundCards={backgroundCards}
             handoffCards={handoffCardsNode}
@@ -3648,6 +3686,7 @@ export function ChatPanel({
             motionStateRef={motionStateRef}
             rowLocatorRef={rowLocatorRef}
           />
+          </OpenQuestionsByJobContext.Provider>
           </ExplorerOwnerProvider>
         </VoicePlaybackProvider>
         {/* The catch-up pill takes the jump button's place while it is shown. */}

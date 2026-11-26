@@ -66,6 +66,12 @@ const seoJob = (): DelegateJob =>
     request: "@seo check the page",
   }) as unknown as DelegateJob;
 
+// A chat that owns a task has talked already: the question cards live in the transcript tail, which an empty chat doesn't draw.
+const assistantMsg = {
+  info: { id: "m1", sessionID: SID, role: "assistant", time: { created: 1, completed: 2 } },
+  parts: [{ id: "m1-t", messageID: "m1", type: "text", text: "I asked the SEO agent." }],
+};
+
 describe("ChatPanel — task questions", () => {
   let h: Harness | null = null;
   let api: MockApi;
@@ -86,6 +92,7 @@ describe("ChatPanel — task questions", () => {
   async function open(overrides: Record<string, unknown> = {}, store: Record<string, unknown> = {}) {
     ({ api, bus } = installMockApi({
       agentsList: () => Promise.resolve([]),
+      opencodeMessages: () => Promise.resolve([assistantMsg]),
       agentsQuestions: () => Promise.resolve(list),
       onTaskQuestion: (cb: typeof hint) => {
         hint = cb;
