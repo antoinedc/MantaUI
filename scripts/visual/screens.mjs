@@ -53,6 +53,10 @@
  *             region crops the REAL page — it never renders the component in
  *             isolation, because an isolated render can be perfect while the
  *             page it lives on is broken.
+ *   mockupReady Optional CSS selector the mockup must show both before `mockupActions`
+ *             run and after them. Defaults to `[data-screen]`, which waits on the FIRST such
+ *             element — wrong for a mockup that hides all but one screen (agents: only the
+ *             open one carries `.on`).
  *   mockupRegion Optional CSS selector inside the mockup HTML, used by
  *             compare.mjs to find the matching region in the design. Defaults
  *             to `region`. It exists because the mockup is a different DOM and
@@ -111,6 +115,8 @@ async function exMockupTheme(page) {
 const BACKGROUND_URL = "/app/index.html?demo&desktop&state=background";
 // Taller than the desktop default: six cards plus an open Details panel must sit in view without the
 // capture scrolling the transcript, or a header overlay lands on the card depending on scroll timing.
+/** Agent pages: taller than the desktop default so a whole page is in view (the page scrolls inside its pane). */
+const AGENTS_VIEWPORT = { width: DESKTOP_VIEWPORT.width, height: 1500 };
 const BACKGROUND_VIEWPORT = { width: DESKTOP_VIEWPORT.width, height: 1600 };
 const bgCard = (jobId) => `[data-testid="background-card"][data-job-id="${jobId}"]`;
 
@@ -1263,6 +1269,8 @@ export const SCREENS = [
   },
 
   // ---- Agent screens (docs/screens/agents) -------------------------------
+  // The Fleet page (three cards, a recap, the grid) and the profile are longer than the desktop default: they sit in view in a
+  // taller capture so the page's own scroller doesn't hide the grid or the tabs.
   // Both rows boot the `agents` demo state (demoAgents.ts) and reach their page with the sidebar's own rows. The mockup's
   // tab strip is clicked for the matching screen; its region is the page pane (the sidebar and chrome are not under review).
   {
@@ -1282,8 +1290,9 @@ export const SCREENS = [
     mockupActions: async (page) => {
       await page.click('[data-tab="fleet"]');
     },
+    mockupReady: "section[data-screen].on",
     mockupRegion: 'section[data-screen="fleet"] .pane',
-    viewport: DESKTOP_VIEWPORT,
+    viewport: AGENTS_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
@@ -1303,8 +1312,9 @@ export const SCREENS = [
     mockupActions: async (page) => {
       await page.click('[data-tab="profile"]');
     },
+    mockupReady: "section[data-screen].on",
     mockupRegion: 'section[data-screen="profile"] .pane',
-    viewport: DESKTOP_VIEWPORT,
+    viewport: AGENTS_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
 ];

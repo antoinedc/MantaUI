@@ -282,7 +282,7 @@ export function AgentProfile({
     <div className="flex items-start gap-3" data-testid="profile-header">
       <AgentBadge size="lg" agent={{ name: info.name, slug: info.slug, color: info.color }} />
       <div className="min-w-0 flex-1">
-        <h2 className="m-0 text-title font-semibold text-text">{info.name || slug}</h2>
+        <h1 className="m-0 text-title font-semibold text-text">{info.name || slug}</h1>
         {!info.error && (
           <div className="mt-1 flex flex-wrap gap-x-3 text-meta text-text-faint">
             {factsLine(p).map((f) => (

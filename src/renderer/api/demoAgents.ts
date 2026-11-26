@@ -3,6 +3,7 @@
 // that a page prints as ages are relative to "now"; the ones it prints as dates are fixed, and the recap has no earlier visit,
 // so a capture reads the same whenever it is taken.
 
+import { nowMs } from "../clock.js";
 import type { AgentChange, AgentFleet, AgentInfo, AgentProfile, NeedsYou, TaskQuestion } from "../../shared/types.js";
 
 const HOUR = 3_600_000;
@@ -204,11 +205,11 @@ const ok = <T>(v: T) => () => Promise.resolve(v);
 /** The methods the "agents" state answers; every other agent channel keeps the Proxy fallback (null). */
 export const demoAgentsApi = {
   agentsList: ok(demoAgentList),
-  agentsNeedsYou: () => Promise.resolve(demoNeedsYou(Date.now())),
-  agentsFleet: () => Promise.resolve(demoFleet(Date.now())),
+  agentsNeedsYou: () => Promise.resolve(demoNeedsYou(nowMs())),
+  agentsFleet: () => Promise.resolve(demoFleet(nowMs())),
   agentsFleetSeen: ok({ ok: true as const }),
   agentsProfile: (input: { slug: string }) => Promise.resolve(demoProfile(input?.slug ?? "seo")),
-  agentsHistory: () => Promise.resolve(demoHistory(Date.now())),
+  agentsHistory: () => Promise.resolve(demoHistory(nowMs())),
   agentsProjects: ok([
     { slug: "manta-0a1b2c3d4e", name: "Manta" },
     { slug: "ronda-1b2c3d4e5f", name: "Ronda" },

@@ -32,3 +32,10 @@ The mockup (`mockup.html`) is the visual reference. These are the places where w
     off-grid paddings to the nearest step) — see `contract.md` §Tokens.
 13. **Sidebar** keeps the existing rail metrics (14 px agent badges, density tokens); the mockup's 22/16 px badges are for
     the pages only.
+14. **Fleet column** is 1120 px wide (the other pages' column is 960) so four project columns and the weekly count fit; the weekly
+    count stays pinned at the right edge when more columns make the region scroll.
+15. **Breadcrumb**: the current page is text with `aria-current="page"`, not a link to itself (no control that does nothing).
+16. **Profile Overview**: Charter shows the agent's description / use when / not for / works / model from the profile, not the mockup's
+    hand-written Does / Doesn't / Asks first lines; its History block is a read-only preview of the first three rows.
+17. **Review item** in Needs you: the context line carries the agent, project, task and age; the result card is the shipped
+    `BackgroundResultCard` (Open session →); "Done" is a ghost button in the context line.

@@ -773,7 +773,7 @@ const demoApiProxy = new Proxy(proxyTarget, {
     // The Routines, explorer and reconnecting states keep the always-mounted CTO pane quiet: its three overview
     // reads would otherwise resolve to null and raise "Couldn't refresh …" toasts over the screen under review
     // (racing the capture).
-    if ((IS_ROUTINES || IS_EXPLORER || DEMO_STATE === "reconnecting") && prop in routinesQuietReads) return routinesQuietReads[prop];
+    if ((IS_ROUTINES || IS_EXPLORER || IS_AGENTS || DEMO_STATE === "reconnecting") && prop in routinesQuietReads) return routinesQuietReads[prop];
     // Subscription methods: calling the returned function with a callback
     // hands back a no-op unsubscribe so the renderer's cleanup logic stays
     // happy. Non-subscription methods: call returns a Promise<null>.

@@ -320,3 +320,31 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.3, §2.5, §4.4, 
 - **"Done · N min" in the task panel is the round's own run time** (`startedAt` → `endedAt` of the shown round), not the whole task across
   follow-up rounds.
 - **The panel's Details toggle on a run card with no progress `view` still opens the panel,** which then says "No progress reported yet".
+
+## Agent screens, R1 renderer (Fleet, profile, sidebar): edge cases left open
+
+Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. Code: `src/renderer/agents/**`, `AgentsSection.tsx`, `Sidebar.tsx`, `App.tsx`.
+- **"Restore before this" guesses the live version from the records.** The profile has no copy of the agent file, so the live version is
+  taken as the `after` of the newest applied change (or the `before` of a later undo). A hand edit is not in the history, so after one the
+  button may show where it would change nothing (or hide where it would); the box is the judge and answers "Already at that version".
+  An `agents:profile` field with the file's hash would make it exact.
+- **The Overview's History is a read-only preview** (first 3 rows, no Details / Restore) and the History tab holds the actions, so a record
+  never has two cards with two Undo buttons. A record whose card shows above the tabs (pending, or settled on this page) has no Details row.
+- **"Instructions" in the Overview comes from the newest applied change's file text.** An agent with no applied change in the history (a
+  built-in nobody changed, or one edited by hand) shows no Instructions fold: the profile wire carries no instructions.
+- **"Mention in a chat" finds the seat's folder by name.** The sidebar knows folders, the registry knows names; the match is the picker's
+  folder-name rule (`resolvePickerProject`), and only an unambiguous one counts. Otherwise the chat opens in the active project. A
+  `folder` on `AgentSeat` would make it exact.
+- **The sidebar's agent rows carry no status dot** (the mockup's running / needs-you / failed dots): the rail has no per-agent state read
+  other than the Fleet grid's. A `status` per agent in `agents:list` would feed it.
+- **The breadcrumb's current page is plain text,** not a link to itself (the `breadcrumbs` guide keeps it a link): a link that does nothing
+  would break the no-dead-controls rule.
+- **The Fleet grid has no stacked small-screen layout** (the `responsive-table` guide's card form): the desktop window is never narrower than
+  a few hundred pixels and the region scrolls sideways with the agent and weekly-count columns pinned. Add the `@container` form with the
+  mobile client, if one ever shows this page.
+- **The profile reads the fleet and the project list on every hint** (soft reads for each seat's current task and "Add a seat"): cheap on
+  the box today; a per-agent `agents:fleet {slug}` would trim it.
+- **No visual-registry row for the task side panel.** It needs an agent task in the chat's job store, which no demo state has yet (the `agents`
+  demo state serves the two pages).
+- **Fixed in passing (R2's store): `openTaskPanel` didn't wake the readers of the right slot,** so Details opened nothing until another
+  render happened. It emits now (`explorerStore.test.ts`, "opening it wakes what is already rendering the right slot").

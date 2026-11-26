@@ -6,7 +6,7 @@
 // task count and the plan usage the composer's dial already shows.
 //
 // The grid is a native table (the `responsive-table` guide: header cells, a sticky row header, a named, keyboard-scrollable
-// region). A cell with a task opens that task's session; an idle cell and a dash (no seat) are not buttons.
+// region); the agent column and the weekly count stay in view while the project columns scroll sideways. A cell with a task opens that task's session; an idle cell and a dash (no seat) are not buttons.
 
 import { useEffect, useId, useRef } from "react";
 import type { AgentFleet, NeedsYou } from "../../shared/types";
@@ -26,6 +26,8 @@ import { useOpenTask } from "./useOpenTask";
 
 /** A cell's width (`w-52`); the table scrolls sideways inside its region when the columns don't fit. */
 export const FLEET_CELL_PX = 208;
+/** The page column: wider than the other pages' 960 so four project columns and the weekly count fit without scrolling. */
+const FLEET_COLUMN_MAX_PX = 1120;
 const SKELETON_DELAY_MS = 150;
 
 const TH = "text-left font-semibold text-text-faint px-2 py-2 border-b border-border sticky top-0 bg-bg z-[1] whitespace-nowrap";
@@ -110,7 +112,7 @@ function Grid({ fleet, onOpenProfile }: { fleet: AgentFleet; onOpenProfile: (slu
                   {p.name}
                 </th>
               ))}
-              <th className={`${TH} text-right`}>Tasks this week</th>
+              <th className={`${TH} right-0 z-[2] text-right`}>Tasks this week</th>
             </tr>
           </thead>
           <tbody>
@@ -166,7 +168,7 @@ function Grid({ fleet, onOpenProfile }: { fleet: AgentFleet; onOpenProfile: (slu
                     </td>
                   );
                 })}
-                <td className={`${TD} text-right tabular-nums text-text-muted`}>{row.tasksThisWeek}</td>
+                <td className={`${TD} sticky right-0 bg-bg text-right tabular-nums text-text-muted`}>{row.tasksThisWeek}</td>
               </tr>
             ))}
           </tbody>
@@ -237,7 +239,7 @@ export function FleetPage({
         <h1 className="m-0 text-label font-medium text-text">Fleet</h1>
       </AgentsHeader>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex flex-col gap-6 px-6 py-8" style={{ maxWidth: "var(--cto-col-max-w)" }}>
+        <div className="mx-auto flex flex-col gap-6 px-6 py-8" style={{ maxWidth: FLEET_COLUMN_MAX_PX }}>
           <NeedsSection needs={needs} fleet={data} agents={agents} sectionRef={sectionRef} headingRef={headingRef} />
           {fleet.loading ? (
             slow ? <Skeleton /> : null
