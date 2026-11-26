@@ -35,7 +35,7 @@ describe("agentInk", () => {
     for (const c of ["#16a36b", "#e11d48", "#336699", "#facc15", "oklch(62% 0.14 250)", "oklch(66% 0.14 25)", "oklch(64% 0.13 60)", "oklch(58% 0.12 320)", "rgb(10, 10, 10)"]) {
       const ink = agentInk(c)!;
       const other = ink === AGENT_INK_DARK ? AGENT_INK_LIGHT : AGENT_INK_DARK;
-      expect(inkContrast(c, ink)).toBeGreaterThanOrEqual(inkContrast(c, other));
+      expect(inkContrast(c, ink)!).toBeGreaterThanOrEqual(inkContrast(c, other)!);
     }
   });
   it("leaves the theme's own ink alone for a colour it can't read", () => {

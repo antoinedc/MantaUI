@@ -608,6 +608,7 @@ describe("AgentChangeView", () => {
     });
   });
   describe("collapsed (the profile's pending card)", () => {
+    let api: MockApi;
     const UPDATE_BEFORE = "---\nname: SEO\ndescription: d\nisolation: none\n---\nAudit one page.\nAsk before redirects.\n";
     const UPDATE_AFTER = "---\nname: SEO\ndescription: d\nisolation: none\n---\nAudit one page.\nCheck llms.txt.\n";
     const pending = (over: Partial<AgentChange> = {}) =>
