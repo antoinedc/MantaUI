@@ -278,3 +278,25 @@ steered message in the child's inbox carries the id we sent it under). Left open
 - **The first question's text echoes into the task's messages** ("Answer from the user to your question "<q>": …", cut at 300 characters). It is the
   model's own text quoted back; there is no filter beyond the cut.
 - **A real-model probe of the placeholder wording** (spec §4.8) is still to do: the e2e uses a scripted model.
+
+## Agent screens, S2 server (seats, history, fleet, refresh): edge cases left open
+
+Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §5. Code: `src/server/agents.mjs`, `routines.mjs`, `researchLibrary.mjs`, wiring in `rpc.mjs` / `index.mjs`.
+- **The refresh task runs in the user's home, not in the agent's folder.** The spec says the task's parent folder is the agent's `home/`,
+  but the delegate refuses any task inside `~/.manta` ("Can't run a task inside Manta's own folders"). The read-only Architect needs no
+  project, so `agents.refresh` uses the box user's home. The headless run SESSION is still created in the agent's `home/`.
+- **A plain shell window anchors the hidden `manta-agents` workspace** when a refresh task is the first thing to need it (the delegate
+  places its window in an existing tmux session only). It is created once with the same name `openChat` uses; closing it is harmless (the
+  next refresh recreates it).
+- **A refresh run deleted while its task is starting** (the routine removed in that window) leaves the task running; its proposals still
+  wait for a click and the task ends on its own, but nothing settles a run. Rare, bounded by the task's own 4 h ceiling.
+- **A refresh run's report is lost across the crash window** between creating its session and storing the task id: the run is failed
+  after 2 minutes ("the box restarted before the refresh could start") although the task may still run and propose.
+- **"Questions answered" in the recap reads the question store's file directly** (`.questions.json`, counting `answered` since the last
+  visit) because the question module has no read for it. If that module gains one, use it.
+- **Restore does not re-check a pinned model.** A restored version that pins a model nobody approves any more is applied as written (the
+  agent would then fail at its next task with the model's own error). Ordinary changes check the approved models.
+- **A deleted agent's refresh routine is removed on the next sync; a transiently invalid `agent.md` (mid-edit) also removes it** and it is
+  recreated (enabled) when the file is valid again, so an "Off" choice does not survive an invalid edit.
+- **Seats are listed by file name only.** A seat file for a project that left the registry still shows (named by its slug) until it is removed.
+- **The fleet's grid reads the jobs store, which keeps finished tasks 7 days or 50 records;** older tasks show as "Idle" (by design).
