@@ -1896,3 +1896,52 @@ test("agent_propose is refused while the task has a question open, with a proces
     await f.cleanup();
   }
 });
+
+// ---- agent screens §5.1: a handoff into a project the specialist has no seat in seats it there ----
+
+test("a handoff into an unseated project creates the seat (added by handoff) and stamps the job; a second one stamps nothing; a refused or declined launch takes the seat back", async () => {
+  const calls = [];
+  const world = { msgs: [], decline: false };
+  const f = await archFixture({
+    extra: {
+      retryDelayMs: 0,
+      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo/site" } }), listMessages: async () => world.msgs },
+      delegate: {
+        startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }),
+        startJobWithApproval: async (i) => (calls.push(i), world.decline ? { ok: false, error: "declined" } : { ok: true, job: { id: `jw${calls.length}` } }),
+        loadRecordsStrict: async () => [],
+      },
+      isManagedSession: async () => false,
+      isCtoSessionStrict: async () => false,
+      isCtoSession: async () => false,
+      delegateView: { assertWritable: async () => {} },
+      registry: { identify: async (d) => (d === "/repo/site" ? { slug: "site-aaaaaaaaaa" } : null), list: async () => [{ slug: "site-aaaaaaaaaa", displayName: "Site" }] },
+    },
+  });
+  try {
+    await f.engine.init();
+    let n = 0;
+    const hand = (title) => {
+      n++;
+      const b = { sessionID: "ses_chat", messageID: `msg_s${n}`, callID: `call_s${n}`, agent: "dev", title, brief: "Fix the build and run the tests." };
+      world.msgs = handoffTranscript(b, "build");
+      return f.engine.handoff(b);
+    };
+    const seatPath = join(f.root, "dev", "seats", "site-aaaaaaaaaa.md");
+    assert.equal((await hand("Fix the build")).ok, true);
+    assert.deepEqual(calls[0].seatAdded, { project: "site-aaaaaaaaaa", projectName: "Site" });
+    assert.match(await readFile(seatPath, "utf-8"), /added_by: handoff/);
+    assert.equal(calls[0].brief, undefined);
+    assert.equal(calls[0].request, "Fix the build", "the request text is never modified");
+    assert.equal((await hand("Fix it again")).ok, true);
+    assert.equal(calls[1].seatAdded, undefined, "the seat exists now");
+    // a declined launch into another project's seat is taken back (here: the same project, seat removed first)
+    await rm(seatPath);
+    world.decline = true;
+    const declined = await hand("A third one");
+    assert.equal(declined.ok, false);
+    assert.equal(await ok(seatPath), false, "a launch the user declined leaves no seat behind");
+  } finally {
+    await f.cleanup();
+  }
+});
