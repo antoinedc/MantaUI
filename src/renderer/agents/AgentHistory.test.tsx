@@ -48,11 +48,11 @@ const LIST = [
 describe("AgentHistory", () => {
   let h: Harness | null = null;
   let api: MockApi;
-  const onRestored = vi.fn();
+  const onChanged = vi.fn();
 
   beforeEach(() => {
     resetStore();
-    onRestored.mockClear();
+    onChanged.mockClear();
   });
   afterEach(() => {
     h?.unmount();
@@ -61,7 +61,7 @@ describe("AgentHistory", () => {
 
   async function open(records: AgentChange[], props: { preview?: number; cardsAbove?: ReadonlySet<string> } = {}, overrides: Record<string, unknown> = {}) {
     ({ api } = installMockApi(overrides));
-    h = mount(<AgentHistory records={records} onRestored={onRestored} {...props} />);
+    h = mount(<AgentHistory records={records} onChanged={onChanged} {...props} />);
     await h.flush();
   }
   const rows = () => [...h!.container.querySelectorAll<HTMLElement>('[data-testid="history-row"]')];
@@ -139,7 +139,7 @@ describe("AgentHistory", () => {
     expect(rows()[0].getAttribute("data-id")).toBe("r1");
     expect(rows()[0].textContent).toContain("You");
     expect(rows()[0].querySelector('[data-testid="agent-change-card"]')).toBeTruthy();
-    expect(onRestored).toHaveBeenCalledWith(restored);
+    expect(onChanged).toHaveBeenCalledWith(restored);
   });
 
   it("a refused Restore says why, under the row", async () => {
@@ -147,7 +147,7 @@ describe("AgentHistory", () => {
     await click(btn(rows()[1], "Restore before this"));
     expect(rows()[1].querySelector('[role="alert"]')?.textContent).toBe("Already at that version");
     expect(rows()).toHaveLength(3);
-    expect(onRestored).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
   });
 
   it("a preview shows only the first rows, read-only (no second copy of a card or a button)", async () => {

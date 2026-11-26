@@ -5,7 +5,7 @@
 
 import type { AgentChange, AgentFleet, AgentProfile, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
 import type { BackgroundResultPart } from "../backgroundRun";
-import { PACKAGE_AGENT_PREFIX } from "../agentDispatch";
+import { PACKAGE_AGENT_PREFIX, resolvePickerProject } from "../agentDispatch";
 import { agentChangeTitle } from "../agentChange";
 
 // ---- constants (contract §Constants) ----
@@ -213,4 +213,15 @@ export function canRestore(change: Pick<AgentChange, "kind" | "state" | "before"
   if (change.kind !== "update" || change.before == null) return false;
   if (change.state !== "applied" && change.state !== "undone") return false;
   return current == null || change.before !== current;
+}
+
+/**
+ * The folder of an open project that is this seat's project (the registry names it; the sidebar knows folders), so "Mention in
+ * a chat" can start in it. Only an unambiguous match counts; none → null (the active project is used instead).
+ */
+export function seatFolder(seat: { project: string; projectName: string } | undefined, projects: ReadonlyArray<{ defaultCwd?: string | null }>): string | null {
+  if (!seat) return null;
+  const one = [{ slug: seat.project, name: seat.projectName }];
+  const hits = projects.filter((p) => p.defaultCwd && resolvePickerProject(p.defaultCwd, one));
+  return hits.length === 1 ? (hits[0].defaultCwd ?? null) : null;
 }

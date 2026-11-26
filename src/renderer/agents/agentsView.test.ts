@@ -18,6 +18,7 @@ import {
   PROFILE_TABS,
   recapLead,
   reviewPart,
+  seatFolder,
   seatNotesLabel,
   weekPill,
 } from "./agentsView";
@@ -225,5 +226,17 @@ describe("recapLead", () => {
     expect(recapLead(at(25, 18, 40), now)).toBe("Since yesterday 18:40:");
     expect(recapLead(at(12, 7, 0), now)).toBe("Since 12 Nov 07:00:");
     expect(recapLead(null, now)).toBe("In the last 24 hours:");
+  });
+});
+
+describe("seatFolder", () => {
+  const seat = { project: "manta-aaaaaaaaaa", projectName: "Manta" };
+  it("the open project whose folder is the seat's project", () => {
+    expect(seatFolder(seat, [{ defaultCwd: "/w/other" }, { defaultCwd: "/w/manta" }])).toBe("/w/manta");
+  });
+  it("none or several candidates is null (never a wrong project)", () => {
+    expect(seatFolder(seat, [{ defaultCwd: "/w/other" }])).toBeNull();
+    expect(seatFolder(seat, [{ defaultCwd: "/a/manta" }, { defaultCwd: "/b/manta" }])).toBeNull();
+    expect(seatFolder(undefined, [{ defaultCwd: "/w/manta" }])).toBeNull();
   });
 });

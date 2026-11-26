@@ -195,7 +195,7 @@ describe("AgentProfile", () => {
       await click(btn("Mention in a chat"));
       const d = useStore.getState().drafts.at(-1)!;
       expect(d.input).toBe("@seo ");
-      expect(d.projectName).toBe("manta");
+      expect(d.mode).toEqual({ projectName: "manta" });
     });
 
     it("Chat opens the agent's direct chat window; a refusal says why on the page", async () => {
