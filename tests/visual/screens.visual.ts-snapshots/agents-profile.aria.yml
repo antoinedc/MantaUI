@@ -11,7 +11,7 @@
 - button "Mention in a chat"
 - text: Change to SEO @seo Waiting for you
 - paragraph: Adds an llms.txt check and drops 2 crawler rules that no longer hold.
-- text: "V1 --- name: Pricing CTA Copy description: Writes and tests the call-to-action text on the pricing page. isolation: none --- Rewrite the pricing page's call-to-action text. Never change prices or layout."
+- text: ⋯ 6 unchanged lines - Ask before changing redirects. - Read how each AI crawler fetches pages before changing robots.txt. - Block GPTBot in robots.txt on staging only. - Block CCBot in robots.txt on every host. - Check that llms.txt is served at the site root and lists the key pages.
 - button "Apply"
 - button "Discard"
 - tablist "SEO":
