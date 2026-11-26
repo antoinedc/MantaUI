@@ -41,10 +41,12 @@ describe("useTaskQuestions", () => {
   let hint: ((p: { id: string; parentSessionID: string; rootJobId: string; state: string }) => void) | null = null;
   let list: TaskQuestion[] = [];
   let order: string[] = [];
+  let fail = false;
 
   beforeEach(() => {
     list = [tq("tq_a")];
     order = [];
+    fail = false;
     hint = null;
     ({ api, bus } = installMockApi({
       onTaskQuestion: (cb: typeof hint) => {
@@ -56,7 +58,7 @@ describe("useTaskQuestions", () => {
       },
       agentsQuestions: () => {
         order.push("read");
-        return Promise.resolve(list);
+        return fail ? Promise.reject(new Error("offline")) : Promise.resolve(list);
       },
     }));
   });
@@ -97,13 +99,10 @@ describe("useTaskQuestions", () => {
     expect(ids()).toBe("");
   });
 
-  it("keeps the list it has when a refetch fails, and shows none on a box without the channel", async () => {
+  it("keeps the list it has when a refetch fails", async () => {
     h = mount(<Probe sessionId="ses_p" />);
     await h.flush();
-    ({ api } = installMockApi({
-      onTaskQuestion: () => () => {},
-      agentsQuestions: () => Promise.reject(new Error("offline")),
-    }));
+    fail = true;
     await act(async () => bus.emitStream({ sub: "resync", sessionId: "", payload: {} }));
     await h.flush();
     expect(ids()).toBe("tq_a");

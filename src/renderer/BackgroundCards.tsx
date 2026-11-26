@@ -335,6 +335,9 @@ function JobDetails({ id, view, box }: { id: string; view: JobView; box: number 
   );
 }
 
+// The task side panel's "What happened" is this same disclosure, unchanged (agent screens spec §2.5).
+export { JobDetails };
+
 /** The cards under the transcript (N5). Rendered in the transcript tail. */
 export const BackgroundRunCards = memo(function BackgroundRunCards({
   cards,

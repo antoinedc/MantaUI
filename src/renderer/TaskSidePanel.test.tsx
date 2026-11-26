@@ -211,7 +211,7 @@ describe("TaskSidePanel", () => {
     const round2 = job({ id: "job2", rootJobId: "job1", childSessionID: "ses_c2", name: "Round two", createdAt: 5, attempt: 2 });
     await open({ ses_c1: round1, ses_c2: round2 });
     expect(q('[data-testid="task-panel-title"]')?.textContent).toBe("Architect · Round two");
-    expect(api.calls.agentsTaskResearch?.[0]).toEqual([{ jobId: "job1" }]); // keyed by the root
+    expect(api.calls.agentsTaskResearch?.[0]).toEqual([{ jobId: "job2" }]); // the round that is shown (the box resolves its root)
   });
 
   it("a task that is gone says so, and Close still works", async () => {
