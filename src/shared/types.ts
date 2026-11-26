@@ -4436,8 +4436,11 @@ export interface AgentFleet {
     tasksThisWeek: number;
   }[];
   week: { tasks: number };
-  recap: { since: number | null; lines: string[] };
+  // `links`: recap lines about one task the user can open (a failure they asked for); `line` indexes `lines`. Absent on an older box.
+  recap: { since: number | null; lines: string[]; links?: { line: number; jobId: string }[] };
 }
+// A finished task waiting on the user (spec §2.1, rule set P1): it ended "needs a decision", or it is the user's own task with a
+// branch that has not landed. `reason` says which, in the words the screen shows.
 export interface NeedsYouReview {
   jobId: string;
   agentSlug: string;
@@ -4447,6 +4450,8 @@ export interface NeedsYouReview {
   filesChanged: number;
   branch: string | null;
   resultText: string;
+  reason: string; // "Needs a decision" | "Branch ready to merge · N files"
+  endedBlocked?: boolean; // the decision case (absent on an older box)
 }
 export interface NeedsYou {
   questions: TaskQuestion[];

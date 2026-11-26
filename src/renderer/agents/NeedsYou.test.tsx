@@ -88,6 +88,8 @@ const review = (over: Partial<NeedsYouReview> = {}): NeedsYouReview => ({
   filesChanged: 3,
   branch: "agent/dev/x",
   resultText: "Fixed the crash.",
+  reason: "Branch ready to merge · 3 files",
+  endedBlocked: false,
   ...over,
 });
 
@@ -151,6 +153,7 @@ describe("NeedsYouList", () => {
     expect(ctx(r)).toContain("Dev");
     expect(ctx(r)).toContain("Manta");
     expect(ctx(r)).toContain("Fix the 0-byte crash");
+    expect(ctx(r)).toContain("Branch ready to merge · 3 files"); // why it is here
     // the cards themselves are the existing ones
     expect(q.textContent).toContain("Sales asks you");
     expect(c.querySelector('[data-testid="agent-change-card"]')).toBeTruthy();
@@ -223,6 +226,14 @@ describe("NeedsYouList", () => {
     await click(btn(items()[0], "Done"));
     expect(items()[0].querySelector('[role="alert"]')?.textContent).toBe("Couldn't save");
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("a task that ended needing a decision says so, as its reason and on its card", async () => {
+    await open(data({ reviews: [review({ reason: "Needs a decision", endedBlocked: true, filesChanged: 0, branch: null })], count: 1 }));
+    const ctx = items()[0].querySelector(".manta-agents-ny-ctx")!.textContent;
+    expect(ctx).toContain("Needs a decision");
+    expect(ctx).not.toContain("finished"); // the reason replaces the generic "finished 10m ago"
+    expect(items()[0].textContent).toContain("Needs a decision");
   });
 
   it("a review card offers no Details (there is no chat here to open a panel in) but Open session →", async () => {

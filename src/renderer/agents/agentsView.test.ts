@@ -102,12 +102,16 @@ describe("cellView", () => {
 });
 
 describe("reviewPart", () => {
-  const r: NeedsYouReview = { jobId: "job9", agentSlug: "dev", project: "manta", name: "Fix the crash", finishedAt: 5, filesChanged: 3, branch: "agent/dev/x", resultText: "Fixed it." };
+  const r: NeedsYouReview = { jobId: "job9", agentSlug: "dev", project: "manta", name: "Fix the crash", finishedAt: 5, filesChanged: 3, branch: "agent/dev/x", resultText: "Fixed it.", reason: "Branch ready to merge · 3 files" };
   it("builds the finished-card part from the review item, with no chat to open a panel in", () => {
     const p = reviewPart(r);
     expect(p).toMatchObject({ type: "background-result", jobId: "job9", state: "done", name: "Fix the crash", agent: "agent-dev", text: "Fixed it." });
     expect(p.sessionID).toBeUndefined();
     expect(p.childSessionId).toBe("job9");
+    expect(p.endedBlocked).toBeUndefined();
+  });
+  it("carries the decision case onto the card, so it reads 'Needs a decision'", () => {
+    expect(reviewPart({ ...r, reason: "Needs a decision", endedBlocked: true }).endedBlocked).toBe(true);
   });
 });
 
