@@ -30,6 +30,15 @@ describe("AgentBadge", () => {
     expect(badge().style.color).toBe(norm(AGENT_INK_LIGHT));
   });
 
+  it("the profile's large badge sets its initial at 15px (the mockup's), the small ones at 11px", () => {
+    h = mount(<AgentBadge size="lg" agent={{ name: "SEO", slug: "seo", color: "#16a36b" }} />);
+    expect(badge().className).toContain("text-prose");
+    expect(badge().className).not.toContain("text-micro");
+    h.unmount();
+    h = mount(<AgentBadge size="md" agent={{ name: "SEO", slug: "seo", color: "#16a36b" }} />);
+    expect(badge().className).toContain("text-micro");
+  });
+
   it("without a colour, keeps the neutral fill and the theme's text", () => {
     h = mount(<AgentBadge agent={{ name: "Manta", slug: "manta", color: null }} />);
     expect(badge().className).toContain("bg-fill-hover");

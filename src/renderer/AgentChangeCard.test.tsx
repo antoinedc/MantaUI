@@ -625,7 +625,7 @@ describe("AgentChangeView", () => {
       const line = q(h!, "agent-change-summary-line")!;
       expect(line.textContent).toContain("Architect");
       expect(line.textContent).toContain("Adds an llms.txt check.");
-      expect(buttons(h!).map((b) => b.textContent)).toEqual(["Apply", "Discard"]); // exactly one of each: no duplicated actions
+      expect(buttons(h!).map((b) => b.textContent)).toEqual(["Discard", "Apply"]); // exactly one of each: no duplicated actions
       const fold = q(h!, "agent-change-fold") as HTMLDetailsElement;
       expect(fold.tagName).toBe("DETAILS");
       expect(fold.open).toBe(false);

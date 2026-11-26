@@ -8,10 +8,10 @@ import { agentInk } from "./agentInk";
 export type AgentBadgeSize = "rail" | "sm" | "md" | "lg";
 
 const SIZE: Record<AgentBadgeSize, string> = {
-  rail: "h-[14px] w-[14px] rounded-sm",
-  sm: "h-4 w-4 rounded-xs",
-  md: "h-[22px] w-[22px] rounded-sm",
-  lg: "h-11 w-11 rounded-md",
+  rail: "h-[14px] w-[14px] rounded-sm text-micro",
+  sm: "h-4 w-4 rounded-xs text-micro",
+  md: "h-[22px] w-[22px] rounded-sm text-micro",
+  lg: "h-11 w-11 rounded-md text-prose tracking-normal", // the profile header: the mockup's 15px initial
 };
 
 export function AgentBadge({
@@ -27,7 +27,7 @@ export function AgentBadge({
       aria-hidden="true"
       data-testid="agent-badge"
       className={
-        "flex shrink-0 items-center justify-center text-micro font-semibold tracking-normal " +
+        "flex shrink-0 items-center justify-center font-semibold tracking-normal " +
         SIZE[size] +
         (agent.color ? " text-on-accent" : " bg-fill-hover text-text")
       }

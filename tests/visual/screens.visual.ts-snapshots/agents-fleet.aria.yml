@@ -21,12 +21,12 @@
       - button "Create"
       - button "Discard"
     - listitem:
-      - text: "/Dev · Manta · Explorer: 0-byte file crash · finished [\\d,.]+[bkmBKM]+ ago/"
+      - text: "/Dev · Manta · Explorer: 0-byte file crash · Branch ready to merge · 3 files · [\\d,.]+[bkmBKM]+ ago/"
       - button "Done"
       - text: "Background Dev · Explorer: 0-byte file crash · done"
       - button "Open session →"
       - text: Fixed the crash when opening a 0-byte file and added a regression test.
-- text: "/In the last \\d+ hours: Manta handed 9 requests to agents · Dev finished 2 tasks in Manta · SEO finished 1 task in Ronda · Sales failed 1 task · Architect updated @seo \\(your setting: Tell me\\)/"
+- text: "/In the last \\d+ hours: Manta handed 9 requests to agents · Dev finished 3 tasks Manta handed off · SEO finished 1 task in Ronda · Sales failed 1 task · 2 branches from Manta-handed tasks still unmerged/"
 - heading "Agents × projects" [level=2]
 - text: · open a cell to see its task
 - region "Agents × projects":
@@ -40,13 +40,13 @@
         - columnheader "Capo"
         - columnheader "Tasks this week"
     - rowgroup:
-      - 'row /Dev Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+ Editor undo stack Done · ready for review — Idle last task 3d ago \d+/':
+      - 'row /Dev Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+ Editor undo stack Done · 5 files changed — Idle last task 3d ago \d+/':
         - rowheader "Dev":
           - button "Dev"
         - 'cell /Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+/':
           - 'button /Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+/'
-        - cell "Editor undo stack Done · ready for review":
-          - button "Editor undo stack Done · ready for review"
+        - cell "Editor undo stack Done · 5 files changed":
+          - button "Editor undo stack Done · 5 files changed"
         - cell "—"
         - cell "Idle last task 3d ago"
         - cell /\d+/
@@ -60,11 +60,11 @@
         - cell "Idle weekly audit Mon"
         - cell "—"
         - cell "7"
-      - row "Design Hero redesign Needs you — — — 4":
+      - row "Design Hero redesign Needs you · Needs a decision — — — 4":
         - rowheader "Design":
           - button "Design"
-        - cell "Hero redesign Needs you":
-          - button "Hero redesign Needs you"
+        - cell "Hero redesign Needs you · Needs a decision":
+          - button "Hero redesign Needs you · Needs a decision"
         - cell "—"
         - cell "—"
         - cell "—"

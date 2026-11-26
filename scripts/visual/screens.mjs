@@ -1297,7 +1297,7 @@ export const SCREENS = [
   },
   {
     id: "agents-profile",
-    title: "Agent profile — header, pending change, tabs (Overview)",
+    title: "Agent profile — header, pending change, tabs (Overview, details pane)",
     url: "/app/index.html?demo&state=agents&desktop",
     ready: '[data-screen="session"]',
     final: ".manta-agents-profile",
@@ -1305,7 +1305,7 @@ export const SCREENS = [
     actions: async (page) => {
       await page.locator('[data-testid="agent-row"][data-slug="seo"]').click();
       await page.waitForSelector('[data-testid="profile-header"]', { state: "visible" });
-      await page.waitForSelector('[data-testid="profile-charter"]', { state: "visible" });
+      await page.waitForSelector('[data-testid="profile-howto"]', { state: "visible" });
       await page.mouse.move(0, 0);
     },
     mockup: "docs/screens/agents/mockup.html",

@@ -258,7 +258,8 @@ function foldLabel(change: AgentChange): string {
  *
  * `collapsed` (the profile's pending card): ONE summary line — the chip, who and what, and the same buttons — with the change
  * itself (evidence, rules, the diff or the new agent) folded under "Show the change". What the user must read to decide or to
- * understand a press (the reason a click is needed, a refusal, the outcome) stays outside the fold. The buttons exist once.
+ * understand a press (the reason a click is needed, a refusal, the outcome) stays outside the fold. The buttons exist once, in
+ * the order of the line (the primary one last, at the line's end).
  */
 export function AgentChangeView({ change, onChange, collapsed = false }: { change: AgentChange; onChange: (next: AgentChange) => void; collapsed?: boolean }) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
@@ -383,7 +384,7 @@ export function AgentChangeView({ change, onChange, collapsed = false }: { chang
               <div className="min-w-0 flex-1 basis-64 break-words text-body text-text" data-testid="agent-change-summary-line">
                 <span className="font-semibold">{changeAuthor(change)}</span> · {change.summary || agentChangeTitle(change)}
               </div>
-              {buttons && <div className="flex shrink-0 items-center gap-2">{buttons}</div>}
+              {buttons && <div className="flex shrink-0 items-center gap-2">{[...buttons].reverse()}</div>}
             </div>
           }
         >

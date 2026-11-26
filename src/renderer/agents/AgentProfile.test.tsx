@@ -237,7 +237,7 @@ describe("AgentProfile", () => {
       const fold = card.querySelector<HTMLDetailsElement>('[data-testid="agent-change-fold"]')!;
       expect(fold.open).toBe(false);
       expect(fold.querySelector("summary")?.textContent).toMatch(/^Show the change · \d+ lines?/);
-      expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Apply", "Discard"]);
+      expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Discard", "Apply"]);
     });
 
     it("none when nothing is pending", async () => {
