@@ -926,6 +926,49 @@ test("profile: who built it, when it last changed, and the research its applied 
   }
 });
 
+test("profile research (Research tab): each entry lists its public sources — a publisher or the site, with a safe link — counts the private ones, and names the other agents relying on it", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.library = [
+      entry({
+        findings: [
+          { claim: "a", url: "https://developers.google.com/x", private: false },
+          { claim: "b", url: "https://developers.google.com/y", private: false },
+          { claim: "c", url: "https://openai.com/z", publisher: "OpenAI", private: false },
+          { claim: "d", url: null, private: true },
+          { claim: "e", url: "javascript:alert(1)", publisher: "Evil", private: false },
+          { claim: "f", url: "javascript:alert(2)", private: false },
+          { claim: "g", url: null, private: false },
+        ],
+      }),
+      entry({ id: "rl_2", topic: "No findings sent", findings: undefined }),
+    ];
+    await f.putChanges([
+      change({ id: "d1", slug: "dev", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }, { id: "rl_2", topic: "No findings sent" }] }),
+      change({ id: "s1", slug: "scout", agentName: "Scout", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
+      change({ id: "s2", slug: "ops", agentName: "Ops", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
+      change({ id: "s3", slug: "scout", agentName: "Scout", state: "applied", decidedAt: T0 - 2 * DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
+      change({ id: "x1", slug: "ghost", agentName: "Ghost", state: "discarded", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
+    ]);
+    const r = (await f.engine.profile("dev")).research;
+    const one = r.find((x) => x.id === "rl_1");
+    assert.deepEqual(one.sources, [
+      { label: "developers.google.com", url: "https://developers.google.com/x" },
+      { label: "OpenAI", url: "https://openai.com/z" },
+      { label: "Evil", url: null },
+    ], "one per publisher or site; a link only when it is http(s); a finding with neither is not a source");
+    assert.equal(one.privateSources, 1);
+    assert.deepEqual(one.usedBy, ["Ops", "Scout"], "other agents whose applied changes rest on it, once each, sorted; not discarded ones, not itself");
+    const bare = r.find((x) => x.id === "rl_2");
+    assert.equal("sources" in bare, false);
+    assert.equal("privateSources" in bare, false);
+    assert.equal("usedBy" in bare, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("task research: the entries the task found or saved, then its proposals' basis, resolved in the task's project; an unknown task is a sentence", async () => {
   const f = await fixture();
   try {

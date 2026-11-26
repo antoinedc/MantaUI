@@ -10,13 +10,16 @@ import {
   detailRows,
   factsLine,
   firstLine,
-  historyOutcome,
+  historyCounts,
+  historyStatus,
   historyWho,
+  latestLiveId,
   isUnknownChannel,
   memoryLabel,
   nextTab,
   planUsagePercent,
   PROFILE_TABS,
+  researchHealth,
   recapLead,
   reviewPart,
   seatFolder,
@@ -184,18 +187,36 @@ describe("history rows", () => {
     expect(historyWho(change({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } }))).toBe("Architect");
     expect(historyWho(change({ origin: { kind: "restore", fromChangeId: "x" } }))).toBe("You");
   });
-  it("the outcome line follows every state; an undone row says Undone and by whom", () => {
-    expect(historyOutcome(change({ state: "applied", decidedBy: "click" }))).toBe("Live (you approved it)");
-    expect(historyOutcome(change({ state: "applied", decidedBy: "auto" }))).toBe("Live (applied automatically)");
-    expect(historyOutcome(change({ state: "undone", decidedBy: "click" }))).toBe("Undone by you");
-    expect(historyOutcome(change({ state: "undone", decidedBy: null }))).toBe("Undone");
-    expect(historyOutcome(change({ state: "pending" }))).toBe("Waiting for your click");
-    expect(historyOutcome(change({ state: "discarded" }))).toBe("Discarded");
-    expect(historyOutcome(change({ state: "expired" }))).toBe("Expired");
-    expect(historyOutcome(change({ state: "conflict", error: "File changed since" }))).toBe("Not applied: File changed since");
-    expect(historyOutcome(change({ state: "failed", error: null }))).toBe("Not activated");
-    expect(historyOutcome(change({ state: "held" }))).toBe("Waiting for the Architect to finish");
-    expect(historyOutcome(change({ state: "applying" }))).toBe("Applying…");
+  it("the status is a label with a tone and, where there is one, the reason — live says how it went live, undone by whom", () => {
+    expect(historyStatus(change({ state: "applied", decidedBy: "click" }))).toEqual({ tone: "ok", label: "Live", why: "you approved it" });
+    expect(historyStatus(change({ state: "applied", decidedBy: "auto" }))).toEqual({ tone: "ok", label: "Live", why: "applied automatically" });
+    expect(historyStatus(change({ state: "undone", decidedBy: "click" }))).toEqual({ tone: "faint", label: "Undone", why: "by you" });
+    expect(historyStatus(change({ state: "undone", decidedBy: null }))).toEqual({ tone: "faint", label: "Undone", why: null });
+    expect(historyStatus(change({ state: "pending" }))).toEqual({ tone: "accent", label: "Waiting for your click", why: null });
+    expect(historyStatus(change({ state: "discarded" }))).toEqual({ tone: "faint", label: "Discarded", why: null });
+    expect(historyStatus(change({ state: "expired" }))).toEqual({ tone: "faint", label: "Expired", why: null });
+    expect(historyStatus(change({ state: "conflict", error: "File changed since" }))).toEqual({ tone: "warn", label: "Not applied", why: "File changed since" });
+    expect(historyStatus(change({ state: "failed", error: null }))).toEqual({ tone: "warn", label: "Not activated", why: null });
+    expect(historyStatus(change({ state: "held" }))).toEqual({ tone: "faint", label: "Waiting for the Architect to finish", why: null });
+    expect(historyStatus(change({ state: "applying" }))).toEqual({ tone: "accent", label: "Applying…", why: null });
+  });
+  it("the counts the pane shows: live (applied), waiting (pending), undone", () => {
+    const rows = [change({ state: "applied" }), change({ state: "applied" }), change({ state: "pending" }), change({ state: "undone" }), change({ state: "discarded" }), change({ state: "expired" })];
+    expect(historyCounts(rows)).toEqual({ live: 2, waiting: 1, undone: 1 });
+    expect(historyCounts([])).toEqual({ live: 0, waiting: 0, undone: 0 });
+  });
+  it("the one Undo belongs to the newest live change", () => {
+    const rows = [change({ id: "p", state: "pending", decidedAt: null, createdAt: 900 }), change({ id: "a", state: "applied", decidedAt: 300 }), change({ id: "b", state: "applied", decidedAt: 200 }), change({ id: "u", state: "undone", decidedAt: 400 })];
+    expect(latestLiveId(rows)).toBe("a");
+    expect(latestLiveId([change({ state: "undone" })])).toBeNull();
+  });
+});
+
+describe("researchHealth", () => {
+  const e = (over: Partial<AgentProfile["research"][number]> = {}) => ({ id: "r", topic: "t", sourceCount: 3, ageDays: 1, status: "fresh" as const, thin: false, ...over });
+  it("counts stale, thin and missing entries (a missing one has no age or sources to judge)", () => {
+    expect(researchHealth([e(), e({ status: "stale" }), e({ thin: true }), e({ status: "stale", thin: true }), e({ status: "missing", thin: false, sourceCount: null, ageDays: null })])).toEqual({ stale: 2, thin: 2, missing: 1 });
+    expect(researchHealth([])).toEqual({ stale: 0, thin: 0, missing: 0 });
   });
 });
 

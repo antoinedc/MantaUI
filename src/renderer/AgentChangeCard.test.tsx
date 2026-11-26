@@ -707,4 +707,32 @@ describe("AgentChangeView", () => {
       expect(q(h, "agent-change-diff")).toBeTruthy();
     });
   });
+  describe("actions filter (the history's rows)", () => {
+    let api: MockApi;
+    const applied = change({ kind: "update", state: "applied", needsClick: false, reason: null, slug: "seo", agentName: "SEO", before: "---\nname: SEO\ndescription: d\nisolation: none\n---\nA\n", after: "---\nname: SEO\ndescription: d\nisolation: none\n---\nB\n" });
+    const show = async (c: AgentChange, actions?: ReadonlyArray<"apply" | "discard" | "undo">) => {
+      ({ api } = installMockApi({}));
+      h = mount(<AgentChangeView change={c} onChange={() => undefined} actions={actions} />);
+      await h.flush();
+    };
+
+    it("offers only the buttons it is given (of those the state allows); the card itself is unchanged", async () => {
+      await show(applied, []);
+      expect(buttons(h!)).toHaveLength(0);
+      expect(chip(h!)).toBe("Updated");
+      expect(q(h!, "agent-change-diff")).toBeTruthy();
+      h!.unmount();
+      await show(applied, ["undo"]);
+      expect(buttons(h!).map((b) => b.textContent)).toEqual(["Undo"]);
+      h!.unmount();
+      await show(change({ state: "pending" }), ["undo"]);
+      expect(buttons(h!)).toHaveLength(0); // a filter never adds a button the state doesn't allow
+    });
+
+    it("without the prop every button the state allows is there, as before", async () => {
+      await show(applied);
+      expect(buttons(h!).map((b) => b.textContent)).toEqual(["Undo"]);
+      expect(api.calls).toBeDefined();
+    });
+  });
 });
