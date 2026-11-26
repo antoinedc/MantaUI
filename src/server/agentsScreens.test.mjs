@@ -944,12 +944,17 @@ test("profile research (Research tab): each entry lists its public sources — a
       }),
       entry({ id: "rl_2", topic: "No findings sent", findings: undefined }),
     ];
+    for (const [slug, name] of [["scout", "Scout"], ["ops", "Ops"]]) {
+      await mkdir(join(f.root, slug));
+      await writeFile(join(f.root, slug, "agent.md"), `---\nname: ${name}\ndescription: d.\nisolation: none\n---\n${name}.\n`);
+    }
     await f.putChanges([
       change({ id: "d1", slug: "dev", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }, { id: "rl_2", topic: "No findings sent" }] }),
       change({ id: "s1", slug: "scout", agentName: "Scout", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
       change({ id: "s2", slug: "ops", agentName: "Ops", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
       change({ id: "s3", slug: "scout", agentName: "Scout", state: "applied", decidedAt: T0 - 2 * DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
-      change({ id: "x1", slug: "ghost", agentName: "Ghost", state: "discarded", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
+      change({ id: "x1", slug: "scout", agentName: "Scout", state: "discarded", decidedAt: T0 - DAY, basis: [{ id: "rl_2", topic: "No findings sent" }] }),
+      change({ id: "g1", slug: "gone", agentName: "Gone", state: "applied", decidedAt: T0 - DAY, basis: [{ id: "rl_1", topic: "Pricing pages" }] }),
     ]);
     const r = (await f.engine.profile("dev")).research;
     const one = r.find((x) => x.id === "rl_1");
@@ -959,7 +964,7 @@ test("profile research (Research tab): each entry lists its public sources — a
       { label: "Evil", url: null },
     ], "one per publisher or site; a link only when it is http(s); a finding with neither is not a source");
     assert.equal(one.privateSources, 1);
-    assert.deepEqual(one.usedBy, ["Ops", "Scout"], "other agents whose applied changes rest on it, once each, sorted; not discarded ones, not itself");
+    assert.deepEqual(one.usedBy, ["Ops", "Scout"], "other agents (still on the box) whose applied changes rest on it, once each, sorted; not discarded ones, not itself, not a deleted agent");
     const bare = r.find((x) => x.id === "rl_2");
     assert.equal("sources" in bare, false);
     assert.equal("privateSources" in bare, false);

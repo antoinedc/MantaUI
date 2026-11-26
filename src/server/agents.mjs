@@ -3692,6 +3692,41 @@ export function createAgentsEngine({
 
   // ---- the profile and a task's research ----
 
+  const SOURCES_SHOWN = 10;
+  const httpUrl = (value) => {
+    try {
+      const u = new URL(String(value));
+      return u.protocol === "https:" || u.protocol === "http:" ? u : null;
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * The Research tab's list of what an entry rests on, from its findings: one per publisher (or site), the link only when it is
+   * http(s); a finding with neither a publisher nor a usable link is not a source. Private findings are only counted. Absent
+   * keys, not empty ones, when there is nothing to say.
+   */
+  function sourcesOf(findings) {
+    const seen = new Map();
+    let privateSources = 0;
+    for (const f of Array.isArray(findings) ? findings : []) {
+      if (!f || typeof f !== "object") continue;
+      if (f.private === true) {
+        privateSources += 1;
+        continue;
+      }
+      const url = typeof f.url === "string" ? httpUrl(f.url) : null;
+      const publisher = typeof f.publisher === "string" ? f.publisher.trim() : "";
+      const label = publisher || url?.hostname.replace(/^www\./, "") || "";
+      if (!label) continue;
+      const known = seen.get(label.toLowerCase());
+      if (!known) seen.set(label.toLowerCase(), { label, url: url ? url.href : null });
+      else if (!known.url && url) known.url = url.href;
+    }
+    const sources = [...seen.values()].slice(0, SOURCES_SHOWN);
+    return { ...(sources.length > 0 ? { sources } : {}), ...(privateSources > 0 ? { privateSources } : {}) };
+  }
+
   /** Library entries `[{id, topic}]` → live entries; each one by its id, else its topic (an entry saved again has a new id); gone → "missing". */
   async function resolveEntries(items, scopes) {
     const out = [];
@@ -3714,7 +3749,7 @@ export function createAgentsEngine({
         }
       }
       const entry = hit
-        ? { id: hit.id, topic: hit.topic, sourceCount: Number.isInteger(hit.sourceCount) ? hit.sourceCount : null, ageDays: Number.isInteger(hit.ageDays) ? hit.ageDays : null, status: hit.status === "stale" ? "stale" : "fresh", thin: hit.thin === true }
+        ? { id: hit.id, topic: hit.topic, sourceCount: Number.isInteger(hit.sourceCount) ? hit.sourceCount : null, ageDays: Number.isInteger(hit.ageDays) ? hit.ageDays : null, status: hit.status === "stale" ? "stale" : "fresh", thin: hit.thin === true, ...sourcesOf(hit.findings) }
         : { id: item.id, topic: item.topic, sourceCount: null, ageDays: null, status: "missing", thin: false };
       if (seen.has(entry.id)) continue;
       seen.add(entry.id);
@@ -3743,22 +3778,38 @@ export function createAgentsEngine({
     return { enabled: state.exists && state.enabled, routineId: id };
   }
 
+  /** Each entry gains `usedBy`: the other agents (still on the box) whose applied changes rest on it, by name, sorted. */
+  async function withUsedBy(research, ownSlug, changes) {
+    const byKey = new Map(); // entry id or topic → names
+    const names = new Map((await scan()).entries.map((e) => [e.slug, e.info.name || e.slug]));
+    for (const r of changes) {
+      if (r.state !== "applied" || !r.slug || r.slug === ownSlug || !names.has(r.slug)) continue;
+      for (const b of basisItems(r)) for (const key of [b.id, b.topic.trim().toLowerCase()]) if (key) (byKey.get(key) ?? byKey.set(key, new Set()).get(key)).add(names.get(r.slug));
+    }
+    return research.map((e) => {
+      const used = new Set([...(byKey.get(e.id) ?? []), ...(byKey.get(e.topic.trim().toLowerCase()) ?? [])]);
+      return used.size > 0 ? { ...e, usedBy: [...used].sort((a, b) => a.localeCompare(b)) } : e;
+    });
+  }
+
   async function profile(slug) {
     const entry = await find(typeof slug === "string" ? slug : "");
     if (!entry) throw new AgentError(`No agent named @${slug}`);
     const seats = await seatsOf(entry);
-    const records = (await readChanges()).filter((r) => r.slug === entry.slug);
+    const allChanges = await readChanges();
+    const records = allChanges.filter((r) => r.slug === entry.slug);
     const applied = records.filter((r) => r.state === "applied").sort((a, b) => (b.decidedAt ?? b.createdAt) - (a.decidedAt ?? a.createdAt));
     const made = records.filter((r) => r.kind === "create").sort((a, b) => a.createdAt - b.createdAt)[0];
     const builtBy = entry.info.builtIn ? "built-in" : made?.origin?.kind === "job" ? "architect" : made?.origin?.kind === "chat" ? "manta" : "user";
     const items = applied.flatMap(basisItems);
+    const research = await resolveEntries(items, seats.length > 0 ? seats.map((s) => s.project) : [null]);
     return {
       info: entry.info,
       seats,
       lastChangedAt: applied.length > 0 ? (applied[0].decidedAt ?? applied[0].createdAt) : null,
       builtBy,
       refresh: await refreshOf(entry),
-      research: await resolveEntries(items, seats.length > 0 ? seats.map((s) => s.project) : [null]),
+      research: await withUsedBy(research, entry.slug, allChanges),
     };
   }
 
