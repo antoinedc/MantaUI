@@ -255,3 +255,26 @@ OpenCode reloaded) and the rest are marked "not applied". Every Outcome line say
 - **Stale OpenCode locations.** The reload now forgets locations whose folder was deleted (`DELETE /api/debug/location`),
   but nothing prunes them proactively; they accumulate until a reload trips on one. It was written against the 2.0.30
   client's wire definition and a fake server; run it once against a real box with a deleted worktree.
+
+## Non-blocking task questions: edge cases left open (agent screens, S1 server)
+
+Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §4. The pieces are in `src/server/taskQuestions.mjs` and `src/server/delegate.mjs`.
+Verified on the pinned binary by `scripts/opencode-v2/question-capture.e2e.mjs` (the question tool returns the placeholder inside its
+"User has answered your questions: …" result, the turn goes on, a steered answer arrives in the same run, a finished task is continued, a
+steered message in the child's inbox carries the id we sent it under). Left open:
+- **The ending gate is not exercised on the real binary.** The inbox shape and cancel are; the race it closes (a steered answer still
+  pending when the turn ends) is only covered with fakes — it is hard to make happen on purpose.
+- **Only a round that finished well is deferred.** A round that FAILED (or was stopped) with an answer waiting posts its failure as always, and
+  the answer is then sent by the question sweep (≤ 60 s) as a continuation of the failed task. A round that fails with a steered answer
+  still unconsumed in its inbox is not taken back by the gate (the gate runs for `done` outcomes only).
+- **A stopped task's open question stays open.** Stopping a task doesn't dismiss its question card; answering it later continues the stopped task.
+- **A failed delivery after `askedUser` was set.** `deliverToTask` marks the newest round `askedUser` before it sends (so a continuation
+  inherits it); if the send is then refused, the mark stays although nothing was answered. It only loosens the Architect's fit-check
+  refusal for that task.
+- **A answer's recording that can't be written** (the store became unreadable after the send) tells the user their answer WAS sent but not
+  recorded; the claim stays and the sweep settles it from the session (a message with the claim's id / a round created with it).
+- **Several answers to one task at the same moment** go out one per press (each its own steered message or continuation). Only the answers that
+  wait for a round to end are merged into one continuation.
+- **The first question's text echoes into the task's messages** ("Answer from the user to your question "<q>": …", cut at 300 characters). It is the
+  model's own text quoted back; there is no filter beyond the cut.
+- **A real-model probe of the placeholder wording** (spec §4.8) is still to do: the e2e uses a scripted model.
