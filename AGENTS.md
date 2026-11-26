@@ -3748,6 +3748,24 @@ was 2.1.257 at the time.
   on the primary install path. The patcher functions are deliberately absent
   from that list: only self-update calls them, and it always sources the lib.
 
+- **The claim is also LIVE — the service env only moves on an opencode restart,
+  and a CLI-only update restarts nothing (issue #1684).** `claude update` via
+  the About row, self-update's CLI step (restart plan `none`), a manual update
+  or Claude's own auto-update all changed the CLI while the running opencode
+  kept claiming the old number, so new models failed with "Claude Code 2.1.207
+  does not support this model" next to a current About row. So manta-server
+  keeps `~/.manta/claude-cli-version` (the real `claude --version`) current —
+  `src/server/claudeCliVersion.mjs`: at boot, hourly, on every CLI-detector
+  probe, after `upgradeCli("claude")`; atomic, only on change — self-update
+  refreshes it right after its CLI step (`write_claude_cli_version_file`), and
+  the plugin's `cliVersion()` claims the HIGHEST of env, that file and
+  `CC_VERSION_FALLBACK`, re-read per request (mtime-cached, never throws). No
+  opencode restart per CLI update — **do not "fix" a stale claim by restarting
+  opencode, it kills every in-flight turn.** The plugin floor
+  (`CC_VERSION_FALLBACK`) and `manta_claude_cli_version_floor` are kept equal
+  (2.1.293, the Haiku 5.5 gate); raise both together. A stale env claim is now
+  lifted to that floor rather than honoured.
+
 If a model starts failing this way again, check what the box actually claims
 (`systemctl --user show opencode-serve -p Environment`) before touching
 anything else — and note the number in the error is the plugin's claim, never

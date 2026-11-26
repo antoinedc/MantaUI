@@ -845,6 +845,101 @@ test("resolve_anthropic_cli_version: unrecognised CLI output falls back to the f
   assert.equal(resolveClaimedVersion("who knows"), FLOOR);
 });
 
+test("floor: at least the highest current model gate (Haiku 5.5 needs 2.1.293)", () => {
+  assert.equal(versionGte(FLOOR, "2.1.293"), "yes");
+});
+
+// --- Live claim file (issue #1684) -------------------------------------------
+// A CLI-only update restarts nothing, so the plugin re-reads this file per
+// request instead of relying on the service env.
+
+/** Run write_claude_cli_version_file in a scratch dir; returns { dir, file, result }. */
+function runWriteClaimFile({ existing, version, claudeOutput, passFile = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-claimfile-"));
+  const binDir = join(dir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  if (claudeOutput != null) {
+    writeFileSync(join(binDir, "claude"), `#!/bin/sh\nprintf '%s\\n' '${claudeOutput}'\n`, { mode: 0o755 });
+  }
+  const file = join(dir, "state", ".manta", "claude-cli-version");
+  if (existing != null) {
+    mkdirSync(join(dir, "state", ".manta"), { recursive: true });
+    writeFileSync(file, existing);
+  }
+  const args = [passFile ? `'${file}'` : "", version != null ? `'${version}'` : ""].join(" ").trim();
+  const result = sourceAndRun(`write_claude_cli_version_file ${args}`, {
+    preamble: `export PATH='${binDir}':/usr/bin:/bin; export MANTA_STATE_HOME='${join(dir, "state")}'`,
+  });
+  return { dir, file, result };
+}
+
+test("write_claude_cli_version_file: writes the version atomically when the file is absent", () => {
+  const { dir, file, result } = runWriteClaimFile({ version: "2.1.301" });
+  try {
+    assert.equal(result.status, 0);
+    assert.equal(readFileSync(file, "utf8"), "2.1.301\n");
+    assert.deepEqual(readdirSync(join(dir, "state", ".manta")), ["claude-cli-version"], "no temp file left behind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_claude_cli_version_file: replaces a stale value", () => {
+  const { dir, file } = runWriteClaimFile({ existing: "2.1.207\n", version: "2.1.301" });
+  try {
+    assert.equal(readFileSync(file, "utf8"), "2.1.301\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_claude_cli_version_file: an unchanged value is not rewritten", () => {
+  const { dir, file, result } = runWriteClaimFile({ existing: "2.1.301\n", version: "2.1.301" });
+  try {
+    assert.equal(result.status, 0);
+    assert.doesNotMatch(result.stdout, /now 2\.1\.301/, "no write, so no log line");
+    assert.equal(readFileSync(file, "utf8"), "2.1.301\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_claude_cli_version_file: junk or empty versions leave the file alone", () => {
+  for (const version of ["banana", "", "v2"]) {
+    const { dir, file, result } = runWriteClaimFile({ existing: "2.1.301\n", version });
+    try {
+      assert.equal(result.status, 0);
+      assert.equal(readFileSync(file, "utf8"), "2.1.301\n", `version ${JSON.stringify(version)}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("write_claude_cli_version_file: defaults to the real CLI's version", () => {
+  const { dir, file } = runWriteClaimFile({ claudeOutput: "2.1.305 (Claude Code)" });
+  try {
+    assert.equal(readFileSync(file, "utf8"), "2.1.305\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_claude_cli_version_file: no claude CLI and no file leaves nothing written", () => {
+  const { dir, file, result } = runWriteClaimFile({});
+  try {
+    assert.equal(result.status, 0);
+    assert.equal(existsSync(file), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("self-update refreshes the claim file after the CLI step", () => {
+  const script = readFileSync(join(dirname(RELEASE_LIB), "..", "self-update.sh"), "utf8");
+  assert.match(script, /write_claude_cli_version_file "\$STATE_HOME\/\.manta\/claude-cli-version"/);
+});
+
 /** Source release.sh and echo ensure_cli_version_text "$UNIT_TEXT" <version>. */
 function cliVersionText(text, version) {
   return execFileSync(

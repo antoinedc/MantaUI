@@ -123,6 +123,7 @@ import {
 } from "./voiceNotes.mjs";
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
+import { createClaudeCliVersionSync, startClaudeCliVersionSync } from "./claudeCliVersion.mjs";
 import { runServerSelfUpdate, restartOpencode, reloadOpencodeConfig } from "./opencodeAdmin.mjs";
 import { createBoxTimeZone, readRunningOpencodeTz, restartOpencodeService } from "./boxTimeZone.mjs";
 import { createOpencodeService } from "./upgradeV2Service.mjs";
@@ -2697,6 +2698,9 @@ startPoller(() => researchEngine.sweep(), { intervalMs: 5 * 60_000, label: "rese
 // what each task relied on (the side panel's list) is kept 30 days
 startPoller(() => researchLibrary.sweepUsed(), { intervalMs: 5 * 60_000, label: "research-used-sweep", immediate: false });
 
+// Issue #1684: the live Claude Code version claim — manta-claude-max re-reads
+// this file per request, so a CLI update never needs an opencode restart.
+const claudeCliVersionSync = createClaudeCliVersionSync();
 rpcHandlers = buildHandlers({
   usageCalibration,
   agents: agentsEngine,
@@ -2810,12 +2814,18 @@ rpcHandlers = buildHandlers({
   // a timeout + try/catch in the handler — a CLI probe can never break the
   // box-update check). 5-minute cached, in-flight-joining probe; no second
   // poller, no new channel, no second bus event kind.
-  cliDetector: createCliDetector(),
+  cliDetector: createCliDetector({
+    onDetect: (targets) => void claudeCliVersionSync.record(targets.find((t) => t.id === "claude")?.current),
+  }),
   // BET-1162: per-row single-CLI upgrade (the `server:cli-update` channel).
   // Shares the SAME cached detector instance above (wired to the
   // `server:update-check` probe) so a manual per-row upgrade reuses the fresh
   // probe rather than spawning a second detector.
-  upgradeCli,
+  upgradeCli: async (cliId, deps) => {
+    const result = await upgradeCli(cliId, deps);
+    if (cliId === "claude" && result?.ok) void claudeCliVersionSync.record(result.after);
+    return result;
+  },
   // BET-834: voice-note metadata over /rpc (audio goes over REST). Oldest
   // first, filtered by session, no audio bytes.
   voiceNotes: {
@@ -2863,6 +2873,11 @@ const { stop: stopServerUpdatePoller, check: checkServerUpdate } =
     currentVersion: SERVER_VERSION,
     notify: push.fireNotify,
   });
+
+// Boot sync + hourly re-check of the box's `claude --version` into
+// ~/.manta/claude-cli-version (notices Claude's own auto-update). Never fatal.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopClaudeCliVersionSync } = startClaudeCliVersionSync({ sync: claudeCliVersionSync });
 
 // Cleanup sweep for expired pages (runs every 5 min).
 // eslint-disable-next-line no-unused-vars

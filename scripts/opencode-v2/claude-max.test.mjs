@@ -3,7 +3,7 @@
 
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -34,10 +34,78 @@ after(async () => {
 // ------------------------------------------------------------------ config
 
 describe("config", () => {
-  test("version claim: env wins, fallback constant otherwise", () => {
+  test("version claim: env above the floor wins, fallback constant otherwise", () => {
     assert.equal(config.cliVersion({}), config.CC_VERSION_FALLBACK);
     assert.equal(config.cliVersion({ ANTHROPIC_CLI_VERSION: "2.1.300" }), "2.1.300");
     assert.equal(config.userAgent({ ANTHROPIC_CLI_VERSION: "2.1.300" }), "claude-cli/2.1.300 (external, sdk-cli)");
+    assert.equal(config.userAgent({ ANTHROPIC_USER_AGENT: "custom/1" }), "custom/1");
+  });
+
+  test("version claim: the floor covers the current model gates and a stale env is lifted to it", () => {
+    // Haiku 5.5 needs 2.1.293, the highest gate at the time of writing.
+    assert.ok(config.CC_VERSION_FALLBACK.split(".").map(Number).reduce((a, n, i) => a + n * [1e8, 1e4, 1][i], 0) >= 2 * 1e8 + 1 * 1e4 + 293);
+    assert.equal(config.cliVersion({ ANTHROPIC_CLI_VERSION: "2.1.207" }), config.CC_VERSION_FALLBACK);
+    assert.equal(config.cliVersion({ ANTHROPIC_CLI_VERSION: "garbage" }), config.CC_VERSION_FALLBACK);
+  });
+
+  describe("live state file (issue #1684)", () => {
+    const home = join(scratch, "claim-home");
+    const file = join(home, ".manta", "claude-cli-version");
+    const env = (extra = {}) => ({ MANTA_STATE_HOME: home, ...extra });
+    const put = (text, mtime) => {
+      mkdirSync(join(home, ".manta"), { recursive: true });
+      writeFileSync(file, text);
+      if (mtime) utimesSync(file, mtime, mtime);
+    };
+
+    test("a missing file is ignored", () => {
+      rmSync(file, { force: true });
+      assert.equal(config.cliVersion(env()), config.CC_VERSION_FALLBACK);
+    });
+
+    test("file only: a newer CLI than the floor is claimed", () => {
+      put("2.1.350\n", 1_000);
+      assert.equal(config.cliVersion(env()), "2.1.350");
+      assert.equal(config.userAgent(env()), "claude-cli/2.1.350 (external, sdk-cli)");
+    });
+
+    test("highest of env and file wins, either way round", () => {
+      put("2.1.350\n", 2_000);
+      assert.equal(config.cliVersion(env({ ANTHROPIC_CLI_VERSION: "2.1.300" })), "2.1.350");
+      assert.equal(config.cliVersion(env({ ANTHROPIC_CLI_VERSION: "2.2.0" })), "2.2.0");
+    });
+
+    test("components compare numerically (2.1.1000 > 2.1.999)", () => {
+      put("2.1.1000\n", 3_000);
+      assert.equal(config.cliVersion(env({ ANTHROPIC_CLI_VERSION: "2.1.999" })), "2.1.1000");
+    });
+
+    test("a file below the floor never lowers the claim", () => {
+      put("2.1.207\n", 4_000);
+      assert.equal(config.cliVersion(env()), config.CC_VERSION_FALLBACK);
+    });
+
+    test("garbage content is ignored", () => {
+      for (const [i, text] of ["banana", "", "2.1.x", "<html>", "999"].entries()) {
+        put(text, 5_000 + i);
+        assert.equal(config.cliVersion(env()), config.CC_VERSION_FALLBACK, JSON.stringify(text));
+      }
+    });
+
+    test("an update is picked up on the next call (no restart), and a deleted file stops counting", () => {
+      put("2.1.400\n", 6_000);
+      assert.equal(config.cliVersion(env()), "2.1.400");
+      put("2.1.401\n", 7_000);
+      assert.equal(config.cliVersion(env()), "2.1.401");
+      rmSync(file);
+      assert.equal(config.cliVersion(env()), config.CC_VERSION_FALLBACK);
+    });
+
+    test("HOME is used when MANTA_STATE_HOME is unset; no home at all means no file", () => {
+      put("2.1.450\n", 8_000);
+      assert.equal(config.cliVersion({ HOME: home }), "2.1.450");
+      assert.equal(config.cliVersion({}), config.CC_VERSION_FALLBACK);
+    });
   });
 
   test("model betas: haiku drops effort, opus-4-5/4-6/4-7 add it, first match wins", () => {
@@ -73,10 +141,10 @@ describe("transformBody", () => {
     });
 
   test("billing header is system[0]; identity is its own entry; other system text moves to the first user turn", () => {
-    const r = body.transformBody(input(), { ANTHROPIC_CLI_VERSION: "2.1.280" });
+    const r = body.transformBody(input(), { ANTHROPIC_CLI_VERSION: "2.1.300" });
     assert.ok(r.rewritten);
     const p = JSON.parse(r.body);
-    assert.match(p.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/);
+    assert.match(p.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.300\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/);
     assert.equal(p.system[0].cache_control, undefined);
     assert.equal(p.system[1].text, body.SYSTEM_IDENTITY);
     assert.equal(p.system[1].cache_control, undefined);
@@ -149,8 +217,8 @@ describe("transformBody", () => {
   });
 
   test("version + entrypoint come from the env", () => {
-    const p = JSON.parse(body.transformBody(input(), { ANTHROPIC_CLI_VERSION: "2.1.100", CLAUDE_CODE_ENTRYPOINT: "cli" }).body);
-    assert.match(p.system[0].text, /cc_version=2\.1\.100\.[0-9a-f]{3}; cc_entrypoint=cli;/);
+    const p = JSON.parse(body.transformBody(input(), { ANTHROPIC_CLI_VERSION: "2.1.400", CLAUDE_CODE_ENTRYPOINT: "cli" }).body);
+    assert.match(p.system[0].text, /cc_version=2\.1\.400\.[0-9a-f]{3}; cc_entrypoint=cli;/);
   });
 });
 
@@ -159,13 +227,13 @@ describe("transformBody", () => {
 describe("claudeHeaders / withBetaParam", () => {
   test("Bearer swap, Claude Code identity, x-api-key removed, betas merged", () => {
     const incoming = new Headers({ "x-api-key": "k", "anthropic-beta": "custom-beta-1, oauth-2025-04-20", "content-type": "application/json" });
-    const h = body.claudeHeaders(incoming, "TOKEN123", "claude-haiku-5-5", undefined, { ANTHROPIC_CLI_VERSION: "2.1.280" });
+    const h = body.claudeHeaders(incoming, "TOKEN123", "claude-haiku-5-5", undefined, { ANTHROPIC_CLI_VERSION: "2.1.300" });
     assert.equal(h.get("authorization"), "Bearer TOKEN123");
     assert.equal(h.get("x-api-key"), null);
     assert.equal(h.get("x-app"), "cli");
     assert.equal(h.get("anthropic-version"), "2023-06-01");
     assert.equal(h.get("anthropic-dangerous-direct-browser-access"), "true");
-    assert.equal(h.get("user-agent"), "claude-cli/2.1.280 (external, sdk-cli)");
+    assert.equal(h.get("user-agent"), "claude-cli/2.1.300 (external, sdk-cli)");
     assert.equal(h.get("content-type"), "application/json");
     const betas = h.get("anthropic-beta").split(",");
     assert.ok(betas.includes("custom-beta-1"));
@@ -572,7 +640,7 @@ describe("exchange (request + response hooks)", () => {
       parentOf: async () => null,
       send,
       sleep: async () => {},
-      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+      env: { ANTHROPIC_CLI_VERSION: "2.1.300" },
       ...extra,
     });
   const anthropicRequest = () =>
@@ -959,7 +1027,7 @@ describe("normalizeCacheControl (V2: top-level + 4 block breakpoints = HTTP 400 
       tools: [{ name: "shell", cache_control: eph() }],
       messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: eph() }] }],
     });
-    const out = JSON.parse(body.transformBody(raw, { ANTHROPIC_CLI_VERSION: "2.1.280" }).body);
+    const out = JSON.parse(body.transformBody(raw, { ANTHROPIC_CLI_VERSION: "2.1.300" }).body);
     assert.equal(out.cache_control, undefined);
     assert.ok(blockCCs(out).length >= 1 && blockCCs(out).length <= 4);
     assert.ok(blockCCs(out).every((c) => c.ttl === "1h"));
@@ -986,7 +1054,7 @@ describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key au
       credentials: creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats"), liveFile: () => join(scratch, "no-live.json") }),
       parentOf: async () => null,
       send: async () => new Response("{}"),
-      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+      env: { ANTHROPIC_CLI_VERSION: "2.1.300" },
     });
 
   test("API-key request (no identity): headers + rest of body untouched, cache_control fixed", async () => {
@@ -1034,7 +1102,7 @@ describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key au
       credentials: creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats"), liveFile: () => liveFile }),
       parentOf: async () => null,
       send: async () => new Response("{}"),
-      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+      env: { ANTHROPIC_CLI_VERSION: "2.1.300" },
     });
     const event = { request: five(), sessionID: "s", kind: "primary" };
     await ex.onRequest(event);
@@ -1131,7 +1199,7 @@ describe("exchange: never signed by OpenCode's own key when the box has seats", 
       parentOf: async () => null,
       send: send ?? (async () => assert.fail("nothing may be sent")),
       sleep: async () => {},
-      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+      env: { ANTHROPIC_CLI_VERSION: "2.1.300" },
       ...extra,
     });
   const run = async (ex, status = 401, headers = {}) => {
