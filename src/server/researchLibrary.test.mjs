@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createResearchLibrary, RESEARCH_GUIDANCE, withResearchGuidance, LIBRARY_MAX_ENTRIES, independentSources, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
@@ -21,7 +21,7 @@ async function fixture({ caller = { child: "ses_a", project: "proj-1", agent: "s
     root: join(base, "research-library"),
     bind: async (b, tool) => {
       state.binds.push({ tool, b });
-      return state.caller.refused ? { refused: state.caller.refused } : { childSessionID: state.caller.child, project: state.caller.project, agent: state.caller.agent };
+      return state.caller.refused ? { refused: state.caller.refused } : { childSessionID: state.caller.child, project: state.caller.project, agent: state.caller.agent, rootJobId: state.caller.rootJobId };
     },
     getSource: async (child, id) => state.sources[`${child}:${id}`] ?? null,
     now: () => state.clock,
@@ -690,4 +690,85 @@ test("the Architect saves its build research into the library, and the authoring
   const authoring = await readFile(join(TEMPLATES, "skills", "authoring", "SKILL.md"), "utf-8");
   assert.match(authoring, /research section/i);
   assert.match(authoring, /every\s+agent's task prompt/i);
+});
+
+// ---- what each task relied on (agent screens §6.5) ----
+
+const ROOT = "job_root_1";
+const usedFile = (f) => join(f.file, "..", "used", `${ROOT}.json`);
+const readUsed = async (f) => JSON.parse(await readFile(usedFile(f), "utf-8"));
+
+test("used: find and save record the entry ids per task root (find: the top 5 returned; save: the saved one), once each", async () => {
+  const f = await fixture({ caller: { child: "ses_a", project: "proj-1", agent: "seo", rootJobId: ROOT }, sources: { [`ses_a:${SRC.id}`]: SRC } });
+  try {
+    const saved = await save(f);
+    assert.equal(saved.ok, true);
+    await f.lib.find(call({ query: "pricing pages" }));
+    await f.lib.find(call({ query: "pricing pages" })); // the same entry twice is recorded once
+    const used = await readUsed(f);
+    assert.deepEqual(used.ids, [{ id: saved.id, topic: "Pricing page layout" }]);
+    assert.deepEqual(await f.lib.usedBy(ROOT), [{ id: saved.id, topic: "Pricing page layout" }]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("used: a task with no root is not recorded; an unknown root reads as empty; an unsafe root is never a path", async () => {
+  const f = await fixture({ sources: { [`ses_a:${SRC.id}`]: SRC } });
+  try {
+    await save(f);
+    await f.lib.find(call({ query: "pricing" }));
+    assert.deepEqual(await f.lib.usedBy(ROOT), []);
+    assert.deepEqual(await f.lib.usedBy("../../etc/passwd"), []);
+    f.state.caller.rootJobId = "../escape";
+    await f.lib.find(call({ query: "pricing" }));
+    await assert.rejects(readFile(join(f.file, "..", "used", "..", "escape.json"), "utf-8"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("used: a task's list is capped at 50 ids, the newest kept", async () => {
+  const f = await fixture({ caller: { child: "ses_a", project: "proj-1", agent: "seo", rootJobId: ROOT } });
+  try {
+    for (let i = 0; i < 55; i++) {
+      const r = await f.lib.save(call({ topic: `Topic number ${i}`, summary: "s", findings: [{ claim: "a fact" }], shelfLifeDays: 30, shelfLifeWhy: "why", shelfLifeVerified: false, scope: "project" }));
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    const ids = (await readUsed(f)).ids;
+    assert.equal(ids.length, 50);
+    assert.equal(ids.at(-1).topic, "Topic number 54");
+    assert.equal(ids[0].topic, "Topic number 5");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("used: a failure to record never fails the tool call", async () => {
+  const f = await fixture({ caller: { child: "ses_a", project: "proj-1", agent: "seo", rootJobId: ROOT }, sources: { [`ses_a:${SRC.id}`]: SRC } });
+  try {
+    await mkdir(join(f.file, "..", "used"), { recursive: true });
+    await mkdir(usedFile(f)); // a folder where the file should be: the write fails
+    const r = await save(f);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal((await f.lib.find(call({ query: "pricing" }))).entries.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("used: the sweep drops records older than 30 days and keeps the rest", async () => {
+  const f = await fixture({ caller: { child: "ses_a", project: "proj-1", agent: "seo", rootJobId: ROOT }, sources: { [`ses_a:${SRC.id}`]: SRC } });
+  try {
+    await save(f);
+    f.state.caller.rootJobId = "job_root_2";
+    f.state.clock = T0 + 20 * DAY;
+    await save(f, { topic: "Another topic" });
+    f.state.clock = T0 + 31 * DAY;
+    assert.equal(await f.lib.sweepUsed(), 1);
+    assert.deepEqual(await f.lib.usedBy(ROOT), []);
+    assert.equal((await f.lib.usedBy("job_root_2")).length, 1);
+  } finally {
+    await f.cleanup();
+  }
 });
