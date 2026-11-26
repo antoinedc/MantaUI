@@ -26,6 +26,8 @@ export const UNVERIFIED_SHELF_LIFE_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FINDINGS_MAX = 20;
 const FIND_LIMIT = 5;
+const USED_MAX = 50; // entries remembered per task
+const USED_KEEP_MS = 30 * DAY_MS;
 const UNEXPECTED = "The research library failed; try again";
 const UNREADABLE = "The research library file couldn't be read, so nothing was changed; try again, or ask the user to check it";
 /** An entry resting on fewer independent sources than this is thin (the same bar as an agent proposal). */
@@ -221,7 +223,79 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
     const b = { sessionID: str("sessionID"), messageID: str("messageID"), callID: str("callID"), raw };
     const r = await bind(b, tool);
     if (r.refused) return { refused: r.refused };
-    return { child: r.childSessionID ?? b.sessionID, project: r.project, agent: r.agent ?? "", raw };
+    return { child: r.childSessionID ?? b.sessionID, project: r.project, agent: r.agent ?? "", rootJobId: r.rootJobId ?? null, raw };
+  }
+
+  // ---- what each task relied on (agent screens spec §6.5) ----
+  // `used/<rootJobId>.json`: the entries a task found or saved, so its side panel can show them. Best effort: a failure here
+  // is logged and never reaches the agent's tool call.
+
+  const usedDir = join(root, "used");
+  const usedLock = createMutex();
+  const safeRoot = (id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(id);
+  const usedFile = (id) => join(usedDir, `${id}.json`);
+  const readUsedFile = async (id) => {
+    try {
+      const doc = JSON.parse(await fs.readFile(usedFile(id), "utf-8"));
+      return doc && Array.isArray(doc.ids) ? doc : null;
+    } catch {
+      return null;
+    }
+  };
+
+  async function recordUsed(rootJobId, items) {
+    if (!safeRoot(rootJobId) || items.length === 0) return;
+    try {
+      await usedLock.runExclusive(async () => {
+        const doc = await readUsedFile(rootJobId);
+        let ids = (doc?.ids ?? []).filter((x) => x && typeof x.id === "string");
+        let changed = false;
+        for (const item of items) {
+          // the same entry again moves to the end (newest), so the cap drops the oldest
+          if (ids.at(-1)?.id === item.id) continue;
+          ids = ids.filter((x) => x.id !== item.id);
+          ids.push({ id: item.id, topic: item.topic });
+          changed = true;
+        }
+        if (!changed && doc) return;
+        await writeJsonAtomic(usedFile(rootJobId), `${JSON.stringify({ version: 1, updatedAt: now(), ids: ids.slice(-USED_MAX) }, null, 2)}\n`);
+      });
+    } catch (e) {
+      log.warn?.(`[research-library] couldn't record the entries a task relied on: ${e?.message ?? e}`);
+    }
+  }
+
+  /** The entries a task (by its root job id) found or saved: `[{id, topic}]`, oldest first. */
+  async function usedBy(rootJobId) {
+    if (!safeRoot(rootJobId)) return [];
+    return ((await readUsedFile(rootJobId))?.ids ?? []).map((x) => ({ id: x.id, topic: x.topic }));
+  }
+
+  /** Drop the records of tasks older than 30 days. Returns how many were removed. */
+  async function sweepUsed() {
+    let names;
+    try {
+      names = await fs.readdir(usedDir);
+    } catch {
+      return 0;
+    }
+    let removed = 0;
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const id = name.slice(0, -".json".length);
+      if (!safeRoot(id)) continue;
+      try {
+        await usedLock.runExclusive(async () => {
+          const doc = await readUsedFile(id);
+          if (doc && now() - (doc.updatedAt ?? 0) <= USED_KEEP_MS) return;
+          await fs.rm(usedFile(id), { force: true });
+          removed++;
+        });
+      } catch (e) {
+        log.warn?.(`[research-library] sweep of the used entries failed: ${e?.message ?? e}`);
+      }
+    }
+    return removed;
   }
 
   const guard = async (fn) => {
@@ -277,7 +351,9 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
       index.addAll(entries.map((e) => ({ id: e.id, topic: e.topic, summary: e.summary, claims: e.findings.map((f) => f.claim).join(" ") })));
       const byId = new Map(entries.map((e) => [e.id, e]));
       const t = now();
-      return { ok: true, entries: index.search(query).slice(0, FIND_LIMIT).map((h) => wire(byId.get(h.id), t)) };
+      const out = index.search(query).slice(0, FIND_LIMIT).map((h) => wire(byId.get(h.id), t));
+      await recordUsed(b.rootJobId, out.map((e) => ({ id: e.id, topic: e.topic })));
+      return { ok: true, entries: out };
     });
   }
 
@@ -379,6 +455,7 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
         };
         const next = [...entries.filter((e) => e !== old), entry].sort((a, c) => c.checkedAt - a.checkedAt).slice(0, LIBRARY_MAX_ENTRIES);
         await persist(next);
+        await recordUsed(b.rootJobId, [{ id: entry.id, topic }]);
         return {
           ok: true,
           id: entry.id,
@@ -416,5 +493,5 @@ export function createResearchLibrary({ bind, getSource, root = statePath("resea
     });
   }
 
-  return { find, save, lookup, file };
+  return { find, save, lookup, usedBy, sweepUsed, file };
 }
