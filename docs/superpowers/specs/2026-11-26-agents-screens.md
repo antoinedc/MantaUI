@@ -36,7 +36,7 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
    recap since the last visit, then the agents × projects grid with this week's task counts. Header: tasks this week and
    plan usage (the existing usage reading). No dollar budgets.
 3. **Agent profile:** header (name, description, facts, actions), the agent's pending change cards, then tabs
-   **Overview · Research · Seats · History · Tests (later)**.
+   **Overview · Research · Seats · History** (a Tests tab appears when Tests exist).
 4. **Creating an agent is a task in the chat it was asked from.** Manta hands it to the Architect; the task card shows
    its progress; "Details" opens the **task side panel** (what happened, research it relied on, the brief, Close).
    Questions arrive as question cards in the same chat; the result card carries the change cards.
