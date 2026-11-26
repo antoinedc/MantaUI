@@ -58,6 +58,11 @@ const OPTIONS = [
   { label: "Add to @conversion-cro", description: "One agent keeps the pricing rules." },
   { label: "Create @pricing-copy", description: "A separate agent, as asked." },
 ];
+// two questions in one form, the first one multiple-choice (every field of the form must get its placeholder)
+const MULTI_QUESTIONS = [
+  { question: "Which markets first?", header: "Markets", options: [{ label: "US", description: "largest" }, { label: "EU", description: "regulated" }], multiple: true },
+  { question: "Name it now?", header: "Name", options: [{ label: "Yes", description: "now" }, { label: "Later", description: "after review" }] },
+];
 // What each scenario's prompt says (the first user message): STEER keeps working until the answer arrives; END finishes at once.
 const textOfMessages = (body) => JSON.stringify(body.messages ?? []);
 const offers = []; // the tool names each model request was offered
@@ -66,7 +71,8 @@ const decideFn = (body) => {
   const names = (body.tools ?? []).map((t) => t.name);
   offers.push(names);
   const all = textOfMessages(body);
-  const scenario = /SCENARIO-STEER/.test(all) ? "steer" : /SCENARIO-END/.test(all) ? "end" : /SCENARIO-IDLE/.test(all) ? "idle" : "plain";
+  const scenario = /SCENARIO-(STEER|MULTI)/.test(all) ? "steer" : /SCENARIO-END/.test(all) ? "end" : /SCENARIO-IDLE/.test(all) ? "idle" : "plain";
+  const multi = /SCENARIO-MULTI/.test(all);
   const q = names.find((n) => /^question$/i.test(n));
   const toolResults = (body.messages ?? []).flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === "tool_result") : []));
   const answerSeen = /Answer from the user to your question/.test(all);
@@ -76,7 +82,7 @@ const decideFn = (body) => {
     return toolResults.length < 12 ? { kind: "tool", name: names.find((n) => /^glob$/i.test(n)) ?? names[0], input: { pattern: "*" } } : { kind: "text", text: "done" };
   }
   if (!q) return { kind: "text", text: "done" };
-  if (toolResults.length === 0) return { kind: "tool", name: q, input: { questions: [{ question: QUESTION, header: "Agent", options: OPTIONS }] } };
+  if (toolResults.length === 0) return { kind: "tool", name: q, input: { questions: multi ? MULTI_QUESTIONS : [{ question: QUESTION, header: "Agent", options: OPTIONS }] } };
   if (scenario === "end") return answerSeen ? { kind: "text", text: "Applied the answer." } : { kind: "text", text: "Finished everything that did not depend on the answer." };
   // steer: keep working (a read-only listing each time) until the answer is in the conversation
   if (answerSeen) return { kind: "text", text: "Applied the answer." };
@@ -270,6 +276,25 @@ try {
   const next = (await delegateMod.loadJobs(jobsFile)).find((x) => x.continues === eid);
   check("a new round started on the same session, carrying the answer as its first message", next?.childSessionID === echild && next.launch?.text?.startsWith("Answer from the user to your question") && next.rootJobId === eid && next.askedUser === true, j({ c: next?.childSessionID === echild, r: next?.rootJobId, t: next?.launch?.text?.slice(0, 80) }));
   check("the continuation finished and the model saw the answer", next?.status === "done" && mock.requests.some((r) => /SCENARIO-END/.test(JSON.stringify(r.body.messages)) && /Create @pricing-copy/.test(JSON.stringify(r.body.messages.at(-1))) ), j({ s: next?.status }));
+
+  // ===== [3b] one form, two questions (one multiple-choice) =====
+  console.log("\n[3b] a form with two questions, one of them multiple-choice: every field gets the placeholder");
+  mock.setDelay(600);
+  posted.length = 0;
+  const multi = await startTask("SCENARIO-MULTI", "probe-multi");
+  const mid2 = multi.res.job?.id;
+  const mchild = multi.res.job?.childSessionID;
+  await until("the two-question form was captured", async () => (await tq.listOpen({})).some((q) => q.rootJobId === mid2), 60_000);
+  const mq = (await tq.listOpen({})).find((q) => q.rootJobId === mid2);
+  check("both questions are on one card, the first one multiple", mq?.questions?.length === 2 && mq.questions[0].multiple === true && mq.questions[1].multiple === false, j(mq?.questions));
+  const mparts = await toolParts(mchild);
+  const mOut = String(mparts.find((p) => /^question$/i.test(p.tool))?.state?.output ?? "");
+  check("the tool call returned the placeholder for BOTH questions", (mOut.match(/Not answered yet/g) ?? []).length === 2, mOut.slice(0, 1500));
+  const manswer = await tq.answer(mq.id, [["US", "EU"], ["Later"]]);
+  check("the answer (a list for the first, one label for the second) was steered", manswer.ok === true && manswer.question?.delivery === "steer", j(manswer));
+  await until("the multi task settled", async () => ["done", "failed"].includes((await jobById(mid2))?.status), 90_000);
+  check("the task saw both answers (one line each) and finished", mock.requests.some((r) => /SCENARIO-MULTI/.test(JSON.stringify(r.body.messages)) && /to your question \\"Which markets first\?\\": US, EU/.test(JSON.stringify(r.body.messages)) && /to your question \\"Name it now\?\\": Later/.test(JSON.stringify(r.body.messages))) && (await jobById(mid2)).status === "done");
+  mock.setDelay(0);
 
   // ===== [4] the ending gate's matching rule =====
   console.log("\n[4] what a steered message looks like in the child's inbox (the ending gate cancels it by id)");
