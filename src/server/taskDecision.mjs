@@ -112,3 +112,7 @@ export function waitingLine(questions) {
   if (!first) return "";
   return `Waiting for the user's answer to: "${echo(first.question)}" (the answer will continue this task).`;
 }
+
+/** The sentences a delivery to a task answers with when it can't go through (shown to the user as they are). */
+export const TASK_GONE = "That task no longer exists; ask in a chat instead.";
+export const TASK_PAUSED = "This task is paused; resume it first, then answer.";

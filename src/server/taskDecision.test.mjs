@@ -112,3 +112,9 @@ test("waitingLine: server-written, names the first question", () => {
   );
   assert.equal(waitingLine([]), "");
 });
+
+test("the refusal sentences a delivery to a task answers with", async () => {
+  const { TASK_GONE, TASK_PAUSED } = await import("./taskDecision.mjs");
+  assert.equal(TASK_GONE, "That task no longer exists; ask in a chat instead.");
+  assert.equal(TASK_PAUSED, "This task is paused; resume it first, then answer.");
+});

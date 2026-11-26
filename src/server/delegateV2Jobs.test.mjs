@@ -3453,3 +3453,638 @@ test("question: buildCompletionText shows the block only for a finished task tha
   assert.ok(!buildCompletionText({ name: "n", status: "failed", error: "boom", decision, endedBlocked: false }).includes(DECISION_HEADER));
   assert.ok(!buildCompletionText({ name: "n", status: "done", result: "r" }).includes(DECISION_HEADER));
 });
+
+// ---------------------------------------------------------------------------
+// Agent screens (docs/superpowers/specs/2026-11-26-agents-screens.md §4, §5.4, §6.1): the root of a task, questions that don't
+// block it (capture, delivering an answer, the ending gate, the deferred round), results that are never posted, and the hook
+// that tells the engine a round ended.
+// ---------------------------------------------------------------------------
+import { createTaskQuestions } from "./taskQuestions.mjs";
+import { deliverToTask, rootJobOf, addJobMilestone, getJob } from "./delegate.mjs";
+import { waitingLine, PLACEHOLDER_ANSWER, TASK_GONE, TASK_PAUSED } from "./taskDecision.mjs";
+
+test("rootJobOf: the first round's id — the field, else the Architect stamp's root, else the record's own id", () => {
+  assert.equal(rootJobOf({ id: "a" }), "a");
+  assert.equal(rootJobOf({ id: "b", architect: { rootJobId: "a" } }), "a");
+  assert.equal(rootJobOf({ id: "c", rootJobId: "z", architect: { rootJobId: "a" } }), "z");
+});
+
+test("rootJobId: every launched job carries its own id as the root; continueJob and resume copy it; an older record without it resolves through rootJobOf", async () => {
+  const w = world();
+  const id = await start(w);
+  assert.equal(w.job(id).rootJobId, id);
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  const next = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(next.job.rootJobId, id, "the continuation shares the root, not its own id");
+  // a record from before the field: the continuation gets the root the old one resolves to
+  const old = world();
+  const oid = await start(old);
+  delete old.jobs.find((j) => j.id === oid).rootJobId;
+  old.finish(old.job(oid).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(old.deps).observeRaw(raw("session.execution.succeeded", old.job(oid).childSessionID));
+  const cont = await continueJob(oid, { prompt: "again", sessionID: PARENT }, old.deps);
+  assert.equal(cont.job.rootJobId, oid);
+  // resume
+  const p = world();
+  const pid = await pausedJob(p);
+  assert.equal(p.job(pid).rootJobId, pid);
+  assert.equal((await resumeJob(pid, p.deps)).ok, true);
+  assert.equal(p.job(pid).rootJobId, pid);
+});
+
+test("continueJob: the successor starts without the previous round's gate marks, seat note or waiting questions — and keeps deliverResult:false; the follow-up can carry its own message id", async () => {
+  const w = world();
+  const id = await start(w, { deliverResult: false });
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  Object.assign(w.jobs.find((j) => j.id === id), { ending: true, continueAfter: true, gateFailed: true, seatAdded: { project: "manta", projectName: "Manta" }, waiting: [{ question: "q" }] });
+  const res = await continueJob(id, { prompt: "the answer", sessionID: PARENT, messageID: "msg_mine" }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  for (const k of ["ending", "continueAfter", "gateFailed", "seatAdded", "waiting"]) assert.equal(k in w.job(res.job.id), false, k);
+  assert.equal(w.job(res.job.id).deliverResult, false);
+  assert.equal(w.job(res.job.id).launch.messageId, "msg_mine");
+  assert.equal(w.calls.send.at(-1).messageID, "msg_mine");
+});
+
+// ---- the wire never carries the server-only marks ----
+test("wire: ending, continueAfter and gateFailed never leave the box", async () => {
+  const w = world();
+  const id = await start(w);
+  Object.assign(w.jobs.find((j) => j.id === id), { ending: true, continueAfter: true, gateFailed: true });
+  const one = await getJob(id, { load: w.deps.load, readProgress: async () => null });
+  const [listed] = await listJobs({}, { load: w.deps.load, readProgress: async () => null });
+  for (const rec of [one, listed]) for (const k of ["ending", "continueAfter", "gateFailed"]) assert.equal(k in rec, false, k);
+});
+
+// ---- the question tool's footer ----
+test("footer: a specialist's task is told the question returns at once, the answer arrives later as a message, and to mark the recommended option; a plain job's prompt is unchanged", () => {
+  const spec = buildJobPrompt({ prompt: "do it", worktree: "/wt", branch: "job/x", ceilingMs: 60_000, specialist: true });
+  const flat = spec.replace(/\s+/g, " ");
+  assert.ok(flat.includes("If you need the user to decide, use the question tool. It returns at once with a note that the question is waiting; keep working on what doesn't depend on the answer. The answer arrives later as a message from the user. Put what you found and what you recommend in the question itself (mark the option you recommend \"(Recommended)\")."), flat);
+  assert.doesNotMatch(flat, /It ends your task/);
+  assert.doesNotMatch(flat, /You cannot wait for an answer/);
+  const plain = buildJobPrompt({ prompt: "do it", worktree: "/wt", branch: "job/x", ceilingMs: 60_000 });
+  assert.ok(plain.includes('call progress_report with state "blocked" and a label saying what you need, then\nend your turn with the question.'));
+});
+
+// ---------------------------------------------------------------------------
+// deliverToTask — steer into the running turn, or continue a finished task
+// ---------------------------------------------------------------------------
+const askerWorld = async (extra = {}) => {
+  const w = withQuestionDeps(specialistWorld());
+  const id = await start(w, autonomyInput(w, { isolation: "none", ...extra }));
+  return { w, id, child: w.job(id).childSessionID };
+};
+
+test("deliverToTask: a running task whose child is busy gets the text STEERED into its turn under the given message id, and the task remembers it was answered", async () => {
+  const { w, id, child } = await askerWorld();
+  assert.ok(!w.job(id).askedUser);
+  const res = await deliverToTask(id, "Answer from the user: A", { messageID: "msg_a" }, w.deps);
+  assert.deepEqual(res, { delivery: "steer" });
+  const sent = w.calls.send.at(-1);
+  assert.deepEqual({ sessionId: sent.sessionId, text: sent.text, delivery: sent.delivery, messageID: sent.messageID }, { sessionId: child, text: "Answer from the user: A", delivery: "steer", messageID: "msg_a" });
+  assert.equal(w.job(id).askedUser, true);
+  assert.equal(w.job(id).status, "running", "nothing was interrupted");
+  assert.deepEqual(w.calls.abort, []);
+});
+
+test("deliverToTask: a round that is ending is never steered into — continue-pending, and the round remembers an answer waits (continueAfter)", async () => {
+  const { w, id } = await askerWorld();
+  w.jobs.find((j) => j.id === id).ending = true;
+  const before = w.calls.send.length;
+  assert.deepEqual(await deliverToTask(id, "T", { messageID: "msg_a" }, w.deps), { delivery: "continue-pending" });
+  assert.equal(w.calls.send.length, before, "nothing sent");
+  assert.equal(w.job(id).continueAfter, true);
+  assert.equal(w.job(id).askedUser, true);
+});
+
+test("deliverToTask: a running task whose child is not busy is re-read once after 2 s — busy by then → steer; still idle → continue-pending", async () => {
+  const { w, id, child } = await askerWorld();
+  const slept = [];
+  w.active.delete(child);
+  w.deps.sleep = async (ms) => { slept.push(ms); w.active.add(child); };
+  assert.deepEqual(await deliverToTask(id, "T", { messageID: "msg_a" }, w.deps), { delivery: "steer" });
+  assert.deepEqual(slept, [2000]);
+  w.active.delete(child);
+  w.deps.sleep = async (ms) => { slept.push(ms); };
+  assert.deepEqual(await deliverToTask(id, "T2", { messageID: "msg_b" }, w.deps), { delivery: "continue-pending" });
+  assert.deepEqual(slept, [2000, 2000]);
+  assert.equal(w.job(id).continueAfter, true);
+  // …and when the round finished during that wait, it is a plain continuation
+  const again = await askerWorld();
+  again.w.active.delete(again.child);
+  again.w.deps.sleep = async () => {
+    again.w.finish(again.child, "succeeded", T0 + 3);
+    await again.w.engine.observeRaw(raw("session.execution.succeeded", again.child));
+  };
+  const res = await deliverToTask(again.id, "T3", { messageID: "msg_c" }, again.w.deps);
+  assert.deepEqual(res, { delivery: "continue" });
+});
+
+test("deliverToTask: a finished task is CONTINUED with the text under the given message id; the successor inherits askedUser and the root, and the lock is not held twice (it completes)", async () => {
+  const w = specialistWorld();
+  const id = await finishedSpecialist(w, { isolation: "none" });
+  const res = await deliverToTask(id, "Answer from the user: A", { messageID: "msg_c" }, w.deps);
+  assert.deepEqual(res, { delivery: "continue" });
+  const next = w.jobs.find((j) => j.continues === id);
+  assert.ok(next, "a new round");
+  assert.equal(next.rootJobId, id);
+  assert.equal(next.askedUser, true, "marked before the continuation, so it is inherited");
+  assert.equal(next.requestedBy, "manta");
+  assert.equal(next.launch.messageId, "msg_c");
+  assert.ok(next.launch.text.startsWith("Answer from the user: A"));
+  assert.equal(w.job(id).supersededBy, next.id);
+  // a later answer, by the task's ROOT id, reaches the newest round
+  assert.deepEqual(await deliverToTask(id, "More", { messageID: "msg_d" }, w.deps), { delivery: "steer" });
+  assert.equal(w.calls.send.at(-1).sessionId, next.childSessionID);
+});
+
+test("deliverToTask: refusals come back as sentences — a result still being delivered, a paused task, a task that is gone", async () => {
+  const w = specialistWorld();
+  const id = await finishedSpecialist(w, { isolation: "none" });
+  w.jobs.find((j) => j.id === id).completionDelivery = "pending";
+  const busy = await deliverToTask(id, "T", { messageID: "msg_a" }, w.deps);
+  assert.match(busy.error, /still being delivered/);
+  assert.equal(w.jobs.some((j) => j.continues === id), false, "nothing continued");
+  const paused = specialistWorld();
+  const pid = await pausedJob(paused, autonomyInput(paused, { isolation: "none" }));
+  assert.deepEqual(await deliverToTask(pid, "T", { messageID: "msg_a" }, paused.deps), { error: TASK_PAUSED });
+  assert.deepEqual(await deliverToTask("nope", "T", { messageID: "msg_a" }, w.deps), { error: TASK_GONE });
+});
+
+test("deliverToTask: a failed steer is a sentence, not a throw", async () => {
+  const { w, id } = await askerWorld();
+  w.fail.send = new Error("fetch failed");
+  const res = await deliverToTask(id, "T", { messageID: "msg_a" }, w.deps);
+  assert.match(res.error, /Couldn't send your answer: fetch failed/);
+});
+
+test("deliverToTask steerOnly (a dismissal): steers a busy task, and for anything else says 'none' — it never starts a round and never marks the task answered", async () => {
+  const { w, id } = await askerWorld();
+  assert.deepEqual(await deliverToTask(id, "dismissed", { messageID: "msg_a", steerOnly: true }, w.deps), { delivery: "steer" });
+  assert.ok(!w.job(id).askedUser);
+  w.jobs.find((j) => j.id === id).ending = true;
+  assert.deepEqual(await deliverToTask(id, "x", { steerOnly: true }, w.deps), { delivery: "none" });
+  const done = specialistWorld();
+  const did = await finishedSpecialist(done, { isolation: "none" });
+  assert.deepEqual(await deliverToTask(did, "x", { steerOnly: true }, done.deps), { delivery: "none" });
+  assert.equal(done.jobs.some((j) => j.continues === did), false);
+  assert.deepEqual(await deliverToTask("nope", "x", { steerOnly: true }, done.deps), { error: TASK_GONE });
+});
+
+// ---------------------------------------------------------------------------
+// handleQuestion, non-blocking
+// ---------------------------------------------------------------------------
+const OC_FAKE = (w) => ({
+  replyQuestion: async (a) => {
+    if (w.fail.reply) throw w.fail.reply;
+    w.calls.replied.push(a);
+  },
+  readMessageStrict: async (sid, mid) => ({ state: (w.timelines.get(sid) ?? []).some((r) => r.id === mid) ? "found" : "missing" }),
+  listQuestions: async () => [],
+});
+// a world with the REAL question store over this world's engine functions
+async function tqWorld() {
+  const w = withQuestionDeps(specialistWorld());
+  w.calls.replied = [];
+  w.calls.cancelled = [];
+  w.fail.reply = null;
+  w.deps.cancelInboxItem = async (sid, iid) => {
+    w.calls.cancelled.push({ sid, iid });
+    w.inboxes.set(sid, (w.inboxes.get(sid) ?? []).filter((i) => i.id !== iid));
+  };
+  w.tqRoot = await mkdtemp(joinPath(tmpdir(), "tq-delegate-"));
+  w.tq = createTaskQuestions({
+    root: w.tqRoot,
+    now: () => w.state.now,
+    publish: () => {},
+    delegate: {
+      rootJobOf,
+      loadRecords: () => w.deps.load(),
+      deliverToTask: (root, text, opts) => deliverToTask(root, text, opts, w.deps),
+      addJobMilestone: (root, text) => addJobMilestone(root, text, w.deps),
+    },
+    oc: OC_FAKE(w),
+    mutex: undefined,
+  });
+  w.deps.taskQuestions = w.tq;
+  return w;
+}
+const closeTq = (w) => rm(w.tqRoot, { recursive: true, force: true });
+
+test("question (non-blocking): the question is captured and answered with the placeholder — the turn is NOT interrupted, nothing is rejected, no decision is stored, the task is not blocked — and the milestone says it asked", async () => {
+  const w = await tqWorld();
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  const res = await w.engine.handleQuestion(FORM(child));
+  assert.deepEqual(res, { captured: true });
+  const j = w.job(id);
+  assert.equal(j.decision, undefined);
+  assert.notEqual(j.jobProgress.modelState, "blocked");
+  assert.ok(!j.askedUser, "askedUser means the user ANSWERED");
+  assert.deepEqual(w.calls.abort, [], "no interrupt");
+  assert.deepEqual(w.calls.rejected, [], "no rejection: the form was answered");
+  assert.deepEqual(w.calls.replied, [{ requestId: "frm_1", sessionId: child, answers: [[PLACEHOLDER_ANSWER]] }]);
+  assert.equal(j.status, "running");
+  assert.equal(w.tq.hasOpen(id), true);
+  assert.ok(j.jobProgress.milestones.some((m) => /^Asked you: Create @pricing-copy as its own agent\?/.test(m.text)), JSON.stringify(j.jobProgress.milestones));
+  await closeTq(w);
+});
+
+test("question (non-blocking): every case the new path can't take falls back to today's — no free-text field, a failed reply, a 4th open question — a subagent's or a plain job's question is untouched", async () => {
+  const w = await tqWorld();
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  // no free text
+  assert.deepEqual(await w.engine.handleQuestion(FORM(child, { fields: [{ ...FORM(child).fields[0], custom: false }] })), { captured: true });
+  assert.ok(w.job(id).decision, "the old path stored the decision");
+  assert.deepEqual(w.calls.abort, [child]);
+  assert.equal(w.calls.rejected.length, 1);
+  assert.deepEqual(w.calls.replied, []);
+  assert.equal(w.job(id).askedUser, true);
+  // a failed reply
+  const b = await tqWorld();
+  const bid = await start(b, autonomyInput(b, { isolation: "none" }));
+  b.fail.reply = new Error("down");
+  assert.deepEqual(await b.engine.handleQuestion(FORM(b.job(bid).childSessionID)), { captured: true });
+  assert.ok(b.job(bid).decision);
+  assert.equal(b.tq.hasOpen(bid), false, "the stored question was taken back");
+  assert.equal(b.calls.rejected.length, 1);
+  // a 4th open question
+  const c = await tqWorld();
+  const cid = await start(c, autonomyInput(c, { isolation: "none" }));
+  for (let i = 0; i < 3; i++) await c.engine.handleQuestion(FORM(c.job(cid).childSessionID, { id: `frm_${i}` }));
+  assert.equal(c.calls.abort.length, 0);
+  await c.engine.handleQuestion(FORM(c.job(cid).childSessionID, { id: "frm_4" }));
+  assert.ok(c.job(cid).decision, "the 4th takes the old path");
+  assert.equal(c.calls.abort.length, 1);
+  // a plain job's and a subagent's question: rejected as before
+  const plain = await tqWorld();
+  const pid = await start(plain);
+  assert.deepEqual(await plain.engine.handleQuestion(FORM(plain.job(pid).childSessionID)), { captured: false });
+  assert.deepEqual(plain.calls.replied, []);
+  for (const t of [w, b, c, plain]) await closeTq(t);
+});
+
+test("question (non-blocking): a task that ends with its question still open ends `done` (not `needs a decision`) and its result says it is waiting for the answer", async () => {
+  const w = await tqWorld();
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.say(child, "Checked the roster. Everything else is done.");
+  await w.engine.handleQuestion(FORM(child));
+  w.finish(child, "succeeded", T0 + 9);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const j = w.job(id);
+  assert.equal(j.status, "done");
+  assert.equal(j.endedBlocked, false);
+  assert.equal(j.completionDelivery, "delivered");
+  oneResult(w, id, "completed");
+  const body = w.calls.synth[0].body;
+  assert.match(body.text, /^\[background job "[^"]+" done\]/);
+  const question = w.job(id).waiting[0].question;
+  assert.ok(body.text.includes(waitingLine([{ question }])), body.text);
+  assert.ok(!body.text.includes("Question for the user"), "no decision block");
+  assert.equal(body.metadata.manta.endedBlocked, undefined);
+  await closeTq(w);
+});
+
+test("buildCompletionText: the waiting line only for a finished task with waiting questions; a failed task carries none", () => {
+  const waiting = [{ question: "Create it?" }, { question: "Rename it?" }];
+  const text = buildCompletionText({ name: "n", status: "done", result: "r", waiting });
+  assert.ok(text.includes('Waiting for the user\'s answer to: "Create it?" (the answer will continue this task).'));
+  assert.ok(text.includes('Waiting for the user\'s answer to: "Rename it?" (the answer will continue this task).'));
+  assert.ok(!buildCompletionText({ name: "n", status: "failed", error: "boom", waiting }).includes("Waiting for"));
+  assert.ok(!buildCompletionText({ name: "n", status: "done", result: "r" }).includes("Waiting for"));
+});
+
+// ---------------------------------------------------------------------------
+// the ending gate and the deferred round (spec §4.3)
+// ---------------------------------------------------------------------------
+const fakeTq = (log, over = {}) => ({
+  waitingFor: () => [],
+  hasOpen: () => false,
+  capture: async () => ({ captured: false, reason: "free-text" }),
+  pendingSteer: async () => [],
+  markContinuePending: async () => {},
+  hasContinuePending: async () => false,
+  onRoundSettled: async () => ({ continued: false }),
+  sweep: async () => {},
+  ...over,
+});
+const gateWorld = (log, over = {}) => {
+  const w = specialistWorld();
+  let marked = [];
+  w.deps.taskQuestions = fakeTq(log, {
+    pendingSteer: async () => [{ id: "tq_1", messageID: "msg_steer", text: "A" }],
+    markContinuePending: async (root, ids) => { marked = ids; log.push(["mark", ids]); },
+    hasContinuePending: async () => marked.length > 0,
+    onRoundSettled: async (job) => { log.push(["settled", job.completionDelivery]); return { continued: true }; },
+    ...over,
+  });
+  w.deps.cancelInboxItem = async (sid, iid) => { log.push(["cancel", iid]); };
+  w.deps.onJobTerminal = async () => log.push(["terminal"]);
+  w.deps.afterJobEnded = async () => log.push(["after"]);
+  w.deps.clearProgress = async () => log.push(["clear"]);
+  return w;
+};
+
+test("ending gate: a steered answer left unconsumed in the inbox is cancelled and becomes continue-pending; the round is written `deferred`, the hooks run in the pinned order, then the answers go out in a continuation — no result is posted and the cleanup is skipped", async () => {
+  const log = [];
+  const w = gateWorld(log);
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.inboxes.set(child, [{ id: "msg_steer", type: "user" }, { id: "msg_other", type: "user" }]);
+  w.say(child, "done");
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.deepEqual(log, [["cancel", "msg_steer"], ["mark", ["tq_1"]], ["terminal"], ["after"], ["clear"], ["settled", "deferred"]]);
+  const j = w.job(id);
+  assert.equal(j.status, "done");
+  assert.equal(j.ending, true);
+  assert.equal(j.continueAfter, true);
+  assert.equal(j.completionDelivery, "not-needed", "its result is never posted: the continuation's is the one the chat gets");
+  assert.equal(w.calls.synth.length, 0);
+  assert.equal(w.calls.deliver.length, 0);
+  assert.equal(w.calls.kill.length, 0, "the window belongs to the continuation");
+});
+
+test("ending gate: a continuation that is refused re-opens nothing here (the store does) — the round falls back to `pending`, its result IS posted and the cleanup runs", async () => {
+  const log = [];
+  const w = gateWorld(log, { onRoundSettled: async (job) => { log.push(["settled", job.completionDelivery]); return { continued: false, error: "that job's session is busy" }; } });
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.inboxes.set(child, [{ id: "msg_steer", type: "user" }]);
+  w.say(child, "done");
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  oneResult(w, id, "completed");
+  assert.equal(w.calls.kill.length, 1, "cleaned up as any finished task");
+});
+
+test("ending gate: nothing to do for a task with no steered answer — no inbox read, an ordinary result, no deferral", async () => {
+  const log = [];
+  const w = gateWorld(log, { pendingSteer: async () => [], hasContinuePending: async () => false });
+  let inboxReads = 0;
+  w.deps.listInbox = async () => { inboxReads++; return []; };
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(inboxReads, 0);
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  assert.equal(w.job(id).continueAfter, undefined);
+  oneResult(w, id, "completed");
+});
+
+test("ending gate: an answer that deliverToTask already marked continue-pending defers the round even when the inbox holds nothing", async () => {
+  const log = [];
+  const w = gateWorld(log, { pendingSteer: async () => [], hasContinuePending: async () => true });
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).continueAfter, true);
+  assert.deepEqual(log.filter((l) => l[0] === "settled"), [["settled", "deferred"]]);
+  assert.equal(w.calls.synth.length, 0);
+});
+
+test("ending gate: a failed round is never deferred (its failure is reported as always); an answer waiting for it is sent by the question sweep afterwards", async () => {
+  const log = [];
+  const w = gateWorld(log, { pendingSteer: async () => [], hasContinuePending: async () => true });
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.jobs.find((j) => j.id === id).continueAfter = true; // deliverToTask marked it while it ran
+  w.finish(child, "failed", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.failed", child, { error: { message: "boom" } }));
+  assert.equal(w.job(id).status, "failed");
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  oneResult(w, id, "failed");
+  assert.deepEqual(log.filter((l) => l[0] === "settled"), []);
+});
+
+test("ending gate: an inbox read that fails leaves the round `ending` + `gateFailed` and the questions as they are; the round finishes as usual; the sweep retries the gate and then the question sweep sends what is owed", async () => {
+  const log = [];
+  const w = gateWorld(log);
+  let inboxDown = true;
+  const item = [{ id: "msg_steer", type: "user" }];
+  w.deps.listInbox = async () => { if (inboxDown) throw new Error("down"); return item; };
+  w.deps.taskQuestions.sweep = async () => { log.push(["tq-sweep"]); };
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  const j = w.job(id);
+  assert.equal(j.ending, true);
+  assert.equal(j.gateFailed, true);
+  assert.equal(j.completionDelivery, "delivered", "the round ended as an ordinary one");
+  assert.deepEqual(log.filter((l) => l[0] === "mark" || l[0] === "cancel"), []);
+  inboxDown = false;
+  await sweepDelegateJobs(w.deps);
+  assert.deepEqual(log.filter((l) => l[0] === "cancel" || l[0] === "mark"), [["cancel", "msg_steer"], ["mark", ["tq_1"]]]);
+  assert.equal(w.job(id).gateFailed, undefined, "retried and settled");
+  assert.ok(log.some((l) => l[0] === "tq-sweep"), "the delegate's sweep runs the question sweep too");
+});
+
+test("deferred round: a crash left it `deferred` — the sweep sends the answers (continued → `not-needed`), or when that is refused posts the result and cleans up (`pending` → delivered); a round whose continuation already exists is just settled", async () => {
+  for (const mode of ["continued", "refused", "exists"]) {
+    const log = [];
+    const w = specialistWorld();
+    w.deps.taskQuestions = fakeTq(log, { onRoundSettled: async () => { log.push(["settled"]); return mode === "continued" ? { continued: true } : { continued: false, error: "busy" }; } });
+    const id = await finishedSpecialist(w, { isolation: "none" });
+    Object.assign(w.jobs.find((j) => j.id === id), { completionDelivery: "deferred", continueAfter: true, ending: true });
+    w.calls.synth.length = 0;
+    w.records.clear();
+    if (mode === "exists") w.jobs.find((j) => j.id === id).supersededBy = "someone";
+    await sweepDelegateJobs(w.deps);
+    const j = w.job(id);
+    if (mode === "continued") {
+      assert.equal(j.completionDelivery, "not-needed");
+      assert.equal(w.calls.synth.length, 0);
+    } else if (mode === "refused") {
+      assert.equal(j.completionDelivery, "delivered");
+      assert.equal(w.calls.synth.length, 1, "the result is posted now");
+    } else {
+      assert.equal(j.completionDelivery, "not-needed");
+      assert.deepEqual(log, [], "nothing to send: the continuation exists");
+    }
+  }
+});
+
+test("deferred: a `deferred` round is not an in-flight delivery — continueJob isn't refused for it, and the result sweep ignores it", async () => {
+  const w = specialistWorld();
+  const id = await finishedSpecialist(w, { isolation: "none" });
+  w.jobs.find((j) => j.id === id).completionDelivery = "deferred";
+  w.calls.synth.length = 0;
+  assert.equal(await retryPendingDeliveries(w.deps), 0);
+  assert.equal(w.calls.synth.length, 0);
+  const res = await continueJob(id, { prompt: "answer", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+});
+
+test("end to end: an answer steered into a running task that ended without consuming it is cancelled, the round is deferred, ONE continuation carries the answer, and only the continuation's result reaches the chat", async () => {
+  const w = await tqWorld();
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  await w.engine.handleQuestion(FORM(child));
+  const [asked] = await w.tq.listOpen({});
+  const answered = await w.tq.answer(asked.id, [["Add to @conversion-cro"]]);
+  assert.equal(answered.ok, true, JSON.stringify(answered));
+  assert.equal(answered.question.delivery, "steer");
+  const steered = w.calls.send.at(-1);
+  assert.equal(steered.delivery, "steer");
+  // the turn ends before its next step could take the message: it is still in the inbox
+  w.inboxes.set(child, [{ id: steered.messageID, type: "user" }]);
+  w.say(child, "Done with what did not depend on the answer.");
+  w.finish(child, "succeeded", T0 + 9);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+
+  assert.deepEqual(w.calls.cancelled, [{ sid: child, iid: steered.messageID }]);
+  const old = w.job(id);
+  assert.equal(old.completionDelivery, "not-needed");
+  const next = w.jobs.find((j) => j.continues === id);
+  assert.ok(next, "the continuation exists");
+  assert.equal(old.supersededBy, next.id);
+  assert.equal(next.status, "running");
+  assert.equal(next.rootJobId, id);
+  assert.ok(next.launch.text.startsWith('Answer from the user to your question "'), next.launch.text);
+  assert.ok(next.launch.text.includes("Add to @conversion-cro"));
+  assert.equal(next.askedUser, true);
+  assert.equal(w.calls.synth.length, 0, "the finished round posted nothing");
+  assert.equal(w.calls.kill.length, 0, "and its window belongs to the continuation");
+  const q = (await w.tq.listOpen({}))[0];
+  assert.equal(q, undefined, "nothing is open any more");
+  assert.equal(w.tq.hasOpen(id), false);
+
+  // the continuation ends: it is the one result the chat gets
+  w.say(child, "Applied the answer.");
+  w.finish(child, "succeeded", T0 + 12);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(next.id).status, "done");
+  assert.equal(w.calls.synth.length, 1);
+  assert.equal(w.calls.synth[0].body.id, w.job(next.id).completionMessageId);
+  assert.ok(w.calls.synth[0].body.text.includes("Applied the answer."));
+  await closeTq(w);
+});
+
+test("end to end: an answer after the task finished continues it (no steer); the question card clears", async () => {
+  const w = await tqWorld();
+  const id = await start(w, autonomyInput(w, { isolation: "none" }));
+  const child = w.job(id).childSessionID;
+  await w.engine.handleQuestion(FORM(child));
+  w.say(child, "Done.");
+  w.finish(child, "succeeded", T0 + 9);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).completionDelivery, "delivered", "ended with the question open: an ordinary result");
+  const [asked] = await w.tq.listOpen({});
+  const res = await w.tq.answer(asked.id, [["Create @pricing-copy"]]);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.question.delivery, "continue");
+  assert.equal(w.jobs.filter((j) => j.continues === id).length, 1);
+  await closeTq(w);
+});
+
+// ---------------------------------------------------------------------------
+// deliverResult:false and the hook that tells the engine a round ended (spec §5.4)
+// ---------------------------------------------------------------------------
+test("deliverResult:false: finishing writes `not-needed`, posts nothing (not through admission either), and still cleans up", async () => {
+  const w = world();
+  const id = await start(w, { deliverResult: false });
+  assert.equal(w.job(id).deliverResult, false);
+  w.say(w.job(id).childSessionID, "result");
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  const j = w.job(id);
+  assert.equal(j.status, "done");
+  assert.equal(j.completionDelivery, "not-needed");
+  assert.deepEqual(results(w), { records: 0, deliveries: 0 });
+  assert.equal(w.calls.rmWorktree.length, 1, "the worktree is cleaned up as for any finished job");
+  // a CTO-conversation parent gets nothing either
+  const c = world();
+  c.state.cto = true;
+  const cid = await start(c, { deliverResult: false });
+  c.finish(c.job(cid).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(c.deps).observeRaw(raw("session.execution.succeeded", c.job(cid).childSessionID));
+  assert.deepEqual(results(c), { records: 0, deliveries: 0 });
+  assert.equal(await retryPendingDeliveries(w.deps), 0);
+});
+
+test("deliverResult:false: stopping writes `not-needed` and posts nothing; a failure too", async () => {
+  const w = world();
+  const stopped = await start(w, { deliverResult: false });
+  assert.equal((await stopJob(stopped, w.deps)).ok, true);
+  assert.equal(w.job(stopped).completionDelivery, "not-needed");
+  const failed = await start(w, { deliverResult: false });
+  w.finish(w.job(failed).childSessionID, "failed", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.failed", w.job(failed).childSessionID, { error: { message: "boom" } }));
+  assert.equal(w.job(failed).completionDelivery, "not-needed");
+  assert.deepEqual(results(w), { records: 0, deliveries: 0 });
+  // an ordinary job still posts
+  const plain = await start(w);
+  await stopJob(plain, w.deps);
+  assert.equal(w.job(plain).completionDelivery, "delivered");
+  assert.equal(w.records.size, 1);
+});
+
+test("deliverResult:false survives continueJob and resume", async () => {
+  const w = world();
+  const id = await start(w, { deliverResult: false });
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  const next = await continueJob(id, { prompt: "again", sessionID: PARENT }, w.deps);
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(next.job.deliverResult, false);
+  w.finish(next.job.childSessionID, "succeeded", T0 + 4);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", next.job.childSessionID));
+  assert.equal(w.job(next.job.id).completionDelivery, "not-needed");
+  assert.deepEqual(results(w), { records: 0, deliveries: 0 });
+  const p = world();
+  const pid = await pausedJob(p, { deliverResult: false });
+  assert.equal((await resumeJob(pid, p.deps)).ok, true);
+  assert.equal(p.job(pid).deliverResult, false);
+  p.finish(p.job(pid).childSessionID, "succeeded", T0 + 6);
+  await createDelegateEngine(p.deps).observeRaw(raw("session.execution.succeeded", p.job(pid).childSessionID));
+  assert.equal(p.job(pid).completionDelivery, "not-needed");
+});
+
+test("targetProject: a parent with no window of its own (a routine's headless session) still launches into the named workspace", async () => {
+  const w = world();
+  w.sessions.set("ses_headless", { id: "ses_headless", directory: REPO });
+  const res = await startJob(input({ parentSessionID: "ses_headless", targetProject: "manta-agents", deliverResult: false }), w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(w.calls.window[0].sessionName, "manta-agents");
+  assert.equal(w.job(res.job.id).tmuxSession, "manta-agents");
+  w.finish(res.job.childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", res.job.childSessionID));
+  assert.equal(w.job(res.job.id).completionDelivery, "not-needed");
+  assert.deepEqual(results(w), { records: 0, deliveries: 0 }, "nothing is posted into the headless session");
+});
+
+test("afterJobEnded: called once for every round that ends — finished, failed, stopped — for any job, after the Architect hook, with the job's final record; a throwing hook breaks nothing", async () => {
+  const w = specialistWorld();
+  const order = [];
+  w.deps.onJobEnded = async (job) => { order.push(["onJobEnded", job.id]); };
+  w.deps.afterJobEnded = async (job) => { order.push(["after", job.id, job.status]); };
+  const arch = await start(w, archInput(w));
+  w.finish(w.job(arch).childSessionID, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", w.job(arch).childSessionID));
+  assert.deepEqual(order, [["onJobEnded", arch], ["after", arch, "done"]]);
+  order.length = 0;
+  const dev = await start(w, autonomyInput(w, { isolation: "none" }));
+  w.finish(w.job(dev).childSessionID, "failed", T0 + 2);
+  await w.engine.observeRaw(raw("session.execution.failed", w.job(dev).childSessionID, { error: { message: "boom" } }));
+  assert.deepEqual(order, [["after", dev, "failed"]], "not only Architect jobs");
+  order.length = 0;
+  const stopped = await start(w, autonomyInput(w, { isolation: "none" }));
+  await stopJob(stopped, w.deps);
+  assert.deepEqual(order, [["after", stopped, "stopped"]]);
+  order.length = 0;
+  const plain = world();
+  plain.deps.afterJobEnded = async (job) => { order.push(["after", job.id]); throw new Error("boom"); };
+  const pid = await start(plain);
+  await stopJob(pid, plain.deps);
+  assert.deepEqual(order, [["after", pid]]);
+  assert.equal(plain.records.size, 1, "the result was still posted");
+});
