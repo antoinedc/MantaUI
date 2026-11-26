@@ -2111,6 +2111,7 @@ async function refreshWorld(opts = {}) {
 /** The routine's first run, started by a tick at 09:00:10. */
 async function startedRefresh(opts) {
   const { w, routine } = await refreshWorld(opts);
+  w.agentLookups.length = 0; // creating the routine looked the agent up once; the run must not
   await w.tickAt(at(9, 0, 10));
   return { w, routine, run: w.runs(routine.id)[0] };
 }
@@ -2123,7 +2124,7 @@ test("refresh: only the agents engine can make one — the charter is fixed, the
   assert.equal(routine.agent, null);
   assert.equal(routine.access, "read");
   assert.equal(routine.enabled, true);
-  assert.equal(routine.nextRunAt, at(9, 0, 0, 31));
+  assert.equal(routine.nextRunAt, at(9, 0, 0));
   // the public paths refuse the kind (the tool and the editor both go through create / update)
   const base = { name: "x", prompt: "y", directory: "/proj", cron: "0 9 * * *" };
   await assert.rejects(w.engine.create({ ...base, kind: "agent-refresh", agentSlug: "seo" }), /can't be made here/);
