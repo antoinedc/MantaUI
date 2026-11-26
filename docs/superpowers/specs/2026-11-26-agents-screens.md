@@ -1,7 +1,7 @@
 # Agents — Phase 6: Agent screens
 
-Status: draft, self-reviewed (2026-11-26; the requested OpenAI review could not run — every OpenAI model on the box
-answered "usage limit reached"; see §12). Owner: Antoine. Builds on Phases 1–5A (`2026-11-22-agents-phase1.md` …
+Status: reviewed, ready to implement (2026-11-26; independent review by Gemini 4 Argon via OpenCode Go, 2 rounds, all
+findings applied; see §12). Owner: Antoine. Builds on Phases 1–5A (`2026-11-22-agents-phase1.md` …
 `2026-11-24-agents-phase5-builder.md`), the question tool (`2026-11-24-ask-user-tool.md`) and the research library
 (`2026-11-24-research-library.md`). Absorbs the old "5B" (history + restore, the refresh routine).
 
@@ -729,8 +729,9 @@ showing hand edits in History (needs file watching).
 
 ## 12. Review log
 
-- **OpenAI review: still pending.** Requested with `openai/gpt-6-astra`, then `openai/gpt-6-sol` (and `gpt-6-luna` as a probe) through
-  the box's OpenCode; all three refused with "The usage limit has been reached". It must be re-run (Must/Should findings applied) before implementation starts.
+- **Independent review: done.** The OpenAI models were out of quota, so the user chose a model from the OpenCode Go
+  subscription: Gemini 4 Argon (a different model family from the author). It reviewed the spec against current main in
+  two rounds (rounds 2 and 3 below record the verdicts); every finding was verified against the code and applied.
 - **Self-review round (Opus), applied:** inbox items may not carry the message id (match by id, else text; verify in the
   e2e first); `askedUser` owner and timing pinned (set before `continueJob` so the successor inherits it); "Mention in a
   chat" no longer reaches into another component's composer (a draft instead); one shared `ResearchRows` for the panel
@@ -777,7 +778,7 @@ showing hand edits in History (needs file watching).
     pill for lead / Architect (§2.3, §6.1).
 13. **COULD — notes source.** **Applied** (cheap): injected `countProjectPages`, `null` fallback (§5.1).
 
-No finding was rejected. The OpenAI review (above) remains pending; a second review round is next.
+No finding was rejected. A second review round followed.
 
 ### Round 3 — Gemini 4 Argon (review2), verdicts (checked against the code at `ba05c45e`)
 
@@ -803,4 +804,4 @@ Round 2 itself: 11 of 13 round-1 findings resolved; R1-4 and R1-6 partially, com
    resume, respected by both terminal writes and by `stopJob`'s post (§5.4, §6.1).
 5. **COULD — stale duplicate bullet in §5.4.** Confirmed. **Applied:** deleted; its charter text kept as its own bullet.
 
-None rejected. The OpenAI review remains pending (above).
+None rejected. Review complete.
