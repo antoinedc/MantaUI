@@ -318,7 +318,7 @@ describe("AddSeatFlow", () => {
   // is pasted until the seat is filed AND the list is refreshed — then the
   // panel reports done. A sign-in that exits with an error fails at once.
   async function claudeFlow(status: () => Promise<unknown>) {
-    let ptyCb: ((e: unknown) => void) | null = null;
+    const ptyCbs: Array<(e: unknown) => void> = [];
     const r = await flow(
       {
         accountsAddSeat: () =>
@@ -326,8 +326,10 @@ describe("AddSeatFlow", () => {
         accountsSeatStatus: status,
         ptyWrite: () => Promise.resolve(),
         onPtyEvent: (cb: (e: unknown) => void) => {
-          ptyCb = cb;
-          return () => {};
+          ptyCbs.push(cb);
+          return () => {
+            ptyCbs.splice(ptyCbs.indexOf(cb), 1);
+          };
         },
       },
       { provider: "claude" },
@@ -342,7 +344,7 @@ describe("AddSeatFlow", () => {
       buttonByText(h!, "Submit")!.click();
     });
     await h!.flush();
-    return { ...r, emitPty: (e: unknown) => ptyCb?.(e) };
+    return { ...r, emitPty: (e: unknown) => [...ptyCbs].forEach((cb) => cb(e)) };
   }
 
   it("Claude: Submit stays busy until the new seat is listed, then the panel reports done", async () => {
@@ -365,6 +367,55 @@ describe("AddSeatFlow", () => {
     await h!.flush();
     expect(h!.text()).toContain("That code didn't work");
     expect(h!.text()).not.toContain("Saving…");
+  });
+
+  it("Claude: the sign-in link of the current CLI (claude.ai, OSC 8) shows up once complete, even split across chunks", async () => {
+    const { emitPty } = await claudeFlow(() => Promise.resolve({ state: "pending" }));
+    const key = "claude-login-k";
+    const link = "https://claude.ai/oauth/authorize?FAKE-token_0123456789abcdefghijklmnopqrstuvwxyz";
+    const out = `Opening browser to sign in…\r\nIf the browser didn't open, visit:\r\n\x1b]8;;${link}\x07\x1b[94m${link}\x1b[39m\x1b]8;;\x07\r\nPaste code here if prompted > `;
+    const cut = out.indexOf("z-Oebf") + 8;
+    await act(async () => emitPty({ kind: "data", sessionKey: key, data: out.slice(0, cut) }));
+    expect(h!.container.querySelector(`a[href^="https://claude.ai/oauth"]`)).toBeNull();
+    await act(async () => emitPty({ kind: "data", sessionKey: key, data: out.slice(cut) }));
+    expect(h!.container.querySelector(`a[href="${link}"]`)).toBeTruthy();
+  });
+
+  it("Claude: a failed exit shows what the CLI said (never the code), not a fixed guess", async () => {
+    const { emitPty } = await claudeFlow(() => Promise.resolve({ state: "pending" }));
+    const key = "claude-login-k";
+    await act(async () => {
+      emitPty({ kind: "data", sessionKey: key, data: "CODE#STATE\r\r\nSigning in…\r\nLogin failed: oauth_not_allowed_for_organization\r\n" });
+      emitPty({ kind: "exit", sessionKey: key, code: 1 });
+    });
+    await h!.flush();
+    expect(h!.text()).toContain("Your organization doesn't allow signing in this way");
+    expect(h!.text()).not.toContain("CODE#STATE");
+    expect(h!.text()).not.toContain("That code didn't work");
+  });
+
+  it("Claude: a rejected code says so and a silent failed exit keeps the generic copy", async () => {
+    const first = await claudeFlow(() => Promise.resolve({ state: "pending" }));
+    await act(async () => {
+      first.emitPty({ kind: "data", sessionKey: "claude-login-k", data: "Couldn't log in: That code wasn't accepted. It may be incomplete, expired.\r\n" });
+      first.emitPty({ kind: "exit", sessionKey: "claude-login-k", code: 1 });
+    });
+    await h!.flush();
+    expect(h!.text()).toContain("That code didn't work (it may be incomplete, expired, already used");
+    expect(h!.text()).toContain("Start the sign-in again.");
+  });
+
+  it("Claude: the CLI asking again for a code without # stops the spinner and says what to fix, in place", async () => {
+    const { emitPty } = await claudeFlow(() => Promise.resolve({ state: "pending" }));
+    expect(h!.text()).toContain("Saving…");
+    await act(async () => {
+      emitPty({ kind: "data", sessionKey: "claude-login-k", data: "x\r\r\nThat doesn't look like the full code. Copy all of it, including the # in the middle.\r\nPaste code here if prompted > " });
+    });
+    await h!.flush();
+    expect(h!.text()).not.toContain("Saving…");
+    expect(h!.text()).toContain("copy all of it, including the # in the middle");
+    // the card stays on the code step: the input is still there to retry with
+    expect(h!.container.querySelector('input[placeholder="paste the code"]')).toBeTruthy();
   });
 
   it("duplicate-login: a clear message and Try again restarts", async () => {

@@ -306,6 +306,57 @@ test("extractClaudeAuthUrl: returns null when the chunk has no authorize URL", (
   assert.equal(extractClaudeAuthUrl(""), null);
 });
 
+// ===== extractClaudeAuthUrl: current CLI (issue #1748) =====
+
+// Bytes captured from `claude auth login` 2.1.332 (token replaced): the link is an OSC 8
+// hyperlink, then repeated as visible text.
+const NEW_TOKEN = "FAKE-token_0123456789abcdefghijklmnopqrstuvwxyz";
+const NEW_URL = `https://claude.ai/oauth/authorize?${NEW_TOKEN}`;
+const newCliOutput = (terminator) =>
+  "Opening browser to sign in…\r\nIf the browser didn't open, visit:\r\n" +
+  `\x1b]8;;${NEW_URL}${terminator}\x1b[94m${NEW_URL}\x1b[39m\x1b]8;;${terminator}\r\n` +
+  "Paste code here if prompted > ";
+
+test("extractClaudeAuthUrl: finds the claude.ai link inside an OSC 8 hyperlink (BEL terminator)", () => {
+  assert.equal(extractClaudeAuthUrl(newCliOutput("\x07")), NEW_URL);
+});
+
+test("extractClaudeAuthUrl: finds the claude.ai link inside an OSC 8 hyperlink (ST terminator)", () => {
+  assert.equal(extractClaudeAuthUrl(newCliOutput("\x1b\\")), NEW_URL);
+});
+
+test("extractClaudeAuthUrl: the old CLI's OSC 8 claude.com/cai link still works", () => {
+  const oldUrl = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&state=BCqk";
+  const out = `If the browser didn't open, visit: \x1b]8;;${oldUrl}\x07\x1b[94m${oldUrl}\x1b[39m\x1b]8;;\x07\r\n`;
+  assert.equal(extractClaudeAuthUrl(out), oldUrl);
+});
+
+test("extractClaudeAuthUrl: the trust prompt's link is not picked even beside the new link", () => {
+  const out = "Security guide: https://docs.claude.com/en/docs/claude-code-security\r\n" + newCliOutput("\x07");
+  assert.equal(extractClaudeAuthUrl(out), NEW_URL);
+  assert.equal(extractClaudeAuthUrl("https://claude.ai/login and https://claude.ai/docs\r\n"), null);
+});
+
+test("extractClaudeAuthUrl: a lookalike host is not accepted", () => {
+  assert.equal(extractClaudeAuthUrl("https://claude.ai.evil.example/oauth/authorize?abc\r\n"), null);
+  assert.equal(extractClaudeAuthUrl("https://evilclaude.ai/oauth/authorize?abc\r\n"), null);
+});
+
+test("extractClaudeAuthUrl: a link split across PTY chunks is only returned once complete (complete mode)", () => {
+  const full = newCliOutput("\x07");
+  const cut = full.indexOf(NEW_TOKEN) + 10; // mid-token
+  let buffer = "";
+  const seen = [];
+  for (const chunk of [full.slice(0, cut), full.slice(cut, cut + 15), full.slice(cut + 15)]) {
+    buffer += chunk;
+    seen.push(extractClaudeAuthUrl(buffer, { complete: true }));
+  }
+  assert.deepEqual(seen, [null, null, NEW_URL], "a truncated link must never be returned");
+  // Default (whole-text) mode keeps its older behaviour: a link at the very end counts.
+  assert.equal(extractClaudeAuthUrl(`visit ${NEW_URL}`), NEW_URL);
+  assert.equal(extractClaudeAuthUrl(`visit ${NEW_URL}`, { complete: true }), null);
+});
+
 // ===== classifyClaudeLoginProgress (BET-354) =====
 
 test("classifyClaudeLoginProgress: 'no-file' when the file is missing", () => {

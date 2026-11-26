@@ -24,6 +24,7 @@ import { useStore } from "./store";
 import { refreshAccounts, refreshAccountsAndUsage } from "./accountsData";
 import {
   CLIENT_LIMIT_MS,
+  GENERIC_CODE_FAILURE,
   SEAT_POLL_INTERVAL_MS,
   SeatSignInBlock,
   signInFromConnect,
@@ -191,13 +192,13 @@ export function ResignSeatFlow({
   const elapsed = useElapsedSeconds(flowId);
 
   const sessionKey = phase.kind === "claude" ? phase.sessionKey : null;
-  useClaudeLoginExit(sessionKey, () => {
+  useClaudeLoginExit(sessionKey, (reason) => {
     const open = flowRef.current;
     flowRef.current = null;
     if (open) void window.api.accountsResignCancel({ flowId: open }).catch(() => {});
     set({
       kind: "failed",
-      message: `That code didn't work (it may have expired). ${seatLabel} was not changed — start the sign-in again.`,
+      message: `${reason ?? GENERIC_CODE_FAILURE} ${seatLabel} was not changed — start the sign-in again.`,
     });
   });
 
