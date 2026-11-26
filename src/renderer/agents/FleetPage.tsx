@@ -93,7 +93,7 @@ function Grid({ fleet, onOpenProfile }: { fleet: AgentFleet; onOpenProfile: (slu
   const titleId = useId();
   const { open, busyId, error } = useOpenTask();
   return (
-    <section data-testid="fleet-grid" className="manta-agents-grid" aria-labelledby={titleId}>
+    <section data-testid="fleet-grid" className="manta-agents-grid">
       <SectionTitle id={titleId} sub="· open a cell to see its task">
         Agents × projects
       </SectionTitle>
