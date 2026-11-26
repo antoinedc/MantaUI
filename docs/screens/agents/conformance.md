@@ -1,10 +1,10 @@
 # Agent screens — deliberate differences from the mockup
 
-Compared with `npm run visual:compare agents-fleet agents-profile` (app left, `mockup.html` right) for the two `agents-*` rows,
+Compared with `npm run visual:compare agents-fleet agents-profile` (app left, `mockup.html` right; the profile Overview was reviewed against `profile-overview-mockup.html` too) for the two `agents-*` rows,
 in light and dark (`VISUAL_COLOR_SCHEME=dark`). The mockup (`mockup.html`) is the visual reference. These are the places where what
 gets built differs on purpose.
 
-Last reviewed: 2026-11-26 (8d508b26)
+Last reviewed: 2026-11-26 (eca4acb8)
 
 ## Deliberate
 
@@ -41,15 +41,26 @@ Last reviewed: 2026-11-26 (8d508b26)
 14. **Fleet column** is 1120 px wide (the other pages' column is 960) so four project columns and the weekly count fit; the weekly
     count stays pinned at the right edge when more columns make the region scroll.
 15. **Breadcrumb**: the current page is text with `aria-current="page"`, not a link to itself (no control that does nothing).
-16. **Profile Overview**: Charter shows the agent's description / use when / not for / works / model from the profile, not the mockup's
-    hand-written Does / Doesn't / Asks first lines; its History block is a read-only preview of the first three rows.
-17. **Review item** in Needs you: the context line carries the agent, project, task and age; the result card is the shipped
-    `BackgroundResultCard` (Open session →); "Done" is a ghost button in the context line.
+16. **Profile Overview** follows the approved layout A (`profile-overview-mockup.html`, not `mockup.html`'s profile screen): "How to
+    use it" lists the agent's real use when / not for (the mockup's "Asks first" / "Measures" rows are illustrative copy: there is no
+    such data, so no such row), then full instructions folded and the research; the details pane holds details, seats, access and
+    refresh. History is a tab only; Tests has no tab and no box until it exists.
+17. **Review item** in Needs you: the context line carries the agent, project, task, **why it is here** ("Needs a decision" /
+    "Branch ready to merge · N files") and age; the result card is the shipped `BackgroundResultCard` (Open session →); "Done" is a
+    ghost button in the context line. Only rule set P1 puts a task here (spec §2.1); everything else is a recap line.
+18. **Pending change on the profile** is the shared change card with the optional `collapsed` prop: one summary line (chip, who and
+    what, Discard · Apply) and the change folded. Buttons are in the mockup's order (Apply last); the card's own order elsewhere is
+    unchanged. "based on N sources" counts the record's evidence (the mockup names a research entry; records carry no basis topic).
+19. **Badge initials** are drawn in whichever of white or near-black has the better contrast on the agent's own colour; the
+    mockup's white-on-green is 3.4:1. The 44px profile badge sets its initial at 15px (`text-prose`), the mockup's size.
+20. **Details pane** stacks under the main column below ~720px of the page's own width (a container query), not of the window's; its
+    note under Access ("Know-how changes only through change cards.") is not drawn — each row's note is its tooltip.
+21. **Recap** gained the Manta-handed lines and an Open button on a user-requested failure; "Needs you · <reason>" in a grid cell is the
+    same reason the list shows.
 
 ## Open
 
 - The task side panel and the Create-an-agent chat screens have no registry row (the `agents` demo state serves the Fleet page and
   the profile; the panel needs an agent task in the chat's job store).
 - The sidebar's agent rows carry no status dot (the mockup's running / needs-you / failed dots).
-- The profile's Charter reads from the profile (description, use when, not for), so it does not show the mockup's hand-written
-  "Does / Doesn't / Asks first" lines; the demo's recap has no earlier visit ("In the last 24 hours").
+- The demo's recap has no earlier visit ("In the last 24 hours").

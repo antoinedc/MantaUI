@@ -50,45 +50,71 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 
 ### 2.1 Fleet (`agents:fleet`, `agents:needs-you`)
 
-- **Needs you** lists, newest first:
+- **Needs you** lists, newest first — rule set **P1** (2026-11-26, calibrated after the first live review: a finished task is not
+  an interruption). Only what is stuck on the user, or the user's own work waiting to land:
   1. open task questions (`QuestionCard`, answered in place — §4);
   2. pending agent changes box-wide, whatever chat or routine made them (`AgentChangeView`);
-  3. finished specialist tasks with changes on a branch that nobody has opened yet (`BackgroundResultCard`, fed a
-     `BackgroundResultPart` built from the review item by a pure `reviewPart()` in `agents/agentsView.ts`; its "Open
-     session →" is the existing action; a "Done" ghost button in the context line dismisses the item).
+  3. finished tasks that ended **"needs a decision"** (`endedBlocked`), whether or not they changed files;
+  4. a finished task with **unmerged commits on its branch**, only when the user asked for it directly (an @mention or a task
+     they started: `requestedBy !== "manta"`) and nobody has picked it up since.
 
-  Each item sits under one context line: agent badge + name, project, task name, age, and "still working on the rest"
-  while the task runs. Count = the sum, also the sidebar badge. Empty → "Nothing needs you."
+  Items 3 and 4 are fed to `BackgroundResultCard` as a `BackgroundResultPart` built from the review item by a pure
+  `reviewPart()` in `agents/agentsView.ts` (its "Open session →" is the existing action; a "Done" ghost button in the context
+  line dismisses the item). Each carries a **`reason`** shown in the context line: "Needs a decision" or "Branch ready to merge ·
+  N files".
+
+  **Everything else goes to the recap, not here:** tasks Manta handed off (Manta read the result and owns the follow-up; if it
+  needs the user, Manta asks in its chat or the task ends blocked, item 3), tasks with no changes, and failures (a failure the
+  user asked for gets its own recap line with an **Open** button).
+
+  **An item clears itself** when its branch is merged into its base or deleted (`git merge-base --is-ancestor`, or the branch is
+  gone: run outside any lock, bounded, remembered for 30 s, and "unknown" — git failed or too slow — keeps the item), when the
+  user opens the task's session (`delegate:open-session` records every round of the task in the counters file's `reviewed`
+  list), or when the user marks it done (`agents:review-done`).
+
+  Each item sits under one context line: agent badge + name, project, task name, reason (review items), age, and "still working
+  on the rest" while the task runs. Count = the sum, also the sidebar badge. Empty → "Nothing needs you."
 - **Recap** "Since <last visit>": server-written plain lines, no model (§6.4). "Seen" is recorded when the page is left
-  (`agents:fleet-seen`), so a reload doesn't eat the recap.
+  (`agents:fleet-seen`), so a reload doesn't eat the recap. It also carries what Needs you no longer does: "Dev finished 3 tasks
+  Manta handed off", "Dev failed “<task>”" (with **Open**) and "2 branches from Manta-handed tasks still unmerged".
 - **Grid**: rows = team agents (lead and Architect excluded: they work everywhere), columns = projects that have at least
   one seat or a task in the last 7 days. A cell = the agent's latest task in that project (running first): title + state
-  line (Working · N/M · 1 question / Needs you / Done · … / Failed · <first line of the error> / Idle · last task Nd ago).
+  line (Working · N/M · 1 question / Needs you · <reason> — the same classification as the list / Done · … / Failed · <first line of the error> / Idle · last task Nd ago).
   "—" = no seat. Clicking a cell with a task opens its session (`delegate:open-session`). Last column: tasks this week.
 - Header pills: "All projects" (no filter in v1, a static label) and "This week: N tasks · plan usage P%" (P = the
   highest `used` percentage of the current plan windows from `usageList()`; omitted when unknown).
 
 ### 2.2 Agent profile (`agents:profile`)
 
-- Breadcrumb `Agents / <Name>`. Header: colour badge, name, facts line (built by / last changed / model / isolation),
-  description. Buttons: **Change via Manta** (new chat draft "Change @slug: "), **Chat** (the existing direct chat,
-  `agents:open-chat`; hidden for the Architect, as today), **Mention in a chat** (primary: a new chat draft prefilled
-  `@slug ` in the agent's first seat's project, else the active project; no reach into an open chat's composer).
-- **Pending change cards** for this agent (`AgentChangeView`, one per pending record) above the tabs.
-- **Tabs** (Overview default; the tab is in the URL-less view state, not persisted):
-  - **Overview:** Charter (the agent's description, use when, not for, edits code or read-only, model; instructions in
-    a `<details>`), Research it relies on (first 4 of the Research tab), History (first 3 rows), Seats (list), memory
-    map for the first seat, "Refresh with new research: Monthly | Off" (§5.4; Monthly by default; not shown for the lead
-    or the Architect), Tests "Coming later".
+- Breadcrumb `Agents / <Name>`. Header: colour badge (initial in whichever of white or near-black reads on the agent's colour),
+  name (`text-display`), one facts line with separators — `@slug · Specialist · 2 seats` (the lead and Architect: "Works in every
+  project") — and the description, **shown once on the page**. Buttons: **Change via Manta** (new chat draft "Change @slug: "),
+  **Chat** (the existing direct chat, `agents:open-chat`; hidden for the Architect, as today), **Mention in a chat** (primary: a
+  new chat draft prefilled `@slug ` in the agent's first seat's project, else the active project; no reach into an open chat's
+  composer).
+- **Pending change** for this agent (`AgentChangeView` with `collapsed`, one per pending record) above the tabs: ONE summary line
+  — chip, who made it, what it does, Discard / Apply — and the change itself folded under "Show the change · N lines · based on
+  N sources". The reason a click is needed, a refusal and the outcome of a press stay outside the fold. Still one Undo after.
+- **Tabs** (Overview default; the tab is in the URL-less view state, not persisted): **Overview · Research · Seats · History**.
+  There is no Tests tab and no Tests box until Tests exist.
+  - **Overview, two columns** (the pane stacks under the main column when the page is narrower than ~720px, by a container query):
+    - *Main:* **How to use it** — a definition list of the agent's real fields (Use it when / Not for; a row only when the agent
+      has it, else "Nothing written yet…"), then **Full instructions** folded; **Research it relies on** — the first 4 rows
+      of the Research tab as hairline rows, "All N →" to that tab.
+    - *Details pane* (~288px, sticky, one tinted `bg-bg-elev` region with hairlines between groups; dark adds an inset
+      `border-subtle`): **Details** (Model, Works, Built by, Changed), **Seats** (each with its notes, Manage seats → the tab),
+      **Access** (the first seat's memory map as rows: read / read + write / no access), **Refresh with new research** (Monthly |
+      Off; specialists only, §5.4).
   - **Research · N:** library entries the agent's applied changes rest on (their `basis`), resolved live through
-    `researchLibrary.lookup` in each seat's project scope: topic, sources, age, fresh / stale, thin. "From the shared
-    research library. Thin means fewer than 3 independent sources." Missing entries show "no longer in the library".
+    `researchLibrary.lookup` in each seat's project scope: topic, sources, age, fresh / stale, thin (warn tone like stale). "From
+    the shared research library. Thin means fewer than 3 independent sources." Missing entries show "no longer in the library".
   - **Seats · N:** one row per seat: project, brief (first line), notes count (knowledge pages of that project),
     current task. Row actions: **Edit brief** (inline `<textarea>`, Save / Cancel), **Remove** (`ConfirmInline`).
     "Add a seat in another project" (a `<select>` of registry projects without a seat + Add). The memory map of the
-    selected seat (§5.1) below.
-  - **History · N:** §5.2.
-  - **Tests — later:** a disabled tab with the title "Trial runs on sample tasks come later".
+    selected seat (§5.1) below, as rows.
+  - **History · N:** §5.2. It is a tab only — never an Overview block.
+- Type and ink: titles are `text-body font-semibold text-text` (no faint uppercase eyebrows); body and values `text-text`; keys and
+  meta `text-text-faint`; lists are hairline rows, not cards.
 - The lead and the Architect: Seats tab says "Works in every project"; no seat actions.
 
 ### 2.3 Chat & @mention
@@ -496,13 +522,15 @@ export interface AgentFleet {
   rows: { slug: string; name: string; color: string | null; seats: string[];
           cells: Record<string, FleetCell | null>; tasksThisWeek: number }[];
   week: { tasks: number };
-  recap: { since: number | null; lines: string[] };
+  recap: { since: number | null; lines: string[]; links?: { line: number; jobId: string }[] };  // links: recap lines with a task to open
 }
 export interface NeedsYou {
   questions: TaskQuestion[];
   changes: AgentChange[];           // pending, box-wide
   reviews: { jobId: string; agentSlug: string; project: string | null; name: string; finishedAt: number;
-             filesChanged: number; branch: string | null; resultText: string }[];
+             filesChanged: number; branch: string | null; resultText: string;
+             reason: string;            // "Needs a decision" | "Branch ready to merge · N files" (rule set P1, §2.1)
+             endedBlocked?: boolean }[];
   count: number;
 }
 // AgentInfo gains: seats: string[]   (absent on an older box → [])
@@ -562,7 +590,9 @@ The agents engine (S2) receives `taskQuestions` as a dependency and uses only `h
 ### 6.4 Recap lines (pure, `fleetRecap(jobs, changes, since)` in `agents.mjs`)
 
 Counted since `lastSeenAt` (or the last 24 h when never seen), at most 6 lines, fixed templates only:
-"Manta handed N requests to agents", "<Agent> finished N task(s) in <Project>", "<Agent> failed N task(s)",
+"Manta handed N requests to agents", "<Agent> finished N task(s) in <Project>" (tasks the user asked for), "<Agent> finished N
+task(s) Manta handed off", "<Agent> failed N task(s)" (Manta-handed), "<Agent> failed “<task>”" (a failure the user asked for; the
+line has an Open button, `recap.links`), "N branch(es) from Manta-handed task(s) still unmerged" (branch check as in §2.1),
 "<Agent> was changed (your setting: <level>)" / "… is waiting for your click", "N questions answered". No model call.
 
 ### 6.5 Task research (S2, `researchLibrary.mjs`)
