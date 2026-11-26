@@ -402,6 +402,7 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   const agentTitle = packageAgentDisplayName(part.agent, packageAgents);
   const title = resultTitleFor(part, agentTitle);
   const { open, busy, error } = useOpenSession(jobId);
+  const resultSession = typeof part.sessionID === "string" ? part.sessionID : "";
   const blocked = part.endedBlocked === true;
   const tone = resultTone(part.state, blocked);
   const text = (part.text ?? "").trim();
@@ -427,10 +428,10 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         {jobId && (
           <span className="ml-auto flex shrink-0 items-center gap-3">
             {/* An agent task's details live in the chat's side panel (agent screens §2.5) */}
-            {part.sessionID && isAgentTask({ agent: part.agent }) && (
+            {resultSession && isAgentTask({ agent: part.agent }) && (
               <button
                 type="button"
-                onClick={() => openTaskPanel(part.sessionID as string, jobId)}
+                onClick={() => openTaskPanel(resultSession, jobId)}
                 className="shrink-0 whitespace-nowrap text-text-muted hover:text-text hover:underline"
                 title="Open this task's details"
                 data-testid="background-result-details"
