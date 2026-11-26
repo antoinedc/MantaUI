@@ -1323,6 +1323,33 @@ export function createRoutinesEngine(deps) {
     });
   }
 
+  /** The run's headless session: created with its pre-minted id; an unknown outcome (timeout, 5xx) asks whether it landed. Throws when it did not. */
+  async function createRunSession(run, routine, { cwd = routine.directory, model, agentKey, access = routine.access } = {}) {
+    try {
+      await oc.createSession({
+        id: run.sessionID,
+        directory: cwd,
+        title: `Routine · ${routine.name} · ${fmtTitleStamp(run.startedAt)}`,
+        ...(model ? { model } : {}),
+        ...(agentKey ? { agent: agentKey } : {}),
+        permission: buildRoutineRuleset(access),
+        metadata: withInternalMarker({ manta: { routineId: routine.id, runId: run.id } }),
+      });
+    } catch (e) {
+      if (isDefiniteRefusal(e)) throw e;
+      // Timeout / 5xx: the create may have landed. The id was pre-minted, so ask.
+      const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
+      if (rs?.state !== "found") throw e;
+    }
+  }
+
+  /** The routine (or run) was deleted while its start was in flight: don't leave an orphan session running. */
+  async function dropOrphanSession(run, worktree = null) {
+    await oc.abortSession(run.sessionID).catch(() => {});
+    await oc.deleteSessionRaw(run.sessionID).catch(() => {});
+    if (worktree) await removeWorktreeIfClean(worktree);
+  }
+
   /** §4.2 steps 2–6. Every failure is a human sentence on a `failed` run; nothing falls back to the user's checkout. */
   async function startRun(run, routine) {
     if (routine.kind === REFRESH_KIND) return startRefreshRun(run, routine);
@@ -1375,22 +1402,7 @@ export function createRoutinesEngine(deps) {
         if (worktree) await removeWorktreeIfClean(worktree);
         return;
       }
-      try {
-        await oc.createSession({
-          id: run.sessionID,
-          directory: cwd,
-          title: `Routine · ${routine.name} · ${fmtTitleStamp(run.startedAt)}`,
-          ...(model ? { model } : {}),
-          ...(agentKey ? { agent: agentKey } : {}),
-          permission: buildRoutineRuleset(routine.access),
-          metadata: withInternalMarker({ manta: { routineId: routine.id, runId: run.id } }),
-        });
-      } catch (e) {
-        if (isDefiniteRefusal(e)) throw e;
-        // Timeout / 5xx: the create may have landed. The id was pre-minted, so ask.
-        const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
-        if (rs?.state !== "found") throw e;
-      }
+      await createRunSession(run, routine, { cwd, model, agentKey });
       sessionCreated = true;
       try {
         await oc.sendPrompt({ sessionId: run.sessionID, text: openingText, ...(model ? { model } : {}), ...(agentKey ? { agent: agentKey } : {}) });
@@ -1400,12 +1412,7 @@ export function createRoutinesEngine(deps) {
         if (!Array.isArray(users) || users.length === 0) throw e;
       }
       const saved = await patchRun(run.id, { submittedAt: now() });
-      if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) {
-        // The routine (or run) was deleted while this was starting: don't leave an orphan session running.
-        await oc.abortSession(run.sessionID).catch(() => {});
-        await oc.deleteSessionRaw(run.sessionID).catch(() => {});
-        if (worktree) await removeWorktreeIfClean(worktree);
-      }
+      if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) await dropOrphanSession(run, worktree);
     } catch (e) {
       await terminate(run.id, "failed", humanError(e), { startup: { sessionCreated, worktree } });
     }
@@ -1422,28 +1429,14 @@ export function createRoutinesEngine(deps) {
     try {
       if (!isDirectory(routine.directory)) throw new Error("The folder no longer exists.");
       if (typeof agents?.refresh !== "function") throw new Error("Refreshing agents isn't available on this box yet.");
-      try {
-        await oc.createSession({
-          id: run.sessionID,
-          directory: routine.directory,
-          title: `Routine · ${routine.name} · ${fmtTitleStamp(run.startedAt)}`,
-          permission: buildRoutineRuleset("read"),
-          metadata: withInternalMarker({ manta: { routineId: routine.id, runId: run.id } }),
-        });
-      } catch (e) {
-        if (isDefiniteRefusal(e)) throw e;
-        const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
-        if (rs?.state !== "found") throw e;
-      }
+      await createRunSession(run, routine, { access: "read" });
       sessionCreated = true;
       const started = await agents.refresh(routine.agentSlug, { runId: run.id, runSessionId: run.sessionID });
       const jobId = typeof started?.jobId === "string" ? started.jobId : "";
       if (!jobId) throw new Error("The refresh task didn't start.");
       const saved = await patchRun(run.id, { jobId, submittedAt: now() });
       if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) {
-        // the routine (or run) was deleted while this was starting: take the headless session back (the task, if it started, ends on its own)
-        await oc.abortSession(run.sessionID).catch(() => {});
-        await oc.deleteSessionRaw(run.sessionID).catch(() => {});
+        await dropOrphanSession(run); // the task, if it started, ends on its own
         return;
       }
       // a task that already ended before its id was stored (a fast failure) settles the run now, not at the next sweep
