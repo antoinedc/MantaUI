@@ -43,6 +43,7 @@ import { Button } from "./Button";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
 import { AgentsSection } from "./AgentsSection";
+import type { AgentsView } from "./agents/agentsView";
 import { AGENTS_TMUX_SESSION } from "./agentDispatch";
 import { shouldShowStoppedMarker, unarmedStoppedCount } from "./usageResume";
 
@@ -117,12 +118,17 @@ type Props = {
   routinesBadge: { needsYou: number; unread: number };
   /** The Routines pane is the visible view (selected-row state). */
   routinesOpen?: boolean;
+  // Agent screens (spec §1.1): the Needs you / Fleet rows and the agent rows open the agent pages. `agentsView` is the page
+  // showing now (selected row), `needsYouCount` the Needs you badge, `onOpenAgents` opens a page (an agent row → its profile).
+  agentsView: AgentsView;
+  needsYouCount: number;
+  onOpenAgents: (view: AgentsView) => void;
   /** ⌘B: the sidebar slides away but stays mounted (`inert`, so nothing in it is reachable). */
   hidden?: boolean;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, hidden = false },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, agentsView, needsYouCount, onOpenAgents, hidden = false },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -474,17 +480,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       openingRef.current.delete(id);
       setOpening(new Set(openingRef.current));
     }
-  };
-
-  // An agent's direct chat: the box made (or found) its window; re-list the tree
-  // (the window may be new), select it, or say why it isn't there.
-  const openAgentWindow = async (tmuxSession: string, windowIndex: number) => {
-    await refresh();
-    const target = useStore
-      .getState()
-      .projects.find((x) => x.tmuxSession === tmuxSession && x.windows.some((w) => w.index === windowIndex));
-    if (!target) throw new Error("its chat window did not appear — try again");
-    await activateWindow(target, windowIndex);
   };
 
   // Reset focus if it falls off the list.
@@ -858,7 +853,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             )}
           </button>
         </div>
-        <AgentsSection onOpenWindow={openAgentWindow} />
+        <AgentsSection view={agentsView} needsCount={needsYouCount} onOpenView={onOpenAgents} />
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts whose mode is "new-project" live directly beneath
             the New workspace row that created them — they belong to no project.

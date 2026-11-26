@@ -125,7 +125,7 @@ async function capture(browser, baseURL, screen) {
   try {
     await preparePage(mpage, {
       url: `${baseURL}/${screen.mockup}`,
-      readySelector: "[data-screen]",
+      readySelector: screen.mockupReady ?? "[data-screen]",
       actions: screen.mockupActions,
     });
     mock = await captureHalf(mpage, {

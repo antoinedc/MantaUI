@@ -70,6 +70,9 @@ describe("Sidebar — session tree rows", () => {
         ctoState={null}
         onOpenRoutines={() => {}}
         routinesBadge={{ needsYou: 0, unread: 0 }}
+        agentsView={null}
+        needsYouCount={0}
+        onOpenAgents={() => {}}
       />,
     );
     await h.flush();

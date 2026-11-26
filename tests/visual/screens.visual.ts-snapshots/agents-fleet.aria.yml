@@ -1,0 +1,81 @@
+- heading "Fleet" [level=1]
+- text: "/All projects This week: \\d+ tasks/"
+- region "Needs you":
+  - heading "Needs you" [level=2]
+  - text: "3"
+  - list:
+    - listitem:
+      - text: "/Sales · Tenanture · Lead research · asked \\d+[hmsp]+ ago Sales asks you Which segment first for outbound: landlords with under \\d+ units, or property managers\\? Small landlords Recommended/"
+      - radio "Small landlords Recommended" [checked]
+      - text: Property managers
+      - radio "Property managers"
+      - textbox "Or type your own answer…"
+      - separator
+      - button "Submit"
+      - button "Dismiss"
+    - listitem:
+      - text: "/Architect · New agent: Pricing CTA Copy · [\\d,.]+[bkmBKM]+ ago New agent: Pricing CTA Copy @pricing-cta-copy Waiting for you/"
+      - paragraph: A dedicated agent for the pricing-page CTA text.
+      - text: "Proposed while planning or outside a hand-off — review before applying Writes and tests the call-to-action text on the pricing page. Read-only · Model: Auto"
+      - group: Instructions
+      - button "Create"
+      - button "Discard"
+    - listitem:
+      - text: "/Dev · Manta · Explorer: 0-byte file crash · finished [\\d,.]+[bkmBKM]+ ago/"
+      - button "Done"
+      - text: "Background Dev · Explorer: 0-byte file crash · done"
+      - button "Open session →"
+      - text: Fixed the crash when opening a 0-byte file and added a regression test.
+- text: "/In the last \\d+ hours: Manta handed 9 requests to agents · Dev finished 2 tasks in Manta · SEO finished 1 task in Ronda · Sales failed 1 task · Architect updated @seo \\(your setting: Tell me\\)/"
+- heading "Agents × projects" [level=2]
+- text: · open a cell to see its task
+- region "Agents × projects":
+  - table:
+    - rowgroup:
+      - row "Agent Manta Ronda Tenanture Capo Tasks this week":
+        - columnheader "Agent"
+        - columnheader "Manta"
+        - columnheader "Ronda"
+        - columnheader "Tenanture"
+        - columnheader "Capo"
+        - columnheader "Tasks this week"
+    - rowgroup:
+      - 'row /Dev Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+ Editor undo stack Done · ready for review — Idle last task 3d ago \d+/':
+        - rowheader "Dev":
+          - button "Dev"
+        - 'cell /Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+/':
+          - 'button /Explorer: 0-byte file crash Working · [\d,.]+[bkmBKM]+/'
+        - cell "Editor undo stack Done · ready for review":
+          - button "Editor undo stack Done · ready for review"
+        - cell "—"
+        - cell "Idle last task 3d ago"
+        - cell /\d+/
+      - row /SEO Pricing \+ vs-\* audit Working · 4\/7 · 1 question Weekly audit Done · \d+ issues Idle weekly audit Mon — 7/:
+        - rowheader "SEO":
+          - button "SEO"
+        - cell "Pricing + vs-* audit Working · 4/7 · 1 question":
+          - button "Pricing + vs-* audit Working · 4/7 · 1 question"
+        - cell /Weekly audit Done · \d+ issues/:
+          - button /Weekly audit Done · \d+ issues/
+        - cell "Idle weekly audit Mon"
+        - cell "—"
+        - cell "7"
+      - row "Design Hero redesign Needs you — — — 4":
+        - rowheader "Design":
+          - button "Design"
+        - cell "Hero redesign Needs you":
+          - button "Hero redesign Needs you"
+        - cell "—"
+        - cell "—"
+        - cell "—"
+        - cell "4"
+      - row /Sales — — Lead research Working · 1 question Sequence follow-ups Failed · Gmail token \d+/:
+        - rowheader "Sales":
+          - button "Sales"
+        - cell "—"
+        - cell "—"
+        - cell "Lead research Working · 1 question":
+          - button "Lead research Working · 1 question"
+        - cell "Sequence follow-ups Failed · Gmail token":
+          - button "Sequence follow-ups Failed · Gmail token"
+        - cell /\d+/

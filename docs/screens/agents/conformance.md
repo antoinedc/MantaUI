@@ -1,6 +1,12 @@
 # Agent screens — deliberate differences from the mockup
 
-The mockup (`mockup.html`) is the visual reference. These are the places where what gets built differs on purpose.
+Compared with `npm run visual:compare agents-fleet agents-profile` (app left, `mockup.html` right) for the two `agents-*` rows,
+in light and dark (`VISUAL_COLOR_SCHEME=dark`). The mockup (`mockup.html`) is the visual reference. These are the places where what
+gets built differs on purpose.
+
+Last reviewed: 2026-11-26 (8d508b26)
+
+## Deliberate
 
 1. **Existing cards are drawn as they ship.** The question card, the change card, the result card and the run card in the
    mockup are transcriptions of `QuestionCard`, `AgentChangeView`, `BackgroundResultCard` and `RunCard`. Any pixel
@@ -32,3 +38,18 @@ The mockup (`mockup.html`) is the visual reference. These are the places where w
     off-grid paddings to the nearest step) — see `contract.md` §Tokens.
 13. **Sidebar** keeps the existing rail metrics (14 px agent badges, density tokens); the mockup's 22/16 px badges are for
     the pages only.
+14. **Fleet column** is 1120 px wide (the other pages' column is 960) so four project columns and the weekly count fit; the weekly
+    count stays pinned at the right edge when more columns make the region scroll.
+15. **Breadcrumb**: the current page is text with `aria-current="page"`, not a link to itself (no control that does nothing).
+16. **Profile Overview**: Charter shows the agent's description / use when / not for / works / model from the profile, not the mockup's
+    hand-written Does / Doesn't / Asks first lines; its History block is a read-only preview of the first three rows.
+17. **Review item** in Needs you: the context line carries the agent, project, task and age; the result card is the shipped
+    `BackgroundResultCard` (Open session →); "Done" is a ghost button in the context line.
+
+## Open
+
+- The task side panel and the Create-an-agent chat screens have no registry row (the `agents` demo state serves the Fleet page and
+  the profile; the panel needs an agent task in the chat's job store).
+- The sidebar's agent rows carry no status dot (the mockup's running / needs-you / failed dots).
+- The profile's Charter reads from the profile (description, use when, not for), so it does not show the mockup's hand-written
+  "Does / Doesn't / Asks first" lines; the demo's recap has no earlier visit ("In the last 24 hours").

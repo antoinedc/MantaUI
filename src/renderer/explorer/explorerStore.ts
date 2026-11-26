@@ -257,6 +257,9 @@ export function openTaskPanel(sessionId: string, jobId: string): void {
   if (!sessionId || !jobId) return;
   taskPanels.set(sessionId, jobId);
   setRightPanel(sessionId, "task");
+  // setRightPanel may change nothing it persists (the slot was empty), so it need not emit: wake the readers ourselves — a
+  // mounted App has to mount the panel now, and a panel already open has to switch to the new job.
+  emit();
 }
 
 export function setRightPanel(sessionId: string | null, which: RightPanel): void {

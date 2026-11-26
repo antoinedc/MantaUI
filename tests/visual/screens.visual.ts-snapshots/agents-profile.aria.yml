@@ -1,0 +1,58 @@
+- navigation "Breadcrumbs":
+  - list:
+    - listitem:
+      - button "Agents"
+    - listitem: SEO
+- heading "SEO" [level=1]
+- text: "/built by Architect last changed \\d+ Oct model: Auto read-only/"
+- paragraph: "Technical SEO and visibility in AI search (ChatGPT, Perplexity, AI Overviews) for marketing sites: audits, structured data, internal links, content briefs. Measures visibility over many runs, never a single \"rank\"."
+- button "Change via Manta"
+- button "Chat"
+- button "Mention in a chat"
+- text: Change to SEO @seo Waiting for you
+- paragraph: Adds an llms.txt check and drops 2 crawler rules that no longer hold.
+- text: ⋯ 6 unchanged lines - Ask before changing redirects. - Read how each AI crawler fetches pages before changing robots.txt. - Block GPTBot in robots.txt on staging only. - Block CCBot in robots.txt on every host. - Check that llms.txt is served at the site root and lists the key pages.
+- button "Apply"
+- button "Discard"
+- tablist "SEO":
+  - tab "Overview" [selected]
+  - tab "Research · 4"
+  - tab "Seats · 2"
+  - tab "History · 4"
+  - tab "Tests — later" [disabled]
+- tabpanel "Overview":
+  - heading "Charter" [level=3]
+  - list:
+    - listitem: "Does: Technical SEO and visibility in AI search (ChatGPT, Perplexity, AI Overviews) for marketing sites: audits, structured data, internal links, content briefs. Measures visibility over many runs, never a single \"rank\"."
+    - listitem: "Use when: A page's ranking, markup or AI-search visibility is the question"
+    - listitem: "Not for: Rewriting brand copy, buying links, touching app code"
+    - listitem: "Works: Read-only, it doesn't edit code"
+    - listitem: "Model: Auto"
+  - group: Instructions
+  - heading "Research it relies on" [level=3]
+  - list:
+    - listitem: Technical SEO for AI search 5 sources · 3 days old fresh
+    - listitem: /Structured data for product pages 4 sources · \d+ days old fresh/
+    - listitem: /AI crawler access rules 4 sources · \d+ days old stale/
+    - listitem: llms.txt adoption 2 sources · 6 days old fresh thin
+  - button "All research (4)"
+  - heading "History" [level=3]
+  - list:
+    - listitem: /\d+ Nov Architect · Adds an llms\.txt check and drops 2 crawler rules that no longer hold\. Waiting for your click · card above/
+    - listitem: /\d+ Oct Architect · Added rules for how AI search engines read pages\. Live \(applied automatically\)/
+    - listitem: 3 Oct Manta · for you · Asks before changing redirects. Live (you approved it)
+  - button "All history (4)"
+  - heading "Seats" [level=3]
+  - list:
+    - listitem: /Manta \d+ notes/
+    - listitem: /Ronda \d+ notes/
+  - button "Manage seats"
+  - heading "What it can read and write (Manta seat)" [level=3]
+  - text: SEO know-how read-only · changed only through change cards Research library read-only · shared by all agents Manta memory read + write · shared with other agents in Manta Other projects' memory no access · only if they share
+  - heading "Refresh with new research" [level=3]
+  - group "Refresh with new research":
+    - button "Monthly" [pressed]
+    - button "Off"
+  - paragraph: Once a month the agent checks the research it rests on and proposes changes. They wait for your click.
+  - heading "Tests" [level=3]
+  - text: Coming later. Trial runs on sample tasks will show here.

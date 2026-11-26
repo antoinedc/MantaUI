@@ -26,6 +26,7 @@ import {
   toggleExpanded,
   toggleExplorer,
   toggleTree,
+  useShownRightPanel,
   useTaskPanelJobId,
 } from "./explorerStore";
 
@@ -311,6 +312,31 @@ describe("toggleTree (⌥⌘E)", () => {
 // ---------------------------------------------------------------------------
 
 describe("task panel in the right slot", () => {
+  it("opening it wakes what is already rendering the right slot (a mounted App must not wait for another render)", () => {
+    const seen: string[] = [];
+    function Probe() {
+      seen.push(useShownRightPanel("a"));
+      return null;
+    }
+    const el = document.createElement("div");
+    const root = createRoot(el);
+    act(() => root.render(createElement(Probe)));
+    expect(seen.at(-1)).toBe("none");
+    act(() => openTaskPanel("a", "job_1"));
+    expect(seen.at(-1)).toBe("task");
+    // another job for the same chat: the job it shows changes without the slot changing
+    const jobs: Array<string | null> = [];
+    function JobProbe() {
+      jobs.push(useTaskPanelJobId("a"));
+      return null;
+    }
+    act(() => root.render(createElement(JobProbe)));
+    expect(jobs.at(-1)).toBe("job_1");
+    act(() => openTaskPanel("a", "job_2"));
+    expect(jobs.at(-1)).toBe("job_2");
+    act(() => root.unmount());
+  });
+
   it("openTaskPanel shows the panel for that session and remembers the job", () => {
     openTaskPanel("a", "job_1");
     expect(shownRightPanel("a")).toBe("task");

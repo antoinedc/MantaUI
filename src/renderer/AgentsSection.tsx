@@ -1,72 +1,42 @@
-// The sidebar's Agents section (Agents Phase 1, spec §8): one row per agent on
-// the box, a "+" that opens a native <dialog> to create one. Clicking a row opens
-// the agent's direct chat (a window in the hidden "manta-agents" tmux session).
+// The sidebar's Agents section (agent screens spec §1.1): the Needs you and Fleet rows, one row per agent on the box, and a
+// New agent button.
 //
-// Every control here does something visible or says why it can't: a failed open
-// is an error toast, a failed create is an inline alert in the dialog, an invalid
-// agent's row is disabled with its error as the tooltip.
+//  - Needs you (a count badge) and Fleet open the Fleet page; Needs you lands on its first section.
+//  - Clicking an agent opens its PROFILE. Its direct chat is the profile's Chat button (a window in the hidden "manta-agents"
+//    tmux session), so a row never opens a window itself.
+//  - New agent opens a new-chat draft with Manta, "Create an agent that " typed, in the active project. Nothing is created
+//    until the user sends it; the old name-and-description dialog is gone.
+//
+// Every control here does something visible: a page opens, a draft opens. An invalid agent's row still opens (its profile says
+// what is wrong) and carries its error as the tooltip.
 
-import { useEffect, useId, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { useId } from "react";
+import { Inbox, LayoutGrid, Plus } from "lucide-react";
 import type { AgentInfo } from "../shared/types";
-import { IconButton } from "./IconButton";
 import { Button } from "./Button";
-import { useStore } from "./store";
 import { agentInitial, leadAgent } from "./agentDispatch";
+import type { AgentsView } from "./agents/agentsView";
+import { openNewAgentDraft } from "./newAgentDraft";
+import { usePackageAgents } from "./packageAgents";
+import { ROW_SELECTED } from "./SessionRow";
 import { Tag } from "./Tag";
-import { refreshPackageAgents, usePackageAgents } from "./packageAgents";
 
 const ROW_CLASS =
   "group relative z-[1] flex w-full items-center gap-2 rounded-md min-h-[var(--row-h)] px-[var(--row-px)] py-[var(--row-py)] text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1";
 
-const FIELD_CLASS =
-  "w-full rounded-md border border-border bg-bg px-2 py-2 text-body text-text placeholder:text-text-quiet outline-none focus-visible:ring-2 focus-visible:ring-accent";
+let focusNonce = 0;
 
-function AgentRow({
-  agent,
-  opening,
-  onOpen,
-}: {
-  agent: AgentInfo;
-  opening: boolean;
-  onOpen: () => void;
-}) {
+function AgentRow({ agent, selected, onOpen }: { agent: AgentInfo; selected: boolean; onOpen: () => void }) {
   const invalid = !!agent.error;
   const isLead = agent.role === "lead" && !invalid;
+  const isArchitect = agent.role === "architect" && !invalid;
   const noticeId = useId();
   const showNotice = !!agent.notice;
-  // The Architect works through tasks only (Phase 5A): there is no direct chat to open, so its row is a label, not a button
-  if (agent.role === "architect" && !invalid) {
-    return (
-      <>
-        <div
-          data-rail-row=""
-          data-testid="agent-row"
-          data-slug={agent.slug}
-          aria-describedby={showNotice ? noticeId : undefined}
-          title={`${agent.description || agent.name} Ask Manta to build or improve an agent; the Architect does it as a task.`}
-          className={`${ROW_CLASS} cursor-default`}
-        >
-          <span
-            aria-hidden="true"
-            className="flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-sm bg-fill-hover text-micro font-semibold text-text"
-            style={agent.color ? { backgroundColor: agent.color, color: "#fff" } : undefined}
-          >
-            {agentInitial(agent)}
-          </span>
-          <span className="flex-1 min-w-0 truncate text-label font-medium text-text">{agent.name || agent.slug}</span>
-          <Tag size="sm" title="Works through tasks Manta hands it; ask Manta to build or improve an agent">
-            via Manta
-          </Tag>
-        </div>
-        {showNotice && (
-          <p id={noticeId} data-testid="agent-notice" className="m-0 px-[var(--row-px)] pb-1 text-micro text-text-faint">
-            {agent.notice}
-          </p>
-        )}
-      </>
-    );
-  }
+  const title = invalid
+    ? `${agent.name || agent.slug}: ${agent.error}`
+    : isArchitect
+      ? `${agent.description || agent.name} Ask Manta to build or improve an agent; the Architect does it as a task.`
+      : agent.description || agent.name;
   return (
     <>
       <button
@@ -74,11 +44,11 @@ function AgentRow({
         data-rail-row=""
         data-testid="agent-row"
         data-slug={agent.slug}
-        disabled={invalid || opening}
         onClick={onOpen}
+        aria-current={selected ? "page" : undefined}
         aria-describedby={showNotice ? noticeId : undefined}
-        title={invalid ? `${agent.name || agent.slug}: ${agent.error}` : agent.description || agent.name}
-        className={`${ROW_CLASS} ${invalid ? "opacity-50 cursor-not-allowed" : "hover:bg-fill-hover"}`}
+        title={title}
+        className={`${ROW_CLASS} ${selected ? ROW_SELECTED : "hover:bg-fill-hover"}${invalid ? " opacity-70" : ""}`}
       >
         <span
           aria-hidden="true"
@@ -93,7 +63,11 @@ function AgentRow({
             lead
           </Tag>
         )}
-        {opening && <span className="shrink-0 text-micro text-text-faint">Opening…</span>}
+        {isArchitect && (
+          <Tag size="sm" title="Works through tasks Manta hands it; ask Manta to build or improve an agent">
+            via Manta
+          </Tag>
+        )}
         {invalid && <span className="shrink-0 text-micro text-danger">invalid</span>}
       </button>
       {showNotice && (
@@ -105,113 +79,57 @@ function AgentRow({
   );
 }
 
-function CreateAgentDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  const nameRef = useRef<HTMLInputElement | null>(null);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const d = dialogRef.current;
-    if (!d) return;
-    // No close() in a cleanup: under StrictMode the effect runs twice, and a
-    // cleanup close() queues a "close" event that lands after the reopen and
-    // unmounts the dialog. Unmounting removes it from the top layer anyway.
-    if (!d.open) d.showModal();
-    // showModal() focuses the first focusable control; the name field is the one we want.
-    nameRef.current?.focus();
-  }, []);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await window.api.agentsCreate({ name: name.trim(), description: description.trim() });
-      onCreated();
-      dialogRef.current?.close();
-    } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : "Couldn't create the agent");
-    } finally {
-      setBusy(false);
-    }
-  };
-
+function NavRow({
+  name,
+  label,
+  icon,
+  selected,
+  badge,
+  onClick,
+}: {
+  name: "needs" | "fleet";
+  label: string;
+  icon: React.ReactNode;
+  selected: boolean;
+  badge?: number;
+  onClick: () => void;
+}) {
+  const count = badge ?? 0;
   return (
-    <dialog
-      ref={dialogRef}
-      aria-labelledby="new-agent-title"
-      onClose={onClose}
-      className="w-[360px] max-w-[92vw] rounded-lg border border-border bg-bg-elev p-4 text-text shadow-md backdrop:bg-bg/[0.7]"
+    <button
+      type="button"
+      data-rail-row=""
+      data-testid={`agents-nav-${name}`}
+      onClick={onClick}
+      aria-current={selected ? "page" : undefined}
+      aria-label={count > 0 ? `${label}, ${count} waiting` : label}
+      className={`${ROW_CLASS} ${selected ? ROW_SELECTED : "hover:bg-fill-hover"}`}
     >
-      <form method="dialog" onSubmit={(e) => void submit(e)} className="flex flex-col gap-3">
-        <h2 id="new-agent-title" className="text-body font-semibold">
-          New agent
-        </h2>
-        <div className="flex flex-col gap-1">
-          <label htmlFor="new-agent-name" className="text-meta text-text-muted">
-            Name
-          </label>
-          <input
-            id="new-agent-name"
-            ref={nameRef}
-            type="text"
-            required
-            maxLength={40}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Reviewer"
-            autoComplete="off"
-            className={FIELD_CLASS}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <label htmlFor="new-agent-description" className="text-meta text-text-muted">
-            What does it do? (one line)
-          </label>
-          <input
-            id="new-agent-description"
-            type="text"
-            required
-            maxLength={200}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Reviews pull requests for bugs and risky changes."
-            autoComplete="off"
-            className={FIELD_CLASS}
-          />
-        </div>
-        {error && (
-          <p role="alert" className="m-0 text-meta text-danger break-words" data-testid="new-agent-error">
-            {error}
-          </p>
-        )}
-        <div className="flex justify-end gap-2">
-          <Button tone="default" onClick={() => dialogRef.current?.close()}>
-            Cancel
-          </Button>
-          <Button tone="primary" type="submit" disabled={busy}>
-            {busy ? "Creating…" : "Create"}
-          </Button>
-        </div>
-      </form>
-    </dialog>
+      <span aria-hidden="true" className={`flex shrink-0 ${selected ? "text-accent-tx" : "text-text-faint"}`}>
+        {icon}
+      </span>
+      <span className="flex-1 min-w-0 truncate text-label font-medium text-text">{label}</span>
+      {count > 0 && (
+        <span data-testid="agents-needs-badge" aria-hidden="true" className="rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white">
+          {count}
+        </span>
+      )}
+    </button>
   );
 }
 
 export function AgentsSection({
-  onOpenWindow,
+  view,
+  needsCount,
+  onOpenView,
 }: {
-  /** Select a window of the agents' tmux session (the caller re-lists the tree and activates it). */
-  onOpenWindow: (tmuxSession: string, windowIndex: number) => Promise<void>;
+  /** The agent page showing now (selected-row state). */
+  view: AgentsView;
+  /** How many things wait for the user, box-wide (the Needs you badge). */
+  needsCount: number;
+  onOpenView: (v: AgentsView) => void;
 }) {
   const { agents } = usePackageAgents();
-  const pushAppToast = useStore((s) => s.pushAppToast);
-  const [creating, setCreating] = useState(false);
-  const [openingSlug, setOpeningSlug] = useState<string | null>(null);
 
   // A box without the feature (or the demo transport) has no agents to show.
   if (!agents || agents.length === 0) return null;
@@ -219,40 +137,37 @@ export function AgentsSection({
   // The valid lead first, then the rest in the box's order (one row per package, no synthetic rows).
   const lead = leadAgent(agents);
   const ordered = lead ? [lead, ...agents.filter((a) => a !== lead)] : agents;
-
-  const open = async (agent: AgentInfo) => {
-    if (openingSlug) return;
-    setOpeningSlug(agent.slug);
-    try {
-      const r = await window.api.agentsOpenChat({ slug: agent.slug });
-      await onOpenWindow(r.tmuxSession, r.windowIndex);
-    } catch (e) {
-      pushAppToast({
-        tone: "error",
-        message: `Couldn't open ${agent.name || agent.slug}: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    } finally {
-      setOpeningSlug(null);
-    }
-  };
+  const onNeeds = view?.page === "fleet" && view.focus === "needs";
+  const onFleet = view?.page === "fleet" && !view.focus;
 
   return (
     <div className="px-1 pb-2" data-testid="agents-section">
-      <div className="flex items-center justify-between px-1 py-1">
+      <div className="space-y-px">
+        <NavRow
+          name="needs"
+          label="Needs you"
+          icon={<Inbox size={14} />}
+          selected={onNeeds}
+          badge={needsCount}
+          onClick={() => onOpenView({ page: "fleet", focus: "needs", nonce: ++focusNonce })}
+        />
+        <NavRow name="fleet" label="Fleet" icon={<LayoutGrid size={14} />} selected={onFleet} onClick={() => onOpenView({ page: "fleet" })} />
+      </div>
+      <div className="flex items-center justify-between px-1 pb-1 pt-3">
         <h3 className="m-0 text-micro font-semibold uppercase tracking-wider text-text-quiet">Agents</h3>
-        <IconButton icon={<Plus />} label="New agent" title="New agent" onClick={() => setCreating(true)} />
+      </div>
+      <div className="flex flex-col items-start gap-px px-[var(--row-px)] pb-1">
+        <Button tone="default" onClick={() => openNewAgentDraft()} title="Opens a chat with Manta to describe it">
+          <Plus size={12} aria-hidden="true" />
+          New agent
+        </Button>
+        <span className="text-micro tracking-normal text-text-faint">opens a chat with Manta to describe it</span>
       </div>
       <div className="space-y-px">
         {ordered.map((a) => (
-          <AgentRow key={a.slug} agent={a} opening={openingSlug === a.slug} onOpen={() => void open(a)} />
+          <AgentRow key={a.slug} agent={a} selected={view?.page === "profile" && view.slug === a.slug} onOpen={() => onOpenView({ page: "profile", slug: a.slug })} />
         ))}
       </div>
-      {creating && (
-        <CreateAgentDialog
-          onClose={() => setCreating(false)}
-          onCreated={() => refreshPackageAgents()}
-        />
-      )}
     </div>
   );
 }
