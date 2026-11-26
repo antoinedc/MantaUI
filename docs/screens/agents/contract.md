@@ -31,7 +31,7 @@ are EXISTING components drawn as they ship; render the component, never copy the
 | Chips / tags | `Pill` (`ok` fresh, `warn` stale, `neutral` thin / later), `Tag` (sidebar "via Manta") | |
 | Status dots | `StatusDot` | |
 | Seat remove confirm | `ConfirmInline` | |
-| Refresh Off / Monthly | `Segmented` | |
+| Refresh Monthly / Off (Monthly is the default) | `Segmented` | `AgentProfile.refresh.enabled` |
 | `@` picker | `TypeaheadPopup` (`ComposerParts.tsx`), agent rows extended (spec §2.3) | |
 | New agent / Change via Manta | the new-session draft (`createDraft` / `updateDraft`, `NewSessionScreen`) | |
 | Sidebar rows | the rail row class of `AgentsSection.tsx` (`ROW_CLASS`, density tokens) | |
@@ -115,8 +115,8 @@ The mockup inlines `src/renderer/tokens.css` verbatim (it predates `--usage-dot*
 
 - **Fleet:** loading (skeleton rows after 150 ms), error (sentence + Try again), empty Needs you ("Nothing needs you."),
   no agents ("No agents yet" + New agent), older box (channel unknown → "Update the box to see the fleet").
-- **Profile:** loading, error, invalid agent (its `error`, no tabs), lead/Architect (no seats actions), pending cards 0..n.
-- **History row:** collapsed / expanded; Restore busy ("Restoring…"), refused (sentence under the row), done (the new
+- **Profile:** loading, error, invalid agent (its `error`, no tabs), lead/Architect (no seats actions, no refresh control), pending cards 0..n; refresh Monthly (default) / Off / saving / refused (sentence).
+- **History row:** applied / undone ("Undone" chip and outcome line) / pending / other states; collapsed / expanded; Restore busy ("Restoring…"), refused (sentence under the row), done (the new
   record's card appears at the top, expanded).
 - **Seat row:** view / editing / saving / save error / confirm remove.
 - **Question card:** open / submitting / refused (sentence) — after a successful answer the card disappears (the store

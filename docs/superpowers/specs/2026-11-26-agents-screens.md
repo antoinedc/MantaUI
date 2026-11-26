@@ -43,7 +43,7 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 5. **`@` mention polish.** The picker rows show the agent's colour badge, description and a seat hint; agents seated in
    this project come first; mentioning an unseated agent seats it here (said on the task card).
 6. **Seats:** an agent placed in specific projects, each with a brief and a memory scope (§5.1).
-7. **History + Restore** in the profile (§5.2). **Refresh** (monthly, opt-in per agent) proposes updates that wait in
+7. **History + Restore** in the profile (§5.2). **Refresh** (monthly, ON by default for every team agent, can be turned off per agent) proposes updates that wait in
    Needs you (§5.4).
 
 ## 2. Screens (behaviour; looks are the mockup's)
@@ -78,7 +78,8 @@ Screens: `docs/screens/agents/mockup.html` (looks), `contract.md` (components, t
 - **Tabs** (Overview default; the tab is in the URL-less view state, not persisted):
   - **Overview:** Charter (the agent's description, use when, not for, edits code or read-only, model; instructions in
     a `<details>`), Research it relies on (first 4 of the Research tab), History (first 3 rows), Seats (list), memory
-    map for the first seat, Tests "Coming later".
+    map for the first seat, "Refresh with new research: Monthly | Off" (§5.4; Monthly by default; not shown for the lead
+    or the Architect), Tests "Coming later".
   - **Research · N:** library entries the agent's applied changes rest on (their `basis`), resolved live through
     `researchLibrary.lookup` in each seat's project scope: topic, sources, age, fresh / stale, thin. "From the shared
     research library. Thin means fewer than 3 independent sources." Missing entries show "no longer in the library".
@@ -261,8 +262,12 @@ the user is still open. Finish what doesn't depend on it; propose after the answ
 
 - **Source:** the change store (`.changes.json`, ≤ 200 records). `agents:history {slug}` = records whose `slug` is the
   agent (creates included once applied), newest first, all states, ≤ 50. One strict-free read of one file: bounded.
-- **Retention change:** `undone` records are no longer pruned after 7 days; they share `applied`'s rule (kept until the
-  200 cap, terminal-first eviction otherwise unchanged). Discarded / expired keep 7 days.
+- **Retention change:** `undone` records are kept like `applied` ones: never pruned by age, only by the store's
+  200-record cap. Cap eviction order: discarded / expired / conflict first (oldest first), then `undone` (oldest first),
+  then `applied` (oldest first); journal records (`held`, `applying`, claimed `failed`) are never evicted (unchanged).
+  Discarded / expired still go after 7 days.
+- **Undone entries are listed** with their change card's "Undone" chip (`agentChangeChip`) and the row's outcome line
+  "Undone" (plus who undid it when known: `decidedBy`), so the list shows the change and its reversal.
 - **Row:** date, who (`origin.kind`: `chat` → "Manta" with "for you"; `job` → "Architect"; `restore` → "You"), the
   summary or title, the Outcome line (`describeProposalOutcome`), and actions:
   - **Details / Hide**: expands the row into `AgentChangeView` for that record (its own Apply / Discard / Undo — the only
@@ -286,18 +291,29 @@ the user is still open. Finish what doesn't depend on it; propose after the answ
 All reads are cheap: one jobs-store read, one change-store read, the question store, `readdir` of seats, and a small
 counters file.
 - `~/.manta/agents/.fleet.json` (`writeJsonAtomic`, mutex): `{ version: 1, counts: { "<isoWeek>": { "<slug>": { "<project>":
-  n } } }, lastSeenAt: number | null, reviewed: string[] /* job ids, ≤ 200 */ }`. `counts` keeps the current and previous
+  n } } }, lastSeenAt: number | null, reviewed: string[] /* job ids, ≤ 200 */, refresh: { "<slug>": "<routineId>" } /* §5.4 */ }`. `counts` keeps the current and previous
   ISO week; incremented by `dispatch` / `handoff` after a successful launch (best effort, failures logged).
 - Cells come from the jobs store (`loadJobs`): specialist jobs (`specialist === true`) grouped by `agent` key → slug and
   by `registry.identify(parentDirectory)` (cached per directory for the call), newest round per root, running first.
   Retention of finished jobs (7 days / 50) bounds what a cell can show; older → "Idle".
 - No opencode DB reads.
 
-### 5.4 Refresh (the old 5B monthly refresh)
+### 5.4 Refresh (the old 5B monthly refresh) — ON by default
 
-- Profile Overview: "Refresh with new research: Off | Monthly" (`Segmented`), for team agents only.
-- On: `agents:refresh-set {slug, enabled}` creates (or deletes) a routine in the routines engine with
-  `kind: "agent-refresh", agentSlug, cron: "0 9 1 * *"` (box-local), `rollUp: true`, `access: "read"`.
+- **Default: ON, monthly, for every team agent** (valid, not the lead, not the Architect). Built-in and user-made agents
+  alike, including agents that exist when this ships and agents created later.
+- **Provisioning (agents engine, idempotent):** after every `sync` (boot included), each team agent with no entry in
+  `.fleet.json` `refresh: { "<slug>": "<routineId>" }` gets one routine in the routines engine:
+  `{ kind: "agent-refresh", agentSlug, name: "Refresh @<slug>", cron: "0 9 <day> * *", enabled: true, rollUp: true,
+  access: "read" }`, where `<day>` = 1 + (sha256(slug) mod 28), so agents don't all refresh on the same day (the 5-task
+  cap). The routine id is recorded in the same save. An agent that already has an entry is never provisioned again.
+- **Off per agent:** the routine's own `enabled` flag IS the setting. Profile Overview: "Refresh with new research:
+  Monthly | Off" (`Segmented`, Monthly selected by default) → `agents:refresh-set {slug, enabled}` →
+  `routines.update(routineId, { enabled })`. Disabling or deleting it on the Routines page counts as Off too: a missing
+  routine for a recorded slug reads as Off and is NOT recreated (`agents:refresh-set {enabled:true}` recreates it and
+  records the new id).
+- **Agent deleted / invalid / became lead or Architect:** its refresh routine is deleted and its entry removed by the
+  same reconcile.
 - At fire, the routines engine, instead of prompting a model in its run session, calls `agents.refresh(slug, {runId})`,
   which dispatches an Architect task (`dispatch` with the run session as parent; charter text: "Refresh @<slug>: check the
   research it rests on and propose only changes your research supports.") and records the job id on the run. The run
@@ -305,6 +321,8 @@ counters file.
 - Release: a dispatch round is mode `"unknown"`, so its proposals are always `pending` (reason `plan`) — they wait for a
   click, appear in Needs you and on the profile. Nothing applies by itself.
 - `checkAgent`'s Architect refusal is untouched (this routine kind doesn't run the Architect as the routine's agent).
+- A dispatch refused at fire time (5 tasks already running, "Change an agent" = Never, Architect missing) ends the run
+  `failed` with that sentence as its report; the next month tries again. No retry loop.
 
 ## 6. Contracts (committed first, before implementers start)
 
@@ -336,7 +354,7 @@ export interface AgentSeat {
 export interface AgentProfile {
   info: AgentInfo; seats: AgentSeat[];
   lastChangedAt: number | null; builtBy: "architect" | "manta" | "user" | "built-in";
-  refresh: { enabled: boolean; routineId: string | null };
+  refresh: { enabled: boolean; routineId: string | null };   // enabled defaults to true (provisioned on sync)
   research: { id: string; topic: string; sourceCount: number | null; ageDays: number | null; status: "fresh" | "stale" | "missing"; thin: boolean }[];
 }
 export interface FleetCell {
@@ -452,8 +470,12 @@ UI guides consulted (modern-web-guidance, telemetry off): `tabs`, `responsive-ta
 Rows where we write our own code: the tab key handler (~15 lines; the polyfill/library alternatives above are heavier than
 the code), the recap templates (domain text), the stores (existing pattern).
 
-## 9. Tests (targeted while fixing; the full check once at the end — this box has no Freestyle budget for this phase,
-run the full suite on the CI `typecheck-test` job)
+## 9. Tests
+
+**Where checks run:** while iterating, run only the targeted tests locally (the files you changed, `vitest related
+<files>`, the touched module's `node --test` file, the affected typecheck). The **full check before merge runs on GitHub
+CI only** (the required `typecheck-test` job on the PR). **No Freestyle VMs** for this phase. A failing CI test is
+fixed, never waved through.
 
 - **`taskQuestions.test.mjs`** (new): capture stores + replies with the placeholder (fake `replyQuestion`); fallback on
   `custom:false`, on a reply failure, on the 4th open question; answer → steer when running+active, → `continueJob` when
@@ -466,21 +488,32 @@ run the full suite on the CI `typecheck-test` job)
 - **e2e `scripts/opencode-v2/question-capture.e2e.mjs`** (pinned binary, scripted model): the model's question tool call
   returns the placeholder, the turn continues (a second tool call happens), a steered answer arrives in the same run
   (a user message with the answer text appears before the turn ends), and a finished task is continued by an answer.
-- **`agents.test.mjs`**: seats (legacy file reads as brief; frontmatter round-trip; implicit seat on dispatch/handoff;
-  remove moves the file; symlink refused); history (filter, order, cap, `undone` retention); restore (applies with
+- **`agents.test.mjs`**: refresh provisioning (every team agent gets one routine on sync; lead and Architect don't;
+  days spread by slug; idempotent across syncs; a disabled or deleted routine is NOT recreated; `refresh-set` toggles the
+  routine's `enabled` and recreates a missing one; a deleted agent's routine is removed); seats (legacy file reads as brief; frontmatter round-trip; implicit seat on dispatch/handoff;
+  remove moves the file; symlink refused); history (filter, order, ≤ 50; `undone` records listed with the "Undone" chip; an `undone` record older than 7 days is
+  kept; at the 200 cap discarded/expired go first, then the oldest `undone`, then the oldest `applied`; journal records
+  never evicted); restore (applies with
   `click`, refuses at Never, refuses "already at that version", undo of a restore); fleet (cells from fake jobs, counters,
   week roll-over, recap templates); needs-you (pending box-wide, reviews minus `reviewed`); `agent_propose` refused with an
   open question; `askedUser` set at answer time; the guard test still passes with the new lead / footer text.
 - **`researchLibrary.test.mjs`**: used-ids recorded per root, capped, swept.
 - **`routines.test.mjs`**: an `agent-refresh` routine dispatches the Architect via `agents.refresh` and never prompts the
-  run session; its proposals are `pending` (`plan`).
-- **Renderer**: question merge in ChatPanel (reply / dismiss / refusal shown); Fleet page (needs-you groups, empty state,
+  run session; its proposals are `pending` (`plan`) whatever the "Change an agent" level (Auto included); a refused
+  dispatch ends the run `failed` with the sentence.
+- **Renderer**: refresh control shows Monthly by default and Off after the toggle (and reports a refusal); history
+  shows undone rows; question merge in ChatPanel (reply / dismiss / refusal shown); Fleet page (needs-you groups, empty state,
   grid cells, click opens the session); profile tabs (keyboard: arrows, Home/End; `aria-selected`; hidden panels);
   history row expand renders `AgentChangeView`; restore button visibility; seats edit/remove/add; side panel open/close
   and right-slot exclusivity; picker sort + pills; New agent creates a prefilled draft. Visual registry rows for Fleet,
   profile and the side panel against the mockup.
 
 ## 10. Implementation split (by file ownership; nobody edits another's paths)
+
+**Checks for every implementer (put this in each brief):** run targeted tests locally while iterating (changed files,
+`vitest related`, the module's `node --test`, the affected typecheck). The full check before merge is GitHub CI's
+`typecheck-test` on the PR — no Freestyle VMs, no full suite on the dev box. Report the targeted commands you ran and the
+CI result.
 
 **Committed first by the lead:** this spec, the screen docs, §6.1 types in `src/shared/types.ts`, the §6.2 `Api` members
 in `src/shared/api.ts` (signatures only) and channel names.
@@ -489,7 +522,7 @@ in `src/shared/api.ts` (signatures only) and channel names.
   (capture, `deliverToTask`, footer text, completion line, settle inbox check) + `delegateV2Jobs.test.mjs`,
   `src/server/taskDecision.mjs` (+test), `scripts/opencode-v2/question-capture.e2e.mjs`.
 - **S2 — server, agents** (Sonnet 5.5): `src/server/agents.mjs` (seats, history, restore, fleet, needs-you, recap,
-  refresh, lead brief, §4.6) + `agents*.test.mjs`, `src/server/researchLibrary.mjs` (+test), `src/server/routines.mjs`
+  refresh provisioning + toggle (§5.4), lead brief, §4.6) + `agents*.test.mjs`, `src/server/researchLibrary.mjs` (+test), `src/server/routines.mjs`
   (+test), `src/server/rpc.mjs` and `src/server/index.mjs` (ALL wiring, including the question channels and bus kinds,
   against §6.3), `docs/opencode-plugins-v2/**` only if a tool text changes (none planned).
 - **R1 — renderer, pages** (Sonnet 5.5): `src/renderer/agents/**` (new: `FleetPage.tsx`, `NeedsYou.tsx`,
@@ -520,8 +553,8 @@ showing hand edits in History (needs file watching).
 
 ## 12. Review log
 
-- **OpenAI review:** requested with `openai/gpt-6-astra`, then `openai/gpt-6-sol` (and `gpt-6-luna` as a probe) through
-  the box's OpenCode; all three refused with "The usage limit has been reached". Re-run it before implementation starts.
+- **OpenAI review: still pending.** Requested with `openai/gpt-6-astra`, then `openai/gpt-6-sol` (and `gpt-6-luna` as a probe) through
+  the box's OpenCode; all three refused with "The usage limit has been reached". It must be re-run (Must/Should findings applied) before implementation starts.
 - **Self-review round (Opus), applied:** inbox items may not carry the message id (match by id, else text; verify in the
   e2e first); `askedUser` owner and timing pinned (set before `continueJob` so the successor inherits it); "Mention in a
   chat" no longer reaches into another component's composer (a draft instead); one shared `ResearchRows` for the panel
