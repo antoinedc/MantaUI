@@ -34,6 +34,9 @@ const STORE_PATH = statePath("routines.json");
 export const RUN_TIMEOUT_MS = 30 * 60_000;
 export const NEEDS_INPUT_TIMEOUT_MS = 7 * 24 * 3600_000;
 export const REPORT_GRACE_MS = 60_000;
+/** A refresh run with no task id (a crash between its session and its task) is failed after this long. */
+export const REFRESH_START_GRACE_MS = 2 * 60_000;
+export const REFRESH_KIND = "agent-refresh";
 export const ERROR_SETTLE_MS = 60_000;
 export const MIN_INTERVAL_MS = 15 * 60_000;
 export const CATCH_UP_GRACE_MS = 2 * 60_000;
@@ -637,7 +640,9 @@ const byQueued = (a, b) => a.queuedAt - b.queuedAt || (a.id < b.id ? -1 : a.id >
  * @param {() => Promise<object>} [deps.config]
  * @param {(a: {instruction: string, signal?: AbortSignal}) => Promise<string>} [deps.generateText]
  * @param {object} [deps.schedule] listJobs, createJob, deleteJob (the follow-up store, §8)
- * @param {object} [deps.agents]   { routineAgent(slug, directory?) → { key, seat } | null } — Agents Phase 2: a routine can run as an agent
+ * @param {object} [deps.agents]   { routineAgent(slug, directory?) → { key, seat } | null } — Agents Phase 2: a routine can run as an agent;
+ *                                 agent screens §5.4: refresh(slug, {runId, runSessionId}) → {jobId} (throws a sentence), changesForJob(jobId), outcomeLinesForJob(jobId)
+ * @param {(id: string) => Promise<object | null>} [deps.getJob]  a delegate job record by id (null: gone; throws when the store can't be read)
  */
 export function createRoutinesEngine(deps) {
   const {
@@ -655,6 +660,7 @@ export function createRoutinesEngine(deps) {
     config = async () => ({}),
     generateText = async () => "",
     agents = null,
+    getJob = async () => null,
     schedule = { listJobs: async () => [], createJob: async () => ({ ok: false, error: "follow-ups are unavailable" }), deleteJob: async () => ({ ok: true, deleted: false }) },
     log = (...a) => console.warn(...a),
     // Auto-handoff: the live session a follow-up's (possibly replaced) session id now fires into.
@@ -808,6 +814,8 @@ export function createRoutinesEngine(deps) {
       terminalNotified: false,
       agentKey: null,
       openingText: null,
+      // a refresh run's work is a delegate task: its id is stored once it started (agent screens §5.4)
+      ...(routine.kind === REFRESH_KIND ? { kind: REFRESH_KIND, jobId: null } : {}),
     };
     store.runs.push(run);
     return run;
@@ -969,10 +977,32 @@ export function createRoutinesEngine(deps) {
     return slug;
   }
 
+  /** The public create (the editor, the `routine_create` tool): an ordinary routine only — a kind is the agents engine's alone. */
   async function create(input, { runtimeSessionID } = {}) {
+    if (input && typeof input === "object" && ((input.kind !== undefined && input.kind !== "prompt") || input.agentSlug !== undefined)) {
+      throw bad("Routines of that kind can't be made here.");
+    }
+    return createRoutine(input, { runtimeSessionID });
+  }
+
+  /**
+   * A refresh routine (agent screens §5.4), made by the agents engine only. Its prompt is the fixed charter, never user text; its
+   * agent must be a valid specialist (not the lead, not the Architect); it never runs as an agent of its own (`agent` stays null).
+   */
+  async function createInternal(input) {
+    if (!input || typeof input !== "object" || input.kind !== REFRESH_KIND) throw bad(`Only an ${REFRESH_KIND} routine can be made here.`);
+    const slug = typeof input.agentSlug === "string" ? input.agentSlug.trim().toLowerCase() : "";
+    const found = slug && agents ? await agents.routineAgent(slug, "").catch(() => null) : null;
+    if (found?.refused) throw bad(found.refused);
+    if (!found) throw bad(`No agent named @${slug}`);
+    const { kind: _kind, agentSlug: _slug, agent: _agent, prompt: _prompt, ...rest } = input;
+    return createRoutine({ ...rest, prompt: `Refresh @${slug}: check the research it rests on and propose only changes your research supports.` }, { extra: { kind: REFRESH_KIND, agentSlug: slug }, noAgent: true });
+  }
+
+  async function createRoutine(input, { runtimeSessionID, extra = {}, noAgent = false } = {}) {
     const t = now();
     const fields = cleanInput({ ...input, ...(input?.createdFrom === undefined && runtimeSessionID ? { createdFrom: { sessionID: runtimeSessionID } } : {}) }, { partial: false, isDirectory, now: t });
-    const agent = input?.agent === undefined ? null : await checkAgent(input.agent);
+    const agent = noAgent || input?.agent === undefined ? null : await checkAgent(input.agent);
     const projs = await projects();
     const routine = await txn(async (store, touch) => {
       let id = newId(4);
@@ -999,6 +1029,7 @@ export function createRoutinesEngine(deps) {
         nextRunAt: enabled ? nextOccurrence(rest.cron, t) : null,
         memoryUpdatedByRunId: null,
         agent,
+        ...extra,
       };
       if (memory) await writeMemory(id, memory);
       store.routines.push(r);
@@ -1008,8 +1039,11 @@ export function createRoutinesEngine(deps) {
     return routineWire(routine, projectNameFor(projs, routine));
   }
 
+  /** On a refresh routine the editor may switch it on or off and move its time: nothing else. */
+  const REFRESH_EDITABLE = new Set(["enabled", "cron"]);
   async function update(id, patch) {
     const t = now();
+    if (patch && typeof patch === "object" && patch.kind !== undefined) throw bad("A routine's kind can't be changed.");
     const fields = cleanInput(patch ?? {}, { partial: true, isDirectory, now: t });
     // omitted = unchanged, null = clear. Re-saving the routine's CURRENT agent is always accepted, even when that agent
     // has become unavailable since (the run then falls back with a note): editing another field must not be blocked.
@@ -1026,6 +1060,9 @@ export function createRoutinesEngine(deps) {
     const routine = await txn(async (store, touch) => {
       const r = store.routines.find((x) => x.id === id);
       if (!r) throw bad("That routine no longer exists.", 404);
+      if (r.kind === REFRESH_KIND && Object.keys(patch ?? {}).some((k) => patch[k] !== undefined && !REFRESH_EDITABLE.has(k))) {
+        throw bad("Only the schedule and on/off can be changed on a refresh routine.");
+      }
       if (agentError) {
         const same = typeof patch.agent === "string" && patch.agent.trim().replace(/^@/, "").toLowerCase() === r.agent;
         if (!same) throw agentError;
@@ -1286,8 +1323,36 @@ export function createRoutinesEngine(deps) {
     });
   }
 
+  /** The run's headless session: created with its pre-minted id; an unknown outcome (timeout, 5xx) asks whether it landed. Throws when it did not. */
+  async function createRunSession(run, routine, { cwd = routine.directory, model, agentKey, access = routine.access } = {}) {
+    try {
+      await oc.createSession({
+        id: run.sessionID,
+        directory: cwd,
+        title: `Routine · ${routine.name} · ${fmtTitleStamp(run.startedAt)}`,
+        ...(model ? { model } : {}),
+        ...(agentKey ? { agent: agentKey } : {}),
+        permission: buildRoutineRuleset(access),
+        metadata: withInternalMarker({ manta: { routineId: routine.id, runId: run.id } }),
+      });
+    } catch (e) {
+      if (isDefiniteRefusal(e)) throw e;
+      // Timeout / 5xx: the create may have landed. The id was pre-minted, so ask.
+      const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
+      if (rs?.state !== "found") throw e;
+    }
+  }
+
+  /** The routine (or run) was deleted while its start was in flight: don't leave an orphan session running. */
+  async function dropOrphanSession(run, worktree = null) {
+    await oc.abortSession(run.sessionID).catch(() => {});
+    await oc.deleteSessionRaw(run.sessionID).catch(() => {});
+    if (worktree) await removeWorktreeIfClean(worktree);
+  }
+
   /** §4.2 steps 2–6. Every failure is a human sentence on a `failed` run; nothing falls back to the user's checkout. */
   async function startRun(run, routine) {
+    if (routine.kind === REFRESH_KIND) return startRefreshRun(run, routine);
     let cwd = routine.directory;
     let worktree = null;
     let sessionCreated = false;
@@ -1337,22 +1402,7 @@ export function createRoutinesEngine(deps) {
         if (worktree) await removeWorktreeIfClean(worktree);
         return;
       }
-      try {
-        await oc.createSession({
-          id: run.sessionID,
-          directory: cwd,
-          title: `Routine · ${routine.name} · ${fmtTitleStamp(run.startedAt)}`,
-          ...(model ? { model } : {}),
-          ...(agentKey ? { agent: agentKey } : {}),
-          permission: buildRoutineRuleset(routine.access),
-          metadata: withInternalMarker({ manta: { routineId: routine.id, runId: run.id } }),
-        });
-      } catch (e) {
-        if (isDefiniteRefusal(e)) throw e;
-        // Timeout / 5xx: the create may have landed. The id was pre-minted, so ask.
-        const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
-        if (rs?.state !== "found") throw e;
-      }
+      await createRunSession(run, routine, { cwd, model, agentKey });
       sessionCreated = true;
       try {
         await oc.sendPrompt({ sessionId: run.sessionID, text: openingText, ...(model ? { model } : {}), ...(agentKey ? { agent: agentKey } : {}) });
@@ -1362,15 +1412,106 @@ export function createRoutinesEngine(deps) {
         if (!Array.isArray(users) || users.length === 0) throw e;
       }
       const saved = await patchRun(run.id, { submittedAt: now() });
-      if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) {
-        // The routine (or run) was deleted while this was starting: don't leave an orphan session running.
-        await oc.abortSession(run.sessionID).catch(() => {});
-        await oc.deleteSessionRaw(run.sessionID).catch(() => {});
-        if (worktree) await removeWorktreeIfClean(worktree);
-      }
+      if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) await dropOrphanSession(run, worktree);
     } catch (e) {
       await terminate(run.id, "failed", humanError(e), { startup: { sessionCreated, worktree } });
     }
+  }
+
+
+  /**
+   * A refresh run (agent screens §5.4): the headless session is made exactly as for any run, but it is NEVER prompted — a delegate
+   * task started by the agents engine does the work, with this session as its parent. The task's id is stored together with
+   * `submittedAt`, so no resend path can ever write into the session. Every failure is a sentence on a `failed` run.
+   */
+  async function startRefreshRun(run, routine) {
+    let sessionCreated = false;
+    try {
+      if (!isDirectory(routine.directory)) throw new Error("The folder no longer exists.");
+      if (typeof agents?.refresh !== "function") throw new Error("Refreshing agents isn't available on this box yet.");
+      await createRunSession(run, routine, { access: "read" });
+      sessionCreated = true;
+      const started = await agents.refresh(routine.agentSlug, { runId: run.id, runSessionId: run.sessionID });
+      const jobId = typeof started?.jobId === "string" ? started.jobId : "";
+      if (!jobId) throw new Error("The refresh task didn't start.");
+      const saved = await patchRun(run.id, { jobId, submittedAt: now() });
+      if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) {
+        await dropOrphanSession(run); // the task, if it started, ends on its own
+        return;
+      }
+      // a task that already ended before its id was stored (a fast failure) settles the run now, not at the next sweep
+      let job = null;
+      try {
+        job = await getJob(jobId);
+      } catch {
+        job = null;
+      }
+      if (job && isEndedJob(job)) await serial(run.id, () => settleRefreshRun(run.id, job));
+    } catch (e) {
+      await terminate(run.id, "failed", humanError(e), { startup: { sessionCreated, worktree: null } });
+    }
+  }
+
+  const isEndedJob = (job) => job?.status === "done" || job?.status === "failed" || job?.status === "stopped";
+
+  /**
+   * The refresh task `job` ended: finish its run (no-op when the run is not live or the job is still going). Called from
+   * `settleFromJob` (the delegate's end-of-task hook), from `reconcileRun` and right after the launch. Never takes `serial`:
+   * its callers already run inside it.
+   */
+  async function settleRefreshRun(runId, job) {
+    if (!isEndedJob(job)) return;
+    const run = (await readStore()).runs.find((r) => r.id === runId);
+    if (!run || !isLive(run) || run.jobId !== job.id) return;
+    if (job.status !== "done") {
+      const why = job.status === "stopped" ? "the refresh task was stopped" : (typeof job.error === "string" && job.error.trim() ? humanError(job.error) : "the refresh task failed");
+      await terminate(runId, "failed", why);
+      return;
+    }
+    const routine = (await readStore()).routines.find((r) => r.id === run.routineId);
+    const slug = routine?.agentSlug ?? "the agent";
+    let changes = [];
+    let lines = [];
+    try {
+      changes = (await agents?.changesForJob?.(job.id)) ?? [];
+      lines = (await agents?.outcomeLinesForJob?.(job.id)) ?? [];
+    } catch (e) {
+      log(`[routines] couldn't read the proposals of ${job.id}:`, e?.message ?? e);
+    }
+    const waiting = changes.filter((c) => c?.state === "pending").length;
+    const text = typeof job.result === "string" ? job.result.trim() : "";
+    const body = [text, ...lines].filter(Boolean).join("\n\n").slice(0, 8000);
+    const report = waiting > 0
+      ? { outcome: "findings", title: `Refresh @${slug}: ${waiting === 1 ? "a change is" : `${waiting} changes are`} waiting for your click`, summary: lines[0] ? String(lines[0]).slice(0, 400) : "", body }
+      : { outcome: "nothing", title: `Refresh @${slug}: nothing to change`, summary: "", body };
+    await terminate(runId, "done", null, { report });
+  }
+
+  /** The delegate's end-of-task hook (`afterJobEnded`): settle the live run whose task this was. Idempotent; any other job is ignored. */
+  async function settleFromJob(job) {
+    if (!job || typeof job.id !== "string" || !isEndedJob(job)) return;
+    const run = (await readStore()).runs.find((r) => r.jobId === job.id && isLive(r));
+    if (!run) return;
+    await serial(run.id, () => settleRefreshRun(run.id, job));
+  }
+
+  /** The safety net for a refresh run: read its task first, never the session (§5.4). */
+  async function reconcileRefreshRun(run) {
+    if (!run.jobId) {
+      if (now() - (run.startedAt ?? now()) > REFRESH_START_GRACE_MS) await terminate(run.id, "failed", "the box restarted before the refresh could start");
+      return;
+    }
+    let job;
+    try {
+      job = await getJob(run.jobId);
+    } catch {
+      return; // can't read the store: the next sweep tries again
+    }
+    if (!job) {
+      await terminate(run.id, "failed", "the refresh task is no longer on the box");
+      return;
+    }
+    if (isEndedJob(job)) await settleRefreshRun(run.id, job);
   }
 
   // ---- finishing a run -------------------------------------------------------
@@ -1400,7 +1541,7 @@ export function createRoutinesEngine(deps) {
   }
 
   /** Terminal transition with its I/O: tokens + worktree state before, cleanup + notify + next dispatch after. */
-  async function terminate(runId, status, error, { startup = null, notes = [] } = {}) {
+  async function terminate(runId, status, error, { startup = null, notes = [], report = null } = {}) {
     const before = (await readStore()).runs.find((r) => r.id === runId);
     if (!before || isTerminal(before)) return false;
     let tokens = null;
@@ -1412,7 +1553,7 @@ export function createRoutinesEngine(deps) {
     const done = await txn(async (store, touch) => {
       const run = store.runs.find((r) => r.id === runId);
       if (!run || isTerminal(run)) return null;
-      finalize(store, run, status, error, { tokens, notes, keepWorktree: !!wt && !wt.clean, touch });
+      finalize(store, run, status, error, { tokens, notes, keepWorktree: !!wt && !wt.clean, touch, ...(report ? { report } : {}) });
       touch({ routineId: run.routineId, runId });
       return { run: clone(run), routine: clone(store.routines.find((r) => r.id === run.routineId)) };
     });
@@ -1621,6 +1762,7 @@ export function createRoutinesEngine(deps) {
   async function reconcileRun(runId) {
     const run = (await readStore()).runs.find((r) => r.id === runId);
     if (!run || !isLive(run) || !run.sessionID || launching.has(runId)) return;
+    if (run.kind === REFRESH_KIND) return reconcileRefreshRun(run); // its task decides, never its (silent) session
     const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
     if (rs.state === "unknown") return;
     if (rs.state === "missing") {
@@ -1688,7 +1830,7 @@ export function createRoutinesEngine(deps) {
     for (const run of store.runs) {
       if (launching.has(run.id)) continue;
       const since = run.phaseSince ?? run.startedAt ?? t;
-      if (run.status === "running" && t - since > RUN_TIMEOUT_MS) {
+      if (run.status === "running" && t - since > RUN_TIMEOUT_MS && !run.jobId) {
         await serial(run.id, () => timeoutRun(run.id)).catch((e) => log(`[routines] timeout of ${run.id} failed:`, e?.message ?? e));
       } else if (run.status === "needs_input" && t - since > NEEDS_INPUT_TIMEOUT_MS) {
         if (run.sessionID) await oc.abortSession(run.sessionID).catch(() => {});
@@ -1888,6 +2030,7 @@ export function createRoutinesEngine(deps) {
     const routine = before.routines.find((r) => r.id === id);
     if (!routine) throw bad("That routine no longer exists.", 404);
     if (routine.destination?.type === "session") throw bad("This routine already runs inside a chat.", 409);
+    if (routine.kind === REFRESH_KIND) throw bad("A refresh routine can't run inside a chat.", 409);
     const busy = (store) => store.runs.some((r) => r.routineId === id && (r.status === "queued" || isLive(r)));
     if (busy(before)) throw bad("Wait for the current run to finish.", 409);
     const v = validateFollowupCron(routine.cron);
@@ -1972,9 +2115,11 @@ export function createRoutinesEngine(deps) {
     get,
     list,
     create,
+    createInternal,
     update,
     remove,
     runNow,
+    settleFromJob,
     runGet,
     markRead,
     memorySet,

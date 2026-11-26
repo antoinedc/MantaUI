@@ -256,6 +256,7 @@ import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
+import { createTaskQuestions } from "./taskQuestions.mjs";
 import { createResearchEngine } from "./research.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
@@ -867,7 +868,15 @@ const routinesEngine = createRoutinesEngine({
   push,
   // Agents Phase 2: a routine can run as an agent. The agents engine is created further down, so it is read at call time
   // (an async wrapper: a call before it exists is a rejection the routine handles, never a synchronous throw).
-  agents: { routineAgent: async (slug, directory) => agentsEngine.routineAgent(slug, directory) },
+  agents: {
+    routineAgent: async (slug, directory) => agentsEngine.routineAgent(slug, directory),
+    // Agent screens §5.4: the monthly refresh runs as a delegate task started by the agents engine; the same wrappers (read at call time)
+    refresh: async (slug, ctx) => agentsEngine.refresh(slug, ctx),
+    changesForJob: async (jobId) => agentsEngine.changesForJob(jobId),
+    outcomeLinesForJob: async (jobId) => agentsEngine.outcomeLinesForJob(jobId),
+  },
+  // a delegate job record by id (null: gone; throws when the store can't be read): the refresh run's safety net reads it
+  getJob: async (id) => ((await delegateEngine.loadRecordsStrict()) ?? []).find((j) => j.id === id) ?? null,
   publish: (evt) => bus.publish(evt),
   config: () => local.configGet(),
   generateText: (a) => oc.generateText(a),
@@ -1433,6 +1442,12 @@ const delegateEngine = createDelegateEngine({
   onJobEnded: async (job) => {
     return architectJobEndedSink ? await architectJobEndedSink(job) : undefined;
   },
+  // Agent screens §5.4: the one hook every Manta-owned task that ended (finished, failed, stopped) goes through, after its proposals
+  // were released — it settles a refresh routine's run, and tells the Fleet page something changed.
+  afterJobEnded: async (job) => {
+    bus.publish({ kind: "agentFleet", payload: {} });
+    await routinesEngine.settleFromJob(job);
+  },
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
     tmux.stampOwner(sessionName, windowIndex, owner),
@@ -1533,6 +1548,19 @@ const delegateEngine = createDelegateEngine({
 });
 // The interpreter's activity tap feeds the engine's per-job liveness (the stall rule, the progress view).
 streamInterp.onActivity(delegateEngine.observeActivity);
+// Agent screens §4 (src/server/taskQuestions.mjs): a specialist task's question that does not block the task. Handed to the delegate
+// engine BEFORE the first reconcile (the boot reconcile and the 60 s sweep settle what a restart left in flight).
+const taskQuestions = createTaskQuestions({
+  delegate: delegateEngine,
+  oc,
+  publish: (payload) => {
+    bus.publish({ kind: "taskQuestion", payload });
+    bus.publish({ kind: "agentFleet", payload: {} });
+  },
+  // the registry project owning the task's folder, for Needs you and the Fleet grid (read at call time: the knowledge layer is built later)
+  projectOf: async (job) => (await knowledgeEngine.registry?.identify(job.parentDirectory))?.slug ?? null,
+});
+delegateEngine.setTaskQuestions(taskQuestions);
 // WS02 (SF-4): the box's reading of background-job records for the chat screen.
 const delegateView = createDelegateView({
   // The RAW record list: assertWritable runs on every guarded request, so it must not
@@ -2612,7 +2640,22 @@ const agentsEngine = createAgentsEngine({
   delegate: delegateEngine,
   tmux,
   // the registry exists only once the knowledge layer has opened its store: read it at call time
-  registry: { identify: async (directory) => (await knowledgeEngine.registry?.identify(directory)) ?? null },
+  registry: {
+    identify: async (directory) => (await knowledgeEngine.registry?.identify(directory)) ?? null,
+    // the registry's projects, for a seat's project name and the "Add a seat" list
+    list: async () => (await knowledgeEngine.registry?.list?.()) ?? [],
+  },
+  taskQuestions,
+  routines: routinesEngine, // the monthly refresh routines (agent screens §5.4)
+  // a seat's memory scope follows its project's sharing mode (read at call time; unknown → private)
+  sharingOf: async (slug) => (await knowledgeEngine.settings?.effective?.(slug))?.sharing ?? "private",
+  // knowledge pages of a project (a count only): one indexed query, no page text; the engine gives up after 500 ms
+  countProjectPages: async (slug) => {
+    const db = knowledgeEngine.state?.db;
+    if (!db) return null;
+    return Number(db.prepare("SELECT COUNT(*) AS n FROM page_meta WHERE area = 'project' AND slug = ?").get(slug)?.n ?? 0);
+  },
+  onFleetChanged: () => bus.publish({ kind: "agentFleet", payload: {} }),
   delegateView,
   isCtoSession: (sid) => ctoConversation.isConversationSession(sid),
   // Phase 2 (the lead): "is this chat led?" must never read an unreadable store as "no" — both readers THROW instead
@@ -2637,7 +2680,10 @@ const agentsEngine = createAgentsEngine({
     if (failed) throw failed;
     return approved.map((m) => `${m.providerID}/${m.id}`);
   },
-  publish: (payload) => bus.publish({ kind: "agentChange", payload }),
+  publish: (payload) => {
+    bus.publish({ kind: "agentChange", payload });
+    bus.publish({ kind: "agentFleet", payload: {} });
+  },
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
 architectJobEndedSink = async (job) => {
@@ -2648,6 +2694,8 @@ architectJobEndedSink = async (job) => {
 // research store drops what is older than 30 days or over its cap every five
 startPoller(() => agentsEngine.reconcile(), { intervalMs: 60_000, label: "agents-reconcile", immediate: false });
 startPoller(() => researchEngine.sweep(), { intervalMs: 5 * 60_000, label: "research-sweep", immediate: false });
+// what each task relied on (the side panel's list) is kept 30 days
+startPoller(() => researchLibrary.sweepUsed(), { intervalMs: 5 * 60_000, label: "research-used-sweep", immediate: false });
 
 rpcHandlers = buildHandlers({
   usageCalibration,

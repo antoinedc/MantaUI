@@ -1844,3 +1844,104 @@ test("describeProposalOutcome: rolled back, not applied, failed and an applied c
   assert.match(d({ state: "failed", slug: null, agentName: "Pricing CTA", error: "boom" }), /^Outcome: Pricing CTA could not be activated.*nothing from this task is live/s);
   assert.match(d({ state: "applied", error: "Couldn't roll back: disk full" }), /is live, but rolling it back failed/);
 });
+
+// ---- agent screens §4.3 / §4.6: an open question of the task holds everything it proposed ----
+
+test("a question of the task still open (or being delivered, or answered but not yet sent) keeps the held proposals waiting for a click, whatever the level and mode", async () => {
+  for (const [name, open] of [["open", true], ["resolved", false]]) {
+    const w = { open: false };
+    const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => w.open && root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
+    try {
+      const id = await heldFor(f); // proposed before the question was asked
+      w.open = open;
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      const r = await rec(f, id);
+      if (open) {
+        assert.equal(r.state, "pending", name);
+        assert.equal(r.reason, "unfinished");
+        assert.equal(r.needsClick, true);
+      } else {
+        assert.equal(r.state, "applied", "with no question open the same task applies at Auto");
+      }
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // the root is the task's, not the round's: a later round of the same task is covered too
+  let asked = false;
+  const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => asked && root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
+  try {
+    const id = await heldFor(f);
+    asked = true;
+    endJob(f, { status: "done", rootJobId: "job1" });
+    await f.engine.reconcile();
+    assert.equal((await rec(f, id)).reason, "unfinished");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_propose is refused while the task has a question open, with a process sentence; the slot is not used", async () => {
+  let open = true;
+  const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: () => open, openCountFor: () => 1, listOpen: async () => [] } } });
+  try {
+    const r = await propose(f);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "Your question to the user is still open. Finish what doesn't depend on it; propose after the answer arrives.");
+    assert.equal((await storeOrEmpty(f)).proposalSlots?.job1 ?? 0, 0);
+    open = false;
+    assert.equal((await propose(f)).ok, true, "after the answer it goes through");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- agent screens §5.1: a handoff into a project the specialist has no seat in seats it there ----
+
+test("a handoff into an unseated project creates the seat (added by handoff) and stamps the job; a second one stamps nothing; a refused or declined launch takes the seat back", async () => {
+  const calls = [];
+  const world = { msgs: [], decline: false };
+  const f = await archFixture({
+    extra: {
+      retryDelayMs: 0,
+      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo/site" } }), listMessages: async () => world.msgs },
+      delegate: {
+        startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }),
+        startJobWithApproval: async (i) => (calls.push(i), world.decline ? { ok: false, error: "declined" } : { ok: true, job: { id: `jw${calls.length}` } }),
+        loadRecordsStrict: async () => [],
+      },
+      isManagedSession: async () => false,
+      isCtoSessionStrict: async () => false,
+      isCtoSession: async () => false,
+      delegateView: { assertWritable: async () => {} },
+      registry: { identify: async (d) => (d === "/repo/site" ? { slug: "site-aaaaaaaaaa" } : null), list: async () => [{ slug: "site-aaaaaaaaaa", displayName: "Site" }] },
+    },
+  });
+  try {
+    await f.engine.init();
+    let n = 0;
+    const hand = (title) => {
+      n++;
+      const b = { sessionID: "ses_chat", messageID: `msg_s${n}`, callID: `call_s${n}`, agent: "dev", title, brief: "Fix the build and run the tests." };
+      world.msgs = handoffTranscript(b, "build");
+      return f.engine.handoff(b);
+    };
+    const seatPath = join(f.root, "dev", "seats", "site-aaaaaaaaaa.md");
+    assert.equal((await hand("Fix the build")).ok, true);
+    assert.deepEqual(calls[0].seatAdded, { project: "site-aaaaaaaaaa", projectName: "Site" });
+    assert.match(await readFile(seatPath, "utf-8"), /added_by: handoff/);
+    assert.equal(calls[0].brief, undefined);
+    assert.equal(calls[0].request, "Fix the build", "the request text is never modified");
+    assert.equal((await hand("Fix it again")).ok, true);
+    assert.equal(calls[1].seatAdded, undefined, "the seat exists now");
+    // a declined launch into another project's seat is taken back (here: the same project, seat removed first)
+    await rm(seatPath);
+    world.decline = true;
+    const declined = await hand("A third one");
+    assert.equal(declined.ok, false);
+    assert.equal(await ok(seatPath), false, "a launch the user declined leaves no seat behind");
+  } finally {
+    await f.cleanup();
+  }
+});
