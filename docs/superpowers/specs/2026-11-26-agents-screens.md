@@ -212,14 +212,30 @@ delivering the user's real answer later as a message.
      pending item that is one of our steered answers (matched by message id when the item carries one, else by exact
      text — S1 checks which on the pinned binary in the e2e first) is cancelled with `cancelInboxItem`, and its question
      becomes `delivery: "continue-pending"`. Release the lock.
-  2. `finishV2Job` as today (it takes `withSessionResources` only in its own cleanup, after step 1 released it: no
-     nesting).
-  3. After the terminal write and `onJobTerminal`, the delegate calls `taskQuestions.onRoundSettled(job)`, which sends
-     every `continue-pending` answer of that root with `continueJob` (one round; several answers joined into one
-     prompt) and records the outcome as in step 3 of §4.2.
-  An inbox read that fails leaves `ending` set and the questions as they are; the 60 s sweep retries step 1 for `ending`
-  rounds that are terminal with `continue-pending` / `delivering` questions. `deliverToTask` never steers into a round
-  marked `ending`.
+     Step 1 also sets `continueAfter: true` on the record (same jobs-lock patch) when the root has any
+     `continue-pending` answer at that moment (from this inbox check, or from `deliverToTask` having returned
+     `continue-pending` while the round was `ending`).
+  2. `finishV2Job`, in this exact order (it takes `withSessionResources` only in its own cleanup, after step 1 released
+     it: no nesting):
+     a. **Terminal write** (jobs lock). `completionDelivery` = `null` when not Manta-owned; else `"not-needed"` when the
+        record has `deliverResult: false` (§5.4); else **`"deferred"`** when the LIVE record has `continueAfter`; else
+        `"pending"` (today). `"deferred"` is a new value: the result-retry sweep (`completionDelivery === "pending"`) and
+        `continueRefusal`'s 409 ("its result is still being delivered") both ignore it, so `continueJob` is not refused.
+     b. `onJobTerminal` (unchanged), then `notifyJobEnded` (unchanged, `agents.reconcile` for Architect jobs), then the
+        new `afterJobEnded` hook (§5.4), then `clearProgress` (unchanged).
+     c. **If `"deferred"`:** `await taskQuestions.onRoundSettled(updated)` — it sends every `continue-pending` answer of
+        that root with ONE `continueJob` (answers joined into one prompt) and records the outcome as in step 3 of §4.2.
+        - `continueJob` ok → patch this round `completionDelivery: "not-needed"` (`onlyIf` still `"deferred"`). Its
+          result is never posted (the successor's result is the one the chat gets) and `finishV2Cleanup` is **skipped**:
+          the window and worktree belong to the successor (same child session / worktree).
+        - `continueJob` refused or threw → the answers' questions go back to `open` with the sentence as `error`, patch
+          `completionDelivery: "pending"` (`onlyIf` `"deferred"`), then fall through to d.
+     d. `if (completionDelivery === "pending") deliverJobResult(...)`, then `finishV2Cleanup` — exactly today's tail.
+  - **Crash / restart:** a terminal record left at `"deferred"` (crash inside c) is picked up by the 60 s sweep and the
+    boot pass, which run c and d for it. An inbox read that fails in step 1 leaves `ending` set and the questions as they
+    are; the sweep retries step 1 for terminal `ending` rounds with `continue-pending` / `delivering` questions.
+  - `deliverToTask` never steers into a round marked `ending`; while `ending` is set it returns `continue-pending` and
+    sets `continueAfter` on the round (jobs lock), so step 2a sees it.
 - **Held proposals never release while a question is open.** `decideRelease` (`agents.mjs`) rule 4 gains
   `|| taskQuestions.hasOpen(rootJobOf(job))` (open, `delivering` or `continue-pending` all count) → `pending`,
   reason `"unfinished"`. The click then decides; nothing auto-applies under a pending question.
@@ -387,19 +403,38 @@ counters file.
   `delegate.startJob` with the same prompt-building as dispatch (`buildDispatchPrompt` + research guidance + Architect
   context), `parentSessionID: runSessionId`, `parentDirectory: <agent home>`, `targetProject: AGENTS_TMUX_SESSION` (the
   hidden `manta-agents` tmux session; created if missing with the same helper `openChat` uses), `architect: { mode:
-  "unknown" }`, `deliverResult: false` (new `startJob` input, S1: the record gets `completionDelivery: "not-needed"` and
-  N7 never posts into the headless session, so no model turn runs there). Returns the job id, stored on the run
+  "unknown" }`, `deliverResult: false` (new `startJob` input, S1). It is **persisted on the record** as
+  `deliverResult: false`, **inherited** by `continueJob` and resume (it is not in the stripped-field list, and S1 adds
+  it to resume's copied fields), and **respected at every terminal write**: `finishV2Job` (step 2a of §4.3) and `stopJob`
+  both compute `completionDelivery = !manta ? null : job.deliverResult === false ? "not-needed" : …`, and `stopJob`
+  only calls `deliverJobResult` when that is `"pending"`. So N7 never posts into the headless session and no model turn
+  runs there. Returns the job id, stored on the run
   (`run.jobId`, persisted under the routines lock).
-- **Settling the run from the task:** `index.mjs` chains `routines.onJobTerminal(job)` into the delegate's existing
-  `onJobTerminal` hook (after `agents.reconcile`, so released records read as released). For the run with that
-  `jobId`: `terminate(runId, job.status === "done" ? "done" : "failed")` with a synthesized report (`outcome: "findings"`
-  when any proposal is pending, else `"nothing"`; body = the task's result text + `outcomeLinesForJob(job.id)`). The 30
-  minute `RUN_TIMEOUT_MS` sweep skips runs that have a `jobId` (the task has its own 4 h ceiling); on boot a run with a
-  `jobId` whose job is already terminal is settled from the job record.
-- At fire, the routines engine, instead of prompting a model in its run session, calls `agents.refresh(slug, {runId})`,
-  which dispatches an Architect task (`dispatch` with the run session as parent; charter text: "Refresh @<slug>: check the
-  research it rests on and propose only changes your research supports.") and records the job id on the run. The run
-  completes when the task does; its report is the task's result text.
+- **Settling the run from the task — one hook, every terminal path.** The delegate gets a new dependency
+  `afterJobEnded(job)`, called **unconditionally** (not only for Architect jobs) at the end of `notifyJobEnded`, i.e.
+  right after `agents.reconcile` has released the round's records. `notifyJobEnded` already runs on BOTH terminal paths
+  that end a Manta-owned round: `finishV2Job` (done / failed / timed out / stalled / lost run — all go through it) and
+  `stopJob` (user stop, CTO stop) — so a stopped refresh task settles its run too. (`onJobTerminal` is NOT used: it runs
+  before `agents.reconcile` and `stopJob` never calls it.) `index.mjs` wires `afterJobEnded` → `routines.settleFromJob(job)`:
+  for the live run whose `jobId === job.id` (else nothing): `terminate(runId, job.status === "done" ? "done" : "failed")`
+  with a synthesized report (`outcome: "findings"` when any of `changesForJob(job.id)` is `pending`, else `"nothing"`;
+  body = the job's result or error text + `outcomeLinesForJob(job.id)`). Idempotent (a run already terminal is left
+  alone).
+- **The safety net (`reconcileRun`, every 60 s sweep and on reconnect/boot) branches on `run.jobId` FIRST**, before any
+  session read:
+  - `run.jobId` set → read that job (`delegate.getJob(id)`, a jobs-store read, injected). Running or paused → return
+    (nothing else: no session read, no prompt). Terminal → `settleFromJob(job)`. Missing → `terminate(runId, "failed",
+    "the refresh task is no longer on the box")`.
+  - an `agent-refresh` run with NO `jobId` (crash between creating the session and recording the job) → never prompted;
+    if older than 2 min, `terminate(runId, "failed", "the box restarted before the refresh could start")`. A task that
+    did start in that window still runs and its proposals still land pending; only its run report is lost
+    (follow-up).
+  - `startRun` for `agent-refresh` persists `submittedAt` together with `jobId`, so the `submittedAt == null` resend branch
+    (`oc.sendPrompt` into the run session) can never run for it; the `run.jobId` branch above returns before it anyway.
+  - The 30-minute `RUN_TIMEOUT_MS` sweep skips runs that have a `jobId` (the task has its own 4 h ceiling and the net
+    above settles it).
+- **Charter text** (fixed, server-written): "Refresh @<slug>: check the research it rests on and propose only changes your
+  research supports."
 - Release: a dispatch round is mode `"unknown"`, so its proposals are always `pending` (reason `plan`) — they wait for a
   click, appear in Needs you and on the profile. Nothing applies by itself.
 - `checkAgent`'s Architect refusal is untouched (this routine kind doesn't run the Architect as the routine's agent).
@@ -417,6 +452,10 @@ counters file.
 //                                    // Readers of older records use rootJobOf(job) = job.rootJobId ?? job.architect?.rootJobId ?? job.id.
 //   seatAdded?: { project: string; projectName: string };   // set when this launch created the seat
 //   ending?: true;                   // the settle gate is running (§4.3); server-only, stripped from the wire
+//   continueAfter?: true;            // a continue-pending answer exists for this round (§4.3); server-only
+//   deliverResult?: false;           // never post this job's result (refresh tasks, §5.4); inherited by continuations
+//   completionDelivery gains: "deferred" (§4.3) and "not-needed" (§4.3, §5.4); the sweep and continueRefusal only treat
+//                                    // "pending" as in flight (unchanged code paths).
 export type TaskQuestionState = "open" | "answered" | "dismissed" | "failed";
 export interface TaskQuestion {
   id: string;                       // "tq_<16 hex>"
@@ -507,8 +546,11 @@ hasOpen(rootJobId), onRoundSettled(job), sweep() }`. Store: `~/.manta/agents/.qu
 questions:[]}`, `writeJsonAtomic` + mutex; strict read for mutations; open questions never evicted; others kept 7 days,
 cap 300). `delegate.mjs` (S1) exports `deliverToTask(rootJobId, text, { messageID })` →
 `{ delivery: "steer" | "continue" | "continue-pending" } | { error }`, `rootJobOf(job)`, and accepts the new `startJob`
-input `deliverResult: false`. It calls `taskQuestions.onRoundSettled(job)` after a terminal write and runs the §4.3
-ending gate. **Everything is keyed by `rootJobId`** (questions, research usage, the side panel, `hasOpen`), never by
+input `deliverResult: false`. It runs the §4.3 ending gate, the exact `finishV2Job` order of §4.3 step 2 (calling
+`taskQuestions.onRoundSettled(job)` only for a `"deferred"` round, before any result post or cleanup), applies
+`deliverResult` in `finishV2Job` AND `stopJob`, and calls the new `deps.afterJobEnded(job)` at the end of
+`notifyJobEnded` for every job. `routines.mjs` (S2) exports `settleFromJob(job)` and takes an injected
+`getJob(id)`; `index.mjs` (S2) wires both. **Everything is keyed by `rootJobId`** (questions, research usage, the side panel, `hasOpen`), never by
 `childSessionID`.
 
 **Research binding (S2):** `bindResearcher` returns `rootJobId: rootJobOf(job)` next to `childSessionID`, and
@@ -596,7 +638,11 @@ fixed, never waved through.
   finished, refused when paused, sentence returned on a `continueJob` refusal (question stays open); double answer;
   dismiss running vs finished; settle with an unconsumed steered answer → cancelled + continued; store strict-read
   refusal; open questions never evicted.
-- **`delegateV2Jobs.test.mjs`**: every launched job has `rootJobId`; `continueJob` and resume copy it; an old
+- **`delegateV2Jobs.test.mjs`**: a round ending with a `continue-pending` answer writes `"deferred"`, posts NO result,
+  skips cleanup, and the successor starts (no 409); a refused continuation reopens the questions, posts the result and
+  cleans up; a crash at `"deferred"` is finished by the sweep; `deliverResult:false` → `"not-needed"` on finish AND on
+  stop (no post either way) and survives `continueJob` and resume; `afterJobEnded` fires after `onJobEnded` on finish
+  and on stop, for non-Architect jobs too; every launched job has `rootJobId`; `continueJob` and resume copy it; an old
   record without it resolves via `rootJobOf`; `deliverResult:false` never posts N7; `handleQuestion` no longer interrupts on the new path; a task ending with an open
   question is `done` (not `endedBlocked`) and its completion text carries the waiting line; the fallback path unchanged.
 - **`taskDecision.test.mjs`**: answer-text formatting (single, multi, typed text); `acceptsFreeText` (no fields,
@@ -620,8 +666,10 @@ fixed, never waved through.
 - **`researchLibrary.test.mjs`**: used-ids recorded per root, capped, swept.
 - **`routines.test.mjs`**: `cleanInput` accepts `agent-refresh` only from `createInternal`, with a team-agent slug and
   the agent home dir; the tool / editor can't set `kind`; the run creates the headless session without prompting it,
-  stores `jobId`, is skipped by the 30-min timeout, settles from `onJobTerminal` (done → report with Outcome lines; failed
-  → failed), and a boot with a terminal job settles it; an `agent-refresh` routine dispatches the Architect via
+  stores `jobId` + `submittedAt`, is skipped by the 30-min timeout, settles from `settleFromJob` (done → report with
+  Outcome lines; failed → failed; stopped → failed), `reconcileRun` with `jobId` never reads the session or prompts it
+  (running job → no-op; terminal → settled; missing → failed), an `agent-refresh` run without `jobId` is failed after 2 min
+  and never prompted; an `agent-refresh` routine dispatches the Architect via
   `agents.refresh` and never prompts the run session; its proposals are `pending` (`plan`) whatever the "Change an agent" level (Auto included); a refused
   dispatch ends the run `failed` with the sentence.
 - **Renderer**: question routing by id prefix (task vs session question) and a task refusal on the send-error line;
@@ -730,3 +778,29 @@ showing hand edits in History (needs file watching).
 13. **COULD — notes source.** **Applied** (cheap): injected `countProjectPages`, `null` fallback (§5.1).
 
 No finding was rejected. The OpenAI review (above) remains pending; a second review round is next.
+
+### Round 3 — Gemini 4 Argon (review2), verdicts (checked against the code at `ba05c45e`)
+
+Round 2 itself: 11 of 13 round-1 findings resolved; R1-4 and R1-6 partially, completed by the items below.
+
+1. **MUST — the ending gate vs the result post.** Confirmed: `finishV2Job` writes `completionDelivery: "pending"` and
+   then posts (`deliverJobResult`) and cleans up (`finishV2Cleanup`) in its tail; `continueRefusal` returns 409 on
+   `"pending"`. **Applied:** new `"deferred"` value when a continue-pending answer exists; the exact order (terminal write →
+   `onJobTerminal` → `notifyJobEnded` → `afterJobEnded` → `clearProgress` → `onRoundSettled` → post/cleanup only when not
+   continued); a refused continuation reopens the questions and falls back to posting the result and cleaning up; crash
+   recovery through the sweep (§4.3).
+2. **MUST — hook order and `stopJob`.** Confirmed: `finishV2Job` calls `onJobTerminal` before `notifyJobEnded`
+   (`agents.reconcile` runs in `onJobEnded`, Architect jobs only), and `stopJob` calls `notifyJobEnded` but never
+   `onJobTerminal`. **Applied:** a new `afterJobEnded` hook at the end of `notifyJobEnded`, unconditional, so it runs after
+   reconcile on both the finish and stop paths; `onJobTerminal` is not used (§5.4). The `reconcileRun` net (item 3)
+   settles any path that still slips through, so no run stays running.
+3. **MUST — `reconcileRun` resends the prompt.** Confirmed: with `submittedAt == null` and no user message it calls
+   `oc.sendPrompt` into the run session; a missing session fails the run. **Applied:** `reconcileRun` branches on
+   `run.jobId` before any session read (running → no-op, terminal → settle, missing → fail); `submittedAt` is persisted
+   with `jobId`; a refresh run without `jobId` is never prompted and fails after 2 min (§5.4).
+4. **SHOULD — `deliverResult:false` overwritten.** Confirmed: `finishV2Job` and `stopJob` both set
+   `completionDelivery: manta ? "pending" : null`. **Applied:** persisted on the record, inherited by continuations and
+   resume, respected by both terminal writes and by `stopJob`'s post (§5.4, §6.1).
+5. **COULD — stale duplicate bullet in §5.4.** Confirmed. **Applied:** deleted; its charter text kept as its own bullet.
+
+None rejected. The OpenAI review remains pending (above).
