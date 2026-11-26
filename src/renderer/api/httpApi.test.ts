@@ -814,16 +814,38 @@ describe("dispatchFrame records the run epoch (WS11 D11)", () => {
 // Agents Phase 4: the agent-change channels and the `agentChange` bus kind
 // ---------------------------------------------------------------------------
 
-describe("httpApi agent-change channels", () => {
+type ChannelCall = { name: string; call: () => Promise<unknown>; channel: string; args: unknown[] };
+
+/** One test pair per channel: it posts `{args}` to /rpc/<channel> and resolves with the answer; a refusal throws the box's sentence. */
+function channelTable(calls: ChannelCall[], answerFor: (c: ChannelCall) => unknown, refusal: string) {
   beforeEach(() => {
     mockLocalStorage["manta_server"] = "https://example.com";
     mockLocalStorage["manta_token"] = HEX32;
   });
+  for (const c of calls) {
+    it(`${c.name} posts to ${c.channel} and resolves with the answer`, async () => {
+      const answer = answerFor(c);
+      const fetchMock = stubFetch().mockImplementation(
+        async () => new Response(JSON.stringify({ result: answer }), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+      await expect(c.call()).resolves.toEqual(answer);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`https://example.com/rpc/${encodeURIComponent(c.channel)}`);
+      expect(JSON.parse(String(init.body))).toEqual({ args: c.args });
+    });
 
+    it(`${c.name} throws the box's sentence on a refusal`, async () => {
+      stubFetch().mockImplementation(async () => new Response(JSON.stringify({ error: refusal }), { status: 400 }));
+      await expect(c.call()).rejects.toThrow(refusal);
+    });
+  }
+}
+
+describe("httpApi agent-change channels", () => {
   const ok = (result: unknown) => async () =>
     new Response(JSON.stringify({ result }), { status: 200, headers: { "content-type": "application/json" } });
 
-  const calls: Array<{ name: string; call: () => Promise<unknown>; channel: string; args: unknown[] }> = [
+  const calls: ChannelCall[] = [
     {
       name: "agentsChangeFor",
       call: () => httpApi.agentsChangeFor({ sessionID: "ses_1", messageID: "msg_1", callID: "call_1" }),
@@ -836,22 +858,7 @@ describe("httpApi agent-change channels", () => {
     { name: "agentsChangesForJob", call: () => httpApi.agentsChangesForJob("job_1"), channel: "agents:changes-for-job", args: [{ jobId: "job_1" }] },
   ];
 
-  for (const c of calls) {
-    it(`${c.name} posts to ${c.channel} and resolves with the record`, async () => {
-      const fetchMock = stubFetch().mockImplementation(ok({ id: "ach_1", state: "applied" }));
-      await expect(c.call()).resolves.toEqual({ id: "ach_1", state: "applied" });
-      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe(`https://example.com/rpc/${encodeURIComponent(c.channel)}`);
-      expect(JSON.parse(String(init.body))).toEqual({ args: c.args });
-    });
-
-    it(`${c.name} throws the box's sentence on a refusal`, async () => {
-      stubFetch().mockImplementation(
-        async () => new Response(JSON.stringify({ error: "Changing agents is turned off in your autonomy settings" }), { status: 400 }),
-      );
-      await expect(c.call()).rejects.toThrow("Changing agents is turned off in your autonomy settings");
-    });
-  }
+  channelTable(calls, () => ({ id: "ach_1", state: "applied" }), "Changing agents is turned off in your autonomy settings");
 
   it("agentsChangeFor passes a missing record through as null", async () => {
     stubFetch().mockImplementation(ok(null));
@@ -876,15 +883,7 @@ describe("httpApi agent-change channels", () => {
 // ---------------------------------------------------------------------------
 
 describe("httpApi agent-screens channels", () => {
-  beforeEach(() => {
-    mockLocalStorage["manta_server"] = "https://example.com";
-    mockLocalStorage["manta_token"] = HEX32;
-  });
-
-  const ok = (result: unknown) => async () =>
-    new Response(JSON.stringify({ result }), { status: 200, headers: { "content-type": "application/json" } });
-
-  const calls: Array<{ name: string; call: () => Promise<unknown>; channel: string; args: unknown[] }> = [
+  const calls: ChannelCall[] = [
     { name: "agentsQuestions", call: () => httpApi.agentsQuestions({ sessionID: "ses_1" }), channel: "agents:questions", args: [{ sessionID: "ses_1" }] },
     { name: "agentsQuestions (all)", call: () => httpApi.agentsQuestions(), channel: "agents:questions", args: [{}] },
     {
@@ -924,20 +923,7 @@ describe("httpApi agent-screens channels", () => {
     { name: "agentsProjects", call: () => httpApi.agentsProjects(), channel: "agents:projects", args: [] },
   ];
 
-  for (const c of calls) {
-    it(`${c.name} posts to ${c.channel} and resolves with the answer`, async () => {
-      const fetchMock = stubFetch().mockImplementation(ok({ marker: c.name }));
-      await expect(c.call()).resolves.toEqual({ marker: c.name });
-      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe(`https://example.com/rpc/${encodeURIComponent(c.channel)}`);
-      expect(JSON.parse(String(init.body))).toEqual({ args: c.args });
-    });
-
-    it(`${c.name} throws the box's sentence on a refusal`, async () => {
-      stubFetch().mockImplementation(async () => new Response(JSON.stringify({ error: "Already sending your answer" }), { status: 400 }));
-      await expect(c.call()).rejects.toThrow("Already sending your answer");
-    });
-  }
+  channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");
 
   it("onTaskQuestion delivers a taskQuestion frame's payload and stops after unsubscribe", () => {
     const cb = vi.fn();
