@@ -586,7 +586,6 @@ test("fleet: launches are counted per ISO week by dispatch; last week is kept, o
     f.w.clock = T0 + 21 * DAY;
     await f.engine.dispatch(dispatchInput());
     const kept = Object.keys(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).counts);
-    assert.deepEqual(kept.sort(), ["2026-W48", "2026-W51"].slice(1).concat([]).length ? kept.sort() : kept, "shape check");
     assert.ok(kept.length <= 2, `only the current and previous week: ${kept}`);
     // a failed launch is not counted
     f.w.startResult = { ok: false, error: "busy" };
