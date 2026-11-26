@@ -515,6 +515,9 @@ test("hasOpen / openCountFor: open, delivering and continue-pending count; answe
   assert.equal(fresh.openCountFor("job1"), 1);
   assert.equal(fresh.openCountFor("r2"), 1, "an answer in flight still counts");
   assert.equal(fresh.openCountFor("r3"), 0, "openCountFor is the number of questions waiting for the user's answer");
+  assert.deepEqual(fresh.waitingFor("job1").map((q) => q.question), ["Create it?"], "waitingFor: the first question of each open card");
+  assert.deepEqual(fresh.waitingFor("r3"), [], "an answered one is not waiting");
+  assert.deepEqual(fresh.waitingFor("nope"), []);
   await r.cleanup();
 });
 

@@ -424,6 +424,16 @@ export function createTaskQuestions({
   /** How many questions of this task are waiting for the user (a card each). */
   const openCountFor = (rootJobId) => primeSync().filter((q) => q.rootJobId === rootJobId && q.state === "open").length;
 
+  /**
+   * The questions of this task still waiting for the user's answer — the first question of each card — as the result of a round that ended
+   * meanwhile says it ("Waiting for the user's answer to: …"). Synchronous: the delegate reads it while it writes the round's terminal state.
+   */
+  const waitingFor = (rootJobId) =>
+    primeSync()
+      .filter((q) => q.rootJobId === rootJobId && q.state === "open" && Array.isArray(q.questions) && q.questions[0])
+      .sort((a, b) => a.askedAt - b.askedAt)
+      .map((q) => structuredClone(q.questions[0]));
+
   // ---------------------------------------------------------------------------------------------------------------------
   // the ending gate's side (delegate.mjs runs the gate itself, under the session lock)
   // ---------------------------------------------------------------------------------------------------------------------
@@ -630,6 +640,7 @@ export function createTaskQuestions({
     listOpen,
     openCountFor,
     hasOpen,
+    waitingFor,
     onRoundSettled,
     sweep,
     // the ending gate's side of the store (delegate.mjs)

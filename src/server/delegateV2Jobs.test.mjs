@@ -2496,7 +2496,7 @@ test("autonomy: a specialist's denies are appended ONCE after the base (no quest
   assert.ok(job.launch.text.indexOf("## Your limits") > job.launch.text.indexOf("never touch any other checkout") || job.launch.text.indexOf("## Your limits") > job.launch.text.indexOf("Do not open pull requests"));
   assert.ok(job.launch.text.indexOf("## Your limits") < job.launch.text.indexOf("Time: this job is stopped"));
   // a specialist's endings send the question and the summary to its final message, before the report section
-  assert.match(job.launch.text, /use the\nquestion tool\. It ends your task and the lead puts the question to the user, so put\nwhat you found and what you recommend in the question itself\./);
+  assert.match(job.launch.text, /If you need the user to decide, use the question tool\. It returns at once\nwith a note that the question is waiting; keep working on what doesn't depend on the\nanswer\. The answer arrives later as a message from the user\. Put what you found and\nwhat you recommend in the question itself \(mark the option you recommend "\(Recommended\)"\)\./);
   assert.match(job.launch.text, /When you are done, write a short summary of what you changed and why\./);
   assert.deepEqual(job.projectPatterns, [], "no page entries: an empty snapshot");
 });
@@ -2860,7 +2860,7 @@ test("project actions: a RESUME (fresh child) reads the page again — new denie
   assert.deepEqual(w.calls.create.at(-1).permission, job.permission);
   assert.ok(bashDenies(job.permission).includes("make release") && !bashDenies(job.permission).includes("make ship"));
   assert.match(w.calls.send.at(-1).text, /`make release` \(Makefile\)/);
-  assert.match(w.calls.send.at(-1).text, /use the\nquestion tool\. It ends your task and the lead puts the question to the user, so put\nwhat you found and what you recommend in the question itself\./);
+  assert.match(w.calls.send.at(-1).text, /If you need the user to decide, use the question tool\. It returns at once\nwith a note that the question is waiting; keep working on what doesn't depend on the\nanswer\. The answer arrives later as a message from the user\. Put what you found and\nwhat you recommend in the question itself \(mark the option you recommend "\(Recommended\)"\)\./);
   assert.match(w.calls.send.at(-1).text, /When you are done, write a short summary/);
   assert.equal("projectPatterns" in res.job || "selfReport" in res.job || "basePermission" in res.job, false, "never on the wire");
 });
