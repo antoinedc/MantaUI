@@ -278,7 +278,7 @@ test("list: reserved folders are skipped, an invalid agent is listed with its er
     assert.equal(bySlug.empty.error, "agent.md is missing");
     assert.equal(bySlug.dev.builtIn, true);
     assert.equal(bySlug.dev.error, undefined);
-    assert.deepEqual(bySlug.scout, { slug: "scout", name: "Scout", description: "Looks things up.", isolation: "worktree", model: null, color: "#112233", builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null });
+    assert.deepEqual(bySlug.scout, { slug: "scout", name: "Scout", description: "Looks things up.", isolation: "worktree", model: null, color: "#112233", builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null, seats: [] });
     assert.ok(f.config.cfg.agent["agent-scout"], "the new valid agent was synced by the list call");
     assert.equal(f.config.cfg.agent["agent-broken"], undefined, "an invalid agent is never compiled");
     assert.equal(f.config.cfg.agent["agent-build"], undefined);
@@ -372,7 +372,7 @@ test("create: slug, files, compiled block; a collision numbers the slug; bad inp
   try {
     await f.engine.init();
     const info = await f.engine.create({ name: "Code Reviewer", description: "Reviews diffs.", isolation: "none" });
-    assert.deepEqual(info, { slug: "code-reviewer", name: "Code Reviewer", description: "Reviews diffs.", isolation: "none", model: null, color: null, builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null });
+    assert.deepEqual(info, { slug: "code-reviewer", name: "Code Reviewer", description: "Reviews diffs.", isolation: "none", model: null, color: null, builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null, seats: [] });
     assert.ok((await stat(join(f.root, "code-reviewer", "home"))).isDirectory());
     const parsed = parseAgentMd(await readFile(join(f.root, "code-reviewer", "agent.md"), "utf-8"));
     assert.equal(parsed.ok, true);

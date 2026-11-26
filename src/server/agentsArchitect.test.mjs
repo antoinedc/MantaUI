@@ -1849,10 +1849,11 @@ test("describeProposalOutcome: rolled back, not applied, failed and an applied c
 
 test("a question of the task still open (or being delivered, or answered but not yet sent) keeps the held proposals waiting for a click, whatever the level and mode", async () => {
   for (const [name, open] of [["open", true], ["resolved", false]]) {
-    const w = { open };
+    const w = { open: false };
     const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => w.open && root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
     try {
-      const id = await heldFor(f);
+      const id = await heldFor(f); // proposed before the question was asked
+      w.open = open;
       endJob(f, { status: "done" });
       await f.engine.reconcile();
       const r = await rec(f, id);
@@ -1868,9 +1869,11 @@ test("a question of the task still open (or being delivered, or answered but not
     }
   }
   // the root is the task's, not the round's: a later round of the same task is covered too
-  const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
+  let asked = false;
+  const f = await proposeFixture({ extra: { taskQuestions: { hasOpen: (root) => asked && root === "job1", openCountFor: () => 0, listOpen: async () => [] } } });
   try {
     const id = await heldFor(f);
+    asked = true;
     endJob(f, { status: "done", rootJobId: "job1" });
     await f.engine.reconcile();
     assert.equal((await rec(f, id)).reason, "unfinished");
