@@ -1396,9 +1396,20 @@ test("guard: no agent-design advice is written into Manta's or the Architect's b
   const toolDescription = tools.slice(from, tools.indexOf("input: input(", from));
   assert.ok(from > 0 && toolDescription.length > 200, "found the agent_change description");
   const read = (...p) => readFile(join(REAL_TEMPLATES, ...p), "utf-8");
+  // Architect v2: the Architect's own tools state mechanics (what is checked, what is limited), never what a good agent or a good test is
+  const descriptionOf = (name) => {
+    const at = tools.indexOf(`name: "${name}"`);
+    const text = tools.slice(at, tools.indexOf("input: input(", at));
+    assert.ok(at > 0 && text.length > 200, `found the ${name} description`);
+    return text;
+  };
   const surfaces = {
     "lead brief": buildLeadBrief({ body: "", roster: [] }),
     "agent_change tool description": toolDescription,
+    "agent_propose tool description": descriptionOf("agent_propose"),
+    "agent_trial tool description": descriptionOf("agent_trial"),
+    "agent_trial_wait tool description": descriptionOf("agent_trial_wait"),
+    "agent_trial_read tool description": descriptionOf("agent_trial_read"),
     "manta/agent.md": await read("manta", "agent.md"),
     "architect/agent.md": await read("architect", "agent.md"),
     "architect authoring skill": await read("architect", "skills", "authoring", "SKILL.md"),
@@ -1421,6 +1432,12 @@ test("guard: no agent-design advice is written into Manta's or the Architect's b
     /beats a rewrite/i,
     /earns the most/i,
     /generic skill bundles/i,
+    // Architect v2: no preference among the shapes, no rule about what a good case or a good trial is
+    /prefer(s|red)? (a|an|the) (new|existing|single|separate)/i,
+    /(best|right|ideal|good) (shape|case|trial|number of cases)/i,
+    /(always|usually|normally|generally) (choose|pick|prefer|create|extend)/i,
+    /cases? (should|must) (always )?(cover|include|test)/i,
+    /(edge|happy)[- ](case|path)/i,
   ];
   for (const [where, text] of Object.entries(surfaces)) {
     for (const re of denylist) assert.doesNotMatch(text, re, `${where}: ${re} is agent-design advice; it must come from the Architect's research, not from instructions`);

@@ -37,7 +37,7 @@ device.
    deployment you intend to commercialize — it disables the whole point of M1.
 
 3. **You need loopback access to the box** (SSH in, or a local shell). Minting a
-   pairing code is **local-only** by design: `GET /auth/pair` is rejected unless
+   pairing code is **local-only** by design: `POST /auth/pair` (header `X-Manta-Pair: 1`) is rejected unless
    the request originates from the box itself (loopback AND no proxy-injected
    `X-Forwarded-For`). This is what stops a remote attacker from minting a code
    and claiming the `box_token` in two requests. You cannot pair a device
@@ -64,7 +64,7 @@ Run the loopback pairing request **on the box** (the `manta pair` CLI does this;
 the equivalent raw call is a loopback curl):
 
 ```bash
-curl -s http://127.0.0.1:8787/auth/pair
+curl -s -X POST -H 'X-Manta-Pair: 1' http://127.0.0.1:8787/auth/pair
 # → {"pairing_code":"847291","box_id":"<32-hex>","expiresAt":<epoch-ms>}
 ```
 

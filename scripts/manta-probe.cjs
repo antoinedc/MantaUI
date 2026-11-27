@@ -180,12 +180,12 @@ async function main() {
       return;
     }
 
-    // Pair a phone or a Simulator. /auth/pair is loopback-only BY DESIGN, so
+    // Pair a phone or a Simulator. /auth/pair (POST, header X-Manta-Pair: 1) is loopback-only BY DESIGN, so
     // this must run ON the box — over ssh from a Mac, never against the public
     // hostname (which correctly answers 403).
     case "pair": {
       const { host } = auth();
-      const res = await fetch(`${BOX}/auth/pair`).catch((e) => die(`cannot reach ${BOX} (${e.message})`));
+      const res = await fetch(`${BOX}/auth/pair`, { method: "POST", headers: { "X-Manta-Pair": "1" } }).catch((e) => die(`cannot reach ${BOX} (${e.message})`));
       const body = await res.json().catch(() => die("pairing endpoint returned non-JSON"));
       if (!body.pairing_code) die(`no pairing code in response: ${JSON.stringify(body).slice(0, 200)}`);
       const url = host ? `https://${host}` : "(no gateway_host on this box)";
@@ -205,7 +205,7 @@ async function main() {
     // reached over its public gateway hostname. With `box=` alone the app
     // derives https://<boxId>.boxes.mantaui.com itself, which is what we want.
     case "pair-url": {
-      const res = await fetch(`${BOX}/auth/pair`).catch((e) => die(`cannot reach ${BOX} (${e.message})`));
+      const res = await fetch(`${BOX}/auth/pair`, { method: "POST", headers: { "X-Manta-Pair": "1" } }).catch((e) => die(`cannot reach ${BOX} (${e.message})`));
       const body = await res.json().catch(() => die("pairing endpoint returned non-JSON"));
       if (!body.pairing_code || !body.box_id) {
         die(`unexpected pairing response: ${JSON.stringify(body).slice(0, 200)}`);

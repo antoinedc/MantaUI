@@ -366,6 +366,16 @@ test("every refusal carries the work class; unknown work types are refused as un
   assert.equal(WORK_CLASS["knowledge-trial"], "batch");
 });
 
+test("an Architect's trial run (agent-trial) is a known work type: continuous (a person asked for it), priced as balanced, and booked like any other", async () => {
+  assert.equal(WORK_CLASS["agent-trial"], "continuous");
+  assert.equal(WORK_BANDS["agent-trial"], "balanced");
+  const r = rig({ bw: { level: "off" } });
+  await r.b.check({ workType: "agent-trial", model: OPUS });
+  r.b.flushEvidence();
+  const row = r.logs.find((l) => l.type === "refused");
+  assert.deepEqual([row.workType, row.reason, row.class], ["agent-trial", "off", "continuous"], "refused for the setting, not as an unknown type");
+});
+
 // ---- decision rules: pay-per-token ----
 
 const OR = { providerID: "openrouter", modelID: "x" };

@@ -18,9 +18,11 @@ import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import fsPromises from "node:fs/promises";
 import YAML from "yaml";
+import { diff3Merge } from "node-diff3";
+import { draftHash, differingFiles } from "./agentTrials.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
-import { LEAD_SLUG, ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
+import { LEAD_SLUG, ARCHITECT_SLUG, ARCHITECT_TRIAL_TOOLS, TRIAL_BLOCK_RE, isTeamAgent } from "../shared/agentsShared.mjs";
 import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
 import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals, CREDENTIAL_HINT } from "../shared/architectSources.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
@@ -75,6 +77,17 @@ const CHANGES_FILE = ".changes.json";
 const UNFINISHED_CREATE_NOTICE = "An interrupted create left this folder; check it and delete .claim";
 const CLAIM_FILE = ".claim"; // a create in progress owns its folder through this marker (the change id); a reserved name
 const SNAPSHOT_MAX = 64 * 1024;
+
+// Architect v2 (docs/superpowers/specs/2026-11-27-architect-v2.md): template upgrades (§2) and bundle snapshots (§4.1).
+const BASE_DIR = ".base"; // the shipped files an agent folder was last in step with (three-way merge base)
+const BLOBS_DIR = ".blobs"; // content-addressed copies of the files a change record names, `.blobs/<sha256>`
+const TEMPLATE_HISTORY_FILE = ".history.json";
+const BLOB_GRACE_MS = 10 * 60_000; // a blob younger than this may belong to a record not saved yet
+const SPACE_ROOTS = ["agent.md", "skills", "learned"]; // what a snapshot of an agent covers
+const SPACE_MAX_FILES = 300;
+const SPACE_FILE_MAX = 256 * 1024;
+const SPACE_TOTAL_MAX = 4 * 1024 * 1024;
+export const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
 
 // Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md): Manta creates and edits agents.
 export const INSTRUCTIONS_MAX = 12_000;
@@ -524,6 +537,79 @@ export function editAgentMd(before, fields, name = "The agent") {
   return { ok: true, after, meta: parsed.meta, base: base.meta };
 }
 
+/**
+ * Three-way merge of a built-in's `agent.md` (Architect v2 §2). `live` is the file on the box, `base` the shipped version it
+ * came from, `next` the new shipped version. Frontmatter is merged key by key (a key the user changed stays; a key only the
+ * template changed is taken; both changed differently is a conflict), the body line by line with `node-diff3`. The result must
+ * be a valid agent file. `{ conflict, text }`: clean → the merged file; conflict → the card text: the shipped body with the
+ * user's frontmatter keys (the shipped file itself when the files can't be read as agent files).
+ */
+export function mergeAgentMd({ live, base = null, next }) {
+  const L = splitFrontmatter(live);
+  const B = base == null ? null : splitFrontmatter(base);
+  const N = splitFrontmatter(next);
+  if (!L || !N || (base != null && !B)) return { conflict: true, text: next };
+  let ld;
+  let bd;
+  let nd;
+  let doc;
+  try {
+    [ld, nd] = [YAML.parse(L.yaml), YAML.parse(N.yaml)];
+    bd = B ? YAML.parse(B.yaml) : null;
+    doc = YAML.parseDocument(L.yaml);
+  } catch {
+    return { conflict: true, text: next };
+  }
+  const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
+  if (!plain(ld) || !plain(nd) || (B && !plain(bd)) || doc.errors.length > 0 || !YAML.isMap(doc.contents)) return { conflict: true, text: next };
+  // no base copy: nothing says which keys the user changed, so every key they have is theirs and the body is the shipped one
+  let conflict = !B;
+  for (const k of new Set([...Object.keys(nd), ...Object.keys(ld)])) {
+    const [lv, nv] = [ld[k], nd[k]];
+    let pick;
+    if (!B) pick = Object.hasOwn(ld, k) ? lv : nv;
+    else if (isDeepStrictEqual(lv, bd[k])) pick = nv;
+    else if (isDeepStrictEqual(nv, bd[k]) || isDeepStrictEqual(lv, nv)) pick = lv;
+    else {
+      conflict = true;
+      pick = lv; // the user's key wins on the card
+    }
+    if (isDeepStrictEqual(pick, lv)) continue;
+    if (pick === undefined) doc.delete(k);
+    else doc.set(k, doc.createNode(pick));
+  }
+  const merged = B ? mergeLines(L.body, B.body, N.body) : { ok: false };
+  if (!merged.ok) conflict = true;
+  const body = merged.ok ? merged.text : N.body;
+  const text = `---\n${doc.toString({ lineWidth: 0 }).replace(/\n+$/, "")}\n---\n${body}\n`;
+  if (!parseAgentMd(text).ok) return { conflict: true, text: next };
+  return { conflict, text };
+}
+
+/** Line-level three-way merge: `{ ok: true, text }`, or `{ ok: false }` when both sides changed the same lines differently. */
+export function mergeLines(live, base, next) {
+  const parts = diff3Merge(String(live).split("\n"), String(base).split("\n"), String(next).split("\n"));
+  if (parts.some((p) => p.conflict)) return { ok: false };
+  return { ok: true, text: parts.flatMap((p) => p.ok ?? []).join("\n") };
+}
+
+/** A skill's `{ name, description }` from its SKILL.md frontmatter (a skill with broken frontmatter keeps its folder name). */
+function skillHeaderOf(text, fallback) {
+  let name = fallback;
+  let description = "";
+  const front = splitFrontmatter(text);
+  if (front) {
+    try {
+      const data = YAML.parse(front.yaml);
+      if (typeof data?.name === "string" && data.name.trim()) name = data.name.trim();
+      if (typeof data?.description === "string") description = data.description.trim().replace(/\s+/g, " ");
+    } catch {
+      /* keeps the folder name */
+    }
+  }
+  return { name, description };
+}
+
 /** Does the running tool call's input equal what the tool posted? Exact field presence: an omitted field is not null. */
 function changeInputMatches(given, b) {
   for (const k of ["action", "agent", "draft"]) {
@@ -563,7 +649,7 @@ export function compileAgentPrompt({ body, skills = [] }) {
 // What the Architect may do when OpenCode invokes it natively (its own agent picker, a `task` call naming it) and no job
 // stamp vouches for the call: read and search, nothing else. The catch-all deny is FIRST (insertion order is rule order,
 // last match wins; proved on the pinned binary by scripts/opencode-v2/autonomy-rules.e2e.mjs).
-const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch", "todowrite", "progress_report", ...SPECIALIST_RESEARCH_TOOLS, "agent_propose"];
+const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch", "todowrite", "progress_report", ...SPECIALIST_RESEARCH_TOOLS, ...ARCHITECT_TRIAL_TOOLS, "agent_propose"];
 export function ARCHITECT_BLOCK_PERMISSION(dir, home = homedir()) {
   return {
     "*": "deny",
@@ -716,9 +802,9 @@ const MECHANICS = [
   `- When a result carries a "${DECISION_MARKER}" block (written by the server), that task ended because it needs the user's decision. Put it to the user yourself in ONE question call, all the questions of that turn at once, with the recommended option first, using the block's options; if it says "Concern:", state that concern plainly. Never answer it on the user's behalf, and don't pick an option because you agree. Once the user answers, send the answer back to the same task with \`agent_handoff\` and \`continueJob: <jobId>\`.`,
   "- A teammate's question is shown to the user as a card in this chat; never ask it again or answer it. The server sends the answer to the task.",
   "- In plan mode, don't hand off code changes; propose them.",
-  "- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself only for small edits the user dictates, or when @architect is not on the team; never because a handoff to @architect was refused: then tell the user plainly that it didn't start and why, and stop. Don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards. When you draft an agent yourself, write what the user asked for; make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
+  "- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself only for small edits the user dictates, or when @architect is not on the team; never because a handoff to @architect was refused: then tell the user plainly that it didn't start and why, and stop. Don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards. When you draft an agent yourself, write what the user asked for; make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created. The charter you hand @architect quotes the user's request word for word under \"The user's words\" and states the problem it solves; a role name the user used is part of their words, not a decision.",
   "- When a \"Routing note\" line in your team section says an agent's routing line mentions an agent that doesn't exist, tell the user in one line and offer to fix it: a small edit they dictate (`agent_change`), or a rework through @architect. Never change an agent until the user says so.",
-  "- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card.",
+  "- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card. `Outcome: No change was proposed.` means the Architect decided no change was needed: say so and give its reason from its result.",
 ].join("\n");
 
 /** " Based on: <topic> (N sources, saved D days ago); …." — what the fit check rested on, so the user sees it; "" for an older record. */
@@ -730,6 +816,9 @@ function basisSentence(rec) {
   const thin = rec.basisThin === true ? " The evidence was thin and you were asked, so you decided on incomplete evidence." : "";
   return ` Based on: ${items.join("; ")}.${thin}`;
 }
+
+/** The server's one sentence for an Architect task that finished and proposed nothing (the lead relays it, the user reads why in the task's result). */
+export const NO_CHANGE_OUTCOME = "Outcome: No change was proposed.";
 
 const OUTCOME_WAIT_REASONS = {
   plan: "it was proposed in plan mode",
@@ -907,6 +996,7 @@ async function readJsonOptional(fs, path) {
  * @param {()=>Promise<string[]>} [deps.listApprovedModels]  the Sub-approved models as `provider/model` keys; throws (or is empty) when they can't be checked
  * @param {object} [deps.research]      { getSource(childSessionID, sourceId) → {text,url,finalUrl,private}|null } — the Architect's stored sources (Phase 5A)
  * @param {object} [deps.library]       { lookup({project, refs}) → [{ref, entry|null}], usedBy(rootJobId) } — the research library, read by the server to check what a fit check rests on
+ * @param {object} [deps.trials]        { get(id) → trial|null, transcript(id, caseName) → text|null, activeTrialKeys() → Set<string> } — Architect v2 trial runs (src/server/agentTrials.mjs)
  * @param {(p:{id:string,sessionID:string,slug:string|null,origin:object})=>void} [deps.publish]  (as above; the payload carries the change's origin)
  */
 export function createAgentsEngine({
@@ -931,6 +1021,7 @@ export function createAgentsEngine({
   research = null,
   library = null,
   taskQuestions = null, // agent screens: the open questions of tasks (`hasOpen`, `listOpen`, `openCountFor`, `answer`, `dismiss`)
+  trials = null, // Architect v2: the trials module (`get(id)`, `transcript(id, case)`, `activeTrialKeys()`) — built after this engine, read at call time
   countProjectPages = null, // (projectSlug) → knowledge pages of that project (a count only); slow or failing reads as unknown
   countTimeoutMs = 500,
   sharingOf = null, // (projectSlug) → "share-and-read" | "read-only" | "private": what a seat's memory scope reads
@@ -1024,19 +1115,7 @@ export function createAgentsEngine({
         continue;
       }
       stamp += `|${file}:${mtime}`;
-      let name = dirName;
-      let description = "";
-      const front = splitFrontmatter(text);
-      if (front) {
-        try {
-          const data = YAML.parse(front.yaml);
-          if (typeof data?.name === "string" && data.name.trim()) name = data.name.trim();
-          if (typeof data?.description === "string") description = data.description.trim().replace(/\s+/g, " ");
-        } catch {
-          /* a skill with broken frontmatter keeps its folder name */
-        }
-      }
-      out.push({ name, description, path: file });
+      out.push({ ...skillHeaderOf(text, dirName), path: file });
     }
     return { skills: out, stamp };
   }
@@ -1173,6 +1252,12 @@ export function createAgentsEngine({
       for (const key of installed) {
         if (!desired.has(key) && cfg?.agent?.[key] !== undefined) edits.push({ path: ["agent", key], value: undefined });
       }
+      // a trial's temporary block (`agent-trial-tr_<hex>`: a slug has no underscore, so no user's agent matches) lives only while
+      // the trials module says its trial is live; any other one — a crash left it — goes
+      const liveTrials = new Set(trials?.activeTrialKeys?.() ?? []);
+      for (const key of Object.keys(cfg?.agent ?? {})) {
+        if (TRIAL_BLOCK_RE.test(key) && !liveTrials.has(key) && !desired.has(key)) edits.push({ path: ["agent", key], value: undefined });
+      }
       // the config as it is now, for every block this call is about to change
       for (const e of edits) undo?.config.push({ path: e.path, value: cfg?.agent?.[e.path[1]] === undefined ? undefined : structuredClone(cfg.agent[e.path[1]]) });
       return edits;
@@ -1194,15 +1279,446 @@ export function createAgentsEngine({
     return { entries };
   }
 
-  /** Copy the built-in agents that this box does not have yet. Never overwrites a folder (user edits win). */
+  // ---- snapshots of an agent's folder: files in `.blobs/<sha256>`, maps `{ path: sha256 }` on the change record (§4.1) ----
+
+  const blobsDir = join(root, BLOBS_DIR);
+  const safeRel = (rel) => typeof rel === "string" && rel !== "" && !rel.startsWith("/") && !rel.includes("\0") && rel.split("/").every((s) => s !== "" && s !== "." && s !== "..");
+  const hashesOf = (files) => Object.fromEntries([...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([rel, buf]) => [rel, sha256Hex(buf)]));
+
+  /** What a snapshot covers: `agent.md`, `skills/**`, `learned/**` as `Map<path, Buffer>`; null when anything is a link, too big or too many. */
+  async function readSpace(dir) {
+    const files = new Map();
+    let total = 0;
+    const visit = async (rel) => {
+      let st;
+      try {
+        st = await fs.lstat(join(dir, rel));
+      } catch (e) {
+        return e?.code === "ENOENT";
+      }
+      if (st.isSymbolicLink()) return false;
+      if (st.isDirectory()) {
+        if (rel === "agent.md") return false;
+        let names;
+        try {
+          names = (await fs.readdir(join(dir, rel))).sort();
+        } catch {
+          return false;
+        }
+        for (const n of names) if (!(await visit(`${rel}/${n}`))) return false;
+        return true;
+      }
+      if (!st.isFile() || st.size > SPACE_FILE_MAX || files.size >= SPACE_MAX_FILES) return false;
+      total += st.size;
+      if (total > SPACE_TOTAL_MAX) return false;
+      files.set(rel, await fs.readFile(join(dir, rel)));
+      return true;
+    };
+    for (const r of SPACE_ROOTS) if (!(await visit(r))) return null;
+    return files;
+  }
+
+  /** A folder tree as `Map<path, Buffer>` (plain files only); null when it holds a link or is too big. A missing folder is empty. */
+  async function readTree(base, { skipDot = false } = {}) {
+    const files = new Map();
+    const visit = async (rel) => {
+      let st;
+      try {
+        st = await fs.lstat(rel ? join(base, rel) : base);
+      } catch (e) {
+        return e?.code === "ENOENT" || e?.code === "ENOTDIR";
+      }
+      if (st.isSymbolicLink()) return false;
+      if (st.isDirectory()) {
+        for (const n of (await fs.readdir(rel ? join(base, rel) : base)).sort()) {
+          if (skipDot && n.startsWith(".")) continue;
+          if (!(await visit(rel ? `${rel}/${n}` : n))) return false;
+        }
+        return true;
+      }
+      if (!st.isFile() || st.size > SPACE_FILE_MAX || files.size >= SPACE_MAX_FILES) return false;
+      files.set(rel, await fs.readFile(join(base, rel)));
+      return true;
+    };
+    return (await visit("")) ? files : null;
+  }
+
+  async function putBlob(buf) {
+    const hash = sha256Hex(buf);
+    if (await getBlob(hash)) return hash;
+    await fs.mkdir(blobsDir, { recursive: true });
+    await writeFileAtomic(join(blobsDir, hash), buf);
+    return hash;
+  }
+
+  async function getBlob(hash) {
+    if (typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) return null;
+    try {
+      const buf = await fs.readFile(join(blobsDir, hash));
+      return sha256Hex(buf) === hash ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function putBlobs(files) {
+    for (const buf of files.values()) await putBlob(buf);
+  }
+
+  /**
+   * Move an agent's folder from the file set `from` to `to` (`{ path: sha256 }` maps over agent.md + skills + learned). Every
+   * file must be exactly what `from` says, or nothing is touched: `{ conflict: true }`. A write that fails is put back and thrown.
+   */
+  async function transitionSpace(dir, from, to) {
+    const cur = await readSpace(dir);
+    if (!cur) return { conflict: true };
+    const now0 = hashesOf(cur);
+    for (const p of new Set([...Object.keys(now0), ...Object.keys(from), ...Object.keys(to)])) {
+      if ((now0[p] ?? null) !== (from[p] ?? null)) return { conflict: true };
+    }
+    const wanted = new Map();
+    for (const [p, h] of Object.entries(to)) {
+      if (!safeRel(p)) return { conflict: true };
+      if (now0[p] === h) continue;
+      const blob = await getBlob(h);
+      if (!blob) return { conflict: true };
+      wanted.set(p, blob);
+    }
+    const touched = []; // [path, what it held before]
+    try {
+      for (const [p, blob] of wanted) {
+        await fs.mkdir(join(dir, p, ".."), { recursive: true });
+        touched.push([p, cur.get(p) ?? null]);
+        await writeFileAtomic(join(dir, p), blob);
+      }
+      for (const p of Object.keys(now0)) {
+        if (p in to) continue;
+        touched.push([p, cur.get(p)]);
+        await fs.unlink(join(dir, p));
+      }
+    } catch (e) {
+      for (const [p, prev] of touched.reverse()) {
+        try {
+          if (prev === null) await fs.rm(join(dir, p), { force: true });
+          else {
+            await fs.mkdir(join(dir, p, ".."), { recursive: true });
+            await writeFileAtomic(join(dir, p), prev);
+          }
+        } catch {
+          /* best effort: the record says what was expected */
+        }
+      }
+      throw writeFailed(e);
+    }
+    // a removed skill leaves empty folders behind: take them away, innermost first
+    for (const p of Object.keys(now0).filter((x) => !(x in to))) {
+      for (let d = join(p, ".."); d !== "." && d !== "skills" && d !== "learned"; d = join(d, "..")) {
+        try {
+          await fs.rmdir(join(dir, d));
+        } catch {
+          break;
+        }
+      }
+    }
+    return { ok: true };
+  }
+
+  /** Does the agent's folder hold exactly the files of `bundle` right now? */
+  async function spaceIs(dir, bundle) {
+    const cur = await readSpace(dir);
+    return !!cur && isDeepStrictEqual(hashesOf(cur), bundle);
+  }
+
+  /** `.base/` becomes `files` (`Map<path, Buffer>`), or goes away for null. Bookkeeping: a problem is logged, never thrown. */
+  async function writeBase(dir, files) {
+    const base = join(dir, BASE_DIR);
+    try {
+      const st = await fs.lstat(base).catch(() => null);
+      if (st && !st.isDirectory()) return; // not ours to replace
+      if (st) await fs.rm(base, { recursive: true, force: true });
+      for (const [p, buf] of files ?? []) {
+        if (!safeRel(p)) continue;
+        await fs.mkdir(join(base, p, ".."), { recursive: true });
+        await fs.writeFile(join(base, p), buf);
+      }
+    } catch (e) {
+      log.warn?.(`[agents] couldn't update ${BASE_DIR} of ${dir}: ${e?.message ?? e}`);
+    }
+  }
+
+  /** The same from a record's `{ path: sha256 }` map (or null); a missing copy leaves `.base/` as it was. */
+  async function setBase(dir, map) {
+    const files = new Map();
+    for (const [p, h] of Object.entries(map ?? {})) {
+      const blob = await getBlob(h);
+      if (!blob) return log.warn?.(`[agents] couldn't restore ${BASE_DIR}/${p} of ${dir}: its copy is missing`);
+      files.set(p, blob);
+    }
+    await writeBase(dir, map ? files : null);
+  }
+
+  /** Blobs no record names and that are older than the grace period are deleted. The caller holds `syncLock`. */
+  async function sweepBlobsLocked() {
+    let names;
+    try {
+      names = await fs.readdir(blobsDir);
+    } catch {
+      return;
+    }
+    if (names.length === 0) return;
+    let store;
+    try {
+      store = await readStore({ strict: true });
+    } catch {
+      return; // an unreadable store keeps every blob
+    }
+    const used = new Set();
+    for (const r of store.changes) for (const m of [r.beforeBundle, r.afterBundle, r.baseBefore, r.baseAfter]) for (const h of Object.values(m ?? {})) used.add(h);
+    for (const n of names) {
+      if (used.has(n)) continue;
+      try {
+        const st = await fs.lstat(join(blobsDir, n));
+        if (st.isFile() && now() - st.mtimeMs > BLOB_GRACE_MS) await fs.unlink(join(blobsDir, n));
+      } catch {
+        /* gone already */
+      }
+    }
+  }
+
+  /**
+   * `rec` (an update of an existing agent) gains the snapshots of its folder before and after: `beforeBundle` / `afterBundle`
+   * (agent.md + skills + learned as `{ path: sha256 }`, `after` = `before` with `rec.after` as agent.md) and their blobs.
+   * Left without them when the folder can't be snapshotted (a link, too big): the agent.md-string path then applies.
+   */
+  async function attachBundles(rec, dir = folderOf(rec.slug)) {
+    const files = await readSpace(dir).catch(() => null);
+    if (!files || !files.has("agent.md")) return rec;
+    const after = new Map(files).set("agent.md", Buffer.from(rec.after, "utf-8"));
+    try {
+      await putBlobs(files);
+      await putBlobs(after);
+    } catch (e) {
+      log.warn?.(`[agents] couldn't snapshot ${rec.slug}: ${e?.message ?? e}`);
+      return rec;
+    }
+    rec.beforeBundle = hashesOf(files);
+    rec.afterBundle = hashesOf(after);
+    return rec;
+  }
+
+  const hasBundles = (rec) => !!rec.beforeBundle && !!rec.afterBundle;
+  /** Is the agent as the record's `before` (or `after`) says: every file of its bundle, else the agent.md text? */
+  async function isAt(rec, which) {
+    if (hasBundles(rec)) return spaceIs(folderOf(rec.slug), which === "before" ? rec.beforeBundle : rec.afterBundle);
+    const snap = await readAgentSnapshot(rec.slug);
+    return !!snap && snap.text === rec[which];
+  }
+
+  // ---- built-in templates reach existing boxes (§2) ----
+
+  const roleOfText = (text) => {
+    try {
+      const role = YAML.parse(splitFrontmatter(text)?.yaml ?? "")?.role;
+      return typeof role === "string" && role.trim() ? role.trim() : "specialist";
+    } catch {
+      return "specialist";
+    }
+  };
+  const isShipped = (rel) => rel === "agent.md" || rel.startsWith("skills/");
+  const sameBuf = (a, b) => !!a && !!b && Buffer.compare(a, b) === 0;
+
+  /**
+   * What upgrading one built-in would do, from the files alone (no lock, nothing written except a base copy that was missing):
+   * `null` (nothing to do or not ours), or `{ slug, name, writes, removes, conflict, shipped, baseFiles, templateHash, before, after }`.
+   * Per file, with `live` on the box, `base` the shipped copy it came from (`.base/`, or the template's only version) and `next`
+   * the new one: equal → nothing; live is any version ever shipped → replace; base unknown → conflict; template unchanged →
+   * keep the user's file; else a three-way merge.
+   */
+  async function planTemplateUpgrade(slug) {
+    const tdir = join(templatesDir, slug);
+    const dir = folderOf(slug);
+    const shipped = await readTree(tdir, { skipDot: true });
+    if (!shipped?.has("agent.md")) return null;
+    for (const rel of [...shipped.keys()]) if (!isShipped(rel)) shipped.delete(rel);
+    const history = parseJsonOrNull(await readOptional(fs, join(tdir, TEMPLATE_HISTORY_FILE))) ?? {};
+    const st = await fs.lstat(dir).catch(() => null);
+    if (!st?.isDirectory() || (await exists(fs, join(dir, CLAIM_FILE)))) return null;
+    const space = await readSpace(dir);
+    if (!space) {
+      log.warn?.(`[agents] ${slug} can't be upgraded: its folder holds a link or is too big`);
+      return null;
+    }
+    const baseFiles = (await readTree(join(dir, BASE_DIR))) ?? new Map();
+    const hadBase = [...baseFiles.keys()].some(isShipped);
+    const wasShipped = (rel, buf) => Array.isArray(history[rel]) && history[rel].includes(sha256Hex(buf));
+    const liveMd = space.get("agent.md");
+    // a folder that only shares the built-in's name (another role, nothing of ours in it) is somebody else's agent
+    if (!hadBase && liveMd && !wasShipped("agent.md", liveMd) && roleOfText(liveMd.toString("utf-8")) !== roleOfText(shipped.get("agent.md").toString("utf-8"))) return null;
+
+    const writes = new Map();
+    const removes = new Set();
+    let conflict = false;
+    for (const rel of new Set([...shipped.keys(), ...[...baseFiles.keys()].filter(isShipped)])) {
+      const live = space.get(rel) ?? null;
+      const next = shipped.get(rel) ?? null;
+      let base = baseFiles.get(rel) ?? null;
+      // a template that has only ever had one version: the base is known even without a copy
+      if (!base && next && Array.isArray(history[rel]) && history[rel].length === 1 && sha256Hex(next) === history[rel][0]) base = next;
+      if (!next) {
+        // dropped by the template: removed only while the box's copy is untouched
+        if (live && (sameBuf(live, base) || wasShipped(rel, live))) removes.add(rel);
+        continue;
+      }
+      if (!live) {
+        if (!(baseFiles.has(rel) && sameBuf(base, next))) writes.set(rel, next); // a file deleted by the user stays deleted until the template changes it
+        continue;
+      }
+      if (sameBuf(live, next)) continue;
+      if (wasShipped(rel, live) || sameBuf(live, base)) {
+        writes.set(rel, next);
+        continue;
+      }
+      if (!base) {
+        conflict = true;
+        writes.set(rel, rel === "agent.md" ? Buffer.from(mergeAgentMd({ live: live.toString("utf-8"), next: next.toString("utf-8") }).text, "utf-8") : next);
+        continue;
+      }
+      if (sameBuf(base, next)) continue; // the template didn't change this file: the user's edit stands
+      if (rel === "agent.md") {
+        const m = mergeAgentMd({ live: live.toString("utf-8"), base: base.toString("utf-8"), next: next.toString("utf-8") });
+        if (m.conflict) conflict = true;
+        writes.set(rel, Buffer.from(m.text, "utf-8"));
+        continue;
+      }
+      const m = mergeLines(live.toString("utf-8"), base.toString("utf-8"), next.toString("utf-8"));
+      if (!m.ok) conflict = true;
+      writes.set(rel, m.ok ? Buffer.from(m.text, "utf-8") : next);
+    }
+    // an Architect file stays subject to the Architect's own source checks: the merged result may keep the user's sources, but one that
+    // is invalid or seems to hold a credential is never written by an upgrade — it waits for a click
+    if (writes.has("agent.md")) {
+      const merged = parseAgentMd(writes.get("agent.md").toString("utf-8"));
+      if (merged.ok && merged.meta.role === "architect" && ((merged.meta.sourceNotes ?? []).length > 0 || (await checkSourceCredentials(merged.meta.sources ?? [])))) conflict = true;
+    }
+    // no base copy and no conflict card to make: the user's file is a rewrite of the template's own only version — just remember it
+    if (writes.size === 0 && removes.size === 0 && !conflict) {
+      const same = hadBase && [...shipped].every(([rel, buf]) => sameBuf(baseFiles.get(rel), buf));
+      if (!same) {
+        await writeBase(dir, shipped);
+      }
+      return null;
+    }
+    // the conflict card of an agent.md that couldn't be merged (conflict above wrote the shipped body with the user's keys)
+    const after = new Map(space);
+    for (const [rel, buf] of writes) after.set(rel, buf);
+    for (const rel of removes) after.delete(rel);
+    const text = (m) => m?.get("agent.md")?.toString("utf-8") ?? "";
+    const meta = parseAgentMd(text(space));
+    return {
+      slug,
+      dir,
+      name: meta.ok ? meta.meta.name : slug,
+      writes,
+      removes,
+      conflict,
+      shipped,
+      baseFiles,
+      space,
+      after,
+      templateHash: draftHash(Object.fromEntries([...shipped].map(([rel, buf]) => [rel, buf.toString("utf-8")]))),
+      before: text(space),
+      afterText: text(after),
+    };
+  }
+
+  /**
+   * Boot only (`init()`): every built-in whose shipped files moved on gets ONE change record. A clean upgrade is applied at once
+   * (Undo on the card) whatever the user's "Change an agent" level: that setting governs agents changing agents, and a shipped
+   * template is a Manta release the user already took. Only a merge conflict waits for a click. A shipped bundle that already has a record (any state but expired) is not offered again. Returns the records made.
+   */
+  async function upgradeBuiltIns() {
+    const made = [];
+    for (const slug of [...(await builtInSlugs())].sort()) {
+      try {
+        const plan = await planTemplateUpgrade(slug);
+        if (!plan) continue;
+        const rec = await syncLock.runExclusive(async () => {
+          const store = await readStore({ strict: true });
+          if (store.changes.some((r) => r.origin?.kind === "template-update" && r.slug === slug && r.origin.templateHash === plan.templateHash && r.state !== "expired")) return null;
+          const files = plan.space;
+          await putBlobs(files);
+          await putBlobs(plan.after);
+          await putBlobs(plan.shipped);
+          const baseNow = new Map([...plan.baseFiles].filter(([rel]) => isShipped(rel)));
+          await putBlobs(baseNow);
+          const r = normalizeRecord({
+            id: `ach_${randomBytes(8).toString("hex")}`,
+            kind: "update",
+            slug,
+            agentName: plan.name,
+            sessionID: "",
+            messageID: "",
+            callID: "",
+            state: "pending",
+            needsClick: false,
+            reason: null,
+            before: plan.before,
+            after: plan.afterText,
+            createdAt: now(),
+            decidedAt: null,
+            error: null,
+            origin: { kind: "template-update", templateHash: plan.templateHash },
+            summary: plan.conflict
+              ? `A new version of the built-in ${plan.name} conflicts with your edits: applying keeps your settings and uses the new instructions`
+              : `A new version of the built-in ${plan.name}`,
+            beforeBundle: hashesOf(files),
+            afterBundle: hashesOf(plan.after),
+            baseBefore: baseNow.size > 0 ? hashesOf(baseNow) : null,
+            baseAfter: hashesOf(plan.shipped),
+          });
+          if (plan.conflict) {
+            r.needsClick = true;
+            r.reason = "ask";
+          } else {
+            try {
+              await applyLocked(r, "auto");
+            } catch (e) {
+              if (!(e instanceof AgentError)) throw e;
+              // the write failed and nothing was kept: the user can retry it from the card
+              r.state = "pending";
+              r.needsClick = true;
+              r.reason = "ask";
+              r.error = e.message;
+            }
+          }
+          await saveRecord(r);
+          return r;
+        });
+        if (rec) {
+          made.push(rec);
+          publishChange(rec);
+        }
+      } catch (e) {
+        log.warn?.(`[agents] couldn't upgrade @${slug}: ${e?.message ?? e}`);
+      }
+    }
+    return made;
+  }
+
+  /** Copy the built-in agents that this box does not have yet (and their `.base/` copy). Never overwrites a folder (user edits win). */
   async function installBuiltIns() {
     await fs.mkdir(root, { recursive: true });
     const installed = [];
     for (const slug of await builtInSlugs()) {
       const target = join(root, slug);
       if (await exists(fs, target)) continue;
-      await fs.cp(join(templatesDir, slug), target, { recursive: true });
+      await fs.cp(join(templatesDir, slug), target, { recursive: true, filter: (src) => !src.endsWith(`/${TEMPLATE_HISTORY_FILE}`) });
       await fs.mkdir(join(target, "home"), { recursive: true });
+      const shipped = await readTree(join(templatesDir, slug), { skipDot: true });
+      if (shipped) {
+        for (const rel of [...shipped.keys()]) if (!isShipped(rel)) shipped.delete(rel);
+        await writeBase(target, shipped);
+      }
       installed.push(slug);
     }
     return installed;
@@ -1213,6 +1729,8 @@ export function createAgentsEngine({
     const installed = await installBuiltIns();
     // an interrupted write is finished (or undone) BEFORE the first ordinary sync, which treats a claimed folder as a problem
     await recover();
+    // new shipped versions of the built-ins: once per boot, never from sync() (which runs from list() and mid-activation)
+    await upgradeBuiltIns();
     await sync();
     await reconcile();
     return { installed };
@@ -1749,7 +2267,7 @@ export function createAgentsEngine({
 
   // What leaves the box: the contract's fields only (the journal's bookkeeping stays here).
   // eslint-disable-next-line no-unused-vars
-  const wire = ({ prior, invocation, claimed, target, raisesIsolation, ...r }) => clone(r);
+  const wire = ({ prior, invocation, claimed, target, raisesIsolation, beforeBundle, afterBundle, baseBefore, baseAfter, ...r }) => clone(r);
 
   /**
    * The change store. `strict`: a missing file is empty, but an unreadable or malformed one THROWS (every mutation and every
@@ -1836,9 +2354,10 @@ export function createAgentsEngine({
    * The Outcome lines for an Architect task's result (one per proposal, oldest first), from the records as they are NOW.
    * Call after `reconcile()` so a released proposal reads as released. `[]` when the task proposed nothing.
    */
-  async function outcomeLinesForJob(jobId) {
-    const recs = await changesForJob(jobId);
-    if (recs.length === 0) return [];
+  async function outcomeLinesForJob(input) {
+    const recs = await changesForJob(typeof input === "string" ? input : input?.id);
+    // a finished task that proposed nothing says so, in the server's own words (an id alone can't tell how the task ended)
+    if (recs.length === 0) return input && typeof input === "object" && input.status === "done" && input.endedBlocked !== true && !hasOpenQuestion(input) ? [NO_CHANGE_OUTCOME] : [];
     let level = null;
     try {
       level = autonomy.decide("agent_change", await autonomyPolicy());
@@ -1944,11 +2463,17 @@ export function createAgentsEngine({
       }
     } else if (dir) {
       const target = await resolveTarget(rec.slug);
-      const snap = target ? await readAgentSnapshot(rec.slug) : null;
-      if (!snap || snap.text !== rec.after) {
+      if (!target || !(await isAt(rec, "after"))) {
         left.push(`${rec.agentName} was edited since`);
       } else {
-        if (await attempt("couldn't restore agent.md", () => writeFileAtomic(target.file, rec.before))) {
+        const putBack = hasBundles(rec)
+          ? () =>
+              attempt("couldn't restore the files", async () => {
+                if ((await transitionSpace(dir, rec.afterBundle, rec.beforeBundle)).conflict) throw new Error("they changed since");
+                if (rec.baseAfter) await setBase(dir, rec.baseBefore ?? null);
+              })
+          : () => attempt("couldn't restore agent.md", () => writeFileAtomic(target.file, rec.before));
+        if (await putBack()) {
           for (const { file, previous } of undo.compiled) {
             if (file !== join(dir, COMPILED_FILE)) continue;
             await attempt("couldn't restore the compiled prompt", () => (previous == null ? fs.unlink(file) : writeFileAtomic(file, previous)));
@@ -2022,8 +2547,7 @@ export function createAgentsEngine({
   /** Does a failed change still own something on disk: a create its folder, an update its new file? */
   async function leftOnDisk(rec) {
     if (rec.kind === "create") return rec.claimed === true;
-    const snap = await readAgentSnapshot(rec.slug);
-    return !snap || snap.text !== rec.before;
+    return !(await isAt(rec, "before"));
   }
 
   /** A retry: nothing is rewritten or reclaimed; the file must still be exactly what was written, then it is activated again. */
@@ -2037,8 +2561,7 @@ export function createAgentsEngine({
       return finishCreateLocked(rec, rec.slug, { forceReload: true });
     }
     const target = await resolveTarget(rec.slug);
-    const snap = target ? await readAgentSnapshot(rec.slug) : null;
-    if (!snap || snap.text !== rec.after) return markConflict(rec, changedSince(rec));
+    if (!target || !(await isAt(rec, "after"))) return markConflict(rec, changedSince(rec));
     return activateLocked(rec, { forceReload: true });
   }
 
@@ -2138,13 +2661,18 @@ export function createAgentsEngine({
       throw e;
     }
     const target = await resolveTarget(rec.slug);
-    const snap = target ? await readAgentSnapshot(rec.slug) : null;
-    if (!target || !snap || snap.text !== rec.before) return markConflict(rec, changedSince(rec));
+    if (!target || !(await isAt(rec, "before"))) return markConflict(rec, changedSince(rec));
     try {
-      await writeFileAtomic(target.file, rec.after);
+      if (hasBundles(rec)) {
+        // every file of the agent's folder is checked against the snapshot, then moved to the new one together
+        if ((await transitionSpace(target.dir, rec.beforeBundle, rec.afterBundle)).conflict) return markConflict(rec, changedSince(rec));
+        if (rec.baseAfter) await setBase(target.dir, rec.baseAfter);
+      } else {
+        await writeFileAtomic(target.file, rec.after);
+      }
     } catch (e) {
       await backToPrior(rec);
-      throw writeFailed(e);
+      throw e instanceof AgentError ? e : writeFailed(e);
     }
     await activateLocked(rec);
     await saveRecord(rec);
@@ -2166,13 +2694,17 @@ export function createAgentsEngine({
     };
     const target = await resolveTarget(rec.slug);
     if (rec.kind === "update") {
-      const snap = target ? await readAgentSnapshot(rec.slug) : null;
       if (!target) return markConflict(rec, `${rec.agentName} changed since; undo it by hand`);
-      if (!snap || snap.text !== rec.after) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
+      if (!(await isAt(rec, "after"))) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
       try {
-        await writeFileAtomic(target.file, rec.before);
+        if (hasBundles(rec)) {
+          if ((await transitionSpace(target.dir, rec.afterBundle, rec.beforeBundle)).conflict) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
+          if (rec.baseAfter) await setBase(target.dir, rec.baseBefore ?? null);
+        } else {
+          await writeFileAtomic(target.file, rec.before);
+        }
       } catch (e) {
-        throw writeFailed(e);
+        throw e instanceof AgentError ? e : writeFailed(e);
       }
       return finish();
     }
@@ -2245,7 +2777,7 @@ export function createAgentsEngine({
     return operate(id, async (rec) => {
       if (rec.state === "pending") {
         if (isExpired(rec)) return expire(rec);
-        await requireChangeAllowed();
+        if (rec.origin?.kind !== "template-update") await requireChangeAllowed(); // a shipped template isn't an agent changing an agent
         await applyLocked(rec, "click");
         return true;
       }
@@ -2254,7 +2786,7 @@ export function createAgentsEngine({
         // take-back, or a record from before rollbacks) is only activated again
         if (await leftOnDisk(rec)) await reactivateLocked(rec);
         else {
-          await requireChangeAllowed();
+          if (rec.origin?.kind !== "template-update") await requireChangeAllowed();
           delete rec.groupAborted; // a fresh attempt on its own, whatever the task's other proposals did
           await applyLocked(rec, "click");
         }
@@ -2449,6 +2981,7 @@ export function createAgentsEngine({
           decidedAt: null,
           error: null,
         });
+        if (made.kind === "update") await attachBundles(made);
         if (!made.needsClick) await applyLocked(made, "auto");
         await saveRecord(made);
         return { rec: made };
@@ -2492,7 +3025,10 @@ export function createAgentsEngine({
   };
 
   const ARCHITECT_TOOL_KEYS = {
-    agent_propose: ["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"],
+    agent_propose: ["action", "draft", "summary", "evidence", "admission", "fitCheck", "problem", "trial", "agent", "baseHash"],
+    agent_trial: ["action", "agent", "baseHash", "draft", "cases"],
+    agent_trial_wait: ["trialId"],
+    agent_trial_read: ["trialId", "case", "offset"],
     research_fetch: ["url"],
     research_read: ["sourceId", "offset"],
     research_search: ["source", "query"],
@@ -2514,7 +3050,7 @@ export function createAgentsEngine({
     if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
     const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.architect && typeof j.architect === "object");
     if (!job) return { refused: NOT_ARCHITECT };
-    return { job, stamp: job.architect, childSessionID: b.sessionID };
+    return { job, jobs, stamp: job.architect, childSessionID: b.sessionID };
   }
 
   // The research and library tools (research library spec §3): every specialist's running task, and the Architect's.
@@ -2575,6 +3111,45 @@ export function createAgentsEngine({
   const days = (n) => `${n} day${n === 1 ? "" : "s"}`;
   const FIT_CHECK_ASK_FIRST = "Your fit check says the request doesn't match what your research says; ask the user with the question tool first (options and your recommendation), then propose once they have answered";
 
+  // ---- the problem (Architect v2 §3.1): facts only — a real quote of the request, counts, an index in range ----
+
+  const PROBLEM_MISSING =
+    "Add the problem before proposing: problem {userWords, statement, shapes, chosen, why} — the user's own words quoted from the request you were given (10 to 600 characters), the problem in one statement (up to 300), the shapes you considered ({shape, wouldBuild}, 2 to 5), the index of the one you chose and why (up to 600)";
+  // what the server appended to a task's opening prompt (the roster and the agent files) is data, never the user's words
+  const withoutTeamData = (t) => {
+    const i = String(t).indexOf(`\n---\n${ARCHITECT_DATA_LINE}`);
+    return i >= 0 ? String(t).slice(0, i) : String(t);
+  };
+  /** The text of every round of a task (its opening prompt and each continuation's), the server's team data removed. */
+  const roundTexts = (jobs, rootJobId) => jobs.filter((j) => rootJobOf(j) === rootJobId && typeof j.prompt === "string").map((j) => withoutTeamData(j.prompt));
+
+  /** `{ problem }` (trimmed) or `{ error }`. `routine`: a refresh / check-up round, which may name a single shape (the fact that triggered it). */
+  function checkProblem(p, { texts, routine }) {
+    const bad = (error) => ({ error });
+    if (!p || typeof p !== "object" || Array.isArray(p)) return bad(PROBLEM_MISSING);
+    const text = (v, max) => typeof v === "string" && v.trim().length >= 1 && v.length <= max;
+    if (typeof p.userWords !== "string" || wsNorm(p.userWords).length < 10 || p.userWords.length > 600) return bad("problem.userWords must be a quote of 10 to 600 characters from the request you were given");
+    if (!text(p.statement, 300)) return bad("problem.statement must be 1 to 300 characters");
+    const min = routine ? 1 : 2;
+    if (!Array.isArray(p.shapes) || p.shapes.length < min || p.shapes.length > 5) {
+      return bad(`problem.shapes must list ${min} to 5 shapes you considered, each {shape, wouldBuild} (changing an existing agent, or no change at all, can be one of them)`);
+    }
+    for (const sh of p.shapes) if (!sh || typeof sh !== "object" || !text(sh.shape, 300) || !text(sh.wouldBuild, 300)) return bad("every problem shape needs a shape and a wouldBuild, each 1 to 300 characters");
+    if (!Number.isInteger(p.chosen) || p.chosen < 0 || p.chosen >= p.shapes.length) return bad("problem.chosen must be the index (from 0) of the shape you chose");
+    if (!text(p.why, 600)) return bad("problem.why must be 1 to 600 characters");
+    const words = wsNorm(p.userWords);
+    if (!texts.some((t) => wsNorm(t).includes(words))) return bad("problem.userWords isn't in the request your task was given (any round of it); quote the user's own words exactly");
+    return {
+      problem: {
+        userWords: p.userWords.trim(),
+        statement: p.statement.trim(),
+        shapes: p.shapes.map((sh) => ({ shape: sh.shape.trim(), wouldBuild: sh.wouldBuild.trim() })),
+        chosen: p.chosen,
+        why: p.why.trim(),
+      },
+    };
+  }
+
   /** The envelope of an `agent_propose` call: `{ ok, summary, evidence, admission, fitCheck, basisRefs }` or `{ error }` (a sentence). */
   function checkEnvelope(raw) {
     const bad = (error) => ({ error });
@@ -2595,7 +3170,14 @@ export function createAgentsEngine({
       if (!a || typeof a !== "object" || !text(a.rule, 1, 300) || !text(a.why, 1, 300) || !VERDICTS.includes(a.verdict)) {
         return bad('Every admission item needs a rule (1–300), a verdict ("general", "scoped" or "excluded") and a why (1–300)');
       }
-      admission.push({ rule: a.rule.trim(), verdict: a.verdict, why: a.why.trim() });
+      const item = { rule: a.rule.trim(), verdict: a.verdict, why: a.why.trim() };
+      for (const k of ["replaces", "revises"]) {
+        if (a[k] === undefined || a[k] === null) continue;
+        if (typeof a[k] !== "string" || wsNorm(a[k]).length < 10 || a[k].length > 600) return bad(`${k} must be 10 to 600 characters: the rule of the current instructions it ${k === "replaces" ? "replaces" : "rewords"}`);
+        item[k] = a[k].trim();
+      }
+      if (item.replaces && item.revises) return bad("An admission item names one of replaces (the old rule is gone) or revises (the old rule was reworded), not both");
+      admission.push(item);
     }
     const fc = raw.fitCheck;
     if (!fc || typeof fc !== "object" || Array.isArray(fc) || !text(fc.researchSays, 1, 600) || !text(fc.why, 1, 600) || typeof fc.matches !== "boolean") return bad(FIT_CHECK_MISSING);
@@ -2643,6 +3225,149 @@ export function createAgentsEngine({
     return { basis, basisThin };
   }
 
+  // ---- replace, don't append (§3.2) and trials (§3.3): what the server can check as facts ----
+
+  const bodyOf = (text) => (parseAgentMd(text ?? "").body ?? "").toString();
+
+  /** A sentence refusing an admission item whose `replaces` / `revises` quote doesn't fit the current and the new instructions, or null. */
+  function checkReplacements(admission, plan) {
+    const named = admission.filter((a) => a.replaces || a.revises);
+    if (named.length === 0) return null;
+    if (plan.kind === "create") return "A new agent has nothing to replace or revise: leave replaces and revises out";
+    const before = wsNorm(bodyOf(plan.before));
+    const after = wsNorm(bodyOf(plan.after));
+    for (const a of named) {
+      const quote = wsNorm(a.replaces ?? a.revises);
+      if (!before.includes(quote)) return `"${quote.slice(0, 60)}${quote.length > 60 ? "…" : ""}" isn't in the current instructions`;
+      if (a.replaces && after.includes(quote)) return "the rule you replace is still in the new text";
+    }
+    return null;
+  }
+
+  /** Does this change touch what a trial covers: a new agent, or an update of its instructions, isolation or model (and, later, skills)? */
+  function trialRequired(plan) {
+    if (plan.kind === "create") return true;
+    const was = parseAgentMd(plan.before);
+    const is = parseAgentMd(plan.after);
+    return was.body !== is.body || was.meta?.isolation !== is.meta?.isolation || (was.meta?.model ?? null) !== (is.meta?.model ?? null);
+  }
+
+  /** The complete resulting file set of a plan: the new agent.md and, for an update, the agent's existing skills. `{ path: text }`. */
+  async function bundleOf(plan) {
+    const bundle = {};
+    if (plan.kind === "update") {
+      const files = await readSpace(folderOf(plan.slug)).catch(() => null);
+      for (const [rel, buf] of files ?? []) if (rel.startsWith("skills/")) bundle[rel] = buf.toString("utf-8");
+    }
+    bundle["agent.md"] = plan.after;
+    return bundle;
+  }
+  const fileHashesOf = (bundle) => Object.fromEntries(Object.entries(bundle).map(([k, v]) => [k, sha256Hex(v)]));
+
+  /**
+   * What a trial of this draft needs (the trials module calls it): the complete resulting file set, its per-file hashes, the
+   * agent's slug (an update's own, a create's `slugForName`), its parsed fields, the compiled prompt and the opencode block for a
+   * folder `dir` that will hold those files. `{ error }` (a sentence) when the draft can't be planned. Read-only.
+   */
+  async function trialPlan(input, { dir } = {}) {
+    const action = typeof input?.action === "string" ? input.action : "";
+    if (action !== "create" && action !== "update") return { error: 'action must be "create" or "update"' };
+    const draft = input?.draft;
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return { error: "The draft is missing" };
+    if (Object.hasOwn(draft, "sources")) return { error: PROPOSE_NO_SOURCES };
+    const models = await approvedModelsFor(draft);
+    if (models.error) return { error: models.error };
+    return syncLock.runExclusive(async () => {
+      const plan = await planChange({ action, agent: input.agent, draft, approved: models.approved, via: "propose" });
+      if (plan.error) return { error: plan.error };
+      if (plan.kind === "update") {
+        const given = typeof input.baseHash === "string" ? input.baseHash.trim() : "";
+        if (!given) return { error: `An update needs the baseHash of the file you read (it is ${plan.hash} now)` };
+        if (given !== plan.hash) return { error: `@${plan.slug} changed since you read it (hash ${plan.hash} now, not ${given}); redo the work against the current text you were given` };
+      }
+      let slug = plan.slug;
+      if (plan.kind === "create") {
+        try {
+          slug = slugForName(String(draft.name ?? ""));
+        } catch (e) {
+          return { error: e.message };
+        }
+      }
+      const parsed = parseAgentMd(plan.after);
+      const bundle = await bundleOf(plan);
+      const where = dir ?? folderOf(slug);
+      const skills = Object.entries(bundle)
+        .filter(([rel]) => /^skills\/[^/]+\/SKILL\.md$/.test(rel))
+        .map(([rel, text]) => ({ ...skillHeaderOf(text, rel.split("/")[1]), path: join(where, rel) }));
+      return {
+        kind: plan.kind,
+        slug,
+        name: plan.agentName,
+        bundle,
+        files: fileHashesOf(bundle),
+        meta: parsed.meta,
+        body: parsed.body,
+        needsTrial: trialRequired(plan),
+        // the projects the agent is seated in: a case with no project of its own works in a copy of the first
+        seats: plan.kind === "update" ? await seatSlugsOf(folderOf(slug)) : [],
+        compiled: compileAgentPrompt({ body: parsed.body, skills }),
+        block: buildAgentBlock({ dir: where, meta: parsed.meta, home }),
+      };
+    });
+  }
+
+  const TRIAL_MISSING =
+    "A trial is required for this proposal: run it on this exact draft with agent_trial, wait for it with agent_trial_wait, read what happened with agent_trial_read, then pass `trial` {trialId, verdicts} with one verdict {case, pass, quote, note} per case";
+  const TRIAL_ENDED = new Set(["done", "failed", "timed-out"]);
+
+  /**
+   * The facts about a proposal's trial (§3.3): it belongs to this task, ran on exactly this draft, every case ended, there is one
+   * verdict per case, each verdict quotes that case's transcript, and every verdict is a pass. Whether the agent did well is the
+   * Architect's judgement; nothing here reads the answers. `{ trial: { id, verdicts } }` or `{ error }`.
+   */
+  async function checkTrial(raw, { rootJobId, bundle }) {
+    const bad = (error) => ({ error });
+    if (raw === undefined || raw === null) return bad(TRIAL_MISSING);
+    if (!trials?.get) return bad("Trials aren't available on this box yet");
+    if (typeof raw !== "object" || Array.isArray(raw) || typeof raw.trialId !== "string" || !raw.trialId) return bad(TRIAL_MISSING);
+    if (!Array.isArray(raw.verdicts)) return bad("Give a verdict for every case of the trial: verdicts [{case, pass, quote, note}]");
+    const t = trials.get(raw.trialId);
+    if (!t) return bad(`The trial ${raw.trialId} doesn't exist (or is too old); run a trial again`);
+    if (t.rootJobId !== rootJobId) return bad(`The trial ${raw.trialId} belongs to another task; run a trial in this one`);
+    if (t.draftHash !== draftHash(bundle)) {
+      const files = differingFiles(t.files, fileHashesOf(bundle));
+      return bad(`The draft you propose isn't the one the trial ran on (${files.length > 0 ? files.join(", ") : "the files differ"}); run a trial again on the draft you propose`);
+    }
+    const cases = Array.isArray(t.cases) ? t.cases : [];
+    for (const c of cases) {
+      if (!TRIAL_ENDED.has(c.state)) return bad(`Case ${c.name} didn't finish (${c.state}): wait for it with agent_trial_wait, or run the trial again`);
+    }
+    const verdicts = [];
+    for (const v of raw.verdicts) {
+      if (!v || typeof v !== "object" || typeof v.case !== "string" || typeof v.pass !== "boolean" || typeof v.quote !== "string" || (v.note !== undefined && typeof v.note !== "string")) {
+        return bad("Every verdict needs a case, pass (true or false), a quote and a note");
+      }
+      if (!cases.some((c) => c.name === v.case)) return bad(`There is no case "${v.case}" in this trial; give one verdict per case: ${cases.map((c) => c.name).join(", ")}`);
+      if (verdicts.some((x) => x.case === v.case)) return bad(`Case ${v.case} has two verdicts; give one verdict per case`);
+      if (wsNorm(v.quote).length < 20 || v.quote.length > 300) return bad(`The quote for case ${v.case} must be 20 to 300 characters from that case's transcript (read it with agent_trial_read)`);
+      if ((v.note ?? "").length > 600) return bad(`The note for case ${v.case} can be at most 600 characters`);
+      let transcript = null;
+      try {
+        transcript = await trials.transcript?.(t.id, v.case, { agentOnly: true }); // what the agent did, not the task text
+      } catch {
+        transcript = null;
+      }
+      if (typeof transcript !== "string") return bad("Couldn't read the trial's transcripts; try again");
+      if (!wsNorm(transcript).includes(wsNorm(v.quote))) return bad(`The quote for case ${v.case} isn't in what the agent did (its messages and tool calls); the task text of the case doesn't count. Quote the agent's own lines, read with agent_trial_read, exactly`);
+      verdicts.push({ case: v.case, pass: v.pass, quote: v.quote.trim(), note: (v.note ?? "").trim() });
+    }
+    const missing = cases.filter((c) => !verdicts.some((v) => v.case === c.name)).map((c) => c.name);
+    if (missing.length > 0) return bad(`Give one verdict per case; missing: ${missing.join(", ")}`);
+    const failed = verdicts.find((v) => !v.pass);
+    if (failed) return bad(`Case ${failed.case} failed: fix the draft and run a trial again`);
+    return { trial: { id: t.id, verdicts } };
+  }
+
   /**
    * `agent_propose` (§4.4): the Architect proposes one change. The record is created `held`; it is released (applied,
    * pending or discarded) when its task ends. Refusals are RETURNED as sentences; only unexpected failures throw.
@@ -2680,9 +3405,11 @@ export function createAgentsEngine({
     if (!raw.draft || typeof raw.draft !== "object" || Array.isArray(raw.draft)) return refuse("The draft is missing");
     if (Object.hasOwn(raw.draft, "sources")) return refuse(PROPOSE_NO_SOURCES);
 
-    // 2. the envelope
+    // 2. the envelope, and the problem it answers (a real quote of what this task was asked, in any of its rounds)
     const env = checkEnvelope(raw);
     if (env.error) return refuse(env.error);
+    const stated = checkProblem(raw.problem, { texts: roundTexts(bound.jobs, stamp.rootJobId), routine: stamp.mode === "routine" });
+    if (stated.error) return refuse(stated.error);
     // the fit check must rest on library entries that are fresh and well founded (the server checks the evidence, not the judgement)
     const based = await checkBasis(env.basisRefs, { project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : ""), askedUser: job.askedUser === true });
     if (based.error) return refuse(based.error);
@@ -2730,6 +3457,15 @@ export function createAgentsEngine({
             return { error: `@${plan.slug} changed since you read it (hash ${plan.hash} now, not ${given}); redo the work against the current text`, current: { text: plan.before, hash: plan.hash } };
           }
         }
+        const replaceRefusal = checkReplacements(env.admission, plan);
+        if (replaceRefusal) return { error: replaceRefusal };
+        // a trial on exactly this draft, when the change touches what one covers (a new agent; instructions, isolation or model)
+        let trial = null;
+        if (trialRequired(plan) || raw.trial !== undefined) {
+          const checked = await checkTrial(raw.trial, { rootJobId: stamp.rootJobId, bundle: await bundleOf(plan) });
+          if (checked.error) return { error: checked.error };
+          trial = checked.trial;
+        }
         const made = normalizeRecord({
           id: `ach_${randomBytes(8).toString("hex")}`,
           kind: plan.kind,
@@ -2747,7 +3483,7 @@ export function createAgentsEngine({
           decidedAt: null,
           error: null,
           origin: { kind: "job", jobId: job.id, rootJobId: stamp.rootJobId, attempt: job.attempt ?? 1 },
-          mode: stamp.mode === "build" || stamp.mode === "plan" ? stamp.mode : "unknown",
+          mode: stamp.mode === "build" || stamp.mode === "plan" || stamp.mode === "routine" ? stamp.mode : "unknown",
           releasedAt: null,
           decidedBy: null,
           summary: env.summary,
@@ -2759,7 +3495,12 @@ export function createAgentsEngine({
           target: plan.lead ? "lead" : plan.core ? "core" : null,
           raisesIsolation: plan.raisesIsolation === true,
           invocation: { childSessionID: bound.childSessionID, messageID: b.messageID, callID: b.callID, argsHash },
+          problem: stated.problem,
+          ...(trial ? { trial } : {}),
+          sizeBefore: plan.kind === "update" ? bodyOf(plan.before).length : null,
+          sizeAfter: bodyOf(plan.after).length,
         });
+        if (made.kind === "update") await attachBundles(made);
         await saveRecord(made, { slots: { ...store.slots, [stamp.rootJobId]: used + 1 } });
         return { rec: made, used: used + 1 };
       });
@@ -2961,7 +3702,11 @@ export function createAgentsEngine({
 
   /** Release held proposals whose round has ended (after a task ends or is stopped, at boot, and every sweep). */
   function reconcile() {
-    return syncLock.runExclusive(() => reconcileLocked());
+    return syncLock.runExclusive(async () => {
+      const out = await reconcileLocked();
+      await sweepBlobsLocked().catch((e) => log.warn?.(`[agents] blob sweep: ${e?.message ?? e}`));
+      return out;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -2969,6 +3714,32 @@ export function createAgentsEngine({
   // -------------------------------------------------------------------------
 
   async function recoverOneLocked(rec) {
+    if (rec.kind === "update" && hasBundles(rec)) {
+      const dir = folderOf(rec.slug);
+      if (await spaceIs(dir, rec.afterBundle)) {
+        if (rec.baseAfter) await setBase(dir, rec.baseAfter);
+        await activateLocked(rec);
+        await saveRecord(rec);
+        return;
+      }
+      if (await spaceIs(dir, rec.beforeBundle)) {
+        await backToPrior(rec);
+        return;
+      }
+      // a crash between two files: when every file is one of the two versions, the write is finished
+      const cur = await readSpace(dir);
+      const now0 = cur ? hashesOf(cur) : null;
+      const mixed = now0 && [...new Set([...Object.keys(now0), ...Object.keys(rec.beforeBundle), ...Object.keys(rec.afterBundle)])].every((p) => [rec.beforeBundle[p] ?? null, rec.afterBundle[p] ?? null].includes(now0[p] ?? null));
+      if (mixed && !(await transitionSpace(dir, now0, rec.afterBundle)).conflict) {
+        if (rec.baseAfter) await setBase(dir, rec.baseAfter);
+        await activateLocked(rec);
+        await saveRecord(rec);
+        return;
+      }
+      markConflict(rec, changedSince(rec));
+      await saveRecord(rec);
+      return;
+    }
     if (rec.kind === "update") {
       const snap = await readAgentSnapshot(rec.slug);
       if (snap && snap.text === rec.after) {
@@ -3377,7 +4148,14 @@ export function createAgentsEngine({
       if (!target) throw new AgentError(`@${src.slug} no longer exists`);
       const snap = await readAgentSnapshot(src.slug);
       if (!snap) throw new AgentError(`@${src.slug} can't be edited safely; fix it by hand`);
-      if (snap.text === src.before) throw new AgentError("Already at that version");
+      // a record with snapshots puts the whole folder back (skills and all) when every file of the old version is still kept
+      let wholeFolder = null;
+      if (src.beforeBundle) {
+        const files = await readSpace(target.dir).catch(() => null);
+        const kept = (await Promise.all(Object.values(src.beforeBundle).map((h) => getBlob(h)))).every(Boolean);
+        if (files && kept) wholeFolder = files;
+      }
+      if (wholeFolder ? isDeepStrictEqual(hashesOf(wholeFolder), src.beforeBundle) : snap.text === src.before) throw new AgentError("Already at that version");
       // the old file is old data: it must still be a valid agent file, and an Architect's sources must still be safe
       const parsed = parseAgentMd(src.before);
       if (!parsed.ok) throw new AgentError(`That version can't be read any more: ${parsed.error}`);
@@ -3406,6 +4184,13 @@ export function createAgentsEngine({
         origin: { kind: "restore", fromChangeId: src.id },
         summary: "Restored an earlier version",
       });
+      if (wholeFolder) {
+        await putBlobs(wholeFolder);
+        rec.beforeBundle = hashesOf(wholeFolder);
+        rec.afterBundle = { ...src.beforeBundle };
+      } else {
+        await attachBundles(rec);
+      }
       try {
         await applyLocked(rec, "click");
       } catch (e) {
@@ -3711,6 +4496,30 @@ export function createAgentsEngine({
     return registryProjects();
   }
 
+  // ---- trials (Architect v2 §3.3, §6.2): what the change card and the Tests tab read ----
+
+  const TRIAL_GONE = "That trial no longer exists";
+  const TRANSCRIPT_WINDOW = 20_000;
+
+  /** The wire view of one trial (`agents:trial`): its cases and what each did; never a transcript. */
+  async function trial(input) {
+    const id = typeof input === "string" ? input : typeof input?.id === "string" ? input.id : "";
+    const v = id ? trials?.view?.(id) : null;
+    if (!v) throw new AgentError(TRIAL_GONE);
+    return v;
+  }
+
+  /** One case's redacted transcript, 20 000 characters from `offset` (`agents:trial-transcript`). */
+  async function trialTranscript(input) {
+    const id = typeof input?.id === "string" ? input.id : "";
+    const name = typeof input?.case === "string" ? input.case : "";
+    const offset = input?.offset === undefined ? 0 : input.offset;
+    if (!Number.isInteger(offset) || offset < 0) throw new AgentError("offset must be a whole number from 0");
+    const full = id && name ? await trials?.transcript?.(id, name) : null;
+    if (typeof full !== "string") throw new AgentError(TRIAL_GONE);
+    return { text: full.slice(offset, offset + TRANSCRIPT_WINDOW), nextOffset: offset + TRANSCRIPT_WINDOW < full.length ? offset + TRANSCRIPT_WINDOW : null };
+  }
+
   // ---- the profile and a task's research ----
 
   const SOURCES_SHOWN = 10;
@@ -3970,7 +4779,7 @@ export function createAgentsEngine({
       request: charter,
       targetProject: AGENTS_TMUX_SESSION,
       deliverResult: false,
-      architect: { mode: "unknown" },
+      architect: { mode: "routine" },
       ...specialistAutonomy({ writer: isolation === "worktree" }),
     });
     if (!res?.ok) throw new AgentError(res?.error || "The refresh task couldn't be started");
@@ -4020,6 +4829,7 @@ export function createAgentsEngine({
   return {
     init,
     installBuiltIns,
+    upgradeBuiltIns,
     sync,
     list,
     create,
@@ -4037,6 +4847,7 @@ export function createAgentsEngine({
     changesForJob,
     outcomeLinesForJob,
     propose,
+    trialPlan,
     bindArchitect,
     bindResearcher,
     reconcile,
@@ -4060,6 +4871,8 @@ export function createAgentsEngine({
     questionAnswer,
     questionDismiss,
     projects,
+    trial,
+    trialTranscript,
     taskResearch,
     refreshSet,
     refresh,

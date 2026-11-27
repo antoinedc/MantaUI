@@ -101,10 +101,10 @@ missing around it:
 
 ## From the Architect quick round (PDF reading, GitHub skill search, 2026-11-24)
 
-- **Existing boxes keep their old Architect.** `installBuiltIns` never overwrites an existing folder, so a box's
-  `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) does not get the new instructions by itself.
-  Phase 5B's built-in update feature should compare the shipped template with the installed one (and keep the user's
-  edits). Until then the files are copied by hand.
+- **Existing boxes keep their old Architect.** *(Resolved by Architect v2 Stage 0, 2026-11-27: `upgradeBuiltIns()` runs at
+  boot, merges the shipped template into the box's folder and records each upgrade as a change.)* `installBuiltIns` never
+  overwrites an existing folder, so a box's `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) did not
+  get new instructions by itself.
 - **PDF text is raw pdf.js text.** Two-column papers can interleave columns, hyphenated line breaks split words, and
   tables flatten. A quote that spans a column or hyphen break won't match; the model has to quote a single-column span.
   Possible later: join hyphenated line endings before storing.
@@ -375,6 +375,22 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **Restore for a change shown above the tabs.** A record whose card is above (just applied) has no row to open, so "Restore the version before this" isn't offered for it; its own Undo does the same thing.
 - **Seat briefs are shown whole.** A 4000-character brief makes a tall row; clamp with "Show more" if that turns out to matter.
 
+
+## From Architect v2 PR A (template upgrades, bundle snapshots, problem + trials, 2026-11-27)
+
+- **The trial's progress line.** The spec has the trials module report "Trial running · case 2 of 3" through the Architect job's
+  `jobProgress` label; PR A only records the cases (`agents:trial`). The label belongs with the renderer's progress line (PR B).
+- **The profile's trials list.** `AgentProfile.trials` (the Tests tab) is not part of `agents:profile` yet; PR B adds it from `agentTrials.list(slug)`.
+- **A VM sandbox for trials.** Trials have no shell (an agent that needs commands gets a partial test: what it couldn't run shows
+  as a refusal in the case record), because no ruleset can confine a shell on this box. Real command runs need a throwaway VM
+  (the Freestyle account is the candidate); until then the Tests tab's wording says "no shell".
+- **A trial's folders live in a private 0700 base in the OS temp folder, not under `~/.manta/agents/.trials/`.** The task
+  rulesets protect `~/.manta` by absolute path, which only holds for a session whose folder is outside it. Each case works in a
+  standalone `git clone --local --no-hardlinks` of the project's current HEAD (uncommitted files are not copied).
+- **Clean template upgrades apply automatically at every level** (with Undo); only a merge conflict waits for a click (spec §2).
+  If the lead / Architect should always wait for a click, say so.
+- **A pending template update that nobody clicks expires after 24 h** like any change; the next boot offers it again
+  (an expired record doesn't count for the dedupe).
 
 ## Parallel work by the same agent
 

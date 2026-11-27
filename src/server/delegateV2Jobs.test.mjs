@@ -2721,14 +2721,18 @@ test("autonomy result: using a secret file the task was handed is not reported; 
   assert.deepEqual(done.exceededActions ?? [], []);
 });
 
-test("autonomy result: a continuation reads only its own round; nothing to report omits the fields", async () => {
-  const w = specialistWorld(AUT);
+/** A finished specialist task, then its continuation ("round two"): `{ w, id, first, child, next }`. */
+async function continuedSpecialist(policy) {
+  const w = specialistWorld(policy);
   const id = await finishedSpecialist(w);
   const first = w.job(id);
-  const child = first.childSessionID;
   const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
   assert.equal(res.ok, true, JSON.stringify(res));
-  const next = w.job(res.job.id);
+  return { w, id, first, child: first.childSessionID, next: w.job(res.job.id) };
+}
+
+test("autonomy result: a continuation reads only its own round; nothing to report omits the fields", async () => {
+  const { w, first, child, next } = await continuedSpecialist(AUT);
   assert.equal(next.toldActions, undefined, "not inherited");
   w.setMessages(child, [
     { info: { id: first.launch.messageId, role: "user" }, parts: [] },
@@ -2966,13 +2970,7 @@ test("project actions: a specialist's result without the section says so (done o
 });
 
 test("project actions: the result text is THIS attempt's — a continuation that wrote no new final text has none (never round one's report)", async () => {
-  const w = specialistWorld(BAL);
-  const id = await finishedSpecialist(w);
-  const first = w.job(id);
-  const child = first.childSessionID;
-  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
-  assert.equal(res.ok, true, JSON.stringify(res));
-  const next = w.job(res.job.id);
+  const { w, first, child, next } = await continuedSpecialist(BAL);
   assert.equal(next.exceededActions, undefined, "not inherited");
   assert.equal(next.selfReport, undefined, "not inherited");
   const roundOne = turn(first.launch.messageId, [], reportText("- Did: spend — round one VM"));
@@ -3136,6 +3134,38 @@ test("Architect jobs tell the agents engine when they end — finished, failed o
   const dev = await start(w, autonomyInput(w));
   await stopJob(dev, w.deps);
   assert.equal(ended.length, 3, "an ordinary specialist job doesn't notify");
+});
+
+test("an Architect round that is PAUSED tells the agents engine too (its trial cases are stopped, as when it ends); a paused ordinary job doesn't", async () => {
+  const w = specialistWorld();
+  const paused = [];
+  w.deps.onJobPaused = async (job) => paused.push({ id: job.id, status: job.status });
+  const id = await start(w, archInput(w));
+  const child = w.job(id).childSessionID;
+  assert.equal((await pauseJob(id, w.deps)).ok, true);
+  await observeEvent(toolDone(child), w.deps);
+  w.finish(child, "interrupted", T0 + 3);
+  await w.engine.observeRaw(raw("session.execution.interrupted", child));
+  assert.equal(w.job(id).status, "paused");
+  assert.deepEqual(paused, [{ id, status: "paused" }]);
+  // an ordinary specialist job
+  const dev = await start(w, autonomyInput(w));
+  const devChild = w.job(dev).childSessionID;
+  await pauseJob(dev, w.deps);
+  await observeEvent(toolDone(devChild), w.deps);
+  w.finish(devChild, "interrupted", T0 + 4);
+  await w.engine.observeRaw(raw("session.execution.interrupted", devChild));
+  assert.equal(w.job(dev).status, "paused");
+  assert.equal(paused.length, 1);
+  // a hook that fails doesn't break the pause
+  w.deps.onJobPaused = async () => { throw new Error("boom"); };
+  const again = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  const c2 = w.job(again).childSessionID;
+  await pauseJob(again, w.deps);
+  await observeEvent(toolDone(c2), w.deps);
+  w.finish(c2, "interrupted", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.interrupted", c2));
+  assert.equal(w.job(again).status, "paused");
 });
 
 test("Architect outcome: what the agents engine returns when the job ends is in the result posted to the parent", async () => {

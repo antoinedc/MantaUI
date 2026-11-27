@@ -1066,7 +1066,7 @@ test("refresh provisioning: a deleted or invalid agent's routine is removed with
   }
 });
 
-test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, round mode unknown; refusals are sentences", async () => {
+test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, a routine round; refusals are sentences", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -1080,7 +1080,7 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     assert.equal(input.agent, "agent-architect");
     assert.equal(input.targetProject, AGENTS_TMUX_SESSION);
     assert.equal(input.deliverResult, false);
-    assert.deepEqual(input.architect, { mode: "unknown" });
+    assert.deepEqual(input.architect, { mode: "routine" }, "a refresh is a routine round: its change quotes the brief, one shape is enough");
     assert.equal(input.specialist, true);
     assert.match(input.prompt, /Refresh @dev: check the research it rests on and propose only changes your research supports\./);
     assert.match(input.prompt, /Research library/, "the research guidance every task gets");

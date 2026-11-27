@@ -1853,7 +1853,7 @@ export const IPC = {
   // (src/shared/claim.mjs) — never throws for a normal auth failure.
   authClaim: "auth:claim",
   // Mint a one-time pairing code for mobile device pairing (BET-80).
-  // GET <serverUrl>/auth/pair → { pairing_code, box_id, expiresAt }
+  // POST <serverUrl>/auth/pair → { pairing_code, box_id, expiresAt }
   // The desktop renders the code in a QR (manta://pair?id=<boxId>&token=<code>)
   // and lets the mobile app scan it. Main owns the fetch over the SSH tunnel.
   // Result: { pairingCode, boxId, expiresAt } or { error }.
@@ -3068,7 +3068,9 @@ export interface ArchitectSource {
 export type AgentChangeOrigin =
   | { kind: "chat" }
   | { kind: "job"; jobId: string; rootJobId: string; attempt: number }
-  | { kind: "restore"; fromChangeId: string };
+  | { kind: "restore"; fromChangeId: string }
+  /** Architect v2 Stage 0: a new shipped version of a built-in agent; `templateHash` = sha256 of the shipped file set. */
+  | { kind: "template-update"; templateHash: string };
 export interface AgentChangeEvidence {
   claim: string;
   /** null for a private source. */
@@ -3080,6 +3082,47 @@ export interface AgentChangeAdmission {
   rule: string;
   verdict: "general" | "scoped" | "excluded";
   why: string;
+  /** Architect v2 §3.2: the old rule this one replaces (it is gone from the new text) / rewords (it was in the old text). One of the two at most. */
+  replaces?: string;
+  revises?: string;
+}
+// Architect v2 Stage 1 (docs/superpowers/specs/2026-11-27-architect-v2.md §3, §6.1): the problem a proposal answers, and its trial.
+export interface AgentProblem {
+  /** A quote of the request the task was given (10 to 600 characters). */
+  userWords: string;
+  statement: string;
+  shapes: { shape: string; wouldBuild: string }[];
+  chosen: number;
+  why: string;
+}
+export interface TrialCaseResult {
+  name: string;
+  expect: "does" | "declines";
+  state: "queued" | "running" | "done" | "failed" | "timed-out" | "aborted";
+  finalAnswer: string | null;
+  tools: string[];
+  filesChanged: number;
+  /** Permission denials: what the agent tried that its test-run rules stopped. */
+  refused: string[];
+  /** Questions the agent would have asked a user (answered by the server with a fixed sentence). */
+  wouldAsk: string[];
+  durationMs: number | null;
+  /** Why a case did not run or did not start (a budget refusal, a workspace problem); null otherwise. */
+  error?: string | null;
+}
+export interface AgentTrial {
+  id: string;
+  rootJobId: string;
+  agentSlug: string | null;
+  draftHash: string;
+  createdAt: number;
+  cases: TrialCaseResult[];
+}
+export interface TrialVerdict {
+  case: string;
+  pass: boolean;
+  quote: string;
+  note: string;
 }
 // Agents Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md §2.1): Manta creates / edits agents.
 export interface AgentDraftCreate {
@@ -3118,7 +3161,7 @@ export interface AgentChange {
   // Phase 5A. Records written before 5A read as origin {kind:"chat"}, mode null, releasedAt = createdAt,
   // decidedBy null, summary null, empty arrays.
   origin: AgentChangeOrigin;
-  mode: "build" | "plan" | "unknown" | null;
+  mode: "build" | "plan" | "routine" | "unknown" | null;
   releasedAt: number | null;
   decidedBy: "auto" | "click" | null;
   summary: string | null;
@@ -3126,6 +3169,12 @@ export interface AgentChange {
   admission: AgentChangeAdmission[];
   /** One task's proposals are released all-or-nothing: set on every record of a group that was rolled back, not applied, or failed. `error` says why. */
   groupAborted?: boolean;
+  /** Architect v2 Stage 1: absent on older records. */
+  problem?: AgentProblem;
+  trial?: { id: string; verdicts: TrialVerdict[] };
+  /** Instructions size (characters of the body) before → after; `sizeBefore` is null for a new agent. */
+  sizeBefore?: number | null;
+  sizeAfter?: number;
 }
 export interface AgentChangeEvent {
   id: string;
@@ -3232,7 +3281,7 @@ export type AuthClaimInput = {
   code: string;
 };
 
-// Result of GET /auth/pair — a one-time pairing code the desktop renders as a
+// Result of POST /auth/pair — a one-time pairing code the desktop renders as a
 // QR for mobile scanning. `expiresAt` is an ISO-8601 timestamp (server-side
 // clock); the desktop computes the remaining seconds for the UI countdown.
 // `error` is non-null only on failure (network, 403 from a non-loopback

@@ -248,6 +248,7 @@ export const KIND_PATTERNS = Object.freeze({
   },
 });
 
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]", "0.0.0.0"];
 const expandHome = (p, home) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
 
 /** The files a task must not read, search or write (absolute), and the directories it must not write (`edit`/`write` only). */
@@ -323,6 +324,9 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [], session
   const agentFolder = typeof agentDir === "string" ? agentDir.replace(/\/+$/, "") : "";
   const keepAgentFolder = agentFolder && writeTrees.some((t) => agentFolder.startsWith(`${t}/`));
   for (const fragment of PROTECTED_BASH_OTHER) deny("bash", `*${fragment}*`);
+
+  // Manta's own server, opencode and anything else listening on the box answer only to the box: a task never fetches them
+  for (const host of LOOPBACK_HOSTS) for (const scheme of ["http", "https"]) deny("webfetch", `${scheme}://${host}*`);
 
   // merge: always
   for (const [pattern] of MERGE_PATTERNS) deny("bash", pattern);

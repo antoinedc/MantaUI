@@ -661,3 +661,20 @@ test("isInsideMantaFolders", () => {
   for (const p of [`${HOME}/.manta`, `${HOME}/.manta/agents/manta/home`, `${HOME}/.manta-secrets/x`, `${HOME}/.config/opencode`, `${HOME}/.config/opencode/skills`]) assert.equal(isInsideMantaFolders(p, HOME), true, p);
   for (const p of [`${HOME}/projects/x`, `${HOME}/.mantaui`, `${HOME}/.config/other`, "/tmp/x", ""]) assert.equal(isInsideMantaFolders(p, HOME), false, p);
 });
+
+test("jobRules: a task can't web-fetch a loopback address (Manta's own server, opencode, anything listening on the box) — in every policy, noSecrets or not", () => {
+  const targets = ["http://127.0.0.1*", "http://localhost*", "http://[::1]*", "http://0.0.0.0*"];
+  for (const policy of [MODES.balanced, MODES.autonomous, MODES.cautious]) {
+    for (const noSecrets of [false, true]) {
+      const rules = jobRules(policy, { home: HOME, agentDir: `${HOME}/.manta/agents/dev`, sessionID: "ses_own", noSecrets });
+      for (const pattern of targets) {
+        const at = rules.findIndex((r) => r.permission === "webfetch" && r.pattern === pattern && r.action === "deny");
+        assert.ok(at >= 0, pattern);
+        assert.ok(!rules.slice(at + 1).some((r) => r.permission === "webfetch" && r.action === "allow"), "nothing re-allows it");
+      }
+      // https loopback too
+      assert.ok(rules.some((r) => r.permission === "webfetch" && r.pattern === "https://127.0.0.1*" && r.action === "deny"));
+      assert.ok(rules.some((r) => r.permission === "webfetch" && r.pattern === "https://localhost*" && r.action === "deny"));
+    }
+  }
+});

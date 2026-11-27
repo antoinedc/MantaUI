@@ -271,7 +271,7 @@ const server = http.createServer((req, res) => {
   const { pathname } = url;
 
   // S2 pairing — the app claims after a human enters the code + server URL.
-  if (pathname === "/auth/pair" && req.method === "GET") {
+  if (pathname === "/auth/pair" && req.method === "POST") { // (like the real box: POST with `X-Manta-Pair: 1`)
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ code: pairingCode }));
     return;
