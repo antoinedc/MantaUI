@@ -1709,6 +1709,19 @@ async function countFilesChanged(job, deps) {
   }
 }
 
+// The commit the job's branch is at when its round ends (the learner reads what the user committed AFTER it, Architect v2 §5.1). null when
+// there is no worktree or git can't say; only a real commit id is kept.
+async function readEndHead(job, deps) {
+  if (!job.worktree || typeof deps.gitRun !== "function") return null;
+  try {
+    const out = await deps.gitRun(["-C", job.worktree, "rev-parse", "HEAD"]);
+    const sha = String(out?.stdout ?? "").trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Terminal cleanup (BET-418 §B)
 //
@@ -3011,6 +3024,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   // exactly one terminal write.
   let result = null;
   let filesChanged = null;
+  const endHead = await readEndHead(job, deps); // the branch head at the end of this round, before cleanup removes the worktree
   let actions = null; // a specialist's told / blocked / exceeded actions (Agents Phase 3 §5), read from this attempt's transcript
   const wantsActions = job.specialist === true && !!job.childSessionID && typeof listMessages === "function" && !(interrupted && job.pauseRequested);
   if (wantsActions && status !== "done") {
@@ -3102,6 +3116,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       result: outcome.status === "done" ? result : null,
       filesChanged: outcome.status === "done" ? filesChanged : null,
       finishedAt: endedAt,
+      endHead: endHead ?? undefined,
       pauseRequested: false,
       endedBlocked,
       endReason: outcome.status === "failed" ? endReason : null,
