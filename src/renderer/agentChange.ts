@@ -77,6 +77,7 @@ export function agentChangeReason(change: Pick<AgentChange, "needsClick" | "reas
   if (change.reason === "lead") return "This changes Manta's own instructions";
   if (change.reason === "isolation") return `This lets ${change.agentName} edit code`;
   if (change.reason === "core") return "This changes the Architect itself";
+  if (change.reason === "scripts") return "This adds or changes a script the agent could run — open each script before applying";
   if (change.reason === "unfinished") return "The task didn't finish — review before applying";
   if (change.reason === "plan") return "Proposed while planning or outside a hand-off — review before applying";
   return null;

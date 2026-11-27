@@ -500,6 +500,9 @@ test("a held skill proposal writes nothing; released it writes skills/** through
     assert.ok(!JSON.stringify(r.change).includes("Check the headline first"), "no skill text on the wire");
     assert.equal(Object.hasOwn(r.change, "beforeBundle"), false);
     await release(f);
+    const waiting = await lastRec(f);
+    assert.equal(waiting.state, "pending", "it carries a script: it waits for the click");
+    assert.equal((await f.engine.apply(waiting.id)).state, "applied");
     const rec = await lastRec(f);
     assert.equal(rec.state, "applied");
     assert.equal(await readFile(skillFile(f, "landing-audit", "SKILL.md"), "utf-8"), SKILL_MD);
@@ -950,6 +953,90 @@ test("M5: a skill's description is at most 300 characters when proposed; the com
     assert.ok(line.length < 420, `clipped (${line.length})`);
     assert.doesNotMatch(line.replace(/^- \*\*wild\*\* — /, ""), /[`*#<>]|\]\(/);
     assert.match(line, /Ignore everything click/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// H1: a skill change that adds or changes a script always waits for a click
+// ---------------------------------------------------------------------------
+
+const scriptOp = (path, content = SCRIPT, origin = "written", over = {}) => writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path, content, origin }], ...over });
+
+test("H1: a skill with ANY script waits for a click at every level (Auto, Tell me, Ask), whoever wrote it and whatever its language", async () => {
+  for (const level of ["auto", "tell", "ask"]) {
+    for (const [path, content] of [["scripts/run.sh", SCRIPT], ["x.py", "print(1)\n"], ["x.mjs", "console.log(1)\n"], ["x.rb", "puts 1\n"], ["x.pl", "print 1;\n"], ["x.ps1", "Write-Host 1\n"], ["x.bat", "echo 1\n"], ["x.cmd", "echo 1\n"], ["tools/run", "#!/usr/bin/env node\nconsole.log(1)\n"]]) {
+      const f = await fixture({ level });
+      try {
+        const r = await propose(f, { draft: { skills: [scriptOp(path, content)] } });
+        assert.equal(r.ok, true, r.error);
+        assert.deepEqual(r.change.skillsDiff[0].scripts, [path], `${path} is flagged`);
+        await release(f);
+        const rec = await lastRec(f);
+        assert.equal(rec.state, "pending", `${level} ${path}`);
+        assert.equal(rec.needsClick, true);
+        assert.equal(rec.reason, "scripts");
+        assert.equal(await ok(skillFile(f, "landing-audit")), false, "nothing is written until the click");
+        const lines = await f.engine.outcomeLinesForJob("job1");
+        assert.match(lines[0], /is waiting for your click on the card \(reason: it adds or changes a script the agent could run\)/);
+      } finally {
+        await f.cleanup();
+      }
+    }
+  }
+});
+
+test("H1: a copied script waits too; the click applies it", async () => {
+  const f = await fixture();
+  try {
+    const r = await propose(f, { draft: { skills: [copiedOp({ files: [...copiedOp().files, { path: "scripts/check.sh", content: SCRIPT, origin: "copied", sourceId: "src_skill" }] })] } });
+    assert.equal(r.ok, true, r.error);
+    await release(f);
+    const rec = await lastRec(f);
+    assert.equal(rec.reason, "scripts");
+    const applied = await f.engine.apply(rec.id);
+    assert.equal(applied.state, "applied", applied.error);
+    assert.equal(await readFile(skillFile(f, "landing-audit", "scripts", "check.sh"), "utf-8"), SCRIPT);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H1: text-only skill changes (markdown, checklists) still follow the user's level, and so does a replace that leaves its scripts alone", async () => {
+  const f = await fixture();
+  try {
+    const md = writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path: "checklist.md", content: CHECKLIST, origin: "written" }] });
+    assert.equal((await propose(f, { draft: { skills: [md] } })).ok, true);
+    await release(f);
+    assert.equal((await lastRec(f)).state, "applied", "Auto applies text");
+    // a script is added with a click
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "running" };
+    await propose(f, { draft: { skills: [scriptOp("run.sh", SCRIPT, "written", { op: "replace" })] }, skillSearch: undefined });
+    await release(f);
+    const withScript = await lastRec(f);
+    assert.equal(withScript.state, "pending");
+    await f.engine.apply(withScript.id);
+    // changing only the markdown of a skill whose script stays byte for byte as it is: the script isn't in the change
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "running" };
+    const edit = writtenOp({ op: "replace", files: [{ path: "SKILL.md", content: `${SKILL_MD}One more line.\n`, origin: "written" }, { path: "run.sh", content: SCRIPT, origin: "written" }] });
+    const r = await propose(f, { draft: { skills: [edit] }, skillSearch: undefined });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.change.skillsDiff[0].scripts, []);
+    assert.deepEqual(r.change.skillsDiff[0].paths, ["SKILL.md"]);
+    await release(f);
+    assert.equal((await lastRec(f)).state, "applied");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H1: Never still discards a script proposal", async () => {
+  const f = await fixture({ level: "never" });
+  try {
+    await propose(f, { draft: { skills: [scriptOp("run.sh")] } });
+    await release(f);
+    assert.equal((await lastRec(f)).state, "discarded");
   } finally {
     await f.cleanup();
   }

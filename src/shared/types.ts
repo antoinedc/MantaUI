@@ -3190,7 +3190,7 @@ export interface AgentChange {
   callID: string;
   state: AgentChangeState;
   needsClick: boolean;
-  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | null;
+  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "scripts" | null;
   before: string | null;
   after: string;
   createdAt: number;

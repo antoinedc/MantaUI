@@ -879,6 +879,7 @@ const OUTCOME_WAIT_REASONS = {
   lead: "it changes the lead agent",
   core: "it changes the Architect itself",
   isolation: "it widens what the agent may touch",
+  scripts: "it adds or changes a script the agent could run",
   unfinished: "the task didn't finish cleanly",
 };
 
@@ -3853,6 +3854,9 @@ export function createAgentsEngine({
     }
   }
 
+  /** Does this record add or change a script file in a skill? Read from the server's own diff on the record, never from the model's words. */
+  const changesScripts = (rec) => (Array.isArray(rec?.skillsDiff) ? rec.skillsDiff : []).some((d) => Array.isArray(d?.scripts) && d.scripts.length > 0);
+
   function decideRelease(rec, { jobs, policy }) {
     if (!Array.isArray(jobs)) return { action: "stay" }; // an unreadable jobs store leaves everything held
     const origin = rec.origin?.kind === "job" ? rec.origin : null;
@@ -3875,6 +3879,8 @@ export function createAgentsEngine({
     if (rec.target === "lead") return { action: "pending", reason: "lead" };
     if (rec.target === "core") return { action: "pending", reason: "core" };
     if (rec.raisesIsolation) return { action: "pending", reason: "isolation" };
+    // a script among the skill changes (copied or written) is something the agent could run: only a click lets it in, at any level
+    if (changesScripts(rec)) return { action: "pending", reason: "scripts" };
     // 7. Ask
     if (level === "ask") return { action: "pending", reason: "ask" };
     // 8. Auto / Tell me
