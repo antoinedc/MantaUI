@@ -636,6 +636,16 @@ test("timeoutMs is passed through to the synchronous session (class with one); a
   assert.equal(gate.pollIntervalMs, undefined);
 });
 
+test("agent-learning (Architect v2 §5.1): a nano class on the knowledge titles, like the corrections it resembles, and it runs with the CTO engine off", async () => {
+  const m = getTaskClass("agent-learning");
+  assert.deepEqual([m.tier, m.contextBudget, m.timeoutMs, m.titlePrefix, m.strict, m.cheapest], ["nano", 8000, 90_000, KNOWLEDGE_TITLE_PREFIX, undefined, undefined]);
+  const reported = [];
+  const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-l"); return { text: "twelve chars", sid: "sid-l" }; } };
+  const out = await runEphemeral({ taskClass: "agent-learning", context: [{ priority: 1, text: "in" }], deps: { preflight: allow, oc, engineState: fakeEngineState(), resolveModel: async () => OPUS, reportCost: async (r) => void reported.push(r) } });
+  assert.equal(out.text, "twelve chars");
+  assert.deepEqual(reported.map((r) => r.taskClass), ["agent-learning"]);
+});
+
 test("runEphemeral works with the CTO engine off and reports cost for every knowledge class", async () => {
   const reported = [];
   const oc = { async runEphemeralSession({ onCreated }) { await onCreated("sid-k"); return { text: "twelve chars", sid: "sid-k" }; } };

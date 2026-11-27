@@ -50,6 +50,8 @@ export const TASK_CLASSES = Object.freeze({
   // resolve a model for the caller's own session and are never run here.
   "knowledge-capture": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
   "knowledge-corrections": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
+  // Architect v2 §5.1: one cheap call per finished agent task, reading the user's corrections of it (src/server/agentLearning.mjs).
+  "agent-learning": Object.freeze({ tier: "nano", contextBudget: 8000, timeoutMs: 90_000, titlePrefix: K }),
   // Agents Phase 3c: the one-shot scan that lists which commands of a project trigger each autonomy action.
   // `cheapest` orders the band by price (the router's economy ordering) instead of by quality: a plain read-and-list
   // job needs no more than the cheapest model of its band (live: the quality ordering put Opus 5.5 — the top of a
