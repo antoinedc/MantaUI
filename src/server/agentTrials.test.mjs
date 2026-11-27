@@ -258,7 +258,7 @@ test("the private base is a 0700 folder of the box user's own, and each case's f
     assert.equal((await stat(base)).mode & 0o777, 0o700);
     assert.equal((await stat(f.w.created[0].directory)).mode & 0o777, 0o700);
     f.t.observeRaw({ type: "session.execution.succeeded", data: { sessionID: f.w.created[0].id } });
-    await until(() => f.t.get("tr_00000001")?.settled === true);
+    await settle(f.t, "tr_00000001");
     // a base somebody else made (a link, or a wide-open folder) is not used
     await rm(base, { recursive: true });
     await mkdir(join(f.base, "elsewhere"));
@@ -826,13 +826,13 @@ test("state.json and result.json are written 0600, the trial's folder 0700, and 
     assert.equal((await stat(dir)).mode & 0o777, 0o700);
     assert.equal((await stat(join(dir, "state.json"))).mode & 0o777, 0o600);
     let state = null; // (the file is rewritten as the case moves on: read it until it parses)
-    for (let i = 0; i < 50 && !state; i++) state = await readFile(join(dir, "state.json"), "utf-8").then(JSON.parse).catch(() => null);
+    for (let i = 0; i < 50 && !state; i++) state = await readFile(join(dir, "state.json"), "utf-8").then(JSON.parse).catch(async () => (await quiet(5), null));
     assert.deepEqual(Object.keys(state.cases[0]).sort(), ["dir", "sessionId"]);
     // the folder the case works in is neither the trial's folder nor anything under it
     const cwd = f.w.created[0].directory;
     assert.equal(cwd.startsWith(`${dir}/`) || dir.startsWith(`${cwd}/`), false);
     f.t.observeRaw({ type: "session.execution.succeeded", data: { sessionID: f.w.created[0].id } });
-    await until(() => f.t.get(trialId)?.settled === true);
+    await settle(f.t, trialId); // (`settled` is set before result.json is written: wait for the end)
     assert.equal((await stat(join(dir, "result.json"))).mode & 0o777, 0o600);
   } finally {
     await f.cleanup();
