@@ -309,3 +309,17 @@ test("the Fleet recap says a rule was learned, with the user's setting", () => {
   const lines = fleetRecapEntries([], [rec], T0, { level: "tell" }).map((e) => e.text);
   assert.deepEqual(lines, ["Dev learned a preference (your setting: Tell me)"]);
 });
+
+test("changesForRoot and questionsForRoot: what one task proposed, and what it asked, for the learner", async () => {
+  const f = await fixture();
+  try {
+    const rec = { id: "ach_a", kind: "update", slug: "dev", agentName: "Dev", sessionID: "s", messageID: "", callID: "", state: "undone", needsClick: false, reason: null, before: "x", after: "y", createdAt: T0, decidedAt: T0, error: null, origin: { kind: "job", jobId: "job2", rootJobId: "job1", attempt: 2 } };
+    await writeFile(join(f.root, ".changes.json"), JSON.stringify({ version: 2, changes: [rec, { ...rec, id: "ach_b", origin: { kind: "job", jobId: "job9", rootJobId: "job9", attempt: 1 } }], proposalSlots: {} }));
+    await writeFile(join(f.root, ".questions.json"), JSON.stringify({ questions: [{ id: "tq_1", rootJobId: "job1", state: "answered" }, { id: "tq_2", rootJobId: "job9", state: "open" }] }));
+    assert.deepEqual((await f.engine.changesForRoot("job1")).map((r) => r.id), ["ach_a"]);
+    assert.deepEqual((await f.engine.questionsForRoot("job1")).map((q) => q.id), ["tq_1"]);
+    assert.deepEqual(await f.engine.changesForRoot("nothing"), []);
+  } finally {
+    await f.cleanup();
+  }
+});

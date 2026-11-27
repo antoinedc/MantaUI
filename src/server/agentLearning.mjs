@@ -308,6 +308,41 @@ function textOf(message) {
     .join("\n");
 }
 
+const COMMITS_TEXT_MAX = 20 * 1024; // the diff of the user's commits that the learner reads, at most
+const COMMITS_MAX = 20;
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Signal 5: what the USER committed on a task's branch after the task's round ended. No agent has a git identity of its own — it commits
+ * with the box's — so "not the agent" means an author email that none of the task's own commits (base..endHead) carries; a commit by the
+ * same author as the agent's is not seen (it can't be told apart). `gitRun(args) → { stdout }`. Returns the commits and their patches as
+ * text, cut at 20 KiB, or null; never throws.
+ */
+export function createUserCommitReader({ gitRun }) {
+  const lines = async (args) => String((await gitRun(args))?.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return async function userCommits(job) {
+    try {
+      const { parentDirectory: dir, branch, baseSha, endHead } = job ?? {};
+      if (typeof dir !== "string" || !dir || typeof branch !== "string" || !branch || branch.startsWith("-") || !SHA_RE.test(String(endHead)) || !SHA_RE.test(String(baseSha))) return null;
+      const after = await lines(["-C", dir, "log", `--max-count=${COMMITS_MAX}`, "--format=%H%x09%ae", `${endHead}..${branch}`]);
+      if (after.length === 0) return null;
+      const own = new Set((await lines(["-C", dir, "log", `--max-count=${COMMITS_MAX * 5}`, "--format=%ae", `${baseSha}..${endHead}`])).map((e) => e.toLowerCase()));
+      if (own.size === 0) own.add(((await lines(["-C", dir, "config", "user.email"]))[0] ?? "").toLowerCase());
+      let text = "";
+      for (const line of after) {
+        const [sha, email = ""] = line.split("\t");
+        if (!SHA_RE.test(sha) || own.has(email.toLowerCase())) continue;
+        const shown = String((await gitRun(["-C", dir, "show", "--no-color", "--format=commit %s", sha]))?.stdout ?? "");
+        text += `${shown}\n`;
+        if (text.length >= COMMITS_TEXT_MAX) break;
+      }
+      return text.trim() ? text.slice(0, COMMITS_TEXT_MAX) : null;
+    } catch {
+      return null;
+    }
+  };
+}
+
 /** The learner's own small store (`{ version, tasks }`) in a JSON file; `load` answers null when there is none yet. */
 export function createLearningStore({ path }) {
   return {

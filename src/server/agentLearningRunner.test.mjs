@@ -344,3 +344,47 @@ test("the state survives a restart: a due task is picked up by a new learner ove
   assert.deepEqual(await again.runDue(), { ran: 1 });
   assert.equal(a.w.writes.length, 1);
 });
+
+// ---- the commit reader (signal 5) over a real repository ----
+
+import { execFileSync } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createUserCommitReader } from "./agentLearning.mjs";
+
+test("userCommits: the diff of commits made on the task's branch after it ended by someone other than the task's own author; none otherwise", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "learn-git-"));
+  try {
+    const git = (email, ...args) => execFileSync("git", ["-C", dir, "-c", `user.email=${email}`, "-c", "user.name=x", "-c", "commit.gpgsign=false", ...args], { encoding: "utf-8" }).trim();
+    git("a@agent.test", "init", "-q", "-b", "main");
+    await writeFile(join(dir, "f.txt"), "one\n");
+    git("a@agent.test", "add", ".");
+    git("a@agent.test", "commit", "-q", "-m", "base");
+    const base = git("a@agent.test", "rev-parse", "HEAD");
+    git("a@agent.test", "checkout", "-q", "-b", "agent/dev/x");
+    await writeFile(join(dir, "f.txt"), "one\ntwo\n");
+    git("a@agent.test", "commit", "-q", "-am", "Added two");
+    const endHead = git("a@agent.test", "rev-parse", "HEAD");
+    const read = createUserCommitReader({ gitRun: async (args) => ({ stdout: execFileSync("git", args, { encoding: "utf-8" }) }) });
+    const job = { parentDirectory: dir, branch: "agent/dev/x", baseSha: base, endHead };
+    assert.equal(await read(job), null, "nothing after the end of the round");
+    await writeFile(join(dir, "f.txt"), "one\ntwo\nthree\n");
+    git("a@agent.test", "commit", "-q", "-am", "The agent again");
+    assert.equal(await read(job), null, "the task's own author isn't the user");
+    await writeFile(join(dir, "f.txt"), "one\ntwo\nthree\nUse imperative messages\n");
+    git("u@user.test", "commit", "-q", "-am", "Fix wording");
+    const text = await read(job);
+    assert.match(text, /\+Use imperative messages/);
+    assert.match(text, /Fix wording/);
+    assert.equal(await read({ ...job, endHead: undefined }), null, "no recorded head, no comparison");
+    assert.equal(await read({ ...job, branch: "gone" }), null, "a branch that is gone says nothing");
+    // bounded: a 40 KiB commit is cut to 20 KiB
+    await writeFile(join(dir, "big.txt"), `${"x".repeat(100)}\n`.repeat(400));
+    git("u@user.test", "add", ".");
+    git("u@user.test", "commit", "-q", "-m", "big");
+    assert.ok((await read(job)).length <= 20 * 1024 + 200);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

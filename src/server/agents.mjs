@@ -2604,6 +2604,19 @@ export function createAgentsEngine({
     return list.sort((a, b) => a.createdAt - b.createdAt).map((r) => wire(isExpired(r) ? expiredCopy(r) : r));
   }
 
+  /** The change records one task proposed (every round of it), oldest first — what the learner reads for "the user undid it". */
+  async function changesForRoot(rootJobId) {
+    if (typeof rootJobId !== "string" || !rootJobId) return [];
+    return (await readChanges()).filter((r) => r.origin?.kind === "job" && r.origin.rootJobId === rootJobId).sort((a, b) => a.createdAt - b.createdAt).map(wire);
+  }
+
+  /** The questions one task asked (`.questions.json`), answered or not — what the learner reads for "the user chose something else". */
+  async function questionsForRoot(rootJobId) {
+    if (typeof rootJobId !== "string" || !rootJobId) return [];
+    const doc = parseJsonOrNull(await readOptional(fs, join(root, ".questions.json")));
+    return (Array.isArray(doc?.questions) ? doc.questions : []).filter((q) => q && q.rootJobId === rootJobId);
+  }
+
   /**
    * The Outcome lines for an Architect task's result (one per proposal, oldest first), from the records as they are NOW.
    * Call after `reconcile()` so a released proposal reads as released. `[]` when the task proposed nothing.
@@ -5809,6 +5822,8 @@ export function createAgentsEngine({
     change,
     forCall,
     changesForJob,
+    changesForRoot,
+    questionsForRoot,
     outcomeLinesForJob,
     propose,
     trialPlan,
