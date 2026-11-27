@@ -135,11 +135,14 @@ test("a pending rule still applies after another rule was learned in between (it
     assert.equal((await f.engine.apply(a.change.id)).state, "applied");
     assert.equal((await f.engine.apply(b.change.id)).state, "applied");
     assert.deepEqual((await rulesOn(f)).map((r) => r.rule).sort(), ["Always run the linter first.", "Keep pull requests small.", RULE.rule].sort());
-    // a duplicate of what is there by the time of the click
+    // two pending cards for the same rule: the first click wins, the second finds it already learned
     f.w.level = "ask";
-    const d = await learn(f, { rule: { ...RULE, rule: "Always run the linter first!", quote: "linter first" } });
-    assert.equal(d.change.state, "pending");
-    const dd = await f.engine.apply(d.change.id);
+    const d1 = await learn(f, { rule: { ...RULE, rule: "Name branches after the ticket.", quote: "name the branch after the ticket" } });
+    const d2 = await learn(f, { rule: { ...RULE, rule: "name branches after the ticket!", quote: "branch named after the ticket" } });
+    assert.equal(d1.change.state, "pending");
+    assert.equal(d2.change.state, "pending");
+    assert.equal((await f.engine.apply(d1.change.id)).state, "applied");
+    const dd = await f.engine.apply(d2.change.id);
     assert.equal(dd.state, "discarded");
     assert.match(dd.error, /already/i);
   } finally {
@@ -190,14 +193,14 @@ test("learnedUndo (the Learned tab): removes one rule whatever was learned since
     assert.deepEqual((await rulesOn(f)).map((r) => r.rule), ["Keep pull requests small."]);
     assert.equal((await f.engine.learnedTombstones("dev")).has(quoteHash(RULE.quote)), true);
     await assert.rejects(f.engine.learnedUndo({ slug: "dev", id: a.change.learned.added.id }), /isn't one of this agent's rules|gone/i);
-    // not gated by the learning level: the user pressed it
-    f.w.level = "never";
-    assert.equal((await f.engine.learnedUndo({ slug: "dev", id: b.change.learned.added.id })).state, "applied");
     // undoing the removal puts the rule back and lifts its tombstone
     const back = await f.engine.undo(rec.id);
     assert.equal(back.state, "undone");
     assert.equal((await f.engine.learnedTombstones("dev")).has(quoteHash(RULE.quote)), false);
-    assert.deepEqual((await rulesOn(f)).map((r) => r.rule), [RULE.rule]);
+    assert.deepEqual((await rulesOn(f)).map((r) => r.rule).sort(), [RULE.rule, "Keep pull requests small."].sort());
+    // not gated by the learning level: the user pressed it
+    f.w.level = "never";
+    assert.equal((await f.engine.learnedUndo({ slug: "dev", id: b.change.learned.added.id })).state, "applied");
     await assert.rejects(f.engine.learnedUndo({ slug: "nobody", id: "lr_00000001" }), /No agent/);
   } finally {
     await f.cleanup();

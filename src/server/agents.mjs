@@ -22,6 +22,7 @@ import { diff3Merge } from "node-diff3";
 import { draftHash, differingFiles } from "./agentTrials.mjs";
 import { reviewScripts, pickReviewModel } from "./agentScriptReview.mjs";
 import { checkSkillOps, planSkills, existingSkillsOf, checkSkillSearch, checkSkillSearchFacts, parseSourceMd, SKILL_SEARCH_MISSING } from "./agentSkills.mjs";
+import { planLearned, parseLearned, renderLearned, checkRuleText, buildLearnedBlock, quoteHash, normalizeRule, ALL_SCOPE, LEARNED_ID_RE, wsNorm as learnedWsNorm } from "./agentLearning.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG, ARCHITECT_SLUG, ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS, TRIAL_BLOCK_RE, isTeamAgent } from "../shared/agentsShared.mjs";
@@ -99,6 +100,7 @@ export const CHANGE_PENDING_MS = 24 * 60 * 60 * 1000; // a proposal nobody click
 export const CHANGE_KEEP_MS = 7 * 24 * 60 * 60 * 1000; // finished records are kept a week
 export const CHANGE_MAX = 200;
 export const AGENT_CHANGE_OFF = "Changing agents is turned off in your autonomy settings";
+export const LEARN_OFF = "Learning preferences is turned off in your autonomy settings";
 export const CHANGE_NOT_LEAD = "Only the lead can create or change agents";
 export const CHANGE_GONE = "This change is no longer available";
 const CHANGE_COULDNT_CHECK = "Couldn't check this chat; try again";
@@ -168,6 +170,7 @@ export const renderSeat = ({ brief, addedAt, addedBy }) => `---\nadded_at: ${new
 
 // ---- the fleet counters and the refresh routine (§5.3, §5.4) ----
 const FLEET_FILE = ".fleet.json";
+const LEARNED_STATE_FILE = ".learned.json"; // quote hashes of the rules the user undid (outside the agents' folders: Undo restores those)
 const REVIEWED_MAX = 200;
 
 /** `2026-W48` — the ISO week (UTC) of an instant. */
@@ -201,8 +204,9 @@ export function fleetRecap(jobs, changes, since, opts = {}) {
  * `opts.unmergedHanded`: how many finished Manta-handed tasks still have an unmerged branch (a git question, answered by the caller).
  * What Needs you does not hold lands here: Manta-handed results, tasks without changes, failures (a failure the user asked for can be opened).
  */
-export function fleetRecapEntries(jobs, changes, since, { level = null, answered = 0, projectNameOf = () => null, unmergedHanded = 0 } = {}) {
+export function fleetRecapEntries(jobs, changes, since, { level = null, learnLevel = null, answered = 0, projectNameOf = () => null, unmergedHanded = 0 } = {}) {
   const lines = [];
+  const levels = { learn: learnLevel };
   const add = (text, jobId) => lines.push(jobId ? { text, jobId } : { text });
   const all = jobs ?? [];
   const byManta = (j) => j.requestedBy === "manta";
@@ -228,8 +232,9 @@ export function fleetRecapEntries(jobs, changes, since, { level = null, answered
   const changeLines = [];
   for (const r of changes ?? []) {
     if (r.state === "applied" && (r.decidedAt ?? 0) >= since) {
-      const by = r.decidedBy === "click" ? "you approved it" : `your setting: ${LEVEL_TITLES[level] ?? "Auto"}`;
-      changeLines.push([r.decidedAt, `${r.agentName} was changed (${by})`]);
+      const learned = r.origin?.kind === "learned";
+      const by = r.decidedBy === "click" ? (learned ? "you asked for it" : "you approved it") : `your setting: ${LEVEL_TITLES[learned ? (levels.learn ?? level) : level] ?? "Auto"}`;
+      changeLines.push([r.decidedAt, learned ? `${r.agentName} ${r.learned?.removedId ? "forgot a preference" : "learned a preference"} (${by})` : `${r.agentName} was changed (${by})`]);
     } else if (r.state === "pending" && baseOf(r) >= since) {
       changeLines.push([baseOf(r), `${r.agentName} is waiting for your click`]);
     }
@@ -780,10 +785,14 @@ export function buildConversationExcerpt(messages, { maxMessages = EXCERPT_MESSA
   return picked.reverse().join("\n\n");
 }
 
-/** The opening prompt of an agent task: the request, then the project brief (if any), then the recent conversation. */
-export function buildDispatchPrompt({ text, seat = "", excerpt = "" }) {
+/**
+ * The opening prompt of an agent task: the request, then the project brief (if any), then what the user's corrections taught the agent
+ * (`learned`: the block of `buildLearnedBlock`, already marked as data), then the recent conversation.
+ */
+export function buildDispatchPrompt({ text, seat = "", learned = "", excerpt = "" }) {
   let out = String(text ?? "").trim();
   if (seat) out += `\n\n---\nYour brief for this project:\n${seat}`;
+  if (learned) out += `\n\n${learned}`;
   if (excerpt) out += `\n\n---\nRecent conversation in the chat that asked you (oldest first), for context:\n${excerpt}`;
   return out;
 }
@@ -985,6 +994,11 @@ export function buildArchitectContext({ roster = [], named = [], sources = [], r
   ];
   for (const n of [...named].sort((a, b) => (a.slug < b.slug ? -1 : 1))) {
     parts.push(`Current file of @${n.slug} (hash ${n.hash}):`, `\`\`\`\`markdown\n${String(n.text).replace(/\u0060\u0060\u0060\u0060/g, "\u0060\u0060\u0060")}\n\`\`\`\``);
+    const learned = (n.learned ?? []).filter((r) => !r.archived);
+    if (learned.length > 0) {
+      const line = (r) => `- [${r.id}] (${r.scope === ALL_SCOPE ? "every project" : r.scope}) ${learnedWsNorm(r.rule).replace(/\u0060/g, "")}${r.quote ? ` — the user's words: "${learnedWsNorm(r.quote).replace(/\u0060/g, "").slice(0, 200)}"` : ""}${r.whyIsInferred ? " (inferred)" : ""}`;
+      parts.push(`Learned preferences of @${n.slug} (data from the user's corrections, kept apart from its file; fold one into the instructions with an admission item whose replaces is its id):`, learned.map(line).join("\n"));
+    }
   }
   parts.push("END TEAM DATA");
   if (routingNotes.length > 0) parts.push(`Routing facts checked by the server (facts, not opinions):\n${routingNotes.map((n) => `- ${n}`).join("\n")}`);
@@ -1573,10 +1587,10 @@ export function createAgentsEngine({
    * (agent.md + skills + learned as `{ path: sha256 }`, `after` = `before` with `rec.after` as agent.md) and their blobs.
    * Left without them when the folder can't be snapshotted (a link, too big): the agent.md-string path then applies.
    */
-  async function attachBundles(rec, dir = folderOf(rec.slug), skills = null) {
+  async function attachBundles(rec, dir = folderOf(rec.slug), skills = null, learned = null) {
     const files = await readSpace(dir).catch(() => null);
     if (!files || !files.has("agent.md")) {
-      if (skills) throw new AgentError(`${rec.agentName}'s files can't be snapshotted safely; fix it by hand`); // skills can't go through the agent.md-only path
+      if (skills || learned) throw new AgentError(`${rec.agentName}'s files can't be snapshotted safely; fix it by hand`); // skills and learned rules can't go through the agent.md-only path
       return rec;
     }
     const after = new Map(files).set("agent.md", Buffer.from(rec.after, "utf-8"));
@@ -1584,6 +1598,11 @@ export function createAgentsEngine({
       // `skills`: the COMPLETE resulting skills/** set (the planned changes applied to what the agent has)
       for (const rel of [...after.keys()]) if (rel.startsWith("skills/")) after.delete(rel);
       for (const [rel, text] of skills) after.set(rel, Buffer.from(text, "utf-8"));
+    }
+    // `learned`: the learned files that change, `rel → text` (null: the file goes away with its last rule)
+    for (const [rel, text] of learned ?? []) {
+      if (text === null) after.delete(rel);
+      else after.set(rel, Buffer.from(text, "utf-8"));
     }
     try {
       await putBlobs(files);
@@ -2102,7 +2121,7 @@ export function createAgentsEngine({
       const entry = entries.find((e) => e.slug === slug && !e.info.error);
       if (!entry) continue;
       const snap = await readAgentSnapshot(slug);
-      if (snap) named.push({ slug, text: snap.text, hash: snap.hash });
+      if (snap) named.push({ slug, text: snap.text, hash: snap.hash, learned: await learnedRules(slug) });
     }
     const arch = entries.find(isArchitect);
     return `\n\n${buildArchitectContext({ roster, named, sources: arch?.meta.sources ?? [], routingNotes: renderRoutingNotes(findDanglingReferences(entries)) })}`;
@@ -2132,10 +2151,11 @@ export function createAgentsEngine({
     const seated = await ensureSeat(agent, directory, "mention");
     const seat = await seatFor(agent, taskDirectory);
     const excerpt = await excerptFor(sessionId);
+    const learned = await learnedBlockFor(slug, taskDirectory);
     const architect = isArchitect(agent);
 
     const res = await delegate.startJob({
-      prompt: withResearchGuidance(buildDispatchPrompt({ text, seat, excerpt })) + (architect ? await architectContextFor(text) : ""),
+      prompt: withResearchGuidance(buildDispatchPrompt({ text, seat, learned, excerpt })) + (architect ? await architectContextFor(text) : ""),
       parentSessionID: sessionId,
       parentDirectory: taskDirectory,
       agent: agentKey(slug),
@@ -2388,8 +2408,9 @@ export function createAgentsEngine({
     const taskDirectory = taskFolderFor(agent, directory);
     const seat = await seatFor(agent, taskDirectory);
     const excerpt = await excerptFor(b.sessionID);
+    const learned = await learnedBlockFor(slug, taskDirectory);
     const job = {
-      prompt: withResearchGuidance(buildDispatchPrompt({ text: b.brief.trim(), seat, excerpt })) + (architect ? await architectContextFor(b.brief) : ""),
+      prompt: withResearchGuidance(buildDispatchPrompt({ text: b.brief.trim(), seat, learned, excerpt })) + (architect ? await architectContextFor(b.brief) : ""),
       parentSessionID: b.sessionID,
       parentDirectory: taskDirectory,
       agent: agentKey(slug),
@@ -2500,7 +2521,7 @@ export function createAgentsEngine({
 
   // What leaves the box: the contract's fields only (the journal's bookkeeping stays here).
   // eslint-disable-next-line no-unused-vars
-  const wire = ({ prior, invocation, claimed, target, raisesIsolation, beforeBundle, afterBundle, baseBefore, baseAfter, ...r }) => clone(r);
+  const wire = ({ prior, invocation, claimed, target, raisesIsolation, beforeBundle, afterBundle, baseBefore, baseAfter, learnedOp, learnedTomb, ...r }) => clone(r);
 
   /**
    * The change store. `strict`: a missing file is empty, but an unreadable or malformed one THROWS (every mutation and every
@@ -2979,8 +3000,8 @@ export function createAgentsEngine({
     return finish();
   }
 
-  /** The user's CURRENT "Change an agent" level, read now: unreadable or Never refuses with a sentence (thrown). */
-  async function requireChangeAllowed() {
+  /** The user's CURRENT "Change an agent" level (`kind`: or the "learn a preference" one), read now: unreadable or Never refuses with a sentence (thrown). */
+  async function requireChangeAllowed(kind = "agent_change") {
     let policy;
     try {
       policy = await autonomyPolicy();
@@ -2988,7 +3009,7 @@ export function createAgentsEngine({
       log.warn?.(`[agents] couldn't read the autonomy settings: ${e?.message ?? e}`);
       throw new AgentError(autonomy.SETTINGS_UNREADABLE);
     }
-    if (autonomy.decide("agent_change", policy) === "never") throw new AgentError(AGENT_CHANGE_OFF);
+    if (autonomy.decide(kind, policy) === "never") throw new AgentError(kind === "learn_preference" ? LEARN_OFF : AGENT_CHANGE_OFF);
   }
 
   /**
@@ -3021,7 +3042,10 @@ export function createAgentsEngine({
     return operate(id, async (rec) => {
       if (rec.state === "pending") {
         if (isExpired(rec)) return expire(rec);
-        if (rec.origin?.kind !== "template-update") await requireChangeAllowed(); // a shipped template isn't an agent changing an agent
+        if (rec.origin?.kind === "learned") {
+          await requireChangeAllowed("learn_preference");
+          if (!(await replanLearned(rec))) return true; // it became a duplicate (or the rule is gone): discarded, saying so
+        } else if (rec.origin?.kind !== "template-update") await requireChangeAllowed(); // a shipped template isn't an agent changing an agent
         await applyLocked(rec, "click");
         return true;
       }
@@ -3054,6 +3078,7 @@ export function createAgentsEngine({
     return operate(id, async (rec) => {
       if (rec.state !== "applied") return false;
       await undoLocked(rec);
+      if (rec.state === "undone" && rec.learnedTomb) await tombstone(rec.slug, rec.learnedTomb.hash, rec.learnedTomb.onUndo === "tombstone"); // Undo of a learned rule: those words never produce it again (and of a removal: they may again)
       return true;
     });
   }
@@ -4568,6 +4593,245 @@ export function createAgentsEngine({
   }
   const seatStamp = (seat) => (seat?.created ? { seatAdded: { project: seat.project, projectName: seat.projectName } } : {});
 
+  // ---- learned preferences (§5.1): files under <agent>/learned/, each write a change record ----
+
+  const LEARNED_SCOPE_RE = /^(?:_all|[a-z0-9-]+)$/;
+  const tombstonesPath = join(root, LEARNED_STATE_FILE);
+  const tombstoneLock = createMutex();
+  const TOMBSTONES_PER_AGENT = 300;
+
+  /** The rules of every learned file of an agent, `{ [scope]: LearnedRule[] }` (archived ones included). A folder that holds a link has none. */
+  async function readLearnedFiles(slug) {
+    const space = await readSpace(folderOf(slug)).catch(() => null);
+    const out = {};
+    for (const [rel, buf] of space ?? []) {
+      const m = /^learned\/([^/]+)\.md$/.exec(rel);
+      if (!m || !LEARNED_SCOPE_RE.test(m[1])) continue;
+      out[m[1]] = parseLearned(buf.toString("utf-8"), m[1]);
+    }
+    return out;
+  }
+
+  /** Every rule an agent has learned (all scopes, archived ones flagged), newest first. */
+  async function learnedRules(slug) {
+    if (typeof slug !== "string" || !SLUG_RE.test(slug)) return [];
+    return Object.values(await readLearnedFiles(slug)).flat().sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : 1));
+  }
+
+  /** `learned/<scope>.md` → its new text, or null when its last rule is gone: what `attachBundles` puts into the after-snapshot. */
+  const learnedFileMap = (changed) => new Map(Object.entries(changed).map(([scope, rules]) => [`learned/${scope}.md`, rules.length === 0 ? null : renderLearned(rules)]));
+
+  // The quotes of rules the user undid. They live beside the change store, NOT in the agent's folder: Undo restores that folder.
+  async function readTombstones() {
+    const doc = parseJsonOrNull(await readOptional(fs, tombstonesPath));
+    return plainObject(doc?.tombstones);
+  }
+
+  async function learnedTombstones(slug) {
+    const list = (await readTombstones())[slug];
+    return new Set(Array.isArray(list) ? list.filter((h) => typeof h === "string") : []);
+  }
+
+  /** Remember (`add`) or forget a quote hash for an agent. Bookkeeping: a failure is logged, never thrown. */
+  function tombstone(slug, hash, add) {
+    return tombstoneLock.runExclusive(async () => {
+      try {
+        const all = await readTombstones();
+        const next = new Set(Array.isArray(all[slug]) ? all[slug] : []);
+        if (add) next.add(hash);
+        else next.delete(hash);
+        const out = { ...all, [slug]: [...next].slice(-TOMBSTONES_PER_AGENT) };
+        if (out[slug].length === 0) delete out[slug];
+        await fs.mkdir(root, { recursive: true });
+        await writeJsonAtomic(tombstonesPath, `${JSON.stringify({ version: 1, tombstones: out }, null, 2)}\n`);
+      } catch (e) {
+        log.warn?.(`[agents] couldn't update the learned tombstones: ${e?.message ?? e}`);
+      }
+    });
+  }
+
+  const clipText = (t, n) => (String(t).length > n ? `${String(t).slice(0, n - 1).trimEnd()}…` : String(t));
+
+  /**
+   * One planned write as a change record (not yet saved): `{ rec }` or `{ noop }`. agent.md is exactly as it is; only `learned/*` differs
+   * between the snapshots. The caller holds `syncLock`. A refusal is an AgentError.
+   */
+  async function learnedRecord(slug, op, summary) {
+    const target = await resolveTarget(slug);
+    if (!target) throw new AgentError(`@${slug} can't be edited safely; fix it by hand`);
+    const snap = await readAgentSnapshot(slug);
+    if (!snap) throw new AgentError(`@${slug} can't be edited safely; fix it by hand`);
+    const files = await readLearnedFiles(slug);
+    const plan = planLearned(files, op);
+    if (plan.error) throw new AgentError(`${plan.error[0].toUpperCase()}${plan.error.slice(1)}`);
+    if (plan.noop) return { noop: plan.noop };
+    const gone = plan.removed?.[0] ?? null;
+    const rec = normalizeRecord({
+      id: `ach_${randomBytes(8).toString("hex")}`,
+      kind: "update",
+      slug,
+      agentName: target.entry.info.name,
+      sessionID: "",
+      messageID: "",
+      callID: "",
+      state: "pending",
+      needsClick: false,
+      reason: null,
+      before: snap.text,
+      after: snap.text,
+      createdAt: now(),
+      decidedAt: null,
+      error: null,
+      origin: { kind: "learned" },
+      summary,
+      learned: plan.added ? { added: plan.added } : { removedId: op.id },
+      learnedOp: op,
+      learnedTomb: plan.added ? { hash: quoteHash(plan.added.quote), onUndo: "tombstone" } : gone ? { hash: quoteHash(gone.quote), onUndo: "release" } : undefined,
+    });
+    await attachBundles(rec, target.dir, null, learnedFileMap(plan.changed));
+    if (!hasBundles(rec)) throw new AgentError(`${rec.agentName}'s files can't be snapshotted safely; fix it by hand`);
+    return { rec };
+  }
+
+  /**
+   * A pending learned record is planned AGAIN against the files as they are at the click (other rules may have been learned since):
+   * true = go on and apply; false = it is now a duplicate or its target rule is gone, so it was discarded (and says why). The caller holds `syncLock`.
+   */
+  async function replanLearned(rec) {
+    const op = rec.learnedOp;
+    if (!op) return true;
+    const plan = planLearned(await readLearnedFiles(rec.slug), op);
+    if (plan.noop || plan.error) {
+      rec.state = "discarded";
+      rec.needsClick = false;
+      rec.error = plan.noop ? "That preference is already learned" : "The rule it replaces is gone";
+      rec.decidedAt = now();
+      return false;
+    }
+    const snap = await readAgentSnapshot(rec.slug);
+    if (!snap) throw new AgentError(`@${rec.slug} can't be edited safely; fix it by hand`);
+    rec.before = snap.text;
+    rec.after = snap.text;
+    rec.learned = plan.added ? { added: plan.added } : rec.learned;
+    await attachBundles(rec, folderOf(rec.slug), null, learnedFileMap(plan.changed));
+    return true;
+  }
+
+  const LEARNED_SUMMARY_MAX = 160;
+
+  /**
+   * The learner's one write: a rule for an agent in a scope (a project slug, or `_all`). Released by the user's `learn_preference` level —
+   * Auto / Tell me apply it at once (Undo on the card), Ask leaves a pending card, Never learns nothing. Returns `{ ok: true, change }`,
+   * `{ ok: false, skipped: "never" | "duplicate" }` or `{ ok: false, error }`. Never asks anyone anything.
+   */
+  async function learnedWrite(input) {
+    const refuse = (error, extra = {}) => ({ ok: false, error, ...extra });
+    const slug = typeof input?.slug === "string" ? input.slug : "";
+    const scope = typeof input?.scope === "string" ? input.scope : "";
+    const entry = slug ? await find(slug) : null;
+    if (!entry) return refuse(`No agent named @${slug}`);
+    if (entry.info.role === "lead") return refuse("The lead agent doesn't learn preferences");
+    if (!LEARNED_SCOPE_RE.test(scope)) return refuse("That isn't a project");
+    if (isArchitect(entry) && scope !== ALL_SCOPE) return refuse("The Architect's preferences apply in every project");
+    const given = input?.rule;
+    if (!given || typeof given !== "object") return refuse("There is no rule to learn");
+    const bad = checkRuleText(given.rule);
+    if (bad) return refuse(bad[0].toUpperCase() + bad.slice(1));
+    let level;
+    try {
+      level = autonomy.decide("learn_preference", await autonomyPolicy());
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the autonomy settings to learn a preference: ${e?.message ?? e}`);
+      return refuse(autonomy.SETTINGS_UNREADABLE);
+    }
+    if (level === "never") return { ok: false, skipped: "never" };
+    const op = {
+      type: "add",
+      scope,
+      rule: { rule: given.rule.trim(), why: String(given.why ?? ""), whyIsInferred: given.whyIsInferred === true, quote: String(given.quote ?? ""), sourceJobId: typeof given.sourceJobId === "string" && given.sourceJobId ? given.sourceJobId : null },
+      ...(typeof input.replacesId === "string" && input.replacesId ? { replacesId: input.replacesId } : {}),
+      id: `lr_${randomBytes(4).toString("hex")}`,
+      now: now(),
+    };
+    let rec;
+    try {
+      const out = await syncLock.runExclusive(async () => {
+        const made = await learnedRecord(slug, op, `Learned: ${clipText(op.rule.rule, LEARNED_SUMMARY_MAX)}`);
+        if (made.noop) return { noop: made.noop };
+        const r = made.rec;
+        r.releasedAt = now();
+        if (level === "ask") {
+          r.needsClick = true;
+          r.reason = "ask";
+        } else {
+          await applyLocked(r, "auto");
+        }
+        await saveRecord(r);
+        return { rec: r };
+      });
+      if (out.noop) return { ok: false, skipped: out.noop };
+      rec = out.rec;
+    } catch (e) {
+      if (e instanceof AgentError) return refuse(e.message);
+      throw e;
+    }
+    publishChange(rec);
+    fleetChanged();
+    if (rec.state === "applied" || rec.state === "pending") return { ok: true, change: wire(rec) };
+    return refuse(rec.error ?? "The preference wasn't learned", { change: wire(rec) });
+  }
+
+  /**
+   * The Learned tab's Undo: one rule removed whatever was learned since, as its own record (applied at once: the user pressed it, whatever the
+   * level), and its words are remembered so they can't produce the rule again. `agents:learned-undo`.
+   */
+  async function learnedUndo(input) {
+    const slug = typeof input?.slug === "string" ? input.slug : "";
+    const id = typeof input?.id === "string" ? input.id : "";
+    if (!slug || !(await find(slug))) throw new AgentError(`No agent named @${slug}`);
+    if (!LEARNED_ID_RE.test(id)) throw new AgentError("That preference is already gone");
+    let rec;
+    await syncLock.runExclusive(async () => {
+      const found = Object.values(await readLearnedFiles(slug)).flat().find((r) => r.id === id);
+      if (!found) throw new AgentError("That preference is already gone");
+      const made = await learnedRecord(slug, { type: "remove", id }, `Removed a learned preference: ${clipText(found.rule, LEARNED_SUMMARY_MAX)}`);
+      rec = made.rec;
+      rec.releasedAt = now();
+      try {
+        await applyLocked(rec, "click");
+      } catch (e) {
+        rec.state = "discarded";
+        rec.error = e instanceof AgentError ? e.message : "Couldn't write the agent's files; try again";
+        rec.decidedAt = now();
+        await saveRecord(rec).catch(() => {});
+        throw e;
+      }
+      await saveRecord(rec);
+      if (rec.state === "applied") await tombstone(slug, quoteHash(found.quote), true);
+    });
+    publishChange(rec);
+    fleetChanged();
+    return wire(rec);
+  }
+
+  /** The block a task of `slug` started in `directory` carries: that project's rules, then the ones for every project ("" when none). */
+  async function learnedBlockFor(slug, directory) {
+    try {
+      const files = await readLearnedFiles(slug);
+      let project = null;
+      try {
+        const p = typeof directory === "string" && directory ? await registry?.identify(directory) : null;
+        if (p?.slug && PROJECT_RE.test(p.slug)) project = p.slug;
+      } catch (e) {
+        log.warn?.(`[agents] project lookup for learned preferences failed: ${e?.message ?? e}`);
+      }
+      return buildLearnedBlock({ project: project ? (files[project] ?? []) : [], all: files[ALL_SCOPE] ?? [] });
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the learned preferences of @${slug}: ${e?.message ?? e}`);
+      return "";
+    }
+  }
+
   // ---- history + restore ----
 
   /** The records about one agent, newest first, at most 50. An unclicked proposal reads as expired. */
@@ -4789,6 +5053,14 @@ export function createAgentsEngine({
     }
   }
 
+  async function learnLevel() {
+    try {
+      return autonomy.decide("learn_preference", await autonomyPolicy());
+    } catch {
+      return null;
+    }
+  }
+
   /** The Fleet page: agents × projects, this week's counts, and the recap since the last visit. */
   async function fleet() {
     const t = now();
@@ -4845,7 +5117,7 @@ export function createAgentsEngine({
       if (!isFinished(job) || job.requestedBy !== "manta" || reviewed.has(job.id) || job.endedBlocked === true || !hasBranchWork(job)) continue;
       if ((await branchVerdict(job)) === "unmerged") unmergedHanded += 1;
     }
-    const recapEntries = fleetRecapEntries(jobs, await readChanges(), since, { level: await agentChangeLevel(), answered: await answeredSince(since), projectNameOf: (j) => dirNames.get(j.parentDirectory) ?? null, unmergedHanded });
+    const recapEntries = fleetRecapEntries(jobs, await readChanges(), since, { level: await agentChangeLevel(), learnLevel: await learnLevel(), answered: await answeredSince(since), projectNameOf: (j) => dirNames.get(j.parentDirectory) ?? null, unmergedHanded });
     const links = recapEntries.flatMap((e, line) => (e.jobId ? [{ line, jobId: e.jobId }] : []));
     return { asOf: t, projects, rows, week: { tasks: total }, recap: { since: doc.lastSeenAt, lines: recapEntries.map((e) => e.text), ...(links.length > 0 ? { links } : {}) } };
   }
@@ -5310,6 +5582,8 @@ export function createAgentsEngine({
       trials: (trials?.list?.(entry.slug) ?? []).filter(Boolean),
       // Architect v2 §4: the skills it has, with where they came from
       skills: await skillInfosOf(entry.dir),
+      // Architect v2 §5.1: what it has learned from the user's corrections (the Learned tab); the lead learns nothing
+      learned: entry.info.role === "lead" ? [] : await learnedRules(entry.slug),
     };
   }
 
@@ -5437,7 +5711,7 @@ export function createAgentsEngine({
     // (read-only) needs no project.
     const isolation = await effectiveIsolation(architect, home);
     const res = await delegate.startJob({
-      prompt: withResearchGuidance(buildDispatchPrompt({ text: charter })) + (await architectContextFor(charter)) + (await skillUpdatesBrief(agent.slug)),
+      prompt: withResearchGuidance(buildDispatchPrompt({ text: charter, learned: await learnedBlockFor(ARCHITECT_SLUG, home) })) + (await architectContextFor(charter)) + (await skillUpdatesBrief(agent.slug)),
       parentSessionID: ctx?.runSessionId,
       parentDirectory: home,
       agent: agentKey(ARCHITECT_SLUG),
@@ -5523,6 +5797,11 @@ export function createAgentsEngine({
     skillUpdatesBrief,
     warmSkillUpdates,
     settleScriptReviews,
+    learnedWrite,
+    learnedUndo,
+    learnedRules,
+    learnedTombstones,
+    learnedBlockFor,
     bindArchitect,
     bindResearcher,
     reconcile,
