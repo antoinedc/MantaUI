@@ -391,3 +391,11 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
   If the lead / Architect should always wait for a click, say so.
 - **A pending template update that nobody clicks expires after 24 h** like any change; the next boot offers it again
   (an expired record doesn't count for the dedupe).
+
+## Parallel work by the same agent
+
+- **Dispatch the same agent several times in parallel.** Today a chat runs at most one code-editing task of a teammate at a
+  time, so independent pieces (e.g. a server PR and a renderer PR of the same spec) queue behind each other and the lead
+  falls back to generic background jobs. Allow several concurrent tasks of the same agent when they own disjoint files /
+  branches (each already gets its own worktree), with a per-chat cap, and show them as separate task cards. Asked by the
+  user on 2026-11-27.
