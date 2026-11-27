@@ -1008,8 +1008,8 @@ describe("AgentChangeView — skills", () => {
   });
 });
 
-// Architect v2 Stage 2 (review H2): every skill file can be opened; a change with scripts can't be applied until each script was opened
-describe("AgentChangeView — opening skill files, and the scripts gate", () => {
+// Architect v2 Stage 2: every skill file can be opened; a script is read independently by the box, and the verdict is on the card
+describe("AgentChangeView — opening skill files, and the independent script check", () => {
   let h: Harness | null = null;
   afterEach(() => {
     h?.unmount();
@@ -1029,7 +1029,7 @@ describe("AgentChangeView — opening skill files, and the scripts gate", () => 
       after: BEFORE,
       state: "pending",
       needsClick: true,
-      reason: "scripts",
+      reason: "ask",
       origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
       skillsDiff: [{ name: "audit", op: "add", paths: ["SKILL.md", "scripts/a.sh", "scripts/b.py"], provenance: prov, scripts: ["scripts/a.sh", "scripts/b.py"] }],
       ...over,
@@ -1099,57 +1099,60 @@ describe("AgentChangeView — opening skill files, and the scripts gate", () => 
     expect(api.calls.agentsChangeFile).toHaveLength(2);
   });
 
-  it("Apply is disabled until every script has been opened (and read); the reason is in the button's title and in a line on the card; Discard stays available", async () => {
-    mountView(proposal());
+  it("Apply is never gated by opening files: a change with scripts offers Apply at once, and nothing asks to open the scripts first", async () => {
+    mountView(proposal({ reason: "ask" }));
     await h!.flush();
-    const btn = () => byText(h!, "Apply")!;
-    expect(btn().disabled).toBe(true);
-    expect(btn().title).toMatch(/open each script/i);
-    expect(btn().title).toContain("scripts/a.sh");
-    expect(btn().title).toContain("scripts/b.py");
-    expect(q(h!, "agent-change-scripts-gate")!.textContent).toMatch(/2 scripts left to open/);
-    expect(byText(h!, "Discard")!.disabled).toBe(false);
-    // a non-script file doesn't unlock it
-    await openFile("skills/audit/SKILL.md");
-    expect(btn().disabled).toBe(true);
+    const apply = byText(h!, "Apply")!;
+    expect(apply.disabled).toBe(false);
+    expect(apply.title).toBe("");
+    expect(h!.container.textContent).not.toMatch(/left to open|open each script/i);
+    // the files can still be opened, and opening one changes nothing about Apply
     await openFile("skills/audit/scripts/a.sh");
-    expect(btn().disabled).toBe(true);
-    expect(btn().title).not.toContain("scripts/a.sh");
-    expect(btn().title).toContain("scripts/b.py");
-    expect(q(h!, "agent-change-scripts-gate")!.textContent).toMatch(/1 script left to open/);
-    await openFile("skills/audit/scripts/b.py");
-    expect(btn().disabled).toBe(false);
-    expect(q(h!, "agent-change-scripts-gate")).toBeNull();
-  });
-
-  it("a script whose text couldn't be read doesn't count as opened", async () => {
-    mountView(proposal({ skillsDiff: [{ name: "audit", op: "add", paths: ["scripts/a.sh"], provenance: null, scripts: ["scripts/a.sh"] }] }), { agentsChangeFile: readFile(new Set(["skills/audit/scripts/a.sh"])) });
-    await h!.flush();
-    await openFile("skills/audit/scripts/a.sh");
-    expect(byText(h!, "Apply")!.disabled).toBe(true);
-  });
-
-  it("a change without scripts applies as always; a script-free skill change is not gated", async () => {
-    mountView(proposal({ reason: "ask", skillsDiff: [{ name: "audit", op: "add", paths: ["SKILL.md"], provenance: null, scripts: [] }] }));
-    await h!.flush();
-    expect(byText(h!, "Apply")!.disabled).toBe(false);
-    expect(q(h!, "agent-change-scripts-gate")).toBeNull();
-  });
-
-  it("the collapsed profile card gates the same Apply button", async () => {
-    mountView(proposal(), {}, true);
-    await h!.flush();
-    expect(byText(h!, "Apply")!.disabled).toBe(true);
-    expect(byText(h!, "Apply")!.title).toMatch(/open each script/i);
-    // the files are under the fold; opening them there unlocks it
-    await openFile("skills/audit/scripts/a.sh");
-    await openFile("skills/audit/scripts/b.py");
     expect(byText(h!, "Apply")!.disabled).toBe(false);
   });
 
-  it("the reason line for a script proposal says why a click is needed", async () => {
-    mountView(proposal());
+  it("the independent script check is shown: clean says no issues were found, naming the model's independence in one line", async () => {
+    mountView(proposal({ reason: "ask", scriptReview: { verdict: "clean", reasons: [], model: "anthropic/claude-opus-5-5", at: 1 } }));
     await h!.flush();
-    expect(q(h!, "agent-change-reason")!.textContent).toMatch(/script the agent could run/);
+    const block = q(h!, "agent-change-script-review")!;
+    expect(block.getAttribute("data-verdict")).toBe("clean");
+    expect(block.textContent).toBe("Scripts checked independently: no issues found");
+    expect(q(h!, "agent-change-reason")).toBeNull();
+  });
+
+  it("flagged: the reasons are listed outside the fold and the reason line says a click is needed because a check flagged a script", async () => {
+    const review = { verdict: "flagged" as const, reasons: ["scripts/a.sh sends $HOME to a remote host", "b.py reads ~/.ssh"], model: "anthropic/claude-sonnet-5-5", at: 1 };
+    mountView(proposal({ reason: "script-flagged", scriptReview: review }));
+    await h!.flush();
+    const block = q(h!, "agent-change-script-review")!;
+    expect(block.getAttribute("data-verdict")).toBe("flagged");
+    expect(block.textContent).toContain("Scripts checked independently: flagged");
+    expect(Array.from(block.querySelectorAll("li")).map((l) => l.textContent)).toEqual(review.reasons);
+    expect(q(h!, "agent-change-reason")!.textContent).toMatch(/independent check flagged a script/i);
+    h!.unmount();
+    mountView(proposal({ reason: "script-flagged", scriptReview: review }), {}, true);
+    await h!.flush();
+    const fold = q(h!, "agent-change-fold")!;
+    expect(fold.contains(q(h!, "agent-change-script-review"))).toBe(false);
+  });
+
+  it("a check that couldn't run says so and the reason line asks the user to read the scripts; its sentence is shown", async () => {
+    mountView(proposal({ reason: "script-unchecked", scriptReview: { verdict: "error", reasons: ["The script check didn't finish within 5 minutes"], model: "anthropic/claude-opus-5-5", at: 1 } }));
+    await h!.flush();
+    const block = q(h!, "agent-change-script-review")!;
+    expect(block.getAttribute("data-verdict")).toBe("error");
+    expect(block.textContent).toContain("The independent script check couldn't run");
+    expect(block.textContent).toContain("didn't finish within 5 minutes");
+    expect(q(h!, "agent-change-reason")!.textContent).toMatch(/couldn't run/i);
+  });
+
+  it("while the check is out, a held change with scripts says it is being checked; one with no scripts, or with a verdict, doesn't", async () => {
+    mountView(proposal({ state: "held", needsClick: false, reason: null }));
+    await h!.flush();
+    expect(q(h!, "agent-change-script-review")!.textContent).toBe("Checking the scripts independently…");
+    h!.unmount();
+    mountView(proposal({ state: "held", needsClick: false, reason: null, skillsDiff: [{ name: "audit", op: "add", paths: ["SKILL.md"], provenance: null, scripts: [] }] }));
+    await h!.flush();
+    expect(q(h!, "agent-change-script-review")).toBeNull();
   });
 });

@@ -60,17 +60,14 @@ export function candidateVerdictLabel(v: SkillSearchRecord["candidates"][number]
 /** The skills block of a card has something to say. */
 export const hasSkillChanges = (change: Pick<AgentChange, "skillsDiff">): boolean => (change.skillsDiff?.length ?? 0) > 0;
 
-/** Every script a change adds or changes, as `<skill>/<path>` — the keys the card tracks as opened. */
-export function scriptKeys(change: Pick<AgentChange, "skillsDiff">): string[] {
-  return (change.skillsDiff ?? []).flatMap((d) => (d.scripts ?? []).map((p) => `${d.name}/${p}`));
-}
-
 /**
- * Whether Apply must wait: a change with scripts can't be applied until the user has opened each script (its text was read from the box).
- * `title` is the disabled button's native tooltip, `line` the visible sentence on the card (a tooltip alone doesn't reach keyboard users).
+ * What the card says about the independent script check (a tool-less session on another model that read the scripts as data): the verdict,
+ * or — while a held change is still waiting for it — that it is being checked. null when the change has no scripts or there is nothing to say.
  */
-export function applyGate(change: Pick<AgentChange, "skillsDiff">, opened: ReadonlySet<string>): { blocked: boolean; left: string[]; title: string | null; line: string | null } {
-  const left = scriptKeys(change).filter((k) => !opened.has(k));
-  if (left.length === 0) return { blocked: false, left, title: null, line: null };
-  return { blocked: true, left, title: `Open each script before applying: ${left.join(", ")}`, line: `${plural(left.length, "script")} left to open before this can be applied` };
+export function scriptReviewLine(change: Pick<AgentChange, "skillsDiff" | "scriptReview" | "state">): string | null {
+  const hasScripts = (change.skillsDiff ?? []).some((d) => (d.scripts?.length ?? 0) > 0);
+  if (!hasScripts) return null;
+  const r = change.scriptReview;
+  if (!r) return change.state === "held" ? "Checking the scripts independently…" : null;
+  return r.verdict === "clean" ? "Scripts checked independently: no issues found" : r.verdict === "flagged" ? "Scripts checked independently: flagged" : "The independent script check couldn't run";
 }

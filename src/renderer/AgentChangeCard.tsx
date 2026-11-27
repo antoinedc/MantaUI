@@ -39,8 +39,8 @@ import {
 } from "./agentChange";
 import { isTemplateConflict, sizeLine } from "./agentTrial";
 import { ProblemBlock, TrialBlock } from "./TrialParts";
-import { SkillsDiffBlock } from "./SkillParts";
-import { applyGate, skillsFoldPart } from "./agentSkills";
+import { ScriptReviewBlock, SkillsDiffBlock } from "./SkillParts";
+import { skillsFoldPart } from "./agentSkills";
 import { DiffLine } from "./DiffLine";
 
 type Notice = { tone: "ok" | "error"; text: string; state: AgentChange["state"] };
@@ -259,10 +259,6 @@ export function AgentChangeView({
 }) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  // the scripts of a skill change the user has opened and read: Apply waits for every one of them
-  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
-  const markOpened = useCallback((key: string) => setOpened((s) => (s.has(key) ? s : new Set(s).add(key))), []);
-  const gate = applyGate(change, opened);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -311,8 +307,7 @@ export function AgentChangeView({
             key={action}
             tone={action === "apply" && change.state === "pending" ? "primary" : "default"}
             loading={busy === action}
-            disabled={anyBusy || (action === "apply" && gate.blocked)}
-            title={action === "apply" && gate.blocked ? (gate.title ?? undefined) : undefined}
+            disabled={anyBusy}
             onClick={() => void press(action)}
           >
             {agentChangeButtonLabel(action, change, busy === action)}
@@ -327,11 +322,7 @@ export function AgentChangeView({
           {reason}
         </div>
       )}
-      {gate.line && (
-        <div className="text-warn" data-testid="agent-change-scripts-gate">
-          {gate.line}
-        </div>
-      )}
+      <ScriptReviewBlock change={change} />
       {isTemplateConflict(change) && (
         <div className="text-warn break-words" data-testid="agent-change-conflict">
           Conflict: your edits and the new built-in version change the same part, so it waits for your click.
@@ -361,7 +352,7 @@ export function AgentChangeView({
           {size}
         </div>
       )}
-      <SkillsDiffBlock change={change} onOpened={markOpened} />
+      <SkillsDiffBlock change={change} />
       <SourceBlocks change={change} />
       {change.trial && <TrialBlock change={change} />}
       <EvidenceSection change={change} />

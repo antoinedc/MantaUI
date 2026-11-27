@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SkillProvenance } from "../shared/types";
-import { applyGate, scriptKeys, candidateVerdictLabel, httpsUrl, provenanceLine, registryLine, skillOpLabel, skillSearchLine, skillSizeLine, skillsFoldPart } from "./agentSkills";
+import { scriptReviewLine, candidateVerdictLabel, httpsUrl, provenanceLine, registryLine, skillOpLabel, skillSearchLine, skillSizeLine, skillsFoldPart } from "./agentSkills";
 
 const prov = (over: Partial<SkillProvenance> = {}): SkillProvenance => ({ url: "https://github.com/acme/cro/blob/abc/SKILL.md", sourceId: "src_1", repo: "acme/cro", ref: "abc123", licence: "MIT", taken: "whole", ...over });
 
@@ -51,12 +51,15 @@ describe("agent skills helpers (Architect v2 §4)", () => {
     expect(candidateVerdictLabel("rejected")).toBe("Rejected");
   });
 
-  it("scriptKeys lists every script of a change as name/path; applyGate says what is left to open", () => {
-    const change = { skillsDiff: [{ name: "a", op: "add" as const, paths: ["x.sh", "y.md"], provenance: null, scripts: ["x.sh"] }, { name: "b", op: "replace" as const, paths: ["z.py"], provenance: null, scripts: ["z.py"] }] };
-    expect(scriptKeys(change)).toEqual(["a/x.sh", "b/z.py"]);
-    expect(applyGate(change, new Set())).toEqual({ blocked: true, left: ["a/x.sh", "b/z.py"], title: "Open each script before applying: a/x.sh, b/z.py", line: "2 scripts left to open before this can be applied" });
-    expect(applyGate(change, new Set(["a/x.sh"]))).toEqual({ blocked: true, left: ["b/z.py"], title: "Open each script before applying: b/z.py", line: "1 script left to open before this can be applied" });
-    expect(applyGate(change, new Set(["a/x.sh", "b/z.py", "other"]))).toEqual({ blocked: false, left: [], title: null, line: null });
-    expect(applyGate({ skillsDiff: undefined }, new Set())).toEqual({ blocked: false, left: [], title: null, line: null });
+  it("scriptReviewLine: what the card says about the independent check; nothing when there is nothing to say", () => {
+    const scripts = [{ name: "a", op: "add" as const, paths: ["x.sh"], provenance: null, scripts: ["x.sh"] }];
+    const clean = { verdict: "clean" as const, reasons: [], model: "m", at: 1 };
+    expect(scriptReviewLine({ skillsDiff: scripts, scriptReview: clean, state: "applied" })).toBe("Scripts checked independently: no issues found");
+    expect(scriptReviewLine({ skillsDiff: scripts, scriptReview: { ...clean, verdict: "flagged", reasons: ["r"] }, state: "pending" })).toBe("Scripts checked independently: flagged");
+    expect(scriptReviewLine({ skillsDiff: scripts, scriptReview: { ...clean, verdict: "error", reasons: ["r"] }, state: "pending" })).toBe("The independent script check couldn't run");
+    expect(scriptReviewLine({ skillsDiff: scripts, scriptReview: undefined, state: "held" })).toBe("Checking the scripts independently…");
+    expect(scriptReviewLine({ skillsDiff: scripts, scriptReview: undefined, state: "pending" })).toBeNull();
+    expect(scriptReviewLine({ skillsDiff: [{ ...scripts[0], scripts: [] }], scriptReview: undefined, state: "held" })).toBeNull();
+    expect(scriptReviewLine({ skillsDiff: undefined, scriptReview: undefined, state: "held" })).toBeNull();
   });
 });

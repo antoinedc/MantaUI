@@ -12,7 +12,7 @@ import { diffRows } from "./agentChange";
 import { Button } from "./Button";
 import { DiffLine } from "./DiffLine";
 import { Pill } from "./Pill";
-import { candidateVerdictLabel, hasSkillChanges, httpsUrl, provenanceLine, registryLine, skillOpLabel, skillSearchLine } from "./agentSkills";
+import { candidateVerdictLabel, hasSkillChanges, httpsUrl, provenanceLine, registryLine, scriptReviewLine, skillOpLabel, skillSearchLine } from "./agentSkills";
 
 const H4 = "m-0 text-meta font-semibold uppercase tracking-wider text-text-faint";
 
@@ -52,7 +52,7 @@ type FileState =
 const errText = (e: unknown): string => String((e as Error)?.message ?? e ?? "").trim() || "Something went wrong.";
 
 /** One changed file of a skill: a native <details>; opening it reads the file from the box (once) and shows its text, or a diff against what was there. */
-function SkillFile({ changeId, skill, path, script, onOpened }: { changeId: string; skill: string; path: string; script: boolean; onOpened?: (key: string) => void }) {
+function SkillFile({ changeId, skill, path, script }: { changeId: string; skill: string; path: string; script: boolean }) {
   const full = `skills/${skill}/${path}`;
   const [state, setState] = useState<FileState>({ status: "idle" });
   const alive = useRef(true);
@@ -69,11 +69,10 @@ function SkillFile({ changeId, skill, path, script, onOpened }: { changeId: stri
       if (!alive.current) return;
       if (!r || (r.before !== null && typeof r.before !== "string") || (r.after !== null && typeof r.after !== "string")) throw new Error("The box didn't answer. Try again in a moment.");
       setState({ status: "ready", before: r.before, after: r.after, truncated: r.truncated === true });
-      onOpened?.(`${skill}/${path}`); // only a file that was really read counts as opened
     } catch (e) {
       if (alive.current) setState({ status: "error", message: errText(e) });
     }
-  }, [changeId, full, onOpened, skill, path]);
+  }, [changeId, full]);
   const rows = state.status === "ready" && state.before !== null && state.after !== null ? diffRows(state.before, state.after) : [];
   return (
     <details
@@ -125,8 +124,27 @@ function SkillFile({ changeId, skill, path, script, onOpened }: { changeId: stri
   );
 }
 
-/** Under the diff of a change that touches skills: each skill with its files and origin, and the search that came first. `onOpened`: a file was read. */
-export function SkillsDiffBlock({ change, onOpened }: { change: AgentChange; onOpened?: (key: string) => void }) {
+/** The independent script check's verdict, with its reasons when it flagged a script or couldn't run. Read before deciding: it sits outside the card's fold. */
+export function ScriptReviewBlock({ change }: { change: AgentChange }) {
+  const line = scriptReviewLine(change);
+  if (!line) return null;
+  const r = change.scriptReview;
+  return (
+    <div className={`flex flex-col gap-1 break-words ${r?.verdict === "flagged" || r?.verdict === "error" ? "text-warn" : "text-text-muted"}`} data-testid="agent-change-script-review" data-verdict={r?.verdict ?? "pending"} role={r && r.verdict !== "clean" ? "alert" : undefined}>
+      <span>{line}</span>
+      {r && r.verdict !== "clean" && r.reasons.length > 0 && (
+        <ul className="m-0 flex list-disc flex-col gap-px pl-5">
+          {r.reasons.map((reason, i) => (
+            <li key={i}>{reason}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Under the diff of a change that touches skills: each skill with its files and origin, and the search that came first. */
+export function SkillsDiffBlock({ change }: { change: AgentChange }) {
   if (!hasSkillChanges(change)) return null;
   const search = change.skillSearch;
   return (
@@ -149,7 +167,7 @@ export function SkillsDiffBlock({ change, onOpened }: { change: AgentChange; onO
               <ul className="m-0 flex list-none flex-col gap-px p-0 font-mono text-text-muted" aria-label={`Files of ${s.name}`}>
                 {s.paths.map((p) => (
                   <li key={p}>
-                    <SkillFile changeId={change.id} skill={s.name} path={p} script={s.op !== "remove" && s.scripts.includes(p)} onOpened={onOpened} />
+                    <SkillFile changeId={change.id} skill={s.name} path={p} script={s.op !== "remove" && s.scripts.includes(p)} />
                   </li>
                 ))}
               </ul>

@@ -3190,7 +3190,7 @@ export interface AgentChange {
   callID: string;
   state: AgentChangeState;
   needsClick: boolean;
-  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "scripts" | null;
+  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "script-flagged" | "script-unchecked" | null;
   before: string | null;
   after: string;
   createdAt: number;
@@ -3216,6 +3216,8 @@ export interface AgentChange {
   /** Architect v2 Stage 2: the skills this change adds, replaces or removes, and the search that came first. Absent on older records. */
   skillsDiff?: SkillChange[];
   skillSearch?: SkillSearchRecord;
+  /** The independent script review (a tool-less session on another model reads the scripts as data): "error" = it failed, timed out or couldn't be read. Absent until it has run, and when there are no scripts. */
+  scriptReview?: { verdict: "clean" | "flagged" | "error"; reasons: string[]; model: string; at: number };
 }
 export interface AgentChangeEvent {
   id: string;
