@@ -18,7 +18,7 @@ const reply = (status, headers, body) => {
   return { status, headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])), body: buf, bytes: buf.length };
 };
 
-async function fixture({ routes = {}, bound = true, architect = true, extras = [], secrets = [], exec, now } = {}) {
+async function fixture({ routes = {}, bound = true, architect = true, extras = [], secrets = [], exec, now, engineExtra = {} } = {}) {
   const base = await mkdtemp(join(tmpdir(), "research-test-"));
   const calls = [];
   const hop = async (req) => {
@@ -45,7 +45,9 @@ async function fixture({ routes = {}, bound = true, architect = true, extras = [
     },
     exec,
     log: { warn: () => {} },
+    toolsRoot: join(base, "tools", "skills"),
     ...(now ? { now } : {}),
+    ...engineExtra,
   });
   return { base, calls, binds, engine, root: join(base, "research"), cleanup: () => rm(base, { recursive: true, force: true }) };
 }
@@ -847,5 +849,102 @@ test("a binding that does not say the caller is the Architect never reaches an e
     assert.equal(ran, 0);
   } finally {
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+// ---- Architect v2 Stage 2 (spec §4.2): searches are recorded per session; the `skills` source is the Architect's ----
+
+const HN_URL = "https://hn.algolia.com/api/v1/search?query=agents&tags=story&hitsPerPage=10";
+const hnReply = reply(200, { "content-type": "application/json" }, JSON.stringify({ hits: [{ title: "T", url: "https://t.example/post", points: 3, num_comments: 1, objectID: "77" }] }));
+const SKILLS_OUT = "\nInstall with npx skills add <owner/repo@skill>\n\nacme/cro-skills@landing-pages 12.5K installs\n\u2514 https://skills.sh/acme/cro-skills/landing-pages\n\nother/repo@thing 300 installs\n\u2514 https://skills.sh/other/repo/thing\n";
+const skillsExec = (runs) => async (file, args, opts) => {
+  runs.push({ file, args, opts });
+  if (file === "npm") {
+    await mkdir(join(opts.cwd, "node_modules", "skills", "bin"), { recursive: true });
+    await writeFile(join(opts.cwd, "node_modules", "skills", "package.json"), JSON.stringify({ name: "skills", version: "1.9.1" }));
+    await writeFile(join(opts.cwd, "node_modules", "skills", "bin", "cli.mjs"), "//");
+    return { stdout: "" };
+  }
+  return { stdout: SKILLS_OUT };
+};
+
+test("searchesOf: every research_search call is stored per child session as {source, query, refs}; a failed search and another session leave nothing", async () => {
+  const f = await fixture({ routes: { [HN_URL]: hnReply, "https://hn.algolia.com/api/v1/search?query=boom&tags=story&hitsPerPage=10": reply(500, {}, "no") } });
+  try {
+    assert.deepEqual(await f.engine.searchesOf("ses_child"), []);
+    assert.equal((await f.engine.search(call({ source: "hn", query: "agents" }))).ok, true);
+    assert.equal((await f.engine.search(call({ source: "hn", query: "boom" }))).ok, false);
+    const list = await f.engine.searchesOf("ses_child");
+    assert.equal(list.length, 1);
+    assert.equal(list[0].source, "hn");
+    assert.equal(list[0].query, "agents");
+    assert.deepEqual([...list[0].refs].sort(), ["https://news.ycombinator.com/item?id=77", "https://t.example/post"]);
+    assert.deepEqual(await f.engine.searchesOf("ses_other"), []);
+    assert.deepEqual(await f.engine.searchesOf("../ses_child"), []);
+    // the search record sits beside the sources and never counts as one
+    assert.equal(await f.engine.getSource("ses_child", "searches"), null);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("searchesOf: github results are recorded by repository name and address; searches accumulate in order", async () => {
+  const repos = JSON.stringify({ items: [{ full_name: "acme/cro-skills", html_url: "https://github.com/acme/cro-skills", stargazers_count: 5, pushed_at: "2026-11-01T00:00:00Z", license: { spdx_id: "MIT" } }] });
+  const f = await fixture({ routes: { "*": reply(200, { "content-type": "application/json" }, repos) } });
+  try {
+    await f.engine.search(call({ source: "github", query: "cro skill" }));
+    await f.engine.search(call({ source: "github", query: "second" }));
+    const list = await f.engine.searchesOf("ses_child");
+    assert.deepEqual(list.map((s) => s.query), ["cro skill", "second"]);
+    assert.ok(list[0].refs.includes("acme/cro-skills"));
+    assert.ok(list[0].refs.includes("https://github.com/acme/cro-skills"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the skills source: the Architect gets owner/repo@skill, installs and the skills.sh address; the search is recorded with those refs (the ref, its repository and the address)", async () => {
+  const runs = [];
+  const f = await fixture({ engineExtra: { exec: skillsExec(runs) } });
+  try {
+    const r = await f.engine.search(call({ source: "skills", query: "landing pages" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.source, "skills");
+    assert.deepEqual(r.results[0], { ref: "acme/cro-skills@landing-pages", repo: "acme/cro-skills", skill: "landing-pages", installs: 12_500, url: "https://skills.sh/acme/cro-skills/landing-pages" });
+    assert.deepEqual(runs.map((x) => x.file === "npm" ? "npm" : x.args.slice(1)), ["npm", ["find", "landing pages"]]);
+    const [rec] = await f.engine.searchesOf("ses_child");
+    assert.equal(rec.source, "skills");
+    for (const ref of ["acme/cro-skills@landing-pages", "acme/cro-skills", "https://skills.sh/acme/cro-skills/landing-pages", "other/repo@thing"]) assert.ok(rec.refs.includes(ref), ref);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the skills source refuses a query that starts with a dash before anything is installed or run, and is listed among the Architect's sources", async () => {
+  const runs = [];
+  const f = await fixture({ engineExtra: { exec: skillsExec(runs) } });
+  try {
+    const r = await f.engine.search(call({ source: "skills", query: "-rf /" }));
+    assert.equal(r.ok, false);
+    assert.match(r.error, /dash/);
+    assert.equal(runs.length, 0);
+    assert.deepEqual(await f.engine.searchesOf("ses_child"), []);
+    const unknown = await f.engine.search(call({ source: "nope", query: "q" }));
+    assert.match(unknown.error, /Available: hn, arxiv, reddit, x, github, skills$/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a specialist that isn't the Architect has no skills source: unknown, nothing installed or run", async () => {
+  const runs = [];
+  const f = await fixture({ architect: false, engineExtra: { exec: skillsExec(runs) } });
+  try {
+    const r = await f.engine.search(call({ source: "skills", query: "landing pages" }));
+    assert.equal(r.ok, false);
+    assert.match(r.error, /Unknown source "skills"\. Available: hn, arxiv, reddit, x, github$/);
+    assert.equal(runs.length, 0);
+  } finally {
+    await f.cleanup();
   }
 });
