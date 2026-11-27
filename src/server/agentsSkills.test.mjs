@@ -581,6 +581,7 @@ test("skills_installed lists the skills on this box: name, description, folder a
   try {
     await propose(f, { draft: { skills: [copiedOp()] } });
     await release(f);
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "running" };
     const b = installedCall();
     assert.equal((await f.engine.skillsInstalled(b)).ok, false, "no running tool call: refused");
     withInstalledTranscript(f, b);
