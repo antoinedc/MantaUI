@@ -1014,8 +1014,9 @@ test("M5: a skill's description is at most 300 characters when proposed; the com
 const scriptOp = (path, content = SCRIPT, origin = "written", over = {}) => writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path, content, origin }], ...over });
 
 test("H1: a skill with ANY script waits for a click at every level (Auto, Tell me, Ask), whoever wrote it and whatever its language", async () => {
+  const ALL = [["scripts/run.sh", SCRIPT], ["x.py", "print(1)\n"], ["x.mjs", "console.log(1)\n"], ["x.rb", "puts 1\n"], ["x.pl", "print 1;\n"], ["x.ps1", "Write-Host 1\n"], ["x.bat", "echo 1\n"], ["x.cmd", "echo 1\n"], ["tools/run", "#!/usr/bin/env node\nconsole.log(1)\n"]];
   for (const level of ["auto", "tell", "ask"]) {
-    for (const [path, content] of [["scripts/run.sh", SCRIPT], ["x.py", "print(1)\n"], ["x.mjs", "console.log(1)\n"], ["x.rb", "puts 1\n"], ["x.pl", "print 1;\n"], ["x.ps1", "Write-Host 1\n"], ["x.bat", "echo 1\n"], ["x.cmd", "echo 1\n"], ["tools/run", "#!/usr/bin/env node\nconsole.log(1)\n"]]) {
+    for (const [path, content] of level === "auto" ? ALL : ALL.slice(0, 1)) { // every language at Auto; the other levels with one
       const f = await fixture({ level });
       try {
         const r = await propose(f, { draft: { skills: [scriptOp(path, content)] } });

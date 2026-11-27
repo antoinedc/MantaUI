@@ -28,23 +28,34 @@ What the file is made of; how to write it well is for your research to decide.
 
 An agent's `skills/<name>/` folder holds method files it reads when it needs them.
 - **Files:** `SKILL.md` with frontmatter `name` (the folder name, 1–50 lowercase letters, digits and dashes) and `description`,
-  plus up to 20 text files in all (paths are relative, up to 4 folders deep). A skill is at most 256 KiB, an agent's skills at
-  most 1 MiB, and an agent has at most 15 skills.
+  plus up to 20 text files in all (paths are relative, up to 4 folders deep, compared without regard to case). A skill is at most
+  256 KiB, an agent's skills at most 1 MiB, and an agent has at most 15 skills. The `description` is at most 300 characters. The
+  Architect's own and Manta's own skills ship with Manta: a draft that changes them is refused.
 - **Draft:** `draft.skills` is a list of `{name, op, files?, provenance?}`. `op` is `add`, `replace` (the skill's whole folder is
   swapped for the files you send) or `remove` (no files). Each file is `{path, content, origin, sourceId?}`; `origin` is `copied`
   (text unchanged from a page you fetched, with that page's `sourceId`; at least 20 characters, never from a private source) or
-  `written` (yours). `SOURCE.md` and `LICENSE` are written by the server; don't send them.
+  `written` (yours). `SOURCE.md` and `LICENSE` are written by the server; don't send them. A copied file must be a contiguous piece
+  of its page: only line endings and trailing spaces may differ, never newlines or indentation, so a shell line stays the line it
+  was. All copied files of one skill come from the provenance page or from other pages of the same GitHub repository. A written
+  file that holds a passage of 400 or more characters found verbatim in a page you fetched is refused: label it copied, with provenance.
 - **Provenance** (needed when any file is copied): `{url, sourceId, repo, ref, licence, taken, licenseSourceId?, registry?}` —
-  `url` is the address of the page `sourceId` was fetched from, `repo` is `owner/repo`, `ref` the commit (40 hex characters) or
-  tag, `taken` is `whole` or `part`, `registry` the installs / stars you saw, if any.
+  `url` is the address of the page `sourceId` was fetched from and must be a github.com (or raw.githubusercontent.com) page of the
+  repository; `repo` is `owner/repo` and `ref` the commit (40 hex characters) or tag, and both must agree with the address (the
+  server reads them from it, and a `/blob/<ref>/` in the address is the ref); `taken` is `whole` or `part`, `registry` the installs
+  / stars you saw, if any.
 - **Licences you may copy under:** MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1.0, CC-BY-4.0,
   MPL-2.0 (the SPDX id). Any other, unknown or missing licence can't be copied: write your own and cite what you learned as
-  research. Every one of them except 0BSD, Unlicense and CC0-1.0 needs `licenseSourceId`, the source id of the fetched licence file.
+  research. Every one of them except 0BSD, Unlicense and CC0-1.0 needs `licenseSourceId`, the source id of the fetched licence file:
+  a page of the same repository that holds that licence's own text. For those three, a licence file isn't needed, but the licence must
+  be stated on a fetched page of the repository (the provenance page, or a licence file you pass as `licenseSourceId`).
 - **`skillSearch`** goes with an added skill: `{queries: [{source, query}], candidates: [{ref, installs, stars, licence, verdict,
   why}]}`. Each query must be one you ran with `research_search` in this task; each candidate `ref` (`owner/repo@skill`,
   `owner/repo`, an address, or an installed skill's name) must have appeared in a result or in `skills_installed`; `verdict` is
   `used-whole`, `used-part` or `rejected`.
 - A skill change needs a trial like any change to the agent: the skill files are part of the draft that runs.
+- A skill with a script (`.sh`, `.py`, `.js`, `.mjs`, `.ts`, `.rb`, `.pl`, `.ps1`, `.bat`, `.cmd`, or a file starting with `#!`), copied or
+  written, always waits for the user's click, whatever their setting; the card flags the script and the user opens it before applying.
+  A skill of text only follows the user's setting.
 
 ## Routing
 
