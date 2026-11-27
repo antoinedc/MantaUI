@@ -1,6 +1,6 @@
 # Agents — Phase 7: Architect v2 (problem first, tested agents, skills, learning)
 
-Status: draft, review round 2 (2026-11-27). Owner: Antoine. Builds on Phases 1–6 (`2026-11-22-agents-phase1.md` …
+Status: reviewed, ready to implement (2026-11-27; Gemini 4 Argon, 3 rounds, see §12). Owner: Antoine. Builds on Phases 1–6 (`2026-11-22-agents-phase1.md` …
 `2026-11-26-agents-screens.md`), the research library (`2026-11-24-research-library.md`) and the knowledge system
 (`src/server/knowledge/`). Inspired by a comparison with Dispatch's agent fleet (agents.voska.org, 2026-11-27): its
 Architect treats "a request for an agent [as] a request to solve a problem, not a requirement to create another record",
@@ -155,7 +155,9 @@ removes the rest (so boot cleans leftovers). Trials never touch `.installed.json
   `agent_handoff`, `routine_*`, `schedule_*`, `notify`, `send_file`, `serve_page`. The `question` tool is answered at
   once with "This is a test run with no user: continue on your best assumption and say what you assumed"; recorded as
   "would ask".
-- **Limits:** 15 min per case; ≤ 3 cases per trial; ≤ 3 trials per target agent and ≤ 6 per root task; ≤ 2 cases
+- **Limits:** 15 min per case; ≤ 3 cases per trial; ≤ 3 trials per target agent (keyed by `agent` for an update, by
+  `slugForName(draft.name)` for a create — also stored as the trial's `agentSlug`, so the created agent's Tests tab shows
+  the trials that made it) and ≤ 6 per root task; ≤ 2 cases
   running box-wide (own FIFO, not the delegate cap). Model = the draft's `model`, else Auto. Usage is checked with
   `budget.canSpend` and booked with `budget.book` (work type `agent-trial`), as `knowledge/trial.mjs` does.
 - **Recorded per case:** end state (done / failed / timed out / aborted), final answer, tools used, files changed (diff
@@ -205,8 +207,9 @@ The lead's `agent_change` (small dictated edits) is unchanged and needs no trial
   ```
 - Server-generated files (never sent by the model): `SOURCE.md` (origin link, ref, licence, what was taken, installs /
   stars at the time) and, when `licenseSourceId` is given, `LICENSE` = that fetched source's text.
-- **Facts checked:**
-  - a `copied` file carries `sourceId`; `research.getSource(childSessionID, sourceId)` exists for this task's sessions
+- **Facts checked** (sources and searches are looked up across every child session of the root task — all jobs
+  sharing `rootJobOf` — usually one):
+  - a `copied` file carries `sourceId`; `research.getSource(childSessionID, sourceId)` exists in one of them
     and contains the content (whitespace-normalised); the skill's `provenance.sourceId` was fetched by this task and
     its `url` matches that source;
   - licence allowlist for copying: `MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1.0,
@@ -302,7 +305,8 @@ Only Architect proposals (create, update, refresh, check-up). The lead's `agent_
 - **Release (self-driving):** refresh and check-up jobs are stamped `architect: { mode: "routine" }` (today refresh
   uses `"unknown"`); `propose()` keeps it; `decideRelease()` step 5 becomes `if (rec.mode !== "build" && rec.mode !==
   "routine") → pending "plan"`. So they follow the user's "Change an agent" level, with the same exceptions (lead,
-  core, raising isolation → pending). Outcome text for a routine round that waits: "it came from a scheduled check".
+  core, raising isolation → pending). A routine proposal that waits keeps the existing specific reasons (`lead`, `core`, `isolation`, `ask`,
+  `unfinished`); none is added.
 - Report: a routine report with the highlights of the fact sheet and the Outcome lines.
 
 ## 6. Contracts
@@ -402,12 +406,13 @@ UI: modern-web-guidance consulted for the Tests / Learned tabs during implementa
 
 One code-editing task at a time. Each PR: targeted tests locally, full suite on CI.
 
-1. **PR A — Stage 0 + Stage 1 server and templates together** (`agents.mjs`, new `agentTrials.mjs`, `delegate.mjs`
-   hooks, plugin tools, `node-diff3`, `.history.json` + script, the
+1. **PR A — Stage 0 + Stage 1 server and templates together** (`agents.mjs` incl. the bundle snapshots of §4.1 —
+   `.blobs/`, `beforeBundle` / `afterBundle` — because template upgrades already touch the Architect's `skills/**`;
+   new `agentTrials.mjs`, `delegate.mjs` hooks, plugin tools, `node-diff3`, `.history.json` + script, the
    Architect + lead template texts — process only, drafted by the lead session, checked by the guard — and tests). The
    server never requires a field the shipped Architect doesn't know.
 2. **PR B — Stage 1 renderer**: change card Problem / Trial / size, Tests tab, progress line.
-3. **PR C — Stage 2** (server incl. search recording + blobs, templates, renderer Skills section and card skill diff).
+3. **PR C — Stage 2** (skill proposals, provenance and licences, search recording, the `skills` source, templates, renderer Skills section and card skill diff).
 4. **PR D — Stage 3** (learning, `learn_preference`, check-up, Learned tab, Settings row).
 5. **Acceptance:** hand `@architect` "I want a UX/UI agent that designs the product's UI, not only reviews it" for
    `@ux-ui-review`; check it uses every stage (problem + shapes, a question if open, proven skills, trials, replaces).
@@ -452,3 +457,9 @@ tasks; learning for the lead; upstream skill diffs before an update; usage-based
 
 Also from the user (2026-11-27): background work reports to Manta, which merges; unmerged finished branches go to the
 check-up fact sheet for the lead, never to the user as review items (§5.2).
+
+### Round 2 — Gemini 4 Argon, at f744803e
+
+All 17 round-1 findings verified resolved; no new MUST. Applied: per-agent trial key for creates (`slugForName`, §3.3);
+sources / searches checked across all child sessions of the root task (§4.1); bundle snapshots moved to PR A (§10);
+no new Outcome wait reason for routine rounds (§5.2).
