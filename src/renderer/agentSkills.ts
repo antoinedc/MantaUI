@@ -59,3 +59,18 @@ export function candidateVerdictLabel(v: SkillSearchRecord["candidates"][number]
 
 /** The skills block of a card has something to say. */
 export const hasSkillChanges = (change: Pick<AgentChange, "skillsDiff">): boolean => (change.skillsDiff?.length ?? 0) > 0;
+
+/** Every script a change adds or changes, as `<skill>/<path>` — the keys the card tracks as opened. */
+export function scriptKeys(change: Pick<AgentChange, "skillsDiff">): string[] {
+  return (change.skillsDiff ?? []).flatMap((d) => (d.scripts ?? []).map((p) => `${d.name}/${p}`));
+}
+
+/**
+ * Whether Apply must wait: a change with scripts can't be applied until the user has opened each script (its text was read from the box).
+ * `title` is the disabled button's native tooltip, `line` the visible sentence on the card (a tooltip alone doesn't reach keyboard users).
+ */
+export function applyGate(change: Pick<AgentChange, "skillsDiff">, opened: ReadonlySet<string>): { blocked: boolean; left: string[]; title: string | null; line: string | null } {
+  const left = scriptKeys(change).filter((k) => !opened.has(k));
+  if (left.length === 0) return { blocked: false, left, title: null, line: null };
+  return { blocked: true, left, title: `Open each script before applying: ${left.join(", ")}`, line: `${plural(left.length, "script")} left to open before this can be applied` };
+}

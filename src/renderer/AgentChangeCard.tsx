@@ -36,12 +36,12 @@ import {
   parseAgentMdView,
   verdictLabel,
   type AgentChangeAction,
-  type DiffRow,
 } from "./agentChange";
 import { isTemplateConflict, sizeLine } from "./agentTrial";
 import { ProblemBlock, TrialBlock } from "./TrialParts";
 import { SkillsDiffBlock } from "./SkillParts";
-import { skillsFoldPart } from "./agentSkills";
+import { applyGate, skillsFoldPart } from "./agentSkills";
+import { DiffLine } from "./DiffLine";
 
 type Notice = { tone: "ok" | "error"; text: string; state: AgentChange["state"] };
 
@@ -85,27 +85,6 @@ function CreateView({ change }: { change: AgentChange }) {
         <summary className="cursor-pointer text-text-muted">Instructions</summary>
         <div className="mt-2 whitespace-pre-wrap break-words text-text-muted max-h-64 overflow-y-auto">{view.body}</div>
       </details>
-    </div>
-  );
-}
-
-function DiffLine({ row }: { row: DiffRow }) {
-  if (row.kind === "gap") {
-    return (
-      <div className="flex whitespace-pre text-text-faint" data-diff="gap">
-        <span className="select-none shrink-0 w-3" aria-hidden="true" />
-        <span className="flex-1">⋯ {row.count} unchanged line{row.count === 1 ? "" : "s"}</span>
-      </div>
-    );
-  }
-  const add = row.kind === "add";
-  const del = row.kind === "del";
-  return (
-    <div className={`flex whitespace-pre${add ? " bg-[var(--diff-add)]" : del ? " bg-[var(--diff-del)]" : ""}`} data-diff={row.kind}>
-      <span className={`select-none shrink-0 w-3 ${add ? "text-ok" : del ? "text-danger" : "text-text-faint"}`} aria-hidden="true">
-        {add ? "+" : del ? "−" : " "}
-      </span>
-      <span className="flex-1 text-text">{row.text || " "}</span>
     </div>
   );
 }
@@ -280,6 +259,10 @@ export function AgentChangeView({
 }) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // the scripts of a skill change the user has opened and read: Apply waits for every one of them
+  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
+  const markOpened = useCallback((key: string) => setOpened((s) => (s.has(key) ? s : new Set(s).add(key))), []);
+  const gate = applyGate(change, opened);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -328,7 +311,8 @@ export function AgentChangeView({
             key={action}
             tone={action === "apply" && change.state === "pending" ? "primary" : "default"}
             loading={busy === action}
-            disabled={anyBusy}
+            disabled={anyBusy || (action === "apply" && gate.blocked)}
+            title={action === "apply" && gate.blocked ? (gate.title ?? undefined) : undefined}
             onClick={() => void press(action)}
           >
             {agentChangeButtonLabel(action, change, busy === action)}
@@ -341,6 +325,11 @@ export function AgentChangeView({
       {reason && (
         <div className="text-warn" data-testid="agent-change-reason">
           {reason}
+        </div>
+      )}
+      {gate.line && (
+        <div className="text-warn" data-testid="agent-change-scripts-gate">
+          {gate.line}
         </div>
       )}
       {isTemplateConflict(change) && (
@@ -372,7 +361,7 @@ export function AgentChangeView({
           {size}
         </div>
       )}
-      <SkillsDiffBlock change={change} />
+      <SkillsDiffBlock change={change} onOpened={markOpened} />
       <SourceBlocks change={change} />
       {change.trial && <TrialBlock change={change} />}
       <EvidenceSection change={change} />
