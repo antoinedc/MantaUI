@@ -1008,14 +1008,14 @@ test("refresh provisioning: every team agent gets one monthly routine on sync; t
   const f = await fixture();
   try {
     await f.engine.init();
-    const created = f.w.routineCalls.filter((c) => c[0] === "create");
+    const created = f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh"); // (the team check-up routine is made beside them: agentsCheckup.test.mjs)
     assert.equal(created.length, 1, "Dev only");
     const input = created[0][1];
     assert.deepEqual({ kind: input.kind, agentSlug: input.agentSlug, name: input.name, enabled: input.enabled, rollUp: input.rollUp, access: input.access, directory: input.directory, cron: input.cron }, { kind: "agent-refresh", agentSlug: "dev", name: "Refresh @dev", enabled: true, rollUp: true, access: "read", directory: join(f.root, "dev", "home"), cron: `0 9 ${refreshDay("dev")} * *` });
     assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh, { dev: "rt1" });
     await f.engine.sync();
     await f.engine.list();
-    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create").length, 1, "idempotent");
+    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh").length, 1, "idempotent");
     // a new agent gets one at the next sync
     await mkdir(join(f.root, "scout", "home"), { recursive: true });
     await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
@@ -1023,11 +1023,11 @@ test("refresh provisioning: every team agent gets one monthly routine on sync; t
     assert.deepEqual(Object.keys(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh).sort(), ["dev", "scout"]);
     // Off (the routine disabled, or deleted on the Routines page) stays Off
     f.w.routines.get("rt1").enabled = false;
-    f.w.routines.delete("rt2");
+    f.w.routines.delete("rt3"); // (rt2 is the team check-up)
     await f.engine.sync();
-    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create").length, 2, "nothing recreated");
+    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh").length, 2, "nothing recreated");
     assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1" });
-    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt2" });
+    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt3" });
     assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null });
   } finally {
     await f.cleanup();
@@ -1044,8 +1044,8 @@ test("refresh toggle: Off disables the routine, On enables it, a missing routine
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: true }), { enabled: true, routineId: "rt1" });
     f.w.routines.delete("rt1");
     const back = await f.engine.refreshSet({ slug: "dev", enabled: true });
-    assert.deepEqual(back, { enabled: true, routineId: "rt2" });
-    assert.equal(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh.dev, "rt2");
+    assert.deepEqual(back, { enabled: true, routineId: "rt3" }); // (rt2 is the team check-up)
+    assert.equal(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh.dev, "rt3");
     for (const slug of ["manta", "architect", "ghost"]) await assert.rejects(f.engine.refreshSet({ slug, enabled: true }), /team agents|No agent named/);
     await assert.rejects(f.engine.refreshSet({ slug: "dev", enabled: "yes" }), /on or off/i);
   } finally {

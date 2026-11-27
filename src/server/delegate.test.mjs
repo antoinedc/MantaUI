@@ -2040,6 +2040,43 @@ test("finishV2Job counts the unique changed paths (base diff + untracked) when a
   assert.equal(h.jobs[0].filesChanged, 3);
 });
 
+test("finishV2Job records the branch head at the end of each round (endHead); no worktree or a failing git leaves it out and never fails the job", async () => {
+  const job = { ...runningObserverJob(), id: "eh", worktree: "/repo/wt", branch: "b", baseSha: "sha1" };
+  const h = harness([job]);
+  h.deps.listMessages = async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }];
+  const seen = [];
+  h.deps.gitRun = async (args) => {
+    seen.push(args);
+    if (args.includes("rev-parse")) return { stdout: "0123456789abcdef0123456789abcdef01234567\n" };
+    return { stdout: "" };
+  };
+  await finishV2Job(job, "done", null, h.deps);
+  assert.equal(h.jobs[0].endHead, "0123456789abcdef0123456789abcdef01234567");
+  assert.deepEqual(seen.find((a) => a.includes("rev-parse")), ["-C", "/repo/wt", "rev-parse", "HEAD"]);
+  // a failed round has a head too; a second round overwrites the first's
+  const second = { ...runningObserverJob(), id: "eh2", worktree: "/repo/wt", branch: "b", baseSha: "sha1", endHead: "old" };
+  const h2 = harness([second]);
+  h2.deps.listMessages = async () => [];
+  h2.deps.gitRun = async (args) => (args.includes("rev-parse") ? { stdout: "fedcba9876543210fedcba9876543210fedcba98\n" } : { stdout: "" });
+  await finishV2Job(second, "failed", "boom", h2.deps);
+  assert.equal(h2.jobs[0].endHead, "fedcba9876543210fedcba9876543210fedcba98");
+  const plain = { ...runningObserverJob(), id: "eh3" };
+  const h3 = harness([plain]);
+  h3.deps.listMessages = async () => [];
+  h3.deps.gitRun = async () => {
+    throw new Error("git is gone");
+  };
+  await finishV2Job(plain, "done", null, h3.deps);
+  assert.equal(h3.jobs[0].status, "done");
+  assert.equal(h3.jobs[0].endHead, undefined);
+  const broken = { ...runningObserverJob(), id: "eh4", worktree: "/repo/wt", branch: "b", baseSha: "sha1" };
+  const h4 = harness([broken]);
+  h4.deps.listMessages = async () => [];
+  h4.deps.gitRun = async (args) => (args.includes("rev-parse") ? { stdout: "not a sha" } : { stdout: "" });
+  await finishV2Job(broken, "done", null, h4.deps);
+  assert.equal(h4.jobs[0].endHead, undefined, "only a real commit id is kept");
+});
+
 test("finishV2Job is idempotent for an already-terminal job", async () => {
   const job = { ...runningObserverJob(), id: "idem", status: "done", finishedAt: 9 };
   const h = harness([job]);

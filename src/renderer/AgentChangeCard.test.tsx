@@ -1156,3 +1156,54 @@ describe("AgentChangeView — opening skill files, and the independent script ch
     expect(q(h!, "agent-change-script-review")).toBeNull();
   });
 });
+
+// Architect v2 Stage 3 (§5.1): a rule Manta learned from the user's corrections is a change record with no change to the agent's file
+describe("AgentChangeView — learned preferences", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  beforeEach(() => resetStore());
+
+  const FILE = "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\n";
+  const rule = { id: "lr_0a1b2c3d", scope: "site", rule: "Write commit messages in the imperative mood.", why: "They corrected it twice.", whyIsInferred: true, quote: "always use imperative commit messages", createdAt: 5, sourceJobId: "job1", archived: false };
+  const learned = (over: Partial<AgentChange> = {}): AgentChange =>
+    change({ kind: "update", slug: "dev", agentName: "Dev", before: FILE, after: FILE, origin: { kind: "learned" }, mode: null, state: "applied", needsClick: false, reason: null, decidedBy: "auto", summary: "Learned: Write commit messages in the imperative mood.", learned: { added: rule }, ...over });
+  const show = async (c: AgentChange, collapsed = false) => {
+    installMockApi({});
+    h = mount(<AgentChangeView change={c} onChange={() => undefined} collapsed={collapsed} />);
+    await h.flush();
+  };
+
+  it("shows the rule with the user's own words as its evidence and why it was inferred — not an empty diff", async () => {
+    await show(learned());
+    const body = q(h!, "agent-change-learned")!;
+    expect(body.textContent).toContain("Write commit messages in the imperative mood.");
+    expect(body.textContent).toContain("always use imperative commit messages");
+    expect(body.textContent).toContain("They corrected it twice.");
+    expect(body.textContent).toMatch(/inferred/i);
+    expect(body.textContent).toContain("site");
+    expect(q(h!, "agent-change-nodiff")).toBeNull();
+    expect(q(h!, "agent-change-diff")).toBeNull();
+    expect(h!.text()).toContain("Learned by Dev");
+  });
+
+  it("a rule for every project says so; one the user removed shows what was taken back", async () => {
+    await show(learned({ learned: { added: { ...rule, scope: "_all", whyIsInferred: false } } }));
+    expect(q(h!, "agent-change-learned")!.textContent).toContain("every project");
+    expect(q(h!, "agent-change-learned")!.textContent).not.toMatch(/inferred/i);
+    h!.unmount();
+    await show(learned({ learned: { removedId: "lr_0a1b2c3d" }, summary: "Removed a learned preference: Keep PRs small." }));
+    expect(q(h!, "agent-change-learned")).toBeNull();
+    expect(h!.text()).toContain("Dev forgot a preference");
+  });
+
+  it("collapsed: the summary line says Manta learned it, and the fold names what it holds", async () => {
+    await show(learned({ state: "pending", needsClick: true, reason: "ask", decidedBy: null }), true);
+    expect(q(h!, "agent-change-summary-line")!.textContent).toMatch(/^Manta · Learned: Write commit messages/);
+    expect(q(h!, "agent-change-fold")!.textContent).toContain("Show what was learned");
+    expect(byText(h!, "Apply")).toBeTruthy();
+    expect(byText(h!, "Discard")).toBeTruthy();
+  });
+});

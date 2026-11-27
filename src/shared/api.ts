@@ -2036,6 +2036,8 @@ export interface Api {
   agentsTrialTranscript(input: { id: string; case: string; offset?: number }): Promise<{ text: string; nextOffset: number | null }>;
   /** One file of a change record from its snapshots (`path` as in the record's bundles, e.g. "skills/<name>/run.sh"); null = the file didn't exist there. */
   agentsChangeFile(input: { id: string; path: string }): Promise<{ before: string | null; after: string | null; truncated?: boolean }>;
+  /** Architect v2 Stage 3: take back one rule an agent learned (`id` = `lr_…`); the answer is the change record that removed it. Its words won't produce it again. */
+  agentsLearnedUndo(input: { slug: string; id: string }): Promise<AgentChange>;
   /** Bus kind `taskQuestion`: a question was asked, answered, dismissed or lost (a hint: refetch). */
   onTaskQuestion(cb: (p: TaskQuestionEvent) => void): () => void;
   /** Bus kind `agentFleet`: jobs, changes, seats or questions changed (a hint: refetch, debounced). */

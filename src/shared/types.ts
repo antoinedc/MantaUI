@@ -3035,7 +3035,8 @@ export type AutonomyKind =
   | "delete_data"
   | "spend"
   | "settings"
-  | "agent_change";
+  | "agent_change"
+  | "learn_preference";
 export interface AgentAutonomy {
   mode: AutonomyMode;
   overrides: Partial<Record<AutonomyKind, AutonomyLevel>>;
@@ -3074,7 +3075,9 @@ export type AgentChangeOrigin =
    * conflict card `shipped` is the shipped agent.md (the card's file keeps the user's own instructions; the shipped ones are
    * there to merge by hand) and `shippedFiles` any other shipped file the user's own could not be merged with.
    */
-  | { kind: "template-update"; templateHash: string; shipped?: string; shippedFiles?: Record<string, string> };
+  | { kind: "template-update"; templateHash: string; shipped?: string; shippedFiles?: Record<string, string> }
+  /** Architect v2 Stage 3: a rule Manta learned from the user's corrections was written (or taken back); see `AgentChange.learned`. */
+  | { kind: "learned" };
 export interface AgentChangeEvidence {
   claim: string;
   /** null for a private source. */
@@ -3141,6 +3144,21 @@ export interface SkillProvenance {
   taken: "whole" | "part";
   registry?: { installs: number | null; stars: number | null };
 }
+/** Architect v2 Stage 3 (§5.1): a preference an agent learned from the user's corrections. `scope`: a project slug, or `_all` for every project. */
+export interface LearnedRule {
+  id: string; // "lr_<8 hex>"
+  scope: string;
+  rule: string;
+  why: string;
+  whyIsInferred: boolean;
+  /** The user's own words (or the line of a commit they made) the rule rests on. */
+  quote: string;
+  createdAt: number;
+  /** The task whose outcome taught it (its root job id), when known. */
+  sourceJobId: string | null;
+  /** Kept in the history but no longer given to the agent (the agent has more than 30 rules in that scope). */
+  archived: boolean;
+}
 export interface AgentSkillInfo {
   name: string;
   description: string;
@@ -3190,7 +3208,7 @@ export interface AgentChange {
   callID: string;
   state: AgentChangeState;
   needsClick: boolean;
-  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "script-flagged" | "script-unchecked" | null;
+  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "script-flagged" | "script-unchecked" | "change-flagged" | "change-unchecked" | "routine-create" | null;
   before: string | null;
   after: string;
   createdAt: number;
@@ -3216,8 +3234,12 @@ export interface AgentChange {
   /** Architect v2 Stage 2: the skills this change adds, replaces or removes, and the search that came first. Absent on older records. */
   skillsDiff?: SkillChange[];
   skillSearch?: SkillSearchRecord;
+  /** Architect v2 Stage 3: what a learned-preference record added, took back (`removedId`), or what a proposal folded into the instructions (`foldedIds`). */
+  learned?: { added?: LearnedRule; removedId?: string; foldedIds?: string[]; removed?: LearnedRule[]; archivedIds?: string[]; retired?: LearnedRule[]; kept?: string[] };
   /** The independent script review (a tool-less session on another model reads the scripts as data): "error" = it failed, timed out or couldn't be read. Absent until it has run, and when there are no scripts. */
   scriptReview?: { verdict: "clean" | "flagged" | "error"; reasons: string[]; model: string; at: number };
+  /** Security review H4: the independent review of a routine round's change (instruction diff and changed skill texts vs. the round's purpose); `carried`: the folded learned rules it confirmed. */
+  contentReview?: { verdict: "clean" | "flagged" | "error"; reasons: string[]; carried: string[]; model: string; at: number };
 }
 export interface AgentChangeEvent {
   id: string;
@@ -4518,6 +4540,8 @@ export interface AgentProfile {
   trials?: AgentTrial[];
   /** Architect v2 §4: the skills the agent has, with where each came from. Absent on an older box. */
   skills?: AgentSkillInfo[];
+  /** Architect v2 §5.1: what the agent learned from the user's corrections, newest first (the Learned tab). Absent on an older box. */
+  learned?: LearnedRule[];
 }
 export interface FleetCell {
   jobId: string;

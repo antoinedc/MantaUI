@@ -929,6 +929,7 @@ describe("httpApi agent-screens channels", () => {
       args: [{ id: "tr_1", case: "main", offset: 20000 }],
     },
     { name: "agentsChangeFile", call: () => httpApi.agentsChangeFile({ id: "ach_1", path: "skills/a/run.sh" }), channel: "agents:change-file", args: [{ id: "ach_1", path: "skills/a/run.sh" }] },
+    { name: "agentsLearnedUndo", call: () => httpApi.agentsLearnedUndo({ slug: "seo", id: "lr_00000001" }), channel: "agents:learned-undo", args: [{ slug: "seo", id: "lr_00000001" }] },
   ];
 
   channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");

@@ -615,4 +615,102 @@ describe("AgentProfile", () => {
       expect(tab("Tests").getAttribute("aria-selected")).toBe("true");
     });
   });
+  // Architect v2 Stage 3 (§5.1): the Learned tab
+  describe("Learned tab", () => {
+    const lr = (over: Record<string, unknown> = {}) => ({ id: "lr_00000001", scope: "manta-aaaaaaaaaa", rule: "Write commit messages in the imperative mood.", why: "They corrected it twice.", whyIsInferred: false, quote: "always use imperative commit messages", createdAt: NOW - 2 * DAY, sourceJobId: "job1", archived: false, ...over });
+    const RULES = [
+      lr(),
+      lr({ id: "lr_00000002", scope: "_all", rule: "Say what you assumed.", quote: "say what you assumed, please", whyIsInferred: true, createdAt: NOW - DAY, sourceJobId: null }),
+      lr({ id: "lr_00000003", scope: "manta-aaaaaaaaaa", rule: "An old rule that was archived.", archived: true, quote: "old words here please" }),
+    ];
+    const withRules = (rules: unknown[] = RULES, extra: Record<string, unknown> = {}) => ({ agentsProfile: () => Promise.resolve(profile({ learned: rules as never })), ...extra });
+    const removal = rec({ id: "r1", summary: "Removed a learned preference: Say what you assumed.", origin: { kind: "learned" }, learned: { removedId: "lr_00000002" }, decidedBy: "click" });
+
+    it("is there for an agent whose box sends learned rules — with the count of the live ones — and for none else", async () => {
+      await open(withRules());
+      expect(qa('[role="tab"]').map((t) => t.textContent)).toEqual(["Overview", "Research · 5", "Seats · 2", "History · 2", "Learned · 2"]);
+      h!.unmount();
+      await open();
+      expect(qa('[role="tab"]').map((t) => t.textContent ?? "").some((t) => t.startsWith("Learned"))).toBe(false);
+      h!.unmount();
+      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ slug: "manta", name: "Manta", role: "lead" }), learned: [] })) }, "manta");
+      expect(qa('[role="tab"]').map((t) => t.textContent ?? "").some((t) => t.startsWith("Learned"))).toBe(false);
+    });
+
+    it("lists each rule under its scope (every project first, then the project by name), with the date, 'inferred' where it is, and the user's words behind a disclosure", async () => {
+      await open(withRules());
+      await click(tab("Learned"));
+      const p = panel("Learned");
+      expect(p.hidden).toBe(false);
+      const groups = [...p.querySelectorAll<HTMLElement>('[data-testid="learned-group"]')];
+      expect(groups.map((g) => g.querySelector("h3,h4,[data-testid='learned-group-title']")?.textContent)).toEqual(["Every project", "Manta"]);
+      const rows = [...p.querySelectorAll<HTMLElement>('[data-testid="learned-row"]')];
+      expect(rows.map((r) => r.querySelector('[data-testid="learned-rule"]')?.textContent)).toEqual(["Say what you assumed.", "Write commit messages in the imperative mood."]);
+      expect(rows[0].textContent).toContain("inferred");
+      expect(rows[1].textContent).not.toContain("inferred");
+      expect(rows[1].querySelector('[data-testid="learned-when"]')?.textContent).toMatch(/\d/);
+      const details = rows[1].querySelector("details")!;
+      expect(details.open).toBe(false);
+      expect(details.textContent).toContain("always use imperative commit messages");
+      expect(details.textContent).toContain("They corrected it twice.");
+      // the archived rule is kept but offered nothing
+      const archived = p.querySelector('[data-testid="learned-archived"]')!;
+      expect(archived.textContent).toContain("An old rule that was archived.");
+      expect(archived.querySelectorAll("button")).toHaveLength(0);
+      expect(p.querySelector('[data-testid="learned-about"]')?.textContent).toMatch(/Settings/);
+    });
+
+    it("an agent that has learned nothing says where rules will show up, and offers nothing to press", async () => {
+      await open(withRules([]));
+      await click(tab("Learned"));
+      const p = panel("Learned");
+      expect(p.querySelector('[data-testid="learned-empty"]')?.textContent).toContain("Nothing learned yet");
+      expect(p.querySelectorAll('[data-testid="learned-row"]')).toHaveLength(0);
+      expect(p.querySelectorAll("button")).toHaveLength(0);
+    });
+
+    it("Undo removes the rule through the box, says so, and the page reads the agent again", async () => {
+      await open(withRules(RULES, { agentsLearnedUndo: () => Promise.resolve(removal) }));
+      await click(tab("Learned"));
+      const before = api.calls.agentsProfile.length;
+      const row = panel("Learned").querySelectorAll<HTMLElement>('[data-testid="learned-row"]')[0];
+      await click(btn("Undo", row));
+      expect(api.calls.agentsLearnedUndo).toEqual([[{ slug: "seo", id: "lr_00000002" }]]);
+      expect(api.calls.agentsProfile.length).toBeGreaterThan(before);
+      expect(panel("Learned").querySelector('[data-testid="learned-notice"]')?.textContent).toContain("Say what you assumed.");
+      expect(panel("Learned").querySelector('[data-testid="learned-notice"]')?.textContent).toMatch(/won't be learned again/);
+    });
+
+    it("a refusal is a sentence, the rule stays, and pressing again works; only one press runs at a time", async () => {
+      let n = 0;
+      let resolve!: (r: AgentChange) => void;
+      await open(
+        withRules(RULES, {
+          agentsLearnedUndo: () => (++n === 1 ? Promise.reject(new Error("That preference is already gone")) : new Promise<AgentChange>((r) => (resolve = r))),
+        }),
+      );
+      await click(tab("Learned"));
+      const row = () => panel("Learned").querySelectorAll<HTMLElement>('[data-testid="learned-row"]')[0];
+      await click(btn("Undo", row()));
+      expect(panel("Learned").querySelector('[data-testid="learned-error"]')?.textContent).toContain("That preference is already gone");
+      expect(panel("Learned").querySelectorAll('[data-testid="learned-row"]')).toHaveLength(2);
+      await click(btn("Undo", row()));
+      // in flight: every Undo of the tab is disabled
+      expect([...panel("Learned").querySelectorAll("button")].filter((b) => (b.textContent ?? "").includes("Undo")).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+      expect(api.calls.agentsLearnedUndo).toHaveLength(2);
+      await act(async () => resolve(removal));
+      await h!.flush();
+      expect(panel("Learned").querySelector('[data-testid="learned-error"]')).toBeNull();
+    });
+
+    it("'Open the task' opens the task that taught the rule, only where the rule knows its task; a refusal is said", async () => {
+      await open(withRules(RULES, { delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task's session is gone" }) }));
+      await click(tab("Learned"));
+      const rows = [...panel("Learned").querySelectorAll<HTMLElement>('[data-testid="learned-row"]')];
+      expect(buttonIn(rows[0], "Open the task")).toBeUndefined();
+      await click(buttonIn(rows[1], "Open the task"));
+      expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "job1" }]]);
+      expect(panel("Learned").textContent).toContain("That task's session is gone");
+    });
+  });
 });

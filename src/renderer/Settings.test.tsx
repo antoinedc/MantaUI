@@ -312,7 +312,7 @@ describe("Settings — schema-driven toasts are error-only (BET-1055)", () => {
       getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
       launchersList: () => Promise.resolve([]),
       configUpdate: () => Promise.resolve({}),
-      agentsAutonomyGet: () => Promise.resolve({ mode: "balanced", overrides: {}, effective: { edit_code: "auto", handoff: "auto", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask" } }),
+      agentsAutonomyGet: () => Promise.resolve({ mode: "balanced", overrides: {}, effective: { edit_code: "auto", handoff: "auto", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask", learn_preference: "tell" } }),
     });
     h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
     await h.flush();

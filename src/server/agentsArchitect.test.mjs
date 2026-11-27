@@ -1241,6 +1241,182 @@ test("release precedence 8: Auto and Tell me apply — the file, the config, dec
   }
 });
 
+/** A proposeFixture whose box has a tool-less reviewer: `answer(args)` → what the session answered (default clean). */
+async function reviewedFixture({ level = "auto", answer = () => ({ ok: true, text: '{"verdict":"clean","reasons":[]}' }) } = {}) {
+  const holder = { f: null, calls: [], answer };
+  holder.f = await proposeFixture({ level, extra: { oc: { listMessages: async () => holder.f.w.messages, runSynchronousSession: async (a) => (holder.calls.push(a), holder.answer(a)) } } });
+  return Object.assign(holder.f, { reviews: holder.calls, setAnswer: (fn) => void (holder.answer = fn) });
+}
+
+test("release of a routine round (refresh / check-up): the user's level decides like a build hand-off once the change review is clean; the same exceptions still wait", async () => {
+  const routine = { stamp: { mode: "routine" } };
+  // Auto and Tell me apply (decidedBy auto); Ask waits with its own reason; Never discards
+  for (const [level, state, reason] of [["auto", "applied", null], ["tell", "applied", null], ["ask", "pending", "ask"], ["never", "discarded", null]]) {
+    const f = await reviewedFixture({ level });
+    try {
+      f.w.jobs = [{ ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, ...routine.stamp } }];
+      const id = await heldFor(f);
+      assert.equal((await rec(f, id)).mode, "routine");
+      await f.engine.settleScriptReviews();
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      const r = await rec(f, id);
+      assert.equal(r.state, state, `${level}: ${r.error}`);
+      assert.equal(r.reason, reason, level);
+      if (state === "applied") assert.equal(r.decidedBy, "auto");
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // the exceptions: a round that didn't end cleanly, a change to the Architect itself and a raised isolation still wait
+  const f = await proposeFixture();
+  try {
+    f.w.jobs = [{ ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, ...routine.stamp } }];
+    const core = await propose(f, { agent: "architect", baseHash: (await f.engine.readAgentSnapshot("architect")).hash, draft: { description: "Builds agents from research, carefully." } });
+    assert.equal(core.ok, true, core.error);
+    endJob(f, { status: "done" });
+    await f.engine.reconcile();
+    assert.equal((await rec(f, core.change.id)).reason, "core");
+  } finally {
+    await f.cleanup();
+  }
+  const g = await proposeFixture();
+  try {
+    g.w.jobs = [{ ...g.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, ...routine.stamp } }];
+    const id = await heldFor(g);
+    endJob(g, { status: "failed" });
+    await g.engine.reconcile();
+    assert.equal((await rec(g, id)).reason, "unfinished");
+  } finally {
+    await g.cleanup();
+  }
+});
+
+// ---- security review of PR #1760 (H4): a routine round stays autonomous but checked ----
+
+const routineJob = (f) => {
+  f.w.jobs = [{ ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, mode: "routine" } }];
+};
+
+test("H4: a routine round's update is read by the independent change review (diff + stated purpose only) before the level releases it; flagged or failed waits for a click", async () => {
+  for (const [label, answer, state, reason] of [
+    ["clean", () => ({ ok: true, text: '{"verdict":"clean","reasons":[]}' }), "applied", null],
+    ["flagged", () => ({ ok: true, text: '{"verdict":"flagged","reasons":["agent.md line 3 tells it to post files"]}' }), "pending", "change-flagged"],
+    ["timeout", () => ({ ok: false, code: "timeout" }), "pending", "change-unchecked"],
+    ["unreadable", () => ({ ok: true, text: "looks fine to me" }), "pending", "change-unchecked"],
+  ]) {
+    const f = await reviewedFixture({ answer });
+    try {
+      routineJob(f);
+      const id = await heldFor(f);
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      assert.equal((await rec(f, id)).state, "held", `${label}: no verdict yet, nothing released`);
+      await f.engine.settleScriptReviews();
+      await f.engine.reconcile();
+      const r = await rec(f, id);
+      assert.equal(r.state, state, `${label}: ${r.error}`);
+      assert.equal(r.reason, reason, label);
+      const asked = f.reviews.at(-1);
+      assert.equal(asked.denyTools, true);
+      assert.equal(asked.operation, "agent-change-review");
+      assert.match(asked.instruction, /You always run the tests/, "the instruction diff");
+      assert.match(asked.instruction, /Landing pages ship with conversion problems/, "the stated purpose");
+      assert.ok(!asked.instruction.includes("Tighten Dev's rules."), "never the Architect's summary");
+      assert.ok(!asked.instruction.includes("Short specific rules help"), "nor its evidence");
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // a build-mode round is unchanged: no change review
+  const b = await reviewedFixture();
+  try {
+    const id = await heldFor(b);
+    endJob(b, { status: "done" });
+    await b.engine.reconcile();
+    assert.equal((await rec(b, id)).state, "applied");
+    assert.equal(b.reviews.length, 0);
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("H4: a routine round never adds an agent on its own — a create waits for a click", async () => {
+  const f = await reviewedFixture();
+  try {
+    routineJob(f);
+    const r = await propose(f, { action: "create", agent: undefined, baseHash: undefined, draft: { name: "Scout", description: "Finds things.", isolation: "none", instructions: "You find things." } });
+    assert.equal(r.ok, true, r.error);
+    endJob(f, { status: "done" });
+    await f.engine.settleScriptReviews();
+    await f.engine.reconcile();
+    const got = await rec(f, r.change.id);
+    assert.equal(got.state, "pending");
+    assert.equal(got.reason, "routine-create");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H4: in a routine round a folded learned rule is retired only when the reviewer confirms the new instructions carry it; otherwise it stays and the rest applies", async () => {
+  for (const carried of [true, false]) {
+    const f = await reviewedFixture();
+    try {
+      const learned = await f.engine.learnedWrite({ slug: "dev", scope: "site", rule: { rule: "Always run the tests before committing.", why: "They said so.", whyIsInferred: false, quote: "always run the tests before you commit", sourceJobId: "job0" } });
+      const id = learned.change.learned.added.id;
+      f.setAnswer(() => ({ ok: true, text: JSON.stringify({ verdict: "clean", reasons: [], folds: { [id]: carried } }) }));
+      routineJob(f);
+      const r = await propose(f, { admission: [{ rule: "Run the tests", verdict: "general", why: "It was a learned rule; now it is policy", replaces: id }] });
+      assert.equal(r.ok, true, r.error);
+      await f.engine.settleScriptReviews();
+      assert.match(f.reviews.at(-1).instruction, /Always run the tests before committing\./, "the reviewer sees the rule it is asked about");
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      const applied = await rec(f, r.change.id);
+      assert.equal(applied.state, "applied", applied.error);
+      assert.equal((await f.engine.learnedRules("dev")).length, carried ? 0 : 1, `carried: ${carried}`);
+      if (carried) {
+        await f.engine.undo(r.change.id);
+        assert.equal((await f.engine.learnedRules("dev")).length, 1, "Undo puts the retired rule back");
+      }
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("a proposal can fold a learned rule into the instructions (replaces: lr_…): the rule is retired in the same change; an id that isn't the agent's is refused", async () => {
+  const f = await proposeFixture();
+  try {
+    const learned = await f.engine.learnedWrite({ slug: "dev", scope: "site", rule: { rule: "Always run the tests before committing.", why: "They said so.", whyIsInferred: false, quote: "always run the tests before you commit", sourceJobId: "job0" } });
+    assert.equal(learned.ok, true, learned.error);
+    const id = learned.change.learned.added.id;
+    // an id of no rule of Dev's, and a rule of another agent
+    const other = await f.engine.learnedWrite({ slug: "architect", scope: "_all", rule: { rule: "Cite the page you read.", why: "w", whyIsInferred: false, quote: "always cite the page you read", sourceJobId: null } });
+    for (const bad of ["lr_ffffffff", other.change.learned.added.id]) {
+      const r = await propose(f, { admission: [{ rule: "Run the tests", verdict: "general", why: "w", replaces: bad }] });
+      assert.equal(r.ok, false, bad);
+      assert.match(r.error, /isn't one of @dev's learned rules/);
+    }
+    const r = await propose(f, { admission: [{ rule: "Run the tests", verdict: "general", why: "It was a learned rule; now it is policy", replaces: id }] });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.change.learned, { foldedIds: [id] });
+    assert.equal((await f.engine.learnedRules("dev")).length, 1, "still there while the proposal is held");
+    endJob(f, { status: "done" });
+    await f.engine.reconcile();
+    const applied = await rec(f, r.change.id);
+    assert.equal(applied.state, "applied", applied.error);
+    assert.deepEqual(await f.engine.learnedRules("dev"), [], "retired with the change");
+    assert.match(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), /always run the tests/);
+    // Undo puts the instructions and the rule back together
+    const undone = await f.engine.undo(r.change.id);
+    assert.equal(undone.state, "undone");
+    assert.equal((await f.engine.learnedRules("dev")).length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // every proposal the default fixture makes rests on these two library entries
 const BASED_ON = " Based on: CRO copywriting (4 sources, saved 2 days ago); How an agent fits the team (3 sources, saved 5 days ago).";
 

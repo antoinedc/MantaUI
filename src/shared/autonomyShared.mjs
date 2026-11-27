@@ -14,15 +14,22 @@ export const ACTION_KINDS = Object.freeze([
   "spend",
   "settings",
   "agent_change",
+  "learn_preference",
 ]);
+
+/**
+ * Kinds the SERVER decides on its own (Architect v2 §5.1): no agent is ever asked to follow them, so the lead brief, a task's limits, its
+ * blocking rules, the policy key of a running task and the words of a task's report skip them. Settings still lists them.
+ */
+export const SERVER_KINDS = Object.freeze(["learn_preference"]);
 
 /** Kinds that only take "auto" or "never". */
 export const BINARY_KINDS = Object.freeze(["edit_code"]);
 
 export const MODES = Object.freeze({
-  cautious: Object.freeze({ edit_code: "auto", handoff: "tell", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask" }),
-  balanced: Object.freeze({ edit_code: "auto", handoff: "auto", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask" }),
-  autonomous: Object.freeze({ edit_code: "auto", handoff: "auto", merge: "auto", deploy: "tell", publish: "tell", send_external: "tell", delete_data: "tell", spend: "ask", settings: "tell", agent_change: "tell" }),
+  cautious: Object.freeze({ edit_code: "auto", handoff: "tell", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask", learn_preference: "tell" }),
+  balanced: Object.freeze({ edit_code: "auto", handoff: "auto", merge: "ask", deploy: "ask", publish: "ask", send_external: "ask", delete_data: "ask", spend: "ask", settings: "ask", agent_change: "ask", learn_preference: "tell" }),
+  autonomous: Object.freeze({ edit_code: "auto", handoff: "auto", merge: "auto", deploy: "tell", publish: "tell", send_external: "tell", delete_data: "tell", spend: "ask", settings: "tell", agent_change: "tell", learn_preference: "tell" }),
 });
 
 export const MODE_NAMES = Object.freeze(["cautious", "balanced", "autonomous"]);
@@ -40,6 +47,7 @@ export const KIND_LABELS = Object.freeze({
   spend: "spend money or buy anything",
   settings: "change Manta's settings",
   agent_change: "create an agent, or change an agent's instructions or permissions",
+  learn_preference: "learn a preference from your corrections",
 });
 
 /** User-facing row titles (Settings → Agents). */
@@ -54,6 +62,7 @@ export const KIND_TITLES = Object.freeze({
   spend: "Spend money",
   settings: "Change Manta settings",
   agent_change: "Change an agent",
+  learn_preference: "Learn a preference from your corrections",
 });
 
 export const LEVEL_TITLES = Object.freeze({ auto: "Auto", tell: "Tell me", ask: "Ask", never: "Never" });
@@ -75,6 +84,7 @@ export const KIND_DEFINITIONS = Object.freeze({
   spend: "spend money = anything that costs money: buying, subscriptions, starting paid servers or VMs, raising a plan or quota.",
   settings: "change Manta's settings = Manta's own configuration, sign-in, secrets or the OpenCode configuration.",
   agent_change: "change an agent = creating an agent or editing any agent's instructions, model, tools or permissions, including your own.",
+  learn_preference: "learn a preference = Manta writes down a rule an agent should follow from how you corrected its work, and gives it to that agent's later tasks in the same project.",
 });
 
 /** The word a specialist writes for each kind in its "Actions from your list" section (Phase 3c). */

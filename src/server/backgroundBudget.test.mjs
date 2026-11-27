@@ -366,6 +366,16 @@ test("every refusal carries the work class; unknown work types are refused as un
   assert.equal(WORK_CLASS["knowledge-trial"], "batch");
 });
 
+test("learning from corrections (agent-learning) is a known work type: batch work, priced as the fast band, deferred like the other corrections work", async () => {
+  assert.equal(WORK_CLASS["agent-learning"], "batch");
+  assert.equal(WORK_BANDS["agent-learning"], "fast");
+  const r = rig({ bw: { level: "off" } });
+  await r.b.check({ workType: "agent-learning", model: OPUS });
+  r.b.flushEvidence();
+  const row = r.logs.find((l) => l.type === "refused");
+  assert.deepEqual([row.workType, row.reason, row.class], ["agent-learning", "off", "batch"], "refused for the setting, not as an unknown type");
+});
+
 test("an Architect's trial run (agent-trial) is a known work type: continuous (a person asked for it), priced as balanced, and booked like any other", async () => {
   assert.equal(WORK_CLASS["agent-trial"], "continuous");
   assert.equal(WORK_BANDS["agent-trial"], "balanced");

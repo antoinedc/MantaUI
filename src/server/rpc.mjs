@@ -2908,6 +2908,8 @@ export function buildHandlers({
     "agents:trial-transcript": (input) => agentsCall("trial-transcript", (a) => a.trialTranscript(input)),
     // Architect v2 Stage 2: one file of a change record, before and after, from its snapshots (the card opens each skill file)
     "agents:change-file": (input) => agentsCall("change-file", (a) => a.changeFile(input)),
+    // Architect v2 Stage 3: the Learned tab's Undo — one learned rule removed (its own change record); a refusal is a sentence
+    "agents:learned-undo": (input) => agentsCall("learned-undo", (a) => a.learnedUndo(input)),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>

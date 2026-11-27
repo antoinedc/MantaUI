@@ -258,6 +258,8 @@ import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
 import { createAgentTrials, TRIAL_PROGRESS_PREFIX } from "./agentTrials.mjs";
+import { createAgentLearning, createLearningStore, createUserCommitReader } from "./agentLearning.mjs";
+import { checkLearnedRule } from "./agentScriptReview.mjs";
 import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
 import { createSecretScanner } from "./knowledge/secretScan.mjs";
 import { createTaskQuestions } from "./taskQuestions.mjs";
@@ -1416,6 +1418,7 @@ let workOutcomeSink = null;
 // Agents Phase 5A: an Architect job reached a final state (finished, failed, stopped) — its held proposals are released.
 // Assigned once the agents engine exists (it is built much further down); until then a no-op.
 let architectJobEndedSink = null;
+let agentLearningSink = null; // set once the agents engine exists (Architect v2 §5.1)
 let architectJobPausedSink = null;
 // Agents Phase 3 (src/server/autonomy.mjs): the user's CURRENT autonomy policy, read strictly from `~/.manta/config.json`
 // (throws when the file can't be read or parsed, so the caller refuses instead of guessing). Shared by the delegate
@@ -1457,6 +1460,8 @@ const delegateEngine = createDelegateEngine({
   afterJobEnded: async (job) => {
     bus.publish({ kind: "agentFleet", payload: {} });
     await routinesEngine.settleFromJob(job);
+    // Architect v2 §5.1: a finished agent task is read for the user's corrections 30 minutes from now (never blocks, never throws)
+    if (agentLearningSink) await Promise.resolve(agentLearningSink(job)).catch((e) => console.warn("[agent-learning] noting a finished task failed:", e?.message ?? e));
   },
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
@@ -2746,6 +2751,36 @@ architectJobEndedSink = async (job) => {
 architectJobPausedSink = async (job) => {
   await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the pause of a round failed:", e?.message ?? e));
 };
+// Architect v2 Stage 3 (src/server/agentLearning.mjs): what a finished agent task taught the agent. Each ended task is read 30 minutes later
+// (the user's messages in it, their next message in the chat, their answers, what they undid, what they committed), by ONE cheap model call
+// of the shared background budget; the facts are checked and every rule is a change record. Nothing here ever asks the user anything.
+const agentLearning = createAgentLearning({
+  agents: agentsEngine,
+  canLearn: async (slug) => (await agentsEngine.scan()).entries.some((e) => e.slug === slug && !e.info.error && e.info.role !== "lead"),
+  agentName: async (slug) => (await agentsEngine.scan()).entries.find((e) => e.slug === slug)?.info.name || slug,
+  listJobs: () => delegateEngine.loadRecordsStrict(),
+  listMessages: (sid, opts) => oc.listMessages(sid, opts),
+  isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
+  questionsOf: (root) => agentsEngine.questionsForRoot(root),
+  changesOf: (root) => agentsEngine.changesForRoot(root),
+  userCommits: createUserCommitReader({ gitRun: (args) => tmux.run("git", args) }),
+  // the same lookup the engine uses to give a task its project's rules (security review L3)
+  projectOf: (directory) => agentsEngine.learnedProjectOf(directory),
+  ask: async (prompt) => {
+    const r = await knowledgeRunner({ taskClass: "agent-learning", context: [{ priority: 10, text: prompt }], directory: "~" });
+    const model = typeof r?.model === "string" ? r.model : r?.model?.providerID && r?.model?.modelID ? `${r.model.providerID}/${r.model.modelID}` : null;
+    return r && r.ok !== false ? { ok: true, text: String(r.text ?? ""), model } : { ok: false, code: String(r?.code ?? "run-failed") };
+  },
+  // every rule is checked by another model, with no tools, against the user's words alone; anything but "clean" stores nothing
+  checkRule: ({ quote, rule, learnerModel }) => checkLearnedRule({ run: oc.runSynchronousSession, directory: homedir(), learnerModel, quote, rule }),
+  redact: async (text) => {
+    const r = await trialScanner.redact(String(text ?? ""));
+    return r.unavailable ? null : r.text;
+  },
+  store: createLearningStore({ path: statePath("agent-learning.json") }),
+});
+agentLearningSink = (job) => agentLearning.noteEnded(job);
+startPoller(() => agentLearning.runDue(), { intervalMs: 60_000, label: "agent-learning", immediate: false });
 // leftovers of a crashed trial (a session, a copy of a project, a block) are cleaned at boot; results are kept 30 days
 void agentTrials.recover().catch((e) => console.error("[agent-trials] boot cleanup failed:", e?.message ?? e));
 startPoller(() => agentTrials.sweep(), { intervalMs: 60 * 60_000, label: "agent-trials-sweep", immediate: false });

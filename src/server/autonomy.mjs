@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   LEVELS,
   ACTION_KINDS,
+  SERVER_KINDS,
   BINARY_KINDS,
   MODES,
   MODE_NAMES,
@@ -20,7 +21,7 @@ import {
 } from "../shared/autonomyShared.mjs";
 import { TASK_KINDS, projectSection } from "./projectActions.mjs";
 
-export { LEVELS, ACTION_KINDS, BINARY_KINDS, MODES, MODE_NAMES, DEFAULT_MODE, KIND_LABELS, KIND_TITLES, LEVEL_TITLES, MODE_TITLES };
+export { LEVELS, ACTION_KINDS, SERVER_KINDS, BINARY_KINDS, MODES, MODE_NAMES, DEFAULT_MODE, KIND_LABELS, KIND_TITLES, LEVEL_TITLES, MODE_TITLES };
 
 /** Phase 2's fixed default is Balanced (same answers for the old kinds). */
 export const DEFAULT_POLICY = MODES.balanced;
@@ -44,6 +45,9 @@ export function effectivePolicy(cfg) {
   return policy;
 }
 
+/** The kinds an agent can be asked to follow: every kind but the ones the server decides itself (a change to those never alters a running task). */
+const AGENT_KINDS = ACTION_KINDS.filter((k) => !SERVER_KINDS.includes(k));
+
 /** The level of a kind under `policy`; an unknown kind, a missing kind or an unknown value is `"ask"`. */
 export function decide(kind, policy = DEFAULT_POLICY) {
   if (!ACTION_KINDS.includes(kind)) return "ask";
@@ -53,7 +57,7 @@ export function decide(kind, policy = DEFAULT_POLICY) {
 
 /** A stable string for a policy: two policies with the same answers have the same key. */
 export function policyKey(policy) {
-  return ACTION_KINDS.map((k) => `${k}=${decide(k, policy)}`).join(",");
+  return AGENT_KINDS.map((k) => `${k}=${decide(k, policy)}`).join(",");
 }
 
 /** The same policy as a plain `{kind: level}` object in fixed kind order (what a job record stores). */
@@ -66,7 +70,7 @@ export const SETTINGS_RULE =
 
 /** The "When to ask the user" markdown: fixed order, nothing time- or run-dependent (the lead brief must be byte-stable). */
 export function renderPolicy(policy = DEFAULT_POLICY) {
-  const group = (level) => ACTION_KINDS.filter((k) => decide(k, policy) === level).map((k) => `- ${KIND_LABELS[k]}`);
+  const group = (level) => AGENT_KINDS.filter((k) => decide(k, policy) === level).map((k) => `- ${KIND_LABELS[k]}`);
   const auto = group("auto");
   const tell = group("tell");
   const ask = group("ask");
@@ -85,7 +89,7 @@ export function renderPolicy(policy = DEFAULT_POLICY) {
     );
   }
   // what each action means, by its effect (only the kinds that are not Auto)
-  const meant = ACTION_KINDS.filter((k) => decide(k, policy) !== "auto");
+  const meant = AGENT_KINDS.filter((k) => decide(k, policy) !== "auto");
   if (meant.length > 0) {
     lines.push(
       "What these mean:",
@@ -573,7 +577,7 @@ function kindOfWord(raw) {
   const w = String(raw ?? "").toLowerCase().replace(/[\s_-]+/g, " ").trim();
   if (!w) return null;
   for (const [kind, word] of Object.entries(KIND_WORDS)) if (word === w) return kind;
-  for (const kind of ACTION_KINDS) if (kind.replace(/_/g, " ") === w) return kind;
+  for (const kind of AGENT_KINDS) if (kind.replace(/_/g, " ") === w) return kind;
   return ACTION_ALIASES[w] ?? null;
 }
 

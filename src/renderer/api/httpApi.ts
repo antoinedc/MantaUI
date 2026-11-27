@@ -1391,6 +1391,7 @@ export const httpApi: Api = {
   agentsTrial: (input) => rpc("agents:trial", input),
   agentsTrialTranscript: (input) => rpc("agents:trial-transcript", input),
   agentsChangeFile: (input) => rpc("agents:change-file", input),
+  agentsLearnedUndo: (input) => rpc("agents:learned-undo", input),
   // The box publishes `taskQuestion` ({id, parentSessionID, rootJobId, state}) and `agentFleet` ({}): hints, refetch.
   onTaskQuestion: (cb) => on<TaskQuestionEvent>("taskQuestion", cb),
   onAgentFleet: (cb) => on<unknown>("agentFleet", () => cb()),

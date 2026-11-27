@@ -66,8 +66,9 @@ export function agentChangeChip(change: Pick<AgentChange, "state" | "kind">): { 
   }
 }
 
-export function agentChangeTitle(change: Pick<AgentChange, "kind" | "agentName"> & { origin?: AgentChange["origin"] }): string {
+export function agentChangeTitle(change: Pick<AgentChange, "kind" | "agentName"> & { origin?: AgentChange["origin"]; learned?: AgentChange["learned"] }): string {
   if (change.origin?.kind === "template-update") return `Built-in update: ${change.agentName}`;
+  if (change.origin?.kind === "learned") return change.learned?.removedId ? `${change.agentName} forgot a preference` : `Learned by ${change.agentName}`;
   return change.kind === "create" ? `New agent: ${change.agentName}` : `Change to ${change.agentName}`;
 }
 
@@ -79,6 +80,9 @@ export function agentChangeReason(change: Pick<AgentChange, "needsClick" | "reas
   if (change.reason === "core") return "This changes the Architect itself";
   if (change.reason === "script-flagged") return "An independent check flagged a script — read the reasons before applying";
   if (change.reason === "script-unchecked") return "The independent script check couldn't run — read the scripts before applying";
+  if (change.reason === "change-flagged") return "An independent check flagged this scheduled change — read the reasons before applying";
+  if (change.reason === "change-unchecked") return "The independent check of this scheduled change couldn't run — read it before applying";
+  if (change.reason === "routine-create") return "A scheduled round proposed a new agent — review before adding it";
   if (change.reason === "unfinished") return "The task didn't finish — review before applying";
   if (change.reason === "plan") return "Proposed while planning or outside a hand-off — review before applying";
   return null;
@@ -221,6 +225,7 @@ export function changedLineCount(change: Pick<AgentChange, "kind" | "before" | "
 /** Who made the change, for the one-line card: the Architect (a task), you (a restore), a shipped built-in version, else Manta. */
 export function changeAuthor(change: Pick<AgentChange, "origin">): string {
   if (change.origin.kind === "template-update") return "Built-in update";
+  if (change.origin.kind === "learned") return "Manta";
   return change.origin.kind === "job" ? "Architect" : change.origin.kind === "restore" ? "You" : "Manta";
 }
 

@@ -139,6 +139,12 @@ describe("tabs", () => {
     expect(profileTabs({ trials: [{}] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "tests"]);
     expect(nextTab("history", "ArrowRight", profileTabs({ trials: [{}] }).map((t) => t.id))).toBe("tests");
   });
+  it("adds Learned (before Tests) when the box sends the agent's learned rules, even none — but never for the lead, and not for an older box", () => {
+    expect(profileTabs({ learned: [] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "learned"]);
+    expect(profileTabs({ learned: [{}], trials: [{}] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "learned", "tests"]);
+    expect(profileTabs({ learned: [], info: { role: "lead" } }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+    expect(profileTabs({ info: { role: "specialist" } }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+  });
 });
 
 describe("factsLine / detailRows / firstLine", () => {
@@ -191,6 +197,7 @@ describe("factsLine / detailRows / firstLine", () => {
 describe("history rows", () => {
   it("who: Manta for you (chat), Architect (job), You (restore)", () => {
     expect(historyWho(change({ origin: { kind: "chat" } }))).toBe("Manta · for you");
+    expect(historyWho(change({ origin: { kind: "learned" } }))).toBe("Manta · learned from you");
     expect(historyWho(change({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } }))).toBe("Architect");
     expect(historyWho(change({ origin: { kind: "restore", fromChangeId: "x" } }))).toBe("You");
   });
@@ -246,6 +253,8 @@ describe("Restore before this", () => {
   });
   it("is not offered where it would change nothing (the version before the change is already live)", () => {
     expect(canRestore(rows[0], "V2")).toBe(false);
+    // a learned rule changes no agent file: undoing it is the Learned tab's job, not a restore of the whole folder
+    expect(canRestore(change({ state: "applied", before: "V2", origin: { kind: "learned" } }), "V3")).toBe(false);
   });
   it("never on a create, a record with no before, or a state that never applied", () => {
     expect(canRestore(rows[2], "V3")).toBe(false);
