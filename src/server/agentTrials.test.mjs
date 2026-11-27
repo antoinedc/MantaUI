@@ -129,7 +129,17 @@ async function rig(over = {}) {
   return { base, root, w, make, caseOf, input, trialsRoot, t: make(), cleanup: () => rm(base, { recursive: true, force: true }) };
 }
 
-const settle = async (t, id, ms = 50) => {
+// poll for a condition instead of sleeping: the runner's steps are asynchronous and a loaded machine makes them slow
+const until = async (cond, ms = 3000) => {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) throw new Error("timed out waiting for a condition");
+    await new Promise((r) => setTimeout(r, 2));
+  }
+};
+const quiet = (ms = 40) => new Promise((r) => setTimeout(r, ms));
+
+const settle = async (t, id) => {
   const r = await t.wait({ sessionID: "ses_child", messageID: `msg_w${id}`, callID: `call_w${id}`, trialId: id });
   return r;
 };
@@ -323,7 +333,7 @@ test("a question the agent asks is answered at once by the server, recorded as '
   try {
     f.w.outcome = "hang";
     const { trialId } = await f.t.create(f.input());
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => f.w.created.length >= 1);
     const sid = f.w.created[0].id;
     assert.equal(f.t.ownsSession(sid), true);
     assert.equal(f.t.ownsSession("ses_other"), false);
@@ -348,14 +358,15 @@ test("limits: at most 2 cases run at once box-wide, in order; 3 trials per agent
     f.w.outcome = "hang";
     const a = await f.t.create(f.input({ cases: [f.caseOf("a1"), f.caseOf("a2"), f.caseOf("a3")] }));
     const b = await f.t.create(f.input({ messageID: "msg_2", callID: "call_2", cases: [f.caseOf("b1")] }));
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => f.w.created.length >= 2);
+    await quiet(); // (a third would start by now if the limit were broken)
     assert.equal(f.w.created.length, 2, "only two sessions run at a time");
     assert.deepEqual(f.w.prompts.map((p) => p.text.split("\n")[0]).sort(), ["Do the a1 thing.", "Do the a2 thing."], "first come, first served");
     assert.equal(f.t.get(a.trialId).cases[2].state, "queued");
     assert.equal(f.t.get(b.trialId).cases[0].state, "queued");
     // one ends: the next in line starts
     f.t.observeRaw({ type: "session.execution.succeeded", data: { sessionID: f.w.created[0].id } });
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => f.w.created.length >= 3);
     assert.equal(f.w.created.length, 3);
     assert.equal(f.w.prompts[2].text.split("\n")[0], "Do the a3 thing.");
     // the per-agent cap: a third trial of the same agent is the last
@@ -389,7 +400,7 @@ test("a case that runs past 15 minutes is aborted and recorded as timed out", as
     f.w.outcome = "hang";
     const t = f.make({ setTimeoutFn: (fn, ms) => (timers.push({ fn, ms }), { unref() {} }), clearTimeoutFn: () => {} });
     const { trialId } = await t.create(f.input());
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => timers.some((x) => x.ms === CASE_TIMEOUT_MS));
     const guard = timers.find((x) => x.ms === CASE_TIMEOUT_MS);
     assert.ok(guard, "a 15-minute guard was set");
     assert.equal(CASE_TIMEOUT_MS, 15 * 60_000);
@@ -501,6 +512,7 @@ test("wait returns after at most the wait limit with the cases as they are; a fi
     f.w.outcome = "hang";
     const t = f.make({ waitMs: 30 });
     const { trialId } = await t.create(f.input());
+    await until(() => f.w.created.length >= 1);
     const started = Date.now();
     const r = await t.wait({ sessionID: "ses_child", messageID: "msg_w", callID: "call_w", trialId });
     assert.ok(Date.now() - started < 1000);
@@ -520,7 +532,7 @@ test("when the Architect's round ends: queued cases are aborted, running ones ar
   try {
     f.w.outcome = "hang";
     const a = await f.t.create(f.input({ cases: [f.caseOf("a1"), f.caseOf("a2"), f.caseOf("a3")] }));
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => f.w.created.length >= 2);
     await f.t.abortForJob("job1");
     const trial = f.t.get(a.trialId);
     assert.deepEqual(trial.cases.map((c) => c.state), ["aborted", "aborted", "aborted"]);
