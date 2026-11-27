@@ -89,6 +89,23 @@ function CreateView({ change }: { change: AgentChange }) {
   );
 }
 
+/** A learned preference (Architect v2 §5.1): the rule, where it applies, the user's own words behind it — the agent's file doesn't change. */
+function LearnedView({ change }: { change: AgentChange }) {
+  const r = change.learned?.added;
+  if (!r) return null;
+  return (
+    <div className="flex flex-col gap-1 break-words" data-testid="agent-change-learned">
+      <div className="text-text">{r.rule}</div>
+      <div className="text-text-muted">
+        Applies in {r.scope === "_all" ? "every project" : r.scope}
+        {r.whyIsInferred ? " · inferred: a little beyond your words" : ""}
+      </div>
+      {r.quote && <blockquote className="m-0 border-l-2 border-border pl-3 text-text-muted">“{r.quote}”</blockquote>}
+      {r.why && <div className="text-text-faint">{r.why}</div>}
+    </div>
+  );
+}
+
 function UpdateView({ change }: { change: AgentChange }) {
   const rows = diffRows(change.before ?? "", change.after);
   if (rows.length === 0) {
@@ -229,6 +246,7 @@ const plural = (n: number, one: string): string => `${n} ${n === 1 ? one : `${on
 
 /** The fold's label when the card is collapsed: "Show the change · 2 lines · based on 3 sources". */
 function foldLabel(change: AgentChange): string {
+  if (change.origin?.kind === "learned") return "Show what was learned";
   const skills = skillsFoldPart(change.skillsDiff);
   if (change.kind === "create") return ["Show the new agent", ...(skills ? [skills] : [])].join(" · ");
   const lines = changedLineCount(change);
@@ -346,7 +364,7 @@ export function AgentChangeView({
   const detail = (
     <>
       {change.problem && <ProblemBlock problem={change.problem} />}
-      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
+      {change.kind === "create" ? <CreateView change={change} /> : change.origin?.kind === "learned" ? <LearnedView change={change} /> : <UpdateView change={change} />}
       {size && (
         <div className="text-text-muted" data-testid="agent-change-size">
           {size}
@@ -402,6 +420,8 @@ export function AgentChangeView({
           <div className="flex flex-col gap-2">
             {lead}
             {outcome}
+            {/* a taken-back learned rule has nothing to unfold: its summary line says it all */}
+            {!(change.origin?.kind === "learned" && !change.learned?.added) && (
             <details data-testid="agent-change-fold" className="group">
               <summary className="flex cursor-pointer list-none items-center gap-1 text-meta font-medium text-text-faint hover:text-text [&::-webkit-details-marker]:hidden">
                 <ChevronRight size={12} aria-hidden="true" className="shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" />
@@ -409,6 +429,7 @@ export function AgentChangeView({
               </summary>
               <div className="mt-2 flex flex-col gap-2">{detail}</div>
             </details>
+            )}
           </div>
         </Card>
       </div>

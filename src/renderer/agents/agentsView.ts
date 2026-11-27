@@ -21,7 +21,7 @@ export const SEAT_BRIEF_MAX = 4000;
 /** null = closed. "needs" is the Needs you row: the Fleet page, scrolled to its first section. */
 export type AgentsView = null | { page: "fleet"; focus?: "needs"; nonce?: number } | { page: "profile"; slug: string };
 
-export type ProfileTab = "overview" | "research" | "seats" | "history" | "tests";
+export type ProfileTab = "overview" | "research" | "seats" | "history" | "learned" | "tests";
 export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "research", label: "Research" },
@@ -31,9 +31,13 @@ export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
 /** Architect v2 §3.4: the Tests tab, last, shown only when the agent has trial runs. */
 export const TESTS_TAB: { id: ProfileTab; label: string } = { id: "tests", label: "Tests" };
 
-/** The tabs a profile shows: the four, plus Tests when the box sent any trial for this agent. */
-export function profileTabs(profile: { trials?: ReadonlyArray<unknown> }): ReadonlyArray<{ id: ProfileTab; label: string }> {
-  return (profile.trials?.length ?? 0) > 0 ? [...PROFILE_TABS, TESTS_TAB] : PROFILE_TABS;
+/** Architect v2 §5.1: the Learned tab, before Tests: shown whenever the box sends the agent's learned rules (even none), never for the lead. */
+export const LEARNED_TAB: { id: ProfileTab; label: string } = { id: "learned", label: "Learned" };
+
+/** The tabs a profile shows: the four, plus Learned when the box sends the agent's rules, plus Tests when it sent any trial for this agent. */
+export function profileTabs(profile: { trials?: ReadonlyArray<unknown>; learned?: ReadonlyArray<unknown>; info?: { role?: string } }): ReadonlyArray<{ id: ProfileTab; label: string }> {
+  const learned = Array.isArray(profile.learned) && profile.info?.role !== "lead";
+  return [...PROFILE_TABS, ...(learned ? [LEARNED_TAB] : []), ...((profile.trials?.length ?? 0) > 0 ? [TESTS_TAB] : [])];
 }
 
 /** The tab a key press moves to (arrows wrap, Home / End jump); null for any other key. Selection follows focus. */
@@ -183,6 +187,7 @@ export function memoryLabel(access: "read" | "read-write" | "none"): string {
 export function historyWho(change: Pick<AgentChange, "origin">): string {
   if (change.origin.kind === "job") return "Architect";
   if (change.origin.kind === "restore") return "You";
+  if (change.origin.kind === "learned") return "Manta · learned from you";
   return "Manta · for you";
 }
 

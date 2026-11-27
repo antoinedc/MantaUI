@@ -66,8 +66,9 @@ export function agentChangeChip(change: Pick<AgentChange, "state" | "kind">): { 
   }
 }
 
-export function agentChangeTitle(change: Pick<AgentChange, "kind" | "agentName"> & { origin?: AgentChange["origin"] }): string {
+export function agentChangeTitle(change: Pick<AgentChange, "kind" | "agentName"> & { origin?: AgentChange["origin"]; learned?: AgentChange["learned"] }): string {
   if (change.origin?.kind === "template-update") return `Built-in update: ${change.agentName}`;
+  if (change.origin?.kind === "learned") return change.learned?.removedId ? `${change.agentName} forgot a preference` : `Learned by ${change.agentName}`;
   return change.kind === "create" ? `New agent: ${change.agentName}` : `Change to ${change.agentName}`;
 }
 
@@ -221,6 +222,7 @@ export function changedLineCount(change: Pick<AgentChange, "kind" | "before" | "
 /** Who made the change, for the one-line card: the Architect (a task), you (a restore), a shipped built-in version, else Manta. */
 export function changeAuthor(change: Pick<AgentChange, "origin">): string {
   if (change.origin.kind === "template-update") return "Built-in update";
+  if (change.origin.kind === "learned") return "Manta";
   return change.origin.kind === "job" ? "Architect" : change.origin.kind === "restore" ? "You" : "Manta";
 }
 
