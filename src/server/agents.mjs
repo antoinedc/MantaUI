@@ -1422,6 +1422,23 @@ export function createAgentsEngine({
     for (const buf of files.values()) await putBlob(buf);
   }
 
+  /** Is a link (or a file where a folder should be) on the way to `rel` under `dir`, the file itself included? An absent segment is fine: it gets made. */
+  async function pathHasLink(dir, rel) {
+    const parts = rel.split("/");
+    let at = dir;
+    for (let i = 0; i < parts.length; i++) {
+      at = join(at, parts[i]);
+      let st;
+      try {
+        st = await fs.lstat(at);
+      } catch (e) {
+        return e?.code === "ENOENT" ? false : true;
+      }
+      if (st.isSymbolicLink() || (i < parts.length - 1 && !st.isDirectory())) return true;
+    }
+    return false;
+  }
+
   /**
    * Move an agent's folder from the file set `from` to `to` (`{ path: sha256 }` maps over agent.md + skills + learned). Every
    * file must be exactly what `from` says, or nothing is touched: `{ conflict: true }`. A write that fails is put back and thrown.
@@ -1429,6 +1446,8 @@ export function createAgentsEngine({
   async function transitionSpace(dir, from, to) {
     const cur = await readSpace(dir);
     if (!cur) return { conflict: true };
+    // nothing is written, replaced or removed through a link: every path of the move is checked first
+    for (const p of new Set([...Object.keys(from), ...Object.keys(to)])) if (!safeRel(p) || (await pathHasLink(dir, p))) return { conflict: true };
     const now0 = hashesOf(cur);
     for (const p of new Set([...Object.keys(now0), ...Object.keys(from), ...Object.keys(to)])) {
       if ((now0[p] ?? null) !== (from[p] ?? null)) return { conflict: true };
@@ -1589,7 +1608,7 @@ export function createAgentsEngine({
    */
   async function writeCreateSkills(rec, dir) {
     for (const [rel, hash] of createSkillFiles(rec)) {
-      if (!safeRel(rel)) return { conflict: true };
+      if (!safeRel(rel) || (await pathHasLink(dir, rel))) return { conflict: true };
       const file = join(dir, rel);
       const cur = await fs.readFile(file).catch(() => null);
       if (cur) {
@@ -1613,6 +1632,10 @@ export function createAgentsEngine({
     const files = createSkillFiles(rec);
     if (files.length === 0) return left;
     for (const [rel, hash] of files) {
+      if (await pathHasLink(dir, rel)) {
+        left.push(`${rel} is behind a link`);
+        continue;
+      }
       const cur = await fs.readFile(join(dir, rel)).catch(() => null);
       if (!cur) continue;
       if (sha256Hex(cur) !== hash) {

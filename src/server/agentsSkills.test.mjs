@@ -4,7 +4,7 @@
 // A real temp folder stands in for ~/.manta/agents; opencode, the jobs store, the research store and the trials are fakes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, rm, cp, readdir, access } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, cp, readdir, access, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1103,5 +1103,48 @@ test("H2: a file bigger than the cap is cut and says so; a blob that is gone is 
     await assert.rejects(f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/SKILL.md" }), /copy of this file is gone/i);
   } finally {
     await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// L2: no skill write goes through a link
+// ---------------------------------------------------------------------------
+
+
+test("L2: a link where a skill folder goes makes the apply a conflict and writes nothing through it", async () => {
+  const f = await fixture();
+  try {
+    await propose(f);
+    const outside = join(f.base, "outside");
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(f.root, "dev", "skills"));
+    await release(f);
+    const rec = await lastRec(f);
+    assert.equal(rec.state, "conflict");
+    assert.deepEqual(await readdir(outside), [], "nothing was written through the link");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("L2: the recovery of a create refuses a link at skills/ or at skills/<name>, and writes nothing through it", async () => {
+  for (const where of ["skills", "skills/landing-audit"]) {
+    const f = await fixture();
+    try {
+      const { rec, dir } = await crashedCreate(f);
+      const outside = join(f.base, "outside");
+      await mkdir(outside, { recursive: true });
+      if (where === "skills") await symlink(outside, join(dir, "skills"));
+      else {
+        await mkdir(join(dir, "skills"), { recursive: true });
+        await symlink(outside, join(dir, "skills", "landing-audit"));
+      }
+      await f.engine.recover();
+      const done = (await store(f)).changes.find((r) => r.id === rec.id);
+      assert.equal(done.state, "conflict", where);
+      assert.deepEqual(await readdir(outside), [], `${where}: nothing was written through the link`);
+    } finally {
+      await f.cleanup();
+    }
   }
 });
