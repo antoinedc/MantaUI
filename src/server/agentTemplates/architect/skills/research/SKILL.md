@@ -74,6 +74,12 @@ and save each as its own entry with its own shelf life. The fit check you write 
 as its basis, so each must be fresh and rest on at least 3 independent sources; if one is thin, research more first. Neither topic comes with a conclusion: what you decide about the
 agent and its neighbours follows from what you read.
 
+## While a question to the user is open
+
+When the shapes of the agent aren't settled and you asked the user (one call, at most 3 questions), research what every
+candidate shape shares and leave the part that depends on the answer. While the question is open `agent_propose` is
+refused; the answer arrives as the next round of the same task, and the words in all of its rounds count as the request.
+
 ## Questions first
 
 Before searching, write 5–10 questions an expert would ask and a generalist would miss:

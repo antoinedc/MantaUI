@@ -133,7 +133,7 @@ test("the Architect templates carry no agent-design opinions (research and the l
   assert.match(authoring, /admission/i);
   assert.match(authoring, /isolation/);
   // one short process line: compare the request with the roster in light of the research; the question tool on a conflict
-  assert.equal(main.split("question tool").length - 1, 1, "named once");
+  assert.equal(main.split("question tool").length - 1, 2, "named twice: step 1 (the shapes are open) and step 4 (the request and the research conflict)");
   assert.ok(!all.includes("ask_user"));
   const step = main.match(/\n\d+\. \*\*Compare\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0].replace(/\s+/g, " ") ?? "";
   assert.match(step, /ask the user with the question tool, with your recommendation and what you found/);
@@ -164,7 +164,7 @@ test("the Architect writes a fit check before proposing: what its research says,
   assert.ok(step.length < 600, "one short step");
   // it says nothing about which answer is right: that is the research's call
   assert.doesNotMatch(step, /single agent|extend|narrow|split|new agent/i);
-  assert.equal(main.split("question tool").length - 1, 1, "the question tool is still named once (step 4)");
+  assert.equal(main.split("question tool").length - 1, 2, "the question tool is named in step 1 (open shapes) and step 4 only");
   // the result starts with it
   const finish = flat(main.match(/\n\d+\. \*\*Finish\*\*[\s\S]*?(?=\n\d+\. |\n## )/)?.[0] ?? "");
   assert.match(finish, /begin with the fit check/i);
@@ -982,7 +982,7 @@ test("the Architect's templates: the fit check names the library entries it rest
   assert.match(step, /research more/i);
   assert.match(step, /couldn't establish it/i);
   assert.ok(step.length < 900, "still one short step");
-  assert.equal(main.split("question tool").length - 1, 1, "the question tool is still named once (step 4)");
+  assert.equal(main.split("question tool").length - 1, 2, "the question tool is named in step 1 (open shapes) and step 4 only");
   assert.doesNotMatch(step, /single agent|extend|narrow|split|new agent/i, "no agent-design conclusion");
   const fields = flat(authoring.match(/## `agent_propose` fields[\s\S]*$/)?.[0] ?? "");
   assert.match(fields, /`fitCheck`: `\{researchSays, matches, why, basis\}`/);
@@ -2388,4 +2388,76 @@ test("trial / trialTranscript (the agents:trial RPCs): the wire view of a trial,
   } finally {
     await f.cleanup();
   }
+});
+
+// ---- Architect v2 Stage 1: what the shipped texts tell the Architect and the lead (process and mechanics only) ----
+
+test("the Architect's step 1 is the problem: who has it, the outcome, the shapes (one may be no change), a question when two shapes differ materially, researching what they share meanwhile", async () => {
+  const main = await readFile(join(REAL_TEMPLATES, "architect", "agent.md"), "utf-8");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const step = flat(main.match(/\n1\. \*\*Read the charter and work out the problem\.\*\*[\s\S]*?(?=\n2\. )/)?.[0] ?? "");
+  assert.ok(step.length > 0, "step 1 is the problem step");
+  assert.match(step, /the charter quotes the user's words/i);
+  assert.match(step, /who has it and the outcome wanted/i);
+  assert.match(step, /list the shapes that could solve it/i);
+  assert.match(step, /changing an existing agent, another no change at all/i);
+  assert.match(step, /materially different agents/i);
+  assert.match(step, /ask the user with the question tool/i);
+  assert.match(step, /at most 3 questions in one call, the recommended option first/i);
+  assert.match(step, /keep researching what the shapes share while the question is open/i);
+  assert.match(step, /otherwise choose, and state your assumption in your result/i);
+  // it names no shape as the right one
+  assert.doesNotMatch(step, /prefer|best shape|usually|always choose/i);
+});
+
+test("the Architect runs a trial before proposing: the mechanics, the limits, and that the trial must be on the proposed draft", async () => {
+  const main = await readFile(join(REAL_TEMPLATES, "architect", "agent.md"), "utf-8");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const order = [...main.matchAll(/\n(\d+)\. \*\*([^*]+)\*\*/g)].map((m) => m[2].replace(/\.$/, ""));
+  assert.ok(order.indexOf("Trial it") > order.indexOf("Write the agent"), "after writing the draft");
+  assert.ok(order.indexOf("Trial it") < order.indexOf("Propose"), "before proposing");
+  const trial = flat(main.match(/\n\d+\. \*\*Trial it\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
+  for (const re of [/`agent_trial`/, /1 to 3 cases/, /`expect` \("does" or "declines"\)/, /throwaway copy of a project/, /minus secrets, publishing and sending/, /no user/, /`agent_trial_wait`/, /`agent_trial_read`/, /judge each case yourself/, /3 trials per agent, 6 per task/, /exactly the draft you propose/]) assert.match(trial, re);
+  const propose = flat(main.match(/\n\d+\. \*\*Propose\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
+  assert.match(propose, /`problem`: the user's words quoted from the request, the shapes you listed, the one you chose and why/);
+  assert.match(propose, /`trial`: the trial's id and one verdict per case with a quote from that case's transcript/);
+  assert.match(propose, /a failing verdict is refused/);
+  const write = flat(main.match(/\n\d+\. \*\*Write the agent\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
+  assert.match(write, /`replaces` \/ `revises`/);
+  assert.match(write, /the old text must be gone from the new instructions when it is replaced/);
+  const finish = flat(main.match(/\n\d+\. \*\*Finish\*\*[\s\S]*?(?=\n## )/)?.[0] ?? "");
+  assert.match(finish, /A task may end with no proposal: begin the result with "No change needed:" and say why/);
+  assert.match(main, /the trial\s+tools and\s+`agent_propose`/);
+  assert.ok(main.trimEnd().split("\n").length <= 150, "the main file stays within 150 lines");
+});
+
+test("the authoring and research skills list the new fields and the open-question mechanics", async () => {
+  const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const fields = flat((await read("skills", "authoring", "SKILL.md")).match(/## `agent_propose` fields[\s\S]*$/)?.[0] ?? "");
+  assert.match(fields, /`admission` \(≤ 40\): `\{rule, verdict, why\}`.*`replaces` \(10–600 characters of the current instructions that this rule replaces/);
+  assert.match(fields, /`revises`.*it may stay in some form/);
+  assert.match(fields, /One of the two at most/);
+  assert.match(fields, /`problem`: `\{userWords, statement, shapes, chosen, why\}`/);
+  assert.match(fields, /`userWords` \(10–600\) is copied exactly from the request any round of your task was given/);
+  assert.match(fields, /2–5 shapes.*\(1–5 in a refresh or check-up round\)/);
+  assert.match(fields, /`trial`: `\{trialId, verdicts\}` — required for a new agent and for an update of instructions, isolation or model/);
+  assert.match(fields, /the refusal names the files/);
+  assert.match(fields, /Case <name> failed: fix the draft and run a trial again/);
+  const research = flat(await read("skills", "research", "SKILL.md"));
+  assert.match(research, /## While a question to the user is open/);
+  assert.match(research, /research what every candidate shape shares and leave the part that depends on the answer/);
+  assert.match(research, /the words in all of its rounds count as the request/);
+});
+
+test("the lead's charter quotes the user's words verbatim and states the problem; a role name is part of their words; 'No change was proposed' is relayed", async () => {
+  const { buildLeadBrief } = await import("./agents.mjs");
+  const brief = buildLeadBrief({ body: "B", roster: [] });
+  const tpl = await readFile(join(REAL_TEMPLATES, "manta", "agent.md"), "utf-8");
+  for (const text of [brief, tpl.replace(/\s+/g, " ")]) {
+    assert.match(text, /quotes the user's request word for word under "The user's words" and states the problem it solves; a role name the user used is part of their words, not a decision/);
+  }
+  assert.match(brief, /`Outcome: No change was proposed\.` means the Architect decided no change was needed: say so and give its reason from its result\./);
+  const plugin = await readFile(new URL("../../docs/opencode-plugins-v2/manta/tools/agents.ts", import.meta.url), "utf-8");
+  assert.match(plugin, /quotes the user's request word for word under \\"The user's words\\" and states the problem it solves/);
 });
