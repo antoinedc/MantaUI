@@ -487,7 +487,7 @@ let trialSeq = 0;
 const TRIAL_QUOTE = "I changed the rules and ran the tests.";
 async function trialFor(f, b, { rootJobId = "job1", state = "done", quote = TRIAL_QUOTE, pass = true, text = `${TRIAL_QUOTE} All of them passed.`, mutate = (x) => x } = {}) {
   const plan = await f.engine.trialPlan({ action: b.action, agent: b.agent, draft: b.draft, baseHash: b.baseHash }, { dir: "/t/x" });
-  assert.equal(plan.error, undefined, plan.error);
+  if (plan.error) return undefined; // a draft the server can't plan has no trial: the proposal is refused for its own reason
   const id = `tr_${++trialSeq}`;
   f.w.trials.set(id, mutate({ id, rootJobId, agentSlug: plan.slug, draftHash: draftHash(plan.bundle), files: plan.files, cases: [{ name: "main", expect: "does", state }] }));
   f.w.trialText[`${id}:main`] = text;
@@ -524,7 +524,10 @@ const needsTrialDraft = (b) => b.action === "create" || ["instructions", "isolat
 const withTrial = async (f, b, over = {}) => {
   if (over.trial === null) delete b.trial;
   else if (over.trial !== undefined) b.trial = over.trial;
-  else if (needsTrialDraft(b) && (b.action === "create" || b.baseHash !== undefined) && !Object.hasOwn(b, "trial")) b.trial = await trialFor(f, b);
+  else if (needsTrialDraft(b) && (b.action === "create" || b.baseHash !== undefined) && !Object.hasOwn(b, "trial")) {
+    const made = await trialFor(f, b);
+    if (made) b.trial = made;
+  }
   return b;
 };
 const propose = async (f, over = {}, tOver) => {
@@ -729,14 +732,14 @@ test("agent_propose binding: wrong agent, unstamped job, terminal job, another s
     await refusedWith(/Only the Architect/);
     f.w.jobs = [{ ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, mode: "build" }, status: "done" }]; // a terminal job
     await refusedWith(/Only the Architect/);
-    f.w.jobs = [{ id: "job1", childSessionID: "ses_other", parentSessionID: "ses_chat", status: "running", attempt: 1, architect: { rootJobId: "job1", attempt: 1, mode: "build" } }];
+    f.w.jobs = [{ id: "job1", childSessionID: "ses_other", parentSessionID: "ses_chat", status: "running", attempt: 1, prompt: USER_PROMPT, architect: { rootJobId: "job1", attempt: 1, mode: "build" } }];
     await refusedWith(/Only the Architect/); // the calling session is not that job's child
     f.w.jobsThrow = true;
     await refusedWith(/Couldn't check this task/);
     f.w.jobsThrow = false;
     assert.deepEqual((await store(f).catch(() => ({ changes: [] }))).changes, []);
     // a replay of one live call: the first works, the second (same message and call) returns the original without a new slot
-    f.w.jobs = [{ id: "job1", childSessionID: "ses_child", parentSessionID: "ses_chat", status: "running", attempt: 1, architect: { rootJobId: "job1", attempt: 1, mode: "build" } }];
+    f.w.jobs = [{ id: "job1", childSessionID: "ses_child", parentSessionID: "ses_chat", status: "running", attempt: 1, prompt: USER_PROMPT, architect: { rootJobId: "job1", attempt: 1, mode: "build" } }];
     const hash = (await f.engine.readAgentSnapshot("dev")).hash;
     const b = await withTrial(f, proposeBody({ baseHash: hash }));
     f.w.messages = proposeTranscript(b);
@@ -2212,9 +2215,14 @@ test("a trial is required for a create and for an update of instructions, isolat
     await refusedProposal(f, { ...noTrial, action: "create", agent: undefined, baseHash: null, draft: { name: "SEO Reviewer", description: "Reviews SEO.", isolation: "none", instructions: "You review SEO." } }, /agent_trial/);
     // description / colour / routing lines only: no trial
     for (const draft of [{ description: "Writes better code." }, { color: "#112233" }, { useWhen: "Code changes." }, { notFor: "Reviews." }]) {
-      const r = await propose(f, { ...noTrial, draft });
-      assert.equal(r.ok, true, `${JSON.stringify(draft)}: ${r.error}`);
-      assert.equal(r.change.trial, undefined);
+      const g = await proposeFixture(); // (three proposals per task)
+      try {
+        const r = await propose(g, { ...noTrial, draft });
+        assert.equal(r.ok, true, `${JSON.stringify(draft)}: ${r.error}`);
+        assert.equal(r.change.trial, undefined);
+      } finally {
+        await g.cleanup();
+      }
     }
   } finally {
     await f.cleanup();
