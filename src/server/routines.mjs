@@ -37,6 +37,11 @@ export const REPORT_GRACE_MS = 60_000;
 /** A refresh run with no task id (a crash between its session and its task) is failed after this long. */
 export const REFRESH_START_GRACE_MS = 2 * 60_000;
 export const REFRESH_KIND = "agent-refresh";
+/** The weekly team check-up (Architect v2 §5.2): one routine for the whole team, made by the agents engine only. */
+export const CHECKUP_KIND = "fleet-checkup";
+const CHECKUP_CHARTER = "Check the team: propose only changes the facts and your research support.";
+/** The kinds whose run is a task of the agents engine under a headless session that is never prompted. */
+const isInternalKind = (kind) => kind === REFRESH_KIND || kind === CHECKUP_KIND;
 export const ERROR_SETTLE_MS = 60_000;
 export const MIN_INTERVAL_MS = 15 * 60_000;
 export const CATCH_UP_GRACE_MS = 2 * 60_000;
@@ -815,7 +820,7 @@ export function createRoutinesEngine(deps) {
       agentKey: null,
       openingText: null,
       // a refresh run's work is a delegate task: its id is stored once it started (agent screens §5.4)
-      ...(routine.kind === REFRESH_KIND ? { kind: REFRESH_KIND, jobId: null } : {}),
+      ...(isInternalKind(routine.kind) ? { kind: routine.kind, jobId: null } : {}),
     };
     store.runs.push(run);
     return run;
@@ -990,6 +995,12 @@ export function createRoutinesEngine(deps) {
    * agent must be a valid specialist (not the lead, not the Architect); it never runs as an agent of its own (`agent` stays null).
    */
   async function createInternal(input) {
+    if (input?.kind === CHECKUP_KIND) {
+      // the team check-up: no agent, a fixed charter
+      if (input.agentSlug !== undefined) throw bad("A team check-up has no agent.");
+      const { kind: _kind, agent: _agent, prompt: _prompt, ...rest } = input;
+      return createRoutine({ ...rest, prompt: CHECKUP_CHARTER }, { extra: { kind: CHECKUP_KIND }, noAgent: true });
+    }
     if (!input || typeof input !== "object" || input.kind !== REFRESH_KIND) throw bad(`Only an ${REFRESH_KIND} routine can be made here.`);
     const slug = typeof input.agentSlug === "string" ? input.agentSlug.trim().toLowerCase() : "";
     const found = slug && agents ? await agents.routineAgent(slug, "").catch(() => null) : null;
@@ -1060,8 +1071,8 @@ export function createRoutinesEngine(deps) {
     const routine = await txn(async (store, touch) => {
       const r = store.routines.find((x) => x.id === id);
       if (!r) throw bad("That routine no longer exists.", 404);
-      if (r.kind === REFRESH_KIND && Object.keys(patch ?? {}).some((k) => patch[k] !== undefined && !REFRESH_EDITABLE.has(k))) {
-        throw bad("Only the schedule and on/off can be changed on a refresh routine.");
+      if (isInternalKind(r.kind) && Object.keys(patch ?? {}).some((k) => patch[k] !== undefined && !REFRESH_EDITABLE.has(k))) {
+        throw bad(`Only the schedule and on/off can be changed on a ${r.kind === CHECKUP_KIND ? "check-up" : "refresh"} routine.`);
       }
       if (agentError) {
         const same = typeof patch.agent === "string" && patch.agent.trim().replace(/^@/, "").toLowerCase() === r.agent;
@@ -1352,7 +1363,7 @@ export function createRoutinesEngine(deps) {
 
   /** §4.2 steps 2–6. Every failure is a human sentence on a `failed` run; nothing falls back to the user's checkout. */
   async function startRun(run, routine) {
-    if (routine.kind === REFRESH_KIND) return startRefreshRun(run, routine);
+    if (isInternalKind(routine.kind)) return startRefreshRun(run, routine);
     let cwd = routine.directory;
     let worktree = null;
     let sessionCreated = false;
@@ -1426,14 +1437,16 @@ export function createRoutinesEngine(deps) {
    */
   async function startRefreshRun(run, routine) {
     let sessionCreated = false;
+    const checkup = routine.kind === CHECKUP_KIND;
     try {
       if (!isDirectory(routine.directory)) throw new Error("The folder no longer exists.");
-      if (typeof agents?.refresh !== "function") throw new Error("Refreshing agents isn't available on this box yet.");
+      if (typeof (checkup ? agents?.checkup : agents?.refresh) !== "function") throw new Error(checkup ? "The team check-up isn't available on this box yet." : "Refreshing agents isn't available on this box yet.");
       await createRunSession(run, routine, { access: "read" });
       sessionCreated = true;
-      const started = await agents.refresh(routine.agentSlug, { runId: run.id, runSessionId: run.sessionID });
+      const ctx = { runId: run.id, runSessionId: run.sessionID };
+      const started = checkup ? await agents.checkup(ctx) : await agents.refresh(routine.agentSlug, ctx);
       const jobId = typeof started?.jobId === "string" ? started.jobId : "";
-      if (!jobId) throw new Error("The refresh task didn't start.");
+      if (!jobId) throw new Error(checkup ? "The check-up task didn't start." : "The refresh task didn't start.");
       const saved = await patchRun(run.id, { jobId, submittedAt: now() });
       if (!saved && !(await readStore()).runs.some((r) => r.id === run.id)) {
         await dropOrphanSession(run); // the task, if it started, ends on its own
@@ -1463,12 +1476,14 @@ export function createRoutinesEngine(deps) {
     if (!isEndedJob(job)) return;
     const run = (await readStore()).runs.find((r) => r.id === runId);
     if (!run || !isLive(run) || run.jobId !== job.id) return;
+    const routine = (await readStore()).routines.find((r) => r.id === run.routineId);
+    const checkup = (routine?.kind ?? run.kind) === CHECKUP_KIND;
     if (job.status !== "done") {
-      const why = job.status === "stopped" ? "the refresh task was stopped" : (typeof job.error === "string" && job.error.trim() ? humanError(job.error) : "the refresh task failed");
+      const what = checkup ? "check-up" : "refresh";
+      const why = job.status === "stopped" ? `the ${what} task was stopped` : (typeof job.error === "string" && job.error.trim() ? humanError(job.error) : `the ${what} task failed`);
       await terminate(runId, "failed", why);
       return;
     }
-    const routine = (await readStore()).routines.find((r) => r.id === run.routineId);
     const slug = routine?.agentSlug ?? "the agent";
     let changes = [];
     let lines = [];
@@ -1481,9 +1496,10 @@ export function createRoutinesEngine(deps) {
     const waiting = changes.filter((c) => c?.state === "pending").length;
     const text = typeof job.result === "string" ? job.result.trim() : "";
     const body = [text, ...lines].filter(Boolean).join("\n\n").slice(0, 8000);
+    const subject = checkup ? "Team check-up" : `Refresh @${slug}`;
     const report = waiting > 0
-      ? { outcome: "findings", title: `Refresh @${slug}: ${waiting === 1 ? "a change is" : `${waiting} changes are`} waiting for your click`, summary: lines[0] ? String(lines[0]).slice(0, 400) : "", body }
-      : { outcome: "nothing", title: `Refresh @${slug}: nothing to change`, summary: "", body };
+      ? { outcome: "findings", title: `${subject}: ${waiting === 1 ? "a change is" : `${waiting} changes are`} waiting for your click`, summary: lines[0] ? String(lines[0]).slice(0, 400) : "", body }
+      : { outcome: "nothing", title: `${subject}: nothing to change`, summary: "", body };
     await terminate(runId, "done", null, { report });
   }
 
@@ -1498,7 +1514,7 @@ export function createRoutinesEngine(deps) {
   /** The safety net for a refresh run: read its task first, never the session (§5.4). */
   async function reconcileRefreshRun(run) {
     if (!run.jobId) {
-      if (now() - (run.startedAt ?? now()) > REFRESH_START_GRACE_MS) await terminate(run.id, "failed", "the box restarted before the refresh could start");
+      if (now() - (run.startedAt ?? now()) > REFRESH_START_GRACE_MS) await terminate(run.id, "failed", `the box restarted before the ${run.kind === CHECKUP_KIND ? "check-up" : "refresh"} could start`);
       return;
     }
     let job;
@@ -1508,7 +1524,7 @@ export function createRoutinesEngine(deps) {
       return; // can't read the store: the next sweep tries again
     }
     if (!job) {
-      await terminate(run.id, "failed", "the refresh task is no longer on the box");
+      await terminate(run.id, "failed", `the ${run.kind === CHECKUP_KIND ? "check-up" : "refresh"} task is no longer on the box`);
       return;
     }
     if (isEndedJob(job)) await settleRefreshRun(run.id, job);
@@ -1762,7 +1778,7 @@ export function createRoutinesEngine(deps) {
   async function reconcileRun(runId) {
     const run = (await readStore()).runs.find((r) => r.id === runId);
     if (!run || !isLive(run) || !run.sessionID || launching.has(runId)) return;
-    if (run.kind === REFRESH_KIND) return reconcileRefreshRun(run); // its task decides, never its (silent) session
+    if (isInternalKind(run.kind)) return reconcileRefreshRun(run); // its task decides, never its (silent) session
     const rs = await oc.readSession(run.sessionID).catch(() => ({ state: "unknown" }));
     if (rs.state === "unknown") return;
     if (rs.state === "missing") {
@@ -2030,7 +2046,7 @@ export function createRoutinesEngine(deps) {
     const routine = before.routines.find((r) => r.id === id);
     if (!routine) throw bad("That routine no longer exists.", 404);
     if (routine.destination?.type === "session") throw bad("This routine already runs inside a chat.", 409);
-    if (routine.kind === REFRESH_KIND) throw bad("A refresh routine can't run inside a chat.", 409);
+    if (isInternalKind(routine.kind)) throw bad(`A ${routine.kind === CHECKUP_KIND ? "check-up" : "refresh"} routine can't run inside a chat.`, 409);
     const busy = (store) => store.runs.some((r) => r.routineId === id && (r.status === "queued" || isLive(r)));
     if (busy(before)) throw bad("Wait for the current run to finish.", 409);
     const v = validateFollowupCron(routine.cron);

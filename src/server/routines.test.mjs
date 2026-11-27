@@ -70,6 +70,7 @@ function makeWorld({ concurrency = 2 } = {}) {
     // agent refresh (agent screens §5.4): the delegate job store, the agents engine's refresh, and what the proposals came to
     jobsDb: new Map(),
     refreshCalls: [],
+    checkupCalls: [],
     refreshFail: null,
     refreshJobStatus: "running",
     getJobFails: false,
@@ -189,6 +190,13 @@ function makeWorld({ concurrency = 2 } = {}) {
         w.refreshCalls.push({ slug, ...ctx });
         if (w.refreshFail) throw new Error(w.refreshFail);
         const id = `job_r${w.refreshCalls.length}`;
+        w.jobsDb.set(id, { id, status: w.refreshJobStatus, result: null, error: null });
+        return { jobId: id };
+      },
+      checkup: async (ctx) => {
+        w.checkupCalls.push({ ...ctx });
+        if (w.refreshFail) throw new Error(w.refreshFail);
+        const id = `job_c${w.checkupCalls.length}`;
         w.jobsDb.set(id, { id, status: w.refreshJobStatus, result: null, error: null });
         return { jobId: id };
       },
@@ -2279,4 +2287,108 @@ test("refresh: a run with no job id (a crash between the session and the task) i
   assert.equal(w.run(run.id).status, "failed");
   assert.match(w.run(run.id).error, /box restarted before the refresh could start/);
   assert.deepEqual(w.prompts, []);
+});
+
+// ---------------------------------------------------------------------------
+// the weekly team check-up (Architect v2 §5.2): the second internal routine kind, one for the whole team (no agent), made by the agents
+// engine only; its run is the same headless session that is never prompted, and a task of the Architect does the work
+// ---------------------------------------------------------------------------
+
+const CHECKUP_CHARTER = "Check the team: propose only changes the facts and your research support.";
+
+async function checkupWorld(opts = {}) {
+  const w = makeWorld(opts);
+  const routine = await w.engine.createInternal({ kind: "fleet-checkup", name: "Team check-up", cron: "0 9 * * *", directory: "/proj", rollUp: true, access: "read" });
+  return { w, routine };
+}
+async function startedCheckup(opts) {
+  const { w, routine } = await checkupWorld(opts);
+  await w.tickAt(at(9, 0, 10));
+  return { w, routine, run: w.runs(routine.id)[0] };
+}
+
+test("check-up: made by the agents engine only, for the whole team: the charter is fixed, there is no agent, and the public paths refuse the kind", async () => {
+  const { w, routine } = await checkupWorld();
+  assert.equal(routine.kind, "fleet-checkup");
+  assert.equal(routine.agentSlug, undefined);
+  assert.equal(routine.prompt, CHECKUP_CHARTER);
+  assert.equal(routine.agent, null);
+  assert.equal(routine.access, "read");
+  assert.equal(routine.rollUp, true);
+  const base = { name: "x", prompt: "y", directory: "/proj", cron: "0 9 * * *" };
+  await assert.rejects(w.engine.create({ ...base, kind: "fleet-checkup" }), /can't be made here/);
+  await assert.rejects(w.engine.createInternal({ kind: "fleet-checkup", agentSlug: "seo", name: "r", cron: "0 9 * * *", directory: "/proj" }), /no agent/i);
+  assert.equal(w.agentLookups.length, 0);
+});
+
+test("check-up: the editor can switch it on or off and move its time, and nothing else; it can't run in a chat; deleting is allowed", async () => {
+  const { w, routine } = await checkupWorld();
+  assert.equal((await w.engine.update(routine.id, { enabled: false })).enabled, false);
+  assert.equal((await w.engine.update(routine.id, { cron: "30 10 * * 1" })).cron, "30 10 * * 1");
+  for (const patch of [{ prompt: "Do something else" }, { name: "Other" }, { directory: "/other" }, { access: "edit" }]) {
+    await assert.rejects(w.engine.update(routine.id, patch), /Only the schedule and on\/off/, JSON.stringify(patch));
+  }
+  await assert.rejects(w.engine.moveToChat(routine.id, { type: "new" }), /can't run inside a chat/);
+  assert.deepEqual(await w.engine.remove(routine.id), { deleted: true });
+});
+
+test("check-up: the run creates a headless session with no prompt and starts the agents engine's check-up task under it", async () => {
+  const { w, routine, run } = await startedCheckup();
+  assert.equal(run.status, "running");
+  assert.equal(run.kind, "fleet-checkup");
+  assert.deepEqual(w.prompts, []);
+  assert.deepEqual(w.checkupCalls, [{ runId: run.id, runSessionId: run.sessionID }]);
+  assert.deepEqual(w.refreshCalls, [], "not a refresh of anyone");
+  assert.equal(run.jobId, "job_c1");
+  assert.ok(run.submittedAt != null);
+  assert.equal(w.created[0].metadata.manta.routineId, routine.id);
+});
+
+test("check-up: a refused task fails the run with that sentence; the 30-minute timeout never ends a run that has a task", async () => {
+  const { w, routine } = await checkupWorld();
+  w.refreshFail = "The Architect isn't available";
+  await w.tickAt(at(9, 0, 10));
+  const run = w.runs(routine.id)[0];
+  assert.equal(run.status, "failed");
+  assert.equal(run.error, "The Architect isn't available");
+  assert.equal(w.deleted.length, 1);
+  const ok = await startedCheckup();
+  ok.w.t = at(9, 0, 10) + RUN_TIMEOUT_MS + 5 * MIN;
+  await ok.w.engine.sweep();
+  assert.equal(ok.w.run(ok.run.id).status, "running");
+});
+
+test("check-up: the task's end settles the run — proposals waiting for a click are findings with the Outcome lines; none is a quiet report; a failed or stopped task fails it", async () => {
+  const waiting = await startedCheckup();
+  waiting.w.changesDb.set(waiting.run.jobId, [{ state: "pending" }]);
+  waiting.w.outcomeDb.set(waiting.run.jobId, ["Outcome: @seo is waiting for your click on the card (reason: your setting for changing agents is Ask)."]);
+  await waiting.w.engine.settleFromJob({ id: waiting.run.jobId, status: "done", result: "Two agents repeat each other's rules." });
+  const r = waiting.w.run(waiting.run.id);
+  assert.equal(r.status, "done");
+  assert.equal(r.report.outcome, "findings");
+  assert.match(r.report.title, /Team check-up/);
+  assert.match(r.report.body, /Two agents repeat each other's rules\./);
+  assert.match(r.report.body, /Outcome: @seo is waiting for your click/);
+  assert.equal(waiting.w.notes.length, 1);
+  const quiet = await startedCheckup();
+  await quiet.w.engine.settleFromJob({ id: quiet.run.jobId, status: "done", result: "No change needed: the team covers everything." });
+  assert.equal(quiet.w.run(quiet.run.id).report.outcome, "nothing");
+  assert.match(quiet.w.run(quiet.run.id).report.title, /Team check-up/);
+  const failed = await startedCheckup();
+  await failed.w.engine.settleFromJob({ id: failed.run.jobId, status: "failed", error: "cut off" });
+  assert.equal(failed.w.run(failed.run.id).status, "failed");
+  const stopped = await startedCheckup();
+  await stopped.w.engine.settleFromJob({ id: stopped.run.jobId, status: "stopped" });
+  assert.match(stopped.w.run(stopped.run.id).error, /check-up task was stopped/);
+});
+
+test("check-up: reconcile reads the task first, like a refresh", async () => {
+  const { w, run } = await startedCheckup();
+  w.sessions.delete(run.sessionID);
+  w.active.clear();
+  await w.engine.sweep();
+  assert.equal(w.run(run.id).status, "running");
+  w.jobsDb.set(run.jobId, { id: run.jobId, status: "done", result: "Done." });
+  await w.engine.onReconnect();
+  assert.equal(w.run(run.id).status, "done");
 });
