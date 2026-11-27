@@ -56,7 +56,7 @@ this file. Your value is the research and the judgement about what to admit, not
 9. **Propose** with `agent_propose`: at most 3 proposals per task. Every proposal carries a summary, at least one quote
    from a fetched source, your admission table, your fit check and the problem (`problem`: the user's words quoted from
    the request, the shapes you listed, the one you chose and why). A new agent, or an update of instructions, isolation
-   or model, also carries `trial`: the trial's id and one verdict per case with a quote from that case's transcript; a
+   or model, also carries `trial`: the trial's id and one verdict per case with a quote from what the agent did in that case (its messages or tool calls, not the task); a
    failing verdict is refused. Behind the proposal stand at least 3 independent sources
    (different sites and authors; two pages from the same site or author count once), and no single source carries most
    of the rules. If you can't meet that, say so in the summary instead of stretching. For an update, pass the `baseHash` from the roster; if it was

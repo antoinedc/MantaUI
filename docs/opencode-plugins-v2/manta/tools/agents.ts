@@ -161,7 +161,7 @@ export const tools: ToolDef[] = [
       "At most 3 per task. The proposal is held until your task ends; then the user's settings decide whether it is applied or waits for their click. Never say it is applied.",
       "An update needs the baseHash of the file you read (from your brief).",
       "Every proposal also carries the problem it answers: the user's own words quoted from the request any round of your task was given, the problem in one statement, the shapes you considered, the one you chose and why.",
-      "A new agent, or an update of its instructions, isolation or model, also carries the trial you ran on this exact draft (agent_trial): one verdict per case with a quote from that case's transcript; it is refused if the trial ran on a different draft, belongs to another task, has a case that didn't finish, or has a verdict that isn't a pass.",
+      "A new agent, or an update of its instructions, isolation or model, also carries the trial you ran on this exact draft (agent_trial): one verdict per case with a quote from what the agent did in that case (its messages and tool calls in the transcript, not the task text); it is refused if the trial ran on a different draft, belongs to another task, has a case that didn't finish, or has a verdict that isn't a pass.",
       "An admission item may carry replaces (a sentence of the current instructions that must be gone from the new text) or revises (a sentence of the current instructions that was reworded).",
     ].join(" "),
     // `agent` and `baseHash` are optional and LAST: an optional key before a required one is silently dropped by strict tool schemas
@@ -229,7 +229,7 @@ export const tools: ToolDef[] = [
                 {
                   case: str("The case's name."),
                   pass: { type: "boolean", description: "Your judgement of the case." },
-                  quote: str("20 to 300 characters copied exactly from that case's transcript (agent_trial_read)."),
+                  quote: str("20 to 300 characters copied exactly from what the agent did in that case: its messages or tool calls in the transcript (agent_trial_read), not the task text."),
                   note: str("Up to 600 characters."),
                 },
                 ["case", "pass", "quote", "note"],
@@ -363,7 +363,7 @@ export const tools: ToolDef[] = [
     name: "agent_trial_read",
     description: [
       "Read one case of a trial (redacted transcript: the task, the agent's messages, each tool call and its outcome), 20,000 characters at a time.",
-      "A verdict you give agent_propose must quote 20 to 300 characters of the case's transcript exactly.",
+      "A verdict you give agent_propose must quote 20 to 300 characters of what the agent did in the case (its messages and tool calls, not the \"User:\" task text) exactly.",
     ].join(" "),
     // `offset` is optional and LAST
     input: input({ trialId: str("The trialId agent_trial returned."), case: str("The case's name."), offset: { type: "integer", minimum: 0, description: "Where to start reading (from nextOffset of the previous window); default 0." } }, ["offset"]),

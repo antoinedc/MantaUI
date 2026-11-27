@@ -1632,9 +1632,9 @@ export function createAgentsEngine({
   }
 
   /**
-   * Boot only (`init()`): every built-in whose shipped files moved on gets ONE change record, released by the user's "Change an
-   * agent" level like any change: Auto / Tell me apply it (Undo), Ask or a merge conflict wait for a click, Never discards it.
-   * A shipped bundle that already has a record (any state but expired) is not offered again. Returns the records made.
+   * Boot only (`init()`): every built-in whose shipped files moved on gets ONE change record. A clean upgrade is applied at once
+   * (Undo on the card) whatever the user's "Change an agent" level: that setting governs agents changing agents, and a shipped
+   * template is a Manta release the user already took. Only a merge conflict waits for a click. A shipped bundle that already has a record (any state but expired) is not offered again. Returns the records made.
    */
   async function upgradeBuiltIns() {
     const made = [];
@@ -1645,14 +1645,6 @@ export function createAgentsEngine({
         const rec = await syncLock.runExclusive(async () => {
           const store = await readStore({ strict: true });
           if (store.changes.some((r) => r.origin?.kind === "template-update" && r.slug === slug && r.origin.templateHash === plan.templateHash && r.state !== "expired")) return null;
-          let policy;
-          try {
-            policy = await autonomyPolicy();
-          } catch (e) {
-            log.warn?.(`[agents] couldn't read the autonomy settings to upgrade @${slug}: ${e?.message ?? e}`);
-            return null; // tried again at the next boot
-          }
-          const level = autonomy.decide("agent_change", policy);
           const files = plan.space;
           await putBlobs(files);
           await putBlobs(plan.after);
@@ -1684,11 +1676,7 @@ export function createAgentsEngine({
             baseBefore: baseNow.size > 0 ? hashesOf(baseNow) : null,
             baseAfter: hashesOf(plan.shipped),
           });
-          if (level === "never") {
-            r.state = "discarded";
-            r.error = AGENT_CHANGE_OFF;
-            r.decidedAt = now();
-          } else if (plan.conflict || level === "ask") {
+          if (plan.conflict) {
             r.needsClick = true;
             r.reason = "ask";
           } else {
@@ -2789,7 +2777,7 @@ export function createAgentsEngine({
     return operate(id, async (rec) => {
       if (rec.state === "pending") {
         if (isExpired(rec)) return expire(rec);
-        await requireChangeAllowed();
+        if (rec.origin?.kind !== "template-update") await requireChangeAllowed(); // a shipped template isn't an agent changing an agent
         await applyLocked(rec, "click");
         return true;
       }
@@ -2798,7 +2786,7 @@ export function createAgentsEngine({
         // take-back, or a record from before rollbacks) is only activated again
         if (await leftOnDisk(rec)) await reactivateLocked(rec);
         else {
-          await requireChangeAllowed();
+          if (rec.origin?.kind !== "template-update") await requireChangeAllowed();
           delete rec.groupAborted; // a fresh attempt on its own, whatever the task's other proposals did
           await applyLocked(rec, "click");
         }
@@ -3365,12 +3353,12 @@ export function createAgentsEngine({
       if ((v.note ?? "").length > 600) return bad(`The note for case ${v.case} can be at most 600 characters`);
       let transcript = null;
       try {
-        transcript = await trials.transcript?.(t.id, v.case);
+        transcript = await trials.transcript?.(t.id, v.case, { agentOnly: true }); // what the agent did, not the task text
       } catch {
         transcript = null;
       }
       if (typeof transcript !== "string") return bad("Couldn't read the trial's transcripts; try again");
-      if (!wsNorm(transcript).includes(wsNorm(v.quote))) return bad(`The quote for case ${v.case} isn't in that case's transcript; quote text you read with agent_trial_read, exactly`);
+      if (!wsNorm(transcript).includes(wsNorm(v.quote))) return bad(`The quote for case ${v.case} isn't in what the agent did (its messages and tool calls); the task text of the case doesn't count. Quote the agent's own lines, read with agent_trial_read, exactly`);
       verdicts.push({ case: v.case, pass: v.pass, quote: v.quote.trim(), note: (v.note ?? "").trim() });
     }
     const missing = cases.filter((c) => !verdicts.some((v) => v.case === c.name)).map((c) => c.name);

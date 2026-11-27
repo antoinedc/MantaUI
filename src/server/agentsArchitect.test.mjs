@@ -417,7 +417,8 @@ async function proposeFixture({ level = "auto", extra = {}, templates } = {}) {
     policyThrows: false,
     jobs: [{ id: "job1", childSessionID: "ses_child", parentSessionID: "ses_chat", status: "running", attempt: 1, prompt: USER_PROMPT, architect: { rootJobId: "job1", attempt: 1, mode: "build" } }],
     trials: new Map(), // trial id → the trial as the trials module keeps it; their transcripts in `trialText["<id>:<case>"]`
-    trialText: {},
+    trialText: {}, // the full transcript
+    trialAgentText: {}, // what the agent did (assistant and tool lines): when a test sets none, a trial's transcript is all agent
     jobsThrow: false,
     messages: [],
     agent: AGENT_KEY,
@@ -452,7 +453,7 @@ async function proposeFixture({ level = "auto", extra = {}, templates } = {}) {
         },
       },
       research: { getSource: async (child, id) => w.sources[`${child}:${id}`] ?? null },
-      trials: { get: (id) => w.trials.get(id) ?? null, transcript: async (id, name) => w.trialText[`${id}:${name}`] ?? null, activeTrialKeys: () => new Set() },
+      trials: { get: (id) => w.trials.get(id) ?? null, transcript: async (id, name, opts) => (opts?.agentOnly ? (w.trialAgentText[`${id}:${name}`] ?? w.trialText[`${id}:${name}`]) : w.trialText[`${id}:${name}`]) ?? null, activeTrialKeys: () => new Set() },
       library: {
         lookup: async ({ project, refs }) => {
           if (w.libraryThrows) throw new Error("library unreadable");
@@ -2430,7 +2431,7 @@ test("the Architect runs a trial before proposing: the mechanics, the limits, an
   for (const re of [/`agent_trial`/, /1 to 3 cases/, /`expect` \("does" or "declines"\)/, /throwaway copy of a project/, /minus secrets, publishing and sending/, /no user/, /`agent_trial_wait`/, /`agent_trial_read`/, /judge each case yourself/, /3 trials per agent, 6 per task/, /exactly the draft you propose/]) assert.match(trial, re);
   const propose = flat(main.match(/\n\d+\. \*\*Propose\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
   assert.match(propose, /`problem`: the user's words quoted from the request, the shapes you listed, the one you chose and why/);
-  assert.match(propose, /`trial`: the trial's id and one verdict per case with a quote from that case's transcript/);
+  assert.match(propose, /`trial`: the trial's id and one verdict per case with a quote from what the agent did in that case \(its messages or tool calls, not the task\)/);
   assert.match(propose, /a failing verdict is refused/);
   const write = flat(main.match(/\n\d+\. \*\*Write the agent\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
   assert.match(write, /`replaces` \/ `revises`/);
@@ -2488,7 +2489,7 @@ test("the real trials module and the real engine together: agent_trial → agent
     replyQuestion: async () => {},
   };
   // the engine is built before the trials module (which needs the engine): it reads the module at call time, as index.mjs does
-  const late = { get: (id) => trials.get(id), transcript: (id, name) => trials.transcript(id, name), view: (id) => trials.view(id), activeTrialKeys: () => trials?.activeTrialKeys() ?? new Set() };
+  const late = { get: (id) => trials.get(id), transcript: (id, name, opts) => trials.transcript(id, name, opts), view: (id) => trials.view(id), activeTrialKeys: () => trials?.activeTrialKeys() ?? new Set() };
   const f = await proposeFixture({ extra: { trials: late } });
   trials = createAgentTrials({
     root: f.root,
@@ -2546,11 +2547,37 @@ test("the real trials module and the real engine together: agent_trial → agent
     // a quote that isn't in the transcript is refused
     const invented = proposeBody({ baseHash: hash, draft, trial: { trialId: started.trialId, verdicts: [{ ...verdicts[0], quote: "The agent said something it never said." }] } });
     f.w.messages = proposeTranscript(invented);
-    assert.match((await f.engine.propose(invented)).error, /isn't in that case's transcript/);
+    assert.match((await f.engine.propose(invented)).error, /isn't in what the agent did/);
     // the trials of the round that ends are aborted; this one finished and stays
     await trials.abortForJob("job1");
     assert.equal(trials.get(started.trialId).cases[0].state, "done");
     assert.deepEqual(sent.deleted, [sent.created[0].id]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a verdict's quote must come from what the agent did (its messages and tool calls), never from the task text the Architect wrote", async () => {
+  const f = await proposeFixture();
+  try {
+    const hash = (await f.engine.readAgentSnapshot("dev")).hash;
+    const b = { action: "update", agent: "dev", draft: { ...DRAFT_UPDATE }, baseHash: hash };
+    const TASK_LINE = "Please fix the failing login test in the repository.";
+    const DID = "I changed the rules and ran the tests. All of them passed.";
+    const mk = async (quote) => {
+      const trial = await trialFor(f, b, { quote });
+      const id = trial.trialId;
+      f.w.trialText[`${id}:main`] = `User: ${TASK_LINE}\n\nAssistant: ${DID}`;
+      f.w.trialAgentText[`${id}:main`] = `Assistant: ${DID}`;
+      return trial;
+    };
+    // a quote from the task text is refused, and the sentence says why
+    const r = await refusedProposal(f, { trial: await mk(TASK_LINE) }, /isn't in what the agent did/);
+    assert.match(r.error, /task/i);
+    assert.match(r.error, /case main/);
+    // a quote from the agent's own lines is accepted
+    const ok = await propose(f, { trial: await mk(DID) });
+    assert.equal(ok.ok, true, ok.error);
   } finally {
     await f.cleanup();
   }

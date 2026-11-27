@@ -69,6 +69,18 @@ async function box({ level = "tell", policyThrows = false, extra = {}, slug = "d
 }
 
 const V1 = { "agent.md": md(), "skills/style/SKILL.md": SKILL() };
+const MINE = md({ description: "Mine.", body: "Mine entirely." });
+
+/** The user edited the agent, then a version that conflicts with the edit ships: a pending card (the one upgrade a click decides). Returns the new engine. */
+async function installThenConflict(b) {
+  await b.ship(V1);
+  await b.engine.init();
+  await writeFile(join(b.root, "dev", "agent.md"), MINE);
+  await b.ship({ ...V1, "agent.md": md({ description: "Theirs.", body: "Shipped body.\nSecond." }) });
+  const engine = b.make();
+  await engine.init();
+  return engine;
+}
 
 /** Install V1, publish a second version (a new description) and boot again: the box that was just upgraded. Returns the new engine. */
 async function installThenUpgrade(b) {
@@ -290,9 +302,15 @@ test("files the template dropped are removed only when the box's copy is untouch
 });
 
 test("dedupe: the same shipped bundle makes one record in any state; a new bundle makes a new one", async () => {
-  const b = await box({ level: "ask" });
+  const b = await box({ level: "tell" });
   try {
-    const engine = await installThenUpgrade(b);
+    await b.ship(V1);
+    await b.engine.init();
+    const mine = md({ description: "Mine.", body: "Mine entirely." });
+    await writeFile(join(b.root, "dev", "agent.md"), mine); // a conflict card: the one state a user can discard
+    await b.ship({ ...V1, "agent.md": md({ description: "Second.", body: "Shipped.\nSecond." }) });
+    const engine = b.make();
+    await engine.init();
     await engine.upgradeBuiltIns();
     await b.make().init();
     let recs = await b.records();
@@ -301,7 +319,7 @@ test("dedupe: the same shipped bundle makes one record in any state; a new bundl
     await engine.discard(recs[0].id);
     await b.make().init();
     assert.equal((await b.records()).length, 1, "discarded: still one");
-    await b.ship({ ...V1, "agent.md": md({ description: "Third." }) });
+    await b.ship({ ...V1, "agent.md": md({ description: "Third.", body: "Shipped.\nThird." }) });
     await b.make().init();
     recs = await b.records();
     assert.equal(recs.length, 2);
@@ -311,8 +329,8 @@ test("dedupe: the same shipped bundle makes one record in any state; a new bundl
   }
 });
 
-test("release follows the user's Change an agent level: Ask → a card; Never → discarded; unreadable settings → nothing yet", async () => {
-  for (const [level, state, error] of [["ask", "pending", null], ["never", "discarded", /turned off/]]) {
+test("a clean upgrade applies at every \"Change an agent\" level (Ask and Never included, settings unreadable too); only a merge conflict waits for a click", async () => {
+  for (const level of ["auto", "tell", "ask", "never"]) {
     const b = await box({ level });
     try {
       await b.ship(V1);
@@ -320,26 +338,47 @@ test("release follows the user's Change an agent level: Ask → a card; Never �
       await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
       await b.make().init();
       const [rec] = await b.records();
-      assert.equal(rec.state, state, level);
-      if (error) assert.match(rec.error, error);
-      assert.equal(await b.read("agent.md"), V1["agent.md"], "nothing written");
-      if (level === "ask") assert.equal(rec.reason, "ask");
+      assert.equal(rec.state, "applied", level);
+      assert.equal(rec.decidedBy, "auto");
+      assert.match(await b.read("agent.md"), /Second\./, level);
+      // Undo works as for any change
+      const engine = b.make();
+      assert.equal((await engine.undo(rec.id)).state, "undone", level);
+      assert.equal(await b.read("agent.md"), V1["agent.md"]);
     } finally {
       await b.cleanup();
     }
   }
-  const b = await box({ policyThrows: true });
+  // the setting governs agents changing agents, not a shipped release: unreadable settings don't hold it back
+  const u = await box({ policyThrows: true });
   try {
-    await b.ship(V1);
-    await b.engine.init();
-    await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
-    await b.make().init();
-    assert.deepEqual(await b.records(), []);
-    b.w.policyThrows = false;
-    await b.make().init();
-    assert.equal((await b.records()).length, 1, "tried again at the next boot");
+    await u.ship(V1);
+    await u.engine.init();
+    await u.ship({ ...V1, "agent.md": md({ description: "Second." }) });
+    await u.make().init();
+    assert.equal((await u.records())[0].state, "applied");
   } finally {
-    await b.cleanup();
+    await u.cleanup();
+  }
+  // a conflict waits, whatever the level (the Never level included: the user still has to choose)
+  for (const level of ["auto", "never"]) {
+    const c = await box({ level });
+    try {
+      await c.ship(V1);
+      await c.engine.init();
+      await writeFile(join(c.root, "dev", "agent.md"), md({ description: "Mine.", body: "Mine entirely." }));
+      await c.ship({ ...V1, "agent.md": md({ description: "Theirs.", body: "Shipped body.\nSecond." }) });
+      await c.make().init();
+      const [rec] = await c.records();
+      assert.equal(rec.state, "pending", level);
+      assert.equal(rec.needsClick, true);
+      assert.match(await c.read("agent.md"), /Mine entirely/);
+      // the click applies it even at Never: the setting doesn't govern a shipped release
+      assert.equal((await c.make().apply(rec.id)).state, "applied", level);
+      assert.match(await c.read("agent.md"), /Shipped body\./);
+    } finally {
+      await c.cleanup();
+    }
   }
 });
 
@@ -377,13 +416,13 @@ test("a folder that only shares a built-in's name (another role) is never upgrad
 });
 
 test("bundle snapshots: an update record carries before/after file maps and their blobs; an edit anywhere in the folder since makes Apply a conflict", async () => {
-  const b = await box({ level: "ask" });
+  const b = await box({ level: "tell" });
   try {
-    const engine = await installThenUpgrade(b);
+    const engine = await installThenConflict(b);
     const [rec] = await b.records();
     assert.deepEqual(Object.keys(rec.beforeBundle).sort(), ["agent.md", "skills/style/SKILL.md"]);
-    assert.equal(rec.beforeBundle["agent.md"], sha256(V1["agent.md"]));
-    assert.equal(rec.afterBundle["agent.md"], sha256(md({ description: "Second." })));
+    assert.equal(rec.beforeBundle["agent.md"], sha256(MINE));
+    assert.equal(rec.afterBundle["agent.md"], sha256(rec.after));
     assert.equal(rec.afterBundle["skills/style/SKILL.md"], rec.beforeBundle["skills/style/SKILL.md"]);
     for (const hash of Object.values({ ...rec.beforeBundle, ...rec.afterBundle })) await stat(join(b.root, ".blobs", hash));
     // a file the string snapshot never saw: the bundle check does
@@ -391,7 +430,7 @@ test("bundle snapshots: an update record carries before/after file maps and thei
     const out = await engine.apply(rec.id);
     assert.equal(out.state, "conflict");
     assert.match(out.error, /changed since/);
-    assert.equal(await b.read("agent.md"), V1["agent.md"]);
+    assert.equal(await b.read("agent.md"), MINE);
   } finally {
     await b.cleanup();
   }
@@ -412,18 +451,18 @@ test("Undo of a bundle record refuses when any file changed since, and changes n
 });
 
 test("a record written before bundles (agent.md strings only) still applies and undoes", async () => {
-  const b = await box({ level: "ask" });
+  const b = await box({ level: "tell" });
   try {
-    const engine = await installThenUpgrade(b);
+    const engine = await installThenConflict(b);
     const doc = JSON.parse(await readFile(join(b.root, ".changes.json"), "utf-8"));
     for (const r of doc.changes) for (const k of ["beforeBundle", "afterBundle", "baseBefore", "baseAfter"]) delete r[k];
     await writeFile(join(b.root, ".changes.json"), JSON.stringify(doc));
     const applied = await engine.apply(doc.changes[0].id);
     assert.equal(applied.state, "applied");
-    assert.match(await b.read("agent.md"), /Second\./);
+    assert.match(await b.read("agent.md"), /Shipped body\./);
     const undone = await engine.undo(doc.changes[0].id);
     assert.equal(undone.state, "undone");
-    assert.equal(await b.read("agent.md"), V1["agent.md"]);
+    assert.equal(await b.read("agent.md"), MINE);
   } finally {
     await b.cleanup();
   }

@@ -73,11 +73,12 @@ update after install (`follow-ups.md`).
      Clean → apply; conflict → pending (below).
 - **Records.** Each upgrade of one agent is one change record: `kind: "update"`, `origin: { kind: "template-update",
   templateHash }` (`templateHash` = sha256 of the shipped bundle), `before`/`after` = agent.md text (as today) plus
-  bundle maps (§4.1). Release = the user's "Change an agent" level via the same path as `change()`: Auto / Tell me →
-  applied (Undo); Ask or a merge conflict → pending card in Needs you (conflict card shows the shipped text with the
-  user's frontmatter keys; Apply overwrites body); Never → discarded.
+  bundle maps (§4.1). **Release is automatic, whatever the user's "Change an agent" level (Ask and Never included):** that
+  setting governs agents changing agents; a shipped template is a Manta release the user already took. A clean upgrade is
+  applied at once, with Undo on its card. Only a merge conflict waits as a pending card in Needs you (the card shows the
+  shipped text with the user's frontmatter keys; Apply overwrites the body, and a click is not blocked by the level).
 - **Dedupe:** skip creating a record when one exists for the same `(slug, origin.templateHash)` in any state
-  (pending, applied, discarded, undone). `.base` is updated when the record applies (incl. a later click) and restored
+  (pending, applied, discarded, undone; an expired one doesn't count, so an update nobody clicked is offered again at the next boot). `.base` is updated when the record applies (incl. a later click) and restored
   to the record's previous base on Undo.
 - Files only in `next` are added; files `next` dropped are removed only when `live` matches base/history.
 
@@ -145,12 +146,14 @@ bundle[k]]))`, sha256 hex. A mismatch refusal names the files that differ.
 removes the rest (so boot cleans leftovers). Trials never touch `.installed.json`.
 
 **Run** each case as a headless internal session (`withInternalMarker`, as `knowledge/trial.mjs`), never a sidebar row:
-- **Folder:** always a throwaway git worktree — of the case `project` (registry slug; else the agent's first seat) at
-  its default branch, else a fresh empty scratch repo `~/.manta/agents/.trials/<trialId>/scratch`. Never the live
-  checkout, for any isolation. `scanSymlinks` (as `knowledge/trial.mjs`) refuses a worktree with links out of it.
+- **Folder:** always a throwaway git worktree — of the case `project` (registry slug; else the agent's first seat),
+  starting from the project's current HEAD (the worktree helper has no start point) — else a fresh empty scratch repo in
+  the OS temp folder, outside `~/.manta`, because the task rulesets protect `~/.manta` by absolute path, which only holds
+  for a session whose folder is outside it. Never the live checkout, for any isolation. `scanSymlinks` (as `knowledge/trial.mjs`) refuses a worktree with links out of it.
 - **Ruleset** = the agent's normal task ruleset for its isolation, built with `noSecrets: true`, plus trial denies:
   the deploy / publish / send-external / delete-data / spend kinds at "never"; `git push`, `gh pr`, `gh release`,
-  `gh issue`, `gh api`; `curl` with `-X`/`--request`/`-d`/`--data*`/`-F`/`--form`/`-T`; `wget --post*`; `ssh`, `scp`,
+  `gh issue`, `gh api`; `curl` with `-X`/`--request`/`-d`/`--data*`/`-F`/`--form`/`-T`/`--upload*` **as separate arguments** (first or later: `curl -d*`,
+  `curl * -d*`; a URL such as `…/api-docs` is not a flag); `wget --post*`; `ssh`, `scp`,
   `rsync`, `nc`; the tools `agent_trial*`, `agent_propose`, `agent_change`, `research_library_save`, `delegate*`,
   `agent_handoff`, `routine_*`, `schedule_*`, `notify`, `send_file`, `serve_page`. The `question` tool is answered at
   once with "This is a test run with no user: continue on your best assumption and say what you assumed"; recorded as
@@ -163,8 +166,9 @@ removes the rest (so boot cleans leftovers). Trials never touch `.installed.json
 - **Recorded per case:** end state (done / failed / timed out / aborted), final answer, tools used, files changed (diff
   stat), refused actions (permission denials), "would ask" questions, duration, transcript text (redacted with the
   knowledge `scanner.redact`). Written to `~/.manta/agents/.trials/<trialId>/result.json`; kept 30 days (Tests tab).
-- **Cleanup:** after `result.json` is written: delete the opencode session (`deleteSessionRaw`), remove the worktree /
-  scratch, drop the block. When the Architect job ends, fails or is stopped (`afterJobEnded`), its queued and running
+- **Cleanup:** after `result.json` is written: delete the opencode session (`deleteSessionRaw`), remove the worktree and
+  force-delete its branch (`git branch -D`, only a name matching `agent-trial-tr_<hex>-<n>`: the helper's `-d` refuses a
+  branch the case committed to), or remove the scratch repo, drop the block. Boot `recover()` does the same for leftovers. When the Architect job ends, fails or is stopped (`afterJobEnded`), its queued and running
   cases are aborted (state `aborted`) and cleaned up.
 - A trial of the **Architect** itself runs the draft up to the point of proposing (`agent_propose` is denied); the
   case's final answer shows what it would have proposed.
@@ -175,8 +179,9 @@ that changes instructions, skills, isolation or model (not for description / col
 trial: { trialId: string; verdicts: { case: string; pass: boolean; quote: string; note: string }[] }
 ```
 Facts checked: the trial belongs to this root task; `draftHash` equals the proposal's; every case reached
-done/failed/timed-out (not aborted/queued); one verdict per case; each `quote` (20–300 chars) occurs in that case's
-transcript; every verdict `pass`. Otherwise refused ("Case <name> failed: fix the draft and run a trial again").
+done/failed/timed-out (not aborted/queued); one verdict per case; each `quote` (20–300 chars) occurs in the **assistant and
+tool lines** of that case's transcript — never in its "User:" lines, which are the task the Architect itself wrote; every
+verdict `pass`. Otherwise refused ("Case <name> failed: fix the draft and run a trial again").
 
 The lead's `agent_change` (small dictated edits) is unchanged and needs no trial.
 

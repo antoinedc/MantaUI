@@ -102,7 +102,7 @@ async function rig(over = {}) {
       }),
       oc,
       local: {
-        gitAddWorktree: async ({ cwd, name }) => (w.worktrees.push({ cwd, name }), { path: `/wt/${name}`, branch: name }),
+        gitAddWorktree: async ({ cwd, name }) => (w.worktrees.push({ cwd, name }), { path: `/wt/${name}`, branch: w.branchOf ? w.branchOf(name) : name }),
         gitRemoveWorktree: async (a) => (w.removed.push(a), { removed: true }),
       },
       gitRun: async (args) => {
@@ -286,7 +286,7 @@ test("the ruleset: the agent's own task rules with no secrets, the never-kinds, 
     // the kinds are never, whatever the user's settings say
     for (const p of ["fly deploy*", "npm publish*", "gh gist create*", "gh issue create*", "dropdb*"]) assert.equal(last("bash", p)?.action, "deny", p);
     // publishing, sending and network writes
-    for (const p of ["git push*", "gh pr *", "gh release *", "gh issue *", "gh api *", "curl *-X*", "curl *--request*", "curl *-d*", "curl *--data*", "curl *-F*", "curl *--form*", "curl *-T*", "wget *--post*", "ssh *", "scp *", "rsync *", "nc *"]) {
+    for (const p of ["git push*", "gh pr *", "gh release *", "gh issue *", "gh api *", "wget --post*", "wget * --post*", "ssh *", "scp *", "rsync *", "nc *"]) {
       assert.equal(last("bash", p)?.action, "deny", p);
     }
     // Manta's own side-effect tools
@@ -609,6 +609,132 @@ test("the wire view of a trial carries no transcript, task text or private plumb
     assert.deepEqual(Object.keys(view).sort(), ["agentSlug", "cases", "createdAt", "draftHash", "id", "rootJobId"]);
     assert.deepEqual(Object.keys(view.cases[0]).sort(), ["durationMs", "error", "expect", "filesChanged", "finalAnswer", "name", "refused", "state", "tools", "wouldAsk"]);
     assert.equal(f.t.view("tr_nope"), null);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const branchDeletes = (f) => f.w.git.filter((a) => a.includes("branch")).map((a) => a.slice(a.indexOf("branch")));
+
+test("after a case's worktree is removed its branch is force-deleted (the case may have committed to it); only an agent-trial branch, only after the worktree is gone", async () => {
+  const f = await rig();
+  try {
+    const { trialId } = await f.t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    await settle(f.t, trialId);
+    const branch = f.w.worktrees[0].name;
+    assert.match(branch, /^agent-trial-tr_[0-9a-f]+-0$/);
+    assert.deepEqual(branchDeletes(f), [["branch", "-D", branch]]);
+    const del = f.w.git.findIndex((a) => a.includes("branch"));
+    assert.ok(f.w.git[del].includes("/repo/shop"), "run in the project's own checkout");
+    assert.ok(f.w.git.some((a, i) => i < del && a.includes("prune")), "stale worktree records are pruned first");
+    assert.equal(f.w.removed.length, 1, "removed before the branch is deleted");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a branch the worktree helper named something else is never deleted; a scratch case has no branch to delete", async () => {
+  const f = await rig();
+  try {
+    for (const odd of ["main", "feature/x", "agent-trial-tr_ab-0; rm -rf", "agent-trial-notes"]) {
+      f.w.branchOf = () => odd;
+      const { trialId } = await f.t.create(f.input({ messageID: `m${odd}`, callID: `c${odd}`, cases: [f.caseOf("main", { project: "shop" })], sessionID: `ses_${Math.random()}` }));
+      await settle(f.t, trialId);
+    }
+    assert.deepEqual(branchDeletes(f), []);
+    f.w.git.length = 0;
+    f.w.branchOf = null;
+    const { trialId } = await f.t.create(f.input({ messageID: "ms", callID: "cs", sessionID: `ses_${Math.random()}` }));
+    await settle(f.t, trialId);
+    assert.deepEqual(branchDeletes(f), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("after a restart, a crashed trial's branch is force-deleted too (its worktree may already be gone)", async () => {
+  const f = await rig();
+  try {
+    const left = join(f.trialsRoot(), "tr_deadbeef");
+    await mkdir(left, { recursive: true });
+    await writeFile(join(left, "state.json"), JSON.stringify({ cases: [{ sessionId: "ses_o", worktree: "/wt/o", branch: "agent-trial-tr_deadbeef-0", repo: "/repo/shop", scratch: null }, { sessionId: null, worktree: "/wt/p", branch: "main", repo: "/repo/shop", scratch: null }] }));
+    await f.make().recover();
+    assert.deepEqual(branchDeletes(f), [["branch", "-D", "agent-trial-tr_deadbeef-0"]], "the other case's branch isn't ours by name");
+    assert.ok(f.w.removed.some((a) => a.path === "/wt/o"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// opencode's matching: `*` matches anything (slashes too); the last rule that matches a command decides
+const globToRe = (g) => new RegExp(`^${g.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
+const bashAction = (rules, cmd) => rules.findLast((r) => r.permission === "bash" && globToRe(r.pattern).test(cmd))?.action;
+
+test("the curl denies are anchored: a write flag is a denied argument of its own (first or later), a URL or word that merely contains one is a read", async () => {
+  const f = await rig();
+  try {
+    f.w.plan = planFor({ meta: { name: "Dev", description: "d", isolation: "worktree", model: null, role: "specialist" } });
+    const { trialId } = await f.t.create(f.input());
+    await settle(f.t, trialId);
+    const rules = f.w.created[0].permission;
+    for (const cmd of [
+      "curl https://x.com/api-docs",
+      "curl -sSL https://example.com/docs-draft/index.html -o /tmp/page.html",
+      "curl https://x.com/a?x=-d&y=-X",
+      "curl https://x.com/--data-sheet",
+      "curl https://x.com/file-Format.txt",
+      "curl -I https://x.com/tools-Tour",
+      "wget https://x.com/post--page",
+      "git status",
+      "npm test",
+    ]) assert.equal(bashAction(rules, cmd), "allow", cmd);
+    for (const cmd of [
+      "curl -d 'a=b' https://x.com",
+      "curl -X POST https://x.com",
+      "curl -XPOST https://x.com",
+      "curl --request DELETE https://x.com",
+      "curl --data @f https://x.com",
+      "curl --data-binary @f https://x.com",
+      "curl -F file=@f https://x.com",
+      "curl --form a=b https://x.com",
+      "curl -T f https://x.com",
+      "curl --upload-file f https://x.com",
+      "curl https://x.com -d 'a=b'",
+      "curl -s https://x.com -X PUT",
+      "curl -sS https://x.com --data a=b",
+      "curl https://x.com/a -F f=@x",
+      "wget --post-data a=b https://x.com",
+      "wget -q https://x.com --post-file f",
+    ]) assert.equal(bashAction(rules, cmd), "deny", cmd);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("transcript(id, case, { agentOnly }) is the assistant and tool lines only — the task text the Architect wrote is not in it — from memory and after a restart, redacted", async () => {
+  const f = await rig();
+  try {
+    f.w.messages = [
+      { info: { id: "m1", role: "user" }, parts: [{ type: "text", text: "Review the home page SECRET-TOKEN." }] },
+      { info: { id: "m2", role: "assistant" }, parts: [{ type: "tool", tool: "read", state: { status: "completed", input: { path: "index.html" }, output: "<html></html>" } }, { type: "text", text: "The page has no title tag.\n\nSECRET-TOKEN stays out." }] },
+    ];
+    f.w.scanLeak = true;
+    const { trialId } = await f.t.create(f.input());
+    await settle(f.t, trialId);
+    const check = async (t) => {
+      const full = await t.transcript(trialId, "main");
+      const mine = await t.transcript(trialId, "main", { agentOnly: true });
+      assert.match(full, /^User: Review the home page/);
+      assert.doesNotMatch(mine, /User:|Review the home page/);
+      assert.match(mine, /^Tool read /);
+      assert.match(mine, /Assistant: The page has no title tag\.\n\n\[redacted\] stays out\./, "multi-line answers stay whole");
+      assert.ok(!mine.includes("SECRET-TOKEN"));
+      assert.equal(await t.transcript(trialId, "ghost", { agentOnly: true }), null);
+    };
+    await check(f.t);
+    const again = f.make();
+    await again.recover();
+    await check(again);
   } finally {
     await f.cleanup();
   }

@@ -50,7 +50,7 @@ Read its current file (in your brief) and its recent failures if given, then pas
   when the words aren't in the request.
 - `trial`: `{trialId, verdicts}` — required for a new agent and for an update of instructions, isolation or model. It is the
   trial you ran on exactly this draft (`agent_trial`), with one verdict `{case, pass, quote, note}` per case: `quote` is
-  20–300 characters copied exactly from that case's transcript (`agent_trial_read`). Refused when the trial belongs to
+  20–300 characters copied exactly from what the agent did in that case, its messages or tool calls in the transcript (`agent_trial_read`), never the task text. Refused when the trial belongs to
   another task, ran on a different draft (the refusal names the files), has a case that didn't finish, lacks a verdict or
   has one that isn't a pass ("Case <name> failed: fix the draft and run a trial again").
 - `fitCheck`: `{researchSays, matches, why, basis}` — your fit check, also the first block of your result: what your research says

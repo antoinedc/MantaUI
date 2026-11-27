@@ -56,6 +56,9 @@ export const TRANSCRIPT_MAX = 200_000;
 export const WORK_TYPE = "agent-trial";
 export const TRIAL_AUTO_ANSWER = "This is a test run with no user: continue on your best assumption and say what you assumed";
 
+// The branch a case's worktree was made on. The helper slugifies the name (`tr_` → `tr-`) and may add a number on a clash, so
+// both separators are accepted; nothing else is ever deleted.
+const TRIAL_BRANCH_RE = /^agent-trial-tr[-_][0-9a-f]+-\d+(?:-\d+)?$/;
 const RESULT_FILE = "result.json";
 const STATE_FILE = "state.json";
 const PROJECT_RE = /^[a-z0-9-]+$/;
@@ -88,20 +91,18 @@ const DENIED_TOOLS = [
   "send_file",
   "serve_page",
 ];
+// A flag counts only as an argument of its own — `curl -d …` or `curl <anything> -d …` — never inside a URL or another word
+// (`curl https://x.com/api-docs` is a read). Short flags glued together (`-sXPOST`) slip past: best effort, like every task's denies.
+const CURL_WRITE_FLAGS = ["-X*", "--request*", "-d*", "--data*", "-F*", "--form*", "-T*", "--upload*"];
 const DENIED_COMMANDS = [
+  ...CURL_WRITE_FLAGS.flatMap((f) => [`curl ${f}`, `curl * ${f}`]),
+  "wget --post*",
+  "wget * --post*",
   "git push*",
   "gh pr *",
   "gh release *",
   "gh issue *",
   "gh api *",
-  "curl *-X*",
-  "curl *--request*",
-  "curl *-d*",
-  "curl *--data*",
-  "curl *-F*",
-  "curl *--form*",
-  "curl *-T*",
-  "wget *--post*",
   "ssh *",
   "scp *",
   "rsync *",
@@ -146,6 +147,7 @@ export function readCase(messages) {
   const refused = [];
   const wouldAsk = [];
   const lines = [];
+  const agentLines = []; // the same without the "User:" lines: the task text is the Architect's own, not something the agent did
   let finalAnswer = null;
   let usd = 0;
   let model;
@@ -172,14 +174,20 @@ export function readCase(messages) {
     }
     for (const p of Array.isArray(m.parts) ? m.parts : []) {
       if (p?.type === "text" && typeof p.text === "string" && !p.synthetic && p.text.trim()) {
-        lines.push(`${assistant ? "Assistant" : "User"}: ${p.text.trim()}`);
-        if (assistant) finalAnswer = p.text.trim();
+        const line = `${assistant ? "Assistant" : "User"}: ${p.text.trim()}`;
+        lines.push(line);
+        if (assistant) {
+          agentLines.push(line);
+          finalAnswer = p.text.trim();
+        }
       } else if (assistant && p?.type === "tool") {
         const name = String(p.tool ?? "");
         tools.add(name);
         const st = p.state ?? {};
         const failed = st.status === "error";
-        lines.push(`Tool ${name} ${clip(st.input, 300)} → ${failed ? `ERROR ${clip(st.error, 500)}` : clip(st.output, 800)}`);
+        const line = `Tool ${name} ${clip(st.input, 300)} → ${failed ? `ERROR ${clip(st.error, 500)}` : clip(st.output, 800)}`;
+        lines.push(line);
+        agentLines.push(line);
         if (failed && typeof st.error === "string" && DENIAL_TEXT_RE.test(st.error)) refused.push(st.error.split("\n")[0].trim());
         if (name === "question") for (const q of Array.isArray(st.input?.questions) ? st.input.questions : []) if (typeof q?.question === "string" && q.question.trim()) wouldAsk.push(q.question.trim());
       }
@@ -191,6 +199,7 @@ export function readCase(messages) {
     refused: [...new Set(refused)],
     wouldAsk: [...new Set(wouldAsk)],
     transcript: lines.join("\n\n"),
+    agentTranscript: agentLines.join("\n\n"),
     usage: sawUsage ? { tokens, ...(usd > 0 ? { usd } : {}), ...(model ? { model } : {}) } : null,
   };
 }
@@ -267,7 +276,18 @@ export function createAgentTrials({
   // ---- the case runner ----
 
   async function writeState(t) {
-    await safelyAsync(() => fs.writeFile(join(dirOf(t.id), STATE_FILE), JSON.stringify({ cases: t.cases.map((c) => ({ sessionId: c.sessionId ?? null, worktree: c.worktree ?? null, scratch: c.scratch ?? null })) })));
+    await safelyAsync(() => fs.writeFile(join(dirOf(t.id), STATE_FILE), JSON.stringify({ cases: t.cases.map((c) => ({ sessionId: c.sessionId ?? null, worktree: c.worktree ?? null, branch: c.branch ?? null, repo: c.repo ?? null, scratch: c.scratch ?? null })) })));
+  }
+
+  /** Force-delete a trial's branch in its project's checkout once its worktree is gone (the case may have committed: `-d` would refuse). */
+  async function deleteTrialBranch(repo, branch) {
+    if (typeof repo !== "string" || !repo || typeof branch !== "string" || !TRIAL_BRANCH_RE.test(branch)) return;
+    try {
+      await gitRun(["-C", repo, "worktree", "prune"]); // a worktree folder that is already gone still blocks the delete
+      await gitRun(["-C", repo, "branch", "-D", branch]);
+    } catch (e) {
+      log.warn?.(`[agent-trials] branch ${branch} not deleted: ${e?.message ?? e}`);
+    }
   }
 
   async function cleanupCase(t, c) {
@@ -281,10 +301,13 @@ export function createAgentTrials({
       } catch (e) {
         log.warn?.(`[agent-trials] worktree not removed: ${e?.message ?? e}`);
       }
+      await deleteTrialBranch(c.repo, c.branch);
     }
     if (c.scratch && c.scratch.startsWith(scratchRoot)) await safelyAsync(() => fs.rm(c.scratch, { recursive: true, force: true }));
     c.sessionId = null;
     c.worktree = null;
+    c.branch = null;
+    c.repo = null;
     c.scratch = null;
     await writeState(t);
   }
@@ -301,6 +324,8 @@ export function createAgentTrials({
         return { error: `The project's copy couldn't be made: ${String(e?.message ?? e).slice(0, 160)}` };
       }
       c.worktree = wt.path;
+      c.branch = typeof wt.branch === "string" ? wt.branch : null;
+      c.repo = checkout;
       await writeState(t);
       const links = scanSymlinks(wt.path);
       if (!links.ok) return { error: links.outside ? `The project holds a link that leaves it (${links.outside}); it can't be copied safely` : `The project's copy couldn't be checked for links (${links.reason ?? "unknown"})` };
@@ -381,15 +406,19 @@ export function createAgentTrials({
       } catch {
         filesChanged = 0;
       }
-      const redacted = await redact(read.transcript);
-      let transcript = redacted.unavailable ? "[the transcript is not kept: the secret scanner couldn't run]" : String(redacted.text ?? "");
-      if (transcript.length > TRANSCRIPT_MAX) transcript = `${transcript.slice(0, TRANSCRIPT_MAX)}\n[… truncated]`;
+      const keep = async (raw) => {
+        const r = await redact(raw);
+        const text = r.unavailable ? "[the transcript is not kept: the secret scanner couldn't run]" : String(r.text ?? "");
+        return text.length > TRANSCRIPT_MAX ? `${text.slice(0, TRANSCRIPT_MAX)}\n[… truncated]` : text;
+      };
+      const transcript = await keep(read.transcript);
+      const agentTranscript = await keep(read.agentTranscript);
       const answer = read.finalAnswer === null ? null : (await redact(read.finalAnswer)).text;
       if (read.usage) {
         await safelyAsync(() => budget.book?.({ workType: WORK_TYPE, model: read.usage.model ?? model, usage: read.usage.tokens, ...(typeof read.usage.usd === "number" ? { usd: read.usage.usd } : {}), inLedger: false }));
       }
       const state = t.aborted || end.outcome === "abort" ? "aborted" : end.outcome === "timeout" ? "timed-out" : end.outcome === "succeeded" ? "done" : "failed";
-      await finish(state, { finalAnswer: answer, tools: read.tools, filesChanged, refused: read.refused, wouldAsk: [...new Set([...(c.wouldAsk ?? []), ...read.wouldAsk])], transcript });
+      await finish(state, { finalAnswer: answer, tools: read.tools, filesChanged, refused: read.refused, wouldAsk: [...new Set([...(c.wouldAsk ?? []), ...read.wouldAsk])], transcript, agentTranscript });
     } catch (e) {
       log.warn?.(`[agent-trials] a test run failed: ${e?.message ?? e}`);
       await finish("failed", { error: "The test run failed unexpectedly" }).catch(() => {});
@@ -417,12 +446,15 @@ export function createAgentTrials({
     if (t.settled || !allEnded(t)) return;
     t.settled = true;
     try {
-      const doc = { id: t.id, rootJobId: t.rootJobId, jobId: t.jobId, agentSlug: t.agentSlug, kind: t.kind, draftHash: t.draftHash, files: t.files, createdAt: t.createdAt, finishedAt: now(), cases: t.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null, transcript: c.transcript ?? "" })) };
+      const doc = { id: t.id, rootJobId: t.rootJobId, jobId: t.jobId, agentSlug: t.agentSlug, kind: t.kind, draftHash: t.draftHash, files: t.files, createdAt: t.createdAt, finishedAt: now(), cases: t.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null, transcript: c.transcript ?? "", agentTranscript: c.agentTranscript ?? "" })) };
       await fs.writeFile(join(dirOf(t.id), RESULT_FILE), `${JSON.stringify(doc)}\n`);
     } catch (e) {
       log.warn?.(`[agent-trials] couldn't write the result of ${t.id}: ${e?.message ?? e}`);
     }
-    for (const c of t.cases) delete c.transcript; // read back from result.json from here on
+    for (const c of t.cases) {
+      delete c.transcript; // read back from result.json from here on
+      delete c.agentTranscript;
+    }
     await dropBlock(t);
     await safelyAsync(async () => {
       for (const n of await fs.readdir(dirOf(t.id))) if (n !== RESULT_FILE) await fs.rm(join(dirOf(t.id), n), { recursive: true, force: true });
@@ -609,15 +641,19 @@ export function createAgentTrials({
     return trials.get(id) ?? null;
   }
 
-  /** The full redacted transcript of one case, or null (unknown case, not ended yet). */
-  async function transcript(id, name) {
+  /**
+   * The redacted transcript of one case, or null (unknown case, not ended yet). `agentOnly`: just what the agent did (its messages
+   * and tool calls), without the "User:" lines — the task text the Architect itself wrote.
+   */
+  async function transcript(id, name, { agentOnly = false } = {}) {
     const t = trials.get(id);
     const c = t?.cases.find((x) => x.name === name);
     if (!c) return null;
-    if (typeof c.transcript === "string") return c.transcript;
+    const field = agentOnly ? "agentTranscript" : "transcript";
+    if (typeof c[field] === "string") return c[field];
     if (!ENDED.has(c.state)) return null;
     const doc = await readResult(id);
-    const stored = doc?.cases?.find((x) => x.name === name)?.transcript;
+    const stored = doc?.cases?.find((x) => x.name === name)?.[field];
     return typeof stored === "string" ? stored : null;
   }
 
@@ -696,6 +732,7 @@ export function createAgentTrials({
           await safelyAsync(() => oc.deleteSessionRaw?.(c.sessionId));
         }
         if (typeof c?.worktree === "string" && c.worktree) await safelyAsync(() => local.gitRemoveWorktree({ path: c.worktree, force: true }));
+        await deleteTrialBranch(c.repo, c.branch);
         if (typeof c?.scratch === "string" && c.scratch.startsWith(scratchRoot)) await safelyAsync(() => fs.rm(c.scratch, { recursive: true, force: true }));
       }
       await safelyAsync(() => fs.rm(join(trialsRoot, name), { recursive: true, force: true }));
