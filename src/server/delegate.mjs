@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { SPECIALIST_TASK_TOOLS } from "../shared/researchTools.mjs";
+import { ARCHITECT_TRIAL_TOOLS } from "../shared/agentsShared.mjs";
 import { decisionLines, decisionFromForm, waitingLine, TASK_GONE, TASK_PAUSED } from "./taskDecision.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
@@ -535,7 +536,7 @@ export function withResearchToolAllows(rules) {
 
 // The tools the Architect's task may call, besides reading and searching (Agents Phase 5A §4.2).
 const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch"];
-const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, "agent_propose"];
+const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, ...ARCHITECT_TRIAL_TOOLS, "agent_propose"];
 
 /**
  * The ruleset of the Architect's task, built for launch AND resume by this one function (spec §4.2). Last match wins, so:
@@ -4787,7 +4788,7 @@ function livenessFieldsAtLaunch(ceilingMs) {
 // child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
 // use) and reports ONE result through N7, whatever route it takes to a terminal state.
 
-const architectModeOf = (mode) => (mode === "build" || mode === "plan" ? mode : "unknown");
+const architectModeOf = (mode) => (mode === "build" || mode === "plan" || mode === "routine" ? mode : "unknown");
 
 // The agent every delegate child runs. Today's jobs always ran the default agent; a
 // child created under a parent would otherwise be free to inherit a plan-mode one.

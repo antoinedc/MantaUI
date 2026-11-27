@@ -22,7 +22,7 @@ import { diff3Merge } from "node-diff3";
 import { draftHash, differingFiles } from "./agentTrials.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
-import { LEAD_SLUG, ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
+import { LEAD_SLUG, ARCHITECT_SLUG, ARCHITECT_TRIAL_TOOLS, TRIAL_BLOCK_RE, isTeamAgent } from "../shared/agentsShared.mjs";
 import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
 import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals, CREDENTIAL_HINT } from "../shared/architectSources.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
@@ -632,7 +632,7 @@ export function compileAgentPrompt({ body, skills = [] }) {
 // What the Architect may do when OpenCode invokes it natively (its own agent picker, a `task` call naming it) and no job
 // stamp vouches for the call: read and search, nothing else. The catch-all deny is FIRST (insertion order is rule order,
 // last match wins; proved on the pinned binary by scripts/opencode-v2/autonomy-rules.e2e.mjs).
-const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch", "todowrite", "progress_report", ...SPECIALIST_RESEARCH_TOOLS, "agent_propose"];
+const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch", "todowrite", "progress_report", ...SPECIALIST_RESEARCH_TOOLS, ...ARCHITECT_TRIAL_TOOLS, "agent_propose"];
 export function ARCHITECT_BLOCK_PERMISSION(dir, home = homedir()) {
   return {
     "*": "deny",
@@ -799,6 +799,9 @@ function basisSentence(rec) {
   const thin = rec.basisThin === true ? " The evidence was thin and you were asked, so you decided on incomplete evidence." : "";
   return ` Based on: ${items.join("; ")}.${thin}`;
 }
+
+/** The server's one sentence for an Architect task that finished and proposed nothing (the lead relays it, the user reads why in the task's result). */
+export const NO_CHANGE_OUTCOME = "Outcome: No change was proposed.";
 
 const OUTCOME_WAIT_REASONS = {
   plan: "it was proposed in plan mode",
@@ -976,6 +979,7 @@ async function readJsonOptional(fs, path) {
  * @param {()=>Promise<string[]>} [deps.listApprovedModels]  the Sub-approved models as `provider/model` keys; throws (or is empty) when they can't be checked
  * @param {object} [deps.research]      { getSource(childSessionID, sourceId) → {text,url,finalUrl,private}|null } — the Architect's stored sources (Phase 5A)
  * @param {object} [deps.library]       { lookup({project, refs}) → [{ref, entry|null}], usedBy(rootJobId) } — the research library, read by the server to check what a fit check rests on
+ * @param {object} [deps.trials]        { get(id) → trial|null, transcript(id, caseName) → text|null, activeTrialKeys() → Set<string> } — Architect v2 trial runs (src/server/agentTrials.mjs)
  * @param {(p:{id:string,sessionID:string,slug:string|null,origin:object})=>void} [deps.publish]  (as above; the payload carries the change's origin)
  */
 export function createAgentsEngine({
@@ -1000,6 +1004,7 @@ export function createAgentsEngine({
   research = null,
   library = null,
   taskQuestions = null, // agent screens: the open questions of tasks (`hasOpen`, `listOpen`, `openCountFor`, `answer`, `dismiss`)
+  trials = null, // Architect v2: the trials module (`get(id)`, `transcript(id, case)`, `activeTrialKeys()`) — built after this engine, read at call time
   countProjectPages = null, // (projectSlug) → knowledge pages of that project (a count only); slow or failing reads as unknown
   countTimeoutMs = 500,
   sharingOf = null, // (projectSlug) → "share-and-read" | "read-only" | "private": what a seat's memory scope reads
@@ -1241,6 +1246,12 @@ export function createAgentsEngine({
       // only what Manta installed earlier and whose package is gone — never someone else's block
       for (const key of installed) {
         if (!desired.has(key) && cfg?.agent?.[key] !== undefined) edits.push({ path: ["agent", key], value: undefined });
+      }
+      // a trial's temporary block (`agent-trial-tr_<hex>`: a slug has no underscore, so no user's agent matches) lives only while
+      // the trials module says its trial is live; any other one — a crash left it — goes
+      const liveTrials = new Set(trials?.activeTrialKeys?.() ?? []);
+      for (const key of Object.keys(cfg?.agent ?? {})) {
+        if (TRIAL_BLOCK_RE.test(key) && !liveTrials.has(key) && !desired.has(key)) edits.push({ path: ["agent", key], value: undefined });
       }
       // the config as it is now, for every block this call is about to change
       for (const e of edits) undo?.config.push({ path: e.path, value: cfg?.agent?.[e.path[1]] === undefined ? undefined : structuredClone(cfg.agent[e.path[1]]) });
@@ -2344,9 +2355,10 @@ export function createAgentsEngine({
    * The Outcome lines for an Architect task's result (one per proposal, oldest first), from the records as they are NOW.
    * Call after `reconcile()` so a released proposal reads as released. `[]` when the task proposed nothing.
    */
-  async function outcomeLinesForJob(jobId) {
-    const recs = await changesForJob(jobId);
-    if (recs.length === 0) return [];
+  async function outcomeLinesForJob(input) {
+    const recs = await changesForJob(typeof input === "string" ? input : input?.id);
+    // a finished task that proposed nothing says so, in the server's own words (an id alone can't tell how the task ended)
+    if (recs.length === 0) return input && typeof input === "object" && input.status === "done" && input.endedBlocked !== true && !hasOpenQuestion(input) ? [NO_CHANGE_OUTCOME] : [];
     let level = null;
     try {
       level = autonomy.decide("agent_change", await autonomyPolicy());
@@ -3014,7 +3026,10 @@ export function createAgentsEngine({
   };
 
   const ARCHITECT_TOOL_KEYS = {
-    agent_propose: ["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"],
+    agent_propose: ["action", "draft", "summary", "evidence", "admission", "fitCheck", "problem", "trial", "agent", "baseHash"],
+    agent_trial: ["action", "agent", "baseHash", "draft", "cases"],
+    agent_trial_wait: ["trialId"],
+    agent_trial_read: ["trialId", "case", "offset"],
     research_fetch: ["url"],
     research_read: ["sourceId", "offset"],
     research_search: ["source", "query"],
@@ -3036,7 +3051,7 @@ export function createAgentsEngine({
     if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
     const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.architect && typeof j.architect === "object");
     if (!job) return { refused: NOT_ARCHITECT };
-    return { job, stamp: job.architect, childSessionID: b.sessionID };
+    return { job, jobs, stamp: job.architect, childSessionID: b.sessionID };
   }
 
   // The research and library tools (research library spec §3): every specialist's running task, and the Architect's.
@@ -3097,6 +3112,45 @@ export function createAgentsEngine({
   const days = (n) => `${n} day${n === 1 ? "" : "s"}`;
   const FIT_CHECK_ASK_FIRST = "Your fit check says the request doesn't match what your research says; ask the user with the question tool first (options and your recommendation), then propose once they have answered";
 
+  // ---- the problem (Architect v2 §3.1): facts only — a real quote of the request, counts, an index in range ----
+
+  const PROBLEM_MISSING =
+    "Add the problem before proposing: problem {userWords, statement, shapes, chosen, why} — the user's own words quoted from the request you were given (10 to 600 characters), the problem in one statement (up to 300), the shapes you considered ({shape, wouldBuild}, 2 to 5), the index of the one you chose and why (up to 600)";
+  // what the server appended to a task's opening prompt (the roster and the agent files) is data, never the user's words
+  const withoutTeamData = (t) => {
+    const i = String(t).indexOf(`\n---\n${ARCHITECT_DATA_LINE}`);
+    return i >= 0 ? String(t).slice(0, i) : String(t);
+  };
+  /** The text of every round of a task (its opening prompt and each continuation's), the server's team data removed. */
+  const roundTexts = (jobs, rootJobId) => jobs.filter((j) => rootJobOf(j) === rootJobId && typeof j.prompt === "string").map((j) => withoutTeamData(j.prompt));
+
+  /** `{ problem }` (trimmed) or `{ error }`. `routine`: a refresh / check-up round, which may name a single shape (the fact that triggered it). */
+  function checkProblem(p, { texts, routine }) {
+    const bad = (error) => ({ error });
+    if (!p || typeof p !== "object" || Array.isArray(p)) return bad(PROBLEM_MISSING);
+    const text = (v, max) => typeof v === "string" && v.trim().length >= 1 && v.length <= max;
+    if (typeof p.userWords !== "string" || wsNorm(p.userWords).length < 10 || p.userWords.length > 600) return bad("problem.userWords must be a quote of 10 to 600 characters from the request you were given");
+    if (!text(p.statement, 300)) return bad("problem.statement must be 1 to 300 characters");
+    const min = routine ? 1 : 2;
+    if (!Array.isArray(p.shapes) || p.shapes.length < min || p.shapes.length > 5) {
+      return bad(`problem.shapes must list ${min} to 5 shapes you considered, each {shape, wouldBuild} (changing an existing agent, or no change at all, can be one of them)`);
+    }
+    for (const sh of p.shapes) if (!sh || typeof sh !== "object" || !text(sh.shape, 300) || !text(sh.wouldBuild, 300)) return bad("every problem shape needs a shape and a wouldBuild, each 1 to 300 characters");
+    if (!Number.isInteger(p.chosen) || p.chosen < 0 || p.chosen >= p.shapes.length) return bad("problem.chosen must be the index (from 0) of the shape you chose");
+    if (!text(p.why, 600)) return bad("problem.why must be 1 to 600 characters");
+    const words = wsNorm(p.userWords);
+    if (!texts.some((t) => wsNorm(t).includes(words))) return bad("problem.userWords isn't in the request your task was given (any round of it); quote the user's own words exactly");
+    return {
+      problem: {
+        userWords: p.userWords.trim(),
+        statement: p.statement.trim(),
+        shapes: p.shapes.map((sh) => ({ shape: sh.shape.trim(), wouldBuild: sh.wouldBuild.trim() })),
+        chosen: p.chosen,
+        why: p.why.trim(),
+      },
+    };
+  }
+
   /** The envelope of an `agent_propose` call: `{ ok, summary, evidence, admission, fitCheck, basisRefs }` or `{ error }` (a sentence). */
   function checkEnvelope(raw) {
     const bad = (error) => ({ error });
@@ -3117,7 +3171,14 @@ export function createAgentsEngine({
       if (!a || typeof a !== "object" || !text(a.rule, 1, 300) || !text(a.why, 1, 300) || !VERDICTS.includes(a.verdict)) {
         return bad('Every admission item needs a rule (1–300), a verdict ("general", "scoped" or "excluded") and a why (1–300)');
       }
-      admission.push({ rule: a.rule.trim(), verdict: a.verdict, why: a.why.trim() });
+      const item = { rule: a.rule.trim(), verdict: a.verdict, why: a.why.trim() };
+      for (const k of ["replaces", "revises"]) {
+        if (a[k] === undefined || a[k] === null) continue;
+        if (typeof a[k] !== "string" || wsNorm(a[k]).length < 10 || a[k].length > 600) return bad(`${k} must be 10 to 600 characters: the rule of the current instructions it ${k === "replaces" ? "replaces" : "rewords"}`);
+        item[k] = a[k].trim();
+      }
+      if (item.replaces && item.revises) return bad("An admission item names one of replaces (the old rule is gone) or revises (the old rule was reworded), not both");
+      admission.push(item);
     }
     const fc = raw.fitCheck;
     if (!fc || typeof fc !== "object" || Array.isArray(fc) || !text(fc.researchSays, 1, 600) || !text(fc.why, 1, 600) || typeof fc.matches !== "boolean") return bad(FIT_CHECK_MISSING);
@@ -3165,6 +3226,163 @@ export function createAgentsEngine({
     return { basis, basisThin };
   }
 
+  // ---- replace, don't append (§3.2) and trials (§3.3): what the server can check as facts ----
+
+  const bodyOf = (text) => (parseAgentMd(text ?? "").body ?? "").toString();
+
+  /** A sentence refusing an admission item whose `replaces` / `revises` quote doesn't fit the current and the new instructions, or null. */
+  function checkReplacements(admission, plan) {
+    const named = admission.filter((a) => a.replaces || a.revises);
+    if (named.length === 0) return null;
+    if (plan.kind === "create") return "A new agent has nothing to replace or revise: leave replaces and revises out";
+    const before = wsNorm(bodyOf(plan.before));
+    const after = wsNorm(bodyOf(plan.after));
+    for (const a of named) {
+      const quote = wsNorm(a.replaces ?? a.revises);
+      if (!before.includes(quote)) return `"${quote.slice(0, 60)}${quote.length > 60 ? "…" : ""}" isn't in the current instructions`;
+      if (a.replaces && after.includes(quote)) return "the rule you replace is still in the new text";
+    }
+    return null;
+  }
+
+  /** Does this change touch what a trial covers: a new agent, or an update of its instructions, isolation or model (and, later, skills)? */
+  function trialRequired(plan) {
+    if (plan.kind === "create") return true;
+    const was = parseAgentMd(plan.before);
+    const is = parseAgentMd(plan.after);
+    return was.body !== is.body || was.meta?.isolation !== is.meta?.isolation || (was.meta?.model ?? null) !== (is.meta?.model ?? null);
+  }
+
+  /** The complete resulting file set of a plan: the new agent.md and, for an update, the agent's existing skills. `{ path: text }`. */
+  async function bundleOf(plan) {
+    const bundle = {};
+    if (plan.kind === "update") {
+      const files = await readSpace(folderOf(plan.slug)).catch(() => null);
+      for (const [rel, buf] of files ?? []) if (rel.startsWith("skills/")) bundle[rel] = buf.toString("utf-8");
+    }
+    bundle["agent.md"] = plan.after;
+    return bundle;
+  }
+  const fileHashesOf = (bundle) => Object.fromEntries(Object.entries(bundle).map(([k, v]) => [k, sha256Hex(v)]));
+
+  const skillHeaderOf = (text, fallback) => {
+    let name = fallback;
+    let description = "";
+    const front = splitFrontmatter(text);
+    if (front) {
+      try {
+        const data = YAML.parse(front.yaml);
+        if (typeof data?.name === "string" && data.name.trim()) name = data.name.trim();
+        if (typeof data?.description === "string") description = data.description.trim().replace(/\s+/g, " ");
+      } catch {
+        /* a skill with broken frontmatter keeps its folder name */
+      }
+    }
+    return { name, description };
+  };
+
+  /**
+   * What a trial of this draft needs (the trials module calls it): the complete resulting file set, its per-file hashes, the
+   * agent's slug (an update's own, a create's `slugForName`), its parsed fields, the compiled prompt and the opencode block for a
+   * folder `dir` that will hold those files. `{ error }` (a sentence) when the draft can't be planned. Read-only.
+   */
+  async function trialPlan(input, { dir } = {}) {
+    const action = typeof input?.action === "string" ? input.action : "";
+    if (action !== "create" && action !== "update") return { error: 'action must be "create" or "update"' };
+    const draft = input?.draft;
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return { error: "The draft is missing" };
+    if (Object.hasOwn(draft, "sources")) return { error: PROPOSE_NO_SOURCES };
+    const models = await approvedModelsFor(draft);
+    if (models.error) return { error: models.error };
+    return syncLock.runExclusive(async () => {
+      const plan = await planChange({ action, agent: input.agent, draft, approved: models.approved, via: "propose" });
+      if (plan.error) return { error: plan.error };
+      if (plan.kind === "update") {
+        const given = typeof input.baseHash === "string" ? input.baseHash.trim() : "";
+        if (!given) return { error: `An update needs the baseHash of the file you read (it is ${plan.hash} now)` };
+        if (given !== plan.hash) return { error: `@${plan.slug} changed since you read it (hash ${plan.hash} now, not ${given}); redo the work against the current text you were given` };
+      }
+      let slug = plan.slug;
+      if (plan.kind === "create") {
+        try {
+          slug = slugForName(String(draft.name ?? ""));
+        } catch (e) {
+          return { error: e.message };
+        }
+      }
+      const parsed = parseAgentMd(plan.after);
+      const bundle = await bundleOf(plan);
+      const where = dir ?? folderOf(slug);
+      const skills = Object.entries(bundle)
+        .filter(([rel]) => /^skills\/[^/]+\/SKILL\.md$/.test(rel))
+        .map(([rel, text]) => ({ ...skillHeaderOf(text, rel.split("/")[1]), path: join(where, rel) }));
+      return {
+        kind: plan.kind,
+        slug,
+        name: plan.agentName,
+        bundle,
+        files: fileHashesOf(bundle),
+        meta: parsed.meta,
+        body: parsed.body,
+        needsTrial: trialRequired(plan),
+        compiled: compileAgentPrompt({ body: parsed.body, skills }),
+        block: buildAgentBlock({ dir: where, meta: parsed.meta, home }),
+      };
+    });
+  }
+
+  const TRIAL_MISSING =
+    "A trial is required for this proposal: run it on this exact draft with agent_trial, wait for it with agent_trial_wait, read what happened with agent_trial_read, then pass `trial` {trialId, verdicts} with one verdict {case, pass, quote, note} per case";
+  const TRIAL_ENDED = new Set(["done", "failed", "timed-out"]);
+
+  /**
+   * The facts about a proposal's trial (§3.3): it belongs to this task, ran on exactly this draft, every case ended, there is one
+   * verdict per case, each verdict quotes that case's transcript, and every verdict is a pass. Whether the agent did well is the
+   * Architect's judgement; nothing here reads the answers. `{ trial: { id, verdicts } }` or `{ error }`.
+   */
+  async function checkTrial(raw, { rootJobId, bundle }) {
+    const bad = (error) => ({ error });
+    if (raw === undefined || raw === null) return bad(TRIAL_MISSING);
+    if (!trials?.get) return bad("Trials aren't available on this box yet");
+    if (typeof raw !== "object" || Array.isArray(raw) || typeof raw.trialId !== "string" || !raw.trialId) return bad(TRIAL_MISSING);
+    if (!Array.isArray(raw.verdicts)) return bad("Give a verdict for every case of the trial: verdicts [{case, pass, quote, note}]");
+    const t = trials.get(raw.trialId);
+    if (!t) return bad(`The trial ${raw.trialId} doesn't exist (or is too old); run a trial again`);
+    if (t.rootJobId !== rootJobId) return bad(`The trial ${raw.trialId} belongs to another task; run a trial in this one`);
+    if (t.draftHash !== draftHash(bundle)) {
+      const files = differingFiles(t.files, fileHashesOf(bundle));
+      return bad(`The draft you propose isn't the one the trial ran on (${files.length > 0 ? files.join(", ") : "the files differ"}); run a trial again on the draft you propose`);
+    }
+    const cases = Array.isArray(t.cases) ? t.cases : [];
+    for (const c of cases) {
+      if (!TRIAL_ENDED.has(c.state)) return bad(`Case ${c.name} didn't finish (${c.state}): wait for it with agent_trial_wait, or run the trial again`);
+    }
+    const verdicts = [];
+    for (const v of raw.verdicts) {
+      if (!v || typeof v !== "object" || typeof v.case !== "string" || typeof v.pass !== "boolean" || typeof v.quote !== "string" || (v.note !== undefined && typeof v.note !== "string")) {
+        return bad("Every verdict needs a case, pass (true or false), a quote and a note");
+      }
+      if (!cases.some((c) => c.name === v.case)) return bad(`There is no case "${v.case}" in this trial; give one verdict per case: ${cases.map((c) => c.name).join(", ")}`);
+      if (verdicts.some((x) => x.case === v.case)) return bad(`Case ${v.case} has two verdicts; give one verdict per case`);
+      if (wsNorm(v.quote).length < 20 || v.quote.length > 300) return bad(`The quote for case ${v.case} must be 20 to 300 characters from that case's transcript (read it with agent_trial_read)`);
+      if ((v.note ?? "").length > 600) return bad(`The note for case ${v.case} can be at most 600 characters`);
+      let transcript = null;
+      try {
+        transcript = await trials.transcript?.(t.id, v.case);
+      } catch {
+        transcript = null;
+      }
+      if (typeof transcript !== "string") return bad("Couldn't read the trial's transcripts; try again");
+      if (!wsNorm(transcript).includes(wsNorm(v.quote))) return bad(`The quote for case ${v.case} isn't in that case's transcript; quote text you read with agent_trial_read, exactly`);
+      verdicts.push({ case: v.case, pass: v.pass, quote: v.quote.trim(), note: (v.note ?? "").trim() });
+    }
+    const missing = cases.filter((c) => !verdicts.some((v) => v.case === c.name)).map((c) => c.name);
+    if (missing.length > 0) return bad(`Give one verdict per case; missing: ${missing.join(", ")}`);
+    const failed = verdicts.find((v) => !v.pass);
+    if (failed) return bad(`Case ${failed.case} failed: fix the draft and run a trial again`);
+    return { trial: { id: t.id, verdicts } };
+  }
+
   /**
    * `agent_propose` (§4.4): the Architect proposes one change. The record is created `held`; it is released (applied,
    * pending or discarded) when its task ends. Refusals are RETURNED as sentences; only unexpected failures throw.
@@ -3202,9 +3420,11 @@ export function createAgentsEngine({
     if (!raw.draft || typeof raw.draft !== "object" || Array.isArray(raw.draft)) return refuse("The draft is missing");
     if (Object.hasOwn(raw.draft, "sources")) return refuse(PROPOSE_NO_SOURCES);
 
-    // 2. the envelope
+    // 2. the envelope, and the problem it answers (a real quote of what this task was asked, in any of its rounds)
     const env = checkEnvelope(raw);
     if (env.error) return refuse(env.error);
+    const stated = checkProblem(raw.problem, { texts: roundTexts(bound.jobs, stamp.rootJobId), routine: stamp.mode === "routine" });
+    if (stated.error) return refuse(stated.error);
     // the fit check must rest on library entries that are fresh and well founded (the server checks the evidence, not the judgement)
     const based = await checkBasis(env.basisRefs, { project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : ""), askedUser: job.askedUser === true });
     if (based.error) return refuse(based.error);
@@ -3252,6 +3472,15 @@ export function createAgentsEngine({
             return { error: `@${plan.slug} changed since you read it (hash ${plan.hash} now, not ${given}); redo the work against the current text`, current: { text: plan.before, hash: plan.hash } };
           }
         }
+        const replaceRefusal = checkReplacements(env.admission, plan);
+        if (replaceRefusal) return { error: replaceRefusal };
+        // a trial on exactly this draft, when the change touches what one covers (a new agent; instructions, isolation or model)
+        let trial = null;
+        if (trialRequired(plan) || raw.trial !== undefined) {
+          const checked = await checkTrial(raw.trial, { rootJobId: stamp.rootJobId, bundle: await bundleOf(plan) });
+          if (checked.error) return { error: checked.error };
+          trial = checked.trial;
+        }
         const made = normalizeRecord({
           id: `ach_${randomBytes(8).toString("hex")}`,
           kind: plan.kind,
@@ -3269,7 +3498,7 @@ export function createAgentsEngine({
           decidedAt: null,
           error: null,
           origin: { kind: "job", jobId: job.id, rootJobId: stamp.rootJobId, attempt: job.attempt ?? 1 },
-          mode: stamp.mode === "build" || stamp.mode === "plan" ? stamp.mode : "unknown",
+          mode: stamp.mode === "build" || stamp.mode === "plan" || stamp.mode === "routine" ? stamp.mode : "unknown",
           releasedAt: null,
           decidedBy: null,
           summary: env.summary,
@@ -3281,6 +3510,10 @@ export function createAgentsEngine({
           target: plan.lead ? "lead" : plan.core ? "core" : null,
           raisesIsolation: plan.raisesIsolation === true,
           invocation: { childSessionID: bound.childSessionID, messageID: b.messageID, callID: b.callID, argsHash },
+          problem: stated.problem,
+          ...(trial ? { trial } : {}),
+          sizeBefore: plan.kind === "update" ? bodyOf(plan.before).length : null,
+          sizeAfter: bodyOf(plan.after).length,
         });
         if (made.kind === "update") await attachBundles(made);
         await saveRecord(made, { slots: { ...store.slots, [stamp.rootJobId]: used + 1 } });
@@ -4537,7 +4770,7 @@ export function createAgentsEngine({
       request: charter,
       targetProject: AGENTS_TMUX_SESSION,
       deliverResult: false,
-      architect: { mode: "unknown" },
+      architect: { mode: "routine" },
       ...specialistAutonomy({ writer: isolation === "worktree" }),
     });
     if (!res?.ok) throw new AgentError(res?.error || "The refresh task couldn't be started");
@@ -4605,6 +4838,7 @@ export function createAgentsEngine({
     changesForJob,
     outcomeLinesForJob,
     propose,
+    trialPlan,
     bindArchitect,
     bindResearcher,
     reconcile,
