@@ -1,7 +1,7 @@
 // ===== The agent profile (agent screens spec §2.2) =====
 //
 // One agent, one page: a header (name, who-it-is line, description, actions), its pending change (one summary line, the change
-// folded), then the tabs Overview · Research · Seats · History (there is no Tests tab until Tests exist). The Overview is two
+// folded), then the tabs Overview · Research · Seats · History, and Tests (last) when the agent has trial runs (Architect v2 §3.4). The Overview is two
 // columns: how to use the agent and the research it rests on, beside one tinted details pane (details, seats, access, refresh)
 // that stacks under the main column when the page is narrow. History is a tab, not an Overview block. Every other tab has the
 // same two columns (Research, Seats, History: proposal A), each with its own pane. The tabs are the `tabs` guide's hand-written tablist: a button per tab with
@@ -30,7 +30,8 @@ import { AgentResearch } from "./AgentResearch";
 import { AgentSeats, MemoryMap } from "./AgentSeats";
 import { AgentsHeader, BlockTitle, Crumbs, LinkButton } from "./AgentsParts";
 import { Pane, PaneBlock, PaneFacts, PaneGroup, TwoColumn } from "./ProfileLayout";
-import { OVERVIEW_PREVIEW, PROFILE_TABS, currentSnapshot, detailRows, errText, factsLine, nextTab, seatFolder, seatNotesLabel, type ProfileTab } from "./agentsView";
+import { AgentTests } from "./AgentTests";
+import { OVERVIEW_PREVIEW, currentSnapshot, profileTabs, detailRows, errText, factsLine, nextTab, seatFolder, seatNotesLabel, type ProfileTab } from "./agentsView";
 import { useAgentsRead, type AgentsRead } from "./useAgentsRead";
 import { openChatWindow } from "./useOpenTask";
 
@@ -298,7 +299,8 @@ export function AgentProfile({
   }
 
   const records = history.data;
-  const tabs = PROFILE_TABS.map((t) => ({
+  const shownTabs = profileTabs(p);
+  const tabs = shownTabs.map((t) => ({
     ...t,
     text:
       t.id === "research"
@@ -309,9 +311,11 @@ export function AgentProfile({
             : "Seats"
           : t.id === "history"
             ? records ? `History · ${records.length}` : "History"
-            : t.label,
+            : t.id === "tests"
+              ? `Tests · ${p.trials?.length ?? 0}`
+              : t.label,
   }));
-  const tabIds = PROFILE_TABS.map((t) => t.id);
+  const tabIds = shownTabs.map((t) => t.id);
   const tabId = (id: ProfileTab) => `${base}-tab-${id}`;
 
   const onTabKey = (e: React.KeyboardEvent<HTMLButtonElement>, id: ProfileTab) => {
@@ -411,6 +415,13 @@ export function AgentProfile({
             />
           </div>
         </div>
+        {tabIds.includes("tests") && (
+          <div role="tabpanel" aria-labelledby={tabId("tests")} hidden={tab !== "tests"}>
+            <div className="pt-4">
+              <AgentTests trials={p.trials ?? []} records={history.data ?? null} />
+            </div>
+          </div>
+        )}
       </div>
     </div>,
   );

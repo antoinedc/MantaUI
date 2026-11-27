@@ -736,3 +736,151 @@ describe("AgentChangeView", () => {
     });
   });
 });
+
+// Architect v2 §3.4: the problem first, the size, the trial cases with their transcript, built-in updates
+describe("AgentChangeView — problem, size and trial", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    document.body.querySelectorAll('[role="dialog"]').forEach((d) => d.parentElement?.remove());
+  });
+  beforeEach(() => resetStore());
+
+  const BEFORE = "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\n";
+  const AFTER = "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nRun the tests.\n";
+  const trial = {
+    id: "tr_00000001",
+    rootJobId: "job1",
+    agentSlug: "dev",
+    draftHash: "h",
+    createdAt: 1,
+    cases: [
+      { name: "runs tests", expect: "does" as const, state: "done" as const, finalAnswer: "ok", tools: [], filesChanged: 0, refused: [], wouldAsk: [], durationMs: 10 },
+      { name: "no deploy", expect: "declines" as const, state: "done" as const, finalAnswer: "no", tools: [], filesChanged: 0, refused: [], wouldAsk: [], durationMs: 10 },
+    ],
+  };
+  const proposal = (over: Partial<AgentChange> = {}): AgentChange =>
+    change({
+      kind: "update",
+      slug: "dev",
+      agentName: "Dev",
+      before: BEFORE,
+      after: AFTER,
+      origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
+      evidence: [{ claim: "Tests catch regressions", quote: "a quote", url: null, private: false }],
+      problem: {
+        userWords: "Dev keeps shipping without running the tests",
+        statement: "Dev finishes before checking its work.",
+        shapes: [
+          { shape: "Change Dev", wouldBuild: "A rule to run the tests" },
+          { shape: "A new tester agent", wouldBuild: "An agent that only runs tests" },
+        ],
+        chosen: 0,
+        why: "The fix belongs where the work happens.",
+      },
+      sizeBefore: 1240,
+      sizeAfter: 980,
+      trial: {
+        id: "tr_00000001",
+        verdicts: [
+          { case: "runs tests", pass: true, quote: "Running npm test before finishing", note: "Ran them." },
+          { case: "no deploy", pass: true, quote: "I won't deploy this, that's out of scope", note: "Declined." },
+        ],
+      },
+      ...over,
+    });
+  const mountView = (c: AgentChange, extra: Record<string, unknown> = {}) => {
+    const { api } = installMockApi({ agentsTrial: () => Promise.resolve(trial), ...extra });
+    h = mount(<AgentChangeView change={c} onChange={() => {}} />);
+    return { api };
+  };
+  const order = (a: Element | null, b: Element | null) => !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+  it("puts the problem first: the user's words, the shapes with the chosen one marked, and why; then the diff, the size, the trial, the evidence", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const problem = q(h!, "agent-change-problem")!;
+    expect(q(h!, "agent-change-problem-quote")!.textContent).toBe("Dev keeps shipping without running the tests");
+    const shapes = Array.from(problem.querySelectorAll('[data-testid="agent-change-shape"]'));
+    expect(shapes.map((s) => s.getAttribute("data-chosen"))).toEqual(["true", null]);
+    expect(shapes[0].textContent).toContain("Chosen");
+    expect(problem.textContent).toContain("Why: The fix belongs where the work happens.");
+    expect(q(h!, "agent-change-size")!.textContent).toBe("Instructions: 1,240 → 980 characters (−260)");
+    expect(order(problem, q(h!, "agent-change-diff"))).toBe(true);
+    expect(order(q(h!, "agent-change-diff"), q(h!, "agent-change-size"))).toBe(true);
+    expect(order(q(h!, "agent-change-size"), q(h!, "agent-change-trial"))).toBe(true);
+    expect(order(q(h!, "agent-change-trial"), q(h!, "agent-change-evidence"))).toBe(true);
+  });
+
+  it("lists every case with what it should do, its verdict and quote; Transcript opens the case's transcript a window at a time", async () => {
+    const pages: Record<number, { text: string; nextOffset: number | null }> = { 0: { text: "User: run\n\nAssistant: Running npm test", nextOffset: 20000 }, 20000: { text: " before finishing", nextOffset: null } };
+    const { api } = mountView(proposal(), { agentsTrialTranscript: (i: { offset?: number }) => Promise.resolve(pages[i.offset ?? 0]) });
+    await h!.flush();
+    expect(api.calls.agentsTrial).toEqual([[{ id: "tr_00000001" }]]);
+    const cases = Array.from(h!.container.querySelectorAll('[data-testid="trial-case"]'));
+    expect(cases).toHaveLength(2);
+    expect(cases[0].textContent).toContain("runs tests");
+    expect(cases[0].textContent).toContain("should do it");
+    expect(cases[0].textContent).toContain("Passed");
+    expect(cases[0].textContent).toContain("Running npm test before finishing");
+    expect(cases[1].textContent).toContain("should decline");
+    const transcript = Array.from(cases[0].querySelectorAll("button")).find((b) => b.textContent === "Transcript")!;
+    await press(h!, transcript);
+    expect(api.calls.agentsTrialTranscript).toEqual([[{ id: "tr_00000001", case: "runs tests", offset: 0 }]]);
+    const dialog = document.body.querySelector('[role="dialog"]')!;
+    expect(dialog.getAttribute("aria-label")).toBe("Transcript · runs tests");
+    expect(dialog.textContent).toContain("Assistant: Running npm test");
+    const more = Array.from(dialog.querySelectorAll("button")).find((b) => b.textContent === "Load more")!;
+    await act(async () => more.click());
+    await h!.flush();
+    expect(api.calls.agentsTrialTranscript[1]).toEqual([{ id: "tr_00000001", case: "runs tests", offset: 20000 }]);
+    expect(dialog.textContent).toContain("Running npm test before finishing");
+    expect(Array.from(dialog.querySelectorAll("button")).some((b) => b.textContent === "Load more")).toBe(false);
+    const close = Array.from(dialog.querySelectorAll("button")).find((b) => b.textContent === "Close")!;
+    await act(async () => close.click());
+    await h!.flush();
+  });
+
+  it("a transcript the box refuses says why, with Try again", async () => {
+    mountView(proposal(), { agentsTrialTranscript: () => Promise.reject(new Error("That trial no longer exists")) });
+    await h!.flush();
+    await press(h!, Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Transcript"));
+    const err = document.body.querySelector('[data-testid="trial-transcript-error"]')!;
+    expect(err.textContent).toContain("That trial no longer exists");
+    expect(Array.from(document.body.querySelectorAll('[role="dialog"] button')).some((b) => b.textContent === "Try again")).toBe(true);
+  });
+
+  it("when the trial can't be read, the verdicts still show, no Transcript control is drawn, and Try again reads it again", async () => {
+    let fail = true;
+    const { api } = mountView(proposal(), { agentsTrial: () => (fail ? Promise.reject(new Error("That trial no longer exists")) : Promise.resolve(trial)) });
+    await h!.flush();
+    expect(h!.container.querySelectorAll('[data-testid="trial-case"]')).toHaveLength(2);
+    expect(byText(h!, "Transcript")).toBeUndefined();
+    expect(q(h!, "agent-change-trial-error")!.textContent).toContain("That trial no longer exists");
+    fail = false;
+    await press(h!, byText(h!, "Try again"));
+    expect(api.calls.agentsTrial).toHaveLength(2);
+    expect(q(h!, "agent-change-trial-error")).toBeNull();
+    expect(buttons(h!).filter((b) => b.textContent === "Transcript")).toHaveLength(2);
+  });
+
+  it("an older record has no problem, size or trial blocks and reads no trial", async () => {
+    const { api } = mountView(proposal({ problem: undefined, sizeBefore: undefined, sizeAfter: undefined, trial: undefined }));
+    await h!.flush();
+    for (const id of ["agent-change-problem", "agent-change-size", "agent-change-trial"]) expect(q(h!, id)).toBeNull();
+    expect(api.calls.agentsTrial).toBeUndefined();
+  });
+
+  it("a shipped template update is labelled Built-in update; a conflicting one says so", async () => {
+    mountView(proposal({ origin: { kind: "template-update", templateHash: "h" }, problem: undefined, trial: undefined, state: "pending", needsClick: true, reason: "ask" }));
+    await h!.flush();
+    expect(h!.text()).toContain("Built-in update: Dev");
+    expect(q(h!, "agent-change-conflict")!.textContent).toMatch(/^Conflict: your edits and the new built-in version/);
+    h!.unmount();
+    h = mount(<AgentChangeView change={proposal({ origin: { kind: "template-update", templateHash: "h" }, problem: undefined, trial: undefined, state: "applied", needsClick: false, reason: null })} onChange={() => {}} collapsed />);
+    await h.flush();
+    expect(q(h, "agent-change-summary-line")!.textContent).toMatch(/^Built-in update · /);
+    expect(q(h, "agent-change-conflict")).toBeNull();
+  });
+});

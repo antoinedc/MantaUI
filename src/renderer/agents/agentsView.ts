@@ -21,13 +21,20 @@ export const SEAT_BRIEF_MAX = 4000;
 /** null = closed. "needs" is the Needs you row: the Fleet page, scrolled to its first section. */
 export type AgentsView = null | { page: "fleet"; focus?: "needs"; nonce?: number } | { page: "profile"; slug: string };
 
-export type ProfileTab = "overview" | "research" | "seats" | "history";
+export type ProfileTab = "overview" | "research" | "seats" | "history" | "tests";
 export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "research", label: "Research" },
   { id: "seats", label: "Seats" },
   { id: "history", label: "History" },
 ];
+/** Architect v2 §3.4: the Tests tab, last, shown only when the agent has trial runs. */
+export const TESTS_TAB: { id: ProfileTab; label: string } = { id: "tests", label: "Tests" };
+
+/** The tabs a profile shows: the four, plus Tests when the box sent any trial for this agent. */
+export function profileTabs(profile: { trials?: ReadonlyArray<unknown> }): ReadonlyArray<{ id: ProfileTab; label: string }> {
+  return (profile.trials?.length ?? 0) > 0 ? [...PROFILE_TABS, TESTS_TAB] : PROFILE_TABS;
+}
 
 /** The tab a key press moves to (arrows wrap, Home / End jump); null for any other key. Selection follows focus. */
 export function nextTab(current: ProfileTab, key: string, ids: ReadonlyArray<ProfileTab>): ProfileTab | null {
