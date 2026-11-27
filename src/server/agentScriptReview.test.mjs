@@ -140,3 +140,56 @@ test("reviewScripts: a throw, a refusal, an empty or unreadable answer and a mis
   assert.equal(tooBig.verdict, "error");
   assert.match(tooBig.reasons[0], /too large/i);
 });
+
+// ---- security review of PR #1760: the same tool-less helper checks a learned rule (H1) and a routine round's change (H4) ----
+
+import { checkLearnedRule, buildRuleCheckPrompt, pickRuleCheckModel, reviewRoutineChange, buildContentReviewPrompt, parseContentVerdict } from "./agentScriptReview.mjs";
+
+const fakeRun = (answers, calls = []) => async (args) => {
+  calls.push(args);
+  const a = answers.shift();
+  if (a instanceof Error) throw a;
+  return a;
+};
+
+test("H1: the rule check runs tool-less on a model other than the learner's and sees only the quote and the rule", async () => {
+  assert.equal(pickRuleCheckModel("anthropic/claude-sonnet-5-5"), MODEL_OPUS);
+  for (const m of [null, "anthropic/claude-haiku-5-5", "openai/gpt-6-luna", "anthropic/claude-opus-5-5"]) assert.notEqual(pickRuleCheckModel(m), m);
+  const built = buildRuleCheckPrompt({ quote: "always use imperative commit messages", rule: "Write commit messages in the imperative mood." });
+  assert.match(built, /always use imperative commit messages/);
+  assert.match(built, /smuggled/i);
+  const calls = [];
+  const clean = await checkLearnedRule({ run: fakeRun([{ ok: true, text: '{"verdict":"clean","reasons":[]}' }], calls), directory: "/h", learnerModel: "anthropic/claude-haiku-5-5", quote: "q words here", rule: "A rule." });
+  assert.equal(clean.verdict, "clean");
+  assert.equal(calls[0].denyTools, true);
+  assert.notEqual(`${calls[0].model.providerID}/${calls[0].model.modelID}`, "anthropic/claude-haiku-5-5");
+  assert.equal((await checkLearnedRule({ run: fakeRun([{ ok: true, text: '{"verdict":"flagged","reasons":["adds an upload"]}' }]), directory: "/h", quote: "q", rule: "r" })).verdict, "flagged");
+  assert.equal((await checkLearnedRule({ run: fakeRun([{ ok: true, text: "sure!" }]), directory: "/h", quote: "q", rule: "r" })).verdict, "error");
+  assert.equal((await checkLearnedRule({ run: fakeRun([{ ok: false, code: "timeout" }]), directory: "/h", quote: "q", rule: "r" })).verdict, "error");
+  assert.equal((await checkLearnedRule({ run: undefined, directory: "/h", quote: "q", rule: "r" })).verdict, "error");
+});
+
+test("H4: the routine change review sees the diff, the stated purpose and the folded rules; a fold counts only when confirmed", async () => {
+  const input = {
+    agent: { name: "Dev" },
+    purpose: "Tighten Dev's routing after the weekly facts",
+    files: [{ path: "agent.md", before: "---\nname: Dev\n---\nBe brief.\n", after: "---\nname: Dev\n---\nBe brief.\nAlways commit in the imperative mood.\n" }, { path: "skills/x/SKILL.md", before: null, after: "# X\nDo x.\n" }],
+    folds: [{ id: "lr_00000001", rule: "Write commit messages in the imperative mood.", quote: "always imperative" }, { id: "lr_00000002", rule: "Keep PRs small.", quote: "small PRs" }],
+  };
+  const built = buildContentReviewPrompt(input);
+  assert.ok(!built.error);
+  for (const s of ["Always commit in the imperative mood.", "skills/x/SKILL.md", "Tighten Dev's routing", "lr_00000001", "Keep PRs small."]) assert.ok(built.prompt.includes(s), s);
+  assert.match(built.prompt, /exfiltrat|sending data off/i);
+  assert.deepEqual(parseContentVerdict('{"verdict":"clean","reasons":[],"folds":{"lr_00000001":true,"lr_00000002":false,"lr_99999999":true}}', ["lr_00000001", "lr_00000002"]), { verdict: "clean", reasons: [], carried: ["lr_00000001"] });
+  assert.equal(parseContentVerdict('{"verdict":"flagged","reasons":["adds an upload"]}', []).verdict, "flagged");
+  assert.equal(parseContentVerdict("nope", []), null);
+  const calls = [];
+  const r = await reviewRoutineChange({ run: fakeRun([{ ok: true, text: '{"verdict":"clean","reasons":[],"folds":{"lr_00000001":true}}' }], calls), directory: "/h", architectModel: MODEL_OPUS, ...input });
+  assert.equal(r.verdict, "clean");
+  assert.deepEqual(r.carried, ["lr_00000001"]);
+  assert.equal(r.model, MODEL_SONNET);
+  assert.equal(calls[0].denyTools, true);
+  const failed = await reviewRoutineChange({ run: fakeRun([{ ok: false, code: "timeout" }]), directory: "/h", ...input });
+  assert.equal(failed.verdict, "error");
+  assert.deepEqual(failed.carried, []);
+});
