@@ -30,6 +30,7 @@ import { AgentResearch } from "./AgentResearch";
 import { AgentSeats, MemoryMap } from "./AgentSeats";
 import { AgentsHeader, BlockTitle, Crumbs, LinkButton } from "./AgentsParts";
 import { Pane, PaneBlock, PaneFacts, PaneGroup, TwoColumn } from "./ProfileLayout";
+import { AgentSkills } from "./AgentSkills";
 import { AgentTests } from "./AgentTests";
 import { OVERVIEW_PREVIEW, currentSnapshot, profileTabs, detailRows, errText, factsLine, nextTab, seatFolder, seatNotesLabel, type ProfileTab } from "./agentsView";
 import { useAgentsRead, type AgentsRead } from "./useAgentsRead";
@@ -335,6 +336,7 @@ export function AgentProfile({
             <BlockTitle aside={p.research.length > 0 ? <LinkButton spaced={false} onClick={() => setTab("research")}>{`All ${p.research.length} →`}</LinkButton> : undefined}>Research it relies on</BlockTitle>
             <ResearchRows entries={p.research} limit={OVERVIEW_PREVIEW.research} emptyText="Nothing yet. The research this agent's changes rest on shows here." />
           </section>
+          <AgentSkills skills={p.skills ?? []} />
         </>
       }
       pane={<DetailsPane profile={p} refreshable={refreshable} onManage={() => setTab("seats")} onChanged={() => void profile.reload()} />}

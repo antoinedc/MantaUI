@@ -3128,6 +3128,40 @@ export interface TrialVerdict {
   quote: string;
   note: string;
 }
+// Architect v2 Stage 2 (§4, §6.1): skills an agent carries, where a copied one came from, and what a proposal changes in them.
+export interface SkillProvenance {
+  url: string;
+  sourceId: string;
+  repo: string;
+  /** The commit or tag it was taken at. */
+  ref: string;
+  /** SPDX id. */
+  licence: string;
+  licenseSourceId?: string;
+  taken: "whole" | "part";
+  registry?: { installs: number | null; stars: number | null };
+}
+export interface AgentSkillInfo {
+  name: string;
+  description: string;
+  files: number;
+  bytes: number;
+  /** Null for a skill written for this agent (it has no SOURCE.md). */
+  provenance: SkillProvenance | null;
+}
+/** What one proposed skill change does, for the card: paths are relative to the skill's folder; `scripts` are the COPIED script files among them. */
+export interface SkillChange {
+  name: string;
+  op: "add" | "replace" | "remove";
+  paths: string[];
+  provenance: SkillProvenance | null;
+  scripts: string[];
+}
+/** The searches an Architect proposal says it ran before adding a skill, and the skills it looked at (checked against the box's record). */
+export interface SkillSearchRecord {
+  queries: { source: string; query: string }[];
+  candidates: { ref: string; installs: number | null; stars: number | null; licence: string | null; verdict: "used-whole" | "used-part" | "rejected"; why: string }[];
+}
 // Agents Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md §2.1): Manta creates / edits agents.
 export interface AgentDraftCreate {
   name: string;
@@ -3179,6 +3213,9 @@ export interface AgentChange {
   /** Instructions size (characters of the body) before → after; `sizeBefore` is null for a new agent. */
   sizeBefore?: number | null;
   sizeAfter?: number;
+  /** Architect v2 Stage 2: the skills this change adds, replaces or removes, and the search that came first. Absent on older records. */
+  skillsDiff?: SkillChange[];
+  skillSearch?: SkillSearchRecord;
 }
 export interface AgentChangeEvent {
   id: string;
@@ -4477,6 +4514,8 @@ export interface AgentProfile {
   research: AgentResearchEntry[];
   /** Architect v2 §3.4: the agent's trial runs, newest first (≤ 20). Absent on an older box. */
   trials?: AgentTrial[];
+  /** Architect v2 §4: the skills the agent has, with where each came from. Absent on an older box. */
+  skills?: AgentSkillInfo[];
 }
 export interface FleetCell {
   jobId: string;

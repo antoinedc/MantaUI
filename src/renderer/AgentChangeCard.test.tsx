@@ -884,3 +884,126 @@ describe("AgentChangeView — problem, size and trial", () => {
     expect(q(h, "agent-change-conflict")).toBeNull();
   });
 });
+
+// Architect v2 Stage 2 (§4): the skills a proposal adds, replaces or removes, and the search that came first
+describe("AgentChangeView — skills", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  beforeEach(() => resetStore());
+
+  const BEFORE = "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\n";
+  const prov = { url: "https://github.com/acme/cro/blob/abc123/landing-audit/SKILL.md", sourceId: "src_1", repo: "acme/cro", ref: "abc123", licence: "MIT", taken: "whole" as const, registry: { installs: 12500, stars: null } };
+  const proposal = (over: Partial<AgentChange> = {}): AgentChange =>
+    change({
+      kind: "update",
+      slug: "dev",
+      agentName: "Dev",
+      before: BEFORE,
+      after: BEFORE,
+      origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
+      skillsDiff: [
+        { name: "landing-audit", op: "add", paths: ["LICENSE", "SKILL.md", "SOURCE.md", "scripts/check.sh"], provenance: prov, scripts: ["scripts/check.sh"] },
+        { name: "old-skill", op: "remove", paths: ["SKILL.md"], provenance: null, scripts: [] },
+      ],
+      skillSearch: {
+        queries: [{ source: "skills", query: "landing pages" }],
+        candidates: [
+          { ref: "acme/cro@landing-audit", installs: 12500, stars: null, licence: "MIT", verdict: "used-whole", why: "Most installed and it fits" },
+          { ref: "other/repo@thing", installs: 300, stars: null, licence: null, verdict: "rejected", why: "Unmaintained" },
+        ],
+      },
+      ...over,
+    });
+  const mountView = (c: AgentChange, extra: Record<string, unknown> = {}) => {
+    const { api } = installMockApi(extra);
+    h = mount(<AgentChangeView change={c} onChange={() => {}} />);
+    return { api };
+  };
+  const items = () => Array.from(h!.container.querySelectorAll('[data-testid="agent-change-skill"]'));
+
+  it("lists each skill with what is done to it, its files, where it came from, the licence and the installs", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const block = q(h!, "agent-change-skills")!;
+    expect(block.getAttribute("aria-label")).toBe("Skills");
+    expect(items()).toHaveLength(2);
+    const [add, remove] = items();
+    expect(add.getAttribute("data-op")).toBe("add");
+    expect(add.textContent).toContain("New skill");
+    expect(add.textContent).toContain("landing-audit");
+    expect(add.textContent).toContain("Copied from acme/cro · MIT · 12,500 installs");
+    expect(add.textContent).toContain("SKILL.md");
+    expect(add.textContent).toContain("SOURCE.md");
+    expect(remove.getAttribute("data-op")).toBe("remove");
+    expect(remove.textContent).toContain("Removes skill");
+    expect(remove.textContent).toContain("old-skill");
+    expect(remove.textContent).not.toContain("Written for this agent"); // a removed skill's origin isn't known here: nothing is claimed
+  });
+
+  it("a copied script is flagged, and only a copied one", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const [add, remove] = items();
+    const flags = Array.from(add.querySelectorAll('[data-testid="agent-change-skill-script"]'));
+    expect(flags).toHaveLength(1);
+    expect(flags[0].textContent).toContain("scripts/check.sh");
+    expect(add.textContent).toMatch(/Copied script/);
+    expect(remove.querySelector('[data-testid="agent-change-skill-script"]')).toBeNull();
+  });
+
+  it("the origin link opens through the app and says so when it can't; an address that isn't https is text, not a link", async () => {
+    const { api } = mountView(proposal(), { openExternal: () => Promise.reject(new Error("no browser")) });
+    await h!.flush();
+    const link = items()[0].querySelector("a") as HTMLAnchorElement;
+    expect(link.href).toBe(prov.url);
+    await press(h!, link);
+    expect(api.calls.openExternal).toEqual([[prov.url]]);
+    expect(q(h!, "agent-change-skill-link-error")!.textContent).toMatch(/Couldn't open the link/);
+    expect(q(h!, "agent-change-skill-link-error")!.getAttribute("role")).toBe("alert");
+    h!.unmount();
+    mountView(proposal({ skillsDiff: [{ name: "x", op: "add", paths: ["SKILL.md"], provenance: { ...prov, url: "javascript:alert(1)" }, scripts: [] }] }));
+    await h!.flush();
+    expect(items()[0].querySelector("a")).toBeNull();
+    expect(items()[0].textContent).toContain("javascript:alert(1)");
+  });
+
+  it("what was searched for first is one native details: the queries, and each skill looked at with its verdict and why", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const d = q(h!, "agent-change-skill-search")!;
+    expect(d.tagName).toBe("DETAILS");
+    expect(d.querySelector("summary")!.textContent).toBe("Searched for existing skills · 1 search · 2 skills looked at");
+    const cands = Array.from(d.querySelectorAll('[data-testid="agent-change-skill-candidate"]'));
+    expect(cands).toHaveLength(2);
+    expect(cands[0].textContent).toContain("acme/cro@landing-audit");
+    expect(cands[0].textContent).toContain("Used whole");
+    expect(cands[0].textContent).toContain("Most installed and it fits");
+    expect(cands[1].textContent).toContain("Rejected");
+    expect(d.textContent).toContain("landing pages");
+  });
+
+  it("the collapsed card's fold says how many skills the change touches", async () => {
+    h = mount(<AgentChangeView change={proposal()} onChange={() => {}} collapsed />);
+    await h.flush();
+    expect(q(h, "agent-change-fold")!.querySelector("summary")!.textContent).toContain("2 skills");
+  });
+
+  it("a record with no skills has no skills block (older boxes too)", async () => {
+    mountView(proposal({ skillsDiff: undefined, skillSearch: undefined }));
+    await h!.flush();
+    expect(q(h!, "agent-change-skills")).toBeNull();
+    h!.unmount();
+    mountView(proposal({ skillsDiff: [] }));
+    await h!.flush();
+    expect(q(h!, "agent-change-skills")).toBeNull();
+  });
+
+  it("a change that only touches skills still shows the diff block honestly: no change to the agent's file", async () => {
+    mountView(proposal());
+    await h!.flush();
+    expect(q(h!, "agent-change-nodiff")!.textContent).toContain("No visible change to the agent's file");
+  });
+});

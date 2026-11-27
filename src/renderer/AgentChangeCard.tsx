@@ -40,6 +40,8 @@ import {
 } from "./agentChange";
 import { isTemplateConflict, sizeLine } from "./agentTrial";
 import { ProblemBlock, TrialBlock } from "./TrialParts";
+import { SkillsDiffBlock } from "./SkillParts";
+import { skillsFoldPart } from "./agentSkills";
 
 type Notice = { tone: "ok" | "error"; text: string; state: AgentChange["state"] };
 
@@ -248,10 +250,11 @@ const plural = (n: number, one: string): string => `${n} ${n === 1 ? one : `${on
 
 /** The fold's label when the card is collapsed: "Show the change · 2 lines · based on 3 sources". */
 function foldLabel(change: AgentChange): string {
-  if (change.kind === "create") return "Show the new agent";
+  const skills = skillsFoldPart(change.skillsDiff);
+  if (change.kind === "create") return ["Show the new agent", ...(skills ? [skills] : [])].join(" · ");
   const lines = changedLineCount(change);
   const sources = change.evidence?.length ?? 0;
-  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
+  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(skills ? [skills] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
 }
 
 /**
@@ -369,6 +372,7 @@ export function AgentChangeView({
           {size}
         </div>
       )}
+      <SkillsDiffBlock change={change} />
       <SourceBlocks change={change} />
       {change.trial && <TrialBlock change={change} />}
       <EvidenceSection change={change} />
