@@ -279,8 +279,8 @@ The lead's `agent_change` (small dictated edits) is unchanged and needs no trial
 ### 4.2 Finding proven skills
 
 - **Research source `skills`** (built in, Architect only): runs the pinned `skills` CLI from a box-local install
-  (`npm install --prefix ~/.manta/tools/skills skills@1.9.1` on first use, then `node …/bin`), argv
-  `["find", query]`, no shell, `queryRefusal()` from `research/extra.mjs` first, 40 s timeout, ANSI stripped; parses
+  (the committed lockfile installed with `npm ci --ignore-scripts` into `~/.manta/tools/skills` on first use, then `node …/bin`), argv
+  `["find", "--", query]`, no shell, `queryRefusal()` from `research/extra.mjs` first, 40 s timeout, ANSI stripped; parses
   `owner/repo@skill`, installs and the skills.sh URL.
 - **The research engine records searches** (new): every `research_search` call stores `{ source, query, refs[] }` per
   child session (`research.searchesOf(childSessionID)`), refs = repo / URL ids it returned.

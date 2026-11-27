@@ -398,12 +398,14 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
   HEAD (`git ls-remote`, 5 repositories at most, asked once a day) and only when `ref` is a 40-character commit. A tag or a branch
   name can't be compared with where the upstream is now without a stored commit, so such a skill is never listed. The template
   tells the Architect to give a commit; resolving a tag to its commit at proposal time (one more network read) would close this.
-  The weekly check-up's fact sheet (PR D) reads the same `skillUpdatesFor(slug)`; it is not wired there yet.
+  The weekly check-up's fact sheet (PR D) reads the same `skillUpdatesFor(slug)` (it asks the network within the 10 s budget); it is not
+  wired there yet. The refresh brief reads the cache the sweep warms once a day, so the first refresh after a restart may carry nothing.
 - **Upstream diffs.** The brief says the upstream moved, not what changed in the skill's files (spec §11: "upstream skill diffs
   before an update").
-- **The `skills` source needs `npm` on the box's PATH the first time.** It installs `skills@1.9.1` under `~/.manta/tools/skills`
-  (`--ignore-scripts`); with no npm, or no network, the source answers with a fixed sentence and the Architect uses GitHub or
-  the web. The tool folder is not swept, and a box that never searches skills never installs it.
+- **The `skills` source needs `npm` on the box's PATH the first time.** It runs `npm ci --ignore-scripts` from the committed lockfile
+  (`src/server/research/skillsCli/`) into `~/.manta/tools/skills`; with no npm, or no network, the source answers with a fixed
+  sentence (and doesn't try again for 10 minutes) and the Architect uses GitHub or the web. Moving the pin = regenerate the lockfile
+  (`npm install --package-lock-only --ignore-scripts` in that folder) and bump `SKILLS_CLI_VERSION`. The tool folder is not swept.
 - **Searches are recorded per task session in `~/.manta/research/<session>/searches.json`** (last 200, swept with the sources).
   A `skillSearch` is checked against the searches of every round of the root task; extra (user-defined) sources record the query
   but no refs, so a candidate can't be justified by an extra source's result alone (it can by `skills_installed` or a base search).
