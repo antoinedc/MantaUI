@@ -24,6 +24,28 @@ What the file is made of; how to write it well is for your research to decide.
   agent's task prompt; don't write a research section into the file.
 - **Hard limits** are better as isolation than as prose: an agent that must not edit code is `isolation: none`.
 
+## Skills
+
+An agent's `skills/<name>/` folder holds method files it reads when it needs them.
+- **Files:** `SKILL.md` with frontmatter `name` (the folder name, 1–50 lowercase letters, digits and dashes) and `description`,
+  plus up to 20 text files in all (paths are relative, up to 4 folders deep). A skill is at most 256 KiB, an agent's skills at
+  most 1 MiB, and an agent has at most 15 skills.
+- **Draft:** `draft.skills` is a list of `{name, op, files?, provenance?}`. `op` is `add`, `replace` (the skill's whole folder is
+  swapped for the files you send) or `remove` (no files). Each file is `{path, content, origin, sourceId?}`; `origin` is `copied`
+  (text unchanged from a page you fetched, with that page's `sourceId`; at least 20 characters, never from a private source) or
+  `written` (yours). `SOURCE.md` and `LICENSE` are written by the server; don't send them.
+- **Provenance** (needed when any file is copied): `{url, sourceId, repo, ref, licence, taken, licenseSourceId?, registry?}` —
+  `url` is the address of the page `sourceId` was fetched from, `repo` is `owner/repo`, `ref` the commit (40 hex characters) or
+  tag, `taken` is `whole` or `part`, `registry` the installs / stars you saw, if any.
+- **Licences you may copy under:** MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1.0, CC-BY-4.0,
+  MPL-2.0 (the SPDX id). Any other, unknown or missing licence can't be copied: write your own and cite what you learned as
+  research. Every one of them except 0BSD, Unlicense and CC0-1.0 needs `licenseSourceId`, the source id of the fetched licence file.
+- **`skillSearch`** goes with an added skill: `{queries: [{source, query}], candidates: [{ref, installs, stars, licence, verdict,
+  why}]}`. Each query must be one you ran with `research_search` in this task; each candidate `ref` (`owner/repo@skill`,
+  `owner/repo`, an address, or an installed skill's name) must have appeared in a result or in `skills_installed`; `verdict` is
+  `used-whole`, `used-part` or `rejected`.
+- A skill change needs a trial like any change to the agent: the skill files are part of the draft that runs.
+
 ## Routing
 
 `use_when` decides whether Manta hands work to this agent; `not_for` sends near-misses elsewhere. Write both the way
@@ -36,8 +58,8 @@ Read its current file (in your brief) and its recent failures if given, then pas
 ## `agent_propose` fields
 
 - `action`: "create" or "update"; `agent` and `baseHash` (from the roster) for an update.
-- `draft`: the fields you change (for create: name, description, isolation, instructions, and the routing lines).
-  Instructions are the body only, without frontmatter.
+- `draft`: the fields you change (for create: name, description, isolation, instructions, and the routing lines), and `skills`.
+  Instructions are the body only, without frontmatter. A draft may change only its skills.
 - `summary` (≤ 600): what this changes and why, in plain words for the user.
 - `evidence` (1–12): `{sourceId, quote, claim}` — the quote copied exactly from the fetched text.
 - `admission` (≤ 40): `{rule, verdict, why}` for every candidate, including excluded ones. On an update, an item may add
@@ -48,7 +70,7 @@ Read its current file (in your brief) and its recent failures if given, then pas
   of your task was given; `statement` (≤ 300) is the problem; `shapes` are the 2–5 shapes you listed, each `{shape,
   wouldBuild}` (1–5 in a refresh or check-up round); `chosen` is the index of the one you picked; `why` (≤ 600). Refused
   when the words aren't in the request.
-- `trial`: `{trialId, verdicts}` — required for a new agent and for an update of instructions, isolation or model. It is the
+- `trial`: `{trialId, verdicts}` — required for a new agent and for an update of instructions, skills, isolation or model. It is the
   trial you ran on exactly this draft (`agent_trial`), with one verdict `{case, pass, quote, note}` per case: `quote` is
   20–300 characters copied exactly from what the agent did in that case, its messages or tool calls in the transcript (`agent_trial_read`), never the task text. Refused when the trial belongs to
   another task, ran on a different draft (the refusal names the files), has a case that didn't finish, lacks a verdict or

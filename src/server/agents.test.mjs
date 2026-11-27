@@ -1399,7 +1399,8 @@ test("guard: no agent-design advice is written into Manta's or the Architect's b
   // Architect v2: the Architect's own tools state mechanics (what is checked, what is limited), never what a good agent or a good test is
   const descriptionOf = (name) => {
     const at = tools.indexOf(`name: "${name}"`);
-    const text = tools.slice(at, tools.indexOf("input: input(", at));
+    const cuts = ["input: input(", "input: noInput("].map((c) => tools.indexOf(c, at)).filter((i) => i > at);
+    const text = tools.slice(at, Math.min(...cuts));
     assert.ok(at > 0 && text.length > 200, `found the ${name} description`);
     return text;
   };
@@ -1410,6 +1411,7 @@ test("guard: no agent-design advice is written into Manta's or the Architect's b
     "agent_trial tool description": descriptionOf("agent_trial"),
     "agent_trial_wait tool description": descriptionOf("agent_trial_wait"),
     "agent_trial_read tool description": descriptionOf("agent_trial_read"),
+    "skills_installed tool description": descriptionOf("skills_installed"),
     "manta/agent.md": await read("manta", "agent.md"),
     "architect/agent.md": await read("architect", "agent.md"),
     "architect authoring skill": await read("architect", "skills", "authoring", "SKILL.md"),
