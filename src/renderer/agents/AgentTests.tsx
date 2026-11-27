@@ -8,11 +8,9 @@ import { ChevronRight, FlaskConical } from "lucide-react";
 import type { AgentChange, AgentTrial } from "../../shared/types";
 import { Pill } from "../Pill";
 import { TrialCaseList } from "../TrialParts";
-import { trialCountLine, trialDate, trialRows, trialVerdictOf, verdictsFor } from "../agentTrial";
+import { TRIAL_SAFETY_NOTE, trialCountLine, trialDate, trialRows, trialVerdictOf, verdictsFor } from "../agentTrial";
 import { BlockTitle } from "./AgentsParts";
 import { Pane, PaneGroup, TwoColumn } from "./ProfileLayout";
-
-export const TRIAL_SAFETY_NOTE = "Runs on this box with the agent's permissions, minus secrets, publishing and sending.";
 
 function TrialRow({ trial, records, defaultOpen }: { trial: AgentTrial; records: ReadonlyArray<AgentChange> | null; defaultOpen: boolean }) {
   const verdict = trialVerdictOf(trial, records);

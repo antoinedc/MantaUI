@@ -554,7 +554,9 @@ describe("AgentProfile", () => {
       expect((rows[0].querySelector("details") as HTMLDetailsElement).open).toBe(true);
       expect(rows[1].querySelector('[data-testid="trial-row-verdict"]')?.textContent).toBe("passed");
       expect(rows[1].textContent).toContain("I checked the title tags first");
-      expect(p.querySelector('[data-testid="tests-about"]')?.textContent).toContain("Runs on this box with the agent's permissions, minus secrets, publishing and sending.");
+      expect(p.querySelector('[data-testid="tests-about"]')?.textContent).toContain(
+        "Runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy.",
+      );
       // a running case has no transcript yet; a finished one does
       const newCases = [...rows[0].querySelectorAll<HTMLElement>('[data-testid="trial-case"]')];
       expect(newCases.map((c) => [...c.querySelectorAll("button")].some((b) => b.textContent === "Transcript"))).toEqual([true, true, false]);

@@ -6,6 +6,10 @@
 
 import type { AgentChange, AgentTrial, TrialCaseResult, TrialVerdict } from "../shared/types";
 
+/** What a trial may do, in the words every surface that describes trials uses (§7). */
+export const TRIAL_SAFETY_NOTE =
+  "Runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy.";
+
 export type TrialCaseState = TrialCaseResult["state"];
 
 /** "should do it" / "should decline". */
