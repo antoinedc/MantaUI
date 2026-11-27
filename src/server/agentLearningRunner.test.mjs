@@ -133,6 +133,7 @@ test("signal 2: the user's next message in the chat after a result counts when t
   w.jobs.push({ id: "job2", rootJobId: "job1", continues: "job1", agent: "agent-dev", specialist: true, status: "done", createdAt: T0 + 3 * MIN, finishedAt: T0 + 6 * MIN, parentSessionID: "ses_chat", parentDirectory: "/proj/site", childSessionID: "ses_child2", requestedBy: "manta", result: "Reverted the lockfile." });
   w.messages.ses_child2 = [];
   w.answers.push(CAND({ rule: "Never edit the lockfile by hand.", quote: "never touch the lockfile by hand" }));
+  w.clock = T0 + 6 * MIN; // the continuation ended
   await learning.noteEnded(w.jobs[1]);
   w.clock = T0 + 6 * MIN + LEARN_DELAY_MS;
   await learning.runDue();
@@ -161,7 +162,7 @@ test("signal 2 also attributes a message to the EARLIER task when the same work 
 test("signal 3: an answer that typed the user's own text, or picked an option other than the recommended one, counts; the recommended pick doesn't", async () => {
   const q = (answer) => ({ id: "tq_1", state: "answered", answer, questions: [{ question: "Which style?", options: [{ label: "Tabs (Recommended)" }, { label: "Spaces" }], multiple: false }] });
   for (const [answer, quoted, expected] of [
-    [[["Spaces"]], "Spaces", true],
+    [[["Spaces"]], 'Picked "Spaces"', true],
     [[["we use two-space indentation everywhere"]], "two-space indentation everywhere", true],
     [[["Tabs (Recommended)"]], "Tabs (Recommended)", false],
   ]) {
