@@ -27,6 +27,7 @@ import {
   thriftyBannerText,
   KNOWLEDGE_WORK_TYPES,
   CTO_WORK_TYPES,
+  AGENT_WORK_TYPES,
   waitingBatchText,
   workTypeLabel,
 } from "./backgroundWorkFormat";
@@ -457,8 +458,9 @@ describe("work type lists", () => {
     const block = src.slice(src.indexOf("export const WORK_CLASS"), src.indexOf("export const WORK_TYPES"));
     const serverTypes = [...block.matchAll(/"([a-z-]+)":\s*CLASS\./g)].map((m) => m[1]).sort();
     expect(serverTypes.length).toBeGreaterThan(5);
-    expect([...KNOWLEDGE_WORK_TYPES, ...CTO_WORK_TYPES].sort()).toEqual(serverTypes);
-    expect(KNOWLEDGE_WORK_TYPES.filter((t) => CTO_WORK_TYPES.includes(t))).toEqual([]);
+    expect([...KNOWLEDGE_WORK_TYPES, ...CTO_WORK_TYPES, ...AGENT_WORK_TYPES].sort()).toEqual(serverTypes);
+    expect(KNOWLEDGE_WORK_TYPES.filter((t) => CTO_WORK_TYPES.includes(t) || AGENT_WORK_TYPES.includes(t))).toEqual([]);
+    expect(CTO_WORK_TYPES.filter((t) => AGENT_WORK_TYPES.includes(t))).toEqual([]);
   });
 });
 
