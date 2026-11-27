@@ -392,6 +392,26 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **A pending template update that nobody clicks expires after 24 h** like any change; the next boot offers it again
   (an expired record doesn't count for the dedupe).
 
+## From Architect v2 PR C (skills, 2026-11-27)
+
+- **"Upstream moved" only knows commits.** The refresh brief compares a copied skill's `provenance.ref` with the upstream repository's
+  HEAD (`git ls-remote`, 5 repositories at most, asked once a day) and only when `ref` is a 40-character commit. A tag or a branch
+  name can't be compared with where the upstream is now without a stored commit, so such a skill is never listed. The template
+  tells the Architect to give a commit; resolving a tag to its commit at proposal time (one more network read) would close this.
+  The weekly check-up's fact sheet (PR D) reads the same `skillUpdatesFor(slug)`; it is not wired there yet.
+- **Upstream diffs.** The brief says the upstream moved, not what changed in the skill's files (spec §11: "upstream skill diffs
+  before an update").
+- **The `skills` source needs `npm` on the box's PATH the first time.** It installs `skills@1.9.1` under `~/.manta/tools/skills`
+  (`--ignore-scripts`); with no npm, or no network, the source answers with a fixed sentence and the Architect uses GitHub or
+  the web. The tool folder is not swept, and a box that never searches skills never installs it.
+- **Searches are recorded per task session in `~/.manta/research/<session>/searches.json`** (last 200, swept with the sources).
+  A `skillSearch` is checked against the searches of every round of the root task; extra (user-defined) sources record the query
+  but no refs, so a candidate can't be justified by an extra source's result alone (it can by `skills_installed` or a base search).
+- **A removed skill's origin isn't shown on its card** (the record keeps what was removed, not where it came from).
+- **Skills are plain text only.** A skill folder that holds a binary or a non-UTF-8 file can't be replaced or snapshotted through
+  a proposal (the bundle is text); the agent's other files are untouched.
+- **Native OpenCode skill scoping per agent** (spec §8, §11) stays a spike: the compiled index still lists an agent's skills.
+
 ## Parallel work by the same agent
 
 - **Dispatch the same agent several times in parallel.** Today a chat runs at most one code-editing task of a teammate at a
