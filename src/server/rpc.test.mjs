@@ -176,6 +176,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     trial: rec("trial", { id: "tr_1", cases: [] }),
     trialTranscript: rec("trialTranscript", { text: "t", nextOffset: null }),
     changeFile: rec("changeFile", { before: null, after: "x" }),
+    learnedUndo: rec("learnedUndo", { id: "ach_9", state: "applied" }),
   };
   const handlers = buildHandlers(deps);
   assert.deepEqual(await handlers["agents:questions"]({ sessionID: "s" }), []);
@@ -197,6 +198,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
   assert.deepEqual(await handlers["agents:trial"]({ id: "tr_1" }), { id: "tr_1", cases: [] });
   assert.deepEqual(await handlers["agents:trial-transcript"]({ id: "tr_1", case: "main", offset: 20000 }), { text: "t", nextOffset: null });
   assert.deepEqual(await handlers["agents:change-file"]({ id: "ach_1", path: "skills/a/run.sh" }), { before: null, after: "x" });
+  assert.deepEqual(await handlers["agents:learned-undo"]({ slug: "dev", id: "lr_00000001" }), { id: "ach_9", state: "applied" });
   assert.deepEqual(seen, [
     ["questions", { sessionID: "s" }],
     ["questionAnswer", { id: "tq_1", answers: [["a"]] }],
@@ -217,6 +219,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     ["trial", { id: "tr_1" }],
     ["trialTranscript", { id: "tr_1", case: "main", offset: 20000 }],
     ["changeFile", { id: "ach_1", path: "skills/a/run.sh" }],
+    ["learnedUndo", { slug: "dev", id: "lr_00000001" }],
   ]);
   // a refusal passes through as its sentence; an unexpected failure never shows a path
   deps.agents.questionAnswer = async () => {

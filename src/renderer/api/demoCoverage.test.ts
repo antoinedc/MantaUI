@@ -65,6 +65,7 @@ export const DEMO_UNIMPLEMENTED = [
   "agentsFleet",
   "agentsFleetSeen",
   "agentsHistory",
+  "agentsLearnedUndo",
   "agentsList",
   "agentsNeedsYou",
   "agentsOpenChat",
