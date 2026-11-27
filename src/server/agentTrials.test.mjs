@@ -139,6 +139,14 @@ const until = async (cond, ms = 3000) => {
 };
 const quiet = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 
+/** Run a trial of a code-editing (worktree) agent and return the ruleset its case's session was created with. */
+async function worktreeAgentRules(f) {
+  f.w.plan = planFor({ meta: { name: "Dev", description: "d", isolation: "worktree", model: null, role: "specialist" } });
+  const { trialId } = await f.t.create(f.input());
+  await settle(f.t, trialId);
+  return f.w.created[0].permission;
+}
+
 const settle = async (t, id) => {
   const r = await t.wait({ sessionID: "ses_child", messageID: `msg_w${id}`, callID: `call_w${id}`, trialId: id });
   return r;
@@ -272,10 +280,7 @@ test("a worktree holding a link that leaves it is refused: the case fails, no se
 test("the ruleset: the agent's own task rules with no secrets, the never-kinds, the command and tool denies — all after the allows; the question tool is allowed", async () => {
   const f = await rig();
   try {
-    f.w.plan = planFor({ meta: { name: "Dev", description: "d", isolation: "worktree", model: null, role: "specialist" } });
-    const { trialId } = await f.t.create(f.input());
-    await settle(f.t, trialId);
-    const rules = f.w.created[0].permission;
+    const rules = await worktreeAgentRules(f);
     assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" }, "the catch-all deny is first");
     const last = (permission, pattern) => rules.findLast((r) => r.permission === permission && r.pattern === pattern);
     // an agent that works in a branch keeps its edit tools
@@ -673,10 +678,7 @@ const bashAction = (rules, cmd) => rules.findLast((r) => r.permission === "bash"
 test("the curl denies are anchored: a write flag is a denied argument of its own (first or later), a URL or word that merely contains one is a read", async () => {
   const f = await rig();
   try {
-    f.w.plan = planFor({ meta: { name: "Dev", description: "d", isolation: "worktree", model: null, role: "specialist" } });
-    const { trialId } = await f.t.create(f.input());
-    await settle(f.t, trialId);
-    const rules = f.w.created[0].permission;
+    const rules = await worktreeAgentRules(f);
     for (const cmd of [
       "curl https://x.com/api-docs",
       "curl -sSL https://example.com/docs-draft/index.html -o /tmp/page.html",
