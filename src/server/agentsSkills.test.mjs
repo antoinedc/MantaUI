@@ -1148,3 +1148,31 @@ test("L2: the recovery of a create refuses a link at skills/ or at skills/<name>
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// L3: skills_installed doesn't follow a link out of its folder
+// ---------------------------------------------------------------------------
+
+test("L3: skills_installed skips a skill folder that links outside its root and a SKILL.md that is a link; a link that stays inside is kept", async () => {
+  const f = await fixture();
+  try {
+    const root = join(f.base, "installed-skills");
+    const outside = join(f.base, "elsewhere", "stolen");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "SKILL.md"), "---\nname: stolen\ndescription: From somewhere else.\n---\nBody\n");
+    await symlink(outside, join(root, "linked-out"));
+    await symlink(join(root, "dev-helper"), join(root, "linked-in"));
+    await mkdir(join(root, "link-file"), { recursive: true });
+    await writeFile(join(f.base, "secret.txt"), "---\nname: secret\ndescription: A file that is not a skill.\n---\n");
+    await symlink(join(f.base, "secret.txt"), join(root, "link-file", "SKILL.md"));
+    const b = installedCall(7);
+    withInstalledTranscript(f, b);
+    const r = await f.engine.skillsInstalled(b);
+    assert.equal(r.ok, true, r.error);
+    const names = r.skills.filter((s) => s.owner === null).map((s) => s.folder.split("/").at(-1)).sort();
+    assert.deepEqual(names, ["dev-helper", "linked-in"]);
+    assert.ok(!r.skills.some((s) => s.name === "stolen" || s.name === "secret"));
+  } finally {
+    await f.cleanup();
+  }
+});

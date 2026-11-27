@@ -5021,7 +5021,7 @@ export function createAgentsEngine({
   async function readHead(file, max = SKILL_HEAD_BYTES) {
     let handle;
     try {
-      handle = await fs.open(file, "r");
+      handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); // the file itself is never a link
       const st = await handle.stat();
       if (!st.isFile()) return null;
       const buf = Buffer.alloc(Math.min(st.size, max));
@@ -5034,7 +5034,10 @@ export function createAgentsEngine({
     }
   }
 
-  /** The skills of one `skills/` folder: `{ name, description, folder, owner, provenance }` per folder with a SKILL.md. A link to a folder counts (read only). */
+  /**
+   * The skills of one `skills/` folder: `{ name, description, folder, owner, provenance }` per folder with a SKILL.md. A folder that is a
+   * link is followed only when it resolves to somewhere inside this very folder; a SKILL.md or SOURCE.md that is a link is not read.
+   */
   async function skillRowsIn(dir, owner) {
     let names;
     try {
@@ -5043,8 +5046,18 @@ export function createAgentsEngine({
       return [];
     }
     const rows = [];
+    let rootReal = null;
     for (const n of names) {
       const folder = join(dir, n);
+      try {
+        if ((await fs.lstat(folder)).isSymbolicLink()) {
+          rootReal ??= await fs.realpath(dir);
+          const real = await fs.realpath(folder);
+          if (real !== rootReal && !real.startsWith(`${rootReal}/`)) continue; // out of its root: not listed, not read
+        }
+      } catch {
+        continue;
+      }
       const head = await readHead(join(folder, "SKILL.md"));
       if (head === null) continue;
       const h = skillHeaderOf(head, n);
