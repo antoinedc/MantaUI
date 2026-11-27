@@ -409,6 +409,9 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **Searches are recorded per task session in `~/.manta/research/<session>/searches.json`** (last 200, swept with the sources).
   A `skillSearch` is checked against the searches of every round of the root task; extra (user-defined) sources record the query
   but no refs, so a candidate can't be justified by an extra source's result alone (it can by `skills_installed` or a base search).
+- **The script review is a model reading text.** It catches clearly harmful scripts, not subtle ones; Undo removes the skill, not what a
+  script already did. A real sandbox run of copied scripts (a throwaway VM) would be the next step, with the trials' VM item.
+- **The review's model pair is fixed** (opus ↔ sonnet, spec §4.1): a box with neither approved gets a verdict of `error` and a click.
 - **A removed skill's origin isn't shown on its card** (the record keeps what was removed, not where it came from).
 - **Skills are plain text only.** A skill folder that holds a binary or a non-UTF-8 file can't be replaced or snapshotted through
   a proposal (the bundle is text); the agent's other files are untouched.

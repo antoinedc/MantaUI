@@ -54,8 +54,9 @@ An agent's `skills/<name>/` folder holds method files it reads when it needs the
   `used-whole`, `used-part` or `rejected`.
 - A skill change needs a trial like any change to the agent: the skill files are part of the draft that runs.
 - A skill with a script (`.sh`, `.py`, `.js`, `.mjs`, `.ts`, `.rb`, `.pl`, `.ps1`, `.bat`, `.cmd`, or a file starting with `#!`), copied or
-  written, always waits for the user's click, whatever their setting; the card flags the script and the user opens it before applying.
-  A skill of text only follows the user's setting.
+  written, is read first by an independent check: another model, no tools, seeing only the scripts, the SKILL.md, the origin and the agent's
+  name and description (never your transcript or the pages you read). A clean verdict lets the change follow the user's setting; a flagged
+  one, or a check that couldn't run, waits for the user's click. A skill of text only is not checked.
 
 ## Routing
 
