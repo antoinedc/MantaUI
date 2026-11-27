@@ -11,7 +11,7 @@
 // quote against the sources it fetched, and holds the proposal until the task ends.
 
 // Architect v2 Stage 1 (docs/superpowers/specs/2026-11-27-architect-v2.md §3): `agent_propose` also carries the problem it answers and
-// the trial it ran; `agent_trial`, `agent_trial_wait` and `agent_trial_read` run a draft on sample tasks in a throwaway copy of a project.
+// the trial it ran; `agent_trial`, `agent_trial_wait` and `agent_trial_read` run a draft on sample tasks in a private copy of a project.
 // Descriptions state mechanics only: what is checked, what is limited. What makes an agent good comes from the Architect's research.
 
 import { call } from "../lib/server.ts";
@@ -279,11 +279,11 @@ export const tools: ToolDef[] = [
   {
     name: "agent_trial",
     description: [
-      "Run a drafted agent on 1 to 3 sample tasks in a throwaway copy of a project before you propose it — only inside a task Manta handed you (you are the Architect).",
+      "Run a drafted agent on 1 to 3 sample tasks in a private copy of the project before you propose it — only inside a task Manta handed you (you are the Architect).",
       "The draft is what you would pass to agent_propose (a create needs name, description, isolation and instructions; an update takes the fields that change, with the baseHash of the file you read).",
       "Returns a trialId and the draft's hash at once; the cases run in the background, at most 2 at a time on the box (agent_trial_wait waits for them, agent_trial_read reads each transcript).",
-      "At most 3 cases per trial, 3 trials per agent and 6 per task. Each case runs with the agent's own permissions minus secrets, publishing and sending, for at most 15 minutes, with no user: a question it asks is answered with a fixed sentence and noted.",
-      "A case has a name, a task, whether the agent should do it or decline it, what to check, and optionally a project (its id) to copy; without one, the agent's first project, else an empty folder.",
+      "At most 3 cases per trial, 3 trials per agent and 6 per task. Each case runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy, for at most 15 minutes, with no user: a question it asks is answered with a fixed sentence and noted. An agent that needs commands gets a partial test: a refused command shows in the case record.",
+      "A case has a name, a task, whether the agent should do it or decline it, what to check, and optionally a project (its id) to copy, one of the agent's own projects or the project this task is in; without one, the agent's first project, else an empty folder.",
     ].join(" "),
     // optional keys LAST: an optional key before a required one is silently dropped by strict tool schemas
     input: input(

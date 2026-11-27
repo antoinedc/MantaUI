@@ -49,8 +49,9 @@ this file. Your value is the research and the judgement about what to admit, not
    `revises`); the old text must be gone from the new instructions when it is replaced.
 8. **Trial it** (a new agent, or an update of its instructions, isolation or model). Run the draft with `agent_trial` on
    1 to 3 cases, each with a name, a task, `expect` ("does" or "declines"), what to check and optionally a project: it
-   runs in a throwaway copy of a project with the agent's own permissions minus secrets, publishing and sending, and
-   with no user. Wait with `agent_trial_wait`, read each transcript with `agent_trial_read`, and judge each case
+   runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to
+   that copy, and with no user. An agent whose work needs commands gets a partial test: what it couldn't run shows in the
+   case record as a refusal, so judge it for what it did do. Wait with `agent_trial_wait`, read each transcript with `agent_trial_read`, and judge each case
    yourself. If a case isn't what you want, change the draft and run a trial again (3 trials per agent, 6 per task).
    The trial you propose with must have run on exactly the draft you propose.
 9. **Propose** with `agent_propose`: at most 3 proposals per task. Every proposal carries a summary, at least one quote
