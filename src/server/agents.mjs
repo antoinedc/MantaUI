@@ -56,6 +56,14 @@ export { isTeamAgent };
 // The delegate cap's own sentence tells a generic caller to "do this work yourself"; the lead must not.
 export const HANDOFF_BUSY =
   "All background slots on this box are busy right now. Do not retry and do not do the work yourself: tell the user, and offer to hand it off again once a running task finishes.";
+/**
+ * Added to every refusal of a handoff to the Architect, so the lead tells the user instead of quietly doing the Architect's
+ * job itself with `agent_change` (no research, no fit check, no evidence).
+ */
+export const ARCHITECT_NOT_STARTED =
+  "The Architect did not start. Tell the user plainly that it didn't start and why, and do not create or change the agent yourself with `agent_change` in this turn.";
+const withArchitectNote = (error) => `${String(error).replace(/[.\s]+$/, "")}. ${ARCHITECT_NOT_STARTED}`;
+
 const handoffError = (error, fallback) => (error === CAP_ERROR ? HANDOFF_BUSY : error || fallback);
 const CONSUMED_MAX = 1000; // handoff invocations remembered, so a replayed tool call is refused
 const EXCERPT_FETCH = 60; // messages read to find EXCERPT_MESSAGES with text in them
@@ -708,7 +716,7 @@ const MECHANICS = [
   `- When a result carries a "${DECISION_MARKER}" block (written by the server), that task ended because it needs the user's decision. Put it to the user yourself in ONE question call, all the questions of that turn at once, with the recommended option first, using the block's options; if it says "Concern:", state that concern plainly. Never answer it on the user's behalf, and don't pick an option because you agree. Once the user answers, send the answer back to the same task with \`agent_handoff\` and \`continueJob: <jobId>\`.`,
   "- A teammate's question is shown to the user as a card in this chat; never ask it again or answer it. The server sends the answer to the task.",
   "- In plan mode, don't hand off code changes; propose them.",
-  "- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself for small edits the user dictates, or when @architect isn't on the team; don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards. When you draft an agent yourself, write what the user asked for; make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
+  "- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself only for small edits the user dictates, or when @architect is not on the team; never because a handoff to @architect was refused: then tell the user plainly that it didn't start and why, and stop. Don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards. When you draft an agent yourself, write what the user asked for; make it read-only unless it must change code; leave the model empty (Auto) unless the user named one. Only say an agent exists once the tool says it was created.",
   "- When a \"Routing note\" line in your team section says an agent's routing line mentions an agent that doesn't exist, tell the user in one line and offer to fix it: a small edit they dictate (`agent_change`), or a rework through @architect. Never change an agent until the user says so.",
   "- When @architect's result arrives it ends with `Outcome:` lines written by the server, one per proposal. Report each as it says (live, waiting for a click, or discarded); never say a change needs approval or isn't live yet unless an Outcome line says so. With no Outcome line, say you don't know yet and point to the card.",
 ].join("\n");
@@ -1288,6 +1296,14 @@ export function createAgentsEngine({
     }
   }
 
+  /**
+   * The folder a task started from a chat in `directory` runs in. The Architect is read-only and edits no code, so a chat
+   * inside Manta's own folders (Manta's direct chat lives in ~/.manta/agents/manta/home) starts it in the box user's home
+   * instead — the neutral folder `refresh` uses; the requesting chat is still the parent, so the result comes back there.
+   * Every other agent keeps the chat's folder (a code-editing one must never run under ~/.manta; the engine refuses that).
+   */
+  const taskFolderFor = (agent, directory) => (isArchitect(agent) && autonomy.isInsideMantaFolders(resolvePath(directory), home) ? home : directory);
+
   /** Where `agent` works for a task started in `directory`: its own isolation, a non-git folder falls back to read-only. */
   async function effectiveIsolation(agent, directory) {
     return agent.meta.isolation === "worktree" && !(await isGitRepo(directory)) ? "none" : agent.meta.isolation;
@@ -1355,21 +1371,22 @@ export function createAgentsEngine({
     if (!directory) throw new AgentError("This chat has no folder to start the task in");
     await delegateView?.assertWritable(sessionId);
 
-    const isolation = await effectiveIsolation(agent, directory);
+    const taskDirectory = taskFolderFor(agent, directory);
+    const isolation = await effectiveIsolation(agent, taskDirectory);
     // the user's own @mention: only "Code changes: Never" can refuse it (handoff governs Manta's automatic ones)
     const refusal = await autonomyRefusal({ writer: isolation === "worktree" });
     if (refusal) throw new AgentError(refusal);
 
     // a task in a project the agent has no seat in seats it there (said on the task card); the request text is never modified
     const seated = await ensureSeat(agent, directory, "mention");
-    const seat = await seatFor(agent, directory);
+    const seat = await seatFor(agent, taskDirectory);
     const excerpt = await excerptFor(sessionId);
     const architect = isArchitect(agent);
 
     const res = await delegate.startJob({
       prompt: withResearchGuidance(buildDispatchPrompt({ text, seat, excerpt })) + (architect ? await architectContextFor(text) : ""),
       parentSessionID: sessionId,
-      parentDirectory: directory,
+      parentDirectory: taskDirectory,
       agent: agentKey(slug),
       agentDir: agent.dir,
       isolation,
@@ -1522,7 +1539,9 @@ export function createAgentsEngine({
       brief: typeof input?.brief === "string" ? input.brief : "",
       continueJob: typeof input?.continueJob === "string" ? input.continueJob : "",
     };
-    const refuse = (error) => ({ ok: false, error });
+    // a refusal of a handoff to the Architect carries the "don't fall back" sentence (set once the agent is known)
+    let architectNote = false;
+    const refuse = (error) => ({ ok: false, error: architectNote ? withArchitectNote(error) : error });
     const NOT_LEAD = "Only the lead can hand off work";
 
     // 1. the caller binding
@@ -1540,6 +1559,8 @@ export function createAgentsEngine({
     if (!directory) return refuse("This chat has no folder to start the task in");
 
     const slug = b.agent.replace(/^@/, "").toLowerCase();
+    const agent = await find(slug);
+    architectNote = isArchitect(agent);
 
     // continueJob: validated FIRST — its stored isolation drives the plan gate and admission
     let stored = null;
@@ -1558,7 +1579,6 @@ export function createAgentsEngine({
     }
 
     // 4 (resolved early: the writer test needs the agent's isolation). Refusals keep the spec's order below.
-    const agent = await find(slug);
     const writerIfNew = agent && agent.info.role !== "lead" ? (await effectiveIsolation(agent, directory)) === "worktree" : false;
     const storedIsolation = stored ? (stored.isolation ?? (stored.worktree ? "worktree" : "none")) : null;
     const writer = stored ? storedIsolation === "worktree" : writerIfNew;
@@ -1614,12 +1634,13 @@ export function createAgentsEngine({
     }
 
     const seated = await ensureSeat(agent, directory, "handoff");
-    const seat = await seatFor(agent, directory);
+    const taskDirectory = taskFolderFor(agent, directory);
+    const seat = await seatFor(agent, taskDirectory);
     const excerpt = await excerptFor(b.sessionID);
     const job = {
       prompt: withResearchGuidance(buildDispatchPrompt({ text: b.brief.trim(), seat, excerpt })) + (architect ? await architectContextFor(b.brief) : ""),
       parentSessionID: b.sessionID,
-      parentDirectory: directory,
+      parentDirectory: taskDirectory,
       agent: agentKey(slug),
       agentDir: agent.dir,
       isolation: writerIfNew ? "worktree" : "none",
