@@ -1284,6 +1284,38 @@ test("release of a routine round (refresh / check-up): the user's level decides 
   }
 });
 
+test("a proposal can fold a learned rule into the instructions (replaces: lr_…): the rule is retired in the same change; an id that isn't the agent's is refused", async () => {
+  const f = await proposeFixture();
+  try {
+    const learned = await f.engine.learnedWrite({ slug: "dev", scope: "site", rule: { rule: "Always run the tests before committing.", why: "They said so.", whyIsInferred: false, quote: "always run the tests before you commit", sourceJobId: "job0" } });
+    assert.equal(learned.ok, true, learned.error);
+    const id = learned.change.learned.added.id;
+    // an id of no rule of Dev's, and a rule of another agent
+    const other = await f.engine.learnedWrite({ slug: "architect", scope: "_all", rule: { rule: "Cite the page you read.", why: "w", whyIsInferred: false, quote: "always cite the page you read", sourceJobId: null } });
+    for (const bad of ["lr_ffffffff", other.change.learned.added.id]) {
+      const r = await propose(f, { admission: [{ rule: "Run the tests", verdict: "general", why: "w", replaces: bad }] });
+      assert.equal(r.ok, false, bad);
+      assert.match(r.error, /isn't one of @dev's learned rules/);
+    }
+    const r = await propose(f, { admission: [{ rule: "Run the tests", verdict: "general", why: "It was a learned rule; now it is policy", replaces: id }] });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.change.learned, { foldedIds: [id] });
+    assert.equal((await f.engine.learnedRules("dev")).length, 1, "still there while the proposal is held");
+    endJob(f, { status: "done" });
+    await f.engine.reconcile();
+    const applied = await rec(f, r.change.id);
+    assert.equal(applied.state, "applied", applied.error);
+    assert.deepEqual(await f.engine.learnedRules("dev"), [], "retired with the change");
+    assert.match(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), /always run the tests/);
+    // Undo puts the instructions and the rule back together
+    const undone = await f.engine.undo(r.change.id);
+    assert.equal(undone.state, "undone");
+    assert.equal((await f.engine.learnedRules("dev")).length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // every proposal the default fixture makes rests on these two library entries
 const BASED_ON = " Based on: CRO copywriting (4 sources, saved 2 days ago); How an agent fits the team (3 sources, saved 5 days ago).";
 

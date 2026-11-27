@@ -3506,13 +3506,18 @@ export function createAgentsEngine({
   const bodyOf = (text) => (parseAgentMd(text ?? "").body ?? "").toString();
 
   /** A sentence refusing an admission item whose `replaces` / `revises` quote doesn't fit the current and the new instructions, or null. */
-  function checkReplacements(admission, plan) {
+  function checkReplacements(admission, plan, learnedIds = new Set()) {
     const named = admission.filter((a) => a.replaces || a.revises);
     if (named.length === 0) return null;
     if (plan.kind === "create") return "A new agent has nothing to replace or revise: leave replaces and revises out";
     const before = wsNorm(bodyOf(plan.before));
     const after = wsNorm(bodyOf(plan.after));
     for (const a of named) {
+      // a learned rule folded into the instructions (§3.2): it must be one of this agent's, and is retired when the change is applied
+      if (a.replaces && LEARNED_ID_RE.test(a.replaces)) {
+        if (!learnedIds.has(a.replaces)) return `${a.replaces} isn't one of @${plan.slug}'s learned rules`;
+        continue;
+      }
       const quote = wsNorm(a.replaces ?? a.revises);
       if (!before.includes(quote)) return `"${quote.slice(0, 60)}${quote.length > 60 ? "…" : ""}" isn't in the current instructions`;
       if (a.replaces && after.includes(quote)) return "the rule you replace is still in the new text";
@@ -3833,8 +3838,22 @@ export function createAgentsEngine({
             return { error: `@${plan.slug} changed since you read it (hash ${plan.hash} now, not ${given}); redo the work against the current text`, current: { text: plan.before, hash: plan.hash } };
           }
         }
-        const replaceRefusal = checkReplacements(env.admission, plan);
+        // learned rules this proposal folds into the instructions: retired in the same change (Undo brings both back)
+        const foldIds = [...new Set(env.admission.map((a) => a.replaces).filter((r) => typeof r === "string" && LEARNED_ID_RE.test(r)))];
+        const learnedFiles = plan.kind === "update" && foldIds.length > 0 ? await readLearnedFiles(plan.slug) : {};
+        const replaceRefusal = checkReplacements(env.admission, plan, new Set(Object.values(learnedFiles).flat().filter((r) => !r.archived).map((r) => r.id)));
         if (replaceRefusal) return { error: replaceRefusal };
+        let foldMap = null;
+        if (foldIds.length > 0) {
+          let cur = learnedFiles;
+          const changed = {};
+          for (const id of foldIds) {
+            const step = planLearned(cur, { type: "remove", id });
+            cur = { ...cur, ...step.changed };
+            Object.assign(changed, step.changed);
+          }
+          foldMap = learnedFileMap(changed);
+        }
         // a trial on exactly this draft, when the change touches what one covers (a new agent; instructions, isolation or model)
         let trial = null;
         if (trialRequired(plan, !!drafted.skills) || raw.trial !== undefined) {
@@ -3877,8 +3896,9 @@ export function createAgentsEngine({
           sizeAfter: bodyOf(plan.after).length,
           ...(drafted.skills ? { skillsDiff: drafted.skills.diff } : {}),
           ...(skillSearch ? { skillSearch } : {}),
+          ...(foldIds.length > 0 ? { learned: { foldedIds: foldIds } } : {}),
         });
-        if (made.kind === "update") await attachBundles(made, folderOf(made.slug), drafted.skills?.files ?? null);
+        if (made.kind === "update") await attachBundles(made, folderOf(made.slug), drafted.skills?.files ?? null, foldMap);
         else if (drafted.skills) await attachCreateBundle(made, drafted.skills.files);
         await saveRecord(made, { slots: { ...store.slots, [stamp.rootJobId]: used + 1 } });
         return { rec: made, used: used + 1 };
