@@ -54,6 +54,9 @@ describe("chip, title, reason, buttons", () => {
     expect(agentChangeTitle({ kind: "create", agentName: "Reviewer" })).toBe("New agent: Reviewer");
     expect(agentChangeTitle({ kind: "update", agentName: "Dev" })).toBe("Change to Dev");
     expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "template-update", templateHash: "h" } })).toBe("Built-in update: Dev");
+    expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "learned" } })).toBe("Learned by Dev");
+    expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "learned" }, learned: { removedId: "lr_00000001" } })).toBe("Dev forgot a preference");
+    expect(changeAuthor({ origin: { kind: "learned" } })).toBe("Manta");
   });
 
   it("gives a reason line only for a change that raises power", () => {

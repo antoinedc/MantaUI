@@ -139,6 +139,12 @@ describe("tabs", () => {
     expect(profileTabs({ trials: [{}] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "tests"]);
     expect(nextTab("history", "ArrowRight", profileTabs({ trials: [{}] }).map((t) => t.id))).toBe("tests");
   });
+  it("adds Learned (before Tests) when the box sends the agent's learned rules, even none — but never for the lead, and not for an older box", () => {
+    expect(profileTabs({ learned: [] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "learned"]);
+    expect(profileTabs({ learned: [{}], trials: [{}] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "learned", "tests"]);
+    expect(profileTabs({ learned: [], info: { role: "lead" } }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+    expect(profileTabs({ info: { role: "specialist" } }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+  });
 });
 
 describe("factsLine / detailRows / firstLine", () => {
@@ -191,6 +197,7 @@ describe("factsLine / detailRows / firstLine", () => {
 describe("history rows", () => {
   it("who: Manta for you (chat), Architect (job), You (restore)", () => {
     expect(historyWho(change({ origin: { kind: "chat" } }))).toBe("Manta · for you");
+    expect(historyWho(change({ origin: { kind: "learned" } }))).toBe("Manta · learned from you");
     expect(historyWho(change({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } }))).toBe("Architect");
     expect(historyWho(change({ origin: { kind: "restore", fromChangeId: "x" } }))).toBe("You");
   });
