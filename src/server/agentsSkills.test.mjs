@@ -1090,6 +1090,40 @@ test("review flagged: the record waits for a click whatever the level, with the 
   }
 });
 
+test("a routine round (the check-up, the refresh) with a script still goes through the independent review first: clean follows the user's level, flagged waits", async () => {
+  const routine = (f) => {
+    f.w.jobs[0] = { ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, mode: "routine" } };
+  };
+  const f = await fixture();
+  try {
+    routine(f);
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    assert.equal((await lastRec(f)).mode, "routine");
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "done" };
+    await f.engine.reconcile(); // the verdict is in (the review ran at the proposal): clean, Auto: it goes live
+    await f.engine.settleScriptReviews();
+    const rec = await lastRec(f);
+    assert.equal(rec.scriptReview.verdict, "clean");
+    assert.equal(rec.state, "applied", rec.error);
+    assert.equal(rec.decidedBy, "auto");
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture();
+  try {
+    routine(g);
+    g.w.review = async () => ({ ok: true, text: FLAGGED });
+    await propose(g, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    await release(g);
+    const rec = await lastRec(g);
+    assert.equal(rec.state, "pending");
+    assert.equal(rec.reason, "script-flagged", "the existing reason: a routine round adds none of its own");
+    assert.equal(await ok(skillFile(g, "landing-audit")), false);
+  } finally {
+    await g.cleanup();
+  }
+});
+
 test("review failed, timed out or unreadable: the record waits for a click (fail closed) and says the check couldn't run", async () => {
   const cases = {
     timeout: async () => ({ ok: false, code: "timeout", text: "" }),
