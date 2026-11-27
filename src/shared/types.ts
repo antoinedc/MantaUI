@@ -4471,6 +4471,8 @@ export interface AgentProfile {
   builtBy: "architect" | "manta" | "user" | "built-in";
   refresh: { enabled: boolean; routineId: string | null }; // enabled defaults to true (provisioned on sync)
   research: AgentResearchEntry[];
+  /** Architect v2 §3.4: the agent's trial runs, newest first (≤ 20). Absent on an older box. */
+  trials?: AgentTrial[];
 }
 export interface FleetCell {
   jobId: string;

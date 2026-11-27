@@ -4139,3 +4139,22 @@ test("deliverToTask: a child with a handoff pending is never steered into — th
   assert.equal(w.job(id).continueAfter, true);
   assert.deepEqual(await deliverToTask(id, "x", { steerOnly: true }, w.deps), { delivery: "none" });
 });
+
+// ---- Architect v2 §3.4: a label the server sets on a running round ("Trial running · case 2 of 3") ----
+import { setJobLabel } from "./delegate.mjs";
+
+test("setJobLabel: sets a running round's label; null clears only a label with the given prefix; a finished round is left alone", async () => {
+  const w = world();
+  const id = await start(w);
+  assert.equal(await setJobLabel(id, "Trial running · case 1 of 2", {}, w.deps), true);
+  assert.equal(w.job(id).jobProgress.label, "Trial running · case 1 of 2");
+  assert.equal(typeof w.job(id).jobProgress.labelAt, "number");
+  assert.equal(await setJobLabel(id, null, { clearPrefix: "Trial running · " }, w.deps), true);
+  assert.equal(w.job(id).jobProgress.label, "");
+  // the model's own report since then is kept
+  w.jobs.find((j) => j.id === id).jobProgress.label = "Writing the draft";
+  assert.equal(await setJobLabel(id, null, { clearPrefix: "Trial running · " }, w.deps), false);
+  assert.equal(w.job(id).jobProgress.label, "Writing the draft");
+  await finishPlain(w, id);
+  assert.equal(await setJobLabel(id, "Trial running · case 2 of 2", {}, w.deps), false, "not on a finished round");
+});

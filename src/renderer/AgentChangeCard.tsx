@@ -38,6 +38,8 @@ import {
   type AgentChangeAction,
   type DiffRow,
 } from "./agentChange";
+import { isTemplateConflict, sizeLine } from "./agentTrial";
+import { ProblemBlock, TrialBlock } from "./TrialParts";
 
 type Notice = { tone: "ok" | "error"; text: string; state: AgentChange["state"] };
 
@@ -338,6 +340,11 @@ export function AgentChangeView({
           {reason}
         </div>
       )}
+      {isTemplateConflict(change) && (
+        <div className="text-warn break-words" data-testid="agent-change-conflict">
+          Conflict: your edits and the new built-in version change the same part, so it waits for your click.
+        </div>
+      )}
       {change.state === "held" && (
         <div className="text-text-muted" data-testid="agent-change-held">
           The Architect is still working
@@ -351,12 +358,21 @@ export function AgentChangeView({
       )}
     </>
   );
+  const size = sizeLine(change);
+  // Architect v2 §3.4: the problem first, then the change and its size, the trial, then what it rests on
   const detail = (
     <>
+      {change.problem && <ProblemBlock problem={change.problem} />}
+      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
+      {size && (
+        <div className="text-text-muted" data-testid="agent-change-size">
+          {size}
+        </div>
+      )}
+      <SourceBlocks change={change} />
+      {change.trial && <TrialBlock change={change} />}
       <EvidenceSection change={change} />
       <AdmissionSection change={change} />
-      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
-      <SourceBlocks change={change} />
     </>
   );
   const outcome = (

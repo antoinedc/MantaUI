@@ -257,7 +257,7 @@ import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
-import { createAgentTrials } from "./agentTrials.mjs";
+import { createAgentTrials, TRIAL_PROGRESS_PREFIX } from "./agentTrials.mjs";
 import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
 import { createSecretScanner } from "./knowledge/secretScan.mjs";
 import { createTaskQuestions } from "./taskQuestions.mjs";
@@ -2678,6 +2678,8 @@ const agentTrials = createAgentTrials({
   },
   scanSymlinks: scanTrialSymlinks,
   redact: (text) => trialScanner.redact(text),
+  // "Trial running · case 2 of 3" on the Architect's task card while a case runs; cleared when the trial ends
+  progress: (jobId, label) => delegateEngine.setJobLabel(jobId, label, { clearPrefix: TRIAL_PROGRESS_PREFIX }),
 });
 const agentsEngine = createAgentsEngine({
   trials: agentTrials,

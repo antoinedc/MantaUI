@@ -55,6 +55,9 @@ export const READ_WINDOW = 20_000;
 export const KEEP_MS = 30 * 24 * 3600 * 1000;
 export const TRANSCRIPT_MAX = 200_000;
 export const WORK_TYPE = "agent-trial";
+/** The Architect task card's headline while a case of its trial runs (§3.4); clearing only removes a label with this prefix. */
+export const TRIAL_PROGRESS_PREFIX = "Trial running · ";
+export const trialProgressLabel = (idx, total) => `${TRIAL_PROGRESS_PREFIX}case ${idx + 1} of ${total}`;
 export const TRIAL_AUTO_ANSWER = "This is a test run with no user: continue on your best assumption and say what you assumed";
 
 export const TRIAL_BLOCK_DESCRIPTION = "Test run of a draft agent (not for use)";
@@ -249,6 +252,8 @@ export function createAgentTrials({
   caseTimeoutMs = CASE_TIMEOUT_MS,
   waitMs = WAIT_MS,
   log = console,
+  // the Architect's task card: `progress(jobId, label)` sets its headline, `progress(jobId, null)` clears ours (delegate's setJobLabel)
+  progress = async () => {},
 } = {}) {
   const trialsRoot = join(root, TRIALS_DIR);
   const trials = new Map(); // id → trial (see `create`)
@@ -423,6 +428,7 @@ export function createAgentTrials({
       const outcome = new Promise((resolve) => bySession.set(sessionId, { trial: t, idx, resolve }));
       c.state = "running";
       await writeState(t);
+      if (t.jobId) await safelyAsync(() => progress(t.jobId, trialProgressLabel(idx, t.cases.length)));
       try {
         await oc.createSession({
           id: sessionId,
@@ -503,6 +509,7 @@ export function createAgentTrials({
       delete c.agentTranscript;
     }
     await dropBlock(t);
+    if (t.jobId) await safelyAsync(() => progress(t.jobId, null));
     await safelyAsync(async () => {
       for (const n of await fs.readdir(dirOf(t.id))) if (n !== RESULT_FILE) await fs.rm(join(dirOf(t.id), n), { recursive: true, force: true });
     });

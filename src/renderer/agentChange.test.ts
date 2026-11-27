@@ -14,6 +14,7 @@ import {
   isAgentChangePart,
   parseAgentMdView,
   verdictLabel,
+  changeAuthor,
 } from "./agentChange";
 
 describe("isAgentChangePart", () => {
@@ -52,6 +53,7 @@ describe("chip, title, reason, buttons", () => {
   it("titles a create and an update", () => {
     expect(agentChangeTitle({ kind: "create", agentName: "Reviewer" })).toBe("New agent: Reviewer");
     expect(agentChangeTitle({ kind: "update", agentName: "Dev" })).toBe("Change to Dev");
+    expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "template-update", templateHash: "h" } })).toBe("Built-in update: Dev");
   });
 
   it("gives a reason line only for a change that raises power", () => {
@@ -232,5 +234,14 @@ describe("architectSourceBlocks (the Architect card's source blocks)", () => {
   it("text that can't be read has no blocks", () => {
     expect(architectSourceBlocks(null, "no frontmatter")).toEqual([]);
     expect(architectSourceBlocks("x", null as never)).toEqual([]);
+  });
+});
+
+describe("changeAuthor", () => {
+  it("names who made the change: the Architect, you, a shipped built-in version, else Manta", () => {
+    expect(changeAuthor({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } })).toBe("Architect");
+    expect(changeAuthor({ origin: { kind: "restore", fromChangeId: "x" } })).toBe("You");
+    expect(changeAuthor({ origin: { kind: "template-update", templateHash: "h" } })).toBe("Built-in update");
+    expect(changeAuthor({ origin: { kind: "chat" } })).toBe("Manta");
   });
 });

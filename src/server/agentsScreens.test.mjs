@@ -1120,3 +1120,18 @@ test("lead brief: a teammate's question is shown by the app and never asked agai
   assert.match(brief, /A teammate's question is shown to the user as a card in this chat; never ask it again or answer it\. The server sends the answer to the task\./);
   assert.match(brief, new RegExp(DECISION_MARKER));
 });
+
+test("profile: the Tests tab reads this agent's trials from the trials module; none without one", async () => {
+  const trial = { id: "tr_ab", rootJobId: "job_1", agentSlug: "dev", draftHash: "h", createdAt: T0, cases: [] };
+  const asked = [];
+  const f = await fixture({ extra: { trials: { list: (slug) => (asked.push(slug), slug === "dev" ? [trial] : []) } } });
+  try {
+    await f.engine.init();
+    assert.deepEqual((await f.engine.profile("dev")).trials, [trial]);
+    assert.deepEqual((await f.engine.profile("manta")).trials, []);
+    assert.deepEqual(asked, ["dev", "manta"]);
+    assert.deepEqual((await f.make().profile("dev")).trials, [], "no trials module: an empty list");
+  } finally {
+    await f.cleanup();
+  }
+});

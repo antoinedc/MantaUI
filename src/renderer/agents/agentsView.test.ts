@@ -19,6 +19,7 @@ import {
   nextTab,
   planUsagePercent,
   PROFILE_TABS,
+  profileTabs,
   researchHealth,
   recapLead,
   reviewPart,
@@ -131,6 +132,12 @@ describe("tabs", () => {
     expect(nextTab("seats", "Home", ids)).toBe("overview");
     expect(nextTab("seats", "End", ids)).toBe("history");
     expect(nextTab("seats", "Enter", ids)).toBeNull();
+  });
+  it("adds Tests last only when the agent has trial runs (an older box sends none)", () => {
+    expect(profileTabs({}).map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+    expect(profileTabs({ trials: [] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+    expect(profileTabs({ trials: [{}] }).map((t) => t.id)).toEqual(["overview", "research", "seats", "history", "tests"]);
+    expect(nextTab("history", "ArrowRight", profileTabs({ trials: [{}] }).map((t) => t.id))).toBe("tests");
   });
 });
 

@@ -521,4 +521,59 @@ describe("AgentProfile", () => {
       expect(api.calls.agentsProfile.length).toBeGreaterThan(before);
     });
   });
+
+  // Architect v2 §3.4: the Tests tab
+  describe("Tests tab", () => {
+    const kase = (name: string, over: Record<string, unknown> = {}) => ({ name, expect: "does" as const, state: "done" as const, finalAnswer: null, tools: [], filesChanged: 0, refused: [], wouldAsk: [], durationMs: 5, ...over });
+    const trials = [
+      { id: "tr_old", rootJobId: "job0", agentSlug: "seo", draftHash: "a", createdAt: NOW - 5 * DAY, cases: [kase("audit")] },
+      { id: "tr_new", rootJobId: "job1", agentSlug: "seo", draftHash: "b", createdAt: NOW - DAY, cases: [kase("audit"), kase("publish", { expect: "declines" }), kase("slow", { state: "running" })] },
+    ];
+    const withTrials = () => ({
+      agentsProfile: () => Promise.resolve(profile({ trials })),
+      agentsHistory: () => Promise.resolve([rec({ id: "c3", trial: { id: "tr_old", verdicts: [{ case: "audit", pass: true, quote: "I checked the title tags first", note: "ok" }] } }), ...HISTORY]),
+      agentsTrialTranscript: () => Promise.resolve({ text: "Assistant: I checked the title tags first", nextOffset: null }),
+    });
+
+    it("is shown last, with its count, only when the agent has trials", async () => {
+      await open(withTrials());
+      const names = qa('[role="tab"]').map((t) => t.textContent);
+      expect(names.at(-1)).toBe("Tests · 2");
+      expect(panel("Tests").hidden).toBe(true);
+    });
+
+    it("lists the trials newest first, the honest note beside them, the verdict of the proposal that used one, and each case's transcript", async () => {
+      await open(withTrials());
+      await click(tab("Tests"));
+      const p = panel("Tests");
+      expect(p.hidden).toBe(false);
+      const rows = [...p.querySelectorAll<HTMLElement>('[data-testid="trial-row"]')];
+      expect(rows).toHaveLength(2);
+      expect(rows[0].textContent).toContain("2 of 3 cases finished");
+      expect(rows[0].textContent).toContain("running");
+      expect((rows[0].querySelector("details") as HTMLDetailsElement).open).toBe(true);
+      expect(rows[1].querySelector('[data-testid="trial-row-verdict"]')?.textContent).toBe("passed");
+      expect(rows[1].textContent).toContain("I checked the title tags first");
+      expect(p.querySelector('[data-testid="tests-about"]')?.textContent).toContain(
+        "Runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy.",
+      );
+      // a running case has no transcript yet; a finished one does
+      const newCases = [...rows[0].querySelectorAll<HTMLElement>('[data-testid="trial-case"]')];
+      expect(newCases.map((c) => [...c.querySelectorAll("button")].some((b) => b.textContent === "Transcript"))).toEqual([true, true, false]);
+      expect(newCases[1].textContent).toContain("should decline");
+      await click([...rows[1].querySelectorAll("button")].find((b) => b.textContent === "Transcript"));
+      expect(api.calls.agentsTrialTranscript).toEqual([[{ id: "tr_old", case: "audit", offset: 0 }]]);
+      expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("Assistant: I checked the title tags first");
+    });
+
+    it("End from History reaches Tests", async () => {
+      await open(withTrials());
+      await click(tab("History"));
+      await act(async () => {
+        tab("History").dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+      });
+      await h!.flush();
+      expect(tab("Tests").getAttribute("aria-selected")).toBe("true");
+    });
+  });
 });
