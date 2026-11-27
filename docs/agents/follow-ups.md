@@ -375,3 +375,11 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **Restore for a change shown above the tabs.** A record whose card is above (just applied) has no row to open, so "Restore the version before this" isn't offered for it; its own Undo does the same thing.
 - **Seat briefs are shown whole.** A 4000-character brief makes a tall row; clamp with "Show more" if that turns out to matter.
 
+
+## Parallel work by the same agent
+
+- **Dispatch the same agent several times in parallel.** Today a chat runs at most one code-editing task of a teammate at a
+  time, so independent pieces (e.g. a server PR and a renderer PR of the same spec) queue behind each other and the lead
+  falls back to generic background jobs. Allow several concurrent tasks of the same agent when they own disjoint files /
+  branches (each already gets its own worktree), with a per-chat cap, and show them as separate task cards. Asked by the
+  user on 2026-11-27.
