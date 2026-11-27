@@ -1041,3 +1041,67 @@ test("H1: Never still discards a script proposal", async () => {
     await f.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// H2: the card can read each changed file of a record (before / after) from its snapshots
+// ---------------------------------------------------------------------------
+
+test("H2: agents:change-file reads a file of a record's snapshots — before and after — and nothing else", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    const rec = await lastRec(f);
+    // a held record: the file is new
+    const added = await f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/scripts/run.sh" });
+    assert.deepEqual(added, { before: null, after: SCRIPT });
+    assert.deepEqual(await f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/SKILL.md" }), { before: null, after: SKILL_MD });
+    // agent.md is in the bundles too: it reads the same before and after
+    const md = await f.engine.changeFile({ id: rec.id, path: "agent.md" });
+    assert.equal(md.before, md.after);
+    // anything not in either snapshot is refused, however it is spelled
+    for (const path of ["skills/landing-audit/other.sh", "../../secrets.json", "/etc/passwd", "skills/../agent.md", "", 4, undefined, "skills/landing-audit"]) {
+      await assert.rejects(f.engine.changeFile({ id: rec.id, path }), /isn't part of this change|isn't available/i, String(path));
+    }
+    await assert.rejects(f.engine.changeFile({ id: "ach_nope", path: "agent.md" }), /no longer available/i);
+    await assert.rejects(f.engine.changeFile({ path: "agent.md" }), /no longer available/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H2: a replace shows the old text as before and the new as after; a removed file has no after; a record without snapshots can't be read", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path: "old.md", content: "old file", origin: "written" }] })] } });
+    await release(f);
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "running" };
+    await propose(f, { draft: { skills: [writtenOp({ op: "replace", files: [{ path: "SKILL.md", content: `${SKILL_MD}More.\n`, origin: "written" }] })] }, skillSearch: undefined });
+    const rec = await lastRec(f);
+    assert.deepEqual(await f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/SKILL.md" }), { before: SKILL_MD, after: `${SKILL_MD}More.\n` });
+    assert.deepEqual(await f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/old.md" }), { before: "old file", after: null });
+    // an old record (no snapshots)
+    const doc = await store(f);
+    const old = doc.changes.at(-1);
+    delete old.beforeBundle;
+    delete old.afterBundle;
+    await writeFile(join(f.root, ".changes.json"), JSON.stringify(doc));
+    await assert.rejects(f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/SKILL.md" }), /isn't part of this change|isn't available/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H2: a file bigger than the cap is cut and says so; a blob that is gone is a sentence", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path: "big.md", content: "z".repeat(250 * 1024), origin: "written" }] })] } });
+    const rec = await lastRec(f);
+    const big = await f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/big.md" });
+    assert.equal(big.truncated, true);
+    assert.ok(big.after.length <= 200 * 1024);
+    for (const h of Object.values(rec.afterBundle)) await rm(join(f.root, ".blobs", h), { force: true });
+    await assert.rejects(f.engine.changeFile({ id: rec.id, path: "skills/landing-audit/SKILL.md" }), /copy of this file is gone/i);
+  } finally {
+    await f.cleanup();
+  }
+});

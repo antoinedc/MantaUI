@@ -4856,6 +4856,36 @@ export function createAgentsEngine({
     return { text: full.slice(offset, offset + TRANSCRIPT_WINDOW), nextOffset: offset + TRANSCRIPT_WINDOW < full.length ? offset + TRANSCRIPT_WINDOW : null };
   }
 
+  // ---- a changed file of a record (`agents:change-file`): the card opens each skill file before the user applies it ----
+
+  const CHANGE_FILE_MAX = 200 * 1024;
+  const NOT_IN_CHANGE = "That file isn't part of this change";
+
+  /**
+   * The text of one file of a record's snapshots before and after the change: `{ before, after, truncated? }`, null where the file didn't
+   * exist (or was removed). Read from the content-addressed blobs the record names, only for a path in its own `beforeBundle` /
+   * `afterBundle` — never a path the caller makes up. Each text is cut at 200 KiB and `truncated` says so.
+   */
+  async function changeFile(input) {
+    const id = typeof input?.id === "string" ? input.id : "";
+    const path = typeof input?.path === "string" ? input.path : "";
+    const rec = id ? (await readChanges()).find((r) => r.id === id) : null;
+    if (!rec) throw new AgentError(CHANGE_GONE);
+    const before = rec.beforeBundle && Object.hasOwn(rec.beforeBundle, path) ? rec.beforeBundle[path] : null;
+    const after = rec.afterBundle && Object.hasOwn(rec.afterBundle, path) ? rec.afterBundle[path] : null;
+    if (!path || (before === null && after === null)) throw new AgentError(NOT_IN_CHANGE);
+    let truncated = false;
+    const read = async (hash) => {
+      if (hash === null) return null;
+      const blob = await getBlob(hash);
+      if (!blob) throw new AgentError("The kept copy of this file is gone; the file can't be shown any more");
+      if (blob.length > CHANGE_FILE_MAX) truncated = true;
+      return blob.subarray(0, CHANGE_FILE_MAX).toString("utf-8");
+    };
+    const out = { before: await read(before), after: await read(after) };
+    return truncated ? { ...out, truncated: true } : out;
+  }
+
   // ---- the profile and a task's research ----
 
   const SOURCES_SHOWN = 10;
@@ -5342,6 +5372,7 @@ export function createAgentsEngine({
     projects,
     trial,
     trialTranscript,
+    changeFile,
     taskResearch,
     refreshSet,
     refresh,

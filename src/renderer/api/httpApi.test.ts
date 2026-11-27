@@ -928,6 +928,7 @@ describe("httpApi agent-screens channels", () => {
       channel: "agents:trial-transcript",
       args: [{ id: "tr_1", case: "main", offset: 20000 }],
     },
+    { name: "agentsChangeFile", call: () => httpApi.agentsChangeFile({ id: "ach_1", path: "skills/a/run.sh" }), channel: "agents:change-file", args: [{ id: "ach_1", path: "skills/a/run.sh" }] },
   ];
 
   channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");
