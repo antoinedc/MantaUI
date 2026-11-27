@@ -143,6 +143,14 @@ const until = async (cond, ms = 3000) => {
 };
 const quiet = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 
+/** Start a trial whose one case never ends on its own; returns its id and its session's id. */
+async function hungTrial(f, over = {}) {
+  f.w.outcome = "hang";
+  const { trialId } = await f.t.create(f.input(over));
+  await until(() => f.w.created.length >= 1);
+  return { trialId, sid: f.w.created[0].id };
+}
+
 const settle = async (t, id, sessionID = "ses_child") => {
   const r = await t.wait({ sessionID, messageID: `msg_w${id}`, callID: `call_w${id}`, trialId: id });
   return r;
@@ -860,10 +868,7 @@ test("the temporary agent block is locked down: nothing allowed of its own, prim
 test("a `started` event does not end a case; only succeeded, failed or interrupted do", async () => {
   const f = await rig();
   try {
-    f.w.outcome = "hang";
-    const { trialId } = await f.t.create(f.input());
-    await until(() => f.w.created.length >= 1);
-    const sid = f.w.created[0].id;
+    const { trialId, sid } = await hungTrial(f);
     f.t.observeRaw({ type: "session.execution.started", data: { sessionID: sid } });
     f.t.observeRaw({ type: "session.execution.retrying", data: { sessionID: sid } });
     await quiet();
@@ -965,10 +970,7 @@ test("when the scanner works, would-ask, refused and error are redacted like the
 test("while a case runs, what it would ask is not shown until it has been scanned", async () => {
   const f = await rig();
   try {
-    f.w.outcome = "hang";
-    const { trialId } = await f.t.create(f.input());
-    await until(() => f.w.created.length >= 1);
-    const sid = f.w.created[0].id;
+    const { trialId, sid } = await hungTrial(f);
     await f.t.handleQuestion({ id: "form_1", sessionID: sid, metadata: { kind: "question" }, fields: [{ key: "q1", title: "Page", description: "Which page with SECRET-TOKEN?", type: "select", options: [{ label: "Home" }] }] });
     assert.deepEqual(f.t.view(trialId).cases[0].wouldAsk, []);
     f.t.observeRaw({ type: "session.execution.succeeded", data: { sessionID: sid } });

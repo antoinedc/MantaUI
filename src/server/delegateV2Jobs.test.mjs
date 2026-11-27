@@ -2721,14 +2721,18 @@ test("autonomy result: using a secret file the task was handed is not reported; 
   assert.deepEqual(done.exceededActions ?? [], []);
 });
 
-test("autonomy result: a continuation reads only its own round; nothing to report omits the fields", async () => {
-  const w = specialistWorld(AUT);
+/** A finished specialist task, then its continuation ("round two"): `{ w, id, first, child, next }`. */
+async function continuedSpecialist(policy) {
+  const w = specialistWorld(policy);
   const id = await finishedSpecialist(w);
   const first = w.job(id);
-  const child = first.childSessionID;
   const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
   assert.equal(res.ok, true, JSON.stringify(res));
-  const next = w.job(res.job.id);
+  return { w, id, first, child: first.childSessionID, next: w.job(res.job.id) };
+}
+
+test("autonomy result: a continuation reads only its own round; nothing to report omits the fields", async () => {
+  const { w, first, child, next } = await continuedSpecialist(AUT);
   assert.equal(next.toldActions, undefined, "not inherited");
   w.setMessages(child, [
     { info: { id: first.launch.messageId, role: "user" }, parts: [] },
@@ -2966,13 +2970,7 @@ test("project actions: a specialist's result without the section says so (done o
 });
 
 test("project actions: the result text is THIS attempt's — a continuation that wrote no new final text has none (never round one's report)", async () => {
-  const w = specialistWorld(BAL);
-  const id = await finishedSpecialist(w);
-  const first = w.job(id);
-  const child = first.childSessionID;
-  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
-  assert.equal(res.ok, true, JSON.stringify(res));
-  const next = w.job(res.job.id);
+  const { w, first, child, next } = await continuedSpecialist(BAL);
   assert.equal(next.exceededActions, undefined, "not inherited");
   assert.equal(next.selfReport, undefined, "not inherited");
   const roundOne = turn(first.launch.messageId, [], reportText("- Did: spend — round one VM"));

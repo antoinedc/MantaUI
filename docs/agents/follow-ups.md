@@ -381,10 +381,13 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **The trial's progress line.** The spec has the trials module report "Trial running · case 2 of 3" through the Architect job's
   `jobProgress` label; PR A only records the cases (`agents:trial`). The label belongs with the renderer's progress line (PR B).
 - **The profile's trials list.** `AgentProfile.trials` (the Tests tab) is not part of `agents:profile` yet; PR B adds it from `agentTrials.list(slug)`.
-- **Scratch repos live in the OS temp folder, not under `~/.manta/agents/.trials/`.** The task rulesets protect `~/.manta` by
-  absolute path, which only holds for a session whose folder is outside it (and a task never runs inside Manta's folders).
-- **A trial worktree starts from the project's current HEAD**, not its default branch (`gitAddWorktree` has no start point).
-- **Template upgrades follow the "Change an agent" level for every built-in, the lead and the Architect included** (spec §2:
-  Ask → a card, Tell me / Auto → applied with Undo). If the lead / Architect should always wait for a click, say so.
+- **A VM sandbox for trials.** Trials have no shell (an agent that needs commands gets a partial test: what it couldn't run shows
+  as a refusal in the case record), because no ruleset can confine a shell on this box. Real command runs need a throwaway VM
+  (the Freestyle account is the candidate); until then the Tests tab's wording says "no shell".
+- **A trial's folders live in a private 0700 base in the OS temp folder, not under `~/.manta/agents/.trials/`.** The task
+  rulesets protect `~/.manta` by absolute path, which only holds for a session whose folder is outside it. Each case works in a
+  standalone `git clone --local --no-hardlinks` of the project's current HEAD (uncommitted files are not copied).
+- **Clean template upgrades apply automatically at every level** (with Undo); only a merge conflict waits for a click (spec §2).
+  If the lead / Architect should always wait for a click, say so.
 - **A pending template update that nobody clicks expires after 24 h** like any change; the next boot offers it again
   (an expired record doesn't count for the dedupe).

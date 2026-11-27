@@ -350,10 +350,8 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
     return { code: active.code, expiresAt: active.expiresAt };
   }
 
-  // Try to consume `code`. Returns true only if it matches the single active,
-  // unexpired code — and clears it so it's strictly one-time. Constant-time
-  // digit compare to avoid leaking how many leading digits matched.
-  function consume(code) {
+  // The shared gate: a well-formed `code` that matches the single active, unexpired code (an expired one is dropped).
+  function matchesActive(code) {
     if (!isValidPairingCode(code)) return false;
     if (!active) return false;
     if (now() > active.expiresAt) {
@@ -362,7 +360,14 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
     }
     const a = Buffer.from(active.code, "utf-8");
     const b = Buffer.from(String(code), "utf-8");
-    const ok = a.length === b.length && timingSafeEqual(a, b);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  // Try to consume `code`. Returns true only if it matches the single active,
+  // unexpired code — and clears it so it's strictly one-time. Constant-time
+  // digit compare to avoid leaking how many leading digits matched.
+  function consume(code) {
+    const ok = matchesActive(code);
     if (ok) active = null; // one-time
     return ok;
   }
@@ -375,15 +380,7 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
   // distinguish "wrong code" from "expired" — like `claim`, a guesser learns
   // only "no".
   function check(code) {
-    if (!isValidPairingCode(code)) return false;
-    if (!active) return false;
-    if (now() > active.expiresAt) {
-      active = null;
-      return false;
-    }
-    const a = Buffer.from(active.code, "utf-8");
-    const b = Buffer.from(String(code), "utf-8");
-    return a.length === b.length && timingSafeEqual(a, b);
+    return matchesActive(code);
   }
 
   function clear() {
