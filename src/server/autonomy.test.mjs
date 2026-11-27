@@ -678,3 +678,29 @@ test("jobRules: a task can't web-fetch a loopback address (Manta's own server, o
     }
   }
 });
+
+// ---- Architect v2 PR D: `learn_preference` is a server-side kind ----
+
+test("learn_preference: in every mode it is 'Tell me'; Settings lists it; the model-facing texts and the job snapshot key never mention it", async () => {
+  const shared = await import("../shared/autonomyShared.mjs");
+  assert.ok(ACTION_KINDS.includes("learn_preference"));
+  assert.deepEqual([...shared.SERVER_KINDS], ["learn_preference"]);
+  for (const mode of MODE_NAMES) assert.equal(MODES[mode].learn_preference, "tell", mode);
+  assert.equal(decide("learn_preference"), "tell");
+  assert.match(shared.KIND_TITLES.learn_preference, /preference/i);
+  assert.ok(shared.KIND_LABELS.learn_preference && shared.KIND_DEFINITIONS.learn_preference);
+  // the lead brief and a task's limits are about what an agent may DO; a server-side kind is not one of them, at any level
+  for (const level of LEVELS) {
+    const policy = { ...MODES.balanced, learn_preference: level };
+    assert.doesNotMatch(renderPolicy(policy), /preference|learn/i, level);
+    assert.doesNotMatch(taskPromptSection(policy), /preference|learn/i, level);
+    // changing it must not make a running task read "your settings changed"
+    assert.equal(policyKey(policy), policyKey(MODES.balanced), level);
+  }
+  assert.equal(parseSelfReport("## Actions from your list\n- Did: learn preference — x").did.length, 0);
+});
+
+test("learn_preference: the user's override is validated like any other kind and shows in the settings answer", () => {
+  assert.equal(validateAutonomyInput({ mode: "balanced", overrides: { learn_preference: "ask" } }).overrides.learn_preference, "ask");
+  assert.equal(settingsOf({ mode: "balanced", overrides: { learn_preference: "never" } }).effective.learn_preference, "never");
+});
