@@ -442,7 +442,7 @@ export function createResearchEngine({
     return windowed(rec);
   }
 
-  const skillsFinder = createSkillsFinder({ toolsRoot, exec, fs, home, pathEnv, log });
+  const skillsFinder = createSkillsFinder({ toolsRoot, exec, fs, pathEnv, now, log });
 
   async function searchTool(input) {
     const b = await bound(input, "research_search", ["source", "query"]);

@@ -860,9 +860,10 @@ const SKILLS_OUT = "\nInstall with npx skills add <owner/repo@skill>\n\nacme/cro
 const skillsExec = (runs) => async (file, args, opts) => {
   runs.push({ file, args, opts });
   if (file === "npm") {
-    await mkdir(join(opts.cwd, "node_modules", "skills", "bin"), { recursive: true });
-    await writeFile(join(opts.cwd, "node_modules", "skills", "package.json"), JSON.stringify({ name: "skills", version: "1.9.1" }));
-    await writeFile(join(opts.cwd, "node_modules", "skills", "bin", "cli.mjs"), "//");
+    const prefix = args[args.indexOf("--prefix") + 1];
+    await mkdir(join(prefix, "node_modules", "skills", "bin"), { recursive: true });
+    await writeFile(join(prefix, "node_modules", "skills", "package.json"), JSON.stringify({ name: "skills", version: "1.9.1" }));
+    await writeFile(join(prefix, "node_modules", "skills", "bin", "cli.mjs"), "//");
     return { stdout: "" };
   }
   return { stdout: SKILLS_OUT };
@@ -911,7 +912,7 @@ test("the skills source: the Architect gets owner/repo@skill, installs and the s
     assert.equal(r.ok, true, r.error);
     assert.equal(r.source, "skills");
     assert.deepEqual(r.results[0], { ref: "acme/cro-skills@landing-pages", repo: "acme/cro-skills", skill: "landing-pages", installs: 12_500, url: "https://skills.sh/acme/cro-skills/landing-pages" });
-    assert.deepEqual(runs.map((x) => x.file === "npm" ? "npm" : x.args.slice(1)), ["npm", ["find", "landing pages"]]);
+    assert.deepEqual(runs.map((x) => x.file === "npm" ? "npm" : x.args.slice(1)), ["npm", ["find", "--", "landing pages"]]);
     const [rec] = await f.engine.searchesOf("ses_child");
     assert.equal(rec.source, "skills");
     for (const ref of ["acme/cro-skills@landing-pages", "acme/cro-skills", "https://skills.sh/acme/cro-skills/landing-pages", "other/repo@thing"]) assert.ok(rec.refs.includes(ref), ref);
