@@ -26,11 +26,16 @@ import { createGuardedTransport, fetchFollowing, ResearchError, BYTE_CAP, PDF_BY
 import { extractPdfText } from "./research/pdf.mjs";
 import { RESERVED_HOSTS, RESERVED_SENTENCE, canonicalPost, jinaRead, exaSearch } from "./research/reach.mjs";
 import { runCommandSource, runUrlSource, queryRefusal } from "./research/extra.mjs";
+import { createSkillsFinder } from "./research/skillsCli.mjs";
 
 export const WINDOW_CHARS = 40_000;
 export const STORE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 export const STORE_MAX_BYTES = 200 * 1024 * 1024;
 export const BASE_SEARCH_SOURCES = Object.freeze(["hn", "arxiv", "reddit", "x", "github"]);
+export const SKILLS_SOURCE = "skills"; // the Architect's own: existing skills (src/server/research/skillsCli.mjs)
+const SEARCHES_FILE = "searches.json"; // beside a session's sources: what its research_search calls asked and returned (never a source)
+const SEARCHES_KEEP = 200;
+const REFS_PER_SEARCH = 80;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const SOURCE_ID_RE = /^src_[0-9a-f]{16}$/;
 const UNEXPECTED = "The research tool failed; try again";
@@ -124,6 +129,7 @@ export function createResearchEngine({
   exec = (file, args, opts) => execFileAsync(file, args, { ...opts, encoding: "utf8" }),
   extractPdf = extractPdfText,
   agentHome = statePath("agents", "architect", "home"),
+  toolsRoot = statePath("tools", "skills"),
   home = homedir(),
   pathEnv = process.env.PATH,
   now = Date.now,
@@ -150,6 +156,50 @@ export function createResearchEngine({
     } catch {
       return null;
     }
+  }
+
+  // ---- the search record (Architect v2 §4.2): what each research_search call asked and which repositories / addresses it returned ----
+
+  let searchChain = Promise.resolve();
+
+  /** The searches of THIS session, oldest first: `[{ source, query, refs[], at }]` (never another session's). */
+  async function searchesOf(child) {
+    if (typeof child !== "string" || !SESSION_RE.test(child)) return [];
+    try {
+      const doc = JSON.parse(await fs.readFile(join(sessionDir(child), SEARCHES_FILE), "utf-8"));
+      return Array.isArray(doc) ? doc.filter((s) => s && typeof s.source === "string" && typeof s.query === "string" && Array.isArray(s.refs)) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function recordSearch(child, entry) {
+    const run = searchChain.then(async () => {
+      const list = await searchesOf(child);
+      list.push({ ...entry, at: now() });
+      await fs.mkdir(sessionDir(child), { recursive: true });
+      const file = join(sessionDir(child), SEARCHES_FILE);
+      const tmp = `${file}.tmp-${randomBytes(4).toString("hex")}`;
+      await fs.writeFile(tmp, `${JSON.stringify(list.slice(-SEARCHES_KEEP))}\n`);
+      await fs.rename(tmp, file);
+    });
+    searchChain = run.catch(() => {});
+    return run;
+  }
+
+  const REPO_NAME = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+  /** The repository names and addresses a search returned (what a later claim "I saw it in a result" is checked against). */
+  function refsOf(results) {
+    const out = new Set();
+    const add = (v) => {
+      if (typeof v === "string" && v.trim() !== "" && v.length <= 300) out.add(v.trim());
+    };
+    for (const r of Array.isArray(results) ? results : []) {
+      for (const k of ["ref", "repo", "url", "item"]) add(r?.[k]);
+      const repo = typeof r?.title === "string" ? r.title.split(" — ")[0].trim() : "";
+      if (REPO_NAME.test(repo)) add(repo);
+    }
+    return [...out].slice(0, REFS_PER_SEARCH);
   }
 
   // the first window of a stored source, the shape every fetching tool answers with
@@ -375,27 +425,42 @@ export function createResearchEngine({
     return windowed(rec);
   }
 
+  const skillsFinder = createSkillsFinder({ toolsRoot, exec, fs, home, pathEnv, log });
+
   async function searchTool(input) {
     const b = await bound(input, "research_search", ["source", "query"]);
     if (b.refused) return { ok: false, error: b.refused };
     return guard(async () => {
       const source = typeof b.raw.source === "string" ? b.raw.source : "";
       const query = b.raw.query;
-      // the user's extra sources are the Architect's alone; every other agent searches the base sources
+      // the user's extra sources and the skills search are the Architect's alone; every other agent searches the base sources
       const extras = b.architect ? await extraSources() : [];
       const extra = extras.find((s) => s.id === source);
       if (typeof query !== "string" || query.trim() === "" || query.length > QUERY_MAX) throw new ResearchError(`The query must be 1 to ${QUERY_MAX} characters`);
       if (source === "web") throw new ResearchError("Use the built-in websearch for the web");
-      if (extra) return { ok: true, source, ...(await searchExtra(extra, query, b.child)) };
-      if (!BASE_SEARCH_SOURCES.includes(source)) {
-        throw new ResearchError(`Unknown source "${source}". Available: ${[...BASE_SEARCH_SOURCES, ...extras.map((s) => s.id)].join(", ")}`);
+      let answer;
+      if (extra) {
+        answer = { ok: true, source, ...(await searchExtra(extra, query, b.child)) };
+      } else if (b.architect && source === SKILLS_SOURCE) {
+        answer = { ok: true, source, ...(await skillsFinder.find(query)) };
+      } else {
+        if (!BASE_SEARCH_SOURCES.includes(source)) {
+          throw new ResearchError(`Unknown source "${source}". Available: ${[...BASE_SEARCH_SOURCES, ...extras.map((s) => s.id), ...(b.architect ? [SKILLS_SOURCE] : [])].join(", ")}`);
+        }
+        const refused = queryRefusal(query);
+        if (refused) throw new ResearchError(refused);
+        if (source === "hn") answer = { ok: true, source, results: await searchHn(query) };
+        else if (source === "arxiv") answer = { ok: true, source, results: await searchArxiv(query) };
+        else if (source === "github") answer = { ok: true, source, ...(await searchGithub(query)) };
+        else answer = { ok: true, source, results: await exaSearch(hop, query, source, { deadlineAt: now() + FETCH_DEADLINE_MS }) };
       }
-      const refused = queryRefusal(query);
-      if (refused) throw new ResearchError(refused);
-      if (source === "hn") return { ok: true, source, results: await searchHn(query) };
-      if (source === "arxiv") return { ok: true, source, results: await searchArxiv(query) };
-      if (source === "github") return { ok: true, source, ...(await searchGithub(query)) };
-      return { ok: true, source, results: await exaSearch(hop, query, source, { deadlineAt: now() + FETCH_DEADLINE_MS }) };
+      // what the search asked and returned is kept for the server's later checks; a failed search throws above and leaves nothing
+      try {
+        await recordSearch(b.child, { source, query, refs: refsOf(answer.results) });
+      } catch (e) {
+        log.warn?.(`[research] couldn't record a search: ${e?.message ?? e}`);
+      }
+      return answer;
     });
   }
 
@@ -441,5 +506,5 @@ export function createResearchEngine({
     return { removed };
   }
 
-  return { fetch: fetchTool, read: readTool, search: searchTool, getSource, sweep, root };
+  return { fetch: fetchTool, read: readTool, search: searchTool, getSource, searchesOf, sweep, root };
 }

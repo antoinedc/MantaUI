@@ -46,6 +46,7 @@ describe("validateSource", () => {
 
   it("refuses base ids, bad ids and unknown keys", () => {
     expect(err(cmd({ id: "hn" }))).toMatch(/built-in/);
+    expect(err(cmd({ id: "skills" }))).toMatch(/built-in/); // the Architect's own skills search
     expect(err(cmd({ id: "Bad Id" }))).toMatch(/id/);
     expect(err(cmd({ other: 1 }))).toMatch(/unknown key/);
   });

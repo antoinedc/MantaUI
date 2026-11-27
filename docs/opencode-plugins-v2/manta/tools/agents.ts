@@ -26,7 +26,7 @@ const mapOf = (description: string): Record<string, unknown> => ({ type: "object
 const sourceSchema = (): Record<string, unknown> =>
   obj(
     {
-      id: str("Lowercase letters, digits and dashes, at most 30; not hn, arxiv, reddit, x, github or web."),
+      id: str("Lowercase letters, digits and dashes, at most 30; not hn, arxiv, reddit, x, github, skills or web."),
       name: str("A short display name, at most 60 characters."),
       description: str("One line, at most 300 characters: what the source is and what queries suit it. Shown to the Architect."),
       private: { type: "boolean", description: "Default true. False only if the user says the source is public." },
