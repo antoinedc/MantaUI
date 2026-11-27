@@ -908,3 +908,28 @@ test("BET-493: a distinct-device claim leaves the primary (desktop) and existing
   assert.deepEqual(asJoiner.filter((d) => d.current).map((d) => d.device_id), [c.device_id]);
   assert.equal(eng.listDevices().some((d) => d.current), false);
 });
+
+// ----------------------------------------------------------------------------
+// Minting a pairing code takes a POST with a custom header (a browser page on the box can't send one cross-origin
+// without a preflight, and the preflight is refused), and never an Origin
+// ----------------------------------------------------------------------------
+
+test("pairMintRefusal: POST with X-Manta-Pair: 1 and no Origin is allowed; anything else is refused with its status", async () => {
+  const { pairMintRefusal, PAIR_HEADER } = await import("./auth.mjs");
+  assert.equal(PAIR_HEADER, "x-manta-pair");
+  const ok = { method: "POST", headers: { "x-manta-pair": "1" } };
+  assert.equal(pairMintRefusal(ok), null);
+  assert.equal(pairMintRefusal({ method: "POST", headers: { "x-manta-pair": "1", "user-agent": "curl/8" } }), null);
+  // a GET (the old form, and what a page's <img>/fetch could send) is 405
+  assert.deepEqual(pairMintRefusal({ method: "GET", headers: { "x-manta-pair": "1" } }), { status: 405, error: "use POST with the X-Manta-Pair: 1 header", allow: "POST" });
+  assert.equal(pairMintRefusal({ method: "GET", headers: {} }).status, 405);
+  assert.equal(pairMintRefusal({ method: "DELETE", headers: { "x-manta-pair": "1" } }).status, 405);
+  // a POST without the header (a plain form post from a web page) is refused
+  assert.equal(pairMintRefusal({ method: "POST", headers: {} }).status, 403);
+  assert.equal(pairMintRefusal({ method: "POST", headers: { "x-manta-pair": "0" } }).status, 403);
+  assert.equal(pairMintRefusal({ method: "POST", headers: { "x-manta-pair": "yes" } }).status, 403);
+  // a browser always sends Origin on a cross-origin request; the CLI never does
+  assert.equal(pairMintRefusal({ method: "POST", headers: { "x-manta-pair": "1", origin: "https://evil.example" } }).status, 403);
+  assert.equal(pairMintRefusal({ method: "POST", headers: { "x-manta-pair": "1", origin: "null" } }).status, 403);
+  assert.deepEqual(pairMintRefusal(), pairMintRefusal({}));
+});

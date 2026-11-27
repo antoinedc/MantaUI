@@ -3198,7 +3198,7 @@ export function buildHandlers({
 
     // ---- auth pairing code mint (BET-161) ----
     // Mint a one-time mobile pairing code. Runs in-process on the box, so it
-    // satisfies the loopback-only minting invariant that the GET /auth/pair
+    // satisfies the loopback-only minting invariant that the POST /auth/pair
     // HTTP endpoint enforces (a remote httpApi caller can't hit that endpoint
     // — it 403s non-loopback). authEngine.pair() returns snake_case;
     // translate to the camelCase AuthPairResult the renderer expects.

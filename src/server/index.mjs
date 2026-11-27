@@ -315,6 +315,7 @@ import {
   ensureAuth,
   createAuthEngine,
   isLocalDirectRequest,
+  pairMintRefusal,
   parseBearer,
   authorizationForRequest,
   AUTH_RL_CAPACITY,
@@ -1994,7 +1995,7 @@ if (!authEnforced) {
 }
 
 // Now that authEngine exists, wire the /rpc dispatch — the `auth:pair` channel
-// needs authEngine.pair() (GET /auth/pair is loopback-only, so the renderer can
+// needs authEngine.pair() (POST /auth/pair is loopback-only, so the renderer can
 // only reach it through this in-process call, not as an HTTP round-trip).
 //
 // `serverVersion` is the SAME value `GET /api/version` returns — read once at
@@ -4600,13 +4601,18 @@ const handleRequest = async (req, res) => {
   // token in an Authorization header, never a cookie.
   res.setHeader("Access-Control-Allow-Headers", "*, Authorization");
   res.setHeader("Access-Control-Max-Age", "600");
+  // Minting a pairing code is never a cross-origin request: no CORS grant on this route, so a page can't pass the preflight
+  // that its custom header would need (and the response is never readable by a page).
+  if (path === "/auth/pair") {
+    for (const h of ["Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers", "Access-Control-Max-Age"]) res.removeHeader(h);
+  }
   if (req.method === "OPTIONS") {
     res.writeHead(204).end();
     return;
   }
 
   // ---------- Auth pairing handshake (UNAUTHENTICATED, rate-limited) ----------
-  // GET    /auth/pair            → {pairing_code, box_id, expiresAt}
+  // POST   /auth/pair            → {pairing_code, box_id, expiresAt}   (header `X-Manta-Pair: 1`, no Origin; GET → 405)
   //                                Mint a one-time, ~5-min code. The desktop
   //                                shows it (and encodes box_id+code in a QR
   //                                for mobile).
@@ -4643,7 +4649,13 @@ const handleRequest = async (req, res) => {
       return;
     }
     try {
-      if (req.method === "GET" && path === "/auth/pair") {
+      if (path === "/auth/pair") {
+        const refusal = pairMintRefusal({ method: req.method, headers: req.headers });
+        if (refusal) {
+          if (refusal.allow) res.setHeader("Allow", refusal.allow);
+          respondJson(res, refusal.status, { error: refusal.error });
+          return;
+        }
         // Minting a code is LOCAL-ONLY (the `manta pair` CLI / SSH forward).
         // Remote-reachable minting would let anyone claim the box_token in two
         // requests. Loopback alone is insufficient — cloudflared proxies public

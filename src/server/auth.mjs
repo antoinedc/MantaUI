@@ -149,7 +149,7 @@ export function isExemptPath(path) {
 // Local-only gate for minting pairing codes
 // ---------------------------------------------------------------------------
 //
-// GET /auth/pair must be callable ONLY from the box itself (the `manta pair` CLI,
+// POST /auth/pair must be callable ONLY from the box itself (the `manta pair` CLI,
 // or any other channel that terminates on the box).
 // A bare loopback check is NOT enough: cloudflared runs on this box and proxies
 // PUBLIC traffic to 127.0.0.1:8787, so tunnel requests also arrive with a
@@ -188,6 +188,20 @@ export function isLocalDirectRequest({ remoteAddress, headers } = {}) {
     if (h[name] != null && h[name] !== "") return false;
   }
   return true;
+}
+
+// Minting a code is `POST /auth/pair` with this header. A GET could be sent by any page (an <img>, a navigation) a browser on the
+// box opens; a POST with a custom header needs a CORS preflight, which index.mjs refuses for this route, and a browser always adds
+// `Origin` to a cross-origin request, which is refused here. The `manta pair` CLI sends the header and no Origin.
+export const PAIR_HEADER = "x-manta-pair";
+
+/** `null` when the request may mint a code (the loopback check is separate), else `{ status, error, allow? }`. */
+export function pairMintRefusal({ method, headers } = {}) {
+  const h = headers && typeof headers === "object" ? headers : {};
+  if (method !== "POST") return { status: 405, error: "use POST with the X-Manta-Pair: 1 header", allow: "POST" };
+  if (h[PAIR_HEADER] !== "1") return { status: 403, error: "use POST with the X-Manta-Pair: 1 header" };
+  if (h.origin != null) return { status: 403, error: "pairing codes can't be minted from a web page" };
+  return null;
 }
 
 // Static SPA-shell / PWA asset paths that must load WITHOUT a token, so the
@@ -480,7 +494,7 @@ export function createAuthEngine({
     return { ok: false, status: 401, error: "unauthorized" };
   }
 
-  // Handle GET /auth/pair — mint a one-time pairing code. Rate-limiting is
+  // Handle POST /auth/pair — mint a one-time pairing code. Rate-limiting is
   // applied by the caller (index.mjs) via the shared limiter; here we just
   // issue. Returns the code + box_id so the caller can render it / a QR.
   function pair() {

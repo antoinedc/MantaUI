@@ -920,7 +920,7 @@ MantaMantaUI
 
       - Box identity — a random `box_id` (32 hex chars), a `box_token` (HMAC key), and a `gateway_token` (bearer credential for the push gateway) under `~/.manta/auth.json` (`0600`). The token never leaves the box.
 
-      - Pairing codes — short-lived (5 min), loopback-only, one-time. Mints when you run `npm run pair` or hit `GET /auth/pair` from the box itself.
+      - Pairing codes — short-lived (5 min), loopback-only, one-time. Mints when you run `npm run pair` or hit `POST /auth/pair` from the box itself.
 
       - Device tokens — issued to each paired desktop / phone. Stored locally in each app's `config.json`. The box keeps a per-device registry (id, name, last-seen) and the APNs tokens it needs to push to each device.
 

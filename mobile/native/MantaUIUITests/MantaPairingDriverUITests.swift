@@ -11,7 +11,7 @@ import XCTest
 // Skipped unless BOTH env vars are present, so an ordinary test run (which
 // has no live box and no unexpired code) is unaffected:
 //
-//   MANTA_PAIR_CODE   six digits from `curl 127.0.0.1:8787/auth/pair` ON the box
+//   MANTA_PAIR_CODE   six digits from `curl -X POST -H 'X-Manta-Pair: 1' 127.0.0.1:8787/auth/pair` ON the box
 //   MANTA_PAIR_SERVER https://<box_id>.boxes.mantaui.com
 //
 // xcodebuild forwards `TEST_RUNNER_MANTA_PAIR_CODE=…` to the runner process

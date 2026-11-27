@@ -1853,7 +1853,7 @@ export const IPC = {
   // (src/shared/claim.mjs) — never throws for a normal auth failure.
   authClaim: "auth:claim",
   // Mint a one-time pairing code for mobile device pairing (BET-80).
-  // GET <serverUrl>/auth/pair → { pairing_code, box_id, expiresAt }
+  // POST <serverUrl>/auth/pair → { pairing_code, box_id, expiresAt }
   // The desktop renders the code in a QR (manta://pair?id=<boxId>&token=<code>)
   // and lets the mobile app scan it. Main owns the fetch over the SSH tunnel.
   // Result: { pairingCode, boxId, expiresAt } or { error }.
@@ -3281,7 +3281,7 @@ export type AuthClaimInput = {
   code: string;
 };
 
-// Result of GET /auth/pair — a one-time pairing code the desktop renders as a
+// Result of POST /auth/pair — a one-time pairing code the desktop renders as a
 // QR for mobile scanning. `expiresAt` is an ISO-8601 timestamp (server-side
 // clock); the desktop computes the remaining seconds for the UI countdown.
 // `error` is non-null only on failure (network, 403 from a non-loopback

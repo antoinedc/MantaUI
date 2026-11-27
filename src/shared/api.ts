@@ -1456,7 +1456,7 @@ export interface Api {
   // promise.
   authClaim(input: AuthClaimInput): Promise<ClaimOutcome>;
 
-  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
+  // Mobile pairing code mint (BET-80): POST /auth/pair over the SSH tunnel.
   // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
   // QR. Resolves to an AuthPairResult — a failure is { ok:false, error }, NOT
   // a rejected promise.

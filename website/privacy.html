@@ -98,7 +98,7 @@ document.documentElement.setAttribute("data-theme","dark")}})();
     <h2>What's on your box</h2>
     <ul>
       <li><b>Box identity</b> — a random <code>box_id</code> (32 hex chars), a <code>box_token</code> (HMAC key), and a <code>gateway_token</code> (bearer credential for the push gateway) under <code>~/.manta/auth.json</code> (<code>0600</code>). The token never leaves the box.</li>
-      <li><b>Pairing codes</b> — short-lived (5 min), loopback-only, one-time. Mints when you run <code>npm run pair</code> or hit <code>GET /auth/pair</code> from the box itself.</li>
+      <li><b>Pairing codes</b> — short-lived (5 min), loopback-only, one-time. Mints when you run <code>npm run pair</code> or hit <code>POST /auth/pair</code> from the box itself.</li>
       <li><b>Device tokens</b> — issued to each paired desktop / phone. Stored locally in each app's <code>config.json</code>. The box keeps a per-device registry (id, name, last-seen) and the APNs tokens it needs to push to each device.</li>
       <li><b>Your work</b> — every <code>tmux</code> session, every opencode chat, every uploaded file (<code>~/.manta-uploads/</code>, hourly auto-clean), every scheduled prompt, every webhook, every secret, every published page.</li>
     </ul>

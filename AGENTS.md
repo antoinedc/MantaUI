@@ -3503,7 +3503,7 @@ the dev box (`dev@157.90.224.92`) or the prod box.
   simulator over HTTPS with no tunnel. `GET /` returns **401** from outside;
   that is the auth gate working, not a broken box.
 - Pair a client against it by minting a code ON the box —
-  `ssh dev@135.181.255.249 'curl -s http://127.0.0.1:8787/auth/pair'` — then
+  `ssh dev@135.181.255.249 'curl -s -X POST -H 'X-Manta-Pair: 1' http://127.0.0.1:8787/auth/pair'` — then
   entering the code plus the `https://<box_id>.boxes.mantaui.com` server URL in
   the client. `/auth/pair` is loopback-only by design, so the SSH hop is
   mandatory.
