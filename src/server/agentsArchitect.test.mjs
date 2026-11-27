@@ -17,6 +17,7 @@ import {
 } from "./agents.mjs";
 import { ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
+import { isInsideMantaFolders, MANTA_FOLDER } from "./autonomy.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const SPECIALIST = "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nYou are Scout.\n";
@@ -53,8 +54,13 @@ const handoffFixture = (calls, world) =>
   archFixture({
     extra: {
       retryDelayMs: 0,
-      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }), listMessages: async () => world.msgs },
-      delegate: { startJob: async (i) => (calls.push(i), { ok: true, job: { id: `j${calls.length}` } }), startJobWithApproval: async (i) => (calls.push(i), { ok: true, job: { id: "jw" } }), loadRecordsStrict: async () => [] },
+      oc: { readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: world.directory ?? "/repo" } }), listMessages: async () => world.msgs },
+      // like the real delegate engine: a specialist's task never runs inside Manta's own folders; `world.startError` is any other refusal
+      delegate: {
+        startJob: async (i) => (calls.push(i), world.startError ? { ok: false, error: world.startError } : isInsideMantaFolders(i.parentDirectory, "/h") ? { ok: false, error: MANTA_FOLDER } : { ok: true, job: { id: `j${calls.length}` } }),
+        startJobWithApproval: async (i) => (calls.push(i), isInsideMantaFolders(i.parentDirectory, "/h") ? { ok: false, error: MANTA_FOLDER } : { ok: true, job: { id: "jw" } }),
+        loadRecordsStrict: async () => [],
+      },
       isManagedSession: async () => false,
       isCtoSessionStrict: async () => false,
       isCtoSession: async () => false,
@@ -526,6 +532,96 @@ test("a handoff to the Architect stamps the job with its round mode; mention = u
     // dev gets none either
     await f.engine.dispatch({ sessionId: "ses_chat", directory: "/repo", slug: "dev", text: "@dev fix it" });
     assert.equal(Object.hasOwn(calls[5], "architect"), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const MANTA_CHAT = "/h/.manta/agents/manta/home";
+
+test("a handoff to the Architect from Manta's own chat (a folder under ~/.manta) runs its task in the user's home instead of being refused", async () => {
+  const calls = [];
+  const world = { msgs: [], directory: MANTA_CHAT };
+  const f = await handoffFixture(calls, world);
+  try {
+    await f.engine.init();
+    const b = { sessionID: "ses_chat", messageID: "msg_h1", callID: "call_h1", agent: "architect", title: "Build a UX reviewer", brief: "Make a UX/UI review agent." };
+    world.msgs = handoffTranscript(b, "build");
+    const r = await f.engine.handoff(b);
+    assert.equal(r.ok, true, r.error);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].parentDirectory, "/h", "the neutral folder, as the monthly refresh uses");
+    assert.equal(calls[0].parentSessionID, "ses_chat", "the requesting chat stays the parent, so the result lands there");
+    assert.equal(calls[0].isolation, "none");
+    assert.deepEqual(calls[0].architect, { mode: "build" });
+    // from an ordinary project chat nothing changes
+    world.directory = "/repo";
+    const b2 = { ...b, messageID: "msg_h2", callID: "call_h2" };
+    world.msgs = handoffTranscript(b2, "build");
+    assert.equal((await f.engine.handoff(b2)).ok, true);
+    assert.equal(calls[1].parentDirectory, "/repo");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a code-editing specialist handed work from Manta's own chat is still refused (its task would run under ~/.manta)", async () => {
+  const calls = [];
+  const world = { msgs: [], directory: MANTA_CHAT };
+  const f = await handoffFixture(calls, world);
+  try {
+    await f.engine.init();
+    const b = { sessionID: "ses_chat", messageID: "msg_h1", callID: "call_h1", agent: "dev", title: "Fix it", brief: "Fix the bug." };
+    world.msgs = handoffTranscript(b, "build");
+    const r = await f.engine.handoff(b);
+    assert.deepEqual(r, { ok: false, error: MANTA_FOLDER });
+    assert.equal(calls[0].parentDirectory, MANTA_CHAT, "the folder is passed unchanged, so the engine's guard refuses it");
+    assert.doesNotMatch(r.error, /Architect/, "the no-fallback sentence is the Architect's only");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an @mention of the Architect in Manta's own chat starts its task in the user's home too", async () => {
+  const calls = [];
+  const world = { msgs: [], directory: MANTA_CHAT };
+  const f = await handoffFixture(calls, world);
+  try {
+    await f.engine.init();
+    await f.engine.dispatch({ sessionId: "ses_chat", directory: MANTA_CHAT, slug: "architect", text: "@architect make a UX agent" });
+    assert.equal(calls[0].parentDirectory, "/h");
+    assert.equal(calls[0].parentSessionID, "ses_chat");
+    // a code-editing specialist keeps its folder (and the engine's refusal)
+    await f.engine.dispatch({ sessionId: "ses_chat", directory: MANTA_CHAT, slug: "dev", text: "@dev fix it" }).catch(() => {});
+    assert.equal(calls[1].parentDirectory, MANTA_CHAT);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a refused handoff to the Architect says it didn't start, why, and that Manta must tell the user and not make the agent itself", async () => {
+  const calls = [];
+  const world = { msgs: [], startError: "OpenCode is restarting" };
+  const f = await handoffFixture(calls, world);
+  try {
+    await f.engine.init();
+    const b = { sessionID: "ses_chat", messageID: "msg_h1", callID: "call_h1", agent: "architect", title: "t", brief: "Make an agent." };
+    world.msgs = handoffTranscript(b, "build");
+    const r = await f.engine.handoff(b);
+    assert.equal(r.ok, false);
+    assert.ok(r.error.startsWith("OpenCode is restarting"), "the reason comes first, unchanged");
+    assert.match(r.error, /The Architect did not start/);
+    assert.match(r.error, /tell the user/i);
+    assert.match(r.error, /do not create or change the agent yourself with `agent_change`/i);
+    // another refusal on the same path (settings) carries it too; a refusal for another agent does not
+    const never = f.make({ autonomyPolicy: async () => ({ ...MODES.balanced, handoff: "never" }) });
+    await never.init();
+    const b2 = { ...b, messageID: "msg_h2", callID: "call_h2" };
+    world.msgs = handoffTranscript(b2, "build");
+    assert.match((await never.handoff(b2)).error, /The Architect did not start/);
+    const b3 = { ...b, messageID: "msg_h3", callID: "call_h3", agent: "dev" };
+    world.msgs = handoffTranscript(b3, "build");
+    assert.doesNotMatch((await f.engine.handoff(b3)).error ?? "", /The Architect did not start/);
   } finally {
     await f.cleanup();
   }
