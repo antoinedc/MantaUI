@@ -3035,7 +3035,8 @@ export type AutonomyKind =
   | "delete_data"
   | "spend"
   | "settings"
-  | "agent_change";
+  | "agent_change"
+  | "learn_preference";
 export interface AgentAutonomy {
   mode: AutonomyMode;
   overrides: Partial<Record<AutonomyKind, AutonomyLevel>>;
