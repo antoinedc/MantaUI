@@ -205,7 +205,7 @@ export const tools: ToolDef[] = [
       "An update needs the baseHash of the file you read (from your brief).",
       "Every proposal also carries the problem it answers: the user's own words quoted from the request any round of your task was given, the problem in one statement, the shapes you considered, the one you chose and why.",
       "A new agent, or an update of its instructions, skills, isolation or model, also carries the trial you ran on this exact draft (agent_trial): one verdict per case with a quote from what the agent did in that case (its messages and tool calls in the transcript, not the task text); it is refused if the trial ran on a different draft, belongs to another task, has a case that didn't finish, or has a verdict that isn't a pass.",
-      "An admission item may carry replaces (a sentence of the current instructions that must be gone from the new text) or revises (a sentence of the current instructions that was reworded).",
+      "An admission item may carry replaces (a sentence of the current instructions that must be gone from the new text, or the id lr_… of one of the agent's learned preferences, which the server then retires with your change) or revises (a sentence of the current instructions that was reworded).",
       "A draft may carry skills (add, replace or remove). Every copied file must occur in a page you fetched (sourceId), with provenance (url, sourceId, repo, ref, licence, taken) and, for most licences, the licence file's sourceId; the server writes SOURCE.md and LICENSE and refuses a licence that doesn't allow copying. A skill change needs a trial like any other. Adding a skill also needs skillSearch: the searches you ran in this task (research_search, including source \"skills\") and the candidates you looked at (each must have appeared in a search result or in skills_installed), with a verdict and a why for each.",
     ].join(" "),
     // `agent` and `baseHash` are optional and LAST: an optional key before a required one is silently dropped by strict tool schemas
@@ -231,7 +231,7 @@ export const tools: ToolDef[] = [
               rule: str("The candidate rule, 1 to 300 characters."),
               verdict: oneOf(["general", "scoped", "excluded"], "general = well supported across contexts; scoped = true only for a named situation; excluded = weak, contradicted or already done by the model."),
               why: str("1 to 300 characters."),
-              replaces: str("Update only, optional: 10 to 600 characters of the current instructions that this rule replaces; they must not occur in the new instructions."),
+              replaces: str("Update only, optional: 10 to 600 characters of the current instructions that this rule replaces (they must not occur in the new instructions), or the id (lr_…) of a learned preference of this agent that the new instructions now carry."),
               revises: str("Update only, optional: 10 to 600 characters of the current instructions that this rule rewords; they must occur in the current instructions."),
             },
             ["rule", "verdict", "why"],
