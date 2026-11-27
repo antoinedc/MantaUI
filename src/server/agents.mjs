@@ -18,6 +18,8 @@ import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import fsPromises from "node:fs/promises";
 import YAML from "yaml";
+import { diff3Merge } from "node-diff3";
+import { draftHash, differingFiles } from "./agentTrials.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG, ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
@@ -75,6 +77,17 @@ const CHANGES_FILE = ".changes.json";
 const UNFINISHED_CREATE_NOTICE = "An interrupted create left this folder; check it and delete .claim";
 const CLAIM_FILE = ".claim"; // a create in progress owns its folder through this marker (the change id); a reserved name
 const SNAPSHOT_MAX = 64 * 1024;
+
+// Architect v2 (docs/superpowers/specs/2026-11-27-architect-v2.md): template upgrades (§2) and bundle snapshots (§4.1).
+const BASE_DIR = ".base"; // the shipped files an agent folder was last in step with (three-way merge base)
+const BLOBS_DIR = ".blobs"; // content-addressed copies of the files a change record names, `.blobs/<sha256>`
+const TEMPLATE_HISTORY_FILE = ".history.json";
+const BLOB_GRACE_MS = 10 * 60_000; // a blob younger than this may belong to a record not saved yet
+const SPACE_ROOTS = ["agent.md", "skills", "learned"]; // what a snapshot of an agent covers
+const SPACE_MAX_FILES = 300;
+const SPACE_FILE_MAX = 256 * 1024;
+const SPACE_TOTAL_MAX = 4 * 1024 * 1024;
+export const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
 
 // Phase 4 (docs/superpowers/specs/2026-11-23-agents-phase4-architect.md): Manta creates and edits agents.
 export const INSTRUCTIONS_MAX = 12_000;
@@ -522,6 +535,62 @@ export function editAgentMd(before, fields, name = "The agent") {
     return { ok: false, error: `The change to ${name} couldn't be written safely; simplify the text and try again` };
   }
   return { ok: true, after, meta: parsed.meta, base: base.meta };
+}
+
+/**
+ * Three-way merge of a built-in's `agent.md` (Architect v2 §2). `live` is the file on the box, `base` the shipped version it
+ * came from, `next` the new shipped version. Frontmatter is merged key by key (a key the user changed stays; a key only the
+ * template changed is taken; both changed differently is a conflict), the body line by line with `node-diff3`. The result must
+ * be a valid agent file. `{ conflict, text }`: clean → the merged file; conflict → the card text: the shipped body with the
+ * user's frontmatter keys (the shipped file itself when the files can't be read as agent files).
+ */
+export function mergeAgentMd({ live, base = null, next }) {
+  const L = splitFrontmatter(live);
+  const B = base == null ? null : splitFrontmatter(base);
+  const N = splitFrontmatter(next);
+  if (!L || !N || (base != null && !B)) return { conflict: true, text: next };
+  let ld;
+  let bd;
+  let nd;
+  let doc;
+  try {
+    [ld, nd] = [YAML.parse(L.yaml), YAML.parse(N.yaml)];
+    bd = B ? YAML.parse(B.yaml) : null;
+    doc = YAML.parseDocument(L.yaml);
+  } catch {
+    return { conflict: true, text: next };
+  }
+  const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
+  if (!plain(ld) || !plain(nd) || (B && !plain(bd)) || doc.errors.length > 0 || !YAML.isMap(doc.contents)) return { conflict: true, text: next };
+  // no base copy: nothing says which keys the user changed, so every key they have is theirs and the body is the shipped one
+  let conflict = !B;
+  for (const k of new Set([...Object.keys(nd), ...Object.keys(ld)])) {
+    const [lv, nv] = [ld[k], nd[k]];
+    let pick;
+    if (!B) pick = Object.hasOwn(ld, k) ? lv : nv;
+    else if (isDeepStrictEqual(lv, bd[k])) pick = nv;
+    else if (isDeepStrictEqual(nv, bd[k]) || isDeepStrictEqual(lv, nv)) pick = lv;
+    else {
+      conflict = true;
+      pick = lv; // the user's key wins on the card
+    }
+    if (isDeepStrictEqual(pick, lv)) continue;
+    if (pick === undefined) doc.delete(k);
+    else doc.set(k, doc.createNode(pick));
+  }
+  const merged = B ? mergeLines(L.body, B.body, N.body) : { ok: false };
+  if (!merged.ok) conflict = true;
+  const body = merged.ok ? merged.text : N.body;
+  const text = `---\n${doc.toString({ lineWidth: 0 }).replace(/\n+$/, "")}\n---\n${body}\n`;
+  if (!parseAgentMd(text).ok) return { conflict: true, text: next };
+  return { conflict, text };
+}
+
+/** Line-level three-way merge: `{ ok: true, text }`, or `{ ok: false }` when both sides changed the same lines differently. */
+export function mergeLines(live, base, next) {
+  const parts = diff3Merge(String(live).split("\n"), String(base).split("\n"), String(next).split("\n"));
+  if (parts.some((p) => p.conflict)) return { ok: false };
+  return { ok: true, text: parts.flatMap((p) => p.ok ?? []).join("\n") };
 }
 
 /** Does the running tool call's input equal what the tool posted? Exact field presence: an omitted field is not null. */
@@ -1194,15 +1263,452 @@ export function createAgentsEngine({
     return { entries };
   }
 
-  /** Copy the built-in agents that this box does not have yet. Never overwrites a folder (user edits win). */
+  // ---- snapshots of an agent's folder: files in `.blobs/<sha256>`, maps `{ path: sha256 }` on the change record (§4.1) ----
+
+  const blobsDir = join(root, BLOBS_DIR);
+  const safeRel = (rel) => typeof rel === "string" && rel !== "" && !rel.startsWith("/") && !rel.includes("\0") && rel.split("/").every((s) => s !== "" && s !== "." && s !== "..");
+  const hashesOf = (files) => Object.fromEntries([...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([rel, buf]) => [rel, sha256Hex(buf)]));
+
+  /** What a snapshot covers: `agent.md`, `skills/**`, `learned/**` as `Map<path, Buffer>`; null when anything is a link, too big or too many. */
+  async function readSpace(dir) {
+    const files = new Map();
+    let total = 0;
+    const visit = async (rel) => {
+      let st;
+      try {
+        st = await fs.lstat(join(dir, rel));
+      } catch (e) {
+        return e?.code === "ENOENT";
+      }
+      if (st.isSymbolicLink()) return false;
+      if (st.isDirectory()) {
+        if (rel === "agent.md") return false;
+        let names;
+        try {
+          names = (await fs.readdir(join(dir, rel))).sort();
+        } catch {
+          return false;
+        }
+        for (const n of names) if (!(await visit(`${rel}/${n}`))) return false;
+        return true;
+      }
+      if (!st.isFile() || st.size > SPACE_FILE_MAX || files.size >= SPACE_MAX_FILES) return false;
+      total += st.size;
+      if (total > SPACE_TOTAL_MAX) return false;
+      files.set(rel, await fs.readFile(join(dir, rel)));
+      return true;
+    };
+    for (const r of SPACE_ROOTS) if (!(await visit(r))) return null;
+    return files;
+  }
+
+  /** A folder tree as `Map<path, Buffer>` (plain files only); null when it holds a link or is too big. A missing folder is empty. */
+  async function readTree(base, { skipDot = false } = {}) {
+    const files = new Map();
+    const visit = async (rel) => {
+      let st;
+      try {
+        st = await fs.lstat(rel ? join(base, rel) : base);
+      } catch (e) {
+        return e?.code === "ENOENT" || e?.code === "ENOTDIR";
+      }
+      if (st.isSymbolicLink()) return false;
+      if (st.isDirectory()) {
+        for (const n of (await fs.readdir(rel ? join(base, rel) : base)).sort()) {
+          if (skipDot && n.startsWith(".")) continue;
+          if (!(await visit(rel ? `${rel}/${n}` : n))) return false;
+        }
+        return true;
+      }
+      if (!st.isFile() || st.size > SPACE_FILE_MAX || files.size >= SPACE_MAX_FILES) return false;
+      files.set(rel, await fs.readFile(join(base, rel)));
+      return true;
+    };
+    return (await visit("")) ? files : null;
+  }
+
+  async function putBlob(buf) {
+    const hash = sha256Hex(buf);
+    if (await getBlob(hash)) return hash;
+    await fs.mkdir(blobsDir, { recursive: true });
+    await writeFileAtomic(join(blobsDir, hash), buf);
+    return hash;
+  }
+
+  async function getBlob(hash) {
+    if (typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) return null;
+    try {
+      const buf = await fs.readFile(join(blobsDir, hash));
+      return sha256Hex(buf) === hash ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function putBlobs(files) {
+    for (const buf of files.values()) await putBlob(buf);
+  }
+
+  /**
+   * Move an agent's folder from the file set `from` to `to` (`{ path: sha256 }` maps over agent.md + skills + learned). Every
+   * file must be exactly what `from` says, or nothing is touched: `{ conflict: true }`. A write that fails is put back and thrown.
+   */
+  async function transitionSpace(dir, from, to) {
+    const cur = await readSpace(dir);
+    if (!cur) return { conflict: true };
+    const now0 = hashesOf(cur);
+    for (const p of new Set([...Object.keys(now0), ...Object.keys(from), ...Object.keys(to)])) {
+      if ((now0[p] ?? null) !== (from[p] ?? null)) return { conflict: true };
+    }
+    const wanted = new Map();
+    for (const [p, h] of Object.entries(to)) {
+      if (!safeRel(p)) return { conflict: true };
+      if (now0[p] === h) continue;
+      const blob = await getBlob(h);
+      if (!blob) return { conflict: true };
+      wanted.set(p, blob);
+    }
+    const touched = []; // [path, what it held before]
+    try {
+      for (const [p, blob] of wanted) {
+        await fs.mkdir(join(dir, p, ".."), { recursive: true });
+        touched.push([p, cur.get(p) ?? null]);
+        await writeFileAtomic(join(dir, p), blob);
+      }
+      for (const p of Object.keys(now0)) {
+        if (p in to) continue;
+        touched.push([p, cur.get(p)]);
+        await fs.unlink(join(dir, p));
+      }
+    } catch (e) {
+      for (const [p, prev] of touched.reverse()) {
+        try {
+          if (prev === null) await fs.rm(join(dir, p), { force: true });
+          else {
+            await fs.mkdir(join(dir, p, ".."), { recursive: true });
+            await writeFileAtomic(join(dir, p), prev);
+          }
+        } catch {
+          /* best effort: the record says what was expected */
+        }
+      }
+      throw writeFailed(e);
+    }
+    // a removed skill leaves empty folders behind: take them away, innermost first
+    for (const p of Object.keys(now0).filter((x) => !(x in to))) {
+      for (let d = join(p, ".."); d !== "." && d !== "skills" && d !== "learned"; d = join(d, "..")) {
+        try {
+          await fs.rmdir(join(dir, d));
+        } catch {
+          break;
+        }
+      }
+    }
+    return { ok: true };
+  }
+
+  /** Does the agent's folder hold exactly the files of `bundle` right now? */
+  async function spaceIs(dir, bundle) {
+    const cur = await readSpace(dir);
+    return !!cur && isDeepStrictEqual(hashesOf(cur), bundle);
+  }
+
+  /** `.base/` becomes `files` (`Map<path, Buffer>`), or goes away for null. Bookkeeping: a problem is logged, never thrown. */
+  async function writeBase(dir, files) {
+    const base = join(dir, BASE_DIR);
+    try {
+      const st = await fs.lstat(base).catch(() => null);
+      if (st && !st.isDirectory()) return; // not ours to replace
+      if (st) await fs.rm(base, { recursive: true, force: true });
+      for (const [p, buf] of files ?? []) {
+        if (!safeRel(p)) continue;
+        await fs.mkdir(join(base, p, ".."), { recursive: true });
+        await fs.writeFile(join(base, p), buf);
+      }
+    } catch (e) {
+      log.warn?.(`[agents] couldn't update ${BASE_DIR} of ${dir}: ${e?.message ?? e}`);
+    }
+  }
+
+  /** The same from a record's `{ path: sha256 }` map (or null); a missing copy leaves `.base/` as it was. */
+  async function setBase(dir, map) {
+    const files = new Map();
+    for (const [p, h] of Object.entries(map ?? {})) {
+      const blob = await getBlob(h);
+      if (!blob) return log.warn?.(`[agents] couldn't restore ${BASE_DIR}/${p} of ${dir}: its copy is missing`);
+      files.set(p, blob);
+    }
+    await writeBase(dir, map ? files : null);
+  }
+
+  /** Blobs no record names and that are older than the grace period are deleted. The caller holds `syncLock`. */
+  async function sweepBlobsLocked() {
+    let names;
+    try {
+      names = await fs.readdir(blobsDir);
+    } catch {
+      return;
+    }
+    if (names.length === 0) return;
+    let store;
+    try {
+      store = await readStore({ strict: true });
+    } catch {
+      return; // an unreadable store keeps every blob
+    }
+    const used = new Set();
+    for (const r of store.changes) for (const m of [r.beforeBundle, r.afterBundle, r.baseBefore, r.baseAfter]) for (const h of Object.values(m ?? {})) used.add(h);
+    for (const n of names) {
+      if (used.has(n)) continue;
+      try {
+        const st = await fs.lstat(join(blobsDir, n));
+        if (st.isFile() && now() - st.mtimeMs > BLOB_GRACE_MS) await fs.unlink(join(blobsDir, n));
+      } catch {
+        /* gone already */
+      }
+    }
+  }
+
+  /**
+   * `rec` (an update of an existing agent) gains the snapshots of its folder before and after: `beforeBundle` / `afterBundle`
+   * (agent.md + skills + learned as `{ path: sha256 }`, `after` = `before` with `rec.after` as agent.md) and their blobs.
+   * Left without them when the folder can't be snapshotted (a link, too big): the agent.md-string path then applies.
+   */
+  async function attachBundles(rec, dir = folderOf(rec.slug)) {
+    const files = await readSpace(dir).catch(() => null);
+    if (!files || !files.has("agent.md")) return rec;
+    const after = new Map(files).set("agent.md", Buffer.from(rec.after, "utf-8"));
+    try {
+      await putBlobs(files);
+      await putBlobs(after);
+    } catch (e) {
+      log.warn?.(`[agents] couldn't snapshot ${rec.slug}: ${e?.message ?? e}`);
+      return rec;
+    }
+    rec.beforeBundle = hashesOf(files);
+    rec.afterBundle = hashesOf(after);
+    return rec;
+  }
+
+  const hasBundles = (rec) => !!rec.beforeBundle && !!rec.afterBundle;
+  /** Is the agent as the record's `before` (or `after`) says: every file of its bundle, else the agent.md text? */
+  async function isAt(rec, which) {
+    if (hasBundles(rec)) return spaceIs(folderOf(rec.slug), which === "before" ? rec.beforeBundle : rec.afterBundle);
+    const snap = await readAgentSnapshot(rec.slug);
+    return !!snap && snap.text === rec[which];
+  }
+
+  // ---- built-in templates reach existing boxes (§2) ----
+
+  const roleOfText = (text) => {
+    try {
+      const role = YAML.parse(splitFrontmatter(text)?.yaml ?? "")?.role;
+      return typeof role === "string" && role.trim() ? role.trim() : "specialist";
+    } catch {
+      return "specialist";
+    }
+  };
+  const isShipped = (rel) => rel === "agent.md" || rel.startsWith("skills/");
+  const sameBuf = (a, b) => !!a && !!b && Buffer.compare(a, b) === 0;
+
+  /**
+   * What upgrading one built-in would do, from the files alone (no lock, nothing written except a base copy that was missing):
+   * `null` (nothing to do or not ours), or `{ slug, name, writes, removes, conflict, shipped, baseFiles, templateHash, before, after }`.
+   * Per file, with `live` on the box, `base` the shipped copy it came from (`.base/`, or the template's only version) and `next`
+   * the new one: equal → nothing; live is any version ever shipped → replace; base unknown → conflict; template unchanged →
+   * keep the user's file; else a three-way merge.
+   */
+  async function planTemplateUpgrade(slug) {
+    const tdir = join(templatesDir, slug);
+    const dir = folderOf(slug);
+    const shipped = await readTree(tdir, { skipDot: true });
+    if (!shipped?.has("agent.md")) return null;
+    for (const rel of [...shipped.keys()]) if (!isShipped(rel)) shipped.delete(rel);
+    const history = parseJsonOrNull(await readOptional(fs, join(tdir, TEMPLATE_HISTORY_FILE))) ?? {};
+    const st = await fs.lstat(dir).catch(() => null);
+    if (!st?.isDirectory() || (await exists(fs, join(dir, CLAIM_FILE)))) return null;
+    const space = await readSpace(dir);
+    if (!space) {
+      log.warn?.(`[agents] ${slug} can't be upgraded: its folder holds a link or is too big`);
+      return null;
+    }
+    const baseFiles = (await readTree(join(dir, BASE_DIR))) ?? new Map();
+    const hadBase = [...baseFiles.keys()].some(isShipped);
+    const wasShipped = (rel, buf) => Array.isArray(history[rel]) && history[rel].includes(sha256Hex(buf));
+    const liveMd = space.get("agent.md");
+    // a folder that only shares the built-in's name (another role, nothing of ours in it) is somebody else's agent
+    if (!hadBase && liveMd && !wasShipped("agent.md", liveMd) && roleOfText(liveMd.toString("utf-8")) !== roleOfText(shipped.get("agent.md").toString("utf-8"))) return null;
+
+    const writes = new Map();
+    const removes = new Set();
+    let conflict = false;
+    for (const rel of new Set([...shipped.keys(), ...[...baseFiles.keys()].filter(isShipped)])) {
+      const live = space.get(rel) ?? null;
+      const next = shipped.get(rel) ?? null;
+      let base = baseFiles.get(rel) ?? null;
+      // a template that has only ever had one version: the base is known even without a copy
+      if (!base && next && Array.isArray(history[rel]) && history[rel].length === 1 && sha256Hex(next) === history[rel][0]) base = next;
+      if (!next) {
+        // dropped by the template: removed only while the box's copy is untouched
+        if (live && (sameBuf(live, base) || wasShipped(rel, live))) removes.add(rel);
+        continue;
+      }
+      if (!live) {
+        if (!(baseFiles.has(rel) && sameBuf(base, next))) writes.set(rel, next); // a file deleted by the user stays deleted until the template changes it
+        continue;
+      }
+      if (sameBuf(live, next)) continue;
+      if (wasShipped(rel, live) || sameBuf(live, base)) {
+        writes.set(rel, next);
+        continue;
+      }
+      if (!base) {
+        conflict = true;
+        writes.set(rel, rel === "agent.md" ? Buffer.from(mergeAgentMd({ live: live.toString("utf-8"), next: next.toString("utf-8") }).text, "utf-8") : next);
+        continue;
+      }
+      if (sameBuf(base, next)) continue; // the template didn't change this file: the user's edit stands
+      if (rel === "agent.md") {
+        const m = mergeAgentMd({ live: live.toString("utf-8"), base: base.toString("utf-8"), next: next.toString("utf-8") });
+        if (m.conflict) conflict = true;
+        writes.set(rel, Buffer.from(m.text, "utf-8"));
+        continue;
+      }
+      const m = mergeLines(live.toString("utf-8"), base.toString("utf-8"), next.toString("utf-8"));
+      if (!m.ok) conflict = true;
+      writes.set(rel, m.ok ? Buffer.from(m.text, "utf-8") : next);
+    }
+    // no base copy and no conflict card to make: the user's file is a rewrite of the template's own only version — just remember it
+    if (writes.size === 0 && removes.size === 0 && !conflict) {
+      const same = hadBase && [...shipped].every(([rel, buf]) => sameBuf(baseFiles.get(rel), buf));
+      if (!same) {
+        await writeBase(dir, shipped);
+      }
+      return null;
+    }
+    // the conflict card of an agent.md that couldn't be merged (conflict above wrote the shipped body with the user's keys)
+    const after = new Map(space);
+    for (const [rel, buf] of writes) after.set(rel, buf);
+    for (const rel of removes) after.delete(rel);
+    const text = (m) => m?.get("agent.md")?.toString("utf-8") ?? "";
+    const meta = parseAgentMd(text(space));
+    return {
+      slug,
+      dir,
+      name: meta.ok ? meta.meta.name : slug,
+      writes,
+      removes,
+      conflict,
+      shipped,
+      baseFiles,
+      space,
+      after,
+      templateHash: draftHash(Object.fromEntries([...shipped].map(([rel, buf]) => [rel, buf.toString("utf-8")]))),
+      before: text(space),
+      afterText: text(after),
+    };
+  }
+
+  /**
+   * Boot only (`init()`): every built-in whose shipped files moved on gets ONE change record, released by the user's "Change an
+   * agent" level like any change: Auto / Tell me apply it (Undo), Ask or a merge conflict wait for a click, Never discards it.
+   * A shipped bundle that already has a record (any state but expired) is not offered again. Returns the records made.
+   */
+  async function upgradeBuiltIns() {
+    const made = [];
+    for (const slug of [...(await builtInSlugs())].sort()) {
+      try {
+        const plan = await planTemplateUpgrade(slug);
+        if (!plan) continue;
+        const rec = await syncLock.runExclusive(async () => {
+          const store = await readStore({ strict: true });
+          if (store.changes.some((r) => r.origin?.kind === "template-update" && r.slug === slug && r.origin.templateHash === plan.templateHash && r.state !== "expired")) return null;
+          let policy;
+          try {
+            policy = await autonomyPolicy();
+          } catch (e) {
+            log.warn?.(`[agents] couldn't read the autonomy settings to upgrade @${slug}: ${e?.message ?? e}`);
+            return null; // tried again at the next boot
+          }
+          const level = autonomy.decide("agent_change", policy);
+          const files = plan.space;
+          await putBlobs(files);
+          await putBlobs(plan.after);
+          await putBlobs(plan.shipped);
+          const baseNow = new Map([...plan.baseFiles].filter(([rel]) => isShipped(rel)));
+          await putBlobs(baseNow);
+          const r = normalizeRecord({
+            id: `ach_${randomBytes(8).toString("hex")}`,
+            kind: "update",
+            slug,
+            agentName: plan.name,
+            sessionID: "",
+            messageID: "",
+            callID: "",
+            state: "pending",
+            needsClick: false,
+            reason: null,
+            before: plan.before,
+            after: plan.afterText,
+            createdAt: now(),
+            decidedAt: null,
+            error: null,
+            origin: { kind: "template-update", templateHash: plan.templateHash },
+            summary: plan.conflict
+              ? `A new version of the built-in ${plan.name} conflicts with your edits: applying keeps your settings and uses the new instructions`
+              : `A new version of the built-in ${plan.name}`,
+            beforeBundle: hashesOf(files),
+            afterBundle: hashesOf(plan.after),
+            baseBefore: baseNow.size > 0 ? hashesOf(baseNow) : null,
+            baseAfter: hashesOf(plan.shipped),
+          });
+          if (level === "never") {
+            r.state = "discarded";
+            r.error = AGENT_CHANGE_OFF;
+            r.decidedAt = now();
+          } else if (plan.conflict || level === "ask") {
+            r.needsClick = true;
+            r.reason = "ask";
+          } else {
+            try {
+              await applyLocked(r, "auto");
+            } catch (e) {
+              if (!(e instanceof AgentError)) throw e;
+              // the write failed and nothing was kept: the user can retry it from the card
+              r.state = "pending";
+              r.needsClick = true;
+              r.reason = "ask";
+              r.error = e.message;
+            }
+          }
+          await saveRecord(r);
+          return r;
+        });
+        if (rec) {
+          made.push(rec);
+          publishChange(rec);
+        }
+      } catch (e) {
+        log.warn?.(`[agents] couldn't upgrade @${slug}: ${e?.message ?? e}`);
+      }
+    }
+    return made;
+  }
+
+  /** Copy the built-in agents that this box does not have yet (and their `.base/` copy). Never overwrites a folder (user edits win). */
   async function installBuiltIns() {
     await fs.mkdir(root, { recursive: true });
     const installed = [];
     for (const slug of await builtInSlugs()) {
       const target = join(root, slug);
       if (await exists(fs, target)) continue;
-      await fs.cp(join(templatesDir, slug), target, { recursive: true });
+      await fs.cp(join(templatesDir, slug), target, { recursive: true, filter: (src) => !src.endsWith(`/${TEMPLATE_HISTORY_FILE}`) });
       await fs.mkdir(join(target, "home"), { recursive: true });
+      const shipped = await readTree(join(templatesDir, slug), { skipDot: true });
+      if (shipped) {
+        for (const rel of [...shipped.keys()]) if (!isShipped(rel)) shipped.delete(rel);
+        await writeBase(target, shipped);
+      }
       installed.push(slug);
     }
     return installed;
@@ -1213,6 +1719,8 @@ export function createAgentsEngine({
     const installed = await installBuiltIns();
     // an interrupted write is finished (or undone) BEFORE the first ordinary sync, which treats a claimed folder as a problem
     await recover();
+    // new shipped versions of the built-ins: once per boot, never from sync() (which runs from list() and mid-activation)
+    await upgradeBuiltIns();
     await sync();
     await reconcile();
     return { installed };
@@ -1749,7 +2257,7 @@ export function createAgentsEngine({
 
   // What leaves the box: the contract's fields only (the journal's bookkeeping stays here).
   // eslint-disable-next-line no-unused-vars
-  const wire = ({ prior, invocation, claimed, target, raisesIsolation, ...r }) => clone(r);
+  const wire = ({ prior, invocation, claimed, target, raisesIsolation, beforeBundle, afterBundle, baseBefore, baseAfter, ...r }) => clone(r);
 
   /**
    * The change store. `strict`: a missing file is empty, but an unreadable or malformed one THROWS (every mutation and every
@@ -1944,11 +2452,17 @@ export function createAgentsEngine({
       }
     } else if (dir) {
       const target = await resolveTarget(rec.slug);
-      const snap = target ? await readAgentSnapshot(rec.slug) : null;
-      if (!snap || snap.text !== rec.after) {
+      if (!target || !(await isAt(rec, "after"))) {
         left.push(`${rec.agentName} was edited since`);
       } else {
-        if (await attempt("couldn't restore agent.md", () => writeFileAtomic(target.file, rec.before))) {
+        const putBack = hasBundles(rec)
+          ? () =>
+              attempt("couldn't restore the files", async () => {
+                if ((await transitionSpace(dir, rec.afterBundle, rec.beforeBundle)).conflict) throw new Error("they changed since");
+                if (rec.baseAfter) await setBase(dir, rec.baseBefore ?? null);
+              })
+          : () => attempt("couldn't restore agent.md", () => writeFileAtomic(target.file, rec.before));
+        if (await putBack()) {
           for (const { file, previous } of undo.compiled) {
             if (file !== join(dir, COMPILED_FILE)) continue;
             await attempt("couldn't restore the compiled prompt", () => (previous == null ? fs.unlink(file) : writeFileAtomic(file, previous)));
@@ -2022,8 +2536,7 @@ export function createAgentsEngine({
   /** Does a failed change still own something on disk: a create its folder, an update its new file? */
   async function leftOnDisk(rec) {
     if (rec.kind === "create") return rec.claimed === true;
-    const snap = await readAgentSnapshot(rec.slug);
-    return !snap || snap.text !== rec.before;
+    return !(await isAt(rec, "before"));
   }
 
   /** A retry: nothing is rewritten or reclaimed; the file must still be exactly what was written, then it is activated again. */
@@ -2037,8 +2550,7 @@ export function createAgentsEngine({
       return finishCreateLocked(rec, rec.slug, { forceReload: true });
     }
     const target = await resolveTarget(rec.slug);
-    const snap = target ? await readAgentSnapshot(rec.slug) : null;
-    if (!snap || snap.text !== rec.after) return markConflict(rec, changedSince(rec));
+    if (!target || !(await isAt(rec, "after"))) return markConflict(rec, changedSince(rec));
     return activateLocked(rec, { forceReload: true });
   }
 
@@ -2138,13 +2650,18 @@ export function createAgentsEngine({
       throw e;
     }
     const target = await resolveTarget(rec.slug);
-    const snap = target ? await readAgentSnapshot(rec.slug) : null;
-    if (!target || !snap || snap.text !== rec.before) return markConflict(rec, changedSince(rec));
+    if (!target || !(await isAt(rec, "before"))) return markConflict(rec, changedSince(rec));
     try {
-      await writeFileAtomic(target.file, rec.after);
+      if (hasBundles(rec)) {
+        // every file of the agent's folder is checked against the snapshot, then moved to the new one together
+        if ((await transitionSpace(target.dir, rec.beforeBundle, rec.afterBundle)).conflict) return markConflict(rec, changedSince(rec));
+        if (rec.baseAfter) await setBase(target.dir, rec.baseAfter);
+      } else {
+        await writeFileAtomic(target.file, rec.after);
+      }
     } catch (e) {
       await backToPrior(rec);
-      throw writeFailed(e);
+      throw e instanceof AgentError ? e : writeFailed(e);
     }
     await activateLocked(rec);
     await saveRecord(rec);
@@ -2166,13 +2683,17 @@ export function createAgentsEngine({
     };
     const target = await resolveTarget(rec.slug);
     if (rec.kind === "update") {
-      const snap = target ? await readAgentSnapshot(rec.slug) : null;
       if (!target) return markConflict(rec, `${rec.agentName} changed since; undo it by hand`);
-      if (!snap || snap.text !== rec.after) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
+      if (!(await isAt(rec, "after"))) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
       try {
-        await writeFileAtomic(target.file, rec.before);
+        if (hasBundles(rec)) {
+          if ((await transitionSpace(target.dir, rec.afterBundle, rec.beforeBundle)).conflict) return markConflict(rec, `${rec.agentName} was edited since; undo it by hand`);
+          if (rec.baseAfter) await setBase(target.dir, rec.baseBefore ?? null);
+        } else {
+          await writeFileAtomic(target.file, rec.before);
+        }
       } catch (e) {
-        throw writeFailed(e);
+        throw e instanceof AgentError ? e : writeFailed(e);
       }
       return finish();
     }
@@ -2449,6 +2970,7 @@ export function createAgentsEngine({
           decidedAt: null,
           error: null,
         });
+        if (made.kind === "update") await attachBundles(made);
         if (!made.needsClick) await applyLocked(made, "auto");
         await saveRecord(made);
         return { rec: made };
@@ -2760,6 +3282,7 @@ export function createAgentsEngine({
           raisesIsolation: plan.raisesIsolation === true,
           invocation: { childSessionID: bound.childSessionID, messageID: b.messageID, callID: b.callID, argsHash },
         });
+        if (made.kind === "update") await attachBundles(made);
         await saveRecord(made, { slots: { ...store.slots, [stamp.rootJobId]: used + 1 } });
         return { rec: made, used: used + 1 };
       });
@@ -2961,7 +3484,11 @@ export function createAgentsEngine({
 
   /** Release held proposals whose round has ended (after a task ends or is stopped, at boot, and every sweep). */
   function reconcile() {
-    return syncLock.runExclusive(() => reconcileLocked());
+    return syncLock.runExclusive(async () => {
+      const out = await reconcileLocked();
+      await sweepBlobsLocked().catch((e) => log.warn?.(`[agents] blob sweep: ${e?.message ?? e}`));
+      return out;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -2969,6 +3496,32 @@ export function createAgentsEngine({
   // -------------------------------------------------------------------------
 
   async function recoverOneLocked(rec) {
+    if (rec.kind === "update" && hasBundles(rec)) {
+      const dir = folderOf(rec.slug);
+      if (await spaceIs(dir, rec.afterBundle)) {
+        if (rec.baseAfter) await setBase(dir, rec.baseAfter);
+        await activateLocked(rec);
+        await saveRecord(rec);
+        return;
+      }
+      if (await spaceIs(dir, rec.beforeBundle)) {
+        await backToPrior(rec);
+        return;
+      }
+      // a crash between two files: when every file is one of the two versions, the write is finished
+      const cur = await readSpace(dir);
+      const now0 = cur ? hashesOf(cur) : null;
+      const mixed = now0 && [...new Set([...Object.keys(now0), ...Object.keys(rec.beforeBundle), ...Object.keys(rec.afterBundle)])].every((p) => [rec.beforeBundle[p] ?? null, rec.afterBundle[p] ?? null].includes(now0[p] ?? null));
+      if (mixed && !(await transitionSpace(dir, now0, rec.afterBundle)).conflict) {
+        if (rec.baseAfter) await setBase(dir, rec.baseAfter);
+        await activateLocked(rec);
+        await saveRecord(rec);
+        return;
+      }
+      markConflict(rec, changedSince(rec));
+      await saveRecord(rec);
+      return;
+    }
     if (rec.kind === "update") {
       const snap = await readAgentSnapshot(rec.slug);
       if (snap && snap.text === rec.after) {
@@ -3377,7 +3930,14 @@ export function createAgentsEngine({
       if (!target) throw new AgentError(`@${src.slug} no longer exists`);
       const snap = await readAgentSnapshot(src.slug);
       if (!snap) throw new AgentError(`@${src.slug} can't be edited safely; fix it by hand`);
-      if (snap.text === src.before) throw new AgentError("Already at that version");
+      // a record with snapshots puts the whole folder back (skills and all) when every file of the old version is still kept
+      let wholeFolder = null;
+      if (src.beforeBundle) {
+        const files = await readSpace(target.dir).catch(() => null);
+        const kept = (await Promise.all(Object.values(src.beforeBundle).map((h) => getBlob(h)))).every(Boolean);
+        if (files && kept) wholeFolder = files;
+      }
+      if (wholeFolder ? isDeepStrictEqual(hashesOf(wholeFolder), src.beforeBundle) : snap.text === src.before) throw new AgentError("Already at that version");
       // the old file is old data: it must still be a valid agent file, and an Architect's sources must still be safe
       const parsed = parseAgentMd(src.before);
       if (!parsed.ok) throw new AgentError(`That version can't be read any more: ${parsed.error}`);
@@ -3406,6 +3966,13 @@ export function createAgentsEngine({
         origin: { kind: "restore", fromChangeId: src.id },
         summary: "Restored an earlier version",
       });
+      if (wholeFolder) {
+        await putBlobs(wholeFolder);
+        rec.beforeBundle = hashesOf(wholeFolder);
+        rec.afterBundle = { ...src.beforeBundle };
+      } else {
+        await attachBundles(rec);
+      }
       try {
         await applyLocked(rec, "click");
       } catch (e) {
@@ -4020,6 +4587,7 @@ export function createAgentsEngine({
   return {
     init,
     installBuiltIns,
+    upgradeBuiltIns,
     sync,
     list,
     create,
