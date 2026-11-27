@@ -16,11 +16,11 @@ const md = ({ description = "Writes code.", model = null, color = null, body = "
 const SKILL = (extra = "") => `---\nname: style\ndescription: House style.\n---\nUse tabs.${extra}\n`;
 
 /** A box over temp folders. `ship(files)` publishes a template version (and appends its hashes to the history file, as the script does). */
-async function box({ level = "tell", policyThrows = false, extra = {} } = {}) {
+async function box({ level = "tell", policyThrows = false, extra = {}, slug = "dev" } = {}) {
   const base = await mkdtemp(join(tmpdir(), "agents-upgrade-"));
   const root = join(base, "agents");
   const templatesDir = join(base, "templates");
-  const tdir = join(templatesDir, "dev");
+  const tdir = join(templatesDir, slug);
   const config = { cfg: { agent: {} }, edits: [], reloads: 0 };
   const w = { level, policyThrows, clock: 1_700_000_000_000 };
   const engineOver = (over = {}) =>
@@ -55,15 +55,15 @@ async function box({ level = "tell", policyThrows = false, extra = {} } = {}) {
     }
     let history = {};
     try {
-      history = JSON.parse(await readFile(join(tdir, "..", "dev.history.json"), "utf-8"));
+      history = JSON.parse(await readFile(join(tdir, "..", `${slug}.history.json`), "utf-8"));
     } catch {
       /* the first release */
     }
     history = historyOf(history, hashes);
-    await writeFile(join(templatesDir, "dev.history.json"), JSON.stringify(history));
+    await writeFile(join(templatesDir, `${slug}.history.json`), JSON.stringify(history));
     await writeFile(join(tdir, ".history.json"), JSON.stringify(history));
   };
-  const read = (...p) => readFile(join(root, "dev", ...p), "utf-8");
+  const read = (...p) => readFile(join(root, slug, ...p), "utf-8");
   const records = async () => JSON.parse(await readFile(join(root, ".changes.json"), "utf-8").catch(() => '{"changes":[]}')).changes;
   return { base, root, templatesDir, tdir, config, w, engine: engineOver(), make: engineOver, ship, read, records, cleanup: () => rm(base, { recursive: true, force: true }) };
 }
@@ -500,4 +500,43 @@ test("mergeAgentMd: frontmatter keys one by one, the body line by line; a result
   const broken = mergeAgentMd({ live: "no frontmatter", base, next });
   assert.equal(broken.conflict, true);
   assert.equal(broken.text, next);
+});
+
+const ARCH = (extra = "", body = "You are the Architect.\nLine two.\nLine three.") => `---\nname: Architect\ndescription: Builds agents.\nrole: architect\nisolation: none\n${extra}---\n${body}\n`;
+const SOURCES = 'sources:\n  - id: yc\n    name: YC\n    description: Search the YC directory.\n    url: "https://search.example.com/api?q={query}"\n';
+
+test("the Architect's own sources (frontmatter the template doesn't have) are kept through an upgrade", async () => {
+  const b = await box({ level: "tell", slug: "architect" });
+  try {
+    await b.ship({ "agent.md": ARCH() });
+    await b.engine.init();
+    await writeFile(join(b.root, "architect", "agent.md"), ARCH(SOURCES));
+    await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.") });
+    await b.make().init();
+    const parsed = parseAgentMd(await b.read("agent.md"));
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.meta.sources.length, 1, "the user's source stays");
+    assert.match(parsed.body, /Line four\./);
+    assert.equal((await b.records())[0].state, "applied");
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("a merged Architect file whose sources fail the Architect's checks (a credential in a source) waits for a click instead of being applied", async () => {
+  const b = await box({ level: "tell", slug: "architect", extra: { createScanner: () => ({ scan: async () => ({ clean: false, unavailable: false, hits: [{ source: "store" }] }) }) } });
+  try {
+    await b.ship({ "agent.md": ARCH() });
+    await b.engine.init();
+    await writeFile(join(b.root, "architect", "agent.md"), ARCH(SOURCES));
+    await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.") });
+    await b.make().init();
+    const [rec] = await b.records();
+    assert.equal(rec.state, "pending");
+    assert.equal(rec.needsClick, true);
+    assert.match(await b.read("agent.md"), /sources:/, "nothing written");
+    assert.doesNotMatch(await b.read("agent.md"), /Line four\./);
+  } finally {
+    await b.cleanup();
+  }
 });

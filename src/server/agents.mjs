@@ -1589,6 +1589,12 @@ export function createAgentsEngine({
       if (!m.ok) conflict = true;
       writes.set(rel, m.ok ? Buffer.from(m.text, "utf-8") : next);
     }
+    // an Architect file stays subject to the Architect's own source checks: the merged result may keep the user's sources, but one that
+    // is invalid or seems to hold a credential is never written by an upgrade — it waits for a click
+    if (writes.has("agent.md")) {
+      const merged = parseAgentMd(writes.get("agent.md").toString("utf-8"));
+      if (merged.ok && merged.meta.role === "architect" && ((merged.meta.sourceNotes ?? []).length > 0 || (await checkSourceCredentials(merged.meta.sources ?? [])))) conflict = true;
+    }
     // no base copy and no conflict card to make: the user's file is a rewrite of the template's own only version — just remember it
     if (writes.size === 0 && removes.size === 0 && !conflict) {
       const same = hadBase && [...shipped].every(([rel, buf]) => sameBuf(baseFiles.get(rel), buf));
@@ -3325,6 +3331,8 @@ export function createAgentsEngine({
         meta: parsed.meta,
         body: parsed.body,
         needsTrial: trialRequired(plan),
+        // the projects the agent is seated in: a case with no project of its own works in a copy of the first
+        seats: plan.kind === "update" ? await seatSlugsOf(folderOf(slug)) : [],
         compiled: compileAgentPrompt({ body: parsed.body, skills }),
         block: buildAgentBlock({ dir: where, meta: parsed.meta, home }),
       };

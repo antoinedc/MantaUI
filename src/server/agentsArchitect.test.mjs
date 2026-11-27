@@ -16,7 +16,7 @@ import {
   describeProposalOutcome,
 } from "./agents.mjs";
 import { ARCHITECT_SLUG, isTeamAgent } from "../shared/agentsShared.mjs";
-import { draftHash } from "./agentTrials.mjs";
+import { draftHash, createAgentTrials } from "./agentTrials.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 import { isInsideMantaFolders, MANTA_FOLDER } from "./autonomy.mjs";
 
@@ -2293,6 +2293,10 @@ test("trialPlan: the complete resulting file set for the Architect's trial tools
     assert.equal(plan.block.prompt, "{file:/t/x/.compiled.md}");
     assert.match(plan.compiled, /always run the tests/);
     assert.equal(plan.needsTrial, true);
+    assert.deepEqual(plan.seats, [], "no seats yet");
+    await mkdir2(join(f.root, "dev", "seats"), { recursive: true });
+    await writeFile(join(f.root, "dev", "seats", "shop.md"), "---\nadded_at: 2026-11-01T00:00:00.000Z\nadded_by: user\n---\nBrief.\n");
+    assert.deepEqual((await f.engine.trialPlan({ action: "update", agent: "dev", draft: { ...DRAFT_UPDATE }, baseHash: hash }, { dir: "/t/x" })).seats, ["shop"], "an update's seats, for the default project of a case");
     const create = await f.engine.trialPlan({ action: "create", draft: { name: "SEO Reviewer", description: "Reviews SEO.", isolation: "none", instructions: "You review SEO." } }, { dir: "/t/y" });
     assert.equal(create.slug, "seo-reviewer");
     assert.equal(create.kind, "create");
@@ -2460,4 +2464,88 @@ test("the lead's charter quotes the user's words verbatim and states the problem
   assert.match(brief, /`Outcome: No change was proposed\.` means the Architect decided no change was needed: say so and give its reason from its result\./);
   const plugin = await readFile(new URL("../../docs/opencode-plugins-v2/manta/tools/agents.ts", import.meta.url), "utf-8");
   assert.match(plugin, /quotes the user's request word for word under \\"The user's words\\" and states the problem it solves/);
+});
+
+test("the real trials module and the real engine together: agent_trial → agent_trial_wait → agent_trial_read → agent_propose, through the same running-call binding", async () => {
+  let engine = null;
+  const sent = { created: [], deleted: [] };
+  let trials;
+  const oc = {
+    createSession: async (i) => (sent.created.push(i), { id: i.id }),
+    sendPrompt: async (i) => queueMicrotask(() => trials.observeRaw({ type: "session.execution.succeeded", data: { sessionID: i.sessionId } })),
+    abortSession: async () => {},
+    deleteSessionRaw: async (id) => sent.deleted.push(id),
+    listMessages: async () => [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the failing test." }] },
+      { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "I fixed the test and ran the whole suite; it passes." }] },
+    ],
+    replyQuestion: async () => {},
+  };
+  // the engine is built before the trials module (which needs the engine): it reads the module at call time, as index.mjs does
+  const late = { get: (id) => trials.get(id), transcript: (id, name) => trials.transcript(id, name), view: (id) => trials.view(id), activeTrialKeys: () => trials?.activeTrialKeys() ?? new Set() };
+  const f = await proposeFixture({ extra: { trials: late } });
+  trials = createAgentTrials({
+    root: f.root,
+    home: "/h",
+    scratchRoot: join(f.base, "scratch"),
+    agents: () => engine,
+    oc,
+    local: { gitAddWorktree: async () => ({ path: "/wt/x" }), gitRemoveWorktree: async () => ({ removed: true }) },
+    gitRun: async () => ({ stdout: "" }),
+    editConfig: async (fn) => {
+      const edits = await fn(f.config.cfg);
+      for (const e of edits) (e.value === undefined ? delete f.config.cfg.agent[e.path[1]] : (f.config.cfg.agent[e.path[1]] = e.value));
+      return { ok: true, changed: edits.length > 0 };
+    },
+    budget: { canSpend: async () => ({ ok: true }), book: async () => {} },
+    policy: async () => ({ ...MODES.balanced, agent_change: "auto" }),
+    log: { warn: () => {} },
+  });
+  engine = f.engine;
+  try {
+    const hash = (await f.engine.readAgentSnapshot("dev")).hash;
+    const call = (tool, extra, input) => {
+      const n = ++seq;
+      const b = { sessionID: "ses_child", messageID: `msg_i${n}`, callID: `call_i${n}`, ...extra };
+      f.w.messages = [
+        { info: { id: "msg_user", role: "user" }, parts: [] },
+        { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent: AGENT_KEY }, parts: [{ type: "tool", tool, callID: b.callID, state: { status: "running", input: input ?? extra } }] },
+      ];
+      return b;
+    };
+    const draft = { instructions: "You write code.\nYou always run the tests." };
+    const started = await trials.create(call("agent_trial", { action: "update", agent: "dev", baseHash: hash, draft, cases: [{ name: "fix", task: "Fix the failing test.", expect: "does", checks: ["The suite passes."] }] }));
+    assert.equal(started.ok, true, started.error);
+    assert.equal(f.config.cfg.agent[`agent-trial-${started.trialId}`].prompt, `{file:${join(f.root, ".trials", started.trialId)}/.compiled.md}`);
+    const waited = await trials.wait(call("agent_trial_wait", { trialId: started.trialId }));
+    assert.equal(waited.state, "done");
+    assert.equal(waited.cases[0].finalAnswer, "I fixed the test and ran the whole suite; it passes.");
+    const text = await trials.read(call("agent_trial_read", { trialId: started.trialId, case: "fix" }));
+    assert.match(text.text, /Assistant: I fixed the test/);
+    assert.equal(sent.created[0].agent, `agent-trial-${started.trialId}`);
+    assert.equal(f.config.cfg.agent[`agent-trial-${started.trialId}`], undefined, "the temporary block is gone");
+    // the proposal on this exact draft is accepted ...
+    const verdicts = [{ case: "fix", pass: true, quote: "I fixed the test and ran the whole suite", note: "It did." }];
+    const b = proposeBody({ baseHash: hash, draft, trial: { trialId: started.trialId, verdicts } });
+    f.w.messages = proposeTranscript(b);
+    const ok = await f.engine.propose(b);
+    assert.equal(ok.ok, true, ok.error);
+    assert.deepEqual(ok.change.trial, { id: started.trialId, verdicts });
+    // ... and one on another draft is refused, naming the file
+    const other = proposeBody({ baseHash: hash, draft: { instructions: "Something else.\nEntirely." }, trial: { trialId: started.trialId, verdicts } });
+    f.w.messages = proposeTranscript(other);
+    const refused = await f.engine.propose(other);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /agent\.md/);
+    // a quote that isn't in the transcript is refused
+    const invented = proposeBody({ baseHash: hash, draft, trial: { trialId: started.trialId, verdicts: [{ ...verdicts[0], quote: "The agent said something it never said." }] } });
+    f.w.messages = proposeTranscript(invented);
+    assert.match((await f.engine.propose(invented)).error, /isn't in that case's transcript/);
+    // the trials of the round that ends are aborted; this one finished and stays
+    await trials.abortForJob("job1");
+    assert.equal(trials.get(started.trialId).cases[0].state, "done");
+    assert.deepEqual(sent.deleted, [sent.created[0].id]);
+  } finally {
+    await f.cleanup();
+  }
 });
