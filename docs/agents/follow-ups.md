@@ -443,7 +443,7 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
   its numbers out of the sheet and the rest stand; nothing says so in the sheet. `brokenReferences` looks at agent.md and the `.md` / `.txt` files of
   its skills, for `@slug` mentions and paths under `/home`, `/Users`, `/opt`, `/var`, `/etc`, `/srv`, `/usr`, `/root`, `/mnt` or `~/`.
 - **The check-up routine is made once the Architect exists and never again** (`.fleet.json` `checkup`, a tombstone): a box that deleted it on the
-  Routines page keeps it deleted; turning it back on means asking Manta to make it (there is no toggle on the profile: it belongs to the team, not an agent).
+  Routines page keeps it deleted. There is no way to bring it back short of removing the `checkup` key from `.fleet.json`; a profile-level switch doesn't fit (it belongs to the team, not an agent), so a control on the Fleet page would be the place.
 - **The learner's own state** (`~/.manta/agent-learning.json`: which tasks wait, which signals were read) is kept 30 days per task; the model
   call is the `agent-learning` task class (nano band, batch work of the shared background budget).
 

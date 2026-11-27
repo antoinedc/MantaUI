@@ -295,6 +295,7 @@ const SIGNALS_MAX = 12;
 const SIGNAL_TEXT_MAX = 2500;
 const NEXT_ROUND_WINDOW_MS = 24 * 3_600_000; // "handed to the same agent again": within a day of the result
 const RUN_PER_SWEEP = 5;
+const MESSAGES_READ_MAX = 500;
 
 const rootOf = (job) => job?.rootJobId ?? job?.architect?.rootJobId ?? job?.id;
 const slugOf = (job) => (typeof job?.agent === "string" && job.agent.startsWith("agent-") ? job.agent.slice("agent-".length) : null);
@@ -363,7 +364,7 @@ export function createLearningStore({ path }) {
  * @param {(slug:string)=>Promise<boolean>} deps.canLearn                        a valid agent that is not the lead
  * @param {(slug:string)=>Promise<string>} deps.agentName
  * @param {()=>Promise<object[]>} deps.listJobs                                  the jobs store (throws when unreadable: retried)
- * @param {(sessionId:string)=>Promise<object[]>} deps.listMessages
+ * @param {(sessionId:string, opts:{limit:number})=>Promise<object[]>} deps.listMessages  the newest `limit` messages
  * @param {(messageID:string)=>Promise<boolean>} deps.isUserAuthored             the prompt-origin record: only a message the user typed
  * @param {(rootJobId:string)=>Promise<object[]>} deps.questionsOf               the task's questions (answered ones carry `answer`)
  * @param {(rootJobId:string)=>Promise<object[]>} deps.changesOf                 the change records the task proposed
@@ -428,7 +429,8 @@ export function createAgentLearning(deps) {
 
   async function userMessages(sessionId) {
     const out = [];
-    for (const m of (await safe(() => listMessages(sessionId), [])) ?? []) {
+    // the newest messages only: a long chat is never read whole for one task
+    for (const m of (await safe(() => listMessages(sessionId, { limit: MESSAGES_READ_MAX }), [])) ?? []) {
       if (m?.info?.role !== "user" || typeof m.info.id !== "string") continue;
       const text = textOf(m);
       if (text && (await safe(() => isUserAuthored(m.info.id), false))) out.push({ id: m.info.id, at: m.info.time?.created ?? 0, text });

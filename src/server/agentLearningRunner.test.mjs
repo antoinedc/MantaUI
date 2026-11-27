@@ -53,7 +53,10 @@ function world(over = {}) {
       if (w.jobsThrow) throw new Error("unreadable");
       return w.jobs;
     },
-    listMessages: async (sid) => w.messages[sid] ?? [],
+    listMessages: async (sid, opts) => {
+      (w.reads ??= []).push([sid, opts]);
+      return w.messages[sid] ?? [];
+    },
     isUserAuthored: async (id) => w.userAuthored.has(id),
     questionsOf: async () => w.questions,
     changesOf: async () => w.changes,
@@ -100,6 +103,15 @@ test("the prompt frames what the user wrote as data and names the agent and proj
   assert.match(p, /always use imperative commit messages/);
   assert.ok(!p.includes("Fix the build."), "a message the user didn't write is no signal");
   assert.ok(!p.includes("Sorry."), "nor is the agent's own");
+});
+
+test("a long chat is never read whole: only the newest messages of a session are asked for", async () => {
+  const { w, learning } = world();
+  await learning.noteEnded(w.jobs[0]);
+  w.clock = T0 + LEARN_DELAY_MS;
+  await learning.runDue();
+  assert.ok(w.reads.length > 0);
+  for (const [, opts] of w.reads) assert.deepEqual(opts, { limit: 500 });
 });
 
 test("a quote the user never wrote is dropped (nothing written); a task with no user words costs no model call at all", async () => {

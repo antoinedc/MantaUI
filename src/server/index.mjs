@@ -2758,7 +2758,7 @@ const agentLearning = createAgentLearning({
   canLearn: async (slug) => (await agentsEngine.scan()).entries.some((e) => e.slug === slug && !e.info.error && e.info.role !== "lead"),
   agentName: async (slug) => (await agentsEngine.scan()).entries.find((e) => e.slug === slug)?.info.name || slug,
   listJobs: () => delegateEngine.loadRecordsStrict(),
-  listMessages: (sid) => oc.listMessages(sid),
+  listMessages: (sid, opts) => oc.listMessages(sid, opts),
   isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
   questionsOf: (root) => agentsEngine.questionsForRoot(root),
   changesOf: (root) => agentsEngine.changesForRoot(root),
