@@ -20,6 +20,7 @@ import fsPromises from "node:fs/promises";
 import YAML from "yaml";
 import { diff3Merge } from "node-diff3";
 import { draftHash, differingFiles } from "./agentTrials.mjs";
+import { DAY as CHECKUP_DAY, taskCounts, median, repeatedSentences, brokenReferenceCandidates, agentNeedsLook, renderFactSheet, factHighlights } from "./agentCheckup.mjs";
 import { reviewScripts, pickReviewModel } from "./agentScriptReview.mjs";
 import { checkSkillOps, planSkills, existingSkillsOf, checkSkillSearch, checkSkillSearchFacts, parseSourceMd, SKILL_SEARCH_MISSING } from "./agentSkills.mjs";
 import { planLearned, parseLearned, renderLearned, checkRuleText, buildLearnedBlock, quoteHash, normalizeRule, ALL_SCOPE, LEARNED_ID_RE, wsNorm as learnedWsNorm } from "./agentLearning.mjs";
@@ -4393,6 +4394,10 @@ export function createAgentsEngine({
       lastSeenAt: Number.isFinite(doc.lastSeenAt) ? doc.lastSeenAt : null,
       reviewed: (Array.isArray(doc.reviewed) ? doc.reviewed : []).filter((x) => typeof x === "string"),
       refresh: plainObject(doc.refresh),
+      // the weekly team check-up's routine: ABSENT until it was made, then its id (or null) for good — a tombstone, never remade
+      checkup: doc.checkup === undefined ? undefined : typeof doc.checkup === "string" ? doc.checkup : null,
+      // the highlights of the last few check-ups' fact sheets, by the id of the task that was given them (the routine's report quotes them)
+      checkupRuns: plainObject(doc.checkupRuns),
     };
   }
 
@@ -5638,6 +5643,9 @@ export function createAgentsEngine({
   // ---- the monthly refresh (§5.4): one routine per team agent, ON by default ----
 
   const refreshLock = createMutex();
+  const CHECKUP_CRON = "0 9 * * 1"; // Mondays, box-local
+  const CHECKUP_TEXT =
+    "Check the team: propose only changes the facts and your research support (max 3). The facts below are the server's own; research what they point at before you propose anything. Say in your result what you found, including anything you recommend that you can't propose (for example retiring an agent).";
   const CHARTER = (slug) => `Refresh @${slug}: check the research it rests on and propose only changes your research supports.`;
 
   async function makeRefreshRoutine(entry, enabled) {
@@ -5656,6 +5664,25 @@ export function createAgentsEngine({
     if (typeof id !== "string" || !id) throw new Error("the routines engine didn't return an id");
     await mutateFleet((doc) => {
       doc.refresh[entry.slug] = id;
+    });
+    return id;
+  }
+
+  async function makeCheckupRoutine(architect) {
+    await fs.mkdir(join(architect.dir, "home"), { recursive: true });
+    const made = await routines.createInternal({
+      kind: "fleet-checkup",
+      name: "Team check-up",
+      cron: CHECKUP_CRON,
+      enabled: true,
+      rollUp: true,
+      access: "read",
+      directory: join(architect.dir, "home"),
+    });
+    const id = made?.id ?? made?.routine?.id;
+    if (typeof id !== "string" || !id) throw new Error("the routines engine didn't return an id");
+    await mutateFleet((doc) => {
+      doc.checkup = id;
     });
     return id;
   }
@@ -5685,6 +5712,15 @@ export function createAgentsEngine({
           await makeRefreshRoutine(entry, true);
         } catch (e) {
           log.warn?.(`[agents] couldn't make the refresh routine of @${entry.slug}: ${e?.message ?? e}`);
+        }
+      }
+      // the weekly team check-up: made once the Architect exists, then never again (the user may delete it)
+      const architect = entries.find(isArchitect);
+      if (doc.checkup === undefined && architect) {
+        try {
+          await makeCheckupRoutine(architect);
+        } catch (e) {
+          log.warn?.(`[agents] couldn't make the team check-up routine: ${e?.message ?? e}`);
         }
       }
       lastRefreshKey = teamSlugsKey(entries);
@@ -5760,6 +5796,159 @@ export function createAgentsEngine({
       ...specialistAutonomy({ writer: isolation === "worktree" }),
     });
     if (!res?.ok) throw new AgentError(res?.error || "The refresh task couldn't be started");
+    return { jobId: res.job.id };
+  }
+
+  // ---- the weekly team check-up (§5.2): facts from the server's own records, then the Architect's routine round ----
+
+  const SHEET_RULES_MAX = 10;
+  const SHEET_REFS_MAX = 10;
+  const SHEET_BRANCH_CHECKS_MAX = 30;
+  const CHECKUP_RUNS_KEPT = 4;
+
+  /** The `@slug` mentions and absolute paths in `text` that don't resolve on this box (`@ghost`, `/opt/gone/x`). */
+  async function brokenIn(text, slugs) {
+    const { mentions, paths } = brokenReferenceCandidates(text);
+    const out = mentions.filter((m) => !slugs.has(m) && !RESERVED_SLUGS.includes(m)).map((m) => `@${m}`);
+    for (const p of paths) if (!(await exists(fs, p.startsWith("~") ? join(home, p.slice(1)) : p))) out.push(p);
+    return out;
+  }
+
+  /**
+   * The check-up's fact sheet: per team agent how its tasks ended (last 7 and 30 days), changes the user undid, what it learned, failed
+   * trials, research that went stale, copied skills whose upstream moved, references that no longer resolve, whether it sat idle; and for the
+   * team the sentences repeated across 3+ agents and the finished branches that waited over a day. Facts only; no model. Each source is
+   * read on its own: one that fails leaves its numbers out and the rest stand.
+   */
+  async function factSheet() {
+    const t = now();
+    const guarded = async (fn, fallback) => {
+      try {
+        return await fn();
+      } catch (e) {
+        log.warn?.(`[agents] check-up fact left out: ${e?.message ?? e}`);
+        return fallback;
+      }
+    };
+    const { entries } = await scan();
+    const team = entries.filter(isRefreshable);
+    const slugs = new Set(entries.map((e) => e.slug));
+    const rounds = newestRounds(await readSpecialistJobs());
+    const changes = await readChanges();
+    const inLast = (at, days) => typeof at === "number" && at >= t - days * CHECKUP_DAY;
+    const projectOf = projectCache();
+    const agents = [];
+    const bodies = {};
+    for (const e of team) {
+      const mine = rounds.filter((j) => slugOfJob(j) === e.slug);
+      const d30 = taskCounts(mine, t, 30 * CHECKUP_DAY);
+      const done30 = mine.filter((j) => j.status === "done" && inLast(j.createdAt, 30));
+      const records = changes.filter((r) => r.slug === e.slug);
+      const learnedRecords = records.filter((r) => r.origin?.kind === "learned");
+      const rules = await guarded(() => learnedRules(e.slug), []);
+      const seats = e.info.seats ?? [];
+      const basis = records.filter((r) => r.state === "applied").flatMap(basisItems);
+      const resolved = basis.length > 0 ? await guarded(() => resolveEntries(basis, seats.length > 0 ? seats : [null]), []) : [];
+      const space = await guarded(() => readSpace(e.dir), null);
+      let brokenText = e.body ?? "";
+      for (const [rel, buf] of space ?? []) if (rel.startsWith("skills/") && /\.(md|txt)$/i.test(rel)) brokenText += `\n${buf.toString("utf-8")}`;
+      const lastAt = mine.reduce((m, j) => Math.max(m, j.createdAt ?? 0), 0);
+      const running = mine.some((j) => j.status === "running" || j.status === "paused");
+      bodies[e.slug] = e.body ?? "";
+      agents.push({
+        slug: e.slug,
+        name: e.info.name,
+        tasks: {
+          d7: taskCounts(mine, t, 7 * CHECKUP_DAY),
+          d30,
+          medianMinutes30: median(done30.map((j) => Math.round(((j.finishedAt ?? j.createdAt) - (j.startedAt ?? j.createdAt)) / 60_000))),
+          refusedActions30: mine.filter((j) => inLast(j.createdAt, 30)).reduce((n, j) => n + (Array.isArray(j.blockedActions) ? j.blockedActions.length : 0), 0),
+        },
+        changesUndone: {
+          d7: records.filter((r) => r.state === "undone" && r.origin?.kind !== "learned" && inLast(r.decidedAt, 7)).length,
+          d30: records.filter((r) => r.state === "undone" && r.origin?.kind !== "learned" && inLast(r.decidedAt, 30)).length,
+        },
+        learned: {
+          active: rules.filter((r) => !r.archived).length,
+          added30: learnedRecords.filter((r) => r.state === "applied" && r.learned?.added && inLast(r.decidedAt, 30)).length,
+          undone30: learnedRecords.filter((r) => ((r.state === "undone" && r.learned?.added) || (r.state === "applied" && r.learned?.removedId)) && inLast(r.decidedAt, 30)).length,
+          rules: rules.filter((r) => !r.archived).slice(0, SHEET_RULES_MAX).map((r) => ({ id: r.id, scope: r.scope, rule: r.rule })),
+        },
+        trialsFailed30: (trials?.list?.(e.slug) ?? []).filter((x) => x && inLast(x.createdAt, 30) && (x.cases ?? []).some((c) => c.state === "failed" || c.state === "timed-out")).length,
+        research: {
+          stale: resolved.filter((r) => r.status === "stale").map((r) => r.topic),
+          thin: resolved.filter((r) => r.status === "fresh" && r.thin).map((r) => r.topic),
+          missing: resolved.filter((r) => r.status === "missing").map((r) => r.topic),
+        },
+        skillUpdates: (await guarded(() => skillUpdatesFor(e.slug), [])).map((u) => ({ skill: u.skill, repo: u.repo })),
+        instructionChars: (e.body ?? "").length,
+        brokenReferences: (await guarded(() => brokenIn(brokenText, slugs), [])).slice(0, SHEET_REFS_MAX),
+        idle: !running && !(lastAt >= t - 30 * CHECKUP_DAY),
+        idleDays: lastAt > 0 ? Math.floor((t - lastAt) / CHECKUP_DAY) : null,
+      });
+    }
+    // finished tasks whose branch has had commits waiting to land for more than a day (Manta-handed ones too): for the lead, not the user
+    const unmergedBranches = [];
+    let checked = 0;
+    for (const job of rounds) {
+      if (!isFinished(job) || !hasBranchWork(job) || !slugOfJob(job) || !team.some((e) => e.slug === slugOfJob(job))) continue;
+      if (typeof job.finishedAt !== "number" || t - job.finishedAt <= CHECKUP_DAY || checked++ >= SHEET_BRANCH_CHECKS_MAX) continue;
+      if ((await branchVerdict(job)) !== "unmerged") continue;
+      unmergedBranches.push({ agent: slugOfJob(job), task: typeof job.name === "string" ? job.name : "", branch: job.branch, files: Number(job.filesChanged) || 0, hoursSinceFinished: Math.floor((t - job.finishedAt) / 3_600_000), project: await projectOf(job.parentDirectory) });
+    }
+    unmergedBranches.sort((a, b) => b.hoursSinceFinished - a.hoursSinceFinished);
+    return {
+      asOf: new Date(t).toISOString(),
+      agents,
+      team: { repeatedSentences: repeatedSentences(bodies), routingNotes: renderRoutingNotes(findDanglingReferences(entries)) },
+      unmergedBranches,
+    };
+  }
+
+  /** The highlights kept for the check-up task `jobId` (what its routine's report opens with); `[]` when none were kept. */
+  async function checkupHighlights(jobId) {
+    const lines = (await readFleet()).checkupRuns[typeof jobId === "string" ? jobId : ""];
+    return Array.isArray(lines) ? lines.filter((l) => typeof l === "string") : [];
+  }
+
+  /**
+   * The check-up routine's run starts its work here: the Architect's task over the fact sheet, under the run's headless session. A routine
+   * round (its proposals release by the user's level). Returns `{ jobId }`; a refusal is a sentence.
+   */
+  async function checkup(ctx) {
+    await requireChangeAllowed();
+    const architect = (await scan()).entries.find(isArchitect);
+    if (!architect) throw new AgentError("The Architect isn't available");
+    const sheet = await factSheet();
+    const agentHome = join(architect.dir, "home");
+    await fs.mkdir(agentHome, { recursive: true });
+    await ensureAgentsSpace(agentHome);
+    // the agents whose facts deserve a look come with their own file and learned rules (the Architect's context names them)
+    const flagged = sheet.agents.filter(agentNeedsLook).slice(0, 5).map((a) => `@${a.slug}`);
+    const named = flagged.length > 0 ? `Agents whose facts deserve a look: ${flagged.join(", ")}.` : "";
+    const text = [CHECKUP_TEXT, named, renderFactSheet(sheet)].filter(Boolean).join("\n\n");
+    const isolation = await effectiveIsolation(architect, home);
+    const res = await delegate.startJob({
+      prompt: withResearchGuidance(buildDispatchPrompt({ text, learned: await learnedBlockFor(ARCHITECT_SLUG, home) })) + (await architectContextFor(named)),
+      parentSessionID: ctx?.runSessionId,
+      parentDirectory: home,
+      agent: agentKey(ARCHITECT_SLUG),
+      agentDir: architect.dir,
+      isolation,
+      ...(architect.meta.model ? { model: architect.meta.model } : {}),
+      name: "Team check-up",
+      agentName: architect.meta.name,
+      request: CHECKUP_TEXT,
+      targetProject: AGENTS_TMUX_SESSION,
+      deliverResult: false,
+      architect: { mode: "routine" },
+      ...specialistAutonomy({ writer: isolation === "worktree" }),
+    });
+    if (!res?.ok) throw new AgentError(res?.error || "The check-up task couldn't be started");
+    const lines = factHighlights(sheet);
+    await mutateFleet((doc) => {
+      doc.checkupRuns = Object.fromEntries([...Object.entries(doc.checkupRuns ?? {}), [res.job.id, lines]].slice(-CHECKUP_RUNS_KEPT));
+    }).catch((e) => log.warn?.(`[agents] couldn't keep the check-up highlights: ${e?.message ?? e}`));
     return { jobId: res.job.id };
   }
 
@@ -5866,5 +6055,8 @@ export function createAgentsEngine({
     taskResearch,
     refreshSet,
     refresh,
+    factSheet,
+    checkup,
+    checkupHighlights,
   };
 }

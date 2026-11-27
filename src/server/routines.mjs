@@ -1487,15 +1487,19 @@ export function createRoutinesEngine(deps) {
     const slug = routine?.agentSlug ?? "the agent";
     let changes = [];
     let lines = [];
+    let facts = [];
     try {
       changes = (await agents?.changesForJob?.(job.id)) ?? [];
       lines = (await agents?.outcomeLinesForJob?.(job.id)) ?? [];
+      // the team check-up's report opens with what the server's fact sheet said (a refresh has none)
+      if (checkup) facts = (await agents?.checkupHighlights?.(job.id)) ?? [];
     } catch (e) {
       log(`[routines] couldn't read the proposals of ${job.id}:`, e?.message ?? e);
     }
     const waiting = changes.filter((c) => c?.state === "pending").length;
     const text = typeof job.result === "string" ? job.result.trim() : "";
-    const body = [text, ...lines].filter(Boolean).join("\n\n").slice(0, 8000);
+    const highlights = facts.length > 0 ? `What the facts say:\n${facts.map((l) => `- ${l}`).join("\n")}` : "";
+    const body = [highlights, text, ...lines].filter(Boolean).join("\n\n").slice(0, 8000);
     const subject = checkup ? "Team check-up" : `Refresh @${slug}`;
     const report = waiting > 0
       ? { outcome: "findings", title: `${subject}: ${waiting === 1 ? "a change is" : `${waiting} changes are`} waiting for your click`, summary: lines[0] ? String(lines[0]).slice(0, 400) : "", body }

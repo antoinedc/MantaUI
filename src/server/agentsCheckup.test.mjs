@@ -83,7 +83,10 @@ async function fixture({ templates = ["dev", "manta", "architect"], level = "aut
       ...extra,
       ...over,
     });
-  return { base, root, w, make, engine: make(), putChanges: (changes) => writeFile(join(root, ".changes.json"), JSON.stringify({ version: 2, changes, proposalSlots: {} })), cleanup: () => rm(base, { recursive: true, force: true }) };
+  return { base, root, w, make, engine: make(), putChanges: async (changes) => {
+      const kept = JSON.parse(await readFile(join(root, ".changes.json"), "utf-8").catch(() => '{"changes":[]}')).changes;
+      await writeFile(join(root, ".changes.json"), JSON.stringify({ version: 2, changes: [...kept, ...changes], proposalSlots: {} }));
+    }, cleanup: () => rm(base, { recursive: true, force: true }) };
 }
 
 const task = (over = {}) => ({ id: "j1", rootJobId: "j1", specialist: true, agent: "agent-dev", status: "done", createdAt: T0 - 2 * D, startedAt: T0 - 2 * D, finishedAt: T0 - 2 * D + 10 * 60_000, parentDirectory: "/repo/site", name: "fix the build", isolation: "worktree", ...over });
@@ -147,7 +150,7 @@ test("the fact sheet: how tasks ended, undone changes, learned rules, idle agent
     const dev = sheet.agents[0];
     assert.deepEqual(dev.tasks.d7, { run: 2, finished: 1, failed: 1, stalled: 0, cutOff: 0, needsDecision: 0 });
     assert.equal(dev.tasks.d30.run, 3);
-    assert.equal(dev.tasks.medianMinutes30, 10);
+    assert.equal(dev.tasks.medianMinutes30, 20, "the median of the 10 and the 30 minutes of the two finished tasks");
     assert.equal(dev.changesUndone.d30, 1);
     assert.equal(dev.learned.active, 1);
     assert.equal(dev.learned.added30, 1);

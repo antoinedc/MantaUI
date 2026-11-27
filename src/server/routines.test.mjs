@@ -71,6 +71,7 @@ function makeWorld({ concurrency = 2 } = {}) {
     jobsDb: new Map(),
     refreshCalls: [],
     checkupCalls: [],
+    highlightsDb: new Map(),
     refreshFail: null,
     refreshJobStatus: "running",
     getJobFails: false,
@@ -200,6 +201,7 @@ function makeWorld({ concurrency = 2 } = {}) {
         w.jobsDb.set(id, { id, status: w.refreshJobStatus, result: null, error: null });
         return { jobId: id };
       },
+      checkupHighlights: async (id) => w.highlightsDb.get(id) ?? [],
       changesForJob: async (id) => w.changesDb.get(id) ?? [],
       outcomeLinesForJob: async (id) => w.outcomeDb.get(id) ?? [],
     },
@@ -2391,4 +2393,24 @@ test("check-up: reconcile reads the task first, like a refresh", async () => {
   w.jobsDb.set(run.jobId, { id: run.jobId, status: "done", result: "Done." });
   await w.engine.onReconnect();
   assert.equal(w.run(run.id).status, "done");
+});
+
+test("check-up: the report opens with the highlights of the fact sheet, then the Architect's result and the Outcome lines; a refresh report has no highlights", async () => {
+  const { w, run } = await startedCheckup();
+  w.highlightsDb.set(run.jobId, ["@dev: 2 of 5 tasks failed this week", "1 finished branch unmerged for more than a day: fix the build (@dev)"]);
+  w.outcomeDb.set(run.jobId, ["Outcome: @dev was updated and is live (your setting: Auto). Undo is on the card."]);
+  await w.engine.settleFromJob({ id: run.jobId, status: "done", result: "Dev's research went stale; I refreshed it." });
+  const body = w.run(run.id).report.body;
+  assert.ok(body.indexOf("@dev: 2 of 5 tasks failed this week") < body.indexOf("Dev's research went stale"), "highlights first");
+  assert.match(body, /1 finished branch unmerged for more than a day: fix the build/);
+  assert.ok(body.indexOf("Dev's research went stale") < body.indexOf("Outcome: @dev was updated"));
+  assert.match(body, /What the facts say/);
+  const refresh = await startedRefresh();
+  refresh.w.highlightsDb.set(refresh.run.jobId, ["should never show"]);
+  await refresh.w.engine.settleFromJob({ id: refresh.run.jobId, status: "done", result: "Nothing needed changing." });
+  assert.ok(!refresh.w.run(refresh.run.id).report.body.includes("should never show"));
+  // no highlights kept (a restart lost them, an older box): the report is the result and the lines, as for a refresh
+  const none = await startedCheckup();
+  await none.w.engine.settleFromJob({ id: none.run.jobId, status: "done", result: "No change needed." });
+  assert.ok(!none.w.run(none.run.id).report.body.includes("What the facts say"));
 });
