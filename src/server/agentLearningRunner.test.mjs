@@ -46,6 +46,7 @@ function world(over = {}) {
       },
       learnedRules: async () => w.rules,
       learnedTombstones: async () => w.tombstones,
+      learningLevel: async () => w.learnLevel ?? "tell",
     },
     canLearn: async (slug) => w.learners.has(slug),
     agentName: async (slug) => (slug === "dev" ? "Dev" : slug),
@@ -103,6 +104,23 @@ test("the prompt frames what the user wrote as data and names the agent and proj
   assert.match(p, /always use imperative commit messages/);
   assert.ok(!p.includes("Fix the build."), "a message the user didn't write is no signal");
   assert.ok(!p.includes("Sorry."), "nor is the agent's own");
+});
+
+test("with learning turned off (Never) nothing is read and nothing is asked; turning it back on, a later signal reads the task as usual", async () => {
+  const { w, learning } = world();
+  w.learnLevel = "never";
+  w.answers.push(CAND());
+  await learning.noteEnded(w.jobs[0]);
+  w.clock = T0 + LEARN_DELAY_MS;
+  assert.deepEqual(await learning.runDue(), { ran: 1 });
+  assert.equal(w.asked.length, 0);
+  assert.equal(w.writes.length, 0);
+  w.learnLevel = "ask";
+  await learning.noteEnded(w.jobs[0]);
+  w.clock += LEARN_DELAY_MS;
+  await learning.runDue();
+  assert.equal(w.asked.length, 1, "what was not read while it was off is read now");
+  assert.equal(w.writes.length, 1);
 });
 
 test("a long chat is never read whole: only the newest messages of a session are asked for", async () => {

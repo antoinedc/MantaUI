@@ -360,7 +360,7 @@ export function createLearningStore({ path }) {
 
 /**
  * @param {object} deps
- * @param {{learnedWrite, learnedRules, learnedTombstones}} deps.agents          the agents engine's learned-preference calls
+ * @param {{learnedWrite, learnedRules, learnedTombstones, learningLevel?}} deps.agents  the agents engine's learned-preference calls (`learningLevel` → the user's level)
  * @param {(slug:string)=>Promise<boolean>} deps.canLearn                        a valid agent that is not the lead
  * @param {(slug:string)=>Promise<string>} deps.agentName
  * @param {()=>Promise<object[]>} deps.listJobs                                  the jobs store (throws when unreadable: retried)
@@ -496,6 +496,8 @@ export function createAgentLearning(deps) {
     const rounds = jobs.filter((j) => j.specialist === true && rootOf(j) === root).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     const slug = rounds[0] ? slugOf(rounds[0]) : null;
     if (!slug || !(await canLearn(slug))) return { done: true, keys: [] };
+    // learning turned off by the user: nothing is read, nothing is spent (and nothing is marked read: turned back on, the task is read as usual)
+    if ((await safe(() => agents.learningLevel?.(), null)) === "never") return { done: true, keys: [] };
     const signals = await collectSignals(rounds, jobs);
     const extracted = new Set(task.extracted ?? []);
     const fresh = signals.filter((s) => !extracted.has(s.key));

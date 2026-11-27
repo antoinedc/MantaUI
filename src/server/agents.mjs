@@ -6026,6 +6026,7 @@ export function createAgentsEngine({
     learnedRules,
     learnedTombstones,
     learnedBlockFor,
+    learningLevel: learnLevel,
     bindArchitect,
     bindResearcher,
     reconcile,
