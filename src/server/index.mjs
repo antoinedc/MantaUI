@@ -5178,6 +5178,21 @@ const handleRequest = async (req, res) => {
     }
     return;
   }
+  if (path === "/api/agents/skills-installed") {
+    // Architect v2 Stage 2: skills_installed — the skills on this box, bound to the Architect's live call; a refusal is HTTP 200 {ok:false, error}.
+    // class-2 (BET-1460): the manta plugin.
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      respondJson(res, 200, await agentsEngine.skillsInstalled((await readJsonBody(req)) ?? {}));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (skills_installed tool) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
   if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save") {
     try {
       if (req.method !== "POST") {

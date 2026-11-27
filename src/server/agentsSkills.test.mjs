@@ -73,6 +73,7 @@ async function fixture({ level = "auto" } = {}) {
       { id: "job9", childSessionID: "ses_other", parentSessionID: "ses_chat", status: "done", attempt: 1, prompt: "Something else", architect: { rootJobId: "job9", attempt: 1, mode: "build" } },
     ],
     messages: [],
+    started: [],
     trials: new Map(),
     clock: 1_700_000_000_000,
     sources: {
@@ -105,8 +106,8 @@ async function fixture({ level = "auto" } = {}) {
     listApprovedModels: async () => ["anthropic/claude-sonnet-5-5"],
     publish: () => {},
     oc: { listMessages: async () => w.messages },
-    delegate: { loadRecordsStrict: async () => w.jobs },
-    tmux: { listProjects: async () => [] },
+    delegate: { loadRecordsStrict: async () => w.jobs, startJob: async (a) => (w.started.push(a), { ok: true, job: { id: "job_refresh" } }) },
+    tmux: { listProjects: async () => [], newSession: async () => {} },
     skillRoots: [skillRoot],
     research: { getSource: async (child, id) => w.sources[`${child}:${id}`] ?? null, searchesOf: async (child) => w.searches[child] ?? [] },
     trials: { get: (id) => w.trials.get(id) ?? null, transcript: async () => "I applied the skill and it worked fine on the page.", activeTrialKeys: () => new Set() },
@@ -683,6 +684,74 @@ test("the refresh task's brief carries the moved skills as data; an agent with n
     f.w.lsRemote = async () => ({ head: "a".repeat(40) });
     f.w.clock += 25 * 3600 * 1000;
     assert.equal(await f.engine.skillUpdatesBrief("dev"), "");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("refresh: the Architect's task brief for @dev carries the moved skills (the refresh routine's own start)", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [copiedOp({ provenance: { ...PROV, ref: "a".repeat(40) } })] } });
+    await release(f);
+    f.w.lsRemote = async () => ({ head: "b".repeat(40) });
+    const r = await f.engine.refresh("dev", { runSessionId: "ses_run" });
+    assert.equal(r.jobId, "job_refresh");
+    const prompt = f.w.started.at(-1).prompt;
+    assert.match(prompt, /Copied skills of @dev whose upstream has moved/);
+    assert.match(prompt, /landing-audit \(acme\/cro-skills\)/);
+    // an agent whose copied skills are all current gets a brief without the section
+    f.w.lsRemote = async () => ({ head: "a".repeat(40) });
+    f.w.clock += 25 * 3600 * 1000;
+    await f.engine.refresh("dev", { runSessionId: "ses_run" });
+    assert.doesNotMatch(f.w.started.at(-1).prompt, /upstream has moved/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// a create the server was writing when it stopped: saved `applying`, the folder claimed, agent.md written, nothing more
+async function crashedCreate(f) {
+  const draft = { name: "CRO Reviewer", description: "Reviews landing pages.", isolation: "none", instructions: "You review landing pages for conversion problems.", skills: [writtenOp()] };
+  const r = await propose(f, { action: "create", agent: undefined, baseHash: undefined, draft });
+  assert.equal(r.ok, true, r.error);
+  const doc = await store(f);
+  const rec = doc.changes.at(-1);
+  Object.assign(rec, { state: "applying", prior: { state: "pending", needsClick: false, reason: null }, intendedSlug: "cro-reviewer", decidedBy: "auto" });
+  await writeFile(join(f.root, ".changes.json"), JSON.stringify(doc));
+  const dir = join(f.root, "cro-reviewer");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, ".claim"), rec.id);
+  await writeFile(join(dir, "agent.md"), rec.after);
+  return { rec, dir };
+}
+
+test("recovery, create with skills: a crash after agent.md leaves the skill files to write at boot", async () => {
+  const f = await fixture();
+  try {
+    const { rec, dir } = await crashedCreate(f);
+    await f.engine.recover();
+    const done = (await store(f)).changes.find((r) => r.id === rec.id);
+    assert.equal(done.state, "applied", done.error);
+    assert.equal(await readFile(join(dir, "skills", "landing-audit", "SKILL.md"), "utf-8"), SKILL_MD);
+    assert.equal(await ok(join(dir, ".claim")), false);
+    assert.match(await readFile(join(dir, ".compiled.md"), "utf-8"), /landing-audit/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("recovery, create with skills: a skill file in the claimed folder that isn't what was planned is a conflict naming the folder, never overwritten", async () => {
+  const f = await fixture();
+  try {
+    const { rec, dir } = await crashedCreate(f);
+    await mkdir(join(dir, "skills", "landing-audit"), { recursive: true });
+    await writeFile(join(dir, "skills", "landing-audit", "SKILL.md"), "someone else's text");
+    await f.engine.recover();
+    const done = (await store(f)).changes.find((r) => r.id === rec.id);
+    assert.equal(done.state, "conflict");
+    assert.match(done.error, /cro-reviewer/);
+    assert.equal(await readFile(join(dir, "skills", "landing-audit", "SKILL.md"), "utf-8"), "someone else's text");
   } finally {
     await f.cleanup();
   }
