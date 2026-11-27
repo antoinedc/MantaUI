@@ -57,6 +57,8 @@ const PROBLEM = {
   why: "Reviewing is a separate job from writing code.",
 };
 
+const CLEAN = '{"verdict":"clean","reasons":[]}';
+const FLAGGED = '{"verdict":"flagged","reasons":["scripts/run.sh sends $HOME to a remote host"]}';
 const writtenOp = (over = {}) => ({ name: "landing-audit", op: "add", files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }], ...over });
 const copiedOp40 = (over = {}) => ({
   ...{
@@ -78,7 +80,7 @@ const copiedOp = (over = {}) => ({
   ...over,
 });
 
-async function fixture({ level = "auto", lsRemoteBudgetMs = undefined } = {}) {
+async function fixture({ level = "auto", lsRemoteBudgetMs = undefined, noReviewer = false } = {}) {
   const base = await mkdtemp(join(tmpdir(), "agents-skills-"));
   const root = join(base, "agents");
   const templatesDir = join(base, "templates");
@@ -97,6 +99,8 @@ async function fixture({ level = "auto", lsRemoteBudgetMs = undefined } = {}) {
       { id: "job9", childSessionID: "ses_other", parentSessionID: "ses_chat", status: "done", attempt: 1, prompt: "Something else", architect: { rootJobId: "job9", attempt: 1, mode: "build" } },
     ],
     messages: [],
+    reviewCalls: [], // the independent script review's sessions
+    review: async () => ({ ok: true, text: CLEAN }),
     started: [],
     trials: new Map(),
     clock: 1_700_000_000_000,
@@ -132,7 +136,7 @@ async function fixture({ level = "auto", lsRemoteBudgetMs = undefined } = {}) {
     autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: w.level }),
     listApprovedModels: async () => ["anthropic/claude-sonnet-5-5"],
     publish: () => {},
-    oc: { listMessages: async () => w.messages },
+    oc: { listMessages: async () => w.messages, ...(noReviewer ? {} : { runSynchronousSession: async (a) => (w.reviewCalls.push(a), w.review(a)) }) },
     delegate: { loadRecordsStrict: async () => w.jobs, startJob: async (a) => (w.started.push(a), { ok: true, job: { id: "job_refresh" } }) },
     tmux: { listProjects: async () => [], newSession: async () => {} },
     skillRoots: [skillRoot],
@@ -199,7 +203,9 @@ async function propose(f, over = {}, { trial } = {}) {
     { info: { id: "msg_user", role: "user" }, parts: [] },
     { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent: AGENT_KEY }, parts: [{ type: "tool", tool: "agent_propose", callID: b.callID, state: { status: "running", input: Object.fromEntries(KEYS.filter((k) => Object.hasOwn(b, k)).map((k) => [k, b[k]])) } }] },
   ];
-  return f.engine.propose(b);
+  const r = await f.engine.propose(b);
+  await f.engine.settleScriptReviews(); // the review runs in the background: time passes before the round ends
+  return r;
 }
 const refused = async (f, over, re, opts) => {
   const r = await propose(f, over, opts);
@@ -211,6 +217,7 @@ const refused = async (f, over, re, opts) => {
 const release = async (f) => {
   f.w.jobs[0] = { ...f.w.jobs[0], status: "done" };
   await f.engine.reconcile();
+  await f.engine.settleScriptReviews();
 };
 const lastRec = async (f) => (await store(f)).changes.at(-1);
 const skillFile = (f, ...p) => join(f.root, "dev", "skills", ...p);
@@ -501,9 +508,6 @@ test("a held skill proposal writes nothing; released it writes skills/** through
     assert.ok(!JSON.stringify(r.change).includes("Check the headline first"), "no skill text on the wire");
     assert.equal(Object.hasOwn(r.change, "beforeBundle"), false);
     await release(f);
-    const waiting = await lastRec(f);
-    assert.equal(waiting.state, "pending", "it carries a script: it waits for the click");
-    assert.equal((await f.engine.apply(waiting.id)).state, "applied");
     const rec = await lastRec(f);
     assert.equal(rec.state, "applied");
     assert.equal(await readFile(skillFile(f, "landing-audit", "SKILL.md"), "utf-8"), SKILL_MD);
@@ -1008,72 +1012,179 @@ test("M5: a skill's description is at most 300 characters when proposed; the com
 });
 
 // ---------------------------------------------------------------------------
-// H1: a skill change that adds or changes a script always waits for a click
+// The independent script review: a script among the skill changes is read by a tool-less session on another model before the release
 // ---------------------------------------------------------------------------
 
 const scriptOp = (path, content = SCRIPT, origin = "written", over = {}) => writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path, content, origin }], ...over });
+const reviewOf = async (f) => (await lastRec(f)).scriptReview;
 
-test("H1: a skill with ANY script waits for a click at every level (Auto, Tell me, Ask), whoever wrote it and whatever its language", async () => {
+test("review: every script, in any language, is flagged on the record and reviewed once; the review is a tool-less session on the chosen model within 5 minutes", async () => {
   const ALL = [["scripts/run.sh", SCRIPT], ["x.py", "print(1)\n"], ["x.mjs", "console.log(1)\n"], ["x.rb", "puts 1\n"], ["x.pl", "print 1;\n"], ["x.ps1", "Write-Host 1\n"], ["x.bat", "echo 1\n"], ["x.cmd", "echo 1\n"], ["tools/run", "#!/usr/bin/env node\nconsole.log(1)\n"]];
-  for (const level of ["auto", "tell", "ask"]) {
-    for (const [path, content] of level === "auto" ? ALL : ALL.slice(0, 1)) { // every language at Auto; the other levels with one
-      const f = await fixture({ level });
-      try {
-        const r = await propose(f, { draft: { skills: [scriptOp(path, content)] } });
-        assert.equal(r.ok, true, r.error);
-        assert.deepEqual(r.change.skillsDiff[0].scripts, [path], `${path} is flagged`);
-        await release(f);
-        const rec = await lastRec(f);
-        assert.equal(rec.state, "pending", `${level} ${path}`);
-        assert.equal(rec.needsClick, true);
-        assert.equal(rec.reason, "scripts");
-        assert.equal(await ok(skillFile(f, "landing-audit")), false, "nothing is written until the click");
-        const lines = await f.engine.outcomeLinesForJob("job1");
-        assert.match(lines[0], /is waiting for your click on the card \(reason: it adds or changes a script the agent could run\)/);
-      } finally {
-        await f.cleanup();
-      }
+  for (const [path, content] of ALL) {
+    const f = await fixture();
+    try {
+      const r = await propose(f, { draft: { skills: [scriptOp(path, content)] } });
+      assert.equal(r.ok, true, r.error);
+      assert.deepEqual(r.change.skillsDiff[0].scripts, [path], `${path} is flagged`);
+      assert.equal(f.w.reviewCalls.length, 1, path);
+      const a = f.w.reviewCalls[0];
+      assert.equal(a.denyTools, true);
+      assert.equal(a.agent, "general");
+      assert.deepEqual(a.model, { providerID: "anthropic", modelID: "claude-opus-5-5" });
+      assert.equal(a.pollIntervalMs * a.maxAttempts, 5 * 60_000);
+      assert.ok(a.instruction.includes(content), `${path}: the whole script is in the prompt`);
+    } finally {
+      await f.cleanup();
     }
   }
 });
 
-test("H1: a copied script waits too; the click applies it", async () => {
+test("review clean: the release follows the user's level exactly — applied with Undo at Auto and at Tell me, pending (Ask) at Ask; the verdict is on the record", async () => {
+  for (const [level, state, reason] of [["auto", "applied", null], ["tell", "applied", null], ["ask", "pending", "ask"]]) {
+    const f = await fixture({ level });
+    try {
+      const r = await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+      assert.equal(r.change.state, "held");
+      await release(f);
+      const rec = await lastRec(f);
+      assert.equal(rec.state, state, level);
+      assert.equal(rec.reason, reason, level);
+      assert.equal(rec.scriptReview.verdict, "clean");
+      assert.deepEqual(rec.scriptReview.reasons, []);
+      assert.equal(rec.scriptReview.model, "anthropic/claude-opus-5-5");
+      assert.equal(rec.scriptReview.at, f.w.clock);
+      assert.equal(f.w.reviewCalls.length, 1, "reviewed once, however often the record is looked at");
+      if (state === "applied") {
+        assert.equal(await readFile(skillFile(f, "landing-audit", "scripts", "run.sh"), "utf-8"), SCRIPT);
+        assert.equal((await f.engine.undo(rec.id)).state, "undone", "Undo takes the skill away");
+        assert.equal(await ok(skillFile(f, "landing-audit")), false);
+      } else {
+        assert.equal(await ok(skillFile(f, "landing-audit")), false, "nothing is written until the click");
+      }
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("review flagged: the record waits for a click whatever the level, with the reasons; the click still applies it", async () => {
+  for (const level of ["auto", "tell", "ask"]) {
+    const f = await fixture({ level });
+    try {
+      f.w.review = async () => ({ ok: true, text: FLAGGED });
+      await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+      await release(f);
+      const rec = await lastRec(f);
+      assert.equal(rec.state, "pending", level);
+      assert.equal(rec.needsClick, true);
+      assert.equal(rec.reason, "script-flagged");
+      assert.deepEqual(rec.scriptReview.reasons, ["scripts/run.sh sends $HOME to a remote host"]);
+      assert.equal(rec.scriptReview.verdict, "flagged");
+      assert.equal(await ok(skillFile(f, "landing-audit")), false);
+      const lines = await f.engine.outcomeLinesForJob("job1");
+      assert.match(lines[0], /is waiting for your click on the card \(reason: an independent check flagged a script\)/);
+      if (level === "auto") assert.equal((await f.engine.apply(rec.id)).state, "applied", "the user's click is the decision");
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("review failed, timed out or unreadable: the record waits for a click (fail closed) and says the check couldn't run", async () => {
+  const cases = {
+    timeout: async () => ({ ok: false, code: "timeout", text: "" }),
+    refused: async () => ({ ok: false, code: "prompt-http", text: "" }),
+    threw: async () => {
+      throw new Error("socket hang up");
+    },
+    "an empty answer": async () => ({ ok: true, text: "" }),
+    "an unreadable answer": async () => ({ ok: true, text: "Looks fine to me." }),
+    "an unknown verdict": async () => ({ ok: true, text: '{"verdict":"fine","reasons":[]}' }),
+    "transport errors twice": async () => ({ ok: false, code: "transport-error", text: "" }),
+  };
+  for (const [name, impl] of Object.entries(cases)) {
+    const f = await fixture();
+    try {
+      f.w.review = impl;
+      await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+      await release(f);
+      const rec = await lastRec(f);
+      assert.equal(rec.state, "pending", name);
+      assert.equal(rec.reason, "script-unchecked", name);
+      assert.equal(rec.scriptReview.verdict, "error");
+      assert.equal(rec.scriptReview.reasons.length, 1);
+      assert.doesNotMatch(rec.scriptReview.reasons[0], /socket hang up|Looks fine/);
+      assert.match((await f.engine.outcomeLinesForJob("job1"))[0], /\(reason: the script check couldn't run\)/);
+      assert.equal(f.w.reviewCalls.length, name === "transport errors twice" ? 2 : 1, name);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("review: one retry on a transport error, and then the review can still be clean", async () => {
   const f = await fixture();
   try {
-    const r = await propose(f, { draft: { skills: [copiedOp({ files: [...copiedOp().files, { path: "scripts/check.sh", content: SCRIPT, origin: "copied", sourceId: "src_skill" }] })] } });
-    assert.equal(r.ok, true, r.error);
+    let n = 0;
+    f.w.review = async () => (++n === 1 ? { ok: false, code: "transport-error", text: "" } : { ok: true, text: CLEAN });
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
     await release(f);
-    const rec = await lastRec(f);
-    assert.equal(rec.reason, "scripts");
-    const applied = await f.engine.apply(rec.id);
-    assert.equal(applied.state, "applied", applied.error);
-    assert.equal(await readFile(skillFile(f, "landing-audit", "scripts", "check.sh"), "utf-8"), SCRIPT);
+    assert.equal(n, 2);
+    assert.equal((await lastRec(f)).state, "applied");
   } finally {
     await f.cleanup();
   }
 });
 
-test("H1: text-only skill changes (markdown, checklists) still follow the user's level, and so does a replace that leaves its scripts alone", async () => {
+test("review: a box that can't run the session at all waits for a click too", async () => {
+  const f = await fixture({ noReviewer: true });
+  try {
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    await release(f);
+    const rec = await lastRec(f);
+    assert.equal(rec.state, "pending");
+    assert.equal(rec.reason, "script-unchecked");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("review: the prompt holds the scripts, SKILL.md, provenance and the agent's name and description — never the Architect's transcript, summary, evidence or any page it read", async () => {
   const f = await fixture();
   try {
-    const md = writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path: "checklist.md", content: CHECKLIST, origin: "written" }] });
-    assert.equal((await propose(f, { draft: { skills: [md] } })).ok, true);
+    const profile = await f.engine.profile("dev");
+    await propose(f, { draft: { skills: [copiedOp({ files: [...copiedOp().files, { path: "scripts/check.sh", content: SCRIPT, origin: "copied", sourceId: "src_skill" }] })] } });
+    assert.equal(f.w.reviewCalls.length, 1);
+    const prompt = f.w.reviewCalls[0].instruction;
+    for (const needle of [SCRIPT, "Check the headline first.", "acme/cro-skills", "abc123", SKILL_URL, "MIT", profile.info.name, profile.info.description]) assert.ok(prompt.includes(needle), needle.slice(0, 40));
+    for (const banned of [USER_PROMPT, "Give Dev a landing-page skill.", "Short specific rules help", QUOTE, "Upstream page.", "end of page.", FIT_CHECK.researchSays, PROBLEM.statement, PROBLEM.userWords, "Audit the headline first", "landing pages"]) assert.ok(!prompt.includes(banned), `must not carry: ${banned.slice(0, 40)}`);
+    // the Architect's pages are not even reachable: only the record's saved files went in
+    assert.doesNotMatch(prompt, /src_(skill|lic|a)\b/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("review: a replace shows the reviewer the script's text before and after; a replace that leaves its script alone is not reviewed", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [scriptOp("run.sh", "#!/bin/sh\necho old\n")] } });
     await release(f);
-    assert.equal((await lastRec(f)).state, "applied", "Auto applies text");
-    // a script is added with a click
+    assert.equal(f.w.reviewCalls.length, 1);
     f.w.jobs[0] = { ...f.w.jobs[0], status: "running" };
-    await propose(f, { draft: { skills: [scriptOp("run.sh", SCRIPT, "written", { op: "replace" })] }, skillSearch: undefined });
+    await propose(f, { draft: { skills: [scriptOp("run.sh", "#!/bin/sh\necho new\n", "written", { op: "replace" })] }, skillSearch: undefined });
+    assert.equal(f.w.reviewCalls.length, 2);
+    const p = f.w.reviewCalls[1].instruction;
+    assert.ok(p.includes("echo old") && p.includes("echo new"));
+    assert.match(p, /BEFORE/);
     await release(f);
-    const withScript = await lastRec(f);
-    assert.equal(withScript.state, "pending");
-    await f.engine.apply(withScript.id);
-    // changing only the markdown of a skill whose script stays byte for byte as it is: the script isn't in the change
+    // only the markdown changes; the script is byte for byte as it was: nothing to review
     f.w.jobs[0] = { ...f.w.jobs[0], status: "running" };
-    const edit = writtenOp({ op: "replace", files: [{ path: "SKILL.md", content: `${SKILL_MD}One more line.\n`, origin: "written" }, { path: "run.sh", content: SCRIPT, origin: "written" }] });
+    const edit = writtenOp({ op: "replace", files: [{ path: "SKILL.md", content: `${SKILL_MD}One more line.\n`, origin: "written" }, { path: "run.sh", content: "#!/bin/sh\necho new\n", origin: "written" }] });
     const r = await propose(f, { draft: { skills: [edit] }, skillSearch: undefined });
     assert.equal(r.ok, true, r.error);
     assert.deepEqual(r.change.skillsDiff[0].scripts, []);
-    assert.deepEqual(r.change.skillsDiff[0].paths, ["SKILL.md"]);
+    assert.equal(f.w.reviewCalls.length, 2, "no new review");
     await release(f);
     assert.equal((await lastRec(f)).state, "applied");
   } finally {
@@ -1081,10 +1192,75 @@ test("H1: text-only skill changes (markdown, checklists) still follow the user's
   }
 });
 
-test("H1: Never still discards a script proposal", async () => {
+test("review: text-only skill changes are never reviewed and follow the user's level", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path: "checklist.md", content: CHECKLIST, origin: "written" }] })] } });
+    await release(f);
+    assert.equal(f.w.reviewCalls.length, 0);
+    const rec = await lastRec(f);
+    assert.equal(rec.state, "applied");
+    assert.equal(Object.hasOwn(rec, "scriptReview"), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("review: a different model from a pinned Architect's: opus → sonnet; the verdict records which", async () => {
+  const f = await fixture();
+  try {
+    const file = join(f.root, "architect", "agent.md");
+    await writeFile(file, (await readFile(file, "utf-8")).replace("isolation: none", "isolation: none\nmodel: anthropic/claude-opus-5-5"));
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    assert.deepEqual(f.w.reviewCalls[0].model, { providerID: "anthropic", modelID: "claude-sonnet-5-5" });
+    assert.equal((await reviewOf(f)).model, "anthropic/claude-sonnet-5-5");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("review: while it runs the record stays held even though its round ended; it is released when the verdict arrives", async () => {
+  const f = await fixture();
+  try {
+    let open;
+    const gate = new Promise((r) => (open = r));
+    f.w.review = async () => (await gate, { ok: true, text: CLEAN });
+    const body = propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    // propose() waits for reviews to settle: end the round and look while the review is still out
+    await new Promise((r) => setTimeout(r, 30));
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "done" };
+    await f.engine.reconcile();
+    assert.equal((await lastRec(f)).state, "held", "no verdict yet: nothing is released");
+    open();
+    await body;
+    await f.engine.settleScriptReviews();
+    assert.equal((await lastRec(f)).state, "applied");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("review: a held record whose review was lost (a restart) is reviewed again by the next sweep, then released", async () => {
+  const f = await fixture();
+  try {
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
+    const doc = await store(f);
+    delete doc.changes.at(-1).scriptReview;
+    await writeFile(join(f.root, ".changes.json"), JSON.stringify(doc));
+    f.w.jobs[0] = { ...f.w.jobs[0], status: "done" };
+    await f.engine.reconcile();
+    await f.engine.settleScriptReviews();
+    assert.equal(f.w.reviewCalls.length, 2);
+    assert.equal((await lastRec(f)).state, "applied");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("review: Never still discards a script proposal", async () => {
   const f = await fixture({ level: "never" });
   try {
-    await propose(f, { draft: { skills: [scriptOp("run.sh")] } });
+    await propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
     await release(f);
     assert.equal((await lastRec(f)).state, "discarded");
   } finally {
