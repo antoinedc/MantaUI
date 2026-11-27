@@ -45,6 +45,7 @@ async function box({ level = "tell", policyThrows = false, extra = {}, slug = "d
       ...extra,
       ...over,
     });
+  const versions = new Map(); // hash → text of every version published so far: the template ships the old texts in `.versions/`
   const ship = async (files) => {
     await rm(tdir, { recursive: true, force: true });
     const hashes = {};
@@ -52,7 +53,10 @@ async function box({ level = "tell", policyThrows = false, extra = {}, slug = "d
       await mkdir(join(tdir, rel, ".."), { recursive: true });
       await writeFile(join(tdir, rel), text);
       hashes[rel] = sha256(text);
+      versions.set(hashes[rel], text);
     }
+    await mkdir(join(tdir, ".versions"), { recursive: true });
+    for (const [h, text] of versions) await writeFile(join(tdir, ".versions", h), text);
     let history = {};
     try {
       history = JSON.parse(await readFile(join(tdir, "..", `${slug}.history.json`), "utf-8"));
@@ -201,7 +205,7 @@ test("frontmatter merges key by key: a key the user changed (model, color) is ke
   }
 });
 
-test("both sides changed one key differently → a conflict card (Needs you), the user's keys with the shipped body; Apply overwrites the body", async () => {
+test("both sides changed one key differently → a conflict card (Needs you) that keeps the user's body and keys; the shipped text rides on the record; Apply never drops the user's instructions", async () => {
   const b = await box({ level: "tell" });
   try {
     await b.ship(V1);
@@ -219,10 +223,15 @@ test("both sides changed one key differently → a conflict card (Needs you), th
     assert.equal(rec.origin.kind, "template-update");
     const parsed = parseAgentMd(rec.after);
     assert.equal(parsed.meta.description, "My description.", "the user's frontmatter key");
-    assert.equal(parsed.body, "Shipped body.\nSecond line.", "the shipped body");
+    assert.equal(parsed.body, "Mine entirely.", "the user's body");
+    assert.equal(rec.origin.shipped, V2["agent.md"], "the shipped text is on the record for the card");
+    assert.match(rec.summary, /Apply keeps your instructions and takes only the new settings; the shipped instructions are in the card to merge by hand/);
+    assert.doesNotMatch(rec.summary, /uses the new instructions/);
+    assert.equal((await engine.history("dev"))[0].origin.shipped, V2["agent.md"], "and on the wire");
     const applied = await engine.apply(rec.id);
     assert.equal(applied.state, "applied");
     assert.equal(await b.read("agent.md"), rec.after);
+    assert.match(await b.read("agent.md"), /Mine entirely\./, "the user's instructions survive Apply");
     assert.equal(await b.read(".base", "agent.md"), V2["agent.md"], ".base follows a later click");
   } finally {
     await b.cleanup();
@@ -239,13 +248,15 @@ test("a body edited on the same lines as the template's is a conflict", async ()
     await b.make().init();
     const [rec] = await b.records();
     assert.equal(rec.state, "pending");
-    assert.match(rec.after, /Their line two\./);
+    assert.match(rec.after, /My line two\./, "the user's line stays");
+    assert.doesNotMatch(rec.after, /Their line two\./);
+    assert.match(rec.origin.shipped, /Their line two\./, "the shipped line is on the card");
   } finally {
     await b.cleanup();
   }
 });
 
-test("an edited agent with no base copy (a box from before this feature) is a conflict, except when the template never changed", async () => {
+test("an edited agent with no base copy (a box from before this feature): the base is inferred from the shipped history, so it merges cleanly when it can", async () => {
   const b = await box({ level: "tell" });
   try {
     await b.ship(V1);
@@ -258,13 +269,15 @@ test("an edited agent with no base copy (a box from before this feature) is a co
     assert.deepEqual(await b.records(), []);
     assert.equal(await b.read(".base", "agent.md"), V1["agent.md"], "the base copy is made");
     assert.equal(await b.read("agent.md"), mine);
-    // now a second version ships and the base is unknown again
+    // now a second version ships and the base is unknown again: the first version is tried as the base and merges cleanly
     await rm(join(b.root, "dev", ".base"), { recursive: true });
     await b.ship({ ...V1, "agent.md": md({ description: "Writes better code." }) });
     await b.make().init();
     const [rec] = await b.records();
-    assert.equal(rec.state, "pending");
-    assert.equal(await b.read("agent.md"), mine);
+    assert.equal(rec.state, "applied");
+    const parsed = parseAgentMd(await b.read("agent.md"));
+    assert.equal(parsed.meta.description, "Writes better code.");
+    assert.equal(parsed.meta.color, "#112233");
   } finally {
     await b.cleanup();
   }
@@ -375,7 +388,7 @@ test("a clean upgrade applies at every \"Change an agent\" level (Ask and Never 
       assert.match(await c.read("agent.md"), /Mine entirely/);
       // the click applies it even at Never: the setting doesn't govern a shipped release
       assert.equal((await c.make().apply(rec.id)).state, "applied", level);
-      assert.match(await c.read("agent.md"), /Shipped body\./);
+      assert.match(await c.read("agent.md"), /Mine entirely\./);
     } finally {
       await c.cleanup();
     }
@@ -459,7 +472,7 @@ test("a record written before bundles (agent.md strings only) still applies and 
     await writeFile(join(b.root, ".changes.json"), JSON.stringify(doc));
     const applied = await engine.apply(doc.changes[0].id);
     assert.equal(applied.state, "applied");
-    assert.match(await b.read("agent.md"), /Shipped body\./);
+    assert.match(await b.read("agent.md"), /Mine entirely\./);
     const undone = await engine.undo(doc.changes[0].id);
     assert.equal(undone.state, "undone");
     assert.equal(await b.read("agent.md"), MINE);
@@ -528,7 +541,16 @@ test("mergeAgentMd: frontmatter keys one by one, the body line by line; a result
   assert.match(parsed.body, /Line six\./);
   const broken = mergeAgentMd({ live: "no frontmatter", base, next });
   assert.equal(broken.conflict, true);
-  assert.equal(broken.text, next);
+  assert.equal(broken.text, "no frontmatter", "the user's file is never replaced by the shipped one");
+  // a body conflict keeps the user's body (and the keys the merge settled); so does a missing base
+  const clash = mergeAgentMd({ live: md({ body: "Mine.\nLine two.\nLine three.\nLine four.\nLine five." }), base, next: md({ description: "New.", body: "Theirs.\nLine two.\nLine three.\nLine four.\nLine five." }) });
+  assert.equal(clash.conflict, true);
+  assert.equal(parseAgentMd(clash.text).body, "Mine.\nLine two.\nLine three.\nLine four.\nLine five.");
+  assert.equal(parseAgentMd(clash.text).meta.description, "New.", "a key only the template changed is still taken");
+  const noBase = mergeAgentMd({ live: md({ color: "#112233", body: "Mine." }), next });
+  assert.equal(noBase.conflict, true);
+  assert.equal(parseAgentMd(noBase.text).body, "Mine.");
+  assert.equal(parseAgentMd(noBase.text).meta.color, "#112233");
 });
 
 const ARCH = (extra = "", body = "You are the Architect.\nLine two.\nLine three.") => `---\nname: Architect\ndescription: Builds agents.\nrole: architect\nisolation: none\n${extra}---\n${body}\n`;
@@ -565,6 +587,202 @@ test("a merged Architect file whose sources fail the Architect's checks (a crede
     assert.equal(rec.needsClick, true);
     assert.match(await b.read("agent.md"), /sources:/, "nothing written");
     assert.doesNotMatch(await b.read("agent.md"), /Line four\./);
+  } finally {
+    await b.cleanup();
+  }
+});
+
+// ---- a box with no .base copy: the base is inferred from the shipped history (the live-box regression) ----
+
+const DEV_V1 = md({ body: "Line one.\nLine two.\nLine three.\nLine four.\nLine five." });
+const DEV_V2 = md({ description: "Writes better code.", body: "Line one.\nLine two, sharper.\nLine three.\nLine four.\nLine five." });
+const TEST_FIRST = "Always write the failing test first.";
+/** What the user made of DEV_V2: their own model and one more rule. */
+const DEV_MINE = md({ description: "Writes better code.", model: "anthropic/claude-sonnet-5-5", body: `Line one.\nLine two, sharper.\nLine three.\nLine four.\nLine five.\n${TEST_FIRST}` });
+
+/** A box that has run before the base copies existed: the template shipped two versions, the folder has the user's file and no `.base`. */
+async function boxWithoutBase(b, live) {
+  await b.ship({ "agent.md": DEV_V1 });
+  await b.ship({ "agent.md": DEV_V2 });
+  await mkdir(join(b.root, "dev"), { recursive: true });
+  await writeFile(join(b.root, "dev", "agent.md"), live);
+}
+
+test("no .base, the user's edits on top of the newest shipped version, the template unchanged since: no upgrade, no record, .base is made (the dev regression)", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    await boxWithoutBase(b, DEV_MINE);
+    await b.make().init();
+    assert.deepEqual(await b.records(), [], "nothing to offer: the template has nothing the user lacks");
+    assert.equal(await b.read("agent.md"), DEV_MINE, "the user's file is untouched, test-first rule included");
+    assert.equal(await b.read(".base", "agent.md"), DEV_V2, "the base copy is made from the shipped version");
+    await b.make().init();
+    assert.deepEqual(await b.records(), [], "and a second boot is quiet too");
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("no .base, edits on top of an OLD shipped version (the Architect with its own sources): older versions are tried as the base until one merges, then it applies", async () => {
+  const b = await box({ level: "tell", slug: "architect" });
+  try {
+    await b.ship({ "agent.md": ARCH() });
+    await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.") });
+    await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.\nLine five.") });
+    await mkdir(join(b.root, "architect"), { recursive: true });
+    // the first version plus the user's sources: the newest older version (the second) can't merge, the first does
+    await writeFile(join(b.root, "architect", "agent.md"), ARCH(SOURCES));
+    await b.make().init();
+    const parsed = parseAgentMd(await b.read("agent.md"));
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.meta.sources.length, 1, "the user's source stays");
+    assert.match(parsed.body, /Line five\./, "the new shipped lines land");
+    const [rec, ...none] = await b.records();
+    assert.equal(none.length, 0);
+    assert.equal(rec.state, "applied");
+    assert.equal(rec.origin.kind, "template-update");
+    assert.equal(await b.read(".base", "agent.md"), ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.\nLine five."));
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("no .base and no shipped version merges: a conflict card that keeps the user's instructions; Apply takes only the new settings", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    const mine = md({ description: "Writes better code.", color: "#112233", body: `Do it my way.\n${TEST_FIRST}` });
+    await boxWithoutBase(b, mine);
+    const engine = b.make();
+    await engine.init();
+    const [rec] = await b.records();
+    assert.equal(rec.state, "pending");
+    assert.equal(rec.needsClick, true);
+    assert.equal(await b.read("agent.md"), mine, "nothing written");
+    assert.equal(rec.origin.shipped, DEV_V2, "the shipped text is in the record");
+    const parsed = parseAgentMd(rec.after);
+    assert.equal(parsed.body, `Do it my way.\n${TEST_FIRST}`, "the card's file keeps the user's instructions");
+    assert.equal(parsed.meta.color, "#112233");
+    assert.match(rec.summary, /Apply keeps your instructions and takes only the new settings; the shipped instructions are in the card to merge by hand/);
+    await engine.apply(rec.id);
+    assert.match(await b.read("agent.md"), new RegExp(TEST_FIRST));
+    assert.equal(await b.read(".base", "agent.md"), DEV_V2);
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("a conflict never overwrites a user's skill either: the user's file stays, the shipped one is not written", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    await b.ship(V1);
+    await b.engine.init();
+    const mine = SKILL(" Mine.");
+    await writeFile(join(b.root, "dev", "skills", "style", "SKILL.md"), mine);
+    await b.ship({ ...V1, "skills/style/SKILL.md": SKILL(" Theirs.") });
+    await b.make().init();
+    const [rec] = await b.records();
+    assert.equal(rec.state, "pending");
+    await b.make().apply(rec.id);
+    assert.equal(await b.read("skills", "style", "SKILL.md"), mine);
+  } finally {
+    await b.cleanup();
+  }
+});
+
+// ---- stale records ----
+
+const THEIRS = md({ body: "Line one.\nTheir line two.\nLine three.\nLine four.\nLine five." });
+/** A pending conflict card for `dev` (the user and the template both changed line two). */
+async function pendingConflict(b) {
+  await b.ship(V1);
+  await b.engine.init();
+  await writeFile(join(b.root, "dev", "agent.md"), md({ body: "Line one.\nMy line two.\nLine three.\nLine four.\nLine five." }));
+  await b.ship({ ...V1, "agent.md": THEIRS });
+  await b.make().init();
+  const [rec] = await b.records();
+  assert.equal(rec.state, "pending");
+  return rec;
+}
+
+test("a pending template-update card whose re-plan is now a no-op is discarded as superseded", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    const stale = await pendingConflict(b);
+    await writeFile(join(b.root, "dev", "agent.md"), THEIRS); // the user took the shipped text by hand
+    const logs = [];
+    await b.make({ log: { warn: (m) => logs.push(m), info: (m) => logs.push(m) } }).init();
+    const recs = await b.records();
+    assert.equal(recs.length, 1);
+    assert.equal(recs[0].id, stale.id);
+    assert.equal(recs[0].state, "discarded");
+    assert.equal(recs[0].error, "superseded by a re-plan");
+    assert.ok(logs.some((m) => /superseded/.test(m)), "logged");
+    assert.equal(await b.read("agent.md"), THEIRS);
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("a pending card whose re-plan is a clean merge is discarded as superseded, and the merge is applied (the same bundle is not blocked by the dedupe)", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    const stale = await pendingConflict(b);
+    // the user resolves it by hand in a way that merges cleanly: only line four is theirs
+    await writeFile(join(b.root, "dev", "agent.md"), md({ body: "Line one.\nLine two.\nLine three.\nMy line four.\nLine five." }));
+    await b.make().init();
+    const recs = await b.records();
+    assert.equal(recs.length, 2);
+    const old = recs.find((r) => r.id === stale.id);
+    assert.equal(old.state, "discarded");
+    assert.equal(old.error, "superseded by a re-plan");
+    const fresh = recs.find((r) => r.id !== stale.id);
+    assert.equal(fresh.state, "applied");
+    assert.equal(fresh.origin.templateHash, stale.origin.templateHash);
+    const text = await b.read("agent.md");
+    assert.match(text, /Their line two\./);
+    assert.match(text, /My line four\./);
+    // a later boot makes nothing more
+    await b.make().init();
+    assert.equal((await b.records()).length, 2);
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("a pending card made by the old planner (shipped body, no shipped text) is replaced by a card that keeps the user's body; a current card is left alone", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    const stale = await pendingConflict(b);
+    const doc = JSON.parse(await readFile(join(b.root, ".changes.json"), "utf-8"));
+    delete doc.changes[0].origin.shipped; // how an old card looked
+    await writeFile(join(b.root, ".changes.json"), JSON.stringify(doc));
+    await b.make().init();
+    let recs = await b.records();
+    assert.equal(recs.length, 2);
+    assert.equal(recs.find((r) => r.id === stale.id).state, "discarded");
+    const fresh = recs.find((r) => r.id !== stale.id);
+    assert.equal(fresh.state, "pending");
+    assert.match(fresh.origin.shipped, /Their line two\./);
+    assert.match(fresh.after, /My line two\./);
+    await b.make().init();
+    recs = await b.records();
+    assert.equal(recs.length, 2, "the current card is kept, not re-made on every boot");
+    assert.equal(recs.find((r) => r.id === fresh.id).state, "pending");
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("a card the user discarded stays discarded: only a superseded one is ignored by the dedupe", async () => {
+  const b = await box({ level: "tell" });
+  try {
+    const stale = await pendingConflict(b);
+    await b.make().discard(stale.id);
+    await b.make().init();
+    const recs = await b.records();
+    assert.equal(recs.length, 1);
+    assert.equal(recs[0].state, "discarded");
+    assert.equal(recs[0].error ?? null, null);
   } finally {
     await b.cleanup();
   }
