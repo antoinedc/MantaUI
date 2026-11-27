@@ -68,7 +68,8 @@ test("refresh flow: the routine's run starts the Architect's task, its proposals
       log: { warn: () => {} },
       retryDelayMs: 0,
       autonomyPolicy: async () => ({ ...MODES.autonomous, agent_change: "ask" }), // a refresh is a routine round: it releases by the user's level, and at Ask it waits
-      oc: { listMessages: async () => [] },
+      // the independent change review a routine round's change goes through (security review H4): clean here
+      oc: { listMessages: async () => [], runSynchronousSession: async () => ({ ok: true, text: '{"verdict":"clean","reasons":[]}' }) },
       delegate: {
         startJob: async (i) => {
           w.startJobs.push(i);
@@ -116,6 +117,7 @@ test("refresh flow: the routine's run starts the Architect's task, its proposals
     // the task ends: the delegate's hook releases the proposals, then settles the run (what index.mjs's afterJobEnded does)
     Object.assign(w.jobs[0], { status: "done", result: "I checked the research it rests on." });
     await agents.reconcile();
+    await agents.settleScriptReviews(); // the change review's verdict is in, and the release it allows has been tried
     await routines.settleFromJob(w.jobs[0]);
     const done = w.store.runs.find((r) => r.id === run.id);
     assert.equal(done.status, "done");

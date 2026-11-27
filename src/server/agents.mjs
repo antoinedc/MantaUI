@@ -21,9 +21,9 @@ import YAML from "yaml";
 import { diff3Merge } from "node-diff3";
 import { draftHash, differingFiles } from "./agentTrials.mjs";
 import { DAY as CHECKUP_DAY, taskCounts, median, repeatedSentences, brokenReferenceCandidates, agentNeedsLook, renderFactSheet, factHighlights } from "./agentCheckup.mjs";
-import { reviewScripts, pickReviewModel } from "./agentScriptReview.mjs";
+import { reviewScripts, reviewRoutineChange, pickReviewModel } from "./agentScriptReview.mjs";
 import { checkSkillOps, planSkills, existingSkillsOf, checkSkillSearch, checkSkillSearchFacts, parseSourceMd, SKILL_SEARCH_MISSING } from "./agentSkills.mjs";
-import { planLearned, parseLearned, renderLearned, checkRuleText, buildLearnedBlock, quoteHash, ALL_SCOPE, LEARNED_ID_RE, wsNorm as learnedWsNorm } from "./agentLearning.mjs";
+import { planLearned, parseLearned, renderLearned, checkRuleText, buildLearnedBlock, quoteHash, ruleHash, normalizeRule, ALL_SCOPE, LEARNED_ID_RE, wsNorm as learnedWsNorm } from "./agentLearning.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG, ARCHITECT_SLUG, ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS, TRIAL_BLOCK_RE, isTeamAgent } from "../shared/agentsShared.mjs";
@@ -89,7 +89,7 @@ const TEMPLATE_HISTORY_FILE = ".history.json";
 const TEMPLATE_VERSIONS_DIR = ".versions"; // `<hash>` → the text of every shipped version older than the current one (the merge bases of a box with no `.base/`)
 const SUPERSEDED = "superseded by a re-plan"; // why a pending template-update card was discarded by the boot re-plan
 const BLOB_GRACE_MS = 10 * 60_000; // a blob younger than this may belong to a record not saved yet
-const SPACE_ROOTS = ["agent.md", "skills", "learned"]; // what a snapshot of an agent covers
+const SPACE_ROOTS = ["agent.md", "skills"]; // what a snapshot of an agent covers (learned rules live in LEARNED_DIR, outside it)
 const SPACE_MAX_FILES = 300;
 const SPACE_FILE_MAX = 256 * 1024;
 const SPACE_TOTAL_MAX = 4 * 1024 * 1024;
@@ -100,6 +100,7 @@ export const INSTRUCTIONS_MAX = 12_000;
 export const CHANGE_PENDING_MS = 24 * 60 * 60 * 1000; // a proposal nobody clicked expires
 export const CHANGE_KEEP_MS = 7 * 24 * 60 * 60 * 1000; // finished records are kept a week
 export const CHANGE_MAX = 200;
+export const LEARNED_CHANGE_MAX = 200; // learned-preference records have their own cap: they never evict a change to an agent
 export const AGENT_CHANGE_OFF = "Changing agents is turned off in your autonomy settings";
 export const LEARN_OFF = "Learning preferences is turned off in your autonomy settings";
 export const CHANGE_NOT_LEAD = "Only the lead can create or change agents";
@@ -133,12 +134,15 @@ const evictRank = (r) => (r.state === "undone" ? 1 : r.state === "applied" ? 2 :
 export function pruneChangeRecords(list, t) {
   let out = list.map((r) => (isExpiredAt(r, t) ? expiredCopyOf(r) : r));
   out = out.filter((r) => !(AGE_PRUNED.has(r.state) && t - (r.decidedAt ?? r.createdAt) > CHANGE_KEEP_MS));
-  if (out.length > CHANGE_MAX) {
-    const droppable = out.filter((r) => !isJournalRecord(r)).sort((a, b) => evictRank(a) - evictRank(b) || a.createdAt - b.createdAt);
-    const drop = new Set(droppable.slice(0, out.length - CHANGE_MAX).map((r) => r.id));
-    out = out.filter((r) => !drop.has(r.id));
+  // learned-preference records and every other record are capped apart: many learned rules never push out a change to an agent
+  const isLearned = (r) => r.origin?.kind === "learned";
+  const drop = new Set();
+  for (const [group, cap] of [[out.filter((r) => !isLearned(r)), CHANGE_MAX], [out.filter(isLearned), LEARNED_CHANGE_MAX]]) {
+    if (group.length <= cap) continue;
+    const droppable = group.filter((r) => !isJournalRecord(r)).sort((a, b) => evictRank(a) - evictRank(b) || a.createdAt - b.createdAt);
+    for (const r of droppable.slice(0, group.length - cap)) drop.add(r.id);
   }
-  return out;
+  return drop.size > 0 ? out.filter((r) => !drop.has(r.id)) : out;
 }
 
 // ---- seats (agent screens §5.1) ----
@@ -171,7 +175,8 @@ export const renderSeat = ({ brief, addedAt, addedBy }) => `---\nadded_at: ${new
 
 // ---- the fleet counters and the refresh routine (§5.3, §5.4) ----
 const FLEET_FILE = ".fleet.json";
-const LEARNED_STATE_FILE = ".learned.json"; // quote hashes of the rules the user undid (outside the agents' folders: Undo restores those)
+const LEARNED_STATE_FILE = ".learned.json"; // quote and rule hashes of the rules the user undid (outside the agents' folders: Undo restores those)
+const LEARNED_DIR = ".learned"; // `<slug>/<scope>.md`: the rules themselves, beside the change store and never in a snapshot
 const REVIEWED_MAX = 200;
 
 /** `2026-W48` — the ISO week (UTC) of an instant. */
@@ -896,6 +901,9 @@ const OUTCOME_WAIT_REASONS = {
   isolation: "it widens what the agent may touch",
   "script-flagged": "an independent check flagged a script",
   "script-unchecked": "the script check couldn't run",
+  "change-flagged": "an independent check flagged the change",
+  "change-unchecked": "the change check couldn't run",
+  "routine-create": "a scheduled round doesn't add agents on its own",
   unfinished: "the task didn't finish cleanly",
 };
 
@@ -1364,7 +1372,7 @@ export function createAgentsEngine({
   const safeRel = (rel) => typeof rel === "string" && rel !== "" && !rel.startsWith("/") && !rel.includes("\0") && rel.split("/").every((s) => s !== "" && s !== "." && s !== "..");
   const hashesOf = (files) => Object.fromEntries([...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([rel, buf]) => [rel, sha256Hex(buf)]));
 
-  /** What a snapshot covers: `agent.md`, `skills/**`, `learned/**` as `Map<path, Buffer>`; null when anything is a link, too big or too many. */
+  /** What a snapshot covers: `agent.md` and `skills/**` as `Map<path, Buffer>`; null when anything is a link, too big or too many. */
   async function readSpace(dir) {
     const files = new Map();
     let total = 0;
@@ -1462,7 +1470,7 @@ export function createAgentsEngine({
   }
 
   /**
-   * Move an agent's folder from the file set `from` to `to` (`{ path: sha256 }` maps over agent.md + skills + learned). Every
+   * Move an agent's folder from the file set `from` to `to` (`{ path: sha256 }` maps over agent.md + skills). Every
    * file must be exactly what `from` says, or nothing is touched: `{ conflict: true }`. A write that fails is put back and thrown.
    */
   async function transitionSpace(dir, from, to) {
@@ -1510,7 +1518,7 @@ export function createAgentsEngine({
     }
     // a removed skill leaves empty folders behind: take them away, innermost first
     for (const p of Object.keys(now0).filter((x) => !(x in to))) {
-      for (let d = join(p, ".."); d !== "." && d !== "skills" && d !== "learned"; d = join(d, "..")) {
+      for (let d = join(p, ".."); d !== "." && d !== "skills"; d = join(d, "..")) {
         try {
           await fs.rmdir(join(dir, d));
         } catch {
@@ -1585,13 +1593,13 @@ export function createAgentsEngine({
 
   /**
    * `rec` (an update of an existing agent) gains the snapshots of its folder before and after: `beforeBundle` / `afterBundle`
-   * (agent.md + skills + learned as `{ path: sha256 }`, `after` = `before` with `rec.after` as agent.md) and their blobs.
+   * (agent.md + skills as `{ path: sha256 }`, `after` = `before` with `rec.after` as agent.md) and their blobs.
    * Left without them when the folder can't be snapshotted (a link, too big): the agent.md-string path then applies.
    */
-  async function attachBundles(rec, dir = folderOf(rec.slug), skills = null, learned = null) {
+  async function attachBundles(rec, dir = folderOf(rec.slug), skills = null) {
     const files = await readSpace(dir).catch(() => null);
     if (!files || !files.has("agent.md")) {
-      if (skills || learned) throw new AgentError(`${rec.agentName}'s files can't be snapshotted safely; fix it by hand`); // skills and learned rules can't go through the agent.md-only path
+      if (skills) throw new AgentError(`${rec.agentName}'s files can't be snapshotted safely; fix it by hand`); // skills can't go through the agent.md-only path
       return rec;
     }
     const after = new Map(files).set("agent.md", Buffer.from(rec.after, "utf-8"));
@@ -1599,11 +1607,6 @@ export function createAgentsEngine({
       // `skills`: the COMPLETE resulting skills/** set (the planned changes applied to what the agent has)
       for (const rel of [...after.keys()]) if (rel.startsWith("skills/")) after.delete(rel);
       for (const [rel, text] of skills) after.set(rel, Buffer.from(text, "utf-8"));
-    }
-    // `learned`: the learned files that change, `rel → text` (null: the file goes away with its last rule)
-    for (const [rel, text] of learned ?? []) {
-      if (text === null) after.delete(rel);
-      else after.set(rel, Buffer.from(text, "utf-8"));
     }
     try {
       await putBlobs(files);
@@ -2889,6 +2892,7 @@ export function createAgentsEngine({
    * at boot. May throw an AgentError (the record is back where it was; nothing is left on disk).
    */
   async function applyLocked(rec, decidedBy) {
+    if (rec.origin?.kind === "learned") return applyLearnedLocked(rec, decidedBy); // the learned store, never the agent's folder
     const prior = { state: rec.state, needsClick: rec.needsClick, reason: rec.reason };
     if (rec.kind === "create") {
       try {
@@ -2945,12 +2949,14 @@ export function createAgentsEngine({
       throw e instanceof AgentError ? e : writeFailed(e);
     }
     await activateLocked(rec);
+    if (rec.state === "applied") await retireFoldedLocked(rec);
     await saveRecord(rec);
     return rec;
   }
 
   /** Undo of an applied change. The caller holds `syncLock`. A refusal that changes nothing throws an AgentError. */
   async function undoLocked(rec) {
+    if (rec.origin?.kind === "learned") return undoLearnedLocked(rec);
     const finish = async () => {
       rec.state = "undone";
       rec.error = null;
@@ -2976,6 +2982,7 @@ export function createAgentsEngine({
       } catch (e) {
         throw e instanceof AgentError ? e : writeFailed(e);
       }
+      await restoreRetiredLocked(rec); // the learned rules this change folded in and retired come back with the old instructions
       return finish();
     }
     if (!target) return markConflict(rec, `${rec.agentName} changed since; delete it by hand`);
@@ -3056,10 +3063,10 @@ export function createAgentsEngine({
     return operate(id, async (rec) => {
       if (rec.state === "pending") {
         if (isExpired(rec)) return expire(rec);
-        if (rec.origin?.kind === "learned") {
-          await requireChangeAllowed("learn_preference");
-          if (!(await replanLearned(rec))) return true; // it became a duplicate (or the rule is gone): discarded, saying so
-        } else if (rec.origin?.kind !== "template-update") await requireChangeAllowed(); // a shipped template isn't an agent changing an agent
+        // a learned record is planned again at the click (other rules may have been learned since); one that became a duplicate, or whose
+        // rule is gone, is discarded saying so
+        if (rec.origin?.kind === "learned") await requireChangeAllowed("learn_preference");
+        else if (rec.origin?.kind !== "template-update") await requireChangeAllowed(); // a shipped template isn't an agent changing an agent
         await applyLocked(rec, "click");
         return true;
       }
@@ -3092,7 +3099,7 @@ export function createAgentsEngine({
     return operate(id, async (rec) => {
       if (rec.state !== "applied") return false;
       await undoLocked(rec);
-      if (rec.state === "undone" && rec.learnedTomb) await tombstone(rec.slug, rec.learnedTomb.hash, rec.learnedTomb.onUndo === "tombstone"); // Undo of a learned rule: those words never produce it again (and of a removal: they may again)
+      if (rec.state === "undone" && rec.learnedTomb) await tombstone(rec.slug, tombHashes(rec.learnedTomb), rec.learnedTomb.onUndo === "tombstone"); // Undo of a learned rule: those words (and that rule) never come back (and of a removal: they may again)
       return true;
     });
   }
@@ -3853,21 +3860,11 @@ export function createAgentsEngine({
           }
         }
         // learned rules this proposal folds into the instructions: retired in the same change (Undo brings both back)
+        // (they live in the learned store, not in the agent's folder: the record names them and the apply retires them, see retireFoldedLocked)
         const foldIds = [...new Set(env.admission.map((a) => a.replaces).filter((r) => typeof r === "string" && LEARNED_ID_RE.test(r)))];
         const learnedFiles = plan.kind === "update" && foldIds.length > 0 ? await readLearnedFiles(plan.slug) : {};
         const replaceRefusal = checkReplacements(env.admission, plan, new Set(Object.values(learnedFiles).flat().filter((r) => !r.archived).map((r) => r.id)));
         if (replaceRefusal) return { error: replaceRefusal };
-        let foldMap = null;
-        if (foldIds.length > 0) {
-          let cur = learnedFiles;
-          const changed = {};
-          for (const id of foldIds) {
-            const step = planLearned(cur, { type: "remove", id });
-            cur = { ...cur, ...step.changed };
-            Object.assign(changed, step.changed);
-          }
-          foldMap = learnedFileMap(changed);
-        }
         // a trial on exactly this draft, when the change touches what one covers (a new agent; instructions, isolation or model)
         let trial = null;
         if (trialRequired(plan, !!drafted.skills) || raw.trial !== undefined) {
@@ -3912,7 +3909,7 @@ export function createAgentsEngine({
           ...(skillSearch ? { skillSearch } : {}),
           ...(foldIds.length > 0 ? { learned: { foldedIds: foldIds } } : {}),
         });
-        if (made.kind === "update") await attachBundles(made, folderOf(made.slug), drafted.skills?.files ?? null, foldMap);
+        if (made.kind === "update") await attachBundles(made, folderOf(made.slug), drafted.skills?.files ?? null);
         else if (drafted.skills) await attachCreateBundle(made, drafted.skills.files);
         await saveRecord(made, { slots: { ...store.slots, [stamp.rootJobId]: used + 1 } });
         return { rec: made, used: used + 1 };
@@ -3920,7 +3917,7 @@ export function createAgentsEngine({
       if (outcome.error) return refuse(outcome.error, outcome.current ? { current: outcome.current } : {});
       rec = outcome.rec;
       publishChange(rec);
-      if (changesScripts(rec)) void startScriptReview(rec.id); // read independently in the background; the record is released once the verdict is in
+      if (changesScripts(rec) || needsContentReview(rec)) void startScriptReview(rec.id); // read independently in the background; the record is released once the verdict is in
       return { ok: true, change: wire(rec), used: outcome.used, limit: PROPOSALS_PER_TASK };
     } catch (e) {
       if (e instanceof AgentError) return refuse(e.message);
@@ -3974,22 +3971,81 @@ export function createAgentsEngine({
     return { agent: { name: rec.agentName || meta.name, description: meta.description ?? "" }, skills };
   }
 
+  // ---- the routine change review (security review H4): a scheduled round (refresh, check-up) has nobody reading along, so every change it
+  // makes to an agent — the instruction diff and every changed skill text — is read by the same kind of tool-less session on another model,
+  // against the round's stated purpose, before the user's level may release it. It also confirms which folded learned rules the new
+  // instructions really carry (only those are retired).
+
+  /** Does this record need the change review? A routine round's update (a routine create is held for a click instead). */
+  const needsContentReview = (rec) => rec?.mode === "routine" && rec.kind === "update";
+
+  /** What the change reviewer is given: the files that differ between the record's saved snapshots, its stated purpose, the folded rules. */
+  async function contentReviewInputOf(rec) {
+    const text = async (hash) => {
+      if (hash === undefined || hash === null) return null;
+      const blob = await getBlob(hash);
+      if (!blob) throw new Error("a saved file is gone");
+      return blob;
+    };
+    const files = [];
+    if (hasBundles(rec)) {
+      for (const path of [...new Set([...Object.keys(rec.beforeBundle), ...Object.keys(rec.afterBundle)])].sort()) {
+        if (rec.beforeBundle[path] === rec.afterBundle[path]) continue;
+        const before = await text(rec.beforeBundle[path]);
+        const after = await text(rec.afterBundle[path]);
+        const binary = [before, after].some((b) => b && b.includes(0));
+        files.push({ path, before: before ? before.toString("utf-8") : null, after: after ? after.toString("utf-8") : null, ...(binary ? { binary: true } : {}) });
+      }
+    } else if (rec.before !== rec.after) {
+      files.push({ path: "agent.md", before: rec.before, after: rec.after });
+    }
+    const foldIds = Array.isArray(rec.learned?.foldedIds) ? rec.learned.foldedIds : [];
+    const rules = foldIds.length > 0 ? await learnedRules(rec.slug) : [];
+    const folds = foldIds.map((id) => rules.find((r) => r.id === id)).filter(Boolean).map((r) => ({ id: r.id, rule: r.rule, quote: r.quote }));
+    const purpose = [rec.problem?.statement, rec.problem?.userWords ? `(quoted from the round's request: ${JSON.stringify(rec.problem.userWords)})` : ""].filter(Boolean).join(" ");
+    return { agent: { name: rec.agentName }, purpose, files, folds };
+  }
+
   async function runScriptReview(id) {
     const rec = (await readChanges()).find((r) => r.id === id);
-    if (!rec || rec.scriptReview || !changesScripts(rec) || (rec.state !== "held" && rec.state !== "pending")) return;
+    if (!rec || (rec.state !== "held" && rec.state !== "pending")) return;
+    const wantScripts = !rec.scriptReview && changesScripts(rec);
+    const wantContent = !rec.contentReview && needsContentReview(rec);
+    if (!wantScripts && !wantContent) return;
     const architectModel = (await scan()).entries.find(isArchitect)?.meta?.model ?? null;
-    let verdict;
-    try {
-      const input = await reviewInputOf(rec);
-      verdict = await reviewScripts({ run: oc?.runSynchronousSession, directory: home, architectModel, ...input, now, log });
-    } catch (e) {
-      log.warn?.(`[agents] script review of ${id} couldn't start: ${e?.message ?? e}`);
-      verdict = { verdict: "error", reasons: ["The script check couldn't read the saved files"], model: pickReviewModel(architectModel), at: now() };
+    let verdict = null;
+    let content = null;
+    if (wantScripts) {
+      try {
+        const input = await reviewInputOf(rec);
+        verdict = await reviewScripts({ run: oc?.runSynchronousSession, directory: home, architectModel, ...input, now, log });
+      } catch (e) {
+        log.warn?.(`[agents] script review of ${id} couldn't start: ${e?.message ?? e}`);
+        verdict = { verdict: "error", reasons: ["The script check couldn't read the saved files"], model: pickReviewModel(architectModel), at: now() };
+      }
+    }
+    if (wantContent) {
+      try {
+        const input = await contentReviewInputOf(rec);
+        content = await reviewRoutineChange({ run: oc?.runSynchronousSession, directory: home, architectModel, ...input, now, log });
+      } catch (e) {
+        log.warn?.(`[agents] change review of ${id} couldn't start: ${e?.message ?? e}`);
+        content = { verdict: "error", reasons: ["The change check couldn't read the saved files"], carried: [], model: pickReviewModel(architectModel), at: now() };
+      }
     }
     await syncLock.runExclusive(async () => {
       const cur = (await readChanges({ strict: true })).find((r) => r.id === id);
-      if (!cur || cur.scriptReview) return;
-      cur.scriptReview = verdict;
+      if (!cur) return;
+      let changed = false;
+      if (verdict && !cur.scriptReview) {
+        cur.scriptReview = verdict;
+        changed = true;
+      }
+      if (content && !cur.contentReview) {
+        cur.contentReview = content;
+        changed = true;
+      }
+      if (!changed) return;
       await saveRecord(cur);
       publishChange(cur);
     });
@@ -4042,6 +4098,15 @@ export function createAgentsEngine({
       if (!review) return { action: "stay" };
       if (review.verdict === "flagged") return { action: "pending", reason: "script-flagged" };
       if (review.verdict !== "clean") return { action: "pending", reason: "script-unchecked" };
+    }
+    // a routine round (nobody asked for it in a chat): a new agent waits for a click; a change to one waits for the independent change
+    // review (instruction diff and every changed skill text, against the round's purpose). Clean: the level decides. Anything else: a click.
+    if (rec.mode === "routine") {
+      if (rec.kind === "create") return { action: "pending", reason: "routine-create" };
+      const review = rec.contentReview;
+      if (!review) return { action: "stay" };
+      if (review.verdict === "flagged") return { action: "pending", reason: "change-flagged" };
+      if (review.verdict !== "clean") return { action: "pending", reason: "change-unchecked" };
     }
     // 7. Ask
     if (level === "ask") return { action: "pending", reason: "ask" };
@@ -4198,7 +4263,7 @@ export function createAgentsEngine({
       await sweepBlobsLocked().catch((e) => log.warn?.(`[agents] blob sweep: ${e?.message ?? e}`));
       // a record with scripts and no verdict (a restart lost its review) is reviewed again; never waited for here
       try {
-        for (const r of (await readChanges()).filter((x) => (x.state === "held" || x.state === "pending") && changesScripts(x) && !x.scriptReview)) void startScriptReview(r.id);
+        for (const r of (await readChanges()).filter((x) => (x.state === "held" || x.state === "pending") && ((changesScripts(x) && !x.scriptReview) || (needsContentReview(x) && !x.contentReview)))) void startScriptReview(r.id);
       } catch (e) {
         log.warn?.(`[agents] couldn't look for unreviewed scripts: ${e?.message ?? e}`);
       }
@@ -4221,6 +4286,7 @@ export function createAgentsEngine({
       if (await spaceIs(dir, rec.afterBundle)) {
         if (rec.baseAfter) await setBase(dir, rec.baseAfter);
         await activateLocked(rec);
+        if (rec.state === "applied") await retireFoldedLocked(rec);
         await saveRecord(rec);
         return;
       }
@@ -4235,6 +4301,7 @@ export function createAgentsEngine({
       if (mixed && !(await transitionSpace(dir, now0, rec.afterBundle)).conflict) {
         if (rec.baseAfter) await setBase(dir, rec.baseAfter);
         await activateLocked(rec);
+        if (rec.state === "applied") await retireFoldedLocked(rec);
         await saveRecord(rec);
         return;
       }
@@ -4631,23 +4698,48 @@ export function createAgentsEngine({
   }
   const seatStamp = (seat) => (seat?.created ? { seatAdded: { project: seat.project, projectName: seat.projectName } } : {});
 
-  // ---- learned preferences (§5.1): files under <agent>/learned/, each write a change record ----
+  // ---- learned preferences (§5.1): files under LEARNED_DIR/<agent>/, each write a per-rule change record ----
+  // The rules live beside the change store, NOT in the agent's folder: a snapshot of the agent (Undo, a pending proposal's check, Restore)
+  // never sees them, so learning never makes another change conflict and restoring an old version never brings back or removes a rule.
+  // A learned record carries the operation and what it did to the rules (`learned`), and its Undo inverts exactly that.
 
   const LEARNED_SCOPE_RE = /^(?:_all|[a-z0-9-]+)$/;
+  const learnedRoot = join(root, LEARNED_DIR);
   const tombstonesPath = join(root, LEARNED_STATE_FILE);
   const tombstoneLock = createMutex();
   const TOMBSTONES_PER_AGENT = 300;
+  const LEARNED_UNSAFE = "The learned preferences can't be written safely: their folder is a link; fix it by hand";
 
   /** The rules of every learned file of an agent, `{ [scope]: LearnedRule[] }` (archived ones included). A folder that holds a link has none. */
   async function readLearnedFiles(slug) {
-    const space = await readSpace(folderOf(slug)).catch(() => null);
+    if (typeof slug !== "string" || !SLUG_RE.test(slug)) return {};
+    if (await pathHasLink(root, `${LEARNED_DIR}/${slug}`)) return {};
+    const tree = await readTree(join(learnedRoot, slug)).catch(() => null);
     const out = {};
-    for (const [rel, buf] of space ?? []) {
-      const m = /^learned\/([^/]+)\.md$/.exec(rel);
+    for (const [rel, buf] of tree ?? []) {
+      const m = /^([^/]+)\.md$/.exec(rel);
       if (!m || !LEARNED_SCOPE_RE.test(m[1])) continue;
       out[m[1]] = parseLearned(buf.toString("utf-8"), m[1]);
     }
     return out;
+  }
+
+  /** Write the scopes `changed` (`{ [scope]: LearnedRule[] }`, an empty list removes the file): additions first, so a crash leaves a duplicate, never a loss. */
+  async function writeLearnedFiles(slug, changed) {
+    const dir = join(learnedRoot, slug);
+    const entries = Object.entries(changed).sort(([, x], [, y]) => y.length - x.length);
+    for (const [scope] of entries) if (!LEARNED_SCOPE_RE.test(scope) || (await pathHasLink(root, `${LEARNED_DIR}/${slug}/${scope}.md`))) throw new AgentError(LEARNED_UNSAFE);
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      for (const [scope, rules] of entries) {
+        const file = join(dir, `${scope}.md`);
+        if (rules.length === 0) await fs.rm(file, { force: true });
+        else await writeFileAtomic(file, renderLearned(rules));
+      }
+      if ((await fs.readdir(dir)).length === 0) await fs.rmdir(dir).catch(() => {});
+    } catch (e) {
+      throw e instanceof AgentError ? e : writeFailed(e);
+    }
   }
 
   /** Every rule an agent has learned (all scopes, archived ones flagged), newest first. */
@@ -4656,10 +4748,20 @@ export function createAgentsEngine({
     return Object.values(await readLearnedFiles(slug)).flat().sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : 1));
   }
 
-  /** `learned/<scope>.md` → its new text, or null when its last rule is gone: what `attachBundles` puts into the after-snapshot. */
-  const learnedFileMap = (changed) => new Map(Object.entries(changed).map(([scope, rules]) => [`learned/${scope}.md`, rules.length === 0 ? null : renderLearned(rules)]));
+  /** Put rules back (each only if its id isn't there and no active rule says the same): `{ [scope]: LearnedRule[] }` of what changes. */
+  function putBack(files, rules) {
+    const next = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v.map((r) => ({ ...r }))]));
+    const touched = new Set();
+    for (const r of rules) {
+      const all = Object.values(next).flat();
+      if (all.some((x) => x.id === r.id) || all.some((x) => !x.archived && normalizeRule(x.rule) === normalizeRule(r.rule))) continue;
+      next[r.scope] = [...(next[r.scope] ?? []), { ...r, archived: r.archived === true }];
+      touched.add(r.scope);
+    }
+    return Object.fromEntries([...touched].map((k) => [k, next[k]]));
+  }
 
-  // The quotes of rules the user undid. They live beside the change store, NOT in the agent's folder: Undo restores that folder.
+  // The quotes and rules the user undid. They live beside the change store, NOT in the agent's folder.
   async function readTombstones() {
     const doc = parseJsonOrNull(await readOptional(fs, tombstonesPath));
     return plainObject(doc?.tombstones);
@@ -4670,14 +4772,19 @@ export function createAgentsEngine({
     return new Set(Array.isArray(list) ? list.filter((h) => typeof h === "string") : []);
   }
 
-  /** Remember (`add`) or forget a quote hash for an agent. Bookkeeping: a failure is logged, never thrown. */
-  function tombstone(slug, hash, add) {
+  /** The hashes a learned record's tombstone covers: its quote and (since the security review) its normalised rule text. */
+  const tombHashes = (t) => [t?.hash, t?.ruleHash].filter((h) => typeof h === "string" && h);
+
+  /** Remember (`add`) or forget hashes for an agent. Bookkeeping: a failure is logged, never thrown. */
+  function tombstone(slug, hashes, add) {
     return tombstoneLock.runExclusive(async () => {
       try {
         const all = await readTombstones();
         const next = new Set(Array.isArray(all[slug]) ? all[slug] : []);
-        if (add) next.add(hash);
-        else next.delete(hash);
+        for (const hash of [hashes].flat()) {
+          if (add) next.add(hash);
+          else next.delete(hash);
+        }
         const out = { ...all, [slug]: [...next].slice(-TOMBSTONES_PER_AGENT) };
         if (out[slug].length === 0) delete out[slug];
         await fs.mkdir(root, { recursive: true });
@@ -4691,19 +4798,19 @@ export function createAgentsEngine({
   const clipText = (t, n) => (String(t).length > n ? `${String(t).slice(0, n - 1).trimEnd()}…` : String(t));
 
   /**
-   * One planned write as a change record (not yet saved): `{ rec }` or `{ noop }`. agent.md is exactly as it is; only `learned/*` differs
-   * between the snapshots. The caller holds `syncLock`. A refusal is an AgentError.
+   * One planned write as a change record (not yet saved): `{ rec }` or `{ noop }`. `before === after` (agent.md as it is): nothing of the
+   * agent's folder changes. The caller holds `syncLock`. A refusal is an AgentError.
    */
   async function learnedRecord(slug, op, summary) {
     const target = await resolveTarget(slug);
     if (!target) throw new AgentError(`@${slug} can't be edited safely; fix it by hand`);
     const snap = await readAgentSnapshot(slug);
     if (!snap) throw new AgentError(`@${slug} can't be edited safely; fix it by hand`);
-    const files = await readLearnedFiles(slug);
-    const plan = planLearned(files, op);
+    const plan = planLearned(await readLearnedFiles(slug), op);
     if (plan.error) throw new AgentError(`${plan.error[0].toUpperCase()}${plan.error.slice(1)}`);
     if (plan.noop) return { noop: plan.noop };
     const gone = plan.removed?.[0] ?? null;
+    const subject = plan.added ?? gone;
     const rec = normalizeRecord({
       id: `ach_${randomBytes(8).toString("hex")}`,
       kind: "update",
@@ -4724,35 +4831,104 @@ export function createAgentsEngine({
       summary,
       learned: plan.added ? { added: plan.added } : { removedId: op.id },
       learnedOp: op,
-      learnedTomb: plan.added ? { hash: quoteHash(plan.added.quote), onUndo: "tombstone" } : gone ? { hash: quoteHash(gone.quote), onUndo: "release" } : undefined,
+      learnedTomb: subject ? { hash: quoteHash(subject.quote), ruleHash: ruleHash(subject.rule), onUndo: plan.added ? "tombstone" : "release" } : undefined,
     });
-    await attachBundles(rec, target.dir, null, learnedFileMap(plan.changed));
-    if (!hasBundles(rec)) throw new AgentError(`${rec.agentName}'s files can't be snapshotted safely; fix it by hand`);
     return { rec };
   }
 
   /**
-   * A pending learned record is planned AGAIN against the files as they are at the click (other rules may have been learned since):
-   * true = go on and apply; false = it is now a duplicate or its target rule is gone, so it was discarded (and says why). The caller holds `syncLock`.
+   * Apply a learned record: its operation is planned AGAIN against the rules as they are now (other rules may have been learned since) and
+   * written to the learned store; one that became a duplicate, or whose rule is gone, is discarded saying so. The caller holds `syncLock`.
    */
-  async function replanLearned(rec) {
+  async function applyLearnedLocked(rec, decidedBy) {
     const op = rec.learnedOp;
-    if (!op) return true;
+    if (!op) throw new AgentError("That preference can't be applied any more");
     const plan = planLearned(await readLearnedFiles(rec.slug), op);
     if (plan.noop || plan.error) {
       rec.state = "discarded";
       rec.needsClick = false;
-      rec.error = plan.noop ? "That preference is already learned" : "The rule it replaces is gone";
+      rec.error = plan.noop ? "That preference is already learned" : op.type === "remove" ? "That preference is already gone" : "The rule it replaces is gone";
       rec.decidedAt = now();
-      return false;
+      return rec;
     }
-    const snap = await readAgentSnapshot(rec.slug);
-    if (!snap) throw new AgentError(`@${rec.slug} can't be edited safely; fix it by hand`);
-    rec.before = snap.text;
-    rec.after = snap.text;
-    rec.learned = plan.added ? { added: plan.added } : rec.learned;
-    await attachBundles(rec, folderOf(rec.slug), null, learnedFileMap(plan.changed));
-    return true;
+    await writeLearnedFiles(rec.slug, plan.changed);
+    rec.learned = op.type === "add" ? { added: plan.added, removed: plan.removed, archivedIds: plan.archived.map((r) => r.id) } : { removedId: op.id, removed: plan.removed };
+    rec.state = "applied";
+    rec.needsClick = false;
+    rec.error = null;
+    rec.decidedBy = decidedBy;
+    rec.decidedAt = now();
+    return rec;
+  }
+
+  /** Undo of an applied learned record: exactly its own rule (and what it replaced or archived) — never anything learned since. */
+  async function undoLearnedLocked(rec) {
+    const files = await readLearnedFiles(rec.slug);
+    let changed;
+    if (rec.learned?.added) {
+      const id = rec.learned.added.id;
+      if (!Object.values(files).flat().some((r) => r.id === id)) throw new AgentError("That preference is already gone");
+      const step = planLearned(files, { type: "remove", id });
+      let cur = { ...files, ...step.changed };
+      // what it archived comes back to the active list; what it replaced or promoted comes back as it was
+      const archivedIds = new Set(rec.learned.archivedIds ?? []);
+      const unarchived = {};
+      for (const [scope, rules] of Object.entries(cur)) {
+        if (!rules.some((r) => archivedIds.has(r.id) && r.archived)) continue;
+        unarchived[scope] = rules.map((r) => (archivedIds.has(r.id) ? { ...r, archived: false } : r));
+      }
+      cur = { ...cur, ...unarchived };
+      changed = { ...step.changed, ...unarchived, ...putBack(cur, rec.learned.removed ?? []) };
+    } else {
+      const removed = rec.learned?.removed ?? [];
+      if (removed.length === 0) throw new AgentError("That preference can't be brought back");
+      changed = putBack(files, removed);
+      if (Object.keys(changed).length === 0) throw new AgentError("That preference is already back");
+    }
+    await writeLearnedFiles(rec.slug, changed);
+    rec.state = "undone";
+    rec.error = null;
+    rec.decidedAt = now();
+    return rec;
+  }
+
+  /**
+   * An applied change that folded learned rules into the instructions retires them now (§3.2). A routine round retires only the ones its
+   * independent change review confirmed the new instructions carry; the rest stay. Bookkeeping: a failure is logged and the rule stays.
+   */
+  async function retireFoldedLocked(rec) {
+    const ids = Array.isArray(rec.learned?.foldedIds) ? rec.learned.foldedIds : [];
+    if (ids.length === 0 || rec.origin?.kind === "learned" || !rec.slug) return;
+    const confirmed = rec.mode === "routine" ? new Set(rec.contentReview?.verdict === "clean" || rec.decidedBy === "click" ? (rec.contentReview?.carried ?? []) : []) : new Set(ids);
+    try {
+      let cur = await readLearnedFiles(rec.slug);
+      const changed = {};
+      const retired = [];
+      for (const id of ids.filter((x) => confirmed.has(x))) {
+        const step = planLearned(cur, { type: "remove", id });
+        if (step.error) continue; // already gone
+        retired.push(...step.removed);
+        cur = { ...cur, ...step.changed };
+        Object.assign(changed, step.changed);
+      }
+      if (retired.length > 0) await writeLearnedFiles(rec.slug, changed);
+      rec.learned = { ...rec.learned, retired, kept: ids.filter((x) => !retired.some((r) => r.id === x)) };
+    } catch (e) {
+      log.warn?.(`[agents] couldn't retire the learned rules folded into ${rec.id}: ${e?.message ?? e}`);
+      rec.learned = { ...rec.learned, retired: [], kept: ids };
+    }
+  }
+
+  /** Undo of such a change puts the rules it retired back. Bookkeeping: a failure is logged. */
+  async function restoreRetiredLocked(rec) {
+    const retired = Array.isArray(rec.learned?.retired) ? rec.learned.retired : [];
+    if (retired.length === 0 || rec.origin?.kind === "learned") return;
+    try {
+      const changed = putBack(await readLearnedFiles(rec.slug), retired);
+      if (Object.keys(changed).length > 0) await writeLearnedFiles(rec.slug, changed);
+    } catch (e) {
+      log.warn?.(`[agents] couldn't put back the learned rules of ${rec.id}: ${e?.message ?? e}`);
+    }
   }
 
   const LEARNED_SUMMARY_MAX = 160;
@@ -4775,6 +4951,8 @@ export function createAgentsEngine({
     if (!given || typeof given !== "object") return refuse("There is no rule to learn");
     const bad = checkRuleText(given.rule);
     if (bad) return refuse(bad[0].toUpperCase() + bad.slice(1));
+    const tombs = await learnedTombstones(slug);
+    if (tombs.has(quoteHash(String(given.quote ?? ""))) || tombs.has(ruleHash(given.rule))) return refuse("The user undid this preference before");
     let level;
     try {
       level = autonomy.decide("learn_preference", await autonomyPolicy());
@@ -4845,24 +5023,29 @@ export function createAgentsEngine({
         throw e;
       }
       await saveRecord(rec);
-      if (rec.state === "applied") await tombstone(slug, quoteHash(found.quote), true);
+      if (rec.state === "applied") await tombstone(slug, [quoteHash(found.quote), ruleHash(found.rule)], true);
     });
     publishChange(rec);
     fleetChanged();
     return wire(rec);
   }
 
+  /** The project a folder belongs to for learned preferences — ONE lookup, used both to store a rule and to give it to a task (null: none). */
+  async function learnedProjectOf(directory) {
+    try {
+      const p = typeof directory === "string" && directory ? await registry?.identify(directory) : null;
+      return p?.slug && PROJECT_RE.test(p.slug) ? p.slug : null;
+    } catch (e) {
+      log.warn?.(`[agents] project lookup for learned preferences failed: ${e?.message ?? e}`);
+      return null;
+    }
+  }
+
   /** The block a task of `slug` started in `directory` carries: that project's rules, then the ones for every project ("" when none). */
   async function learnedBlockFor(slug, directory) {
     try {
       const files = await readLearnedFiles(slug);
-      let project = null;
-      try {
-        const p = typeof directory === "string" && directory ? await registry?.identify(directory) : null;
-        if (p?.slug && PROJECT_RE.test(p.slug)) project = p.slug;
-      } catch (e) {
-        log.warn?.(`[agents] project lookup for learned preferences failed: ${e?.message ?? e}`);
-      }
+      const project = await learnedProjectOf(directory);
       return buildLearnedBlock({ project: project ? (files[project] ?? []) : [], all: files[ALL_SCOPE] ?? [] });
     } catch (e) {
       log.warn?.(`[agents] couldn't read the learned preferences of @${slug}: ${e?.message ?? e}`);
@@ -4894,6 +5077,7 @@ export function createAgentsEngine({
       await requireChangeAllowed();
       const src = typeof id === "string" && id ? (await readChanges({ strict: true })).find((r) => r.id === id) : null;
       if (!src) throw new AgentError(CHANGE_GONE);
+      if (src.origin?.kind === "learned") throw new AgentError("A learned preference isn't restored; undo it, or remove it in the agent's Learned tab");
       if (src.kind !== "update" || typeof src.before !== "string" || !src.slug) throw new AgentError("Only a change to an existing agent can be restored");
       if (src.state !== "applied" && src.state !== "undone") throw new AgentError("Only a change that was applied or undone can be restored");
       const target = await resolveTarget(src.slug);
@@ -6026,6 +6210,7 @@ export function createAgentsEngine({
     learnedRules,
     learnedTombstones,
     learnedBlockFor,
+    learnedProjectOf,
     learningLevel: learnLevel,
     bindArchitect,
     bindResearcher,

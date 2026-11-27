@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, cp, access, readdir } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentsEngine, buildDispatchPrompt, buildArchitectContext, fleetRecapEntries } from "./agents.mjs";
+import { createAgentsEngine, buildDispatchPrompt, buildArchitectContext, fleetRecapEntries, pruneChangeRecords, CHANGE_MAX, LEARNED_CHANGE_MAX } from "./agents.mjs";
 import { parseLearned, quoteHash, ALL_SCOPE } from "./agentLearning.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 import { MODES } from "../shared/autonomyShared.mjs";
@@ -22,7 +22,7 @@ async function fixture({ level = "tell", changeLevel = "ask" } = {}) {
   const templatesDir = join(base, "templates");
   await mkdir(templatesDir, { recursive: true });
   for (const t of ["dev", "manta", "architect"]) await cp(join(REAL_TEMPLATES, t), join(templatesDir, t), { recursive: true });
-  const w = { level, changeLevel, clock: T0, started: [], pubs: [], policyThrows: false, jobs: [] };
+  const w = { level, changeLevel, clock: T0, started: [], pubs: [], policyThrows: false, jobs: [], messages: [] };
   const projects = { "/proj/site": "site", "/proj/blog": "blog" };
   const engine = createAgentsEngine({
     root,
@@ -40,7 +40,11 @@ async function fixture({ level = "tell", changeLevel = "ask" } = {}) {
     },
     publish: (p) => w.pubs.push(p),
     registry: { identify: async (dir) => (projects[dir] ? { slug: projects[dir] } : null), list: async () => [] },
-    oc: { listMessages: async () => [] },
+    oc: { listMessages: async () => w.messages, readSession: async () => ({ state: "found", session: { id: "ses_chat", directory: "/repo" } }) },
+    isManagedSession: async () => false,
+    isCtoSessionStrict: async () => false,
+    configGet: async () => ({ chatAutoAllow: true }),
+    listApprovedModels: async () => ["anthropic/claude-sonnet-5-5"],
     delegate: { loadRecordsStrict: async () => w.jobs, loadRecords: async () => w.jobs, startJob: async (a) => (w.started.push(a), { ok: true, job: { id: "job_x" } }) },
     tmux: { listProjects: async () => [], newSession: async () => {} },
     loadSecretsStrict: async () => [],
@@ -51,7 +55,8 @@ async function fixture({ level = "tell", changeLevel = "ask" } = {}) {
 
 const RULE = { rule: "Write commit messages in the imperative mood.", why: "They said so.", whyIsInferred: false, quote: "always use imperative commit messages", sourceJobId: "job1" };
 const learn = (f, over = {}) => f.engine.learnedWrite({ slug: "dev", scope: "site", rule: { ...RULE }, ...over });
-const file = (f, scope = "site", slug = "dev") => join(f.root, slug, "learned", `${scope}.md`);
+// learned rules live beside the change store, never in the agent's (snapshotted) folder (security review H3)
+const file = (f, scope = "site", slug = "dev") => join(f.root, ".learned", slug, `${scope}.md`);
 const rulesOn = async (f, scope = "site") => parseLearned(await readFile(file(f, scope), "utf-8"), scope);
 const store = async (f) => JSON.parse(await readFile(join(f.root, ".changes.json"), "utf-8")).changes;
 
@@ -185,7 +190,7 @@ test("learnedUndo (the Learned tab): removes one rule whatever was learned since
   try {
     const a = await learn(f);
     const b = await learn(f, { rule: { ...RULE, rule: "Keep pull requests small.", quote: "pull requests should stay small" } });
-    // the first rule's own Undo would now conflict; the tab's Undo doesn't
+    // each rule is its own record: the tab's Undo removes this one whatever was learned since
     const rec = await f.engine.learnedUndo({ slug: "dev", id: a.change.learned.added.id });
     assert.equal(rec.state, "applied");
     assert.equal(rec.decidedBy, "click");
@@ -322,4 +327,90 @@ test("changesForRoot and questionsForRoot: what one task proposed, and what it a
   } finally {
     await f.cleanup();
   }
+});
+
+// ---- security review of PR #1760 (H3, M2, M3): learned rules never ride in an agent's snapshot ----
+
+let chgSeq = 0;
+/** An `agent_change` from the lead's chat updating @dev's instructions (released by `changeLevel`). */
+async function changeDev(f, instructions) {
+  const n = ++chgSeq;
+  const b = { sessionID: "ses_chat", messageID: `msg_c${n}`, callID: `callc${n}`, action: "update", agent: "dev", draft: { instructions } };
+  f.w.messages = [
+    { info: { id: "msg_user1", role: "user" }, parts: [] },
+    { info: { id: b.messageID, role: "assistant", parentID: "msg_user1", agent: "build" }, parts: [{ type: "tool", tool: "agent_change", callID: b.callID, state: { status: "running", input: { action: b.action, agent: b.agent, draft: b.draft } } }] },
+  ];
+  const r = await f.engine.change(b);
+  assert.equal(r.ok, true, r.error);
+  return r.change;
+}
+
+test("H3: a learned rule doesn't touch the agent's folder, so Undo of an earlier change to the agent still works and keeps the rule", async () => {
+  const f = await fixture({ changeLevel: "auto" });
+  try {
+    const before = await readFile(join(f.root, "dev", "agent.md"), "utf-8");
+    const c = await changeDev(f, "You fix bugs. Keep changes small.");
+    assert.equal(c.state, "applied");
+    assert.equal((await learn(f)).change.state, "applied");
+    assert.equal(await exists(join(f.root, "dev", "learned")), false, "nothing learned is written into the agent's folder");
+    const undone = await f.engine.undo(c.id);
+    assert.equal(undone.state, "undone", undone.error ?? "");
+    assert.equal(await readFile(join(f.root, "dev", "agent.md"), "utf-8"), before);
+    assert.deepEqual((await f.engine.learnedRules("dev")).map((r) => r.rule), [RULE.rule], "the rule outlives the undo");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H3: a pending change to the agent still applies after a rule is learned in between", async () => {
+  const f = await fixture({ changeLevel: "ask" });
+  try {
+    const c = await changeDev(f, "You fix bugs. Keep changes small.");
+    assert.equal(c.state, "pending");
+    await learn(f);
+    const applied = await f.engine.apply(c.id);
+    assert.equal(applied.state, "applied", applied.error ?? "");
+    assert.deepEqual((await f.engine.learnedRules("dev")).map((r) => r.rule), [RULE.rule]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H3/M3: Restore never touches learned rules — a removed rule stays removed, a learned one stays — and a learned record isn't restorable", async () => {
+  const f = await fixture({ changeLevel: "auto" });
+  try {
+    const kept = await learn(f);
+    const c = await changeDev(f, "You fix bugs. Keep changes small.");
+    const gone = await learn(f, { rule: { ...RULE, rule: "Keep pull requests small.", quote: "pull requests should stay small" } });
+    await f.engine.learnedUndo({ slug: "dev", id: gone.change.learned.added.id });
+    const restored = await f.engine.restore(c.id);
+    assert.equal(restored.state, "applied", restored.error ?? "");
+    assert.deepEqual((await f.engine.learnedRules("dev")).map((r) => r.rule), [RULE.rule], "neither brought back nor taken away");
+    await assert.rejects(f.engine.restore(kept.change.id), /learned/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("H1: the engine itself refuses a rule whose words or text the user undid", async () => {
+  const f = await fixture();
+  try {
+    const r = await learn(f);
+    await f.engine.undo(r.change.id);
+    const again = await learn(f, { rule: { ...RULE, quote: "some other words, same rule" } });
+    assert.equal(again.ok, false);
+    assert.match(again.error, /undid/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("M2: learned records have their own cap and never evict an agent change", () => {
+  const rec = (i, origin) => ({ id: `ach_${origin}${i}`, state: "applied", createdAt: i, decidedAt: i, origin: { kind: origin } });
+  const changes = Array.from({ length: CHANGE_MAX }, (_, i) => rec(i + 1000, "job"));
+  const learnedOnes = Array.from({ length: LEARNED_CHANGE_MAX + 25 }, (_, i) => rec(i, "learned"));
+  const out = pruneChangeRecords([...learnedOnes, ...changes], T0);
+  assert.equal(out.filter((r) => r.origin.kind === "job").length, CHANGE_MAX, "every agent change kept");
+  assert.equal(out.filter((r) => r.origin.kind === "learned").length, LEARNED_CHANGE_MAX);
+  assert.ok(!out.some((r) => r.id === "ach_learned0"), "the oldest learned record goes first");
 });
