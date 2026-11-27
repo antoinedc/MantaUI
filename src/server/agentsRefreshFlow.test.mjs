@@ -15,7 +15,7 @@ import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const T0 = Date.parse("2026-11-25T12:00:00Z");
 
-test("refresh flow: the routine's run starts the Architect's task, its proposals wait for a click (even at Auto), and the task's end settles the run with the Outcome lines", async () => {
+test("refresh flow: the routine's run starts the Architect's task, its proposals follow the user's level (here Ask: they wait for a click), and the task's end settles the run with the Outcome lines", async () => {
   const base = await mkdtemp(join(tmpdir(), "agents-flow-"));
   try {
     const root = join(base, "agents");
@@ -121,7 +121,7 @@ test("refresh flow: the routine's run starts the Architect's task, its proposals
     assert.equal(done.status, "done");
     assert.equal(done.report.outcome, "findings", "a proposal is waiting for a click");
     assert.match(done.report.body, /I checked the research it rests on\./);
-    assert.match(done.report.body, /Outcome: @dev is waiting for your click on the card \(reason: it was proposed in plan mode\)/);
+    assert.match(done.report.body, /Outcome: @dev is waiting for your click on the card \(reason: your setting for changing agents is Ask\)/);
     assert.equal(w.prompts.length, 0, "nothing ever prompted the headless session");
     assert.equal(w.notes.length, 1, "the user is told once");
   } finally {
