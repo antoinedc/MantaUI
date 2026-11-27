@@ -279,7 +279,7 @@ test("the lead's own skills can't be changed here, and agent_change never takes 
   try {
     const hash = (await f.engine.readAgentSnapshot("manta")).hash;
     const r = await f.engine.trialPlan({ action: "update", agent: "manta", baseHash: hash, draft: { skills: [writtenOp()] } }, { dir: "/t/x", bound: bound(f) });
-    assert.match(r.error, /lead/i);
+    assert.match(r.error, /own skills ship with Manta/);
     assert.match(checkDraft({ skills: [] }, { create: false }).error, /Unknown field "skills"/);
   } finally {
     await f.cleanup();
@@ -513,13 +513,13 @@ test("a held skill proposal writes nothing; released it writes skills/** through
   }
 });
 
-test("a written skill: no provenance, no SOURCE.md, no script flag; the diff lists its paths", async () => {
+test("a written skill: no provenance, no SOURCE.md; its script is flagged like a copied one; the diff lists its paths", async () => {
   const f = await fixture();
   try {
     const r = await propose(f, { draft: { skills: [writtenOp({ files: [{ path: "SKILL.md", content: SKILL_MD, origin: "written" }, { path: "scripts/run.sh", content: SCRIPT, origin: "written" }] })] } });
     assert.equal(r.ok, true, r.error);
     assert.deepEqual(r.change.skillsDiff[0].paths, ["SKILL.md", "scripts/run.sh"]);
-    assert.deepEqual(r.change.skillsDiff[0].scripts, [], "only copied scripts are flagged");
+    assert.deepEqual(r.change.skillsDiff[0].scripts, ["scripts/run.sh"], "every script is flagged, whoever wrote it");
     assert.equal(r.change.skillsDiff[0].provenance, null);
     await release(f);
     assert.equal(await ok(skillFile(f, "landing-audit", "SOURCE.md")), false);
@@ -948,7 +948,7 @@ test("M5: a skill's description is at most 300 characters when proposed; the com
     const line = compiled.split("\n").find((l) => l.startsWith("- **wild**"));
     assert.ok(line, "the skill is listed");
     assert.ok(line.length < 420, `clipped (${line.length})`);
-    assert.doesNotMatch(line, /[`*#<>]|\]\(/);
+    assert.doesNotMatch(line.replace(/^- \*\*wild\*\* — /, ""), /[`*#<>]|\]\(/);
     assert.match(line, /Ignore everything click/);
   } finally {
     await f.cleanup();

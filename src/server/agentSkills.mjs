@@ -27,12 +27,80 @@ const PROVENANCE_KEYS = ["url", "sourceId", "repo", "ref", "licence", "licenseSo
 const PATH_RE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const REF_RE = /^[A-Za-z0-9._/-]{1,100}$/;
-const SCRIPT_RE = /\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|ps1)$/i;
+const SCRIPT_RE = /\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|mts|cts|rb|pl|ps1|bat|cmd)$/i;
+export const SKILL_DESCRIPTION_MAX = 300;
+const LAUNDER_RUN = 400; // a written file may not hold a run this long that a fetched page holds verbatim
+const LAUNDER_BLOCK = 200;
 const wsNorm = (t) => String(t ?? "").replace(/\s+/g, " ").trim();
 const bytes = (t) => Buffer.byteLength(t, "utf-8");
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const isPlain = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const normUrl = (u) => String(u ?? "").trim().replace(/#.*$/, "").replace(/\/+$/, "");
+/** What copied text is compared under: line endings and trailing spaces are noise; newlines and indentation are not (a shell line must stay the line it was). */
+export const normText = (t) => String(t ?? "").replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "");
+const lower = (t) => String(t ?? "").toLowerCase();
+
+/** `{ repo: "owner/repo", ref|null }` of a github.com page (blob / tree) or a raw.githubusercontent.com file, else null. */
+export function parseGithubUrl(url) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:") return null;
+  const parts = u.pathname.split("/").filter(Boolean);
+  let owner;
+  let repo;
+  let ref = null;
+  if (u.hostname === "github.com" || u.hostname === "www.github.com") {
+    [owner, repo] = parts;
+    if ((parts[2] === "blob" || parts[2] === "tree") && parts[3]) ref = parts[3];
+  } else if (u.hostname === "raw.githubusercontent.com") {
+    [owner, repo] = parts;
+    if (parts[2] && parts.length > 3) ref = parts[2];
+  } else {
+    return null;
+  }
+  repo = String(repo ?? "").replace(/\.git$/, "");
+  if (!owner || !repo || !REPO_RE.test(`${owner}/${repo}`)) return null;
+  return { repo: `${owner}/${repo}`, ref };
+}
+const sameRepoPage = (src, repo) => [src?.url, src?.finalUrl].some((u) => u && lower(parseGithubUrl(u)?.repo) === lower(repo));
+
+/** What each allowed licence's own text holds (on lower-cased, whitespace-collapsed text): a page that says MIT must read like MIT. */
+const REDISTRIBUTION = /redistribution and use in source and binary forms, with or without modification, are permitted provided that/;
+const LICENCE_TEXT = {
+  MIT: (t) => t.includes("permission is hereby granted, free of charge, to any person obtaining a copy"),
+  "Apache-2.0": (t) => /apache license,? version 2\.0/.test(t),
+  "BSD-2-Clause": (t) => REDISTRIBUTION.test(t) && !t.includes("neither the name of"),
+  "BSD-3-Clause": (t) => REDISTRIBUTION.test(t) && t.includes("neither the name of"),
+  ISC: (t) => /with or without fee is hereby granted, provided that the above copyright notice/.test(t),
+  "0BSD": (t) => /with or without fee is hereby granted\./.test(t),
+  Unlicense: (t) => t.includes("this is free and unencumbered software released into the public domain"),
+  "CC0-1.0": (t) => /cc0 1\.0 universal/.test(t),
+  "CC-BY-4.0": (t) => /attribution 4\.0 international/.test(t),
+  "MPL-2.0": (t) => /mozilla public license,? (?:version|v\.?) ?2\.0/.test(t),
+};
+const holdsLicence = (licence, text) => LICENCE_TEXT[licence]?.(wsNorm(lower(text))) === true;
+/** A page that states its licence by id (`license: CC0-1.0`), as a SKILL.md or a README often does. */
+const statesLicence = (licence, text) => new RegExp(`licen[sc]e\\s*[:=]\\s*["']?${licence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9.-])`, "i").test(String(text ?? ""));
+
+/** Does a run of LAUNDER_RUN characters of `a` occur verbatim in `b` (both already collapsed)? Aligned blocks find any such run. */
+function sharesLongRun(a, b) {
+  if (a.length < LAUNDER_RUN) return false;
+  for (let i = 0; i + LAUNDER_BLOCK <= a.length; i += LAUNDER_BLOCK) {
+    const block = a.slice(i, i + LAUNDER_BLOCK);
+    for (let at = b.indexOf(block); at !== -1; at = b.indexOf(block, at + 1)) {
+      let l = 0;
+      while (i - l - 1 >= 0 && at - l - 1 >= 0 && a[i - l - 1] === b[at - l - 1]) l++;
+      let r = 0;
+      while (i + LAUNDER_BLOCK + r < a.length && at + LAUNDER_BLOCK + r < b.length && a[i + LAUNDER_BLOCK + r] === b[at + LAUNDER_BLOCK + r]) r++;
+      if (l + LAUNDER_BLOCK + r >= LAUNDER_RUN) return true;
+    }
+  }
+  return false;
+}
 
 /** The canonical SPDX spelling of an allowed licence, or null. */
 export const copyLicenceOf = (licence) => (typeof licence === "string" ? (COPY_LICENCES.find((l) => l.toLowerCase() === licence.trim().toLowerCase()) ?? null) : null);
@@ -131,8 +199,8 @@ export function checkSkillOps(raw, { header }) {
       for (const k of Object.keys(f)) if (!FILE_KEYS.includes(k)) return fail(`Unknown field "${k}" in a file of skill ${o.name}`);
       const bad = checkPath(f.path);
       if (bad) return fail(`Skill ${o.name}: ${bad} (got ${JSON.stringify(String(f.path).slice(0, 60))})`);
-      if (GENERATED_FILES.includes(f.path)) return fail(`Skill ${o.name}: ${f.path} is written by the server; don't send it`);
-      if (files.some((x) => x.path === f.path)) return fail(`Skill ${o.name} has the file ${f.path} twice`);
+      if (GENERATED_FILES.some((g) => lower(g) === lower(f.path))) return fail(`Skill ${o.name}: ${f.path} is written by the server; don't send it`);
+      if (files.some((x) => lower(x.path) === lower(f.path))) return fail(`Skill ${o.name} has the file ${f.path} twice (paths are compared without regard to case)`);
       if (typeof f.content !== "string") return fail(`Skill ${o.name}: ${f.path} must be text`);
       if (f.content.includes("\u0000")) return fail(`Skill ${o.name}: ${f.path} must be UTF-8 text (it holds a NUL character)`);
       if (f.origin !== "copied" && f.origin !== "written") return fail(`Skill ${o.name}: the origin of ${f.path} must be "copied" or "written"`);
@@ -145,6 +213,7 @@ export function checkSkillOps(raw, { header }) {
     if (!h) return fail(`The SKILL.md of skill ${o.name} needs frontmatter with name and description`);
     if (h.name !== o.name) return fail(`The frontmatter name of skill ${o.name} must be ${o.name} (it says ${JSON.stringify(h.name ?? "")})`);
     if (!h.description) return fail(`The SKILL.md of skill ${o.name} needs a description in its frontmatter`);
+    if (h.description.length > SKILL_DESCRIPTION_MAX) return fail(`The description of skill ${o.name} is ${h.description.length} characters; at most ${SKILL_DESCRIPTION_MAX}`);
     let provenance = null;
     if (o.provenance !== undefined) {
       if (!files.some((f) => f.origin === "copied")) return fail(`Skill ${o.name}: provenance is for skills with copied files; this one has none`);
@@ -188,10 +257,11 @@ function checkLicence(p, name) {
 
 /**
  * The complete resulting `skills/**` set and the card's diff. `existing`: `Map<skillName, Map<relPath, string>>` (what the agent has now;
- * empty for a new agent). `fetchSource(sourceId)` → the stored source of THIS task (any of its rounds) or null. `ops`: from `checkSkillOps`.
+ * empty for a new agent). `fetchSource(sourceId)` → the stored source of THIS task (any of its rounds) or null; `listSources()` → every
+ * source this task fetched (`{id, text}`), asked only when a written file is long enough to be checked. `ops`: from `checkSkillOps`.
  * `{ files: Map<"skills/<name>/<path>", text>, diff }` or `{ error }`.
  */
-export async function planSkills({ ops, existing, fetchSource }) {
+export async function planSkills({ ops, existing, fetchSource, listSources = null }) {
   const result = new Map([...existing].map(([name, files]) => [name, new Map(files)]));
   const diff = [];
   const unfetched = (id) => `Source ${id} wasn't fetched in this task; read it with research_fetch first`;
@@ -204,25 +274,18 @@ export async function planSkills({ ops, existing, fetchSource }) {
       diff.push({ name: o.name, op: "remove", paths: [...had.keys()].sort(cmp), provenance: null, scripts: [] });
       continue;
     }
-    // every copied file really occurs in a page this task fetched, and that page is a public one
-    const copiedPaths = [];
+    // copied files: their provenance is tied to the text (the page, its repository, the commit in its url, its licence), and each file
+    // is a contiguous piece of a public page of that repository this task fetched
+    const copiedFiles = o.files.filter((f) => f.origin === "copied");
+    const copiedPaths = copiedFiles.map((f) => f.path);
     const cache = new Map();
     const source = async (id) => {
       if (!cache.has(id)) cache.set(id, (await fetchSource(id)) ?? null);
       return cache.get(id);
     };
-    for (const f of o.files) {
-      if (f.origin !== "copied") continue;
-      if (wsNorm(f.content).length < COPIED_MIN_CHARS) return fail(`Skill ${o.name}: ${f.path} is copied but too short (under ${COPIED_MIN_CHARS} characters) to show where it came from; write it instead`);
-      const src = await source(f.sourceId);
-      if (!src || typeof src.text !== "string") return fail(unfetched(f.sourceId));
-      if (src.private === true) return fail(`Skill ${o.name}: ${f.path} would be copied from a private source (${f.sourceId}); private sources never appear in an agent's files`);
-      if (!wsNorm(src.text).includes(wsNorm(f.content))) return fail(`The text of ${o.name}/${f.path} doesn't occur in source ${f.sourceId}; copy only text you fetched, exactly (whitespace may differ, case may not)`);
-      copiedPaths.push(f.path);
-    }
     let provenance = null;
     let licenceText = null;
-    if (copiedPaths.length > 0) {
+    if (copiedFiles.length > 0) {
       const shaped = checkProvenanceShape(o.provenance, o.name);
       if (shaped.error) return shaped;
       const p = shaped.provenance;
@@ -231,6 +294,13 @@ export async function planSkills({ ops, existing, fetchSource }) {
       if (page.private === true) return fail(`Skill ${o.name}: provenance.sourceId is a private source; cite a public page`);
       const urls = [page.url, page.finalUrl].filter(Boolean).map(normUrl);
       if (!urls.includes(normUrl(p.url))) return fail(`The provenance url of skill ${o.name} doesn't match the page source ${p.sourceId} was fetched from (${urls[0] ?? "no address"}); give that page's address as url`);
+      // the repository (and the commit, when the address names one) come from the address, never from what the model says
+      const gh = parseGithubUrl(p.url);
+      if (!gh) return fail(`The provenance url of skill ${o.name} must be a page on github.com (or raw.githubusercontent.com) of the repository the skill is in`);
+      if (lower(p.repo) !== lower(gh.repo)) return fail(`The provenance repo of skill ${o.name} (${p.repo}) isn't the repository its url points to (${gh.repo})`);
+      if (gh.ref && p.ref !== gh.ref) return fail(`The provenance ref of skill ${o.name} (${p.ref}) isn't the ref its url names (${gh.ref}); copy it from the address`);
+      p.repo = gh.repo;
+      p.ref = gh.ref ?? p.ref;
       const lic = checkLicence(p, o.name);
       if (lic.error) return lic;
       p.licence = lic.licence;
@@ -238,10 +308,31 @@ export async function planSkills({ ops, existing, fetchSource }) {
         const l = await source(p.licenseSourceId);
         if (!l || typeof l.text !== "string") return fail(unfetched(p.licenseSourceId));
         if (l.private === true) return fail(`Skill ${o.name}: provenance.licenseSourceId is a private source; cite a public page`);
-        if (wsNorm(l.text) === "") return fail(`Skill ${o.name}: the licence page ${p.licenseSourceId} has no text`);
+        if (!sameRepoPage(l, p.repo)) return fail(`Skill ${o.name}: the licence page ${p.licenseSourceId} isn't a page of the same repository as the skill (${p.repo})`);
+        if (!holdsLicence(p.licence, l.text)) return fail(`Skill ${o.name}: the licence page ${p.licenseSourceId} doesn't hold the text of ${p.licence}; fetch the repository's own licence file`);
         licenceText = l.text;
+      } else if (!holdsLicence(p.licence, page.text) && !statesLicence(p.licence, page.text)) {
+        return fail(`Skill ${o.name}: nothing fetched from ${p.repo} states the ${p.licence} licence; fetch its licence file and pass the source id as provenance.licenseSourceId`);
       }
       provenance = p;
+      for (const f of copiedFiles) {
+        if (wsNorm(f.content).length < COPIED_MIN_CHARS) return fail(`Skill ${o.name}: ${f.path} is copied but too short (under ${COPIED_MIN_CHARS} characters) to show where it came from; write it instead`);
+        const src = f.sourceId === p.sourceId ? page : await source(f.sourceId);
+        if (!src || typeof src.text !== "string") return fail(unfetched(f.sourceId));
+        if (src.private === true) return fail(`Skill ${o.name}: ${f.path} would be copied from a private source (${f.sourceId}); private sources never appear in an agent's files`);
+        if (f.sourceId !== p.sourceId && !sameRepoPage(src, p.repo)) return fail(`Skill ${o.name}: ${f.path} was copied from a page (${f.sourceId}) that isn't of the same repository as the provenance (${p.repo}); one skill is taken from one repository`);
+        if (!normText(src.text).includes(normText(f.content))) return fail(`The text of ${o.name}/${f.path} doesn't occur in source ${f.sourceId}; copy only text you fetched, exactly (line endings and trailing spaces may differ; newlines, indentation and case may not)`);
+      }
+    }
+    // a written file is the Architect's own: a long run that a page it fetched holds verbatim is copied text under the wrong label
+    const writtenLong = o.files.filter((f) => f.origin === "written" && wsNorm(f.content).length >= LAUNDER_RUN);
+    if (writtenLong.length > 0) {
+      const pages = (await listSources?.()) ?? [];
+      for (const f of writtenLong) {
+        const mine = wsNorm(f.content);
+        const hit = pages.find((pg) => typeof pg?.text === "string" && sharesLongRun(mine, wsNorm(pg.text)));
+        if (hit) return fail(`Skill ${o.name}: ${f.path} holds a passage of ${LAUNDER_RUN} or more characters that is verbatim in a page you fetched (${hit.id}); if it is copied, label it copied with provenance, otherwise write it in your own words`);
+      }
     }
     const now = new Map(o.files.map((f) => [f.path, f.content]));
     if (provenance) {
@@ -257,7 +348,8 @@ export async function planSkills({ ops, existing, fetchSource }) {
       op: o.op,
       paths,
       provenance,
-      scripts: o.files.filter((f) => f.origin === "copied" && paths.includes(f.path) && isScriptFile(f.path, f.content)).map((f) => f.path).sort(cmp),
+      // every script among the changed files, whoever wrote it: an agent with a shell can run what it finds
+      scripts: o.files.filter((f) => paths.includes(f.path) && isScriptFile(f.path, f.content)).map((f) => f.path).sort(cmp),
     });
   }
   if (result.size > SKILLS_MAX) return fail(`An agent can have at most ${SKILLS_MAX} skills; this change leaves ${result.size}`);

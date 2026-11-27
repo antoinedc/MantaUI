@@ -202,6 +202,23 @@ export function createResearchEngine({
     return [...out].slice(0, REFS_PER_SEARCH);
   }
 
+  /** Every stored source of THIS session (`{id,url,finalUrl,private,text}`), for the server's own checks; never shown to a model. */
+  async function listSources(child) {
+    if (typeof child !== "string" || !SESSION_RE.test(child)) return [];
+    let names;
+    try {
+      names = (await fs.readdir(sessionDir(child))).filter((n) => /^src_[0-9a-f]{16}\.json$/.test(n));
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const n of names) {
+      const rec = await getSource(child, n.slice(0, -".json".length));
+      if (rec) out.push(rec);
+    }
+    return out;
+  }
+
   // the first window of a stored source, the shape every fetching tool answers with
   function windowed(rec, offset = 0) {
     const total = rec.text.length;
@@ -506,5 +523,5 @@ export function createResearchEngine({
     return { removed };
   }
 
-  return { fetch: fetchTool, read: readTool, search: searchTool, getSource, searchesOf, sweep, root };
+  return { fetch: fetchTool, read: readTool, search: searchTool, getSource, searchesOf, listSources, sweep, root };
 }
