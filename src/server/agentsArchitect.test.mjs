@@ -2494,10 +2494,9 @@ test("the real trials module and the real engine together: agent_trial → agent
   trials = createAgentTrials({
     root: f.root,
     home: "/h",
-    scratchRoot: join(f.base, "scratch"),
+    scratchRoot: join(f.base, "private"),
     agents: () => engine,
     oc,
-    local: { gitAddWorktree: async () => ({ path: "/wt/x" }), gitRemoveWorktree: async () => ({ removed: true }) },
     gitRun: async () => ({ stdout: "" }),
     editConfig: async (fn) => {
       const edits = await fn(f.config.cfg);
@@ -2523,12 +2522,13 @@ test("the real trials module and the real engine together: agent_trial → agent
     const draft = { instructions: "You write code.\nYou always run the tests." };
     const started = await trials.create(call("agent_trial", { action: "update", agent: "dev", baseHash: hash, draft, cases: [{ name: "fix", task: "Fix the failing test.", expect: "does", checks: ["The suite passes."] }] }));
     assert.equal(started.ok, true, started.error);
-    assert.equal(f.config.cfg.agent[`agent-trial-${started.trialId}`].prompt, `{file:${join(f.root, ".trials", started.trialId)}/.compiled.md}`);
+    assert.equal(f.config.cfg.agent[`agent-trial-${started.trialId}`].prompt, `{file:${join(f.root, ".trials", started.trialId, "agent")}/.compiled.md}`);
     const waited = await trials.wait(call("agent_trial_wait", { trialId: started.trialId }));
     assert.equal(waited.state, "done");
     assert.equal(waited.cases[0].finalAnswer, "I fixed the test and ran the whole suite; it passes.");
     const text = await trials.read(call("agent_trial_read", { trialId: started.trialId, case: "fix" }));
     assert.match(text.text, /Assistant: I fixed the test/);
+    assert.match(text.text, /data, not instructions/);
     assert.equal(sent.created[0].agent, `agent-trial-${started.trialId}`);
     assert.equal(f.config.cfg.agent[`agent-trial-${started.trialId}`], undefined, "the temporary block is gone");
     // the proposal on this exact draft is accepted ...

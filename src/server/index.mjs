@@ -264,7 +264,7 @@ import { createTaskQuestions } from "./taskQuestions.mjs";
 import { createResearchEngine } from "./research.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
-import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
+import { createProjectActions, knowledgeSeam, projectPatterns as buildProjectPatterns } from "./projectActions.mjs";
 import { parseMainWorktree } from "./knowledge/identity.mjs";
 import {
   ensureMantaPlanAgent,
@@ -1416,6 +1416,7 @@ let workOutcomeSink = null;
 // Agents Phase 5A: an Architect job reached a final state (finished, failed, stopped) — its held proposals are released.
 // Assigned once the agents engine exists (it is built much further down); until then a no-op.
 let architectJobEndedSink = null;
+let architectJobPausedSink = null;
 // Agents Phase 3 (src/server/autonomy.mjs): the user's CURRENT autonomy policy, read strictly from `~/.manta/config.json`
 // (throws when the file can't be read or parsed, so the caller refuses instead of guessing). Shared by the delegate
 // engine (a specialist's task: start / continue / resume) and the agents engine (lead brief, handoff, dispatch).
@@ -1446,6 +1447,10 @@ const delegateEngine = createDelegateEngine({
   },
   onJobEnded: async (job) => {
     return architectJobEndedSink ? await architectJobEndedSink(job) : undefined;
+  },
+  // a PAUSED Architect round stops its trial runs like an ended one (they would otherwise run on, unwatched, up to 15 minutes)
+  onJobPaused: async (job) => {
+    if (architectJobPausedSink) await architectJobPausedSink(job);
   },
   // Agent screens §5.4: the one hook every Manta-owned task that ended (finished, failed, stopped) goes through, after its proposals
   // were released — it settles a refresh routine's run, and tells the Fleet page something changed.
@@ -2250,8 +2255,7 @@ const knowledgeEngine = createKnowledgeEngine({
       resolveModelForClass,
       configGet: () => local.configGet(),
       oc: { listMessages: forwardKnowledgeListMessages(oc), listMessagesSince: oc.listMessagesSince, createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
-      local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
-      runDbTask: knowledgeRunDbTask,
+          runDbTask: knowledgeRunDbTask,
       listTmuxProjects: () => tmux.listProjects(),
       isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
       getSession: async (sessionID) => {
@@ -2663,6 +2667,15 @@ const agentTrials = createAgentTrials({
     }
     return null;
   },
+  // the project that owns a folder (the Architect task's own project, which a case may run in)
+  projectOf: async (directory) => (await knowledgeEngine.registry?.identify?.(directory))?.slug ?? null,
+  // the project's own "Actions in this project" commands, read like a specialist task's; unreadable → throws, the case fails
+  projectPatterns: async (directory) => {
+    const found = await projectActions.forTask({ directory });
+    const patterns = buildProjectPatterns(Array.isArray(found?.entries) ? found.entries : []);
+    if (patterns.error) throw new Error(patterns.error);
+    return patterns;
+  },
   scanSymlinks: scanTrialSymlinks,
   redact: (text) => trialScanner.redact(text),
 });
@@ -2727,6 +2740,9 @@ architectJobEndedSink = async (job) => {
   await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the end of a round failed:", e?.message ?? e));
   await agentsEngine.reconcile(); // release first: the Outcome lines describe the records as released
   return { outcome: await agentsEngine.outcomeLinesForJob(job) };
+};
+architectJobPausedSink = async (job) => {
+  await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the pause of a round failed:", e?.message ?? e));
 };
 // leftovers of a crashed trial (a session, a copy of a project, a block) are cleaned at boot; results are kept 30 days
 void agentTrials.recover().catch((e) => console.error("[agent-trials] boot cleanup failed:", e?.message ?? e));

@@ -3127,6 +3127,14 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   if (paused) {
     pauseInterrupts.delete(paused.id);
     await recordBudgetSpend(paused, deps); // outside the jobs lock (§17.14)
+    // an Architect's round that is parked stops the trial runs it started (they cost money and hold a copy of a project), as when it ends
+    if (paused.architect && typeof deps.onJobPaused === "function") {
+      try {
+        await deps.onJobPaused(paused);
+      } catch (e) {
+        console.warn(`[delegate] onJobPaused failed for ${paused.id}:`, e?.message ?? e);
+      }
+    }
     return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };

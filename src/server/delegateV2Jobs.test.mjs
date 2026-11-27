@@ -3138,6 +3138,38 @@ test("Architect jobs tell the agents engine when they end — finished, failed o
   assert.equal(ended.length, 3, "an ordinary specialist job doesn't notify");
 });
 
+test("an Architect round that is PAUSED tells the agents engine too (its trial cases are stopped, as when it ends); a paused ordinary job doesn't", async () => {
+  const w = specialistWorld();
+  const paused = [];
+  w.deps.onJobPaused = async (job) => paused.push({ id: job.id, status: job.status });
+  const id = await start(w, archInput(w));
+  const child = w.job(id).childSessionID;
+  assert.equal((await pauseJob(id, w.deps)).ok, true);
+  await observeEvent(toolDone(child), w.deps);
+  w.finish(child, "interrupted", T0 + 3);
+  await w.engine.observeRaw(raw("session.execution.interrupted", child));
+  assert.equal(w.job(id).status, "paused");
+  assert.deepEqual(paused, [{ id, status: "paused" }]);
+  // an ordinary specialist job
+  const dev = await start(w, autonomyInput(w));
+  const devChild = w.job(dev).childSessionID;
+  await pauseJob(dev, w.deps);
+  await observeEvent(toolDone(devChild), w.deps);
+  w.finish(devChild, "interrupted", T0 + 4);
+  await w.engine.observeRaw(raw("session.execution.interrupted", devChild));
+  assert.equal(w.job(dev).status, "paused");
+  assert.equal(paused.length, 1);
+  // a hook that fails doesn't break the pause
+  w.deps.onJobPaused = async () => { throw new Error("boom"); };
+  const again = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  const c2 = w.job(again).childSessionID;
+  await pauseJob(again, w.deps);
+  await observeEvent(toolDone(c2), w.deps);
+  w.finish(c2, "interrupted", T0 + 5);
+  await w.engine.observeRaw(raw("session.execution.interrupted", c2));
+  assert.equal(w.job(again).status, "paused");
+});
+
 test("Architect outcome: what the agents engine returns when the job ends is in the result posted to the parent", async () => {
   const w = specialistWorld();
   let hookFails = false; // the engine keeps the deps it first saw, so the hook itself switches behaviour
