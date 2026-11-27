@@ -34,6 +34,7 @@ import {
   CHANGE_MAX,
 } from "./agents.mjs";
 import { withResearchGuidance } from "./researchLibrary.mjs";
+import { buildReviewPrompt } from "./agentScriptReview.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 import { CAP_ERROR } from "./delegate.mjs";
 import { DECISION_MARKER } from "./taskDecision.mjs";
@@ -1413,6 +1414,8 @@ test("guard: no agent-design advice is written into Manta's or the Architect's b
     "agent_trial_wait tool description": descriptionOf("agent_trial_wait"),
     "agent_trial_read tool description": descriptionOf("agent_trial_read"),
     "skills_installed tool description": descriptionOf("skills_installed"),
+    // the independent script review: security process text, never an opinion about what a good agent is
+    "script review prompt": buildReviewPrompt({ agent: { name: "A", description: "B" }, skills: [] }).prompt,
     "manta/agent.md": await read("manta", "agent.md"),
     "architect/agent.md": await read("architect", "agent.md"),
     "architect authoring skill": await read("architect", "skills", "authoring", "SKILL.md"),

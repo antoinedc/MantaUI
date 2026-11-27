@@ -1115,7 +1115,7 @@ test("review failed, timed out or unreadable: the record waits for a click (fail
       assert.equal(rec.scriptReview.reasons.length, 1);
       assert.doesNotMatch(rec.scriptReview.reasons[0], /socket hang up|Looks fine/);
       assert.match((await f.engine.outcomeLinesForJob("job1"))[0], /\(reason: the script check couldn't run\)/);
-      assert.equal(f.w.reviewCalls.length, name === "transport errors twice" ? 2 : 1, name);
+      assert.equal(f.w.reviewCalls.length, name === "transport errors twice" || name === "threw" ? 2 : 1, `${name} (a throw is a transport error: one retry)`);
     } finally {
       await f.cleanup();
     }
@@ -1227,7 +1227,8 @@ test("review: while it runs the record stays held even though its round ended; i
     f.w.review = async () => (await gate, { ok: true, text: CLEAN });
     const body = propose(f, { draft: { skills: [scriptOp("scripts/run.sh")] } });
     // propose() waits for reviews to settle: end the round and look while the review is still out
-    await new Promise((r) => setTimeout(r, 30));
+    for (let i = 0; i < 300 && f.w.reviewCalls.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(f.w.reviewCalls.length, 1, "the review started");
     f.w.jobs[0] = { ...f.w.jobs[0], status: "done" };
     await f.engine.reconcile();
     assert.equal((await lastRec(f)).state, "held", "no verdict yet: nothing is released");

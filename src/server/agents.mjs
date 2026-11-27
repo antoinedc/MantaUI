@@ -20,6 +20,7 @@ import fsPromises from "node:fs/promises";
 import YAML from "yaml";
 import { diff3Merge } from "node-diff3";
 import { draftHash, differingFiles } from "./agentTrials.mjs";
+import { reviewScripts, pickReviewModel } from "./agentScriptReview.mjs";
 import { checkSkillOps, planSkills, existingSkillsOf, checkSkillSearch, checkSkillSearchFacts, parseSourceMd, SKILL_SEARCH_MISSING } from "./agentSkills.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
@@ -883,7 +884,8 @@ const OUTCOME_WAIT_REASONS = {
   lead: "it changes the lead agent",
   core: "it changes the Architect itself",
   isolation: "it widens what the agent may touch",
-  scripts: "it adds or changes a script the agent could run",
+  "script-flagged": "an independent check flagged a script",
+  "script-unchecked": "the script check couldn't run",
   unfinished: "the task didn't finish cleanly",
 };
 
@@ -3859,6 +3861,7 @@ export function createAgentsEngine({
       if (outcome.error) return refuse(outcome.error, outcome.current ? { current: outcome.current } : {});
       rec = outcome.rec;
       publishChange(rec);
+      if (changesScripts(rec)) void startScriptReview(rec.id); // read independently in the background; the record is released once the verdict is in
       return { ok: true, change: wire(rec), used: outcome.used, limit: PROPOSALS_PER_TASK };
     } catch (e) {
       if (e instanceof AgentError) return refuse(e.message);
@@ -3885,6 +3888,71 @@ export function createAgentsEngine({
   /** Does this record add or change a script file in a skill? Read from the server's own diff on the record, never from the model's words. */
   const changesScripts = (rec) => (Array.isArray(rec?.skillsDiff) ? rec.skillsDiff : []).some((d) => Array.isArray(d?.scripts) && d.scripts.length > 0);
 
+  // ---- the independent script review (spec §4.1, §7): a tool-less session on another model reads the scripts as data ----
+
+  const reviewsInFlight = new Map(); // change id → the promise of its review (and the release that follows it)
+
+  /** What the reviewer is given, from the record's SAVED files alone — never the Architect's transcript, summary, evidence or sources. */
+  async function reviewInputOf(rec) {
+    const text = async (hash) => {
+      if (hash === undefined || hash === null) return null;
+      const blob = await getBlob(hash);
+      if (!blob) throw new Error("a saved file is gone");
+      return blob.toString("utf-8");
+    };
+    const meta = parseAgentMd(rec.after).meta ?? {};
+    const skills = [];
+    for (const d of rec.skillsDiff ?? []) {
+      if (!Array.isArray(d?.scripts) || d.scripts.length === 0) continue;
+      const file = (p) => `skills/${d.name}/${p}`;
+      skills.push({
+        name: d.name,
+        skillMd: await text(rec.afterBundle?.[file("SKILL.md")]),
+        provenance: d.provenance ?? null,
+        scripts: await Promise.all(d.scripts.map(async (p) => ({ path: p, before: await text(rec.beforeBundle?.[file(p)]), after: (await text(rec.afterBundle?.[file(p)])) ?? "" }))),
+      });
+    }
+    return { agent: { name: rec.agentName || meta.name, description: meta.description ?? "" }, skills };
+  }
+
+  async function runScriptReview(id) {
+    const rec = (await readChanges()).find((r) => r.id === id);
+    if (!rec || rec.scriptReview || !changesScripts(rec) || (rec.state !== "held" && rec.state !== "pending")) return;
+    const architectModel = (await scan()).entries.find(isArchitect)?.meta?.model ?? null;
+    let verdict;
+    try {
+      const input = await reviewInputOf(rec);
+      verdict = await reviewScripts({ run: oc?.runSynchronousSession, directory: home, architectModel, ...input, now, log });
+    } catch (e) {
+      log.warn?.(`[agents] script review of ${id} couldn't start: ${e?.message ?? e}`);
+      verdict = { verdict: "error", reasons: ["The script check couldn't read the saved files"], model: pickReviewModel(architectModel), at: now() };
+    }
+    await syncLock.runExclusive(async () => {
+      const cur = (await readChanges({ strict: true })).find((r) => r.id === id);
+      if (!cur || cur.scriptReview) return;
+      cur.scriptReview = verdict;
+      await saveRecord(cur);
+      publishChange(cur);
+    });
+    await reconcile(); // the verdict is in: release it if its round is over
+  }
+
+  /** Start (once) the review of a record; the promise ends when the verdict is saved and the release it allows has been tried. Never rejects. */
+  function startScriptReview(id) {
+    const running = reviewsInFlight.get(id);
+    if (running) return running;
+    const p = runScriptReview(id)
+      .catch((e) => log.warn?.(`[agents] script review of ${id} failed: ${e?.message ?? e}`))
+      .finally(() => reviewsInFlight.delete(id));
+    reviewsInFlight.set(id, p);
+    return p;
+  }
+
+  /** Wait for every review in flight (and the release it triggers). */
+  async function settleScriptReviews() {
+    while (reviewsInFlight.size > 0) await Promise.all([...reviewsInFlight.values()]);
+  }
+
   function decideRelease(rec, { jobs, policy }) {
     if (!Array.isArray(jobs)) return { action: "stay" }; // an unreadable jobs store leaves everything held
     const origin = rec.origin?.kind === "job" ? rec.origin : null;
@@ -3907,8 +3975,15 @@ export function createAgentsEngine({
     if (rec.target === "lead") return { action: "pending", reason: "lead" };
     if (rec.target === "core") return { action: "pending", reason: "core" };
     if (rec.raisesIsolation) return { action: "pending", reason: "isolation" };
-    // a script among the skill changes (copied or written) is something the agent could run: only a click lets it in, at any level
-    if (changesScripts(rec)) return { action: "pending", reason: "scripts" };
+    // a script among the skill changes (copied or written) is something the agent could run: an independent, tool-less review reads it first.
+    // No verdict yet: the record stays held (the review runs in the background and releases it). Clean: the user's level decides, as for any
+    // change. Flagged, or a review that failed, timed out or couldn't be read: only a click lets it in (fail closed).
+    if (changesScripts(rec)) {
+      const review = rec.scriptReview;
+      if (!review) return { action: "stay" };
+      if (review.verdict === "flagged") return { action: "pending", reason: "script-flagged" };
+      if (review.verdict !== "clean") return { action: "pending", reason: "script-unchecked" };
+    }
     // 7. Ask
     if (level === "ask") return { action: "pending", reason: "ask" };
     // 8. Auto / Tell me
@@ -4062,6 +4137,12 @@ export function createAgentsEngine({
     return syncLock.runExclusive(async () => {
       const out = await reconcileLocked();
       await sweepBlobsLocked().catch((e) => log.warn?.(`[agents] blob sweep: ${e?.message ?? e}`));
+      // a record with scripts and no verdict (a restart lost its review) is reviewed again; never waited for here
+      try {
+        for (const r of (await readChanges()).filter((x) => (x.state === "held" || x.state === "pending") && changesScripts(x) && !x.scriptReview)) void startScriptReview(r.id);
+      } catch (e) {
+        log.warn?.(`[agents] couldn't look for unreviewed scripts: ${e?.message ?? e}`);
+      }
       // once a day, in the background and never waited for: look where the upstream of the copied skills is now (the refresh brief reads the answers)
       if (now() >= nextWarmAt) {
         nextWarmAt = now() + SKILL_UPDATES_CACHE_MS;
@@ -5441,6 +5522,7 @@ export function createAgentsEngine({
     skillUpdatesFor,
     skillUpdatesBrief,
     warmSkillUpdates,
+    settleScriptReviews,
     bindArchitect,
     bindResearcher,
     reconcile,
