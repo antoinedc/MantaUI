@@ -78,7 +78,7 @@ const copiedOp = (over = {}) => ({
   ...over,
 });
 
-async function fixture({ level = "auto" } = {}) {
+async function fixture({ level = "auto", lsRemoteBudgetMs = undefined } = {}) {
   const base = await mkdtemp(join(tmpdir(), "agents-skills-"));
   const root = join(base, "agents");
   const templatesDir = join(base, "templates");
@@ -142,6 +142,7 @@ async function fixture({ level = "auto" } = {}) {
       lookup: async ({ refs }) => refs.map((ref) => ({ ref, entry: w.library.find((e) => e.id === ref || e.topic.toLowerCase() === String(ref).trim().toLowerCase()) ?? null })),
     },
     lsRemote: (...a) => w.lsRemote(...a),
+    ...(lsRemoteBudgetMs !== undefined ? { lsRemoteBudgetMs } : {}),
     loadSecretsStrict: async () => [],
     createScanner: () => ({ scan: async () => ({ clean: true, unavailable: false, hits: [] }) }),
   });
@@ -707,75 +708,123 @@ test("the profile lists the agent's skills with their origin: name, description,
 // the refresh brief lists copied skills whose upstream moved (§4.2)
 // ---------------------------------------------------------------------------
 
-test("the refresh brief lists copied skills whose upstream commit has moved (git ls-remote, bounded, cached for a day); nothing moved, no section", async () => {
+const NEVER = () => new Promise(() => {}); // an upstream that never answers
+
+test("L4: the brief only reads the cache: a cold cache says nothing and asks nothing; after the background check the brief carries the moved skills as data; current skills, no section", async () => {
   const f = await fixture();
   try {
     await propose(f, { draft: { skills: [copiedOp40()] } });
     await release(f);
     const calls = [];
-    f.w.lsRemote = async (repo) => {
-      calls.push(repo);
-      return { head: "b".repeat(40) };
-    };
-    const moved = await f.engine.skillUpdatesFor("dev");
+    f.w.lsRemote = async (repo) => (calls.push(repo), { head: "b".repeat(40) });
+    assert.equal(await f.engine.skillUpdatesBrief("dev"), "", "cold cache");
+    assert.deepEqual(calls, [], "the brief never asks the network");
+    await f.engine.warmSkillUpdates();
     assert.deepEqual(calls, ["acme/cro-skills"]);
-    assert.equal(moved.length, 1);
-    assert.equal(moved[0].skill, "landing-audit");
-    assert.equal(moved[0].repo, "acme/cro-skills");
-    assert.equal(moved[0].ref, "a".repeat(40));
-    assert.equal(moved[0].upstream, "b".repeat(40));
-    // cached for a day, asked again after
-    await f.engine.skillUpdatesFor("dev");
-    assert.equal(calls.length, 1);
-    f.w.clock += 25 * 3600 * 1000;
-    await f.engine.skillUpdatesFor("dev");
-    assert.equal(calls.length, 2);
-    // upstream still at the copied commit: nothing to say; an unreachable upstream says nothing either
-    f.w.clock += 25 * 3600 * 1000;
-    f.w.lsRemote = async () => ({ head: "a".repeat(40) });
-    assert.deepEqual(await f.engine.skillUpdatesFor("dev"), []);
-    f.w.clock += 25 * 3600 * 1000;
-    f.w.lsRemote = async () => null;
-    assert.deepEqual(await f.engine.skillUpdatesFor("dev"), []);
-  } finally {
-    await f.cleanup();
-  }
-});
-
-test("the refresh task's brief carries the moved skills as data; an agent with no copied skill has none", async () => {
-  const f = await fixture();
-  try {
-    await propose(f, { draft: { skills: [copiedOp40()] } });
-    await release(f);
-    f.w.lsRemote = async () => ({ head: "b".repeat(40) });
     const brief = await f.engine.skillUpdatesBrief("dev");
     assert.match(brief, /landing-audit/);
     assert.match(brief, /acme\/cro-skills/);
     assert.match(brief, /moved/i);
     assert.match(brief, new RegExp("b".repeat(12)));
+    assert.equal(calls.length, 1, "reading the brief asked nothing more");
+    // the upstream is back at the copied commit
     f.w.lsRemote = async () => ({ head: "a".repeat(40) });
     f.w.clock += 25 * 3600 * 1000;
+    await f.engine.warmSkillUpdates();
     assert.equal(await f.engine.skillUpdatesBrief("dev"), "");
   } finally {
     await f.cleanup();
   }
 });
 
-test("refresh: the Architect's task brief for @dev carries the moved skills (the refresh routine's own start)", async () => {
+test("L4: a stale cache is not used by the brief for more than three days", async () => {
   const f = await fixture();
   try {
     await propose(f, { draft: { skills: [copiedOp40()] } });
     await release(f);
     f.w.lsRemote = async () => ({ head: "b".repeat(40) });
+    await f.engine.warmSkillUpdates();
+    f.w.clock += 2 * 24 * 3600 * 1000;
+    assert.match(await f.engine.skillUpdatesBrief("dev"), /landing-audit/);
+    f.w.clock += 2 * 24 * 3600 * 1000;
+    assert.equal(await f.engine.skillUpdatesBrief("dev"), "");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("L4: the checks have a total budget: an upstream that never answers ends the pass at the budget, and the next pass tries again", async () => {
+  const f = await fixture({ lsRemoteBudgetMs: 60 });
+  try {
+    await propose(f, { draft: { skills: [copiedOp40()] } });
+    await release(f);
+    f.w.lsRemote = NEVER;
+    const t0 = Date.now();
+    assert.deepEqual(await f.engine.skillUpdatesFor("dev"), []);
+    assert.ok(Date.now() - t0 < 2000, "ended at the budget, not at the network's pace");
+    await f.engine.warmSkillUpdates();
+    f.w.lsRemote = async () => ({ head: "b".repeat(40) });
+    assert.equal((await f.engine.skillUpdatesFor("dev")).length, 1, "a timed-out answer is not cached as an answer");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("L4: starting a refresh task never waits for the network; a hanging upstream changes nothing about when the job starts", async () => {
+  const f = await fixture({ lsRemoteBudgetMs: 5_000 });
+  try {
+    await propose(f, { draft: { skills: [copiedOp40()] } });
+    await release(f);
+    f.w.lsRemote = NEVER;
+    const t0 = Date.now();
     const r = await f.engine.refresh("dev", { runSessionId: "ses_run" });
     assert.equal(r.jobId, "job_refresh");
+    assert.ok(Date.now() - t0 < 1500, "the job started at once");
+    assert.doesNotMatch(f.w.started.at(-1).prompt, /upstream has moved/);
+    // once the cache holds an answer, the next refresh carries it
+    f.w.lsRemote = async () => ({ head: "b".repeat(40) });
+    await f.engine.warmSkillUpdates();
+    await f.engine.refresh("dev", { runSessionId: "ses_run" });
     const prompt = f.w.started.at(-1).prompt;
     assert.match(prompt, /Copied skills of @dev whose upstream has moved/);
     assert.match(prompt, /landing-audit \(acme\/cro-skills\)/);
-    // an agent whose copied skills are all current gets a brief without the section
-    f.w.lsRemote = async () => ({ head: "a".repeat(40) });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("L4: skillUpdatesFor asks at most five repositories, once a day each; an unreachable upstream says nothing; the sweep warms the cache in the background without delaying it", async () => {
+  const f = await fixture({ lsRemoteBudgetMs: 100 });
+  try {
+    await propose(f, { draft: { skills: [copiedOp40()] } });
+    await release(f);
+    const calls = [];
+    f.w.lsRemote = async (repo) => (calls.push(repo), { head: "b".repeat(40) });
+    assert.equal((await f.engine.skillUpdatesFor("dev")).length, 1);
+    await f.engine.skillUpdatesFor("dev");
+    assert.equal(calls.length, 1, "cached for a day");
     f.w.clock += 25 * 3600 * 1000;
-    await f.engine.refresh("dev", { runSessionId: "ses_run" });
+    f.w.lsRemote = async () => null;
+    assert.deepEqual(await f.engine.skillUpdatesFor("dev"), []);
+    // reconcile (every sweep) warms in the background: it returns before a hanging upstream does
+    f.w.clock += 25 * 3600 * 1000;
+    f.w.lsRemote = NEVER;
+    const t0 = Date.now();
+    await f.engine.reconcile();
+    assert.ok(Date.now() - t0 < 1500, "reconcile didn't wait for the network");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("refresh: a team agent with no copied skill starts as always", async () => {
+  const f = await fixture();
+  try {
+    f.w.lsRemote = async () => {
+      throw new Error("never asked");
+    };
+    const r = await f.engine.refresh("dev", { runSessionId: "ses_run" });
+    assert.equal(r.jobId, "job_refresh");
     assert.doesNotMatch(f.w.started.at(-1).prompt, /upstream has moved/);
   } finally {
     await f.cleanup();

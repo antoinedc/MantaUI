@@ -630,7 +630,11 @@ function strictSkillHeader(text) {
 
 const LS_REMOTE_MS = 10_000;
 const SKILL_UPDATES_CACHE_MS = 24 * 60 * 60 * 1000; // an upstream is asked about at most once a day
-const SKILL_UPDATES_MAX_REPOS = 5; // per brief: a bounded number of `git ls-remote` calls
+const SKILL_UPDATES_MAX_REPOS = 5; // per agent: a bounded number of `git ls-remote` calls
+const SKILL_UPDATES_WARM_MAX_REPOS = 20; // per background pass, all agents
+const SKILL_UPDATES_BRIEF_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000; // a brief may use an answer up to this old (the sweep renews them daily)
+const LS_REMOTE_BUDGET_MS = 10_000; // all the network a pass may use
+const WARM_FIRST_DELAY_MS = 5 * 60_000; // the first background pass runs this long after the engine starts
 const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /** The commit an upstream GitHub repository's HEAD is at: `{ head }`, or null when it can't be asked (no network, gone, private). */
@@ -1090,6 +1094,7 @@ export function createAgentsEngine({
   branchState = defaultBranchState, // ({directory, branch}) → "landed" | "unmerged" | "unknown": is a task's branch still waiting to land
   skillRoots = [join(homedir(), ".config", "opencode", "skills"), join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")], // skills installed on the box besides the team's own
   lsRemote = defaultLsRemote, // (owner/repo) → { head } | null: where an upstream skill repository is now
+  lsRemoteBudgetMs = LS_REMOTE_BUDGET_MS, // the total time one pass of upstream checks may take
   retryDelayMs = 200,
   log = console,
 } = {}) {
@@ -4057,6 +4062,11 @@ export function createAgentsEngine({
     return syncLock.runExclusive(async () => {
       const out = await reconcileLocked();
       await sweepBlobsLocked().catch((e) => log.warn?.(`[agents] blob sweep: ${e?.message ?? e}`));
+      // once a day, in the background and never waited for: look where the upstream of the copied skills is now (the refresh brief reads the answers)
+      if (now() >= nextWarmAt) {
+        nextWarmAt = now() + SKILL_UPDATES_CACHE_MS;
+        void warmSkillUpdates();
+      }
       return out;
     });
   }
@@ -5101,48 +5111,95 @@ export function createAgentsEngine({
     return out;
   }
 
-  // ---- copied skills whose upstream moved (§4.2): `git ls-remote` per repository, bounded, asked at most once a day ----
+  // ---- copied skills whose upstream moved (§4.2): `git ls-remote` per repository, cached for a day, never on the path of a job start ----
+  //
+  // The network is asked only by `warmSkillUpdates` (the sweep's background pass, within one total budget) and by `skillUpdatesFor` (the
+  // check-up's fact sheet, same budget). A job start reads the cache alone (`skillUpdatesBrief`), so an upstream that is slow, gone or
+  // never answers can't delay it.
 
-  const upstreamCache = new Map(); // owner/repo → { at, head | null }
+  const upstreamCache = new Map(); // owner/repo → { at, head | null } (null: it couldn't be asked; that is cached for the day too)
+  let nextWarmAt = now() + WARM_FIRST_DELAY_MS;
 
-  async function upstreamHead(repo) {
+  const fresh = (repo, maxAgeMs) => {
     const hit = upstreamCache.get(repo);
-    if (hit && now() - hit.at < SKILL_UPDATES_CACHE_MS) return hit.head;
-    let head = null;
+    return hit && now() - hit.at < maxAgeMs ? hit : null;
+  };
+
+  /** Ask the upstream of each repository the cache can't answer, in order, until `budgetMs` is spent. An answer that didn't come in time is not cached. */
+  async function askUpstreams(repos, budgetMs) {
+    const todo = repos.filter((r) => !fresh(r, SKILL_UPDATES_CACHE_MS));
+    if (todo.length === 0) return;
+    let stopped = false;
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        stopped = true;
+        resolve();
+      }, budgetMs);
+    });
+    const work = (async () => {
+      for (const repo of todo) {
+        if (stopped) return;
+        let head = null;
+        try {
+          const r = await lsRemote(repo);
+          head = typeof r?.head === "string" && SHA_RE.test(r.head) ? r.head.toLowerCase() : null;
+        } catch {
+          head = null; // an upstream that can't be asked says nothing
+        }
+        if (stopped) return;
+        upstreamCache.set(repo, { at: now(), head });
+      }
+    })();
     try {
-      const r = await lsRemote(repo);
-      head = typeof r?.head === "string" && SHA_RE.test(r.head) ? r.head.toLowerCase() : null;
-    } catch {
-      head = null; // an upstream that can't be asked says nothing
+      await Promise.race([work, timeout]);
+    } finally {
+      clearTimeout(timer);
     }
-    upstreamCache.set(repo, { at: now(), head });
-    return head;
   }
 
-  /** The agent's copied skills whose upstream HEAD is no longer the commit they were copied at: `[{ agent, skill, repo, ref, upstream, url }]`. */
-  async function skillUpdatesFor(slug) {
+  /** The copied skills of one agent a pass can compare with their upstream: those taken at a commit (a tag or branch name can't be compared). */
+  async function comparableSkills(entry) {
+    return (await skillInfosOf(entry.dir)).filter((i) => i.provenance && SHA_RE.test(i.provenance.ref));
+  }
+
+  /**
+   * The agent's copied skills whose upstream HEAD is no longer the commit they were copied at: `[{ agent, skill, repo, ref, upstream, url }]`.
+   * Asks the network (within `budgetMs` in all) for what the cache can't answer, unless `cacheOnly`; `maxAgeMs`: how old a cached answer may be.
+   */
+  async function skillUpdatesFor(slug, { budgetMs = lsRemoteBudgetMs, cacheOnly = false, maxAgeMs = SKILL_UPDATES_CACHE_MS } = {}) {
     const entry = await find(typeof slug === "string" ? slug : "");
     if (!entry) return [];
+    const infos = await comparableSkills(entry);
+    const repos = [...new Set(infos.map((i) => i.provenance.repo))].slice(0, SKILL_UPDATES_MAX_REPOS);
+    if (!cacheOnly) await askUpstreams(repos, budgetMs);
     const moved = [];
-    const asked = new Set();
-    for (const info of await skillInfosOf(entry.dir)) {
+    for (const info of infos) {
       const p = info.provenance;
-      if (!p || !SHA_RE.test(p.ref)) continue; // only a commit can be compared with where the upstream is now
-      if (!asked.has(p.repo) && asked.size >= SKILL_UPDATES_MAX_REPOS) continue;
-      asked.add(p.repo);
-      const head = await upstreamHead(p.repo);
-      if (head && head !== p.ref.toLowerCase()) moved.push({ agent: entry.slug, skill: info.name, repo: p.repo, ref: p.ref, upstream: head, url: p.url });
+      const hit = repos.includes(p.repo) ? fresh(p.repo, maxAgeMs) : null;
+      if (hit?.head && hit.head !== p.ref.toLowerCase()) moved.push({ agent: entry.slug, skill: info.name, repo: p.repo, ref: p.ref, upstream: hit.head, url: p.url });
     }
     return moved;
   }
 
-  /** The text the refresh task's brief gains for @slug: the copied skills whose upstream moved (facts, data); "" when none did. */
+  /** The background pass: every agent's comparable copied skills, their repositories asked within one total budget. Never throws. */
+  async function warmSkillUpdates({ budgetMs = lsRemoteBudgetMs } = {}) {
+    try {
+      const repos = new Set();
+      for (const e of (await scan()).entries) for (const i of await comparableSkills(e)) repos.add(i.provenance.repo);
+      await askUpstreams([...repos].slice(0, SKILL_UPDATES_WARM_MAX_REPOS), budgetMs);
+    } catch (e) {
+      log.warn?.(`[agents] couldn't check the upstream of the copied skills: ${e?.message ?? e}`);
+    }
+  }
+
+  /** The text the refresh task's brief gains for @slug: copied skills whose upstream moved, from the cache only (facts, data); "" when none did. */
   async function skillUpdatesBrief(slug) {
     let moved;
     try {
-      moved = await skillUpdatesFor(slug);
+      moved = await skillUpdatesFor(slug, { cacheOnly: true, maxAgeMs: SKILL_UPDATES_BRIEF_MAX_AGE_MS });
     } catch (e) {
-      log.warn?.(`[agents] couldn't check the upstream of the copied skills: ${e?.message ?? e}`);
+      log.warn?.(`[agents] couldn't read the upstream of the copied skills: ${e?.message ?? e}`);
       return "";
     }
     if (moved.length === 0) return "";
@@ -5383,6 +5440,7 @@ export function createAgentsEngine({
     skillsInstalled,
     skillUpdatesFor,
     skillUpdatesBrief,
+    warmSkillUpdates,
     bindArchitect,
     bindResearcher,
     reconcile,
