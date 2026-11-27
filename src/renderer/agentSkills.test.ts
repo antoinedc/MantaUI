@@ -52,11 +52,11 @@ describe("agent skills helpers (Architect v2 §4)", () => {
   });
 
   it("scriptKeys lists every script of a change as name/path; applyGate says what is left to open", () => {
-    const change = { state: "pending" as const, skillsDiff: [{ name: "a", op: "add" as const, paths: ["x.sh", "y.md"], provenance: null, scripts: ["x.sh"] }, { name: "b", op: "replace" as const, paths: ["z.py"], provenance: null, scripts: ["z.py"] }] };
+    const change = { skillsDiff: [{ name: "a", op: "add" as const, paths: ["x.sh", "y.md"], provenance: null, scripts: ["x.sh"] }, { name: "b", op: "replace" as const, paths: ["z.py"], provenance: null, scripts: ["z.py"] }] };
     expect(scriptKeys(change)).toEqual(["a/x.sh", "b/z.py"]);
     expect(applyGate(change, new Set())).toEqual({ blocked: true, left: ["a/x.sh", "b/z.py"], title: "Open each script before applying: a/x.sh, b/z.py", line: "2 scripts left to open before this can be applied" });
     expect(applyGate(change, new Set(["a/x.sh"]))).toEqual({ blocked: true, left: ["b/z.py"], title: "Open each script before applying: b/z.py", line: "1 script left to open before this can be applied" });
     expect(applyGate(change, new Set(["a/x.sh", "b/z.py", "other"]))).toEqual({ blocked: false, left: [], title: null, line: null });
-    expect(applyGate({ state: "pending", skillsDiff: undefined }, new Set())).toEqual({ blocked: false, left: [], title: null, line: null });
+    expect(applyGate({ skillsDiff: undefined }, new Set())).toEqual({ blocked: false, left: [], title: null, line: null });
   });
 });

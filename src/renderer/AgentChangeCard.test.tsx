@@ -1055,7 +1055,6 @@ describe("AgentChangeView — opening skill files, and the scripts gate", () => 
     });
     await h!.flush();
   }
-  const apply = () => byText(h!, "Apply") ?? byText(h!, "Create");
 
   it("every file of a skill is a native details; opening it reads that file once from the box and shows a new file as its text, a changed one as a diff", async () => {
     const { api } = mountView(proposal());
@@ -1086,7 +1085,7 @@ describe("AgentChangeView — opening skill files, and the scripts gate", () => 
 
   it("a removed file shows what was removed; a refusal is a sentence with Try again that reads again", async () => {
     let fail = true;
-    const { api } = mountView(proposal(), { agentsChangeFile: (i: { id: string; path: string }) => (fail ? Promise.reject(new Error("The kept copy of this file is gone")) : Promise.resolve({ before: "old text", after: null })) });
+    const { api } = mountView(proposal(), { agentsChangeFile: () => (fail ? Promise.reject(new Error("The kept copy of this file is gone")) : Promise.resolve({ before: "old text", after: null })) });
     await h!.flush();
     await openFile("skills/audit/SKILL.md");
     const err = fileEl("skills/audit/SKILL.md").querySelector('[data-testid="agent-change-skill-file-error"]')!;
