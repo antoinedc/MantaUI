@@ -175,6 +175,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     projects: rec("projects", []),
     trial: rec("trial", { id: "tr_1", cases: [] }),
     trialTranscript: rec("trialTranscript", { text: "t", nextOffset: null }),
+    changeFile: rec("changeFile", { before: null, after: "x" }),
   };
   const handlers = buildHandlers(deps);
   assert.deepEqual(await handlers["agents:questions"]({ sessionID: "s" }), []);
@@ -195,6 +196,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
   await handlers["agents:projects"]();
   assert.deepEqual(await handlers["agents:trial"]({ id: "tr_1" }), { id: "tr_1", cases: [] });
   assert.deepEqual(await handlers["agents:trial-transcript"]({ id: "tr_1", case: "main", offset: 20000 }), { text: "t", nextOffset: null });
+  assert.deepEqual(await handlers["agents:change-file"]({ id: "ach_1", path: "skills/a/run.sh" }), { before: null, after: "x" });
   assert.deepEqual(seen, [
     ["questions", { sessionID: "s" }],
     ["questionAnswer", { id: "tq_1", answers: [["a"]] }],
@@ -214,6 +216,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     ["projects"],
     ["trial", { id: "tr_1" }],
     ["trialTranscript", { id: "tr_1", case: "main", offset: 20000 }],
+    ["changeFile", { id: "ach_1", path: "skills/a/run.sh" }],
   ]);
   // a refusal passes through as its sentence; an unexpected failure never shows a path
   deps.agents.questionAnswer = async () => {

@@ -59,6 +59,8 @@ describe("chip, title, reason, buttons", () => {
   it("gives a reason line only for a change that raises power", () => {
     expect(agentChangeReason({ needsClick: true, reason: "lead", agentName: "Manta" })).toBe("This changes Manta's own instructions");
     expect(agentChangeReason({ needsClick: true, reason: "isolation", agentName: "Dev" })).toBe("This lets Dev edit code");
+    expect(agentChangeReason({ needsClick: true, reason: "script-flagged", agentName: "Dev" })).toBe("An independent check flagged a script — read the reasons before applying");
+    expect(agentChangeReason({ needsClick: true, reason: "script-unchecked", agentName: "Dev" })).toBe("The independent script check couldn't run — read the scripts before applying");
     expect(agentChangeReason({ needsClick: true, reason: "ask", agentName: "Dev" })).toBeNull();
     expect(agentChangeReason({ needsClick: false, reason: null, agentName: "Dev" })).toBeNull();
   });

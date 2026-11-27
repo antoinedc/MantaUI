@@ -55,6 +55,7 @@ export const DEMO_UNIMPLEMENTED = [
   "agentsAutonomySet",
   "agentsChangeApply",
   "agentsChangeDiscard",
+  "agentsChangeFile",
   "agentsChangeFor",
   "agentsChangeRestore",
   "agentsChangeUndo",

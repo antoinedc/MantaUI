@@ -884,3 +884,275 @@ describe("AgentChangeView — problem, size and trial", () => {
     expect(q(h, "agent-change-conflict")).toBeNull();
   });
 });
+
+// Architect v2 Stage 2 (§4): the skills a proposal adds, replaces or removes, and the search that came first
+describe("AgentChangeView — skills", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  beforeEach(() => resetStore());
+
+  const BEFORE = "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\n";
+  const prov = { url: "https://github.com/acme/cro/blob/abc123/landing-audit/SKILL.md", sourceId: "src_1", repo: "acme/cro", ref: "abc123", licence: "MIT", taken: "whole" as const, registry: { installs: 12500, stars: null } };
+  const proposal = (over: Partial<AgentChange> = {}): AgentChange =>
+    change({
+      kind: "update",
+      slug: "dev",
+      agentName: "Dev",
+      before: BEFORE,
+      after: BEFORE,
+      origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
+      skillsDiff: [
+        { name: "landing-audit", op: "add", paths: ["LICENSE", "SKILL.md", "SOURCE.md", "scripts/check.sh"], provenance: prov, scripts: ["scripts/check.sh"] },
+        { name: "old-skill", op: "remove", paths: ["SKILL.md"], provenance: null, scripts: [] },
+      ],
+      skillSearch: {
+        queries: [{ source: "skills", query: "landing pages" }],
+        candidates: [
+          { ref: "acme/cro@landing-audit", installs: 12500, stars: null, licence: "MIT", verdict: "used-whole", why: "Most installed and it fits" },
+          { ref: "other/repo@thing", installs: 300, stars: null, licence: null, verdict: "rejected", why: "Unmaintained" },
+        ],
+      },
+      ...over,
+    });
+  const mountView = (c: AgentChange, extra: Record<string, unknown> = {}) => {
+    const { api } = installMockApi(extra);
+    h = mount(<AgentChangeView change={c} onChange={() => {}} />);
+    return { api };
+  };
+  const items = () => Array.from(h!.container.querySelectorAll('[data-testid="agent-change-skill"]'));
+
+  it("lists each skill with what is done to it, its files, where it came from, the licence and the installs", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const block = q(h!, "agent-change-skills")!;
+    expect(block.getAttribute("aria-label")).toBe("Skills");
+    expect(items()).toHaveLength(2);
+    const [add, remove] = items();
+    expect(add.getAttribute("data-op")).toBe("add");
+    expect(add.textContent).toContain("New skill");
+    expect(add.textContent).toContain("landing-audit");
+    expect(add.textContent).toContain("Copied from acme/cro · MIT · 12,500 installs");
+    expect(add.textContent).toContain("SKILL.md");
+    expect(add.textContent).toContain("SOURCE.md");
+    expect(remove.getAttribute("data-op")).toBe("remove");
+    expect(remove.textContent).toContain("Removes skill");
+    expect(remove.textContent).toContain("old-skill");
+    expect(remove.textContent).not.toContain("Written for this agent"); // a removed skill's origin isn't known here: nothing is claimed
+  });
+
+  it("a script is flagged, whoever wrote it, and only a script", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const [add, remove] = items();
+    const flags = Array.from(add.querySelectorAll('[data-script="true"]'));
+    expect(flags).toHaveLength(1);
+    expect(flags[0].textContent).toContain("scripts/check.sh");
+    expect(flags[0].textContent).toMatch(/Script/);
+    expect(remove.querySelector('[data-script="true"]')).toBeNull();
+  });
+
+  it("the origin link opens through the app and says so when it can't; an address that isn't https is text, not a link", async () => {
+    const { api } = mountView(proposal(), { openExternal: () => Promise.reject(new Error("no browser")) });
+    await h!.flush();
+    const link = items()[0].querySelector("a") as HTMLAnchorElement;
+    expect(link.href).toBe(prov.url);
+    await press(h!, link);
+    expect(api.calls.openExternal).toEqual([[prov.url]]);
+    expect(q(h!, "agent-change-skill-link-error")!.textContent).toMatch(/Couldn't open the link/);
+    expect(q(h!, "agent-change-skill-link-error")!.getAttribute("role")).toBe("alert");
+    h!.unmount();
+    mountView(proposal({ skillsDiff: [{ name: "x", op: "add", paths: ["SKILL.md"], provenance: { ...prov, url: "javascript:alert(1)" }, scripts: [] }] }));
+    await h!.flush();
+    expect(items()[0].querySelector("a")).toBeNull();
+    expect(items()[0].textContent).toContain("javascript:alert(1)");
+  });
+
+  it("what was searched for first is one native details: the queries, and each skill looked at with its verdict and why", async () => {
+    mountView(proposal());
+    await h!.flush();
+    const d = q(h!, "agent-change-skill-search")!;
+    expect(d.tagName).toBe("DETAILS");
+    expect(d.querySelector("summary")!.textContent).toBe("Searched for existing skills · 1 search · 2 skills looked at");
+    const cands = Array.from(d.querySelectorAll('[data-testid="agent-change-skill-candidate"]'));
+    expect(cands).toHaveLength(2);
+    expect(cands[0].textContent).toContain("acme/cro@landing-audit");
+    expect(cands[0].textContent).toContain("Used whole");
+    expect(cands[0].textContent).toContain("Most installed and it fits");
+    expect(cands[1].textContent).toContain("Rejected");
+    expect(d.textContent).toContain("landing pages");
+  });
+
+  it("the collapsed card's fold says how many skills the change touches", async () => {
+    h = mount(<AgentChangeView change={proposal()} onChange={() => {}} collapsed />);
+    await h.flush();
+    expect(q(h, "agent-change-fold")!.querySelector("summary")!.textContent).toContain("2 skills");
+  });
+
+  it("a record with no skills has no skills block (older boxes too)", async () => {
+    mountView(proposal({ skillsDiff: undefined, skillSearch: undefined }));
+    await h!.flush();
+    expect(q(h!, "agent-change-skills")).toBeNull();
+    h!.unmount();
+    mountView(proposal({ skillsDiff: [] }));
+    await h!.flush();
+    expect(q(h!, "agent-change-skills")).toBeNull();
+  });
+
+  it("a change that only touches skills still shows the diff block honestly: no change to the agent's file", async () => {
+    mountView(proposal());
+    await h!.flush();
+    expect(q(h!, "agent-change-nodiff")!.textContent).toContain("No visible change to the agent's file");
+  });
+});
+
+// Architect v2 Stage 2: every skill file can be opened; a script is read independently by the box, and the verdict is on the card
+describe("AgentChangeView — opening skill files, and the independent script check", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  beforeEach(() => resetStore());
+
+  const BEFORE = "---\nname: Dev\ndescription: Builds\nisolation: worktree\n---\nBe careful.\n";
+  const prov = { url: "https://github.com/acme/cro/blob/abc123/SKILL.md", sourceId: "src_1", repo: "acme/cro", ref: "abc123", licence: "MIT", taken: "whole" as const };
+  const proposal = (over: Partial<AgentChange> = {}): AgentChange =>
+    change({
+      id: "ach_files",
+      kind: "update",
+      slug: "dev",
+      agentName: "Dev",
+      before: BEFORE,
+      after: BEFORE,
+      state: "pending",
+      needsClick: true,
+      reason: "ask",
+      origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
+      skillsDiff: [{ name: "audit", op: "add", paths: ["SKILL.md", "scripts/a.sh", "scripts/b.py"], provenance: prov, scripts: ["scripts/a.sh", "scripts/b.py"] }],
+      ...over,
+    });
+  const FILES: Record<string, { before: string | null; after: string | null }> = {
+    "skills/audit/SKILL.md": { before: null, after: "# Audit\nCheck the headline." },
+    "skills/audit/scripts/a.sh": { before: null, after: "#!/bin/sh\necho hi" },
+    "skills/audit/scripts/b.py": { before: "print(1)\nprint(2)", after: "print(1)\nprint(3)" },
+  };
+  const readFile = (fail: Set<string> = new Set()) => (input: { id: string; path: string }) => (fail.has(input.path) ? Promise.reject(new Error("The kept copy of this file is gone")) : Promise.resolve(FILES[input.path]));
+  const mountView = (c: AgentChange, extra: Record<string, unknown> = {}, collapsed = false) => {
+    const { api } = installMockApi({ agentsChangeFile: readFile(), ...extra });
+    h = mount(<AgentChangeView change={c} onChange={() => {}} collapsed={collapsed} />);
+    return { api };
+  };
+  const fileEl = (path: string) => Array.from(h!.container.querySelectorAll<HTMLDetailsElement>('[data-testid="agent-change-skill-file"]')).find((d) => d.getAttribute("data-path") === path)!;
+  async function openFile(path: string) {
+    const d = fileEl(path);
+    expect(d, `a control to open ${path}`).toBeTruthy();
+    await act(async () => {
+      d.open = true;
+      d.dispatchEvent(new Event("toggle"));
+    });
+    await h!.flush();
+  }
+
+  it("every file of a skill is a native details; opening it reads that file once from the box and shows a new file as its text, a changed one as a diff", async () => {
+    const { api } = mountView(proposal());
+    await h!.flush();
+    for (const p of ["SKILL.md", "scripts/a.sh", "scripts/b.py"]) {
+      const d = fileEl(`skills/audit/${p}`);
+      expect(d.tagName).toBe("DETAILS");
+      expect(d.querySelector("summary")!.textContent).toContain(p);
+    }
+    expect(api.calls.agentsChangeFile).toBeUndefined();
+    await openFile("skills/audit/SKILL.md");
+    expect(api.calls.agentsChangeFile).toEqual([[{ id: "ach_files", path: "skills/audit/SKILL.md" }]]);
+    const body = fileEl("skills/audit/SKILL.md").querySelector('[data-testid="agent-change-skill-file-body"]')!;
+    expect(body.textContent).toContain("New file");
+    expect(body.textContent).toContain("Check the headline.");
+    await openFile("skills/audit/scripts/b.py");
+    const diff = fileEl("skills/audit/scripts/b.py").querySelector('[data-testid="agent-change-skill-file-body"]')!;
+    expect(diff.querySelector('[data-diff="del"]')!.textContent).toContain("print(2)");
+    expect(diff.querySelector('[data-diff="add"]')!.textContent).toContain("print(3)");
+    // closing and opening again doesn't read again
+    await act(async () => {
+      fileEl("skills/audit/SKILL.md").open = false;
+      fileEl("skills/audit/SKILL.md").dispatchEvent(new Event("toggle"));
+    });
+    await openFile("skills/audit/SKILL.md");
+    expect(api.calls.agentsChangeFile).toHaveLength(2);
+  });
+
+  it("a removed file shows what was removed; a refusal is a sentence with Try again that reads again", async () => {
+    let fail = true;
+    const { api } = mountView(proposal(), { agentsChangeFile: () => (fail ? Promise.reject(new Error("The kept copy of this file is gone")) : Promise.resolve({ before: "old text", after: null })) });
+    await h!.flush();
+    await openFile("skills/audit/SKILL.md");
+    const err = fileEl("skills/audit/SKILL.md").querySelector('[data-testid="agent-change-skill-file-error"]')!;
+    expect(err.getAttribute("role")).toBe("alert");
+    expect(err.textContent).toContain("The kept copy of this file is gone");
+    fail = false;
+    await press(h!, Array.from(fileEl("skills/audit/SKILL.md").querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Try again"));
+    const body = fileEl("skills/audit/SKILL.md").querySelector('[data-testid="agent-change-skill-file-body"]')!;
+    expect(body.textContent).toContain("Removed file");
+    expect(body.textContent).toContain("old text");
+    expect(api.calls.agentsChangeFile).toHaveLength(2);
+  });
+
+  it("Apply is never gated by opening files: a change with scripts offers Apply at once, and nothing asks to open the scripts first", async () => {
+    mountView(proposal({ reason: "ask" }));
+    await h!.flush();
+    const apply = byText(h!, "Apply")!;
+    expect(apply.disabled).toBe(false);
+    expect(apply.title).toBe("");
+    expect(h!.container.textContent).not.toMatch(/left to open|open each script/i);
+    // the files can still be opened, and opening one changes nothing about Apply
+    await openFile("skills/audit/scripts/a.sh");
+    expect(byText(h!, "Apply")!.disabled).toBe(false);
+  });
+
+  it("the independent script check is shown: clean says no issues were found, naming the model's independence in one line", async () => {
+    mountView(proposal({ reason: "ask", scriptReview: { verdict: "clean", reasons: [], model: "anthropic/claude-opus-5-5", at: 1 } }));
+    await h!.flush();
+    const block = q(h!, "agent-change-script-review")!;
+    expect(block.getAttribute("data-verdict")).toBe("clean");
+    expect(block.textContent).toBe("Scripts checked independently: no issues found");
+    expect(q(h!, "agent-change-reason")).toBeNull();
+  });
+
+  it("flagged: the reasons are listed outside the fold and the reason line says a click is needed because a check flagged a script", async () => {
+    const review = { verdict: "flagged" as const, reasons: ["scripts/a.sh sends $HOME to a remote host", "b.py reads ~/.ssh"], model: "anthropic/claude-sonnet-5-5", at: 1 };
+    mountView(proposal({ reason: "script-flagged", scriptReview: review }));
+    await h!.flush();
+    const block = q(h!, "agent-change-script-review")!;
+    expect(block.getAttribute("data-verdict")).toBe("flagged");
+    expect(block.textContent).toContain("Scripts checked independently: flagged");
+    expect(Array.from(block.querySelectorAll("li")).map((l) => l.textContent)).toEqual(review.reasons);
+    expect(q(h!, "agent-change-reason")!.textContent).toMatch(/independent check flagged a script/i);
+    h!.unmount();
+    mountView(proposal({ reason: "script-flagged", scriptReview: review }), {}, true);
+    await h!.flush();
+    const fold = q(h!, "agent-change-fold")!;
+    expect(fold.contains(q(h!, "agent-change-script-review"))).toBe(false);
+  });
+
+  it("a check that couldn't run says so and the reason line asks the user to read the scripts; its sentence is shown", async () => {
+    mountView(proposal({ reason: "script-unchecked", scriptReview: { verdict: "error", reasons: ["The script check didn't finish within 5 minutes"], model: "anthropic/claude-opus-5-5", at: 1 } }));
+    await h!.flush();
+    const block = q(h!, "agent-change-script-review")!;
+    expect(block.getAttribute("data-verdict")).toBe("error");
+    expect(block.textContent).toContain("The independent script check couldn't run");
+    expect(block.textContent).toContain("didn't finish within 5 minutes");
+    expect(q(h!, "agent-change-reason")!.textContent).toMatch(/couldn't run/i);
+  });
+
+  it("while the check is out, a held change with scripts says it is being checked; one with no scripts, or with a verdict, doesn't", async () => {
+    mountView(proposal({ state: "held", needsClick: false, reason: null }));
+    await h!.flush();
+    expect(q(h!, "agent-change-script-review")!.textContent).toBe("Checking the scripts independently…");
+    h!.unmount();
+    mountView(proposal({ state: "held", needsClick: false, reason: null, skillsDiff: [{ name: "audit", op: "add", paths: ["SKILL.md"], provenance: null, scripts: [] }] }));
+    await h!.flush();
+    expect(q(h!, "agent-change-script-review")).toBeNull();
+  });
+});

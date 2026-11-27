@@ -91,13 +91,39 @@ test("the Architect template stays short and tells it to look for existing skill
   assert.match(main, /research_search.*source `github`/s);
   assert.match(main, /at least 3 independent sources/);
   assert.match(main, /fetch the PDF itself/);
-  assert.match(main, /Never copy a whole skill/);
+  assert.doesNotMatch(main, /Never copy a whole skill/, "Stage 2: a proven skill may be copied, whole or in part, under its licence");
   assert.match(main, /malicious instructions/);
   assert.match(main, /the card below/);
   const skill = await readFile(join(REAL_TEMPLATES, "architect", "skills", "research", "SKILL.md"), "utf-8");
   assert.match(skill, /## Existing skills first/);
   assert.match(skill, /## Independent sources/);
   assert.match(skill, /anthropics\/skills/);
+});
+
+test("the Architect's templates tell it, as process, to look for proven skills first, take only what fits, respect licences and write its own only when nothing suitable exists, saying why", async () => {
+  const read = (...p) => readFile(join(REAL_TEMPLATES, "architect", ...p), "utf-8");
+  const main = await read("agent.md");
+  const authoring = await read("skills", "authoring", "SKILL.md");
+  const research = await read("skills", "research", "SKILL.md");
+  const flat = (t) => t.replace(/\s+/g, " ");
+  const m = flat(main);
+  assert.match(m, /research_search` source `skills`/, "the skills registry is searched");
+  assert.match(m, /`skills_installed`/, "what is installed on this box is looked at");
+  assert.match(m, /Search for an existing skill before you write one/i);
+  assert.match(m, /prefer a proven skill/i);
+  assert.match(m, /only the parts that fit/i);
+  assert.match(m, /licence/i);
+  assert.match(m, /write your own[^.]*only when nothing suitable exists[^.]*say why in `skillSearch`/i);
+  assert.match(m, /`skillSearch`/);
+  assert.match(m, /`origin: "copied"`/);
+  assert.ok(main.trimEnd().split("\n").length <= 150, "the main file stays within 150 lines");
+  assert.equal(main.split("question tool").length - 1, 2, "the question tool is still named twice: nothing about skills adds to it");
+  const a = flat(authoring);
+  for (const re of [/## Skills/, /`draft\.skills` is a list.*`add`.*`replace`.*`remove`/i, /SKILL\.md.*frontmatter/i, /256 KiB/, /1 MiB/, /15 skills/, /SOURCE\.md/, /LICENSE/, /MIT, Apache-2\.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1\.0, CC-BY-4\.0, MPL-2\.0/, /`skillSearch`/, /`licenseSourceId`/, /skill change needs a trial|skills? .* trial/i]) assert.match(a, re);
+  const r = flat(research);
+  assert.match(r, /source `skills`/);
+  assert.match(r, /`skills_installed`/);
+  assert.doesNotMatch(r, /Never copy a whole skill/);
 });
 
 test("the Architect templates carry no agent-design opinions (research and the library decide those) and tell it to ask with the question tool when the request and the roster conflict", async () => {
@@ -2452,7 +2478,7 @@ test("the authoring and research skills list the new fields and the open-questio
   assert.match(fields, /`problem`: `\{userWords, statement, shapes, chosen, why\}`/);
   assert.match(fields, /`userWords` \(10–600\) is copied exactly from the request any round of your task was given/);
   assert.match(fields, /2–5 shapes.*\(1–5 in a refresh or check-up round\)/);
-  assert.match(fields, /`trial`: `\{trialId, verdicts\}` — required for a new agent and for an update of instructions, isolation or model/);
+  assert.match(fields, /`trial`: `\{trialId, verdicts\}` — required for a new agent and for an update of instructions, skills, isolation or model/);
   assert.match(fields, /the refusal names the files/);
   assert.match(fields, /Case <name> failed: fix the draft and run a trial again/);
   const research = flat(await read("skills", "research", "SKILL.md"));

@@ -22,7 +22,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { ARCHITECT_TRIAL_TOOLS } from "../shared/agentsShared.mjs";
+import { ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS } from "../shared/agentsShared.mjs";
 import { questionFromForm } from "../shared/opencodeV2.mjs";
 import { withInternalMarker } from "./internalSessionMarker.mjs";
 import { jobRules, DENIAL_TEXT_RE, isInsideMantaFolders } from "./autonomy.mjs";
@@ -75,6 +75,7 @@ const ENDED = new Set(["done", "failed", "timed-out", "aborted"]);
 // Manta's own side-effect tools and the ways to publish, send or write to the network. Appended LAST to the ruleset (last match wins).
 const DENIED_TOOLS = [
   ...ARCHITECT_TRIAL_TOOLS,
+  ...ARCHITECT_SKILL_TOOLS,
   "agent_trial*",
   "agent_propose",
   "agent_change",
@@ -609,7 +610,7 @@ export function createAgentTrials({
       if (c.project && !(await projectDirectory(c.project))) return refuse(`Case ${c.name}: I can't find a checkout of the project "${c.project}" on this box`);
     }
     const id = mint();
-    const plan = await agents().trialPlan({ action: input?.action, agent: input?.agent, baseHash: input?.baseHash, draft: input?.draft }, { dir: agentDirOf(id) });
+    const plan = await agents().trialPlan({ action: input?.action, agent: input?.agent, baseHash: input?.baseHash, draft: input?.draft }, { dir: agentDirOf(id), bound });
     if (plan.error) return refuse(plan.error);
     // checked and recorded with no await between them
     if (mineOf(rootJobId).filter((t) => t !== slot && t.agentSlug === plan.slug).length >= MAX_TRIALS_PER_AGENT) return refuse(`You've already run ${MAX_TRIALS_PER_AGENT} trials of @${plan.slug} in this task; that's the limit`);

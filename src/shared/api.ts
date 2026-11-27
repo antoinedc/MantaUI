@@ -2034,6 +2034,8 @@ export interface Api {
   agentsTrial(input: { id: string }): Promise<AgentTrial>;
   /** One trial case's redacted transcript, 20 000 characters from `offset`; `nextOffset` is null at the end. */
   agentsTrialTranscript(input: { id: string; case: string; offset?: number }): Promise<{ text: string; nextOffset: number | null }>;
+  /** One file of a change record from its snapshots (`path` as in the record's bundles, e.g. "skills/<name>/run.sh"); null = the file didn't exist there. */
+  agentsChangeFile(input: { id: string; path: string }): Promise<{ before: string | null; after: string | null; truncated?: boolean }>;
   /** Bus kind `taskQuestion`: a question was asked, answered, dismissed or lost (a hint: refetch). */
   onTaskQuestion(cb: (p: TaskQuestionEvent) => void): () => void;
   /** Bus kind `agentFleet`: jobs, changes, seats or questions changed (a hint: refetch, debounced). */

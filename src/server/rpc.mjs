@@ -2906,6 +2906,8 @@ export function buildHandlers({
     // Architect v2 Stage 1: a trial run of a drafted agent (cases and what they did) and one case's transcript, a window at a time
     "agents:trial": (input) => agentsCall("trial", (a) => a.trial(input)),
     "agents:trial-transcript": (input) => agentsCall("trial-transcript", (a) => a.trialTranscript(input)),
+    // Architect v2 Stage 2: one file of a change record, before and after, from its snapshots (the card opens each skill file)
+    "agents:change-file": (input) => agentsCall("change-file", (a) => a.changeFile(input)),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>
