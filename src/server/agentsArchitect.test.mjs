@@ -1241,6 +1241,49 @@ test("release precedence 8: Auto and Tell me apply — the file, the config, dec
   }
 });
 
+test("release of a routine round (refresh / check-up): the user's level decides like a build hand-off; the same exceptions still wait", async () => {
+  const routine = { stamp: { mode: "routine" } };
+  // Auto and Tell me apply (decidedBy auto); Ask waits with its own reason; Never discards
+  for (const [level, state, reason] of [["auto", "applied", null], ["tell", "applied", null], ["ask", "pending", "ask"], ["never", "discarded", null]]) {
+    const f = await proposeFixture({ level });
+    try {
+      f.w.jobs = [{ ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, ...routine.stamp } }];
+      const id = await heldFor(f);
+      assert.equal((await rec(f, id)).mode, "routine");
+      endJob(f, { status: "done" });
+      await f.engine.reconcile();
+      const r = await rec(f, id);
+      assert.equal(r.state, state, `${level}: ${r.error}`);
+      assert.equal(r.reason, reason, level);
+      if (state === "applied") assert.equal(r.decidedBy, "auto");
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // the exceptions: a round that didn't end cleanly, a change to the Architect itself and a raised isolation still wait
+  const f = await proposeFixture();
+  try {
+    f.w.jobs = [{ ...f.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, ...routine.stamp } }];
+    const core = await propose(f, { agent: "architect", baseHash: (await f.engine.readAgentSnapshot("architect")).hash, draft: { description: "Builds agents from research, carefully." } });
+    assert.equal(core.ok, true, core.error);
+    endJob(f, { status: "done" });
+    await f.engine.reconcile();
+    assert.equal((await rec(f, core.change.id)).reason, "core");
+  } finally {
+    await f.cleanup();
+  }
+  const g = await proposeFixture();
+  try {
+    g.w.jobs = [{ ...g.w.jobs[0], architect: { rootJobId: "job1", attempt: 1, ...routine.stamp } }];
+    const id = await heldFor(g);
+    endJob(g, { status: "failed" });
+    await g.engine.reconcile();
+    assert.equal((await rec(g, id)).reason, "unfinished");
+  } finally {
+    await g.cleanup();
+  }
+});
+
 // every proposal the default fixture makes rests on these two library entries
 const BASED_ON = " Based on: CRO copywriting (4 sources, saved 2 days ago); How an agent fits the team (3 sources, saved 5 days ago).";
 

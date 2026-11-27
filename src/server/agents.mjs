@@ -3969,8 +3969,8 @@ export function createAgentsEngine({
     // 4. the round did not end cleanly (a later round replaced it, it didn't finish, it ended asking a question, or it is gone)
     // (a question of the task still open, being delivered or answered but not yet sent holds everything it proposed: nothing applies under it)
     if (!job || attempt > origin.attempt || job.status !== "done" || job.endedBlocked === true || hasOpenQuestion(job)) return { action: "pending", reason: "unfinished" };
-    // 5. only a build-mode hand-off releases by level
-    if (rec.mode !== "build") return { action: "pending", reason: "plan" };
+    // 5. a build-mode hand-off and a routine round (the monthly refresh, the weekly check-up) release by level; plan mode and an unknown mode wait
+    if (rec.mode !== "build" && rec.mode !== "routine") return { action: "pending", reason: "plan" };
     // 6. power changes
     if (rec.target === "lead") return { action: "pending", reason: "lead" };
     if (rec.target === "core") return { action: "pending", reason: "core" };

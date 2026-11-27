@@ -67,12 +67,12 @@ test("refresh flow: the routine's run starts the Architect's task, its proposals
       reload: async () => ({ ok: true }),
       log: { warn: () => {} },
       retryDelayMs: 0,
-      autonomyPolicy: async () => ({ ...MODES.autonomous, agent_change: "auto" }), // even at Auto a refresh waits for a click
+      autonomyPolicy: async () => ({ ...MODES.autonomous, agent_change: "ask" }), // a refresh is a routine round: it releases by the user's level, and at Ask it waits
       oc: { listMessages: async () => [] },
       delegate: {
         startJob: async (i) => {
           w.startJobs.push(i);
-          const job = { id: "job_refresh", rootJobId: "job_refresh", status: "running", attempt: 1, specialist: true, agent: i.agent, architect: { rootJobId: "job_refresh", attempt: 1, mode: "unknown" }, result: null, error: null };
+          const job = { id: "job_refresh", rootJobId: "job_refresh", status: "running", attempt: 1, specialist: true, agent: i.agent, architect: { rootJobId: "job_refresh", attempt: 1, mode: "routine" }, result: null, error: null };
           w.jobs.push(job);
           return { ok: true, job };
         },
@@ -108,7 +108,7 @@ test("refresh flow: the routine's run starts the Architect's task, its proposals
       join(root, ".changes.json"),
       JSON.stringify({
         version: 2,
-        changes: [{ id: "ach_1", kind: "update", slug: "dev", agentName: "Dev", sessionID: started.sessionID, messageID: "", callID: "", state: "held", needsClick: false, reason: null, before: "x", after: "y", createdAt: T0, decidedAt: null, error: null, origin: { kind: "job", jobId: "job_refresh", rootJobId: "job_refresh", attempt: 1 }, mode: "unknown", releasedAt: null, decidedBy: null, target: null }],
+        changes: [{ id: "ach_1", kind: "update", slug: "dev", agentName: "Dev", sessionID: started.sessionID, messageID: "", callID: "", state: "held", needsClick: false, reason: null, before: "x", after: "y", createdAt: T0, decidedAt: null, error: null, origin: { kind: "job", jobId: "job_refresh", rootJobId: "job_refresh", attempt: 1 }, mode: "routine", releasedAt: null, decidedBy: null, target: null }],
         proposalSlots: { job_refresh: 1 },
       }),
     );
