@@ -265,8 +265,9 @@ export function currentSnapshot(history: ReadonlyArray<AgentChange>): string | n
 }
 
 /** "Restore before this" is offered on an applied or undone update, only where restoring would change something. */
-export function canRestore(change: Pick<AgentChange, "kind" | "state" | "before">, current: string | null): boolean {
+export function canRestore(change: Pick<AgentChange, "kind" | "state" | "before"> & { origin?: AgentChange["origin"] }, current: string | null): boolean {
   if (change.kind !== "update" || change.before == null) return false;
+  if (change.origin?.kind === "learned") return false; // it changed no agent file: a rule is taken back from the Learned tab
   if (change.state !== "applied" && change.state !== "undone") return false;
   return current == null || change.before !== current;
 }

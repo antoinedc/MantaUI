@@ -253,6 +253,8 @@ describe("Restore before this", () => {
   });
   it("is not offered where it would change nothing (the version before the change is already live)", () => {
     expect(canRestore(rows[0], "V2")).toBe(false);
+    // a learned rule changes no agent file: undoing it is the Learned tab's job, not a restore of the whole folder
+    expect(canRestore(change({ state: "applied", before: "V2", origin: { kind: "learned" } }), "V3")).toBe(false);
   });
   it("never on a create, a record with no before, or a state that never applied", () => {
     expect(canRestore(rows[2], "V3")).toBe(false);
