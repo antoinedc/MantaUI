@@ -135,15 +135,6 @@ const parseModel = (m) => {
   return i > 0 && i < m.length - 1 ? { providerID: m.slice(0, i), modelID: m.slice(i + 1) } : undefined;
 };
 
-function messageText(m) {
-  const parts = Array.isArray(m?.parts) ? m.parts : [];
-  return parts
-    .filter((p) => p?.type === "text" && typeof p.text === "string" && !p.synthetic)
-    .map((p) => p.text.trim())
-    .filter(Boolean)
-    .join("\n");
-}
-
 const clip = (v, n) => {
   const s = typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v);
   return s.length > n ? `${s.slice(0, n)}…` : s;
@@ -162,36 +153,33 @@ export function readCase(messages) {
   const tokens = { input: 0, output: 0, cache: { read: 0, write: 0 } };
   for (const m of Array.isArray(messages) ? messages : []) {
     const role = m?.info?.role;
-    if (role === "user") {
-      const t = messageText(m);
-      if (t) lines.push(`User: ${t}`);
-      continue;
-    }
-    if (role !== "assistant") continue;
+    if (role !== "user" && role !== "assistant") continue;
+    const assistant = role === "assistant";
     const info = m.info ?? {};
-    if (typeof info.cost === "number") {
-      usd += info.cost;
-      sawUsage = true;
+    if (assistant) {
+      if (typeof info.cost === "number") {
+        usd += info.cost;
+        sawUsage = true;
+      }
+      if (info.tokens && typeof info.tokens === "object") {
+        tokens.input += Number(info.tokens.input) || 0;
+        tokens.output += Number(info.tokens.output) || 0;
+        tokens.cache.read += Number(info.tokens.cache?.read) || 0;
+        tokens.cache.write += Number(info.tokens.cache?.write) || 0;
+        sawUsage = true;
+      }
+      if (info.providerID && info.modelID) model = { providerID: info.providerID, modelID: info.modelID };
     }
-    if (info.tokens && typeof info.tokens === "object") {
-      tokens.input += Number(info.tokens.input) || 0;
-      tokens.output += Number(info.tokens.output) || 0;
-      tokens.cache.read += Number(info.tokens.cache?.read) || 0;
-      tokens.cache.write += Number(info.tokens.cache?.write) || 0;
-      sawUsage = true;
-    }
-    if (info.providerID && info.modelID) model = { providerID: info.providerID, modelID: info.modelID };
     for (const p of Array.isArray(m.parts) ? m.parts : []) {
       if (p?.type === "text" && typeof p.text === "string" && !p.synthetic && p.text.trim()) {
-        lines.push(`Assistant: ${p.text.trim()}`);
-        finalAnswer = p.text.trim();
-      } else if (p?.type === "tool") {
+        lines.push(`${assistant ? "Assistant" : "User"}: ${p.text.trim()}`);
+        if (assistant) finalAnswer = p.text.trim();
+      } else if (assistant && p?.type === "tool") {
         const name = String(p.tool ?? "");
         tools.add(name);
         const st = p.state ?? {};
         const failed = st.status === "error";
-        const outcome = failed ? `ERROR ${clip(st.error, 500)}` : clip(st.output, 800);
-        lines.push(`Tool ${name} ${clip(st.input, 300)} → ${outcome}`);
+        lines.push(`Tool ${name} ${clip(st.input, 300)} → ${failed ? `ERROR ${clip(st.error, 500)}` : clip(st.output, 800)}`);
         if (failed && typeof st.error === "string" && DENIAL_TEXT_RE.test(st.error)) refused.push(st.error.split("\n")[0].trim());
         if (name === "question") for (const q of Array.isArray(st.input?.questions) ? st.input.questions : []) if (typeof q?.question === "string" && q.question.trim()) wouldAsk.push(q.question.trim());
       }
@@ -692,7 +680,7 @@ export function createAgentTrials({
           finishedAt: doc.finishedAt,
           settled: true,
           aborted: false,
-          cases: doc.cases.map((c) => ({ name: c.name, expect: c.expect, state: c.state, finalAnswer: c.finalAnswer ?? null, tools: c.tools ?? [], filesChanged: c.filesChanged ?? 0, refused: c.refused ?? [], wouldAsk: c.wouldAsk ?? [], durationMs: c.durationMs ?? null, error: c.error ?? null, task: c.task, checks: c.checks, project: c.project ?? null })),
+          cases: doc.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null })),
         });
         continue;
       }

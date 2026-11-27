@@ -2339,6 +2339,12 @@ test("the Architect's outcome says 'No change was proposed' when a finished task
   }
 });
 
+test("an Architect round is stamped build, plan, routine or unknown — nothing else", async () => {
+  const { architectModeOf } = await import("./delegate.mjs");
+  for (const mode of ["build", "plan", "routine"]) assert.equal(architectModeOf(mode), mode);
+  for (const mode of ["whatever", undefined, null, 7, "Routine"]) assert.equal(architectModeOf(mode), "unknown");
+});
+
 test("the Architect's own block and ruleset allow the trial tools", async () => {
   const perm = ARCHITECT_BLOCK_PERMISSION("/x", "/h");
   for (const tool of ["agent_trial", "agent_trial_wait", "agent_trial_read", "agent_propose"]) assert.equal(perm[tool], "allow", tool);

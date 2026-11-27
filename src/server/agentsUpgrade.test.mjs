@@ -70,6 +70,16 @@ async function box({ level = "tell", policyThrows = false, extra = {}, slug = "d
 
 const V1 = { "agent.md": md(), "skills/style/SKILL.md": SKILL() };
 
+/** Install V1, publish a second version (a new description) and boot again: the box that was just upgraded. Returns the new engine. */
+async function installThenUpgrade(b) {
+  await b.ship(V1);
+  await b.engine.init();
+  await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
+  const engine = b.make();
+  await engine.init();
+  return engine;
+}
+
 test("install copies the shipped files to .base/ and leaves .history.json out of the agent's folder", async () => {
   const b = await box();
   try {
@@ -282,11 +292,7 @@ test("files the template dropped are removed only when the box's copy is untouch
 test("dedupe: the same shipped bundle makes one record in any state; a new bundle makes a new one", async () => {
   const b = await box({ level: "ask" });
   try {
-    await b.ship(V1);
-    await b.engine.init();
-    await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
-    const engine = b.make();
-    await engine.init();
+    const engine = await installThenUpgrade(b);
     await engine.upgradeBuiltIns();
     await b.make().init();
     let recs = await b.records();
@@ -373,11 +379,7 @@ test("a folder that only shares a built-in's name (another role) is never upgrad
 test("bundle snapshots: an update record carries before/after file maps and their blobs; an edit anywhere in the folder since makes Apply a conflict", async () => {
   const b = await box({ level: "ask" });
   try {
-    await b.ship(V1);
-    await b.engine.init();
-    await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
-    const engine = b.make();
-    await engine.init();
+    const engine = await installThenUpgrade(b);
     const [rec] = await b.records();
     assert.deepEqual(Object.keys(rec.beforeBundle).sort(), ["agent.md", "skills/style/SKILL.md"]);
     assert.equal(rec.beforeBundle["agent.md"], sha256(V1["agent.md"]));
@@ -398,11 +400,7 @@ test("bundle snapshots: an update record carries before/after file maps and thei
 test("Undo of a bundle record refuses when any file changed since, and changes nothing", async () => {
   const b = await box({ level: "tell" });
   try {
-    await b.ship(V1);
-    await b.engine.init();
-    await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
-    const engine = b.make();
-    await engine.init();
+    const engine = await installThenUpgrade(b);
     const [rec] = await b.records();
     await writeFile(join(b.root, "dev", "skills", "style", "SKILL.md"), SKILL(" Edited."));
     const out = await engine.undo(rec.id);
@@ -416,11 +414,7 @@ test("Undo of a bundle record refuses when any file changed since, and changes n
 test("a record written before bundles (agent.md strings only) still applies and undoes", async () => {
   const b = await box({ level: "ask" });
   try {
-    await b.ship(V1);
-    await b.engine.init();
-    await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
-    const engine = b.make();
-    await engine.init();
+    const engine = await installThenUpgrade(b);
     const doc = JSON.parse(await readFile(join(b.root, ".changes.json"), "utf-8"));
     for (const r of doc.changes) for (const k of ["beforeBundle", "afterBundle", "baseBefore", "baseAfter"]) delete r[k];
     await writeFile(join(b.root, ".changes.json"), JSON.stringify(doc));
@@ -461,11 +455,7 @@ test("Restore puts the whole folder back from the bundle, skills included", asyn
 test("blobs nobody references are swept (after a grace period); referenced ones stay", async () => {
   const b = await box({ level: "tell" });
   try {
-    await b.ship(V1);
-    await b.engine.init();
-    await b.ship({ ...V1, "agent.md": md({ description: "Second." }) });
-    const engine = b.make();
-    await engine.init();
+    const engine = await installThenUpgrade(b);
     const stray = sha256("stray");
     await mkdir(join(b.root, ".blobs"), { recursive: true });
     await writeFile(join(b.root, ".blobs", stray), "stray");
@@ -503,16 +493,20 @@ test("mergeAgentMd: frontmatter keys one by one, the body line by line; a result
 });
 
 const ARCH = (extra = "", body = "You are the Architect.\nLine two.\nLine three.") => `---\nname: Architect\ndescription: Builds agents.\nrole: architect\nisolation: none\n${extra}---\n${body}\n`;
+/** An Architect box where the user added a source, then a new template version (one more line) ships and the box boots. */
+async function upgradeArchitectWithSources(b) {
+  await b.ship({ "agent.md": ARCH() });
+  await b.engine.init();
+  await writeFile(join(b.root, "architect", "agent.md"), ARCH(SOURCES));
+  await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.") });
+  await b.make().init();
+}
 const SOURCES = 'sources:\n  - id: yc\n    name: YC\n    description: Search the YC directory.\n    url: "https://search.example.com/api?q={query}"\n';
 
 test("the Architect's own sources (frontmatter the template doesn't have) are kept through an upgrade", async () => {
   const b = await box({ level: "tell", slug: "architect" });
   try {
-    await b.ship({ "agent.md": ARCH() });
-    await b.engine.init();
-    await writeFile(join(b.root, "architect", "agent.md"), ARCH(SOURCES));
-    await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.") });
-    await b.make().init();
+    await upgradeArchitectWithSources(b);
     const parsed = parseAgentMd(await b.read("agent.md"));
     assert.equal(parsed.ok, true);
     assert.equal(parsed.meta.sources.length, 1, "the user's source stays");
@@ -526,11 +520,7 @@ test("the Architect's own sources (frontmatter the template doesn't have) are ke
 test("a merged Architect file whose sources fail the Architect's checks (a credential in a source) waits for a click instead of being applied", async () => {
   const b = await box({ level: "tell", slug: "architect", extra: { createScanner: () => ({ scan: async () => ({ clean: false, unavailable: false, hits: [{ source: "store" }] }) }) } });
   try {
-    await b.ship({ "agent.md": ARCH() });
-    await b.engine.init();
-    await writeFile(join(b.root, "architect", "agent.md"), ARCH(SOURCES));
-    await b.ship({ "agent.md": ARCH("", "You are the Architect.\nLine two.\nLine three.\nLine four.") });
-    await b.make().init();
+    await upgradeArchitectWithSources(b);
     const [rec] = await b.records();
     assert.equal(rec.state, "pending");
     assert.equal(rec.needsClick, true);

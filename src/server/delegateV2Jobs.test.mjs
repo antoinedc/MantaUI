@@ -3043,7 +3043,7 @@ test("Architect launch: stamped {rootJobId = its own id, attempt 1, mode}; the r
   const rules = job.permission;
   assert.deepEqual(rules[0], { permission: "*", pattern: "**", action: "deny" });
   assert.equal(hasQuestionDeny(rules), false, "a specialist's task may ask: no question deny");
-  for (const t of ["research_fetch", "research_read", "research_search", "agent_propose", "agent_trial", "agent_trial_wait", "agent_trial_read", "todowrite", "progress_report"]) assert.ok(ruleAt(rules, t, "*", "allow") > 0, t);
+  for (const t of ["research_fetch", "research_read", "research_search", "agent_propose", "todowrite", "progress_report"]) assert.ok(ruleAt(rules, t, "*", "allow") > 0, t);
   for (const t of ["read", "glob", "grep", "list", "websearch"]) assert.ok(ruleAt(rules, t, "**", "allow") > 0, t);
   assert.ok(ruleAt(rules, "external_directory", `${ARCH_DIR}/**`, "allow") > 0);
   assert.ok(ruleAt(rules, "external_directory", `${HOME}/.local/share/opencode/tool-output/*`, "allow") > 0);
@@ -3063,14 +3063,6 @@ test("Architect launch: stamped {rootJobId = its own id, attempt 1, mode}; the r
   assert.equal("architect" in plain.job(pid), false, "the stamp needs a specialist launch");
 });
 const buildArchitectRulesetFor = (job, policy) => buildArchitectRuleset({ policy, agentDir: ARCH_DIR, home: HOME, projectPatterns: [], sessionID: job.childSessionID });
-
-test("Architect launch: a routine round (refresh / check-up) keeps its mode; an unknown one reads as unknown (Architect v2)", async () => {
-  const w = specialistWorld();
-  const routine = await start(w, { ...archInput(w), architect: { mode: "routine" } });
-  assert.deepEqual(w.job(routine).architect, { rootJobId: routine, attempt: 1, mode: "routine" });
-  const odd = await start(w, { ...archInput(w), architect: { mode: "whatever" } });
-  assert.equal(w.job(odd).architect.mode, "unknown");
-});
 
 test("Architect ruleset: no bash allow survives (secret patterns included), nothing under ~/.manta-secrets is allowed to ANY tool, edit / write / webfetch are denied", () => {
   const rules = buildArchitectRuleset({ policy: BAL, agentDir: ARCH_DIR, home: HOME, sessionID: "ses_child1" });

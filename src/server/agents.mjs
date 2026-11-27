@@ -593,6 +593,23 @@ export function mergeLines(live, base, next) {
   return { ok: true, text: parts.flatMap((p) => p.ok ?? []).join("\n") };
 }
 
+/** A skill's `{ name, description }` from its SKILL.md frontmatter (a skill with broken frontmatter keeps its folder name). */
+function skillHeaderOf(text, fallback) {
+  let name = fallback;
+  let description = "";
+  const front = splitFrontmatter(text);
+  if (front) {
+    try {
+      const data = YAML.parse(front.yaml);
+      if (typeof data?.name === "string" && data.name.trim()) name = data.name.trim();
+      if (typeof data?.description === "string") description = data.description.trim().replace(/\s+/g, " ");
+    } catch {
+      /* keeps the folder name */
+    }
+  }
+  return { name, description };
+}
+
 /** Does the running tool call's input equal what the tool posted? Exact field presence: an omitted field is not null. */
 function changeInputMatches(given, b) {
   for (const k of ["action", "agent", "draft"]) {
@@ -1098,19 +1115,7 @@ export function createAgentsEngine({
         continue;
       }
       stamp += `|${file}:${mtime}`;
-      let name = dirName;
-      let description = "";
-      const front = splitFrontmatter(text);
-      if (front) {
-        try {
-          const data = YAML.parse(front.yaml);
-          if (typeof data?.name === "string" && data.name.trim()) name = data.name.trim();
-          if (typeof data?.description === "string") description = data.description.trim().replace(/\s+/g, " ");
-        } catch {
-          /* a skill with broken frontmatter keeps its folder name */
-        }
-      }
-      out.push({ name, description, path: file });
+      out.push({ ...skillHeaderOf(text, dirName), path: file });
     }
     return { skills: out, stamp };
   }
@@ -3270,22 +3275,6 @@ export function createAgentsEngine({
     return bundle;
   }
   const fileHashesOf = (bundle) => Object.fromEntries(Object.entries(bundle).map(([k, v]) => [k, sha256Hex(v)]));
-
-  const skillHeaderOf = (text, fallback) => {
-    let name = fallback;
-    let description = "";
-    const front = splitFrontmatter(text);
-    if (front) {
-      try {
-        const data = YAML.parse(front.yaml);
-        if (typeof data?.name === "string" && data.name.trim()) name = data.name.trim();
-        if (typeof data?.description === "string") description = data.description.trim().replace(/\s+/g, " ");
-      } catch {
-        /* a skill with broken frontmatter keeps its folder name */
-      }
-    }
-    return { name, description };
-  };
 
   /**
    * What a trial of this draft needs (the trials module calls it): the complete resulting file set, its per-file hashes, the

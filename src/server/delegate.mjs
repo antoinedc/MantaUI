@@ -4788,7 +4788,8 @@ function livenessFieldsAtLaunch(ceilingMs) {
 // child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
 // use) and reports ONE result through N7, whatever route it takes to a terminal state.
 
-const architectModeOf = (mode) => (mode === "build" || mode === "plan" || mode === "routine" ? mode : "unknown");
+/** The mode an Architect round is stamped with: build / plan (a lead's hand-off), routine (a refresh or check-up), else unknown. */
+export const architectModeOf = (mode) => (mode === "build" || mode === "plan" || mode === "routine" ? mode : "unknown");
 
 // The agent every delegate child runs. Today's jobs always ran the default agent; a
 // child created under a parent would otherwise be free to inherit a plan-mode one.
