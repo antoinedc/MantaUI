@@ -4511,6 +4511,30 @@ export function createAgentsEngine({
     return registryProjects();
   }
 
+  // ---- trials (Architect v2 §3.3, §6.2): what the change card and the Tests tab read ----
+
+  const TRIAL_GONE = "That trial no longer exists";
+  const TRANSCRIPT_WINDOW = 20_000;
+
+  /** The wire view of one trial (`agents:trial`): its cases and what each did; never a transcript. */
+  async function trial(input) {
+    const id = typeof input === "string" ? input : typeof input?.id === "string" ? input.id : "";
+    const v = id ? trials?.view?.(id) : null;
+    if (!v) throw new AgentError(TRIAL_GONE);
+    return v;
+  }
+
+  /** One case's redacted transcript, 20 000 characters from `offset` (`agents:trial-transcript`). */
+  async function trialTranscript(input) {
+    const id = typeof input?.id === "string" ? input.id : "";
+    const name = typeof input?.case === "string" ? input.case : "";
+    const offset = input?.offset === undefined ? 0 : input.offset;
+    if (!Number.isInteger(offset) || offset < 0) throw new AgentError("offset must be a whole number from 0");
+    const full = id && name ? await trials?.transcript?.(id, name) : null;
+    if (typeof full !== "string") throw new AgentError(TRIAL_GONE);
+    return { text: full.slice(offset, offset + TRANSCRIPT_WINDOW), nextOffset: offset + TRANSCRIPT_WINDOW < full.length ? offset + TRANSCRIPT_WINDOW : null };
+  }
+
   // ---- the profile and a task's research ----
 
   const SOURCES_SHOWN = 10;
@@ -4862,6 +4886,8 @@ export function createAgentsEngine({
     questionAnswer,
     questionDismiss,
     projects,
+    trial,
+    trialTranscript,
     taskResearch,
     refreshSet,
     refresh,

@@ -1388,6 +1388,8 @@ export const httpApi: Api = {
   agentsRefreshSet: (input) => rpc("agents:refresh-set", input),
   agentsTaskResearch: (input) => rpc("agents:task-research", input),
   agentsProjects: () => rpc("agents:projects"),
+  agentsTrial: (input) => rpc("agents:trial", input),
+  agentsTrialTranscript: (input) => rpc("agents:trial-transcript", input),
   // The box publishes `taskQuestion` ({id, parentSessionID, rootJobId, state}) and `agentFleet` ({}): hints, refetch.
   onTaskQuestion: (cb) => on<TaskQuestionEvent>("taskQuestion", cb),
   onAgentFleet: (cb) => on<unknown>("agentFleet", () => cb()),

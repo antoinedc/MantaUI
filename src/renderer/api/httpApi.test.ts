@@ -921,6 +921,13 @@ describe("httpApi agent-screens channels", () => {
     { name: "agentsRefreshSet", call: () => httpApi.agentsRefreshSet({ slug: "seo", enabled: false }), channel: "agents:refresh-set", args: [{ slug: "seo", enabled: false }] },
     { name: "agentsTaskResearch", call: () => httpApi.agentsTaskResearch({ jobId: "j1" }), channel: "agents:task-research", args: [{ jobId: "j1" }] },
     { name: "agentsProjects", call: () => httpApi.agentsProjects(), channel: "agents:projects", args: [] },
+    { name: "agentsTrial", call: () => httpApi.agentsTrial({ id: "tr_1" }), channel: "agents:trial", args: [{ id: "tr_1" }] },
+    {
+      name: "agentsTrialTranscript",
+      call: () => httpApi.agentsTrialTranscript({ id: "tr_1", case: "main", offset: 20000 }),
+      channel: "agents:trial-transcript",
+      args: [{ id: "tr_1", case: "main", offset: 20000 }],
+    },
   ];
 
   channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");

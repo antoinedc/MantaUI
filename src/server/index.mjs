@@ -14,7 +14,7 @@ import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat, mkdir, rm, readdir } from "node:fs/promises";
-import { createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, basename } from "node:path";
 import { homedir, hostname } from "node:os";
@@ -257,6 +257,9 @@ import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
+import { createAgentTrials } from "./agentTrials.mjs";
+import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
+import { createSecretScanner } from "./knowledge/secretScan.mjs";
 import { createTaskQuestions } from "./taskQuestions.mjs";
 import { createResearchEngine } from "./research.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
@@ -2632,7 +2635,38 @@ const researchLibrary = createResearchLibrary({
   bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
   getSource: (child, id) => researchEngine.getSource(child, id),
 });
+// Architect v2 Stage 1 (src/server/agentTrials.mjs): the Architect's trial runs of a drafted agent. Headless internal sessions
+// in a throwaway copy of a project; the agents engine (built just below) plans each draft and checks the verdicts, read at call time.
+const trialScanner = createSecretScanner();
+const agentTrials = createAgentTrials({
+  root: statePath("agents"),
+  home: homedir(),
+  agents: () => agentsEngine,
+  oc,
+  local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
+  gitRun: (args) => tmux.run("git", args),
+  editConfig: (edits) => editOpencodeConfig(edits),
+  // the shared background budget: asked before each case, told what it really cost
+  budget: { canSpend: (a) => backgroundBudget.check(a), book: (a) => backgroundBudget.record(a) },
+  policy: autonomyPolicy,
+  // the most recently used checkout of a project that still exists on this box (the knowledge layer's own record of them)
+  projectDirectory: async (slug) => {
+    const db = knowledgeEngine.state?.db;
+    if (!db) return null;
+    for (const r of db.prepare("SELECT directory FROM session_project WHERE slug = ? AND directory IS NOT NULL GROUP BY directory ORDER BY MAX(pinned_at) DESC LIMIT 10").all(slug)) {
+      try {
+        if (statSync(r.directory).isDirectory()) return r.directory;
+      } catch {
+        /* gone */
+      }
+    }
+    return null;
+  },
+  scanSymlinks: scanTrialSymlinks,
+  redact: (text) => trialScanner.redact(text),
+});
 const agentsEngine = createAgentsEngine({
+  trials: agentTrials,
   research: researchEngine,
   library: researchLibrary, // the Architect's fit check is checked against the entries it names
   editConfig: (edits) => editOpencodeConfig(edits),
@@ -2688,9 +2722,14 @@ const agentsEngine = createAgentsEngine({
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
 architectJobEndedSink = async (job) => {
+  // the round is over (finished, failed or stopped): its trial cases that are still queued or running are aborted and cleaned up
+  await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the end of a round failed:", e?.message ?? e));
   await agentsEngine.reconcile(); // release first: the Outcome lines describe the records as released
-  return { outcome: await agentsEngine.outcomeLinesForJob(job.id) };
+  return { outcome: await agentsEngine.outcomeLinesForJob(job) };
 };
+// leftovers of a crashed trial (a session, a copy of a project, a block) are cleaned at boot; results are kept 30 days
+void agentTrials.recover().catch((e) => console.error("[agent-trials] boot cleanup failed:", e?.message ?? e));
+startPoller(() => agentTrials.sweep(), { intervalMs: 60 * 60_000, label: "agent-trials-sweep", immediate: false });
 // held proposals whose round ended while nobody was looking (a stop, a crash, a restart) are released every minute; the
 // research store drops what is older than 30 days or over its cap every five
 startPoller(() => agentsEngine.reconcile(), { intervalMs: 60_000, label: "agents-reconcile", immediate: false });
@@ -4132,7 +4171,8 @@ function observeLifecycleEvent(evt, raw) {
       getConfig: () => local.configGet(),
       reply: (a) => oc.replyPermission(a),
       // A background job cannot wait on a person: an ask in one of its sessions is rejected before trust mode sees it.
-      ownsSession: (sid) => delegateEngine.ownsSession(sid),
+      // (a trial run of a drafted agent has no user either: the ask is rejected and the refusal shows in its record)
+      ownsSession: (sid) => delegateEngine.ownsSession(sid) || agentTrials.ownsSession(sid),
       onRejectFailed: (a) => delegateEngine.queueRejection(a),
       interpret: () => interpretEvent(raw),
       publish: () => bus.publish({ kind: "opencode", payload: raw }),
@@ -4158,7 +4198,7 @@ const statusReconciler = createStatusReconciler({
   listQuestions: (sid, o) => oc.listQuestions(sid, o),
   interp: streamInterp,
   autoAllow: async () => !!(await local.configGet())?.chatAutoAllow,
-  ownsSession: (sid) => delegateEngine.ownsSession(sid),
+  ownsSession: (sid) => delegateEngine.ownsSession(sid) || agentTrials.ownsSession(sid),
   isAutoAnswered: (id) => autoAnsweredAsks.has(id),
   log: (...a) => console.log(...a),
   warn: (...a) => console.warn(...a),
@@ -4209,6 +4249,11 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   // A background job cannot wait on a person (spec 2026-11-14 A5): a question form raised in one of its sessions is
   // never interpreted, published or pushed. A specialist's task asking in its own session has it captured as the decision
   // (the task ends "needs a decision", spec 2026-11-24-ask-user-tool.md); any other is rejected. (The model learns why from its opening prompt.)
+  // A trial run of a drafted agent has no user: its question is recorded and answered by the server, never shown or pushed.
+  if (raw?.type === "form.created" && isQuestionForm(raw.data?.form) && agentTrials.ownsSession(raw.data.form.sessionID)) {
+    void agentTrials.handleQuestion(raw.data.form).catch((e) => console.warn("[agent-trials] handling a test run's question failed:", e?.message ?? e));
+    return;
+  }
   if (raw?.type === "form.created" && isQuestionForm(raw.data?.form) && delegateEngine.ownsSession(raw.data.form.sessionID)) {
     void delegateEngine
       .handleQuestion(raw.data.form)
@@ -4227,6 +4272,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   routinesEngine.observeRaw(raw).catch((e) => console.warn("[routines] observeRaw failed:", e?.message ?? e));
   // Shared knowledge: pins a session to its project at its first prompt; a subagent child inherits its parent's.
   knowledgeEngine.observeRaw(raw);
+  // Architect trials: how a test run's session ended
+  agentTrials.observeRaw(raw);
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
     if (evt.type === "session.idle" && evt.properties?.sessionID) {
@@ -5084,6 +5131,23 @@ const handleRequest = async (req, res) => {
   // POST /api/research-library/{find,save}  the same shape (every specialist's task; src/server/researchLibrary.mjs)
   //                                         → {ok:true, ...} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engines: src/server/agents.mjs, src/server/research.mjs.
+  if (path === "/api/agents/trial" || path === "/api/agents/trial-wait" || path === "/api/agents/trial-read") {
+    // Architect v2 Stage 1: the trial tools (agent_trial / agent_trial_wait / agent_trial_read) — bound to the Architect's live call
+    // by the agents engine, same shape as agent_propose; a refusal is HTTP 200 {ok:false, error}. class-2 (BET-1460): the manta plugin.
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = (await readJsonBody(req)) ?? {};
+      const run = { "/api/agents/trial": agentTrials.create, "/api/agents/trial-wait": agentTrials.wait, "/api/agents/trial-read": agentTrials.read }[path];
+      respondJson(res, 200, await run(body));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (agent_trial* tools) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
   if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save") {
     try {
       if (req.method !== "POST") {

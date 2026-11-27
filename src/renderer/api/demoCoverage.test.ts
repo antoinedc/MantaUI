@@ -78,6 +78,8 @@ export const DEMO_UNIMPLEMENTED = [
   "agentsSeatRemove",
   "agentsSeatSet",
   "agentsTaskResearch",
+  "agentsTrial",
+  "agentsTrialTranscript",
   "authClaim",
   "authPair",
   "autoUpdateCheck",

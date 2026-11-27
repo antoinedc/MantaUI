@@ -2362,3 +2362,30 @@ test("syncLocked keeps the trial blocks the trials module says are live and remo
     await f.cleanup();
   }
 });
+
+test("trial / trialTranscript (the agents:trial RPCs): the wire view of a trial, and its transcript a window at a time; a trial that is gone is a sentence", async () => {
+  const f = await proposeFixture({
+    extra: {
+      trials: {
+        get: () => null,
+        activeTrialKeys: () => new Set(),
+        view: (id) => (id === "tr_1" ? { id: "tr_1", rootJobId: "job1", agentSlug: "dev", draftHash: "h", createdAt: 1, cases: [] } : null),
+        transcript: async (id, name) => (id === "tr_1" && name === "main" ? "x".repeat(45_000) : null),
+      },
+    },
+  });
+  try {
+    assert.equal((await f.engine.trial({ id: "tr_1" })).agentSlug, "dev");
+    await assert.rejects(f.engine.trial({ id: "tr_nope" }), /no longer exists/);
+    const p1 = await f.engine.trialTranscript({ id: "tr_1", case: "main" });
+    assert.equal(p1.text.length, 20_000);
+    assert.equal(p1.nextOffset, 20_000);
+    const p3 = await f.engine.trialTranscript({ id: "tr_1", case: "main", offset: 40_000 });
+    assert.equal(p3.text.length, 5_000);
+    assert.equal(p3.nextOffset, null);
+    await assert.rejects(f.engine.trialTranscript({ id: "tr_1", case: "ghost" }), /no longer exists|no case/i);
+    await assert.rejects(f.engine.trialTranscript({ id: "tr_1", case: "main", offset: -5 }), /offset/);
+  } finally {
+    await f.cleanup();
+  }
+});

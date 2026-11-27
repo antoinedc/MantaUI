@@ -2903,6 +2903,9 @@ export function buildHandlers({
     "agents:refresh-set": (input) => agentsCall("refresh-set", (a) => a.refreshSet(input)),
     "agents:task-research": (input) => agentsCall("task-research", (a) => a.taskResearch(input)),
     "agents:projects": () => agentsCall("projects", (a) => a.projects()),
+    // Architect v2 Stage 1: a trial run of a drafted agent (cases and what they did) and one case's transcript, a window at a time
+    "agents:trial": (input) => agentsCall("trial", (a) => a.trial(input)),
+    "agents:trial-transcript": (input) => agentsCall("trial-transcript", (a) => a.trialTranscript(input)),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>
