@@ -996,7 +996,7 @@ async function readJsonOptional(fs, path) {
  * @param {()=>Promise<string[]>} [deps.listApprovedModels]  the Sub-approved models as `provider/model` keys; throws (or is empty) when they can't be checked
  * @param {object} [deps.research]      { getSource(childSessionID, sourceId) → {text,url,finalUrl,private}|null } — the Architect's stored sources (Phase 5A)
  * @param {object} [deps.library]       { lookup({project, refs}) → [{ref, entry|null}], usedBy(rootJobId) } — the research library, read by the server to check what a fit check rests on
- * @param {object} [deps.trials]        { get(id) → trial|null, transcript(id, caseName) → text|null, activeTrialKeys() → Set<string> } — Architect v2 trial runs (src/server/agentTrials.mjs)
+ * @param {object} [deps.trials]        { get(id) → trial|null, transcript(id, caseName) → text|null, activeTrialKeys() → Set<string>, list(slug) → AgentTrial[] } — Architect v2 trial runs (src/server/agentTrials.mjs)
  * @param {(p:{id:string,sessionID:string,slug:string|null,origin:object})=>void} [deps.publish]  (as above; the payload carries the change's origin)
  */
 export function createAgentsEngine({
@@ -4640,6 +4640,8 @@ export function createAgentsEngine({
       builtBy,
       refresh: await refreshOf(entry),
       research: await withUsedBy(research, entry.slug, allChanges),
+      // Architect v2 §3.4: the Tests tab — this agent's trial runs, newest first (≤ 20)
+      trials: (trials?.list?.(entry.slug) ?? []).filter(Boolean),
     };
   }
 

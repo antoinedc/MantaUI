@@ -5747,6 +5747,25 @@ async function handleQuestion(form, deps) {
   return { captured: decision !== null };
 }
 
+/**
+ * A server-set progress label on a RUNNING round (Architect v2 §3.4: "Trial running · case 2 of 3"), shown as the task card's
+ * headline while fresh. `label: null` clears it, but only when the current label is still one that starts with `clearPrefix`
+ * (a model's own report since then is kept).
+ */
+export async function setJobLabel(id, label, { clearPrefix = "" } = {}, deps = {}) {
+  const at = (deps.now ?? (() => Date.now()))();
+  const out = await mutateJobProgress(id, deps, (job) => {
+    const jp = job.jobProgress;
+    if (typeof label === "string" && label.trim()) {
+      const text = label.trim().slice(0, 500);
+      return jp.label === text ? null : { jobProgress: { ...jp, label: text, labelAt: at } };
+    }
+    if (!jp.label || !clearPrefix || !jp.label.startsWith(clearPrefix)) return null;
+    return { jobProgress: { ...jp, label: "", labelAt: null } };
+  });
+  return !!out;
+}
+
 /** A guarded patch of a RUNNING record's progress fields under the jobs lock; publishes (throttled) when it wrote. */
 async function mutateJobProgress(id, deps, fn) {
   const { load = loadJobs, save = saveJobs } = deps;
@@ -6284,6 +6303,8 @@ export function createDelegateEngine(baseDeps) {
     rootJobOf,
     /** A milestone on the task's newest round (`rootJobId`). */
     addJobMilestone: (rootJobId, text) => addJobMilestone(rootJobId, text, deps),
+    /** A server-set progress label on a running round (null clears one that starts with `clearPrefix`). */
+    setJobLabel: (id, label, opts) => setJobLabel(id, label, opts, deps),
     /** The question store's engine is created AFTER this one (it needs this engine's functions): hand it over here. */
     setTaskQuestions: (taskQuestions) => {
       deps.taskQuestions = taskQuestions;

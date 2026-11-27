@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgentTrials, draftHash, differingFiles, TRIAL_AUTO_ANSWER, CASE_TIMEOUT_MS, TRIAL_DATA_LINE, TRIAL_BLOCK_DESCRIPTION, WITHHELD } from "./agentTrials.mjs";
+import { createAgentTrials, draftHash, differingFiles, TRIAL_AUTO_ANSWER, CASE_TIMEOUT_MS, TRIAL_DATA_LINE, TRIAL_BLOCK_DESCRIPTION, WITHHELD, TRIAL_PROGRESS_PREFIX, trialProgressLabel } from "./agentTrials.mjs";
 import { MODES } from "../shared/autonomyShared.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 
@@ -1035,6 +1035,37 @@ test("a case's project is limited to the agent's seats and the Architect task's 
     assert.equal(seat.ok, true, seat.error);
     await settle(f.t, own.trialId);
     await settle(f.t, seat.trialId);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("the Architect's task card says which case runs: a label per case as it starts, cleared when the trial ends", async () => {
+  const f = await rig();
+  try {
+    const calls = [];
+    const t = f.make({ progress: async (jobId, label) => calls.push([jobId, label]) });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("a"), f.caseOf("b"), f.caseOf("c")] }));
+    await settle(t, trialId);
+    await until(() => calls.some(([, l]) => l === null));
+    const labels = calls.filter(([, l]) => l !== null);
+    assert.deepEqual(labels.map(([j]) => j), ["job1", "job1", "job1"], "on the Architect's round");
+    assert.deepEqual(labels.map(([, l]) => l).sort(), ["Trial running · case 1 of 3", "Trial running · case 2 of 3", "Trial running · case 3 of 3"]);
+    assert.ok(labels.every(([, l]) => l.startsWith(TRIAL_PROGRESS_PREFIX)));
+    assert.deepEqual(calls.at(-1), ["job1", null], "cleared once every case ended");
+    assert.equal(trialProgressLabel(1, 3), "Trial running · case 2 of 3");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a progress label that can't be set never stops a case", async () => {
+  const f = await rig();
+  try {
+    const t = f.make({ progress: async () => { throw new Error("jobs store busy"); } });
+    const { trialId } = await t.create(f.input());
+    const r = await settle(t, trialId);
+    assert.equal(r.state, "done");
+    assert.equal(r.cases[0].state, "done");
   } finally {
     await f.cleanup();
   }
