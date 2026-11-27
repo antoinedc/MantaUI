@@ -23,7 +23,7 @@ import { draftHash, differingFiles } from "./agentTrials.mjs";
 import { DAY as CHECKUP_DAY, taskCounts, median, repeatedSentences, brokenReferenceCandidates, agentNeedsLook, renderFactSheet, factHighlights } from "./agentCheckup.mjs";
 import { reviewScripts, pickReviewModel } from "./agentScriptReview.mjs";
 import { checkSkillOps, planSkills, existingSkillsOf, checkSkillSearch, checkSkillSearchFacts, parseSourceMd, SKILL_SEARCH_MISSING } from "./agentSkills.mjs";
-import { planLearned, parseLearned, renderLearned, checkRuleText, buildLearnedBlock, quoteHash, normalizeRule, ALL_SCOPE, LEARNED_ID_RE, wsNorm as learnedWsNorm } from "./agentLearning.mjs";
+import { planLearned, parseLearned, renderLearned, checkRuleText, buildLearnedBlock, quoteHash, ALL_SCOPE, LEARNED_ID_RE, wsNorm as learnedWsNorm } from "./agentLearning.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG, ARCHITECT_SLUG, ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS, TRIAL_BLOCK_RE, isTeamAgent } from "../shared/agentsShared.mjs";
