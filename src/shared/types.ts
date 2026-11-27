@@ -3208,7 +3208,7 @@ export interface AgentChange {
   callID: string;
   state: AgentChangeState;
   needsClick: boolean;
-  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "script-flagged" | "script-unchecked" | null;
+  reason: "ask" | "lead" | "isolation" | "core" | "unfinished" | "plan" | "script-flagged" | "script-unchecked" | "change-flagged" | "change-unchecked" | "routine-create" | null;
   before: string | null;
   after: string;
   createdAt: number;
@@ -3235,9 +3235,11 @@ export interface AgentChange {
   skillsDiff?: SkillChange[];
   skillSearch?: SkillSearchRecord;
   /** Architect v2 Stage 3: what a learned-preference record added, took back (`removedId`), or what a proposal folded into the instructions (`foldedIds`). */
-  learned?: { added?: LearnedRule; removedId?: string; foldedIds?: string[] };
+  learned?: { added?: LearnedRule; removedId?: string; foldedIds?: string[]; removed?: LearnedRule[]; archivedIds?: string[]; retired?: LearnedRule[]; kept?: string[] };
   /** The independent script review (a tool-less session on another model reads the scripts as data): "error" = it failed, timed out or couldn't be read. Absent until it has run, and when there are no scripts. */
   scriptReview?: { verdict: "clean" | "flagged" | "error"; reasons: string[]; model: string; at: number };
+  /** Security review H4: the independent review of a routine round's change (instruction diff and changed skill texts vs. the round's purpose); `carried`: the folded learned rules it confirmed. */
+  contentReview?: { verdict: "clean" | "flagged" | "error"; reasons: string[]; carried: string[]; model: string; at: number };
 }
 export interface AgentChangeEvent {
   id: string;

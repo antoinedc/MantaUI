@@ -11,7 +11,7 @@
 
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
@@ -5990,11 +5990,34 @@ export function createAgentsEngine({
   const SHEET_BRANCH_CHECKS_MAX = 30;
   const CHECKUP_RUNS_KEPT = 4;
 
-  /** The `@slug` mentions and absolute paths in `text` that don't resolve on this box (`@ghost`, `/opt/gone/x`). */
-  async function brokenIn(text, slugs) {
+  /** The folders a check-up may look into for broken paths: every registered project's paths. Empty when the registry can't say. */
+  async function projectFolders() {
+    try {
+      const list = (await registry?.list?.()) ?? [];
+      return list.flatMap((p) => (Array.isArray(p?.paths) ? p.paths : [])).filter((x) => typeof x === "string" && isAbsolute(x));
+    } catch (e) {
+      log.warn?.(`[agents] couldn't list the project folders: ${e?.message ?? e}`);
+      return [];
+    }
+  }
+
+  /**
+   * The `@slug` mentions and absolute paths in `text` that don't resolve on this box (`@ghost`, `/repo/site/gone.md`). Only paths under the
+   * agent's own folder or a registered project's folder are looked at (security review L2): the fact sheet never says whether some other
+   * file on the box exists.
+   */
+  async function brokenIn(text, slugs, roots = []) {
     const { mentions, paths } = brokenReferenceCandidates(text);
     const out = mentions.filter((m) => !slugs.has(m) && !RESERVED_SLUGS.includes(m)).map((m) => `@${m}`);
-    for (const p of paths) if (!(await exists(fs, p.startsWith("~") ? join(home, p.slice(1)) : p))) out.push(p);
+    const inside = (p) => roots.some((r) => {
+      const rel = relative(resolvePath(r), p);
+      return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+    });
+    for (const p of paths) {
+      const abs = resolvePath(p.startsWith("~") ? join(home, p.slice(1)) : p);
+      if (!inside(abs)) continue;
+      if (!(await exists(fs, abs))) out.push(p);
+    }
     return out;
   }
 
@@ -6066,7 +6089,7 @@ export function createAgentsEngine({
         },
         skillUpdates: (await guarded(() => skillUpdatesFor(e.slug), [])).map((u) => ({ skill: u.skill, repo: u.repo })),
         instructionChars: (e.body ?? "").length,
-        brokenReferences: (await guarded(() => brokenIn(brokenText, slugs), [])).slice(0, SHEET_REFS_MAX),
+        brokenReferences: (await guarded(async () => brokenIn(brokenText, slugs, [e.dir, ...(await projectFolders())]), [])).slice(0, SHEET_REFS_MAX),
         idle: !running && !(lastAt >= t - 30 * CHECKUP_DAY),
         idleDays: lastAt > 0 ? Math.floor((t - lastAt) / CHECKUP_DAY) : null,
       });

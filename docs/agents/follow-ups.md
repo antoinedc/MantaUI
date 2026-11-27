@@ -419,22 +419,28 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 
 ## From Architect v2 PR D (learning, the weekly check-up, 2026-11-27)
 
-- **No agent has a git identity of its own, so signal 5 can't tell the agent's commits from the user's by author.** Agents commit with the
-  box's `user.email`. The runner reads commits on a task's branch made after `job.endHead` whose author email is not one the task's own
-  commits (`baseSha..endHead`) carry; a commit the user makes from the same identity as the agent's is not seen. Giving worktree tasks a
-  dedicated identity (e.g. `agent@manta.invalid`) would make the signal exact.
+- **Give agents their own git identity.** Agents commit with the box's `user.email`, so signal 5 can't tell the agent's commits from the
+  user's by author: the runner reads commits on a task's branch made after `job.endHead` whose author email is not one the task's own
+  commits (`baseSha..endHead`) carry (no merges, nothing reachable from the default branch, messages only); a commit the user makes from the
+  same identity as the agent's is not seen, and one from a third person with another identity is read as the user's. Giving worktree tasks a
+  dedicated identity (e.g. `agent@manta.invalid`) and reading only commits by the box user's own identity would make the signal exact.
 - **A rule that is learned again is not "reinforced".** The spec's cap archives "the least recently reinforced" rule; a duplicate is dropped
-  without a write (a write per repeat would be a change record per repeat, and would break the Undo of the record that made the rule), so the
-  oldest-learned rule is the one archived. If reinforcement matters, store a counter outside the snapshotted folder.
+  without a write (a write per repeat would be a change record per repeat), so the oldest-learned rule is the one archived. If reinforcement
+  matters, keep a counter in the learned store (`~/.manta/agents/.learned/`).
 - **`agents:review-dismiss` ("Didn't need me") is not a signal yet:** the Fleet redesign that ships the control is out of scope. An undone or
   turned-down change is read as context for the model (signal 4), and can't be quoted: only the user's words (messages, answers) and the
   user's commits can be, so an undo alone never produces a rule.
 - **Unmerged branches of tasks the USER started still show in Needs you** ("Branch ready to merge", the P1 rule of the screens spec). PR D
   puts every finished branch that waited more than a day (Manta-handed ones too) in the check-up's fact sheet and its report; removing the
   user-started ones from Needs you belongs to the Fleet / Needs-you redesign.
-- **Learned records are change records,** so they count towards the 200-record cap of the change store (finished ones are evicted oldest
-  first, after discarded / undone ones). Evicting an applied learned record only loses its card's Undo; the rule stays and the Learned tab's Undo
-  still works. A very chatty learner could push older Architect changes out of the history sooner; a separate store would avoid that.
+- **Learned records are change records with their own cap** (200 learned records beside the 200 others, evicted oldest first after
+  discarded / undone ones): a chatty learner never pushes Architect changes out of the history. Evicting an applied learned record only loses
+  its card's Undo; the rule stays and the Learned tab's Undo still works.
+- **The independent checks cost model calls outside the background budget.** The learned-rule check (one per candidate that passes the facts)
+  and the routine change review (one per routine update) run as tool-less sessions like the script review, not through the shared background
+  budget; a box with no model for them stores no rule / holds the routine change for a click. Booking them on the budget is a follow-up.
+- **The risky-token gate is lexical.** It catches a rule that names a site, address, path, package or command its quote doesn't; a rule that
+  paraphrases a smuggled instruction in plain words is left to the independent rule check.
 - **A learned write at Ask waits as a card and is planned again at the click** (other rules may have landed since); one that became a duplicate
   is discarded with "That preference is already learned". Its 24 h expiry is the change store's.
 - **The check-up covers specialists only** (the lead and the Architect have no refresh routine either). The Architect's own facts (its learned

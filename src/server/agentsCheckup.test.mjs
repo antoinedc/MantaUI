@@ -60,7 +60,7 @@ async function fixture({ templates = ["dev", "manta", "architect"], level = "aut
         listProjects: async () => w.tmuxProjects,
         newSession: async (i) => (w.newSessions.push(i), (w.tmuxProjects = [{ tmuxSession: i.name, windows: [] }]), { windowIndex: 0 }),
       },
-      registry: { identify: async (dir) => (dir === "/repo/site" ? { slug: "site" } : null), list: async () => [] },
+      registry: { identify: async (dir) => (dir === "/repo/site" ? { slug: "site" } : null), list: async () => w.projectList ?? [] },
       library: { lookup: async ({ refs }) => refs.map((ref) => ({ ref, entry: w.library.find((e) => e.id === ref || e.topic === ref) ?? null })) },
       trials: { list: (slug) => w.trials[slug] ?? [], activeTrialKeys: () => new Set() },
       lsRemote: async (repo) => w.upstream[repo] ?? null,
@@ -188,7 +188,8 @@ test("the fact sheet: sentences repeated across 3 agents, references that no lon
     const shared = "Always run the full test suite before you report that the work is finished.";
     for (const slug of ["scout", "writer"]) {
       await mkdir(join(f.root, slug, "home"), { recursive: true });
-      await writeFile(join(f.root, slug, "agent.md"), `---\nname: ${slug}\ndescription: Does ${slug}.\nisolation: none\n---\n${shared}\nAsk @ghost when unsure, and read /opt/gone-for-good/guide.md first.\n`);
+      // a missing file in a project and in the agent's own folder is reported; anything elsewhere on the box is never probed (L2)
+      await writeFile(join(f.root, slug, "agent.md"), `---\nname: ${slug}\ndescription: Does ${slug}.\nisolation: none\n---\n${shared}\nAsk @ghost when unsure, read /opt/gone-for-good/guide.md and ~/site/gone.md first, and keep notes in ~/agents/${slug}/home/notes.md, never ~/site/../outside.md.\n`);
     }
     const devFile = join(f.root, "dev", "agent.md");
     await writeFile(devFile, `${await readFile(devFile, "utf-8")}\n${shared}\n`);
@@ -201,11 +202,14 @@ test("the fact sheet: sentences repeated across 3 agents, references that no lon
     f.w.library = [{ id: "rl_1", topic: "CRO copywriting", status: "stale", thin: false, ageDays: 120, shelfLifeDays: 90, sourceCount: 4 }];
     await f.putChanges([{ id: "ach_r", kind: "update", slug: "writer", agentName: "writer", sessionID: "s", messageID: "", callID: "", state: "applied", needsClick: false, reason: null, before: "x", after: "y", createdAt: T0 - 5 * D, decidedAt: T0 - 5 * D, error: null, origin: { kind: "job", jobId: "j9", rootJobId: "j9", attempt: 1 }, basis: [{ id: "rl_1", topic: "CRO copywriting", sourceCount: 4, ageDays: 2 }] }]);
     f.w.trials = { scout: [{ id: "tr_1", createdAt: T0 - 2 * D, cases: [{ name: "a", state: "failed" }, { name: "b", state: "done" }] }, { id: "tr_old", createdAt: T0 - 90 * D, cases: [{ name: "a", state: "failed" }] }] };
-    const sheet = await f.engine.factSheet();
+    await mkdir(join(f.base, "site"), { recursive: true });
+    f.w.projectList = [{ slug: "site", paths: [join(f.base, "site")] }];
+    const sheet = await f.make({ home: f.base }).factSheet(); // the box's home is the temp folder: ~/agents is the agents' root
+
     assert.equal(sheet.team.repeatedSentences.length, 1);
     assert.deepEqual(sheet.team.repeatedSentences[0].agents, ["dev", "scout", "writer"]);
     const by = Object.fromEntries(sheet.agents.map((a) => [a.slug, a]));
-    assert.deepEqual(by.scout.brokenReferences.sort(), ["/opt/gone-for-good/guide.md", "@ghost"]);
+    assert.deepEqual(by.scout.brokenReferences.sort(), ["@ghost", "~/agents/scout/home/notes.md", "~/site/gone.md"]);
     assert.deepEqual(by.dev.brokenReferences, []);
     assert.deepEqual(by.writer.research.stale, ["CRO copywriting"]);
     assert.equal(by.scout.trialsFailed30, 1, "only trials of the last 30 days");

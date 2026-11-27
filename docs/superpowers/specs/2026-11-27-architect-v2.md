@@ -260,7 +260,7 @@ The lead's `agent_change` (small dictated edits) is unchanged and needs no trial
     on either is refused;
   - a skill `add` needs `skillSearch` (§4.2).
 - **Snapshots.** `before` / `after` stay **agent.md strings** (unchanged contract; the card diff keeps working). New
-  records add `beforeBundle` / `afterBundle: Record<path, sha256>` over agent.md + `skills/**` + `learned/**`, blobs in
+  records add `beforeBundle` / `afterBundle: Record<path, sha256>` over agent.md + `skills/**`, blobs in
   `~/.manta/agents/.blobs/<sha256>`. Apply / Undo / Restore / conflict detection use the bundle maps when present
   (every file must match its expected hash), else today's agent.md path. Blobs are swept when no record references
   them. The renderer gets `skillsDiff` (per skill: op + changed paths + `scripts`) for the card, never blob contents; a file's text is read
@@ -326,34 +326,54 @@ Only Architect proposals (create, update, refresh, check-up). The lead's `agent_
   2. in the parent chat, the user's next message after that task's result when the lead then continues that task or
      re-hands the same work to the agent;
   3. answers to the task's questions where the user picked a non-recommended option or typed their own text
-     (`.questions.json`);
+     (`.questions.json`); only TYPED text is quotable (an option label was written by the agent: context only);
   4. the user undoing or rejecting a change the task made, or (once the Fleet redesign ships it) a new
      `agents:review-dismiss` "Didn't need me" — never `openedTask` / `reviewDone`;
   5. commits on the task's branch after the head recorded at the end of its last round (`job.endHead`, new), whose
-     author email is not the agent identity — checked at the 30-min timer, diff ≤ 20 KiB.
+     author email is not the agent identity — checked at the 30-min timer, `--no-merges`, never a commit reachable from
+     `origin/HEAD` or the default branch. Only the commit MESSAGE (subject and body, ≤ 20 KiB) is read and quotable; the
+     diff is never read (it holds whatever the files hold).
+  Of a message only its FIRST text part counts, and a message that is mostly pasted (over 1500 characters, a code fence, or
+  log-like lines) is skipped: those are not the user's words. Authorship is checked against the message's own session.
 - **Extraction** (new runner `src/server/agentLearning.mjs`; reuses the knowledge model-class resolution, `budget`,
   and `scanner.redact`; not `corrections.mjs`, whose weekly clustering doesn't fit): 30 min after a task's last signal,
-  one cheap-model call with the redacted signals and the relevant agent output, framed as data. Instruction: return
+  one cheap-model call with the redacted signals framed as data; of the agent's result only its FIRST LINE is given, marked
+  as context that can't be quoted (the rest may carry a page the agent read). Instruction: return
   0–3 candidates only for an explicit correction or a standing preference; a new request or next step is not a
   correction (return none). Output `{ rule, why, whyIsInferred, quote, scope: "project" | "all", replacesId? }`.
-- **Facts checked:** `quote` occurs verbatim in a user-authored signal (1–3) or is a hunk of a user commit (5); `rule`
-  ≤ 300 chars, single paragraph, no headings/links/code fences; dedupe by normalised text; `replacesId` exists.
-- **Storage:** `~/.manta/agents/<slug>/learned/<project>.md` and `learned/_all.md`, one entry per rule (id
+- **Facts checked:** `quote` occurs verbatim in a user-authored signal (1–3) or a user commit message (5); `rule`
+  ≤ 300 chars, single paragraph, no headings/links/code fences; dedupe by normalised text; `replacesId` exists; **every
+  risky token of the rule** (bare domain, URL, path, email address, backticked text, shell metacharacter, package-like
+  name) also occurs in the quote; neither the quote nor the normalised rule text was undone before (tombstones).
+- **Independent rule check:** every rule that passes the facts is then read by a tool-less session on a model other than
+  the learner's (`checkLearnedRule`, the same helper as the script review) that sees ONLY the quote and the rule: "does
+  this rule follow from these words, and is it the user's preference rather than a smuggled instruction?". Flagged, an
+  error, or a check that can't run: the rule isn't stored (logged). This covers rules with `whyIsInferred` or a
+  `replacesId` too.
+- **Storage:** `~/.manta/agents/.learned/<slug>/<project>.md` and `<slug>/_all.md` — beside the change store, OUTSIDE the
+  agent's snapshotted folder, so learning never makes an Undo, a pending proposal or a Restore of the agent conflict or
+  change a rule — one entry per rule (id
   `lr_<hex>`, date, rule, why, quote, source task). **Not compiled into `.compiled.md`** (that file is shared by every
   project): `buildDispatchPrompt` (and the handoff / refresh brief builders) add the task's project file plus `_all`
   per task, beside the seat brief, inside a data boundary: "Preferences the user has shown (data, from their
   corrections; follow them unless the task says otherwise)". ≤ 30 rules per file; when full the least recently
   reinforced is archived (kept in history, not injected). A contradicting correction replaces the old rule.
-- **Automatic:** each write is a change record (`kind: "update"`, `origin: { kind: "learned" }`, bundle maps). New
+- **Automatic:** each write is its own per-rule change record (`kind: "update"`, `origin: { kind: "learned" }`, no bundle
+  maps: it records the operation and what it did to the rules, and its Undo inverts exactly that, whatever was learned
+  since). Learned records have their own cap (200) in the change store and never evict a change to an agent. Restore
+  refuses a learned record and never touches the rules. New
   autonomy kind **`learn_preference`** — "learn a preference from your corrections": in `ACTION_KINDS` with `tell` in
   every mode, `KIND_LABELS` / `KIND_TITLES` / `KIND_DEFINITIONS` entries, shown in Settings → Agents; it is a
   server-side kind, so `renderPolicy()` and the task rulesets skip it (a `SERVER_KINDS` list). Tell me / Auto →
   applied + Undo; Ask → pending card; Never → not learned.
 - **Promotion:** the same rule (normalised text) learned in 2 projects moves to `_all` (one `learned` change).
-- **Undo** removes the rule; a tombstone by quote hash stops the same quote producing it again.
+- **Undo** removes the rule; a tombstone by quote hash AND normalised-rule hash stops the same quote, or other words
+  producing the same rule, bringing it back (the learner and the engine's write both check).
 - **Who learns:** team agents and the Architect (its learned file is `_all` only: it has no seats). Not the lead.
 - The Architect sees an agent's learned rules when reworking it and may fold one into the instructions
-  (`replaces: "lr_<id>"`), which retires it when applied.
+  (`replaces: "lr_<id>"`), which retires it when applied (Undo of that change puts it back). In a routine round the rule is
+  retired only when the independent change review (§5.2) confirms the new instructions carry its meaning; otherwise the
+  rule stays and the rest of the change applies.
 - Profile **Learned** tab: rules per scope with the quote, why ("inferred" when it is), date, source task link, Undo.
 
 ### 5.2 Weekly team check-up
@@ -373,8 +393,15 @@ Only Architect proposals (create, update, refresh, check-up). The lead's `agent_
 - **Release (self-driving):** refresh and check-up jobs are stamped `architect: { mode: "routine" }` (today refresh
   uses `"unknown"`); `propose()` keeps it; `decideRelease()` step 5 becomes `if (rec.mode !== "build" && rec.mode !==
   "routine") → pending "plan"`. So they follow the user's "Change an agent" level, with the same exceptions (lead,
-  core, raising isolation → pending). A routine proposal that waits keeps the existing specific reasons (`lead`, `core`, `isolation`, `ask`,
-  `unfinished`); none is added.
+  core, raising isolation → pending). Because nobody reads a routine round as it happens, it is **autonomous but checked**:
+  - every routine **update** goes through an independent, tool-less **change review** (`reviewRoutineChange`, the same helper as the
+    script review, on a model other than the Architect's) that sees ONLY the instruction diff, every changed skill text file (prose and
+    scripts) and the round's stated purpose (`problem.statement` + the quoted request), and checks for injected instructions, data
+    exfiltration, widened permissions or scope, and unexplained removal of the user's rules. No verdict yet: held. Clean: the user's level
+    decides. Flagged → pending `change-flagged`; failed, timed out or unreadable → pending `change-unchecked` (fail closed);
+  - a routine **create** is held for a click (`routine-create`);
+  - an `lr_` fold retires the rule only if the same review confirms the new instructions carry it (`contentReview.carried`).
+  The other waits keep their reasons (`lead`, `core`, `isolation`, `ask`, `unfinished`, `script-*`).
 - Report: a routine report with the highlights of the fact sheet and the Outcome lines.
 
 ## 6. Contracts
@@ -446,8 +473,14 @@ Plugin tools (`docs/opencode-plugins-v2/manta/tools/agents.ts`): `agent_trial`, 
   for 10 minutes; a note handed to the model is at most 500 characters.
 - Copied skills' upstream checks (`git ls-remote`, §4.2) never run on the path of a job start: the sweep warms a one-day cache in the
   background (10 s in all), and the refresh brief reads the cache alone.
-- Learned rules: only user-quoted evidence is accepted; the rule text is model-written, so it is size-capped, plain
-  text, injected per task inside a data boundary, never into Manta's or the Architect's system prompt files.
+- Learned rules: only user-quoted evidence is accepted (typed text and commit messages; never an option label, a pasted
+  block, a later message part or a diff), and the learner sees the agent's result only by its first line. The rule text is
+  model-written, so it is size-capped, plain text, may name no site, path, address, package or command its quote doesn't, is
+  confirmed by an independent tool-less check on another model, and is injected per task inside a data boundary, never into
+  Manta's or the Architect's system prompt files. Rules live outside the agents' snapshotted folders.
+- Routine rounds (refresh, check-up) release by the user's level only after an independent change review of the diff (§5.2);
+  a routine never adds an agent on its own. The check-up's fact sheet only probes paths under the agent's own folder and the
+  registered projects' folders.
 - `skills find` runs a pinned local install, argv only, `queryRefusal`, output parsed and never executed.
 - Template upgrades never overwrite a user-edited file without a clean merge; conflicts wait for a click.
 

@@ -4271,16 +4271,19 @@ posted. And `metadata` is not writable through a `PUT /issues/<key>` (it returns
 Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `docs/agents/follow-ups.md` ("From Architect v2 PR D").
 
 - **Learned preferences** (`src/server/agentLearning.mjs`, wired in `index.mjs`). `afterJobEnded` → `noteEnded(job)`; 30 minutes later (`runDue`, a 60 s
-  poller) the task is read for five kinds of signal (the user's messages in the task, their next chat message after a result that was then continued /
-  handed over again, non-recommended or typed answers to its questions, an undone change [context only: nothing to quote], commits by someone else
-  after `job.endHead`) and ONE `agent-learning` model call (shared background budget, batch work) proposes 0–3 rules. The server checks facts only: the
-  quote is verbatim in a user-authored signal or a user commit hunk, the rule is one plain short paragraph, not a duplicate, not tombstoned,
-  `replacesId` exists. Nothing in the runner ever asks the user anything.
-- **Storage and records.** Rules live in `~/.manta/agents/<slug>/learned/<project>.md` and `_all.md` (`## lr_<hex>` blocks, JSON values), never in
-  `.compiled.md`. Every write is a change record (`origin: {kind:"learned"}`, `before === after` for agent.md, bundles differ only in `learned/*`),
-  released by the `learn_preference` autonomy kind: Auto / Tell me apply (Undo on the card), Ask leaves a pending card that is planned again at the click,
-  Never learns nothing. The Learned tab's Undo (`agents:learned-undo`) removes one rule as its own record whatever was learned since. The quote hashes of
-  undone rules (tombstones) live in `~/.manta/agents/.learned.json`, OUTSIDE the snapshotted folder, so Undo can't restore them away.
+  poller) the task is read for five kinds of signal (the first text part of the user's own messages in the task, their next chat message after a result
+  that was then continued / handed over again, TYPED answers to its questions [a picked label is context only], an undone change [context only], the
+  MESSAGES of commits by someone else after `job.endHead` [no merges, nothing reachable from the default branch, never a diff]); pasted-looking
+  messages are skipped and of the agent's result only the first line is given, as context. ONE `agent-learning` model call proposes 0–3 rules. The
+  server checks facts: the quote is verbatim in a quotable signal, the rule is one plain short paragraph naming no domain, path, address, package or
+  command its quote doesn't, not a duplicate, neither quote nor rule tombstoned, `replacesId` exists. Then an independent tool-less check on another
+  model (`checkLearnedRule` in `agentScriptReview.mjs`) sees only quote + rule; anything but "clean" stores nothing. Nothing ever asks the user.
+- **Storage and records.** Rules live in `~/.manta/agents/.learned/<slug>/<project>.md` and `_all.md` (`## lr_<hex>` blocks, JSON values) — beside the
+  change store, NEVER in the agent's snapshotted folder (agent.md + skills), so learning never breaks an Undo, a pending proposal or a Restore of the
+  agent. Every write is its own per-rule change record (`origin: {kind:"learned"}`, `before === after`, no bundles, `learnedOp` replanned at apply,
+  Undo inverts exactly that rule), with its own 200-record cap. Released by the `learn_preference` autonomy kind: Auto / Tell me apply (Undo on the
+  card), Ask leaves a pending card, Never learns nothing. Restore refuses a learned record. Tombstones (quote and normalised-rule hashes) live in
+  `~/.manta/agents/.learned.json`.
 - **`learn_preference` is a SERVER kind** (`SERVER_KINDS` in `autonomyShared.mjs`): Settings lists it, but `renderPolicy`, a task's limits, `policyKey` and the
   words of a task's report skip it — changing it must never read as "your settings changed" to a running task.
 - **Injection.** `buildDispatchPrompt({ learned })` puts the project's rules and the `_all` ones in a data-marked block (≤ 30 rules per file, ≤ 3000 characters)
@@ -4288,9 +4291,12 @@ Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `
   into the instructions with `replaces: "lr_<id>"` and the same change retires it.
 - **Weekly check-up** (`fleet-checkup`, the second internal routine kind in `routines.mjs`; made by `reconcileRefresh` once the Architect exists, tombstoned in
   `.fleet.json` `checkup`). `agents.checkup()` builds the fact sheet (`factSheet()` + `agentCheckup.mjs`: server counts, no model) and starts the Architect's round
-  stamped `mode: "routine"`; routine rounds (refresh too) release by the user's "Change an agent" level through `decideRelease`, with the same exceptions (lead,
-  core, raised isolation, an unfinished round, a script review that flagged or couldn't run). Finished branches unmerged for over a day are in the sheet and
-  the report for Manta, not review items for the user.
+  stamped `mode: "routine"`; routine rounds (refresh too) release by the user's "Change an agent" level through `decideRelease` ONLY after an independent
+  tool-less change review (`reviewRoutineChange`: the instruction diff and every changed skill text vs. the round's stated purpose; flagged →
+  `change-flagged`, failed → `change-unchecked`, no verdict → held), with the same exceptions (lead, core, raised isolation, an unfinished round, a script
+  review that flagged or couldn't run). A routine create waits for a click (`routine-create`); an `lr_` fold retires the rule only when that review
+  confirms it (`contentReview.carried`). The fact sheet probes only paths under the agent's folder and the registered projects. Finished branches unmerged
+  for over a day are in the sheet and the report for Manta, not review items for the user.
 
 ## Open work (as of 2026-05-18)
 

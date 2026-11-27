@@ -64,6 +64,9 @@ describe("chip, title, reason, buttons", () => {
     expect(agentChangeReason({ needsClick: true, reason: "isolation", agentName: "Dev" })).toBe("This lets Dev edit code");
     expect(agentChangeReason({ needsClick: true, reason: "script-flagged", agentName: "Dev" })).toBe("An independent check flagged a script — read the reasons before applying");
     expect(agentChangeReason({ needsClick: true, reason: "script-unchecked", agentName: "Dev" })).toBe("The independent script check couldn't run — read the scripts before applying");
+    expect(agentChangeReason({ needsClick: true, reason: "change-flagged", agentName: "Dev" })).toMatch(/flagged this scheduled change/);
+    expect(agentChangeReason({ needsClick: true, reason: "change-unchecked", agentName: "Dev" })).toMatch(/couldn't run/);
+    expect(agentChangeReason({ needsClick: true, reason: "routine-create", agentName: "Dev" })).toMatch(/new agent/);
     expect(agentChangeReason({ needsClick: true, reason: "ask", agentName: "Dev" })).toBeNull();
     expect(agentChangeReason({ needsClick: false, reason: null, agentName: "Dev" })).toBeNull();
   });

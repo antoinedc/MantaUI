@@ -1,10 +1,10 @@
 // Architect v2 PR D (docs/superpowers/specs/2026-11-27-architect-v2.md §5.1): an agent learns the user's preferences from the user's
-// own corrections. This file holds the PURE parts — the file format of `~/.manta/agents/<slug>/learned/<project>.md` and `_all.md`, the
+// own corrections. This file holds the PURE parts — the file format of `~/.manta/agents/.learned/<slug>/<project>.md` and `_all.md`, the
 // plan of one write (dedupe, replace, cap + archive, promotion), the block injected into a task, and the facts a model's candidate must
 // meet before it is stored — and the runner (`createAgentLearning`, below) that watches finished tasks and asks a cheap model.
 //
 // Nothing here talks to the agents engine's change store: a write is PLANNED here and RECORDED there (`learnedWrite`), so every rule has
-// a change record, a bundle snapshot and an Undo like any other change to an agent.
+// its own change record and an Undo; the rules live in the learned store, outside the agent's snapshotted folder.
 
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";

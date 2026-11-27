@@ -80,6 +80,9 @@ export function agentChangeReason(change: Pick<AgentChange, "needsClick" | "reas
   if (change.reason === "core") return "This changes the Architect itself";
   if (change.reason === "script-flagged") return "An independent check flagged a script — read the reasons before applying";
   if (change.reason === "script-unchecked") return "The independent script check couldn't run — read the scripts before applying";
+  if (change.reason === "change-flagged") return "An independent check flagged this scheduled change — read the reasons before applying";
+  if (change.reason === "change-unchecked") return "The independent check of this scheduled change couldn't run — read it before applying";
+  if (change.reason === "routine-create") return "A scheduled round proposed a new agent — review before adding it";
   if (change.reason === "unfinished") return "The task didn't finish — review before applying";
   if (change.reason === "plan") return "Proposed while planning or outside a hand-off — review before applying";
   return null;

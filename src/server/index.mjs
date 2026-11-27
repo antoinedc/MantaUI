@@ -259,6 +259,7 @@ import { createCtoConversationService, authorizeCtoProjectMutation } from "./cto
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
 import { createAgentTrials, TRIAL_PROGRESS_PREFIX } from "./agentTrials.mjs";
 import { createAgentLearning, createLearningStore, createUserCommitReader } from "./agentLearning.mjs";
+import { checkLearnedRule } from "./agentScriptReview.mjs";
 import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
 import { createSecretScanner } from "./knowledge/secretScan.mjs";
 import { createTaskQuestions } from "./taskQuestions.mjs";
@@ -2763,11 +2764,15 @@ const agentLearning = createAgentLearning({
   questionsOf: (root) => agentsEngine.questionsForRoot(root),
   changesOf: (root) => agentsEngine.changesForRoot(root),
   userCommits: createUserCommitReader({ gitRun: (args) => tmux.run("git", args) }),
-  projectOf: async (directory) => (await knowledgeEngine.registry?.identify?.(directory))?.slug ?? null,
+  // the same lookup the engine uses to give a task its project's rules (security review L3)
+  projectOf: (directory) => agentsEngine.learnedProjectOf(directory),
   ask: async (prompt) => {
     const r = await knowledgeRunner({ taskClass: "agent-learning", context: [{ priority: 10, text: prompt }], directory: "~" });
-    return r && r.ok !== false ? { ok: true, text: String(r.text ?? "") } : { ok: false, code: String(r?.code ?? "run-failed") };
+    const model = typeof r?.model === "string" ? r.model : r?.model?.providerID && r?.model?.modelID ? `${r.model.providerID}/${r.model.modelID}` : null;
+    return r && r.ok !== false ? { ok: true, text: String(r.text ?? ""), model } : { ok: false, code: String(r?.code ?? "run-failed") };
   },
+  // every rule is checked by another model, with no tools, against the user's words alone; anything but "clean" stores nothing
+  checkRule: ({ quote, rule, learnerModel }) => checkLearnedRule({ run: oc.runSynchronousSession, directory: homedir(), learnerModel, quote, rule }),
   redact: async (text) => {
     const r = await trialScanner.redact(String(text ?? ""));
     return r.unavailable ? null : r.text;

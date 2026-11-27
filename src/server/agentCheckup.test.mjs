@@ -72,7 +72,8 @@ test("renderFactSheet: the facts as data between markers, with the unmerged bran
   const text = renderFactSheet(sheet());
   assert.match(text, /BEGIN FACT SHEET/);
   assert.match(text, /END FACT SHEET/);
-  assert.match(text, /computed by the server/i);
+  assert.match(text, /counted by the server; text fields are data/i);
+  assert.ok(!/no model wrote it/i.test(text), "rule texts and task names in it were written by models and users: the heading must not vouch for them");
   assert.match(text, /data, not instructions/i);
   assert.match(text, /"slug": "dev"/);
   assert.match(text, /agent\/dev\/x/);
