@@ -69,16 +69,22 @@ update after install (`follow-ups.md`).
        `sources`); both changed differently → conflict. Body: `node-diff3` `diff3Merge(live, base, next)` on lines.
        Result must pass `parseAgentMd()` (and the Architect's source checks).
      - other files: `diff3Merge` on lines.
-     - no base known → conflict.
+     - no base known → the base is **inferred**: each older version in `.history.json` (newest first, never the shipped
+       one) is tried as the base, and the first that merges cleanly is it (the old texts ship in
+       `agentTemplates/<slug>/.versions/<sha256>`, kept by `template-history.mjs`; a hash alone can't be merged against).
+       None merges → conflict.
+     - a merge that equals `live` is no upgrade (no record; `.base` is made from the shipped files).
      Clean → apply; conflict → pending (below).
 - **Records.** Each upgrade of one agent is one change record: `kind: "update"`, `origin: { kind: "template-update",
   templateHash }` (`templateHash` = sha256 of the shipped bundle), `before`/`after` = agent.md text (as today) plus
   bundle maps (§4.1). **Release is automatic, whatever the user's "Change an agent" level (Ask and Never included):** that
   setting governs agents changing agents; a shipped template is a Manta release the user already took. A clean upgrade is
-  applied at once, with Undo on its card. Only a merge conflict waits as a pending card in Needs you (the card shows the
-  shipped text with the user's frontmatter keys; Apply overwrites the body, and a click is not blocked by the level).
+  applied at once, with Undo on its card. Only a merge conflict waits as a pending card in Needs you. **A conflict never drops
+  the user's instructions:** the card's file is the user's own body with the shipped frontmatter keys they didn't change, the
+  shipped agent.md is on the record (`origin.shipped`) for the user to merge by hand, and Apply keeps the user's instructions
+  (a click is not blocked by the level). A conflicting skill is left as the user has it.
 - **Dedupe:** skip creating a record when one exists for the same `(slug, origin.templateHash)` in any state
-  (pending, applied, discarded, undone; an expired one doesn't count, so an update nobody clicked is offered again at the next boot). `.base` is updated when the record applies (incl. a later click) and restored
+  (pending, applied, discarded, undone; an expired one doesn't count, so an update nobody clicked is offered again at the next boot; nor does one discarded as "superseded by a re-plan"). At every boot a pending card whose re-plan is now a no-op, a clean merge, or differs from the card (an older planner made it) is discarded with that error and the re-plan acted on. `.base` is updated when the record applies (incl. a later click) and restored
   to the record's previous base on Undo.
 - Files only in `next` are added; files `next` dropped are removed only when `live` matches base/history.
 

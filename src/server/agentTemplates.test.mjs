@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sha256, templateFiles, historyOf, HISTORY_FILE } from "../../scripts/agents/template-history.mjs";
+import { sha256, templateFiles, historyOf, HISTORY_FILE, VERSIONS_DIR } from "../../scripts/agents/template-history.mjs";
 
 const TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 
@@ -40,6 +40,21 @@ test("the history lists each version once, and a template file's older versions 
   // the Architect's agent.md has been rewritten several times: boxes that never edited it carry one of those versions
   const arch = JSON.parse(await readFile(join(TEMPLATES, "architect", HISTORY_FILE), "utf-8"));
   assert.ok(arch["agent.md"].length >= 2, "older shipped versions were back-filled from git");
+});
+
+test("every hash in a template's history has its text in .versions/ (a box with no .base copy merges against it)", async () => {
+  for (const slug of await slugs()) {
+    const history = JSON.parse(await readFile(join(TEMPLATES, slug, HISTORY_FILE), "utf-8"));
+    for (const [rel, hashes] of Object.entries(history)) {
+      for (const h of hashes) {
+        const text = await readFile(join(TEMPLATES, slug, VERSIONS_DIR, h)).catch(() => null);
+        assert.ok(text, `${slug}/${rel}: no text for ${h.slice(0, 12)} in ${VERSIONS_DIR}/; run: node scripts/agents/template-history.mjs --backfill`);
+        assert.equal(sha256(text), h, `${slug}/${VERSIONS_DIR}/${h.slice(0, 12)} is not the text its name says`);
+      }
+    }
+    // the bookkeeping folder is not part of the template
+    assert.ok(!(await templateFiles(join(TEMPLATES, slug))).some((f) => f.startsWith(VERSIONS_DIR)));
+  }
 });
 
 test("historyOf: appends a new hash, keeps the order, never duplicates", () => {

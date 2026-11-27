@@ -82,6 +82,8 @@ const SNAPSHOT_MAX = 64 * 1024;
 const BASE_DIR = ".base"; // the shipped files an agent folder was last in step with (three-way merge base)
 const BLOBS_DIR = ".blobs"; // content-addressed copies of the files a change record names, `.blobs/<sha256>`
 const TEMPLATE_HISTORY_FILE = ".history.json";
+const TEMPLATE_VERSIONS_DIR = ".versions"; // `<hash>` → the text of every shipped version older than the current one (the merge bases of a box with no `.base/`)
+const SUPERSEDED = "superseded by a re-plan"; // why a pending template-update card was discarded by the boot re-plan
 const BLOB_GRACE_MS = 10 * 60_000; // a blob younger than this may belong to a record not saved yet
 const SPACE_ROOTS = ["agent.md", "skills", "learned"]; // what a snapshot of an agent covers
 const SPACE_MAX_FILES = 300;
@@ -541,14 +543,16 @@ export function editAgentMd(before, fields, name = "The agent") {
  * Three-way merge of a built-in's `agent.md` (Architect v2 §2). `live` is the file on the box, `base` the shipped version it
  * came from, `next` the new shipped version. Frontmatter is merged key by key (a key the user changed stays; a key only the
  * template changed is taken; both changed differently is a conflict), the body line by line with `node-diff3`. The result must
- * be a valid agent file. `{ conflict, text }`: clean → the merged file; conflict → the card text: the shipped body with the
- * user's frontmatter keys (the shipped file itself when the files can't be read as agent files).
+ * be a valid agent file. `{ conflict, text }`: clean → the merged file; conflict → the card text: the USER'S body with the
+ * frontmatter keys the merge could settle (the user's file as it is when the files can't be read as agent files). A conflict never
+ * drops the user's instructions: the shipped body is for the user to merge by hand, not something Apply writes over theirs.
+ * Without a `base`, every key the user has is theirs and the shipped file only adds keys they lack.
  */
 export function mergeAgentMd({ live, base = null, next }) {
   const L = splitFrontmatter(live);
   const B = base == null ? null : splitFrontmatter(base);
   const N = splitFrontmatter(next);
-  if (!L || !N || (base != null && !B)) return { conflict: true, text: next };
+  if (!L || !N || (base != null && !B)) return { conflict: true, text: live };
   let ld;
   let bd;
   let nd;
@@ -558,11 +562,11 @@ export function mergeAgentMd({ live, base = null, next }) {
     bd = B ? YAML.parse(B.yaml) : null;
     doc = YAML.parseDocument(L.yaml);
   } catch {
-    return { conflict: true, text: next };
+    return { conflict: true, text: live };
   }
   const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
-  if (!plain(ld) || !plain(nd) || (B && !plain(bd)) || doc.errors.length > 0 || !YAML.isMap(doc.contents)) return { conflict: true, text: next };
-  // no base copy: nothing says which keys the user changed, so every key they have is theirs and the body is the shipped one
+  if (!plain(ld) || !plain(nd) || (B && !plain(bd)) || doc.errors.length > 0 || !YAML.isMap(doc.contents)) return { conflict: true, text: live };
+  // no base copy: nothing says which keys the user changed, so every key they have is theirs
   let conflict = !B;
   for (const k of new Set([...Object.keys(nd), ...Object.keys(ld)])) {
     const [lv, nv] = [ld[k], nd[k]];
@@ -580,9 +584,9 @@ export function mergeAgentMd({ live, base = null, next }) {
   }
   const merged = B ? mergeLines(L.body, B.body, N.body) : { ok: false };
   if (!merged.ok) conflict = true;
-  const body = merged.ok ? merged.text : N.body;
+  const body = merged.ok ? merged.text : L.body; // a body that can't be merged stays the user's
   const text = `---\n${doc.toString({ lineWidth: 0 }).replace(/\n+$/, "")}\n---\n${body}\n`;
-  if (!parseAgentMd(text).ok) return { conflict: true, text: next };
+  if (!parseAgentMd(text).ok) return { conflict: true, text: live };
   return { conflict, text };
 }
 
@@ -1527,12 +1531,48 @@ export function createAgentsEngine({
   const isShipped = (rel) => rel === "agent.md" || rel.startsWith("skills/");
   const sameBuf = (a, b) => !!a && !!b && Buffer.compare(a, b) === 0;
 
+  /** The text of a shipped version, from the template's `.versions/` (null when the copy is missing or isn't what its name says). */
+  async function readShippedVersion(tdir, hash) {
+    if (!/^[0-9a-f]{64}$/.test(hash)) return null;
+    try {
+      const buf = await fs.readFile(join(tdir, TEMPLATE_VERSIONS_DIR, hash));
+      return sha256Hex(buf) === hash ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A box with no `.base/` copy doesn't know which shipped version its edited file came from. Each older version in the history
+   * (newest first; never the shipped one itself, which would make every file look untouched by the template) is tried as the base:
+   * the first that three-way merges cleanly with the user's file and the shipped one is it. `{ base, text }` or null.
+   */
+  async function inferBase(tdir, rel, history, live, next) {
+    const nextHash = sha256Hex(next);
+    for (const hash of [...(Array.isArray(history[rel]) ? history[rel] : [])].reverse()) {
+      if (hash === nextHash) continue;
+      const base = await readShippedVersion(tdir, hash);
+      if (!base) continue;
+      const args = [live.toString("utf-8"), base.toString("utf-8"), next.toString("utf-8")];
+      if (rel === "agent.md") {
+        const m = mergeAgentMd({ live: args[0], base: args[1], next: args[2] });
+        if (!m.conflict) return { base, text: Buffer.from(m.text, "utf-8") };
+      } else {
+        const m = mergeLines(...args);
+        if (m.ok) return { base, text: Buffer.from(m.text, "utf-8") };
+      }
+    }
+    return null;
+  }
+
   /**
    * What upgrading one built-in would do, from the files alone (no lock, nothing written except a base copy that was missing):
    * `null` (nothing to do or not ours), or `{ slug, name, writes, removes, conflict, shipped, baseFiles, templateHash, before, after }`.
-   * Per file, with `live` on the box, `base` the shipped copy it came from (`.base/`, or the template's only version) and `next`
-   * the new one: equal → nothing; live is any version ever shipped → replace; base unknown → conflict; template unchanged →
-   * keep the user's file; else a three-way merge.
+   * Per file, with `live` on the box, `base` the shipped copy it came from (`.base/`, the template's only version, or — with no
+   * copy — the older shipped version that merges cleanly: `inferBase`) and `next` the new one: equal → nothing; live is any version
+   * ever shipped → replace; template unchanged → keep the user's file; else a three-way merge (a merge that gives the user's own file
+   * is no upgrade). A file that can't be merged is a conflict, and a conflict never replaces what the user wrote: agent.md keeps the
+   * user's body (the shipped one goes on the card), a skill stays as it is.
    */
   async function planTemplateUpgrade(slug) {
     const tdir = join(templatesDir, slug);
@@ -1557,7 +1597,7 @@ export function createAgentsEngine({
 
     const writes = new Map();
     const removes = new Set();
-    let conflict = false;
+    const conflictFiles = new Set(); // the shipped files the user's own could not be merged with
     for (const rel of new Set([...shipped.keys(), ...[...baseFiles.keys()].filter(isShipped)])) {
       const live = space.get(rel) ?? null;
       const next = shipped.get(rel) ?? null;
@@ -1579,28 +1619,40 @@ export function createAgentsEngine({
         continue;
       }
       if (!base) {
-        conflict = true;
-        writes.set(rel, rel === "agent.md" ? Buffer.from(mergeAgentMd({ live: live.toString("utf-8"), next: next.toString("utf-8") }).text, "utf-8") : next);
-        continue;
+        const inferred = await inferBase(tdir, rel, history, live, next);
+        if (!inferred) {
+          conflictFiles.add(rel);
+          // agent.md: the user's file with the shipped settings they lack; a skill: left as it is
+          if (rel === "agent.md") writes.set(rel, Buffer.from(mergeAgentMd({ live: live.toString("utf-8"), next: next.toString("utf-8") }).text, "utf-8"));
+          continue;
+        }
+        base = inferred.base;
       }
       if (sameBuf(base, next)) continue; // the template didn't change this file: the user's edit stands
+      let merged;
       if (rel === "agent.md") {
         const m = mergeAgentMd({ live: live.toString("utf-8"), base: base.toString("utf-8"), next: next.toString("utf-8") });
-        if (m.conflict) conflict = true;
-        writes.set(rel, Buffer.from(m.text, "utf-8"));
-        continue;
+        if (m.conflict) conflictFiles.add(rel);
+        merged = Buffer.from(m.text, "utf-8");
+      } else {
+        const m = mergeLines(live.toString("utf-8"), base.toString("utf-8"), next.toString("utf-8"));
+        if (!m.ok) {
+          conflictFiles.add(rel);
+          continue;
+        }
+        merged = Buffer.from(m.text, "utf-8");
       }
-      const m = mergeLines(live.toString("utf-8"), base.toString("utf-8"), next.toString("utf-8"));
-      if (!m.ok) conflict = true;
-      writes.set(rel, m.ok ? Buffer.from(m.text, "utf-8") : next);
+      if (!sameBuf(merged, live)) writes.set(rel, merged); // the user's file already has everything the template changed
     }
+    let conflict = conflictFiles.size > 0;
     // an Architect file stays subject to the Architect's own source checks: the merged result may keep the user's sources, but one that
     // is invalid or seems to hold a credential is never written by an upgrade — it waits for a click
     if (writes.has("agent.md")) {
       const merged = parseAgentMd(writes.get("agent.md").toString("utf-8"));
       if (merged.ok && merged.meta.role === "architect" && ((merged.meta.sourceNotes ?? []).length > 0 || (await checkSourceCredentials(merged.meta.sources ?? [])))) conflict = true;
     }
-    // no base copy and no conflict card to make: the user's file is a rewrite of the template's own only version — just remember it
+    // nothing to write and no conflict card to make: the user's files already hold what the template has (or are a rewrite of its
+    // only version) — just remember the shipped files as the base
     if (writes.size === 0 && removes.size === 0 && !conflict) {
       const same = hadBase && [...shipped].every(([rel, buf]) => sameBuf(baseFiles.get(rel), buf));
       if (!same) {
@@ -1608,7 +1660,6 @@ export function createAgentsEngine({
       }
       return null;
     }
-    // the conflict card of an agent.md that couldn't be merged (conflict above wrote the shipped body with the user's keys)
     const after = new Map(space);
     for (const [rel, buf] of writes) after.set(rel, buf);
     for (const rel of removes) after.delete(rel);
@@ -1621,6 +1672,9 @@ export function createAgentsEngine({
       writes,
       removes,
       conflict,
+      // what the card shows next to the user's file when the two could not be merged: the shipped agent.md, and any other shipped file in the way
+      shippedText: conflict ? text(shipped) : null,
+      shippedFiles: Object.fromEntries([...conflictFiles].filter((rel) => rel !== "agent.md").map((rel) => [rel, shipped.get(rel).toString("utf-8")])),
       shipped,
       baseFiles,
       space,
@@ -1634,17 +1688,34 @@ export function createAgentsEngine({
   /**
    * Boot only (`init()`): every built-in whose shipped files moved on gets ONE change record. A clean upgrade is applied at once
    * (Undo on the card) whatever the user's "Change an agent" level: that setting governs agents changing agents, and a shipped
-   * template is a Manta release the user already took. Only a merge conflict waits for a click. A shipped bundle that already has a record (any state but expired) is not offered again. Returns the records made.
+   * template is a Manta release the user already took. Only a merge conflict waits for a click, and its Apply keeps the user's
+   * instructions. A shipped bundle that already has a record (any state but expired, or discarded as superseded) is not offered
+   * again. A pending card the fresh plan no longer matches (it is now a no-op or a clean merge, or the planner that made it
+   * knew less) is discarded as "superseded by a re-plan" before the plan is acted on. Returns the records made.
    */
   async function upgradeBuiltIns() {
     const made = [];
     for (const slug of [...(await builtInSlugs())].sort()) {
       try {
         const plan = await planTemplateUpgrade(slug);
-        if (!plan) continue;
-        const rec = await syncLock.runExclusive(async () => {
+        const out = await syncLock.runExclusive(async () => {
           const store = await readStore({ strict: true });
-          if (store.changes.some((r) => r.origin?.kind === "template-update" && r.slug === slug && r.origin.templateHash === plan.templateHash && r.state !== "expired")) return null;
+          const superseded = [];
+          for (const old of store.changes) {
+            if (old.slug !== slug || old.origin?.kind !== "template-update" || old.state !== "pending") continue;
+            const current = plan?.conflict && old.origin.templateHash === plan.templateHash && old.origin.shipped !== undefined && old.before === plan.before && old.after === plan.afterText;
+            if (current) continue;
+            old.state = "discarded";
+            old.needsClick = false;
+            old.decidedAt = now();
+            old.error = SUPERSEDED;
+            await saveRecord(old);
+            log.warn?.(`[agents] @${slug}: the pending template update ${old.id} is superseded by a re-plan`);
+            superseded.push(old);
+          }
+          if (!plan) return { rec: null, superseded };
+          const dup = (r) => r.origin?.kind === "template-update" && r.slug === slug && r.origin.templateHash === plan.templateHash && r.state !== "expired" && !(r.state === "discarded" && r.error === SUPERSEDED);
+          if (store.changes.some(dup)) return { rec: null, superseded };
           const files = plan.space;
           await putBlobs(files);
           await putBlobs(plan.after);
@@ -1667,9 +1738,13 @@ export function createAgentsEngine({
             createdAt: now(),
             decidedAt: null,
             error: null,
-            origin: { kind: "template-update", templateHash: plan.templateHash },
+            origin: {
+              kind: "template-update",
+              templateHash: plan.templateHash,
+              ...(plan.conflict ? { shipped: plan.shippedText, ...(Object.keys(plan.shippedFiles).length > 0 ? { shippedFiles: plan.shippedFiles } : {}) } : {}),
+            },
             summary: plan.conflict
-              ? `A new version of the built-in ${plan.name} conflicts with your edits: applying keeps your settings and uses the new instructions`
+              ? `A new version of the built-in ${plan.name} conflicts with your edits: Apply keeps your instructions and takes only the new settings; the shipped instructions are in the card to merge by hand`
               : `A new version of the built-in ${plan.name}`,
             beforeBundle: hashesOf(files),
             afterBundle: hashesOf(plan.after),
@@ -1692,11 +1767,12 @@ export function createAgentsEngine({
             }
           }
           await saveRecord(r);
-          return r;
+          return { rec: r, superseded };
         });
-        if (rec) {
-          made.push(rec);
-          publishChange(rec);
+        for (const old of out.superseded) publishChange(old);
+        if (out.rec) {
+          made.push(out.rec);
+          publishChange(out.rec);
         }
       } catch (e) {
         log.warn?.(`[agents] couldn't upgrade @${slug}: ${e?.message ?? e}`);
@@ -1712,7 +1788,7 @@ export function createAgentsEngine({
     for (const slug of await builtInSlugs()) {
       const target = join(root, slug);
       if (await exists(fs, target)) continue;
-      await fs.cp(join(templatesDir, slug), target, { recursive: true, filter: (src) => !src.endsWith(`/${TEMPLATE_HISTORY_FILE}`) });
+      await fs.cp(join(templatesDir, slug), target, { recursive: true, filter: (src) => !src.endsWith(`/${TEMPLATE_HISTORY_FILE}`) && !src.endsWith(`/${TEMPLATE_VERSIONS_DIR}`) });
       await fs.mkdir(join(target, "home"), { recursive: true });
       const shipped = await readTree(join(templatesDir, slug), { skipDot: true });
       if (shipped) {

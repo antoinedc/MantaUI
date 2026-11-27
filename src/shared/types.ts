@@ -3069,8 +3069,12 @@ export type AgentChangeOrigin =
   | { kind: "chat" }
   | { kind: "job"; jobId: string; rootJobId: string; attempt: number }
   | { kind: "restore"; fromChangeId: string }
-  /** Architect v2 Stage 0: a new shipped version of a built-in agent; `templateHash` = sha256 of the shipped file set. */
-  | { kind: "template-update"; templateHash: string };
+  /**
+   * Architect v2 Stage 0: a new shipped version of a built-in agent; `templateHash` = sha256 of the shipped file set. On a
+   * conflict card `shipped` is the shipped agent.md (the card's file keeps the user's own instructions; the shipped ones are
+   * there to merge by hand) and `shippedFiles` any other shipped file the user's own could not be merged with.
+   */
+  | { kind: "template-update"; templateHash: string; shipped?: string; shippedFiles?: Record<string, string> };
 export interface AgentChangeEvidence {
   claim: string;
   /** null for a private source. */
