@@ -2903,6 +2903,11 @@ export function buildHandlers({
     "agents:refresh-set": (input) => agentsCall("refresh-set", (a) => a.refreshSet(input)),
     "agents:task-research": (input) => agentsCall("task-research", (a) => a.taskResearch(input)),
     "agents:projects": () => agentsCall("projects", (a) => a.projects()),
+    // Architect v2 Stage 1: a trial run of a drafted agent (cases and what they did) and one case's transcript, a window at a time
+    "agents:trial": (input) => agentsCall("trial", (a) => a.trial(input)),
+    "agents:trial-transcript": (input) => agentsCall("trial-transcript", (a) => a.trialTranscript(input)),
+    // Architect v2 Stage 2: one file of a change record, before and after, from its snapshots (the card opens each skill file)
+    "agents:change-file": (input) => agentsCall("change-file", (a) => a.changeFile(input)),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>
@@ -3195,7 +3200,7 @@ export function buildHandlers({
 
     // ---- auth pairing code mint (BET-161) ----
     // Mint a one-time mobile pairing code. Runs in-process on the box, so it
-    // satisfies the loopback-only minting invariant that the GET /auth/pair
+    // satisfies the loopback-only minting invariant that the POST /auth/pair
     // HTTP endpoint enforces (a remote httpApi caller can't hit that endpoint
     // — it 403s non-loopback). authEngine.pair() returns snake_case;
     // translate to the camelCase AuthPairResult the renderer expects.

@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { SPECIALIST_TASK_TOOLS } from "../shared/researchTools.mjs";
+import { ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS } from "../shared/agentsShared.mjs";
 import { decisionLines, decisionFromForm, waitingLine, TASK_GONE, TASK_PAUSED } from "./taskDecision.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
@@ -535,7 +536,7 @@ export function withResearchToolAllows(rules) {
 
 // The tools the Architect's task may call, besides reading and searching (Agents Phase 5A §4.2).
 const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch"];
-const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, "agent_propose"];
+const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, ...ARCHITECT_TRIAL_TOOLS, ...ARCHITECT_SKILL_TOOLS, "agent_propose"];
 
 /**
  * The ruleset of the Architect's task, built for launch AND resume by this one function (spec §4.2). Last match wins, so:
@@ -3126,6 +3127,14 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   if (paused) {
     pauseInterrupts.delete(paused.id);
     await recordBudgetSpend(paused, deps); // outside the jobs lock (§17.14)
+    // an Architect's round that is parked stops the trial runs it started (they cost money and hold a copy of a project), as when it ends
+    if (paused.architect && typeof deps.onJobPaused === "function") {
+      try {
+        await deps.onJobPaused(paused);
+      } catch (e) {
+        console.warn(`[delegate] onJobPaused failed for ${paused.id}:`, e?.message ?? e);
+      }
+    }
     return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };
@@ -4787,7 +4796,8 @@ function livenessFieldsAtLaunch(ceilingMs) {
 // child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
 // use) and reports ONE result through N7, whatever route it takes to a terminal state.
 
-const architectModeOf = (mode) => (mode === "build" || mode === "plan" ? mode : "unknown");
+/** The mode an Architect round is stamped with: build / plan (a lead's hand-off), routine (a refresh or check-up), else unknown. */
+export const architectModeOf = (mode) => (mode === "build" || mode === "plan" || mode === "routine" ? mode : "unknown");
 
 // The agent every delegate child runs. Today's jobs always ran the default agent; a
 // child created under a parent would otherwise be free to inherit a plan-mode one.
@@ -5737,6 +5747,25 @@ async function handleQuestion(form, deps) {
   return { captured: decision !== null };
 }
 
+/**
+ * A server-set progress label on a RUNNING round (Architect v2 §3.4: "Trial running · case 2 of 3"), shown as the task card's
+ * headline while fresh. `label: null` clears it, but only when the current label is still one that starts with `clearPrefix`
+ * (a model's own report since then is kept).
+ */
+export async function setJobLabel(id, label, { clearPrefix = "" } = {}, deps = {}) {
+  const at = (deps.now ?? (() => Date.now()))();
+  const out = await mutateJobProgress(id, deps, (job) => {
+    const jp = job.jobProgress;
+    if (typeof label === "string" && label.trim()) {
+      const text = label.trim().slice(0, 500);
+      return jp.label === text ? null : { jobProgress: { ...jp, label: text, labelAt: at } };
+    }
+    if (!jp.label || !clearPrefix || !jp.label.startsWith(clearPrefix)) return null;
+    return { jobProgress: { ...jp, label: "", labelAt: null } };
+  });
+  return !!out;
+}
+
 /** A guarded patch of a RUNNING record's progress fields under the jobs lock; publishes (throttled) when it wrote. */
 async function mutateJobProgress(id, deps, fn) {
   const { load = loadJobs, save = saveJobs } = deps;
@@ -6274,6 +6303,8 @@ export function createDelegateEngine(baseDeps) {
     rootJobOf,
     /** A milestone on the task's newest round (`rootJobId`). */
     addJobMilestone: (rootJobId, text) => addJobMilestone(rootJobId, text, deps),
+    /** A server-set progress label on a running round (null clears one that starts with `clearPrefix`). */
+    setJobLabel: (id, label, opts) => setJobLabel(id, label, opts, deps),
     /** The question store's engine is created AFTER this one (it needs this engine's functions): hand it over here. */
     setTaskQuestions: (taskQuestions) => {
       deps.taskQuestions = taskQuestions;

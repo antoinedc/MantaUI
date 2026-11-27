@@ -101,10 +101,10 @@ missing around it:
 
 ## From the Architect quick round (PDF reading, GitHub skill search, 2026-11-24)
 
-- **Existing boxes keep their old Architect.** `installBuiltIns` never overwrites an existing folder, so a box's
-  `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) does not get the new instructions by itself.
-  Phase 5B's built-in update feature should compare the shipped template with the installed one (and keep the user's
-  edits). Until then the files are copied by hand.
+- **Existing boxes keep their old Architect.** *(Resolved by Architect v2 Stage 0, 2026-11-27: `upgradeBuiltIns()` runs at
+  boot, merges the shipped template into the box's folder and records each upgrade as a change.)* `installBuiltIns` never
+  overwrites an existing folder, so a box's `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) did not
+  get new instructions by itself.
 - **PDF text is raw pdf.js text.** Two-column papers can interleave columns, hyphenated line breaks split words, and
   tables flatten. A quote that spans a column or hyphen break won't match; the model has to quote a single-column span.
   Possible later: join hyphenated line endings before storing.
@@ -375,6 +375,47 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **Restore for a change shown above the tabs.** A record whose card is above (just applied) has no row to open, so "Restore the version before this" isn't offered for it; its own Undo does the same thing.
 - **Seat briefs are shown whole.** A 4000-character brief makes a tall row; clamp with "Show more" if that turns out to matter.
 
+
+## From Architect v2 PR A (template upgrades, bundle snapshots, problem + trials, 2026-11-27)
+
+- **The trial's progress line.** The spec has the trials module report "Trial running · case 2 of 3" through the Architect job's
+  `jobProgress` label; PR A only records the cases (`agents:trial`). The label belongs with the renderer's progress line (PR B).
+- **The profile's trials list.** `AgentProfile.trials` (the Tests tab) is not part of `agents:profile` yet; PR B adds it from `agentTrials.list(slug)`.
+- **A VM sandbox for trials.** Trials have no shell (an agent that needs commands gets a partial test: what it couldn't run shows
+  as a refusal in the case record), because no ruleset can confine a shell on this box. Real command runs need a throwaway VM
+  (the Freestyle account is the candidate); until then the Tests tab's wording says "no shell".
+- **A trial's folders live in a private 0700 base in the OS temp folder, not under `~/.manta/agents/.trials/`.** The task
+  rulesets protect `~/.manta` by absolute path, which only holds for a session whose folder is outside it. Each case works in a
+  standalone `git clone --local --no-hardlinks` of the project's current HEAD (uncommitted files are not copied).
+- **Clean template upgrades apply automatically at every level** (with Undo); only a merge conflict waits for a click (spec §2).
+  If the lead / Architect should always wait for a click, say so.
+- **A pending template update that nobody clicks expires after 24 h** like any change; the next boot offers it again
+  (an expired record doesn't count for the dedupe).
+
+## From Architect v2 PR C (skills, 2026-11-27)
+
+- **"Upstream moved" only knows commits.** The refresh brief compares a copied skill's `provenance.ref` with the upstream repository's
+  HEAD (`git ls-remote`, 5 repositories at most, asked once a day) and only when `ref` is a 40-character commit. A tag or a branch
+  name can't be compared with where the upstream is now without a stored commit, so such a skill is never listed. The template
+  tells the Architect to give a commit; resolving a tag to its commit at proposal time (one more network read) would close this.
+  The weekly check-up's fact sheet (PR D) reads the same `skillUpdatesFor(slug)` (it asks the network within the 10 s budget); it is not
+  wired there yet. The refresh brief reads the cache the sweep warms once a day, so the first refresh after a restart may carry nothing.
+- **Upstream diffs.** The brief says the upstream moved, not what changed in the skill's files (spec §11: "upstream skill diffs
+  before an update").
+- **The `skills` source needs `npm` on the box's PATH the first time.** It runs `npm ci --ignore-scripts` from the committed lockfile
+  (`src/server/research/skillsCli/`) into `~/.manta/tools/skills`; with no npm, or no network, the source answers with a fixed
+  sentence (and doesn't try again for 10 minutes) and the Architect uses GitHub or the web. Moving the pin = regenerate the lockfile
+  (`npm install --package-lock-only --ignore-scripts` in that folder) and bump `SKILLS_CLI_VERSION`. The tool folder is not swept.
+- **Searches are recorded per task session in `~/.manta/research/<session>/searches.json`** (last 200, swept with the sources).
+  A `skillSearch` is checked against the searches of every round of the root task; extra (user-defined) sources record the query
+  but no refs, so a candidate can't be justified by an extra source's result alone (it can by `skills_installed` or a base search).
+- **The script review is a model reading text.** It catches clearly harmful scripts, not subtle ones; Undo removes the skill, not what a
+  script already did. A real sandbox run of copied scripts (a throwaway VM) would be the next step, with the trials' VM item.
+- **The review's model pair is fixed** (opus ↔ sonnet, spec §4.1): a box with neither approved gets a verdict of `error` and a click.
+- **A removed skill's origin isn't shown on its card** (the record keeps what was removed, not where it came from).
+- **Skills are plain text only.** A skill folder that holds a binary or a non-UTF-8 file can't be replaced or snapshotted through
+  a proposal (the bundle is text); the agent's other files are untouched.
+- **Native OpenCode skill scoping per agent** (spec §8, §11) stays a spike: the compiled index still lists an agent's skills.
 
 ## Parallel work by the same agent
 

@@ -97,7 +97,7 @@ Facts that will otherwise waste your time:
 - **Codes expire in minutes.** Mint the link immediately before opening it, never
   at the start of a long job. If pairing fails, mint a fresh one — do not reuse.
 - **`/auth/pair` is loopback-only, by design.** Against the public hostname it
-  answers `403`. That is why it is minted over SSH on the box. A 403 while
+  answers `403`. That is why it is minted over SSH on the box (`curl -s -X POST -H "X-Manta-Pair: 1" …`). A 403 while
   pairing means you called the public URL — the feature working, not a bug.
 - **The link carries no `server=` param, deliberately.** The app REFUSES a
   non-private server URL, and this box is reached over its public gateway

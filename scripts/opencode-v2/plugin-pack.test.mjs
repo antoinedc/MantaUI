@@ -63,8 +63,8 @@ after(async () => {
   await v2Tree.cleanup();
 });
 
-// Tools that never had a V1 file: V2 introduced them (routines: spec 2026-10-30; knowledge: spec 2026-11-16; agent_handoff: agents phase 2; agent_change: agents phase 4; agent_propose and research_*: agents phase 5A; research_library_*: the research library).
-const V2_ONLY = ["agent_change", "agent_handoff", "agent_propose", "handoff", "knowledge_note", "knowledge_read", "knowledge_search", "research_fetch", "research_library_find", "research_library_save", "research_read", "research_search", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "session_link", "session_unlink", "todo_write"];
+// Tools that never had a V1 file: V2 introduced them (routines: spec 2026-10-30; knowledge: spec 2026-11-16; agent_handoff: agents phase 2; agent_change: agents phase 4; agent_propose and research_*: agents phase 5A; agent_trial*: Architect v2; research_library_*: the research library).
+const V2_ONLY = ["agent_change", "agent_handoff", "agent_propose", "agent_trial", "agent_trial_read", "agent_trial_wait", "handoff", "knowledge_note", "knowledge_read", "knowledge_search", "research_fetch", "research_library_find", "research_library_save", "research_read", "research_search", "routine_create", "routine_delete", "routine_list", "routine_report", "routine_run", "routine_update", "session_link", "session_unlink", "skills_installed", "todo_write"];
 
 describe("tool inventory", () => {
   test("V1 inventory is the 46 tools the spec names", async () => {

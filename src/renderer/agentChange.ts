@@ -66,7 +66,8 @@ export function agentChangeChip(change: Pick<AgentChange, "state" | "kind">): { 
   }
 }
 
-export function agentChangeTitle(change: Pick<AgentChange, "kind" | "agentName">): string {
+export function agentChangeTitle(change: Pick<AgentChange, "kind" | "agentName"> & { origin?: AgentChange["origin"] }): string {
+  if (change.origin?.kind === "template-update") return `Built-in update: ${change.agentName}`;
   return change.kind === "create" ? `New agent: ${change.agentName}` : `Change to ${change.agentName}`;
 }
 
@@ -76,6 +77,8 @@ export function agentChangeReason(change: Pick<AgentChange, "needsClick" | "reas
   if (change.reason === "lead") return "This changes Manta's own instructions";
   if (change.reason === "isolation") return `This lets ${change.agentName} edit code`;
   if (change.reason === "core") return "This changes the Architect itself";
+  if (change.reason === "script-flagged") return "An independent check flagged a script — read the reasons before applying";
+  if (change.reason === "script-unchecked") return "The independent script check couldn't run — read the scripts before applying";
   if (change.reason === "unfinished") return "The task didn't finish — review before applying";
   if (change.reason === "plan") return "Proposed while planning or outside a hand-off — review before applying";
   return null;
@@ -215,8 +218,9 @@ export function changedLineCount(change: Pick<AgentChange, "kind" | "before" | "
   return diffRows(change.before ?? "", change.after).filter((r) => r.kind === "add" || r.kind === "del").length;
 }
 
-/** Who made the change, for the one-line card: the Architect (a task), you (a restore), else Manta. */
+/** Who made the change, for the one-line card: the Architect (a task), you (a restore), a shipped built-in version, else Manta. */
 export function changeAuthor(change: Pick<AgentChange, "origin">): string {
+  if (change.origin.kind === "template-update") return "Built-in update";
   return change.origin.kind === "job" ? "Architect" : change.origin.kind === "restore" ? "You" : "Manta";
 }
 

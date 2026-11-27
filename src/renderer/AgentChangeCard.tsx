@@ -36,8 +36,12 @@ import {
   parseAgentMdView,
   verdictLabel,
   type AgentChangeAction,
-  type DiffRow,
 } from "./agentChange";
+import { isTemplateConflict, sizeLine } from "./agentTrial";
+import { ProblemBlock, TrialBlock } from "./TrialParts";
+import { ScriptReviewBlock, SkillsDiffBlock } from "./SkillParts";
+import { skillsFoldPart } from "./agentSkills";
+import { DiffLine } from "./DiffLine";
 
 type Notice = { tone: "ok" | "error"; text: string; state: AgentChange["state"] };
 
@@ -81,27 +85,6 @@ function CreateView({ change }: { change: AgentChange }) {
         <summary className="cursor-pointer text-text-muted">Instructions</summary>
         <div className="mt-2 whitespace-pre-wrap break-words text-text-muted max-h-64 overflow-y-auto">{view.body}</div>
       </details>
-    </div>
-  );
-}
-
-function DiffLine({ row }: { row: DiffRow }) {
-  if (row.kind === "gap") {
-    return (
-      <div className="flex whitespace-pre text-text-faint" data-diff="gap">
-        <span className="select-none shrink-0 w-3" aria-hidden="true" />
-        <span className="flex-1">⋯ {row.count} unchanged line{row.count === 1 ? "" : "s"}</span>
-      </div>
-    );
-  }
-  const add = row.kind === "add";
-  const del = row.kind === "del";
-  return (
-    <div className={`flex whitespace-pre${add ? " bg-[var(--diff-add)]" : del ? " bg-[var(--diff-del)]" : ""}`} data-diff={row.kind}>
-      <span className={`select-none shrink-0 w-3 ${add ? "text-ok" : del ? "text-danger" : "text-text-faint"}`} aria-hidden="true">
-        {add ? "+" : del ? "−" : " "}
-      </span>
-      <span className="flex-1 text-text">{row.text || " "}</span>
     </div>
   );
 }
@@ -246,10 +229,11 @@ const plural = (n: number, one: string): string => `${n} ${n === 1 ? one : `${on
 
 /** The fold's label when the card is collapsed: "Show the change · 2 lines · based on 3 sources". */
 function foldLabel(change: AgentChange): string {
-  if (change.kind === "create") return "Show the new agent";
+  const skills = skillsFoldPart(change.skillsDiff);
+  if (change.kind === "create") return ["Show the new agent", ...(skills ? [skills] : [])].join(" · ");
   const lines = changedLineCount(change);
   const sources = change.evidence?.length ?? 0;
-  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
+  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(skills ? [skills] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
 }
 
 /**
@@ -338,6 +322,12 @@ export function AgentChangeView({
           {reason}
         </div>
       )}
+      <ScriptReviewBlock change={change} />
+      {isTemplateConflict(change) && (
+        <div className="text-warn break-words" data-testid="agent-change-conflict">
+          Conflict: your edits and the new built-in version change the same part, so it waits for your click.
+        </div>
+      )}
       {change.state === "held" && (
         <div className="text-text-muted" data-testid="agent-change-held">
           The Architect is still working
@@ -351,12 +341,22 @@ export function AgentChangeView({
       )}
     </>
   );
+  const size = sizeLine(change);
+  // Architect v2 §3.4: the problem first, then the change and its size, the trial, then what it rests on
   const detail = (
     <>
+      {change.problem && <ProblemBlock problem={change.problem} />}
+      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
+      {size && (
+        <div className="text-text-muted" data-testid="agent-change-size">
+          {size}
+        </div>
+      )}
+      <SkillsDiffBlock change={change} />
+      <SourceBlocks change={change} />
+      {change.trial && <TrialBlock change={change} />}
       <EvidenceSection change={change} />
       <AdmissionSection change={change} />
-      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
-      <SourceBlocks change={change} />
     </>
   );
   const outcome = (

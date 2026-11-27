@@ -2,7 +2,7 @@
 // manta-pair.mjs — the `manta pair` CLI.
 //
 // Mints a fresh pairing code by hitting the LOOPBACK-only endpoint
-// GET http://127.0.0.1:8787/auth/pair and pretty-printing the
+// POST http://127.0.0.1:8787/auth/pair (header X-Manta-Pair: 1) and pretty-printing the
 // {pairing_code, box_id, expiresAt} response. Re-runnable any time: each call
 // supersedes the previous code (auth.mjs keeps a single active code).
 //
@@ -48,7 +48,9 @@ async function main() {
 
   let res;
   try {
-    res = await fetch(url, { method: "GET" });
+    res = await fetch(url, { method: "POST", headers: { "X-Manta-Pair": "1" } });
+    // a server from before the POST form (mid-update, before its restart) only answers GET: ask it the old way once
+    if (res.status === 404 || res.status === 405) res = await fetch(url, { method: "GET" });
   } catch (e) {
     fail(
       `Could not reach manta-server at ${url}\n` +

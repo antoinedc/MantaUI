@@ -406,6 +406,8 @@ export const KNOWLEDGE_WORK_TYPES: readonly string[] = [
   "knowledge-actions",
 ];
 export const CTO_WORK_TYPES: readonly string[] = ["cto-ambient", "cto-overnight", "cto-backfill"];
+/** The agents' own background work: an Architect's trial runs of a drafted agent (Architect v2). */
+export const AGENT_WORK_TYPES: readonly string[] = ["agent-trial"];
 
 /** "Knowledge work today: 14 calls · 1.2M tokens" for the given work types (KNOWLEDGE_WORK_TYPES / CTO_WORK_TYPES). */
 export function shareLine(status: BudgetStatus, workTypes: readonly string[], noun: string): string | null {

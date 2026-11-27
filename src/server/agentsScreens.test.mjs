@@ -1066,7 +1066,7 @@ test("refresh provisioning: a deleted or invalid agent's routine is removed with
   }
 });
 
-test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, round mode unknown; refusals are sentences", async () => {
+test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, a routine round; refusals are sentences", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -1080,7 +1080,7 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     assert.equal(input.agent, "agent-architect");
     assert.equal(input.targetProject, AGENTS_TMUX_SESSION);
     assert.equal(input.deliverResult, false);
-    assert.deepEqual(input.architect, { mode: "unknown" });
+    assert.deepEqual(input.architect, { mode: "routine" }, "a refresh is a routine round: its change quotes the brief, one shape is enough");
     assert.equal(input.specialist, true);
     assert.match(input.prompt, /Refresh @dev: check the research it rests on and propose only changes your research supports\./);
     assert.match(input.prompt, /Research library/, "the research guidance every task gets");
@@ -1119,4 +1119,19 @@ test("lead brief: a teammate's question is shown by the app and never asked agai
   const brief = buildLeadBrief({ body: "You are Manta.", roster: [] });
   assert.match(brief, /A teammate's question is shown to the user as a card in this chat; never ask it again or answer it\. The server sends the answer to the task\./);
   assert.match(brief, new RegExp(DECISION_MARKER));
+});
+
+test("profile: the Tests tab reads this agent's trials from the trials module; none without one", async () => {
+  const trial = { id: "tr_ab", rootJobId: "job_1", agentSlug: "dev", draftHash: "h", createdAt: T0, cases: [] };
+  const asked = [];
+  const f = await fixture({ extra: { trials: { list: (slug) => (asked.push(slug), slug === "dev" ? [trial] : []) } } });
+  try {
+    await f.engine.init();
+    assert.deepEqual((await f.engine.profile("dev")).trials, [trial]);
+    assert.deepEqual((await f.engine.profile("manta")).trials, []);
+    assert.deepEqual(asked, ["dev", "manta"]);
+    assert.deepEqual((await f.make().profile("dev")).trials, [], "no trials module: an empty list");
+  } finally {
+    await f.cleanup();
+  }
 });

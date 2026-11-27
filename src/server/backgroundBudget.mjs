@@ -65,6 +65,8 @@ export const WORK_CLASS = Object.freeze({
   "knowledge-actions": CLASS.CONTINUOUS,
   "knowledge-tidy": CLASS.BATCH,
   "knowledge-trial": CLASS.BATCH,
+  // an Architect's trial run of a drafted agent: asked for by a person's request, so it is not deferred to a quiet moment
+  "agent-trial": CLASS.CONTINUOUS,
   "cto-ambient": CLASS.CONTINUOUS,
   "cto-overnight": CLASS.BATCH,
   "cto-backfill": CLASS.BATCH,
@@ -77,6 +79,7 @@ export const WORK_BANDS = Object.freeze({
   "knowledge-actions": "fast",
   "knowledge-tidy": "fast",
   "knowledge-trial": "balanced",
+  "agent-trial": "balanced",
   "curator-notes": "balanced",
   "curator-rules": "deep",
   "curator-skills": "deep",

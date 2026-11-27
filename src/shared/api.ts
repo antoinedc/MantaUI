@@ -48,6 +48,7 @@ import type {
   AgentChangeEvent,
   AgentFleet,
   AgentProfile,
+  AgentTrial,
   AgentSeat,
   NeedsYou,
   TaskQuestion,
@@ -1455,7 +1456,7 @@ export interface Api {
   // promise.
   authClaim(input: AuthClaimInput): Promise<ClaimOutcome>;
 
-  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
+  // Mobile pairing code mint (BET-80): POST /auth/pair over the SSH tunnel.
   // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
   // QR. Resolves to an AuthPairResult — a failure is { ok:false, error }, NOT
   // a rejected promise.
@@ -2029,6 +2030,12 @@ export interface Api {
   agentsTaskResearch(input: { jobId: string }): Promise<AgentProfile["research"]>;
   /** The registry's projects, for "Add a seat". */
   agentsProjects(): Promise<{ slug: string; name: string }[]>;
+  /** Architect v2 Stage 1: a trial run of a drafted agent — its cases and what each did (never a transcript). */
+  agentsTrial(input: { id: string }): Promise<AgentTrial>;
+  /** One trial case's redacted transcript, 20 000 characters from `offset`; `nextOffset` is null at the end. */
+  agentsTrialTranscript(input: { id: string; case: string; offset?: number }): Promise<{ text: string; nextOffset: number | null }>;
+  /** One file of a change record from its snapshots (`path` as in the record's bundles, e.g. "skills/<name>/run.sh"); null = the file didn't exist there. */
+  agentsChangeFile(input: { id: string; path: string }): Promise<{ before: string | null; after: string | null; truncated?: boolean }>;
   /** Bus kind `taskQuestion`: a question was asked, answered, dismissed or lost (a hint: refetch). */
   onTaskQuestion(cb: (p: TaskQuestionEvent) => void): () => void;
   /** Bus kind `agentFleet`: jobs, changes, seats or questions changed (a hint: refetch, debounced). */
