@@ -13,7 +13,8 @@
 // Everything outside (the store files, the model, opencode, the clock, the setting) is injected; the tests use fakes.
 
 import { randomBytes } from "node:crypto";
-import { createMutex } from "./jsonStore.mjs";
+import { readFile } from "node:fs/promises";
+import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { buildLabelPrompt, parseLabel, labelKey, EXISTING_LABELS_MAX } from "./briefLabel.mjs";
 import { mintPromptId } from "./commandOrigins.mjs";
 import { extractJson } from "./knowledge/capture.mjs";
@@ -44,6 +45,20 @@ const newOfferId = () => `o_${randomBytes(6).toString("hex")}`;
 export const SAFE_SEND_ERROR = "Couldn't reach the chat to send it";
 export const NO_SUCH_OFFER = "That suggestion isn't available any more";
 export const BAD_ACTION = "Choose Make an agent, Make a skill, Not now or Don't ask again";
+
+/** A JSON document on disk, written atomically; a missing or unreadable file is "no document" (the engine starts empty). */
+export function createSuggestionStore({ path }) {
+  return {
+    load: async () => {
+      try {
+        return JSON.parse(await readFile(path, "utf-8"));
+      } catch {
+        return null;
+      }
+    },
+    save: (doc) => writeJsonAtomic(path, `${JSON.stringify(doc)}\n`),
+  };
+}
 
 /** The prompt of the one check call made when an offer is created. The briefs are data. */
 export function buildOfferPrompt({ label, items }) {

@@ -3,6 +3,7 @@
 // Fakes for the store, the model, opencode and the clock; nothing live.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createAgentSuggestions } from "./agentSuggestions.mjs";
 
 const DAY = 86_400_000;
@@ -535,5 +536,24 @@ describe("limits (AC-4.5, AC-4.6)", () => {
     await handoff(b, "Release notes for v4");
     assert.equal((await offersOf(b)).length, 1);
     assert.equal(b.w.docs.sugg.offers[0].count, 4);
+  });
+});
+
+describe("wiring on the box (existing boxes converge with no manual step)", () => {
+  const index = readFileSync(new URL("./index.mjs", import.meta.url), "utf-8");
+
+  test("index.mjs builds the engine on the Summary-model one-shot, hands it to the agents engine and the rpc channels, recovers at boot and sweeps every minute", () => {
+    assert.match(index, /const agentSuggestions = createAgentSuggestions\(/);
+    assert.match(index, /summaryModel\.resolveCheapWriter\(sessionId\)/);
+    assert.match(index, /createAgentsEngine\(\{\s*suggestions: agentSuggestions,/);
+    assert.match(index, /buildHandlers\(\{\s*usageCalibration,\s*agents: agentsEngine,\s*suggestions: agentSuggestions,/);
+    assert.match(index, /agentSuggestions\.recover\(\{ boot: true \}\)/);
+    assert.match(index, /startPoller\(\(\) => agentSuggestions\.sweep\(\), \{ intervalMs: 60_000/);
+  });
+
+  test("the stores are created on first use under the agents folder, and the setting defaults to on when the key is absent", () => {
+    assert.match(index, /statePath\("agents", "\.suggestions\.json"\)/);
+    assert.match(index, /statePath\("agents", "\.suggestion-suppressions\.json"\)/);
+    assert.match(index, /\?\.agentSuggestions !== false/);
   });
 });
