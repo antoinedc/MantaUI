@@ -4309,4 +4309,158 @@ test("task model: the posted result carries the model the task ran on in its man
   const { w, id } = await finishedOnModel("anthropic/claude-sonnet-5-5");
   const next = await continueJob(id, { prompt: "review it", sessionID: PARENT, model: "openai/gpt-6-sol" }, w.deps);
   assert.equal(buildResultSynthetic(next.job).metadata.manta.model, "openai/gpt-6-sol");
+// ---------------------------------------------------------------------------
+// Agent chat tasks (docs/superpowers/specs/2026-11-28-agent-chat-tasks.md §6.6–§6.8): the knowledge pin is awaited and verified
+// BEFORE the opening prompt; the record carries the project and where the task started; a seat owed is on the record.
+// ---------------------------------------------------------------------------
+
+const RONDA = "ronda-0f9e8d7c6b";
+const chatTask = (extra = {}) => input({ knowledgeProject: RONDA, project: { slug: RONDA, name: "Ronda" }, startedFrom: "agent-chat", ...extra });
+const PIN_REFUSED = "Couldn't attach Ronda's notes to the task; nothing was sent to it";
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("AC-5.3a a pin that resolves slowly (2 s) delays the opening prompt: nothing is sent before it resolves", async () => {
+  const w = world();
+  let resolved = false;
+  w.deps.pinKnowledgeSession = async (a) => {
+    w.calls.pin = [...(w.calls.pin ?? []), a];
+    await sleepMs(2000);
+    resolved = true;
+    return { slug: RONDA };
+  };
+  const started = startJob(chatTask(), w.deps);
+  await sleepMs(900);
+  assert.equal(w.calls.send.length, 0, "no prompt while the pin is pending");
+  const res = await started;
+  assert.equal(res.ok, true);
+  assert.equal(resolved, true);
+  assert.equal(w.calls.send.length, 1);
+  assert.equal(w.calls.pin[0].sessionID, res.job.childSessionID);
+  assert.equal(w.calls.pin[0].force, true);
+  assert.equal(w.calls.pin[0].directory, WT, "the worktree the child was moved into");
+});
+
+for (const [label, pin] of [
+  ["throws", async () => { throw new Error("knowledge exploded"); }],
+  ["returns null while knowledge is on", async () => null],
+  ["returns another project's slug", async () => ({ slug: "mantaui-1a2b3c4d5e" })],
+  ["never answers (10 s timeout)", () => new Promise(() => {})],
+]) {
+  test(`AC-5.3b a pin that ${label} refuses the launch: record, child, window and worktree removed, no prompt, the sentence returned`, async () => {
+    const w = world();
+    w.deps.pinTimeoutMs = 50;
+    w.deps.pinKnowledgeSession = pin;
+    const res = await startJob(chatTask(), w.deps);
+    assert.equal(res.ok, false);
+    assert.equal(res.error, PIN_REFUSED);
+    nothingLeft(w);
+    assert.equal(w.calls.send.length, 0, "nothing was sent to the task");
+    assert.deepEqual(w.calls.del, [w.calls.create[0].id]);
+    assert.equal(w.calls.kill.length, 1, "the window was closed");
+    assert.equal(w.records.size, 0, "no result message: the task never existed");
+  });
+}
+
+test("AC-5.3c with the knowledge layer off (`{disabled:true}`) the launch goes on", async () => {
+  const w = world();
+  w.deps.pinKnowledgeSession = async () => ({ disabled: true });
+  const res = await startJob(chatTask(), w.deps);
+  assert.equal(res.ok, true);
+  assert.equal(w.calls.send.length, 1);
+});
+
+test("AC-5.3 the pin is awaited for every delegate job, but without a knowledgeProject a failing pin still never fails the launch", async () => {
+  for (const pin of [async () => { throw new Error("boom"); }, async () => null, () => { throw new Error("sync boom"); }]) {
+    const w = world();
+    w.deps.pinKnowledgeSession = pin;
+    const res = await startJob(input(), w.deps);
+    assert.equal(res.ok, true);
+    assert.equal(w.calls.send.length, 1);
+  }
+  const w = world();
+  const order = [];
+  const send = w.deps.sendChildPrompt;
+  w.deps.sendChildPrompt = async (a) => (order.push("prompt"), send(a));
+  w.deps.pinKnowledgeSession = async () => { await sleepMs(30); order.push("pin"); return { slug: "x" }; };
+  await startJob(input(), w.deps);
+  assert.deepEqual(order, ["pin", "prompt"], "awaited: a slow pin can no longer lose the race");
+});
+
+test("AC-7.8 a restart between the record and the pin: the reconcile runs the same awaited pin; a failure removes the record, child, window and worktree", async () => {
+  const w = world();
+  w.fail.create = netErr();
+  await startJob(chatTask(), w.deps);
+  const job = w.jobs[0];
+  assert.equal(job.launchState, "uncertain");
+  w.sessions.set(job.childSessionID, { id: job.childSessionID, parentID: PARENT, directory: REPO });
+  w.deps.pinKnowledgeSession = async () => { throw new Error("knowledge exploded"); };
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.jobs.length, 0, "no `failed` record is kept");
+  assert.equal(w.records.size, 0, "and no result message");
+  assert.equal(w.calls.send.length, 0);
+  assert.deepEqual(w.calls.rmWorktree.map((r) => r.path), [WT]);
+  assert.deepEqual(w.calls.del, [job.childSessionID]);
+  // the same restart with a pin that works completes the launch
+  const ok = world();
+  ok.fail.create = netErr();
+  await startJob(chatTask(), ok.deps);
+  ok.sessions.set(ok.jobs[0].childSessionID, { id: ok.jobs[0].childSessionID, parentID: PARENT, directory: REPO });
+  ok.deps.pinKnowledgeSession = async () => ({ slug: RONDA });
+  await reconcileV2Jobs(ok.deps);
+  assert.equal(ok.jobs[0].launchState, "running");
+  assert.equal(ok.calls.send.length, 1);
+});
+
+test("§6.8 the record carries project, startedFrom, knowledgeProject and seatOwed — only when well-formed", async () => {
+  const w = world();
+  const res = await startJob(chatTask({ seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
+  const job = w.job(res.job.id);
+  assert.deepEqual(job.project, { slug: RONDA, name: "Ronda" });
+  assert.equal(job.startedFrom, "agent-chat");
+  assert.equal(job.knowledgeProject, RONDA);
+  assert.deepEqual(job.seatOwed, { project: RONDA, projectName: "Ronda" });
+  assert.equal("seatAdded" in job, false, "no seatAdded at start");
+  const bad = world();
+  const r2 = await startJob(input({ project: { slug: 7 }, startedFrom: "somewhere", knowledgeProject: 5, seatOwed: { project: "x" } }), bad.deps);
+  const j2 = bad.job(r2.job.id);
+  for (const k of ["project", "startedFrom", "knowledgeProject", "seatOwed"]) assert.equal(k in j2, false, `${k} is not stored when malformed`);
+});
+
+test("§6.8 a continuation keeps the task's project, startedFrom and knowledgeProject, and never inherits seatOwed", async () => {
+  const w = world();
+  const res = await startJob(chatTask({ seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
+  w.finish(res.job.childSessionID, "succeeded", T0 + 5);
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.job(res.job.id).status, "done");
+  const next = await continueJob(res.job.id, { prompt: "another round", sessionID: PARENT }, w.deps);
+  assert.equal(next.ok, true, JSON.stringify(next));
+  const c = w.job(next.job.id);
+  assert.deepEqual(c.project, { slug: RONDA, name: "Ronda" });
+  assert.equal(c.startedFrom, "agent-chat");
+  assert.equal(c.knowledgeProject, RONDA);
+  assert.equal("seatOwed" in c, false);
+});
+
+test("AC-2.1 the completion text names the project right after the status line", () => {
+  const text = buildCompletionText({ name: "fix-it", status: "done", result: "All good", project: { slug: RONDA, name: "Ronda" } });
+  const lines = text.split("\n");
+  assert.equal(lines[0], '[background job "fix-it" done]');
+  assert.equal(lines[1], "Project: Ronda");
+  assert.equal(buildCompletionText({ name: "fix-it", status: "done", result: "x" }).includes("Project:"), false, "other tasks are unchanged");
+});
+
+test("§6.7 settleSeat: clears seatOwed once, sets seatAdded only when the caller made the file, is idempotent and never touches an ended record's other fields", async () => {
+  const w = world();
+  const engine = createDelegateEngine(w.deps);
+  const a = await startJob(chatTask({ seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
+  const out = await engine.settleSeat(a.job.id, { created: true });
+  assert.equal(out.ok, true);
+  assert.deepEqual(w.job(a.job.id).seatAdded, { project: RONDA, projectName: "Ronda" });
+  assert.equal("seatOwed" in w.job(a.job.id), false);
+  assert.equal((await engine.settleSeat(a.job.id, { created: true })).ok, true, "idempotent");
+  const b = await startJob(chatTask({ name: "second", seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
+  await engine.settleSeat(b.job.id, { created: false });
+  assert.equal("seatAdded" in w.job(b.job.id), false, "someone else made the file: no seatAdded");
+  assert.equal("seatOwed" in w.job(b.job.id), false);
+  assert.deepEqual(await engine.settleSeat("nope", { created: true }), { ok: false });
 });
