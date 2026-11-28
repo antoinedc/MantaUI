@@ -4413,6 +4413,7 @@ test("AC-7.8 a restart between the record and the pin: the reconcile runs the sa
 
 test("§6.8 the record carries project, startedFrom, knowledgeProject and seatOwed — only when well-formed", async () => {
   const w = world();
+  w.deps.pinKnowledgeSession = async () => ({ slug: RONDA });
   const res = await startJob(chatTask({ seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
   const job = w.job(res.job.id);
   assert.deepEqual(job.project, { slug: RONDA, name: "Ronda" });
@@ -4428,6 +4429,7 @@ test("§6.8 the record carries project, startedFrom, knowledgeProject and seatOw
 
 test("§6.8 a continuation keeps the task's project, startedFrom and knowledgeProject, and never inherits seatOwed", async () => {
   const w = world();
+  w.deps.pinKnowledgeSession = async () => ({ slug: RONDA });
   const res = await startJob(chatTask({ seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
   w.finish(res.job.childSessionID, "succeeded", T0 + 5);
   await reconcileV2Jobs(w.deps);
@@ -4451,6 +4453,7 @@ test("AC-2.1 the completion text names the project right after the status line",
 
 test("§6.7 settleSeat: clears seatOwed once, sets seatAdded only when the caller made the file, is idempotent and never touches an ended record's other fields", async () => {
   const w = world();
+  w.deps.pinKnowledgeSession = async () => ({ slug: RONDA });
   const engine = createDelegateEngine(w.deps);
   const a = await startJob(chatTask({ seatOwed: { project: RONDA, projectName: "Ronda" } }), w.deps);
   const out = await engine.settleSeat(a.job.id, { created: true });

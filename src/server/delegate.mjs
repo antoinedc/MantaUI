@@ -307,6 +307,8 @@ export function buildCompletionText(job) {
   const status = job?.status ?? "done";
   const word = status === "done" && job?.endedBlocked === true ? "needs a decision" : status;
   const lines = [`[background job "${name}" ${word}]`];
+  // a task an agent started from its own conversation says which project it ran in (the agent's report names it)
+  if (typeof job?.project?.name === "string" && job.project.name) lines.push(`Project: ${job.project.name.replace(/[\r\n]+/g, " ")}`);
   if (job?.worktree) {
     const changed = job?.filesChanged == null ? "0" : String(job.filesChanged);
     lines.push(`Branch: ${job.branch ?? ""} (${changed} files changed)`);
@@ -4117,16 +4119,45 @@ async function rollbackLaunch(job, deps) {
  * admitted, so the record, child and window stay, marked `uncertain`, and the
  * sweeper keeps reconciling them.
  */
-function pinKnowledgeSession(deps, job) {
+const PIN_TIMEOUT_MS = 10_000;
+
+/**
+ * The knowledge pin of a launching child, AWAITED before its opening prompt (a slow pin can no longer lose the race). A job that asks
+ * for a project (`knowledgeProject`, an agent's task started from its own conversation) needs the pin proven: the layer is off
+ * (`{disabled:true}`: there are no notes to serve) or the stored mapping is that project's. Anything else — a throw, no answer in
+ * `pinTimeoutMs`, null while the layer is on, another project's slug — throws a definite refusal (`pinRefused`), which undoes the launch.
+ * Any other job keeps today's rule: a failed pin is logged and the launch goes on.
+ */
+async function pinKnowledgeSession(deps, job) {
   const directory = job.executionDirectory ?? job.worktree ?? job.parentDirectory;
-  if (typeof deps.pinKnowledgeSession !== "function" || !directory || !job.childSessionID) return;
-  try {
-    Promise.resolve(deps.pinKnowledgeSession({ sessionID: job.childSessionID, directory, force: true })).catch((e) =>
-      console.warn(`[delegate] knowledge pin of ${job.childSessionID} failed:`, e?.message ?? e),
-    );
-  } catch (e) {
-    console.warn(`[delegate] knowledge pin of ${job.childSessionID} failed:`, e?.message ?? e);
+  const required = typeof job.knowledgeProject === "string" && job.knowledgeProject !== "";
+  if (typeof deps.pinKnowledgeSession !== "function" || !directory || !job.childSessionID) {
+    if (required) throw pinRefusal(job);
+    return;
   }
+  let timer;
+  try {
+    const mapping = await Promise.race([
+      Promise.resolve().then(() => deps.pinKnowledgeSession({ sessionID: job.childSessionID, directory, force: true })),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("the knowledge pin took too long")), deps.pinTimeoutMs ?? PIN_TIMEOUT_MS); // cleared below, never left running
+      }),
+    ]);
+    if (required && !(mapping?.disabled === true || mapping?.slug === job.knowledgeProject)) throw pinRefusal(job);
+  } catch (e) {
+    if (e?.pinRefused) throw e;
+    console.warn(`[delegate] knowledge pin of ${job.childSessionID} failed:`, e?.message ?? e);
+    if (required) throw pinRefusal(job);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A definite refusal (status 400 reads as one), so the existing undo takes the whole launch back; `pinRefused` makes it a removal
+// even when a reconcile, not the call that started it, finished the launch.
+function pinRefusal(job) {
+  const name = job.project?.name || "the project";
+  return Object.assign(new Error(`Couldn't attach ${name}'s notes to the task; nothing was sent to it`), { status: 400, pinRefused: true });
 }
 
 async function submitCommand(job, deps, { reconciled = false, undo = {} } = {}) {
@@ -4137,8 +4168,8 @@ async function submitCommand(job, deps, { reconciled = false, undo = {} } = {}) 
     if (delegate) {
       // Shared knowledge §3.1: the child was created under its parent and has just been moved into its
       // worktree, so only NOW does it have its real directory — pin it to that project (forced: it wins over a
-      // parent-/move-sourced mapping). Fire-and-forget; it never delays or fails the launch.
-      pinKnowledgeSession(deps, job);
+      // parent-/move-sourced mapping). Awaited before the opening prompt; only a job that names its project can be refused by it.
+      await pinKnowledgeSession(deps, job);
       // A delegate job's opening prompt goes straight to the child (never through
       // promptDelivery, which swallows the failure this has to classify). The
       // persisted message id makes a retry after an unknown outcome admit once.
@@ -4169,9 +4200,10 @@ async function submitCommand(job, deps, { reconciled = false, undo = {} } = {}) 
         // The caller holds the session's resource lock either way. A RECONCILED refusal was
         // reported as sent: it ends `failed` with its one result. A live one is simply undone.
         // Nothing here ever deletes the session — it is shared with earlier runs.
-        if (reconciled) await finishV2Job(job, "failed", `could not send: ${String(e?.message ?? e)}`, deps, { resourcesHeld: true });
+        // (A refused knowledge pin is never reported as sent: nothing went out, so it is undone either way.)
+        if (reconciled && !e?.pinRefused) await finishV2Job(job, "failed", `could not send: ${String(e?.message ?? e)}`, deps, { resourcesHeld: true });
         else await rollbackContinuation(job, deps, undo);
-      } else if (reconciled && delegate && !job.launch.restore) {
+      } else if (reconciled && delegate && !job.launch.restore && !e?.pinRefused) {
         await finishV2Job(job, "failed", `could not start: ${String(e?.message ?? e)}`, deps);
       } else {
         await rollbackLaunch(job, deps);
@@ -4401,7 +4433,7 @@ async function continueJobRecord(id, input, deps) {
       // (a successor starts with no told / blocked / exceeded actions or self-report of its own: the previous round's stay on
       // the previous record; the project patterns are inherited — the child keeps the permissions OpenCode gave it at creation)
       // (the ending gate's marks, the seat note and the questions the old round ended waiting on belong to that round alone)
-      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, decision: _d, ending: _en, continueAfter: _ca, gateFailed: _gf, seatAdded: _sa, waiting: _w, ...inherited } = old;
+      const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, decision: _d, ending: _en, continueAfter: _ca, gateFailed: _gf, seatAdded: _sa, seatOwed: _so, waiting: _w, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
       // the model this round is sent on: the named one, else the one the task last ran on (nothing pinned when it named none)
       const roundModel = namedModel ?? toDeliverModel(old.launch?.model) ?? parseModelString(old.requestedModel ?? old.model);
@@ -5087,6 +5119,12 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       rootJobId: jobId,
       // this launch placed the agent in a project it had no seat in (the run card says so)
       ...(seatAddedOf(input?.seatAdded) ? { seatAdded: seatAddedOf(input.seatAdded) } : {}),
+      // a task an agent started from its own conversation (agent chat tasks): the project it runs in, where it started, the project its
+      // knowledge pin must be (the launch is refused otherwise) and the seat it owes once its launch is confirmed
+      ...(seatAddedOf(input?.project, "slug", "name") ? { project: seatAddedOf(input.project, "slug", "name") } : {}),
+      ...(input?.startedFrom === "agent-chat" ? { startedFrom: "agent-chat" } : {}),
+      ...(typeof input?.knowledgeProject === "string" && input.knowledgeProject ? { knowledgeProject: input.knowledgeProject } : {}),
+      ...(seatAddedOf(input?.seatOwed) ? { seatOwed: seatAddedOf(input.seatOwed) } : {}),
       // never post this job's result (a refresh task runs under a headless session nobody reads); inherited by every round
       ...(input?.deliverResult === false ? { deliverResult: false } : {}),
       ...(typeof input?.agentName === "string" && input.agentName ? { agentName: input.agentName } : {}),
@@ -5162,9 +5200,28 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
   }
 }
 
-/** `{project, projectName}` as the agents engine passes it, or null. */
-function seatAddedOf(v) {
-  return v && typeof v === "object" && typeof v.project === "string" && v.project && typeof v.projectName === "string" ? { project: v.project, projectName: v.projectName } : null;
+/** `{project, projectName}` as the agents engine passes it (or the two named keys), or null. */
+function seatAddedOf(v, a = "project", b = "projectName") {
+  return v && typeof v === "object" && typeof v[a] === "string" && v[a] && typeof v[b] === "string" && v[b] ? { [a]: v[a], [b]: v[b] } : null;
+}
+
+/**
+ * The seat a confirmed launch owed is settled: `seatOwed` is cleared and, only when the caller made the seat file, `seatAdded` says so
+ * (the card reads "Added @dev to Ronda"). Idempotent; `{ ok:false }` when the record is gone.
+ */
+async function settleSeat(id, { created = false } = {}, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false };
+    const { seatOwed, ...rest } = jobs[idx];
+    if (!seatOwed) return { ok: true };
+    jobs[idx] = { ...rest, ...(created && !rest.seatAdded ? { seatAdded: seatOwed } : {}) };
+    await save(jobs);
+    publish?.({ kind: "delegate.updated", payload: { id, status: jobs[idx].status, launchState: jobs[idx].launchState, activity: jobs[idx].activity } });
+    return { ok: true };
+  });
 }
 
 // The job's record, if it is still the running attempt this launch is for. A stop (or
@@ -6390,6 +6447,8 @@ export function createDelegateEngine(baseDeps) {
     openSession: (id) => openJobSession(id, deps),
     /** `delegate_send`: another round of one of the caller's finished jobs (a NEW record on the same session). */
     continueJob: (id, input) => continueJob(id, input, deps),
+    /** A confirmed launch's owed seat is settled on its record (agent chat tasks §6.7): `seatOwed` cleared, `seatAdded` set when the caller made the file. */
+    settleSeat: (id, opts) => settleSeat(id, opts, deps),
     /** The user's word to a task (an answer, or the news that its question was dismissed), by the task's root id: steered, continued or continue-pending. */
     deliverToTask: (rootJobId, text, opts) => deliverToTask(rootJobId, text, opts, deps),
     rootJobOf,

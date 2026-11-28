@@ -353,6 +353,15 @@ export function createKnowledgeEngine(deps = {}) {
    * (first user message) when the caller already knows the directory. Same rules as the event
    * path (excluded sessions are never mapped; a move re-pins only while nothing is captured).
    */
+  /** Is the knowledge layer started and switched on? (A pin that returns null is "failed" while this is true, "nothing to serve" when it is false.) */
+  async function isEnabled() {
+    try {
+      return !!c && (await enabledState()).enabled === true;
+    } catch {
+      return false;
+    }
+  }
+
   async function pinSession({ sessionID, directory, force = false } = {}) {
     if (!c || !(await enabledState()).enabled || typeof sessionID !== "string" || !sessionID) return null;
     return c.sessionMap.pin({ sessionID, directory, source: "prompt", force: force === true });
@@ -521,6 +530,7 @@ export function createKnowledgeEngine(deps = {}) {
     observeRaw,
     observeEvent: observeRaw,
     pinSession,
+    isEnabled,
     enqueueNote,
     search,
     readPage,

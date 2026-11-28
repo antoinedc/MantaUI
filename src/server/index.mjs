@@ -1532,7 +1532,8 @@ const delegateEngine = createDelegateEngine({
   moveSession: (sid, directory) => oc.moveSession(sid, directory),
   sendChildPrompt: (input) => oc.sendPrompt(input),
   // Shared knowledge: a job's project is its worktree's, known only once it has been moved there.
-  pinKnowledgeSession: (args) => knowledgeEngine.pinSession(args),
+  // (a switched-off layer answers `{disabled:true}`: a task that must be pinned to its project then has no notes to serve, which is not a failed pin)
+  pinKnowledgeSession: async (args) => ((await knowledgeEngine.isEnabled()) ? knowledgeEngine.pinSession(args) : { disabled: true }),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   // N7 result to the parent: an admission like any other (§6.1) — a replaced
@@ -2721,6 +2722,9 @@ const agentsEngine = createAgentsEngine({
     identify: async (directory) => (await knowledgeEngine.registry?.identify(directory)) ?? null,
     // the registry's projects, for a seat's project name and the "Add a seat" list
     list: async () => (await knowledgeEngine.registry?.list?.()) ?? [],
+    // agent chat tasks: one project by id (its folders), and a READ-ONLY "which project is this folder?" that never registers anything
+    get: async (slug) => (await knowledgeEngine.registry?.get?.(slug)) ?? null,
+    lookup: async (directory) => (await knowledgeEngine.registry?.lookup?.(directory)) ?? null,
   },
   taskQuestions,
   routines: routinesEngine, // the monthly refresh routines (agent screens §5.4)

@@ -361,3 +361,13 @@ test("maintenance runs the backfill and the missed-prefetch sweep and never thro
 test("createKnowledgeEngine requires a config", () => {
   assert.throws(() => createKnowledgeEngine({}), /config/);
 });
+
+test("isEnabled: false before start and while the layer is off, true when it is on (a failed pin and an off layer are told apart)", async () => {
+  const { engine } = await rig();
+  assert.equal(await engine.isEnabled(), false, "not started");
+  await engine.start();
+  assert.equal(await engine.isEnabled(), true);
+  const off = await rig({ stored: { enabled: false } });
+  await off.engine.start();
+  assert.equal(await off.engine.isEnabled(), false);
+});
