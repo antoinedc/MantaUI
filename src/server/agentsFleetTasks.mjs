@@ -2,6 +2,8 @@
 // and what ended today with one plain sentence each. Pure shaping over task records — the I/O (stores, git, the registry) is the
 // caller's (agents.mjs `fleetTasks`). Nothing here invents a status: a task is running, paused by the user, or ended one of four ways.
 
+import { displayTitle } from "./jobTitle.mjs";
+
 /** Ended today holds at most this many rows (newest first). */
 export const FLEET_ENDED_MAX = 50;
 
@@ -88,7 +90,7 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
     return {
       jobId: job.id,
       rootJobId: job.rootJobId ?? job.id,
-      title: typeof job.name === "string" ? job.name : "",
+      title: displayTitle(job),
       agentSlug: slugOfJob(job) ?? "",
       project: project?.slug ?? null,
       projectName: project?.name ?? null,

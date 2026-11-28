@@ -77,6 +77,20 @@ test("shapeFleetTasks: running and paused tasks only; paused is 'paused by you';
   assert.deepEqual(out.running.map((t) => t.jobId).includes("x"), false, "not a specialist task");
 });
 
+test("shapeFleetTasks: a row's title is plain words — the stored title, a handoff's own title, or the first sentence of the prompt — never the slug", () => {
+  const out = shape([
+    job({ id: "t1", status: "running", finishedAt: null, name: "build-the-fleet-needs-you-redesign", request: "Build the Fleet / Needs you redesign", requestedBy: "manta" }),
+    job({ id: "t2", status: "running", finishedAt: null, name: "you-are-implementing-pr", title: "Implement the Fleet redesign", request: undefined }),
+    job({ id: "t3", status: "running", finishedAt: null, name: "mantaui-repo-github-com-antoined", prompt: "MantaUI repo (github.com/antoinedc/MantaUI). The Fleet redesign is merged." }),
+  ]);
+  const title = (id) => out.running.find((t) => t.jobId === id).title;
+  assert.equal(title("t1"), "Build the Fleet / Needs you redesign");
+  assert.equal(title("t2"), "Implement the Fleet redesign");
+  assert.equal(title("t3"), "MantaUI repo (github.com/antoinedc/MantaUI)");
+  const endedOne = shape([job({ id: "e1", name: "audit-the-head-tags-on", request: "Audit the head tags on the pricing page. Then the blog." })]);
+  assert.equal(endedOne.ended[0].title, "Audit the head tags on the pricing page");
+});
+
 test("shapeFleetTasks: a task with no registry project is listed with a null project", () => {
   const out = shape([job({ status: "running", finishedAt: null })], { projectOf: () => null });
   assert.equal(out.running[0].project, null);

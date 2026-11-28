@@ -21,6 +21,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
+import { displayTitle } from "./jobTitle.mjs";
 import { acceptsFreeText, answerText, decisionFromForm, dismissText, PLACEHOLDER_ANSWER } from "./taskDecision.mjs";
 
 export const QUESTIONS_FILE = ".questions.json";
@@ -235,7 +236,7 @@ export function createTaskQuestions({
       agentSlug: agent.startsWith("agent-") ? agent.slice("agent-".length) : null,
       agentName: typeof job.agentName === "string" && job.agentName ? job.agentName : agent.replace(/^agent-/, "") || "Agent",
       project,
-      taskName: job.name ?? "",
+      taskName: displayTitle(job),
       questions: decision.questions,
       state: "open",
       askedAt: now(),

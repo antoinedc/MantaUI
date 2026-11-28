@@ -26,6 +26,7 @@
 
 import { completionOwnerOf } from "./delegate.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
+import { displayTitle } from "./jobTitle.mjs";
 
 /** A windowless session that just ended its turn stays a row this long (spec §2). */
 export const LINGER_MS = 30_000;
@@ -989,7 +990,7 @@ export function createSessionStatus(d) {
         sessionId: sid,
         kind: w ? "window" : "virtual",
         windowIndex: w ? w.index : null,
-        title: w ? w.name : (inf?.title?.trim() || (typeof j?.name === "string" && j.name.trim()) || "Session"),
+        title: w ? w.name : (inf?.title?.trim() || (j && displayTitle(j)) || "Session"),
         job: j ? { id: j.id, status: j.status, origin: typeof j.origin === "string" ? j.origin : "" } : null,
         outside: !w && !res.parent,
         children: [],

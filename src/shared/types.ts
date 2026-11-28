@@ -2890,7 +2890,10 @@ export type DelegateJob = {
   agentName?: string; // the agent's display name
   request?: string; // the user's request (@mention) or the handoff title
   requestedBy?: "manta"; // present when the lead handed the work off
-  name: string; // slug of the first 4 words of the prompt
+  name: string; // slug of the first 4 words of the prompt (names the branch and window — not for display)
+  // The task's plain-language title, for every row and card that shows it. The box writes it (a handoff's own title, or one made once
+  // from the prompt when the task starts, else the first sentence of what was asked). Absent on an older box: fall back to `name`.
+  title?: string;
   prompt: string;
   model: string | null;
   parentSessionID: string; // the opencode session that called delegate

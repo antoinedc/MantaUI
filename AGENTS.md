@@ -1284,6 +1284,15 @@ and worktree all belong to it.
   poll).
 - Jobs appear in the session graph's sidebar tree, with or without a window.
 - Nesting is the session graph (`sessionStatus.mjs`) and nothing else: Manta-owned job records, opencode's own `parentID`, and explicit `session_link`s. Nothing is inferred — an API-driven session with none of them is a root, and `session_unlink` records a suppression that makes it a root even if a link existed. `parentSessionID` on a record keeps its job listing/result routing meaning only. Records written before stage (c) may still carry a `displayParentID`; it is ignored and stripped from every wire read.
+- **A task has a plain-language TITLE; `name` is only a slug.** `job.name` names the branch and the tmux window (it is slugified, e.g.
+  `you-are-implementing-pr`) and must never be shown. Every row/card that shows a task (Fleet rows + Ended today + Details, Needs you, the
+  recap, the chat's task cards and result card, the task panel, the sidebar row of a window-less job) reads `displayTitle(job)`
+  (`src/server/jobTitle.mjs`): `job.title` → a routine task's routine name (`Refresh @x`, `Team check-up`) → a task subagent's / command's
+  own name → the first sentence of `request` → a non-slug `name` → the first sentence of the prompt (up to the project brief) → "Untitled
+  task". `delegate:list` rows carry it as `title`. At start `startJobV2` stores `title` + `titleSource`: a caller's own (a handoff's title,
+  a refresh / check-up) is `given`; else the first sentence of the request is stored at once (`fallback`) and one `generateText` call
+  (the `generateTitle` dependency: Summary model, else the asking conversation's own — same writer as auto-rename) replaces it in the
+  background (`generated`), never delaying the launch; a failure or a slug answer keeps the fallback. Do not show `name` anywhere new.
 - Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
   refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
   sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the
