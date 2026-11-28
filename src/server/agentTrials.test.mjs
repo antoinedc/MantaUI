@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgentTrials, draftHash, differingFiles, TRIAL_AUTO_ANSWER, CASE_TIMEOUT_MS, TRIAL_DATA_LINE, TRIAL_BLOCK_DESCRIPTION, WITHHELD, TRIAL_PROGRESS_PREFIX, trialProgressLabel } from "./agentTrials.mjs";
+import { createAgentTrials, draftHash, differingFiles, TRIAL_AUTO_ANSWER, CASE_TIMEOUT_MS, TRIAL_DATA_LINE, TRIAL_BLOCK_DESCRIPTION, WITHHELD, TRIAL_PROGRESS_PREFIX, trialProgressLabel, trialScratchRoot, requiredFreeBytes, MIN_FREE_BYTES } from "./agentTrials.mjs";
 import { MODES } from "../shared/autonomyShared.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 
@@ -124,6 +124,9 @@ async function rig(over = {}) {
       mintSession: () => `ses_trial${++n}`,
       now: () => w.clock,
       log: { warn: () => {} },
+      // the box this runs on may be short of space: the free-space check is fed explicitly
+      diskFree: async () => 1e13,
+      gitBytes: async () => 0,
       ...extra,
     });
     return t;
@@ -352,6 +355,93 @@ test("a failed clone fails the case without a session and leaves nothing behind"
   } finally {
     await f.cleanup();
   }
+});
+
+test("a clone that fails half-way has its partial folder removed at once", async () => {
+  const f = await rig({});
+  try {
+    let partial = null;
+    const t = f.make({ gitRun: async (args) => {
+      if (args.includes("clone")) {
+        partial = args.at(-1);
+        await mkdir(join(partial, ".git", "objects"), { recursive: true });
+        await writeFile(join(partial, ".git", "objects", "pack"), "x".repeat(1000));
+        throw new Error("fatal: write error: No space left on device");
+      }
+      return { stdout: "" };
+    } });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    const r = await settle(t, trialId);
+    assert.equal(r.cases[0].state, "failed");
+    assert.ok(partial);
+    await assert.rejects(stat(partial), { code: "ENOENT" });
+    assert.deepEqual(await readdir(join(f.base, "private")), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("too little free space refuses the case before any copy: no clone, no folder, a plain sentence", async () => {
+  const f = await rig({});
+  try {
+    const seen = [];
+    const t = f.make({
+      diskFree: async () => 1.5 * 1024 ** 3,
+      gitBytes: async () => 100,
+      gitRun: async (args) => (seen.push(args), { stdout: "" }),
+    });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    const r = await settle(t, trialId);
+    assert.equal(r.cases[0].state, "failed");
+    assert.equal(r.cases[0].error, `Not enough disk space for a test copy: 1.5 GB free in ${join(f.base, "private")}`);
+    assert.equal(seen.some((a) => a.includes("clone")), false);
+    assert.deepEqual(f.w.created, []);
+    assert.deepEqual(await readdir(join(f.base, "private")), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the free space needed is max(2 GiB, 3× the checkout's git data)", async () => {
+  assert.equal(requiredFreeBytes(0), MIN_FREE_BYTES);
+  assert.equal(requiredFreeBytes(10 * 1024 ** 3), 30 * 1024 ** 3);
+  const f = await rig({});
+  try {
+    const seen = [];
+    const t = f.make({
+      diskFree: async () => 20 * 1024 ** 3, // plenty by the 2 GiB floor, not for a 10 GiB repository
+      gitBytes: async (dir) => (seen.push(dir), 10 * 1024 ** 3),
+    });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    const r = await settle(t, trialId);
+    assert.deepEqual(seen, ["/repo/shop"]);
+    assert.match(r.cases[0].error, /^Not enough disk space for a test copy: 20\.0 GB free in /);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("enough free space: the copy goes ahead", async () => {
+  const f = await rig({});
+  try {
+    const t = f.make({ diskFree: async () => 3 * 1024 ** 3, gitBytes: async () => 1024 ** 3 / 2 });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    await settle(t, trialId);
+    assert.equal(f.w.git.some((a) => a.includes("clone")), true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the base folder: MANTA_TRIAL_DIR wins over config trialDir, which wins over the temp folder; relative paths are ignored", () => {
+  const uid = 1000;
+  const name = "manta-agent-trials-1000";
+  assert.equal(trialScratchRoot({ env: { MANTA_TRIAL_DIR: "/big/env" }, config: { trialDir: "/big/cfg" }, tmp: "/tmp", uid }), join("/big/env", name));
+  assert.equal(trialScratchRoot({ env: {}, config: { trialDir: "/big/cfg" }, tmp: "/tmp", uid }), join("/big/cfg", name));
+  assert.equal(trialScratchRoot({ env: {}, config: {}, tmp: "/tmp", uid }), join("/tmp", name));
+  assert.equal(trialScratchRoot({ env: { MANTA_TRIAL_DIR: "" }, config: null, tmp: "/tmp", uid }), join("/tmp", name));
+  assert.equal(trialScratchRoot({ env: { MANTA_TRIAL_DIR: "rel/dir" }, config: { trialDir: "/big/cfg" }, tmp: "/tmp", uid }), join("/big/cfg", name));
+  assert.equal(trialScratchRoot({ env: {}, config: { trialDir: 42 }, tmp: "/tmp", uid }), join("/tmp", name));
 });
 
 test("a copy holding a link that leaves it is refused: the case fails, no session is made, the copy is deleted", async () => {

@@ -21,7 +21,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS } from "../shared/agentsShared.mjs";
 import { questionFromForm } from "../shared/opencodeV2.mjs";
 import { withInternalMarker } from "./internalSessionMarker.mjs";
@@ -69,6 +69,41 @@ const GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"
 const END_EVENTS = new Set(["succeeded", "failed", "interrupted"]); // `started` and the like never end a case
 // a no-hardlinks copy of a real project takes more than the 10 s of tmux's helper; it is bounded by the case's own ceiling
 const CLONE_TIMEOUT_MS = 5 * 60_000;
+const GIB = 1024 ** 3;
+/** A copy is only attempted with at least this much free, and at least 3× the checkout's git data (`requiredFreeBytes`). */
+export const MIN_FREE_BYTES = 2 * GIB;
+export const requiredFreeBytes = (gitBytes) => Math.max(MIN_FREE_BYTES, 3 * (Number(gitBytes) || 0));
+export const lowSpaceMessage = (freeBytes, dir) => `Not enough disk space for a test copy: ${(freeBytes / GIB).toFixed(1)} GB free in ${dir}`;
+
+/**
+ * Where the private base for test copies lives: `MANTA_TRIAL_DIR`, else `trialDir` in ~/.manta/config.json, else the OS temp
+ * folder. Only an absolute path is taken; the base itself is a per-user folder inside the chosen one (made private by the runner).
+ */
+export function trialScratchRoot({ env = process.env, config = null, tmp = tmpdir(), uid = process.getuid?.() } = {}) {
+  const pick = [env?.MANTA_TRIAL_DIR, config?.trialDir].find((v) => typeof v === "string" && v.trim() !== "" && isAbsolute(v.trim()));
+  return join(pick ? pick.trim() : tmp, `manta-agent-trials-${uid ?? "user"}`);
+}
+
+/** Bytes used by the files under `dir` (links not followed); a missing folder is 0. */
+async function treeBytes(fs, dir) {
+  let total = 0;
+  const stack = [dir];
+  while (stack.length > 0) {
+    const d = stack.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else if (e.isFile()) total += await fs.lstat(p).then((s) => s.size, () => 0);
+    }
+  }
+  return total;
+}
 const RESULT_FILE = "result.json";
 const STATE_FILE = "state.json";
 const PROJECT_RE = /^[a-z0-9-]+$/;
@@ -219,7 +254,8 @@ export function readCase(messages) {
  * deps:
  *   root            ~/.manta/agents (trials live in `<root>/.trials/<id>/`)
  *   home            the box user's home (for the rulesets)
- *   scratchRoot     the private base (0700, the box user's own) where each case's folder is made with mkdtemp (default: in the OS temp folder)
+ *   scratchRoot     the private base (0700, the box user's own) where each case's folder is made with mkdtemp (default: `trialScratchRoot()` — MANTA_TRIAL_DIR, then config `trialDir`, then the OS temp folder)
+ *   diskFree(dir), gitBytes(checkout)  free space where copies go / a checkout's git data size: a copy needs max(2 GiB, 3× that)
  *   agents()        the agents engine, read at call time: { bindArchitect(b, tool), trialPlan(input, {dir}) }
  *   oc              { createSession, sendPrompt, abortSession, deleteSessionRaw, listMessages, replyQuestion }
  *   gitRun(args, {timeoutMs?})  git through the box's own runner (src/server/gitExec.mjs; not tmux's 10 s helper) → { stdout }
@@ -234,7 +270,7 @@ export function readCase(messages) {
 export function createAgentTrials({
   root,
   home,
-  scratchRoot = join(tmpdir(), `manta-agent-trials-${process.getuid?.() ?? "user"}`),
+  scratchRoot = trialScratchRoot(),
   agents,
   oc,
   gitRun,
@@ -247,6 +283,22 @@ export function createAgentTrials({
   scanSymlinks = () => ({ ok: true }),
   redact = async (t) => ({ text: t, unavailable: false }),
   fs = fsPromises,
+  // free bytes for an unprivileged user on the filesystem holding `dir`
+  diskFree = async (dir) => {
+    const s = await fs.statfs(dir);
+    return Number(s.bavail) * Number(s.bsize);
+  },
+  // bytes of a checkout's git data (what a no-hardlinks clone copies): the common git folder, so a worktree checkout counts its repository
+  gitBytes = async (checkout) => {
+    let gitDir = join(checkout, ".git");
+    try {
+      const out = String((await gitRun([...GIT_SAFE, "-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"]))?.stdout ?? "").trim();
+      if (out && isAbsolute(out)) gitDir = out;
+    } catch {
+      /* fall back to <checkout>/.git */
+    }
+    return treeBytes(fs, gitDir);
+  },
   mint = () => `tr_${randomBytes(6).toString("hex")}`,
   mintSession = () => `ses_${randomUUID().replaceAll("-", "")}`,
   now = Date.now,
@@ -336,8 +388,28 @@ export function createAgentTrials({
    */
   async function workspaceFor(t, c, idx, checkout) {
     let dir;
+    let base;
     try {
-      dir = await fs.mkdtemp(join(await privateBase(), `${t.id}-${idx}-`));
+      base = await privateBase();
+    } catch (e) {
+      log.warn?.(`[agent-trials] private folder: ${e?.message ?? e}`);
+      return { error: "The test run's private folder couldn't be set up safely" };
+    }
+    if (checkout) {
+      // a copy that can't fit is refused before anything is written (a full disk breaks the whole box, not just this case)
+      let free = null;
+      try {
+        free = await diskFree(base);
+      } catch (e) {
+        log.warn?.(`[agent-trials] free space of ${base}: ${e?.message ?? e}`);
+      }
+      if (free !== null && Number.isFinite(free)) {
+        const need = requiredFreeBytes(await gitBytes(checkout).catch(() => 0));
+        if (free < need) return { error: lowSpaceMessage(free, base) };
+      }
+    }
+    try {
+      dir = await fs.mkdtemp(join(base, `${t.id}-${idx}-`));
     } catch (e) {
       log.warn?.(`[agent-trials] private folder: ${e?.message ?? e}`);
       return { error: "The test run's private folder couldn't be set up safely" };
@@ -349,6 +421,8 @@ export function createAgentTrials({
         await gitRun([...GIT_SAFE, "clone", "--local", "--no-hardlinks", checkout, dir], { timeoutMs: Math.min(CLONE_TIMEOUT_MS, caseTimeoutMs) });
         await gitRun([...GIT_SAFE, "-C", dir, "remote", "remove", "origin"]);
       } catch (e) {
+        // a partial copy can be gigabytes: it goes now, not only when the case is cleaned up
+        await removeDir(dir);
         return { error: `The copy of the project couldn't be made: ${String(e?.message ?? e).slice(0, 160)}` };
       }
       const links = scanSymlinks(dir);
