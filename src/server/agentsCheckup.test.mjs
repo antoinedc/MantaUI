@@ -243,7 +243,7 @@ test("agents.checkup: starts the Architect's routine round under the run's headl
     assert.match(input.prompt, /Check the team: propose only changes the facts and your research support \(max 3\)/);
     assert.match(input.prompt, /BEGIN FACT SHEET/);
     assert.match(input.prompt, /"slug": "dev"/);
-    assert.match(input.prompt, /Research library/, "the research guidance every task gets");
+    assert.doesNotMatch(input.prompt, /Research library/, "the research guidance lives once, in the agent's base block, not in the task");
     assert.match(input.prompt, /Current file of @dev/, "an agent with something to look at comes with its file");
     assert.match(input.prompt, /Learned preferences of @dev[^\n]*\n- \[lr_[0-9a-f]{8}\] \(site\) Keep PRs small\./);
     assert.match(input.prompt, /Preferences the user has shown/, "the Architect's own learned rules, as in any task");

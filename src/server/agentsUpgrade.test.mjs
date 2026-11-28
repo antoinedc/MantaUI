@@ -570,23 +570,9 @@ test("the Architect's own sources (frontmatter the template doesn't have) are ke
     await upgradeArchitectWithSources(b);
     const parsed = parseAgentMd(await b.read("agent.md"));
     assert.equal(parsed.ok, true);
-    assert.equal(parsed.meta.sources.length, 1, "the user's source stays");
+    assert.match(await b.read("agent.md"), /sources:\n {2}- id: yc/, "the user's source key stays (the boot migration moves it to Settings)");
     assert.match(parsed.body, /Line four\./);
     assert.equal((await b.records())[0].state, "applied");
-  } finally {
-    await b.cleanup();
-  }
-});
-
-test("a merged Architect file whose sources fail the Architect's checks (a credential in a source) waits for a click instead of being applied", async () => {
-  const b = await box({ level: "tell", slug: "architect", extra: { createScanner: () => ({ scan: async () => ({ clean: false, unavailable: false, hits: [{ source: "store" }] }) }) } });
-  try {
-    await upgradeArchitectWithSources(b);
-    const [rec] = await b.records();
-    assert.equal(rec.state, "pending");
-    assert.equal(rec.needsClick, true);
-    assert.match(await b.read("agent.md"), /sources:/, "nothing written");
-    assert.doesNotMatch(await b.read("agent.md"), /Line four\./);
   } finally {
     await b.cleanup();
   }
@@ -635,7 +621,7 @@ test("no .base, edits on top of an OLD shipped version (the Architect with its o
     await b.make().init();
     const parsed = parseAgentMd(await b.read("agent.md"));
     assert.equal(parsed.ok, true);
-    assert.equal(parsed.meta.sources.length, 1, "the user's source stays");
+    assert.match(await b.read("agent.md"), /sources:\n {2}- id: yc/, "the user's source key stays");
     assert.match(parsed.body, /Line five\./, "the new shipped lines land");
     const [rec, ...none] = await b.records();
     assert.equal(none.length, 0);

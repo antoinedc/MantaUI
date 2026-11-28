@@ -288,26 +288,18 @@ test("restore: refusals are sentences and create no record — Never, already at
   }
 });
 
-test("restore: an Architect version holding a credential in its sources is refused (fail-closed), and a YAML alias refuses the file", async () => {
+test("restore: an Architect version with YAML anchors or aliases is refused; one that still has a `sources:` block restores as written (the key is no longer read: research sources live in Settings)", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
     const archPath = join(f.root, "architect", "agent.md");
     const current = await readFile(archPath, "utf-8");
     const withSource = (url) => current.replace("isolation: none\n", `isolation: none\nsources:\n  - id: forum\n    name: Forum\n    description: A forum.\n    url: ${url}\n`);
-    const leaky = withSource("https://example.com/search?q={query}\n    headers:\n      X-Note: hunter2secret");
-    assert.notEqual(leaky, current);
-    await f.putChanges([change({ id: "leak", slug: "architect", agentName: "Architect", before: leaky, after: current })]);
-    await assert.rejects(f.engine.restore("leak"), /seems to hold a credential/);
-    f.w.scan = () => false; // a scanner that can't be trusted: still refused
-    await assert.rejects(f.engine.restore("leak"), /credential|Couldn't check/);
-    f.w.scan = () => true;
     const aliased = current.replace("color:", "color: &c ").replace(/^use_when:/m, "use_when: *c\nxx:");
     await f.putChanges([change({ id: "alias", slug: "architect", agentName: "Architect", before: aliased, after: current })]);
     await assert.rejects(f.engine.restore("alias"), /anchors or aliases|can't be read/);
     assert.equal((await f.store()).changes.length, 1);
     assert.equal(await readFile(archPath, "utf-8"), current);
-    // a clean earlier Architect version restores (the user is restoring their own file)
     const clean = withSource("https://example.com/search?q={query}\n    headers:\n      X-Note: fine");
     await f.putChanges([change({ id: "clean", slug: "architect", agentName: "Architect", before: clean, after: current })]);
     const rec = await f.engine.restore("clean");
@@ -1160,7 +1152,7 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     assert.deepEqual(input.architect, { mode: "routine" }, "a refresh is a routine round: its change quotes the brief, one shape is enough");
     assert.equal(input.specialist, true);
     assert.match(input.prompt, /Refresh @dev: check the research it rests on and propose only changes your research supports\./);
-    assert.match(input.prompt, /Research library/, "the research guidance every task gets");
+    assert.doesNotMatch(input.prompt, /Research library/, "the research guidance lives once, in the agent's base block, not in the task");
     assert.match(input.prompt, /Current file of @dev/, "the Architect's context names the agent");
     assert.equal(input.isolation, "none");
     await f.engine.refresh("dev", { runId: "run2", runSessionId: "ses_run2" });
