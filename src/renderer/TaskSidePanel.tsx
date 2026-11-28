@@ -128,6 +128,7 @@ function PanelBody({ sessionId, jobId }: { sessionId: string; jobId: string }) {
   const slug = agentSlugOf(job?.agent) ?? "";
   const info = agents?.find((a) => a.slug === slug);
   const agentName = info?.name || job?.agentName || slug || "Agent";
+  const taskTitle = job?.title?.trim() || job?.name || "";
   const badge = { name: agentName, slug: slug || agentName, color: info?.color ?? null };
   const root = job ? rootJobOf(job) : jobId;
   const open = questions.filter((q) => q.rootJobId === root).length;
@@ -143,8 +144,8 @@ function PanelBody({ sessionId, jobId }: { sessionId: string; jobId: string }) {
       <div className="h-11 shrink-0 border-b border-border px-4">
         <div className="flex h-full items-center gap-2 pr-[var(--titlebar-inset-right)]">
           <AgentBadge agent={badge} size="sm" />
-          <span className="min-w-0 flex-1 truncate text-label font-semibold text-text" data-testid="task-panel-title" title={job ? `${agentName} · ${job.name}` : agentName}>
-            {job ? `${agentName} · ${job.name}` : "Agent task"}
+          <span className="min-w-0 flex-1 truncate text-label font-semibold text-text" data-testid="task-panel-title" title={job ? `${agentName} · ${taskTitle}` : agentName}>
+            {job ? `${agentName} · ${taskTitle}` : "Agent task"}
           </span>
           {job && (
             <span className="shrink-0 whitespace-nowrap text-meta text-text-faint" data-testid="task-panel-state">

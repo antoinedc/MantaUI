@@ -137,6 +137,13 @@ describe("agent task cards (Agents Phase 1)", () => {
     expect(card).toMatchObject({ kind: "running", agentName: "Dev", request: "fix the login bug please" });
   });
 
+  it("names the card with the task's plain-language title, not the slug the box keeps for the branch and window", () => {
+    const [card] = deriveBackgroundCards([job({ name: "build-the-fleet-needs-you-redesign", title: "Build the Fleet / Needs you redesign" })], "ses_p", none);
+    expect(card.name).toBe("Build the Fleet / Needs you redesign");
+    const [old] = deriveBackgroundCards([job({ name: "/review HEAD~1" })], "ses_p", none);
+    expect(old.name).toBe("/review HEAD~1");
+  });
+
   it("carries requestedBy 'manta' onto the card, and only that value", () => {
     const [handoff] = deriveBackgroundCards(
       [job({ agentName: "Dev", request: "Fix login", requestedBy: "manta" })],

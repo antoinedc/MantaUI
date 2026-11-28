@@ -206,6 +206,11 @@ describe("TaskSidePanel", () => {
     expect(brief!.textContent).not.toContain("EXCERPT-TEXT");
   });
 
+  it("the top bar uses the task's plain-language title, not the slug", async () => {
+    await open({ ses_c1: job({ name: "new-agent-pricing-cta-copy", title: "Create a pricing CTA copywriter" }) });
+    expect(q('[data-testid="task-panel-title"]')?.textContent).toBe("Architect · Create a pricing CTA copywriter");
+  });
+
   it("follows the task across rounds: the newest record with the same root", async () => {
     const round1 = job({ id: "job1", childSessionID: "ses_c1", supersededBy: "job2", name: "Round one" });
     const round2 = job({ id: "job2", rootJobId: "job1", childSessionID: "ses_c2", name: "Round two", createdAt: 5, attempt: 2 });

@@ -75,6 +75,8 @@ export function describeExceededActions(actions: readonly AutonomyAction[] | und
 export type BackgroundJob = {
   id: string;
   name: string;
+  /** The task's plain-language title (the box writes it; `name` is the slug it uses for the branch and window). Absent on an older box. */
+  title?: string;
   parentSessionID: string;
   childSessionID: string | null;
   status: string; // "running" | "paused" | "done" | "failed" | "stopped"
@@ -270,7 +272,7 @@ export function deriveBackgroundCards(
     const base: CardBase = {
       key: job.id,
       jobId: job.id,
-      name: job.name,
+      name: job.title?.trim() || job.name,
       createdAt: job.createdAt,
       ...(job.agentName ? { agentName: job.agentName } : {}),
       ...(job.request ? { request: job.request } : {}),
