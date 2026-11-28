@@ -431,6 +431,11 @@ function mapBackgroundResult(m, { sessionID }) {
         agent: typeof md.agent === "string" && md.agent ? md.agent : undefined,
         // the model the task ran on ("provider/model"): the card names it without the job record, which the store prunes
         model: modelKey(manta.model),
+        // a task an agent started from its own conversation (agent chat tasks): where it ran and how, for its card
+        startedFrom: manta.startedFrom === "agent-chat" ? "agent-chat" : undefined,
+        project: manta.startedFrom === "agent-chat" && typeof manta.project?.slug === "string" && manta.project.slug && typeof manta.project?.name === "string" && manta.project.name ? { slug: manta.project.slug, name: manta.project.name } : undefined,
+        branch: manta.startedFrom === "agent-chat" && typeof manta.branch === "string" && manta.branch ? manta.branch : undefined,
+        isolation: manta.startedFrom === "agent-chat" && (manta.isolation === "worktree" || manta.isolation === "none") ? manta.isolation : undefined,
         // the job ended while waiting on a decision (spec 2026-11-14 A5); absent means false
         endedBlocked: manta.endedBlocked === true ? true : undefined,
         // Agents Phase 3: what the user asked to be told about, and what the autonomy settings blocked (absent = none)

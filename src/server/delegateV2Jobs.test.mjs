@@ -4467,3 +4467,16 @@ test("§6.7 settleSeat: clears seatOwed once, sets seatAdded only when the calle
   assert.equal("seatOwed" in w.job(b.job.id), false);
   assert.deepEqual(await engine.settleSeat("nope", { created: true }), { ok: false });
 });
+
+test("AC-2.2 the result the parent receives names the task's project, where it started, its branch and isolation, so the card needs no record", async () => {
+  const w = world();
+  w.deps.pinKnowledgeSession = async () => ({ slug: RONDA });
+  const res = await startJob(chatTask({ isolation: "worktree" }), w.deps);
+  const synthetic = buildResultSynthetic(w.job(res.job.id));
+  assert.deepEqual(synthetic.metadata.manta.project, { slug: RONDA, name: "Ronda" });
+  assert.equal(synthetic.metadata.manta.startedFrom, "agent-chat");
+  assert.equal(synthetic.metadata.manta.branch, w.job(res.job.id).branch);
+  assert.equal(synthetic.metadata.manta.isolation, "worktree");
+  const plain = buildResultSynthetic({ id: "x", name: "n", status: "done", childSessionID: "c", completionMessageId: "m" });
+  for (const k of ["project", "startedFrom", "branch", "isolation"]) assert.equal(k in plain.metadata.manta, false, `${k} only for a chat task`);
+});

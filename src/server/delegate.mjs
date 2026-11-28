@@ -3444,6 +3444,15 @@ export function buildResultSynthetic(job) {
         name: displayTitle(job),
         // the model the task ran on: the transcript keeps it after the job record is pruned
         ...(jobModelOf(job) ? { model: jobModelOf(job) } : {}),
+        // a task an agent started from its own conversation: its card reads the project and branch from the result itself
+        ...(job.startedFrom === "agent-chat"
+          ? {
+              startedFrom: "agent-chat",
+              ...(job.project ? { project: job.project } : {}),
+              ...(typeof job.branch === "string" && job.branch ? { branch: job.branch } : {}),
+              ...(job.isolation === "worktree" || job.isolation === "none" ? { isolation: job.isolation } : {}),
+            }
+          : {}),
         ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
         ...(job.status === "done" && job.endedBlocked === true && job.decision ? { decision: { questions: job.decision.questions } } : {}),
         ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
