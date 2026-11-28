@@ -1079,13 +1079,16 @@ test("handoff: a writer follows the trust setting — on starts at once with the
   }
 });
 
-test("handoff: a full box is relayed as 'tell the user', never 'do this work yourself'", async () => {
+test("handoff: a full box is relayed as 'wait, then hand it off again', never 'do this work yourself' and never 'do not retry'", async () => {
   const f = await leadFixture({ delegateOver: { startJobWithApproval: async () => ({ ok: false, error: CAP_ERROR }) } });
   try {
     f.w.trust = true;
     const res = await ok(f, call());
     assert.deepEqual(res, { ok: false, error: HANDOFF_BUSY });
     assert.ok(!/yourself/.test(res.error.replace("do not do the work yourself", "")));
+    assert.ok(!/do not retry/i.test(res.error));
+    assert.match(res.error, /hand it off again once a running task finishes/);
+    assert.match(res.error, /tell the user/);
   } finally {
     await f.cleanup();
   }
@@ -1242,6 +1245,9 @@ test("lead brief: no give-up-after-two-failures rule, no one-code-task-at-a-time
     assert.doesNotMatch(text, /at most one of them edits code|no running teammate task/);
     assert.match(text, /When a handoff fails for a reason that has since been fixed, send it again\. Stop and ask the user only when the same failure repeats and there is no fix in sight\./);
     assert.match(text, /several tasks for the same specialist at once/);
+    // a refused handoff is something to fix and retry, never a stop (byte-stable line)
+    assert.ok(text.includes("- For a teammate's work use `agent_handoff`. If a handoff is refused, fix the cause and hand it off again. Use the generic `delegate` tool only when no teammate fits, or when the handoff stays blocked for a reason only the user can remove, and say so."));
+    assert.doesNotMatch(text, /do not retry it through `delegate`|and stop\. Don't ask first/);
   } finally {
     await f.cleanup();
   }
@@ -1382,7 +1388,7 @@ test("dispatch: a settings read failure refuses before anything starts", async (
 
 test("buildLeadBrief: the mechanics send a new agent to @architect and keep agent_change for small dictated edits (byte-stable line)", () => {
   const a = buildLeadBrief({ body: "B", roster: [] });
-  assert.ok(a.includes("- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do; agents work on their own branch and can edit files by default (isolation `worktree`), so they can deliver finished work such as mockups, docs, specs and code; read-only (isolation `none`) only when the job is purely advisory and the user asked for that) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself only for small edits the user dictates, or when @architect is not on the team; never because a handoff to @architect was refused: then tell the user plainly that it didn't start and why, and stop. Don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards."));
+  assert.ok(a.includes("- For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do; agents work on their own branch and can edit files by default (isolation `worktree`), so they can deliver finished work such as mockups, docs, specs and code; read-only (isolation `none`) only when the job is purely advisory and the user asked for that) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call. Use `agent_change` yourself only for small edits the user dictates, or when @architect is not on the team; never in place of @architect: if a handoff to @architect is refused, fix the cause and hand it off again, and tell the user plainly only if it stays blocked for a reason only they can remove. Don't ask first in words, and never promise or predict an approval step: whether a change is applied or waits for a click depends on the user's settings and is only known afterwards."));
   assert.ok(!a.includes("the user approves on the card when their settings require it"));
   assert.ok(!a.includes("Draft complete, specific instructions"));
   assert.ok(a.includes("write what the user asked for"));

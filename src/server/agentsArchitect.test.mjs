@@ -667,7 +667,7 @@ test("an @mention of the Architect in Manta's own chat starts its task in the us
   }
 });
 
-test("a refused handoff to the Architect says it didn't start, why, and that Manta must tell the user and not make the agent itself", async () => {
+test("a refused handoff to the Architect says it didn't start and why, to fix the cause and hand it off again, and not to make the agent itself", async () => {
   const calls = [];
   const world = { msgs: [], startError: "OpenCode is restarting" };
   const f = await handoffFixture(calls, world);
@@ -679,7 +679,9 @@ test("a refused handoff to the Architect says it didn't start, why, and that Man
     assert.equal(r.ok, false);
     assert.ok(r.error.startsWith("OpenCode is restarting"), "the reason comes first, unchanged");
     assert.match(r.error, /The Architect did not start/);
-    assert.match(r.error, /tell the user/i);
+    assert.match(r.error, /Find the cause, fix it and hand it off to @architect again/);
+    assert.match(r.error, /tell the user plainly/i);
+    assert.doesNotMatch(r.error, /and stop|do not retry/i);
     assert.match(r.error, /do not create or change the agent yourself with `agent_change`/i);
     // another refusal on the same path (settings) carries it too; a refusal for another agent does not
     const never = f.make({ autonomyPolicy: async () => ({ ...MODES.balanced, handoff: "never" }) });

@@ -373,7 +373,7 @@ describe("agent_change tool", () => {
     // Phase 5A (§4.7): a new agent or a substantial rework goes to the Architect; this tool is for small dictated edits
     assert.match(tool.description, /For a new agent \(even one the user fully specified\) or a substantial rework, write the charter yourself from the request/);
     assert.match(tool.description, /The charter states what the user asked; it doesn't decide the design \(scope, overlap, extend vs create\); that's the Architect's call from its research, and it asks the user if needed\./);
-    assert.match(tool.description, /Use agent_change yourself only for small edits the user dictates, or when @architect is not on the team\. If a handoff to @architect was refused, tell the user plainly why instead of calling this\./);
+    assert.match(tool.description, /Use agent_change yourself only for small edits the user dictates, or when @architect is not on the team\. If a handoff to @architect was refused, fix the cause and hand it off again instead of calling this; tell the user plainly only if it stays blocked for a reason only they can remove\./);
   });
 
   test("posts the call identity and the arguments exactly as the model gave them (agent only when given)", async () => {
