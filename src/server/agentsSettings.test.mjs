@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MODES } from "../shared/autonomyShared.mjs";
-import { createAgentsEngine, AgentError, AGENT_CHANGE_OFF } from "./agents.mjs";
+import { createAgentsEngine, parseAgentMd, AgentError, AGENT_CHANGE_OFF } from "./agents.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
@@ -48,7 +48,7 @@ async function fixture({ level = "auto" } = {}) {
     w,
     config,
     engine,
-    store: async () => JSON.parse(await readFile(join(root, ".changes.json"), "utf-8")),
+    store: async () => JSON.parse(await readFile(join(root, ".changes.json"), "utf-8").catch(() => '{"changes":[]}')),
     file: (slug) => readFile(join(root, slug, "agent.md"), "utf-8"),
     cleanup: () => rm(base, { recursive: true, force: true }),
   };
@@ -88,14 +88,14 @@ test("name, use it when, not for and model save; an empty routing line or Auto c
     assert.equal((await f.engine.settingsSet({ slug: "dev", field: "useWhen", value: "Code changes in this project." })).outcome, "saved");
     assert.equal((await f.engine.settingsSet({ slug: "dev", field: "notFor", value: "Reviews that change nothing." })).outcome, "saved");
     assert.equal((await f.engine.settingsSet({ slug: "dev", field: "model", value: "openai/gpt-6-sol" })).outcome, "saved");
-    let text = await f.file("dev");
-    assert.match(text, /^name: Developer$/m);
-    assert.match(text, /^use_when: Code changes in this project\.$/m);
-    assert.match(text, /^not_for: Reviews that change nothing\.$/m);
-    assert.match(text, /^model: openai\/gpt-6-sol$/m);
+    let meta = parseAgentMd(await f.file("dev")).meta;
+    assert.deepEqual([meta.name, meta.useWhen, meta.notFor, meta.model], ["Developer", "Code changes in this project.", "Reviews that change nothing.", "openai/gpt-6-sol"]);
     assert.equal((await f.engine.settingsSet({ slug: "dev", field: "notFor", value: "" })).outcome, "saved");
     assert.equal((await f.engine.settingsSet({ slug: "dev", field: "model", value: null })).outcome, "saved", "Auto");
-    text = await f.file("dev");
+    const text = await f.file("dev");
+    meta = parseAgentMd(text).meta;
+    assert.equal(meta.notFor ?? null, null);
+    assert.equal(meta.model ?? null, null);
     assert.doesNotMatch(text, /not_for:/);
     assert.doesNotMatch(text, /^model:/m);
     assert.equal((await f.engine.list()).find((a) => a.slug === "dev").name, "Developer", "the list reads the new name");
@@ -109,6 +109,7 @@ test("an unchanged value makes no record", async () => {
   try {
     await f.engine.init();
     await f.engine.settingsSet({ slug: "dev", field: "useWhen", value: "Code changes." });
+    await f.engine.settingsSet({ slug: "dev", field: "notFor", value: "" }); // clears the template's line, if it has one
     const before = (await records(f)).length;
     const out = await f.engine.settingsSet({ slug: "dev", field: "useWhen", value: "Code changes." });
     assert.deepEqual(out, { outcome: "unchanged", change: null });
@@ -173,7 +174,7 @@ test("refusals are sentences and create no record: unknown field, the handle, a 
     await assert.rejects(set({ field: "sources", value: "x" }), /can't be changed here/i);
     await assert.rejects(set({ field: "name", value: "Two\nLines" }), /must be on one line/);
     await assert.rejects(set({ field: "name", value: "" }), /can't be empty/);
-    await assert.rejects(set({ value: "y".repeat(301) }), /at most 300/);
+    await assert.rejects(set({ value: "y".repeat(201) }), /at most 200/);
     await assert.rejects(set({ field: "model", value: "nobody/nothing" }), /isn't an approved model/);
     await assert.rejects(set({ value: 5 }), /must be text/);
     await assert.rejects(set({ slug: "ghost" }), /No agent named @ghost/);

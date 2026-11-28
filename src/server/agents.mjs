@@ -5284,6 +5284,97 @@ export function createAgentsEngine({
     return wire(rec);
   }
 
+  // ---- settings saved from the profile (docs/superpowers/specs/2026-11-28-agent-profile-redesign.md §2.1) ----
+
+  const SETTINGS_FIELDS = ["name", "description", "useWhen", "notFor", "model", "isolation"];
+  const SETTINGS_LABEL = { name: "Name", description: "Description", useWhen: "Use it when", notFor: "Not for", model: "Model", isolation: "Works" };
+  const SETTINGS_HANDLE_FIXED = "The handle can't be renamed yet: the agent's seats, history and mentions are filed under it";
+  const NOTHING_WOULD_CHANGE = "Nothing would change";
+  const clip = (s, n = 80) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+
+  /** What a row of History says about one saved field: the new text for a wording field, `old → new` for the rest. */
+  function settingsSummary(field, before, after) {
+    const label = SETTINGS_LABEL[field];
+    const shown = (v) => (field === "isolation" ? (v === "worktree" ? "own branch" : "read-only") : field === "model" ? (v ? v : "Auto") : String(v ?? ""));
+    if (field === "name" || field === "model" || field === "isolation") return `${label}: ${clip(shown(before))} → ${clip(shown(after))}.`;
+    const now2 = String(after ?? "").trim();
+    return now2 ? `${label}: ${clip(now2)}` : `${label}: cleared.`;
+  }
+
+  /**
+   * One field of an agent, saved from its profile's Settings tab. It is the change flow's own machinery (`planChange` validates, an
+   * `update` record with `origin: { kind: "settings" }` is the journal, `applyLocked` writes, Undo is `undoChange`) with ONE difference
+   * from an agent's change: the user's own save is the approval, so it applies directly at any level but Never. The exception is an
+   * isolation RAISE: that is what the flow always makes wait for a click, so the record is saved `pending` (it shows in Needs you).
+   * Returns `{ outcome: "saved" | "waiting" | "unchanged", change }`; a refusal is an AgentError sentence.
+   */
+  async function settingsSet(input) {
+    const slug = typeof input?.slug === "string" ? input.slug.replace(/^@/, "").trim().toLowerCase() : "";
+    const field = typeof input?.field === "string" ? input.field : "";
+    if (field === "handle") throw new AgentError(SETTINGS_HANDLE_FIXED);
+    if (!SETTINGS_FIELDS.includes(field)) throw new AgentError(`"${field}" can't be changed here`);
+    const entry = await find(slug);
+    if (!entry) throw new AgentError(`No agent named @${slug}`);
+    // Manta and the Architect keep their wording and how they work "via Manta"; only the Architect's model is the user's to set
+    if ((entry.info.role === "lead" || isArchitect(entry)) && field !== "model") {
+      throw new AgentError(`${entry.info.name} is built into Manta, so its ${SETTINGS_LABEL[field].toLowerCase()} changes only through Manta`);
+    }
+    await requireChangeAllowed();
+    const draft = { [field]: input.value };
+    const models = await approvedModelsFor(draft);
+    if (models.error) throw new AgentError(models.error);
+    let rec = null;
+    await syncLock.runExclusive(async () => {
+      const plan = await planChange({ action: "update", agent: slug, draft, approved: models.approved, via: "change" });
+      if (plan.error) {
+        if (plan.error.startsWith(NOTHING_WOULD_CHANGE)) return;
+        throw new AgentError(plan.error);
+      }
+      const waits = plan.raisesIsolation === true;
+      const was = parseAgentMd(plan.before).meta ?? {};
+      const is = parseAgentMd(plan.after).meta ?? {};
+      rec = normalizeRecord({
+        id: `ach_${randomBytes(8).toString("hex")}`,
+        kind: "update",
+        slug: plan.slug,
+        agentName: plan.agentName,
+        sessionID: "",
+        messageID: "",
+        callID: "",
+        state: "pending",
+        needsClick: waits,
+        reason: waits ? "isolation" : null,
+        before: plan.before,
+        after: plan.after,
+        createdAt: now(),
+        decidedAt: null,
+        error: null,
+        origin: { kind: "settings", field },
+        summary: settingsSummary(field, was[field], is[field]),
+      });
+      await attachBundles(rec);
+      if (!waits) {
+        try {
+          await applyLocked(rec, "click");
+        } catch (e) {
+          // the write failed and nothing was kept: the record says so instead of waiting for a click nobody asked for
+          rec.state = "discarded";
+          rec.error = e instanceof AgentError ? e.message : "Couldn't write the agent file; try again";
+          rec.decidedAt = now();
+          await saveRecord(rec).catch(() => {});
+          throw e;
+        }
+      }
+      await saveRecord(rec);
+    });
+    if (!rec) return { outcome: "unchanged", change: null };
+    publishChange(rec);
+    fleetChanged();
+    if (rec.state === "applied") return { outcome: "saved", change: wire(rec) };
+    if (rec.state === "pending") return { outcome: "waiting", change: wire(rec) };
+    throw new AgentError(rec.error || "Couldn't save the change; try again");
+  }
+
   // ---- reading the stores for the fleet, needs you and the profile ----
 
   const slugOfJob = (job) => (typeof job?.agent === "string" && job.agent.startsWith(AGENT_PACKAGE_PREFIX) ? job.agent.slice(AGENT_PACKAGE_PREFIX.length) : null);
@@ -6432,6 +6523,7 @@ export function createAgentsEngine({
     // agent screens
     history,
     restore,
+    settingsSet,
     profile,
     seatAdd,
     seatSet,

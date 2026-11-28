@@ -113,7 +113,7 @@ for the change that was tested).
 ## 5. Settings tab
 Group "Identity" (Name, Handle, Description), "When to use it" (Use it when, Not for), "How it works" (Model, Works, Refresh,
 Learning). Fields are real `<input>` / `<textarea>` / `<select>` / radio buttons with a `<label for>`.
-- **Editable (save on blur / change):** Name (≤ 40), Description (≤ 300), Use it when / Not for (≤ 200, optional), Model (Auto or one
+- **Editable (save on blur / change):** Name (≤ 40), Description (≤ 200), Use it when / Not for (≤ 200, optional), Model (Auto or one
   of the approved models: the options come from `agentsModels`-style list already used by the model picker, `opencodeModels`), Works
   (own branch vs read-only; a segmented radio group, saves on click).
 - **Read-only:** the @handle (copy: "Renaming it isn't available yet"), the refresh day ("Next: 1 Dec" style line from
