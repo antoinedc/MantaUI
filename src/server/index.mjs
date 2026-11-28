@@ -258,7 +258,7 @@ import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
-import { createAgentTrials, TRIAL_PROGRESS_PREFIX } from "./agentTrials.mjs";
+import { createAgentTrials, TRIAL_PROGRESS_PREFIX, trialScratchRoot } from "./agentTrials.mjs";
 import { createAgentLearning, createLearningStore, createUserCommitReader } from "./agentLearning.mjs";
 import { checkLearnedRule } from "./agentScriptReview.mjs";
 import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
@@ -2652,6 +2652,8 @@ const trialScanner = createSecretScanner();
 const agentTrials = createAgentTrials({
   root: statePath("agents"),
   home: homedir(),
+  // test copies go to MANTA_TRIAL_DIR, else config `trialDir`, else the OS temp folder (read once, at start)
+  scratchRoot: trialScratchRoot({ env: process.env, config: await local.configGet() }),
   agents: () => agentsEngine,
   oc,
   local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },

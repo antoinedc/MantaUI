@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentsEngine, checkDraft, compileAgentPrompt } from "./agents.mjs";
 import { draftHash } from "./agentTrials.mjs";
-import { parseSourceMd, renderSourceMd } from "./agentSkills.mjs";
+import { parseSourceMd, renderSourceMd, copyLicenceOf, spdxLicenceOf } from "./agentSkills.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 import { MODES } from "../shared/autonomyShared.mjs";
 
@@ -1587,6 +1587,56 @@ test("installed: the licence allowlist still applies — read from the skill's o
   } finally {
     await f.cleanup();
   }
+});
+
+test("installed: a licence written the common way (\"Apache 2.0\", the installed impeccable's spelling) is read as its SPDX id; SOURCE.md keeps both", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": DESIGN_MD.replace("license: Apache-2.0\n", "license: Apache 2.0\n") });
+    const plan = await planFor(f, { skills: [adoptOp()] });
+    assert.equal(plan.error, undefined, plan.error);
+    const source = plan.bundle["skills/design-ref/SOURCE.md"];
+    assert.match(source, /^- Licence: Apache-2\.0$/m);
+    assert.match(source, /^- Licence as stated: Apache 2\.0$/m);
+    assert.equal(parseSourceMd(source)?.licence, "Apache-2.0");
+    assert.equal(parseSourceMd(source)?.licenceStated, "Apache 2.0");
+    // the SPDX spelling itself records no second line
+    await installDesign(f);
+    assert.doesNotMatch((await planFor(f, { skills: [adoptOp()] })).bundle["skills/design-ref/SOURCE.md"], /Licence as stated/);
+    // a common spelling of a licence that isn't allowed is still refused
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": DESIGN_MD.replace("license: Apache-2.0\n", "license: GPL 3.0\n") });
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /doesn't allow copying/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("spdxLicenceOf maps common spellings of allowed licences to their SPDX id, and nothing else", () => {
+  const cases = {
+    "Apache 2.0": "Apache-2.0",
+    "Apache License 2.0": "Apache-2.0",
+    "Apache-2": "Apache-2.0",
+    "apache license, version 2.0": "Apache-2.0",
+    "Apache License Version 2.0": "Apache-2.0",
+    "MIT License": "MIT",
+    "The MIT License": "MIT",
+    "mit": "MIT",
+    "BSD 3-Clause": "BSD-3-Clause",
+    "BSD 3-Clause License": "BSD-3-Clause",
+    "BSD 2-Clause": "BSD-2-Clause",
+    "ISC License": "ISC",
+    "The Unlicense": "Unlicense",
+    "CC0 1.0": "CC0-1.0",
+    "CC BY 4.0": "CC-BY-4.0",
+    "MPL 2.0": "MPL-2.0",
+    "Mozilla Public License 2.0": "MPL-2.0",
+    "Apache-2.0": "Apache-2.0",
+  };
+  for (const [given, spdx] of Object.entries(cases)) {
+    assert.equal(spdxLicenceOf(given), spdx, given);
+    assert.equal(copyLicenceOf(given), spdx, given);
+  }
+  for (const given of ["Apache", "BSD", "GPL 3.0", "GPL-3.0-only", "Apache 1.1", "MIT-0 or GPL", "proprietary", "", null, 42]) assert.equal(copyLicenceOf(given), null, String(given));
 });
 
 test("installed: a SOURCE.md the skill already carries (it was copied to this box before) is carried forward: its origin, repository and commit", async () => {
