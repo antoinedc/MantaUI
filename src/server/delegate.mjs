@@ -4344,7 +4344,6 @@ async function continueJobRecord(id, input, deps) {
         ...(typeof input?.name === "string" && input.name.trim() ? { name: jobNameFor({ name: input.name }, followUp) } : {}),
         ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
         ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
-        ...(typeof input?.turnKey === "string" && input.turnKey ? { turnKey: input.turnKey } : {}),
         ...(input?.allowPr === false ? { allowPr: false } : {}),
         status: "running",
         createdAt: t,
@@ -4907,7 +4906,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     }
     const refused = launchRefusal(jobs, parentSessionID);
     if (refused) return refused;
-    // The caller's admission check (agent handoffs: single writer, per-turn cap) runs BEFORE anything is allocated, so a
+    // The caller's admission check (a generic hook: a refusal leaves nothing allocated) runs BEFORE anything is allocated, so a
     // refusal leaves no record, worktree, branch or session id behind.
     if (typeof input?.admit === "function") {
       const refusal = await runAdmit(input.admit, jobs);
@@ -5018,7 +5017,6 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       // what admission reads later: where the agent works, who asked, in which user turn, and whether it may open a PR
       ...(input?.isolation === "worktree" || input?.isolation === "none" ? { isolation: input.isolation } : {}),
       ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
-      ...(typeof input?.turnKey === "string" && input.turnKey ? { turnKey: input.turnKey } : {}),
       ...(input?.allowPr === false ? { allowPr: false } : {}),
       // Background work budget (spec 2026-11-17 §17.14): set for overnight dispatches (`actor:"cto"` alone does not
       // identify them). The cursor is what has already been booked against the shared budget.

@@ -2295,8 +2295,8 @@ test("WORKTREE_AGENT_GRANTS: the one grant list the worktree ruleset is built fr
 test("admit on startJob: runs under the lock, sees the stored jobs, and a refusal leaves NO record, worktree, session or window", async () => {
   const w = world({ jobs: [{ id: "run00001", name: "other", status: "running", engine: "v2", completionOwner: "manta", parentSessionID: PARENT, isolation: "worktree", childSessionID: "ses_other", origin: "delegate" }] });
   let seen = null;
-  const res = await startJob(input({ agent: "agent-dev", isolation: "worktree", admit: (jobs) => ((seen = jobs.map((j) => j.id)), "Dev is already changing code for this chat (other); wait for its result") }), w.deps);
-  assert.deepEqual(res, { ok: false, error: "Dev is already changing code for this chat (other); wait for its result" });
+  const res = await startJob(input({ agent: "agent-dev", isolation: "worktree", admit: (jobs) => ((seen = jobs.map((j) => j.id)), "the caller said no") }), w.deps);
+  assert.deepEqual(res, { ok: false, error: "the caller said no" });
   assert.deepEqual(seen, ["run00001"]);
   assert.deepEqual(w.calls.addWorktree, [], "refused before a worktree was allocated");
   assert.deepEqual([w.calls.create, w.calls.move, w.calls.window, w.calls.send, w.calls.rmWorktree].map((c) => c.length), [0, 0, 0, 0, 0]);
@@ -2332,13 +2332,12 @@ test("admit on startJob: two concurrent writers through the real lock → exactl
   assert.equal(w.calls.addWorktree.length, 1, "the loser never allocated a worktree");
 });
 
-test("the lead's markers: isolation, requestedBy, turnKey and allowPr are persisted; absent for a plain job", async () => {
+test("the lead's markers: isolation, requestedBy and allowPr are persisted; absent for a plain job", async () => {
   const w = world();
-  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", turnKey: "msg_user1", allowPr: false, agentName: "Dev", request: "Fix login" });
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", allowPr: false, agentName: "Dev", request: "Fix login" });
   const job = w.job(id);
   assert.equal(job.isolation, "worktree");
   assert.equal(job.requestedBy, "manta");
-  assert.equal(job.turnKey, "msg_user1");
   assert.equal(job.allowPr, false);
   const [row] = await listJobs({ sessionID: PARENT }, { load: w.deps.load, readProgress: async () => null });
   assert.equal(row.requestedBy, "manta", "reaches the client like agentName");
@@ -2346,7 +2345,7 @@ test("the lead's markers: isolation, requestedBy, turnKey and allowPr are persis
 
   const plain = world();
   const pid = await start(plain);
-  for (const k of ["isolation", "requestedBy", "turnKey", "allowPr"]) assert.equal(k in plain.job(pid), false, k);
+  for (const k of ["isolation", "requestedBy", "allowPr"]) assert.equal(k in plain.job(pid), false, k);
   const ro = world();
   const rid = await start(ro, { agent: "agent-seo", isolation: "none" });
   assert.equal(ro.job(rid).isolation, "none");
@@ -2391,7 +2390,7 @@ test("allowPr:false on resume: the resumed job's prompt still has no pull-reques
 async function finishedLeadJob(extra = {}) {
   const w = liveWorld();
   w.deps.autonomyPolicy = async () => MODES.balanced;
-  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", turnKey: "msg_u1", allowPr: false, agentName: "Dev", request: "Fix login", specialist: true, autonomy: { load: async () => MODES.balanced, check: () => null }, ...extra });
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", allowPr: false, agentName: "Dev", request: "Fix login", specialist: true, autonomy: { load: async () => MODES.balanced, check: () => null }, ...extra });
   const child = w.job(id).childSessionID;
   w.finish(child, "succeeded", T0 + 1);
   await w.engine.observeRaw(raw("session.execution.succeeded", child));
@@ -2421,15 +2420,14 @@ test("continueJob with admit: an unreadable store refuses and saves nothing", as
   assert.deepEqual(saves, []);
 });
 
-test("continueJob: the lead's fields land on the successor (title, request, requestedBy, turnKey, allowPr); without them it inherits", async () => {
+test("continueJob: the lead's fields land on the successor (title, request, requestedBy, allowPr); without them it inherits", async () => {
   const { w, id } = await finishedLeadJob();
-  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT, admit: () => null, name: "Fix signup page", request: "Fix signup page", requestedBy: "manta", turnKey: "msg_u2", allowPr: false }, w.deps);
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT, admit: () => null, name: "Fix signup page", request: "Fix signup page", requestedBy: "manta", allowPr: false }, w.deps);
   assert.equal(res.ok, true, JSON.stringify(res));
   const next = res.job;
   assert.equal(next.name, "fix-signup-page");
   assert.equal(next.request, "Fix signup page");
   assert.equal(next.requestedBy, "manta");
-  assert.equal(next.turnKey, "msg_u2");
   assert.equal(next.allowPr, false);
   assert.equal(next.isolation, "worktree", "the stored isolation carries over");
   assert.equal(next.agentName, "Dev");
@@ -2441,7 +2439,6 @@ test("continueJob: the lead's fields land on the successor (title, request, requ
   const plain = await continueJob(id2, { prompt: "again", sessionID: PARENT }, w2.deps);
   assert.equal(plain.ok, true);
   assert.equal(plain.job.requestedBy, "manta");
-  assert.equal(plain.job.turnKey, "msg_u1");
   assert.equal(plain.job.request, "Fix login");
   assert.equal(plain.job.allowPr, false);
 });
@@ -2581,7 +2578,7 @@ test("autonomy: a task can't run inside Manta's own folders (parent folder, or a
 });
 
 async function finishedSpecialist(w, extra = {}) {
-  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1", allowPr: false, request: "Fix login", ...extra }));
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta", allowPr: false, request: "Fix login", ...extra }));
   const child = w.job(id).childSessionID;
   w.finish(child, "succeeded", T0 + 1);
   await w.engine.observeRaw(raw("session.execution.succeeded", child));
@@ -2681,7 +2678,7 @@ const msgs = (launchId, ...parts) => [
 
 test("autonomy result: 'Tell me' and blocked actions are read from THIS attempt's transcript, kept on the record, and reach the result's text and metadata", async () => {
   const w = specialistWorld(AUT); // deploy / publish are "Tell me" here
-  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta" }));
   const job = w.job(id);
   w.setMessages(job.childSessionID, msgs(
     job.launch.messageId,
@@ -2704,7 +2701,7 @@ test("autonomy result: 'Tell me' and blocked actions are read from THIS attempt'
 
 test("autonomy result: using a secret file the task was handed is not reported; another session's folder and Manta's own files still are", async () => {
   const w = specialistWorld(BAL);
-  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta" }));
   const job = w.job(id);
   const own = `${HOME}/.manta-secrets/sessions/${job.childSessionID}/KEY`;
   const other = `${HOME}/.manta-secrets/sessions/ses_someoneelse/KEY`;
@@ -2911,7 +2908,7 @@ const turn = (launchId, parts, text) => [
 
 test("project actions: what got through (a command at Ask / Never, or the agent's own 'Did') is kept on the record, put first in the result and on its metadata; a report beats no report", async () => {
   const w = withPage(specialistWorld(BAL));
-  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta" }));
   const job0 = w.job(id);
   const done = await finishWith(
     w,
@@ -2941,13 +2938,13 @@ test("project actions: what got through (a command at Ask / Never, or the agent'
 
 test("project actions: a specialist's result without the section says so (done only); a failed task is not called out; a generic job never is", async () => {
   const w = specialistWorld(BAL);
-  const id = await start(w, autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const id = await start(w, autonomyInput(w, { requestedBy: "manta" }));
   const done = await finishWith(w, id, turn(w.job(id).launch.messageId, [], "Fixed it."));
   assert.equal(done.selfReport, "missing");
   assert.match(buildCompletionText(done), /\nThe task did not include its "Actions from your list" section\.\n/);
 
   const none = specialistWorld(BAL);
-  const nid = await start(none, autonomyInput(none, { requestedBy: "manta", turnKey: "msg_u1" }));
+  const nid = await start(none, autonomyInput(none, { requestedBy: "manta" }));
   const quiet = await finishWith(none, nid, turn(none.job(nid).launch.messageId, [], reportText("- None")));
   assert.equal(quiet.selfReport, "none");
   assert.deepEqual(quiet.exceededActions, []);
@@ -3000,7 +2997,7 @@ test("project actions: the result text is THIS attempt's — a continuation that
 
 test("project actions: projectPatterns, selfReport and the base ruleset stay on the box — never in a start, continue, resume or list response", async () => {
   const w = withPage(specialistWorld(BAL));
-  const res = await startJob(input(autonomyInput(w, { requestedBy: "manta", turnKey: "msg_u1" })), w.deps);
+  const res = await startJob(input(autonomyInput(w, { requestedBy: "manta" })), w.deps);
   assert.equal(res.ok, true, JSON.stringify(res));
   const secrets = ["projectPatterns", "selfReport", "basePermission"];
   const clean = (v, label) => {
@@ -3030,7 +3027,7 @@ test("project actions: projectPatterns, selfReport and the base ruleset stay on 
 
 const ARCH_DIR = `${HOME}/.manta/agents/architect`;
 const archInput = (w, extra = {}) =>
-  autonomyInput(w, { agent: "agent-architect", isolation: "none", agentName: "Architect", agentDir: ARCH_DIR, architect: { mode: "build" }, requestedBy: "manta", turnKey: "msg_u1", allowPr: false, request: "Make an agent", ...extra });
+  autonomyInput(w, { agent: "agent-architect", isolation: "none", agentName: "Architect", agentDir: ARCH_DIR, architect: { mode: "build" }, requestedBy: "manta", allowPr: false, request: "Make an agent", ...extra });
 const ruleAt = (rules, permission, pattern, action) => rules.findIndex((r) => r.permission === permission && r.pattern === pattern && r.action === action);
 
 test("Architect launch: stamped {rootJobId = its own id, attempt 1, mode}; the ruleset is deny-first, allows, jobRules(noSecrets), explicit denies, no question deny", async () => {
@@ -3125,7 +3122,7 @@ test("Architect jobs tell the agents engine when they end — finished, failed o
   const child = w.job(done).childSessionID;
   w.finish(child, "succeeded", T0 + 1);
   await w.engine.observeRaw(raw("session.execution.succeeded", child));
-  const stopped = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  const stopped = await start(w, archInput(w, { requestedBy: undefined }));
   await stopJob(stopped, w.deps);
   const failed = await start(w, archInput(w));
   w.finish(w.job(failed).childSessionID, "failed", T0 + 2);
@@ -3159,7 +3156,7 @@ test("an Architect round that is PAUSED tells the agents engine too (its trial c
   assert.equal(paused.length, 1);
   // a hook that fails doesn't break the pause
   w.deps.onJobPaused = async () => { throw new Error("boom"); };
-  const again = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  const again = await start(w, archInput(w, { requestedBy: undefined }));
   const c2 = w.job(again).childSessionID;
   await pauseJob(again, w.deps);
   await observeEvent(toolDone(c2), w.deps);
@@ -3183,12 +3180,12 @@ test("Architect outcome: what the agents engine returns when the job ends is in 
   assert.ok(w.calls.synth[0].body.text.includes("Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card."));
   assert.deepEqual(w.job(id).architectOutcome, ["Outcome: @cro was created and is live (your setting: Tell me). Undo is on the card."]);
   // a stop too
-  const stopped = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  const stopped = await start(w, archInput(w, { requestedBy: undefined }));
   await stopJob(stopped, w.deps);
   assert.ok(w.calls.synth.at(-1).body.text.includes("Outcome: @cro"));
   // an ending hook that fails or returns nothing adds no line and still delivers
   hookFails = true;
-  const third = await start(w, archInput(w, { requestedBy: undefined, turnKey: undefined }));
+  const third = await start(w, archInput(w, { requestedBy: undefined }));
   w.finish(w.job(third).childSessionID, "succeeded", T0 + 3);
   await w.engine.observeRaw(raw("session.execution.succeeded", w.job(third).childSessionID));
   assert.equal(w.calls.synth.length, 3);

@@ -1008,12 +1008,12 @@ test("handoff: the running part may take a moment to show — it is read again u
   }
 });
 
-test("handoff: a message without a turn (no parent user message) is refused — never its own turn", async () => {
+test("handoff: a message without a parent user message is fine — nothing counts handoffs per turn any more", async () => {
   const f = await leadFixture();
   try {
     const b = call();
     f.w.messages = [{ info: { id: b.messageID, role: "assistant", agent: "build" }, parts: transcript(b)[1].parts }];
-    assert.deepEqual(await f.engine.handoff(b), { ok: false, error: "Couldn't verify this handoff; try again" });
+    assert.equal((await f.engine.handoff(b)).ok, true);
   } finally {
     await f.cleanup();
   }
@@ -1230,6 +1230,21 @@ test("handoff continueJob: a writer continuation is not held back by another run
   }
 });
 
+
+test("lead brief: no give-up-after-two-failures rule, no one-code-task-at-a-time rule; a fixed failure is sent again", async () => {
+  const f = await leadFixture();
+  try {
+    const r = await f.engine.leadBrief("ses_chat");
+    assert.equal(r.status, "ok");
+    const text = r.text.replace(/\s+/g, " ");
+    assert.doesNotMatch(text, /more than twice|after two failures/);
+    assert.doesNotMatch(text, /at most one of them edits code|no running teammate task/);
+    assert.match(text, /When a handoff fails for a reason that has since been fixed, send it again\. Stop and ask the user only when the same failure repeats and there is no fix in sight\./);
+    assert.match(text, /several tasks for the same specialist at once/);
+  } finally {
+    await f.cleanup();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Agents Phase 3: autonomy settings
