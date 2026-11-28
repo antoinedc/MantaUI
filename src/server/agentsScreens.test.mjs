@@ -1064,9 +1064,9 @@ test("refresh provisioning: every team agent gets one monthly routine on sync; t
     f.w.routines.delete("rt3"); // (rt2 is the team check-up)
     await f.engine.sync();
     assert.equal(f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh").length, 2, "nothing recreated");
-    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1" });
-    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt3" });
-    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null });
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1", day: refreshDay("dev") });
+    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt3", day: refreshDay("scout") });
+    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null, day: null }, "the lead has no refresh, so no day");
   } finally {
     await f.cleanup();
   }
@@ -1076,7 +1076,7 @@ test("refresh toggle: Off disables the routine, On enables it, a missing routine
   const f = await fixture();
   try {
     await f.engine.init();
-    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1" });
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1", day: refreshDay("dev") });
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: false }), { enabled: false, routineId: "rt1" });
     assert.deepEqual(f.w.routineCalls.at(-1), ["update", "rt1", { enabled: false }]);
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: true }), { enabled: true, routineId: "rt1" });
