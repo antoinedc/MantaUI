@@ -455,8 +455,8 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 
 ## Parallel work by the same agent
 
-- **Dispatch the same agent several times in parallel.** Today a chat runs at most one code-editing task of a teammate at a
-  time, so independent pieces (e.g. a server PR and a renderer PR of the same spec) queue behind each other and the lead
-  falls back to generic background jobs. Allow several concurrent tasks of the same agent when they own disjoint files /
-  branches (each already gets its own worktree), with a per-chat cap, and show them as separate task cards. Asked by the
-  user on 2026-11-27.
+- **Done 2026-11-28: dispatching the same agent several times in parallel.** The one-code-editing-task-per-chat rule and the
+  three-handoffs-per-request cap are gone (asked by the user on 2026-11-27 and 2026-11-28). Each code task already gets its own
+  worktree and branch, so several run at once, also several of one agent; each is its own task card. Only the box-wide
+  running-jobs cap (`MAX_RUNNING_JOBS`) still bounds them, to protect the box's memory. Open question left for later: two tasks
+  of one agent that edit the same files will conflict when their branches merge; the lead's brief should split work by files.

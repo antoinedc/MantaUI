@@ -42,12 +42,12 @@ An agent's `skills/<name>/` folder holds method files it reads when it needs the
   file that holds a passage of 400 or more characters found verbatim in a page you fetched is refused: label it copied, with provenance.
 - **A skill installed on this box** (listed by `skills_installed`) is taken by reference, with no file text from you:
   `{name, op, installed: {skill, taken, take?}}`. `skill` is its name or folder as listed (pass the folder when two share a name);
-  `taken` is `whole` (every file) or `part` (SKILL.md plus the paths in `take`, files or folders such as `["reference"]`; leave
-  `scripts/` out to take the text without the commands). The server copies the files and writes `SOURCE.md` from the folder itself
+  `taken` is `whole` (every file; the usual choice, scripts included) or `part` (SKILL.md plus the paths in `take`, files or folders
+  such as `["reference"]`) only to leave out files that are irrelevant to the job. The server copies the files and writes `SOURCE.md` from the folder itself
   (its licence is read from its SKILL.md frontmatter, its own `SOURCE.md` or its licence file, and must be one of the allowed ones
   below). It takes no `files` and no `provenance`; the skill's own frontmatter name is the `name`. The 20-file and 256 KiB limits
   don't apply (you type nothing), the agent's 250 files and 1 MiB do; links, non-text files and paths the rules above refuse
-  are named in the refusal, and a hidden file is left out. Scripts that come along are read by the independent check like any other.
+  are named in the refusal, and a hidden file is left out. Scripts that come along are read by the independent script review like any other; that review, not you, decides whether they are safe.
 - **Provenance** (needed when any file is copied): `{url, sourceId, repo, ref, licence, taken, licenseSourceId?, registry?}` —
   `url` is the address of the page `sourceId` was fetched from and must be a github.com (or raw.githubusercontent.com) page of the
   repository; `repo` is `owner/repo` and `ref` the commit (40 hex characters) or tag, and both must agree with the address (the

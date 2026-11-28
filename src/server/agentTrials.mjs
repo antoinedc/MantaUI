@@ -49,8 +49,6 @@ export const CASE_TIMEOUT_MS = 15 * 60_000;
 export const WAIT_MS = 4 * 60_000;
 export const MAX_CASES = 3;
 export const MAX_RUNNING_CASES = 2; // box-wide, in the trials module's own queue (not the delegate cap)
-export const MAX_TRIALS_PER_AGENT = 3; // per task
-export const MAX_TRIALS_PER_TASK = 6;
 export const READ_WINDOW = 20_000;
 export const KEEP_MS = 30 * 24 * 3600 * 1000;
 export const TRANSCRIPT_MAX = 200_000;
@@ -312,7 +310,6 @@ export function createAgentTrials({
 } = {}) {
   const trialsRoot = join(root, TRIALS_DIR);
   const trials = new Map(); // id → trial (see `create`)
-  const reserved = new Set(); // slots of `create` calls in flight: { rootJobId, agentSlug } — counted with the trials against the limits
   const live = new Set(); // block keys of trials that have not been cleaned up
   const bySession = new Map(); // session id → { trial, idx, resolve }
   const queue = []; // { trial, idx }
@@ -521,7 +518,7 @@ export function createAgentTrials({
       } catch (e) {
         return await finish("failed", { error: `The test run couldn't start: ${String(e?.message ?? e).slice(0, 160)}` });
       }
-      c.started = true; // the agent was given its task: from here the trial counts toward the limits
+      c.started = true; // the agent was given its task
       let timer = null;
       const timeout = new Promise((resolve) => {
         timer = setTimeoutFn(() => resolve({ outcome: "timeout" }), caseTimeoutMs);
@@ -662,29 +659,16 @@ export function createAgentTrials({
     return { cases: out };
   }
 
-  // A trial counts toward the limits while it may still run, and afterwards only if a case actually started: one in which every case
-  // was refused before it ran (a project that couldn't be copied, settings that couldn't be read, an aborted round) used up nothing.
-  const counts = (t) => reserved.has(t) || !t.settled || (t.cases ?? []).some((c) => c.started === true);
-  const mineOf = (rootJobId) => [...trials.values(), ...reserved].filter((t) => t.rootJobId === rootJobId && counts(t));
-
   async function create(input) {
     const b = keyedInput(input, ["action", "agent", "baseHash", "draft", "cases"]);
     const bound = await agents().bindArchitect(b, "agent_trial");
     if (bound.refused) return refuse(bound.refused);
-    const rootJobId = bound.stamp.rootJobId;
-    // The limits are reserved right here, before anything else is awaited: calls in flight count, so parallel calls can't all pass
-    // a check made before any of them has been recorded. The slot goes back on every way out that isn't a trial.
-    if (mineOf(rootJobId).length >= MAX_TRIALS_PER_TASK) return refuse(`You've already run ${MAX_TRIALS_PER_TASK} trials in this task; that's the limit. Propose from what you have, or say what you couldn't establish`);
-    const slot = { rootJobId, agentSlug: null };
-    reserved.add(slot);
-    try {
-      return await createReserved(input, bound, rootJobId, slot);
-    } finally {
-      reserved.delete(slot);
-    }
+    // No cap on the number of trials: the limits are the cases per trial, the cases running at once and the 15-minute ceiling.
+    return createChecked(input, bound);
   }
 
-  async function createReserved(input, bound, rootJobId, slot) {
+  async function createChecked(input, bound) {
+    const rootJobId = bound.stamp.rootJobId;
     const checked = checkCases(input?.cases);
     if (checked.error) return refuse(checked.error);
     for (const c of checked.cases) {
@@ -693,9 +677,6 @@ export function createAgentTrials({
     const id = mint();
     const plan = await agents().trialPlan({ action: input?.action, agent: input?.agent, baseHash: input?.baseHash, draft: input?.draft }, { dir: agentDirOf(id), bound });
     if (plan.error) return refuse(plan.error);
-    // checked and recorded with no await between them
-    if (mineOf(rootJobId).filter((t) => t !== slot && t.agentSlug === plan.slug).length >= MAX_TRIALS_PER_AGENT) return refuse(`You've already run ${MAX_TRIALS_PER_AGENT} trials of @${plan.slug} in this task; that's the limit`);
-    slot.agentSlug = plan.slug;
     // a case runs in a copy of one of the agent's projects, or of the project the Architect's own task is in; nothing else
     const seats = Array.isArray(plan.seats) ? plan.seats : [];
     let taskProject = null;
@@ -752,7 +733,6 @@ export function createAgentTrials({
       cases: checked.cases.map((c) => ({ ...c, state: "queued", finalAnswer: null, tools: [], filesChanged: 0, refused: [], wouldAsk: [], durationMs: null, error: null })),
     };
     trials.set(id, trial);
-    reserved.delete(slot);
     await writeState(trial);
     trial.cases.forEach((_, idx) => queue.push({ trial, idx }));
     pump();

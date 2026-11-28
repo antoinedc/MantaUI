@@ -692,14 +692,12 @@ const HANDOFF_VERIFY = {
   tool: "agent_handoff",
   couldnt: "Couldn't verify this handoff; try again",
   notLead: "Only the lead can hand off work",
-  needTurn: true,
   matches: (given, b) => ["agent", "title", "brief", "continueJob"].every((k) => same(given[k], b[k])),
 };
 const CHANGE_VERIFY = {
   tool: "agent_change",
   couldnt: "Couldn't verify this change; try again",
   notLead: CHANGE_NOT_LEAD,
-  needTurn: false,
   matches: changeInputMatches,
 };
 
@@ -883,13 +881,13 @@ const MECHANICS = [
   "## How to hand off work",
   "",
   "- Use `agent_handoff` for work matching a teammate's \"useWhen\"; never for questions, explanations, plans or small reads.",
-  "- A code change is yours only when ALL hold: it is small and low-risk (about 5 files or fewer; no dependency, database schema, login/auth or payment changes); the project folder is safe to write to (check `git status` and the branch first: not on the main/default branch, no uncommitted changes of the user's, and no running teammate task for this chat); and you can check the result quickly. Otherwise hand it to the code-editing teammate. If no teammate edits code, do it yourself.",
+  "- A code change is yours only when ALL hold: it is small and low-risk (about 5 files or fewer; no dependency, database schema, login/auth or payment changes); the project folder is safe to write to (check `git status` and the branch first: not on the main/default branch, no uncommitted changes of the user's); and you can check the result quickly. Otherwise hand it to the code-editing teammate. If no teammate edits code, do it yourself.",
   "- When you made a change yourself, say so and list the files. If it grows beyond small while you work (scope widens, a check fails), stop and hand it off with what you learned.",
-  "- One specialist per handoff; several only when the parts are independent AND at most one of them edits code.",
+  "- One specialist per handoff; several when the parts are independent, including several tasks for the same specialist at once (each code task gets its own branch).",
   "- The brief must stand alone: goal, why, done when, output wanted, scope (in / out), decisions already made in this chat. The specialist has NOT seen this conversation beyond its last few messages.",
   "- After `agent_handoff` returns, say in one line who got what, then stop. Never describe or guess the result before it arrives.",
   "- When a result arrives: check it against \"done when\" (for code: tests run, commit present); quote facts, don't reword them; give a 2–4 line summary and the next step. A result that \"needs a decision\" → ask the user.",
-  "- Don't hand the same request to the same specialist more than twice; after two failures, stop and tell the user.",
+  "- When a handoff fails for a reason that has since been fixed, send it again. Stop and ask the user only when the same failure repeats and there is no fix in sight.",
   "- For a teammate's work use `agent_handoff`, not the generic `delegate` tool; if a handoff is refused, do not retry it through `delegate`.",
   "- To send a fix round to a specialist's finished task (same branch), pass `continueJob: <jobId>`.",
   `- When a result carries a "${DECISION_MARKER}" block (written by the server), that task ended because it needs the user's decision. Put it to the user yourself in ONE question call, all the questions of that turn at once, with the recommended option first, using the block's options; if it says "Concern:", state that concern plainly. Never answer it on the user's behalf, and don't pick an option because you agree. Once the user answers, send the answer back to the same task with \`agent_handoff\` and \`continueJob: <jobId>\`.`,
@@ -2286,7 +2284,7 @@ export function createAgentsEngine({
   /**
    * Step 1 of a handoff (spec §5): is this the lead's own live `agent_handoff` call? Reads the calling assistant
    * message and requires the running tool part with this callID whose input equals the body — the box bearer is
-   * box-wide, so the body alone proves nothing. Returns `{ turnKey, callerAgent }` or `{ refused }`.
+   * box-wide, so the body alone proves nothing. Returns `{ callerAgent }` or `{ refused }`.
    */
   async function verifyInvocation(b, spec = HANDOFF_VERIFY) {
     const COULDNT = spec.couldnt;
@@ -2314,9 +2312,7 @@ export function createAgentsEngine({
     const given = part.state?.input && typeof part.state.input === "object" ? part.state.input : {};
     if (!spec.matches(given, b)) return { refused: NOT_LEAD };
     if (!consume(`${b.messageID}:${b.callID}`)) return { refused: NOT_LEAD };
-    const turnKey = typeof msg.info.parentID === "string" && msg.info.parentID ? msg.info.parentID : null;
-    if (spec.needTurn && !turnKey) return { refused: COULDNT }; // never fall back to the message id: that would make every message its own turn
-    return { turnKey, callerAgent: typeof msg.info.agent === "string" ? msg.info.agent : "" };
+    return { callerAgent: typeof msg.info.agent === "string" ? msg.info.agent : "" };
   }
 
   /**
@@ -2341,7 +2337,7 @@ export function createAgentsEngine({
     // 1. the caller binding
     const verified = await verifyInvocation(b);
     if (verified.refused) return refuse(verified.refused);
-    const { turnKey, callerAgent } = verified;
+    const { callerAgent } = verified;
 
     // 2. a valid lead, and this chat is led
     const lead = await leadEntry();
@@ -2399,27 +2395,15 @@ export function createAgentsEngine({
     const title = b.title.trim().slice(0, 80);
     const name = requestTitle(title, slug);
 
-    // Admission (single writer + per-turn cap) runs under the delegate's jobs lock, before anything is allocated.
-    const admit = (jobs, old) => {
-      const isWriter = old ? (old.isolation ?? (old.worktree ? "worktree" : "none")) === "worktree" : writer;
-      if (isWriter) {
-        const busy = jobs.find((j) => j.parentSessionID === b.sessionID && j.isolation === "worktree" && j.status === "running");
-        if (busy) return `${busy.agentName || "Another agent"} is already changing code for this chat (${busy.name}); wait for its result`;
-      }
-      const used = jobs.filter((j) => j.parentSessionID === b.sessionID && j.requestedBy === "manta" && j.turnKey === turnKey).length;
-      if (used >= 3) return "Too many handoffs for one request; finish or ask the user";
-      return null;
-    };
-
+    // No admission check of the lead's own: every code task has its own worktree and branch, so several run at once (also several
+    // of one agent), and nothing counts handoffs per request. The delegate's box-wide running-jobs cap still applies.
     if (stored) {
       const res = await delegate.continueJob(stored.id, {
         prompt: b.brief,
         sessionID: b.sessionID,
-        admit,
         name,
         request: title,
         requestedBy: "manta",
-        turnKey,
         allowPr: false,
         ...(architect ? { architect: { mode: roundMode } } : {}),
       });
@@ -2444,10 +2428,8 @@ export function createAgentsEngine({
       agentName: agent.meta.name,
       request: title,
       requestedBy: "manta",
-      turnKey,
       // An instruction, not an enforcement: the job's shell grants are unchanged.
       allowPr: false,
-      admit,
       ...(architect ? { architect: { mode: roundMode } } : {}),
       ...seatStamp(seated),
       ...specialistAutonomy({ writer: writerIfNew, handoff: true }),
@@ -3394,7 +3376,7 @@ export function createAgentsEngine({
   async function bindArchitect(b, tool) {
     const keys = ARCHITECT_TOOL_KEYS[tool];
     if (!keys) return { refused: NOT_ARCHITECT };
-    const spec = { tool, couldnt: ARCHITECT_COULDNT_CHECK, notLead: NOT_ARCHITECT, needTurn: false, matches: keyedInputMatches(keys) };
+    const spec = { tool, couldnt: ARCHITECT_COULDNT_CHECK, notLead: NOT_ARCHITECT, matches: keyedInputMatches(keys) };
     const verified = await verifyInvocation(b, spec);
     if (verified.refused) return { refused: verified.refused };
     if (verified.callerAgent !== agentKey(ARCHITECT_SLUG)) return { refused: NOT_ARCHITECT };
@@ -3435,7 +3417,7 @@ export function createAgentsEngine({
   async function bindResearcher(b, tool) {
     const keys = RESEARCHER_TOOL_KEYS[tool];
     if (!keys) return { refused: NOT_RESEARCHER };
-    const spec = { tool, couldnt: ARCHITECT_COULDNT_CHECK, notLead: NOT_RESEARCHER, needTurn: false, matches: keyedInputMatches(keys) };
+    const spec = { tool, couldnt: ARCHITECT_COULDNT_CHECK, notLead: NOT_RESEARCHER, matches: keyedInputMatches(keys) };
     const verified = await verifyInvocation(b, spec);
     if (verified.refused) return { refused: verified.refused };
     const caller = verified.callerAgent;

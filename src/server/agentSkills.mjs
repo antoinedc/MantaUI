@@ -373,7 +373,7 @@ function leftOutOf(all, taken) {
 function adoptInstalled(o, got, { header, frontmatter }) {
   const spec = o.installed;
   const who = `Skill ${o.name}`;
-  const hint = ` Take part of it instead: taken "part" with take listing what fits (SKILL.md is always taken); scripts and long references are the usual things to leave out`;
+  const hint = ` Take part of it instead: taken "part" with take listing what fits (SKILL.md is always taken); long references and files the job does not need are the usual things to leave out`;
   const files = [];
   for (const [path, content] of got.files) {
     const bad = checkPath(path);

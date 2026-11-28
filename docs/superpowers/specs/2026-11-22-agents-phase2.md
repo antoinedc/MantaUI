@@ -152,7 +152,7 @@ Class-2 consumer (the plugin). Text, in this order:
      teammate task) and quickly checkable; else it goes to the code teammate
      (follow-up 2026-11-23, research: Claude Code / Codex / Copilot guidance).
    - One specialist per handoff; several only when the parts are independent
-     AND at most one of them edits code.
+     (several tasks for one specialist may run at once since 2026-11-28).
    - The brief must stand alone: goal, why, done when, output wanted, scope
      (in / out), decisions already made in this chat. The specialist has NOT
      seen this conversation beyond its last few messages.
@@ -161,8 +161,9 @@ Class-2 consumer (the plugin). Text, in this order:
    - When a result arrives: check it against "done when" (for code: tests run,
      commit present); quote facts, don't reword them; give a 2–4 line summary
      and the next step. A result that "needs a decision" → ask the user.
-   - Don't hand the same request to the same specialist more than twice; after
-     two failures, stop and tell the user.
+   - When a handoff fails for a reason that has since been fixed, send it again; stop and ask the
+     user only when the same failure repeats with no fix in sight. (Replaced 2026-11-28; it used to say
+     "don't hand the same request to the same specialist more than twice".)
    - For a teammate's work use `agent_handoff`, not the generic `delegate` tool;
      if a handoff is refused, do not retry it through `delegate`.
    - To send a fix round to a specialist's finished task (same branch), pass
@@ -256,6 +257,9 @@ non-git folder). It decides "writer" (worktree) vs "read-only" (none).
   (possibly narrowed) grants become the job's ruleset exactly as for `delegate`.
 - Read-only: `delegate.startJob` with no `permission` (the existing
   deny-by-default read-only ruleset applies). Never an approval card.
+
+> **Superseded 2026-11-28:** the single-writer rule and the turn cap below were removed (the user never asked for them). Handoffs pass no
+> `admit` and no `turnKey`; each code task has its own worktree, so several run at once. Only the box-wide running-jobs cap remains.
 
 **Admission (single writer + turn cap)** runs INSIDE the delegate
 job-registration lock, through a new optional input `admit(jobs) → string | null`
