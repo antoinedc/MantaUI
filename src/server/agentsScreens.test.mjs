@@ -1117,6 +1117,7 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     assert.equal(input.parentDirectory, "/h", "the user's home: a task inside Manta's own folders is refused, and the read-only Architect needs no project");
     assert.equal(input.agent, "agent-architect");
     assert.equal(input.targetProject, AGENTS_TMUX_SESSION);
+    assert.equal(input.title, "Refresh @dev", "the task is titled like its routine");
     assert.equal(input.deliverResult, false);
     assert.deepEqual(input.architect, { mode: "routine" }, "a refresh is a routine round: its change quotes the brief, one shape is enough");
     assert.equal(input.specialist, true);

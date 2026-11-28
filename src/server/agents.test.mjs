@@ -939,6 +939,7 @@ test("handoff: a valid read-only handoff starts the job with the brief, seat, ex
     assert.equal(job.requestedBy, "manta");
     assert.equal(job.allowPr, false);
     assert.equal(job.request, "Audit the head tags");
+    assert.equal(job.title, "Audit the head tags", "the handoff's own title, never the slug the job name becomes");
     assert.equal(job.name, "Audit the head tags");
     assert.equal(job.permission, undefined, "the existing read-only ruleset applies");
     assert.ok(job.prompt.startsWith("Audit /pricing head tags."));

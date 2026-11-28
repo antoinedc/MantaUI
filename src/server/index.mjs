@@ -175,7 +175,7 @@ import {
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
 import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, completionOwnerOf as delegateCompletionOwnerOf, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
-import { displayTitle } from "./jobTitle.mjs";
+import { buildTitleInstruction, displayTitle } from "./jobTitle.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -1479,6 +1479,13 @@ const delegateEngine = createDelegateEngine({
   gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
   gitRun: (args, opts) => gitRun(args, opts),
   listMessages: (sid) => oc.listMessages(sid),
+  // The plain-language title of a new task, written once when it starts (the same one-shot, on the same writer, as auto-rename): the
+  // Summary model, else the asking conversation's own. "" on any failure — the first sentence of the request stays.
+  generateTitle: async ({ text, sessionID }) => {
+    const writer = await summaryModel.resolveCheapWriter(sessionID);
+    if (!writer) return "";
+    return oc.generateText({ instruction: buildTitleInstruction(text), model: { providerID: writer.providerID, modelID: writer.modelID } });
+  },
   listModels: (overrides) => oc.listModels(overrides),
   // BET-1220: routing inputs for the subagent model decision in startJob.
   // configGet supplies the modelRouting policy (absent on a conversation that

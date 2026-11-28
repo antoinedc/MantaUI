@@ -231,6 +231,7 @@ test("agents.checkup: starts the Architect's routine round under the run's headl
     assert.equal(f.w.newSessions.length, 1);
     assert.equal(f.w.newSessions[0].name, AGENTS_TMUX_SESSION);
     const input = f.w.startJobs[0];
+    assert.equal(input.title, "Team check-up", "the task is titled like its routine");
     assert.equal(input.parentSessionID, "ses_run");
     assert.equal(input.parentDirectory, "/h");
     assert.equal(input.agent, "agent-architect");

@@ -287,6 +287,59 @@ test("C1 startJob: registers FIRST, then create → move → window → send in 
   assert.deepEqual(w.calls.deliver, [], "no legacy promptDelivery on the way in either");
 });
 
+// ---- the job's plain-language title (what Fleet, Needs you and the task cards show; `name` stays the branch / window slug) ----
+
+const settle = async (check) => {
+  for (let i = 0; i < 50 && !check(); i++) await new Promise((r) => setImmediate(r));
+};
+
+test("title: a caller-given title (a handoff's own) is stored as given and never regenerated", async () => {
+  const w = world();
+  let asked = 0;
+  w.deps.generateTitle = async () => ((asked += 1), "Something else");
+  const id = await start(w, { title: "Build the Fleet / Needs you redesign" });
+  await settle(() => false);
+  assert.equal(w.job(id).title, "Build the Fleet / Needs you redesign");
+  assert.equal(w.job(id).titleSource, "given");
+  assert.equal(asked, 0);
+});
+
+test("title: with none given the record has the first sentence of the request at once, then a generated one replaces it", async () => {
+  const w = world();
+  const seen = [];
+  w.deps.generateTitle = async (a) => (seen.push(a), "Fix the parser bug.\n");
+  const id = await start(w, { prompt: "You are fixing a bug in the parser. Read the spec first.", name: "you-are-fixing-a-bug" });
+  assert.equal(w.job(id).title === "You are fixing a bug in the parser" || w.job(id).title === "Fix the parser bug", true, "never a slug, from the first moment");
+  await settle(() => w.job(id).titleSource === "generated");
+  assert.equal(w.job(id).title, "Fix the parser bug");
+  assert.equal(w.job(id).titleSource, "generated");
+  assert.equal(w.job(id).name, "you-are-fixing-a-bug", "the slug still names the branch and window");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].sessionID, PARENT);
+  assert.match(seen[0].text, /fixing a bug in the parser/);
+});
+
+test("title: when the one-shot fails or answers with nothing, the first sentence of the request stays — never a slug", async () => {
+  for (const generate of [async () => { throw new Error("no model"); }, async () => "", async () => "fix-the-parser-bug"]) {
+    const w = world();
+    w.deps.generateTitle = generate;
+    const id = await start(w, { prompt: "Fix the parser. Then the lexer.", name: "fix-the-parser" });
+    await settle(() => false);
+    assert.equal(w.job(id).title, "Fix the parser");
+    assert.equal(w.job(id).titleSource, "fallback");
+  }
+});
+
+test("title: an agent task is titled from the user's request, not from the dispatch prompt with its project brief", async () => {
+  const w = world();
+  let text = "";
+  w.deps.generateTitle = async (a) => ((text = a.text), "");
+  const id = await start(w, { prompt: "Audit the head tags.\n\n---\nYour brief for this project:\nlots of rules", request: "audit the head tags on the pricing page" });
+  await settle(() => text !== "");
+  assert.equal(text, "audit the head tags on the pricing page");
+  assert.equal(w.job(id).title, "audit the head tags on the pricing page");
+});
+
 test("C1 startJob: the named model reaches the child's create AND the opening prompt", async () => {
   const w = world();
   const id = await start(w, { model: { providerID: "anthropic", modelID: "claude-sonnet-5-5" } });
@@ -760,8 +813,8 @@ test("C1 N7: a finished job posts exactly the spec'd body, queue + resume, under
   assert.deepEqual(body, {
     id: job.completionMessageId,
     text: buildCompletionText(done),
-    description: job.name,
-    metadata: { source: "subagent", childID: job.childSessionID, agent: "build", state: "completed", manta: { jobId: id, name: job.name } },
+    description: "Fix the bug in the parser", // the card says it in plain words; the slug (job.name) is only the branch and window
+    metadata: { source: "subagent", childID: job.childSessionID, agent: "build", state: "completed", manta: { jobId: id, name: "Fix the bug in the parser" } },
     delivery: "queue",
     resume: true,
   });

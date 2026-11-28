@@ -93,6 +93,7 @@ import {
   MANTA_FOLDER,
 } from "./autonomy.mjs";
 import { projectPatterns as buildProjectPatterns } from "./projectActions.mjs";
+import { displayTitle, firstSentence, sanitizeTitle } from "./jobTitle.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -1246,6 +1247,34 @@ async function runAdmit(admit, jobs, ...extra) {
 function jobNameFor(input, prompt) {
   return (typeof input?.name === "string" && slugifyProjectName(input.name.trim().split(/\s+/).slice(0, 6).join(" "))) ||
     deriveName(prompt);
+}
+
+// The job's plain-language title (what Fleet, Needs you and the task cards show; `name` stays the branch / window slug). A caller's own
+// (a handoff's title) is kept as given; else the first sentence of what was asked at once, replaced by a generated one when the
+// one-shot answers (`titleLater`). The text is the user's request when there is one, else the prompt without what the server appends.
+function titleSourceText(input, prompt) {
+  return typeof input?.request === "string" && input.request.trim() ? input.request : String(prompt ?? "").split("\n\n---\n")[0];
+}
+function initialTitle(input, prompt) {
+  const given = sanitizeTitle(input?.title);
+  if (given) return { title: given, titleSource: "given" };
+  const title = firstSentence(titleSourceText(input, prompt));
+  return title ? { title, titleSource: "fallback" } : {};
+}
+
+// Write the title once, in the background, when the job starts: never delays the launch, never throws. A failure, an empty answer or a
+// slug leaves the first-sentence title in place.
+function titleLater(job, text, deps) {
+  if (typeof deps.generateTitle !== "function" || job.titleSource === "given") return;
+  void (async () => {
+    try {
+      const title = sanitizeTitle(await deps.generateTitle({ text, sessionID: job.parentSessionID, directory: job.parentDirectory }));
+      if (!title) return;
+      await patchJob(job.id, { title, titleSource: "generated" }, deps, { onlyIf: (j) => j.titleSource !== "given" && j.titleSource !== "generated" });
+    } catch (e) {
+      console.warn(`[delegate] writing the title of ${job.id} failed:`, e?.message ?? e);
+    }
+  })();
 }
 
 // Create the job's worktree + record its baseSha. A worktree failure continues
@@ -3371,7 +3400,7 @@ export function buildResultSynthetic(job) {
   return {
     id: job.completionMessageId,
     text: buildCompletionText(job),
-    description: job.name,
+    description: displayTitle(job),
     metadata: {
       source: "subagent",
       childID: job.childSessionID,
@@ -3379,7 +3408,7 @@ export function buildResultSynthetic(job) {
       state: STATE_FOR_STATUS[job.status] ?? job.status,
       manta: {
         jobId: job.id,
-        name: job.name,
+        name: displayTitle(job),
         ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
         ...(job.status === "done" && job.endedBlocked === true && job.decision ? { decision: { questions: job.decision.questions } } : {}),
         ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
@@ -4343,6 +4372,7 @@ async function continueJobRecord(id, input, deps) {
         // a lead handoff's fix round: the new title, who asked, and the turn it counts against (else inherited)
         ...(typeof input?.name === "string" && input.name.trim() ? { name: jobNameFor({ name: input.name }, followUp) } : {}),
         ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
+        ...(sanitizeTitle(input?.title) ? { title: sanitizeTitle(input.title), titleSource: "given" } : {}),
         ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
         ...(input?.allowPr === false ? { allowPr: false } : {}),
         status: "running",
@@ -4977,6 +5007,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     const job = {
       id: jobId,
       name,
+      ...initialTitle(input, prompt),
       prompt,
       model: requestedModel ?? null,
       requestedModel: requestedModel ?? null,
@@ -5077,6 +5108,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     return { ok: true, job };
   });
   if (!reg.ok) return reg;
+  titleLater(reg.job, titleSourceText(input, prompt), deps);
   try {
     return await launchDelegate(reg.job, deps);
   } finally {
