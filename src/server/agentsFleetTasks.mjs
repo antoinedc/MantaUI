@@ -4,6 +4,7 @@
 
 import { LEAD_SLUG } from "../shared/agentsShared.mjs";
 import { displayTitle } from "./jobTitle.mjs";
+import { jobModelOf } from "./jobModel.mjs";
 
 /** Ended today holds at most this many rows (newest first). */
 export const FLEET_ENDED_MAX = 50;
@@ -146,6 +147,7 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
       startedAt: startedOf(job),
       branch: typeof job.branch === "string" && job.branch ? job.branch : null,
       askedBy: askedFor(job),
+      model: jobModelOf(job),
     };
   };
 
@@ -218,6 +220,7 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
       projectName: proj?.name ?? p.tmuxSession,
       startedAt: rootJob ? startedOf(rootJob) : (statusOf(root.sessionId).startedAt ?? 0),
       branch: typeof rootJob?.branch === "string" && rootJob.branch ? rootJob.branch : null,
+      model: rootJob ? jobModelOf(rootJob) : null,
       askedBy: rootJob ? askedFor(rootJob) : { by: "you" },
       status: paused ? "paused-by-you" : "in-progress",
       pausedAt: paused ? pausedAt : null,

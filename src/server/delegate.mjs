@@ -53,6 +53,7 @@ import {
 } from "./peers.mjs";
 import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
+import { jobModelOf } from "./jobModel.mjs";
 import { backgroundResultText } from "../shared/opencodeV2.mjs";
 import { chooseModel, describeDecision } from "../shared/modelRouter.mjs";
 import { listRoutableModels } from "./opencode.mjs";
@@ -640,13 +641,15 @@ export function resolveForgeOwner(projects, parentDirectory) {
 // `projectPatterns` (the project's own block rules) and `selfReport` (only drives a line of the result text) stay on the box too.
 // `ending` / `continueAfter` / `gateFailed` are the ending gate's marks (spec 2026-11-26 §4.3): server-only.
 function toWireRecord({ displayParentID: _retired, basePermission: _base, projectPatterns: _pp, selfReport: _sr, ending: _e, continueAfter: _ca, gateFailed: _gf, ...rest }) {
+  // `modelUsed`: the model the task ran on ("provider/model"), for the cards and Fleet's Details
+  const modelUsed = jobModelOf(rest);
   // (a resume in flight keeps the paused record's own copies in `launch.restore`)
   const restore = rest.launch?.restore;
   if (restore && typeof restore === "object") {
     const { projectPatterns: _rp, selfReport: _rs, ...kept } = restore;
-    return { ...rest, launch: { ...rest.launch, restore: kept } };
+    return { ...rest, launch: { ...rest.launch, restore: kept }, modelUsed };
   }
-  return rest;
+  return { ...rest, modelUsed };
 }
 
 // a result that carries a raw record (start / continue / resume) goes out the way a listed one does
@@ -967,6 +970,26 @@ export async function adoptExistingSession(input, deps = {}) {
 }
 
 /**
+ * The models a named model is checked against: the user's Sub-ticked (routable) catalogue. Every read is guarded, so a failure is an empty
+ * catalogue (a structured model then passes through; free text matches nothing), never a throw.
+ */
+async function routableCatalog(deps) {
+  const { listModels, configGet = async () => ({}) } = deps;
+  let cfg = {};
+  try {
+    cfg = (await configGet()) ?? {};
+  } catch {
+    cfg = {};
+  }
+  try {
+    const catalog = await listRoutableModels("sub", cfg, typeof listModels === "function" ? listModels : async () => []);
+    return Array.isArray(catalog) ? catalog : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Resolve a caller-NAMED delegate `model` (BET-1275 11b). A named model is the
  * OFF SWITCH for Auto routing — the caller decided, and Auto only ever fills
  * silence — so the caller's choice is honoured verbatim and never routed over.
@@ -1024,14 +1047,22 @@ export function resolveNamedModel(model, catalog) {
   return { providerID: resolved.providerID, modelID: resolved.id };
 }
 
+// The closest models for a query that matched nothing. A whole "provider/model" key rarely appears inside an id, so when the plain
+// query finds nothing its own words (split at every non-alphanumeric) are tried before giving up.
+function closestModels(query, src) {
+  const plain = suggestModels(query, src, 3);
+  if (plain.length > 0) return plain;
+  return suggestModels(String(query).split(/[^A-Za-z0-9]+/).filter(Boolean).join(" "), src, 3);
+}
+
 function candidateHint(query, src) {
-  const suggestions = suggestModels(query, src, 3);
+  const suggestions = closestModels(query, src);
   if (!suggestions.length) return "";
   return ` Closest routable models: ${suggestions.map((s) => `${s.providerID}/${s.id}`).join(", ")}.`;
 }
 
 function noMatchError(model, src) {
-  const suggestions = suggestModels(String(model).trim(), src, 3);
+  const suggestions = closestModels(String(model).trim(), src);
   const hint = suggestions.length
     ? ` Closest models: ${suggestions.map((s) => `${s.providerID}/${s.id}`).join(", ")}.`
     : " No models are currently routable (ticked) on this box.";
@@ -4308,6 +4339,16 @@ async function continueJobRecord(id, input, deps) {
   const child = peeked.job.childSessionID;
   if (!child) return { ok: false, status: 409, error: "that job has no session to continue" };
   const followUp = String(args.prompt).trim();
+  // A round runs on the model the task last ran on unless the caller names another: a named one is checked against the models the user
+  // approved for background work (the same check a new job gets), before anything is written, so a refusal leaves nothing behind.
+  let namedModel = null;
+  if (input?.model) {
+    try {
+      namedModel = resolveNamedModel(input.model, await routableCatalog(deps));
+    } catch (e) {
+      return { ok: false, status: 400, error: e?.message ?? String(e) };
+    }
+  }
 
   return withSessionResources(child, async () => {
     // A specialist's task keeps the permissions it was created with (OpenCode installs them at creation), so another
@@ -4360,8 +4401,11 @@ async function continueJobRecord(id, input, deps) {
       // (the ending gate's marks, the seat note and the questions the old round ended waiting on belong to that round alone)
       const { supersededBy: _s, cleanupReason: _c, toldActions: _t, blockedActions: _b, exceededActions: _e, selfReport: _r, decision: _d, ending: _en, continueAfter: _ca, gateFailed: _gf, seatAdded: _sa, waiting: _w, ...inherited } = old;
       const baseCeiling = withLivenessDefaults(old).baseCeilingMs;
+      // the model this round is sent on: the named one, else the one the task last ran on (nothing pinned when it named none)
+      const roundModel = namedModel ?? toDeliverModel(old.launch?.model) ?? parseModelString(old.requestedModel ?? old.model);
       const job = {
         ...inherited,
+        ...(namedModel ? { model: `${namedModel.providerID}/${namedModel.modelID}`, requestedModel: `${namedModel.providerID}/${namedModel.modelID}` } : {}),
         ...livenessFieldsAtLaunch(baseCeiling),
         budgetRecorded: null, // the successor's usage restarts at 0: so does its cursor
         id: genId(),
@@ -4397,7 +4441,7 @@ async function continueJobRecord(id, input, deps) {
         ...(old.architect ? { architect: { rootJobId: old.architect.rootJobId ?? old.id, attempt: (old.attempt ?? 1) + 1, mode: architectModeOf(input?.architect?.mode) } } : {}),
         // a specialist's follow-up also carries the footer again: a task from before it was introduced never saw it
         // (a caller delivering something it must be able to find again — an answer to a task's question — names the message id)
-        launch: { text: old.specialist === true ? `${followUp}\n\n${taskFooter(old.autonomyPolicy)}` : followUp, messageId: typeof input?.messageID === "string" && input.messageID ? input.messageID : mintMessageId(), model: null, continuation: true },
+        launch: { text: old.specialist === true ? `${followUp}\n\n${taskFooter(old.autonomyPolicy)}` : followUp, messageId: typeof input?.messageID === "string" && input.messageID ? input.messageID : mintMessageId(), model: roundModel, continuation: true },
       };
       inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
       try {

@@ -12,6 +12,7 @@ import { Button } from "../Button";
 import { formatClockTime } from "../chatUtils";
 import { IconButton } from "../IconButton";
 import { boxNow, relativeAgo } from "../jobProgress";
+import { useTaskModelLabel } from "../taskModel";
 import { SECONDARY_BTN } from "./FleetRows";
 import { askedByWho, endedBadge, fallbackAgentName, isTaskRow, statusView, subStatusLabel, UNREACHABLE_TITLE } from "./fleetView";
 
@@ -119,6 +120,7 @@ export function FleetDetails({
   const agentName = info?.name || fallbackAgentName(task.agentSlug);
   const off = offline ? UNREACHABLE_TITLE : undefined;
   const view = storeJob?.view;
+  const modelLabel = useTaskModelLabel(task.model ?? storeJob?.modelUsed);
   const steps = view?.steps ?? null;
   const box = boxNow(now, skew);
 
@@ -141,6 +143,11 @@ export function FleetDetails({
       </Row>
       <Row k="Project">{task.projectName ?? "No project"}</Row>
       <Row k="Asked by">{askedByWho(task.askedBy, chatName)}</Row>
+      {modelLabel && (
+        <Row k="Model">
+          <span data-testid="fleet-details-model">{modelLabel}</span>
+        </Row>
+      )}
     </>
   );
 
