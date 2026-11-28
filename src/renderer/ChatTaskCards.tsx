@@ -5,7 +5,7 @@
 // over here when it started from an agent's conversation; the `agent_start_task` tool part is the "starting" card (while the call
 // runs) or a quiet "Not started" row (when it was refused). The words come from chatTask.ts (Fleet's words, never the slug).
 //
-// Markup: a content card — the title is a heading, the project a plain-text chip, Details and Open session are separate native
+// Markup (modern-web-guidance `card`): an <article> with a heading and a <footer> of independent native buttons; the title is a heading, the project a plain-text chip, Details and Open session are separate native
 // buttons named after their task (one conversation holds several cards). Below 520 px the title wraps and the buttons move to
 // the card's last row (a container query on the card's own column).
 
@@ -113,7 +113,7 @@ function ChatTaskCard(p: CardProps) {
           {p.title}
         </h4>
         {(p.onDetails || p.onOpen) && (
-          <div className={`col-start-2 mt-1 flex items-center gap-1 [grid-row:20] ${WIDE}:col-start-3 ${WIDE}:mt-0 ${WIDE}:[grid-row:1]`}>
+          <footer className={`col-start-2 mt-1 flex items-center gap-1 [grid-row:20] ${WIDE}:col-start-3 ${WIDE}:mt-0 ${WIDE}:[grid-row:1]`}>
             {p.onDetails && (
               <button type="button" onClick={p.onDetails} aria-label={`Details: ${p.title}`} title="Open this task's details" data-testid="chat-task-details" className="inline-flex min-h-6 items-center whitespace-nowrap rounded-xs border-0 bg-transparent px-2 font-medium text-text-muted hover:bg-fill-hover hover:text-text focus-visible:outline-2 focus-visible:outline-accent">
                 Details
@@ -124,7 +124,7 @@ function ChatTaskCard(p: CardProps) {
                 {p.openBusy ? "Opening…" : p.openArrow ? "Open session →" : "Open session"}
               </button>
             )}
-          </div>
+          </footer>
         )}
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-text-faint [grid-column:2/-1]">
           {meta.map((m, i) => (
