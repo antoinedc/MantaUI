@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createResearchLibrary, RESEARCH_GUIDANCE, withResearchGuidance, LIBRARY_MAX_ENTRIES, independentSources, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
+import { createResearchLibrary, RESEARCH_GUIDANCE, LIBRARY_MAX_ENTRIES, independentSources, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 const T0 = Date.parse("2026-11-24T12:00:00Z");
@@ -618,13 +618,6 @@ test("the guidance has one generic line on thin entries: a lead; add independent
   assert.match(thinLines[0], /independent sources/);
   assert.match(thinLines[0], /contrary evidence/);
   assert.match(thinLines[0], /`keep`/);
-});
-
-test("withResearchGuidance appends the block once, after the task text", () => {
-  const out = withResearchGuidance("Do the thing.");
-  assert.ok(out.startsWith("Do the thing.\n\n---\n"));
-  assert.ok(out.endsWith(`${RESEARCH_GUIDANCE.trim()}\n`) || out.includes(RESEARCH_GUIDANCE.trim()));
-  assert.equal(withResearchGuidance(out), out, "idempotent");
 });
 
 // ---- lookup: the server-side read the Architect's fit check is checked against ----

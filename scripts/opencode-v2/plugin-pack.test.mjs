@@ -373,7 +373,7 @@ describe("plugin entry", () => {
       tool: {
         transform: async (cb) => {
           transformCalls++;
-          cb({ add: (t) => added.push(t) });
+          cb({ add: (t) => added.push(t), update() {} });
         },
       },
     };

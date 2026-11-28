@@ -9,15 +9,33 @@
 import { Plugin } from "@opencode/plugin";
 import { installBriefing } from "./lib/briefing.ts";
 import { createDefaultLead } from "./lib/lead.ts";
+import { createDefaultWebGuard, refuseWebTool, WEB_TOOLS } from "./lib/webGuard.ts";
 import { resolveToolContext, type ExecuteContextLike } from "./lib/context.ts";
 import { allTools } from "./tools/index.ts";
 
 export default Plugin.define({
   id: "manta",
   async setup(ctx) {
+    // The built-in `websearch` / `webfetch` are checked for private material BEFORE they run (research layer spec §6.3a):
+    // a throw in this blocking hook fails the call and nothing is sent. Registered FIRST and outside the fail-open
+    // block below. If it can't be registered (no hook on this instance, or the registration throws) the guard is
+    // missing, and the two tools are then REPLACED, in the tool transform below, by ones that refuse every call:
+    // an unguarded web tool is never left standing. Once registered the hook itself fails closed.
+    let webGuardRegistered = false;
+    try {
+      if (typeof ctx?.tool?.hook === "function") {
+        const guard = createDefaultWebGuard();
+        await ctx.tool.hook("execute.before", (event: any) => guard.beforeExecute(event));
+        webGuardRegistered = true;
+      }
+    } catch {
+      webGuardRegistered = false;
+    }
+
     // Transforms replay on every registry rebuild, so the callback only does
     // synchronous registration over data captured here.
     await ctx.tool.transform((editor: any) => {
+      if (!webGuardRegistered) for (const name of WEB_TOOLS) editor.update(name, refuseWebTool);
       for (const def of allTools) {
         editor.add({
           name: def.name,

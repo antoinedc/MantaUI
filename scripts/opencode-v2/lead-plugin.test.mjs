@@ -223,7 +223,7 @@ describe("plugin entry: one composed context hook", () => {
     return {
       hooks,
       location: { directory: "/work/proj" },
-      tool: { transform: async (cb) => cb({ add() {} }) },
+      tool: { transform: async (cb) => cb({ add() {}, update() {} }) },
       session: { hook: async (kind, fn, opts) => void (hooks[kind] = { fn, opts }) },
       event: { subscribe: () => (async function* () { for (const e of events) yield e; })() },
     };
@@ -752,6 +752,46 @@ describe("research tools (Phase 5A)", () => {
     assert.match(fetchTool.description, /PDF/);
     server({ ok: false, error: "Exa's search limit was reached; use the built-in websearch with site: instead" });
     assert.match(await searchTool.execute({ source: "reddit", query: "q" }, CTX), /^Not searched: Exa's search limit/);
+  });
+});
+
+describe("research tools (research layer): every agent, the user's sources, packages and Stack Overflow", () => {
+  const searchTool = allTools.find((t) => t.name === "research_search");
+  const fetchTool = allTools.find((t) => t.name === "research_fetch");
+  const readTool = allTools.find((t) => t.name === "research_read");
+  const findTool = allTools.find((t) => t.name === "research_library_find");
+  const saveTool = allTools.find((t) => t.name === "research_library_save");
+  const CTX = { sessionID: "ses_chat", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
+
+  test("research_search's description names the new built-ins and says any source in your instructions is yours; the Architect-only wording is gone", () => {
+    assert.match(searchTool.description, /packages/);
+    assert.match(searchTool.description, /stackoverflow/);
+    assert.match(searchTool.description, /a source listed in your instructions by its id/);
+    assert.doesNotMatch(searchTool.description, /only the Architect has extra sources/i);
+    assert.match(searchTool.description, /skills \(.*the Architect only\)/, "skills stays the Architect's");
+    assert.match(searchTool.description, /outside source/i, "a reminder to keep private material out of outside queries");
+    assert.match(searchTool.input.properties.source.description, /packages/);
+    assert.doesNotMatch(searchTool.input.properties.source.description, /your brief/);
+  });
+
+  test("the research and library tools are for Manta and its agents, in tasks and chats alike", () => {
+    for (const t of [fetchTool, readTool, findTool, saveTool]) assert.doesNotMatch(t.description, /only inside a task Manta handed you/, t.name);
+    for (const t of [fetchTool, findTool, saveTool]) assert.match(t.description, /Manta and its agents/, t.name);
+  });
+
+  test("packages results show the version, publish date, licence, advisories, deprecation and the newest versions", async () => {
+    serveJson(200, { ok: true, source: "packages", results: [{ title: "npm:react", url: "https://deps.dev/npm/react", version: "19.1.0", date: "2025-03-28", license: "MIT", deprecated: false, advisories: 1, recent: [{ version: "19.2.0-rc.1", date: "2025-09-01" }, { version: "19.1.0", date: "2025-03-28" }] }, { title: "npm:graphile-worker", url: "https://www.npmjs.com/package/graphile-worker", version: "0.18.0", date: "2026-09-08", license: "MIT", weeklyDownloads: 1374531, description: "Job queue for PostgreSQL" }, { title: "npm:old", url: "https://deps.dev/npm/old", version: "1.0.0", date: "2019-01-01", license: null, deprecated: true, deprecatedReason: "use new", advisories: 0 }] });
+    const out = await searchTool.execute({ source: "packages", query: "npm:react" }, CTX);
+    assert.match(out, /1\. npm:react \| https:\/\/deps\.dev\/npm\/react \| version 19\.1\.0, published 2025-03-28 \| MIT \| 1 advisory \| not deprecated\n {3}recent: 19\.2\.0-rc\.1 \(2025-09-01\), 19\.1\.0 \(2025-03-28\)/);
+    assert.match(out, /2\. npm:graphile-worker \| https:\/\/www\.npmjs\.com\/package\/graphile-worker \| version 0\.18\.0, published 2026-09-08 \| MIT \| 1374531 weekly downloads\n {3}Job queue for PostgreSQL/);
+    assert.match(out, /3\. npm:old \| https:\/\/deps\.dev\/npm\/old \| version 1\.0\.0, published 2019-01-01 \| no licence listed \| 0 advisories \| DEPRECATED \(use new\)/);
+  });
+
+  test("Stack Overflow results show the score, answers, whether one is accepted, the date and the tags", async () => {
+    serveJson(200, { ok: true, source: "stackoverflow", results: [{ title: 'How do I use "pg-boss"?', url: "https://stackoverflow.com/questions/1/x", score: 12, answers: 3, accepted: true, date: "2023-05-16", tags: ["postgresql", "queue"] }, { title: "Plain", url: "https://stackoverflow.com/questions/2/y", score: 0, answers: 0, accepted: false, date: "2019-04-25", tags: [] }] });
+    const out = await searchTool.execute({ source: "stackoverflow", query: "pg queue" }, CTX);
+    assert.match(out, /1\. How do I use "pg-boss"\? \| https:\/\/stackoverflow\.com\/questions\/1\/x \| score 12 \| 3 answers, accepted answer \| 2023-05-16 \| postgresql, queue/);
+    assert.match(out, /2\. Plain \| https:\/\/stackoverflow\.com\/questions\/2\/y \| score 0 \| 0 answers \| 2019-04-25$/m);
   });
 });
 

@@ -9,15 +9,17 @@ description: How to research a domain for an agent: sources, tools, claims, the 
 - `websearch` — discovery only. Snippets are never evidence.
 - `research_search({source, query})` — `hn` (Hacker News stories and comments), `arxiv` (papers), `github`
   (repositories that look like agent skills: stars, last push, licence, description), `skills` (existing skills in the
-  skills registry, as `owner/repo@skill` with install counts and an address on skills.sh), `reddit`, `x`, and any extra
-  source listed in your brief by its id. Queries ≤ 200 characters, never starting with `-`.
+  skills registry, as `owner/repo@skill` with install counts and an address on skills.sh), `packages` (versions,
+  licences, advisories), `stackoverflow`, `reddit`, `x`, and any other source in the list under "Your research sources"
+  in your instructions (the user's own are there too: Settings → Research sources), by its id. Queries ≤ 200
+  characters, never starting with `-`.
 - `skills_installed()` — the skills already on this box (the box's own skill folders and every team agent's): name,
   description, folder and, for a copy, where it came from.
 - `research_fetch({url})` — reads a public page, a PDF (as text, up to 10 MiB) or a GitHub file; the server stores the
   text and gives you a `sourceId`. A `github.com/<owner>/<repo>/blob/<ref>/<path>` address is read as the raw file. A
   scanned PDF with no text layer is refused: look for an HTML or text version. Reddit and X posts must be post URLs
   (`/r/<sub>/comments/<id>…`, `/<user>/status/<id>`).
-- `research_read({sourceId, offset})` — reads further into a long source, including an extra source's result.
+- `research_read({sourceId, offset})` — reads further into a long source, including a user source's result.
 
 Searches for Reddit and X go through Exa's search service, and their pages are read through the Jina reader. Don't put
 anything private in those queries.
@@ -67,7 +69,7 @@ rules. If you can't reach that, say so in the summary.
    the paper is a PDF, fetch the PDF itself rather than a page that quotes it.
 2. Practitioners: Hacker News threads, Reddit, X. Prefer these for "what goes wrong in practice". A comment with
    numbers or a concrete failure beats an opinion. Note the date: advice older than a year in a fast field is suspect.
-3. Extra sources from your brief, as their descriptions say.
+3. The user's own sources from your source list, as their descriptions say.
 
 ## Two topics
 
@@ -114,7 +116,7 @@ When you see these, require an independent, older or primary confirmation.
 
 ## Private sources
 
-Some extra sources are private (your brief says which). Their content may inform your judgement, but:
+Some sources are private (your source list says which). Their content may inform your judgement, but:
 - never quote or attribute them in an agent's text — paraphrase the lesson;
 - never put their content in a public search query or in a Reddit/X/web search;
 - never scrape people or companies from them.
