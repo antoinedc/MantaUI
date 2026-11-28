@@ -1,7 +1,8 @@
 # An agent starts work in a project from its own conversation — spec
 
 Status: draft for @product-designer (UI) and @dev (build), checked by @reviewer. Revised after @reviewer round 1 (canonical project folder,
-awaited knowledge pin, launch/Clear fence, seat claims, project paging, model precedence, Fleet row states).
+awaited knowledge pin, launch/Clear fence, project paging, model precedence, Fleet row states) and round 2 (seats written only after a
+confirmed launch, no rollback; a failed pin removes the record).
 Follow-up it implements: item 1 of "From the agent profile redesign (profile v5)" in `docs/agents/follow-ups.md`.
 Builds on: `docs/superpowers/specs/2026-11-28-agent-profile-redesign.md` (the agent conversation, §6) and the v5 mockup
 `docs/screens/agents/profile-v5.html` + `profile-v5-decisions.md` §3 ("A global chat: no project chip").
@@ -138,9 +139,10 @@ Then:
   conversation's. Specifically:
   - AC-5.3a a pin that resolves slowly (test: delayed by 2 s) delays the prompt; no prompt is sent before it resolves;
   - AC-5.3b a pin that fails (throws, returns null while knowledge is on, or returns another project's slug) ends the launch before the
-    prompt is sent: the task is marked failed with `"Couldn't attach Ronda's notes to the task; nothing was sent to it"`, its new child
-    session, window and worktree are removed (the delegate's definite-refusal undo), a seat this launch created is rolled back (§6.7), and the
-    tool returns `{ok:false}` with that sentence;
+    prompt is sent. It is a definite launch refusal, handled by the delegate's existing undo: the job RECORD is removed together with its
+    child session, window and worktree (no `failed` record is kept). So: no task card and no result card appear (the conversation shows the
+    tool's `Not started: Couldn't attach Ronda's notes to the task; nothing was sent to it`), the task never counts for Clear, Fleet or Needs
+    you, and no seat is written (seats are written only after a confirmed launch, §6.7). The tool returns `{ok:false}` with that sentence;
   - AC-5.3c with the knowledge layer turned off, no pin is needed (there are no notes to serve) and the launch goes on;
 - AC-5.4 the conversation's own session keeps its pin (the agent home's project, "Box"): starting tasks never re-pins it, and no project's
   briefing is ever added to it;
@@ -153,19 +155,23 @@ Then:
 Given @dev has no seat in Ronda,
 When @dev starts a task in Ronda,
 Then:
-- AC-6.1 a seat file `seats/<ronda-id>.md` is created with an empty brief and `added_by: chat` (new `addedBy` value) through the strict seat
-  step of §6.7;
-- AC-6.2 the job carries `seatAdded: {project, projectName}` and the card shows "Added @dev to Ronda" (existing line);
-- AC-6.3 the tool's text says the seat was added;
-- AC-6.4 if the launch is then refused (autonomy, declined approval, start failure, failed pin), the seat file is removed again — but only
-  when this launch created it AND no other launch or task holds it (§6.7);
-- AC-6.5 `agent_projects` lists Ronda with `seated:false` before and `seated:true` after;
-- AC-6.6 a seat that can't be written (a link in the seats folder, a write error) refuses the launch with
-  `"Couldn't add <Agent> to <Project>: <reason>; nothing was started"`; nothing else is created (unlike today's `ensureSeat`, which logs and
-  starts anyway);
-- AC-6.7 Given @dev has no seat in Ronda, When two `agent_start_task` calls for Ronda run at the same time and the user approves one and
-  declines the other (in either order), Then the seat exists afterwards, the approved task runs with it, exactly one of the two launches
-  is the seat's creator, and the declined launch removes nothing. When both are declined, the seat is gone.
+- AC-6.1 once the launch is CONFIRMED (the task's opening prompt was accepted: `launchState: "running"`), a seat file `seats/<ronda-id>.md`
+  is created if still missing, with an empty brief and `added_by: chat` (new `addedBy` value) (§6.7). Before confirmation no seat file is
+  written; the opening prompt simply has no seat brief (a new seat's brief is empty anyway);
+- AC-6.2 the job that created the seat carries `seatAdded: {project, projectName}` (written onto its record when the seat is created) and the
+  card shows "Added @dev to Ronda" (existing line);
+- AC-6.3 the tool's text says the seat was added (in the normal case the seat is written before `startJob` returns);
+- AC-6.4 a launch that is refused at any point (autonomy, declined approval, timeout, cap, ownership recheck, failed pin, start failure)
+  never writes a seat, so there is nothing to roll back;
+- AC-6.5 `agent_projects` lists Ronda with `seated:false` before and `seated:true` after a confirmed launch;
+- AC-6.6 a seats folder that can't be written safely (it or the seat file is a link / not a directory) refuses the launch BEFORE anything is
+  created, with `"Couldn't add <Agent> to <Project>: <reason>; nothing was started"` (a read-only pre-check). A write that then fails after a
+  confirmed launch doesn't stop the running task: the record keeps `seatOwed`, the failure is logged, and the next reconcile retries (§6.7);
+- AC-6.7 Given @dev has no seat in Ronda and two `agent_start_task` calls for Ronda at the same time:
+  - one approved, one declined (either order) → exactly one seat file; the approved task's record has `seatAdded`; the declined one created
+    nothing;
+  - both declined (either order) → no seat file;
+  - both approved → exactly one seat file; exactly one record has `seatAdded`, the other has neither `seatAdded` nor `seatOwed`.
 
 ### US-7 (P1) — The tools work only in the agent's own conversation
 - AC-7.1 Given any other session (a project chat, Manta's chat, the CTO conversation, a routine run), When either tool is called, Then it
@@ -182,19 +188,23 @@ Then:
   presses Clear, Then Clear is refused with the AC-10.3 sentence (the in-flight launch counts as a running task) and the launch completes
   normally on approval.
 - AC-7.7 Clear vs launch, Clear first: Given Clear has retired the conversation's session, When a start from the old session reaches its
-  durable start (e.g. it was bound before Clear and approved after), Then the ownership recheck refuses it with `OWN_CHAT_ONLY`, nothing is
-  created and a seat it made is rolled back. (With the fence of §6.5 a start can only be bound before a Clear if Clear then waits or refuses;
+  durable start (e.g. it was bound before Clear and approved after), Then the ownership recheck refuses it with `OWN_CHAT_ONLY` and nothing
+  is created (no seat either). (With the fence of §6.5 a start can only be bound before a Clear if Clear then waits or refuses;
   this test pins the recheck as a second guard by forcing the order with the fence stubbed.)
-- AC-7.8 Restart during launch: Given a start is in flight, When manta-server restarts before the job record is written, Then no job, worktree,
-  branch or record exists afterwards, the approval card is gone, a seat the launch created is removed by the boot cleanup of §6.7, and Clear
-  is allowed. When it restarts after the record was written, the job is handled by the delegate's existing restart path and counts for
-  Clear while running/paused.
+- AC-7.8 Restart during launch:
+  - before the job record is written → afterwards no job, worktree, branch, record or seat exists, the approval card is gone, Clear is
+    allowed;
+  - after the record is written but before the pin and the opening prompt → the delegate's existing restart reconcile settles the launch.
+    If it then fails (test: the pin fails), the record, child, window and worktree are removed (AC-5.3b) and no seat exists; if it
+    completes, the launch is confirmed and the seat is written by the reconcile of §6.7 (`seatOwed`);
+  - after the opening prompt was accepted but before the seat was written → the reconcile writes it on boot (or on the next sweep);
+  - a record counts for Clear while running/paused, whatever its launch state.
 
 ### US-8 (P2) — The user's autonomy settings and approval apply
 - AC-8.1 "Hand off: Never" refuses with the existing `HANDOFF_OFF` sentence; "Code changes: Never" refuses a code-editing task with
   `CODE_OFF`; unreadable settings refuse with `SETTINGS_UNREADABLE`. Nothing is created.
 - AC-8.2 A code-editing task with the box trust setting off waits for the existing approval card (`startJobWithApproval`, same grants as a
-  handoff); declining returns `"The user declined the task"` and undoes the seat.
+  handoff); declining returns `"The user declined the task"` and leaves no seat (none was written).
 - AC-8.3 "Hand off: Ask" → the conversation guidance tells @dev to confirm with the user in the conversation before starting (as the lead
   brief does for Manta); the server does not enforce it (it has no proof of a "yes"), same as today.
 
@@ -221,7 +231,7 @@ Then:
 - AC-E1 No registered project with a folder: `agent_projects` says so ("No projects with a folder on this box yet…") and the guidance makes
   @dev tell the user to open the project in Manta once.
 - AC-E2 Empty / whitespace title or brief: `"Write a brief and a title"`. Title is cut to 80 characters (as a handoff's).
-- AC-E3 The box-wide running cap is full: the delegate's own refusal is relayed (`handoffError` wording); seat undone.
+- AC-E3 The box-wide running cap is full: the delegate's own refusal is relayed (`handoffError` wording); no seat written.
 - AC-E4 An agent whose `agent.md` is invalid, or that was deleted after the conversation opened: the not-own-conversation refusal.
 - AC-E5 A read-only agent (isolation "none") or a non-git project folder: the task runs read-only in the folder, `branch` is null, the card
   shows "read-only" instead of a branch.
@@ -245,8 +255,8 @@ Then:
 - **FR-004** The task's parent is the conversation; its result is delivered there exactly once.
 - **FR-005** Only the chosen project's seat brief and learned rules (plus `_all`) go into the task prompt; no conversation excerpt; the task
   session is pinned to the chosen project; the conversation's pin is never changed.
-- **FR-006** Starting a task in a project without a seat creates one (`added_by: chat`); a seat that can't be written refuses the launch; a
-  refused launch removes the seat only if it created it and nothing else holds it.
+- **FR-006** A task started in a project without a seat creates one (`added_by: chat`) once its launch is confirmed, never before; a
+  seats folder that can't be written safely refuses the launch up front; a refused launch writes no seat, so nothing is ever rolled back.
 - **FR-007** An unknown project id or a project without a usable folder is refused with a sentence and creates nothing.
 - **FR-008** The job record stores `project: {slug, name}` and `startedFrom: "agent-chat"`; continuations inherit both.
 - **FR-009** The conversation gets guidance (served by `GET /api/agents/lead-brief` for that session) covering: work out the project, call
@@ -261,7 +271,7 @@ Then:
 
 Existing parts touched: `src/server/agents.mjs` (engine), `src/server/index.mjs` (two REST routes + `registry.get` / read-only
 `registry.lookup` wiring), `src/server/knowledge/identity.mjs` + `engine.mjs` (the read-only lookup; "disabled" distinguishable from a failed
-pin), `src/server/delegate.mjs` (record fields, `buildCompletionText` line, the awaited pin in `submitCommand`), `src/server/agentsFleetTasks.mjs` (row rule),
+pin), `src/server/delegate.mjs` (record fields incl. `seatOwed`, `buildCompletionText` line, the awaited pin in `submitCommand`, a narrow `settleSeat(jobId)` record update), `src/server/agentsFleetTasks.mjs` (row rule),
 `docs/opencode-plugins-v2/manta/tools/agents.ts` (two tools), `src/shared/types.ts`, renderer `BackgroundCards.tsx`,
 `agents/NeedsYou.tsx` (+ `fleetView.ts`), `ChatPanel`'s clear path. No new store; no new rpc channel for the renderer except the Needs you
 payload addition.
@@ -361,17 +371,21 @@ launch fence (§6.5):
 4. **model** (AC-1.7): the calling assistant message's `providerID/modelID` when present, else `agent.meta.model`, else none (the delegate's
    default chain). A model that the delegate's explicit-model check would refuse is refused here first with the AC-1.7 sentence.
 5. isolation = `effectiveIsolation(agent, folder)`; autonomy = `autonomyRefusal({ writer, handoff: true })`.
-6. seat: the strict seat step (§6.7) → `seatForProject`, `learnedBlockForProject` → `buildDispatchPrompt({ text: brief, seat, learned })`
+6. seat (read only, §6.7): the safe-target pre-check, then `seatForProject` (the existing brief, "" when no seat), `learnedBlockForProject`
+   → `buildDispatchPrompt({ text: brief, seat, learned })`
    (no `excerpt`) → `withResearchGuidance`.
 7. `delegate.startJob` / `startJobWithApproval` exactly like a new handoff (same grants, trust read from `configGet`), with
    `parentSessionID: sessionID`, `parentDirectory: folder` (realpath), `agent: agentKey(slug)`, `agentDir`, `isolation`, the model of step 4,
-   `name`, `title`, `agentName`, `request: title`, `allowPr: false`, `seatStamp`, `specialistAutonomy({ writer, handoff: true })`, the new
+   `name`, `title`, `agentName`, `request: title`, `allowPr: false`, `seatOwed: { project, projectName }` when the agent has no seat there (no
+   `seatAdded` at start), `specialistAutonomy({ writer, handoff: true })`, the new
    `project: { slug, name }`, `startedFrom: "agent-chat"`, and `knowledgeProject: id` (§6.6). No `requestedBy` (that marks the lead). No
    `targetProject`: the window goes where the parent's window is (the hidden `manta-agents` workspace), as today.
 8. **Ownership recheck at the durable start**: the call passes the delegate's existing generic `admit` hook, which runs inside `jobsLock`
    AFTER any approval wait and BEFORE anything is allocated. It re-reads `.chat.json` and refuses with `OWN_CHAT_ONLY` unless the stored
    session is still `sessionID` and the agent is still valid. (A refusal from `admit` leaves no record, worktree, branch or session id.)
-9. On any refusal after step 6: the seat rollback of §6.7. On success: `countLaunchForProject(slug, id)`.
+9. On a refusal: nothing to undo here (the delegate's own refusal paths leave no record; no seat was written). On success with
+   `launchState: "running"`: `settleSeat(job)` (§6.7), then `countLaunchForProject(slug, id)`. On success with an uncertain launch:
+   `countLaunchForProject` only; the seat waits for the reconcile.
 
 ### 6.3 Conversation guidance — the existing lead-brief endpoint
 
@@ -393,8 +407,8 @@ pin. The agent picks projects from names, folders and brief first lines (`agent_
 The race today: `clearChat` holds `chatLock`; a start doesn't, and can wait minutes on the approval card. Clear could count zero tasks,
 retire the session, and the start would then create a task whose parent is a retired conversation.
 
-- **One in-memory launch registry in the agents engine:** `launches: Map<conversationSessionId, Set<launchToken>>`, plus a per-(agent,
-  project) holder set used by §6.7.
+- **One in-memory launch registry in the agents engine:** `launches: Map<conversationSessionId, Set<launchToken>>`. It is used by the
+  fence only; seats need no registry (§6.7).
 - **Start:** after binding, take `chatLock` briefly: re-run `ownChat(sessionID)` (fresh `.chat.json` read) and, if it still matches, add a
   launch token; release `chatLock`. Everything else (approval wait included) runs outside `chatLock`. The token is removed in a `finally`
   once `startJob` has returned — by then the outcome is either a durable job record (which Clear counts) or nothing.
@@ -404,8 +418,8 @@ retire the session, and the start would then create a task whose parent is a ret
 - **Second guard:** the `admit` ownership recheck of §6.2 step 8. It covers any path where Clear won anyway (a bug in the fence, a hand edit
   of `.chat.json`), and is the only guard tests can exercise for the Clear-first order (AC-7.7).
 - **Restart during launch (AC-7.8):** the registry is memory, so it empties on restart; so does the pending approval (the delegate's approval
-  state is in memory) and nothing durable exists before the record. A record already written is a normal job and counts for Clear. A seat
-  made by a launch that never reached its record is handled by §6.7's boot cleanup.
+  state is in memory) and nothing durable exists before the record. A record already written is a normal job and counts for Clear; its
+  launch is settled by the delegate's existing restart reconcile, and its seat (if owed) by §6.7's reconcile.
 
 ### 6.6 The knowledge pin is in place before the task's first prompt (FR-003b)
 
@@ -419,26 +433,39 @@ Change, in the delegate (applies to all delegate jobs; the stricter failure rule
 - For a job with `knowledgeProject` set (this feature), the result must be `null` only when the knowledge layer is off (the engine's
   `pinSession` returns null when disabled — expose that as `{ disabled: true }` or a separate `enabled()` check so "off" and "failed" are not
   the same null), else a mapping whose `slug === knowledgeProject`. Anything else (throw, timeout of 10 s, null while on, another slug) is a
-  definite launch refusal before the prompt is sent: the job ends `failed` with the AC-5.3b sentence, the existing undo removes child,
-  window and worktree, no result message is posted for a task that never started (the tool reports the failure), and §6.7 rolls the seat back.
+  definite launch refusal before the prompt is sent, with the AC-5.3b sentence as the error. It goes through the existing definite-refusal
+  undo, which REMOVES the job record with the child, window and worktree — there is no `failed` record (one outcome everywhere: no task card,
+  no result message, no Clear / Fleet / Needs you count, no seat; the tool reports the sentence). A restart between the record and the pin
+  is settled by the delegate's existing reconcile, which runs the same awaited pin and reaches the same outcome.
 - For other jobs (no `knowledgeProject`), the pin is awaited (so a slow pin can no longer lose the race) but a failure keeps today's
   behaviour (logged, launch goes on). Tightening those is a follow-up.
 
-### 6.7 Seats under concurrent starts (FR-006)
+### 6.7 Seats: written only after a confirmed launch (FR-006)
 
-- **Strict seat step** (new `claimSeat(agent, projectId, addedBy, launchToken)`), under `syncLock`: read `seats/<id>.md`; if it exists, record
-  the launch as a holder and return `{created:false}`; else write it (`added_by: chat`), record `{created:true, creator: launchToken}` and the
-  holder. Any write problem (link, error) throws → the launch is refused with the AC-6.6 sentence. It never returns null-and-continue
-  (`ensureSeat`'s tolerant behaviour stays for @mentions and handoffs).
-- **Holders:** the per-(agent, project) set of in-flight launch tokens (§6.5 registry). A launch leaves the set when its `startJob` returns.
-- **Rollback** (`releaseSeat(token)`), under `syncLock`, only when ALL hold: this launch created the seat; no other launch token is in the
-  holder set; no job record of this agent for this project exists in any status (`agent === agentKey(slug)` and `project.slug === id`, or a
-  `parentDirectory` that `registry.lookup` maps to `id`); and the file still has an empty brief with `added_by: chat` (the user didn't edit
-  it meanwhile). Otherwise the seat stays. So in AC-6.7 a declined launch never removes a seat the other launch is using, whichever came
-  first, and when both are declined the last one out removes it.
-- **Boot cleanup:** seats this feature creates are listed in a small `~/.manta/agents/.chat-seats.json`
-  (`[{slug, project, createdAt}]`, written under `syncLock` with the seat, entry removed once a job record for it exists or it is rolled back).
-  On boot, an entry with no job record for (agent, project) and an unedited seat file is rolled back; others are dropped from the list.
+**Design chosen: no rollback.** The seat file is created only once the launch is confirmed, so a refused launch never has one to remove.
+Nothing needs the seat earlier: the opening prompt only reads an EXISTING seat's brief (a seat this launch would create has an empty brief),
+and the seat's other readers (Seats tab, `agent_projects`, Fleet counts) are fine seeing it a moment later. This removes the creator /
+holder / ledger rules of round 1 and every case that came with them (two declined launches, restart cleanup). Serializing launches per
+agent+project was the other option; it would hold one start behind another's approval wait for minutes, and still need rollback for a
+refusal after the seat was written.
+
+- **Before the launch (read only):** `seatTargetSafe(agent, id)` — the existing `seatWriteTarget` checks without creating anything (the
+  agent folder is real, `seats/` is a real directory or absent, `seats/<id>.md` is a regular file or absent). Unsafe → refuse with the AC-6.6
+  sentence before any record exists. `seatForProject(agent, id)` reads the brief if the file exists.
+- **At start:** the job input carries `seatOwed: { project: id, projectName }` when no seat file existed at step 6. The delegate stores it on
+  the record like `seatAdded` (well-formed only) and never inherits it to a continuation.
+- **Confirmation = the record's `launchState` is `"running"`** (the opening prompt was accepted). An `uncertain` launch is not confirmed
+  yet; a removed record (any definite refusal, AC-5.3b) never will be.
+- **`settleSeat(job)`**, under `syncLock`, idempotent: if `job.seatOwed` and the job's record still exists with `launchState: "running"`:
+  create `seats/<id>.md` only if missing (`added_by: chat`, empty brief); then, through a new narrow delegate call
+  `delegate.settleSeat(jobId, { created })`, clear `seatOwed` on the record and set `seatAdded` only when THIS call created the file. A
+  write failure leaves `seatOwed` in place (logged) for the next run. If the file already exists (another launch or the user made it),
+  `seatOwed` is cleared with no `seatAdded`.
+- **Who calls it:** the chat-start path right after `startJob` returns a running launch (the normal case, so the tool can report the seat),
+  and a reconcile that runs at boot and on the agents engine's existing 60 s sweep / `delegate.updated` hint for every record with `seatOwed`.
+  That reconcile is the restart story: the claim lives on the job record itself until the launch is confirmed, so recovery tells a running
+  launch (seat written) from a refused one (record gone, nothing to do) from a still-uncertain one (wait).
+- `ensureSeat`'s tolerant, write-first behaviour stays as it is for @mentions and handoffs (out of scope).
 
 ### 6.8 Records, wire and other surfaces
 
@@ -453,7 +480,8 @@ Change, in the delegate (applies to all delegate jobs; the stricter failure rule
   Source: `oc.listQuestions(sessionId)` for each agent conversation in `chats()`; a read failure for one conversation skips it (logged).
   `question` = the form's first question text, `askedAt` = the form's time (else the read time).
 - `clearChat` (FR-012): the fence of §6.5.
-- `DelegateJob` also stores `knowledgeProject?: string` (server-side; not needed on the wire).
+- `DelegateJob` also stores `knowledgeProject?: string` (server-side) and `seatOwed?: { project: string; projectName: string }` (§6.7; on the
+  wire so the card can say "Adding @dev to Ronda…" if it ever shows before the seat is written — optional for the designer).
 - Fleet (`shapeFleetTasks`, AC-10.1a–d): a job with `startedFrom === "agent-chat"` (or a session node whose job has it) is excluded from
   every tree entry's `below`/`subs`, including the agent conversation's; it is shaped as its own `task` row — in Running when running/paused,
   in Ended today when ended today — with `project`/`projectName` from `job.project` (fallback `projectOf(job)`). Its job id is added to the
@@ -490,7 +518,7 @@ Numbers fetched 2026-11-28 from the npm registry, npm downloads API (week 2026-1
 | Locks and the launch fence | the engine's existing `syncLock` / `chatLock` + the delegate's existing `admit` hook (runs in `jobsLock`); the fence itself is a `Map` of in-flight tokens | `async-mutex` 0.5.0 (2024-03-11, MIT, 1 dep, 17.0M/wk, 1.4k★, already a dependency): it gives mutexes/semaphores, which the engine already has; the fence needs "is anything in flight for this conversation", a counter, not a lock held across the approval wait (holding a lock for minutes would block every agent's Clear and open). |
 | Canonical folder check | Node's `fs.realpath` + the knowledge layer's own identity resolver (read-only lookup) | none: the project identity is the registry's own definition (remote / root commit / path); a library would be a second, disagreeing definition. |
 | Task / result cards, Needs you item | existing `RunCard`, `BackgroundResultCard`, `NeedsYou` items | none: a project chip and one item kind on existing components. |
-| Rows we write ourselves | `buildAgentChatBrief` (text), `ownChat` (file read), the project-folder pick (≈20 lines), the launch registry and `claimSeat` / `releaseSeat` (≈60 lines), the paging (slice) | each is project-specific glue over existing stores; nothing maintained does it. |
+| Rows we write ourselves | `buildAgentChatBrief` (text), `ownChat` (file read), the project-folder pick (≈20 lines), the launch registry (≈20 lines), `seatTargetSafe` / `settleSeat` and its reconcile (≈40 lines), the paging (slice) | each is project-specific glue over existing stores; nothing maintained does it. |
 
 ## 9. Design (for @product-designer)
 
@@ -526,8 +554,8 @@ library is needed for any of it. Guide ids: `card`, `accessibility`, `forms`.
   the race with a start waiting on approval.
 - **Awaiting the pin changes every delegate job** (§6.6): a pin that hangs now delays a launch (bounded by its 10 s timeout) instead of racing
   it. Only jobs with `knowledgeProject` fail on a bad pin; the rest keep logging, so nothing that works today starts failing.
-- **Concurrent starts on one seat** are subtle; §6.7 keeps the rule simple (only the creator removes, only when nothing else holds it, only
-  an unedited seat) and AC-6.7 tests both orders.
+- **Concurrent starts on one seat**: with seats written only after confirmation and only "if missing" under `syncLock`, two launches can
+  at most both try to create it; one does, the other sees it. AC-6.7 tests every order.
 
 ## 11. Open questions (recommendation applied; the build proceeds on it unless the user says otherwise)
 
@@ -550,8 +578,8 @@ library is needed for any of it. Guide ids: `card`, `accessibility`, `forms`.
 - A4. `agent_projects` lists every registered project with a folder, not only seats, so "naming a project it has no seat in adds a seat"
   works.
 - A5. A project with several folders runs in the newest one that passes the canonical check (§6.2 "Project folder"), as its realpath.
-- A8. A seat created by a refused launch is removed only when nothing else uses it and the user hasn't edited it (§6.7); otherwise it stays,
-  which at worst leaves an empty seat the user can remove in Seats.
+- A8. A new seat appears only once the task is confirmed running (§6.7), not when the agent asks to start it; a task whose seat write fails
+  keeps running and the seat is retried.
 - A6. The window of a conversation task goes to the `manta-agents` workspace (today's default for the parent).
 - A7. US-1's "names the project" and US-3's "asks" are model behaviour driven by the guidance; tests pin the server side and the guidance
   text, not the model's wording.
@@ -563,7 +591,7 @@ out the project, asks with the normal question card when it can't tell, and the 
 with only that project's brief, learned rules and notes. Results come back into the conversation.
 
 **Spec:** `docs/superpowers/specs/2026-11-28-agent-chat-tasks.md` (this file). Read first: `src/server/agents.mjs` (`handoff`,
-`verifyInvocation`, `classify`, `leadBrief`, `ensureSeat`/`undoSeat`, `seatFor`, `learnedBlockFor`, `chats`/`clearChat`, `needsYou`),
+`verifyInvocation`, `classify`, `leadBrief`, `ensureSeat`/`seatWriteTarget`, `seatFor`, `learnedBlockFor`, `chats`/`clearChat`, `needsYou`),
 `src/server/delegate.mjs` (`startJobV2`, `continueJob`, `buildCompletionText`), `docs/opencode-plugins-v2/manta/tools/agents.ts`,
 `src/server/agentsFleetTasks.mjs`, `src/renderer/BackgroundCards.tsx`, `src/renderer/agents/NeedsYou.tsx`, the repo `AGENTS.md`.
 
@@ -571,10 +599,10 @@ with only that project's brief, learned rules and notes. Results come back into 
 - The tool names, inputs, outputs, routes, payloads and refusal sentences of §6.1–§6.2 exactly (the plugin and server are built against them).
 - Binding order: live call → own conversation (fresh `.chat.json` read) → caller agent key. No path starts a task before all three pass.
 - No excerpt in the task prompt; no change to the conversation's knowledge pin; `agent_projects` never returns more than a brief's first line.
-- Every refusal leaves nothing behind (no record, worktree, branch, count; a seat only per §6.7's rule).
+- Every refusal leaves nothing behind (no record, worktree, branch, count or seat); a failed pin removes the record (§6.6), never marks it failed.
 - The folder is a verified realpath of the requested project before ANY memory read; memory lookups use the requested id (§6.2).
 - The task's knowledge pin is awaited and verified before its first prompt (§6.6); the awaited pin applies to all delegate jobs.
-- The launch/Clear fence and the `admit` ownership recheck (§6.5); the strict seat step and guarded rollback (§6.7).
+- The launch/Clear fence and the `admit` ownership recheck (§6.5); seats written only after a confirmed launch, with no rollback (§6.7).
 - Reuse: delegate engine (including its `admit` hook), `verifyInvocation`, `buildDispatchPrompt`, `lead.ts` unchanged, `RunCard`/
   `BackgroundResultCard`/`QuestionCard`. No hand-rolled replacement for anything in §8; flag any new component §8 doesn't cover.
 - Never stub a control (AGENTS.md): "Open conversation" in Needs you opens it or shows why not.
@@ -590,13 +618,14 @@ live model output.
 paging with 51 projects (FR-002, AC-5.5, AC-5.6, AC-6.5, AC-E1), start happy path / unknown / no folder / autonomy / approval declined /
 continueJob / cap (AC-1, 4, 8, 9, E2–E6), model precedence with an override that differs from the agent's model and an unapproved one
 (AC-1.7), canonical folder: a registered path that is a symlink to another project and one that is a symlink into `~/.manta`, each with no
-seat/learned/knowledge read and nothing created (AC-4.3a–d, AC-5.1), prompt contents (AC-5.1, 5.2), seats: write failure refuses (AC-6.6),
-two simultaneous starts for one unseated project with one declined in each order and both declined (AC-6.7), boot cleanup of an orphan seat
-(AC-7.8), the fence: Clear during an in-flight start (AC-7.6), the `admit` recheck with Clear forced first (AC-7.7), restart before / after
-the record (AC-7.8), `clearChat` refusal (AC-10.3), `buildCompletionText` project line (AC-2.1), `needsYou.chatQuestions` (AC-3.3),
+seat/learned/knowledge read and nothing created (AC-4.3a–d, AC-5.1), prompt contents (AC-5.1, 5.2), seats: an unsafe seats folder refuses before anything exists and a failed write after confirmation keeps `seatOwed` and is retried
+(AC-6.6), two simultaneous starts for one unseated project — one declined in each order, both declined in each order, both approved
+(AC-6.7) — no seat before confirmation and none after any refusal (AC-6.1, 6.4), the seat reconcile on boot for a confirmed launch with
+`seatOwed` (AC-7.8), the fence: Clear during an in-flight start (AC-7.6), the `admit` recheck with Clear forced first (AC-7.7), restart before the record, after
+the record but before the pin followed by a pin failure (record removed, no seat), and after the prompt but before the seat (AC-7.8), `clearChat` refusal (AC-10.3), `buildCompletionText` project line (AC-2.1), `needsYou.chatQuestions` (AC-3.3),
 `leadBrief` for an agent conversation. `delegateV2Jobs.test.mjs` (or `delegate.test.mjs`): the pin is awaited before `sendChildPrompt`
-(a pin delayed 2 s → no prompt before it resolves), a failed / null-while-on / wrong-slug pin with `knowledgeProject` fails the launch with
-child, window and worktree undone and no prompt sent, the same failure without `knowledgeProject` keeps today's behaviour, knowledge off
+(a pin delayed 2 s → no prompt before it resolves), a failed / null-while-on / wrong-slug pin with `knowledgeProject` refuses the launch with
+the record, child, window and worktree removed and no prompt sent, the same failure without `knowledgeProject` keeps today's behaviour, knowledge off
 → launch goes on (AC-5.3a–c); the record fields and their inheritance. `agentsFleetTasks.test.mjs`: AC-10.1a–d (Running/Ended today ×
 in tree/orphan), each shown once, with its project, and the conversation's row neither duplicated nor listing the task. Plugin: the tools' text for each outcome. Renderer (vitest): `BackgroundCards` project chip / read-only /
 no quoted request (§7), `NeedsYou` chat-question item and its Open action, `ChatPanel` clear refusal shown.
