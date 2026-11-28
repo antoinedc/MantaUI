@@ -2891,6 +2891,8 @@ export function buildHandlers({
     "agents:question-answer": (input) => agentsCall("question-answer", (a) => a.questionAnswer(input)),
     "agents:question-dismiss": (input) => agentsCall("question-dismiss", (a) => a.questionDismiss(input)),
     "agents:needs-you": () => agentsCall("needs-you", (a) => a.needsYou()),
+    // Fleet redesign (2026-11-28): the Fleet page's one read — running / paused-by-you tasks and today's ended ones
+    "agents:tasks": () => agentsCall("tasks", (a) => a.fleetTasks()),
     "agents:review-done": (input) => agentsCall("review-done", (a) => a.reviewDone(input && typeof input === "object" ? input.jobId : input)),
     "agents:fleet": () => agentsCall("fleet", (a) => a.fleet()),
     "agents:fleet-seen": () => agentsCall("fleet-seen", (a) => a.fleetSeen()),
@@ -3070,6 +3072,8 @@ export function buildHandlers({
     },
     // preload: ipcRenderer.invoke(IPC.delegateStop, id) → args[0] = id
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
+    // A task the user paused starts again (same worktree and branch). A full box refuses with the cap sentence; the task stays paused.
+    "delegate:resume": (id) => (delegate ? delegate.resumeJob(id) : { ok: false, error: "no engine" }),
     // P6: where a job's chat window is (re-created, stamped with the child
     // session id, when it was closed) → { ok, tmuxSession, windowIndex } | { ok:false, error }.
     // Opening a specialist task's session also counts as looking at it: the agents engine drops it from Needs you.
