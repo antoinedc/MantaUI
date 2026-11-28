@@ -126,8 +126,8 @@ export function createGuardedTransport({ agentOptions = {} } = {}) {
 const isRedirect = (status) => status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 
 /**
- * Follow redirects by hand over `hop`. `check(url)` runs on EVERY hop's address (including the first) and returns a sentence
- * to refuse it or null; `onRedirect(from, to)` may refuse a redirect (a sentence) before the next request is made. One
+ * Follow redirects by hand over `hop`. `check(url)` (sync or async) runs on EVERY hop's address (including the first), BEFORE that
+ * hop's request, and returns a sentence to refuse it or null; `onRedirect(from, to)` may refuse a redirect (a sentence) before the next request is made. One
  * deadline and one byte budget span every hop; a redirect response's own body counts against it. `pdfByteCap` (default none)
  * is the larger budget for an answer that is a PDF.
  * `{ status, headers, body, finalUrl, redirects }`.
@@ -137,7 +137,7 @@ export async function fetchFollowing(hop, url, { headers = {}, check = () => nul
   let used = 0;
   let current = url;
   for (let redirects = 0; ; redirects++) {
-    const refused = check(current);
+    const refused = await check(current);
     if (refused) throw new ResearchError(refused);
     const res = await hop({ url: current, headers, deadlineAt, bytesLeft: byteCap - used, pdfBytesLeft: pdfByteCap === null ? null : pdfByteCap - used });
     used += res.bytes ?? res.body.length;

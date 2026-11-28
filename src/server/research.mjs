@@ -358,7 +358,14 @@ export function createResearchEngine({
       } else {
         const hn = HN_ITEM_PAGE.exec(url);
         const target = hn ? `https://hn.algolia.com/api/v1/items/${hn[1]}` : (githubRawUrl(url) ?? url);
-        const res = await fetchFollowing(hop, target, { check: addressRefusal, now, pdfByteCap: PDF_BYTE_CAP });
+        // every hop (the first and each redirect) is an outgoing request: the address policy AND the outside-query check run before it
+        const hopCheck = async (u) => {
+          const no = addressRefusal(u);
+          if (no) return no;
+          const verdict = await outsideCheck.check({ sessionID: b.child, tool: "research_fetch", input: { url: u } });
+          return verdict.ok ? null : verdict.error;
+        };
+        const res = await fetchFollowing(hop, target, { check: hopCheck, now, pdfByteCap: PDF_BYTE_CAP });
         const content = await contentOf(res, res.finalUrl);
         rec = await storeSource(b.child, { url, finalUrl: res.finalUrl, title: content.title, text: content.text });
       }

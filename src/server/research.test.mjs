@@ -1290,3 +1290,56 @@ test("AC-1.6: the engine's check refuses websearch when the web source is off (w
     await on.cleanup();
   }
 });
+
+// ---- review round 1, finding 1: a redirect is an outgoing request too ----
+
+test("research_fetch: every redirect URL passes the outside-query check BEFORE the next request — a redirect to an address with a stored secret in its path is refused, the second request never happens", async () => {
+  const seen = [];
+  const s = await serve((req, res) => {
+    seen.push(req.url);
+    if (req.url === "/go") {
+      res.writeHead(302, { location: `http://127.0.0.1:${s.port}/docs/${SECRET}/plans` });
+      res.end();
+    } else {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("reached");
+    }
+  });
+  const f = await fixture({ secrets: [{ key: "K", scope: "shared", value: SECRET }], engineExtra: { hop: testTransport() } });
+  try {
+    const r = await f.engine.fetch(call({ url: `http://127.0.0.1:${s.port}/go` }));
+    assert.deepEqual(r, { ok: false, error: OUTSIDE });
+    assert.deepEqual(seen, ["/go"], "the redirect target was never requested");
+    await assert.rejects(readdir(f.root), /ENOENT/, "nothing stored");
+    // a clean redirect still works, and is checked too
+    const t = await f.engine.fetch(call({ url: `http://127.0.0.1:${s.port}/docs/pricing` }));
+    assert.equal(t.ok, true, t.error);
+  } finally {
+    await f.cleanup();
+    await s.close();
+  }
+});
+
+test("research_fetch: each hop of a redirect chain is checked (private path words, e-mails, internal hosts), and an unavailable check refuses the hop", async () => {
+  for (const target of ["https://example.com/u/jane.doe%40halvorsen.no/", "https://example.com/search/billing.int.kestrel.lan/plans", "https://example.com/p/%2Fhome%2Fdev%2Fkestrel%2Fnotes"]) {
+    const f = await fixture({ routes: { "https://example.com/start": reply(301, { location: target }, ""), "*": reply(200, { "content-type": "text/plain" }, "reached") } });
+    try {
+      assert.deepEqual(await f.engine.fetch(call({ url: "https://example.com/start" })), { ok: false, error: OUTSIDE }, target);
+      assert.deepEqual(f.calls.map((c) => c.url), ["https://example.com/start"], target);
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // the check becomes unavailable between the first hop and the redirect: the redirect is refused, nothing more is sent
+  let n = 0;
+  const f = await fixture({
+    engineExtra: { outside: { check: async () => (++n <= 2 ? { ok: true } : { ok: false, error: "Couldn't check this query for private material; try again" }) } },
+    routes: { "https://example.com/start": reply(302, { location: "https://example.com/next" }, ""), "*": reply(200, { "content-type": "text/plain" }, "reached") },
+  });
+  try {
+    assert.equal((await f.engine.fetch(call({ url: "https://example.com/start" }))).error, "Couldn't check this query for private material; try again");
+    assert.equal(f.calls.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
