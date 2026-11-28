@@ -173,6 +173,8 @@ async function fixture(extra = {}) {
       get: async (slug) => (world.projects.has(slug) ? { ...world.projects.get(slug), paths: [...world.projects.get(slug).paths] } : null),
       lookup: async (d) => (calls.lookup.push(d), world.dirSlug.has(d) ? { slug: world.dirSlug.get(d) } : null),
     },
+    isManagedSession: async () => false,
+    isCtoSessionStrict: async () => false,
     configGet: async () => world.cfg,
     autonomyPolicy: async () => world.policy,
     listApprovedModels: async () => world.approvedModels,
@@ -214,6 +216,11 @@ const nothingCreated = (f) => {
 const seatFile = (f, project = RONDA, agent = "dev") => join(f.root, agent, "seats", `${project}.md`);
 const readOr = async (p) => readFile(p, "utf-8").catch(() => null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Wait until `cond()` (the launch has reached the approval card), up to 3 s. */
+const until = async (cond) => {
+  for (let i = 0; i < 300 && !cond(); i++) await sleep(10);
+  assert.ok(cond(), "the launch never reached the approval card");
+};
 
 // ---------------------------------------------------------------------------
 // US-7: the tools work only in the agent's own conversation
@@ -509,11 +516,11 @@ test("AC-1.7 model: the model of the calling message; else the agent's own; else
     assert.deepEqual([...f.calls.startApproval, ...f.calls.startJob].at(-1).model, { providerID: "openai", modelID: "gpt-6-sol" });
     // no model on the calling message: the agent's own
     await writeFile(join(f.root, "dev", "agent.md"), AGENT("Dev", "worktree", "model: anthropic/claude-sonnet-5-5\n"));
-    assert.equal((await f.engine.chatStart(startCall(f, {}, { providerID: undefined, modelID: undefined }))).ok, true);
-    assert.equal([...f.calls.startApproval, ...f.calls.startJob].at(-1).model, "anthropic/claude-sonnet-5-5");
+    assert.equal((await f.engine.chatStart(startCall(f, {}, { providerID: null, modelID: null }))).ok, true);
+    assert.deepEqual([...f.calls.startApproval, ...f.calls.startJob].at(-1).model, "anthropic/claude-sonnet-5-5");
     // neither
     await writeFile(join(f.root, "dev", "agent.md"), AGENT("Dev"));
-    assert.equal((await f.engine.chatStart(startCall(f, {}, { providerID: undefined, modelID: undefined }))).ok, true);
+    assert.equal((await f.engine.chatStart(startCall(f, {}, { providerID: null, modelID: null }))).ok, true);
     assert.equal("model" in [...f.calls.startApproval, ...f.calls.startJob].at(-1), false);
   } finally {
     await f.cleanup();
@@ -684,7 +691,7 @@ test("AC-6.1/6.4 while the launch waits on the approval card NO seat file exists
     let open;
     f.world.gate = new Promise((r) => (open = r));
     const pending = f.engine.chatStart(startCall(f));
-    await sleep(20);
+    await until(() => f.calls.startApproval.length === 1);
     assert.equal(await readOr(seatFile(f)), null, "nothing is written before the launch is confirmed");
     open();
     assert.equal((await pending).ok, true);
@@ -863,8 +870,8 @@ test("AC-7.6 Clear while a start waits on the approval card: Clear is refused (t
     let open;
     f.world.gate = new Promise((r) => (open = r));
     const pending = f.engine.chatStart(startCall(f));
-    await sleep(20);
-    await assert.rejects(f.engine.clearChat({ slug: "dev" }), new Error(CLEAR_REFUSED(1)));
+    await until(() => f.calls.startApproval.length === 1);
+    await assert.rejects(f.engine.clearChat({ slug: "dev" }), { message: CLEAR_REFUSED(1) });
     assert.equal(f.calls.createSession.length, 0, "nothing changed");
     assert.deepEqual(JSON.parse(await readFile(join(f.root, "dev", ".chat.json"), "utf-8")), { sessionId: SES });
     open();
@@ -883,7 +890,7 @@ test("AC-7.7 Clear first: a start that reaches its durable start after the conve
     let open;
     f.world.gate = new Promise((r) => (open = r));
     const pending = f.engine.chatStart(startCall(f));
-    await sleep(20);
+    await until(() => f.calls.startApproval.length === 1);
     // the fence stubbed: the stored conversation is replaced by hand while the card waits (a bug in the fence, a hand edit)
     await writeFile(join(f.root, "dev", ".chat.json"), JSON.stringify({ sessionId: "ses_replacement" }));
     f.world.sessions.ses_replacement = { id: "ses_replacement", directory: join(f.root, "dev", "home") };
@@ -901,14 +908,14 @@ test("AC-10.3 Clear is refused while a task started from the conversation is run
   try {
     const mk = (id, status, extra = {}) => ({ id, status, launchState: "running", parentSessionID: SES, startedFrom: "agent-chat", agent: "agent-dev", ...extra });
     f.world.records.push(mk("a", "running"));
-    await assert.rejects(f.engine.clearChat({ slug: "dev" }), new Error(CLEAR_REFUSED(1)));
+    await assert.rejects(f.engine.clearChat({ slug: "dev" }), { message: CLEAR_REFUSED(1) });
     f.world.records.push(mk("b", "paused"), mk("c", "done"), mk("d", "failed"), mk("e", "running", { parentSessionID: "ses_other" }), mk("f", "running", { startedFrom: undefined }));
-    await assert.rejects(f.engine.clearChat({ slug: "dev" }), new Error(CLEAR_REFUSED(2)));
+    await assert.rejects(f.engine.clearChat({ slug: "dev" }), { message: CLEAR_REFUSED(2) });
     assert.equal(f.calls.createSession.length, 0);
     f.world.records.splice(0, f.world.records.length, mk("c", "done"));
     assert.equal((await f.engine.clearChat({ slug: "dev" })).sessionId, "ses_new1");
     f.world.recordsFail = true;
-    await assert.rejects(f.engine.clearChat({ slug: "dev" }), new Error("Couldn't check this conversation's tasks; try again"));
+    await assert.rejects(f.engine.clearChat({ slug: "dev" }), { message: "Couldn't check this conversation's tasks; try again" });
   } finally {
     await f.cleanup();
   }
@@ -918,7 +925,7 @@ test("AC-7.8 a record that is running or paused counts for Clear whatever its la
   const f = await fixture();
   try {
     f.world.records.push({ id: "u", status: "running", launchState: "uncertain", parentSessionID: SES, startedFrom: "agent-chat" });
-    await assert.rejects(f.engine.clearChat({ slug: "dev" }), new Error(CLEAR_REFUSED(1)));
+    await assert.rejects(f.engine.clearChat({ slug: "dev" }), { message: CLEAR_REFUSED(1) });
   } finally {
     await f.cleanup();
   }
@@ -930,7 +937,7 @@ test("AC-7.8 a restart before the record was written: no job, no seat, no approv
     f.world.cfg = { chatAutoAllow: false };
     f.world.gate = new Promise(() => {}); // an approval that never comes: the process dies here
     void f.engine.chatStart(startCall(f));
-    await sleep(20);
+    await until(() => f.calls.startApproval.length === 1);
     assert.equal(f.world.records.length, 0);
     assert.equal(await readOr(seatFile(f)), null);
     // a fresh engine over the same folders (the restart): nothing in flight, so Clear is allowed
@@ -1048,11 +1055,17 @@ test("leadBrief for an agent's own conversation is the agent guidance; for any o
     assert.match(r.text, /agent_start_task/);
     assert.match(r.text, /Dev/);
     f.world.sessions.ses_project = { id: "ses_project", directory: f.folders[RONDA] };
-    assert.deepEqual(await f.engine.leadBrief("ses_project"), { status: "ok", text: "" });
-    // the conversation of a lead is still led by it, not given this guidance
+    // an ordinary project chat is led by Manta (its own brief); a task's session gets nothing
+    const project = await f.engine.leadBrief("ses_project");
+    assert.match(project.text, /^You are Manta/);
+    assert.doesNotMatch(project.text, /agent_start_task/);
+    f.world.sessions.ses_child = { id: "ses_child", parentID: SES, directory: "/wt/x" };
+    assert.deepEqual(await f.engine.leadBrief("ses_child"), { status: "ok", text: "" });
+    // the conversation of the lead is still led by it, not given this guidance
     await writeFile(join(f.root, "manta", ".chat.json"), JSON.stringify({ sessionId: "ses_manta" }));
     f.world.sessions.ses_manta = { id: "ses_manta", directory: join(f.root, "manta", "home") };
     const lead = await f.engine.leadBrief("ses_manta");
+    assert.match(lead.text, /^You are Manta/);
     assert.doesNotMatch(lead.text, /agent_start_task/);
     const g = await fixture({ autonomyPolicy: async () => { throw new Error("nope"); } });
     try {
@@ -1087,12 +1100,14 @@ test("AC-3.3 needsYou lists an open question asked in an agent's conversation (a
   }
 });
 
-test("a conversation question never comes from the lead's chat or a conversation with no stored session", async () => {
+test("conversation questions come from every Team conversation (Manta's too), never the Architect's, and never from a conversation with no stored session", async () => {
   const f = await fixture();
   try {
     f.world.questions.ses_manta = [{ id: "f", sessionID: "ses_manta", questions: [{ question: "q" }] }];
+    f.world.questions.ses_arch = [{ id: "g", sessionID: "ses_arch", questions: [{ question: "q" }] }];
     await writeFile(join(f.root, "manta", ".chat.json"), JSON.stringify({ sessionId: "ses_manta" }));
-    assert.deepEqual((await f.engine.needsYou()).chatQuestions.map((q) => q.slug), [], "Manta's own conversation is not an agent's");
+    await writeFile(join(f.root, "architect", ".chat.json"), JSON.stringify({ sessionId: "ses_arch" }));
+    assert.deepEqual((await f.engine.needsYou()).chatQuestions.map((q) => q.slug), ["manta"]);
   } finally {
     await f.cleanup();
   }
