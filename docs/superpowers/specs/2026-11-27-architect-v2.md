@@ -180,8 +180,13 @@ removes the rest (so boot cleans leftovers). Trials never touch `.installed.json
   `slugForName(draft.name)` for a create — also stored as the trial's `agentSlug`, so the created agent's Tests tab shows
   the trials that made it) and ≤ 6 per root task, **reserved as soon as the call is bound** (calls in flight count, a failed
   call gives its slot back), so parallel calls can't overshoot; ≤ 2 cases
-  running box-wide (own FIFO, not the delegate cap). Model = the draft's `model`, else Auto. Usage is checked with
-  `budget.canSpend` and booked with `budget.book` (work type `agent-trial`), as `knowledge/trial.mjs` does.
+  running box-wide (own FIFO, not the delegate cap). Model = the draft's `model`, else Auto. **A trial is part of a task the user asked
+  for, not optional background work, so the background budget never refuses it** (its level, even "off", and its dollar cap don't apply):
+  usage is only *counted* — booked with `budget.book` (work type `agent-trial`) — and the hard limits above are the bounds. (The first
+  version asked `budget.canSpend` before each case; with the background level off every case was refused and the Architect could never propose.)
+  **A trial in which no case started** (every case was refused before the agent was given its task: a project that couldn't be copied, settings
+  or the project's command list that couldn't be read, an aborted round) **counts toward neither the per-agent nor the per-task limit**; a trial
+  that is still running counts, and so does one whose case started, whatever its end.
 - **Recorded per case:** end state (done / failed / timed out / aborted), final answer, tools used, files changed (diff
   stat), refused actions (permission denials), "would ask" questions, duration, transcript text (redacted with the
   knowledge `scanner.redact`; the final answer, "would ask", refused and error texts too — and if the scanner can't run, **all**
@@ -205,7 +210,12 @@ done/failed/timed-out (not aborted/queued); one verdict per case; each `quote` (
 tool lines** of that case's transcript — never in its "User:" lines, which are the task the Architect itself wrote; every
 verdict `pass`. Otherwise refused ("Case <name> failed: fix the draft and run a trial again").
 
-The lead's `agent_change` (small dictated edits) is unchanged and needs no trial.
+The lead's `agent_change` (small dictated edits) is unchanged and needs no trial. **When the lead makes the change itself after an Architect
+proposal didn't land** (the user insisted, or the Architect couldn't finish), the new record carries that proposal's research so the profile still
+shows it: the newest Architect record of the *same chat* for the *same agent* (a create matches by the agent's name, an update by its slug) in a state
+that never became the agent (held, pending, discarded, expired, failed, conflict) lends its `basis`, `basisThin`, `evidence`, `problem` and `fitCheck`, and
+the lead's record notes `researchFrom: <that record's id>`. Nothing is taken from another chat, another agent, a draft that already landed or a change that
+did not come from an Architect task; the Architect's own record is left as it was.
 
 ### 3.4 What the user sees (Stage 1)
 
@@ -227,13 +237,30 @@ The lead's `agent_change` (small dictated edits) is unchanged and needs no trial
   ```ts
   skills?: { name: string; op: "add" | "replace" | "remove";
              files?: { path: string; content: string; origin: "copied" | "written"; sourceId?: string }[];
-             provenance?: SkillProvenance }[]
+             provenance?: SkillProvenance;
+             installed?: { skill: string; taken: "whole" | "part"; take?: string[] } /* instead of files + provenance */ }[]
   SkillProvenance = { url: string; sourceId: string; repo: string; ref: string /* commit sha or tag */;
                       licence: string /* SPDX */; licenseSourceId?: string; taken: "whole" | "part";
                       registry?: { installs: number | null; stars: number | null } }
   ```
 - Server-generated files (never sent by the model): `SOURCE.md` (origin link, ref, licence, what was taken, installs /
   stars at the time) and, when `licenseSourceId` is given, `LICENSE` = that fetched source's text.
+- **A skill already installed on this box is adopted by reference** (`skills_installed` lists them): a skill op carries
+  `installed: { skill, taken: "whole" | "part", take?: string[] }` instead of `files` + `provenance` (both refused alongside it; add / replace only).
+  `skill` is the name or the folder as listed — matched only against the skills `skills_installed` lists, never an arbitrary path; a name two skills share
+  is refused until the folder is given. The server reads the folder and copies the files, so **no fetched page is needed**: its provenance is the
+  folder itself, its `SOURCE.md` (the ones we wrote when it was copied: origin, repo, ref, licence are carried forward) and its SKILL.md frontmatter
+  (`license`, `version`, `repository`); `SOURCE.md` of the adopted skill reads `Origin: installed on this box: <name>`, `Source id: installed:<name>`,
+  repo / ref `unknown` when the skill names none, and, for a part, `Left out: scripts`. `taken: "part"` takes SKILL.md plus the paths in `take` (files or
+  folders, e.g. `["reference"]`), so the text guidance of a skill whose scripts the agent can't run can be taken without them. **Still applied:** the
+  licence allowlist (the licence is read from the skill's SOURCE.md, then its frontmatter, else its licence file, and the two must agree; none stated or
+  one not on the list refuses; a licence file found in the folder travels as `LICENSE`); path rules (relative, ≤ 4 folders, no `..`, no leading dot — hidden
+  entries are skipped), no link in anything taken (a link in a part left out is not looked at), UTF-8 text only, ≤ 256 KiB a file, case-folded duplicate
+  paths, the generated names, the name = the skill's own frontmatter name, ≤ 300-character description, and the agent-wide ≤ 250 files / ≤ 1 MiB / ≤ 15
+  skills. **Relaxed:** the per-skill 20-file and 256 KiB caps bound what a *model* must type out and nothing is typed here (the installed `impeccable`
+  has well over 20 reference files and ~350 KB of them), so they don't apply; the refusal for a skill over the agent-wide cap says to take part of it. A
+  script that comes along is flagged on the card and read by the independent review exactly like any other; a part without scripts has none to review.
+  Adding one still needs `skillSearch` (the installed skill is a candidate; its name is accepted as seen in `skills_installed`).
 - **Facts checked** (sources and searches are looked up across every child session of the root task — all jobs
   sharing `rootJobOf` — usually one):
   - a `copied` file carries `sourceId`; `research.getSource(childSessionID, sourceId)` exists in one of them (a private
@@ -309,7 +336,11 @@ The lead's `agent_change` (small dictated edits) is unchanged and needs no trial
   Facts: each query is in `searchesOf` for this task; each candidate `ref` appeared in one of its results or in
   `skills_installed`. Ranking (installs, stars, recency, fit) is the Architect's judgement.
 - Template process text: search before writing; prefer a proven skill; take only the parts that fit; write your own
-  only when nothing suitable exists, and say why in `skillSearch`.
+  only when nothing suitable exists, and say why in `skillSearch`. A skill whose scripts the agent can't run is still worth adding when its text
+  guidance fits the job: drop the scripts (`taken: "part"`) or keep them and say in the instructions that they won't run. Adopt a fitting installed
+  or proven skill rather than rewriting its ideas into the instructions. (First run on the box: "create a product designer agent" left the installed
+  `impeccable` skill out because "it runs commands and edits code", although most of its value is its design reference text and it has a fallback for when
+  its launcher can't run.)
 - **Upstream updates:** the refresh and the check-up fact sheet list copied skills whose upstream ref moved
   (`git ls-remote`, bounded, cached 1 day).
 
@@ -426,6 +457,7 @@ export interface LearnedRule { id: string; scope: string /* project slug | "_all
   whyIsInferred: boolean; quote: string; createdAt: number; sourceJobId: string | null; archived: boolean }
 // AgentChange: `kind` stays "create" | "update". `origin.kind` gains "template-update" (+ templateHash) and "learned".
 //   New optional fields: problem?: AgentProblem; trial?: { id: string; verdicts: TrialVerdict[] };
+//   researchFrom?: string /* the lead's change that carries an unlanded Architect proposal's research, §3.3 */;
 //   sizeBefore?: number; sizeAfter?: number; skillsDiff?: { name: string; op: "add" | "replace" | "remove";
 //   paths: string[]; provenance: SkillProvenance | null; scripts: string[] }[];
 //   learned?: { added?: LearnedRule; removedId?: string }. beforeBundle / afterBundle are server-only (stripped).
@@ -456,6 +488,12 @@ Plugin tools (`docs/opencode-plugins-v2/manta/tools/agents.ts`): `agent_trial`, 
   of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy."
 - **Pairing codes** are minted with `POST /auth/pair` and the header `X-Manta-Pair: 1`, from the box itself only (loopback, no
   forwarding headers, no `Origin`, no CORS grant); a `GET` is 405.
+- **An installed skill is adopted from this box's own skill folders**, found only among the ones `skills_installed` lists (a path the model makes up is never
+  read), with no fetched page. It keeps the path, link, text-only, size, case-folding and licence protections of §4.1 and the independent script review of any
+  script it brings; only the per-skill 20-file / 256 KiB caps (which bound what a model types) are lifted, the agent-wide caps stay. **The honest limit:** the
+  skill's licence comes from what the skill says about itself (its own SOURCE.md, frontmatter or licence file), which a folder on the user's own box could
+  misstate; the check is that it is on the allowlist and agrees with its licence file, not that it is true. Trials are not gated by the background budget, so
+  they spend what the user's task would anyway (bounded by the 15-minute ceiling, 3 cases a trial and 3 / 6 trials a task).
 - Skill files are text, never executed by Manta; an agent with bash could run a script it finds in its skills. So **every script, copied or
   written, is read by an independent, tool-less check on another model before it can be released automatically** (§4.1; flagged or failed
   checks wait for a click, Never still discards); every script is flagged on the card (`skillsDiff.scripts`) and every skill file can be
@@ -559,8 +597,8 @@ tasks; learning for the lead; upstream skill diffs before an update; usage-based
   side-effect tools (§3.3).
 - containment → always a private copy, no shell, symlink scan, `noSecrets`, network-write denies (§3.3, §7).
 - draft hash ambiguity → canonical preimage (§3.3).
-- budget + orphans → `canSpend` / `book`, session deletion, abort on parent end (§3.3).
-- trial cap vs 3 proposals → per-agent 3, per-task 6 (§3.3).
+- budget + orphans → `book` only (no refusal; see §3.3), session deletion, abort on parent end (§3.3).
+- trial cap vs 3 proposals → per-agent 3, per-task 6, a trial in which no case started counts toward neither (§3.3).
 - `getSource` needs ids / searches unrecorded → `sourceId` fields, `searchesOf` (§4.1, §4.2).
 - LICENSE echoed by the model → server writes it from `licenseSourceId` (§4.1).
 - blob snapshots broke the agent.md string contract → strings kept, bundle maps added (§4.1).
