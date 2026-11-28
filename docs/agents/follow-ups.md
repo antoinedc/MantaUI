@@ -460,3 +460,11 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
   worktree and branch, so several run at once, also several of one agent; each is its own task card. Only the box-wide
   running-jobs cap (`MAX_RUNNING_JOBS`) still bounds them, to protect the box's memory. Open question left for later: two tasks
   of one agent that edit the same files will conflict when their branches merge; the lead's brief should split work by files.
+
+## Fleet statuses that need reliable tracking first
+
+Left out of the Fleet redesign (v8) until the box can track them deterministically (user's call, 2026-11-28):
+- **"Stuck"** (no progress for N minutes). Liveness is in memory only (`jobLiveness.mjs`): a restart resets it and the sweep fails open until rebuilt, and coverage differs by task type. Needs persisted last-progress per task, for every task type.
+- **"Taking much longer than usual"**: needs a durable per-agent duration history with enough runs.
+- **"Having trouble / retrying"**: needs a recorded retry/refusal signal per task.
+- **"Paused: usage limit reached · resumes automatically"**: usage limits only refuse new background work today; running tasks aren't paused or auto-resumed. Needs a real pause-and-resume on limits first.
