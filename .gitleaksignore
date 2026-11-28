@@ -21,3 +21,8 @@ ec59fcb90deb3b76d4552f7550ea42a6cdf3ab61:src/server/knowledge/secretScan.test.mj
 75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/search.test.mjs:generic-api-key:242
 75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/secretScan.test.mjs:aws-access-token:17
 75e9961f6c0ef53476319adb6eec24731f08e7f5:src/server/knowledge/secretScan.test.mjs:aws-access-token:25
+6695517c89809bf6ea1cdb4cebbb92a817559aea:src/server/research/outsideQuery.test.mjs:github-pat:52
+6695517c89809bf6ea1cdb4cebbb92a817559aea:src/server/research/outsideQuery.test.mjs:github-pat:54
+6695517c89809bf6ea1cdb4cebbb92a817559aea:src/server/research/outsideQuery.test.mjs:generic-api-key:8
+421c7947f2e76adcd7c31a4b6356969cc64ee557:src/server/researchSources.test.mjs:github-pat:275
+4260fb51291a89e220b5a3a6147074c531d3e9a7:scripts/opencode-v2/web-guard.e2e.mjs:generic-api-key:46
