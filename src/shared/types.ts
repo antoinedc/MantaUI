@@ -2020,6 +2020,9 @@ export const IPC = {
   agentsCreate: "agents:create", // (AgentCreateInput) → AgentInfo; throws with a human message
   agentsDispatch: "agents:dispatch", // (AgentDispatchInput) → { jobId }; throws with a human message
   agentsOpenChat: "agents:open-chat", // ({ slug }) → { tmuxSession, windowIndex }; throws with a human message
+  agentsSettingsSet: "agents:settings-set", // ({ slug, field, value }) → { outcome, change }; a refusal is a sentence
+  agentsClearChat: "agents:clear-chat", // ({ slug }) → { sessionId, windowIndex | null }
+  agentsChats: "agents:chats", // () → { [slug]: sessionId }
   // ---- Agents, Phase 3 (spec docs/superpowers/specs/2026-11-23-agents-phase3-autonomy.md) ----
   agentsAutonomyGet: "agents:autonomy-get", // () → AutonomySettings; an older box rejects "unknown rpc channel"
   agentsAutonomySet: "agents:autonomy-set", // (AgentAutonomy) → AutonomySettings; throws with a human message
@@ -3078,7 +3081,9 @@ export type AgentChangeOrigin =
    */
   | { kind: "template-update"; templateHash: string; shipped?: string; shippedFiles?: Record<string, string> }
   /** Architect v2 Stage 3: a rule Manta learned from the user's corrections was written (or taken back); see `AgentChange.learned`. */
-  | { kind: "learned" };
+  | { kind: "learned" }
+  /** The user saved one field of the agent from its profile's Settings tab (`agents:settings-set`). */
+  | { kind: "settings"; field: string };
 export interface AgentChangeEvidence {
   claim: string;
   /** null for a private source. */
@@ -3244,6 +3249,8 @@ export interface AgentChange {
   /** Security review H4: the independent review of a routine round's change (instruction diff and changed skill texts vs. the round's purpose); `carried`: the folded learned rules it confirmed. */
   contentReview?: { verdict: "clean" | "flagged" | "error"; reasons: string[]; carried: string[]; model: string; at: number };
 }
+/** The profile fields `agents:settings-set` can save (the @handle is read-only). */
+export type AgentSettingsField = "name" | "description" | "useWhen" | "notFor" | "model" | "isolation";
 export interface AgentChangeEvent {
   id: string;
   sessionID: string;
@@ -4537,7 +4544,9 @@ export interface AgentProfile {
   seats: AgentSeat[];
   lastChangedAt: number | null;
   builtBy: "architect" | "manta" | "user" | "built-in";
-  refresh: { enabled: boolean; routineId: string | null }; // enabled defaults to true (provisioned on sync)
+  refresh: { enabled: boolean; routineId: string | null; /** The day of the month the refresh runs (read-only); null when the agent has none. Absent on an older box. */ day?: number | null }; // enabled defaults to true (provisioned on sync)
+  /** The body of the agent's file, for the Overview. Absent on an older box. */
+  instructions?: string;
   research: AgentResearchEntry[];
   /** Architect v2 §3.4: the agent's trial runs, newest first (≤ 20). Absent on an older box. */
   trials?: AgentTrial[];
