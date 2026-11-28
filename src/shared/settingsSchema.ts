@@ -331,6 +331,17 @@ export const SETTINGS: SettingEntry[] = [
     group: "Naming",
   },
   {
+    id: "agentSuggestions",
+    section: "sessions",
+    label: "Suggest agents for repeated work",
+    help: "When you ask Manta for the same kind of work 3 times, it offers once to make a dedicated agent or a skill for it. At most one offer a day in a chat. Turning this off keeps counting, so turning it back on works on recent requests.",
+    control: "toggle",
+    configKey: "agentSuggestions",
+    platform: "desktop",
+    default: true,
+    group: "Agents",
+  },
+  {
     id: "worktreePerSession",
     section: "sessions",
     label: "Create git worktree for new sessions",

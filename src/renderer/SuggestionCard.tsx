@@ -57,7 +57,7 @@ export const SuggestionCard = memo(function SuggestionCard({ offer, local, onAct
   const first = view.primary;
   const second = first === "agent" ? "skill" : "agent";
   const btn = (action: "agent" | "skill") => (
-    <Button key={action} tone={action === first ? "primary" : "default"} disabled={view.busy} onClick={() => onAct(action)} hook={`suggestion-${action}`}>
+    <Button key={action} tone={action === first ? "primary" : "default"} disabled={view.busy} onClick={() => onAct(action)} hook={`manta-suggestion-${action}`}>
       {ACTION_LABEL[action]}
     </Button>
   );
@@ -84,15 +84,14 @@ export const SuggestionCard = memo(function SuggestionCard({ offer, local, onAct
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {btn(first)}
             {btn(second)}
-            <Button tone="ghost" disabled={view.busy} onClick={() => onAct("later")} hook="suggestion-later">
+            <Button tone="ghost" disabled={view.busy} onClick={() => onAct("later")} hook="manta-suggestion-later">
               {ACTION_LABEL.later}
             </Button>
             <button
               type="button"
               onClick={() => onAct("never")}
               disabled={view.busy}
-              data-hook="suggestion-never"
-              className="ml-auto min-h-6 rounded-xs px-1 text-label text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 max-[460px]:ml-0 max-[460px]:basis-full max-[460px]:text-left"
+              className="manta-suggestion-never ml-auto min-h-6 rounded-xs px-1 text-label text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 max-[460px]:ml-0 max-[460px]:basis-full max-[460px]:text-left"
             >
               {ACTION_LABEL.never}
             </button>
@@ -105,7 +104,7 @@ export const SuggestionCard = memo(function SuggestionCard({ offer, local, onAct
             {view.status.tone === "error" && <TriangleAlert size={14} aria-hidden="true" className="mt-[2px] shrink-0" />}
             <span className="min-w-0 flex-[1_1_220px]">{view.status.text}</span>
             {view.status.retry && (
-              <Button tone="default" onClick={() => onAct(offer.answer === "skill" ? "skill" : "agent")} hook="suggestion-retry">
+              <Button tone="default" onClick={() => onAct(offer.answer === "skill" ? "skill" : "agent")} hook="manta-suggestion-retry">
                 Retry
               </Button>
             )}

@@ -124,6 +124,9 @@ export type AppConfig = {
   // set by hand — so it's OFF by default and opt-in via Settings. See the
   // "Auto-rename" notes in AGENTS.md.
   autoRenameSessions?: boolean;
+  // "Suggest agents for repeated work" (Settings → Sessions): when the same kind of work has been handed to Dev 3 times, Manta offers once to
+  // make an agent or a skill for it. Absent = on; `false` stops the offers (counting continues). Written through the generic configUpdate path.
+  agentSuggestions?: boolean;
   // BET-738: show the composer's usage dial even when every window is under
   // the dial's normal 70% threshold. Off by default — the dial's whole point
   // is to be absent unless it matters; this is the opt-out for someone who

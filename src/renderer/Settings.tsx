@@ -490,6 +490,7 @@ export function Settings({
   const uploadCleanupHours = useStore((s) => s.uploadCleanupHours);
   const voiceNoteTtlHours = useStore((s) => s.voiceNoteTtlHours);
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
+  const agentSuggestions = useStore((s) => s.agentSuggestions);
   const alwaysShowUsage = useStore((s) => s.alwaysShowUsage);
   const optimizerEnabled = useStore((s) => s.optimizerEnabled);
   const theme = useStore((s) => s.theme);
@@ -565,6 +566,7 @@ export function Settings({
       voiceNoteTtlHours,
       theme,
       autoRenameSessions,
+      agentSuggestions,
       alwaysShowUsage,
       optimizerEnabled,
       "cto.enabled": cto?.enabled ?? false,
@@ -572,7 +574,7 @@ export function Settings({
       "cto.voice": cto?.voice ?? "",
       "cto.alwaysListening": cto?.alwaysListening ?? false,
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, optimizerEnabled, cto],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, agentSuggestions, alwaysShowUsage, optimizerEnabled, cto],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

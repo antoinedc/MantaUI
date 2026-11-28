@@ -943,6 +943,9 @@ describe("httpApi agent-screens channels", () => {
     },
     { name: "agentsChangeFile", call: () => httpApi.agentsChangeFile({ id: "ach_1", path: "skills/a/run.sh" }), channel: "agents:change-file", args: [{ id: "ach_1", path: "skills/a/run.sh" }] },
     { name: "agentsLearnedUndo", call: () => httpApi.agentsLearnedUndo({ slug: "seo", id: "lr_00000001" }), channel: "agents:learned-undo", args: [{ slug: "seo", id: "lr_00000001" }] },
+    { name: "agentsSuggestions", call: () => httpApi.agentsSuggestions({ sessionId: "ses_1" }), channel: "agents:suggestions", args: [{ sessionId: "ses_1" }] },
+    { name: "agentsSuggestionSeen", call: () => httpApi.agentsSuggestionSeen({ id: "o_1", sessionId: "ses_1" }), channel: "agents:suggestion-seen", args: [{ id: "o_1", sessionId: "ses_1" }] },
+    { name: "agentsSuggestionAct", call: () => httpApi.agentsSuggestionAct({ id: "o_1", action: "later" }), channel: "agents:suggestion-act", args: [{ id: "o_1", action: "later" }] },
   ];
 
   channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");

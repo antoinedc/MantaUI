@@ -691,3 +691,68 @@ describe("Settings — background work budget card", () => {
     expect(document.activeElement?.textContent).toBe("Background work");
   });
 });
+
+// "Suggest agents for repeated work" (docs/screens/research/decisions.md §17; spec 2026-11-28-research-layer.md AC-4.6): a Sessions toggle, on by
+// default, saved through the generic config path.
+describe("Settings — Suggest agents for repeated work (Sessions)", () => {
+  let h: Harness | null = null;
+  const stub = (cfg: Record<string, unknown> = {}) =>
+    installMockApi({
+      configGet: () => Promise.resolve(cfg),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      launchersList: () => Promise.resolve([]),
+      configUpdate: (patch: Record<string, unknown>) => Promise.resolve({ ...cfg, ...patch }),
+    });
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    useStore.setState({ appToasts: [], agentSuggestions: true });
+  });
+  const box = () => h!.container.querySelector<HTMLInputElement>('input[aria-label="Suggest agents for repeated work"]');
+
+  it("is on by default, in the Sessions tab, with the design's help text", async () => {
+    stub();
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+    expect(box()).not.toBeNull();
+    expect(box()!.checked).toBe(true);
+    expect(h.text()).toContain("When you ask Manta for the same kind of work 3 times, it offers once to make a dedicated agent or a skill for it.");
+    expect(h.text()).toContain("Turning this off keeps counting");
+  });
+
+  it("turning it off saves agentSuggestions:false and the box's answer is what stays", async () => {
+    const { api } = stub();
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+    clickCheckbox(h, "Suggest agents for repeated work");
+    await h.flush();
+    expect(api.calls.configUpdate).toEqual([[{ agentSuggestions: false }]]);
+    expect(useStore.getState().agentSuggestions).toBe(false);
+    expect(box()!.checked).toBe(false);
+  });
+
+  it("a stored false reads as off", async () => {
+    stub({ agentSuggestions: false });
+    useStore.setState({ agentSuggestions: false });
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+    expect(box()!.checked).toBe(false);
+  });
+
+  it("a refused save puts it back and says so", async () => {
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      launchersList: () => Promise.resolve([]),
+      configUpdate: () => Promise.reject(new Error("boom")),
+    });
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+    clickCheckbox(h, "Suggest agents for repeated work");
+    await h.flush();
+    expect(box()!.checked).toBe(true);
+    expect(useStore.getState().appToasts.length).toBe(1);
+  });
+});
