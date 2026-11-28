@@ -49,4 +49,4 @@ Paused and Ended use the same plain language:
 
 - 216 renders (4 views × 9 states × light/dark × 420/900/1280): no script errors, no sideways scroll. Screenshots: `~/.manta/agents/product-designer/home/fleet-redesign/shots-v6/<view>-<state>-<width>-<theme>.png`.
 - Interactions scripted: no "Let …" buttons left; the recommended option is preselected; Submit and Apply clear the sidebar badge; Stop asks with "Keep running" focused, then the count drops and the task appears in Ended; Undo asks, then marks the row; Resume is disabled with its reason when the box is full.
-- Not checked: real fonts (Inter isn't bundled), contrast by script (tokens only; red label = `--danger` on `--canvas`), a screen reader.
+- Not checked: real fonts (Inter isn't bundled), a screen reader. The red label was measured: 5.45:1 light, 6.88:1 dark (`--danger` with `--canvas` text).
