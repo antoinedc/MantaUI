@@ -70,7 +70,7 @@ themselves; bundling a browser-driven scraping tool; new built-in agents.
 - Per-agent source lists or per-agent overrides (sources are box-wide; decision 1).
 - A library browser, purge or edit screen (the profile's existing Research tab stays as is).
 - Product Manager, Designer, Reviewer as built-ins (decision 8). They stay user agents.
-- Paid search APIs, embeddings, a browser.
+- Paid search APIs, a provider call per handoff (local embeddings were evaluated: §6.5), a browser.
 - Counting work Manta does itself in the chat without a handoff (the server can't see it without reading every message).
 
 ## 4. User stories (P1 first)
@@ -243,7 +243,7 @@ do it better; I can say yes, later, or never for that kind of work.*
 - AC-4.6 Given Settings → Agents → "Suggest agents for repeated work" off (default on),
   Then no suggestion is created; counting continues (so turning it on later works on recent history).
 - AC-4.7 Given a user explicitly asks Manta for an agent, Then Manta hands it to the Architect as today; no suggestion is involved.
-- AC-4.8 Given a handoff, Then no model call is made to count it; exactly one small model call (the Summary model, else the
+- AC-4.8 Given a handoff, Then no REMOTE model call is made to count it (decision 2026-11-28: computing an embedding on the box with a small local model is allowed; a call to a provider per handoff is not); exactly one small model call (the Summary model, else the
   chat's own) is made per suggestion shown (the label and the agent-or-skill check). If that call fails, no suggestion is shown
   and the cluster stays `due` for the next similar handoff.
 - AC-4.9 Given the suggestions store and the suppression set, Then they hold no brief text: only job ids, normalised
@@ -523,7 +523,27 @@ check of AC-2.8 running in front of every covered call (AC-2.9).
   A test sweeps thresholds 0.10–0.60 in 0.025 steps over a background corpus (the fixture's briefs, to give realistic IDF),
   picks the threshold with the highest recall among those with precision ≥ 0.90, asserts the AC-4.2 targets at it, and asserts
   that the constant in the code equals the picked value (changing the fixture or the measure forces a re-tune). If no threshold
-  meets the targets, slice 4 does not ship; the follow-up is a better measure (embeddings), not a looser bar.
+  meets the targets, slice 4 does not ship; the follow-up is a better measure, not a looser bar.
+- **Measures tried (2026-11-28), all on the same fixture and the same four targets; none meets them, so §6.5's counter is blocked.**
+  Best case at precision ≥ 0.90 with no hard negative leaking (recall / templated recall):
+
+  | Measure | Recall | Templated recall |
+  |---|---|---|
+  | IDF-weighted Jaccard of content words (the measure above; overlap, cosine, Dice, IDF², title weight 1–3 tried) | 0.27 (best variant 0.37) | 0.70 (0.80) |
+  | all-MiniLM-L6-v2, int8, cosine of title + brief | 0.10 | 0.20 |
+  | all-MiniLM-L6-v2, fp32 | 0.10 | 0.20 |
+  | bge-small-en-v1.5, int8 | 0.20 | 0.40 |
+  | potion-base-8M (static embeddings) | 0.17 | 0.50 |
+  | potion-base-32M | 0.17 | 0.50 |
+  | the same with the corpus mean removed from every vector | 0.03–0.33 (best: potion-base-8M, 0.33) | 0.1–0.6 |
+  | embedding + IDF-Jaccard summed | 0.20 | 0.40 |
+
+  Why: a sentence embedding measures *topic*, not *kind of work*. In the fixture the hard negatives share a topic and a template
+  ("add logging to the webhook" / "write a test for the webhook": MiniLM cosine 0.75; "bump eslint" / "explain the eslint config in the
+  docs": 0.74) and score as high as, or higher than, the paraphrase positives (median 0.62) and the templated ones (0.59). Quantisation
+  is not the cause (fp32 gives the same numbers). A measure of *kind* needs something that reads the work, not its subject: a model
+  that classifies the brief ("what kind of task is this?"), or a cross-encoder trained on that question. Both are heavier than this
+  slice's appetite and, for a classifier, a model call per handoff.
 - Lexical matching can't see true synonyms the fixture doesn't share words for; the recall target accepts that (≥ 0.60 overall).
 - Due: cluster count within the last 30 days ≥ 3 (first offer) or ≥ `snoozeUntil` (second offer), state `open`/`snoozed`, the
   chat and box caps of AC-4.5 not hit, the setting on.
@@ -647,7 +667,8 @@ Numbers fetched 2026-11-28 from the npm registry / npm downloads API / GitHub AP
 | **HN, arXiv, GitHub** | Existing adapters | — |
 | **Bundled default skill** | **None.** Agent-Reach evaluated: MIT (copying allowed), very popular (115,609 stars, 10,400 forks, pushed 2026-11-24, 167 open issues), read-only by design. Rejected as a default for every box because: install is agent-driven from an unpinned `main` install.md (supply-chain risk on every box); it installs a Python CLI + uv and, for login channels, a dedicated stealth browser that copies the site login from the user's own Chrome; its README advises secondary accounts because platforms restrict automated access (account-ban risk); its default-safe part (keyless Reddit/X via Exa + Jina) is already shipped in Manta. A user who wants it can still install it and add it as a command source. | Other skills/MCP found (awesome lists of skills, Exa MCP) add nothing keyless beyond what the adapters above give. |
 | **Rate limiting per source** | **p-throttle 8.1.1** (MIT, 0 deps, published 2026-09-12, 8.5 M/week, 523 stars, pushed 2026-09-18) for arXiv's 1/3 s and GitHub's 10/min; Stack Exchange quota read from its own `quota_remaining` / `backoff` fields | bottleneck 2.19.5 (MIT, 0 deps, 14.2 M/week, 2,010 stars) — last publish 2019-08-03, last push 2024-01: unmaintained; hand-rolled timers: a maintained 0-dep library exists. |
-| **Similarity of briefs (counter)** | **MiniSearch 7.2.0** (already a dependency: MIT, 0 deps, 6.26 M/week, 6,215 stars, last publish 2025-09-16) for tokenising and candidate retrieval, plus an IDF-weighted Jaccard threshold (~20 lines: trivially small, deterministic, testable) | natural 8.2.6 (MIT, 14 deps, 1.74 M/week, 10,883 stars, pushed 2026-10-26): 14 dependencies for a TF-IDF we need ~20 lines of; wink-nlp 2.4.0 (MIT, 0 deps, 622 k/week, 1,392 stars): needs a separate language-model package; string-similarity 4.0.4: **deprecated**; datasketch MinHash (MIT, 2,985 stars): Python only; embeddings: a model/provider call per handoff (cost; decision 7 asks for no model call to count). |
+| **Similarity of briefs (counter)** | **MiniSearch 7.2.0** (already a dependency: MIT, 0 deps, 6.26 M/week, 6,215 stars, last publish 2025-09-16) for tokenising and candidate retrieval, plus an IDF-weighted Jaccard threshold (~20 lines: trivially small, deterministic, testable) | natural 8.2.6 (MIT, 14 deps, 1.74 M/week, 10,883 stars, pushed 2026-10-26): 14 dependencies for a TF-IDF we need ~20 lines of; wink-nlp 2.4.0 (MIT, 0 deps, 622 k/week, 1,392 stars): needs a separate language-model package; string-similarity 4.0.4: **deprecated**; datasketch MinHash (MIT, 2,985 stars): Python only; embeddings through a provider per handoff: cost and a remote call. **Local embeddings were evaluated on 2026-11-28 (decision: no remote call; a small model on the box is allowed) and none meets AC-4.2** — see the next row and §6.5. |
+| **Local embedding runtime and model (evaluated, not adopted)** | None adopted: no tested model meets AC-4.2, so no dependency was added. Numbers fetched 2026-11-28. **onnxruntime-node 1.31.1** (MIT, published 2026-10-26, 9.1 M/week, 3 deps; unpacked 307 MB of which the CUDA provider is 284 MB: a CPU-only install is 48 MB on linux-x64, 26 MB on linux-arm64, 45 MB on darwin-arm64, to be pruned at pack time) + **@huggingface/tokenizers 0.2.0** (Apache-2.0, 0 deps, 361 KB, 11.3 k stars, pushed 2026-11-28): the lean route, about 40 lines of our own for pooling. Models: all-MiniLM-L6-v2 int8 23 MB on disk (Apache-2.0), process RSS 136 MB peak against 44 MB for a bare node, 7–47 ms per brief on one thread; bge-small-en-v1.5 int8 34 MB, 15–74 ms per brief; **potion-base-8M** static model (MIT, 30 MB, 0 native dependencies, 99 MB peak RSS, under 2 ms per brief, loaded with a 30-line safetensors reader and the same tokenizer). | **@huggingface/transformers 4.3.2** (Apache-2.0, 4.34 M/week, 16.5 k stars, pushed 2026-11-27): installs onnxruntime-node (548 MB) **and** onnxruntime-web (141 MB, unused in node) **and** sharp (28 MB, an image library) — 744 MB and 32 packages in a scratch install; the same models, a heavier route. **fastembed 3.0.0** (MIT, 111 k/week): the repository is **archived** (2026-09-24), pins onnxruntime-node 1.21 and did not install cleanly on Node 22 in a scratch install. @xenova/transformers 2.17.2: superseded by @huggingface/transformers. |
 | **Agent-or-skill check + label** | Existing `generateText` path (Summary model, else the chat's own), one call per offer | A classifier model: training data we don't have. |
 | **Settings storage** | Existing `writeJsonAtomic` + `createMutex` (`jsonStore.mjs`) in a dedicated file | `config.json` via the generic `config:update`: no per-write validation or credential scanning, and no recompile hook; lowdb/conf: the project already runs this primitive for every store. |
 | **Source validation and execution** | Existing `architectSources.mjs` + `research/extra.mjs` | JSON Schema (ajv): would duplicate the credential rules that can't be expressed as schema. |
@@ -722,7 +743,7 @@ The Architect then writes the rule wording and runs the evaluation (AC-3.4/3.5/2
 - **Private-source attribution in free text** can't be enforced structurally (the agent writes prose). Only the library and the
   marker are enforced; follow-up: a check that flags a result naming a private source id/name verbatim.
 - **Similarity threshold** wrong → nagging or never firing. Tuned from the labelled fixture with precision and recall targets;
-  caps and the suppression set bound the damage. If the targets can't be met, slice 4 waits; don't reach for embeddings in this appetite.
+  caps and the suppression set bound the damage. If the targets can't be met, slice 4 waits. Local embeddings were tried (decision 2026-11-28) and also fail: they measure topic, not kind of work (§6.5, "Measures tried"); the next step is a different kind of measure, not a looser bar.
 - **The outside-query check can't catch everything** (a paraphrased codename isn't mechanically detectable). It blocks the clear
   cases; the rule and the confidential-brief trial cover the rest. Don't build a model-based classifier on every query.
 - **The `execute.before` hook might not block on 2.0.30** (only strongly evidenced, not yet run). AC-2.9 proves it first; the
