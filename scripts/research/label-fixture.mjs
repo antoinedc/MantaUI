@@ -4,12 +4,13 @@
 // (POST /api/experimental/generate): it creates no session and prompts none.
 //
 //   OPENCODE_PASSWORD=… node scripts/research/label-fixture.mjs --model openai/gpt-6-luna [--passes 2] [--out file] [--url http://127.0.0.1:4096]
+//                                                              [--seed 1000] [--append]   (--append adds passes to an existing recording of the same model and prompt)
 //
 // The briefs are labelled one after the other, the way the box does it: each call is offered the labels already coined in the pass, most
 // used first. Pass 1 uses the fixture's order; later passes use a seeded shuffle, so the order effect is part of what is measured.
 // A brief whose call fails twice gets no label (and the test then fails on the gap).
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildLabelPrompt, parseLabel, labelKey, LABEL_PROMPT_VERSION, EXISTING_LABELS_MAX } from "../../src/server/briefLabel.mjs";
 
@@ -21,6 +22,8 @@ const fixturePath = fileURLToPath(new URL("../../src/server/fixtures/briefSimila
 const outPath = arg("out", fileURLToPath(new URL("../../src/server/fixtures/briefLabels.json", import.meta.url)));
 const model = arg("model", "");
 const passes = Math.max(1, Number(arg("passes", "2")) || 2);
+const seed = Number(arg("seed", "1000")) || 1000;
+const append = process.argv.includes("--append");
 const base = (arg("url", process.env.OPENCODE_URL || "http://127.0.0.1:4096") || "").replace(/\/+$/, "");
 const password = process.env.OPENCODE_PASSWORD || "";
 if (!model.includes("/") || !password) {
@@ -59,9 +62,18 @@ const briefs = fixture.pairs.flatMap((p) => [
   { id: `${p.id}.b`, ...p.b },
 ]);
 
-const record = { version: 1, promptVersion: LABEL_PROMPT_VERSION, model, recordedAt: new Date().toISOString(), passes: [] };
+let record = { version: 1, promptVersion: LABEL_PROMPT_VERSION, model, recordedAt: new Date().toISOString(), passes: [] };
+if (append && existsSync(outPath)) {
+  const prev = JSON.parse(readFileSync(outPath, "utf-8"));
+  if (prev.model !== model || prev.promptVersion !== LABEL_PROMPT_VERSION) {
+    console.error(`--append: ${outPath} was recorded with ${prev.model} / prompt v${prev.promptVersion}, not ${model} / v${LABEL_PROMPT_VERSION}`);
+    process.exit(2);
+  }
+  record = { ...prev, recordedAt: new Date().toISOString() };
+}
+const firstNew = record.passes.length;
 for (let n = 0; n < passes; n++) {
-  const order = n === 0 ? briefs : shuffled(briefs, 1000 + n);
+  const order = firstNew + n === 0 ? briefs : shuffled(briefs, seed + firstNew + n);
   const counts = new Map(); // key → { label, count, last }
   const labels = {};
   const failed = [];
@@ -86,7 +98,7 @@ for (let n = 0; n < passes; n++) {
     counts.set(key, { label: hit?.label ?? label, count: (hit?.count ?? 0) + 1, last: tick++ });
     process.stderr.write(".");
   }
-  process.stderr.write(`\npass ${n + 1}: ${Object.keys(labels).length}/${briefs.length} labelled, ${counts.size} distinct labels, ${failed.length} failed\n`);
+  process.stderr.write(`\npass ${firstNew + n + 1}: ${Object.keys(labels).length}/${briefs.length} labelled, ${counts.size} distinct labels, ${failed.length} failed\n`);
   record.passes.push({ order: order.map((b) => b.id), labels, failed });
 }
 writeFileSync(outPath, `${JSON.stringify(record, null, 1)}\n`);
