@@ -4366,3 +4366,9 @@ Spec `docs/superpowers/specs/2026-11-28-agent-profile-redesign.md`; mockup `docs
 - **Mobile create flow** — `+` on the mobile session list currently only
   re-syncs; the new-session/new-project modal (desktop `Sidebar.tsx`) is not
   yet lifted into a mobile sheet.
+
+<!-- manta:knowledge:start -->
+## Project rules (managed by Manta)
+
+- Reuse existing UI components such as the chat composer and remove what doesn't fit instead of building new ones, keep the model picker defaulting to the agent's model but overridable, and deliver a real clickable mockup when one is requested. — User corrected three UI delivery choices: component re…
+<!-- manta:knowledge:end -->
