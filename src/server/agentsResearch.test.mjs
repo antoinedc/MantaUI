@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentsEngine } from "./agents.mjs";
+import { createResearchSources } from "./researchSources.mjs";
 import { RESEARCH_GUIDANCE } from "./researchLibrary.mjs";
 import { BASE_MARKER } from "./researchBlock.mjs";
 import { BUILTIN_SOURCES } from "../shared/researchSources.mjs";
@@ -476,5 +477,72 @@ test("agent_change / agent_propose with draft.sources are refused with the Setti
     assert.deepEqual(checkDraft({ name: "N", description: "d", isolation: "none", instructions: "x", sources: [] }, { create: true }), { error: refusal });
   } finally {
     await f.cleanup();
+  }
+});
+
+// ---- AC-6.1: an existing box converges on update, with no step of the user's ----
+
+test("AC-6.1 / AC-1.1 end to end: on the first boot of this release the store is created, the Architect's sources migrate (private), its key is stripped, every compiled prompt carries them, and a second boot changes nothing", async () => {
+  const base = await mkdtemp(join(tmpdir(), "agents-research-boot-"));
+  const root = join(base, "agents");
+  const templatesDir = join(base, "templates");
+  await mkdir(templatesDir, { recursive: true });
+  for (const t of ["dev", "manta", "architect"]) await cp(join(REAL_TEMPLATES, t), join(templatesDir, t), { recursive: true });
+  const reloads = [];
+  const boot = () => {
+    let engine;
+    const store = createResearchSources({
+      file: join(base, "research-sources.json"),
+      readArchitectSources: () => engine.readArchitectSources(),
+      stripArchitectSources: () => engine.stripArchitectSources(),
+      loadSecrets: async () => [],
+      onChange: () => engine.sync(),
+      log: { warn: () => {} },
+    });
+    engine = createAgentsEngine({
+      root,
+      templatesDir,
+      home: "/h",
+      retryDelayMs: 0,
+      isGitRepo: async () => true,
+      log: { warn: () => {} },
+      editConfig: async () => ({ ok: true, changed: false }),
+      reload: async () => (reloads.push(1), { ok: true }),
+      oc: { readSession: async () => ({ state: "missing" }), listMessages: async () => [] },
+      delegate: { loadRecordsStrict: async () => [] },
+      tmux: { listProjects: async () => [] },
+      researchSources: store,
+    });
+    return { engine, store, start: async () => { await engine.init(); return store.migrate(); } };
+  };
+  try {
+    // a box that ran the previous release: the Architect's file has its own sources, and nothing is compiled with a base block yet
+    const old = boot();
+    await old.engine.init();
+    const file = join(root, "architect", "agent.md");
+    await writeFile(file, (await readFile(file, "utf-8")).replace(/\n---\n/, `\n${ARCH_SOURCES}---\n`));
+    const first = boot();
+    assert.deepEqual(await first.start(), { state: "done" });
+    assert.ok(!/^sources:/m.test(await readFile(file, "utf-8")), "the key is gone from the Architect's file");
+    const list = await first.store.list();
+    assert.deepEqual(list.sources.slice(0, 2).map((r) => [r.id, r.private, r.addedBy]), [["bookface", true, "migration"], ["packages-mine", true, "migration"]]);
+    assert.equal(list.sources.length, 2 + 8);
+    for (const slug of ["dev", "architect"]) {
+      const compiled = await readFile(join(root, slug, ".compiled.md"), "utf-8");
+      assert.ok(compiled.includes(BASE_MARKER), slug);
+      assert.match(compiled.split("\n").find((l) => l.startsWith("- bookface ")), /private/, slug);
+      assert.ok(compiled.includes("- packages-mine "), slug);
+      assert.ok(compiled.includes("- packages (deps.dev)") || compiled.includes("- packages —"), `${slug}: the built-in packages source is there too`);
+    }
+    // a second boot: nothing imported twice, nothing rewritten, no new reload
+    const before = { store: await readFile(join(base, "research-sources.json"), "utf-8"), compiled: await readFile(join(root, "dev", ".compiled.md"), "utf-8"), reloads: reloads.length, changes: (await first.engine.history("architect")).length };
+    const second = boot();
+    assert.deepEqual(await second.start(), { state: "done" });
+    assert.equal(await readFile(join(base, "research-sources.json"), "utf-8"), before.store);
+    assert.equal(await readFile(join(root, "dev", ".compiled.md"), "utf-8"), before.compiled);
+    assert.equal(reloads.length, before.reloads);
+    assert.equal((await second.engine.history("architect")).length, before.changes);
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });
