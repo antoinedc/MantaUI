@@ -2,7 +2,9 @@ import type { ArchitectSource } from "./types";
 
 export declare const SOURCE_ID_RE: RegExp;
 export declare const BASE_SOURCE_IDS: readonly string[];
+export declare const LEGACY_BASE_SOURCE_IDS: readonly string[];
 export declare const SOURCES_MAX: number;
+export declare const LEGACY_SOURCES_MAX: number;
 export declare const SOURCE_NAME_MAX: number;
 export declare const SOURCE_DESCRIPTION_MAX: number;
 export declare const QUERY_MAX: number;
@@ -14,9 +16,9 @@ export declare const PRIVATE_TO_PUBLIC_SENTENCE: string;
 
 export declare function isCredentialHeader(name: string): boolean;
 export declare function isCredentialEnv(name: string): boolean;
-export declare function validateSource(raw: unknown): { ok: true; source: ArchitectSource & { private: boolean } } | { ok: false; error: string };
+export declare function validateSource(raw: unknown, options?: { reservedIds?: readonly string[] }): { ok: true; source: ArchitectSource & { private: boolean } } | { ok: false; error: string };
 export declare function validateSourceList(raw: unknown): { ok: true; sources: (ArchitectSource & { private: boolean })[] } | { ok: false; error: string };
-export declare function parseSourceList(raw: unknown): { sources: (ArchitectSource & { private: boolean })[]; notes: string[] };
+export declare function parseSourceList(raw: unknown, options?: { reservedIds?: readonly string[]; max?: number }): { sources: (ArchitectSource & { private: boolean })[]; notes: string[] };
 export declare function hasYamlAliases(yamlText: string): boolean;
 export declare function sourcesOfAgentMd(text: string): { sources: (ArchitectSource & { private: boolean })[]; notes: string[]; refused: boolean };
 export declare function credentialLiterals(source: ArchitectSource): string[];

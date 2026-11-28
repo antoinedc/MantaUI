@@ -3098,7 +3098,9 @@ export type AgentChangeOrigin =
   /** Architect v2 Stage 3: a rule Manta learned from the user's corrections was written (or taken back); see `AgentChange.learned`. */
   | { kind: "learned" }
   /** The user saved one field of the agent from its profile's Settings tab (`agents:settings-set`). */
-  | { kind: "settings"; field: string };
+  | { kind: "settings"; field: string }
+  /** Research layer: the Architect's `sources:` moved out of its agent.md into Settings → Research sources, once, at boot. */
+  | { kind: "migration" };
 export interface AgentChangeEvidence {
   claim: string;
   /** null for a private source. */
