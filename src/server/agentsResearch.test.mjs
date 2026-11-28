@@ -271,7 +271,7 @@ async function chatWorld({ rows = [MINE, ...ROWS], sessions = {} } = {}) {
     delegateView: { assertWritable: async () => {} },
     registry: { identify: async (dir) => (dir === "/repo/site" ? { slug: "site" } : null) },
     autonomyPolicy: async () => ({}),
-    researchSources: { enabledRows: async () => w.rows.filter((r) => r.enabled) },
+    researchSources: { enabledRows: async () => { if (w.fail) throw Object.assign(new Error("damaged"), { safe: true }); return w.rows.filter((r) => r.enabled); } },
   });
   await engine.init();
   await writeFile(join(root, "dev", ".chat.json"), JSON.stringify({ sessionId: "ses_devchat" }));
@@ -544,5 +544,25 @@ test("AC-6.1 / AC-1.1 end to end: on the first boot of this release the store is
     assert.equal((await second.engine.history("architect")).length, before.changes);
   } finally {
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("review: when the sources store can't be read, every compiled prompt says so (not an empty or default list) and recovers when it can", async () => {
+  const f = await chatWorld();
+  try {
+    f.w.fail = true;
+    await f.engine.sync();
+    for (const slug of ["dev", "architect"]) {
+      const compiled = await readFile(join(f.root, slug, ".compiled.md"), "utf-8");
+      assert.match(compiled, /research sources couldn't be read/i, slug);
+      assert.ok(!compiled.includes("- bookface "), slug);
+    }
+    const lead = await f.engine.leadBrief("ses_lead");
+    assert.match(lead.text, /research sources couldn't be read/i);
+    f.w.fail = false;
+    await f.engine.sync();
+    assert.ok((await readFile(join(f.root, "dev", ".compiled.md"), "utf-8")).includes("- bookface "));
+  } finally {
+    await f.cleanup();
   }
 });

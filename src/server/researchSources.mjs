@@ -18,7 +18,7 @@
 import { statePath } from "../shared/paths.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { createSecretScanner, MIN_SECRET_LENGTH } from "./knowledge/secretScan.mjs";
-import { readFile } from "node:fs/promises";
+import { readFile, rename, access } from "node:fs/promises";
 import {
   validateSource,
   parseSourceList,
@@ -41,13 +41,20 @@ const NEW_BUILTIN_IDS = BASE_SOURCE_IDS.filter((id) => id !== "skills");
 const RENAME_SUFFIX = "-mine";
 const MIGRATED_PRIVATE_NOTICE = "Sources moved from the Architect are private; make one public here if you want";
 const COULDNT_CHECK = "Couldn't check the sources for credentials; try again";
-const UNREADABLE = "The saved research sources couldn't be read; fix or remove ~/.manta/research-sources.json, then try again";
+const CORRUPT = "The saved research sources file is damaged, so research is paused. Settings → Research sources can start a new list; the damaged file is kept next to it";
+const UNREADABLE = "The saved research sources couldn't be read, so research is paused; check the permissions of ~/.manta/research-sources.json";
 const WIRE_ONLY_KEYS = ["builtin", "kind", "enabled", "secretRefs", "missingSecrets", "addedBy", "addedAt"];
 
-class SourcesError extends Error {
-  constructor(message) {
-    super(message);
-    this.rpcStatus = 500; // the sentence is safe to show: the page relays it as it is
+/**
+ * The store can't be read. A ResearchError so the search tools relay its sentence; `safe` lets the outside check relay it too; `rpcStatus`
+ * lets the page show it. `kind`: "corrupt" (the file is there but not a sources document) or "unreadable" (it can't be read at all).
+ */
+class SourcesError extends ResearchError {
+  constructor(message, kind) {
+    super(message, kind);
+    this.kind = kind;
+    this.safe = true;
+    this.rpcStatus = 500;
   }
 }
 
@@ -88,15 +95,15 @@ export function createResearchSources({
       text = await readFile(file, "utf-8");
     } catch (e) {
       if (e?.code === "ENOENT") return { version: 1, migration: {}, sources: [] };
-      throw new SourcesError(UNREADABLE);
+      throw new SourcesError(UNREADABLE, "unreadable");
     }
     let doc;
     try {
       doc = JSON.parse(text);
     } catch {
-      throw new SourcesError(UNREADABLE);
+      throw new SourcesError(CORRUPT, "corrupt");
     }
-    if (!isPlain(doc) || (doc.sources !== undefined && !Array.isArray(doc.sources))) throw new SourcesError(UNREADABLE);
+    if (!isPlain(doc) || (doc.sources !== undefined && !Array.isArray(doc.sources))) throw new SourcesError(CORRUPT, "corrupt");
     return { version: 1, migration: isPlain(doc.migration) ? doc.migration : {}, sources: doc.sources ?? [] };
   }
 
@@ -153,14 +160,12 @@ export function createResearchSources({
     };
   }
 
-  /** The ordered rows, enabled or not, for the runtime (the search gate, the prompts). Never throws: an unreadable store reads as the defaults. */
+  /**
+   * The ordered rows, enabled or not, for the runtime (the search gate, the prompts). A missing file is the defaults; a damaged or unreadable
+   * one THROWS a SourcesError (never the defaults: that would turn a web the user switched off, and every source they removed, back on).
+   */
   async function rows() {
-    try {
-      return withBuiltins((await readDoc()).sources).map(expand);
-    } catch (e) {
-      log.warn?.(`[research] ${e?.message ?? e}; using the default sources`);
-      return withBuiltins([]).map(expand);
-    }
+    return withBuiltins((await readDoc()).sources).map(expand);
   }
 
   const enabledRows = async () => (await rows()).filter((r) => r.enabled);
@@ -168,7 +173,13 @@ export function createResearchSources({
 
   /** The page's read: every row with the secrets it names and the ones Secrets lacks, plus the migration's notices. */
   async function list() {
-    const doc = await readDoc();
+    let doc;
+    try {
+      doc = await readDoc();
+    } catch (e) {
+      if (e instanceof SourcesError) return { sources: [], notices: [], error: e.message };
+      throw e;
+    }
     let shared = null;
     try {
       shared = new Set((await loadSecrets()).filter((s) => s?.scope === "shared" && typeof s.key === "string").map((s) => s.key));
@@ -180,6 +191,19 @@ export function createResearchSources({
       return { ...s, secretRefs, missingSecrets: shared ? secretRefs.filter((n) => !shared.has(n)) : [] };
     });
     return { sources, notices: Array.isArray(doc.migration?.notices) ? [...doc.migration.notices] : [] };
+  }
+
+  /** Move the damaged file next to itself as `<file>.corrupt-<time>` (never over an earlier copy), so it can be recovered by hand. */
+  async function keepAside() {
+    for (let n = 0; ; n++) {
+      const target = `${file}.corrupt-${now()}${n > 0 ? `-${n}` : ""}`;
+      try {
+        await access(target);
+      } catch {
+        await rename(file, target);
+        return;
+      }
+    }
   }
 
   // ---- save ----
@@ -229,10 +253,14 @@ export function createResearchSources({
 
     return mutex.runExclusive(async () => {
       let doc;
+      let damaged = false;
       try {
         doc = await readDoc();
       } catch (e) {
-        return bad(e.message);
+        // a damaged file is replaced only by the user's own save, and then kept aside; one that can't be read at all is never touched
+        if (!(e instanceof SourcesError) || e.kind !== "corrupt") return bad(e.message);
+        doc = { version: 1, migration: {}, sources: [] };
+        damaged = true;
       }
       const before = new Map(doc.sources.filter(isPlain).map((r) => [r.id, r]));
       const next = [];
@@ -258,6 +286,7 @@ export function createResearchSources({
       }
       const refused = await credentialRefusal(users);
       if (refused) return bad(refused.error, refused.id);
+      if (damaged) await keepAside();
       await writeDoc({ migration: { ...doc.migration, notices: [] }, sources: next });
       return { ok: true };
     }).then(async (res) => {
@@ -383,7 +412,13 @@ export function createResearchSources({
       if (!v.ok) return { ok: false, error: v.error };
       def = expand({ ...v.source, kind: v.source.command ? "command" : "url", enabled: true });
     } else {
-      def = (await rows()).find((r) => r.id === input?.id);
+      let all;
+      try {
+        all = await rows();
+      } catch (e) {
+        return { ok: false, error: sentenceOf(e) };
+      }
+      def = all.find((r) => r.id === input?.id);
       if (!def) return { ok: false, error: `Unknown source "${typeof input?.id === "string" ? input.id.slice(0, 40) : ""}"` };
     }
     const started = now();

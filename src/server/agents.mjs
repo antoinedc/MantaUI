@@ -1359,7 +1359,7 @@ export function createAgentsEngine({
       return buildResearchBlock({ rows: await researchSources.enabledRows() });
     } catch (e) {
       log.warn?.(`[agents] couldn't read the research sources for the base block: ${e?.message ?? e}`);
-      return buildResearchBlock({ rows: [] });
+      return buildResearchBlock({ unavailable: true });
     }
   }
 

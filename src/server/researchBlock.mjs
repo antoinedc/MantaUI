@@ -34,9 +34,13 @@ Before you act on a decision, sort it by TYPE (not by how sure you feel):
 
 /**
  * The block for `rows` (the ENABLED sources in priority order, as `researchSources.rows()` gives them). `""` is never returned:
- * an empty list still carries the rules.
+ * an empty list still carries the rules. `unavailable`: the store can't be read (a different text from an empty list).
  */
-export function buildResearchBlock({ rows = [] } = {}) {
+export function buildResearchBlock({ rows = [], unavailable = false } = {}) {
+  if (unavailable) {
+    // the store is damaged or unreadable: say so, and never read it as "the defaults" or "everything off"
+    return [BASE_MARKER, "## Research (set by Manta for every agent)\nThe research sources couldn't be read (Settings → Research sources shows the problem), so research is paused: do not search or fetch outside sources until it is fixed. Tell the user if the task needs it.", SEARCH_FIRST, RESEARCH_GUIDANCE.trim()].join("\n\n");
+  }
   const list = rows.map((r) => {
     const label = r.builtin !== true && r.private !== false ? PRIVATE_LABEL : r.id === "reddit" || r.id === "x" ? THIRD_PARTY : OUTSIDE_LABEL;
     const id = r.id === "web" ? "web (use websearch)" : clip(r.id, 30);

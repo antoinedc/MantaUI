@@ -457,3 +457,81 @@ test("test: a failure is the sentence the search itself gives; an unknown id and
     await w.cleanup();
   }
 });
+
+// ---- review round 1, finding 3: a damaged or unreadable store must not turn the web (and every default) back on ----
+
+import { mkdir, readdir } from "node:fs/promises";
+const DAMAGED = /damaged/;
+const UNREADABLE_RE = /couldn't be read/;
+
+test("a CORRUPT file: the runtime reads (rows, enabledRows, webEnabled) refuse with a clear sentence instead of reading as the defaults; the page's list carries the error", async () => {
+  const w = await fixture();
+  try {
+    for (const bad of ["{ not json", "[]", '{"sources": "x"}', "null"]) {
+      await writeFile(w.file, bad);
+      for (const read of [() => w.store.rows(), () => w.store.enabledRows(), () => w.store.webEnabled()]) {
+        await assert.rejects(read(), (e) => DAMAGED.test(e.message) && e.name === "ResearchError", bad);
+      }
+      const l = await w.store.list();
+      assert.deepEqual(l.sources, []);
+      assert.match(l.error, DAMAGED);
+      assert.equal(await readFile(w.file, "utf-8"), bad, "nothing was overwritten");
+    }
+    assert.deepEqual(await w.store.test({ id: "hn" }), { ok: false, error: (await w.store.list()).error });
+  } finally {
+    await w.cleanup();
+  }
+});
+
+test("a file that can't be READ (here: a folder in its place) is the other unavailable case: refused with its own sentence, the save refuses and touches nothing", async () => {
+  const w = await fixture();
+  try {
+    await mkdir(w.file, { recursive: true });
+    await assert.rejects(w.store.rows(), (e) => UNREADABLE_RE.test(e.message));
+    await assert.rejects(w.store.webEnabled(), (e) => UNREADABLE_RE.test(e.message));
+    const l = await w.store.list();
+    assert.match(l.error, UNREADABLE_RE);
+    const r = await w.store.save({ sources: DEFAULT_IDS.map((id) => ({ id, enabled: true })) });
+    assert.equal(r.ok, false);
+    assert.match(r.error, UNREADABLE_RE);
+    assert.deepEqual(await readdir(w.dir), ["research-sources.json"], "nothing moved, nothing written");
+  } finally {
+    await w.cleanup();
+  }
+});
+
+test("saving over a CORRUPT file keeps the bad file aside (research-sources.json.corrupt-<time>, byte for byte) and writes the new list; the store is readable again", async () => {
+  const w = await fixture();
+  try {
+    await writeFile(w.file, '{"sources": [ {broken');
+    const r = await w.store.save({ sources: DEFAULT_IDS.map((id) => ({ id, enabled: id !== "web" })) });
+    assert.deepEqual(r, { ok: true });
+    const names = (await readdir(w.dir)).sort();
+    assert.equal(names.length, 2, names.join());
+    const aside = names.find((n) => n.startsWith("research-sources.json.corrupt-"));
+    assert.ok(aside, names.join());
+    assert.equal(await readFile(join(w.dir, aside), "utf-8"), '{"sources": [ {broken');
+    assert.equal(await w.store.webEnabled(), false, "what the user saved now is what applies");
+    assert.equal((await w.store.list()).error, undefined);
+    // a second damaged file does not overwrite the first copy
+    await writeFile(w.file, "also broken");
+    w.now += 1000;
+    await w.store.save({ sources: DEFAULT_IDS.map((id) => ({ id, enabled: true })) });
+    assert.equal((await readdir(w.dir)).filter((n) => n.includes(".corrupt-")).length, 2);
+  } finally {
+    await w.cleanup();
+  }
+});
+
+test("migrate leaves a corrupt file alone (nothing imported, nothing moved) and tries again at the next boot", async () => {
+  const w = await fixture({ architect: { found: true, raw: [bookface()] } });
+  try {
+    await writeFile(w.file, "{ broken");
+    assert.deepEqual(await w.store.migrate(), { state: null });
+    assert.equal(await readFile(w.file, "utf-8"), "{ broken");
+    assert.equal(w.strips, 0);
+    assert.deepEqual((await readdir(w.dir)), ["research-sources.json"]);
+  } finally {
+    await w.cleanup();
+  }
+});

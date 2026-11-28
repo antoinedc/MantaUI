@@ -67,3 +67,13 @@ test("the block is about 25 lines of rules plus one line per source (it rides ev
   const lines = block.trim().split("\n").length;
   assert.ok(lines < 60, `${lines} lines`);
 });
+
+test("review: when the sources can't be read the block says so and tells the agent not to search (it never reads as 'all defaults on')", () => {
+  const block = buildResearchBlock({ rows: [], unavailable: true });
+  assert.ok(block.startsWith(BASE_MARKER));
+  assert.match(block, /research sources couldn't be read/i);
+  assert.match(block, /do not search or fetch/i);
+  assert.ok(!/No research sources are turned on/.test(block));
+  assert.ok(!/websearch is turned off/.test(block), "not claiming a setting the user never made");
+  assert.ok(block.includes(RESEARCH_GUIDANCE.trim()));
+});

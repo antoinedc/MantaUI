@@ -1343,3 +1343,35 @@ test("research_fetch: each hop of a redirect chain is checked (private path word
     await f.cleanup();
   }
 });
+
+// ---- review round 1, finding 3: a damaged sources store refuses research instead of reading as the defaults ----
+
+test("a damaged research sources file: research_search is refused with its sentence (no source runs, nothing is requested), and so is websearch through the outside check", async () => {
+  const { createResearchSources } = await import("./researchSources.mjs");
+  const f = await fixture({ routes: { "*": json({ hits: [] }) } });
+  try {
+    const file = join(f.base, "research-sources.json");
+    await writeFile(file, "{ broken");
+    const store = createResearchSources({ file, log: { warn: () => {} } });
+    const engine = createResearchEngine({
+      bind: async (b) => ({ childSessionID: b.sessionID, architect: false }),
+      root: join(f.base, "research2"),
+      hop: async (req) => (f.calls.push({ url: req.url }), json({ hits: [] })),
+      sourceList: () => store.rows(),
+      loadSecretsStrict: async () => [],
+      log: { warn: () => {} },
+    });
+    const refused = await engine.search(call({ source: "hn", query: "agents" }));
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /damaged, so research is paused/);
+    const web = await engine.outsideCheck({ sessionID: "ses_x", tool: "websearch", input: { query: "postgres queue library" } });
+    assert.equal(web.ok, false);
+    assert.match(web.error, /damaged, so research is paused/);
+    assert.equal(f.calls.length, 0);
+    // fixed: the next save (the user's own) keeps the bad file aside and the same engine works again
+    assert.deepEqual(await store.save({ sources: DEFAULT_ORDER.map((id) => ({ id, enabled: true })) }), { ok: true });
+    assert.equal((await engine.search(call({ source: "hn", query: "agents" }))).ok, true);
+  } finally {
+    await f.cleanup();
+  }
+});

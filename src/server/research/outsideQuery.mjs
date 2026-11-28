@@ -190,6 +190,8 @@ export function createOutsideCheck({ loadSecrets, privateAnswers = async () => [
       }
       return { ok: false, error: OUTSIDE_REFUSAL };
     } catch (e) {
+      // an error that says it is safe to show (the research sources store is damaged) is the refusal itself, still before any request
+      if (e?.safe === true && typeof e.message === "string") return { ok: false, error: e.message };
       if (!(e instanceof Unavailable)) log.warn?.(`[research] outside check failed: ${e?.message ?? e}`);
       return { ok: false, error: CHECK_UNAVAILABLE };
     }
