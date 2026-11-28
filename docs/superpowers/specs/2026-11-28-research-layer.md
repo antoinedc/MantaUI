@@ -2,7 +2,9 @@
 
 Status: spec, 2026-11-28, revised after review of PR #1779 (migration parses against the old id set and forces private;
 durable suggestion offers with read/ack contracts; similarity fixture with recall and tuned threshold; no private material in
-outside queries; uncapped "don't ask again" suppression set). Owner: Antoine. Builds on `2026-11-24-research-library.md` (the library, the research tools of every
+outside queries; uncapped "don't ask again" suppression set); second round: built-in `websearch`/`webfetch` guarded by the
+plugin's blocking `execute.before` hook (proof gates release, routed fallback specified), whole-URL checking, retry-safe
+accept. Owner: Antoine. Builds on `2026-11-24-research-library.md` (the library, the research tools of every
 specialist task), `2026-11-24-agents-phase5-builder.md` §4.3a (the Architect's extra sources), `2026-11-27-architect-v2.md`
 (the Architect's rounds) and `2026-11-28-agent-profile-redesign.md` (profile, settings through the change flow).
 Out of scope here: the screens (the Product Designer does the Settings page, the profile line and the suggestion line next),
@@ -141,21 +143,35 @@ and the shared library, not only inside a background task.*
   confidential material may go into their queries) or **outside** (every built-in — web, GitHub, packages, Stack Overflow, HN,
   arXiv, and Reddit/X which go through a third party, Exa — every user source not marked private, and any address passed to
   `research_fetch`): queries to an outside source must not contain confidential or project-specific material.
-- AC-2.8 (server check) Given a `research_search` to an outside source, or a `research_fetch` whose address carries a query
-  string, When the query/address contains (a) the value of any secret in the Secrets store or anything the existing secret
-  scanner flags, (b) an absolute file path or a path under the task's/chat's folder, (c) an e-mail address, (d) a private network
-  address or an internal host name (`*.local`, `*.internal`, `*.lan`, RFC 1918 / loopback IPs), or (e) a run of 6+ consecutive
-  words copied verbatim from a private source's answer stored in this task or chat, Then the call is refused BEFORE any network
-  request with `This query would send private material to an outside source; rephrase it in general terms, or use a private
-  source`, and the refusal is recorded (kind only, never the query) for the evaluation. Unit tests cover each of (a)–(e) and a
-  clean query that passes; the same query to a private source is allowed.
-- AC-2.9 (behaviour) Given the scripted confidential-brief trial (§6.4: a brief about a fictional unannounced project with a
-  codename, a customer name, an internal host and a deal amount, asking for market and library research), When it runs 5 times
-  against the shipped rule wording, Then in every run no outside-source query — `research_search` (from the server's recorded
-  searches), `research_fetch` addresses, and `websearch` inputs (read from the run's transcript tool parts) — contains the
-  codename, the customer name, the host or the amount; and the runs still search (≥ 1 outside query each, in general terms).
-  `websearch` is OpenCode's own tool, so the server check of AC-2.8 can't refuse it unless the pinned V2 plugin API offers a
-  before-tool hook (to verify in slice 2; if it does, the same check applies to `websearch` input); until then AC-2.9 is its test.
+- AC-2.8 (the outside-query check) Every outgoing request to an outside destination passes ONE check (`outsideQuery.check`,
+  §6.3a) before any network request is made. Covered calls: `research_search` to an outside source; `research_fetch`; OpenCode's
+  built-in `websearch` (its `query`) and `webfetch` (its `url`) through the plugin's `execute.before` hook. What is checked:
+  - a search query: the whole query text;
+  - an address (`research_fetch`, `webfetch`, and the request a url-type source builds): the WHOLE URL — user-info, host
+    (each label), every path segment (percent-decoded, `+` and `-`/`_` also read as spaces), every query name and value
+    (decoded), and the fragment (decoded). Nothing in the URL is exempt because of where it sits.
+
+  It refuses when that text contains (a) the value of any secret in the Secrets store or anything the existing secret scanner
+  flags, (b) an absolute file path or a path under the task's/chat's folder, (c) an e-mail address, (d) a private network address
+  or an internal host name (`*.local`, `*.internal`, `*.lan`, `*.corp`, `*.home.arpa`, RFC 1918 / link-local / loopback IPs), or
+  (e) a run of 6+ consecutive words copied verbatim from a private source's answer stored in this task or chat. The refusal comes
+  BEFORE any network request, with `This query would send private material to an outside source; rephrase it in general terms,
+  or use a private source`, and is recorded (kind and tool only, never the text). The same query to a private source is allowed.
+  Unit tests: each of (a)–(e) in a query; each of (a)–(e) placed ONLY in a URL path with no query string and no fragment (e.g.
+  `https://example.com/search/billing.int.kestrel.lan/plans` → refused for (d); `https://example.com/u/jane.doe%40halvorsen.no/`
+  → refused for (c) after decoding); each placed only in the fragment; a clean URL and a clean query that pass.
+- AC-2.9 (built-in tools, on the pinned binary) An end-to-end test on OpenCode 2.0.30 with the `manta` plugin loaded and the
+  web-search provider and fetch target pointed at a local recording HTTP server: a session whose model is scripted to call
+  `websearch` with a query containing a secret value, and `webfetch` with a URL whose only private material is in the path. Then
+  both tool parts end in an error carrying the AC-2.8 sentence, and the recording server received NO request; the same calls
+  with clean input reach the recording server. Run in the lead's chat, in an agent task and in an agent conversation, and in a
+  plain (non-agent) session. This test gates the release of slice 2 (§6.3a "If the proof fails").
+- AC-2.9b (fail closed) Given manta-server is unreachable or the check errors, When `websearch` or `webfetch` runs, Then it is
+  refused with `Couldn't check this query for private material; try again`, and nothing is sent.
+- AC-2.9c (behaviour, an extra check — never the only one) Given the scripted confidential-brief trial (§6.4), When it runs 5
+  times against the shipped rule wording, Then no outside query or address in any run — recorded searches, `research_fetch` and
+  `webfetch` addresses, `websearch` inputs — contains the codename, the customer name, the host or the amount (paraphrases
+  included, which the mechanical check can't catch), and the runs still search in general terms (≥ 1 outside query each).
 
 ### US3 (P1) — Agents search when a decision rests on a checkable, changing fact
 *As a new user, when Manta or Dev picks a library, an API, a version or an approach, it checks current facts first and tells me
@@ -204,6 +220,19 @@ do it better; I can say yes, later, or never for that kind of work.*
 - AC-4.3 Given a suggestion, When the user picks "Build an agent", Then a user message is posted in that chat ("Yes — build a
   dedicated agent for <kind>. Earlier briefs: …") and Manta hands it to the Architect through the normal handoff; the cluster
   becomes `accepted`. "Make a skill" does the same with the skill wording. No agent or skill is created by the suggestion itself.
+- AC-4.3b Accepting is safe to retry (§6.5 "Accepting"). Tests, each with injected fakes for the store and opencode:
+  - **Crash after the state write, before the post**: the act call writes `accept: {state: "posting", messageId}` and the process
+    dies (injected throw) before the prompt is sent. On the next boot — and, separately, on the next `agents:suggestions` read for
+    that chat — recovery finds no message with that id in the session, posts it once with that id, and marks it `posted`. Exactly
+    one user message exists afterwards; the cluster is `accepted`.
+  - **Crash after the post, before marking done**: recovery finds the message with that id already in the session, marks the
+    offer `posted` and posts nothing.
+  - **RPC retried**: the same `agents:suggestion-act` sent twice (sequentially, and concurrently) → one message posted; the
+    second call returns `{ ok: true, already: "agent", posted: <the same messageId> }`.
+  - **Post fails** (opencode down): the offer stays `posting`, the card says it is sending; the sweep retries (at most 5
+    attempts, back-off 30 s → 8 min); after the 5th it is `failed`, the card offers Retry, and Retry posts once with the SAME id.
+  - **Busy chat**: the post uses `delivery: "queue"` so it never steers a running turn, and recovery still finds it by id.
+  - **Other answers** ("Not now", "Don't ask again") post nothing and are a single state write.
 - AC-4.4 Given "Not now", Then that cluster is not offered again until 3 more similar handoffs; after a second "Not now" it is
   never offered again. Given "Don't ask again for this", Then the cluster's signature goes into the suppression set (§6.1), and
   a later brief similar to it is never offered — also after the cluster itself has aged out of the 500-item / 90-day history.
@@ -267,8 +296,9 @@ do it better; I can say yes, later, or never for that kind of work.*
 - **FR-015** Accepting a suggestion only posts a user message; the Architect builds through the normal path.
 - **FR-015b** "Don't ask again" is kept in a suppression set separate from the capped history, never pruned by it (§6.1).
 - **FR-018** Confidential or project-specific material never goes into a query to an outside source (every built-in, every
-  non-private user source, any fetched address); private sources may receive it. The rule says so, and the server refuses the
-  mechanically detectable cases before any request (AC-2.8).
+  non-private user source, any fetched address); private sources may receive it. The rule says so, and one check refuses the
+  mechanically detectable cases before any request, over the whole query or the whole URL, for `research_search`,
+  `research_fetch` and the built-in `websearch` / `webfetch` (AC-2.8, §6.3a); it fails closed.
 - **FR-016** The profile shows the sources line and library counts read-only.
 - **FR-017** Everything above converges automatically on update.
 
@@ -309,7 +339,11 @@ other store):
   "offers": [ { "id": "o_…", "cluster": "c_…", "chat": "<lead session id>", "anchorMessageId": "<Manta message the card sits under>",
                 "label": "weekly release notes", "verdict": "agent|skill", "why": "…", "count": 3,
                 "createdAt": "…", "seenAt": null, "state": "pending|answered|withdrawn",
-                "answer": null, "answeredAt": null } ] }
+                "answer": null, "answeredAt": null,
+                "accept": null } ] }
+// accept, set only for "agent" / "skill":
+// { "state": "posting|posted|failed", "messageId": "msg_…", "text": "Yes — build a dedicated agent for …",
+//   "attempts": 0, "nextAttemptAt": "…", "postedAt": null, "lastError": null }
 ```
 
 Caps: 500 items (oldest dropped); clusters with no item in 90 days dropped; offers kept until answered/withdrawn, then 30 days
@@ -380,6 +414,52 @@ Failures log a warning and never stop the server.
 - Where a source's answer is stored: today per child session; for chats, per chat session id under the same store and the same
   30-day / 200 MB sweep.
 
+### 6.3a Guarding the built-in web tools — path taken: the plugin's blocking `execute.before` hook
+
+**Decision: the spec takes the hook path.** The `manta` V2 plugin registers `ctx.tool.hook("execute.before", …)`; for
+`event.tool` = `websearch` or `webfetch` it calls the same outside-query check as `research_search` / `research_fetch`, and
+throws the refusal sentence when it refuses. Built-in `websearch` / `webfetch` stay available (no routing change).
+
+**Evidence (gathered 2026-11-28; nothing under `~/.manta` was read):**
+1. Pinned version: `scripts/opencode-v2/version.mjs` → `OPENCODE_V2_VERSION = "2.0.30"`; the box's binary reports
+   `opencode v2.0.30`.
+2. The hook exists in that binary and runs inside the tool executor before the tool: in the 2.0.30 bundle the executor does
+   `De = yield* i(re.call.name, re.call.input, ctx)` where `i = (tool, input, ctx) => e.trigger("tool", "execute.before",
+   {tool, sessionID, agent, messageID, id, input})`, and only then looks up `De.tool` and runs it with `De.input` (strings
+   extracted from `/home/dev/.opencode/bin/opencode`). The trigger is `yield*`-ed in the same effect, so a failure raised by a
+   hook ends that effect before the tool runs. OpenCode's own built-in plugin `opencode.tool.input.repair` uses this hook to
+   rewrite `event.input`, which proves it runs before execution with the input the tool then receives.
+3. OpenCode's V2 plugin docs (Plugins → Server → Hooks → Tools; Migrate from V1) list `ctx.tool.hook("execute.before")` as
+   the V2 home of V1's `tool.execute.before`, and their guard example blocks a built-in tool (`read`) by throwing.
+4. Not in the repo before this spec: `docs/opencode-plugins-v2/` uses only `ctx.tool.transform` and `ctx.session.hook`
+   (`context`, `compaction`, `generate`, `title`, `http.request`, `http.response`); `docs/opencode-v2/spikes/` mapped the V1 hooks
+   Manta used, which didn't include `tool.execute.before`. The plugin type definitions under `node_modules` were not readable
+   from this job (outside the worktree), so the binary and the docs are the evidence.
+
+What is NOT yet proven, and therefore gates the release: that a throw in the hook stops a built-in tool on 2.0.30 end to end
+with no outgoing request, and that `websearch` / `webfetch` reach the hook under their own names (not wrapped inside a Code
+Mode `execute` call, which OpenCode's own repair hook skips). **AC-2.9 is that proof** and runs first in slice 2.
+
+**If the proof fails** (the throw doesn't stop the tool, or the calls arrive as `execute`), slice 2 switches to the routed path
+before anything ships, with no other change to this spec's behaviour:
+- `research_search` gains source `web`: manta-server runs the check, then calls OpenCode's own location-scoped web search route
+  (`/api/websearch`, present in 2.0.30) and returns the results in the usual shape. `research_fetch` already covers fetching.
+- Built-in `websearch` and `webfetch` are denied (`websearch: deny`, `webfetch: deny`, the same mechanism already used for the
+  Architect's permission block and proven by `scripts/opencode-v2/autonomy-rules.e2e.mjs`) in every agent block (which governs
+  Manta's led chat, agent conversations and agent tasks — they all run as agent packages) and in the task rulesets.
+- Manta's own chat is the lead agent package, so it is covered by the same agent-block deny; a plain session of no agent keeps the
+  built-in tools (no agent rule applies there) and that is stated in Settings help text.
+- AC-2.9 then becomes: the built-in tool is refused by permission in all three agent session kinds, and `research_search`
+  `web` with private material in the query never reaches the recording server.
+
+**How the hook calls the check.** The hook POSTs `/api/research/outside-check {sessionID, tool, input}` (bearer auth like every
+tool; returns `{ ok: true }` or `{ ok: false, error }`), with a 5 s timeout. Any failure → refuse (fail closed, AC-2.9b). The
+check needs the session only for (b) the folder and (e) the private answers of that session; it applies to every session,
+including plain ones (a)–(d).
+
+**Out of reach of this guard (stated, not hidden):** network calls an agent makes through the shell (`curl` in `bash`) or
+through an MCP server. The rule covers them in words; mechanically guarding the shell is out of this appetite (follow-up).
+
 ### 6.4 The search-first rule (behaviour; the Architect writes the words)
 
 The rule must make an agent, before acting:
@@ -407,9 +487,10 @@ the Stripe API charge for Z now", "how do teams usually structure a monorepo wit
 "rename this function", "which of these two button labels do you prefer", "explain what a mutex is", "summarise this file"), 5
 "taste" briefs, and 1 **confidential** brief (fictional: codename "Kestrel", customer "Halvorsen Freight", host
 `billing.int.kestrel.lan`, a $40M amount; asks which queue library and what competitors charge), run 5 times. Pass bars:
-AC-3.4 / AC-3.5 / AC-2.9. The trials run on a scripted check over the run's records: the server's recorded searches (source +
-query), the fetched addresses, and `websearch` inputs from the transcript tool parts, matched case-insensitively against the
-brief's private terms.
+AC-3.4 / AC-3.5 / AC-2.9c. The trials run on a scripted check over the run's records: the server's recorded searches (source +
+query), the fetched addresses (`research_fetch`, `webfetch`), and `websearch` inputs from the transcript tool parts, matched
+case-insensitively against the brief's private terms. This trial is an extra check on behaviour; the guarantee comes from the
+check of AC-2.8 running in front of every covered call (AC-2.9).
 
 ### 6.5 Similarity for the suggestion counter (cheap, deterministic, no model call)
 
@@ -457,6 +538,22 @@ brief's private terms.
   3. After the card is in the DOM, the client calls `agents:suggestion-seen`; the server stores `seenAt` once (first call wins,
      later calls are no-ops). "Shown" = `seenAt` set; never inferred from publishing.
   4. Answered via `agents:suggestion-act` (first answer wins, idempotent). Answered offers keep rendering in their resolved state.
+     **Accepting** ("agent" / "skill") is three steps, in this order:
+     a. Under the suggestions mutex, if the offer has no answer: write `answer`, `answeredAt` and
+        `accept = { state: "posting", messageId: <minted opencode "msg_" id>, text, attempts: 0 }`; the cluster becomes
+        `accepted`. The text is fixed at this moment, so every retry posts the same words. If the offer already has an answer,
+        do not write; go to (b) only if `accept.state` is `posting` and no attempt is in flight in this process.
+     b. Post the message to the chat with that id (`opencodePrompt(sessionId, text, { messageID, delivery })`, `delivery: "queue"`
+        when the chat is busy, none when idle) — the same client-minted-id mechanism the busy composer already uses — but FIRST
+        read the session for a message with that id; if present, skip the post.
+     c. Under the mutex, set `accept.state = "posted"`, `postedAt`. A failure in (b) increments `attempts`, stores `lastError`
+        (safe sentence) and `nextAttemptAt`; after 5 attempts the state is `failed` (the card shows Retry, which is the same act
+        call and resets `attempts`, keeping `messageId`).
+     **Recovery** runs at boot, in the 60 s sweep, and on every `agents:suggestions` read for that chat: for each `posting` offer
+     not in flight in this process and due (`nextAttemptAt` passed, or older than 30 s at boot), run (b) then (c). An in-process
+     set of offer ids in flight prevents the sweep, a read and a retried RPC from posting in parallel; the existence check in
+     (b) prevents a double post across a crash. Result: at most one message per accept, and an accept is never lost — it either
+     posts or stays visibly `failed` with Retry.
   5. Withdrawn: `pending` with `seenAt: null` older than 7 days → `withdrawn` by the 60 s sweep, cluster back to `open`.
      A seen but unanswered offer stays pending (the card stays); it does not block offers for other clusters.
 
@@ -470,9 +567,9 @@ brief's private terms.
 | `research:sources-save` | `{ sources: [{ id, enabled, …user fields }] }` (whole ordered list) | `{ ok: true }` or `{ ok: false, error, id? }` |
 | `research:sources-test` | `{ id, query? }` (also accepts an unsaved `source` object for the add form) | `{ ok: true, ms, count, first?: { title, url? } , sample? }` or `{ ok: false, error }` |
 | `agents:profile` (existing) | — | adds `research: { sources: [{ id, name, private }], library: { entries, savedByAgent } }` |
-| `agents:suggestions` | `{ sessionId }` | `{ offers: [{ id, anchorMessageId, label, verdict, why, count, state: "pending"\|"answered", answer?, seenAt?, createdAt }] }` — every non-withdrawn offer of that chat, oldest first; empty list when none |
+| `agents:suggestions` | `{ sessionId }` | `{ offers: [{ id, anchorMessageId, label, verdict, why, count, state: "pending"\|"answered", answer?, accept?: { state: "posting"\|"posted"\|"failed", messageId }, seenAt?, createdAt }] }` (the read also triggers due accept recovery for that chat) — every non-withdrawn offer of that chat, oldest first; empty list when none |
 | `agents:suggestion-seen` | `{ id, sessionId }` | `{ ok: true, seenAt }` (first call stores it; later calls return the stored value) or `{ ok: false, error }` (unknown id / other chat) |
-| `agents:suggestion-act` | `{ id: offerId, action: "agent"\|"skill"\|"later"\|"never" }` | `{ ok: true, posted?: messageId }`, or `{ ok: true, already: "<answer>" }` when it was answered before, or `{ ok: false, error }` |
+| `agents:suggestion-act` | `{ id: offerId, action: "agent"\|"skill"\|"later"\|"never" }` | First answer: `{ ok: true, posted?: messageId, sending?: true }` (`sending` when the post is still pending). Repeat call (any action): `{ ok: true, already: "<first answer>", posted?: messageId, sending?: true, failed?: true }`, which also resumes a `posting`/`failed` accept. `{ ok: false, error }` for an unknown offer. |
 | `config:update` (existing) | `{ agentSuggestions: boolean }` | — (default true) |
 
 **Bus** (hints only; clients always re-read): `research.sources.updated`; `agentSuggestion { sessionId, id }` when an offer is
@@ -480,7 +577,13 @@ created; `agentSuggestion.resolved { sessionId, id }` when answered or withdrawn
 from `agents:suggestions` on chat open and on reconnect.
 
 Refusal for an outside query carrying private material (AC-2.8): `This query would send private material to an outside source;
-rephrase it in general terms, or use a private source`.
+rephrase it in general terms, or use a private source`. Check unavailable (AC-2.9b): `Couldn't check this query for private
+material; try again`.
+
+**Outside-query check** (used by the plugin's `execute.before` hook for `websearch` / `webfetch`; `research_search` and
+`research_fetch` call the same function in-process): `POST /api/research/outside-check`
+`{ sessionID, tool: "websearch" | "webfetch", input: { query } | { url } }` → `{ ok: true }` or `{ ok: false, error }`.
+Class-2 route (an AI tool registrar is the consumer); bearer auth; it never logs `input`.
 
 **Plugin tools** (`docs/opencode-plugins-v2/manta/tools/research.ts`): names and parameters unchanged
 (`research_search {source, query}`, `research_fetch {url}`, `research_read {sourceId, offset?}`, `research_library_find {query}`,
@@ -502,7 +605,8 @@ reusing `createSecretScanner` from `knowledge/secretScan.mjs`),
 `src/server/agents.mjs` (`compileAgentPrompt`, `bindResearcher`, `buildArchitectContext`, `checkDraft` sources refusal,
 migration, profile, handoff hook for the counter), `src/server/researchLibrary.mjs` (guidance moves into the base block),
 `src/server/delegate.mjs` (rulesets: websearch deny when off), `src/server/rpc.mjs`, `docs/opencode-plugins-v2/manta/tools/research.ts`
-(descriptions), the Architect template and its authoring skill (no per-agent research section; no `sources:`), renderer Settings
+(descriptions), `docs/opencode-plugins-v2/manta/index.ts` (the `execute.before` hook for `websearch` / `webfetch`), the
+`/api/research/outside-check` route in `index.mjs`, the Architect template and its authoring skill (no per-agent research section; no `sources:`), renderer Settings
 (new section), profile, ChatPanel (suggestion line).
 
 ## 7. Default sources (decision 2) — chosen set
@@ -580,7 +684,9 @@ the model controls only the query, passed as one argument with no shell; a query
 suggestion check call gets brief text marked as data.
 **Outside queries**: confidential or project-specific material stays out of queries to outside sources (rule point 5); the server
 refuses the mechanically detectable cases before any request (AC-2.8: secrets, paths, e-mails, internal hosts, verbatim private
-text) and records only the refusal kind; `websearch` input is covered by the trial (AC-2.9) unless a V2 before-tool hook exists.
+text, anywhere in a query or a URL, path included), for Manta's research tools and, through the plugin's `execute.before` hook,
+for the built-in `websearch` / `webfetch` (§6.3a; fallback: deny them and route through Manta's tools). It fails closed and
+records only the refusal kind. The trial (AC-2.9c) is an extra check for paraphrases. Not guarded mechanically: the shell and MCP servers.
 Reddit and X go through Exa (a third party) as well as the site itself, so they are outside sources.
 **Migration**: everything migrated from the Architect's file is private until the user widens it.
 **Suggestions store and suppression set** hold tokens, not text.
@@ -598,8 +704,9 @@ Reddit and X go through Exa (a third party) as well as the site itself, so they 
 
 1. Store + migration + `research:sources-*` + gate changes + outside-query check + `stackoverflow`/`packages` adapters +
    throttles (US1 server, AC-2.4, AC-2.8).
-2. Base block in compiled prompts + chat bindings (US2, US3 server part, AC-3.1–3.3); spike: does the pinned V2 plugin API offer
-   a before-tool hook for `websearch` (AC-2.9 note).
+2. First the AC-2.9 proof on 2.0.30 (hook blocks `websearch`/`webfetch` with no outgoing request); then the hook, or the
+   routed fallback if the proof fails (§6.3a). Then the base block in compiled prompts + chat bindings (US2, US3 server part,
+   AC-3.1–3.3).
 3. Renderer: Settings page + profile line (after the Designer).
 4. Similarity fixture + tuning test first, then the counter, offers, suppression set, read/ack contracts, chat line, setting (US4).
 The Architect then writes the rule wording and runs the evaluation (AC-3.4/3.5/2.9) — its own task, after slice 2.
@@ -618,6 +725,10 @@ The Architect then writes the rule wording and runs the evaluation (AC-3.4/3.5/2
   caps and the suppression set bound the damage. If the targets can't be met, slice 4 waits; don't reach for embeddings in this appetite.
 - **The outside-query check can't catch everything** (a paraphrased codename isn't mechanically detectable). It blocks the clear
   cases; the rule and the confidential-brief trial cover the rest. Don't build a model-based classifier on every query.
+- **The `execute.before` hook might not block on 2.0.30** (only strongly evidenced, not yet run). AC-2.9 proves it first; the
+  routed fallback of §6.3a is fully specified, so a failed proof changes the mechanism, not the scope.
+- **A later OpenCode bump** could change the hook. AC-2.9 lives in `scripts/opencode-v2/` next to the other pinned-binary
+  e2e probes and runs on every pin bump.
 - **A suggestion the user never sees** is withdrawn after 7 days rather than kept forever; it can come back on the next similar handoff.
 - **Recompiling every agent on each sources change** must not restart opencode: reuse the existing reload path.
 - **Turning web off** touches every agent's permissions; keep it one rule applied in the two places that already build them.
@@ -660,16 +771,19 @@ creates anything by itself; automatic convergence on update. The migration parse
 forces private, then validates — never drops a source because a new built-in took its id. Offers render from the durable record,
 never only from an event. "Don't ask again" lives in the uncapped suppression set.
 
-**Acceptance criteria**: AC-1.1, AC-1.1b, AC-1.2 … AC-1.15, AC-2.1 … AC-2.9 (2.9 is a trial), AC-3.1 … AC-3.5 (3.4/3.5 are the
-Architect's evaluation after slice 2), AC-4.1, AC-4.2, AC-4.2b, AC-4.3 … AC-4.9, AC-5.1 … AC-5.3, AC-6.1 … AC-6.2 (§4). Contracts: §6.6. Libraries: §8 (flag, don't silently build, any component
+**Acceptance criteria**: AC-1.1, AC-1.1b, AC-1.2 … AC-1.15, AC-2.1 … AC-2.8, AC-2.9 (pinned-binary proof, gates slice 2),
+AC-2.9b, AC-2.9c (trial), AC-3.1 … AC-3.5 (3.4/3.5 are the Architect's evaluation after slice 2), AC-4.1, AC-4.2, AC-4.2b, AC-4.3,
+AC-4.3b, AC-4.4 … AC-4.9, AC-5.1 … AC-5.3, AC-6.1 … AC-6.2 (§4). Contracts: §6.6. Libraries: §8 (flag, don't silently build, any component
 the table doesn't cover; don't hand-roll what it adopts).
 
 **Spec**: `docs/superpowers/specs/2026-11-28-research-layer.md`.
 
 **How to check.** Targeted while iterating: `node --import ./scripts/testSandbox.mjs --test src/server/<file>.test.mjs` for the
 touched server modules (research, researchLibrary, agents, a new `researchSources.test.mjs` with the AC-1.14/1.15 migration
-fixtures, a new `outsideQuery.test.mjs` for AC-2.8, a new `agentSuggestions.test.mjs` with the similarity fixture, the threshold
-tuning test, the end-to-end AC-4.2b case, the offer lifecycle (reconnect, closed client, ack, two clients, withdrawal) and the
-suppression test of AC-4.4), `npx vitest run <renderer test>` for UI (the card renders from `agents:suggestions` and acks). Full `npm run typecheck && npm test` once at the end, on a
+fixtures, a new `outsideQuery.test.mjs` for AC-2.8 (queries and whole URLs, path-only and fragment-only cases), a new
+`agentSuggestions.test.mjs` with the similarity fixture, the threshold tuning test, the end-to-end AC-4.2b case, the offer
+lifecycle (reconnect, closed client, ack, two clients, withdrawal), the accept crash/retry cases of AC-4.3b and the suppression
+test of AC-4.4), the pinned-binary probe `scripts/opencode-v2/web-guard.e2e.mjs` for AC-2.9 (sandboxed like the other
+`scripts/opencode-v2/*.e2e.mjs`, never the live `:4096`), `npx vitest run <renderer test>` for UI (the card renders from `agents:suggestions` and acks). Full `npm run typecheck && npm test` once at the end, on a
 Freestyle VM, not on this box. Live check on the staging box (`dev@135.181.255.249`): migration with a seeded Architect `sources:`
 block, Test of each default, a chat search by Manta, the suggestion after three similar Dev handoffs.
