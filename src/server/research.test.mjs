@@ -11,6 +11,13 @@ import { createResearchEngine, addressRefusal, WINDOW_CHARS } from "./research.m
 import { createGuardedTransport, fetchFollowing, ResearchError } from "./research/transport.mjs";
 import { parseExaResponse, parseExaText, canonicalPost, isAntibotPage, isReadable, inScope } from "./research/reach.mjs";
 import { queryRefusal, redact, searchDirs } from "./research/extra.mjs";
+import { DEFAULT_ORDER, BUILTIN_SOURCES } from "../shared/researchSources.mjs";
+
+// the research sources store's rows, as `researchSources.rows()` gives them: the user's sources first, then the built-ins in order
+const rowsOf = (extras = [], disabled = []) => [
+  ...extras.map((s) => ({ ...s, builtin: false, kind: s.command ? "command" : "url", enabled: !disabled.includes(s.id), private: s.private !== false })),
+  ...BUILTIN_SOURCES.map((b) => ({ id: b.id, builtin: true, kind: "builtin", enabled: !disabled.includes(b.id), private: false, name: b.name, description: b.description })),
+];
 
 const html = (body, title = "A page") => `<html><head><title>${title}</title></head><body>${body}</body></html>`;
 const reply = (status, headers, body) => {
@@ -18,7 +25,7 @@ const reply = (status, headers, body) => {
   return { status, headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])), body: buf, bytes: buf.length };
 };
 
-async function fixture({ routes = {}, bound = true, architect = true, extras = [], secrets = [], exec, now, engineExtra = {} } = {}) {
+async function fixture({ routes = {}, bound = true, architect = true, extras = [], disabled = [], secrets = [], exec, now, engineExtra = {} } = {}) {
   const base = await mkdtemp(join(tmpdir(), "research-test-"));
   const calls = [];
   const hop = async (req) => {
@@ -38,7 +45,7 @@ async function fixture({ routes = {}, bound = true, architect = true, extras = [
     home: join(base, "h"),
     pathEnv: join(base, "bin"),
     hop,
-    extraSources: async () => extras,
+    sourceList: async () => rowsOf(extras, disabled),
     loadSecretsStrict: async () => {
       if (secrets === "throw") throw new Error("unreadable");
       return secrets;
@@ -290,7 +297,7 @@ test("research_search hn and arxiv: compact results; web is not a source; an unk
     assert.equal(ax.results[0].url, "https://arxiv.org/abs/2602.12670v1");
     assert.ok(ax.results[0].summary.length <= 300);
     assert.match((await f.engine.search(call({ source: "web", query: "q" }))).error, /websearch/);
-    assert.match((await f.engine.search(call({ source: "nope", query: "q" }))).error, /Available: hn, arxiv, reddit, x, github, bookface/);
+    assert.match((await f.engine.search(call({ source: "nope", query: "q" }))).error, /Available: bookface, github, packages, stackoverflow, hn, reddit, arxiv, x$/);
     assert.match((await f.engine.search(call({ source: "hn", query: "-x" }))).error, /dash/);
     assert.match((await f.engine.search(call({ source: "hn", query: "x".repeat(201) }))).error, /1 to 200/);
     assert.match((await f.engine.search(call({ source: "hn", query: "" }))).error, /1 to 200/);
@@ -805,50 +812,83 @@ test("store sweep: sessions untouched for 30 days go; over the cap the OLDEST se
   }
 });
 
-// ---- every specialist may research; the extra sources stay the Architect's ----
+// ---- every agent may research, and every enabled source (the user's too) is theirs; `skills` stays the Architect's ----
 
-test("a specialist (not the Architect) can fetch, read and search the base sources, but never an extra source: it isn't offered and nothing runs", async () => {
+test("AC-2.4: an agent that is not the Architect searches a user source (Bookface) and the base sources; the command runs", async () => {
   let ran = 0;
   const f = await fixture({
     architect: false,
     extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }],
-    exec: async () => ((ran += 1), { stdout: "secret forum text" }),
+    exec: async () => ((ran += 1), { stdout: "forum text" }),
     routes: {
       "https://example.com/": reply(200, { "content-type": "text/html" }, html("<p>Hello</p>")),
       "https://hn.algolia.com/api/v1/search?query=agents&tags=story&hitsPerPage=10": reply(200, { "content-type": "application/json" }, JSON.stringify({ hits: [{ title: "T", url: "https://t.example", points: 3, num_comments: 1, objectID: "1" }] })),
     },
   });
   try {
+    await withProgram(f, "yc");
     const page = await f.engine.fetch(call({ url: "https://example.com/" }));
     assert.equal(page.ok, true);
     assert.equal((await f.engine.read(call({ sourceId: page.sourceId }))).ok, true);
     assert.equal((await f.engine.search(call({ source: "hn", query: "agents" }))).ok, true);
     const extra = await f.engine.search(call({ source: "bookface", query: "agents" }));
-    assert.equal(extra.ok, false);
-    assert.match(extra.error, /Unknown source "bookface"\. Available: hn, arxiv, reddit, x, github$/);
-    assert.equal(ran, 0, "the extra source's command never ran");
+    assert.equal(extra.ok, true, extra.error);
+    assert.equal(ran, 1, "the user's source ran for a non-Architect");
+    assert.equal((await f.engine.getSource("ses_child", extra.sourceId)).private, true, "stored private");
     assert.deepEqual(f.binds.map((b) => b.tool), ["research_fetch", "research_read", "research_search", "research_search"]);
   } finally {
     await f.cleanup();
   }
 });
 
-test("a binding that does not say the caller is the Architect never reaches an extra source", async () => {
+test("a binding that does not say the caller is the Architect reaches user sources but never `skills`", async () => {
   let ran = 0;
   const base = await mkdtemp(join(tmpdir(), "research-test-"));
   try {
     const engine = createResearchEngine({
       bind: async (b) => ({ childSessionID: b.sessionID }),
       root: join(base, "research"),
-      extraSources: async () => [{ id: "bf", name: "n", description: "d", command: ["yc", "{query}"], private: true }],
+      sourceList: async () => rowsOf([{ id: "bf", name: "n", description: "d", command: ["yc", "{query}"], private: true }]),
       exec: async () => ((ran += 1), { stdout: "x" }),
+      home: join(base, "h"),
+      agentHome: join(base, "home"),
+      pathEnv: join(base, "bin"),
       log: { warn: () => {} },
     });
-    const r = await engine.search(call({ source: "bf", query: "agents" }));
-    assert.equal(r.ok, false);
-    assert.equal(ran, 0);
+    await mkdir(join(base, "bin"), { recursive: true });
+    await writeFile(join(base, "bin", "yc"), "#!/bin/sh\n", { mode: 0o755 });
+    assert.equal((await engine.search(call({ source: "bf", query: "agents" }))).ok, true);
+    assert.equal(ran, 1);
+    const skills = await engine.search(call({ source: "skills", query: "agents" }));
+    assert.equal(skills.ok, false);
+    assert.match(skills.error, /Unknown source "skills"/);
   } finally {
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("AC-1.5 / FR-007: a source that is turned off is refused with its sentence before anything runs; an unknown one lists the enabled ids in priority order", async () => {
+  let ran = 0;
+  const f = await fixture({ extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }], disabled: ["bookface", "hn", "web"], exec: async () => ((ran += 1), { stdout: "x" }) });
+  try {
+    await withProgram(f, "yc");
+    const off = await f.engine.search(call({ source: "bookface", query: "agents" }));
+    assert.deepEqual(off, { ok: false, error: 'The source "bookface" is turned off in Settings → Research sources' });
+    assert.equal((await f.engine.search(call({ source: "hn", query: "agents" }))).error, 'The source "hn" is turned off in Settings → Research sources');
+    assert.equal((await f.engine.search(call({ source: "web", query: "agents" }))).error, 'The source "web" is turned off in Settings → Research sources');
+    const unknown = await f.engine.search(call({ source: "nope", query: "agents" }));
+    assert.equal(unknown.error, 'Unknown source "nope". Available: github, packages, stackoverflow, reddit, arxiv, x');
+    assert.equal(ran, 0);
+    assert.equal(f.calls.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture({ architect: true });
+  try {
+    assert.equal((await g.engine.search(call({ source: "nope", query: "q" }))).error, "Unknown source \"nope\". Available: github, packages, stackoverflow, hn, reddit, arxiv, x, skills");
+    assert.equal((await g.engine.search(call({ source: "web", query: "q" }))).error, "Use the built-in websearch for the web");
+  } finally {
+    await g.cleanup();
   }
 });
 
@@ -931,7 +971,7 @@ test("the skills source refuses a query that starts with a dash before anything 
     assert.equal(runs.length, 0);
     assert.deepEqual(await f.engine.searchesOf("ses_child"), []);
     const unknown = await f.engine.search(call({ source: "nope", query: "q" }));
-    assert.match(unknown.error, /Available: hn, arxiv, reddit, x, github, skills$/);
+    assert.match(unknown.error, /Available: github, packages, stackoverflow, hn, reddit, arxiv, x, skills$/);
   } finally {
     await f.cleanup();
   }
@@ -943,9 +983,293 @@ test("a specialist that isn't the Architect has no skills source: unknown, nothi
   try {
     const r = await f.engine.search(call({ source: "skills", query: "landing pages" }));
     assert.equal(r.ok, false);
-    assert.match(r.error, /Unknown source "skills"\. Available: hn, arxiv, reddit, x, github$/);
+    assert.match(r.error, /Unknown source "skills"\. Available: github, packages, stackoverflow, hn, reddit, arxiv, x$/);
     assert.equal(runs.length, 0);
   } finally {
     await f.cleanup();
+  }
+});
+
+// ---- the research layer: new built-in sources, throttles, the 10-minute answer cache, the outside-query check ----
+
+const json = (v) => reply(200, { "content-type": "application/json" }, JSON.stringify(v));
+const DEPS = "https://api.deps.dev/v3/systems";
+const depsPackage = (system, name, versions) => ({ packageKey: { system, name }, versions: versions.map(([version, publishedAt, isDefault = false, isDeprecated = false]) => ({ versionKey: { system, name, version }, publishedAt, isDefault, isDeprecated, deprecatedReason: "" })) });
+
+test("packages: `<system>:<name>` reads deps.dev — the default version, its licence, advisories, deprecation, links and the newest versions", async () => {
+  const f = await fixture({
+    routes: {
+      [`${DEPS}/NPM/packages/react`]: json(depsPackage("NPM", "react", [["18.3.1", "2024-04-26T00:00:00Z"], ["19.1.0", "2025-03-28T19:59:42Z", true], ["19.2.0-rc.1", "2025-09-01T00:00:00Z"], ["17.0.2", "2021-03-22T00:00:00Z"]])),
+      [`${DEPS}/NPM/packages/react/versions/19.1.0`]: json({ versionKey: { system: "NPM", name: "react", version: "19.1.0" }, publishedAt: "2025-03-28T19:59:42Z", isDefault: true, isDeprecated: false, licenses: ["MIT"], advisoryKeys: [{ id: "GHSA-aaaa" }], links: [{ label: "HOMEPAGE", url: "https://react.dev/" }, { label: "SOURCE_REPO", url: "git+https://github.com/facebook/react.git" }] }),
+    },
+  });
+  try {
+    const r = await f.engine.search(call({ source: "packages", query: "npm:react" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.source, "packages");
+    assert.deepEqual(r.results[0], {
+      title: "npm:react",
+      url: "https://deps.dev/npm/react",
+      version: "19.1.0",
+      date: "2025-03-28",
+      license: "MIT",
+      deprecated: false,
+      advisories: 1,
+      homepage: "https://react.dev/",
+      repo: "https://github.com/facebook/react",
+      recent: [{ version: "19.2.0-rc.1", date: "2025-09-01" }, { version: "19.1.0", date: "2025-03-28" }, { version: "18.3.1", date: "2024-04-26" }, { version: "17.0.2", date: "2021-03-22" }],
+    });
+    assert.deepEqual(f.calls.map((c) => c.url), [`${DEPS}/NPM/packages/react`, `${DEPS}/NPM/packages/react/versions/19.1.0`]);
+    // the search is recorded with the package address (what a later claim "I saw it in a result" is checked against)
+    assert.ok((await f.engine.searchesOf("ses_child"))[0].refs.includes("https://deps.dev/npm/react"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("packages: every ecosystem maps to its deps.dev system and the name is one encoded path word; a missing package is a sentence", async () => {
+  const f = await fixture({ routes: { "*": reply(404, {}, "{}") } });
+  try {
+    for (const [query, url] of [["pypi:requests", `${DEPS}/PYPI/packages/requests`], ["go:github.com/gin-gonic/gin", `${DEPS}/GO/packages/github.com%2Fgin-gonic%2Fgin`], ["maven:org.slf4j:slf4j-api", `${DEPS}/MAVEN/packages/org.slf4j%3Aslf4j-api`], ["cargo:serde", `${DEPS}/CARGO/packages/serde`], ["nuget:Newtonsoft.Json", `${DEPS}/NUGET/packages/Newtonsoft.Json`], ["rubygems:rails", `${DEPS}/RUBYGEMS/packages/rails`], ["NPM:@types/node", `${DEPS}/NPM/packages/%40types%2Fnode`]]) {
+      f.calls.length = 0;
+      const r = await f.engine.search(call({ source: "packages", query }));
+      assert.equal(r.ok, false, query);
+      assert.match(r.error, /No package .* found/, query);
+      assert.equal(f.calls[0].url, url, query);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("packages: a bare word searches the npm registry (keyless); results carry version, date, licence, weekly downloads", async () => {
+  const f = await fixture({
+    routes: {
+      "https://registry.npmjs.org/-/v1/search?text=job%20queue&size=8": json({ objects: [{ downloads: { weekly: 1374531, monthly: 1 }, package: { name: "graphile-worker", version: "0.18.0", description: "Job queue for PostgreSQL", license: "MIT", date: "2026-09-08T16:06:26.479Z", links: { npm: "https://www.npmjs.com/package/graphile-worker" } } }] }),
+    },
+  });
+  try {
+    const r = await f.engine.search(call({ source: "packages", query: "job queue" }));
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.results[0], { title: "npm:graphile-worker", url: "https://www.npmjs.com/package/graphile-worker", version: "0.18.0", date: "2026-09-08", license: "MIT", weeklyDownloads: 1374531, description: "Job queue for PostgreSQL" });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const SE = (q) => `https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(q)}&site=stackoverflow&pagesize=8`;
+const seItems = [{ title: "How do I use &quot;pg-boss&quot; &amp; retries?", link: "https://stackoverflow.com/questions/1/x", score: 12, answer_count: 3, is_answered: true, accepted_answer_id: 9, creation_date: 1_684_229_940, tags: ["postgresql", "queue"] }, { title: "Plain", link: "https://stackoverflow.com/questions/2/y", score: 0, answer_count: 0, is_answered: false, creation_date: 1_556_231_712, tags: [] }];
+
+test("stackoverflow: the Stack Exchange API; entities decoded, score / answers / accepted / date / tags, links to the question", async () => {
+  const f = await fixture({ routes: { [SE("pg queue")]: json({ items: seItems, quota_max: 300, quota_remaining: 298 }) } });
+  try {
+    const r = await f.engine.search(call({ source: "stackoverflow", query: "pg queue" }));
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.results[0], { title: 'How do I use "pg-boss" & retries?', url: "https://stackoverflow.com/questions/1/x", score: 12, answers: 3, accepted: true, date: "2023-05-16", tags: ["postgresql", "queue"] });
+    assert.equal(r.results[1].accepted, false);
+    assert.ok((await f.engine.searchesOf("ses_child"))[0].refs.includes("https://stackoverflow.com/questions/1/x"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("stackoverflow: stops for the day at quota 0, honours `backoff`, and says what to do instead", async () => {
+  let t = Date.UTC(2026, 10, 28, 10, 0, 0);
+  const replies = [json({ items: seItems, quota_remaining: 5, backoff: 30 }), json({ items: seItems, quota_remaining: 0 }), json({ items: seItems, quota_remaining: 300 })];
+  const f = await fixture({ now: () => t, routes: { "*": () => replies.shift() } });
+  try {
+    assert.equal((await f.engine.search(call({ source: "stackoverflow", query: "one" }))).ok, true);
+    const paused = await f.engine.search(call({ source: "stackoverflow", query: "two" }));
+    assert.equal(paused.ok, false);
+    assert.match(paused.error, /Stack Overflow asked for a pause; try again in 30 seconds/);
+    assert.equal(f.calls.length, 1, "no request during the backoff");
+    t += 31_000;
+    assert.equal((await f.engine.search(call({ source: "stackoverflow", query: "two" }))).ok, true);
+    const spent = await f.engine.search(call({ source: "stackoverflow", query: "three" }));
+    assert.equal(spent.error, "Stack Overflow's free daily limit was reached; use websearch with site:stackoverflow.com");
+    assert.equal(f.calls.length, 2);
+    t = Date.UTC(2026, 10, 29, 0, 0, 1); // the next UTC day
+    assert.equal((await f.engine.search(call({ source: "stackoverflow", query: "three" }))).ok, true);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture({ routes: { "*": reply(400, { "content-type": "application/json" }, JSON.stringify({ error_id: 502, error_name: "throttle_violation", error_message: "too many requests from this IP" })) } });
+  try {
+    assert.match((await g.engine.search(call({ source: "stackoverflow", query: "x" }))).error, /Stack Overflow asked for a pause/);
+  } finally {
+    await g.cleanup();
+  }
+});
+
+test("throttles: arXiv is one request per 3 s and GitHub ten per minute, box-wide (p-throttle); a queue that is already long is a refusal, not a wait", async () => {
+  const made = [];
+  const makeThrottle = (opts) => {
+    const wrapper = (fn) => {
+      const t = (...args) => {
+        t.runs += 1;
+        return fn(...args);
+      };
+      t.runs = 0;
+      t.queueSize = 0;
+      made.push({ opts, t });
+      return t;
+    };
+    return wrapper;
+  };
+  const f = await fixture({
+    engineExtra: { makeThrottle },
+    routes: {
+      "https://export.arxiv.org/api/query?search_query=all:q&start=0&max_results=8&sortBy=relevance": reply(200, { "content-type": "application/atom+xml" }, `<feed xmlns="http://www.w3.org/2005/Atom"></feed>`),
+      "*": json({ items: [] }),
+    },
+  });
+  try {
+    assert.equal((await f.engine.search(call({ source: "arxiv", query: "q" }))).ok, true);
+    assert.equal((await f.engine.search(call({ source: "github", query: "q" }))).ok, true);
+    const byOpts = Object.fromEntries(made.map((m) => [`${m.opts.limit}/${m.opts.interval}`, m]));
+    assert.ok(byOpts["1/3000"], "arxiv: 1 request / 3 s");
+    assert.ok(byOpts["10/60000"], "github: 10 / min");
+    assert.equal(byOpts["1/3000"].opts.strict, true);
+    assert.ok(byOpts["1/3000"].t.runs >= 1 && byOpts["10/60000"].t.runs >= 1, "the requests went through the throttles");
+    byOpts["10/60000"].t.queueSize = 5;
+    const refused = await f.engine.search(call({ source: "github", query: "other" }));
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /GitHub's search limit was reached/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an identical query to the same built-in source within 10 minutes returns the stored answer (one request); after 10 minutes it asks again", async () => {
+  let t = 1_800_000_000_000;
+  const f = await fixture({ now: () => t, routes: { [HN_URL]: hnReply } });
+  try {
+    const a = await f.engine.search(call({ source: "hn", query: "agents" }));
+    const b = await f.engine.search(call({ sessionID: "ses_other", source: "hn", query: "agents" }));
+    assert.deepEqual(b.results, a.results);
+    assert.equal(f.calls.length, 1);
+    assert.equal((await f.engine.searchesOf("ses_other")).length, 1, "the second session still records its own search");
+    t += 10 * 60_000 + 1;
+    await f.engine.search(call({ source: "hn", query: "agents" }));
+    assert.equal(f.calls.length, 2);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- AC-2.8: the outside-query check runs before any request ----
+
+const SECRET = "sk-live-9f2c41ab77d0e3158c";
+const OUTSIDE = "This query would send private material to an outside source; rephrase it in general terms, or use a private source";
+
+test("AC-2.8: research_search to an outside source refuses a secret in the query BEFORE any request; a private source accepts the same query", async () => {
+  const seen = [];
+  const f = await fixture({
+    secrets: [{ key: "K", scope: "shared", value: SECRET }],
+    extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }, { id: "pubsrc", name: "Pub", description: "d", url: "https://search.example.com/api?q={query}", private: false }],
+    exec: async (file, args) => (seen.push(args), { stdout: "private answer" }),
+    routes: { "*": json({ hits: [] }) },
+  });
+  try {
+    await withProgram(f, "yc");
+    for (const source of ["hn", "arxiv", "github", "packages", "stackoverflow", "reddit", "x", "pubsrc"]) {
+      const r = await f.engine.search(call({ source, query: `queue library for ${SECRET}` }));
+      assert.deepEqual(r, { ok: false, error: OUTSIDE }, source);
+    }
+    assert.equal(f.calls.length, 0, "nothing was requested");
+    const priv = await f.engine.search(call({ source: "bookface", query: `queue library for ${SECRET}` }));
+    assert.equal(priv.ok, true, priv.error);
+    assert.equal(seen.length, 1);
+    assert.deepEqual(await f.engine.searchesOf("ses_child").then((l) => l.map((x) => x.source)), ["bookface"], "a refused search is not recorded");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("AC-2.8: a url source's whole built address is checked (a secret in its path is refused), and so is research_fetch's whole URL", async () => {
+  const f = await fixture({
+    secrets: [{ key: "K", scope: "shared", value: SECRET }],
+    extras: [{ id: "pubsrc", name: "Pub", description: "d", url: "https://search.example.com/api?q={query}", private: false }],
+    routes: { "*": reply(200, { "content-type": "text/plain" }, "ok") },
+  });
+  try {
+    assert.deepEqual(await f.engine.fetch(call({ url: `https://example.com/docs/${SECRET}/plans` })), { ok: false, error: OUTSIDE });
+    assert.deepEqual(await f.engine.fetch(call({ url: "https://example.com/u/jane.doe%40halvorsen.no/" })), { ok: false, error: OUTSIDE });
+    assert.deepEqual(await f.engine.fetch(call({ url: "https://example.com/search/billing.int.kestrel.lan/plans" })), { ok: false, error: OUTSIDE });
+    assert.equal(f.calls.length, 0);
+    assert.equal((await f.engine.fetch(call({ url: "https://example.com/docs/pricing" }))).ok, true);
+    assert.equal(f.calls.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("AC-2.8: the check also sees the task's folder and 6+ words copied from a private answer stored in this session", async () => {
+  const f = await fixture({
+    extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }],
+    exec: async () => ({ stdout: "Halvorsen Freight signed a forty million dollar deal for the Kestrel queue rewrite" }),
+    engineExtra: { folderOf: async (sid) => (sid === "ses_child" ? "/work/acme-secret-project" : null) },
+    routes: { "*": json({ hits: [] }) },
+  });
+  try {
+    await withProgram(f, "yc");
+    assert.equal((await f.engine.search(call({ source: "bookface", query: "what did we sign" }))).ok, true);
+    assert.deepEqual(await f.engine.search(call({ source: "hn", query: "signed a forty million dollar deal for the Kestrel" })), { ok: false, error: OUTSIDE });
+    assert.deepEqual(await f.engine.search(call({ source: "hn", query: "is /work/acme-secret-project a monorepo" })), { ok: false, error: OUTSIDE });
+    assert.equal((await f.engine.search(call({ sessionID: "ses_other", source: "hn", query: "signed a forty million dollar deal for the Kestrel" }))).ok, true, "another session's private answers don't count");
+    assert.equal(f.calls.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("AC-2.9b: when the check can't be made the call is refused and nothing is sent", async () => {
+  const f = await fixture({ secrets: "throw", routes: { "*": json({ hits: [] }) } });
+  try {
+    const s = await f.engine.search(call({ source: "hn", query: "queue library" }));
+    assert.deepEqual(s, { ok: false, error: "Couldn't check this query for private material; try again" });
+    assert.deepEqual(await f.engine.fetch(call({ url: "https://example.com/" })), { ok: false, error: "Couldn't check this query for private material; try again" });
+    assert.equal(f.calls.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the engine's own check is what the HTTP route calls (outsideCheck): clean ok, secret refused, never throws", async () => {
+  const f = await fixture({ secrets: [{ key: "K", scope: "shared", value: SECRET }] });
+  try {
+    assert.deepEqual(await f.engine.outsideCheck({ sessionID: "ses_child", tool: "websearch", input: { query: "postgres queue library" } }), { ok: true });
+    assert.deepEqual(await f.engine.outsideCheck({ sessionID: "ses_child", tool: "webfetch", input: { url: `https://x.example.com/${SECRET}` } }), { ok: false, error: OUTSIDE });
+    assert.equal((await f.engine.outsideCheck(null)).ok, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- Test (AC-1.10): runs a source without storing anything ----
+
+test("testSource runs a source and reports a count and the first result; nothing is stored, recorded or cached", async () => {
+  const f = await fixture({ routes: { [HN_URL]: hnReply } });
+  try {
+    const r = await f.engine.testSource({ id: "hn", builtin: true, kind: "builtin" }, "agents");
+    assert.equal(r.count, 1);
+    assert.deepEqual(r.first, { title: "T", url: "https://t.example/post" });
+    await assert.rejects(readdir(f.root), /ENOENT/, "no session folder, no stored source, no search record");
+    await f.engine.testSource({ id: "hn", builtin: true, kind: "builtin" }, "agents");
+    assert.equal(f.calls.length, 2, "a test is never served from the answer cache");
+  } finally {
+    await f.cleanup();
+  }
+  const exec = async () => ({ stdout: "a long private answer ".repeat(20) });
+  const g = await fixture({ exec });
+  try {
+    await withProgram(g, "yc");
+    const r = await g.engine.testSource({ id: "bf", builtin: false, kind: "command", name: "BF", private: true, command: ["yc", "{query}"] }, "test");
+    assert.equal(r.count, 1);
+    assert.match(r.text, /a long private answer/);
+    assert.equal(r.first.title.startsWith("a long private answer"), true);
+    await assert.rejects(readdir(g.root), /ENOENT/);
+  } finally {
+    await g.cleanup();
   }
 });
