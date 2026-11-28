@@ -21,6 +21,11 @@ export function registryLine(registry: { installs: number | null; stars: number 
 /** "Copied from acme/cro · MIT · 12,500 installs"; a written skill (no provenance): "Written for this agent". */
 export function provenanceLine(p: SkillProvenance | null | undefined): string {
   if (!p) return "Written for this agent";
+  if (p.sourceId.startsWith("installed:")) {
+    // taken from a skill already installed on this box: it names a repository only when the skill carried one
+    const from = `from the skill installed on this box${p.repo && p.repo !== "unknown" ? ` (${p.repo})` : ""}`;
+    return [`${p.taken === "part" ? "Part taken" : "Taken"} ${from}`, p.licence, registryLine(p.registry)].filter(Boolean).join(" · ");
+  }
   return [`${p.taken === "part" ? "Part copied" : "Copied"} from ${p.repo}`, p.licence, registryLine(p.registry)].filter(Boolean).join(" · ");
 }
 

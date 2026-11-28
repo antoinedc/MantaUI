@@ -21,7 +21,9 @@ export const COPY_LICENCES = Object.freeze(["MIT", "Apache-2.0", "BSD-2-Clause",
 /** These need no notice to travel with the copy; every other allowed licence needs `licenseSourceId`. */
 export const NO_NOTICE_LICENCES = Object.freeze(["0BSD", "Unlicense", "CC0-1.0"]);
 
-const OP_KEYS = ["name", "op", "files", "provenance"];
+const OP_KEYS = ["name", "op", "files", "provenance", "installed"];
+const INSTALLED_KEYS = ["skill", "taken", "take"];
+export const INSTALLED_TAKE_MAX = 100; // paths one part-adoption may name
 const FILE_KEYS = ["path", "content", "origin", "sourceId"];
 const PROVENANCE_KEYS = ["url", "sourceId", "repo", "ref", "licence", "licenseSourceId", "taken", "registry"];
 const PATH_RE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
@@ -111,7 +113,7 @@ export const isScriptFile = (path, content = "") => SCRIPT_RE.test(path) || Stri
 // ---- SOURCE.md: written by the server, read back for the profile and skills_installed ----
 
 /** `SOURCE.md` for a copied skill: origin link, ref, licence, what was taken, installs / stars at the time. Deterministic (the draft hash covers it). */
-export function renderSourceMd(provenance, { copied = [], written = [] } = {}) {
+export function renderSourceMd(provenance, { copied = [], written = [], left = [] } = {}) {
   const p = provenance;
   const lines = [
     "# Where this skill comes from",
@@ -127,6 +129,7 @@ export function renderSourceMd(provenance, { copied = [], written = [] } = {}) {
     ...(p.licenseSourceId ? [`- Licence source id: ${p.licenseSourceId}`] : []),
     `- Copied files: ${[...copied].sort(cmp).join(", ")}`,
     ...(written.length > 0 ? [`- Written for this agent: ${[...written].sort(cmp).join(", ")}`] : []),
+    ...(left.length > 0 ? [`- Left out: ${left.join(", ")}`] : []),
     "",
     "The copied files are the origin's own text, taken under the licence above (the notice is in LICENSE when the licence asks for one). Installs and stars are as they were when the skill was added.",
   ];
@@ -188,7 +191,17 @@ export function checkSkillOps(raw, { header }) {
     if (o.op === "remove") {
       if (o.files !== undefined && !(Array.isArray(o.files) && o.files.length === 0)) return fail(`A remove of skill ${o.name} takes no files`);
       if (o.provenance !== undefined) return fail(`A remove of skill ${o.name} takes no provenance`);
+      if (o.installed !== undefined) return fail(`A remove of skill ${o.name} takes no installed`);
       ops.push({ name: o.name, op: "remove", files: [], provenance: null });
+      continue;
+    }
+    if (o.installed !== undefined) {
+      // a skill already installed on this box, taken by reference: the server copies its files, so no file or provenance comes from the model
+      if (o.files !== undefined) return fail(`Skill ${o.name}: give either files or installed, not both (an installed skill's files are copied by the server)`);
+      if (o.provenance !== undefined) return fail(`Skill ${o.name}: an installed skill takes no provenance (the server writes SOURCE.md from the installed folder)`);
+      const inst = checkInstalledSpec(o.installed, o.name);
+      if (inst.error) return inst;
+      ops.push({ name: o.name, op: o.op, files: [], provenance: null, installed: inst.installed });
       continue;
     }
     if (!Array.isArray(o.files) || o.files.length === 0) return fail(`Skill ${o.name} needs its files: [{path, content, origin}], with a SKILL.md`);
@@ -228,6 +241,27 @@ export function checkSkillOps(raw, { header }) {
   return { ops };
 }
 
+/** `{ installed: { skill, taken, take } }` (trimmed) or `{ error }`: the shape of an installed-skill reference. */
+function checkInstalledSpec(raw, name) {
+  const who = `The installed of skill ${name}`;
+  if (!isPlain(raw)) return fail(`${who} must be {skill, taken, take?}: skill is the name or folder skills_installed lists, taken is "whole" or "part"`);
+  for (const k of Object.keys(raw)) if (!INSTALLED_KEYS.includes(k)) return fail(`Unknown field "${k}" in the installed of skill ${name}`);
+  if (typeof raw.skill !== "string" || raw.skill.trim() === "" || raw.skill.length > 400) return fail(`${who}: skill must be the name or folder of a skill skills_installed lists`);
+  if (raw.taken !== "whole" && raw.taken !== "part") return fail(`${who}: taken must be "whole" or "part"`);
+  if (raw.taken === "whole") {
+    if (raw.take !== undefined) return fail(`${who}: take goes with taken "part" (it lists what to take); a whole skill takes everything`);
+    return { installed: { skill: raw.skill.trim(), taken: "whole", take: null } };
+  }
+  if (!Array.isArray(raw.take) || raw.take.length === 0 || raw.take.length > INSTALLED_TAKE_MAX) return fail(`${who}: taken "part" needs take, 1 to ${INSTALLED_TAKE_MAX} paths (files or folders of the skill, e.g. ["reference"]; SKILL.md is always taken)`);
+  const take = [];
+  for (const t of raw.take) {
+    const bad = typeof t === "string" ? checkPath(t) : "a path must be text";
+    if (bad) return fail(`${who}: ${bad} (got ${JSON.stringify(String(t).slice(0, 60))})`);
+    if (!take.includes(t)) take.push(t);
+  }
+  return { installed: { skill: raw.skill.trim(), taken: "part", take } };
+}
+
 /** Is this provenance well-formed? `{ provenance }` (trimmed) or `{ error }`. The licence is judged by `checkLicence`. */
 function checkProvenanceShape(p, name) {
   const who = `The provenance of skill ${name}`;
@@ -255,13 +289,105 @@ function checkLicence(p, name) {
   return { licence };
 }
 
+// ---- adopting a skill that is already installed on this box ----
+
+const MODEST_VERSION_RE = /^[A-Za-z0-9._+-]{1,40}$/;
+/** The licence an installed skill declares, in order of trust: its SOURCE.md (ours, written when it was copied), its SKILL.md frontmatter. */
+const declaredLicence = (sourceMd, fm) => {
+  if (sourceMd?.licence) return sourceMd.licence;
+  for (const k of ["license", "licence"]) if (typeof fm?.[k] === "string" && fm[k].trim()) return fm[k].trim();
+  return "";
+};
+/** The allowed licence whose own text a licence file holds, or null. */
+const detectLicence = (text) => COPY_LICENCES.find((l) => holdsLicence(l, text)) ?? null;
+/** `owner/repo` from a frontmatter's repository / repo field (an address or the short form), or null. */
+function repoFromFrontmatter(fm) {
+  const v = fm?.repository ?? fm?.repo;
+  const raw = typeof v === "string" ? v : typeof v?.url === "string" ? v.url : "";
+  if (!raw) return null;
+  if (REPO_RE.test(raw.trim())) return raw.trim();
+  return parseGithubUrl(raw.trim().replace(/^git\+/, ""))?.repo ?? null;
+}
+const versionFromFrontmatter = (fm) => {
+  const v = fm?.version ?? fm?.metadata?.version;
+  const t = typeof v === "number" ? String(v) : typeof v === "string" ? v.trim() : "";
+  return MODEST_VERSION_RE.test(t) ? t : null;
+};
+
+/** Left-out report for a part-adoption: a whole folder when nothing of it was taken, else the single files that were not. Short. */
+function leftOutOf(all, taken) {
+  const takenSet = new Set(taken);
+  const by = new Map();
+  for (const p of all) {
+    const top = p.includes("/") ? p.slice(0, p.indexOf("/")) : p;
+    (by.get(top) ?? by.set(top, []).get(top)).push(p);
+  }
+  const out = [];
+  for (const [top, paths] of [...by].sort((a, b) => cmp(a[0], b[0]))) {
+    const left = paths.filter((p) => !takenSet.has(p));
+    if (left.length === 0) continue;
+    if (left.length === paths.length) out.push(top);
+    else out.push(...left.sort(cmp));
+  }
+  return out.length > 12 ? [...out.slice(0, 12), `… (${out.length - 12} more)`] : out;
+}
+
+/**
+ * The files, provenance and notice of an installed skill the server read (`got`: { files: Map<path, text>, all, licenceText, sourceMd } from the
+ * installed folder), or `{ error }`. Facts only: the same path, case-folding and size protections as a skill the model sends (the per-skill
+ * 20-file / 256 KiB caps bound what a MODEL has to type out, and nothing is typed here, so only the agent-wide 250 files / 1 MiB apply), a
+ * SKILL.md with a frontmatter naming the skill, and a licence that allows copying — from the skill's own SOURCE.md or frontmatter, else its
+ * licence file. `{ files: [{path, content}], provenance, licenceText, left }`.
+ */
+function adoptInstalled(o, got, { header, frontmatter }) {
+  const spec = o.installed;
+  const who = `Skill ${o.name}`;
+  const hint = ` Take part of it instead: taken "part" with take listing what fits (SKILL.md is always taken); scripts and long references are the usual things to leave out`;
+  const files = [];
+  for (const [path, content] of got.files) {
+    const bad = checkPath(path);
+    if (bad) return fail(`${who}: ${bad} (the installed skill has ${JSON.stringify(path.slice(0, 60))}).${hint}`);
+    if (GENERATED_FILES.some((g) => lower(g) === lower(path))) continue; // written by the server
+    if (files.some((x) => lower(x.path) === lower(path))) return fail(`${who}: the installed skill has the file ${path} twice (paths are compared without regard to case).${hint}`);
+    files.push({ path, content });
+  }
+  const md = files.find((f) => f.path === "SKILL.md");
+  if (!md) return fail(`${who}: the installed skill has no SKILL.md`);
+  const h = header(md.content);
+  if (!h) return fail(`The SKILL.md of the installed skill ${o.name} has no frontmatter with name and description`);
+  if (h.name !== o.name) return fail(`The installed skill's own name is ${JSON.stringify(h.name ?? "")}: name the skill ${h.name || "after its folder"} (${who} says ${o.name})`);
+  if (!h.description) return fail(`The SKILL.md of the installed skill ${o.name} needs a description in its frontmatter`);
+  if (h.description.length > SKILL_DESCRIPTION_MAX) return fail(`The description of the installed skill ${o.name} is ${h.description.length} characters; at most ${SKILL_DESCRIPTION_MAX}`);
+  const size = files.reduce((n, f) => n + bytes(f.content), 0);
+  if (size > AGENT_SKILLS_BYTES_MAX) return fail(`${who} is ${(size / 1024 / 1024).toFixed(1)} MiB; an agent's skills can total at most 1 MiB.${hint}`);
+  if (files.length > AGENT_SKILL_FILES_MAX) return fail(`${who} has ${files.length} files; an agent's skills can hold at most ${AGENT_SKILL_FILES_MAX}.${hint}`);
+  // the licence: declared by the skill itself, else read from its licence file; it must allow copying and agree with the licence file
+  const fm = frontmatter(md.content) ?? {};
+  const carried = parseSourceMd(got.sourceMd);
+  const declared = declaredLicence(carried, fm);
+  const fromFile = got.licenceText ? detectLicence(got.licenceText) : null;
+  const licence = declared ? copyLicenceOf(declared) : fromFile;
+  if (!licence) {
+    const given = declared ? JSON.stringify(declared.slice(0, 60)) : "none stated";
+    return fail(`${who}: the installed skill's licence (${given}) doesn't allow copying; write your own and cite what you learned as research. Copying is allowed under ${COPY_LICENCES.join(", ")}. Its frontmatter (license: <id>), its SOURCE.md or its licence file has to say which`);
+  }
+  if (declared && fromFile && fromFile !== licence) return fail(`${who}: the installed skill says ${licence} but its licence file is ${fromFile}; it can't be copied until that agrees`);
+  const left = spec.taken === "part" ? leftOutOf(got.all, files.map((f) => f.path)) : [];
+  const repo = carried?.repo && carried.repo !== "unknown" ? carried.repo : repoFromFrontmatter(fm) ?? "unknown";
+  const ref = carried?.ref && carried.ref !== "unknown" ? carried.ref : versionFromFrontmatter(fm) ?? "unknown";
+  const url = carried && /^https:\/\/[^\s]+$/.test(carried.url) ? carried.url : `installed on this box: ${o.name}`;
+  const provenance = { url, sourceId: `installed:${o.name}`, repo, ref, licence, taken: spec.taken, ...(carried?.registry ? { registry: carried.registry } : {}) };
+  return { files, provenance, licenceText: typeof got.licenceText === "string" && got.licenceText ? got.licenceText : null, left };
+}
+
 /**
  * The complete resulting `skills/**` set and the card's diff. `existing`: `Map<skillName, Map<relPath, string>>` (what the agent has now;
  * empty for a new agent). `fetchSource(sourceId)` → the stored source of THIS task (any of its rounds) or null; `listSources()` → every
  * source this task fetched (`{id, text}`), asked only when a written file is long enough to be checked. `ops`: from `checkSkillOps`.
+ * `readInstalled(spec)` → what the server read of an installed skill (see `adoptInstalled`) or `{ error }`; `header` / `frontmatter` read a SKILL.md.
  * `{ files: Map<"skills/<name>/<path>", text>, diff }` or `{ error }`.
  */
-export async function planSkills({ ops, existing, fetchSource, listSources = null }) {
+export async function planSkills({ ops, existing, fetchSource, listSources = null, readInstalled = null, header = null, frontmatter = null }) {
   const result = new Map([...existing].map(([name, files]) => [name, new Map(files)]));
   const diff = [];
   const unfetched = (id) => `Source ${id} wasn't fetched in this task; read it with research_fetch first`;
@@ -274,17 +400,26 @@ export async function planSkills({ ops, existing, fetchSource, listSources = nul
       diff.push({ name: o.name, op: "remove", paths: [...had.keys()].sort(cmp), provenance: null, scripts: [] });
       continue;
     }
+    let adopted = null;
+    if (o.installed) {
+      if (!readInstalled || !header || !frontmatter) return fail(`Skill ${o.name}: installed skills can't be read here`);
+      const got = await readInstalled(o.installed);
+      if (!got || got.error) return fail(`Skill ${o.name}: ${got?.error ?? "the installed skill couldn't be read"}`);
+      adopted = adoptInstalled(o, got, { header, frontmatter });
+      if (adopted.error) return adopted;
+    }
+    const skillFiles = adopted ? adopted.files.map((f) => ({ ...f, origin: "copied" })) : o.files;
     // copied files: their provenance is tied to the text (the page, its repository, the commit in its url, its licence), and each file
     // is a contiguous piece of a public page of that repository this task fetched
-    const copiedFiles = o.files.filter((f) => f.origin === "copied");
+    const copiedFiles = adopted ? [] : o.files.filter((f) => f.origin === "copied");
     const copiedPaths = copiedFiles.map((f) => f.path);
     const cache = new Map();
     const source = async (id) => {
       if (!cache.has(id)) cache.set(id, (await fetchSource(id)) ?? null);
       return cache.get(id);
     };
-    let provenance = null;
-    let licenceText = null;
+    let provenance = adopted ? adopted.provenance : null;
+    let licenceText = adopted ? adopted.licenceText : null;
     if (copiedFiles.length > 0) {
       const shaped = checkProvenanceShape(o.provenance, o.name);
       if (shaped.error) return shaped;
@@ -334,13 +469,14 @@ export async function planSkills({ ops, existing, fetchSource, listSources = nul
         if (hit) return fail(`Skill ${o.name}: ${f.path} holds a passage of ${LAUNDER_RUN} or more characters that is verbatim in a page you fetched (${hit.id}); if it is copied, label it copied with provenance, otherwise write it in your own words`);
       }
     }
-    const now = new Map(o.files.map((f) => [f.path, f.content]));
+    const now = new Map(skillFiles.map((f) => [f.path, f.content]));
     if (provenance) {
-      now.set("SOURCE.md", renderSourceMd(provenance, { copied: copiedPaths, written: o.files.filter((f) => f.origin === "written").map((f) => f.path) }));
+      now.set("SOURCE.md", renderSourceMd(provenance, { copied: adopted ? skillFiles.map((f) => f.path) : copiedPaths, written: skillFiles.filter((f) => f.origin === "written").map((f) => f.path), left: adopted?.left ?? [] }));
       if (licenceText !== null) now.set("LICENSE", licenceText);
     }
     const size = [...now.values()].reduce((n, t) => n + bytes(t), 0);
-    if (size > SKILL_BYTES_MAX) return fail(`Skill ${o.name} is ${Math.ceil(size / 1024)} KiB; a skill can be at most 256 KiB`);
+    // (an installed skill is copied by the server, not typed by the model: the agent-wide caps below are its limits)
+    if (!adopted && size > SKILL_BYTES_MAX) return fail(`Skill ${o.name} is ${Math.ceil(size / 1024)} KiB; a skill can be at most 256 KiB`);
     result.set(o.name, now);
     const paths = [...new Set([...now.keys(), ...(had ? had.keys() : [])])].filter((p) => (had?.get(p) ?? null) !== (now.get(p) ?? null)).sort(cmp);
     diff.push({
@@ -349,7 +485,7 @@ export async function planSkills({ ops, existing, fetchSource, listSources = nul
       paths,
       provenance,
       // every script among the changed files, whoever wrote it: an agent with a shell can run what it finds
-      scripts: o.files.filter((f) => paths.includes(f.path) && isScriptFile(f.path, f.content)).map((f) => f.path).sort(cmp),
+      scripts: skillFiles.filter((f) => paths.includes(f.path) && isScriptFile(f.path, f.content)).map((f) => f.path).sort(cmp),
     });
   }
   if (result.size > SKILLS_MAX) return fail(`An agent can have at most ${SKILLS_MAX} skills; this change leaves ${result.size}`);
