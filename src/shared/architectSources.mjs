@@ -9,8 +9,14 @@
 import { parse as parseYaml, parseDocument, visit } from "yaml";
 
 export const SOURCE_ID_RE = /^[a-z][a-z0-9-]{0,29}$/;
-export const BASE_SOURCE_IDS = Object.freeze(["hn", "arxiv", "reddit", "x", "github", "web", "skills"]);
-export const SOURCES_MAX = 10;
+// The ids no user source may take: every built-in research source, plus `skills` (the Architect's own search). The research
+// layer (docs/superpowers/specs/2026-11-28-research-layer.md) added `packages` and `stackoverflow`.
+export const BASE_SOURCE_IDS = Object.freeze(["hn", "arxiv", "reddit", "x", "github", "web", "skills", "packages", "stackoverflow"]);
+// The set as it was BEFORE the research layer, frozen: the Architect's own `sources:` are parsed against it on migration, so a
+// legacy source called `packages` or `stackoverflow` is valid there and renamed afterwards, never dropped (spec §6.2).
+export const LEGACY_BASE_SOURCE_IDS = Object.freeze(["hn", "arxiv", "reddit", "x", "github", "web", "skills"]);
+export const SOURCES_MAX = 20;
+export const LEGACY_SOURCES_MAX = 10;
 export const SOURCE_NAME_MAX = 60;
 export const SOURCE_DESCRIPTION_MAX = 300;
 export const QUERY_MAX = 200;
@@ -46,14 +52,15 @@ const onlyReference = (value) => new RegExp(`^(?:(?:Bearer|Token|Basic) )?${SECR
 /**
  * Validate ONE source's shape. `{ ok:true, source }` (normalised: `private` is always a boolean, default true) or
  * `{ ok:false, error }`, a sentence. Pure: it cannot know whether a literal is a credential (see `credentialLiterals`).
+ * `reservedIds`: the ids a source may not take (default: the current built-in set).
  */
-export function validateSource(raw) {
+export function validateSource(raw, { reservedIds = BASE_SOURCE_IDS } = {}) {
   const bad = (error) => ({ ok: false, error });
   if (!isPlain(raw)) return bad("A source must be a set of key: value lines");
   const label = typeof raw.id === "string" && raw.id ? `source "${raw.id}"` : "a source";
   for (const k of Object.keys(raw)) if (!SOURCE_KEYS.includes(k)) return bad(`${label}: unknown key "${k}"`);
   if (typeof raw.id !== "string" || !SOURCE_ID_RE.test(raw.id)) return bad(`${label}: the id must be lowercase letters, digits and dashes (at most 30)`);
-  if (BASE_SOURCE_IDS.includes(raw.id)) return bad(`${label}: "${raw.id}" is a built-in source id`);
+  if (reservedIds.includes(raw.id)) return bad(`${label}: "${raw.id}" is a built-in source id`);
   if (typeof raw.name !== "string" || !raw.name.trim() || raw.name.trim().length > SOURCE_NAME_MAX || CONTROL_RE.test(raw.name)) {
     return bad(`${label}: the name must be one line of at most ${SOURCE_NAME_MAX} characters`);
   }
@@ -172,7 +179,7 @@ function decodeURIComponentSafe(s) {
 /** A draft's `sources`: every entry must be valid and the ids unique. `{ ok:true, sources }` or `{ ok:false, error }`. */
 export function validateSourceList(raw) {
   if (!Array.isArray(raw)) return { ok: false, error: "sources must be a list" };
-  if (raw.length > SOURCES_MAX) return { ok: false, error: `At most ${SOURCES_MAX} sources` };
+  if (raw.length > SOURCES_MAX) return { ok: false, error: `At most ${SOURCES_MAX} sources of your own` };
   const sources = [];
   for (const entry of raw) {
     const r = validateSource(entry);
@@ -185,15 +192,16 @@ export function validateSourceList(raw) {
 
 /**
  * The sources of a parsed frontmatter value: the valid entries (the first of a repeated id; none past the 10th) plus one
- * note per skipped entry, so the Architect's row can say what was ignored. Never throws.
+ * note per skipped entry, so the page can say what was ignored. Never throws. `reservedIds` / `max`: as `validateSource` and
+ * the cap (the legacy values for a migration).
  */
-export function parseSourceList(raw) {
+export function parseSourceList(raw, { reservedIds = BASE_SOURCE_IDS, max = SOURCES_MAX } = {}) {
   const sources = [];
   const notes = [];
   if (raw === undefined || raw === null) return { sources, notes };
   if (!Array.isArray(raw)) return { sources, notes: ["sources must be a list; none were loaded"] };
   raw.forEach((entry, i) => {
-    const r = validateSource(entry);
+    const r = validateSource(entry, { reservedIds });
     if (!r.ok) {
       notes.push(`Skipped a source: ${r.error}`);
       return;
@@ -202,8 +210,8 @@ export function parseSourceList(raw) {
       notes.push(`Skipped a source: two sources share the id "${r.source.id}"`);
       return;
     }
-    if (sources.length >= SOURCES_MAX) {
-      notes.push(`Skipped source ${i + 1}: at most ${SOURCES_MAX} sources are used`);
+    if (sources.length >= max) {
+      notes.push(`Skipped source ${i + 1}: at most ${max} sources are used`);
       return;
     }
     sources.push(r.source);

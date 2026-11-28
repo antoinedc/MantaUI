@@ -9,6 +9,9 @@ import {
   secretNamesOf,
   describeSource,
   diffSources,
+  BASE_SOURCE_IDS,
+  LEGACY_BASE_SOURCE_IDS,
+  SOURCES_MAX,
 } from "./architectSources.mjs";
 
 const cmd = (extra: Record<string, unknown> = {}) => ({
@@ -108,10 +111,28 @@ describe("validateSource", () => {
 });
 
 describe("source lists", () => {
-  it("validateSourceList refuses duplicates and more than 10", () => {
+  it("validateSourceList refuses duplicates and more than 20 (the research-layer cap)", () => {
     expect(validateSourceList([cmd(), cmd()])).toMatchObject({ ok: false });
-    const many = Array.from({ length: 11 }, (_, i) => cmd({ id: `s${i}` }));
-    expect(validateSourceList(many)).toMatchObject({ ok: false });
+    expect(SOURCES_MAX).toBe(20);
+    expect(validateSourceList(Array.from({ length: 20 }, (_, i) => cmd({ id: `s${i}` })))).toMatchObject({ ok: true });
+    expect(validateSourceList(Array.from({ length: 21 }, (_, i) => cmd({ id: `s${i}` })))).toMatchObject({ ok: false, error: "At most 20 sources of your own" });
+  });
+
+  it("the built-in id set has the two new defaults; the legacy set is frozen at the old ids (AC-1.13, AC-1.14)", () => {
+    expect([...BASE_SOURCE_IDS].sort()).toEqual(["arxiv", "github", "hn", "packages", "reddit", "skills", "stackoverflow", "web", "x"]);
+    expect([...LEGACY_BASE_SOURCE_IDS].sort()).toEqual(["arxiv", "github", "hn", "reddit", "skills", "web", "x"]);
+    expect(Object.isFrozen(LEGACY_BASE_SOURCE_IDS)).toBe(true);
+    for (const id of ["packages", "stackoverflow", "web", "skills", "github"]) expect(err(cmd({ id }))).toMatch(/is a built-in source id/);
+  });
+
+  it("validateSource and parseSourceList take the id set to check against: the legacy set still accepts `packages` and `stackoverflow`", () => {
+    expect(validateSource(cmd({ id: "packages" }), { reservedIds: LEGACY_BASE_SOURCE_IDS })).toMatchObject({ ok: true });
+    expect(validateSource(cmd({ id: "skills" }), { reservedIds: LEGACY_BASE_SOURCE_IDS })).toMatchObject({ ok: false });
+    const r = parseSourceList([cmd({ id: "packages" }), cmd(), cmd({ id: "stackoverflow" })], { reservedIds: LEGACY_BASE_SOURCE_IDS, max: 10 });
+    expect(r.sources.map((s) => s.id)).toEqual(["packages", "bookface", "stackoverflow"]);
+    const capped = parseSourceList(Array.from({ length: 12 }, (_, i) => cmd({ id: `s${i}` })), { reservedIds: LEGACY_BASE_SOURCE_IDS, max: 10 });
+    expect(capped.sources).toHaveLength(10);
+    expect(capped.notes).toHaveLength(2);
   });
 
   it("parseSourceList keeps the valid ones and names what it skipped", () => {
