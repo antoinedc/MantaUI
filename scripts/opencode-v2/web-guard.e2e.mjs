@@ -17,6 +17,7 @@
 // Asserted, for each session kind (a lead's chat, an agent's task, an agent's own conversation, a plain session):
 //   - both tool parts end in an error carrying the refusal sentence, and the recording server received NO request;
 //   - the same calls with clean input reach the recording server;
+//   - with the `web` source turned off, websearch is refused with the Settings sentence and sends nothing (webfetch is unaffected);
 //   - fail closed: with the stand-in manta-server down, both calls are refused with the "couldn't check" sentence and
 //     nothing reaches the recording server.
 //
@@ -32,7 +33,7 @@ import { startSandbox } from "./sandbox.mjs";
 import { startMockAnthropic } from "./mock-anthropic.mjs";
 import { mintSessionId } from "../../src/server/delegate.mjs";
 import { buildAgentBlock } from "../../src/server/agents.mjs";
-import { createOutsideCheck, OUTSIDE_REFUSAL } from "../../src/server/research/outsideQuery.mjs";
+import { createOutsideCheck, OUTSIDE_REFUSAL, WEB_OFF } from "../../src/server/research/outsideQuery.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = join(HERE, "..", "..", "docs", "opencode-plugins-v2", "manta");
@@ -57,7 +58,8 @@ await new Promise((r) => recorder.listen(0, "127.0.0.1", r));
 const recorderUrl = `http://127.0.0.1:${recorder.address().port}`;
 
 // ---- the stand-in manta-server: ONLY the check route, using the real check ----
-const outside = createOutsideCheck({ loadSecrets: async () => [{ key: "PROBE_KEY", scope: "shared", value: SECRET }], privateAnswers: async () => [], folderOf: async () => null });
+let webOn = true;
+const outside = createOutsideCheck({ loadSecrets: async () => [{ key: "PROBE_KEY", scope: "shared", value: SECRET }], privateAnswers: async () => [], folderOf: async () => null, webEnabled: async () => webOn });
 let checkUp = true;
 const checkCalls = [];
 const standIn = createServer(async (req, res) => {
@@ -168,7 +170,18 @@ try {
     check(`${kind}: a clean webfetch completes and reaches the recording server`, f2?.state?.status === "completed" && recorded.includes("GET /docs/pricing"), JSON.stringify(f2?.state) + recorded.join("|"));
   }
 
-  // 3. fail closed: the check is unreachable
+  // 3. the web source turned off in Settings: websearch is refused for every session kind (webfetch is not affected)
+  webOn = false;
+  for (const kind of ["lead chat", "agent task", "agent conversation", "plain session"]) {
+    recorded.length = 0;
+    const off = await run(kind, [search("postgres job queue library for node"), fetchUrl(`${recorderUrl}/docs/pricing`)]);
+    const [s3, f3] = [off.find((p) => p.tool === "websearch"), off.find((p) => p.tool === "webfetch")];
+    check(`${kind}: with the web source off, websearch is refused with the Settings sentence and sends nothing`, errorOf(s3).includes(WEB_OFF) && !recorded.some((r) => r.startsWith("GET /provider-search")), JSON.stringify(s3?.state) + recorded.join("|"));
+    check(`${kind}: with the web source off, webfetch still works`, f3?.state?.status === "completed" && recorded.includes("GET /docs/pricing"), JSON.stringify(f3?.state));
+  }
+  webOn = true;
+
+  // 4. fail closed: the check is unreachable
   checkUp = false;
   recorded.length = 0;
   const down = await run("lead chat", [search("postgres job queue library for node"), fetchUrl(`${recorderUrl}/docs/pricing`)]);
