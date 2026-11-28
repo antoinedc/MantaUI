@@ -2262,3 +2262,118 @@ test("leadBrief: with no dangling reference there is no Routing note", async () 
     await f.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// the lead's own change (the fallback when the Architect couldn't land its draft) keeps the Architect's research
+// ---------------------------------------------------------------------------
+
+const ARCH_PROBLEM = { userWords: "create a product designer agent", statement: "Designs get shipped without a design pass.", shapes: [{ shape: "a new designer agent", wouldBuild: "@designer" }, { shape: "change Dev", wouldBuild: "Dev designs" }], chosen: 0, why: "Designing is its own job." };
+const ARCH_FIT = { researchSays: "Design agents work best with a clear brief and a checklist.", matches: true, why: "The request is that kind.", basis: ["rl_design", "Product design"] };
+const ARCH_BASIS = [{ id: "rl_design", topic: "Product design", sourceCount: 4, ageDays: 2 }, { id: "rl_team", topic: "How an agent fits the team", sourceCount: 3, ageDays: 5 }];
+const ARCH_EVIDENCE = [{ claim: "A checklist beats prose", quote: "Short, specific rules beat long generic checklists every time", url: "https://example.com/a", private: false }];
+const architectRecord = (over = {}) => {
+  const built = buildCreateMd({ ...DRAFT, name: "Reviewer" });
+  return {
+    id: "ach_arch0001",
+    kind: "create",
+    slug: null,
+    agentName: "Reviewer",
+    sessionID: "ses_chat",
+    messageID: "",
+    callID: "",
+    state: "discarded",
+    needsClick: false,
+    reason: null,
+    before: null,
+    after: built.after,
+    createdAt: 1_700_000_000_000 - 60_000,
+    decidedAt: 1_700_000_000_000 - 30_000,
+    error: null,
+    origin: { kind: "job", jobId: "job1", rootJobId: "job1", attempt: 1 },
+    mode: "build",
+    releasedAt: 1_700_000_000_000 - 30_000,
+    decidedBy: null,
+    summary: "A reviewer agent.",
+    evidence: ARCH_EVIDENCE,
+    admission: [{ rule: "Review the diff first", verdict: "general", why: "Backed by the study" }],
+    fitCheck: ARCH_FIT,
+    basis: ARCH_BASIS,
+    basisThin: false,
+    problem: ARCH_PROBLEM,
+    ...over,
+  };
+};
+const seedStore = (f, records) => writeFile(join(f.root, ".changes.json"), `${JSON.stringify({ version: 2, changes: records, proposalSlots: {} }, null, 2)}\n`);
+const storedChange = async (f, id) => JSON.parse(await readFile(join(f.root, ".changes.json"), "utf-8")).changes.find((r) => r.id === id);
+
+test("agent_change: a create that is the draft an Architect task of this chat couldn't land carries that task's research — basis, evidence, problem and fit check", async () => {
+  const f = await changeFixture();
+  try {
+    await seedStore(f, [architectRecord()]);
+    const r = await run(f, chg());
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.change.state, "applied");
+    for (const rec of [r.change, await storedChange(f, r.change.id)]) {
+      assert.deepEqual(rec.basis, ARCH_BASIS);
+      assert.deepEqual(rec.evidence, ARCH_EVIDENCE);
+      assert.deepEqual(rec.problem, ARCH_PROBLEM);
+      assert.deepEqual(rec.fitCheck, ARCH_FIT);
+      assert.equal(rec.basisThin, false);
+      assert.equal(rec.researchFrom, "ach_arch0001", "where it came from");
+    }
+    // the agent's profile now has research to show
+    const profile = await f.engine.profile("reviewer");
+    assert.ok(JSON.stringify(profile).includes("Product design"), "the profile mentions the research");
+    // the Architect's own record is left exactly as it was
+    assert.equal((await storedChange(f, "ach_arch0001")).state, "discarded");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: an update of an agent links the Architect's proposal for that same agent; thin evidence stays marked thin", async () => {
+  const f = await changeFixture();
+  try {
+    await seedStore(f, [architectRecord({ id: "ach_arch0002", kind: "update", slug: "dev", agentName: "Dev", before: "x", state: "pending", needsClick: true, reason: "ask", basisThin: true })]);
+    const r = await run(f, chg({ action: "update", agent: "dev", draft: { description: "Writes better code." } }));
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.change.basis, ARCH_BASIS);
+    assert.equal(r.change.basisThin, true);
+    assert.equal(r.change.researchFrom, "ach_arch0002");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_change: nothing is linked from another chat, another agent, an Architect draft that already landed or a lead's own change; of two candidates the newest wins", async () => {
+  const f = await changeFixture();
+  try {
+    const made = async (b) => {
+      const r = await run(f, b);
+      assert.equal(r.ok, true, r.error);
+      return r.change;
+    };
+    await seedStore(f, [
+      architectRecord({ id: "ach_other_chat", sessionID: "ses_elsewhere" }),
+      architectRecord({ id: "ach_other_agent", agentName: "Somebody Else" }),
+      architectRecord({ id: "ach_landed", state: "applied" }),
+      architectRecord({ id: "ach_lead", origin: { kind: "chat" } }),
+    ]);
+    const c = await made(chg());
+    assert.deepEqual(c.basis, []);
+    assert.deepEqual(c.evidence, []);
+    assert.equal(c.problem, undefined);
+    assert.equal(c.fitCheck, null);
+    assert.equal(c.researchFrom, undefined);
+    // two candidates: the newest wins
+    await seedStore(f, [
+      architectRecord({ id: "ach_old", createdAt: 1_000, basis: [{ id: "rl_old", topic: "Old", sourceCount: 3, ageDays: 1 }] }),
+      architectRecord({ id: "ach_new", createdAt: 2_000 }),
+    ]);
+    const d = await made(chg({ draft: { ...DRAFT, name: "Reviewer" } }));
+    assert.equal(d.researchFrom, "ach_new");
+    assert.deepEqual(d.basis, ARCH_BASIS);
+  } finally {
+    await f.cleanup();
+  }
+});

@@ -4298,6 +4298,13 @@ Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `
   confirms it (`contentReview.carried`). The fact sheet probes only paths under the agent's folder and the registered projects. Finished branches unmerged
   for over a day are in the sheet and the report for Manta, not review items for the user.
 
+- **Nothing the Architect needs is gated by the background budget or counted when it didn't run.** A trial case is never refused by the background level (even
+  "off") or its dollar cap — it is part of the task the user asked for; `agentTrials.mjs` only books the spend. A trial in which no case started uses up neither
+  the 3-per-agent nor the 6-per-task limit. An Architect draft may take a skill already installed on the box by reference (`installed: {skill, taken, take?}`,
+  `readInstalledSkill` in `agents.mjs`, `adoptInstalled` in `agentSkills.mjs`): no fetched page, same path / link / size / licence protections and script
+  review, per-skill 20-file / 256 KiB caps lifted. When the lead makes the change itself after an Architect proposal for the same agent in the same chat didn't
+  land, its record carries that proposal's research (`researchFrom`). Spec §3.3 / §4.1 / §7.
+
 ## Open work (as of 2026-05-18)
 
 - **Open subagent as its own chat-mode window.** Phase 1 ships read-only

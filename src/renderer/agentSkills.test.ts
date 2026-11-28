@@ -25,6 +25,13 @@ describe("agent skills helpers (Architect v2 §4)", () => {
     expect(provenanceLine(null)).toBe("Written for this agent");
   });
 
+  it("provenanceLine: a skill taken from one installed on this box says so (it has no repository to name unless the skill carried one)", () => {
+    const installed = (over: Partial<SkillProvenance> = {}) => prov({ url: "installed on this box: design-ref", sourceId: "installed:design-ref", repo: "unknown", ref: "4.7.0", licence: "Apache-2.0", ...over });
+    expect(provenanceLine(installed())).toBe("Taken from the skill installed on this box · Apache-2.0");
+    expect(provenanceLine(installed({ taken: "part" }))).toBe("Part taken from the skill installed on this box · Apache-2.0");
+    expect(provenanceLine(installed({ repo: "acme/design" }))).toBe("Taken from the skill installed on this box (acme/design) · Apache-2.0");
+  });
+
   it("httpsUrl only passes an https address (anything else is never made a link)", () => {
     expect(httpsUrl("https://github.com/a/b")).toBe("https://github.com/a/b");
     for (const bad of ["http://github.com/a/b", "javascript:alert(1)", "file:///etc/passwd", "", null, undefined, 4, "not a url"]) expect(httpsUrl(bad)).toBeNull();

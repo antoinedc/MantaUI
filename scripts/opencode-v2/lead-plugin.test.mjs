@@ -507,7 +507,7 @@ describe("agent_propose tool (Phase 5A)", () => {
     const skills = tool.input.properties.draft.properties.skills;
     assert.equal(skills.type, "array");
     const item = skills.items;
-    assert.deepEqual(Object.keys(item.properties), ["name", "op", "files", "provenance"]);
+    assert.deepEqual(Object.keys(item.properties), ["name", "op", "files", "provenance", "installed"]);
     assert.deepEqual(item.required, ["name", "op"]);
     assert.deepEqual(item.properties.op.enum, ["add", "replace", "remove"]);
     assert.equal(item.additionalProperties, false);
@@ -520,6 +520,13 @@ describe("agent_propose tool (Phase 5A)", () => {
     assert.deepEqual(prov.required, ["url", "sourceId", "repo", "ref", "licence", "taken"]);
     assert.deepEqual(prov.properties.taken.enum, ["whole", "part"]);
     assert.deepEqual(prov.properties.registry.required, ["installs", "stars"]);
+    // a skill already installed on this box is taken by reference: required keys first, no file text, no provenance
+    const installed = item.properties.installed;
+    assert.deepEqual(Object.keys(installed.properties), ["skill", "taken", "take"]);
+    assert.deepEqual(installed.required, ["skill", "taken"]);
+    assert.deepEqual(installed.properties.taken.enum, ["whole", "part"]);
+    assert.equal(installed.properties.take.type, "array");
+    assert.equal(installed.additionalProperties, false);
     const ss = tool.input.properties.skillSearch;
     assert.deepEqual(Object.keys(ss.properties), ["queries", "candidates"]);
     assert.deepEqual(ss.required, ["queries", "candidates"]);
@@ -527,6 +534,7 @@ describe("agent_propose tool (Phase 5A)", () => {
     assert.deepEqual(ss.properties.candidates.items.required, ["ref", "installs", "stars", "licence", "verdict", "why"]);
     assert.match(tool.description, /skillSearch/);
     assert.match(tool.description, /SOURCE\.md and LICENSE/);
+    assert.match(tool.description, /already installed on this box/);
   });
 
   test("skillSearch is posted when given and not otherwise", async () => {

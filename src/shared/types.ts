@@ -3227,6 +3227,8 @@ export interface AgentChange {
   groupAborted?: boolean;
   /** Architect v2 Stage 1: absent on older records. */
   problem?: AgentProblem;
+  /** The lead made this change itself after an Architect proposal of the same chat for the same agent didn't land: that proposal's id, whose research (basis, evidence, problem, fit check) this record carries. */
+  researchFrom?: string;
   trial?: { id: string; verdicts: TrialVerdict[] };
   /** Instructions size (characters of the body) before → after; `sizeBefore` is null for a new agent. */
   sizeBefore?: number | null;

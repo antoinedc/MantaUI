@@ -2656,8 +2656,9 @@ const agentTrials = createAgentTrials({
   local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
   gitRun: (args) => tmux.run("git", args),
   editConfig: (edits) => editOpencodeConfig(edits),
-  // the shared background budget: asked before each case, told what it really cost
-  budget: { canSpend: (a) => backgroundBudget.check(a), book: (a) => backgroundBudget.record(a) },
+  // the shared background budget is told what each case really cost, never asked: a trial is part of the task the user asked for,
+  // so the background level (even "off") must not refuse it
+  budget: { book: (a) => backgroundBudget.record(a) },
   policy: autonomyPolicy,
   // the most recently used checkout of a project that still exists on this box (the knowledge layer's own record of them)
   projectDirectory: async (slug) => {
