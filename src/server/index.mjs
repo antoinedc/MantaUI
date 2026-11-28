@@ -201,7 +201,9 @@ import {
   startCleanupPoller as startWidgetCleanupPoller,
 } from "./widgets.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
-import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
+import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace, summarizeTranscript } from "./peers.mjs";
+import { createSessionLines } from "./sessionLine.mjs";
+import { createFleetHint } from "./fleetHints.mjs";
 import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped, removeStopped } from "./stoppedStore.mjs";
 import { createStoppedReconciler } from "./stoppedReconcile.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
@@ -1657,6 +1659,9 @@ sessionStatusRef.current = sessionStatus;
 const sessionLinkAction = createSessionLinkActions({ store: sessionLinks, readSession: (sid) => oc.readSession(sid), sessionStatus });
 push.setSessionProjectsReader(() => syncState.snapshot().projects ?? []);
 bus.subscribe((evt) => sessionStatus.observe(evt));
+// a session starting or stopping work, or a progress report, changes the Fleet page without any job event: one throttled hint
+const fleetHint = createFleetHint({ publish: () => bus.publish({ kind: "agentFleet", payload: {} }) });
+bus.subscribe((evt) => fleetHint.observe(evt));
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one
 // result; a `paused` one is upgraded in place so it can still be resumed. A healthy
@@ -2728,6 +2733,17 @@ const agentsEngine = createAgentsEngine({
     return Number(db.prepare("SELECT COUNT(*) AS n FROM page_meta WHERE area = 'project' AND slug = ?").get(slug)?.n ?? 0);
   },
   onFleetChanged: () => bus.publish({ kind: "agentFleet", payload: {} }),
+  // Fleet rows are working sessions (spec 2026-11-28-fleet-redesign §5b): the box's session tree and each session's status ...
+  fleetSessions: () => {
+    const statuses = sessionStatus.windowStatusMap();
+    return { projects: syncState.snapshot().projects ?? [], statusOf: (sid) => statuses[sid] ?? {} };
+  },
+  // ... and the one line each row shows: the session's latest progress report, else its in-progress to-do, else its last short assistant line
+  sessionLines: createSessionLines({
+    readReports: () => listProgress(),
+    todosOf: (sid) => streamInterp.getState(sid)?.todos ?? null,
+    lastAssistantOf: async (sid) => summarizeTranscript(await oc.listMessages(sid, { limit: 6 })).lastAssistant ?? "",
+  }),
   delegateView,
   isCtoSession: (sid) => ctoConversation.isConversationSession(sid),
   // Phase 2 (the lead): "is this chat led?" must never read an unreadable store as "no" — both readers THROW instead
