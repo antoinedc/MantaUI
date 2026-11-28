@@ -3,12 +3,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOutsideCheck, OUTSIDE_REFUSAL, CHECK_UNAVAILABLE } from "./outsideQuery.mjs";
+import { createOutsideCheck, OUTSIDE_REFUSAL, CHECK_UNAVAILABLE, WEB_OFF } from "./outsideQuery.mjs";
 
 const SECRET = "sk-live-9f2c41ab77d0e3158c";
 const PRIVATE_ANSWER = "Halvorsen Freight signed a forty million dollar deal for the Kestrel queue rewrite in March after long talks";
 
-function make({ secrets = [{ key: "K", scope: "shared", value: SECRET }], privateAnswers = async () => [], folderOf = async () => "/home/dev/projects/kestrel", records = [], scanner } = {}) {
+function make({ webEnabled, secrets = [{ key: "K", scope: "shared", value: SECRET }], privateAnswers = async () => [], folderOf = async () => "/home/dev/projects/kestrel", records = [], scanner } = {}) {
   const check = createOutsideCheck({
     loadSecrets: async () => {
       if (secrets === "throw") throw new Error("store unreadable");
@@ -17,6 +17,7 @@ function make({ secrets = [{ key: "K", scope: "shared", value: SECRET }], privat
     privateAnswers,
     folderOf,
     record: (r) => records.push(r),
+    ...(webEnabled ? { webEnabled } : {}),
     ...(scanner ? { createScanner: scanner } : {}),
   });
   return { check, records };
@@ -186,4 +187,18 @@ test("fail closed: an unreadable secrets store, an unavailable scanner, a throwi
 test("a stored value shorter than 8 characters is not treated as a secret (the scanner's rule)", async () => {
   const f = make({ secrets: [{ key: "SHORT", scope: "shared", value: "pnpm" }] });
   assert.equal((await f.check.check(q("pnpm workspaces monorepo"))).ok, true);
+});
+
+test("AC-1.6: with the web source turned off websearch is refused with the Settings sentence (every session kind: the hook asks this same check); webfetch and research_* are not affected; an unreadable setting fails closed", async () => {
+  const records = [];
+  const off = make({ webEnabled: async () => false, records });
+  assert.deepEqual(await off.check.check(q("postgres job queue library")), { ok: false, error: WEB_OFF });
+  assert.equal(WEB_OFF, 'The source "web" is turned off in Settings → Research sources');
+  assert.deepEqual(records, [{ kind: "web-off", tool: "websearch" }]);
+  assert.equal((await off.check.check(u("https://example.com/docs"))).ok, true);
+  assert.equal((await off.check.check({ sessionID: "ses_a", tool: "research_search", input: { query: "queue library" } })).ok, true);
+  const on = make({ webEnabled: async () => true });
+  assert.equal((await on.check.check(q("postgres job queue library"))).ok, true);
+  const broken = make({ webEnabled: async () => { throw new Error("store unreadable"); } });
+  assert.deepEqual(await broken.check.check(q("postgres job queue library")), { ok: false, error: CHECK_UNAVAILABLE });
 });

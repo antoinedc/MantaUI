@@ -1274,3 +1274,19 @@ test("testSource runs a source and reports a count and the first result; nothing
     await g.cleanup();
   }
 });
+
+test("AC-1.6: the engine's check refuses websearch when the web source is off (what the plugin's hook asks), and allows it when on", async () => {
+  const off = await fixture({ disabled: ["web"] });
+  try {
+    assert.deepEqual(await off.engine.outsideCheck({ sessionID: "ses_x", tool: "websearch", input: { query: "postgres queue library" } }), { ok: false, error: 'The source "web" is turned off in Settings → Research sources' });
+    assert.equal((await off.engine.outsideCheck({ sessionID: "ses_x", tool: "webfetch", input: { url: "https://example.com/" } })).ok, true);
+  } finally {
+    await off.cleanup();
+  }
+  const on = await fixture();
+  try {
+    assert.equal((await on.engine.outsideCheck({ sessionID: "ses_x", tool: "websearch", input: { query: "postgres queue library" } })).ok, true);
+  } finally {
+    await on.cleanup();
+  }
+});

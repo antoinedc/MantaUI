@@ -7,7 +7,7 @@
 // the fragment; each percent-decoded, `+` read as a space), for: (a) a secret in the Secrets store or anything the secret
 // scanner flags, (b) an absolute file path or a path under the task's / chat's folder, (c) an e-mail address, (d) a private
 // network address or an internal host name, (e) 6+ consecutive words copied from a private source's answer stored in this
-// task or chat. A refusal is a fixed sentence and is recorded as `{ kind, tool }` — never the text. It FAILS CLOSED: any
+// task or chat; plus, when the `web` source is off, `websearch` itself. A refusal is a fixed sentence and is recorded as `{ kind, tool }` — never the text. It FAILS CLOSED: any
 // failure to check (the secrets store, the scanner, a reader, a malformed request) is a refusal of its own.
 //
 // The destination host of a URL is exempt from the private-ADDRESS test only (an IP literal is never sent to a resolver, so it
@@ -19,6 +19,7 @@ import { createSecretScanner, MIN_SECRET_LENGTH } from "../knowledge/secretScan.
 
 export const OUTSIDE_REFUSAL = "This query would send private material to an outside source; rephrase it in general terms, or use a private source";
 export const CHECK_UNAVAILABLE = "Couldn't check this query for private material; try again";
+export const WEB_OFF = 'The source "web" is turned off in Settings → Research sources';
 export const VERBATIM_WORDS = 6;
 const PRIVATE_TEXT_MAX = 400_000; // characters of one private answer compared against
 const FOLDER_MIN = 4;
@@ -95,8 +96,9 @@ function splitUrl(raw) {
  * @param {(sessionID:string)=>Promise<string|null>} [deps.folderOf]     the task's / chat's folder
  * @param {(r:{kind:string,tool:string})=>void} [deps.record]            one refusal: its kind and tool, never the text
  * @param {Function} [deps.createScanner]                 createSecretScanner-shaped
+ * @param {()=>Promise<boolean>} [deps.webEnabled]       is the `web` research source on? Off → `websearch` is refused with a sentence (AC-1.6)
  */
-export function createOutsideCheck({ loadSecrets, privateAnswers = async () => [], folderOf = async () => null, record = () => {}, createScanner = createSecretScanner, log = console } = {}) {
+export function createOutsideCheck({ loadSecrets, privateAnswers = async () => [], folderOf = async () => null, record = () => {}, createScanner = createSecretScanner, webEnabled = async () => true, log = console } = {}) {
   /** The refusal kind for this request, or null when it is clean. Throws `Unavailable` when it can't be checked. */
   async function kindOf({ sessionID, input }) {
     const isUrl = typeof input?.url === "string";
@@ -170,6 +172,15 @@ export function createOutsideCheck({ loadSecrets, privateAnswers = async () => [
   async function check(req) {
     try {
       if (!req || typeof req !== "object" || !TOOLS.has(req.tool) || !req.input || typeof req.input !== "object") throw new Unavailable("malformed request");
+      // the web source is off: the built-in search is refused here, in the one place every session kind passes through (the plugin's hook)
+      if (req.tool === "websearch" && !(await webEnabled())) {
+        try {
+          record({ kind: "web-off", tool: req.tool });
+        } catch {
+          /* recording never decides */
+        }
+        return { ok: false, error: WEB_OFF };
+      }
       const kind = await kindOf({ sessionID: typeof req.sessionID === "string" ? req.sessionID : "", input: req.input });
       if (kind === null) return { ok: true };
       try {

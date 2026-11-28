@@ -295,6 +295,7 @@ export function createResearchEngine({
       loadSecrets: loadSecretsStrict,
       privateAnswers: async (sessionID) => (await listSources(sessionID)).filter((rec) => rec.private === true).map((rec) => rec.text),
       folderOf,
+      webEnabled: async () => (await sourceList()).find((r) => r.id === "web")?.enabled !== false,
       record: ({ kind, tool }) => log.info?.(`[research] outside query refused kind=${kind} tool=${tool}`),
       log,
     });
