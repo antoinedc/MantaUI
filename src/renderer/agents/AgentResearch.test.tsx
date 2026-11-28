@@ -44,14 +44,15 @@ describe("AgentResearch", () => {
   const btn = (scope: ParentNode, text: string) => buttonIn(scope, text, true);
   const click = (el: Element | null | undefined) => clickEl(h!, el);
 
-  it("two columns: the entries in the main column under a plain title, the tinted pane beside them", async () => {
+  it("one column: the entries under a plain title, the tab's own note under them (no side pane)", async () => {
     await open(profile([entry()]));
     const main = h!.container.querySelector('[data-testid="profile-main"]')!;
     expect(main.querySelector("h3")!.textContent).toBe("Research it relies on");
     expect(main.querySelector("h3")!.className).not.toContain("uppercase");
     expect(pane().tagName).toBe("ASIDE");
-    expect(pane().className).toContain("bg-bg-elev");
+    expect(pane().className).not.toContain("bg-bg-elev");
     expect(main.contains(pane())).toBe(false);
+    expect(main.compareDocumentPosition(pane()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("a row: topic, 'N sources · N days old', fresh / stale, and thin in the warn tone", async () => {

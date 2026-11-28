@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
-// The agent profile (agent screens spec §2.2, contract §States): header, pending change cards, tabs (Overview · Research ·
-// Seats · History · Tests later), the refresh control, and its loading / error / invalid / lead / Architect states.
+// The agent profile (profile v5): header with "Use it when / Not for" above the tabs, one Chat button, tabs Overview · Skills · Seats ·
+// Learned · History · Research · Settings, no side column and no pending-change card, and its loading / error / invalid / lead /
+// Architect states.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import type { AgentChange, AgentFleet, AgentInfo, AgentProfile as Profile } from "../../shared/types";
 import { resetPackageAgentsForTest } from "../packageAgents";
-import { useStore } from "../store";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
 import { AgentProfile } from "./AgentProfile";
 import { buttonIn, changeRecord, clickEl } from "./agentsTestFixtures";
@@ -30,11 +30,10 @@ const info = (over: Partial<AgentInfo> = {}): AgentInfo => ({
   ...over,
 });
 
-const AGENT_MD = "---\nname: SEO\ndescription: Technical SEO and visibility in AI search.\nisolation: none\nuse_when: A page's ranking or markup is the question\n---\nAudit pages. Never publish.";
+const INSTRUCTIONS = "You are SEO.\n\n## How you work\n\n- Audit pages.\n- Never publish.\n\n## Before you finish\n\nSay what you found.\n\n## Gotchas\n\nNone.\n";
 
 const rec = (over: Partial<AgentChange> = {}): AgentChange =>
   changeRecord({
-    after: AGENT_MD,
     createdAt: NOW - 3 * DAY,
     decidedAt: NOW - 3 * DAY,
     releasedAt: NOW - 3 * DAY,
@@ -50,18 +49,16 @@ const profile = (over: Partial<Profile> = {}): Profile => ({
   ],
   lastChangedAt: NOW - 3 * DAY,
   builtBy: "architect",
-  refresh: { enabled: true, routineId: "rt1" },
+  refresh: { enabled: true, routineId: "rt1", day: 12 },
+  instructions: INSTRUCTIONS,
   research: [
     { id: "r1", topic: "Technical SEO for AI search", sourceCount: 5, ageDays: 3, status: "fresh", thin: false },
     { id: "r2", topic: "llms.txt adoption", sourceCount: 2, ageDays: 6, status: "fresh", thin: true },
-    { id: "r3", topic: "Structured data", sourceCount: 4, ageDays: 41, status: "stale", thin: false },
-    { id: "r4", topic: "Old note", sourceCount: null, ageDays: null, status: "missing", thin: false },
-    { id: "r5", topic: "Fifth", sourceCount: 3, ageDays: 1, status: "fresh", thin: false },
   ],
   ...over,
 });
 
-const HISTORY = [rec({ id: "c2", before: "V1", after: AGENT_MD }), rec({ id: "c1", kind: "create", before: null, after: "V1", createdAt: NOW - 9 * DAY, decidedAt: NOW - 9 * DAY, summary: "Created @seo." })];
+const HISTORY = [rec({ id: "c2", before: "V1", after: "V2" }), rec({ id: "c1", kind: "create", before: null, after: "V1", createdAt: NOW - 9 * DAY, decidedAt: NOW - 9 * DAY, summary: "Created @seo." })];
 
 const fleet = (): AgentFleet => ({ asOf: NOW, projects: [], rows: [], week: { tasks: 0 }, recap: { since: null, lines: [] } });
 
@@ -89,6 +86,8 @@ describe("AgentProfile", () => {
       agentsFleet: () => Promise.resolve(fleet()),
       agentsProjects: () => Promise.resolve([{ slug: "manta-aaaaaaaaaa", name: "Manta" }, { slug: "ronda-bbbbbbbbbb", name: "Ronda" }, { slug: "capo-cccccccccc", name: "Capo" }]),
       agentsList: () => Promise.resolve([info()]),
+      agentsApprovedModels: () => Promise.resolve([]),
+      agentsAutonomyGet: () => Promise.resolve({ mode: "balanced", overrides: {}, effective: { learn_preference: "tell" } }),
       ...overrides,
     }));
     h = mount(<AgentProfile slug={slug} onBack={onBack} onOpenWindow={onOpenWindow} />);
@@ -118,7 +117,6 @@ describe("AgentProfile", () => {
       let n = 0;
       await open({ agentsProfile: () => (++n === 1 ? Promise.reject(new Error("No agent named @seo")) : Promise.resolve(profile())) });
       expect(q('[data-testid="profile-error"]')?.textContent).toContain("No agent named @seo");
-      expect(q("nav")?.textContent).toContain("Agents");
       await click(btn("Try again"));
       expect(q('[data-testid="profile-error"]')).toBeNull();
       expect(q('[data-testid="profile-header"]')).toBeTruthy();
@@ -137,60 +135,45 @@ describe("AgentProfile", () => {
   });
 
   describe("header", () => {
-    it("breadcrumbs, name, facts, description", async () => {
+    it("breadcrumbs, name, description", async () => {
       await open();
       const crumbs = q('[data-testid="agents-crumbs"]')!;
       expect(crumbs.textContent).toBe("AgentsSEO");
-      expect(crumbs.querySelector('[aria-current="page"]')?.textContent).toBe("SEO");
       await click(btn("Agents", crumbs));
       expect(onBack).toHaveBeenCalled();
       const head = q('[data-testid="profile-header"]')!;
-      expect(head.textContent).toContain("SEO");
+      expect(head.querySelector("h1")?.textContent).toBe("SEO");
       expect(head.textContent).toContain("Technical SEO and visibility in AI search.");
-      expect(head.querySelector("h1")!.className).toContain("text-display");
     });
 
-    it("the facts line says who it is with separators — @slug, role, seats — and repeats nothing the page already says", async () => {
+    it("the facts line is who it is and how it works: @slug, role, what it does to code, its model", async () => {
       await open();
-      const facts = q('[data-testid="profile-facts"]')!;
-      expect([...facts.querySelectorAll("span")].map((x) => x.textContent)).toEqual(["@seo", "Specialist", "2 seats"]);
-      expect(facts.className).toContain("text-text-faint");
-      expect(facts.textContent).not.toMatch(/model|read-only|built by|last changed/i);
+      expect([...q('[data-testid="profile-facts"]')!.querySelectorAll("span")].map((x) => x.textContent)).toEqual(["@seo", "Specialist", "Read-only", "Auto"]);
     });
 
-    it("the description is shown once on the whole page", async () => {
+    it("'Use it when' and 'Not for' sit above the tabs, in the header's own block", async () => {
       await open();
-      const text = h!.container.textContent ?? "";
-      expect(text.split("Technical SEO and visibility in AI search.").length - 1).toBe(1);
-      expect(text).not.toContain("Does:");
+      const block = q('[data-testid="profile-howto"]')!;
+      expect(block.textContent).toContain("Use it when");
+      expect(block.textContent).toContain("A page's ranking or markup is the question");
+      expect(block.textContent).toContain("Not for");
+      expect(block.textContent).toContain("Writing brand copy");
+      expect(block.compareDocumentPosition(q('[role="tablist"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
 
-    it("Change via Manta and Mention in a chat open chat drafts, prefilled", async () => {
-      resetStore({ drafts: [], projects: [{ tmuxSession: "manta", defaultCwd: "/work/manta", windows: [] } as never], activeProjectName: "manta" });
+    it("an agent with neither line says where to write them", async () => {
+      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ useWhen: null, notFor: null }) })) });
+      expect(q('[data-testid="profile-howto"]')!.textContent).toContain("Nothing written yet. Add it in Settings.");
+    });
+
+    it("there is ONE button for the conversation, Chat — no 'Change via Manta', no 'Mention in a chat'", async () => {
       await open();
-      await click(btn("Change via Manta"));
-      expect(useStore.getState().drafts.at(-1)?.input).toBe("Change @seo: ");
-      await click(btn("Mention in a chat"));
-      expect(useStore.getState().drafts.at(-1)?.input).toBe("@seo ");
+      const head = q('[data-testid="profile-header"]')!;
+      expect([...head.querySelectorAll("button")].map((b) => b.textContent?.trim())).toEqual(["Chat"]);
+      expect(h!.container.textContent).not.toMatch(/Change via Manta|Mention in a chat/);
     });
 
-    it("Mention in a chat opens in the first seat's project when the sidebar has it", async () => {
-      resetStore({
-        drafts: [],
-        activeProjectName: "other",
-        projects: [
-          { tmuxSession: "other", defaultCwd: "/work/other", windows: [] } as never,
-          { tmuxSession: "manta", defaultCwd: "/work/manta-aaaaaaaaaa-src/manta", windows: [] } as never,
-        ],
-      });
-      await open();
-      await click(btn("Mention in a chat"));
-      const d = useStore.getState().drafts.at(-1)!;
-      expect(d.input).toBe("@seo ");
-      expect(d.mode).toEqual({ projectName: "manta" });
-    });
-
-    it("Chat opens the agent's direct chat window; a refusal says why on the page", async () => {
+    it("Chat opens the agent's one conversation; a refusal says why on the page", async () => {
       await open({ agentsOpenChat: () => Promise.resolve({ tmuxSession: "manta-agents", windowIndex: 3 }) });
       await click(btn("Chat"));
       expect(api.calls.agentsOpenChat).toEqual([[{ slug: "seo" }]]);
@@ -209,95 +192,41 @@ describe("AgentProfile", () => {
       expect(q('[data-testid="profile-action-error"]')?.textContent).toContain("did not appear");
     });
 
-    it("the Architect has no Chat button (it works through tasks)", async () => {
+    it("the Architect has no Chat button: it says it works through Manta, and has no Seats tab", async () => {
       await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ slug: "architect", name: "Architect", role: "architect" }), seats: [] })) }, "architect");
       expect(btn("Chat")).toBeUndefined();
-      expect(btn("Change via Manta")).toBeTruthy();
+      expect(q('[data-testid="profile-header"]')!.textContent).toContain("Works through Manta: ask in any chat.");
+      expect(qa('[role="tab"]').map((t) => t.textContent)).not.toContain("Seats");
+      expect(qa('[role="tab"]').some((t) => (t.textContent ?? "").startsWith("Seats"))).toBe(false);
     });
   });
 
-  describe("pending changes", () => {
-    const pending = rec({ id: "p1", state: "pending", decidedAt: null, decidedBy: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check.", before: "---\nname: SEO\ndescription: d\nisolation: none\n---\nOld rule.\n", after: AGENT_MD });
-    it("one card per pending record, above the tabs, with the card's own Apply", async () => {
-      await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]), agentsChangeApply: () => Promise.resolve({ ...pending, state: "applied", decidedAt: NOW, decidedBy: "click" }) });
-      const cards = qa('[data-testid="profile-pending"] [data-testid="agent-change-card"]');
-      expect(cards).toHaveLength(1);
-      expect(cards[0].compareDocumentPosition(q('[role="tablist"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      await click(btn("Apply", cards[0]));
-      expect(api.calls.agentsChangeApply).toEqual([["p1"]]);
-      // it stays, in its new state; the history reads again
-      expect(q('[data-testid="profile-pending"] [data-testid="agent-change-card"]')?.getAttribute("data-state")).toBe("applied");
-      expect(api.calls.agentsHistory.length).toBeGreaterThanOrEqual(2);
-    });
-
-    it("is one summary line with Apply and Discard, the change folded under 'Show the change'", async () => {
+  describe("no side column and no pending card", () => {
+    it("nothing pending is shown on the page, wherever the record sits; no side pane anywhere", async () => {
+      const pending = rec({ id: "p1", state: "pending", decidedAt: null, decidedBy: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check." });
       await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]) });
-      const card = q('[data-testid="profile-pending"] [data-testid="agent-change-card"]')!;
-      expect(card.querySelector('[data-testid="agent-change-summary-line"]')?.textContent).toContain("Adds an llms.txt check.");
-      const fold = card.querySelector<HTMLDetailsElement>('[data-testid="agent-change-fold"]')!;
-      expect(fold.open).toBe(false);
-      expect(fold.querySelector("summary")?.textContent).toMatch(/^Show the change · \d+ lines?/);
-      expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Discard", "Apply"]);
+      expect(q('[data-testid="profile-pending"]')).toBeNull();
+      expect(q('[data-testid="agent-change-card"]')).toBeNull();
+      expect(h!.container.textContent).not.toContain("Adds an llms.txt check.");
+      expect(panel("Overview").querySelector('[data-testid="profile-pane"]')).toBeNull(); // the other tabs keep their own note under the content, never beside it
+      expect(q('[data-testid="profile-details"]')).toBeNull();
+      expect(q('[data-testid="profile-grid"]')).toBeNull();
     });
 
-    it("none when nothing is pending", async () => {
+    it("access shows in Seats only", async () => {
       await open();
-      expect(q('[data-testid="profile-pending"]')).toBeNull();
+      expect(panel("Overview").textContent).not.toMatch(/Manta memory|read \+ write/);
+      expect(panel("Seats").textContent).toMatch(/Manta memory/);
     });
   });
 
   describe("tabs", () => {
-    it("the Overview lists the agent's skills with name, description, files, where each came from, its licence and installs; an origin link opens through the app", async () => {
-      const prov = { url: "https://github.com/acme/cro/blob/abc123/landing-audit/SKILL.md", sourceId: "src_1", repo: "acme/cro", ref: "abc123", licence: "MIT", taken: "whole" as const, registry: { installs: 12500, stars: 41100 } };
-      await open({
-        agentsProfile: () =>
-          Promise.resolve(
-            profile({
-              skills: [
-                { name: "landing-audit", description: "Audits a landing page.", files: 4, bytes: 1536, provenance: prov },
-                { name: "own-notes", description: "", files: 1, bytes: 90, provenance: null },
-              ],
-            }),
-          ),
-        openExternal: () => Promise.reject(new Error("no browser")),
-      });
-      const block = q('[data-testid="profile-skills"]')!;
-      expect(block.closest('[role="tabpanel"]')).toBe(panel("Overview"));
-      const rows = [...block.querySelectorAll<HTMLElement>('[data-testid="profile-skill"]')];
-      expect(rows).toHaveLength(2);
-      expect(rows[0].textContent).toContain("landing-audit");
-      expect(rows[0].textContent).toContain("Audits a landing page.");
-      expect(rows[0].textContent).toContain("Copied from acme/cro · MIT · 12,500 installs · 41,100 stars");
-      expect(rows[0].textContent).toContain("4 files · 1.5 KB");
-      expect(rows[1].textContent).toContain("own-notes");
-      expect(rows[1].textContent).toContain("Written for this agent");
-      const link = rows[0].querySelector("a") as HTMLAnchorElement;
-      expect(link.href).toBe(prov.url);
-      await click(link);
-      expect(api.calls.openExternal).toEqual([[prov.url]]);
-      expect(q('[data-testid="profile-skill-link-error"]')!.textContent).toMatch(/Couldn't open the link/);
-    });
-
-    it("no skills block when the agent has none (and on an older box that doesn't say)", async () => {
-      await open({ agentsProfile: () => Promise.resolve(profile({ skills: [] })) });
-      expect(q('[data-testid="profile-skills"]')).toBeNull();
-      h!.unmount();
-      await open();
-      expect(q('[data-testid="profile-skills"]')).toBeNull();
-    });
-
-    it("a tablist with counts; Overview selected, the other panels hidden; there is no Tests tab until Tests exist", async () => {
-      await open();
-      const tabs = qa('[role="tab"]');
-      expect(tabs.map((t) => t.textContent)).toEqual(["Overview", "Research · 5", "Seats · 2", "History · 2"]);
+    it("Overview · Skills · Seats · Learned · History · Research · Settings, with counts; Overview selected, the other panels hidden", async () => {
+      await open({ agentsProfile: () => Promise.resolve(profile({ learned: [], skills: [{ name: "audit", description: "d", files: 1, bytes: 10, provenance: null }] })) });
+      expect(qa('[role="tab"]').map((t) => t.textContent)).toEqual(["Overview", "Skills 1", "Seats 2", "Learned", "History 2", "Research 2", "Settings"]);
       expect(tab("Overview").getAttribute("aria-selected")).toBe("true");
-      expect(tab("Research").getAttribute("aria-selected")).toBe("false");
+      for (const n of ["Skills", "Seats", "Learned", "History", "Research", "Settings"]) expect(panel(n).hidden).toBe(true);
       expect(panel("Overview").hidden).toBe(false);
-      expect(panel("Research").hidden).toBe(true);
-      expect(panel("Seats").hidden).toBe(true);
-      expect(panel("History").hidden).toBe(true);
-      expect(qa('[role="tab"]').some((t) => /tests/i.test(t.textContent ?? ""))).toBe(false);
-      expect(h!.container.textContent).not.toMatch(/Coming later|Tests — later/);
     });
 
     it("a click selects; only the selected tab is in the tab order", async () => {
@@ -317,400 +246,111 @@ describe("AgentProfile", () => {
           el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
         });
       await key(tab("Overview"), "ArrowRight");
-      expect(tab("Research").getAttribute("aria-selected")).toBe("true");
-      expect(document.activeElement).toBe(tab("Research"));
-      await key(tab("Research"), "End");
-      expect(tab("History").getAttribute("aria-selected")).toBe("true");
-      await key(tab("History"), "ArrowRight");
+      expect(tab("Skills").getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(tab("Skills"));
+      await key(tab("Skills"), "End");
+      expect(tab("Settings").getAttribute("aria-selected")).toBe("true");
+      await key(tab("Settings"), "ArrowRight");
       expect(tab("Overview").getAttribute("aria-selected")).toBe("true");
       await key(tab("Overview"), "ArrowLeft");
-      expect(tab("History").getAttribute("aria-selected")).toBe("true");
-      await key(tab("History"), "Home");
+      expect(tab("Settings").getAttribute("aria-selected")).toBe("true");
+      await key(tab("Settings"), "Home");
       expect(tab("Overview").getAttribute("aria-selected")).toBe("true");
     });
 
-    it("each panel is named by its tab (no aria-controls)", async () => {
+    it("another agent starts from its Overview", async () => {
       await open();
-      for (const t of qa('[role="tab"]')) expect(t.getAttribute("aria-controls")).toBeNull();
-      expect(qa('[role="tabpanel"]')).toHaveLength(4);
+      await click(tab("History"));
+      h!.unmount();
+      await open();
+      expect(tab("Overview").getAttribute("aria-selected")).toBe("true");
     });
   });
 
   describe("Overview", () => {
-    const ov = () => panel("Overview");
-    const pane = () => ov().querySelector<HTMLElement>('[data-testid="profile-pane"]')!;
-    const group = (id: string) => pane().querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
-
-    it("two columns: 'How to use it' and the research on the left, one details pane on the right", async () => {
+    it("the instructions, formatted, with the Sections index; nothing else (no research block, no details)", async () => {
       await open();
-      const main = ov().querySelector<HTMLElement>('[data-testid="profile-main"]')!;
-      expect(main).toBeTruthy();
-      expect(pane().tagName).toBe("ASIDE");
-      expect(pane().getAttribute("aria-label")).toBe("Details");
-      expect(ov().contains(pane())).toBe(true);
-      expect(main.contains(pane())).toBe(false);
-      expect(pane().className).toContain("bg-bg-elev"); // one tinted region
-      expect(pane().className).toContain("sticky");
-      expect(ov().querySelector('[data-testid="profile-grid"]')!.className).toContain("18rem"); // the pane's column: ~288px
-      expect(ov().querySelector('[data-testid="profile-howto"]')).toBeTruthy();
-    });
-
-    it("History is not on the Overview at all (it stays a tab); neither is a Tests box", async () => {
-      await open();
-      expect(ov().querySelector('[data-testid="history-row"]')).toBeNull();
-      expect(ov().textContent).not.toMatch(/All history|Coming later/);
-      expect(ov().textContent).not.toMatch(/\bHistory\b/);
-      expect(panel("History").querySelectorAll('[data-testid="history-row"]')).toHaveLength(2);
-    });
-
-    it("'How to use it' is a definition list of the agent's real fields: use when, not for — nothing invented", async () => {
-      await open();
-      const dl = q('[data-testid="profile-howto"] dl')!;
-      expect([...dl.querySelectorAll("dt")].map((d) => d.textContent)).toEqual(["Use it when", "Not for"]);
-      expect([...dl.querySelectorAll("dd")].map((d) => d.textContent)).toEqual(["A page's ranking or markup is the question", "Writing brand copy"]);
-      expect(ov().textContent).not.toMatch(/Asks first|Measures|Does:/);
-      expect(q('[data-testid="profile-howto"] h3')!.className).toContain("text-body");
-      expect(q('[data-testid="profile-howto"] h3')!.className).toContain("font-semibold");
-      expect(q('[data-testid="profile-howto"] h3')!.className).not.toContain("uppercase");
-    });
-
-    it("an agent with only one of the two shows only that row; with neither it says so instead of an empty list", async () => {
-      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ notFor: null }) })) });
-      expect([...q('[data-testid="profile-howto"] dl')!.querySelectorAll("dt")].map((d) => d.textContent)).toEqual(["Use it when"]);
-      h!.unmount();
-      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ useWhen: null, notFor: null }) })) });
-      expect(q('[data-testid="profile-howto"] dl')).toBeNull();
-      expect(q('[data-testid="profile-howto"]')!.textContent).toContain("Nothing written yet");
-    });
-
-    it("the full instructions are folded under the list, from the agent's own file", async () => {
-      await open();
-      const details = q('[data-testid="profile-howto"] details')!;
-      expect(details.textContent).toContain("Full instructions");
-      expect(details.textContent).toContain("Audit pages. Never publish.");
-      expect((details as HTMLDetailsElement).open).toBe(false);
-    });
-
-    it("research it relies on: the first 4 rows as hairline rows, and 'All 5 →' goes to the tab", async () => {
-      await open();
-      expect(ov().querySelectorAll('[data-testid="research-row"]')).toHaveLength(4);
-      await click(btn("All 5 →", ov()));
-      expect(tab("Research").getAttribute("aria-selected")).toBe("true");
-    });
-
-    it("the pane's Details: model, works, built by, changed", async () => {
-      await open();
-      const rows = [...group("profile-details").querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
-      expect(rows).toEqual([
-        ["Model", "Auto"],
-        ["Works", "Read-only"],
-        ["Built by", "Architect"],
-        ["Changed", expect.stringMatching(/\d/)],
-      ]);
-    });
-
-    it("the pane's Seats: each seat with its notes, and Manage seats goes to the Seats tab", async () => {
-      await open();
-      const seats = group("profile-seats");
-      expect(seats.textContent).toContain("Manta");
-      expect(seats.textContent).toContain("23 notes");
-      expect(seats.textContent).toContain("Ronda");
-      await click(btn("Manage seats", seats));
-      expect(tab("Seats").getAttribute("aria-selected")).toBe("true");
-    });
-
-    it("the pane's Access: the first seat's memory as rows with a tag each", async () => {
-      await open();
-      const access = group("profile-access");
-      expect(access.textContent).toContain("Manta");
-      const rows = [...access.querySelectorAll('[data-testid="memory-row"]')];
-      expect(rows.map((r) => r.textContent)).toEqual([expect.stringContaining("Manta memory")]);
-      expect(rows[0].querySelector("[data-access]")?.textContent).toBe("read + write");
-    });
-
-    it("the pane's Refresh: Monthly / Off (specialists only)", async () => {
-      await open();
-      expect(btn("Monthly", group("profile-refresh"))).toBeTruthy();
-      expect(group("profile-refresh").textContent).toContain("Once a month"); // the Overview's keeps its note
-      h!.unmount();
-      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ role: "lead" }), seats: [] })) });
-      expect(q('[data-testid="profile-refresh"]')).toBeNull();
-      expect(pane()).toBeTruthy();
-    });
-
-    it("below ~720px the pane stacks under the main column (a container query on the overview's own width)", async () => {
-      await open();
-      const grid = ov().querySelector('[data-testid="profile-grid"]')!;
-      expect(grid.parentElement!.className).toContain("[container-type:inline-size]");
-      expect(grid.className).toContain("@container(min-width:720px)");
-    });
-
-    it("the lead has no seats to list: it works in every project", async () => {
-      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ role: "lead" }), seats: [] })) });
-      expect(group("profile-seats").textContent).toContain("Works in every project");
-      expect(group("profile-access")).toBeNull();
+      const doc = q('[data-testid="profile-instructions"]')!;
+      expect(doc.closest('[role="tabpanel"]')).toBe(panel("Overview"));
+      expect(doc.querySelectorAll("h2")).toHaveLength(3);
+      expect(doc.querySelector("pre")).toBeNull();
+      expect(q('nav[aria-label="Sections of the instructions"]')).toBeTruthy();
+      expect(panel("Overview").textContent).not.toMatch(/Research it relies on|Full instructions/);
     });
   });
 
-  describe("refresh", () => {
-    it("is Monthly by default and Off after the toggle (and says so)", async () => {
-      await open({ agentsRefreshSet: () => Promise.resolve({ enabled: false, routineId: "rt1" }) });
-      const group = q('[role="group"][aria-label="Refresh with new research"]')!;
-      expect(btn("Monthly", group)?.getAttribute("aria-pressed")).toBe("true");
-      await click(btn("Off", group));
-      expect(api.calls.agentsRefreshSet).toEqual([[{ slug: "seo", enabled: false }]]);
-      expect(btn("Off", group)?.getAttribute("aria-pressed")).toBe("true");
-      expect(btn("Monthly", group)?.getAttribute("aria-pressed")).toBe("false");
-    });
-
-    it("a refusal is a sentence and the setting stays where it was", async () => {
-      await open({ agentsRefreshSet: () => Promise.reject(new Error("Couldn't read the refresh setting; try again")) });
-      const group = q('[role="group"][aria-label="Refresh with new research"]')!;
-      await click(btn("Off", group));
-      expect(q('[data-testid="refresh-error"]')?.textContent).toBe("Couldn't read the refresh setting; try again");
-      expect(btn("Monthly", group)?.getAttribute("aria-pressed")).toBe("true");
-    });
-
-    it("an agent already Off reads Off; the lead and the Architect have no refresh control", async () => {
-      await open({ agentsProfile: () => Promise.resolve(profile({ refresh: { enabled: false, routineId: "rt1" } })) });
-      expect(btn("Off", q('[role="group"][aria-label="Refresh with new research"]')!)?.getAttribute("aria-pressed")).toBe("true");
-      h!.unmount();
-      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ role: "lead" }), seats: [] })) });
-      expect(q('[role="group"][aria-label="Refresh with new research"]')).toBeNull();
-    });
-  });
-
-  describe("Research and Seats tabs", () => {
-    it("Research: every entry as an expandable row, and the library's note once, in the pane", async () => {
-      await open();
-      const p = panel("Research");
-      expect(p.querySelectorAll('[data-testid="research-entry"]')).toHaveLength(5);
-      expect(p.querySelector('[data-testid="profile-pane"]')?.textContent).toContain("Thin means fewer than 3 independent sources".replace("Thin", "thin"));
-      expect(p.textContent).toContain("no longer in the library");
-      expect(panel("Overview").textContent).not.toContain("independent sources"); // the Overview doesn't repeat it
-    });
-
-    it("every tab is two columns: its content on the left, its own tinted pane on the right", async () => {
-      await open();
-      for (const name of ["Overview", "Research", "Seats", "History"]) {
-        const p = panel(name);
-        const side = p.querySelector('[data-testid="profile-pane"]');
-        expect(side?.tagName, name).toBe("ASIDE");
-        expect(p.querySelector('[data-testid="profile-main"]')?.contains(side), name).toBe(false);
-        expect(side!.className, name).toContain("bg-bg-elev");
-      }
-      expect(panel("Research").textContent).toContain("Refresh with new research");
-      expect(panel("Seats").textContent).toContain("What a seat is");
-      expect(panel("History").textContent).toContain("How changes land");
-    });
-
-    it("the History pane counts the agent's changes: live, waiting, undone", async () => {
-      await open();
-      const counts = [...panel("History").querySelectorAll('[data-testid="history-summary-counts"] dt')].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
-      expect(counts).toEqual([["Live", "2"], ["Waiting", "0"], ["Undone", "0"]]);
-    });
-
-    it("one Apply / Discard on the page (the pending card) and, with a pending change, History's row for it points up", async () => {
-      const pending = rec({ id: "p1", state: "pending", decidedAt: null, decidedBy: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check." });
-      await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]) });
-      await click(tab("History"));
-      const all = [...h!.container.querySelectorAll("button")].map((b) => b.textContent?.trim());
-      expect(all.filter((t) => t === "Apply")).toHaveLength(1);
-      expect(all.filter((t) => t === "Discard")).toHaveLength(1);
-      expect(panel("History").textContent).toContain("card above");
-    });
-
-    it("Seats: the rows and the actions (more in AgentSeats' own tests)", async () => {
-      await open();
-      const p = panel("Seats");
-      expect(p.querySelectorAll('[data-testid="seat-row"]')).toHaveLength(2);
-      expect(btn("Edit brief", p)).toBeTruthy();
-    });
-
-    it("a seat change reads the profile again", async () => {
-      await open({ agentsSeatRemove: () => Promise.resolve({ ok: true }) });
-      const before = api.calls.agentsProfile.length;
-      const p = panel("Seats");
-      await click(btn("Remove seat", p));
-      await click(btn("Remove seat", p)); // the confirmation
-      expect(api.calls.agentsProfile.length).toBe(before + 1);
-    });
-  });
-
-  describe("History tab", () => {
-    it("lists the records; a failed history read says so with Try again (the profile still shows)", async () => {
-      await open();
-      expect(panel("History").querySelectorAll('[data-testid="history-row"]')).toHaveLength(2);
-      h!.unmount();
-      let n = 0;
-      await open({ agentsHistory: () => (++n === 1 ? Promise.reject(new Error("Couldn't read the change history")) : Promise.resolve(HISTORY)) });
-      expect(panel("History").textContent).toContain("Couldn't read the change history");
-      expect(q('[data-testid="profile-header"]')).toBeTruthy();
-      await click(btn("Try again", panel("History")));
-      expect(panel("History").querySelectorAll('[data-testid="history-row"]')).toHaveLength(2);
-    });
-
-    it("a restore reads the profile and history again", async () => {
-      const restored = rec({ id: "r1", before: AGENT_MD, after: "V1", origin: { kind: "restore", fromChangeId: "c2" }, decidedBy: "click" });
-      await open({ agentsChangeRestore: () => Promise.resolve(restored) });
-      const before = api.calls.agentsProfile.length;
-      await click(panel("History").querySelector('[data-id="c2"] summary'));
-      await click(btn("Restore the version before this", panel("History")));
-      expect(api.calls.agentsChangeRestore).toEqual([[{ id: "c2" }]]);
-      expect(api.calls.agentsProfile.length).toBeGreaterThan(before);
-    });
-  });
-
-  // Architect v2 §3.4: the Tests tab
-  describe("Tests tab", () => {
-    const kase = (name: string, over: Record<string, unknown> = {}) => ({ name, expect: "does" as const, state: "done" as const, finalAnswer: null, tools: [], filesChanged: 0, refused: [], wouldAsk: [], durationMs: 5, ...over });
-    const trials = [
-      { id: "tr_old", rootJobId: "job0", agentSlug: "seo", draftHash: "a", createdAt: NOW - 5 * DAY, cases: [kase("audit")] },
-      { id: "tr_new", rootJobId: "job1", agentSlug: "seo", draftHash: "b", createdAt: NOW - DAY, cases: [kase("audit"), kase("publish", { expect: "declines" }), kase("slow", { state: "running" })] },
-    ];
-    const withTrials = () => ({
-      agentsProfile: () => Promise.resolve(profile({ trials })),
-      agentsHistory: () => Promise.resolve([rec({ id: "c3", trial: { id: "tr_old", verdicts: [{ case: "audit", pass: true, quote: "I checked the title tags first", note: "ok" }] } }), ...HISTORY]),
-      agentsTrialTranscript: () => Promise.resolve({ text: "Assistant: I checked the title tags first", nextOffset: null }),
-    });
-
-    it("is shown last, with its count, only when the agent has trials", async () => {
-      await open(withTrials());
-      const names = qa('[role="tab"]').map((t) => t.textContent);
-      expect(names.at(-1)).toBe("Tests · 2");
-      expect(panel("Tests").hidden).toBe(true);
-    });
-
-    it("lists the trials newest first, the honest note beside them, the verdict of the proposal that used one, and each case's transcript", async () => {
-      await open(withTrials());
-      await click(tab("Tests"));
-      const p = panel("Tests");
-      expect(p.hidden).toBe(false);
-      const rows = [...p.querySelectorAll<HTMLElement>('[data-testid="trial-row"]')];
+  describe("Skills", () => {
+    it("lists the agent's skills with name, description, files, where each came from, its licence and installs; an origin link opens through the app", async () => {
+      const prov = { url: "https://github.com/acme/cro/blob/abc123/landing-audit/SKILL.md", sourceId: "src_1", repo: "acme/cro", ref: "abc123", licence: "MIT", taken: "whole" as const, registry: { installs: 12500, stars: 41100 } };
+      await open({
+        agentsProfile: () =>
+          Promise.resolve(
+            profile({
+              skills: [
+                { name: "landing-audit", description: "Audits a landing page.", files: 4, bytes: 1536, provenance: prov },
+                { name: "own-notes", description: "", files: 1, bytes: 90, provenance: null },
+              ],
+            }),
+          ),
+        openExternal: () => Promise.reject(new Error("no browser")),
+      });
+      await click(tab("Skills"));
+      const rows = [...panel("Skills").querySelectorAll<HTMLElement>('[data-testid="profile-skill"]')];
       expect(rows).toHaveLength(2);
-      expect(rows[0].textContent).toContain("2 of 3 cases finished");
-      expect(rows[0].textContent).toContain("running");
-      expect((rows[0].querySelector("details") as HTMLDetailsElement).open).toBe(true);
-      expect(rows[1].querySelector('[data-testid="trial-row-verdict"]')?.textContent).toBe("passed");
-      expect(rows[1].textContent).toContain("I checked the title tags first");
-      expect(p.querySelector('[data-testid="tests-about"]')?.textContent).toContain(
-        "Runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy.",
-      );
-      // a running case has no transcript yet; a finished one does
-      const newCases = [...rows[0].querySelectorAll<HTMLElement>('[data-testid="trial-case"]')];
-      expect(newCases.map((c) => [...c.querySelectorAll("button")].some((b) => b.textContent === "Transcript"))).toEqual([true, true, false]);
-      expect(newCases[1].textContent).toContain("should decline");
-      await click([...rows[1].querySelectorAll("button")].find((b) => b.textContent === "Transcript"));
-      expect(api.calls.agentsTrialTranscript).toEqual([[{ id: "tr_old", case: "audit", offset: 0 }]]);
-      expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("Assistant: I checked the title tags first");
+      expect(rows[0].textContent).toContain("landing-audit");
+      expect(rows[0].textContent).toContain("Audits a landing page.");
+      expect(rows[0].textContent).toContain("Copied from acme/cro · MIT · 12,500 installs · 41,100 stars");
+      expect(rows[0].textContent).toContain("4 files · 1.5 KB");
+      expect(rows[1].textContent).toContain("Written for this agent");
+      const link = rows[0].querySelector("a") as HTMLAnchorElement;
+      expect(link.href).toBe(prov.url);
+      await click(link);
+      expect(api.calls.openExternal).toEqual([[prov.url]]);
+      expect(q('[data-testid="profile-skill-link-error"]')!.textContent).toMatch(/Couldn't open the link/);
     });
 
-    it("End from History reaches Tests", async () => {
-      await open(withTrials());
-      await click(tab("History"));
+    it("no skills: an empty state that says what a skill is and where one will show", async () => {
+      await open();
+      await click(tab("Skills"));
+      expect(q('[data-testid="skills-empty"]')!.textContent).toContain("No skills yet. When a proven skill fits SEO's job, the Architect proposes it; you'll find it in Needs you, then here.");
+      expect(panel("Skills").textContent).toContain("A skill is a method file, checklist or script the agent reads only when its task needs it.");
+    });
+  });
+
+  describe("other tabs", () => {
+    it("Seats, Research, Learned and History are the agent's own, in their tab", async () => {
+      await open({ agentsProfile: () => Promise.resolve(profile({ learned: [] })) });
+      expect(panel("Seats").textContent).toContain("Manta");
+      expect(panel("Research").textContent).toContain("Technical SEO for AI search");
+      expect(panel("Learned").textContent).toContain("Nothing learned yet");
+      expect(panel("History").textContent).toContain("Added rules for how AI search engines read pages.");
+    });
+
+    it("History lists only what went live: a pending change isn't there", async () => {
+      const pending = rec({ id: "p1", state: "pending", decidedAt: null, needsClick: true, reason: "ask", summary: "Adds an llms.txt check." });
+      await open({ agentsHistory: () => Promise.resolve([pending, ...HISTORY]) });
+      expect(panel("History").textContent).not.toContain("Adds an llms.txt check.");
+      expect(panel("History").querySelectorAll('[data-testid="history-row"]')).toHaveLength(2);
+    });
+
+    it("Settings: a field saves on blur and the page reads the agent again", async () => {
+      await open({ agentsSettingsSet: () => Promise.resolve({ outcome: "saved", change: rec({ id: "ach_9", origin: { kind: "settings", field: "name" }, decidedBy: "click" }) }) });
+      await click(tab("Settings"));
+      const input = panel("Settings").querySelector<HTMLInputElement>('[data-testid="settings-field-name"] input')!;
+      expect(input.value).toBe("SEO");
+      const reads = (api.calls.agentsProfile ?? []).length;
       await act(async () => {
-        tab("History").dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+        input.focus();
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "SEO Pro");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        input.blur();
       });
       await h!.flush();
-      expect(tab("Tests").getAttribute("aria-selected")).toBe("true");
-    });
-  });
-  // Architect v2 Stage 3 (§5.1): the Learned tab
-  describe("Learned tab", () => {
-    const lr = (over: Record<string, unknown> = {}) => ({ id: "lr_00000001", scope: "manta-aaaaaaaaaa", rule: "Write commit messages in the imperative mood.", why: "They corrected it twice.", whyIsInferred: false, quote: "always use imperative commit messages", createdAt: NOW - 2 * DAY, sourceJobId: "job1", archived: false, ...over });
-    const RULES = [
-      lr(),
-      lr({ id: "lr_00000002", scope: "_all", rule: "Say what you assumed.", quote: "say what you assumed, please", whyIsInferred: true, createdAt: NOW - DAY, sourceJobId: null }),
-      lr({ id: "lr_00000003", scope: "manta-aaaaaaaaaa", rule: "An old rule that was archived.", archived: true, quote: "old words here please" }),
-    ];
-    const withRules = (rules: unknown[] = RULES, extra: Record<string, unknown> = {}) => ({ agentsProfile: () => Promise.resolve(profile({ learned: rules as never })), ...extra });
-    const removal = rec({ id: "r1", summary: "Removed a learned preference: Say what you assumed.", origin: { kind: "learned" }, learned: { removedId: "lr_00000002" }, decidedBy: "click" });
-
-    it("is there for an agent whose box sends learned rules — with the count of the live ones — and for none else", async () => {
-      await open(withRules());
-      expect(qa('[role="tab"]').map((t) => t.textContent)).toEqual(["Overview", "Research · 5", "Seats · 2", "History · 2", "Learned · 2"]);
-      h!.unmount();
-      await open();
-      expect(qa('[role="tab"]').map((t) => t.textContent ?? "").some((t) => t.startsWith("Learned"))).toBe(false);
-      h!.unmount();
-      await open({ agentsProfile: () => Promise.resolve(profile({ info: info({ slug: "manta", name: "Manta", role: "lead" }), learned: [] })) }, "manta");
-      expect(qa('[role="tab"]').map((t) => t.textContent ?? "").some((t) => t.startsWith("Learned"))).toBe(false);
-    });
-
-    it("lists each rule under its scope (every project first, then the project by name), with the date, 'inferred' where it is, and the user's words behind a disclosure", async () => {
-      await open(withRules());
-      await click(tab("Learned"));
-      const p = panel("Learned");
-      expect(p.hidden).toBe(false);
-      const groups = [...p.querySelectorAll<HTMLElement>('[data-testid="learned-group"]')];
-      expect(groups.map((g) => g.querySelector("h3,h4,[data-testid='learned-group-title']")?.textContent)).toEqual(["Every project", "Manta"]);
-      const rows = [...p.querySelectorAll<HTMLElement>('[data-testid="learned-row"]')];
-      expect(rows.map((r) => r.querySelector('[data-testid="learned-rule"]')?.textContent)).toEqual(["Say what you assumed.", "Write commit messages in the imperative mood."]);
-      expect(rows[0].textContent).toContain("inferred");
-      expect(rows[1].textContent).not.toContain("inferred");
-      expect(rows[1].querySelector('[data-testid="learned-when"]')?.textContent).toMatch(/\d/);
-      const details = rows[1].querySelector("details")!;
-      expect(details.open).toBe(false);
-      expect(details.textContent).toContain("always use imperative commit messages");
-      expect(details.textContent).toContain("They corrected it twice.");
-      // the archived rule is kept but offered nothing
-      const archived = p.querySelector('[data-testid="learned-archived"]')!;
-      expect(archived.textContent).toContain("An old rule that was archived.");
-      expect(archived.querySelectorAll("button")).toHaveLength(0);
-      expect(p.querySelector('[data-testid="learned-about"]')?.textContent).toMatch(/Settings/);
-    });
-
-    it("an agent that has learned nothing says where rules will show up, and offers nothing to press", async () => {
-      await open(withRules([]));
-      await click(tab("Learned"));
-      const p = panel("Learned");
-      expect(p.querySelector('[data-testid="learned-empty"]')?.textContent).toContain("Nothing learned yet");
-      expect(p.querySelectorAll('[data-testid="learned-row"]')).toHaveLength(0);
-      expect(p.querySelectorAll("button")).toHaveLength(0);
-    });
-
-    it("Undo removes the rule through the box, says so, and the page reads the agent again", async () => {
-      await open(withRules(RULES, { agentsLearnedUndo: () => Promise.resolve(removal) }));
-      await click(tab("Learned"));
-      const before = api.calls.agentsProfile.length;
-      const row = panel("Learned").querySelectorAll<HTMLElement>('[data-testid="learned-row"]')[0];
-      await click(btn("Undo", row));
-      expect(api.calls.agentsLearnedUndo).toEqual([[{ slug: "seo", id: "lr_00000002" }]]);
-      expect(api.calls.agentsProfile.length).toBeGreaterThan(before);
-      expect(panel("Learned").querySelector('[data-testid="learned-notice"]')?.textContent).toContain("Say what you assumed.");
-      expect(panel("Learned").querySelector('[data-testid="learned-notice"]')?.textContent).toMatch(/won't be learned again/);
-    });
-
-    it("a refusal is a sentence, the rule stays, and pressing again works; only one press runs at a time", async () => {
-      let n = 0;
-      let resolve!: (r: AgentChange) => void;
-      await open(
-        withRules(RULES, {
-          agentsLearnedUndo: () => (++n === 1 ? Promise.reject(new Error("That preference is already gone")) : new Promise<AgentChange>((r) => (resolve = r))),
-        }),
-      );
-      await click(tab("Learned"));
-      const row = () => panel("Learned").querySelectorAll<HTMLElement>('[data-testid="learned-row"]')[0];
-      await click(btn("Undo", row()));
-      expect(panel("Learned").querySelector('[data-testid="learned-error"]')?.textContent).toContain("That preference is already gone");
-      expect(panel("Learned").querySelectorAll('[data-testid="learned-row"]')).toHaveLength(2);
-      await click(btn("Undo", row()));
-      // in flight: every Undo of the tab is disabled
-      expect([...panel("Learned").querySelectorAll("button")].filter((b) => (b.textContent ?? "").includes("Undo")).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
-      expect(api.calls.agentsLearnedUndo).toHaveLength(2);
-      await act(async () => resolve(removal));
-      await h!.flush();
-      expect(panel("Learned").querySelector('[data-testid="learned-error"]')).toBeNull();
-    });
-
-    it("'Open the task' opens the task that taught the rule, only where the rule knows its task; a refusal is said", async () => {
-      await open(withRules(RULES, { delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task's session is gone" }) }));
-      await click(tab("Learned"));
-      const rows = [...panel("Learned").querySelectorAll<HTMLElement>('[data-testid="learned-row"]')];
-      expect(buttonIn(rows[0], "Open the task")).toBeUndefined();
-      await click(buttonIn(rows[1], "Open the task"));
-      expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "job1" }]]);
-      expect(panel("Learned").textContent).toContain("That task's session is gone");
+      expect(api.calls.agentsSettingsSet).toEqual([[{ slug: "seo", field: "name", value: "SEO Pro" }]]);
+      expect((api.calls.agentsProfile ?? []).length).toBeGreaterThan(reads);
+      expect((api.calls.agentsHistory ?? []).length).toBeGreaterThan(1);
     });
   });
 });
