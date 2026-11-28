@@ -252,7 +252,7 @@ import {
   createPendingMediaStore,
   createMediaSweep,
 } from "./media.mjs";
-import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
+import { setSecret, deleteSecret, listSecrets, provideSecret, loadSecretsStrict } from "./secrets.mjs";
 import { resourceSnapshot } from "./resourceSnapshot.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
 import { createProductionHandoff } from "./handoff/wiring.mjs";
@@ -260,7 +260,7 @@ import { createHandoffHandler } from "./handoffRoute.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
-import { createAgentsEngine, isArchitect } from "./agents.mjs";
+import { createAgentsEngine } from "./agents.mjs";
 import { createAgentTrials, TRIAL_PROGRESS_PREFIX, trialScratchRoot } from "./agentTrials.mjs";
 import { createAgentLearning, createLearningStore, createUserCommitReader } from "./agentLearning.mjs";
 import { checkLearnedRule } from "./agentScriptReview.mjs";
@@ -268,6 +268,7 @@ import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
 import { createSecretScanner } from "./knowledge/secretScan.mjs";
 import { createTaskQuestions } from "./taskQuestions.mjs";
 import { createResearchEngine } from "./research.mjs";
+import { createResearchSources } from "./researchSources.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
 import { createProjectActions, knowledgeSeam, projectPatterns as buildProjectPatterns } from "./projectActions.mjs";
@@ -2653,12 +2654,28 @@ void stopTuner;
 // Agents Phase 5A (src/server/research.mjs): the Architect's research tools. Every call is bound by the agents engine (the
 // exact running tool part, the agent, the stamped running job), which is built just below — read at call time.
 // Research library (docs/superpowers/specs/2026-11-24-research-library.md): the research tools are every specialist task's, and
-// the shared, dated library sits on top of them; both bind through `bindResearcher`. The user's extra sources stay the Architect's.
+// the shared, dated library sits on top of them; both bind through `bindResearcher`.
+// Research layer (docs/superpowers/specs/2026-11-28-research-layer.md): ONE box-wide, ordered list of sources (Settings → Research sources,
+// src/server/researchSources.mjs) feeds every agent's search and prompt. The Architect's own `sources:` are migrated into it once, at boot.
+const researchSources = createResearchSources({
+  readArchitectSources: () => agentsEngine.readArchitectSources(),
+  stripArchitectSources: () => agentsEngine.stripArchitectSources(),
+  loadSecrets: () => loadSecretsStrict(),
+  runTest: (def, query) => researchEngine.testSource(def, query),
+  // every compiled prompt carries the sources in its base block: recompile (a config reload at most, never a restart)
+  onChange: () => agentsEngine.sync(),
+  publish: () => bus.publish({ kind: "research.sources.updated", payload: {} }),
+});
 const researchEngine = createResearchEngine({
   bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
-  extraSources: async () => {
-    const { entries } = await agentsEngine.scan();
-    return entries.find(isArchitect)?.meta.sources ?? [];
+  sourceList: () => researchSources.rows(),
+  // the folder of a task or chat, for the outside-query check (an unreadable session fails the check closed)
+  folderOf: async (sessionID) => {
+    if (typeof sessionID !== "string" || !sessionID) return null;
+    const rs = await oc.readSession(sessionID);
+    if (rs?.state === "missing") return null;
+    if (rs?.state !== "found") throw new Error("session unreadable");
+    return typeof rs.session?.directory === "string" ? rs.session.directory : null;
   },
 });
 const researchLibrary = createResearchLibrary({
@@ -2712,6 +2729,7 @@ const agentTrials = createAgentTrials({
 const agentsEngine = createAgentsEngine({
   trials: agentTrials,
   research: researchEngine,
+  researchSources, // the base block of every compiled prompt: the sources, the search-first rule, the library rules
   library: researchLibrary, // the Architect's fit check is checked against the entries it names
   editConfig: (edits) => editOpencodeConfig(edits),
   reload: () => reloadOpencodeConfig(),
@@ -2778,7 +2796,11 @@ const agentsEngine = createAgentsEngine({
     bus.publish({ kind: "agentFleet", payload: {} });
   },
 });
-void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
+// then, once the built-ins are installed, the Architect's own research sources move into the box-wide list (idempotent, never fatal)
+void agentsEngine
+  .init()
+  .catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e))
+  .then(() => researchSources.migrate());
 architectJobEndedSink = async (job) => {
   // the round is over (finished, failed or stopped): its trial cases that are still queued or running are aborted and cleaned up
   await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the end of a round failed:", e?.message ?? e));
@@ -2834,6 +2856,7 @@ const claudeCliVersionSync = createClaudeCliVersionSync();
 rpcHandlers = buildHandlers({
   usageCalibration,
   agents: agentsEngine,
+  researchSources,
   routines: routinesEngine,
   knowledge: knowledgeEngine,
   backgroundBudget,
@@ -5300,6 +5323,23 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, result);
     } catch (e) {
       // class-2 (BET-1460): the manta plugin (agent_propose / research_* tools) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // POST /api/research/outside-check  body {sessionID, tool: "websearch"|"webfetch", input: {query}|{url}} → {ok:true} | {ok:false, error}
+  // The ONE outside-query check (src/server/research/outsideQuery.mjs), asked by the manta plugin's `execute.before` hook in front of OpenCode's
+  // built-in websearch / webfetch in every session kind (research layer spec §6.3a). A refusal is HTTP 200; it never logs the input.
+  if (path === "/api/research/outside-check") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      respondJson(res, 200, await researchEngine.outsideCheck((await readJsonBody(req)) ?? {}));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin's web-tool hook — it fails closed on any non-answer and never shows this to a user.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

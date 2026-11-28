@@ -44,7 +44,12 @@ const COULDNT_CHECK = "Couldn't check the sources for credentials; try again";
 const UNREADABLE = "The saved research sources couldn't be read; fix or remove ~/.manta/research-sources.json, then try again";
 const WIRE_ONLY_KEYS = ["builtin", "kind", "enabled", "secretRefs", "missingSecrets", "addedBy", "addedAt"];
 
-class SourcesError extends Error {}
+class SourcesError extends Error {
+  constructor(message) {
+    super(message);
+    this.rpcStatus = 500; // the sentence is safe to show: the page relays it as it is
+  }
+}
 
 const isPlain = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const fit = (base, suffix) => `${base.slice(0, 30 - suffix.length).replace(/-+$/, "")}${suffix}`;

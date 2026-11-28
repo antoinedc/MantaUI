@@ -587,6 +587,8 @@ export function buildHandlers({
   delegateView = null,
   // Agents engine (src/server/agents.mjs). Null when not wired (tests): the `agents:*` channels then answer a sentence.
   agents = null,
+  // The box-wide research sources store (src/server/researchSources.mjs). Null when not wired (tests): the `research:sources-*` channels answer 503.
+  researchSources = null,
   progress,
   voiceNotes,
   contextLimitFor = () => null,
@@ -1010,6 +1012,19 @@ export function buildHandlers({
     } catch (e) {
       if (typeof e?.rpcStatus === "number") throw e;
       console.warn(`[agents] ${route} failed:`, e?.message ?? e);
+      throw Object.assign(new Error("Something went wrong on the box — try again."), { rpcStatus: 500 });
+    }
+  };
+
+  // Research sources (research layer spec §6.6): a validation refusal is RETURNED as `{ ok:false, error }`; a store that can't be read carries
+  // its own safe sentence and status; anything else is logged and answered with a safe literal (an fs error would put a path on the screen).
+  const researchCall = async (route, fn) => {
+    if (!researchSources) throw Object.assign(new Error("Research sources aren't available on this box yet."), { rpcStatus: 503 });
+    try {
+      return await fn(researchSources);
+    } catch (e) {
+      if (typeof e?.rpcStatus === "number") throw e;
+      console.warn(`[research] sources ${route} failed:`, e?.message ?? e);
       throw Object.assign(new Error("Something went wrong on the box — try again."), { rpcStatus: 500 });
     }
   };
@@ -2867,6 +2882,11 @@ export function buildHandlers({
 
     // ---- shared knowledge (src/server/knowledge/; spec docs/superpowers/specs/2026-11-16-shared-knowledge.md §11.6) ----
     ...buildKnowledgeChannels(knowledge),
+
+    // ---- research sources (research layer; src/server/researchSources.mjs): the box-wide list agents search ----
+    "research:sources-list": () => researchCall("list", (r) => r.list()),
+    "research:sources-save": (input) => researchCall("save", (r) => r.save(input)),
+    "research:sources-test": (input) => researchCall("test", (r) => r.test(input)),
 
     // ---- agents, Phase 1 (src/server/agents.mjs; wire types AgentInfo & co in src/shared/types.ts) ----
     "agents:list": () => agentsCall("list", (a) => a.list()),

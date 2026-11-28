@@ -245,6 +245,35 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
   await assert.rejects(none["agents:fleet"](), (e) => e.rpcStatus === 503);
 });
 
+test("research sources: the three research:sources-* channels call the store with their one object; a refusal stays a returned sentence; the unexpected is a safe literal; unwired answers 503", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  deps.researchSources = {
+    list: async () => (seen.push(["list"]), { sources: [], notices: [] }),
+    save: async (i) => (seen.push(["save", i]), i?.sources?.length ? { ok: true } : { ok: false, error: "Built-in sources can be turned off, not removed", id: "web" }),
+    test: async (i) => (seen.push(["test", i]), { ok: true, ms: 12, count: 3, first: { title: "T" } }),
+  };
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["research:sources-list"](), { sources: [], notices: [] });
+  assert.deepEqual(await handlers["research:sources-save"]({ sources: [{ id: "web", enabled: true }] }), { ok: true });
+  assert.deepEqual(await handlers["research:sources-save"]({ sources: [] }), { ok: false, error: "Built-in sources can be turned off, not removed", id: "web" });
+  assert.deepEqual(await handlers["research:sources-test"]({ id: "hn", query: "agents" }), { ok: true, ms: 12, count: 3, first: { title: "T" } });
+  assert.deepEqual(seen, [["list"], ["save", { sources: [{ id: "web", enabled: true }] }], ["save", { sources: [] }], ["test", { id: "hn", query: "agents" }]]);
+  deps.researchSources.test = async () => {
+    throw new Error("/home/dev/.manta/research-sources.json: EACCES");
+  };
+  const again = buildHandlers(deps);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    await assert.rejects(again["research:sources-test"]({ id: "hn" }), (e) => e.rpcStatus === 500 && !/EACCES|home/.test(e.message));
+  } finally {
+    console.warn = warn;
+  }
+  const none = buildHandlers({ ...deps, researchSources: null });
+  await assert.rejects(none["research:sources-list"](), (e) => e.rpcStatus === 503);
+});
+
 test("the file explorer's fs:* channels are registered", () => {
   const handlers = buildHandlers(makeDeps([]).deps);
   for (const channel of ["fs:resolve-paths", "fs:list", "fs:git-status"]) {
