@@ -310,4 +310,63 @@ describe("NeedsYouPage", () => {
     await open(data({ questions: [tq()], changes: [change()], reviews: [review()], changeProjects: {} }));
     expect(q('[data-testid="needs-header-counts"]')?.textContent).toBe("2 decisions · 1 optional question");
   });
+  // ---- a question asked in an agent's own conversation (agent chat tasks) ----
+
+  const cq = (over: Record<string, unknown> = {}) => ({
+    id: "form_1",
+    slug: "dev",
+    agentName: "Dev",
+    sessionId: "ses_dev",
+    question: "Which project is the flaky upload test in? MantaUI and Ronda both have one.",
+    options: ["Ronda (Recommended)", "MantaUI"],
+    askedAt: NOW - 3 * MIN,
+    ...over,
+  });
+
+  it("a conversation question is a red 'Waiting on you' item under 'Team': the question as the title, who it is from, a sentence with its options, one Open conversation button", async () => {
+    await open(data({ chatQuestions: [cq()], count: 1 }));
+    expect(items()).toHaveLength(1);
+    const it0 = items()[0];
+    expect(it0.dataset.kind).toBe("chat-question");
+    expect(it0.dataset.urgency).toBe("decision");
+    expect(it0.className).toContain("border-l-danger");
+    expect(it0.querySelector('[data-testid="needs-you-label"]')!.textContent).toContain("Waiting on you");
+    expect(it0.querySelector("h3")!.textContent).toBe("Which project is the flaky upload test in? MantaUI and Ronda both have one.");
+    expect(it0.textContent).toContain("Dev");
+    expect(it0.textContent).toContain("in your conversation");
+    expect(it0.textContent).toContain("Dev is waiting for your answer before it starts anything. Options: Ronda (recommended), MantaUI.");
+    expect(it0.textContent).toContain("3m ago");
+    expect(qa('[data-testid="needs-you-project"] h2').map((h2) => h2.textContent)).toEqual(["Team"]);
+    expect([...it0.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim())).toEqual(["Open conversation"]);
+    // it is not answered here: no question card
+    expect(it0.querySelector("input[type='radio']")).toBeNull();
+  });
+
+  it("'Team' also holds agent changes; a project's items keep their own heading", async () => {
+    await open(data({ chatQuestions: [cq()], changes: [change()], reviews: [review()], count: 3 }));
+    expect(qa('[data-testid="needs-you-project"] h2').map((h2) => h2.textContent)).toEqual(["Team", "Capo"]);
+  });
+
+  it("Open conversation opens the agent's conversation and selects its window", async () => {
+    const activate = vi.fn(() => Promise.resolve());
+    resetStore({ jobs: {}, jobSkew: {}, connectionState: { state: "connected" }, refresh: () => Promise.resolve(), activateWindow: activate, projects: [{ tmuxSession: "manta-agents", windows: [{ index: 3 }] }] } as never);
+    await open(data({ chatQuestions: [cq()], count: 1 }), {}, { agentsOpenChat: () => Promise.resolve({ tmuxSession: "manta-agents", windowIndex: 3 }) });
+    await click(btn(items()[0], "Open conversation"));
+    expect(api.calls.agentsOpenChat).toEqual([[{ slug: "dev" }]]);
+    expect(activate).toHaveBeenCalledWith("manta-agents", 3);
+    expect(q('[data-testid="needs-you-chat-open-error"]')).toBeNull();
+  });
+
+  it("if the conversation can't be opened, a role=alert line under the button says so — never silence", async () => {
+    await open(data({ chatQuestions: [cq()], count: 1 }), {}, { agentsOpenChat: () => Promise.reject(new Error("opencode is not running")) });
+    await click(btn(items()[0], "Open conversation"));
+    const alert = q('[data-testid="needs-you-chat-open-error"]')!;
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toBe("Couldn’t open Dev’s conversation; try again");
+  });
+
+  it("the header counts it as a decision", async () => {
+    await open(data({ chatQuestions: [cq(), cq({ id: "form_2", slug: "pd", agentName: "Product Designer" })], count: 2 }));
+    expect(q('[data-testid="needs-header-counts"]')!.textContent).toBe("2 decisions");
+  });
 });
