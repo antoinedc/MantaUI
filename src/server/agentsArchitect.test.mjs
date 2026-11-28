@@ -2631,7 +2631,8 @@ test("the Architect runs a trial before proposing: the mechanics, the limits, an
   assert.ok(order.indexOf("Trial it") > order.indexOf("Write the agent"), "after writing the draft");
   assert.ok(order.indexOf("Trial it") < order.indexOf("Propose"), "before proposing");
   const trial = flat(main.match(/\n\d+\. \*\*Trial it\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
-  for (const re of [/`agent_trial`/, /1 to 3 cases/, /`expect` \("does" or "declines"\)/, /in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy/, /partial test/, /no user/, /`agent_trial_wait`/, /`agent_trial_read`/, /judge each case yourself/, /3 trials per agent, 6 per task/, /exactly the draft you propose/]) assert.match(trial, re);
+  for (const re of [/`agent_trial`/, /1 to 3 cases/, /`expect` \("does" or "declines"\)/, /in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to that copy/, /partial test/, /no user/, /`agent_trial_wait`/, /`agent_trial_read`/, /judge each case yourself/, /exactly the draft you propose/]) assert.match(trial, re);
+  assert.doesNotMatch(trial, /trials per agent|per task/, "the template states no cap on the number of trials");
   const propose = flat(main.match(/\n\d+\. \*\*Propose\*\*[\s\S]*?(?=\n\d+\. )/)?.[0] ?? "");
   assert.match(propose, /`problem`: the user's words quoted from the request, the shapes you listed, the one you chose and why/);
   assert.match(propose, /`trial`: the trial's id and one verdict per case with a quote from what the agent did in that case \(its messages or tool calls, not the task\)/);

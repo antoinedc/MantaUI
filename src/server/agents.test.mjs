@@ -663,7 +663,7 @@ async function leadFixture({ installLead = true, extra = {}, delegateOver = {} }
         return serial(async () => {
           const refusal = i.admit ? await i.admit(jobs, w.records.find((j) => j.id === id)) : null;
           if (refusal) return { ok: false, status: 409, error: refusal };
-          const job = { id: `cont${++n}`, parentSessionID: i.sessionID, isolation: "worktree", requestedBy: i.requestedBy, turnKey: i.turnKey, status: "running", name: i.name };
+          const job = { id: `cont${++n}`, parentSessionID: i.sessionID, isolation: "worktree", requestedBy: i.requestedBy, status: "running", name: i.name };
           jobs.push(job);
           return { ok: true, job };
         });
@@ -937,14 +937,14 @@ test("handoff: a valid read-only handoff starts the job with the brief, seat, ex
     assert.equal(job.agent, "agent-seo");
     assert.equal(job.isolation, "none");
     assert.equal(job.requestedBy, "manta");
-    assert.equal(job.turnKey, "msg_user1");
     assert.equal(job.allowPr, false);
     assert.equal(job.request, "Audit the head tags");
     assert.equal(job.name, "Audit the head tags");
     assert.equal(job.permission, undefined, "the existing read-only ruleset applies");
     assert.ok(job.prompt.startsWith("Audit /pricing head tags."));
     assert.match(job.prompt, /Check hreflang first\./);
-    assert.equal(typeof job.admit, "function");
+    assert.equal(job.admit, undefined, "nothing of the lead's own limits is asked of the delegate (its box-wide running cap stays)");
+    assert.equal("turnKey" in job, false);
   } finally {
     await f.cleanup();
   }
@@ -1137,42 +1137,36 @@ test("handoff: 'Hand off: Never' refuses with a sentence before anything starts;
   }
 });
 
-test("handoff admission: two concurrent code handoffs → one starts, the other is refused naming the running one", async () => {
+test("handoff admission: concurrent code handoffs all start — each has its own worktree and branch, also for the same agent", async () => {
   const f = await leadFixture();
   try {
     const a = call({ callID: "c1", messageID: "m1", title: "Fix login" });
     const b = call({ callID: "c2", messageID: "m2", title: "Fix signup" });
-    f.w.messages = [...transcript(a), ...transcript(b, { messageID: "m2" }).slice(1)];
-    const [ra, rb] = await Promise.all([f.engine.handoff(a), f.engine.handoff(b)]);
-    const results = [ra, rb];
-    assert.equal(results.filter((r) => r.ok).length, 1);
-    const refused = results.find((r) => !r.ok);
-    assert.match(refused.error, /^Dev is already changing code for this chat \((Fix login|Fix signup)\); wait for its result$/);
-    assert.equal(f.jobs.length, 1);
+    const c = call({ callID: "c3", messageID: "m3", title: "Fix logout" });
+    f.w.messages = [...transcript(a), ...transcript(b, { messageID: "m2" }).slice(1), ...transcript(c, { messageID: "m3" }).slice(1)];
+    const results = await Promise.all([f.engine.handoff(a), f.engine.handoff(b), f.engine.handoff(c)]);
+    assert.deepEqual(results.map((r) => r.ok), [true, true, true], JSON.stringify(results));
+    assert.equal(f.jobs.length, 3);
+    assert.ok(f.jobs.every((j) => j.isolation === "worktree"));
   } finally {
     await f.cleanup();
   }
 });
 
-test("handoff admission: the per-request cap — three handoffs per user message, however many assistant messages", async () => {
+test("handoff admission: there is no per-request cap — five handoffs in one user turn all start", async () => {
   const f = await leadFixture();
   try {
     await mkdir(join(f.root, "seo"));
     await writeFile(join(f.root, "seo", "agent.md"), valid("isolation: none\n"));
-    const results = [];
     const all = [];
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 5; i++) {
       const b = call({ agent: "seo", callID: `c${i}`, messageID: `m${i}`, title: `Audit ${i}` });
       all.push(...transcript(b, { messageID: `m${i}`, parentID: "msg_user1" }).slice(1));
     }
     f.w.messages = [{ info: { id: "msg_user1", role: "user" }, parts: [] }, ...all];
-    for (let i = 1; i <= 4; i++) results.push(await f.engine.handoff(call({ agent: "seo", callID: `c${i}`, messageID: `m${i}`, title: `Audit ${i}` })));
-    assert.deepEqual(results.map((r) => r.ok), [true, true, true, false]);
-    assert.equal(results[3].error, "Too many handoffs for one request; finish or ask the user");
-    // a NEW user message is a new turn
-    const b5 = call({ agent: "seo", callID: "c5", messageID: "m5", title: "Audit 5" });
-    f.w.messages = transcript(b5, { messageID: "m5", parentID: "msg_user2" });
-    assert.equal((await f.engine.handoff(b5)).ok, true);
+    const results = [];
+    for (let i = 1; i <= 5; i++) results.push(await f.engine.handoff(call({ agent: "seo", callID: `c${i}`, messageID: `m${i}`, title: `Audit ${i}` })));
+    assert.deepEqual(results.map((r) => r.ok), [true, true, true, true, true], JSON.stringify(results));
   } finally {
     await f.cleanup();
   }
@@ -1215,22 +1209,22 @@ test("handoff continueJob: validated first — same parent, same agent, the lead
     assert.equal(c.name, "Round two");
     assert.equal(c.request, "Round two");
     assert.equal(c.requestedBy, "manta");
-    assert.equal(c.turnKey, "msg_user1");
+    assert.equal("turnKey" in c, false);
     assert.equal(c.allowPr, false);
-    assert.equal(typeof c.admit, "function");
+    assert.equal(c.admit, undefined);
     assert.equal(f.calls.startApproval.length, 0, "a continuation never shows the approval card");
   } finally {
     await f.cleanup();
   }
 });
 
-test("handoff continueJob: a writer continuation is held back by a running writer", async () => {
+test("handoff continueJob: a writer continuation is not held back by another running writer", async () => {
   const f = await leadFixture();
   try {
     f.w.records = [{ id: "abcd1234", parentSessionID: "ses_chat", agent: "agent-dev", requestedBy: "manta", status: "done", isolation: "worktree" }];
     f.jobs.push({ id: "runner", parentSessionID: "ses_chat", isolation: "worktree", status: "running", name: "other-task", agentName: "Dev" });
     const r = await ok(f, call({ continueJob: "abcd1234" }));
-    assert.deepEqual(r, { ok: false, error: "Dev is already changing code for this chat (other-task); wait for its result" });
+    assert.equal(r.ok, true, JSON.stringify(r));
   } finally {
     await f.cleanup();
   }

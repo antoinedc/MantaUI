@@ -644,7 +644,8 @@ describe("trial tools (Architect v2 Stage 1)", () => {
     assert.deepEqual(wait.input.required, ["trialId"]);
     assert.deepEqual(Object.keys(read.input.properties), ["trialId", "case", "offset"]);
     assert.deepEqual([...read.input.required].sort(), ["case", "trialId"]);
-    assert.match(trial.description, /at most 3 cases per trial, 3 trials per agent and 6 per task/i);
+    assert.match(trial.description, /at most 3 cases per trial/i);
+    assert.doesNotMatch(trial.description, /trials per agent|per task/i, "no cap on the number of trials");
     assert.match(wait.description, /4 minutes/);
     assert.match(read.description, /20,000 characters/);
   });
@@ -675,8 +676,8 @@ describe("trial tools (Architect v2 Stage 1)", () => {
   });
 
   test("a refusal is a sentence, never a throw", async () => {
-    serveJson(200, { ok: false, error: "You've already run 6 trials in this task" });
-    assert.equal(await trial.execute(args, CTX), "Not started: You've already run 6 trials in this task");
+    serveJson(200, { ok: false, error: "The trial couldn't be set up; try again" });
+    assert.equal(await trial.execute(args, CTX), "Not started: The trial couldn't be set up; try again");
     serveJson(200, { ok: false, error: "The trial tr_x doesn't exist" });
     assert.equal(await wait.execute({ trialId: "tr_x" }, CTX), "Couldn't wait: The trial tr_x doesn't exist");
     serveJson(500, { error: "kaboom" });

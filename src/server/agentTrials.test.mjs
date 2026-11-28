@@ -628,7 +628,7 @@ test("a question the agent asks is answered at once by the server, recorded as '
   }
 });
 
-test("limits: at most 2 cases run at once box-wide, in order; 3 trials per agent and 6 per task", async () => {
+test("limits: at most 2 cases run at once box-wide, in order; no cap on trials per agent or per task", async () => {
   const f = await rig();
   try {
     f.w.outcome = "hang";
@@ -645,23 +645,17 @@ test("limits: at most 2 cases run at once box-wide, in order; 3 trials per agent
     await until(() => f.w.created.length >= 3);
     assert.equal(f.w.created.length, 3);
     assert.equal(f.w.prompts[2].text.split("\n")[0], "Do the a3 thing.");
-    // the per-agent cap: a third trial of the same agent is the last
-    const c = await f.t.create(f.input({ messageID: "msg_3", callID: "call_3" }));
-    assert.equal(c.ok, true);
-    const d = await f.t.create(f.input({ messageID: "msg_4", callID: "call_4" }));
-    assert.equal(d.ok, false);
-    assert.match(d.error, /3 trials/);
-    // another agent in the same task: allowed until 6 in all
-    for (let i = 0; i < 3; i++) {
+    // no cap on trials: the same agent and other agents, in one task, as many as the Architect needs
+    for (let i = 0; i < 5; i++) {
+      const r = await f.t.create(f.input({ messageID: `msg_s${i}`, callID: `call_s${i}` }));
+      assert.equal(r.ok, true, r.error);
+    }
+    for (let i = 0; i < 5; i++) {
       f.w.plan = planFor({ slug: `other-${i}` });
       const r = await f.t.create(f.input({ messageID: `msg_o${i}`, callID: `call_o${i}` }));
       assert.equal(r.ok, true, r.error);
     }
-    f.w.plan = planFor({ slug: "other-9" });
-    const seventh = await f.t.create(f.input({ messageID: "msg_o9", callID: "call_o9" }));
-    assert.equal(seventh.ok, false);
-    assert.match(seventh.error, /6 trials/);
-    // another task has its own count
+    // another task is unaffected
     const elsewhere = await f.t.create(f.input({ messageID: "msg_x", callID: "call_x", sessionID: "ses_9" }));
     assert.equal(elsewhere.ok, true, elsewhere.error);
   } finally {
@@ -720,13 +714,13 @@ test("a trial is part of the task the user asked for: the background budget neve
   }
 });
 
-test("a trial in which no case started doesn't use up the per-agent or the per-task limit", async () => {
+test("a trial whose cases never started, or that failed, leaves nothing counted: more trials of the same agent still start", async () => {
   const f = await rig();
   try {
     // every case is refused before it runs (the copy of the project holds a link out of it): no session ever starts
     f.w.symlinkOk = false;
-    for (let i = 0; i < 8; i++) {
-      f.w.plan = planFor({ slug: i < 4 ? "seo-reviewer" : `other-${i}` });
+    for (let i = 0; i < 5; i++) {
+      f.w.plan = planFor({ slug: "seo-reviewer" });
       const r = await f.t.create(f.input({ messageID: `m${i}`, callID: `c${i}`, cases: [f.caseOf("main", { project: "shop" })] }));
       assert.equal(r.ok, true, `trial ${i}: ${r.error}`);
       const done = await settle(f.t, r.trialId);
@@ -734,33 +728,14 @@ test("a trial in which no case started doesn't use up the per-agent or the per-t
       assert.match(done.cases[0].error, /link/);
     }
     assert.equal(f.w.created.length, 0, "no session ever started");
-    // the limits are still all there for trials that run: 3 of an agent, then the 4th is refused
     f.w.symlinkOk = true;
-    f.w.outcome = "hang";
-    f.w.plan = planFor({ slug: "seo-reviewer" });
-    for (let i = 0; i < 3; i++) assert.equal((await f.t.create(f.input({ messageID: `r${i}`, callID: `rc${i}` }))).ok, true);
-    const fourth = await f.t.create(f.input({ messageID: "r9", callID: "rc9" }));
-    assert.equal(fourth.ok, false);
-    assert.match(fourth.error, /3 trials/);
-  } finally {
-    await f.cleanup();
-  }
-});
-
-test("a trial whose case started counts toward the limits even when it ends in failure", async () => {
-  const f = await rig();
-  try {
     f.w.outcome = "failed";
-    f.w.plan = planFor({ slug: "seo-reviewer" });
-    for (let i = 0; i < 3; i++) {
-      const r = await f.t.create(f.input({ messageID: `m${i}`, callID: `c${i}` }));
+    for (let i = 0; i < 5; i++) {
+      const r = await f.t.create(f.input({ messageID: `r${i}`, callID: `rc${i}` }));
       assert.equal(r.ok, true, r.error);
       assert.equal((await settle(f.t, r.trialId)).cases[0].state, "failed");
     }
-    assert.equal(f.w.created.length, 3);
-    const fourth = await f.t.create(f.input({ messageID: "m9", callID: "c9" }));
-    assert.equal(fourth.ok, false);
-    assert.match(fourth.error, /3 trials/);
+    assert.equal(f.w.created.length, 5);
   } finally {
     await f.cleanup();
   }
@@ -1168,22 +1143,19 @@ test("agent_trial_read wraps the transcript in a data boundary: output of the te
   }
 });
 
-test("parallel create calls can't overshoot the limits: 8 at once in one task → 6 start, 2 are refused; 5 at once of one agent → 3 start", async () => {
+test("parallel create calls all start: 8 at once in one task, 5 at once of one agent", async () => {
   const f = await rig();
   try {
     f.w.outcome = "hang";
     const call = (i, over = {}) => f.t.create(f.input({ messageID: `m${i}`, callID: `c${i}`, ...over }));
     f.w.plan = planFor({ slug: "a" });
     const per = await Promise.all([0, 1, 2, 3, 4].map((i) => call(i)));
-    assert.equal(per.filter((r) => r.ok).length, 3);
-    assert.ok(per.filter((r) => !r.ok).every((r) => /3 trials/.test(r.error)));
-    // a failed call gives its slot back
+    assert.deepEqual(per.map((r) => r.ok), [true, true, true, true, true], JSON.stringify(per));
     f.w.planError = "can't plan";
-    assert.equal((await call(50)).ok, false);
+    assert.equal((await call(50)).ok, false, "a failed call is still a failed call");
     f.w.planError = null;
-    const more = await Promise.all([10, 11, 12, 13, 14].map((i) => (f.w.plan = planFor({ slug: `s${i}` }), call(i))));
-    assert.equal(more.filter((r) => r.ok).length, 3, "3 + 3 = the 6 of the task, and the failed call took none");
-    assert.ok(more.filter((r) => !r.ok).every((r) => /6 trials/.test(r.error)));
+    const more = await Promise.all([10, 11, 12, 13, 14, 15, 16, 17].map((i) => (f.w.plan = planFor({ slug: `s${i}` }), call(i))));
+    assert.equal(more.filter((r) => r.ok).length, 8);
   } finally {
     await f.cleanup();
   }
