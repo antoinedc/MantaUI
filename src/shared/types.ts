@@ -4531,6 +4531,34 @@ export interface TaskQuestionEvent {
   rootJobId: string;
   state: TaskQuestionState;
 }
+/** What the user can answer to Manta's "this might deserve an agent" offer. */
+export type AgentSuggestionAction = "agent" | "skill" | "later" | "never";
+/**
+ * One stored offer, as `agents:suggestions` returns it (docs/superpowers/specs/2026-11-28-research-layer.md §6.6). `final`: this "Not now"
+ * was the second, so Manta won't suggest it again. `accept` exists only for an answered agent/skill offer.
+ */
+export interface AgentSuggestion {
+  id: string;
+  anchorMessageId: string;
+  label: string;
+  verdict: "agent" | "skill";
+  why: string;
+  count: number;
+  state: "pending" | "answered";
+  answer?: AgentSuggestionAction;
+  final?: boolean;
+  accept?: { state: "posting" | "posted" | "failed"; messageId: string };
+  seenAt: string | null;
+  createdAt: string;
+}
+export type AgentSuggestionActResult =
+  | { ok: true; posted?: string; sending?: true; failed?: true; already?: AgentSuggestionAction; disabled?: true }
+  | { ok: false; error: string };
+/** Bus kinds `agentSuggestion` (an offer was created) and `agentSuggestion.resolved` (answered or withdrawn): hints, re-read. */
+export interface AgentSuggestionEvent {
+  sessionId: string;
+  id: string;
+}
 export interface AgentSeat {
   project: string;
   projectName: string;
