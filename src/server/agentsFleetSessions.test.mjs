@@ -198,3 +198,77 @@ test("a descendant that finished is listed 'finished' in the row's subs; only th
   assert.deepEqual(row.subs.map((s) => [s.jobId, s.status]), [["dn", "finished"]]);
   assert.equal(row.status, "in-progress");
 });
+
+// ---------------------------------------------------------------------------
+// Tasks an agent started from its own conversation (docs/superpowers/specs/2026-11-28-agent-chat-tasks.md §6.8, AC-10.1a–d):
+// each is its OWN `task` row in its project — never folded into the conversation's row as a sub, never under "Box", exactly once.
+// ---------------------------------------------------------------------------
+
+const RONDA = { slug: "ronda-0f9e8d7c6b", name: "Ronda" };
+const SITE = { slug: "site-aaaaaaaaaa", name: "Site" };
+const chatTask = (over = {}) =>
+  job({ id: "jc", title: "Fix the flaky upload test", parentSessionID: "ses_conv", childSessionID: "ses_jc", parentDirectory: "/home/dev/projects/ronda", startedFrom: "agent-chat", project: RONDA, branch: "agent/dev/fix-flaky", ...over });
+const conv = (children = []) => node("ses_conv", { title: "Dev", windowIndex: 2, children });
+const taskNode = (id = "jc") => node(`ses_${id}`, { kind: "virtual", windowIndex: null, title: "Session", job: { id, status: "running", origin: "delegate" } });
+const convProject = (tree) => project(tree, { tmuxSession: "manta-agents", defaultCwd: "/home/dev/.manta/agents/dev/home", windows: [{ index: 2, name: "Dev", paneCurrentPath: "/home/dev/.manta/agents/dev/home", opencodeSessionId: "ses_conv" }] });
+const chatShape = (over) => shape({ projectOf: () => SITE, agentOfSession: (sid) => (sid === "ses_conv" ? "dev" : null), ...over });
+const allRows = (out) => [...out.running, ...out.ended];
+const timesShown = (out, jobId) => allRows(out).filter((r) => r.jobId === jobId || r.subs.some((s) => s.jobId === jobId)).length;
+
+for (const [label, tree] of [
+  ["AC-10.1a running, its session placed in the tree under the conversation", () => [conv([taskNode()])]],
+  ["AC-10.1b running, its session not placed in any tree (an orphan)", () => [conv([])]],
+]) {
+  test(`${label}: its own task row in its project, once; the conversation row is neither duplicated nor listing it`, () => {
+    const out = chatShape({ rounds: [chatTask()], projects: [convProject(tree())] });
+    assert.equal(out.running.length, 1, "the idle conversation has no row of its own; the task has");
+    const [row] = out.running;
+    assert.equal(row.kind, "task");
+    assert.equal(row.key, "jc");
+    assert.equal(row.jobId, "jc");
+    assert.equal(row.title, "Fix the flaky upload test");
+    assert.deepEqual([row.project, row.projectName], [RONDA.slug, "Ronda"], "job.project, never the folder's registry lookup and never the workspace ('Box')");
+    assert.equal(row.branch, "agent/dev/fix-flaky");
+    assert.deepEqual(row.askedBy, { by: "agent-chat", agentSlug: "dev", sessionId: "ses_conv" });
+    assert.equal(timesShown(out, "jc"), 1);
+    // the conversation itself busy: ONE row for it (with no subs), and the task's own row
+    const busy = chatShape({ rounds: [chatTask()], projects: [convProject(tree())], status: { ses_conv: { running: true, busy: true } } });
+    assert.equal(busy.running.length, 2);
+    const chat = busy.running.find((r) => r.kind === "chat");
+    assert.equal(chat.key, "ses_conv");
+    assert.deepEqual(chat.subs, [], "its subs never list the task");
+    assert.equal(busy.running.filter((r) => r.key === "ses_conv").length, 1, "never duplicated");
+    assert.equal(timesShown(busy, "jc"), 1);
+  });
+}
+
+for (const [label, tree] of [
+  ["AC-10.1c ended today, placed in the tree", () => [conv([node("ses_jc", { kind: "virtual", windowIndex: null, job: { id: "jc", status: "done", origin: "delegate" } })])]],
+  ["AC-10.1d ended today, an orphan", () => [conv([])]],
+]) {
+  test(`${label}: grouped by itself in Ended today (never under the conversation's session), once, with its project`, () => {
+    const done = chatTask({ status: "done", finishedAt: NOW - HOUR });
+    const other = job({ id: "jo", title: "Mention task", parentSessionID: "ses_conv", childSessionID: "ses_jo", status: "done", finishedAt: NOW - 2 * HOUR });
+    const out = chatShape({ rounds: [done, other], projects: [convProject(tree())] });
+    const row = out.ended.find((r) => r.jobId === "jc");
+    assert.ok(row);
+    assert.equal(row.kind, "task");
+    assert.equal(row.key, "jc");
+    assert.deepEqual([row.project, row.projectName], [RONDA.slug, "Ronda"]);
+    assert.deepEqual(row.subs, []);
+    assert.equal(timesShown(out, "jc"), 1);
+    // the conversation's OTHER ended job is grouped under it as before, without the task
+    const group = out.ended.find((r) => r.kind === "chat");
+    assert.ok(group, "the ordinary job still groups under its chat");
+    assert.deepEqual(group.subs.map((s) => s.jobId), ["jo"]);
+  });
+}
+
+test("a chat task whose own session is a tree root keeps ONE row; a chat task with no tree at all is a job row with its project", () => {
+  const out = chatShape({ rounds: [chatTask()], projects: [convProject([node("ses_jc", { kind: "window", windowIndex: 4, title: "Fix the flaky upload test", job: { id: "jc", status: "running" } }), conv([])])] });
+  assert.equal(out.running.filter((r) => r.jobId === "jc").length, 1);
+  assert.equal(out.running.find((r) => r.jobId === "jc").projectName, "Ronda");
+  const flat = shape({ rounds: [chatTask()], sessions: null, projectOf: () => SITE });
+  assert.equal(flat.running.length, 1);
+  assert.equal(flat.running[0].projectName, "Ronda");
+});

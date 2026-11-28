@@ -5226,6 +5226,25 @@ const handleRequest = async (req, res) => {
     return;
   }
 
+  // ---------- Agent chat tasks (docs/superpowers/specs/2026-11-28-agent-chat-tasks.md §6.2) ----------
+  // POST /api/agents/chat-projects body {sessionID, messageID, callID, offset?} → {ok:true, agent, projects, total, offset, nextOffset} | {ok:false, error}
+  // POST /api/agents/chat-start    body {sessionID, messageID, callID, project, title, brief, continueJob?} → {ok:true, jobId, project, seatAdded, branch, isolation} | {ok:false, error}
+  // A refusal is HTTP 200 (the tool relays the sentence). Consumer is the `manta` plugin (agent_projects / agent_start_task).
+  if (path === "/api/agents/chat-projects" || path === "/api/agents/chat-start") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = (await readJsonBody(req)) ?? {};
+      respondJson(res, 200, await (path === "/api/agents/chat-projects" ? agentsEngine.chatProjects(body) : agentsEngine.chatStart(body)));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (agent_projects / agent_start_task tools) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   // ---------- Agents Phase 5A (the Architect) ----------
   // POST /api/agents/propose   body {sessionID, messageID, callID, action, draft, summary, evidence, admission, agent?, baseHash?}
   // POST /api/research/{fetch,read,search}  body {sessionID, messageID, callID, ...the tool's arguments}
