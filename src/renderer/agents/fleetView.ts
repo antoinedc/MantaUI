@@ -3,7 +3,7 @@
 // Everything the Fleet page and the Needs you page decide that has no DOM in it: how tasks group, what a status says, which
 // number the sidebar shows, what a banner says, what a card's recommendation line reads. The components stay thin.
 
-import type { AgentChange, FleetAskedBy, FleetOutcome, FleetTask, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
+import type { AgentChange, FleetAskedBy, FleetOutcome, FleetSub, FleetTask, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
 import { formatClockTime } from "../chatUtils";
 import { relativeAgo } from "../jobProgress";
 
@@ -35,6 +35,15 @@ export type TaskGroup = { key: string; label: string; tasks: FleetTask[] };
 
 const isPaused = (t: Pick<FleetTask, "status">): boolean => t.status === "paused-by-you";
 
+/** A row's identity: its own key (a chat row's session, a task row's job), else its job id (an older box sends job rows only). */
+export const rowKey = (t: { key?: string; jobId: string }): string => t.key || t.jobId;
+
+/** An agent's name when the team list doesn't have it (yet): the lead reads "Manta", anything else its slug. */
+export const fallbackAgentName = (slug: string): string => (slug === "manta" ? "Manta" : slug);
+
+/** A row that is a job can be stopped and resumed itself; a chat row cannot (its paused jobs carry the Resume). */
+export const isTaskRow = (t: { kind?: "chat" | "task"; jobId: string }): boolean => t.kind !== "chat" && !!t.jobId;
+
 /**
  * One group per project (Projects) or per agent (Agents). A group with something in progress comes before a paused-only one;
  * inside a group, in-progress rows come first. The box's order (newest first) is kept otherwise.
@@ -42,7 +51,8 @@ const isPaused = (t: Pick<FleetTask, "status">): boolean => t.status === "paused
 export function groupTasks(tasks: ReadonlyArray<FleetTask>, by: FleetBy, agentName: (slug: string) => string): TaskGroup[] {
   const groups = new Map<string, TaskGroup>();
   for (const t of tasks) {
-    const key = by === "projects" ? (t.project ?? "") : t.agentSlug;
+    // a chat in a workspace the registry doesn't know has no slug: it is grouped under the workspace's own name
+    const key = by === "projects" ? (t.project ?? (t.projectName ? `name:${t.projectName}` : "")) : t.agentSlug;
     const label = by === "projects" ? (t.projectName ?? "No project") : agentName(t.agentSlug);
     const g = groups.get(key) ?? { key, label, tasks: [] };
     g.tasks.push(t);
@@ -71,6 +81,20 @@ export type StatusView = { label: string; tone: "ok" | "idle"; sub: string | nul
 export function statusView(task: Pick<FleetTask, "status" | "pausedAt">, now: number): StatusView {
   if (!isPaused(task)) return { label: "In progress", tone: "ok", sub: null };
   return { label: "Paused by you", tone: "idle", sub: task.pausedAt != null ? relativeAgo(now - task.pausedAt) : null };
+}
+
+/** What a job / subagent beneath a row says about itself. */
+export function subStatusLabel(status: FleetSub["status"]): { label: string; tone: "ok" | "idle" | "bad" } {
+  switch (status) {
+    case "in-progress":
+      return { label: "In progress", tone: "ok" };
+    case "paused-by-you":
+      return { label: "Paused by you", tone: "idle" };
+    case "didnt-finish":
+      return { label: "Didn’t finish", tone: "bad" };
+    default:
+      return { label: "Finished", tone: "idle" };
+  }
 }
 
 export type BadgeTone = "ok" | "bad" | "cut" | "neutral";

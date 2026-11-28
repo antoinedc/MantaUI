@@ -502,7 +502,7 @@ describe("FleetPage", () => {
       expect(subs[0].textContent).toContain("In progress");
       expect(subs[1].textContent).toContain("Paused by you");
       expect(subs[2].textContent).toContain("Finished");
-      expect(byText("Stop task")).toBeUndefined();
+      expect([...q('[data-testid="fleet-details"]')!.querySelectorAll("button")].map((b) => b.textContent?.trim())).not.toContain("Stop task");
       await click(byLabel("Resume: Review the wording"));
       expect(api.calls.delegateResume).toEqual([["j9"]]);
     });

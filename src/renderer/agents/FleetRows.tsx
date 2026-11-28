@@ -12,7 +12,7 @@ import type { ReactNode } from "react";
 import type { AgentInfo, FleetEnded, FleetTask } from "../../shared/types";
 import { AgentBadge } from "../AgentBadge";
 import { relativeAgo } from "../jobProgress";
-import { endedBadge, groupSummary, statusView, UNREACHABLE_TITLE, type BadgeTone, type FleetBy, type TaskGroup } from "./fleetView";
+import { endedBadge, fallbackAgentName, groupSummary, isTaskRow, rowKey, statusView, UNREACHABLE_TITLE, type BadgeTone, type FleetBy, type TaskGroup } from "./fleetView";
 
 /** A running row: three areas in a stack, three columns from 560 px, four from 850 px. */
 const TASK_ROW =
@@ -32,6 +32,10 @@ const ENDED_ROW =
   "[@container(min-width:850px)]:gap-x-5 " +
   "[@container(min-width:850px)]:[grid-template-columns:minmax(0,1fr)_160px_230px_200px] [@container(min-width:850px)]:[grid-template-areas:'body_body_badge_acts']";
 
+/** The bordered secondary button of a row (Resume). */
+export const SECONDARY_BTN =
+  "inline-flex h-[30px] items-center rounded-sm border border-border bg-bg-soft px-3 text-label font-medium text-text shadow-sm hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
+
 const TITLE_BTN =
   "m-0 flex min-h-6 max-w-full items-center rounded-xs border-0 bg-transparent p-0 text-left text-body font-medium text-text hover:underline hover:decoration-border-strong hover:underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
@@ -45,8 +49,8 @@ const BADGE_TONE: Record<BadgeTone, string> = {
 /** The agent's name beside its badge (the Projects view's second column). */
 export const AgentWho = ({ info, slug }: { info: AgentInfo | undefined; slug: string }) => (
   <span className="flex min-w-0 items-center gap-2">
-    <AgentBadge size="sm" agent={{ name: info?.name || slug, slug, color: info?.color ?? null }} />
-    <span className="truncate">{info?.name || slug}</span>
+    <AgentBadge size="sm" agent={{ name: info?.name || fallbackAgentName(slug), slug, color: info?.color ?? null }} />
+    <span className="truncate">{info?.name || fallbackAgentName(slug)}</span>
   </span>
 );
 
@@ -71,6 +75,7 @@ export function TaskRow({
   offline,
   resumeBlocked,
   openBusy,
+  canOpen,
   actionBusy,
   error,
   onDetails,
@@ -85,22 +90,30 @@ export function TaskRow({
   offline: boolean;
   resumeBlocked: string | null;
   openBusy: boolean;
+  canOpen: boolean;
   actionBusy: boolean;
   error: { kind: "stop" | "resume"; text: string } | null;
-  onDetails: (jobId: string) => void;
-  onOpen: (jobId: string) => void;
+  onDetails: (key: string) => void;
+  onOpen: (task: FleetTask) => void;
   onResume: (task: FleetTask) => void;
   onRetryStop: (task: FleetTask) => void;
 }) {
   const status = statusView(task, now);
   const off = offline ? UNREACHABLE_TITLE : undefined;
-  const paused = task.status === "paused-by-you";
+  const key = rowKey(task);
+  // a row that is a job is resumed itself; a chat row's paused jobs carry their own Resume in Details
+  const paused = task.status === "paused-by-you" && isTaskRow(task);
   return (
-    <li data-testid="fleet-task-row" data-job={task.jobId} data-status={task.status} className={TASK_ROW}>
+    <li data-testid="fleet-task-row" data-row={key} data-job={task.jobId} data-status={task.status} className={TASK_ROW}>
       <div className="min-w-0 [grid-area:tt]">
-        <button type="button" onClick={() => onDetails(task.jobId)} title={task.title} aria-label={`Details: ${task.title}`} className={TITLE_BTN}>
+        <button type="button" onClick={() => onDetails(key)} title={task.title} aria-label={`Details: ${task.title}`} className={TITLE_BTN}>
           <span className="line-clamp-2 overflow-hidden break-words">{task.title}</span>
         </button>
+        {task.oneLiner ? (
+          <p data-testid="fleet-task-line" className="m-0 mt-[2px] line-clamp-2 break-words text-label leading-snug text-text-muted">
+            {task.oneLiner}
+          </p>
+        ) : null}
       </div>
       <div className="flex min-w-0 items-center gap-2 text-label text-text-muted [grid-area:who] [@container(min-width:850px)]:pt-[3px]" data-testid="fleet-task-who">
         {by === "projects" ? <AgentWho info={info} slug={task.agentSlug} /> : <span className="truncate">{task.projectName ?? "No project"}</span>}
@@ -120,14 +133,16 @@ export function TaskRow({
             disabled={offline || actionBusy || resumeBlocked != null}
             title={off ?? resumeBlocked ?? undefined}
             aria-label={`Resume: ${task.title}`}
-            className="inline-flex h-[30px] items-center rounded-sm border border-border bg-bg-soft px-3 text-label font-medium text-text shadow-sm hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
+            className={SECONDARY_BTN}
           >
             {actionBusy ? "Resuming…" : "Resume"}
           </button>
         )}
-        <ActionButton label={`Open session: ${task.title}`} onClick={() => onOpen(task.jobId)} disabled={offline || openBusy} title={off}>
-          {openBusy ? "Opening…" : "Open session"}
-        </ActionButton>
+        {canOpen && (
+          <ActionButton label={`Open session: ${task.title}`} onClick={() => onOpen(task)} disabled={offline || openBusy} title={off}>
+            {openBusy ? "Opening…" : "Open session"}
+          </ActionButton>
+        )}
       </div>
       {error && (
         <div role="alert" data-testid="fleet-task-error" className="mt-1 flex flex-wrap items-start gap-2 rounded-sm bg-danger-bg px-2 py-1 text-meta text-text [grid-column:1/-1]">
@@ -151,6 +166,7 @@ export function EndedRow({
   now,
   offline,
   openBusy,
+  canOpen,
   onDetails,
   onOpen,
 }: {
@@ -159,21 +175,22 @@ export function EndedRow({
   now: number;
   offline: boolean;
   openBusy: boolean;
-  onDetails: (jobId: string) => void;
-  onOpen: (jobId: string) => void;
+  canOpen: boolean;
+  onDetails: (key: string) => void;
+  onOpen: (task: FleetEnded) => void;
 }) {
   const badge = endedBadge(task.outcome);
   const off = offline ? UNREACHABLE_TITLE : undefined;
   return (
-    <li data-testid="fleet-ended-row" data-job={task.jobId} data-outcome={task.outcome} className={ENDED_ROW}>
+    <li data-testid="fleet-ended-row" data-row={rowKey(task)} data-job={task.jobId} data-outcome={task.outcome} className={ENDED_ROW}>
       <div className="min-w-0 [grid-area:body]">
-        <button type="button" onClick={() => onDetails(task.jobId)} title={task.title} aria-label={`Details: ${task.title}`} className={TITLE_BTN}>
+        <button type="button" onClick={() => onDetails(rowKey(task))} title={task.title} aria-label={`Details: ${task.title}`} className={TITLE_BTN}>
           <span className="line-clamp-2 overflow-hidden break-words">{task.title}</span>
         </button>
         <div className="mt-[2px] break-words text-meta leading-[1.6] text-text-muted">
           <span className="inline-flex items-center gap-2 align-middle font-medium text-text">
-            <AgentBadge size="sm" agent={{ name: info?.name || task.agentSlug, slug: task.agentSlug, color: info?.color ?? null }} />
-            {info?.name || task.agentSlug}
+            <AgentBadge size="sm" agent={{ name: info?.name || fallbackAgentName(task.agentSlug), slug: task.agentSlug, color: info?.color ?? null }} />
+            {info?.name || fallbackAgentName(task.agentSlug)}
           </span>
           <span>
             {" "}
@@ -188,9 +205,11 @@ export function EndedRow({
         </span>
       </div>
       <div className="flex flex-nowrap items-center justify-end [grid-area:acts]">
-        <ActionButton label={`Open session: ${task.title}`} onClick={() => onOpen(task.jobId)} disabled={offline || openBusy} title={off}>
-          {openBusy ? "Opening…" : "Open session"}
-        </ActionButton>
+        {canOpen && (
+          <ActionButton label={`Open session: ${task.title}`} onClick={() => onOpen(task)} disabled={offline || openBusy} title={off}>
+            {openBusy ? "Opening…" : "Open session"}
+          </ActionButton>
+        )}
       </div>
     </li>
   );
