@@ -370,6 +370,11 @@ function envelopeAttr(text, name) {
   return m ? m[1] : undefined;
 }
 
+/** A "provider/model" string, else undefined. */
+function modelKey(v) {
+  return typeof v === "string" && v.indexOf("/") > 0 && v.indexOf("/") < v.length - 1 ? v : undefined;
+}
+
 // A specialist task's told / blocked / exceeded actions (Agents Phase 3 §5, Phase 3c): `{ kind, level?, summary, source? }`, at most
 // 10. `kind` is an action kind or "protected"; `source` is kept only when it is "agent"; `needLevel` (the exceeded list) drops an
 // entry without a valid ask / never level. Anything else is dropped.
@@ -424,6 +429,8 @@ function mapBackgroundResult(m, { sessionID }) {
         state,
         name,
         agent: typeof md.agent === "string" && md.agent ? md.agent : undefined,
+        // the model the task ran on ("provider/model"): the card names it without the job record, which the store prunes
+        model: modelKey(manta.model),
         // the job ended while waiting on a decision (spec 2026-11-14 A5); absent means false
         endedBlocked: manta.endedBlocked === true ? true : undefined,
         // Agents Phase 3: what the user asked to be told about, and what the autonomy settings blocked (absent = none)

@@ -12,6 +12,7 @@ import type { DelegateJob, DelegateJobProgressView } from "../shared/types";
 import { BackgroundResultCard, BackgroundRunCards } from "./BackgroundCards";
 import type { BackgroundCard, BackgroundResultPart } from "./backgroundRun";
 import { installMockApi, mount, resetStore, type Harness } from "./testHarness";
+import { refreshModelCatalog } from "./modelCatalog";
 import { resetPackageAgentsForTest } from "./packageAgents";
 import { resetExplorerStore, shownRightPanel, useTaskPanelJobId } from "./explorer/explorerStore";
 
@@ -138,6 +139,89 @@ describe("request line (Agents Phase 2)", () => {
     resetPackageAgentsForTest();
     show(job(), runCard({ agentName: "Dev", request: "@dev fix it" }));
     expect(text('[data-testid="background-request"]')).toBe("“@dev fix it”");
+  });
+});
+
+describe("the model a task ran on (agent tasks)", () => {
+  const models = [{ id: "gpt-6-sol", providerID: "openai", name: "GPT-6 Sol" }];
+  const settle = async () => {
+    refreshModelCatalog();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+
+  it("the running card names it in the catalog's words; a task with none recorded shows no line", async () => {
+    installMockApi({ opencodeModels: () => Promise.resolve(models), agentsList: () => Promise.resolve([]) });
+    resetPackageAgentsForTest();
+    show(job({ agent: "agent-dev", agentName: "Dev", modelUsed: "openai/gpt-6-sol" }), runCard({ agentName: "Dev", request: "Review the spec", requestedBy: "manta" }));
+    await settle();
+    expect(text('[data-testid="background-model"]')).toBe("Model · GPT-6 Sol");
+    h?.unmount();
+    show(job({ agent: "agent-dev", agentName: "Dev", modelUsed: null }), runCard({ agentName: "Dev", request: "Review the spec", requestedBy: "manta" }));
+    await settle();
+    expect(q('[data-testid="background-model"]')).toBeNull();
+  });
+
+  it("the finished card names it too", async () => {
+    installMockApi({ opencodeModels: () => Promise.resolve(models), agentsList: () => Promise.resolve([]) });
+    resetPackageAgentsForTest();
+    resetStore({ jobs: { ses_c1: job({ id: "job1", agent: "agent-dev", modelUsed: "openai/gpt-6-sol", status: "done" }) }, jobSkew: {} });
+    h = mount(<BackgroundResultCard part={{ type: "background-result", jobId: "job1", childSessionId: "ses_c1", agent: "agent-dev", state: "completed", text: "Reviewed." } as unknown as BackgroundResultPart} />);
+    await settle();
+    expect(text('[data-testid="background-result-model"]')).toBe("Model · GPT-6 Sol");
+  });
+});
+
+describe("the finished card keeps the model after its job record is gone (the store prunes finished jobs; the result stays in the transcript)", () => {
+  const models = [
+    { id: "gpt-6-sol", providerID: "openai", name: "GPT-6 Sol" },
+    { id: "claude-sonnet-5-5", providerID: "anthropic", name: "Claude Sonnet 5.5" },
+  ];
+  const resultPart = (over: Record<string, unknown> = {}) => ({ type: "background-result", jobId: "job1", childSessionId: "ses_c1", agent: "agent-dev", state: "completed", text: "Reviewed.", ...over }) as unknown as BackgroundResultPart;
+  const settle = async () => {
+    refreshModelCatalog();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+
+  it("reads the model from the result itself, with no job in the store", async () => {
+    installMockApi({ opencodeModels: () => Promise.resolve(models), agentsList: () => Promise.resolve([]) });
+    resetPackageAgentsForTest();
+    resetStore({ jobs: {}, jobSkew: {} });
+    h = mount(<BackgroundResultCard part={resultPart({ model: "openai/gpt-6-sol" })} />);
+    await settle();
+    expect(text('[data-testid="background-result-model"]')).toBe("Model · GPT-6 Sol");
+  });
+
+  it("the result's own model wins over the store's (the store may hold a later round); an older result falls back to the store; neither: no line", async () => {
+    installMockApi({ opencodeModels: () => Promise.resolve(models), agentsList: () => Promise.resolve([]) });
+    resetPackageAgentsForTest();
+    resetStore({ jobs: { ses_c1: job({ id: "job1", agent: "agent-dev", modelUsed: "anthropic/claude-sonnet-5-5", status: "done" }) }, jobSkew: {} });
+    h = mount(<BackgroundResultCard part={resultPart({ model: "openai/gpt-6-sol" })} />);
+    await settle();
+    expect(text('[data-testid="background-result-model"]')).toBe("Model · GPT-6 Sol");
+    h.unmount();
+    h = mount(<BackgroundResultCard part={resultPart()} />);
+    await settle();
+    expect(text('[data-testid="background-result-model"]')).toBe("Model · Claude Sonnet 5.5");
+    h.unmount();
+    resetStore({ jobs: {}, jobSkew: {} });
+    h = mount(<BackgroundResultCard part={resultPart()} />);
+    await settle();
+    expect(q('[data-testid="background-result-model"]')).toBeNull();
+  });
+
+  it("a result that isn't an agent task shows no model line", async () => {
+    installMockApi({ opencodeModels: () => Promise.resolve(models), agentsList: () => Promise.resolve([]) });
+    resetPackageAgentsForTest();
+    resetStore({ jobs: {}, jobSkew: {} });
+    h = mount(<BackgroundResultCard part={resultPart({ agent: "build", model: "openai/gpt-6-sol" })} />);
+    await settle();
+    expect(q('[data-testid="background-result-model"]')).toBeNull();
   });
 });
 

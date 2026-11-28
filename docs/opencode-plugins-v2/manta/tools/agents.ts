@@ -124,6 +124,7 @@ export const tools: ToolDef[] = [
       "Hand a piece of real work to one of your team's agents (listed under 'Your team').",
       "It runs in the background in its own session (code-editing agents get their own branch).",
       "Returns immediately; the result arrives later as a separate message — do not guess it.",
+      "Leave `model` empty to use the agent's own model; set it (an approved \"provider/model\") only when the user asks, when a different model family helps independence (for example a review of work a Claude model wrote), or when the agent's own model hit a usage limit.",
     ].join(" "),
     input: input(
       {
@@ -137,8 +138,12 @@ export const tools: ToolDef[] = [
           "Optional: the id of a FINISHED task of this chat that you handed to the same agent, to send it another round " +
             "(same session and branch) instead of starting a new task.",
         ),
+        model: str(
+          'Optional: a "provider/model" the user approved for agents, to run this task (or fix round) on instead of the agent\'s own model. ' +
+            "A fix round keeps the model the task last ran on when this is empty.",
+        ),
       },
-      ["continueJob"],
+      ["continueJob", "model"],
     ),
     async execute(args, context) {
       let res: any;
@@ -151,6 +156,7 @@ export const tools: ToolDef[] = [
           title: args.title,
           brief: args.brief,
           ...(args.continueJob ? { continueJob: args.continueJob } : {}),
+          ...(args.model ? { model: args.model } : {}),
         });
       } catch (e: any) {
         return `Not handed off: ${e?.message ?? e}`;

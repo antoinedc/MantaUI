@@ -23,6 +23,7 @@ import { useStore } from "./store";
 import { usePackageAgents } from "./packageAgents";
 import { ARCHITECT_AGENT_KEY, agentSlugOf, isAgentTask, leadDisplayName, packageAgentDisplayName, rootJobOf } from "./agentDispatch";
 import { openTaskPanel } from "./explorer/explorerStore";
+import { useTaskModelLabel } from "./taskModel";
 import { ArchitectChanges } from "./ArchitectChanges";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
@@ -157,6 +158,7 @@ const RunCard = memo(function RunCard({
   const questions = job ? (openQuestionsByJob?.get(rootJobOf(job)) ?? 0) : 0;
   const seatAdded = job?.seatAdded;
   const seatSlug = agentSlugOf(job?.agent);
+  const modelLabel = useTaskModelLabel(agentTask ? job?.modelUsed : null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const { agents: packageAgents } = usePackageAgents();
@@ -255,6 +257,11 @@ const RunCard = memo(function RunCard({
       {card.request && (
         <div className="mt-1 truncate text-text-muted" title={card.request} data-testid="background-request">
           {card.requestedBy === "manta" ? `${leadDisplayName(packageAgents)} asked: ${card.request}` : `“${card.request}”`}
+        </div>
+      )}
+      {modelLabel && (
+        <div className="mt-1 truncate text-text-faint" data-testid="background-model">
+          Model · {modelLabel}
         </div>
       )}
       {seatAdded && seatSlug && (
@@ -398,6 +405,9 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   // Parts the box didn't stamp with a jobId (V2-native children, background
   // `task` subagents) are still tracked as job rows, keyed by their child id.
   const jobId = useStore((s) => part.jobId || s.jobs[part.childSessionId]?.id || null);
+  // the result's own record of the model first (it stays in the transcript); the job store answers for an older result
+  const ranOn = useStore((s) => (isAgentTask({ agent: part.agent }) ? (part.model ?? findJobById(s.jobs, jobId)?.modelUsed ?? null) : null));
+  const modelLabel = useTaskModelLabel(ranOn);
   const { agents: packageAgents } = usePackageAgents();
   const agentTitle = packageAgentDisplayName(part.agent, packageAgents);
   const title = resultTitleFor(part, agentTitle);
@@ -443,6 +453,11 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
           </span>
         )}
       </div>
+      {modelLabel && (
+        <div className="mt-1 truncate text-meta text-text-faint" data-testid="background-result-model">
+          Model · {modelLabel}
+        </div>
+      )}
       {text && <ClampedResultText text={text} />}
       {exceeded && (
         <p className="m-0 mt-1 text-meta text-warn break-words" data-testid="background-result-exceeded">

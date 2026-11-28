@@ -156,3 +156,19 @@ test("shapeFleetTasks: an ended row carries who asked, the project and the branc
     { askedBy: { by: "manta", sessionId: "ses_chat" }, project: "site-aaaaaaaaaa", projectName: "Site", branch: "agent/dev/x", outcome: "done", sentence: "Its changes are in the project.", title: "fix the build", agentSlug: "dev" },
   );
 });
+
+test("shapeFleetTasks: every row says the model its task ran on — the one the last round was sent on, else the one asked for, else none", () => {
+  const out = shape([
+    job({ id: "m1", status: "running", finishedAt: null, requestedModel: "openai/gpt-6-sol", model: "openai/gpt-6-sol", launch: { model: { providerID: "openai", modelID: "gpt-6-sol" } } }),
+    job({ id: "m2", status: "running", finishedAt: null, model: null, requestedModel: null, launch: { model: { providerID: "anthropic", modelID: "claude-sonnet-5-5" } } }), // Auto picked it
+    job({ id: "m3", status: "running", finishedAt: null, model: "anthropic/claude-opus-5-5", requestedModel: "anthropic/claude-opus-5-5" }), // no launch record
+    job({ id: "m4", status: "running", finishedAt: null }),
+  ]);
+  const model = (id) => out.running.find((t) => t.jobId === id).model;
+  assert.equal(model("m1"), "openai/gpt-6-sol");
+  assert.equal(model("m2"), "anthropic/claude-sonnet-5-5");
+  assert.equal(model("m3"), "anthropic/claude-opus-5-5");
+  assert.equal(model("m4"), null);
+  const ended = shape([job({ id: "e1", model: "openai/gpt-6-sol", requestedModel: "openai/gpt-6-sol", launch: { model: { providerID: "openai", modelID: "gpt-6-sol" } } })]);
+  assert.equal(ended.ended[0].model, "openai/gpt-6-sol");
+});

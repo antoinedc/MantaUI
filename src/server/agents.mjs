@@ -28,6 +28,7 @@ import { statePath } from "../shared/paths.mjs";
 import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { LEAD_SLUG, ARCHITECT_SLUG, ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS, TRIAL_BLOCK_RE, isTeamAgent } from "../shared/agentsShared.mjs";
 import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
+import { suggestModels } from "../shared/modelGuide.mjs";
 import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals, CREDENTIAL_HINT } from "../shared/architectSources.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
@@ -694,7 +695,7 @@ const HANDOFF_VERIFY = {
   tool: "agent_handoff",
   couldnt: "Couldn't verify this handoff; try again",
   notLead: "Only the lead can hand off work",
-  matches: (given, b) => ["agent", "title", "brief", "continueJob"].every((k) => same(given[k], b[k])),
+  matches: (given, b) => ["agent", "title", "brief", "continueJob", "model"].every((k) => same(given[k], b[k])),
 };
 const CHANGE_VERIFY = {
   tool: "agent_change",
@@ -892,6 +893,7 @@ const MECHANICS = [
   "- When a handoff fails for a reason that has since been fixed, send it again. Stop and ask the user only when the same failure repeats and there is no fix in sight.",
   "- For a teammate's work use `agent_handoff`. If a handoff is refused, fix the cause and hand it off again. Use the generic `delegate` tool only when no teammate fits, or when the handoff stays blocked for a reason only the user can remove, and say so.",
   "- To send a fix round to a specialist's finished task (same branch), pass `continueJob: <jobId>`.",
+  "- By default leave `model` empty on `agent_handoff`: the agent's own model is used. Set it (an approved \"provider/model\") when the user asks for a model, when a different model family helps independence (for example a review of work a Claude model wrote), or when the agent's own model hits a usage limit. A fix round (`continueJob`) keeps the model the task last ran on unless you set a new one.",
   `- When a result carries a "${DECISION_MARKER}" block (written by the server), that task ended because it needs the user's decision. Put it to the user yourself in ONE question call, all the questions of that turn at once, with the recommended option first, using the block's options; if it says "Concern:", state that concern plainly. Never answer it on the user's behalf, and don't pick an option because you agree. Once the user answers, send the answer back to the same task with \`agent_handoff\` and \`continueJob: <jobId>\`.`,
   "- A teammate's question is shown to the user as a card in this chat; never ask it again or answer it. The server sends the answer to the task.",
   "- In plan mode, don't hand off code changes; propose them.",
@@ -2320,6 +2322,25 @@ export function createAgentsEngine({
   }
 
   /**
+   * A model named by a handoff, checked against the models the user approved for agents (the list `agent_change` pins and `delegate` accepts).
+   * `{ model }` when it is exactly one of them; else `{ error }`, a sentence naming the closest approved ones (or the list when none is close).
+   */
+  async function checkHandoffModel(asked) {
+    const models = await approvedModelsFor({ model: asked });
+    if (models.error) return { error: models.error };
+    const approved = models.approved;
+    if (approved.includes(asked)) return { model: asked };
+    const split = (key) => ({ providerID: key.slice(0, Math.max(0, key.indexOf("/"))), id: key.slice(key.indexOf("/") + 1), name: "" });
+    // the words of the model part ("gpt-7-sol" → "gpt 7 sol"): a whole key rarely sits inside another one
+    const words = asked.slice(asked.indexOf("/") + 1).split(/[^A-Za-z0-9]+/).filter(Boolean).join(" ");
+    const close = suggestModels(words, approved.map(split), 3).map((m) => `${m.providerID}/${m.id}`);
+    const leaveOut = "or leave the model out to use the agent's own.";
+    if (close.length > 0) return { error: `${asked} isn't an approved model; the closest approved ones are ${close.join(", ")}. Hand it off again with one of them, ${leaveOut}` };
+    const some = [...approved].sort().slice(0, 8);
+    return { error: `${asked} isn't an approved model; pick one of ${some.join(", ")}${approved.length > some.length ? ", …" : ""}, ${leaveOut}` };
+  }
+
+  /**
    * `agent_handoff` (spec §5): the lead hands a piece of work to a specialist. Refusals are RETURNED as sentences
    * (`{ ok:false, error }`) for the tool to relay; only unexpected failures throw.
    */
@@ -2332,6 +2353,7 @@ export function createAgentsEngine({
       title: typeof input?.title === "string" ? input.title : "",
       brief: typeof input?.brief === "string" ? input.brief : "",
       continueJob: typeof input?.continueJob === "string" ? input.continueJob : "",
+      model: typeof input?.model === "string" ? input.model.trim() : "",
     };
     // a refusal of a handoff to the Architect carries the "don't fall back" sentence (set once the agent is known)
     let architectNote = false;
@@ -2387,6 +2409,10 @@ export function createAgentsEngine({
     // 5. something to hand over
     if (!b.brief.trim() || !b.title.trim()) return refuse("Write a brief and a title");
 
+    // a model named for this task must be one the user approved for agents (the list agent_change and delegate use); none named: the agent's own
+    const named = b.model ? await checkHandoffModel(b.model) : { model: null };
+    if (named.error) return refuse(named.error);
+
     // the Architect's round mode (§4.6): this verified lead call in a build turn, in a plan turn, or unreadable
     const architect = isArchitect(agent);
     const roundMode = !callerAgent ? "unknown" : isPlanName(callerAgent) ? "plan" : "build";
@@ -2410,6 +2436,7 @@ export function createAgentsEngine({
         request: title,
         requestedBy: "manta",
         allowPr: false,
+        ...(named.model ? { model: named.model } : {}), // none: the round keeps the model the task last ran on
         ...(architect ? { architect: { mode: roundMode } } : {}),
       });
       if (!res?.ok) return refuse(handoffError(res?.error, "The task couldn't be continued"));
@@ -2428,7 +2455,7 @@ export function createAgentsEngine({
       agent: agentKey(slug),
       agentDir: agent.dir,
       isolation: writerIfNew ? "worktree" : "none",
-      ...(agent.meta.model ? { model: agent.meta.model } : {}),
+      ...(named.model || agent.meta.model ? { model: named.model ?? agent.meta.model } : {}),
       name,
       title,
       agentName: agent.meta.name,

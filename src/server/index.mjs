@@ -5188,7 +5188,7 @@ const handleRequest = async (req, res) => {
   // ---------- Agents, Phase 2 (the lead) ----------
   // GET  /api/agents/lead-brief?sessionID=  → {text} (empty when the chat is not led / there is no lead); 503 {error}
   //                                           when the chat can't be classified right now (the plugin retries, caches nothing)
-  // POST /api/agents/handoff  body {sessionID, messageID, callID?, agent, title, brief, continueJob?}
+  // POST /api/agents/handoff  body {sessionID, messageID, callID?, agent, title, brief, continueJob?, model?}
   //                                         → {ok:true, jobId, agentName} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engine: src/server/agents.mjs.
   // POST /api/agents/change   body {sessionID, messageID, callID, action, agent?, draft}  (Phase 4: `agent_change`)

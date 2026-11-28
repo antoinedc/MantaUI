@@ -418,6 +418,18 @@ test("mapTimeline: endedBlocked rides the result's manta metadata onto the part 
   assert.equal("endedBlocked" in part({ jobId: "job1", endedBlocked: false }), false);
 });
 
+test("mapTimeline: the model a task ran on rides the result's manta metadata onto the part (only a provider/model string)", () => {
+  const part = (manta) =>
+    mapTimeline(
+      [{ id: "msg_m", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", manta }, text: '[background job "x" done]\n\nok' }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  assert.equal(part({ jobId: "job1", model: "openai/gpt-6-sol" }).model, "openai/gpt-6-sol");
+  assert.equal("model" in part({ jobId: "job1" }), false, "absent when the result names none (an older result)");
+  assert.equal("model" in part({ jobId: "job1", model: "nonsense" }), false);
+  assert.equal("model" in part({ jobId: "job1", model: 7 }), false);
+});
+
 test("mapTimeline: a specialist's told / blocked actions ride the result's manta metadata onto the part (valid entries only, at most 10); absent when none", () => {
   const part = (manta) =>
     mapTimeline(

@@ -693,7 +693,7 @@ async function leadFixture({ installLead = true, extra = {}, delegateOver = {} }
   return { ...f, w, calls: { ...f.calls, ...calls }, jobs };
 }
 
-const call = ({ messageID = "msg_a1", callID = "call1", agent = "dev", title = "Fix login", brief = "Fix the flaky login test. Done when green.", continueJob } = {}) => ({
+const call = ({ messageID = "msg_a1", callID = "call1", agent = "dev", title = "Fix login", brief = "Fix the flaky login test. Done when green.", continueJob, model } = {}) => ({
   sessionID: "ses_chat",
   messageID,
   callID,
@@ -701,13 +701,14 @@ const call = ({ messageID = "msg_a1", callID = "call1", agent = "dev", title = "
   title,
   brief,
   ...(continueJob ? { continueJob } : {}),
+  ...(model ? { model } : {}),
 });
 // the transcript the box would show while the call runs: a user message, then the assistant message holding the running part
 const transcript = (b, { status = "running", agent = "build", parentID = "msg_user1", messageID = b.messageID, input } = {}) => [
   { info: { id: parentID, role: "user" }, parts: [] },
   {
     info: { id: messageID, role: "assistant", parentID, ...(agent === null ? {} : { agent }) },
-    parts: [{ type: "tool", tool: "agent_handoff", callID: b.callID, state: { status, input: input ?? { agent: b.agent, title: b.title, brief: b.brief, ...(b.continueJob ? { continueJob: b.continueJob } : {}) } } }],
+    parts: [{ type: "tool", tool: "agent_handoff", callID: b.callID, state: { status, input: input ?? { agent: b.agent, title: b.title, brief: b.brief, ...(b.continueJob ? { continueJob: b.continueJob } : {}), ...(b.model ? { model: b.model } : {}) } } }],
   },
 ];
 const ok = async (f, b, over) => {
@@ -1234,6 +1235,131 @@ test("handoff continueJob: a writer continuation is not held back by another run
   }
 });
 
+
+// ---- a model for one task: the agent's own model is the default; a handoff may name another approved one ----
+
+const APPROVED_FOR_HANDOFF = ["anthropic/claude-sonnet-5-5", "openai/gpt-6-luna", "openai/gpt-6-sol"];
+const modelFixture = async ({ approved = APPROVED_FOR_HANDOFF, approvedThrows = false } = {}) =>
+  leadFixture({
+    extra: {
+      listApprovedModels: async () => {
+        if (approvedThrows) throw new Error("models down");
+        return approved;
+      },
+    },
+  });
+
+test("handoff model: with none given the task runs on the agent's own model, exactly as before (and the approved list isn't consulted)", async () => {
+  const f = await leadFixture({ extra: { listApprovedModels: async () => { throw new Error("must not be asked"); } } });
+  try {
+    const plain = await ok(f, call({ callID: "c1", messageID: "m1" }));
+    assert.equal(plain.ok, true, JSON.stringify(plain));
+    assert.equal("model" in f.calls.startApproval[0], false, "Auto: no model on the job");
+    await mkdir(join(f.root, "pinned"));
+    await writeFile(join(f.root, "pinned", "agent.md"), valid("isolation: none\nmodel: anthropic/claude-sonnet-5-5\n"));
+    const pinned = await ok(f, call({ callID: "c2", messageID: "m2", agent: "pinned" }));
+    assert.equal(pinned.ok, true, JSON.stringify(pinned));
+    assert.equal(f.calls.start.at(-1).model, "anthropic/claude-sonnet-5-5", "the agent's pinned model");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("handoff model: an approved model is what the task runs on, over the agent's own", async () => {
+  const f = await modelFixture();
+  try {
+    await mkdir(join(f.root, "pinned"));
+    await writeFile(join(f.root, "pinned", "agent.md"), valid("isolation: none\nmodel: anthropic/claude-sonnet-5-5\n"));
+    const r = await ok(f, call({ callID: "c1", messageID: "m1", agent: "pinned", model: "openai/gpt-6-sol" }));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(f.calls.start.at(-1).model, "openai/gpt-6-sol");
+    const w = await ok(f, call({ callID: "c2", messageID: "m2", model: "openai/gpt-6-luna" })); // a code task: through the approval path
+    assert.equal(w.ok, true, JSON.stringify(w));
+    assert.equal(f.calls.startApproval.at(-1).model, "openai/gpt-6-luna");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("handoff model: an unknown or unapproved model is refused with the closest approved ones named, and no task starts", async () => {
+  const f = await modelFixture();
+  try {
+    const r = await ok(f, call({ model: "openai/gpt-7-sol" }));
+    assert.equal(r.ok, false);
+    assert.match(r.error, /^openai\/gpt-7-sol isn't an approved model; the closest approved ones are /);
+    assert.match(r.error, /openai\/gpt-6-sol/);
+    assert.match(r.error, /leave the model out/i);
+    const nonsense = await ok(f, call({ callID: "c2", messageID: "m2", model: "zzz" }));
+    assert.equal(nonsense.ok, false);
+    assert.match(nonsense.error, /^zzz isn't an approved model; pick one of anthropic\/claude-sonnet-5-5, openai\/gpt-6-luna, openai\/gpt-6-sol/, "nothing close: the approved list instead");
+    assert.deepEqual([f.calls.start.length, f.calls.startApproval.length, f.calls.cont.length, f.jobs.length], [0, 0, 0, 0]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("handoff model: when the approved models can't be read the handoff is refused and nothing starts", async () => {
+  for (const f of [await modelFixture({ approvedThrows: true }), await modelFixture({ approved: [] })]) {
+    try {
+      assert.deepEqual(await ok(f, call({ model: "openai/gpt-6-sol" })), { ok: false, error: "Couldn't check the models; try again" });
+      assert.equal(f.calls.startApproval.length + f.calls.start.length, 0);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("handoff model: a fix round passes the model on only when one is given, and an unapproved one is refused before anything is sent", async () => {
+  const f = await modelFixture();
+  try {
+    f.w.records = [{ id: "abcd1234", parentSessionID: "ses_chat", agent: "agent-dev", requestedBy: "manta", status: "done", isolation: "worktree" }];
+    const plain = await ok(f, call({ callID: "c1", messageID: "m1", continueJob: "abcd1234" }));
+    assert.equal(plain.ok, true, JSON.stringify(plain));
+    assert.equal("model" in f.calls.cont[0], false, "the task keeps the model it last ran on (the engine's job)");
+    const named = await ok(f, call({ callID: "c2", messageID: "m2", continueJob: "abcd1234", model: "openai/gpt-6-sol" }));
+    assert.equal(named.ok, true, JSON.stringify(named));
+    assert.equal(f.calls.cont[1].model, "openai/gpt-6-sol");
+    const bad = await ok(f, call({ callID: "c3", messageID: "m3", continueJob: "abcd1234", model: "openai/gpt-7-sol" }));
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /isn't an approved model/);
+    assert.equal(f.calls.cont.length, 2);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("handoff model: the model must be exactly what the running tool call carried (a forged one is refused as not the lead's call)", async () => {
+  const f = await modelFixture();
+  try {
+    const b = call({ model: "openai/gpt-6-sol" });
+    f.w.messages = transcript(b, { input: { agent: b.agent, title: b.title, brief: b.brief } }); // the call named no model
+    assert.deepEqual(await f.engine.handoff(b), { ok: false, error: "Only the lead can hand off work" });
+    assert.equal(f.calls.startApproval.length + f.calls.start.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("lead brief: says to leave the model empty by default and when to set one (the user asks, independence, a usage limit); fix rounds keep it", async () => {
+  const f = await leadFixture();
+  try {
+    const text = (await f.engine.leadBrief("ses_chat")).text.replace(/\s+/g, " ");
+    assert.match(text, /By default leave `model` empty on `agent_handoff`: the agent's own model is used\./);
+    assert.match(text, /Set it .*when the user asks.*different model family.*independence.*review of work a Claude model wrote.*usage limit/);
+    assert.match(text, /`continueJob`\) keeps the model the task last ran on unless you set a new one/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent_handoff's tool description carries the same model guidance", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const tools = await readFile(new URL("../../docs/opencode-plugins-v2/manta/tools/agents.ts", import.meta.url), "utf-8");
+  const at = tools.indexOf('name: "agent_handoff"');
+  const description = tools.slice(at, tools.indexOf("input: input(", at)).replace(/\s+/g, " ");
+  assert.match(description, /Leave `?model`? empty to use the agent's own model/);
+  assert.match(description, /when the user asks.*different model family.*independence.*usage limit/);
+});
 
 test("lead brief: no give-up-after-two-failures rule, no one-code-task-at-a-time rule; a fixed failure is sent again", async () => {
   const f = await leadFixture();

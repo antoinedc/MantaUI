@@ -2958,6 +2958,9 @@ export type DelegateJob = {
   // word ("unknown" when empty) and the terminal summary line ("<branch> · N files changed").
   statusLabel?: string;
   summary?: string;
+  // The model the task ran on ("provider/model"): the one its newest round was sent on (Auto's pick included), else the one asked for.
+  // null when none was recorded. Absent on an older box.
+  modelUsed?: string | null;
   // Liveness + progress (spec 2026-11-14-background-job-liveness-and-progress §5.3).
   // Absent on an older box.
   view?: DelegateJobProgressView;
@@ -4609,6 +4612,8 @@ export interface FleetSub {
 }
 /** Fields every row of the box's session-level read carries (all absent on an older box, which sends job rows). */
 export interface FleetRowSession {
+  /** The model the task ran on ("provider/model"), as its newest round was sent; null when none was recorded. Absent on an older box. */
+  model?: string | null;
   /** The row's identity: a chat row's session id, a task row's job id. */
   key?: string;
   /** `chat`: a session that is working (no job of its own); `task`: the row is a job (Stop and Resume apply). */
