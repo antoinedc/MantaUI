@@ -44,7 +44,7 @@ function Lead({ tone, spinning }: { tone: ChatTaskTone; spinning: boolean }) {
       className="col-start-1 mt-1 h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-2 border-accent/35 border-t-accent-tx motion-reduce:animate-none"
     />
   ) : (
-    <span aria-hidden="true" className={`col-start-1 mt-1.5 h-2 w-2 shrink-0 rounded-full ${DOT[tone]}`} />
+    <span aria-hidden="true" className={`col-start-1 mt-2 h-2 w-2 shrink-0 rounded-full ${DOT[tone]}`} />
   );
 }
 
@@ -139,22 +139,22 @@ function ChatTaskCard(p: CardProps) {
           ))}
         </div>
         {p.headline != null && p.headline !== "" && (
-          <div data-testid="chat-task-headline" title={p.headline} className={`mt-1.5 truncate [grid-column:2/-1] ${p.headlineWarn ? "text-warn" : "text-text"}`}>
+          <div data-testid="chat-task-headline" title={p.headline} className={`mt-2 truncate [grid-column:2/-1] ${p.headlineWarn ? "text-warn" : "text-text"}`}>
             {p.headline}
           </div>
         )}
         {p.bar != null && (
-          <div role="progressbar" aria-label="Plan progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(p.bar * 100)} data-testid="chat-task-bar" className="mt-1.5 h-0.5 overflow-hidden rounded-full bg-border [grid-column:2/-1]">
+          <div role="progressbar" aria-label="Plan progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(p.bar * 100)} data-testid="chat-task-bar" className="mt-2 h-0.5 overflow-hidden rounded-full bg-border [grid-column:2/-1]">
             <div className="h-full bg-accent" style={{ width: `${Math.round(p.bar * 100)}%` }} />
           </div>
         )}
         {p.seat && (
-          <div data-testid="chat-task-seat" className="mt-1.5 truncate text-text-faint [grid-column:2/-1]">
+          <div data-testid="chat-task-seat" className="mt-2 truncate text-text-faint [grid-column:2/-1]">
             {p.seat}
           </div>
         )}
         {p.failure && (
-          <div data-testid="background-failure" className="mt-1.5 break-words text-danger [grid-column:2/-1]">
+          <div data-testid="background-failure" className="mt-2 break-words text-danger [grid-column:2/-1]">
             {p.failure}
           </div>
         )}
@@ -303,8 +303,8 @@ function StartingCard({ part }: { part: OpencodePart }) {
 function RefusedRow({ part, sentence }: { part: OpencodePart; sentence: string }) {
   const { title, project } = startInputOf(part);
   return (
-    <div role="note" data-testid="chat-task-refused" title={sentence} className="flex items-start gap-2 py-0.5 text-meta leading-snug text-text-faint">
-      <span aria-hidden="true" className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-danger" />
+    <div role="note" data-testid="chat-task-refused" title={sentence} className="flex items-start gap-2 py-1 text-meta leading-snug text-text-faint">
+      <span aria-hidden="true" className="mt-2 h-2 w-2 shrink-0 rounded-full bg-danger" />
       <div className="min-w-0">
         <b className="font-semibold text-text-muted">Not started</b>
         {title ? ` · ${title}` : ""}
