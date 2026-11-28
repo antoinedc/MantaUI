@@ -140,6 +140,15 @@ describe("agent pages in the main pane", () => {
     expect(agentsRoot()?.dataset.slug).toBe("seo");
   });
 
+  it("the agent conversation's Profile button (a window event) opens that agent's profile", async () => {
+    await mountApp();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("manta-open-agent-profile", { detail: { slug: "dev" } }));
+    });
+    expect(agentsRoot()?.dataset.page).toBe("profile");
+    expect(agentsRoot()?.dataset.slug).toBe("dev");
+  });
+
   it("the chat pane steps aside while an agent page is open", async () => {
     await mountApp();
     // PanelShell hides a pane with display:none on its own wrapper

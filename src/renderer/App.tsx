@@ -1636,6 +1636,17 @@ function Shell() {
       window.removeEventListener("manta-open-settings", handler as EventListener);
   }, []);
 
+  // The agent conversation's "Profile" button (profile v5): same window-CustomEvent convention; the agent's profile page replaces the
+  // chat pane, and the Team row / the profile's Chat button come back.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const slug = (ev as CustomEvent<{ slug?: string }>).detail?.slug;
+      if (slug) setAgentsView({ page: "profile", slug });
+    };
+    window.addEventListener("manta-open-agent-profile", handler);
+    return () => window.removeEventListener("manta-open-agent-profile", handler);
+  }, [setAgentsView]);
+
   // BET-869: the "Review changes" button in the branch popover opens the
   // artifacts panel (ArtifactsPanel separately switches itself to its Review
   // tab). Same window-CustomEvent convention as manta-open-settings above.

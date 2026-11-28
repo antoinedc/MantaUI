@@ -154,6 +154,7 @@ export function InputArea({
   chatAutoAllow,
   setChatAutoAllow,
   showHandoffMode = false,
+  agentChat = false,
   metaHint,
   voice,
   models,
@@ -237,6 +238,9 @@ export function InputArea({
   // toggle. Chat sessions only — the CTO conversation shares this composer and
   // has nothing to hand off.
   showHandoffMode?: boolean;
+  // An agent's conversation (profile v5): no plan chip, trust row or schedules / secrets / webhooks buttons. The model picker, voice,
+  // attachments, the usage dial, `@` / `/` and Send / Stop stay: it composes like any session.
+  agentChat?: boolean;
   // A routine run replaces the dial + ⏰/🔑/🪝 toolbar (they act on a chat window a run does not have) with one hint line.
   metaHint?: string;
   // The whole voice hook result (BET-836): the recording session state
@@ -518,7 +522,7 @@ export function InputArea({
             // focus, so overriding reverse tab-traversal here is safe — this is
             // composer-scoped, not a window binding. Gated on availability so a
             // box with no `plan` agent can't be toggled into a frozen state.
-            if (e.key === "Tab" && e.shiftKey && plan.available) {
+            if (e.key === "Tab" && e.shiftKey && plan.available && !agentChat) {
               e.preventDefault();
               onTogglePlan();
               return;
@@ -743,7 +747,7 @@ export function InputArea({
           />
           {/* Plan mode chip (BET-949) — shared PlanChip, also used by the
               new-session composer, so the two controls never drift. */}
-          <PlanChip plan={plan} onToggle={onTogglePlan} />
+          {!agentChat && <PlanChip plan={plan} onToggle={onTogglePlan} />}
           {/* Input-mode affordances (🎤 / 📎) sit HERE, beside the model
               group, rather than inside the input box. They choose HOW you
               compose — the same category as which model you compose for —
@@ -780,12 +784,14 @@ export function InputArea({
               ↓ {Math.round(optSavingPct)}% <span className="tx-faint">this conversation</span>
             </span>
           )}
-          <SessionToolbar
-            scheduleCount={scheduleCount}
-            onSchedules={onSchedules}
-            onSecrets={onSecrets}
-            onWebhooks={onWebhooks}
-          />
+          {!agentChat && (
+            <SessionToolbar
+              scheduleCount={scheduleCount}
+              onSchedules={onSchedules}
+              onSecrets={onSecrets}
+              onWebhooks={onWebhooks}
+            />
+          )}
         </span>
         )}
       </div>
@@ -796,6 +802,7 @@ export function InputArea({
           not shown. Two contradictory permission claims stacked together is
           how users stop believing either. */}
       <TrustRow
+        hideTrust={agentChat}
         planOn={plan.on}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}

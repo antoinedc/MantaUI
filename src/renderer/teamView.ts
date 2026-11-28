@@ -31,3 +31,14 @@ export function agentOfSession(
   const found = slug ? agents.find((a) => a.slug === slug) : undefined;
   return found ? { slug: found.slug, name: found.name || found.slug } : null;
 }
+
+/**
+ * The agent's own model setting ("provider/model") as the model a conversation with it starts on — it then behaves like any session:
+ * the picker shows it and the user may pick another for this conversation. null for Auto (the ordinary default applies).
+ */
+export function agentModelSelection(model: string | null | undefined): { providerID: string; modelID: string } | null {
+  if (!model) return null;
+  const at = model.indexOf("/");
+  if (at <= 0 || at === model.length - 1) return null;
+  return { providerID: model.slice(0, at), modelID: model.slice(at + 1) };
+}

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { AgentInfo } from "../shared/types";
-import { agentOfSession, teamAgents, teamWindowsKey, windowOfAgent } from "./teamView";
+import { agentModelSelection, agentOfSession, teamAgents, teamWindowsKey, windowOfAgent } from "./teamView";
 
 const agent = (slug: string, over: Partial<AgentInfo> = {}): AgentInfo => ({
   slug,
@@ -58,5 +58,20 @@ describe("which window is whose", () => {
     expect(agentOfSession("ses_dev", {}, agents)).toBeNull();
     expect(agentOfSession("ses_dev", { dev: "ses_dev" }, null)).toBeNull();
     expect(agentOfSession("ses_dev", null, agents)).toBeNull();
+  });
+});
+
+describe("agentModelSelection", () => {
+  it("the agent's own model setting as the conversation's default, split into provider and model", () => {
+    expect(agentModelSelection("openai/gpt-6-sol")).toEqual({ providerID: "openai", modelID: "gpt-6-sol" });
+    expect(agentModelSelection("openrouter/anthropic/claude-sonnet-5-5")).toEqual({ providerID: "openrouter", modelID: "anthropic/claude-sonnet-5-5" });
+  });
+  it("Auto (no model), or something that isn't a provider/model pair, leaves the ordinary default", () => {
+    expect(agentModelSelection(null)).toBeNull();
+    expect(agentModelSelection(undefined)).toBeNull();
+    expect(agentModelSelection("")).toBeNull();
+    expect(agentModelSelection("gpt")).toBeNull();
+    expect(agentModelSelection("/x")).toBeNull();
+    expect(agentModelSelection("x/")).toBeNull();
   });
 });
