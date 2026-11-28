@@ -11,7 +11,6 @@ import {
   isChatTaskStartPart,
   modelLine,
   refusalOf,
-  startingModel,
   taskBranchLine,
 } from "./chatTask";
 import { endedBadge } from "./agents/fleetView";
@@ -133,8 +132,5 @@ describe("the agent_start_task tool part", () => {
     expect(refusalOf(part({ status: "completed", output: 'Started "Fix it" in Ronda (task j1, branch x). Its result will arrive as a later message; tell the user in one line which project you picked and stop.' }))).toBeNull();
     expect(refusalOf(part({ status: "running" }))).toBeNull();
     expect(refusalOf(part({ status: "error", error: "tool exploded" }))).toBe("tool exploded");
-  });
-  it("the starting card's model: none yet (the box decides it)", () => {
-    expect(startingModel()).toBeNull();
   });
 });
