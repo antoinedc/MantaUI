@@ -4299,3 +4299,14 @@ test("continueJob with a model nobody approved: refused naming the closest appro
   assert.equal(w.job(id).supersededBy, undefined, "the old record is still the live one");
   assert.equal(w.calls.send.length, 0);
 });
+
+test("task model: the posted result carries the model the task ran on in its manta metadata (so the transcript keeps it); omitted when none", async () => {
+  const named = await finishedOnModel("openai/gpt-6-sol");
+  assert.equal(buildResultSynthetic(named.w.job(named.id)).metadata.manta.model, "openai/gpt-6-sol");
+  const plain = await finishedOnModel(null);
+  assert.equal("model" in buildResultSynthetic(plain.w.job(plain.id)).metadata.manta, false);
+  // the round that ran on a new model says that one
+  const { w, id } = await finishedOnModel("anthropic/claude-sonnet-5-5");
+  const next = await continueJob(id, { prompt: "review it", sessionID: PARENT, model: "openai/gpt-6-sol" }, w.deps);
+  assert.equal(buildResultSynthetic(next.job).metadata.manta.model, "openai/gpt-6-sol");
+});
